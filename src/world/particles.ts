@@ -411,10 +411,13 @@ interface QueueEntry {
  * rotation curves and the scale curve -- written into an `InstancedMesh` per primitive of the model.
  * Nothing about the simulation changes and no new program is needed beyond the model's own.
  *
- * What it does **not** do is fade: an instanced draw has no per-instance alpha without a material of
- * its own, so the alpha curve is folded into the instance colour, which reads as a fade on the glowing
- * meshes these really are (a torch, a glow stick, a firework) and as a darkening on an opaque one.
- * Said plainly rather than hidden, because it is the one place this is not what the client did.
+ * What it does **not** do is take the emitter's colour ramp or alpha curve. Every mesh emitter in the
+ * game carries the particle editor's untouched defaults -- a ramp from red to green and an alpha of
+ * 0, 1, 1, 0 -- measured on all 59 in the converted packs and all 386 in the archives, including the
+ * glow sticks whose seven colour variants recolour their quads and leave this ramp alone. Folded into
+ * the instance colour, as it once was, it turned every held stick near black and drifting from red to
+ * green, and blinked a glow stick's base out every ten seconds. So the instance colour is white, times
+ * whatever the effect's own handle fades it by.
  */
 interface MeshBatch {
   key: string;
@@ -1333,8 +1336,10 @@ export class ParticleEffects {
           if (!r.ok) throw new Error(`${r.status}`);
           const def = (await r.json()) as EffectDef;
           // Everything the effect names is relative to **its own** pack, so where that is not this
-          // world's pack the prefix travels with each of them: its quads' textures and the models its
-          // mesh particles draw alike.
+          // world's pack the prefix travels with each of them: its quads' textures, the models its
+          // mesh particles draw, and the effects its particles carry, which were left behind -- a
+          // carried effect out of a prop's pack was fetched from the world's own, where it is on some
+          // worlds and not on others.
           if (out) {
             for (const g of def.groups) {
               for (const e of g.emitters) {
@@ -1342,6 +1347,7 @@ export class ParticleEffects {
                 if (tex?.file) tex.file = out + tex.file;
                 const mesh = e.particle.mesh;
                 if (mesh?.file) mesh.file = out + mesh.file;
+                for (const a of e.particle.attachments ?? []) if (a.file) a.file = out + a.file;
               }
             }
           }
@@ -1566,7 +1572,8 @@ export class ParticleEffects {
    * One frame of a model's instances: a matrix and a colour per live particle.
    *
    * The matrix is the particle's own place, the three rotation curves and the scale curve; the colour
-   * is the ramp times the alpha curve, since an instanced draw has no per-instance alpha of its own.
+   * is white times the handle's own fade, never the emitter's ramp or alpha curve, which on every mesh
+   * emitter in the game are the editor's untouched defaults (see `MeshBatch`).
    * A `localSpace` emitter's particles are in the emitter's frame, which is where the client keeps a
    * held prop's, so the emitter's own transform is applied -- the same rule the quads follow.
    */
@@ -1589,8 +1596,8 @@ export class ParticleEffects {
       // emitter's own transform, and an effect in a hull's frame through that hull's matrix.
       if (d.localSpace) meshM.premultiply(e.world);
       if (e.frame) meshM.premultiply(e.frame);
-      const alpha = clamp01(wave(d.particle.alpha, t, p.r0)) * (e.handle.alphaScale ?? 1);
-      rampColor(d.particle.color, d.particle.color.sample === 1 ? p.r3 : t, meshC).multiplyScalar(alpha);
+      const fade = e.handle.alphaScale ?? 1;
+      meshC.setRGB(fade, fade, fade);
       for (const inst of b.parts) {
         inst.setMatrixAt(i, meshM);
         inst.instanceColor!.setXYZ(i, meshC.r, meshC.g, meshC.b);

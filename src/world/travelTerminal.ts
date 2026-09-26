@@ -157,6 +157,16 @@ export function thingAt(things: readonly TravelThing[], at: { x: number; y: numb
   return best;
 }
 
+/**
+ * What E reaches where the player stands: a terminal in their own room, else a collector in their own
+ * room, else a collector out in the open. Nearly every collector stands outside its starport and is
+ * reached from the street; Theed's stands in the hangar, and while collectors were only ever looked for
+ * as if they were outdoors, that one could not be reached from anywhere at all.
+ */
+export function travelThingAt(things: readonly TravelThing[], at: { x: number; y: number; z: number }, room: { building: string; cell: number } | null, tune = TRAVEL_TUNE): TravelThing | null {
+  return thingAt(things, at, room, 'terminal', tune) ?? (room ? thingAt(things, at, room, 'collector', tune) : null) ?? thingAt(things, at, null, 'collector', tune);
+}
+
 /** A ticket: where it is from, where it goes, and when it was bought. */
 export interface Ticket {
   /** This ticket and no other, so the panel can name which one is being used or thrown away. */

@@ -478,13 +478,24 @@ export async function applySurface(target: AnimatedSurfaces, m: THREE.Material, 
   }
 }
 
-/** Whether a mesh with these materials should cast: false when any carries `userData.noShadow`. */
+/**
+ * A blended surface of water on an ordinary model: a statue fountain's basin (`wter_aqua`, drawn by
+ * `water.eft`), the Nightsister dungeon's pool. The converter gives `noShadow` to additive and
+ * translucent results but not to these, so each basin cast its own water as a solid shadow onto the
+ * stone under it. Keyed on the shader's name and on blending together: a transparent wall must keep its
+ * shadow, and so must an opaque prop that merely has "water" in its name (a canister of it).
+ */
+export function isBlendedWater(m: THREE.Material): boolean {
+  return m.transparent && /(^|[/_])wter_|water/i.test(m.name);
+}
+
+/** Whether a mesh with these materials should cast: false when any carries `userData.noShadow`, or is blended water. */
 export function castsShadow(material: THREE.Material | THREE.Material[]): boolean {
   if (Array.isArray(material)) {
-    for (const m of material) if (m.userData.noShadow) return false;
+    for (const m of material) if (m.userData.noShadow || isBlendedWater(m)) return false;
     return true;
   }
-  return !material.userData.noShadow;
+  return !material.userData.noShadow && !isBlendedWater(material);
 }
 
 /** Whether a placed mesh with this material is a translucent converted surface that must draw after the water. */

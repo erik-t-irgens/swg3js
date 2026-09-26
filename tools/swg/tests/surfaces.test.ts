@@ -376,6 +376,14 @@ const anim8 = (map = [0, 1, 2, 3, 4, 5, 6, 7]): SwgSurface => ({ anim: { mode: '
   noShadow.userData.noShadow = true;
   ok(castsShadow(plain) && !castsShadow(noShadow), 'castsShadow follows userData.noShadow');
   ok(!castsShadow([plain, noShadow]), 'castsShadow is false with one noShadow material in an array');
+  // A statue fountain's basin water was converted blended with no noShadow and cast itself as a solid
+  // shadow onto the stone under it. Blended water casts none; blended walls and opaque "water" props keep theirs.
+  const basin = new THREE.MeshStandardMaterial({ transparent: true, name: 'shader/wter_aqua.sht' });
+  const pool = new THREE.MeshStandardMaterial({ transparent: true, name: 'shader/corl_fountain_water_aaes23.sht' });
+  const stucco = new THREE.MeshStandardMaterial({ transparent: true, name: 'shader/stco_smooth_fallback_a2d13.sht' });
+  const canister = new THREE.MeshStandardMaterial({ name: 'shader/con_gen_inorganic_water.sht' });
+  ok(!castsShadow(basin) && !castsShadow(pool) && !castsShadow([plain, basin]), 'blended water casts no shadow onto its own basin');
+  ok(castsShadow(stucco) && castsShadow(canister), 'while a blended wall and an opaque prop named for water both keep theirs');
   const fall = new THREE.MeshStandardMaterial({ transparent: true });
   fall.userData.swg = { scroll: { map: [0, -0.5] } };
   const fence = new THREE.MeshBasicMaterial({ transparent: true });

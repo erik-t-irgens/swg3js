@@ -3,6 +3,7 @@
 // far away, small props up close), and exact trimesh collision follows the player.
 
 import * as THREE from 'three';
+import { relativeRoot } from './packPath.ts';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics';
 import { splitTrimesh } from './trimeshPieces.ts';
 import type { AssetPack, Layout, LoadedModel, PackModelDef } from './assetPack';
@@ -343,6 +344,22 @@ export class LayoutStreamer {
     if (this.pack.find(id)) return this.pack.model(id);
     for (const g of this.guests) if (g.find(id)) return g.model(id);
     return this.pack.model(id);
+  }
+
+  /**
+   * An effect file a model's entry names, as the effects loader must be handed it: that loader resolves
+   * every file against this world's own pack. An entry out of a guest pack names its effects relative
+   * to that pack, so the file is re-rooted there -- the gallery's garden fountains name
+   * `particles/fx_pt_fountain_garden.json`, and when the gallery stood behind the world ahead of the
+   * props pack (any world with a house on it) a fountain put down from the Props tab found the
+   * gallery's entry and fetched its spray from the world's folder, where it is not. A file that already
+   * climbs out of the world's pack (`../props/...`, which is how the props command writes them) is
+   * left as it is.
+   */
+  private effectFile(def: PackModelDef, file: string): string {
+    if (file.startsWith('../') || this.pack.find(def.id) === def) return file;
+    for (const g of this.guests) if (g.find(def.id) === def) return relativeRoot(this.pack.root, g.root) + file;
+    return file;
   }
 
   constructor(
@@ -839,7 +856,7 @@ export class LayoutStreamer {
     if (this.effects) {
       for (const o of objects) {
         const def = this.defOf(o.model);
-        if (def?.particle) effects.push(this.effects.place(def.file, tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE), o.contained));
+        if (def?.particle) effects.push(this.effects.place(this.effectFile(def, def.file), tmpM.compose(tmpV.set(o.x, o.y, o.z), o.q, ONE), o.contained));
       }
     }
     for (const [model, list] of byModel) {
@@ -847,7 +864,7 @@ export class LayoutStreamer {
       if (this.effects && model.def.effects?.length) {
         for (const p of list) {
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-          for (const fx of model.def.effects) effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained || (fx.cell ?? 0) > 0));
+          for (const fx of model.def.effects) effects.push(this.effects.place(this.effectFile(model.def, fx.file), localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained || (fx.cell ?? 0) > 0));
         }
       }
       const isBuilding = model.interiorBoxes.length > 0;
@@ -915,7 +932,7 @@ export class LayoutStreamer {
     const def = this.defOf(p.model);
     if (def?.particle) {
       if (this.effects) {
-        rec.effects.push(this.effects.place(def.file, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE), false));
+        rec.effects.push(this.effects.place(this.effectFile(def, def.file), tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE), false));
         loaded.effects.push(...rec.effects);
       }
       return null;
@@ -935,7 +952,7 @@ export class LayoutStreamer {
     tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
     if (this.effects && model.def.effects?.length) {
       const localFx = new THREE.Matrix4();
-      for (const fx of model.def.effects) rec.effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), (fx.cell ?? 0) > 0));
+      for (const fx of model.def.effects) rec.effects.push(this.effects.place(this.effectFile(model.def, fx.file), localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), (fx.cell ?? 0) > 0));
     }
     loaded.effects.push(...rec.effects);
     let building: Building | null = null;

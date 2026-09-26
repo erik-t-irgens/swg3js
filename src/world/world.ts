@@ -3118,8 +3118,12 @@ export class World {
    * Stand a named catalogue mobile at a place and leave it there, as the world's own standing people
    * are stood: spawned rather than roaming, with a world name so the hand-spawn cap and the NPC
    * tab's clear both step over it.
+   *
+   * Indoors the height is given (`at.y`, the floor's, from the room's own frame), exactly as the world's
+   * standing people are given theirs: the manager's own ground lookup starts from the terrain under the
+   * building, which is metres below a raised floor, and answers that there is no floor there at all.
    */
-  standMobile(id: string, at: { x: number; z: number; heading?: number }, inside: boolean, worldId: string, essential = false): Mobile | null {
+  standMobile(id: string, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, worldId: string, essential = false): Mobile | null {
     const entry = this.mobileCatalogue?.byId(id);
     if (!entry) return null;
     const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential });

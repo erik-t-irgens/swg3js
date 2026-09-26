@@ -161,6 +161,11 @@ export class AssetPack {
    * Nothing is fetched: there is no layout to place and no floors to read, because nobody walks
    * inside a chair.
    */
+  /** The folder this pack is served from, which a pack standing behind another's needs to be named relative to. */
+  get root(): string {
+    return this.baseUrl;
+  }
+
   static from(manifest: PackManifest, baseUrl: string): AssetPack {
     return new AssetPack(manifest, baseUrl);
   }

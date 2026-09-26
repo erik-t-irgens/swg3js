@@ -2613,8 +2613,11 @@ export class Player {
     this.parts.saber2.quaternion.slerpQuaternions(this.saber2Q.swg, gripQ, this.gripBlend);
 
     if (this.mounted) {
-      rig.aimArm('right', armDir.set(-0.25, -0.15, 0.95).normalize());
-      rig.aimArm('left', armDir.set(0.25, -0.15, 0.95).normalize());
+      // The riding and sitting clips pose the whole arm themselves -- every species' rig carries 45 of
+      // them, each authoring the shoulder, the elbow and the hand on the bars, the yoke or the reins.
+      // Both arms used to be aimed straight ahead here on top of them, left over from the placeholder
+      // rig the first mounts were built on, which locked the elbows and held the hands out in front of
+      // every rider and pilot. The branch stays so a rider takes none of the aims below either.
     } else if (this.classId === 'bounty_hunter' && !this.hasGunClips) {
       rig.aimArm('right', armDir.set(-0.15, 0.02, 0.99).normalize());
       rig.aimArm('left', armDir.set(0.2, -0.1, 0.95).normalize());

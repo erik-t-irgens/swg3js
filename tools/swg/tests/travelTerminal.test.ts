@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { TICKETS_HELD, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, slotHash, thingAt, ticketText, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { TICKETS_HELD, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, slotHash, thingAt, ticketText, travelThingAt, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -88,6 +88,22 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
   ok(thingAt(things, { x: TRAVEL_TUNE.reach + 2, y: 0, z: 0 }, null, 'collector') === null, 'and not from across the landing pad');
   ok(thingAt(things, { x: 1, y: 0, z: 1 }, null, 'terminal') === null, 'and a collector is not a terminal, however near you stand');
   ok(thingAt(things, { x: 0, y: 20, z: 0 }, null, 'collector') === null, 'nor is one on another floor reached through it');
+}
+
+{
+  // Theed's collector stands in the hangar (cell 5), the only one in the game that is indoors. E was
+  // asked for collectors only as if they stood outside, so that one was never offered from anywhere.
+  // The places are the hangar's own: its terminals stand 55 m from its collector, well past the reach.
+  const things: TravelThing[] = [
+    { kind: 'collector', x: -10, y: 13.9, z: 10, yaw: 0, cell: 5, building: 'theed', bx: 0, bz: 0 },
+    { kind: 'collector', x: 60, y: 0, z: 0, yaw: 0, cell: 0, building: 'port', bx: 60, bz: 0 },
+    { kind: 'terminal', x: -9.5, y: 13.9, z: -45.2, yaw: 0, cell: 5, building: 'theed', bx: 0, bz: 0 },
+  ];
+  const hangar = { building: 'theed', cell: 5 };
+  ok(travelThingAt(things, { x: -9, y: 13.9, z: 10 }, hangar)?.kind === 'collector', 'a collector standing in the room with you is reached, as Theed\'s in its hangar must be');
+  ok(travelThingAt(things, { x: -9.5, y: 13.9, z: -44 }, hangar)?.kind === 'terminal', 'and the terminals across the same hangar are still reached from beside them');
+  ok(travelThingAt(things, { x: -9, y: 0, z: 10 }, null) === null, 'and from the street outside the hangar the indoor collector is not offered through the wall');
+  ok(travelThingAt(things, { x: 61, y: 0, z: 0 }, null)?.building === 'port', 'while an outdoor collector is reached from beside it, as every other starport\'s is');
 }
 
 // ---------------------------------------------------------------- the shuttle's clock

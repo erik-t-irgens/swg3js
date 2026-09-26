@@ -102,7 +102,7 @@ import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
-import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, thingAt, ticketText, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, ticketText, travelThingAt, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import type { EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -9861,7 +9861,10 @@ class App {
     for (const w of this.travelWaiting) {
       // Essential: a ticket collector stands at its pad. It does not wander off, cannot be shot and
       // never dies, which is what a person standing at a post is -- the first of many.
-      const droid = this.world.standMobile(w.model, { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key, true);
+      // Indoors with the floor's own height, which is the only way Theed's -- the one collector that
+      // stands in a room, in the hangar at 13.9 m -- was ever going to stand: without it the manager
+      // looked for a floor from the terrain up and answered, every second, that there was none.
+      const droid = this.world.standMobile(w.model, w.inside ? { x: w.x, y: w.y, z: w.z, heading: w.yaw } : { x: w.x, z: w.z, heading: w.yaw }, w.inside, w.key, true);
       if (droid) this.travelStood.droids.push({ droid, row: w });
       else {
         this.travelRefused = this.world.mobileNote() ?? 'the ticket collector would not stand';
@@ -10006,8 +10009,7 @@ class App {
     const at = p.worldPos;
     const cell = this.world.cellState;
     const room = cell ? { building: cell.building.template, cell: cell.cell } : null;
-    const here = { x: at.x, y: at.y, z: at.z };
-    return thingAt(things, here, room, 'terminal') ?? thingAt(things, here, null, 'collector');
+    return travelThingAt(things, { x: at.x, y: at.y, z: at.z }, room);
   }
 
   /** E at a travel terminal, at the collector outside it, or at the ship terminal in the same room. */
