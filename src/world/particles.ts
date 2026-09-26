@@ -16,7 +16,7 @@ import { ACTOR_LAYER } from './portalRender';
 import { surfaces } from './surfaces.ts';
 // Whether an emitter draws anything, which decides whether it is made at all. Pure and node-tested,
 // because an emitter wrongly refused there is indistinguishable from an effect that never played.
-import { emitterKept, type DrawableEmitter } from './particleDraw.ts';
+import { FOUNTAIN_SPRAY_TUNE, emitterKept, isFountainSpray, type DrawableEmitter } from './particleDraw.ts';
 
 export interface WaveForm {
   /** 0 linear, 1 spline (drawn as linear). */
@@ -571,6 +571,8 @@ class EmitterState {
   readonly attachments: ParticleAttachmentDef[];
   /** An untextured quad emitter drawn as flat colour, because its handle asked for it (`solid`). */
   readonly solid: boolean;
+  /** Part of a fountain's own water, whose quads are drawn at `FOUNTAIN_SPRAY_TUNE.alpha` of their alpha. */
+  readonly spray: boolean;
 
   constructor(
     readonly def: EmitterDef,
@@ -579,6 +581,7 @@ class EmitterState {
     private readonly host: AttachmentHost | null = null,
   ) {
     this.solid = !!handle.solid && def.particle.type === 'quad' && !def.particle.quad?.texture.shader && def.visible;
+    this.spray = isFountainSpray(handle.file);
     this.attachments = host ? (def.particle.attachments ?? []).filter((a) => !!a.file).slice(0, 31) : [];
     const rr = def.particle.relativeRotation;
     this.usesRelativeRotation = !!rr && !(isFlatZero(rr[0]) && isFlatZero(rr[1]) && isFlatZero(rr[2]));
@@ -1636,6 +1639,7 @@ export class ParticleEffects {
       rampColor(d.particle.color, d.particle.color.sample === 1 ? p.r3 : t, tmpColor);
       if (d.timeOfDayColor > 0) tmpColor.lerp(this.fogColor, d.timeOfDayColor);
       alpha = clamp01(alpha) * (e.handle.alphaScale ?? 1);
+      if (e.spray) alpha *= FOUNTAIN_SPRAY_TUNE.alpha;
       let rotation = (p.initialRotation + wave(quad.rotation, t, p.r2)) * TWO_PI;
       if (p.initialRotation < 0) rotation = -rotation;
       // A particle carried by its emitter is put into the world here: its place through the

@@ -17,6 +17,7 @@ import { detailWrap } from './detailMap.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
+import { basinFootprint, basinLevelNear, basinLook, basinTopAt, type BasinFootprint } from './basinWater.ts';
 import { envLightFrom, isLavaWater, shaderKey, type WaterLook } from './waterLook';
 import { coveringWaterShader, onSeaSurface, surfaceReach, underwaterVerdict, waterTopAt, type WaterLineQuery } from './waterLineMath.ts';
 import { SEA_FEED, seaFeedReport, seaHeight, seaSwellAt, swellScaleAt, tuneSeaFeed, type SeaFeedTune, type SwellWave } from './seaFeed.ts';
@@ -627,6 +628,12 @@ export class World {
   private readonly waterMaterials: WaterMaterial[] = [];
   /** Every water surface with the look its own terrain shader asks for, and what it reflects. */
   readonly waterBodies = new WaterBodies();
+  /**
+   * The basins' water surfaces standing now (`basinWaterBody`), and each one's body: what a foot, the
+   * ripple field and the spray ask besides the planet's water table.
+   */
+  private readonly basinFootprints: BasinFootprint[] = [];
+  private readonly basinBodies = new Map<BasinFootprint, WaterBody>();
   private waterNear: WaterBody | null = null;
   private waterFarBody: WaterBody | null = null;
   /** Heat sources the effects read: the lava tables are handed over here (App sets it). */
@@ -1158,7 +1165,12 @@ export class World {
      * open water, and the worst a wrong box can do to a footstep is silence it while the same answer
      * would take a swimmer's water away underneath them.
      */
-    waterTop: (x: number, y: number, z: number): number => waterTopAt(x, y, z, this.waterColumnAt(x, z), this.indoorsAt),
+    waterTop: (x: number, y: number, z: number): number => {
+      // A fountain's or a pool's basin is water too, standing well above any table under it.
+      const column = this.waterColumnAt(x, z);
+      const basin = this.basinFootprints.length ? basinTopAt(this.basinFootprints, x, z, y) : -Infinity;
+      return waterTopAt(x, y, z, basin > column ? basin : column, this.indoorsAt);
+    },
     /**
      * The room the player is in, from the cell the frame already tracked. The floor is asked for by
      * itself rather than taken off the bed's own row: `roomRow` steps over a row whose bed the bank
@@ -1756,6 +1768,9 @@ export class World {
     this.forgetMaterials(this.waterMaterials);
     for (const m of this.waterMaterials) m.dispose();
     this.waterMaterials.length = 0;
+    // The basins went with their tiers; nothing of this world's may answer for the next one's feet.
+    this.basinFootprints.length = 0;
+    this.basinBodies.clear();
     // The depth window holds ground heights by world coordinate and slides with the player, keeping
     // what it knows: right inside one world, wrong the instant those coordinates are another's. An
     // arrival within the window's own width of the last one would otherwise slide the old planet's
@@ -2331,6 +2346,9 @@ export class World {
    * stands, drawn with this planet's water look as a lake -- which ripples and takes rain rings and the
    * water pass's reflections but never swells, since a lake has no swell. The streamer calls it for
    * each outdoor copy and takes it away with its tier.
+   *
+   * It wears a look of its own rather than the planet's (`BASIN_WATER_TUNE`), and its surface goes on
+   * the list the feet and the ripple field ask (`basinFootprints`), so a wader leaves rings in it.
    */
   private basinWaterBody(geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, name: string): WaterSurfaceHandle | null {
     if (!this.renderer || this.planet?.space) return null;
@@ -2339,14 +2357,25 @@ export class World {
     matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
     mesh.name = `water:basin:${name}`;
     mesh.receiveShadow = true;
-    const body = bodies.add(mesh, false, bodies.lookFor(null, this.planet), 'lake');
+    const body = bodies.add(mesh, false, basinLook(), 'lake');
     const lit = body.lit;
     this.waterMaterials.push(lit);
     this.scene.add(mesh);
+    const pos = geometry.getAttribute('position');
+    const footprint = pos ? basinFootprint(pos.array, geometry.index?.array ?? null, matrix.elements) : null;
+    if (footprint) {
+      this.basinFootprints.push(footprint);
+      this.basinBodies.set(footprint, body);
+    }
     return {
       mesh,
       remove: () => {
         this.scene.remove(mesh);
+        if (footprint) {
+          const f = this.basinFootprints.indexOf(footprint);
+          if (f >= 0) this.basinFootprints.splice(f, 1);
+          this.basinBodies.delete(footprint);
+        }
         const i = this.waterMaterials.indexOf(lit);
         if (i >= 0) this.waterMaterials.splice(i, 1);
         // Out of the portal renderer's set and the cascades' map before the body disposes it.
@@ -2354,6 +2383,13 @@ export class World {
         bodies.remove(mesh);
       },
     };
+  }
+
+  /** Every standing basin takes `BASIN_WATER_TUNE` again (the console's knob): uniforms only, nothing compiles. */
+  restyleBasins(): number {
+    const look = basinLook();
+    for (const body of this.basinBodies.values()) this.waterBodies.restyle(body, look);
+    return this.basinBodies.size;
   }
 
   /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */
@@ -2370,7 +2406,13 @@ export class World {
    * Spray stays on its own slower clock, since particles do not need the frame rate.
    */
   private emitRipples(dt: number, playerPos: THREE.Vector3): void {
-    this.splashes.update(dt, (x, z) => this.terrain.waterHeightAt(x, z));
+    // A droplet thrown up out of a fountain falls back into the fountain, not through to the table under it.
+    this.splashes.update(dt, (x, z) => {
+      const table = this.terrain.waterHeightAt(x, z);
+      if (!this.basinFootprints.length) return table;
+      const basin = basinTopAt(this.basinFootprints, x, z);
+      return basin > table ? basin : table;
+    });
     if (!this.waterMaterials.length) return;
     this.rippleClock += dt;
     const spray = this.rippleClock >= RIPPLE_INTERVAL;
@@ -5061,7 +5103,12 @@ export class World {
     // The field is stepped after its bodies have moved and before anything is drawn, so the water
     // shader reads the surface those bodies just made.
     if (this.renderer && this.camera && this.waterMaterials.length) {
-      stepWaterSim(this.renderer, this.camera.position.x, this.camera.position.z, this.terrain.waterHeightAt(this.camera.position.x, this.camera.position.z), dt);
+      // The field is one plane. Beside a fountain it is the basin's, or the legs that go into the basin
+      // cut the planet's table metres below them and nothing rings.
+      const cx = this.camera.position.x;
+      const cz = this.camera.position.z;
+      const basin = this.basinFootprints.length ? basinLevelNear(this.basinFootprints, playerPos.x, playerPos.z) : Number.NaN;
+      stepWaterSim(this.renderer, cx, cz, Number.isNaN(basin) ? this.terrain.waterHeightAt(cx, cz) : basin, dt);
     }
     this.emitDust(dt);
     if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));

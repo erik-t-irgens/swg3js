@@ -133,4 +133,14 @@ if (!existsSync(particles)) {
   ok(!emitterKept({}), 'an emitter with no particle description at all is left out rather than throwing');
 }
 
+// ---- The fountains' water, drawn thinner than its files -------------------------------------------
+{
+  const { FOUNTAIN_SPRAY_TUNE, isFountainSpray } = await import('../../../src/world/particleDraw.ts');
+  ok(isFountainSpray('particles/fx_pt_fountain_corl_circle_s01.json'), "a Corellian fountain's spray is a fountain's water");
+  ok(isFountainSpray('../props/particles/fx_pt_fountain_garden.json'), 'and so is one out of the props pack, named its way out of the world it stands in');
+  ok(!isFountainSpray('particles/fx_pt_fountain_corl_brazier_round_s01.json'), "the brazier that shares the fountains' name burns as its files say");
+  ok(!isFountainSpray('particles/fx_pt_waterfall_mist.json') && !isFountainSpray('particles/fx_pt_fountain.json.bak/fx_pt_fire.json'), 'nothing else is thinned, and only the file name is read');
+  ok(FOUNTAIN_SPRAY_TUNE.alpha > 0 && FOUNTAIN_SPRAY_TUNE.alpha < 1, `and the share is a thinning, not a switch (${FOUNTAIN_SPRAY_TUNE.alpha})`);
+}
+
 console.log(`\n${passed} checks passed`);

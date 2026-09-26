@@ -225,6 +225,8 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { World } from './world/world';
 import { REFLECTIONS, reflectiveCount, setReflectionSource, type ReflectionSource } from './world/envmap';
+import { BASIN_WATER_TUNE } from './world/basinWater.ts';
+import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
@@ -2566,6 +2568,22 @@ class App {
           this.world.reflectionsChanged();
         }
         return { source: REFLECTIONS.source, registered: reflectiveCount(), note: REFLECTIONS.source === 'sky' ? 'our own sky dome, captured every few seconds' : "the planet's own cube maps where an area has one, the dome where it has none" };
+      },
+      /**
+       * The fountains: `fountains()` says what the basins' water and the fountains' own spray are drawn
+       * with, and `fountains({ color: '#5d7a70', opacity: 0.45, ripple: 0.8, drift: 0.5, spray: 0.45 })`
+       * changes any of it at once on every basin standing (uniforms only; nothing compiles). `spray` is
+       * the share of their alpha the fountains' particle quads are drawn at. All of it is ours.
+       */
+      fountains: (opts: { color?: string; opacity?: number; ripple?: number; drift?: number; spray?: number } = {}) => {
+        const t = BASIN_WATER_TUNE;
+        if (typeof opts.color === 'string' && /^#[0-9a-f]{6}$/i.test(opts.color)) t.color = opts.color;
+        if (typeof opts.opacity === 'number' && opts.opacity >= 0 && opts.opacity <= 1) t.opacity = opts.opacity;
+        if (typeof opts.ripple === 'number' && opts.ripple >= 0) t.ripple = opts.ripple;
+        if (typeof opts.drift === 'number' && opts.drift >= 0) t.drift = opts.drift;
+        if (typeof opts.spray === 'number' && opts.spray >= 0 && opts.spray <= 1) FOUNTAIN_SPRAY_TUNE.alpha = opts.spray;
+        const basins = this.world.restyleBasins();
+        return { basins, water: { color: t.color, opacity: t.opacity, ripple: t.ripple, drift: t.drift }, spray: FOUNTAIN_SPRAY_TUNE.alpha };
       },
       /** Play as another species or gender (`species()` lists what the pack has): `species('twilek_female')`. */
       species: async (id?: string) => {

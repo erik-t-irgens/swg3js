@@ -1300,6 +1300,10 @@ export class LayoutStreamer {
     for (const prim of model.primitives) {
       const posAttr = prim.geometry.getAttribute('position');
       if (!posAttr || posAttr.count < 3) continue;
+      // A basin's water drawn by the water system is water and not a floor: every triangle of a model
+      // is a collider here, so the fountains' surfaces were paving you stood on, and nothing you do on
+      // paving ripples. Left out, you step into the basin and wade as you would anywhere.
+      if (this.waterSurface && !o.contained && prim.cell <= 0 && isBasinWater(prim.material)) continue;
       const idx = prim.geometry.getIndex();
       const indices = idx ? new Uint32Array(idx.array as ArrayLike<number>) : Uint32Array.from({ length: posAttr.count - (posAttr.count % 3) }, (_, i) => i);
       // Cleaned and flagged, as every other trimesh in the game is. This was the one path that did
