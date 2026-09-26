@@ -46,6 +46,17 @@ export interface CellGraph {
 /** The floors.json shape this game reads; a file that says anything else is passed over. */
 export const FLOOR_PACK_VERSION = 1;
 
+/** An effect a model or a placed object carries: the particle file, and where it hangs in the model's own (unflipped) space. */
+export interface PackEffect {
+  file: string;
+  id: string;
+  transform?: number[];
+  cell?: number;
+}
+
+/** The shape of `objeffects.json` this build reads; the converter's `OBJECT_EFFECTS_VERSION` (`tools/swg/clientfx.mjs`), which a node test holds equal. */
+export const OBJECT_EFFECTS_VERSION = 1;
+
 export interface PackModelDef {
   id: string;
   file: string;
@@ -71,7 +82,7 @@ export interface PackModelDef {
   /** A particle effect (particles/<id>.json) rather than a mesh; placed like any other object. */
   particle?: boolean;
   /** Particle effects attached to this model (a lamp's flame), transforms in the converter's unflipped model space. */
-  effects?: { file: string; id: string; transform?: number[]; cell?: number }[];
+  effects?: PackEffect[];
 }
 
 export interface PackManifest {
@@ -147,7 +158,43 @@ export class AssetPack {
 
   layout: Layout | null = null;
 
+  /**
+   * The effects each kind of placed object's client data hangs on it -- a brazier's fire, a fountain's
+   * spray, a tiki torch's flame, a streetlamp's glow -- keyed by object template, from the pack's
+   * `objeffects.json` (the converter's `objeffects` pass). Keyed by template rather than by model,
+   * because templates sharing one model hang different things on it. Null for a pack converted before
+   * the pass existed, which places what it always did.
+   */
+  objectEffects: Record<string, PackEffect[]> | null = null;
+
+  private effectsLoad: Promise<void> | null = null;
+
+  /**
+   * Reads `objeffects.json`, once: every caller gets the one fetch, so a placement can wait on it for
+   * nothing once it has landed. A pack that has no table keeps `objectEffects` null.
+   */
+  loadObjectEffects(): Promise<void> {
+    this.effectsLoad ??= this.fetchObjectEffects();
+    return this.effectsLoad;
+  }
+
+  private async fetchObjectEffects(): Promise<void> {
+    try {
+      const res = await fetch(`${this.baseUrl}objeffects.json`);
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
+      const table = (await res.json()) as { version?: number; templates?: Record<string, PackEffect[]> };
+      if (table.version === OBJECT_EFFECTS_VERSION && table.templates) this.objectEffects = table.templates;
+    } catch {
+      /* no table: the objects stand as they always did */
+    }
+  }
+
   private constructor(readonly manifest: PackManifest, private readonly baseUrl: string) {}
+
+  /** The folder this pack is served from, which a pack standing behind another's needs to be named relative to. */
+  get root(): string {
+    return this.baseUrl;
+  }
 
   /**
    * A pack over a folder whose manifest is already in hand and is not a planet's.
@@ -161,11 +208,6 @@ export class AssetPack {
    * Nothing is fetched: there is no layout to place and no floors to read, because nobody walks
    * inside a chair.
    */
-  /** The folder this pack is served from, which a pack standing behind another's needs to be named relative to. */
-  get root(): string {
-    return this.baseUrl;
-  }
-
   static from(manifest: PackManifest, baseUrl: string): AssetPack {
     return new AssetPack(manifest, baseUrl);
   }
@@ -209,6 +251,7 @@ export class AssetPack {
       } catch {
         /* no floors in this pack: the game steers, as it always has */
       }
+      await pack.loadObjectEffects();
       return pack;
     } catch {
       return null;

@@ -212,6 +212,11 @@ export const STEP_FACTS = {
   // waits for the snapshot as well. It writes `spawns.json` into each of the ten worlds the server
   // populated and its own `spawns/` folder, so it holds `pack:*` and `spawns`.
   spawns: { order: 42, lock: 'pack', locks: ['spawns'], needs: ['snapshot', 'mobiles'], seconds: 15, bytes: 0.6 * GB, measured: 'ten worlds, 4,619 people, 1,459 lairs: 6.1 s, 450 MB' },
+  // The fires, sprays, flames and glows objects' client data hangs on them, as a table per pack keyed
+  // by template, with the effects converted into each pack's particles. It reads every world's layout
+  // and its fittings and travel rows and the props pack's list, so it waits for all four and holds
+  // every pack and the props folder while it writes into them.
+  objeffects: { order: 43, lock: 'pack', locks: ['props'], needs: ['snapshot', 'props', 'fittings', 'travel'], seconds: 10, bytes: 0.45 * GB, measured: 'thirty-three packs, 598 effects over 439 templates: 3.1 s, 337 MB' },
 };
 
 // Which commands carry the planet (or the zone) they write, and **where** on their own command

@@ -42,6 +42,8 @@ export interface FittingRow {
 /** One of them in the world's own frame. */
 export interface Fitting {
   model: string;
+  /** The object template it came from, whose client data says what hangs on it (a torch's flame). */
+  template?: string;
   x: number;
   y: number;
   z: number;
@@ -63,7 +65,7 @@ export function fittingsOf(rows: readonly FittingRow[], centre: { x: number; z: 
   for (const r of rows) {
     if (!r.model) continue;
     const p = childInWorld(r, centre);
-    out.push({ model: r.model, building: r.building, x: p.x, y: p.y, z: p.z, yaw: p.yaw, cell: p.cell });
+    out.push({ model: r.model, building: r.building, x: p.x, y: p.y, z: p.z, yaw: p.yaw, cell: p.cell, ...(r.template ? { template: r.template } : {}) });
   }
   return out;
 }

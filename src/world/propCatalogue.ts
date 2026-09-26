@@ -130,8 +130,9 @@ export class PropCatalogue {
           bounds: d.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] },
           triangles: d.triangles ?? 0,
           ...(d.appearance ? { appearance: d.appearance } : {}),
-          // A prop's own fire, spray or smoke. The streamer places these wherever it stands the
-          // model, by the same lines that serve the snapshot's own braziers.
+          // The effects a prop's appearance lists beside its mesh (a candle's flame). What its client
+          // data hangs on it -- a brazier's fire, a fountain's spray -- is the pack's `objeffects.json`,
+          // looked up by the prop's template when it is stood (`LayoutStreamer.templateEffects`).
           ...(d.effects?.length ? { effects: d.effects } : {}),
         }));
         this.packManifest = { planet: 'props', categories: { layout } };
@@ -150,7 +151,12 @@ export class PropCatalogue {
 
   /** The pack the streamer stands a prop out of, minted on first use in a world. */
   get pack(): AssetPack | null {
-    if (!this.assets && this.packManifest) this.assets = AssetPack.from(this.packManifest, this.dir);
+    if (!this.assets && this.packManifest) {
+      this.assets = AssetPack.from(this.packManifest, this.dir);
+      // What each prop's client data hangs on it (a brazier's fire, a fountain's spray), fetched now so
+      // it is in before the first thing is stood; `World.placeProp` waits on the same fetch.
+      void this.assets.loadObjectEffects();
+    }
     return this.assets;
   }
 

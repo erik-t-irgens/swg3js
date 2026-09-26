@@ -30,7 +30,7 @@ export function transformHardpoint(hp, t) {
   return { ...hp, matrix, position: [matrix[3], matrix[7], matrix[11]] };
 }
 
-function yawPitchRollTransform(pos, yaw, pitch, roll) {
+export function yawPitchRollTransform(pos, yaw, pitch, roll) {
   // Engine order: yaw about Y, then pitch about X, then roll about Z, applied locally.
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   const cp = Math.cos(pitch), sp = Math.sin(pitch);

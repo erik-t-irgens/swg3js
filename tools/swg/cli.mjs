@@ -215,6 +215,7 @@ import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
+import { OBJECT_EFFECTS_VERSION } from './clientfx.mjs';
 import { CORE3_WORLDS } from './core3.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -2309,6 +2310,29 @@ function skyEffectsUncarried(packDir, sky) {
   return n;
 }
 
+/**
+ * Why a pack's object-effects table (`objeffects.json`) wants writing again, or null: there is none, it is
+ * an older shape or will not parse, or one of the files it was built from is newer than it (a world or
+ * its fittings converted again since, or the props pack).
+ */
+function objEffectsStale(packDir, sources) {
+  const file = join(packDir, 'objeffects.json');
+  if (!existsSync(file)) return 'none';
+  let table = null;
+  try {
+    table = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return 'unreadable';
+  }
+  if (table?.version !== OBJECT_EFFECTS_VERSION) return 'older';
+  const at = statSync(file).mtimeMs;
+  for (const source of sources) {
+    const f = join(packDir, source);
+    if (existsSync(f) && statSync(f).mtimeMs > at) return 'stale';
+  }
+  return null;
+}
+
 function packStatus(dir) {
   // A file that is there but will not parse (a conversion stopped or a machine that lost power in
   // the middle of writing it) is taken as missing, so the step that writes it is asked for again,
@@ -2337,6 +2361,7 @@ function packStatus(dir) {
   let planets = 0;
   let wantTravel = false;
   let wantFittings = false;
+  let wantObjEffects = false;
   for (const planet of GAME_PLANETS) {
     const packDir = join(dir, planet);
     const manifest = readJson(join(packDir, 'manifest.json'));
@@ -2465,6 +2490,9 @@ function packStatus(dir) {
     // made once rather than repeated at every planet -- which is what the two flags below are for.
     if (objects && !travel) wantTravel = true;
     else if (travel && travel.version !== TRAVEL_PACK_VERSION) wantTravel = true;
+    // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
+    // keyed by template: wanted again whenever what the table was built from is newer than it.
+    if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
     if (objects && !fittings) wantFittings = true;
     else if (fittings && fittings.version !== FITTINGS_PACK_VERSION) wantFittings = true;
     // Both commands **append** their models to the manifest's layout category, and a later
@@ -2481,6 +2509,7 @@ function packStatus(dir) {
   // Both must run **after** any snapshot, since a snapshot rewrites the layout category they append
   // to; `convert` reads the order from here, so naming them after the worlds is what keeps it right.
   if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
+  if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world or its fittings");
   if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings, or a world was converted again after they were written: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
   if (!creatures) {
@@ -2582,6 +2611,7 @@ function packStatus(dir) {
     console.log(`  props: ${P.props} in ${P.models} models over ${P.groups} groups (${P.named} named, ${P.iconed} with a picture)`);
     if ((propsPack.version ?? 0) !== PROPS_PACK_VERSION) need(`props <swg-dir> ${dir} --retail-only`, 'the props pack is an older shape than this build reads');
     else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, "the props' models were converted before the gloss maps their own shaders name");
+    if (objEffectsStale(join(dir, 'props'), ['manifest.json'])) need(`objeffects <swg-dir> ${dir} --retail-only`, 'a brazier or a fountain put down from the Props tab has no fire or spray (props/objeffects.json)');
   }
   // The only music in this game is the music players make, and it is the one pack that was reported
   // nowhere: without it an instrument offers its songs and plays nothing at all, and nothing ever
@@ -6368,12 +6398,11 @@ switch (cmd) {
               /* a prop with no picture is still a prop */
             }
           }
-          // A brazier's fire, a fountain's spray, a chimney's smoke, a candle's flame. They are
-          // **parts of the appearance**, not something hung on by a table: a composite appearance
-          // lists its mesh and its `.prt` side by side, which is why the snapshot's own braziers
-          // burn and a prop put down out of this pack did not -- this command simply never asked for
-          // them. The streamer places a model's own effects wherever that model is stood, by the
-          // same two lines that serve the snapshot, so nothing on the game's side had to change.
+          // The effects a composite appearance lists beside its mesh (a `.cmp` PART naming a `.prt`: a
+          // candle's flame, some lamps). That route is small -- 85 prop templates over 44 appearances,
+          // and not one brazier. The fire, spray and glow nearly everything else carries hangs from the
+          // template's client data instead and is written per template by the `objeffects` pass
+          // (`clientfx.mjs`); the streamer places both.
           const effects = attachedEffects(vfs, conv.effects, outDir, '../props/');
           models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, icon, appearance: source, ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
           converted++;
@@ -6520,6 +6549,91 @@ switch (cmd) {
       if (rows.length) console.log(`  ${dir.name}: ${counts.things} fittings (${counts.indoors} in a room) of ${counts.models} kinds over ${counts.buildings} kinds of building`);
     }
     console.log(`fittings: ${things} things over ${worlds} worlds, ${drawn} models converted${lost ? `, ${lost} left out for having no model` : ''}`);
+    break;
+  }
+
+  case 'objeffects': {
+    // <swg-dir> <out-dir>: the effects every placed object's client data hangs on it -- a brazier's fire,
+    // a fountain's spray, a tiki torch's flame, a streetlamp's glow, a harvester's blinking light -- as a
+    // table per pack keyed by object template (`objeffects.json`), with each effect converted into that
+    // pack's `particles/`. `tools/swg/clientfx.mjs` says where they live and what was measured.
+    //
+    // Keyed by template and not by model, because one model is shared by templates whose client data
+    // differ: one streetlamp mesh wears a gold, a red, a blue and a green lamp. And a pass of its own
+    // rather than part of `snapshot` and `props`, so adding them costs minutes instead of the hours a
+    // reconversion of every world and every prop would: it writes the table and the particles and
+    // touches no model. It reads every world's layout, fittings and travel rows and the props pack's
+    // list, so it runs after all of them.
+    if (!pos[2]) usage();
+    const { clientEffectReader, OBJECT_EFFECTS_VERSION } = await import('./clientfx.mjs');
+    const vfs = mount(pos[1]);
+    const out = pos[2];
+    const reader = clientEffectReader(vfs);
+    const known = new Map();
+    const effectsOf = (t) => {
+      if (!known.has(t)) known.set(t, reader.effectsOf(t));
+      return known.get(t);
+    };
+    const writeTable = (packDir, templates) => {
+      const table = {};
+      let effects = 0;
+      for (const t of [...templates].sort()) {
+        const fx = effectsOf(t);
+        if (!fx.length) continue;
+        // Pack-relative, as a world's own effects are: a pack standing behind another's is re-rooted
+        // by the game when it is looked up (`LayoutStreamer`), so one table serves either way.
+        const rows = attachedEffects(vfs, fx, packDir).map(({ cell, ...row }) => row);
+        if (!rows.length) continue;
+        table[t] = rows;
+        effects += rows.length;
+      }
+      writeFileSync(join(packDir, 'objeffects.json'), JSON.stringify({ version: OBJECT_EFFECTS_VERSION, templates: table }));
+      return { templates: Object.keys(table).length, effects };
+    };
+    const rowsOf = (file) => {
+      try {
+        const j = JSON.parse(readFileSync(file, 'utf8'));
+        return j.rows ?? [];
+      } catch {
+        return [];
+      }
+    };
+    let packs = 0;
+    for (const dir of readdirSync(out, { withFileTypes: true })) {
+      if (!dir.isDirectory()) continue;
+      const packDir = join(out, dir.name);
+      const layoutFile = join(packDir, 'layout.json');
+      if (!existsSync(layoutFile)) continue;
+      let layout;
+      try {
+        layout = JSON.parse(readFileSync(layoutFile, 'utf8'));
+      } catch {
+        continue;
+      }
+      const templates = new Set((layout.objects ?? []).map((o) => o.template).filter(Boolean));
+      // What the fittings and travel stand on a world's buildings is placed in play from their own rows.
+      for (const r of [...rowsOf(join(packDir, 'fittings.json')), ...rowsOf(join(packDir, 'travel.json'))]) if (r.template) templates.add(r.template);
+      const { templates: n, effects } = writeTable(packDir, templates);
+      packs++;
+      if (n) console.log(`  ${dir.name}: ${effects} effects on ${n} kinds of object`);
+    }
+    const propsManifest = join(out, 'props', 'manifest.json');
+    if (existsSync(propsManifest)) {
+      let props = null;
+      try {
+        props = JSON.parse(readFileSync(propsManifest, 'utf8'));
+      } catch {
+        props = null;
+      }
+      if (props) {
+        const { templates: n, effects } = writeTable(join(out, 'props'), new Set((props.props ?? []).map((p) => p.template).filter(Boolean)));
+        packs++;
+        console.log(`  props: ${effects} effects on ${n} kinds of prop`);
+      }
+    }
+    const c = reader.counts;
+    console.log(`objeffects: ${packs} packs; of ${c.templates} templates read, ${c.withClientData} name client data that hangs something and ${c.withEffects} hang an effect (${c.effects} in all)${c.missingHardpoint ? `; ${c.missingHardpoint} left out for a hardpoint their appearance has not got` : ''}${c.skeletal ? `; ${c.skeletal} on skeletal things, not placed` : ''}`);
+    for (const m of reader.missing.slice(0, 5)) console.log(`  no hardpoint: ${m}`);
     break;
   }
 

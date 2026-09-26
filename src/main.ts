@@ -9947,7 +9947,7 @@ class App {
       const key = `fitting:${pack}:${i}`;
       // Solid whatever its size: a terminal or a panel is under the sweep's own floor for small
       // props and is exactly the thing the owner asked to be able to walk into rather than through.
-      if (await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true })) this.fittingsStood.keys.push(key);
+      if (await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true, template: f.template })) this.fittingsStood.keys.push(key);
     }
   }
 
@@ -10898,7 +10898,7 @@ class App {
       stand: async (row) => {
         const def = this.props.find(row.id);
         if (!def) return false;
-        return this.world.placeProp(def.model, { key: `prop:${row.thing}`, at: { x: row.x, y: row.y, z: row.z }, yaw: 0, turn: row.q, pack: this.props.pack, inside: !!row.inside, solid: true });
+        return this.world.placeProp(def.model, { key: `prop:${row.thing}`, at: { x: row.x, y: row.y, z: row.z }, yaw: 0, turn: row.q, pack: this.props.pack, inside: !!row.inside, solid: true, template: def.template });
       },
       clear: (thing) => {
         this.world.unplaceBuilding(`prop:${thing}`);

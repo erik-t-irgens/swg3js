@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { relativeRoot } from './packPath.ts';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics';
 import { splitTrimesh } from './trimeshPieces.ts';
-import type { AssetPack, Layout, LoadedModel, PackModelDef } from './assetPack';
+import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef } from './assetPack';
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
@@ -101,6 +101,8 @@ export interface PlacedObject {
   tier: number;
   /** Given collision whatever its size: a thing put down in play, never a snapshot's own prop. */
   solid?: boolean;
+  /** The object template whose client-data effects it carries, where `template` is a name of its own (a thing put down in play). */
+  effectsOf?: string;
 }
 
 /**
@@ -139,6 +141,12 @@ export interface RuntimePlacement {
    * building's shell. The place is still the world's, as it is for anything else placed in play.
    */
   inside?: boolean;
+  /**
+   * The object template whose client data says what hangs on it (a brazier's fire, a fountain's spray,
+   * a torch's flame), looked up in the packs' object-effects tables. Apart from `template`, because a
+   * thing put down in play is filed under a name of its own so a removal finds exactly it.
+   */
+  effectsOf?: string;
 }
 
 /** A placed portal building; the player's cell inside it is tracked by crossing its portals. */
@@ -237,6 +245,9 @@ export interface CellState {
   building: Building;
   cell: number;
 }
+
+/** The one empty effect list every object without any shares, so a lookup allocates nothing. */
+const NO_EFFECTS: readonly PackEffect[] = [];
 
 export class LayoutStreamer {
   readonly buildings = new Set<Building>();
@@ -356,6 +367,24 @@ export class LayoutStreamer {
    * climbs out of the world's pack (`../props/...`, which is how the props command writes them) is
    * left as it is.
    */
+  /**
+   * The effects one kind of placed object carries by its client data, out of this world's own table
+   * first and then each pack standing behind it, whose files are re-rooted as `effectFile` does. Empty
+   * for a template that hangs nothing, and for every template of a pack converted before the table.
+   */
+  private templateEffects(template: string | undefined): readonly PackEffect[] {
+    if (!template) return NO_EFFECTS;
+    const own = this.pack.objectEffects?.[template];
+    if (own) return own;
+    for (const g of this.guests) {
+      const hit = g.objectEffects?.[template];
+      if (!hit) continue;
+      const root = relativeRoot(this.pack.root, g.root);
+      return hit.map((e) => (e.file.startsWith('../') ? e : { ...e, file: root + e.file }));
+    }
+    return NO_EFFECTS;
+  }
+
   private effectFile(def: PackModelDef, file: string): string {
     if (file.startsWith('../') || this.pack.find(def.id) === def) return file;
     for (const g of this.guests) if (g.find(def.id) === def) return relativeRoot(this.pack.root, g.root) + file;
@@ -432,6 +461,7 @@ export class LayoutStreamer {
       contained: !!p.inside,
       solid: !!p.solid,
       tier: tier < 0 ? TIERS.length - 1 : tier,
+      ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}),
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
@@ -867,6 +897,16 @@ export class LayoutStreamer {
           for (const fx of model.def.effects) effects.push(this.effects.place(this.effectFile(model.def, fx.file), localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained || (fx.cell ?? 0) > 0));
         }
       }
+      // And what each placed copy's client data hangs on it, which differs between templates that
+      // share this model (one streetlamp mesh carries four colours of lamp).
+      if (this.effects) {
+        for (const p of list) {
+          const own = this.templateEffects(p.effectsOf ?? p.template);
+          if (!own.length) continue;
+          tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
+          for (const fx of own) effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained));
+        }
+      }
       const isBuilding = model.interiorBoxes.length > 0;
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
@@ -953,6 +993,13 @@ export class LayoutStreamer {
     if (this.effects && model.def.effects?.length) {
       const localFx = new THREE.Matrix4();
       for (const fx of model.def.effects) rec.effects.push(this.effects.place(this.effectFile(model.def, fx.file), localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), (fx.cell ?? 0) > 0));
+    }
+    // A thing put down in play carries what its own template's client data hangs on it: a brazier from
+    // the Props tab burns, a server-placed torch among the fittings flames.
+    const ownFx = this.effects ? this.templateEffects(p.effectsOf ?? p.template) : NO_EFFECTS;
+    if (this.effects && ownFx.length) {
+      const localFx = new THREE.Matrix4();
+      for (const fx of ownFx) rec.effects.push(this.effects.place(fx.file, localFx.multiplyMatrices(tmpM, mirroredTransform(fx.transform, localFx)), p.contained));
     }
     loaded.effects.push(...rec.effects);
     let building: Building | null = null;
