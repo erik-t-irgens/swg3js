@@ -42,7 +42,7 @@ class FakeMixer {
   readonly bank = { available: true, sources: null, template: (id: string) => (this.has === null || this.has.has(id) ? { dim: 3 } : null) };
   /** The templates the pack holds; null means "every one asked for". */
   has: Set<string> | null = null;
-  readonly started: { id: string; loop: boolean; gain: number; pitch: number; space: SoundSpace }[] = [];
+  readonly started: { key: number; id: string; loop: boolean; gain: number; pitch: number; space: SoundSpace }[] = [];
   readonly stopped: number[] = [];
   readonly prepared: string[] = [];
   readonly loops = new Map<number, string>();
@@ -50,18 +50,28 @@ class FakeMixer {
   readonly pitches = new Map<number, number>();
   /** The building each living voice is in, as it was started and as it has been moved since. */
   readonly spaces = new Map<number, number>();
+  /**
+   * Where each voice was started and every place it has been moved to since, the last one being where
+   * it is now. The start is recorded as well as the moves, so a voice that was never moved reads as
+   * left where it began rather than as nowhere at all.
+   */
+  readonly places = new Map<number, { x: number; y: number; z: number }[]>();
+  /** One-shots that have not ended yet: the real mixer keeps a one-shot playing until it runs out. */
+  readonly shotsPlaying = new Set<number>();
   refuse = false;
   private next = 1;
 
-  play(id: string, o: { gain?: number; pitch?: number; space?: SoundSpace; loop?: boolean } = {}): number {
+  play(id: string, o: { x?: number; y?: number; z?: number; gain?: number; pitch?: number; space?: SoundSpace; loop?: boolean } = {}): number {
     if (this.refuse) return 0;
-    this.started.push({ id, loop: !!o.loop, gain: o.gain ?? 1, pitch: o.pitch ?? 0, space: { building: o.space?.building ?? -1, cell: o.space?.cell ?? -1 } });
     const key = this.next++;
+    this.started.push({ key, id, loop: !!o.loop, gain: o.gain ?? 1, pitch: o.pitch ?? 0, space: { building: o.space?.building ?? -1, cell: o.space?.cell ?? -1 } });
     this.spaces.set(key, o.space?.building ?? -1);
+    if (o.x !== undefined) this.places.set(key, [{ x: o.x, y: o.y ?? 0, z: o.z ?? 0 }]);
+    if (!o.loop) this.shotsPlaying.add(key);
     return key;
   }
 
-  loop(id: string, o: { gain?: number; pitch?: number; space?: SoundSpace } = {}): number {
+  loop(id: string, o: { x?: number; y?: number; z?: number; gain?: number; pitch?: number; space?: SoundSpace } = {}): number {
     const key = this.play(id, { ...o, loop: true });
     if (key) this.loops.set(key, id);
     return key;
@@ -70,9 +80,22 @@ class FakeMixer {
   stop(key: number): void {
     this.stopped.push(key);
     this.loops.delete(key);
+    this.shotsPlaying.delete(key);
   }
 
-  move(): void {}
+  move(key: number, x: number, y: number, z: number): void {
+    const list = this.places.get(key);
+    if (list) list.push({ x, y, z });
+    else this.places.set(key, [{ x, y, z }]);
+  }
+  /** Where a voice is now: its last move, or where it was started. */
+  placeOf(key: number): { x: number; y: number; z: number } | null {
+    return this.places.get(key)?.at(-1) ?? null;
+  }
+  /** How many times a voice has been moved since it was started. */
+  movesOf(key: number): number {
+    return Math.max(0, (this.places.get(key)?.length ?? 0) - 1);
+  }
   setGain(key: number, gain: number): void {
     this.gains.set(key, gain);
   }
@@ -82,8 +105,13 @@ class FakeMixer {
   setSpace(key: number, space: SoundSpace): void {
     this.spaces.set(key, space.building);
   }
+  /**
+   * A loop is playing until it is stopped, whatever its gain: the real mixer keeps a loop turned down
+   * to nothing in its list (it gives the slot back and keeps the voice), which is why the idle of a
+   * machine at full speed is still a living voice that is moved every frame.
+   */
   isPlaying(key: number): boolean {
-    return this.loops.has(key);
+    return this.loops.has(key) || this.shotsPlaying.has(key);
   }
   /** The key a living loop of this sound is on, or 0: which voice holds which sound is the whole question. */
   keyOf(id: string): number {
@@ -490,6 +518,105 @@ const TABLES: VehicleTables = {
   ok(sounds.deckSurface('yt1300') === 'metal' && sounds.deckSurface('yt1300_decorated_01') === 'metal', "a hull's deck is what the interior table's own row says its floor is, a decorated one included");
   ok(sounds.deckSurface('sorosuub_space_yacht') === 'carpet', 'and a hull the table gives a floor of its own is walked on as that floor, not as metal');
   ok(sounds.deckSurface('xwing') === null && sounds.deckSurface(null) === null, 'and a hull the table names no room for says nothing, which leaves the caller to decide');
+}
+
+// ---- every voice of the machine you are on goes where it goes ----
+//
+// The machine you ride or fly holds an idle, a run and (a speeder over water) a water loop at once.
+// While the three shared one last-written place, the first of them moved in a frame wrote it and the
+// others measured no distance from it, so the run loop stayed where the rider got on and, at top
+// speed where it is all that is heard, faded out behind them within a few seconds. The fault is a
+// place and not a sound, so it is checked as places, against the mixer's own record of each voice.
+{
+  const step = VEHICLE_TUNE.moveStep;
+  const outside = { building: -1, cell: -1 };
+  // The ear rides a few metres behind and above, as the chase camera does.
+  const behind = { x: -6, y: 2, z: 0 };
+  const ear = Math.hypot(behind.x, behind.y, behind.z);
+  // A straight line up a gentle slope, a little over half a move step a frame, so the step's own
+  // threshold is crossed every other frame rather than every one.
+  const dir = { x: 2 / 3, y: 1 / 3, z: 2 / 3 };
+  const stride = step * 0.6;
+  const gap = (host: FakeMixer, key: number, v: SoundVehicle): number => {
+    const p = key ? host.placeOf(key) : null;
+    return p ? Math.hypot(p.x - v.pos.x, p.y - v.pos.y, p.z - v.pos.z) : Infinity;
+  };
+  const ride = (sounds: VehicleSounds, v: SoundVehicle, own: SoundVehicle | null, metres: number): number => {
+    let frames = 0;
+    for (let done = 0; done < metres; done += stride) {
+      v.pos.x += dir.x * stride;
+      v.pos.y += dir.y * stride;
+      v.pos.z += dir.z * stride;
+      sounds.setListener(v.pos.x + behind.x, v.pos.y + behind.y, v.pos.z + behind.z, outside);
+      sounds.update(0.05, [v], own, null);
+      frames++;
+    }
+    return frames;
+  };
+
+  // A speeder, flat out over water.
+  {
+    const host = new FakeMixer();
+    const sounds = new VehicleSounds();
+    sounds.attach(host as never, '');
+    sounds.adoptEvents(EVENTS);
+    sounds.setTables(TABLES);
+    const bike = makeVehicle({ id: 'speederbike', def: { id: 'speederbike' } });
+    sounds.setListener(behind.x, behind.y, behind.z, outside);
+    sounds.update(0.05, [bike], bike, null);
+    (bike as { speed: number }).speed = bike.spec.maxSpeed;
+    (bike as { onWater: boolean }).onWater = true;
+    const frames = ride(sounds, bike, bike, 200);
+    const idle = host.keyOf('sound/veh_speederbike_idle_lp.snd');
+    const run = host.keyOf('sound/veh_speederbike_run_lp.snd');
+    const water = host.keyOf('sound/amb_river_large_lp.snd');
+    ok(idle > 0 && run > 0 && water > 0 && host.gains.get(idle) === 0, 'flat out over water a speeder holds three loops, the idle among them turned down to nothing and still living, as the mixer keeps it');
+    ok(gap(host, run, bike) <= step, 'after 200 m flat out the run loop, which is all that is heard at top speed, is where the speeder is and not where the rider got on');
+    ok(gap(host, idle, bike) <= step && gap(host, water, bike) <= step, 'and so are the idle beside it and the water under it');
+    const moves = [idle, run, water].map((key) => host.movesOf(key));
+    ok(moves.every((n) => n >= (0.9 * 200) / (2 * step) && n < frames), 'each voice is moved on its own whenever the speeder has gone a step from where that voice was put, and not on every frame');
+    const report = sounds.status() as { machines: { voices: { distance: (number | null)[] } }[] };
+    ok(report.machines[0].voices.distance.every((d) => d !== null && Math.abs(d - ear) <= step + 0.1), "the report gives each voice's own distance to the ear, and all three are the chase camera's few metres");
+
+    // The speed-up sound played as the throttle opened goes with the speeder while it plays.
+    const accel = host.started.find((s) => s.id === 'sound/veh_speederbike_accel.snd')?.key ?? 0;
+    ok(accel > 0 && gap(host, accel, bike) <= step, 'the speed-up sound, while it plays, is carried with the speeder rather than left where the throttle opened');
+    const accelMoves = host.movesOf(accel);
+    host.shotsPlaying.delete(accel);
+    ride(sounds, bike, bike, 20);
+    ok(host.movesOf(accel) === accelMoves, 'and once it has run out it is let go and moved no more');
+
+    // Stepped off and still coasting: one voice, carried as it always was.
+    ride(sounds, bike, null, 20);
+    const coast = host.keyOf('sound/veh_speederbike_run_lp.snd');
+    ok(host.living().length === 1 && gap(host, coast, bike) <= step, 'a speeder nobody rides holds its one voice and still carries it');
+  }
+
+  // A fighter, flown at its top speed with its wings opening.
+  {
+    const host = new FakeMixer();
+    const sounds = new VehicleSounds();
+    sounds.attach(host as never, '');
+    sounds.adoptEvents(EVENTS);
+    sounds.setTables(TABLES);
+    const xw = makeVehicle({
+      id: 'xwing',
+      ship: true,
+      def: { id: 'xwing', chassis: 'player_xwing', attachments: [{ kind: 'wing', sound: 'sound/wings_open_xwing.snd' }], fit: { slots: [{ slot: 'engine', looks: [{ parts: [{ template: 'object/tangible/ship/attachment/engine/shared_xwing_engine_pos_s01.iff' }] }] }] } },
+      fit: { looks: { engine: 0 } },
+      wings: { length: 2, target: false },
+    });
+    sounds.setListener(behind.x, behind.y, behind.z, outside);
+    sounds.update(0.05, [xw], xw, null);
+    (xw as { speed: number }).speed = xw.spec.maxSpeed;
+    (xw.wings as { target: boolean }).target = true;
+    ride(sounds, xw, xw, 200);
+    const run = host.keyOf('sound/eng_run_xwing.snd');
+    const idle = host.keyOf('sound/eng_idle_xwing.snd');
+    ok(run > 0 && idle > 0 && gap(host, run, xw) <= step && gap(host, idle, xw) <= step, "a flown fighter's run loop and the silent idle beside it are both where the fighter is after 200 m");
+    const wing = host.started.find((s) => s.id === 'sound/wings_open_xwing.snd')?.key ?? 0;
+    ok(wing > 0 && gap(host, wing, xw) <= step, "and the wings' sound, while it plays, goes with the ship");
+  }
 }
 
 // ---- what the world calls in ----

@@ -368,16 +368,31 @@ export interface VehicleLogRow {
 }
 
 /**
- * One looping voice a vehicle holds, with the sound it is playing and the space it was started in.
- * Both are kept beside the key because the mixer cannot be asked either: a voice that is still
- * running is not necessarily running the sound wanted now (a refit puts a different engine in the
- * slot, climbing aboard turns one loop into two), and a hull that began humming out in the open
- * while you stood beside it must stop being muffled by its own walls once you are in it.
+ * One voice a vehicle holds, with the sound it is playing, the space it was started in and the place
+ * it was last put at. All three are kept beside the key because the mixer cannot be asked any of
+ * them: a voice that is still running is not necessarily running the sound wanted now (a refit puts
+ * a different engine in the slot, climbing aboard turns one loop into two), and a hull that began
+ * humming out in the open while you stood beside it must stop being muffled by its own walls once
+ * you are in it.
+ *
+ * The place is the voice's own and never the vehicle's. The machine you ride holds an idle, a run
+ * and a water loop at once, and while the three shared one place the first of them to be moved each
+ * frame wrote it and the other two measured no distance from it at all: the run loop stayed where the
+ * rider got on, and at top speed, where the run is all that is heard, the engine faded out behind
+ * them and went silent a few seconds after the throttle opened.
  */
 interface Voice {
   key: number;
   id: string | null;
   space: SoundSpace;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** A voice holding nothing yet, out in the open, at a place. Made with the vehicle's record and never per frame. */
+function voiceAt(p: { x: number; y: number; z: number }): Voice {
+  return { key: 0, id: null, space: { building: OUTSIDE.building, cell: OUTSIDE.cell }, x: p.x, y: p.y, z: p.z };
 }
 
 /** A vehicle's own voices and the choices behind them; made once, kept against the vehicle itself. */
@@ -397,6 +412,13 @@ interface Rec {
   readonly idleVoice: Voice;
   readonly runVoice: Voice;
   readonly waterVoice: Voice;
+  /**
+   * The last speed-up or slow-down sound and the last wing sound of the machine you are on, carried
+   * with it while they play: at a fighter's speed a sound left where it began is tens of metres
+   * behind before it ends. Never stopped with the vehicle, since a one-shot ends by itself.
+   */
+  readonly throttleShot: Voice;
+  readonly wingShot: Voice;
   /** Which of the two an unflown vehicle plays now. */
   usingRun: boolean;
   own: boolean;
@@ -407,9 +429,6 @@ interface Rec {
   /** Its distance to the ear last frame, for the Doppler shift and the flyby. */
   lastDistance: number;
   hasDistance: boolean;
-  x: number;
-  y: number;
-  z: number;
 }
 
 /**
@@ -585,9 +604,11 @@ export class VehicleSounds {
       hitGroup: '',
       power: 'default',
       lookKey: '',
-      idleVoice: { key: 0, id: null, space: { building: OUTSIDE.building, cell: OUTSIDE.cell } },
-      runVoice: { key: 0, id: null, space: { building: OUTSIDE.building, cell: OUTSIDE.cell } },
-      waterVoice: { key: 0, id: null, space: { building: OUTSIDE.building, cell: OUTSIDE.cell } },
+      idleVoice: voiceAt(v.pos),
+      runVoice: voiceAt(v.pos),
+      waterVoice: voiceAt(v.pos),
+      throttleShot: voiceAt(v.pos),
+      wingShot: voiceAt(v.pos),
       usingRun: false,
       own: false,
       wingTarget: v.wings.target,
@@ -596,9 +617,6 @@ export class VehicleSounds {
       retryAt: -1e9,
       lastDistance: 0,
       hasDistance: false,
-      x: v.pos.x,
-      y: v.pos.y,
-      z: v.pos.z,
     };
     this.recs.set(v as object, rec);
     this.live.push(rec);
@@ -656,6 +674,8 @@ export class VehicleSounds {
     this.stepEngine(rec, share, pitch);
     this.stepWater(rec);
     this.stepWings(rec);
+    this.followShot(rec, rec.throttleShot);
+    this.followShot(rec, rec.wingShot);
     if (!rec.own && v.spec.ship) this.stepFlyby(rec, d, closing);
   }
 
@@ -683,13 +703,13 @@ export class VehicleSounds {
         rec.throttleOpen = true;
         if (set.accel) {
           this.counts.accels++;
-          this.at(rec, 'accel', set.accel);
+          this.at(rec, 'accel', set.accel, rec.throttleShot);
         }
       } else if (rec.throttleOpen && share < this.tune.close) {
         rec.throttleOpen = false;
         if (set.decel) {
           this.counts.decels++;
-          this.at(rec, 'decel', set.decel);
+          this.at(rec, 'decel', set.decel, rec.throttleShot);
         }
       }
       return;
@@ -718,7 +738,7 @@ export class VehicleSounds {
     rec.wingTarget = wings.target;
     if (!rec.wing) return;
     this.counts.wings++;
-    this.at(rec, wings.target ? 'wings open' : 'wings close', rec.wing);
+    this.at(rec, wings.target ? 'wings open' : 'wings close', rec.wing, rec.wingShot);
   }
 
   /**
@@ -1153,9 +1173,9 @@ export class VehicleSounds {
       }
       voice.key = key;
       voice.id = id;
-      rec.x = rec.v.pos.x;
-      rec.y = rec.v.pos.y;
-      rec.z = rec.v.pos.z;
+      voice.x = rec.v.pos.x;
+      voice.y = rec.v.pos.y;
+      voice.z = rec.v.pos.z;
       return;
     }
     // The space a living voice is in follows the ear: boarding a hull that was already humming out
@@ -1165,24 +1185,57 @@ export class VehicleSounds {
       voice.space.cell = space.cell;
       host.setSpace(voice.key, voice.space);
     }
-    const dx = rec.v.pos.x - rec.x;
-    const dy = rec.v.pos.y - rec.y;
-    const dz = rec.v.pos.z - rec.z;
-    if (dx * dx + dy * dy + dz * dz > this.tune.moveStep * this.tune.moveStep) {
-      rec.x = rec.v.pos.x;
-      rec.y = rec.v.pos.y;
-      rec.z = rec.v.pos.z;
-      host.move(voice.key, rec.x, rec.y, rec.z);
-    }
+    this.carry(rec, voice, host);
     host.setGain(voice.key, gain);
     host.setPitch?.(voice.key, pitch);
   }
 
-  /** One sound where a vehicle is, in the space it is in. */
-  private at(rec: Rec, what: string, id: string | null): void {
+  /**
+   * A living voice put where its vehicle is now, once the vehicle has moved a step from where this
+   * voice was last put. Measured against the voice's own last place, never against one the vehicle
+   * keeps for all of them, or the first voice moved in a frame takes the step for every other.
+   */
+  private carry(rec: Rec, voice: Voice, host: VehicleHost): void {
+    const p = rec.v.pos;
+    const dx = p.x - voice.x;
+    const dy = p.y - voice.y;
+    const dz = p.z - voice.z;
+    if (dx * dx + dy * dy + dz * dz <= this.tune.moveStep * this.tune.moveStep) return;
+    voice.x = p.x;
+    voice.y = p.y;
+    voice.z = p.z;
+    host.move(voice.key, voice.x, voice.y, voice.z);
+  }
+
+  /**
+   * A one-shot of the machine you are on carried with it while it plays, and forgotten once it has
+   * ended or you have stepped off. It is never stopped here: it ends by itself.
+   */
+  private followShot(rec: Rec, voice: Voice): void {
+    if (!voice.key) return;
+    const host = this.host;
+    if (!host || !rec.own || !host.isPlaying(voice.key)) {
+      voice.key = 0;
+      voice.id = null;
+      return;
+    }
+    this.carry(rec, voice, host);
+  }
+
+  /**
+   * One sound where a vehicle is, in the space it is in. `follow`, for the machine you are on, is the
+   * voice that remembers it so that it goes on being carried with the machine while it plays.
+   */
+  private at(rec: Rec, what: string, id: string | null, follow?: Voice): void {
     const p = rec.v.pos;
     const key = this.play(id, p.x, p.y, p.z, rec.own ? this.earSpace : undefined);
     this.note(what, rec.v.def?.id ?? rec.v.spec.id, id, key);
+    if (!follow || !key || !rec.own) return;
+    follow.key = key;
+    follow.id = id;
+    follow.x = p.x;
+    follow.y = p.y;
+    follow.z = p.z;
   }
 
   private play(id: string | null | undefined, x?: number, y?: number, z?: number, space?: SoundSpace): number {
@@ -1209,6 +1262,15 @@ export class VehicleSounds {
   private note(what: string, who: string, sound: string | null | undefined, key: number): void {
     this.log.push({ at: Math.round(this.clock * 100) / 100, what, who, sound: sound ?? null, key });
     if (this.log.length > 40) this.log.splice(0, this.log.length - 40);
+  }
+
+  /** How far a living voice's own place is from the ear, to a tenth of a metre; null for a voice holding nothing. */
+  private voiceDistance(voice: Voice): number | null {
+    if (!voice.key) return null;
+    const dx = voice.x - this.ear.x;
+    const dy = voice.y - this.ear.y;
+    const dz = voice.z - this.ear.z;
+    return Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz) * 10) / 10;
   }
 
   /** The whole of it in numbers, which is the only way a driven tab can check any of this. */
@@ -1244,6 +1306,9 @@ export class VehicleSounds {
           water: rec.waterVoice.id,
           keys: [rec.idleVoice.key, rec.runVoice.key, rec.waterVoice.key],
           space: [rec.runVoice.space.building, rec.runVoice.space.cell],
+          // Each voice's own place against the ear, beside the vehicle's below: a voice left behind
+          // its machine is the other fault that cannot be heard from a driven tab.
+          distance: [this.voiceDistance(rec.idleVoice), this.voiceDistance(rec.runVoice), this.voiceDistance(rec.waterVoice)],
         },
         speed: Math.round(rec.v.speed * 10) / 10,
         distance: Math.round(rec.lastDistance),
