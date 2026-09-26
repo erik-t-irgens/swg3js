@@ -88,6 +88,10 @@
 //                                                                  volumetric march reads (<out-dir>/clouds/, 8 MB, invented and the same on
 //                                                                  every world). It reads converted packs and no archive, so it takes no
 //                                                                  <swg-dir>, and it must run after sky
+//   node tools/swg/cli.mjs props <swg-dir> <out-dir> [--limit=N] [--no-icons]   every prop and every piece of furniture in the game as one pack a
+//                                                                  player can put down: 8,596 things in 2,894 models (about 900 MB), keyed on what
+//                                                                  a thing is rather than on where one happens to stand. The space stations are
+//                                                                  left out, since the space command already converts every one of them
 //   node tools/swg/cli.mjs travel <swg-dir> <out-dir> [--core3=<dir>]   where each world's travel terminals, ticket collectors and shuttles really
 //                                                                  stood, as <pack>/travel.json with the models that draw them; none of it is in a
 //                                                                  snapshot, because travel was the server's, so it reads the owner's emulator
@@ -210,6 +214,7 @@ import { core3MobileStats, scanServerSpawns } from './spawns.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
 import { statusJson } from './statusplan.mjs';
+import { PROPS_PACK_VERSION, propCounts as propCountsOf } from './props.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
 /** The shape of a world's travel.json. A pack written by an older run is asked for again. */
@@ -2418,6 +2423,17 @@ function packStatus(dir) {
         need(`parts <swg-dir> ${dir} --retail-only`, 'the parts rig has no mood branches');
       } else console.log(`  parts moods: ${partsMoods.length} branches over ${moodValues(partsManifest.variants, partsMoods)} values`);
     }
+  }
+  // Every prop and every piece of furniture in the game, which is what a player puts down.
+  const propsPack = readJson(join(dir, 'props/manifest.json'));
+  if (!propsPack) {
+    console.log('  props: none (nothing can be placed but a building from a deed)');
+    need(`props <swg-dir> ${dir} --retail-only`, 'no props converted: the Props tab has nothing in it');
+  } else {
+    const P = propCountsOf(propsPack);
+    console.log(`  props: ${P.props} in ${P.models} models over ${P.groups} groups (${P.named} named, ${P.iconed} with a picture)`);
+    if ((propsPack.version ?? 0) !== PROPS_PACK_VERSION) need(`props <swg-dir> ${dir} --retail-only`, 'the props pack is an older shape than this build reads');
+    else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, "the props' models were converted before the gloss maps their own shaders name");
   }
   const weapons = readJson(join(dir, 'weapons/manifest.json'));
   if (!weapons) {
@@ -6096,6 +6112,83 @@ switch (cmd) {
     }
     console.log(`travel: ${things} things over ${worlds} worlds, ${drawn} models converted`);
     console.log('  the ticket collector is the mobiles pack\'s own droid and needs no conversion here');
+    break;
+  }
+
+  case 'props': {
+    // <swg-dir> <out-dir> [--limit=N] [--no-icons]: every prop and every piece of furniture in the
+    // game as one pack, so a player can put any of it down anywhere.
+    //
+    // The worlds' packs already carry whatever their own snapshots place; this is the catalogue,
+    // keyed on what a thing is rather than on where one happens to stand. `tools/swg/props.mjs` says
+    // what counts as a prop and why it is a pattern rather than a list.
+    //
+    // It is written **once per appearance**: 8,967 templates resolve to 3,002 models, because every
+    // colour of a chair and every world's copy of a crate is one model, and converting a model per
+    // template would be three times the disk for nothing.
+    if (!pos[2]) usage();
+    const P = await import('./props.mjs');
+    const vfs = mount(pos[1]);
+    const outDir = join(pos[2], 'props');
+    mkdirSync(outDir, { recursive: true });
+    const icons = !flags.has('--no-icons');
+    wantThumbs = icons;
+    if (icons) mkdirSync(join(outDir, 'icons'), { recursive: true });
+    const { galleryTemplates } = await import('./gallery.mjs');
+    const itemCaches = newItemCaches();
+    const models = new Map();
+    const cache = new Map();
+    let converted = 0;
+    const convert = (template) => {
+      const r = resolveTemplateMesh(vfs, template, cache);
+      if (r.skip) return { skip: r.skip };
+      if (r.particle) return { skip: 'particle effect' };
+      if (r.skeletal) return { skip: 'skeletal appearance' };
+      const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
+      const source = single ? r.parts[0].mesh : r.appearance;
+      const id = familyOf(source);
+      if (!models.has(id)) {
+        try {
+          const conv = convertOne(vfs, source, join(outDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+          let icon = null;
+          if (icons && conv.tris) {
+            try {
+              const textures = new Map();
+              for (const g of conv.mesh.groups) {
+                const t = textureFor(vfs, g.shader);
+                if (t) textures.set(g.shader, t);
+              }
+              // Three-quarters and a little from above, which is how a chair, a crate or a table
+              // reads: the weapon view is side-on and would draw a cabinet as a rectangle.
+              const pic = renderThumbnail(iconMeshes(conv.mesh.groups, textures), { view: 'wear', yawDeg: 32, pitchDeg: 22, flipX: conv.flipX });
+              if (pic) {
+                writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
+                icon = `icons/${id}.png`;
+              }
+            } catch {
+              /* a prop with no picture is still a prop */
+            }
+          }
+          models.set(id, { id, file: `${id}.glb`, bounds, triangles: conv.tris, icon, appearance: source, ...(conv.tris ? {} : { failed: 'no triangles' }) });
+          converted++;
+          if (converted % 250 === 0) console.log(`  ${converted} models so far`);
+        } catch (err) {
+          models.set(id, { id, failed: err.message });
+        }
+      }
+      const def = models.get(id);
+      if (!def || def.failed) return { skip: def?.failed ?? 'failed' };
+      return { model: id, file: def.file, bounds: def.bounds, icon: def.icon ?? null };
+    };
+    const templates = [...galleryTemplates(vfs, 'object/tangible/'), ...galleryTemplates(vfs, 'object/static/'), ...galleryTemplates(vfs, 'object/installation/')];
+    console.log(`props: ${templates.length} templates under the three roots`);
+    const { props, skipped } = P.buildProps(templates, { convert, describe: (template, id) => describeItem(vfs, template, id, itemCaches) }, { log: console.log, limit: options.limit ? Number(options.limit) : Infinity });
+    const manifest = { version: P.PROPS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, props, models: [...models.values()].filter((m) => !m.failed), skipped };
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 1));
+    const c = P.propCounts(manifest);
+    console.log(`-> ${outDir}: ${c.props} props in ${c.models} models over ${c.groups} groups; ${c.named} named, ${c.iconed} with a picture, ${skipped.length} left out`);
     break;
   }
 
