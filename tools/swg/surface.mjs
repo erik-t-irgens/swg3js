@@ -287,18 +287,21 @@ export function emissiveOf(effectName, pixelText, samplers) {
  */
 export function envMaskOf(pixelText, samplers) {
   const text = (pixelText ?? '').replace(/\/\/[^\n]*/g, '');
+  // ENVM is the usual name for the cube a surface reflects; IRID is the same thing on the fourteen
+  // iridescent shaders, which are drawn by the envmask programs with that slot bound to `envMap`.
+  const isCube = (slot) => slot === 'ENVM' || slot === 'IRID';
   // Assembly (the whole `c_` family is ps.1.1): the lit colour lerps toward the environment cube by
   // a sampler's alpha, `lrp r0, t0.a, t1, r0` with t1 on ENVM. It is the mirror of the glow reader's
   // own assembly branch, which looks for an lrp toward MAIN instead, and the two must not be
   // confused: one is a sign that lights itself, the other is chrome.
   for (const m of text.matchAll(/\blrp\s+r\d+(?:\.\w+)?\s*,\s*t(\d+)\.a\s*,\s*t(\d+)\b/g)) {
-    if (samplers?.[Number(m[2])] === 'ENVM') return { slot: samplers?.[Number(m[1])] ?? 'MAIN', channel: 'a' };
+    if (isCube(samplers?.[Number(m[2])])) return { slot: samplers?.[Number(m[1])] ?? 'MAIN', channel: 'a' };
   }
   // The same lerp with the mask taken through a register rather than straight off a sampler
   // (`mov r0, t0` then `lrp r0.rgb, r0.w, t1, r0`, which is the plainest of the palette effects):
   // the nearest move into that register before the lerp says which texture it really is.
   for (const m of text.matchAll(/\blrp\s+r\d+(?:\.\w+)?\s*,\s*r(\d+)\.[wa]\s*,\s*t(\d+)\b/g)) {
-    if (samplers?.[Number(m[2])] !== 'ENVM') continue;
+    if (!isCube(samplers?.[Number(m[2])])) continue;
     const moves = [...text.slice(0, m.index).matchAll(new RegExp(`\\bmov\\s+r${m[1]}(?:\\.\\w+)?\\s*,\\s*t(\\d+)\\b`, 'g'))];
     const from = moves.length ? samplers?.[Number(moves[moves.length - 1][1])] : undefined;
     return { slot: from ?? 'MAIN', channel: 'a' };

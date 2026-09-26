@@ -547,7 +547,11 @@ function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = fals
     surfaceEffects.set(name, tags);
   }
   const slotTags = new Set((slots ?? []).map((s) => s.slot));
-  const reflective = slotTags.has('ENVM') || tags.has('ENVM') || /env|chrome|mirror|refl/.test(name);
+  // IRID is an environment cube under another name: the fourteen iridescent shaders (the chitin
+  // armour set) name their cube IRID and are then drawn by the very same program the envmask family
+  // uses, with that slot bound to its `envMap` sampler. Left out of this test they were the one
+  // reflective family in the game with no reflection at all.
+  const reflective = slotTags.has('ENVM') || slotTags.has('IRID') || tags.has('ENVM') || tags.has('IRID') || /env|chrome|mirror|refl|irid/.test(name);
   const specular = reflective || slotTags.has('SPEC') || tags.has('SPEC') || /spec|gloss|shin|metal|glass/.test(name);
   if (!specular) return {};
   // The shader's own gloss map, where it names one that is not simply the diffuse again.
