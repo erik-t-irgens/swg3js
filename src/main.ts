@@ -102,7 +102,8 @@ import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
-import { TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, ticketText, travelThingAt, travelThingsOf, type ShuttleState, type Ticket, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
+import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import type { EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -1906,10 +1907,16 @@ class App {
        * `__debug.terminal()` reports every one of them, which you are standing at, and where each
        * port's shuttle is in its round; `{ go: true }` puts you at the nearest terminal, which is
        * how to try one without finding a starport first; `{ open: true }` opens the window as E
-       * does; `{ tune: { every, waits } }` moves the timetable, every number of which is ours.
+       * does; `{ tune: { every, waits } }` moves the timetable, every number of which is ours, and
+       * `{ rigs: { reach, solid } }` the drawn shuttles' own two numbers. `shuttlesDrawn` is every
+       * shuttle standing on its rig: where it is in its round and whether it is solid just now.
        */
-      terminal: (opts: { go?: boolean; open?: boolean; tune?: Partial<typeof TRAVEL_TUNE> } = {}) => {
+      terminal: (opts: { go?: boolean; open?: boolean; tune?: Partial<typeof TRAVEL_TUNE>; rigs?: Partial<typeof SHUTTLE_RIG_TUNE> } = {}) => {
         if (opts.tune) Object.assign(TRAVEL_TUNE, opts.tune);
+        if (opts.rigs) {
+          if (typeof opts.rigs.reach === 'number' && opts.rigs.reach > 0) SHUTTLE_RIG_TUNE.reach = opts.rigs.reach;
+          if (typeof opts.rigs.solid === 'boolean') SHUTTLE_RIG_TUNE.solid = opts.rigs.solid;
+        }
         const things = this.travelThings();
         const here = packIdOf(this.world.planet, this.zone);
         const at = this.player.worldPos;
@@ -1968,14 +1975,20 @@ class App {
           shipTerminal: this.shipTerminalNear() ? { away: Number(Math.hypot(this.shipTerminalNear()!.x - this.player.worldPos.x, this.shipTerminalNear()!.z - this.player.worldPos.z).toFixed(1)), state: this.shipTerminalState() } : null,
           tickets: this.tickets.map((t) => `${t.to} (${creditText(t.price)})${pickTicket(this.tickets, this.usingTicket, here) === t ? ' ← the one that would be used' : ''}`),
           credits: creditText(purse.credits),
-          shuttles: ports.map((p) => `${p.name}: ${shuttleWords(shuttleAt(`${here}|${p.name}`, seconds))}`),
+          shuttles: ports.map((p) => {
+            const shuttle = things.find((t) => t.kind === 'shuttle' && this.portOfBuilding(t)?.name === p.name);
+            return `${p.name}: ${shuttleWords(shuttleAt(`${here}|${p.name}`, seconds, TRAVEL_TUNE, shuttle ? this.shuttleTimes(shuttle) : null))}`;
+          }),
+          shuttlesDrawn: this.shuttleRigs?.describe() ?? null,
           nearest: near.slice(0, 3).map((n) => ({ kind: n.t.kind, away: Math.round(n.d), cell: n.t.cell })),
           note: !this.travelRows.length
-            ? "no travel.json for this world: npm run swg -- travel '@SWG' assets-private --retail-only (with your emulator checkout), then reload"
+            ? "no travel.json for this world: npm run swg -- travel '@SWG' assets-private --retail-only, then reload"
             : things.length && !things.some((t) => t.model)
               ? "this world's travel pack was written before the models were named, so the terminals are there to press and not to see: run travel again and reload"
-              : '',
-          tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE } },
+              : things.some((t) => t.kind === 'shuttle') && !things.some((t) => t.rig)
+                ? "this world's travel pack was written before the shuttles' rigs, so they stand still: run travel again and reload"
+                : '',
+          tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE }, rigs: { ...SHUTTLE_RIG_TUNE } },
         };
       },
       /**
@@ -7112,8 +7125,11 @@ class App {
     // that row is up and a flourish's turn must not wait on a panel.
     this.stepBandClock();
     // And the collectors that have not managed to stand yet, which is the same "every frame reaches
-    // here" argument: a droid refused on arrival must be asked for again.
-    this.stepTravelStand(this.audio.now);
+    // here" argument: a droid refused on arrival must be asked for again. On the page's own clock:
+    // the audio clock stands at nought until the first click, and no collector anywhere stood before it.
+    this.stepTravelStand(performance.now() / 1000);
+    // The shuttles, posed where their round says they are, on the clock everybody shares.
+    this.shuttleRigs?.update(this.cam.camera.position);
     this.audio.update(dt, pose);
   }
 
@@ -8059,6 +8075,9 @@ class App {
     // from the gather it would be the world left behind's gates, mirrored about the world left
     // behind's centre, for as long as it took a frame to reach the on-foot branch.
     this.zoneGates.use(import.meta.env.BASE_URL, placesFor);
+    // The shuttles of the world left behind: in the scene and the physics that outlive it, so they go
+    // now, whether or not the world arrived at has any of its own.
+    this.shuttleRigs?.clear();
     this.placeNames = [];
     this.placeNamesFor = placesFor;
     void this.poisOf(placesFor)
@@ -9568,6 +9587,8 @@ class App {
     // nearest thing to one of these -- a rigid thing that moves and turns as one.
     const props = loosePropsGroup();
     if (props) out.add(props, false, 'vehicle');
+    // The shuttles, the same shape again: each root stands on its pad and the joints under it move.
+    if (this.shuttleRigs) for (const r of this.shuttleRigs.roots(this.moverRoots)) out.add(r, false, 'vehicle');
     this.remotes.collectMovers(out);
   };
 
@@ -9780,17 +9801,20 @@ class App {
     }
     this.travelRowsFor = pack;
     this.travelRows = [];
+    this.travelRigs = {};
     this.travelCache = { key: '', things: [] };
     try {
       const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/travel.json`);
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
-      const data = (await res.json()) as { version?: number; rows?: TravelRow[] };
+      const data = (await res.json()) as { version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
       // A pack written before the models were named carries no `model` on any row, so it reads as a
-      // world whose terminals are there to press and not to see. Refusing it outright would take
-      // travel away from an install that has not reconverted, which is worse than drawing nothing.
-      if (!Array.isArray(data.rows) || !(data.version === 1 || data.version === TRAVEL_PACK_VERSION)) return;
+      // world whose terminals are there to press and not to see, and one written before the rigs
+      // carries none, so its shuttles stand still as they always did. Refusing either outright would
+      // take travel away from an install that has not reconverted, which is worse than either.
+      if (!Array.isArray(data.rows) || !travelPackReadable(data.version)) return;
       if (this.travelRowsFor !== pack) return;
       this.travelRows = data.rows;
+      this.travelRigs = data.rigs && typeof data.rigs === 'object' ? data.rigs : {};
       this.travelCache = { key: '', things: [] };
       void this.standTravel(pack);
     } catch {
@@ -9829,8 +9853,21 @@ class App {
     if (this.travelRowsFor !== pack) return;
     for (const [i, t] of things.entries()) {
       if (this.travelRowsFor !== pack) return;
-      if (!t.model) continue;
       const key = `travel:${pack}:${i}`;
+      // A shuttle with a rig is the rig, landing and lifting off on the round everybody shares; one
+      // whose rig will not stand falls back on the still model it always was, where it has one.
+      const rig = t.kind === 'shuttle' && t.rig ? this.travelRigs[t.rig] : undefined;
+      if (rig) {
+        const times = rigTimes(rig, t.mood) ?? { land: TRAVEL_TUNE.glide, lift: TRAVEL_TUNE.glide };
+        const name = this.shuttleKey(t);
+        const stood = await this.rigsOf().stand(key, rig, t.mood, { x: t.x, y: t.y, z: t.z, yaw: t.yaw }, t.cell > 0, {
+          times,
+          state: () => shuttleAt(name, sharedClock.walkSeconds(), TRAVEL_TUNE, times),
+        });
+        if (this.travelRowsFor !== pack) return;
+        if (stood) continue;
+      }
+      if (!t.model) continue;
       if (t.kind === 'collector') {
         // Asked for once and then left waiting: a droid is a mobile, and a mobile's spawn is refused
         // for half a dozen reasons that are all about **this moment** rather than about the droid --
@@ -9852,6 +9889,9 @@ class App {
       for (const key of this.travelStood.keys) this.world.unplaceBuilding(key);
       for (const s of this.travelStood.droids) this.world.unstandMobile(s.droid);
     }
+    // The shuttles are this file's own, in the scene and the physics that outlive every world, so they
+    // come down whether or not the world they stood in is still here.
+    this.shuttleRigs?.clear();
     this.travelStood = { pack: '', keys: [], droids: [] };
     this.travelWaiting = [];
     this.travelRefused = '';
@@ -9923,6 +9963,39 @@ class App {
   /** The world's travel rows as the pack carries them, and which pack they are for. */
   private travelRows: TravelRow[] = [];
   private travelRowsFor = '';
+  /** The shuttles' rigs the rows name, by name; empty for a pack written before them. */
+  private travelRigs: Record<string, TravelRig> = {};
+  /** The shuttles drawn with their rigs, made the first time a world has one to draw. */
+  private shuttleRigs: ShuttleRigs | null = null;
+  private readonly moverRoots: THREE.Object3D[] = [];
+
+  private rigsOf(): ShuttleRigs {
+    return (this.shuttleRigs ??= new ShuttleRigs({
+      scene: this.world.scene,
+      physics: this.world.physics,
+      base: `${import.meta.env.BASE_URL}assets-private/`,
+      prepare: (root) => this.world.prepareActor(root),
+      forget: (materials) => this.world.forgetMaterials(materials),
+    }));
+  }
+
+  /**
+   * The name a port's shuttle keeps its round under: the port's, where the world knows one, and the
+   * building's place otherwise. The collector and the shuttle it serves belong to one building, so
+   * they come to the same name, and the words at the collector and what is drawn on the pad are the
+   * same round.
+   */
+  private shuttleKey(thing: TravelThing): string {
+    const here = packIdOf(this.world.planet, this.zone);
+    const port = this.portOfBuilding(thing);
+    return `${here}|${port?.name ?? `${Math.round(thing.bx)},${Math.round(thing.bz)}`}`;
+  }
+
+  /** How long the shuttle of a thing's building takes to land and to lift off: its rig's clips, or null for the old glide. */
+  private shuttleTimes(thing: TravelThing): ShuttleTimes | null {
+    const shuttle = thing.kind === 'shuttle' ? thing : this.travelThings().find((t) => t.kind === 'shuttle' && t.bx === thing.bx && t.bz === thing.bz);
+    return shuttle?.rig ? rigTimes(this.travelRigs[shuttle.rig], shuttle.mood) : null;
+  }
 
   /** The world's fittings as the pack carries them, what was stood, and which pack both are for. */
   private fittingRows: FittingRow[] = [];
@@ -10056,7 +10129,7 @@ class App {
       this.terminalWorld = '';
       this.closePanels();
       this.map.hide();
-      this.showTerminal(this.portOfBuilding({ kind: 'terminal', model: null, x: own.x, y: own.y, z: own.z, yaw: 0, cell: 0, building: own.template, bx: own.x, bz: own.z }));
+      this.showTerminal(this.portOfBuilding({ kind: 'terminal', model: null, rig: null, mood: '', x: own.x, y: own.y, z: own.z, yaw: 0, cell: 0, building: own.template, bx: own.x, bz: own.z }));
       this.freeMouse(true);
       return true;
     }
@@ -10421,9 +10494,7 @@ class App {
    * otherwise, so a collector well away from any named port still keeps a round of its own.
    */
   private shuttleOf(collector: TravelThing): ShuttleState {
-    const here = packIdOf(this.world.planet, this.zone);
-    const port = this.portOfBuilding(collector);
-    return shuttleAt(`${here}|${port?.name ?? `${Math.round(collector.bx)},${Math.round(collector.bz)}`}`, sharedClock.walkSeconds());
+    return shuttleAt(this.shuttleKey(collector), sharedClock.walkSeconds(), TRAVEL_TUNE, this.shuttleTimes(collector));
   }
 
   /** What standing at a collector says: the ticket that would be handed in, and where the shuttle is. */

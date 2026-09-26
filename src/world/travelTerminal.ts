@@ -17,8 +17,36 @@
 // tests): relative imports only as `import type`, no enum, no namespace, no constructor parameter
 // properties.
 
-/** The pack this file reads. 2 added the model each row is drawn with. */
-export const TRAVEL_PACK_VERSION = 2;
+/**
+ * The pack this file reads. 2 added the model each row is drawn with; 3 the rig each shuttle lands
+ * with. Every version from 1 up is still read: an install that has not converted again keeps its
+ * terminals, and its shuttles stand still as they always did.
+ */
+export const TRAVEL_PACK_VERSION = 3;
+
+/** Whether this build reads a travel.json of that version. */
+export function travelPackReadable(version: unknown): boolean {
+  return typeof version === 'number' && version >= 1 && version <= TRAVEL_PACK_VERSION;
+}
+
+/** The clips a rig's round is made of, by role. */
+export interface RigClips {
+  land: string;
+  lift: string;
+  ground?: string;
+  sky?: string;
+}
+
+/**
+ * A shuttle's rig as the pack carries it: the skeleton and its clips, the pieces that hang on its
+ * joints, the clips by branch, and each clip's length. Every file is from the root of the packs.
+ */
+export interface TravelRig {
+  file: string;
+  parts: { joint: string; file: string; bounds?: { min: number[]; max: number[] } }[];
+  moods: Record<string, RigClips>;
+  seconds: Record<string, number>;
+}
 
 /** One travel thing, as a world's pack carries it. */
 export interface TravelRow {
@@ -28,6 +56,9 @@ export interface TravelRow {
    * collector (which is a droid), or null for a thing this game has no model for.
    */
   model?: string | null;
+  /** A shuttle's rig, by its name in the file's `rigs`, and the branch of its clips it plays. */
+  rig?: string;
+  mood?: string;
   building: string;
   /** The room it stands in, or 0 for out in the open. */
   cell: number;
@@ -47,6 +78,9 @@ export interface TravelThing {
   kind: 'terminal' | 'collector' | 'shuttle';
   /** The model it is drawn with, or null. */
   model: string | null;
+  /** A shuttle's rig and branch, where the pack names one; null draws it as it always was. */
+  rig: string | null;
+  mood: string;
   /** Where it really is, in the world's frame. */
   x: number;
   y: number;
@@ -94,7 +128,7 @@ export const TRAVEL_TUNE = {
  * by putting the same local place through both.
  */
 export function travelThingsOf(rows: readonly TravelRow[], centre: { x: number; z: number }): TravelThing[] {
-  return rows.map((r) => ({ kind: r.kind, model: r.model ?? null, building: r.building, ...childInWorld(r, centre) }));
+  return rows.map((r) => ({ kind: r.kind, model: r.model ?? null, rig: r.rig ?? null, mood: r.mood ?? '', building: r.building, ...childInWorld(r, centre) }));
 }
 
 /** A child of a building, as a pack writes one: its place, and where the building it belongs to stands. */
@@ -248,25 +282,85 @@ export interface ShuttleState {
   glide: number;
 }
 
+/** How long a shuttle takes to come down and to go up, seconds. */
+export interface ShuttleTimes {
+  land: number;
+  lift: number;
+}
+
 /**
  * Where a port's shuttle is, from the wall clock and the port's own name and nothing else.
  *
  * Every port keeps its own round of `every` seconds, and where in that round it lands is drawn from
  * its name -- so two ports do not all land together, and the same port lands at the same instant in
  * every browser with nothing sent between them.
+ *
+ * `times` are the landing and the lift-off of the rig that port's shuttle is drawn with, which are the
+ * clips' own lengths: a transport takes 26.6 s to come down and Theed's 32.3, and a timetable that
+ * gave every shuttle the same `glide` would have the collector saying it had landed while it was still
+ * a hundred metres up. Without a rig both are `glide`, as they always were.
  */
-export function shuttleAt(name: string, seconds: number, tune = TRAVEL_TUNE): ShuttleState {
-  const every = Math.max(tune.waits + tune.glide * 2 + 1, tune.every);
+export function shuttleAt(name: string, seconds: number, tune = TRAVEL_TUNE, times: ShuttleTimes | null = null): ShuttleState {
+  const land = times && times.land > 0 ? times.land : tune.glide;
+  const lift = times && times.lift > 0 ? times.lift : tune.glide;
+  const visit = tune.waits + land + lift;
+  const every = Math.max(visit + 1, tune.every);
   const slot = Math.floor(seconds / every);
   // Where in this round it comes down: anywhere that leaves room for the whole visit.
-  const room = every - (tune.waits + tune.glide * 2);
+  const room = every - visit;
   const start = slotHash(name, slot) * room;
   const t = seconds - slot * every - start;
   if (t < 0) return { phase: 'away', until: -t, left: 0, glide: 0 };
-  if (t < tune.glide) return { phase: 'landing', until: tune.glide - t, left: 0, glide: t / tune.glide };
-  if (t < tune.glide + tune.waits) return { phase: 'waiting', until: 0, left: tune.glide + tune.waits - t, glide: 1 };
-  if (t < tune.glide * 2 + tune.waits) return { phase: 'leaving', until: every - t + slotHash(name, slot + 1) * room, left: 0, glide: 1 - (t - tune.glide - tune.waits) / tune.glide };
+  if (t < land) return { phase: 'landing', until: land - t, left: 0, glide: t / land };
+  if (t < land + tune.waits) return { phase: 'waiting', until: 0, left: land + tune.waits - t, glide: 1 };
+  if (t < visit) return { phase: 'leaving', until: every - t + slotHash(name, slot + 1) * room, left: 0, glide: 1 - (t - land - tune.waits) / lift };
   return { phase: 'away', until: every - t + slotHash(name, slot + 1) * room, glide: 0, left: 0 };
+}
+
+/** A rig's landing and lift-off for one branch, from the clips' own lengths; null where it has none. */
+export function rigTimes(rig: TravelRig | null | undefined, mood: string): ShuttleTimes | null {
+  const clips = rig ? rig.moods[mood] ?? Object.values(rig.moods)[0] : undefined;
+  if (!rig || !clips) return null;
+  const land = rig.seconds[clips.land] ?? 0;
+  const lift = rig.seconds[clips.lift] ?? 0;
+  return land > 0 && lift > 0 ? { land, lift } : null;
+}
+
+/** Which clip a rig plays at a moment of its round, and where in it; `shown` false while it is away. */
+export interface RigPose {
+  role: 'land' | 'lift' | 'ground' | 'sky';
+  seconds: number;
+  shown: boolean;
+}
+
+/**
+ * A shuttle's pose, as a pure function of where it is in its round: coming down plays the landing
+ * from its start, waiting holds the pose on the ground, going up plays the lift-off, and away it is
+ * not drawn at all, since both clips end kilometres off and nothing is to be seen of it there.
+ */
+export function rigPose(s: ShuttleState, times: ShuttleTimes, out: RigPose): RigPose {
+  switch (s.phase) {
+    case 'landing':
+      out.role = 'land';
+      out.seconds = Math.min(times.land, Math.max(0, s.glide * times.land));
+      out.shown = true;
+      break;
+    case 'waiting':
+      out.role = 'ground';
+      out.seconds = 0;
+      out.shown = true;
+      break;
+    case 'leaving':
+      out.role = 'lift';
+      out.seconds = Math.min(times.lift, Math.max(0, (1 - s.glide) * times.lift));
+      out.shown = true;
+      break;
+    default:
+      out.role = 'sky';
+      out.seconds = 0;
+      out.shown = false;
+  }
+  return out;
 }
 
 /** What a shuttle's state reads as under the collector, in words. */

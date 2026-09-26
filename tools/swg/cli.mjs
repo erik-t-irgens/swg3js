@@ -216,7 +216,7 @@ import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
-import { OBJECT_EFFECTS_VERSION } from './clientfx.mjs';
+import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { CORE3_WORLDS } from './core3.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -228,7 +228,9 @@ import { PROPS_PACK_VERSION, propCounts as propCountsOf } from './props.mjs';
 const DEED_PACK_VERSION = 1;
 /** The shape of a world's travel.json. A pack written by an older run is asked for again. */
 // 2: every row carries the model it is drawn with, and the shuttleports' own shuttles are in it.
-const TRAVEL_PACK_VERSION = 2;
+// 3: every shuttle names the rig it lands and lifts off with (the file carries the rigs), and a
+//    child's turn is read from a quaternion of any length (Theed's transport was 26.6 degrees out).
+const TRAVEL_PACK_VERSION = 3;
 /** The shape of a world's fittings.json: the other things the server stood on its buildings. */
 const FITTINGS_PACK_VERSION = 1;
 // 2: every ground family carries the bump map the client shaded this terrain with.
@@ -1046,6 +1048,38 @@ function convertParticle(vfs, prtPath, outDir) {
 }
 
 /**
+ * One of the shuttles' rigs, into <out>/travel/: the skeleton and its clips with no mesh (its own mesh
+ * is a placeholder), and every static piece its client data hangs on one of its joints, each an
+ * ordinary model. Returns what travel.json carries for it, with every path from the root of the packs:
+ * the rig, the pieces and the joint each rides, the clips by role and branch, and each clip's seconds.
+ */
+function convertTravelRig(vfs, out, id, T) {
+  const src = T.TRAVEL_RIGS[id];
+  if (!src) throw new Error(`no rig called ${id}`);
+  mkdirSync(join(out, 'travel'), { recursive: true });
+  const file = `travel/rig_${id}.glb`;
+  const info = convertSat(vfs, src.sat, join(out, file), { animations: 'all', maxAnimations: 40, rigOnly: true });
+  const moods = T.rigClipTable(info.animations);
+  if (!Object.keys(moods).length) throw new Error(`${info.animationTable ?? src.sat} has no landing and lift-off`);
+  if (!vfs.has(src.clientData)) throw new Error(`${src.clientData} is not in the archives`);
+  const parts = [];
+  for (const c of readClientChildren(parseIff(vfs.read(src.clientData)))) {
+    // The pieces a skeletal thing's client data hangs on its joints; an effect hung the same way is
+    // not a piece of it (neither shuttle hangs one).
+    if ((c.tag !== 'HOBJ' && c.tag !== 'IHOB') || !c.hardpoint || /\.prt$/i.test(c.name)) continue;
+    const part = `travel/${familyOf(c.name)}.glb`;
+    const conv = convertOne(vfs, c.name, join(out, part));
+    const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+    const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+    parts.push({ joint: c.hardpoint, file: part, appearance: c.name, triangles: conv.tris, bounds });
+  }
+  if (!parts.length) throw new Error(`${src.clientData} hangs nothing on the rig`);
+  const seconds = {};
+  for (const row of Object.values(moods)) for (const clip of Object.values(row)) seconds[clip] = info.clipSeconds?.[clip] ?? 0;
+  return { file, sat: src.sat, joints: info.joints, parts, moods, seconds };
+}
+
+/**
  * Convert a ribbon a particle carries into the pack (cached with the particle effects, per file per
  * pack): particles/swh_<name>.json, its texture shared with the pack's quad particles, and the effect
  * it names converted as any carried effect is. Returns its manifest entry or { failed }.
@@ -1686,7 +1720,7 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
  * the game can dress and undress a character at run time rather than the converter deciding once.
  * `animations: false` reads no animation table at all, for a model whose clips live in a shared pack.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false, rigOnly = false } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -2008,6 +2042,8 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   // The mobiles packs have padded theirs since they were written; these rigs now do the same, and
   // the call is a no-op on every clip of more than one key.
   skin.clips.forEach((clip, i) => M.padSingleFrame(clip, clips[i]?.animation?.fps || 30));
+  // Each clip's own length in seconds, as the game will play it: a landing is timed by it.
+  info.clipSeconds = Object.fromEntries(skin.clips.map((c) => [c.name, Math.round((c.times[c.times.length - 1] ?? 0) * 1e4) / 1e4]));
   if (hardpoints) {
     info.hardpoints = skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
     for (const name of skin.droppedHardpoints) info.skipped.push(`hardpoint ${name}: its joint is not in the skeleton`);
@@ -2053,7 +2089,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
     return info;
   }
   mkdirSync(dirname(outFile), { recursive: true });
-  writeFileSync(outFile, buildGlb(meshes, { flipX: true, textures, skin, animations: skin.clips }));
+  // A rig alone -- its joints and its clips, and none of its meshes -- for an appearance whose own
+  // mesh is a placeholder and whose look hangs on its joints (the shuttles: travel.mjs).
+  if (rigOnly) writeFileSync(outFile, buildGlb([], { flipX: true, skin, animations: skin.clips }));
+  else writeFileSync(outFile, buildGlb(meshes, { flipX: true, textures, skin, animations: skin.clips }));
   return info;
 }
 
@@ -2480,7 +2519,7 @@ function packStatus(dir) {
       // says: a world baked at one and its neighbour at another would steer two different ways
       // with nothing anywhere to show it.
       navGrid ? `nav grid ${navGrid.nx}x${navGrid.nz} at ${navGrid.cell} m, ${navGrid.slopeDegrees ?? '?'} deg${navMoved ? ', BAKED AROUND ANOTHER CENTRE' : ''}${navNoIndoor ? ', NO BUILDING FOOTPRINTS' : ''}${navCut.length ? `, ${navCut.length} TOWN${navCut.length === 1 ? '' : 'S'} OFF THE MAIN REGION` : ''}` : 'no nav grid',
-      travel ? `travel ${travel.counts?.terminals ?? 0} terminals, ${travel.counts?.collectors ?? 0} collectors, ${travel.counts?.shuttles ?? 0} shuttles${travel.version !== TRAVEL_PACK_VERSION ? ' (UNDRAWN: no models)' : ''}` : 'no travel',
+      travel ? `travel ${travel.counts?.terminals ?? 0} terminals, ${travel.counts?.collectors ?? 0} collectors, ${travel.counts?.shuttles ?? 0} shuttles${(travel.version ?? 1) < 2 ? ' (UNDRAWN: no models)' : travel.version !== TRAVEL_PACK_VERSION ? ' (THE SHUTTLES STAND STILL: no rigs)' : ''}` : 'no travel',
       fittings ? `${fittings.counts?.things ?? 0} fittings` : 'no fittings',
     ].filter(Boolean);
     console.log(`  ${planet}: ${parts.join(', ')}`);
@@ -2525,6 +2564,9 @@ function packStatus(dir) {
     // made once rather than repeated at every planet -- which is what the two flags below are for.
     if (objects && !travel) wantTravel = true;
     else if (travel && travel.version !== TRAVEL_PACK_VERSION) wantTravel = true;
+    // The rigs live in one folder every world shares, so a world's file can be current while the
+    // pieces it names have gone.
+    else if (travel && Object.values(travel.rigs ?? {}).some((r) => !existsSync(join(dir, r.file)) || (r.parts ?? []).some((p) => !existsSync(join(dir, p.file))))) wantTravel = true;
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
@@ -6330,6 +6372,22 @@ switch (cmd) {
     let worlds = 0;
     let things = 0;
     let drawn = 0;
+    // The shuttles' rigs, converted once for every world into <out>/travel/ the first time a world's
+    // rows need one (travel.mjs says what a rig is). A rig that will not convert leaves its rows with
+    // none, and the game draws those as it always did.
+    const rigs = {};
+    const rigFor = (id) => {
+      if (id in rigs) return rigs[id];
+      rigs[id] = null;
+      try {
+        rigs[id] = convertTravelRig(vfs, out, id, T);
+        const r = rigs[id];
+        console.log(`  the ${id}: ${r.parts.length} piece${r.parts.length === 1 ? '' : 's'} on ${new Set(r.parts.map((p) => p.joint)).size} joint${r.parts.length === 1 ? '' : 's'}, ${Object.entries(r.moods).map(([m, c]) => `${m || 'one branch'} landing in ${r.seconds[c.land]} s and lifting off in ${r.seconds[c.lift]} s`).join('; ')}`);
+      } catch (err) {
+        console.warn(`  the ${id} would not convert, so it is drawn as it was: ${err.message}`);
+      }
+      return rigs[id];
+    };
     for (const dir of readdirSync(out, { withFileTypes: true })) {
       if (!dir.isDirectory()) continue;
       const layoutFile = join(out, dir.name, 'layout.json');
@@ -6367,9 +6425,21 @@ switch (cmd) {
         }
       }
       writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      // Each shuttle names the rig it lands with and the branch of that rig's clips it plays, and the
+      // file carries the rigs its rows name, with paths from the root of the packs.
+      const used = {};
+      for (const r of rows) {
+        const rig = T.rigOfRow(r);
+        const def = rig ? rigFor(rig) : null;
+        if (!def) continue;
+        const mood = T.moodOfRow(r, rig);
+        r.rig = rig;
+        r.mood = def.moods[mood] ? mood : Object.keys(def.moods)[0];
+        used[rig] = def;
+      }
       writeFileSync(
         join(out, dir.name, 'travel.json'),
-        JSON.stringify({ version: TRAVEL_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rows }, null, 1),
+        JSON.stringify({ version: TRAVEL_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rigs: used, rows }, null, 1),
       );
       worlds++;
       things += rows.length;

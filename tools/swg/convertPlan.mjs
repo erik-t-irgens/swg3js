@@ -185,7 +185,7 @@ export const STEP_FACTS = {
   // reconverted afterwards silently loses its terminals and its elevator panels. Neither carries a
   // planet on its command line, so neither has a SCOPE_ARG entry and each holds `pack:*`, which is
   // the truth about them: one run writes into every converted world.
-  travel: { order: 37, lock: 'pack', needs: ['snapshot'], seconds: 20, bytes: 0.42 * GB, measured: '246 things over 32 worlds: 2.6 s, 306 MB' },
+  travel: { order: 37, lock: 'pack', needs: ['snapshot'], seconds: 20, bytes: 0.42 * GB, measured: "246 things over 32 worlds and the two shuttles' rigs: 2.4 s, 327 MB" },
   fittings: { order: 38, lock: 'pack', needs: ['snapshot'], seconds: 40, bytes: 0.52 * GB, measured: '889 things over 32 worlds: 15.5 s, 388 MB' },
   // The deeds a player buys a building with. It checks each deed's building against the models the
   // gallery carries, so it waits for the gallery; it writes one file at the top of the folder.

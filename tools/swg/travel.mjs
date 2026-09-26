@@ -116,13 +116,82 @@ function luaFiles(dir, out = []) {
 
 /**
  * The yaw of a child's quaternion, which the scripts write as `ox, oy, oz, ow` with **oy the turn
- * about the up axis**: the same convention the snapshots use and the same arithmetic the rest of
- * this converter takes a layer's yaw with.
+ * about the up axis**: the same convention the snapshots use.
+ *
+ * The scripts do not always write a unit quaternion -- Theed's transport is (0, 1, 0, 1), which is a
+ * quarter turn, and 20 of the 1,002 building children are off unit length somewhere -- so the angle
+ * is taken in a form that does not care how long the quaternion is: `2wy` and `w² - y²` are the same
+ * multiple of the sine and cosine of the turn whatever its length. Read as if it were unit length
+ * (`1 - 2y²`), Theed's transport stood at 116.6 degrees rather than 90 and sat crooked in its hangar.
  */
 export function childYaw(c) {
   const w = Number(c.ow ?? 1);
   const y = Number(c.oy ?? 0);
-  return Math.atan2(2 * w * y, 1 - 2 * y * y);
+  return Math.atan2(2 * w * y, w * w - y * y);
+}
+
+/**
+ * The two shuttles the game lands, and where each is drawn from.
+ *
+ * Both are skeletal appearances whose own meshes are placeholders -- four vertices and eight -- and
+ * whose hulls are static appearances hung on joints by their client data (`HOBJ`). The shuttle rides
+ * one piece on its root; the starport's transport is five, the hull, three landing struts and the
+ * door, each on its own joint, which is how its struts fold and its door opens. All the motion is in
+ * the skeleton's own clips: coming down, going up, parked on the ground and parked in the sky.
+ */
+export const TRAVEL_RIGS = {
+  shuttle: { sat: 'appearance/player_shuttle.sat', clientData: 'clientdata/client_shared_player_shuttle.cdf' },
+  transport: { sat: 'appearance/player_transport.sat', clientData: 'clientdata/client_shared_player_transport.cdf' },
+};
+
+/**
+ * Which rig a travel row is drawn with, or null. A shuttleport's shuttle names the `shuttle` model; a
+ * starport's transport names none, since no single model draws it, and that is the only difference
+ * the reference keeps between the two.
+ */
+export function rigOfRow(row) {
+  if (row?.kind !== 'shuttle') return null;
+  return row.model === 'shuttle' ? 'shuttle' : 'transport';
+}
+
+/**
+ * The branch of a transport's clips a row plays. The transport's table carries a mood selector with
+ * two branches: Theed's, which rises out of the royal hangar on a longer path, and one every other
+ * starport shares. Which one a starport used was the server's to say and is not in the archives, so
+ * this is ours: the Theed hangar plays Theed's, and everywhere else the other.
+ */
+export function moodOfRow(row, rig) {
+  if (rig !== 'transport') return '';
+  return /theed/i.test(String(row?.building ?? '')) ? 'theed' : 'calm';
+}
+
+/** The four clips a rig's round is made of, by the names the table gives them. */
+const RIG_ROLES = { land: 'land', lift: 'take_off', ground: 'loop_ground', sky: 'loop_sky' };
+
+/**
+ * A rig's clips by role and branch, out of the clip names its conversion wrote: `land:calm` is the
+ * calm branch's landing, and a clip with no branch in its name is every branch's. A role no clip
+ * fills is left out, and a branch with no landing is not a branch.
+ */
+export function rigClipTable(names) {
+  const list = [...(names ?? [])];
+  const moods = new Set(['']);
+  for (const n of list) {
+    const m = /^[^:]+:(.+)$/.exec(n);
+    if (m) moods.add(m[1]);
+  }
+  if (moods.size > 1) moods.delete('');
+  const out = {};
+  for (const mood of moods) {
+    const row = {};
+    for (const [role, base] of Object.entries(RIG_ROLES)) {
+      const own = mood ? `${base}:${mood}` : base;
+      if (list.includes(own)) row[role] = own;
+      else if (list.includes(base)) row[role] = base;
+    }
+    if (row.land && row.lift) out[mood] = row;
+  }
+  return out;
 }
 
 /**

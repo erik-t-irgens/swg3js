@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { childYaw, kindOfChild, modelOfKind, placeChildren, readTravelBuildings, rowsLost, TRAVEL_MODELS, TRAVEL_OWN_MODELS, travelCounts, yawOfQuat } from '../travel.mjs';
+import { childYaw, kindOfChild, modelOfKind, moodOfRow, placeChildren, readTravelBuildings, rigClipTable, rigOfRow, rowsLost, TRAVEL_MODELS, TRAVEL_OWN_MODELS, travelCounts, yawOfQuat } from '../travel.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -73,6 +73,29 @@ function note(what: string): void {
   ok(Math.abs(yawOfQuat([Math.SQRT1_2, 0, Math.SQRT1_2, 0]) - Math.PI / 2) < 1e-9, 'and a quarter turn about the up axis is a quarter turn');
   ok(Math.abs(childYaw({ ow: 0.909306, oy: -0.416129 }) + 0.858) < 0.01, "a child's own turn is read the same way, out of its ow and oy");
   ok(childYaw({}) === 0, 'and a child with no turn at all faces along the building');
+  // Theed's transport is written (0, 1, 0, 1): a quarter turn that is not unit length. Read as if it
+  // were, it stood at 116.6 degrees and sat crooked in its hangar.
+  ok(Math.abs(childYaw({ oy: 1, ow: 1 }) - Math.PI / 2) < 1e-9, 'a quarter turn written at any length is a quarter turn');
+  ok(Math.abs(childYaw({ oy: 0.7, ow: 0.7 }) - Math.PI / 2) < 1e-9, 'including the 0.7 and 0.7 the scripts write for one');
+  const ref = JSON.parse(readFileSync(new URL('../core3ref/travel-buildings.json', import.meta.url), 'utf8')) as { $map: [string, { kind: string; yaw: number }[]][] };
+  const theed = ref.$map.find(([t]) => t === 'object/building/naboo/hangar_naboo_theed.iff')?.[1].find((k) => k.kind === 'shuttle');
+  ok(!!theed && Math.abs(theed.yaw - Math.PI / 2) < 1e-3, `and the reference in the checkout carries Theed's transport square in its hangar (${theed ? ((theed.yaw * 180) / Math.PI).toFixed(1) : '?'} degrees)`);
+}
+
+// ---------------------------------------------------------------- which rig a shuttle lands with
+
+{
+  ok(rigOfRow({ kind: 'shuttle', model: 'shuttle' }) === 'shuttle', "a shuttleport's shuttle lands on the shuttle's rig");
+  ok(rigOfRow({ kind: 'shuttle', model: null }) === 'transport', "and a starport's transport, which names no model, on the transport's");
+  ok(rigOfRow({ kind: 'terminal', model: 'ksk_all_travel' }) === null, 'and nothing else has a rig at all');
+  ok(moodOfRow({ building: 'object/building/naboo/shared_hangar_naboo_theed.iff' }, 'transport') === 'theed', "Theed's hangar plays Theed's branch");
+  ok(moodOfRow({ building: 'object/building/corellia/shared_starport_corellia.iff' }, 'transport') === 'calm', 'every other starport the one they share');
+  ok(moodOfRow({ building: 'object/building/naboo/theed_shuttleport.iff' }, 'shuttle') === '', 'and the shuttle, which has one branch, none');
+  const transport = rigClipTable(['take_off:calm', 'take_off:theed', 'loop_sky:calm', 'loop_sky:theed', 'land:calm', 'land:theed', 'intro_land', 'loop_ground:calm', 'loop_ground:theed']);
+  ok(Object.keys(transport).sort().join() === 'calm,theed' && transport.theed.land === 'land:theed' && transport.calm.ground === 'loop_ground:calm', "the transport's clips come out as two branches, each with its four roles");
+  const shuttle = rigClipTable(['take_off', 'loop_sky', 'land', 'intro_land', 'loop_ground']);
+  ok(Object.keys(shuttle).join() === '' && shuttle[''].lift === 'take_off' && shuttle[''].sky === 'loop_sky', "the shuttle's as one branch with no name");
+  ok(Object.keys(rigClipTable(['loop_ground', 'take_off'])).length === 0, 'and a table with no landing is no rig');
 }
 
 {
@@ -123,8 +146,12 @@ function note(what: string): void {
     for (const planet of ['corellia', 'naboo', 'tatooine', 'talus', 'rori', 'lok', 'dantooine', 'endor', 'yavin4', 'dathomir']) {
       const file = join('assets-private', planet, 'travel.json');
       if (!existsSync(file)) continue;
-      const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rows: { kind: string; model?: string | null; cell: number; x: number; y: number; z: number }[] };
-      assert.ok(pack.version === 2, `${planet}: the pack is the shape this build reads`);
+      const pack = JSON.parse(readFileSync(file, 'utf8')) as { version: number; rigs?: Record<string, { file: string; parts: { file: string }[] }>; rows: { kind: string; model?: string | null; rig?: string; cell: number; x: number; y: number; z: number }[] };
+      assert.ok(pack.version === 3, `${planet}: the pack is the shape this build writes (run travel again if not)`);
+      // Every shuttle lands on a rig the file carries, and every file the rig names is on disk: the
+      // rigs are one folder every world shares, so a world can be current while its pieces have gone.
+      for (const r of pack.rows) if (r.kind === 'shuttle') assert.ok(!!r.rig && !!pack.rigs?.[r.rig], `${planet}: a shuttle names a rig the file carries`);
+      for (const rig of Object.values(pack.rigs ?? {})) for (const f of [rig.file, ...rig.parts.map((p) => p.file)]) assert.ok(existsSync(join('assets-private', f)), `${planet}: ${f} is on disk`);
       const counts = travelCounts(pack.rows);
       assert.ok(counts.terminals > 0, `${planet}: it has somewhere to buy a ticket`);
       assert.ok(counts.collectors > 0, `${planet}: and somewhere to board`);
@@ -144,7 +171,9 @@ function note(what: string): void {
       passed++;
       console.log(`ok   and ${drawn} of them are drawn, which is every terminal and collector plus a shuttleport's own shuttle`);
       note(`${indoors} of them stand inside a building, which is where a terminal belongs and why the cell travels with it`);
-      note(`${things - drawn} are the starports' own transports, which have no single model: their mesh is a placeholder and the hull is five pieces the converter does not assemble`);
+      note(`${things - drawn} are the starports' own transports, which have no single model: their mesh is a placeholder and the hull is five pieces hung on the transport rig's joints`);
+      passed++;
+      console.log('ok   and every shuttle lands on a rig whose files are on disk');
     }
   }
 }

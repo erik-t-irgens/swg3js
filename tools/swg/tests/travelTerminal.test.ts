@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { TICKETS_HELD, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, shuttleAt, shuttleWords, slotHash, thingAt, ticketText, travelThingAt, travelThingsOf, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { TICKETS_HELD, TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigPose, rigTimes, shuttleAt, shuttleWords, slotHash, thingAt, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type RigPose, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -173,6 +173,44 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
   ok(shuttleWords(waitingNow).includes('here'), 'a shuttle that is here says so');
   ok(shuttleWords(away).includes('2m'), 'and one that is not says how long, in minutes where there are any');
   ok(shuttleWords({ ...away, until: 20 }).includes('20s'), 'and in seconds where there are not');
+}
+
+// ---------------------------------------------------------------- a shuttle drawn on its rig
+
+{
+  // The transport's own lengths: 26.6 s to come down and 20 s to go up. The round is timed by them, and
+  // the pose is where in which clip the rig is, so what is drawn and what the collector says agree.
+  const times = { land: 26.6, lift: 19.97 };
+  const pose: RigPose = { role: 'sky', seconds: 0, shown: false };
+  let landingFor = 0;
+  let liftingFor = 0;
+  let lastLand = -1;
+  let forward = true;
+  let groundWhileBoardable = true;
+  for (let t = 0; t < TRAVEL_TUNE.every * 3; t += 0.25) {
+    const s = shuttleAt('a starport', t, TRAVEL_TUNE, times);
+    rigPose(s, times, pose);
+    if (s.phase === 'landing') {
+      landingFor += 0.25;
+      if (pose.role !== 'land' || pose.seconds < lastLand - 1e-9) forward = false;
+      lastLand = pose.seconds;
+    } else lastLand = -1;
+    if (s.phase === 'leaving') liftingFor += 0.25;
+    if (s.phase === 'waiting' && (pose.role !== 'ground' || !pose.shown)) groundWhileBoardable = false;
+    if (s.phase === 'away' && pose.shown) groundWhileBoardable = false;
+  }
+  ok(Math.abs(landingFor - times.land * 3) < 1.5 && Math.abs(liftingFor - times.lift * 3) < 1.5, `the round takes the rig's own landing and lift-off (${(landingFor / 3).toFixed(1)} s and ${(liftingFor / 3).toFixed(1)} s a round)`);
+  ok(forward, 'and plays its landing forward from the start, never back');
+  ok(groundWhileBoardable, 'it stands on the ground for exactly as long as it can be boarded, and is drawn nowhere while it is away');
+  const mid = rigPose({ phase: 'leaving', until: 0, left: 0, glide: 0.25 }, times, pose);
+  ok(mid.role === 'lift' && Math.abs(mid.seconds - 0.75 * times.lift) < 1e-9, 'three quarters of the way through leaving is three quarters of the way through the lift-off clip');
+  ok(rigTimes(null, '') === null && rigTimes({ file: 'r', parts: [], moods: { calm: { land: 'l', lift: 't' } }, seconds: { l: 26.6, t: 20 } }, 'theed')?.land === 26.6, "a rig's times are its clips' lengths, falling back on its first branch");
+  assert.deepEqual(shuttleAt('a port', 1234), shuttleAt('a port', 1234, TRAVEL_TUNE, null));
+  ok(true, 'and a shuttle with no rig keeps the round it always had');
+  ok(travelPackReadable(1) && travelPackReadable(2) && travelPackReadable(3) && !travelPackReadable(4) && !travelPackReadable(undefined), 'a pack of any version from before the rigs is still read, so an install that has not converted again keeps its terminals');
+  const cli = readFileSync(new URL('../cli.mjs', import.meta.url), 'utf8');
+  const written = Number(/const TRAVEL_PACK_VERSION = (\d+);/.exec(cli)?.[1]);
+  ok(written === TRAVEL_PACK_VERSION, `and the version the converter writes is the one the game reads (${written} and ${TRAVEL_PACK_VERSION})`);
 }
 
 // ---------------------------------------------------------------- boarding
