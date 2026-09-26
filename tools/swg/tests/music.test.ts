@@ -401,6 +401,32 @@ const here = { x: 0, y: 0, z: 0 };
 }
 
 {
+  // Joined five seconds into an eight-second bar: the part came in part way through, so what follows it
+  // is due three seconds later, on the bar -- not a whole sample later, which is where the first cut put
+  // it, five seconds off the performance it had joined.
+  const onces: { when: number }[] = [];
+  let clock = 100;
+  const b = new Band();
+  b.attach({
+    loop: () => 1,
+    once: (_id, _at, _gain, when) => (onces.push({ when: when ?? 0 }), 2),
+    stop: () => {},
+    move: () => {},
+    provide: () => {},
+    duration: () => BAND_TUNE.bar,
+    now: () => clock,
+    seconds: () => 5 * 8 + 5,
+  });
+  b.hear(7, { song: 1, stem: 'mand', flourish: 0 }, here, 5);
+  const offset = songOffset(45);
+  for (let t = 0; t < BAND_TUNE.bar; t += 1 / 30) {
+    clock += 1 / 30;
+    b.tick();
+  }
+  ok(offset === 5 && onces.length === 1 && Math.abs(onces[0].when - (100 - offset + BAND_TUNE.bar)) < 1e-9, `a part joined part way through hands on to the next on the shared bar (${onces[0]?.when.toFixed(2)} s, due ${(100 - offset + BAND_TUNE.bar).toFixed(2)})`);
+}
+
+{
   ok(inBand({ song: 1, stem: 'khorn', flourish: 0 }, { song: 1, stem: 'mand', flourish: 0 }, 10), 'the same song near enough to hear is one band');
   ok(!inBand({ song: 1, stem: 'khorn', flourish: 0 }, { song: 2, stem: 'mand', flourish: 0 }, 10), 'two different songs are not');
   ok(!inBand({ song: 1, stem: 'khorn', flourish: 0 }, { song: 1, stem: 'mand', flourish: 0 }, BAND_TUNE.reach + 1), 'and neither is the same song too far off');

@@ -647,9 +647,13 @@ export class Band {
     this.stopLine(id, BAND_TUNE.cut);
     const line: Line = { song: what.song, stem: what.stem, at: { ...at }, sounding: null, next: null, queued: 0 };
     const mainId = this.idFor(parts.main);
-    const key = this.deps.loop(mainId, at, BAND_TUNE.gain, songOffset(this.deps.seconds()));
+    const offset = songOffset(this.deps.seconds());
+    const key = this.deps.loop(mainId, at, BAND_TUNE.gain, offset);
     if (!key) return;
-    line.sounding = { kind: 'main', n: 0, id: mainId, key, startsAt: this.clock(), endsAt: 0 };
+    // Joined part way through, so it began `offset` seconds ago as far as the bar is concerned: timed
+    // from now, it was taken to run a whole sample from here and the part after it came in that much
+    // late, off the bar the two players are meant to share.
+    line.sounding = { kind: 'main', n: 0, id: mainId, key, startsAt: this.clock() - offset, endsAt: 0 };
     this.lines.set(id, line);
   }
 

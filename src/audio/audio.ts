@@ -173,6 +173,18 @@ const NO_ROOM = -1;
  */
 const POOL_BASE: Record<VoicePool, number> = { positional: 0, flat: VOICE_TUNE.positional, ui: VOICE_TUNE.positional + VOICE_TUNE.flat };
 
+/**
+ * Everything a parameter was going to do from `at` on taken off it, keeping what it does up to then.
+ * `cancelScheduledValues` is not that: a ramp is filed under the time it ends, so cancelling from a
+ * moment inside one takes the whole ramp away, and a fade still climbing when the next loop is lined
+ * up would drop back to where it began and stay there. A browser without the holding kind (and the
+ * node tests' own contexts) gets the plain one, which the caller follows with the ramp it wants.
+ */
+function holdAt(param: AudioParam, at: number): void {
+  if (typeof param.cancelAndHoldAtTime === 'function') param.cancelAndHoldAtTime(at);
+  else param.cancelScheduledValues(at);
+}
+
 interface Slot {
   gain: GainNode;
   /**
@@ -237,11 +249,30 @@ interface Playing {
   /** The slot it holds, numbered across all three pools; -1 while it waits as a virtual voice. */
   slot: number;
   source: AudioBufferSourceNode | null;
+  /**
+   * The source repeats itself (`loop` on the node) and no further source is lined up for it: a run
+   * whose every loop is the first again (`TemplateRun.seamless`). Only while `source` is its own.
+   */
+  native: boolean;
+  /**
+   * The loop before the one in `source`, left to run to the moment that one starts rather than cut
+   * off when it was lined up, and `tailEnd` the latest it can still be sounding. It is on the slot's
+   * own gain until then, so whatever takes a voice off its slot in that window takes it off too.
+   */
+  tail: AudioBufferSourceNode | null;
+  tailEnd: number;
   sample: string;
   rate: number;
   /** The extra pitch that was baked into `rate` when this sound began, so a change can be written live. */
   pitchWritten: number;
-  /** Audio time the sound playing now ends. */
+  /** The template's own volume for the loop playing now, which every later write of the voice keeps. */
+  passGain: number;
+  /** Audio time the loop playing now starts, and the rate it was last written at. */
+  passAt: number;
+  passRate: number;
+  /** Audio time the voice's own fade-in reaches its level, or 0 when it has none. */
+  fadeEnd: number;
+  /** Audio time the sound playing now ends; Infinity for a source that repeats itself. */
   endsAt: number;
   /** Audio time the source may not start before, or 0: the band's own seam. */
   when: number;
@@ -532,9 +563,16 @@ export class AudioSystem {
       pool: template.category === 4 ? 'ui' : flat ? 'flat' : 'positional',
       slot: -1,
       source: null,
+      native: false,
+      tail: null,
+      tailEnd: 0,
       sample: '',
       rate: 1,
       pitchWritten: 0,
+      passGain: 1,
+      passAt: 0,
+      passRate: 1,
+      fadeEnd: 0,
       endsAt: 0,
       when: options.when ?? 0,
       askedAt: now,
@@ -585,12 +623,25 @@ export class AudioSystem {
     if (p.source && ctx) {
       const slot = this.slots[p.slot];
       if (slot) slot.gain.gain.setTargetAtTime(0, ctx.currentTime, Math.max(0.005, seconds) / 3);
+      const until = ctx.currentTime + Math.max(0.01, seconds);
       try {
-        p.source.stop(ctx.currentTime + Math.max(0.01, seconds));
+        p.source.stop(until);
       } catch {
         /* already stopped */
       }
-      p.endsAt = ctx.currentTime + Math.max(0.01, seconds);
+      // The loop before it may still be running out on the same gain. It fades with it, and it must
+      // be over by the time the voice is let go: after that the slot is somebody else's, and moving
+      // it onto the cut node then would bring it back up at full level for the cut's few
+      // milliseconds. A later stop than the one it has would only lengthen it, so none is given.
+      if (p.tail && until < p.tailEnd) {
+        try {
+          p.tail.stop(until);
+        } catch {
+          /* already gone */
+        }
+        p.tailEnd = until;
+      }
+      p.endsAt = until;
     } else {
       this.release(p);
     }
@@ -683,10 +734,13 @@ export class AudioSystem {
     let gridded = 0;
     let muffledVoices = 0;
     let echoingVoices = 0;
+    let nativeLoops = 0;
     const index = this.echoIndex();
     for (const p of this.playing.values()) {
       if (p.slot < 0 && p.loop) waiting++;
       if (p.gridded) gridded++;
+      const native = p.native && p.source !== null;
+      if (native) nativeLoops++;
       const worldly = this.worldly(p);
       const muffle = worldly ? muffleShare(this.listener.space, p.space) : 0;
       const echo = worldly && p.placed && muffle <= 0 && index >= 0 ? (this.tune.echoSend[index] ?? 0) * this.groupGain(p.group) : 0;
@@ -702,7 +756,9 @@ export class AudioSystem {
         virtual: p.slot < 0,
         gain: Number(p.audible.toFixed(3)),
         distance: p.flat ? null : Number(Math.hypot(p.x - this.listener.x, p.y - this.listener.y, p.z - this.listener.z).toFixed(1)),
+        // A source that repeats itself counts one start however many times it has come round.
         starts: p.starts,
+        native,
         // Where it stands in relation to the ear's own room: through a wall, or in the room with it.
         space: worldly ? (p.placed ? `${p.space.building}:${p.space.cell}` : 'no place') : 'not in the world',
         muffled: muffle > 0,
@@ -755,6 +811,8 @@ export class AudioSystem {
       // say whether the four-times-a-second pass is carrying what it should be.
       waitingLoops: waiting,
       griddedVoices: gridded,
+      // Loops sounding on one source that repeats itself rather than a new source every time round.
+      nativeLoops,
       budget: this.budget.status(),
       grid: this.grid.status(),
       bank: this.bank.status(),
@@ -952,7 +1010,7 @@ export class AudioSystem {
       if (p.slot >= 0) this.silence(p);
       return;
     }
-    if (p.run.dueAt <= now + this.tune.lookahead) {
+    if (this.passDue(p, now)) {
       if (!this.ctx || !this.unlocked) {
         // Nothing may sound before the player has clicked: the run keeps its own clock all the
         // same, from the length the index carries, so a bed comes in where it has reached rather
@@ -1008,6 +1066,20 @@ export class AudioSystem {
     }
   }
 
+  /**
+   * Whether a voice's next loop should be lined up now. Never while a source that repeats itself is
+   * sounding: it comes round by itself. And never while the loop before the one sounding is still
+   * running out, so a voice has at most two sources on its slot, the one sounding and the one lined
+   * up after it, and whatever takes it off the slot knows every source it has to take with it. On the
+   * bank's own samples (the shortest endless one is 0.18 s) that second rule never waits; it is there
+   * for a pitch raised far enough to make a pass shorter than the lookahead and a frame.
+   */
+  private passDue(p: Playing, now: number): boolean {
+    if (p.native && p.source) return false;
+    if (p.tail && now < p.tailEnd) return false;
+    return p.run.dueAt <= now + this.tune.lookahead;
+  }
+
   private begin(p: Playing, buffer: AudioBuffer, now: number): void {
     // Every way out of this method after the run has been armed must un-arm it and give the slot
     // back: `nextDue` sets the run waiting and `dueAt` is Infinity until `began`, so a voice that
@@ -1030,6 +1102,13 @@ export class AudioSystem {
     src.buffer = buf;
     const rate = this.start.rate * rateOf(p.pitch);
     src.playbackRate.value = rate;
+    // A run whose every loop is the first again is one source repeating itself, and nothing is ever
+    // lined up after it. That is the only way such a loop stays seamless while its pitch moves (an
+    // engine under the throttle, a ship going past): a loop lined up in advance was timed at the
+    // rate it had then, and at any other rate the one before it either ran out early or was cut off
+    // part way through a wave.
+    const native = p.run.seamless;
+    src.loop = native;
     src.connect(slot.gain);
     // A source plays once and is then done with: it lets go of the slot's gain itself, so a game
     // running for hours never leaves a line of dead nodes behind.
@@ -1044,16 +1123,40 @@ export class AudioSystem {
       at += -offset;
       offset = 0;
     }
-    const gain = this.start.gain * p.gain * p.audible * (this.categoryGain[p.template.category] ?? 1);
-    slot.gain.gain.cancelScheduledValues(at);
-    if (this.start.fadeIn > 0) {
-      slot.gain.gain.setValueAtTime(0, at);
-      slot.gain.gain.linearRampToValueAtTime(gain, at + this.start.fadeIn);
-    } else {
-      slot.gain.gain.setValueAtTime(gain, at);
+    const passGain = this.start.gain;
+    const gain = passGain * p.gain * p.audible * (this.categoryGain[p.template.category] ?? 1);
+    // Whether this loop carries on out of sound the voice is still making: the one before it runs
+    // right up to it. A gap shorter than the lookahead is a late frame and not a silence the
+    // template asked for, so it counts as carrying on as well.
+    const follows = p.starts > 0 && p.source !== null && at - p.endsAt < this.tune.lookahead;
+    const level = slot.gain.gain;
+    if (!follows) {
+      level.cancelScheduledValues(at);
+      if (this.start.fadeIn > 0) {
+        level.setValueAtTime(0, at);
+        level.linearRampToValueAtTime(gain, at + this.start.fadeIn);
+        p.fadeEnd = at + this.start.fadeIn;
+      } else {
+        level.setValueAtTime(gain, at);
+        p.fadeEnd = 0;
+      }
+      slot.lastGain = gain;
+      slot.lastWrite = at;
+    } else if (Math.abs(passGain - p.passGain) > 1e-3) {
+      // A loop coming round again is not faded in: a fade on every loop took a seamless bed down to
+      // nothing at each repeat and brought it back over a second and a half. Only a volume drawn
+      // afresh for this loop is written, from the moment it starts; everything the voice is already
+      // doing up to then is held rather than cancelled, and a fade still climbing (a sample shorter
+      // than its own fade) climbs on to the new level rather than being flattened where it stood.
+      holdAt(level, at);
+      if (p.fadeEnd > at) level.linearRampToValueAtTime(gain, p.fadeEnd);
+      else level.setValueAtTime(gain, at);
+      slot.lastGain = gain;
+      slot.lastWrite = at;
     }
-    slot.lastGain = gain;
-    slot.lastWrite = at;
+    // A loop at the same volume as the last writes nothing: the level it needs is the one the voice
+    // already has, fade and all.
+    p.passGain = passGain;
     // The slot may have been another voice's a moment ago, and its dry, muffled and echo gains are
     // ramps: a new voice's are written outright at the same time as its level, rather than sliding
     // out of what the last one left. A loop of this same voice coming round again is not a new
@@ -1065,27 +1168,41 @@ export class AudioSystem {
       src.start(at, offset);
     } catch {
       p.run.began(0);
-      this.giveBack(p);
+      // Taken off the slot properly, with whatever was sounding on it, rather than only given back.
+      this.silence(p);
       return;
     }
     if (p.source) {
+      // The loop before this one runs out on its own, right where this one starts. It used to be
+      // stopped here, when this one was lined up a lookahead early, which cut a tenth of a second
+      // of silence into every seamless loop at every repeat. The stop at `at` is a backstop for a
+      // pitch lowered after the timing was worked out, and it bounds how long the loop can go on
+      // sounding on the slot's gain, which is what `silence` must take down with the voice.
       try {
-        p.source.stop();
+        p.source.stop(at);
       } catch {
         /* already gone */
       }
+      p.tail = p.source;
+      p.tailEnd = at;
     }
     this.bank.drop(p.sample);
     p.source = src;
+    p.native = native;
     p.sample = sample;
     p.rate = rate;
+    p.passAt = at;
+    p.passRate = rate;
     p.pitchWritten = p.pitch;
-    p.endsAt = at + Math.max(0, buf.duration - offset) / rate;
+    p.endsAt = native ? Infinity : at + Math.max(0, buf.duration - offset) / rate;
     p.askedAt = now;
     p.starts++;
     this.bank.hold(sample);
     this.counts.started++;
-    p.run.began(buf.duration - offset, rate);
+    // Armed from when this loop really starts, not from when it was due: see `TemplateRun.began`.
+    // A source that repeats itself is still told, so the run's own bookkeeping is the same either
+    // way; nothing reads what it arms while that source sounds.
+    p.run.began(buf.duration - offset, rate, at);
     this.writeVoice(p, now);
   }
 
@@ -1134,7 +1251,10 @@ export class AudioSystem {
     if (!slot || !ctx || p.stopping) return;
     if (now - slot.lastWrite < 1 / this.tune.writeRate) return;
     slot.lastWrite = now;
-    const gain = p.gain * p.audible * (this.categoryGain[p.template.category] ?? 1);
+    // The template's own volume for this loop is part of the voice's level for as long as the loop
+    // plays. Left out, every voice was pushed to full within a write of starting, so a bed at 0.8
+    // dipped back to 0.8 at each repeat and every sound whose template draws a volume lost it.
+    const gain = p.passGain * p.gain * p.audible * (this.categoryGain[p.template.category] ?? 1);
     if (Math.abs(gain - slot.lastGain) > 1e-3) {
       slot.gain.gain.setTargetAtTime(gain, now, this.tune.ramp);
       slot.lastGain = gain;
@@ -1146,10 +1266,39 @@ export class AudioSystem {
     // second and only on a change, so a loop that keeps its pitch costs nothing.
     if (p.source) {
       const rate = p.rate * rateOf(p.pitch - p.pitchWritten);
-      if (Math.abs(rate - p.source.playbackRate.value) > 1e-3) p.source.playbackRate.setTargetAtTime(rate, now, this.tune.ramp);
+      if (Math.abs(rate - p.source.playbackRate.value) > 1e-3) {
+        p.source.playbackRate.setTargetAtTime(rate, now, this.tune.ramp);
+        if (!p.native) this.retime(p, now, rate);
+      }
     }
     if (slot.pan) this.place(slot.pan, p.x, p.y, p.z, now);
     this.writeSpace(p, slot, now, false);
+  }
+
+  /**
+   * A loop lined up one after another whose rate has just been written: it now ends at another time,
+   * and the loop after it is armed there instead, so the two still meet. Only the loops that cannot
+   * repeat on one source come here (a volume or pitch drawn afresh each time round, several samples),
+   * since a source that repeats itself needs no timing at all.
+   *
+   * What is left of the sample is worked out at the rate it was last written at. The rate does not
+   * jump to the new one: it eases there on `setTargetAtTime`, a first-order lag, which plays
+   * `(old - new) * ramp` more of the sample than a jump would (less, going up), so that is taken off
+   * what is left. Over any run of writes those corrections sum to exactly the lag's own, so the end
+   * worked out after the last change is exact once the rate has settled, to the render quantum the
+   * browser moves the rate in. A loop lined up but not begun yet has had part of the easing before
+   * it starts, which is what the exponential is for. The loop before it, which is running out
+   * already, is not written at all: its end is fixed by the time it has, and a new rate would only
+   * move it off the start of the one after.
+   */
+  private retime(p: Playing, now: number, rate: number): void {
+    const was = p.passRate;
+    if (Math.abs(rate - was) < 1e-9 || rate <= 0) return;
+    p.passRate = rate;
+    const from = Math.max(now, p.passAt);
+    const left = (p.endsAt - from) * was - (was - rate) * this.tune.ramp * Math.exp(-(from - now) / Math.max(1e-6, this.tune.ramp));
+    p.endsAt = from + Math.max(0, left) / rate;
+    p.run.retime(p.endsAt);
   }
 
   /**
@@ -1280,9 +1429,12 @@ export class AudioSystem {
 
   /** Give the slot back but keep the record and its clock: a loop out of earshot, or one that gave way. */
   private silence(p: Playing, stolen = false): void {
-    if (p.source) {
-      // The source is moved off the slot's own gain, which the voice taking its place is about to
-      // write, and faded out on the slot's cut node instead: an instantaneous stop clicks.
+    // The loop before the one sounding counts only while it can still be running out on the slot.
+    const tail = p.tail && this.ctx && this.ctx.currentTime < p.tailEnd ? p.tail : null;
+    if (p.source || tail) {
+      // Every source on the slot's own gain, which the voice taking its place is about to write, is
+      // moved off it and faded out on the slot's cut node instead: an instantaneous stop clicks, and
+      // a loop left running out on that gain would be heard at the new voice's level.
       const slot = this.slots[p.slot];
       const ctx = this.ctx;
       let until = 0;
@@ -1290,8 +1442,6 @@ export class AudioSystem {
         const now = ctx.currentTime;
         until = now + this.tune.cutFade;
         try {
-          p.source.disconnect();
-          p.source.connect(slot.cut);
           slot.cut.gain.cancelScheduledValues(now);
           slot.cut.gain.setValueAtTime(1, now);
           slot.cut.gain.linearRampToValueAtTime(0, until);
@@ -1301,18 +1451,47 @@ export class AudioSystem {
           until = 0;
         }
       }
-      try {
-        p.source.stop(until || undefined);
-      } catch {
-        /* already gone */
-      }
+      // A pass lined up for later that `stop` has already told to end before it begins never sounds,
+      // and must be left that way: stopped a second time, onto the cut node, a start inside the cut's
+      // few milliseconds would sound there, past the slot gain, after the voice was let go.
+      if (p.source && p.stopping && p.endsAt <= p.passAt) {
+        try {
+          p.source.disconnect();
+        } catch {
+          /* already gone */
+        }
+      } else if (p.source) this.cutAway(p.source, slot, until);
+      if (tail) this.cutAway(tail, slot, until);
       p.source = null;
     }
+    p.tail = null;
+    p.native = false;
     this.bank.drop(p.sample);
     p.sample = '';
     if (!stolen) this.budget.release(p.key);
     p.slot = -1;
     p.starts = 0;
+  }
+
+  /**
+   * One source taken off a slot's own gain onto its cut node, whose fade `silence` has just laid
+   * down, and stopped when that fade ends. With no fade to hang it on (`until` 0) it is stopped at
+   * once.
+   */
+  private cutAway(src: AudioBufferSourceNode, slot: Slot | null | undefined, until: number): void {
+    if (slot && until) {
+      try {
+        src.disconnect();
+        src.connect(slot.cut);
+      } catch {
+        until = 0;
+      }
+    }
+    try {
+      src.stop(until || undefined);
+    } catch {
+      /* already gone */
+    }
   }
 
   private release(p: Playing): void {

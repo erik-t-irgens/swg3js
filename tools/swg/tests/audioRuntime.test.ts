@@ -18,6 +18,7 @@ import { AudioSystem, GROUP_OF_CATEGORY, SOUND_GROUPS, type AudioSettings } from
 import { ClipEventIndex, ClipWatcher, crossed, type ActiveClip, type ClipHalf } from '../../../src/audio/clipEvents.ts';
 import { BodySounds, FOOT_TUNE, resolveSurface, sampleFamily, surfaceWord } from '../../../src/audio/footsteps.ts';
 import { SaberSounds, swingGroup, type JkaPack, type SaberWorld } from '../../../src/audio/saberSounds.ts';
+import { musicTemplate } from '../../../src/audio/band.ts';
 import { powerById } from '../../../src/combat/forcePowers.ts';
 import { liveSettings } from '../../../src/core/settings.ts';
 
@@ -1845,6 +1846,483 @@ const blade = {} as object;
   mixCtx.currentTime = 13.1;
   mix.update(1 / 60, mixRoom);
   ok((mix.status().voices as { space: string }[])[0].space === '4:2', 'and moving it to a point gives it one, so it fades with distance and can be echoed like anything else in the room');
+}
+
+// ---------------------------------------------------------------------------------------------
+// A loop coming round again. Every repeat of every endless loop with no gap used to carry a tenth of
+// a second of silence (the loop before was stopped when the next was lined up, not when it began),
+// a bed with a fade went down to nothing at each repeat, a loop joined part way lined its next one
+// up early, and every voice was pushed to full volume within a write of starting. None of it can be
+// heard from here, so the context below records every stop with its time and every automation event
+// with its own, works out when each source really ran out, and the mixer is driven at 60 frames a
+// second on the audio clock. Every name this section declares is prefixed `seam`.
+// ---------------------------------------------------------------------------------------------
+{
+  type SeamEvent = { kind: 'set' | 'target' | 'ramp' | 'hold'; v: number; t: number; tau: number };
+  /** A parameter that keeps its automation and can say what it is at any time, as the spec lays it out. */
+  class SeamParam {
+    private base: number;
+    private last: number;
+    events: SeamEvent[] = [];
+    /** Every write in the order it was made, never cancelled: what was asked of the parameter. */
+    readonly log: SeamEvent[] = [];
+    constructor(v: number) {
+      this.base = v;
+      this.last = v;
+    }
+    /** The last value written, as the other fakes in this file keep it. */
+    get value(): number {
+      return this.last;
+    }
+    set value(v: number) {
+      this.base = v;
+      this.last = v;
+    }
+    private add(e: SeamEvent): void {
+      let i = this.events.length;
+      while (i > 0 && this.events[i - 1].t > e.t) i--;
+      this.events.splice(i, 0, e);
+    }
+    setValueAtTime(v: number, t: number) {
+      const e: SeamEvent = { kind: 'set', v, t, tau: 0 };
+      this.add(e);
+      this.log.push(e);
+      this.last = v;
+      return this;
+    }
+    setTargetAtTime(v: number, t: number, tau: number) {
+      const e: SeamEvent = { kind: 'target', v, t, tau };
+      this.add(e);
+      this.log.push(e);
+      this.last = v;
+      return this;
+    }
+    linearRampToValueAtTime(v: number, t: number) {
+      const e: SeamEvent = { kind: 'ramp', v, t, tau: 0 };
+      this.add(e);
+      this.log.push(e);
+      this.last = v;
+      return this;
+    }
+    cancelScheduledValues(t: number) {
+      this.events = this.events.filter((e) => e.t < t);
+      return this;
+    }
+    /** Everything from `t` on taken away, holding the value there: a ramp that spans it ends there. */
+    cancelAndHoldAtTime(t: number) {
+      const v = this.at(t);
+      const i = this.events.findIndex((e) => e.t >= t);
+      const spans = i >= 0 && this.events[i].kind === 'ramp';
+      if (i >= 0) this.events.splice(i);
+      this.events.push({ kind: spans ? 'ramp' : 'set', v, t, tau: 0 });
+      this.log.push({ kind: 'hold', v, t, tau: 0 });
+      return this;
+    }
+    at(t: number): number {
+      let st = { t: -Infinity, v: this.base, to: NaN, tau: 0 };
+      const val = (s: typeof st, x: number) => (Number.isNaN(s.to) ? s.v : s.to + (s.v - s.to) * Math.exp(-(x - s.t) / Math.max(1e-9, s.tau)));
+      for (const e of this.events) {
+        if (e.kind === 'ramp') {
+          // A ramp is filed under the time it ends and runs from the event before it.
+          const t0 = st.t === -Infinity ? e.t : st.t;
+          if (t < e.t) return t <= t0 ? val(st, t) : st.v + (e.v - st.v) * ((t - t0) / Math.max(1e-12, e.t - t0));
+          st = { t: e.t, v: e.v, to: NaN, tau: 0 };
+          continue;
+        }
+        if (e.t > t) break;
+        st = e.kind === 'target' ? { t: e.t, v: val(st, e.t), to: e.v, tau: e.tau } : { t: e.t, v: e.v, to: NaN, tau: 0 };
+      }
+      return val(st, t);
+    }
+  }
+  class SeamNode {
+    readonly kind: string;
+    readonly outputs: SeamNode[] = [];
+    constructor(kind: string) {
+      this.kind = kind;
+    }
+    connect(to: SeamNode) {
+      this.outputs.push(to);
+      return to;
+    }
+    disconnect(to?: SeamNode) {
+      if (!to) this.outputs.length = 0;
+      else {
+        const i = this.outputs.indexOf(to);
+        if (i >= 0) this.outputs.splice(i, 1);
+      }
+    }
+  }
+  class SeamGain extends SeamNode {
+    readonly gain = new SeamParam(1);
+    constructor() {
+      super('gain');
+    }
+  }
+  const seamSources: SeamSource[] = [];
+  class SeamSource extends SeamNode {
+    buffer: { duration: number } | null = null;
+    loop = false;
+    readonly playbackRate = new SeamParam(1);
+    onended: (() => void) | null = null;
+    startAt = NaN;
+    offset = 0;
+    stopAt = Infinity;
+    /** The gain it was joined to when it was made: the slot's own. */
+    slotGain: SeamGain | null = null;
+    constructor() {
+      super('source');
+      seamSources.push(this);
+    }
+    connect(to: SeamNode) {
+      if (!this.slotGain && to instanceof SeamGain) this.slotGain = to;
+      return super.connect(to);
+    }
+    start(at = 0, offset = 0) {
+      this.startAt = Math.max(at, seamCtx.currentTime);
+      this.offset = offset;
+    }
+    stop(when?: number) {
+      const now = seamCtx.currentTime;
+      // A source already over is not brought back by a later stop; otherwise the last call counts.
+      if (this.stopAt <= now) return;
+      this.stopAt = when === undefined || when < now ? now : when;
+    }
+    /** Where the sample runs out on its own, from the rate it was really played at. */
+    naturalEnd(): number {
+      if (this.loop) return Infinity;
+      const content = (this.buffer?.duration ?? 0) - this.offset;
+      if (!this.playbackRate.events.length) return this.startAt + content / this.playbackRate.at(this.startAt);
+      const dt = 1e-4;
+      let t = this.startAt;
+      let played = 0;
+      while (t < this.startAt + 600) {
+        const r = this.playbackRate.at(t + dt / 2);
+        if (played + r * dt >= content) return t + (content - played) / r;
+        played += r * dt;
+        t += dt;
+      }
+      return t;
+    }
+  }
+  const seamBuffer = (channels: number, frames: number, rate: number) => ({
+    numberOfChannels: channels,
+    length: frames,
+    sampleRate: rate,
+    duration: frames / rate,
+    getChannelData: () => new Float32Array(frames),
+    copyToChannel: () => {},
+  });
+  const seamCtx = {
+    currentTime: 0,
+    sampleRate: 22050,
+    destination: new SeamNode('destination'),
+    listener: { setPosition: () => {}, setOrientation: () => {} },
+    createGain: () => new SeamGain(),
+    createPanner: () =>
+      Object.assign(new SeamNode('panner'), { panningModel: 'equalpower', distanceModel: 'inverse', refDistance: 1, rolloffFactor: 1, positionX: new SeamParam(0), positionY: new SeamParam(0), positionZ: new SeamParam(0) }),
+    createConvolver: () => Object.assign(new SeamNode('convolver'), { buffer: null as unknown }),
+    createBiquadFilter: () => Object.assign(new SeamNode('filter'), { type: 'lowpass', frequency: new SeamParam(0) }),
+    createBufferSource: () => new SeamSource(),
+    createBuffer: (channels: number, frames: number, rate: number) => seamBuffer(channels, frames, rate),
+  };
+  const seamSettings: AudioSettings = { soundMaster: 1, soundAmbience: 1, soundEffects: 1, soundVoices: 1, soundFootsteps: 1, soundVehicles: 1, soundInterface: 1, soundMusic: 1, soundHeadphones: false, soundRoomEcho: false, soundInBackground: false, soundSabers: 'jka' };
+  const seamPose = { x: 0, y: 0, z: 0, fx: 0, fy: 0, fz: -1, ux: 0, uy: 1, uz: 0, space: { building: -1, cell: -1 } };
+  const SEAM_ID = 'sound/seam.snd';
+  /** A bed with no place (so it is heard at its own gain), looping for ever with no gap. */
+  const seamBed = (over: Partial<SoundTemplate> = {}): SoundTemplate => plain({ dim: 2, full: 0, category: 0, loops: [-1, -1], samples: ['sample/seam.wav'], ...over });
+  /** A volume drawn afresh for every loop, which is what keeps a loop on sources lined up one after another. */
+  const seamDrawn = { mode: 2, range: [0.9, 1] as [number, number], period: 0, glide: 0 };
+  /** A fresh mixer on the recording context, holding one template whose samples all last `seconds`. */
+  const seamMixer = (template: SoundTemplate, seconds: number, id = SEAM_ID, provide = true) => {
+    seamSources.length = 0;
+    seamCtx.currentTime = 0;
+    const audio = new AudioSystem('', seamSettings);
+    audio.installOffline(seamCtx as unknown as BaseAudioContext);
+    audio.bank.adopt({ format: 1, templates: { [id]: template } });
+    const give = () => {
+      for (const s of template.samples) audio.bank.provide(s, seamBuffer(1, Math.round(seconds * 22050), 22050) as unknown as AudioBuffer);
+    };
+    if (provide) give();
+    return { audio, give };
+  };
+  /** Frames at 60 a second on the audio clock from `from` to `until`, with `each` run before each one. */
+  const seamDrive = (audio: AudioSystem, from: number, until: number, each?: (t: number) => void) => {
+    for (let f = Math.round(from * 60); f / 60 <= until + 1e-9; f++) {
+      seamCtx.currentTime = f / 60;
+      each?.(seamCtx.currentTime);
+      audio.update(1 / 60, seamPose);
+    }
+  };
+  const seamStarted = () => seamSources.filter((s) => Number.isFinite(s.startAt)).sort((a, b) => a.startAt - b.startAt);
+  /** Where each source really stopped sounding: its stop, or where its sample ran out. */
+  const seamHeard = (s: SeamSource) => Math.min(s.stopAt, s.naturalEnd());
+  /** Every stretch from `from` to `to` where no source is sounding at all, a half millisecond at a time. */
+  const seamSilences = (from: number, to: number) => {
+    const spans = seamStarted().map((s) => [s.startAt, seamHeard(s)] as const);
+    const out: number[] = [];
+    let quiet = false;
+    for (let t = from; t < to; t += 0.0005) {
+      const heard = spans.some(([a, b]) => t >= a && t < b);
+      if (!heard && !quiet) out.push(t);
+      quiet = !heard;
+    }
+    return out;
+  };
+  /** How far each source starts after the one before it ran out: 0 is a seam, above is a gap, below an overlap. */
+  const seamJoins = () => {
+    const s = seamStarted();
+    const out: number[] = [];
+    for (let i = 1; i < s.length; i++) out.push(s[i].startAt - seamHeard(s[i - 1]));
+    return out;
+  };
+  const seamVoice = (audio: AudioSystem) => (audio.status().voices as { native: boolean; starts: number }[])[0];
+
+  // The run itself: which templates can be one source repeating itself.
+  {
+    const rng = seededRng(1);
+    ok(new TemplateRun(seamBed(), rng, 0).seamless, 'an endless loop with no gap, one sample and nothing drawn per loop can repeat on one source');
+    ok(new TemplateRun(seamBed({ volume: { mode: 2, range: [0.7, 0.7], period: 0, glide: 0 } }), rng, 0).seamless && new TemplateRun(seamBed({ volume: { mode: 1, range: [0.7, 0.9], period: 0, glide: 0 } }), rng, 0).seamless, 'and so can one whose volume is "drawn" from a range of one value, or drawn once for the whole run');
+    ok(!new TemplateRun(seamBed({ volume: seamDrawn }), rng, 0).seamless && !new TemplateRun(seamBed({ pitch: { mode: 3, range: [-1, 1], period: 2, glide: 1 } }), rng, 0).seamless, 'but not one that draws its volume afresh every loop, or lets its pitch drift');
+    ok(!new TemplateRun(seamBed({ samples: ['sample/a.wav', 'sample/b.wav'] }), rng, 0).seamless && !new TemplateRun(seamBed({ gap: [2, 2] }), rng, 0).seamless && !new TemplateRun(plain(), rng, 0).seamless, 'nor one with two samples, one with a gap, or a one-shot');
+    ok(new TemplateRun(musicTemplate('seam.wav', true), rng, 0).seamless, 'a music part made to loop is one source repeating itself (the band plays its parts once each, so this is the mixer rule, not the band)');
+    const start = makeStart();
+    const run = new TemplateRun(seamBed({ gap: [1, 1] }), rng, 0);
+    run.nextDue(0, start);
+    run.began(3, 1, 0.4);
+    ok(near(run.dueAt, 4.4), 'a loop that really began at 0.4 s has the next armed after it and the gap, not after the time it was due');
+    run.retime(2.5);
+    ok(near(run.dueAt, 3.5), 'and a loop whose pitch moved while it played re-arms the next one after its new end');
+  }
+
+  // 1. A gap-0 loop lined up one loop after another has no silence after its first start, and each
+  // loop runs out exactly where the next begins.
+  {
+    const { audio } = seamMixer(seamBed({ volume: seamDrawn }), 1.5624);
+    audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 10);
+    const s = seamStarted();
+    ok(s.length >= 6 && !seamVoice(audio).native, `a loop that draws its volume every time round is lined up one source after another (${s.length} in ten seconds)`);
+    ok(s.slice(0, -1).every((x) => x.stopAt >= x.naturalEnd() - 1e-9), 'no loop is stopped before its own sample has run out');
+    ok(seamJoins().every((j) => Math.abs(j) < 1e-9), 'each loop begins exactly where the one before it ran out, with nothing between and nothing overlapping');
+    ok(seamSilences(s[0].startAt, 9.8).length === 0, 'and from its first start there is not a half millisecond of silence in ten seconds');
+  }
+  {
+    const { audio } = seamMixer(seamBed(), 1.5624);
+    audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 10);
+    const s = seamStarted();
+    ok(s.length === 1 && s[0].loop && s[0].stopAt === Infinity, 'a loop with nothing drawn per loop is one source that repeats itself, started once and never stopped');
+    ok(seamVoice(audio).native && (audio.status().nativeLoops as number) === 1 && seamVoice(audio).starts === 1, 'and the report says so: one start, repeating on its own');
+    ok(seamSilences(s[0].startAt, 9.8).length === 0, 'with no silence in it either');
+  }
+
+  // 2. A loop with a fade fades in once. Coming round again it carries on at the level it is at.
+  {
+    const { audio } = seamMixer(seamBed({ volume: seamDrawn, fadeIn: [1.5, 1.5] }), 4);
+    audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 20);
+    const s = seamStarted();
+    const level = s[0].slotGain!.gain;
+    const zeros = level.log.filter((e) => e.kind === 'set' && e.v === 0);
+    ok(s.length >= 4 && zeros.length === 1 && Math.abs(zeros[0].t - s[0].startAt) < 1e-9, 'the fade from nothing is written once, for the first loop');
+    ok(!s.slice(1).some((x) => zeros.some((z) => Math.abs(z.t - x.startAt) < 1e-9)), 'and no loop after it is taken back down to nothing');
+    let lowest = Infinity;
+    for (let t = s[0].startAt + 1.51; t < 19.8; t += 0.005) lowest = Math.min(lowest, level.at(t));
+    ok(lowest >= 0.9 - 1e-6, `once the fade is over the level never drops under the lowest volume the loops draw (lowest ${lowest.toFixed(3)})`);
+  }
+  {
+    // A sample shorter than its own fade: 0.29 s under a fade of 1.5 s, as seven of the bank's beds are.
+    const { audio } = seamMixer(seamBed({ volume: seamDrawn, fadeIn: [1.5, 1.5] }), 0.29);
+    audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 3);
+    const s = seamStarted();
+    const level = s[0].slotGain!.gain;
+    const t0 = s[0].startAt;
+    let stuck = false;
+    for (let t = t0 + 0.05; t < 2.9; t += 0.005) if (level.at(t) < 1e-3) stuck = true;
+    ok(s.length >= 8 && !stuck, 'a fade longer than its sample is not flattened back to nothing when the next loop is lined up');
+    const half = level.at(t0 + 0.75);
+    ok(half > 0.3 && half < 0.6 && level.at(t0 + 1.55) >= 0.9 - 1e-6, `it climbs on through the loops to the level it was going to (${half.toFixed(3)} half way, ${level.at(t0 + 1.55).toFixed(3)} at the end)`);
+  }
+  {
+    // The same in a browser with no `cancelAndHoldAtTime`, where the hold falls back on cancelling:
+    // the ramp laid again then runs from the fade's own start, so it still climbs and is never stuck.
+    const held = (SeamParam.prototype as unknown as { cancelAndHoldAtTime?: unknown }).cancelAndHoldAtTime;
+    delete (SeamParam.prototype as unknown as { cancelAndHoldAtTime?: unknown }).cancelAndHoldAtTime;
+    try {
+      const { audio } = seamMixer(seamBed({ volume: seamDrawn, fadeIn: [1.5, 1.5] }), 0.29);
+      audio.play(SEAM_ID, { loop: true });
+      seamDrive(audio, 0, 3);
+      const s = seamStarted();
+      const level = s[0].slotGain!.gain;
+      const t0 = s[0].startAt;
+      let stuck = false;
+      for (let t = t0 + 0.05; t < 2.9; t += 0.005) if (level.at(t) < 1e-3) stuck = true;
+      ok(s.length >= 8 && !stuck && level.at(t0 + 1.55) >= 0.9 - 1e-6, `and where the browser has no hold, the fade still climbs to its level and is never stuck at nothing (${level.at(t0 + 1.55).toFixed(3)} at the end)`);
+    } finally {
+      (SeamParam.prototype as unknown as { cancelAndHoldAtTime?: unknown }).cancelAndHoldAtTime = held;
+    }
+  }
+
+  // 3. A buffer that arrives late: the loop comes in where its clock has reached, and the next one
+  // is lined up after what was left of the sample, not after the whole of it.
+  {
+    const { audio, give } = seamMixer(seamBed({ volume: seamDrawn }), 1.5624, SEAM_ID, false);
+    audio.play(SEAM_ID, { loop: true });
+    let given = false;
+    seamDrive(audio, 0, 6, (t) => {
+      if (!given && t >= 0.4 - 1e-9) {
+        give();
+        given = true;
+      }
+    });
+    const s = seamStarted();
+    ok(s[0].offset > 0.3 && near(s[0].startAt, 0.4, 1e-9), `a loop whose sample came 0.4 s late comes in part way (${s[0].offset.toFixed(3)} s in)`);
+    ok(near(seamHeard(s[0]), s[0].naturalEnd(), 1e-9) && near(s[1].startAt, seamHeard(s[0]), 1e-9), 'and that first loop runs to the end of its sample, exactly where the second begins');
+  }
+
+  // 4. A loop back from being a virtual voice: one source, at its own clock's offset, then on as before.
+  {
+    const { audio } = seamMixer(seamBed({ volume: seamDrawn }), 1.5);
+    const key = audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 34, (t) => {
+      if (near(t, 2, 1e-9)) audio.setGain(key, 0);
+      if (near(t, 32, 1e-9)) audio.setGain(key, 1);
+    });
+    const back = seamStarted().filter((x) => x.startAt >= 32 && x.startAt < 32.5);
+    ok(!seamStarted().some((x) => x.startAt > 2.1 && x.startAt < 32), 'out of earshot for thirty seconds it starts nothing');
+    ok(back.length === 1 && near(back[0].offset, 32 % 1.5, 1e-9), `coming back it starts one source in the next half second, where its clock has reached (${back.length})`);
+    const after = seamStarted().filter((x) => x.startAt >= 32);
+    ok(after.length >= 2 && seamJoins().slice(-(after.length - 1)).every((j) => Math.abs(j) < 1e-9), 'and the loops after it follow on seamlessly');
+  }
+  {
+    // The same for one that repeats on its own source.
+    const { audio } = seamMixer(seamBed(), 1.5);
+    const key = audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 34, (t) => {
+      if (near(t, 2, 1e-9)) audio.setGain(key, 0);
+      if (near(t, 32, 1e-9)) audio.setGain(key, 1);
+    });
+    const s = seamStarted();
+    ok(s.length === 2 && s[0].stopAt <= 2 + 0.01 && near(s[1].startAt, 32, 1e-9) && near(s[1].offset, 0.5, 1e-9) && s[1].loop, 'a loop on one repeating source goes when it is out of earshot and comes back where its clock has reached, repeating again');
+  }
+
+  // 5. The template's own volume stays the voice's level for as long as the voice plays.
+  {
+    const { audio } = seamMixer(seamBed({ volume: noVariation(0.8) }), 2);
+    audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 8);
+    const s = seamStarted();
+    let worst = 0;
+    for (let t = s[0].startAt; t < 7.9; t += 0.005) worst = Math.max(worst, Math.abs(s[0].slotGain!.gain.at(t) - 0.8));
+    ok(worst < 1e-6, `a loop at volume 0.8 stays at 0.8 once the voice has been written to (off by ${worst.toFixed(4)} at worst)`);
+  }
+  {
+    const { audio } = seamMixer(seamBed({ volume: noVariation(0.8), samples: ['sample/seam.wav', 'sample/seam2.wav'], order: 2 }), 2);
+    audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 8);
+    const s = seamStarted();
+    let worst = 0;
+    for (let t = s[0].startAt; t < 7.9; t += 0.005) worst = Math.max(worst, Math.abs(s[0].slotGain!.gain.at(t) - 0.8));
+    ok(s.length >= 4 && worst < 1e-6, 'and so does one lined up a sample at a time, through every repeat');
+  }
+  {
+    const { audio } = seamMixer(plain({ dim: 2, full: 0, category: 7, samples: ['sample/seam.wav'], volume: noVariation(0.75) }), 2);
+    audio.play(SEAM_ID);
+    seamDrive(audio, 0, 1.9);
+    const s = seamStarted();
+    let worst = 0;
+    for (let t = s[0].startAt; t < 1.9; t += 0.005) worst = Math.max(worst, Math.abs(s[0].slotGain!.gain.at(t) - 0.75));
+    ok(s.length === 1 && worst < 1e-6, 'a one-shot keeps the volume its template drew for the whole of its sound');
+  }
+
+  // 6. A loop whose pitch moves while it plays: an engine under the throttle, a ship going past.
+  {
+    const { audio } = seamMixer(seamBed(), 1.5624);
+    const key = audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 10, (t) => {
+      if (t >= 0.5 && t <= 8) audio.setPitch(key, 3 * Math.sin(t * 1.7));
+    });
+    const s = seamStarted();
+    ok(s.length === 1 && s[0].loop && s[0].stopAt === Infinity && s[0].playbackRate.log.length > 20, `a loop repeating on one source is bent live and never lined up again (${s[0].playbackRate.log.length} rate writes, ${s.length} source)`);
+    ok(seamSilences(s[0].startAt, 9.8).length === 0, 'so a pitch moving under it never opens a gap or cuts a wave off');
+    audio.stop(key, 0.2);
+    const stoppedAt = seamCtx.currentTime;
+    seamDrive(audio, 10 + 1 / 60, 10.5);
+    ok(near(s[0].stopAt, stoppedAt + 0.2, 1e-9) && !audio.isPlaying(key) && (audio.status().counts as { started: number }).started === 1, 'and stopping it stops that one source after its fade and lets the voice go');
+  }
+  for (const [name, bend] of [
+    ['raised once', (t: number) => (t >= 0.5 ? 3 : 0)],
+    ['swept all the while', (t: number) => 2 * Math.sin(t * 1.3)],
+  ] as const) {
+    // One that cannot repeat on one source (its volume is drawn every loop) is re-timed instead.
+    const { audio } = seamMixer(seamBed({ volume: seamDrawn }), 3);
+    const key = audio.play(SEAM_ID, { loop: true });
+    seamDrive(audio, 0, 12, (t) => audio.setPitch(key, bend(t)));
+    const joins = seamJoins();
+    const worst = Math.max(...joins.map(Math.abs));
+    ok(joins.length >= 3 && worst < 0.002, `a loop lined up a sample at a time whose pitch is ${name} still meets the next one (${(worst * 1000).toFixed(2)} ms out at worst)`);
+  }
+
+  // 7. A loop started as though it had begun earlier (`at` in the past). The band joins another
+  // player's part that way, though with a part that plays once and is then chained by `Band` itself
+  // (music.test.ts pins that chain on the bar); what is pinned here is the mixer's own half of it.
+  {
+    const id = 'sound/seam_band.snd';
+    const part = musicTemplate('seam.wav', true);
+    const { audio } = seamMixer(part, 4, id);
+    seamCtx.currentTime = 5;
+    audio.loop(id, { x: 0, y: 0, z: 0, at: 5 - 1.3 });
+    seamDrive(audio, 5, 20);
+    const s = seamStarted();
+    const top = s[0].startAt - s[0].offset;
+    ok(s.length === 1 && s[0].loop && near(((top - 3.7) % 4 + 4) % 4, 0, 1e-9), 'a loop started part way through comes in with the top of its sample where its own clock puts it, and repeats there on its own');
+  }
+  {
+    const id = 'sound/seam_band.snd';
+    const part = { ...musicTemplate('seam.wav', true), volume: seamDrawn };
+    const { audio } = seamMixer(part, 4, id);
+    seamCtx.currentTime = 5;
+    audio.loop(id, { x: 0, y: 0, z: 0, at: 5 - 1.3 });
+    seamDrive(audio, 5, 20);
+    const s = seamStarted();
+    const onBar = s.every((x) => {
+      const r = (((x.startAt - x.offset - 3.7) % 4) + 4) % 4;
+      return r < 1e-9 || 4 - r < 1e-9;
+    });
+    ok(s.length >= 4 && onBar && s.slice(1).every((x) => x.offset === 0), 'and one lined up a loop at a time comes round on its own clock every time, rather than early by how far in it was started');
+  }
+
+  // 8. A voice taken off its slot while the loop before is still running out into the next one.
+  for (const how of ['silenced', 'stopped'] as const) {
+    const { audio } = seamMixer(seamBed({ volume: seamDrawn }), 1.5);
+    const key = audio.play(SEAM_ID, { loop: true });
+    let caught: { tail: SeamSource; next: SeamSource; now: number } | null = null;
+    for (let f = 0; f < 600 && !caught; f++) {
+      seamCtx.currentTime = f / 60;
+      audio.update(1 / 60, seamPose);
+      const s = seamStarted();
+      const next = s[s.length - 1];
+      if (s.length >= 2 && next.startAt > seamCtx.currentTime) caught = { tail: s[s.length - 2], next, now: seamCtx.currentTime };
+    }
+    ok(!!caught && caught.tail.stopAt === caught.next.startAt, `the loop before runs out on the slot until the next begins (${how})`);
+    const { tail, next, now } = caught!;
+    const slotGain = tail.slotGain!;
+    if (how === 'silenced') {
+      audio.setGain(key, 0);
+      seamCtx.currentTime = now + 1 / 60;
+      audio.update(1 / 60, seamPose);
+      const cut = tail.outputs[0];
+      ok(!tail.outputs.includes(slotGain) && !next.outputs.includes(slotGain), 'silenced in that window, neither it nor the one lined up is left on the gain the next voice will write');
+      ok(cut instanceof SeamGain && cut !== slotGain && next.outputs[0] === cut && tail.stopAt <= seamCtx.currentTime + audio.tune.cutFade + 1e-9, 'both are faded out on the slot\'s cut node and stopped when that fade ends');
+    } else {
+      audio.stop(key, 0.01);
+      ok(tail.stopAt <= now + 0.01 + 1e-9 && tail.stopAt < next.startAt, 'stopped in that window, the loop running out is stopped with the voice rather than left to its own end');
+      seamDrive(audio, now + 1 / 60, now + 0.2);
+      ok(!audio.isPlaying(key), 'and the voice is let go once both are over');
+    }
+  }
 }
 
 console.log(`\n${passed} checks passed`);

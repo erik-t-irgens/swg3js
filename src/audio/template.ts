@@ -92,6 +92,8 @@ export function makeStart(): SoundStart {
 
 const clamp01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const draw = (range: readonly [number, number], rng: Rng) => (range[1] === range[0] ? range[0] : range[0] + (range[1] - range[0]) * rng());
+/** A value drawn again for every loop (mode 2) or drifting (mode 3) over a range that is really a range. */
+const variesByLoop = (v: Variation) => (v.mode === 2 || v.mode === 3) && v.range[0] !== v.range[1];
 
 /** A loop count of -1 loops for ever, and so does 99 (56 templates carry 99 and nothing carries more). */
 export function endless(n: number): boolean {
@@ -155,8 +157,9 @@ export class Drift {
 
 /**
  * One playing template. The caller asks `nextDue(until, out)` for the loop that should start, and
- * tells it how long that sound runs with `began(seconds)`, which arms the one after it. A template
- * whose samples are not loaded yet simply has nothing armed, and the next call tries again.
+ * tells it how long that sound runs, and when it really began, with `began(seconds, rate, from)`,
+ * which arms the one after it. A template whose samples are not loaded yet simply has nothing armed,
+ * and the next call tries again.
  */
 export class TemplateRun {
   readonly template: SoundTemplate;
@@ -167,9 +170,18 @@ export class TemplateRun {
   readonly total: number;
   /** The fade-out drawn for this run, for whoever stops it. */
   readonly fadeOut: number;
+  /**
+   * Every loop after the first is the first again: it loops for ever, with no gap, on one sample,
+   * and nothing is drawn afresh for a loop (no volume or pitch that varies from one to the next).
+   * Such a run can be played by one source repeating itself instead of a new source lined up for
+   * every loop, which is the only way a loop stays seamless while its pitch is moved under it: a
+   * loop lined up in advance was timed at the pitch it had then. 603 of the bank's 644 endless loops
+   * with no gap are this. (The band's parts are not: each is a single play, chained by `Band` itself.)
+   */
+  readonly seamless: boolean;
   private index = 0;
   private armed: number;
-  /** The start `nextDue` last handed out; `began` measures the next loop from it. */
+  /** The start `nextDue` last handed out; `began` measures the next loop from it unless told when the loop really began. */
   private handed = 0;
   private waiting = false;
   private last = -1;
@@ -210,6 +222,7 @@ export class TemplateRun {
     this.fixedPitch = this.pit.mode === 1 ? draw(this.pit.range, rng) : (this.pit.range[0] + this.pit.range[1]) / 2;
     this.volDrift = this.vol.mode === 3 ? new Drift(this.vol.range, this.vol.period ?? 0, this.vol.glide ?? 0, rng, this.begin) : null;
     this.pitchDrift = this.pit.mode === 3 ? new Drift(this.pit.range, this.pit.period ?? 0, this.pit.glide ?? 0, rng, this.begin) : null;
+    this.seamless = this.total === Infinity && t.samples.length === 1 && this.gapRange[0] <= 0 && this.gapRange[1] <= 0 && !variesByLoop(this.vol) && !variesByLoop(this.pit);
   }
 
   /** Nothing left to start, and nothing playing that this run will start again. */
@@ -252,15 +265,37 @@ export class TemplateRun {
     return true;
   }
 
-  /** The loop just handed out plays for this many seconds at rate 1: arm the next after it and the gap. */
-  began(lengthSeconds: number, rate = 1): void {
+  /**
+   * The loop just handed out plays for this many seconds at rate 1, from `from`: arm the next after
+   * it and the gap.
+   *
+   * `from` is when the sound really began, which is not always the time it was due. A loop the
+   * caller came into part way (a buffer that arrived late, a bed back from being a virtual voice, a
+   * band part joined at the shared bar) began later than its due time and plays only what was left
+   * of the sample, so measuring from the due time armed the next loop early by exactly how far in it
+   * was joined: once, for a late buffer, and every frame until the clock caught up for a bed that
+   * had been away longer than its sample, which restarted it from the top once a frame. The due
+   * time is kept as the default for the caller that has no sound to time (the run's own clock before
+   * the first click).
+   */
+  began(lengthSeconds: number, rate = 1, from = this.handed): void {
     if (!this.waiting) return;
     this.waiting = false;
     // Gap mode 2 draws the gap again for every loop, which is what makes the random one-shot beds
     // come round at an uneven 15 to 30 seconds rather than on a beat.
     if (this.gapMode === 2) this.gap = draw(this.gapRange, this.rng);
     const len = lengthSeconds > 0 ? lengthSeconds / Math.max(0.01, rate) : 0;
-    this.armed = this.handed + len + Math.max(0, this.gap);
+    this.armed = from + len + Math.max(0, this.gap);
+  }
+
+  /**
+   * The loop playing now ends at this time instead of the one `began` worked out, because its pitch
+   * was moved while it played: the next is armed after it and the same gap. Nothing happens while a
+   * loop is handed out and not yet begun, or once the run is over.
+   */
+  retime(endsAt: number): void {
+    if (this.waiting || this.finished) return;
+    this.armed = endsAt + Math.max(0, this.gap);
   }
 
   /** Volume for a loop starting at this time, before the category and the distance. */
