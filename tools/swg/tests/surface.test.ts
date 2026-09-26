@@ -488,16 +488,17 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   // The line grew the gloss counts when the converter started reading a shader's own specular map
   // instead of guessing from the diffuse alpha; these fixtures name none, so both are nought.
   ok(c.glossy === 0 && c.glossMaps === 0, 'and no gloss map, since none of these fixtures names one');
-  ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\), 0 with the shader's own gloss map \(0 maps\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
+  ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\), 0 with the shader's own gloss map \(0 maps\), 0 with a detail map \(0 maps, 0\.0 MB\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
   const line = surfaceLine(T('shader/whitewater.sht'), describeSurface(vfs, 'shader/whitewater.sht'));
   ok(line === 'translucent, alpha test 6/255, no depth write, no shadow; scrolls colour (-0.25,-0.6)/s, alpha (0.6,0)/s, split alpha', `the materials line for the whitewater (${line})`);
   ok(surfaceLine(T('shader/anim_screen.sht'), describeSurface(vfs, 'shader/anim_screen.sht')) === 'flip-book 4 frames, 0.1 s each; unlit', 'the materials line for an unlit flip-book');
   ok(surfaceLine(T('shader/decal_emismap.sht'), describeSurface(vfs, 'shader/decal_emismap.sht')) === 'glows by MAIN.a (lit and glow images)', 'the materials line for a glowing decal');
   ok(describeLines(describeSurface(vfs, 'shader/anim_screen_gap.sht')).some((l) => /missing texture\/absent\.dds/.test(l)), 'the shader command lists the missing frames');
   // Bumped whenever what a pack's materials carry changes, so `status` asks for every pack again.
-  // 3 is the gloss maps: a surface wears the one its own shader names, a baked shader carries the
-  // surface fields it was getting none of, and glass blends rather than being cut out.
-  ok(MATERIAL_FORMAT === 3, 'the material format is 3');
+  // 3 was the gloss maps: a surface wears the one its own shader names, a baked shader carries the
+  // surface fields it was getting none of, and glass blends rather than being cut out. 4 is the
+  // detail maps, with the second coordinate set the meshes have always carried.
+  ok(MATERIAL_FORMAT === 4, 'the material format is 4');
   // eff.mjs imports surface.mjs; surface.mjs must not import eff.mjs back (a cycle breaks the first
   // time either module reads the other's binding while it evaluates).
   const surfaceSource = readFileSync(new URL('../surface.mjs', import.meta.url), 'utf8');

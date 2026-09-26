@@ -15,8 +15,9 @@ import { shaderTextures } from './sht.mjs';
  * 3: every surface wears the gloss map its own shader names rather than a guess from the colour
  *    texture's alpha, a baked shader carries the surface fields it was getting none of, and glass
  *    blends rather than being cut out.
+ * 4: the detail map, with the coordinate set of its own that the meshes have always carried.
  */
-export const MATERIAL_FORMAT = 3;
+export const MATERIAL_FORMAT = 4;
 
 /** The glTF alpha mode an effect's pass state gives (a cut-out effect by name is a MASK too). */
 export function alphaModeFor({ alphaBlend, alphaTest }, effectName = '') {
@@ -620,7 +621,7 @@ function paintedImage(img) {
 /**
  * The whole texture entry for one shader: what textureFor returned before, plus the new fields.
  * deps: { cache, decodeDds, encodePng, alphaFromEffect(effect, fallback), surfaceFor(effect, slots, dds, alphaMode, { alphaIsEmissive }),
- *         normalFor(path), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba),
+ *         normalFor(path), detailFor?(slots), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba),
  *         mainImage?(shaderPath) -> { path, width, height, rgba, hasAlpha? } | null }.
  * With `thumb`, the entry carries a non-enumerable `thumb` made from the unsplit main image.
  * With `mainImage` answering (a customizable shader baked at its defaults, the ships command's paint),
@@ -712,6 +713,16 @@ export function surfaceTexture(vfs, shaderPath, deps) {
   const normalSlot = d.textures.find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
   const normal = normalSlot ? deps.normalFor(normalSlot.path) : null;
   if (normal) result.normal = normal;
+  // The detail map, which the client multiplies the diffuse texture by before lighting.
+  //
+  // Not a second diffuse and not a decal: every one of the detail effects' pixel programs is the
+  // same line, `result.rgb = diffuseColor * detailColor * light` (the specmap ones add the specular
+  // afterwards, so it is the diffuse term alone), and it reads a texture coordinate set of its own.
+  // 1,369 of the retail shaders carry one over 281 distinct images, and 38% of a planet's placed
+  // objects draw with one, so the surfaces with it are the concrete, marble, metal and rock a town
+  // is built out of, which today are flat.
+  const detail = deps.detailFor ? deps.detailFor(d.textures) : null;
+  if (detail) result.detail = detail;
   const treat = (f, i) => {
     const out = {};
     if (opaqueAdd || d.split) out.rgb = { path: `${f.path}#rgb`, png: png(rgbOnly(f.image)) };
@@ -831,9 +842,10 @@ function paneLike(img) {
 }
 
 export function surfaceCounts(entries) {
-  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0 };
+  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0, detailed: 0, detailMaps: 0, detailBytes: 0 };
   const glow = new Map();
   const gloss = new Set();
+  const detail = new Map();
   for (const t of entries ?? []) {
     if (!t || t.invisible) continue;
     if (t.anim) c.flipBooks++;
@@ -845,6 +857,10 @@ export function surfaceCounts(entries) {
       c.glossy++;
       gloss.add(t.glossFrom);
     }
+    if (t.detail) {
+      c.detailed++;
+      detail.set(t.detail.path, t.detail.png.length);
+    }
     if (t.emissive) {
       c.glowing++;
       glow.set(t.emissive.path, t.emissive.png.length);
@@ -852,10 +868,12 @@ export function surfaceCounts(entries) {
     }
   }
   for (const n of glow.values()) c.glowBytes += n;
+  for (const n of detail.values()) c.detailBytes += n;
   c.glossMaps = gloss.size;
+  c.detailMaps = detail.size;
   return c;
 }
 
 export function surfaceCountsLine(c) {
-  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps)`;
+  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps), ${c.detailed} with a detail map (${c.detailMaps} maps, ${(c.detailBytes / 1e6).toFixed(1)} MB)`;
 }

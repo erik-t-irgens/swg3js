@@ -20,6 +20,8 @@ export interface SwgSurface {
   alphaMap?: number;
   alphaTest?: number;
   blend?: 'add';
+  /** The detail map's glTF texture index: multiplied into the base colour at the second UV set. */
+  detail?: number;
 }
 
 /** What the loader plugin needs to resolve a material's indices. */
@@ -93,6 +95,29 @@ class ScrollRec {
   }
 }
 
+/**
+ * One detail map, shared by every material that names it.
+ *
+ * It animates nothing -- the texture is bound once and never moves -- so this is a register rather
+ * than a clock. It exists at all because the link has to survive `material.clone()`, which the
+ * interior cells, the ship paint and GLTFLoader's own vertex-colour copies all do: `Material.copy`
+ * runs `userData` through JSON and copies no field the material class does not declare, so a string
+ * id in `userData` is the only thing a clone still has. That is exactly why the flip-books are
+ * keyed the same way.
+ */
+class DetailRec {
+  readonly id: string;
+  readonly name: string;
+  readonly texture: THREE.Texture;
+  readonly materials: THREE.Material[] = [];
+
+  constructor(id: string, name: string, texture: THREE.Texture) {
+    this.id = id;
+    this.name = name;
+    this.texture = texture;
+  }
+}
+
 type Mapped = THREE.Material & { map?: THREE.Texture | null; emissiveMap?: THREE.Texture | null; alphaMap?: THREE.Texture | null; fog?: boolean };
 
 /** A 1x1 black glow, standing in for a frame whose glow the converter left empty: the emissive slot never empties, so the program never changes. */
@@ -124,10 +149,12 @@ export class AnimatedSurfaces {
 
   private readonly tracks = new Map<string, Track>();
   private readonly scrolls = new Map<string, ScrollRec>();
+  private readonly details = new Map<string, DetailRec>();
   private readonly activeTracks: Track[] = [];
   private readonly activeScrolls: ScrollRec[] = [];
   private readonly ownedRefs = new Map<THREE.Texture, number>();
   private readonly scrollByTexture = new Map<THREE.Texture, string>();
+  private readonly detailByTexture = new Map<THREE.Texture, string>();
   private readonly adopted = new WeakSet<THREE.Material>();
   private adoptedCount = 0;
   private nextId = 0;
@@ -163,12 +190,30 @@ export class AnimatedSurfaces {
     return id;
   }
 
+  /** Called by the plugin (and tests): a detail map's record, or the one that texture already has. */
+  registerDetail(name: string, texture: THREE.Texture): string {
+    const known = this.detailByTexture.get(texture);
+    if (known && this.details.has(known)) return known;
+    const id = `detail${++this.nextId}`;
+    this.details.set(id, new DetailRec(id, name, texture));
+    this.detailByTexture.set(texture, id);
+    return id;
+  }
+
+  /** The texture a material's `userData.swgDetail` names, or null. What the shader injection reads. */
+  detailTexture(id: string | undefined): THREE.Texture | null {
+    return (id ? this.details.get(id)?.texture : null) ?? null;
+  }
+
   /** A material in the scene (original or clone) joins its track and scrolls. Idempotent. Adds one 'dispose' listener. */
   adopt(m: THREE.Material): void {
     if (this.adopted.has(m)) return;
     const trackId = m.userData.swgTrack as string | undefined;
     const scrollIds = m.userData.swgScroll as string[] | undefined;
-    if (!trackId && !(Array.isArray(scrollIds) && scrollIds.length)) return;
+    const detailId = m.userData.swgDetail as string | undefined;
+    if (!trackId && !detailId && !(Array.isArray(scrollIds) && scrollIds.length)) return;
+    const detail = detailId ? this.details.get(detailId) : undefined;
+    if (detail) detail.materials.push(m);
     this.adopted.add(m);
     this.adoptedCount++;
     m.addEventListener('dispose', this.onDispose);
@@ -218,6 +263,9 @@ export class AnimatedSurfaces {
         if (rec && swapRemove(rec.materials, m) && !rec.materials.length) this.retireScroll(rec);
       }
     }
+    const detailId = m.userData.swgDetail as string | undefined;
+    const detail = detailId ? this.details.get(detailId) : undefined;
+    if (detail && swapRemove(detail.materials, m) && !detail.materials.length) this.retireDetail(detail);
   }
 
   /** forget() every material under a root: for owners that drop models without disposing materials. */
@@ -230,10 +278,11 @@ export class AnimatedSurfaces {
     });
   }
 
-  /** Drop every track and scroll no material has joined (World.unload calls it after the pack is disposed). */
+  /** Drop every track, scroll and detail no material has joined (World.unload calls it after the pack is disposed). */
   sweep(): void {
     for (const track of [...this.tracks.values()]) if (!track.materials.length) this.retireTrack(track);
     for (const rec of [...this.scrolls.values()]) if (!rec.materials.length) this.retireScroll(rec);
+    for (const rec of [...this.details.values()]) if (!rec.materials.length) this.retireDetail(rec);
   }
 
   /** Once per step: uploads a few frames, advances every active track, moves every active scroll. No allocation. */
@@ -341,6 +390,19 @@ export class AnimatedSurfaces {
     this.scrolls.delete(rec.id);
     if (this.scrollByTexture.get(rec.texture) === rec.id) this.scrollByTexture.delete(rec.texture);
   }
+
+  /**
+   * The last material naming a detail map has gone: forget it, and free the texture.
+   *
+   * Freeing it here is right because no standard material slot names a detail map -- three would
+   * hold its GL texture for the life of the renderer otherwise, and a world's worth of them is
+   * megabytes a travel.
+   */
+  private retireDetail(rec: DetailRec): void {
+    this.details.delete(rec.id);
+    if (this.detailByTexture.get(rec.texture) === rec.id) this.detailByTexture.delete(rec.texture);
+    rec.texture.dispose();
+  }
 }
 
 export const surfaces = new AnimatedSurfaces();
@@ -362,6 +424,16 @@ export async function applySurface(target: AnimatedSurfaces, m: THREE.Material, 
     // Data, with no colour space: the converter wrote the alpha as grey and three's alphaMap reads green.
     const tex = await ctx.getTexture(s.alphaMap);
     if (tex) mm.alphaMap = tex;
+  }
+  // The detail map. Registered here rather than bound to a slot, because there is no slot for it:
+  // it is multiplied into the base colour at the second coordinate set by an injection of our own
+  // (`detailMap.ts`), which reads it back through the id.
+  if (isIndex(s.detail)) {
+    const tex = await ctx.getTexture(s.detail);
+    if (tex) {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      m.userData.swgDetail = target.registerDetail(m.name, tex);
+    }
   }
   const scroll = s.scroll;
   if (scroll) {

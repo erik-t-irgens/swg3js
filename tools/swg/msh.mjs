@@ -70,6 +70,20 @@ function readVertexArray(vtxa) {
   const colors = d.color0 ? new Uint8Array(count * 4) : null;
   const firstUv = d.texDims.findIndex((dim) => dim === 2);
   const uvs = firstUv >= 0 ? new Float32Array(count * 2) : null;
+  // The **second** two-dimensional set, which is the detail map's own.
+  //
+  // The client's detail effects read it by set index: every one of their vertex programs writes
+  // `#define textureCoordinateSetDETA textureCoordinateSet1`, and the effect file says the same in
+  // the leading byte of each pass's PTXM (0 for MAIN, 1 for DETA, 2 for SPEC). It is a coordinate
+  // set of its own and not the main one scaled: measured over the 12,632 retail vertex arrays that
+  // belong to a detail shader, only 60.7% fit `u1 = a*u0 + b` at all, and the rest miss by up to a
+  // hundred and thirty texture units. So it has to be carried, and a per-material tiling factor
+  // would have been wrong on four surfaces in ten.
+  //
+  // Read by index rather than as "the next 2D one" for the same reason the slot is: 76 of those
+  // arrays have a four-dimensional set 1, which is not a pair of coordinates and is left alone.
+  const secondUv = d.texDims.length > 1 && d.texDims[1] === 2 && firstUv === 0 ? 1 : -1;
+  const uvs2 = secondUv >= 0 ? new Float32Array(count * 2) : null;
   const buf = data.data;
   for (let i = 0; i < count; i++) {
     let o = i * stride;
@@ -100,11 +114,14 @@ function readVertexArray(vtxa) {
       if (j === firstUv) {
         uvs[i * 2] = buf.readFloatLE(o);
         uvs[i * 2 + 1] = buf.readFloatLE(o + 4);
+      } else if (j === secondUv) {
+        uvs2[i * 2] = buf.readFloatLE(o);
+        uvs2[i * 2 + 1] = buf.readFloatLE(o + 4);
       }
       o += d.texDims[j] * 4;
     }
   }
-  return { count, positions, normals, colors, uvs, flags: d };
+  return { count, positions, normals, colors, uvs, uvs2, flags: d };
 }
 
 function readIndices(indx, vertexCount) {

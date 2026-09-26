@@ -334,6 +334,7 @@ function surfaceDeps(vfs) {
     alphaFromEffect: (effect, fallback) => alphaFromEffect(vfs, effect, fallback),
     surfaceFor: (effect, slots, dds, alphaMode, opts) => surfaceFor(vfs, effect, slots, dds, alphaMode, opts),
     normalFor: (path) => normalFor(vfs, path),
+    detailFor: (slots) => detailFor(vfs, slots),
     // Glass by name is drawn as its effect says (a name told nothing about transparency: a
     // fuselage texture called cockpit blended at a fixed share looked like a ghost ship), only
     // marked so the runtime lets the sun through it and clears it while someone is aboard.
@@ -455,6 +456,50 @@ function normalFor(vfs, file) {
     console.error(`  normal map ${file} skipped: ${err.message}`);
   }
   normalCache.set(key, out);
+  return out;
+}
+
+/** Detail maps already read this run, by path: 281 images are shared by 1,369 shaders. */
+const detailCache = new Map();
+
+/**
+ * A shader's detail map, which the client multiplies its diffuse texture by.
+ *
+ * Three things about it were measured off the archives rather than assumed, and each one decides
+ * how it is written:
+ *
+ *  - **The combination is a plain multiply, before lighting.** Every detail pixel program in the
+ *    game is one line -- `result.rgb = diffuseColor * detailColor * light`, or with a specular map
+ *    `diffuseColor * allDiffuseLight * detailColor + allSpecularLight`. So it multiplies the diffuse
+ *    term and never the specular, which is what multiplying the base colour does in three.
+ *  - **It reads a texture coordinate set of its own**, set 1. Every detail vertex program writes
+ *    `#define textureCoordinateSetDETA textureCoordinateSet1`, and the effect file says so itself:
+ *    the leading byte of each pass's PTXM is the set index, 0 on MAIN, 1 on DETA, 2 on SPEC.
+ *  - **That set is not the main one scaled.** Over the 12,632 retail vertex arrays belonging to a
+ *    detail shader, only 60.7% fit `u1 = a*u0 + b` at all and the rest miss by up to 137 texture
+ *    units, so a per-material tiling factor would have been wrong on four surfaces in ten and the
+ *    set has to be carried (`msh.mjs`, `TEXCOORD_1` in `glb.mjs`).
+ *
+ * Written as an ordinary colour image; nothing is split out of it and its alpha is not read, since
+ * the programs take `.rgb` and nothing else.
+ */
+function detailFor(vfs, slots) {
+  if (flags.has('--no-textures')) return null;
+  const slot = (slots ?? []).find((s) => s.slot === 'DETA');
+  if (!slot?.path) return null;
+  const path = String(slot.path).replace(/\\/g, '/').toLowerCase();
+  const had = detailCache.get(path);
+  if (had !== undefined) return had;
+  let out = null;
+  try {
+    if (vfs.has(path)) {
+      const img = decodeDds(vfs.read(path));
+      out = { path, png: encodePng(img.width, img.height, img.rgba) };
+    }
+  } catch (err) {
+    console.error(`  detail map ${path} skipped: ${err.message}`);
+  }
+  detailCache.set(path, out);
   return out;
 }
 

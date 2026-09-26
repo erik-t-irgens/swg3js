@@ -69,6 +69,15 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
   const rootNodes = [];
   let byteLength = 0;
 
+  // Which shaders really have a detail coordinate set to sample at, worked out before any material
+  // is made. A material that named a detail map with no `TEXCOORD_1` under it would sample one
+  // texel of it over the whole surface (an unset attribute reads as zero), which is a flat tint and
+  // worse than no detail at all -- so those keep none. It catches the skinned meshes, whose reader
+  // has only ever kept one coordinate set, and the 218 retail vertex arrays whose second set is not
+  // a pair of coordinates.
+  const detailed = new Set();
+  for (const mesh of meshes) for (const g of mesh.groups) for (const p of g.primitives) if (p.uvs2) detailed.add(g.shader);
+
   const pushView = (bytes, target) => {
     const padded = align4(bytes.length);
     const view = { buffer: 0, byteOffset: byteLength, byteLength: bytes.length };
@@ -188,6 +197,10 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
           };
           if (emissive !== undefined && frames.every((f, i) => i === 0 || f.emissive)) swg.anim.emissive = frames.map((f, i) => (i === 0 ? emissive : textureOf(f.emissive)));
         }
+        // The detail map, which the game multiplies the base colour by at the second coordinate
+        // set. It rides in `swg` rather than in a glTF slot of its own because glTF has no such
+        // slot: three's aoMap is the only channel-1 texture it knows and that is not this.
+        if (tex.detail && detailed.has(shader)) swg.detail = textureOf(tex.detail);
         if (tex.scroll) swg.scroll = { map: tex.scroll.map.map(round4), alpha: tex.scroll.alpha ? tex.scroll.alpha.map(round4) : null };
         if (tex.alphaImage) swg.alphaMap = textureOf(tex.alphaImage, !!tex.scroll?.alpha);
         if (tex.alphaTest) swg.alphaTest = round4(tex.alphaTest);
@@ -232,6 +245,9 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         const attributes = { POSITION: pushAccessor(positions, 'VEC3', 5126, 34962, { bounds: true }) };
         if (normals) attributes.NORMAL = pushAccessor(normals, 'VEC3', 5126, 34962);
         if (p.uvs) attributes.TEXCOORD_0 = pushAccessor(p.uvs, 'VEC2', 5126, 34962);
+        // The detail map's own coordinate set, written only where the shader really has a detail
+        // map: it is eight bytes a vertex, and a set nothing samples is a set nobody should pay for.
+        if (p.uvs2 && textures.get(g.shader)?.detail) attributes.TEXCOORD_1 = pushAccessor(p.uvs2, 'VEC2', 5126, 34962);
         if (p.colors) attributes.COLOR_0 = pushAccessor(p.colors, 'VEC4', 5121, 34962, { normalized: true });
         if (p.joints) attributes.JOINTS_0 = pushAccessor(p.joints, 'VEC4', 5123, 34962);
         if (p.weights) attributes.WEIGHTS_0 = pushAccessor(p.weights, 'VEC4', 5126, 34962);

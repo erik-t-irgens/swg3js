@@ -13,6 +13,7 @@ import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
+import { detailWrap } from './detailMap.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -3197,7 +3198,7 @@ export class World {
           const std = m as THREE.MeshStandardMaterial;
           if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
           // The only place an animated surface is joined: this material is in the scene now.
-          if (m.userData.swgTrack || m.userData.swgScroll) surfaces.adopt(m);
+          if (m.userData.swgTrack || m.userData.swgScroll || m.userData.swgDetail) surfaces.adopt(m);
         }
         if (csm && !this.csmMaterials.has(m) && !(m as THREE.ShaderMaterial).isShaderMaterial && m.userData.unlit !== true) {
           csm.setupMaterial(m);
@@ -3208,6 +3209,10 @@ export class World {
         // before the program is ever asked for: rain then moves uniforms and compiles nothing.
         // Every material reaches this point; none is wrapped before `csm` exists.
         if (csm && WET_WRAP) wetWrap(m, o);
+        // And the detail map, after both of those and for the same reason: it is a define and a
+        // hook, both in the program key, so it must be on before anything compiles. A material with
+        // no detail map (every one in a pack converted before this) is left exactly as it was.
+        if (m.userData.swgDetail) detailWrap(m);
       }
       if (isNew) fresh.push(o);
     });
