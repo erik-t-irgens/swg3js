@@ -8,8 +8,15 @@
 import { childOf, childrenOf, findAll, find, isForm, parseIff, readCString } from './iff.mjs';
 import { shaderTextures } from './sht.mjs';
 
-/** Manifests written by this code carry it; `status` asks for a run when a pack's is older. */
-export const MATERIAL_FORMAT = 2;
+/**
+ * Manifests written by this code carry it; `status` asks for a run when a pack's is older.
+ *
+ * 2: animated and glowing surfaces.
+ * 3: every surface wears the gloss map its own shader names rather than a guess from the colour
+ *    texture's alpha, a baked shader carries the surface fields it was getting none of, and glass
+ *    blends rather than being cut out.
+ */
+export const MATERIAL_FORMAT = 3;
 
 /** The glTF alpha mode an effect's pass state gives (a cut-out effect by name is a MASK too). */
 export function alphaModeFor({ alphaBlend, alphaTest }, effectName = '') {
@@ -663,9 +670,19 @@ export function surfaceTexture(vfs, shaderPath, deps) {
   // hair and fences -- three sorts transparency per object, and an instanced field of it draws far
   // over near -- but a lens is not a leaf: a visor's alpha is a mid grey everywhere and never
   // reaches opaque, so a half-threshold cut-out throws most of it away and leaves the wearer looking
-  // out through two holes. Named glass is let through here rather than judged by the shape of its
-  // alpha, which was measured and does not separate a lens from a hair card.
-  const looksTranslucent = !!(d.scroll || d.split || em?.kind === 'full' || d.anim || result.glass);
+  // out through two holes.
+  //
+  // Two ways in, because neither alone is enough. **By name** -- a window, a canopy, a visor, a lens
+  // -- which is what catches a vehicle's windscreen and a pair of goggles. And **by the shape of the
+  // alpha**, for the things nobody thought to name: a hair card's alpha is strands, opaque down the
+  // middle of each and clear between, while a pane of anything is a mid grey over the whole of
+  // itself and never reaches opaque. Measured over every blending shader in the archives that the
+  // name does not already catch: at nine tenths mid-alpha and never opaque there are 117, and **not
+  // one of them is hair or fur** -- the highest any of the 233 hair and fur shaders reaches is 82%,
+  // so the line has eight points of daylight either side. What it finds is fountain water, bacta
+  // tanks, medicine gels, crystals and energy shields.
+  const glassy = result.glass || paneLike(main);
+  const looksTranslucent = !!(d.scroll || d.split || em?.kind === 'full' || d.anim || glassy);
   if (!additive && alphaMode === 'MASK' && pass?.alphaBlend && pass.alphaTest && !pass.zWrite && pass.blendDst === 5 && looksTranslucent) {
     result.translucent = true;
     if (d.alphaRef > 0) result.alphaTest = Math.round((d.alphaRef / 255) * 1e4) / 1e4;
@@ -791,6 +808,28 @@ export function describeLines(d) {
 }
 
 /** Counts over a pack's texture entries for the snapshot's `surfaces:` line. */
+/**
+ * Whether an image's alpha is a pane rather than a cut-out: mid-grey over nine tenths of itself and
+ * never reaching opaque anywhere.
+ *
+ * The two numbers are ours and were chosen by measuring, not by taste. See the note at the
+ * translucency decision for what the margin is.
+ */
+function paneLike(img) {
+  if (!img?.rgba || !img.hasAlpha) return false;
+  let mid = 0;
+  let n = 0;
+  let max = 0;
+  // Every seventh pixel: the answer is a share over the whole image and does not move at that rate.
+  for (let i = 3; i < img.rgba.length; i += 4 * 7) {
+    const a = img.rgba[i];
+    n++;
+    if (a > max) max = a;
+    if (a > 24 && a < 232) mid++;
+  }
+  return n > 0 && mid / n >= 0.9 && max < 250;
+}
+
 export function surfaceCounts(entries) {
   const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0 };
   const glow = new Map();

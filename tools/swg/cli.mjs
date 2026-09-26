@@ -2413,6 +2413,7 @@ function packStatus(dir) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
     need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (I in game, the Weapons tab)');
   } else {
+    if ((weapons.materialFormat ?? 1) < MATERIAL_FORMAT) need(`weapons <swg-dir> ${dir} --retail-only`, "the rack's models were converted before the gloss maps their own shaders name");
     const items = itemPackStatus(weapons.weapons);
     // A weapon effect's sounds: the older packs kept one sound for the muzzle and one for a hit on a
     // creature, and nothing for the other four surfaces, the eight misses or the ricochet. A pack that
@@ -2455,6 +2456,10 @@ function packStatus(dir) {
       const items = itemPackStatus(wardrobe.items);
       console.log(`  wardrobe ${folder}: ${items.items} items (${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${items.fitted} with species rules, ${items.unseen} worn unseen)`);
       if (items.missingKeys && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} has no item names, slots or icons (the backpack needs them)`);
+      // A wardrobe converted before a baked shader carried its surface fields has no gloss maps and
+      // draws its glass as a cut-out. It stamped nothing at all until now, so an old one reads as
+      // format 1 and is asked for once.
+      else if ((wardrobe.materialFormat ?? 1) < MATERIAL_FORMAT && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} was converted before a baked shader carried its gloss and its glass`);
     }
   }
   const speciesIndex = readJson(join(dir, 'characters/index.json'));
@@ -3084,7 +3089,10 @@ function mobilesConvert(vfs, outRoot) {
         }
         items.push({ id: `npc_${entry.name.replace(/_l\d+$/, '')}`, template: '', kind: /hair/.test(lmg) ? 'hair' : 'wearables', sat: '', gender: plan.gender, parts: [entry], variables: customizationList(vfs, info) });
       }
-      writeFileSync(join(dir, 'wardrobe.json'), JSON.stringify({ species: plan.folder, gender: plan.gender, skeleton: plan.skeleton, items }, null, 2));
+      // Stamped, so `status` can tell a pack converted before a change to how a surface is read from one
+  // converted after it. The wardrobe, the weapons, the player and the mobiles carried no stamp at
+  // all, which is the hole CLAUDE.md has been warning about: nothing would ever ask for them again.
+  writeFileSync(join(dir, 'wardrobe.json'), JSON.stringify({ species: plan.folder, gender: plan.gender, skeleton: plan.skeleton, materialFormat: MATERIAL_FORMAT, items }, null, 2));
       if (recipes.length) writeFileSync(join(dir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes: exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r))) }, null, 1));
       return { items: items.map((i) => i.id), failed };
     },
@@ -4231,7 +4239,7 @@ switch (cmd) {
       },
       { log: console.log },
     );
-    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects, powers };
+    const manifest = { classes: WEAPON_CLASSES, weapons, skipped, saberColors, effects, powers, materialFormat: MATERIAL_FORMAT };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
     console.log(`-> ${outDir}: ${weapons.length} weapons in ${models.size} models, ${skipped.length} left out (listed in manifest.json; I in game opens the rack, the Weapons tab); ${fxCache.size} weapon effect rows, ${particleCountFor(outDir)} particle effects; ${weapons.filter((w) => w.name).length} named, ${weapons.filter((w) => w.icon).length} with icons`);
     if (powers.skipped.length) console.log(`   the Force's files left out:\n${powers.skipped.map((s) => `     ${s.file}  (${s.why})`).join('\n')}`);

@@ -494,7 +494,10 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   ok(surfaceLine(T('shader/anim_screen.sht'), describeSurface(vfs, 'shader/anim_screen.sht')) === 'flip-book 4 frames, 0.1 s each; unlit', 'the materials line for an unlit flip-book');
   ok(surfaceLine(T('shader/decal_emismap.sht'), describeSurface(vfs, 'shader/decal_emismap.sht')) === 'glows by MAIN.a (lit and glow images)', 'the materials line for a glowing decal');
   ok(describeLines(describeSurface(vfs, 'shader/anim_screen_gap.sht')).some((l) => /missing texture\/absent\.dds/.test(l)), 'the shader command lists the missing frames');
-  ok(MATERIAL_FORMAT === 2, 'the material format is 2');
+  // Bumped whenever what a pack's materials carry changes, so `status` asks for every pack again.
+  // 3 is the gloss maps: a surface wears the one its own shader names, a baked shader carries the
+  // surface fields it was getting none of, and glass blends rather than being cut out.
+  ok(MATERIAL_FORMAT === 3, 'the material format is 3');
   // eff.mjs imports surface.mjs; surface.mjs must not import eff.mjs back (a cycle breaks the first
   // time either module reads the other's binding while it evaluates).
   const surfaceSource = readFileSync(new URL('../surface.mjs', import.meta.url), 'utf8');
