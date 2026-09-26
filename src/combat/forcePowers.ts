@@ -134,6 +134,12 @@ export const POWERS: PowerDef[] = [
   // that said plainly rather than left as the same blue spark every other power used to throw.
   { id: 'rage', name: 'Force Rage', cost: 'health', kind: 'toggle', blurb: 'Ten seconds faster and half again as hard with the blade, at a cost in health; then a rest.', sound: lasting('strength'), fx: { expect: 'armor', place: 'self', source: 'invented', note: "the game had no rage of its own: the armour's own effect is worn for it" } },
   { id: 'fists', name: 'Bare Hands', cost: 'none', kind: 'toggle', blurb: 'The saber put away: punches on the left mouse, kicks on the right, brawling the way the game did.' },
+  // Not a power, and not the Force at all. It is here because the number slots are the one place in
+  // the game that hands a key to a thing you choose, and they are keyed by class: a Jedi's slots
+  // read this list and nobody else's, so an ability meant for everybody has to be in both, exactly
+  // as Bare Hands is. The kit has no case for it and wants none -- it opens a row on the screen,
+  // which is not a thing a kit can reach.
+  { id: 'band', name: 'Start Playing', cost: 'none', kind: 'toggle', blurb: 'With an instrument in hand: the songs it has a part in, and the eight flourishes on the number keys while you play.' },
 ];
 
 /** The number keys' actions, one per slot. */

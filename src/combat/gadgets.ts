@@ -119,6 +119,9 @@ export const GADGETS: GadgetDef[] = [
   { id: 'det_pack', name: 'Det Pack', cost: '1s', kind: 'tap', cooldown: 1, blurb: 'Stuck where the crosshair is (within four metres, or thrown at what is farther); the key again sets every one off.' },
   { id: 'stim', name: 'Stim Pack', cost: '12s', kind: 'tap', cooldown: 12, blurb: 'Mends forty-five health at once.' },
   { id: 'fists', name: 'Bare Hands', cost: 'none', kind: 'toggle', cooldown: 0, blurb: 'The gun put away: punches on the left mouse, kicks on the right, brawling the way the game did.' },
+  // The same entry the Jedi's list carries, for the same reason Bare Hands is in both: the slots are
+  // keyed by class and an ability that belongs to nobody in particular has to be in each list.
+  { id: 'band', name: 'Start Playing', cost: 'none', kind: 'toggle', cooldown: 0, blurb: 'With an instrument in hand: the songs it has a part in, and the eight flourishes on the number keys while you play.' },
 ];
 
 export const DEFAULT_GADGETS = ['thermal', 'frag', 'trip_mine', 'det_pack', 'stim', 'fists'];

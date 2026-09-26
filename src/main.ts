@@ -1287,11 +1287,9 @@ class App {
     this.bandBar.onFlourish = (n) => {
       if (!band.flourish(n, this.player.worldPos)) this.messages.system('this song has no such flourish for that instrument');
     };
-    this.bandBar.onSong = (step) => {
-      const songs = songsFor(stemFor(this.instrumentHeld() ?? ''));
-      if (!songs.length) return;
-      const at = Math.max(0, songs.indexOf(this.bandSong));
-      this.bandSong = songs[(at + step + songs.length) % songs.length];
+    this.bandBar.onPick = (song) => {
+      if (song === this.bandSong) return;
+      this.bandSong = song;
       // Changing song while playing changes what is played, which is what a band leader does.
       if (band.mine) this.toggleBand(), this.toggleBand();
     };
@@ -10136,11 +10134,19 @@ class App {
    *
    * It is called from the frame loop and writes to the page only when the words have changed.
    */
+  /**
+   * The band's own row: shown by the Start Playing ability, not merely by holding an instrument.
+   *
+   * It is stepped from the camera's own pass rather than from the branch that simulates, so it goes
+   * on showing and the part goes on following the player with a panel or the map up. Losing the
+   * instrument closes the whole thing, since there is nothing left to play.
+   */
   private stepBand(): void {
     const instrument = this.instrumentHeld();
-    if (!instrument) {
+    if (!instrument || !this.bandOpen) {
       if (band.mine) band.stop(this.player.worldPos);
       if (this.bandBar.open) this.bandBar.hide();
+      this.bandOpen = this.bandOpen && !!instrument;
       return;
     }
     const stem = stemFor(instrument);
@@ -10149,14 +10155,60 @@ class App {
     const parts = partsFor(this.bandSong, stem);
     const pack = musicPack();
     const name = pack?.stemNames[stem ?? ''] ?? stem ?? 'instrument';
-    this.bandBar.show(
-      this.bandSong ? `song ${this.bandSong} · ${name}` : `${name}: no song`,
-      !!band.mine,
-      songs.length ? `${songs.length} songs have a ${name} part` : pack ? `no song has a ${name} part` : 'no music converted: run the converter\'s `music` command',
-      parts ? parts.flourishes.map((_, i) => i + 1) : [],
-    );
+    this.bandBar.show({
+      what: this.bandSong ? `song ${this.bandSong} · ${name}` : `${name}: no song`,
+      songs,
+      song: this.bandSong,
+      playing: !!band.mine,
+      has: parts ? parts.flourishes.map((_, i) => i + 1) : [],
+      note: songs.length ? `${songs.length} songs have a ${name} part` : pack ? `no song has a ${name} part` : "no music converted: run the converter's `music` command",
+      key: this.bandKeyCap(),
+    });
     // The part follows the player, so walking away from a band is heard as walking away.
     if (band.mine) band.moveMine(this.player.worldPos);
+  }
+
+  /** Whether the band's row is up. The Start Playing ability opens and closes it. */
+  private bandOpen = false;
+
+  /** Which slot the Start Playing ability sits in for the class being played, or -1. */
+  private bandSlot(): number {
+    return (this.kit.id === 'jedi' ? this.jediKit().loadout : this.hunterKit().loadout).indexOf('band');
+  }
+
+  /** What that slot's key is called, for the line under the row. */
+  private bandKeyCap(): string {
+    const i = this.bandSlot();
+    if (i < 0) return 'the Start Playing slot';
+    return keyLabel(this.input.bindings[`slot${i + 1}` as Action]?.[0] ?? '');
+  }
+
+  /**
+   * The Start Playing key, and the flourishes under it.
+   *
+   * The order is the whole of it. The ability's own key is read **first** and its codes consumed, so
+   * that a slot on one of the digits still stops the performance rather than being eaten as a
+   * flourish; the digits are taken after that, and only while something is really playing, which is
+   * exactly how a dance takes 1 to 8 while it runs.
+   */
+  private stepBandKeys(): void {
+    const input = this.input;
+    const i = this.bandSlot();
+    if (i >= 0 && input.pressedAction(`slot${i + 1}` as Action)) {
+      for (const code of input.bindings[`slot${i + 1}` as Action] ?? []) input.consumeKey(code);
+      if (!this.instrumentHeld()) this.messages.system('nothing in your hands to play: an instrument goes in a hand like a weapon');
+      else {
+        this.bandOpen = !this.bandOpen;
+        if (!this.bandOpen && band.mine) band.stop(this.player.worldPos);
+      }
+    }
+    if (!this.bandOpen || !band.mine) return;
+    for (let n = 1; n <= 8; n++) {
+      // The digit is spelled rather than looked up in the bindings, exactly as a dance's flourishes
+      // are: eight keys in a row are what a flourish is, and rebinding a slot must not move them.
+      if (!input.consumeKey(`Digit${n}`)) continue;
+      if (!band.flourish(n, this.player.worldPos)) this.messages.system('this song has no such flourish for that instrument');
+    }
   }
 
   /** Start or stop playing what the bar is set to. */
@@ -11940,6 +11992,9 @@ class App {
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
           this.stepEmoteKeys();
+          // The band's own key and its flourishes, after the emotes so that a dance keeps first
+          // claim on the digits: a dancer has already consumed them by here.
+          this.stepBandKeys();
         }
       }
       if (this.emoteWheel.open) {

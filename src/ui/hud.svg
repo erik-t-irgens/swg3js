@@ -104,6 +104,13 @@
   </symbol>
 
   <!-- Bare hands: a fist. -->
+  <!-- A note with a flag: the one thing on the sheet that is not a weapon or a way of hurting somebody. -->
+  <symbol id="ic-music" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 17.5V5.5l8-1.5v12"/>
+    <circle cx="7.5" cy="17.5" r="2.5"/>
+    <circle cx="15.5" cy="16" r="2.5"/>
+    <path d="M10 9l8-1.5"/>
+  </symbol>
   <symbol id="ic-fists" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
     <path d="M5.5 10h11.5a2.5 2.5 0 0 1 2.5 2.5v2a4.5 4.5 0 0 1-4.5 4.5h-7A4.5 4.5 0 0 1 3.5 14.5v-2A2.5 2.5 0 0 1 6 10z"/>
     <path d="M7 13.5h9"/>

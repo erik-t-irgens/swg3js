@@ -31,6 +31,7 @@ export const ICON_IDS = [
   'ic-force-protect',
   'ic-force-rage',
   'ic-fists',
+  'ic-music',
   'ic-grenade',
   'ic-detonator',
   'ic-mine',
@@ -90,6 +91,8 @@ const BY_NAME: Record<string, IconId> = {
   stimpack: 'ic-stim',
   // in both lists
   barehands: 'ic-fists',
+  // Not a weapon and not a power: the only music in this game is the music players make.
+  startplaying: 'ic-music',
   lightsaber: 'ic-saber',
 };
 
@@ -120,6 +123,9 @@ const BY_WORD: readonly (readonly [string, IconId])[] = [
   ['slow', 'ic-force-slow'],
   ['protect', 'ic-force-protect'],
   ['rage', 'ic-force-rage'],
+  ['music', 'ic-music'],
+  ['instrument', 'ic-music'],
+  ['play', 'ic-music'],
   ['fist', 'ic-fists'],
   ['hand', 'ic-fists'],
 ];
