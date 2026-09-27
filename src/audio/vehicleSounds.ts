@@ -139,6 +139,8 @@ export interface SoundVehicle {
   readonly spec: { id: string; label: string; maxSpeed: number; animal: boolean; ship?: boolean };
   readonly def: {
     id: string;
+    /** Where the garage got it: a shuttle on its rig (`rig`) sounds through its own clips, never through here. */
+    source?: string;
     template?: string;
     chassis?: string | null;
     attachments?: readonly { kind: string; slot?: string; template?: string; sound?: string | null }[];
@@ -579,6 +581,9 @@ export class VehicleSounds {
     for (let i = 0; i < vehicles.length; i++) {
       const v = vehicles[i];
       if (v.disposed || v.destroyed) continue;
+      // A shuttle on its rig is heard through its own client data at the moments its clips mark
+      // (`ShuttleRigs`); a family match on its name here would give it some other ship's engine.
+      if (v.def?.source === 'rig') continue;
       const rec = this.recOf(v);
       rec.seen = this.pass;
       rec.own = v === own;

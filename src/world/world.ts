@@ -65,6 +65,7 @@ import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
 import { remoteInteriors, type RemoteInteriors } from '../net/remoteInterior.ts';
 import { watchPeers } from '../net/remotePlayers.ts';
 import { ShipContacts } from '../space/contacts';
+import { joinsTheFight } from '../space/shipCombat.ts';
 import { NpcShipManager } from '../space/npcShips';
 import { ZONE_TIER } from '../space/roster';
 import { SPACE_SKY_TUNE, spaceBodyStandIn, standingBodyMaxDepth, standingBodyPlace, type StandingBodyPlace } from '../space/suns';
@@ -4084,7 +4085,8 @@ export class World {
     }
     this.vehicles.push(v);
     // A player's ship fights too: its combat from its fit (neutral until someone flies it; sync marks the player's).
-    if (v.spec.ship) this.ships.adopt(v, { faction: 'neutral' });
+    // A hull nothing may hurt (a shuttle on its rig) has no fight at all.
+    if (joinsTheFight(v)) this.ships.adopt(v, { faction: 'neutral' });
     // The ship's bolt and hit effects, every one its guns fire, played once far below the world.
     this.warmShipFx(v);
     const gravity = -this.physics.world.gravity.y;
@@ -4797,7 +4799,7 @@ export class World {
     }
     if (v.disposed) return;
     v.space = !!planet.space;
-    if (v.spec.ship) {
+    if (joinsTheFight(v)) {
       const combat = this.ships.adopt(v, { faction: 'neutral' });
       if (condition) combat.restore(condition);
       this.warmShipFx(v);

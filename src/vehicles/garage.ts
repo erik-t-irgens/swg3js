@@ -18,6 +18,8 @@ import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitT
 import { ShipPaint } from './shipPaint';
 import { renderPaint } from './paintRender';
 import { lavaImmuneTemplate, setImmunityCatalogue } from '../world/lavaImmunity';
+import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf, pieceVolumes } from './rigHull.ts';
+import type { TravelRig } from '../world/travelTerminal.ts';
 
 // Moved to shipAssembly.ts (node-testable); every existing import from here keeps working.
 export { hardpointName } from './shipAssembly';
@@ -57,7 +59,13 @@ export interface VehicleDef {
   kind: VehicleKind;
   /** Whether the kind was read off the name; unknown names default to a speeder bike and are marked. */
   inferred: boolean;
-  source: 'gallery' | 'creature' | 'ship';
+  source: 'gallery' | 'creature' | 'ship' | 'rig';
+  /**
+   * A shuttle drawn on its travel rig (`rigDef` in rigHull.ts): the pack's rig block carried whole, the
+   * branch of its clips, and its hull joint. Never in the garage's list, so no Spawn tab, no `find` and
+   * no other player ever meets one.
+   */
+  rig?: { name: string; rig: TravelRig; mood: string; hull: string } | null;
   /** A ship's interior, when it has one: the model, and what the manifest says of its cells and bounds. */
   interior?: { file: string; cells: number; def: import('./interior').InteriorDef } | null;
   /** What the manifest says of the hull model's own cells, when it is a portal building (rooms, their lights), and its portal polygons. */
@@ -622,6 +630,7 @@ export class Garage {
 
   /** Stand a vehicle on the ground at a point, facing a heading, and hand it back to drive. */
   async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number], opts: BuildOptions = {}): Promise<Vehicle> {
+    if (def.source === 'rig') return this.spawnRig(def, physics, scene, x, y, z, heading, place, opts);
     // A mount's saddle loads beside it, before the body exists: nothing may be awaited once it does.
     const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
     // A skinned model (a creature, a walker, a pod racer built on a skeleton) needs a skeleton of
@@ -643,6 +652,87 @@ export class Garage {
     const drop = a.wings.length ? wingDrop(model, a.wings, (o) => cellIndexOf(o) <= 0) : 0;
     const hardpoints: string[] = [];
     return this.finishSpawn(def, model, a, drop, bounds, hardpoints, loaded.animations, saddle, physics, scene, x, y, z, heading, kind, place, opts, fit, paint);
+  }
+
+  /**
+   * A shuttle's hull out of its travel rig (`rigHull.ts`): the skeleton and each piece through this
+   * garage's own session cache, the pieces hung on the joints, the hull joint pinned at the model's
+   * origin, posed on the ground and framed on its box as every machine is (`RigHull.frame`). Every
+   * mesh receives shadows and is culled on its own box, as the clock rig's are (`receiveShadow` is in
+   * a program's key), and its glass casts none (`model` saw to that), so the two draw with the same
+   * programs. A pack that gives its pieces no bounds has its hull joint worked out again from the
+   * pieces themselves.
+   */
+  private async rigModel(def: VehicleDef): Promise<{ model: THREE.Group; hull: RigHull; bounds: VehicleSpec['bounds'] }> {
+    const r = def.rig;
+    if (!r) throw new Error(`garage: ${def.id} names no rig`);
+    const clips = r.rig.moods[r.mood] ?? Object.values(r.rig.moods)[0];
+    if (!clips) throw new Error(`garage: ${def.id}: its rig has no clips`);
+    // Stub defs with no kind, so nothing is marked dry: the pieces hang under bones, which the rain never wets.
+    const [skeleton, ...loaded] = await Promise.all([this.model({ file: def.file } as VehicleDef), ...r.rig.parts.map((p) => this.model({ file: `assets-private/${p.file}` } as VehicleDef))]);
+    const pieces = r.rig.parts.map((p, i) => ({ joint: p.joint, model: loaded[i].scene.clone(true) as THREE.Object3D }));
+    const hullJoint = r.rig.parts.every((p) => p.bounds) ? r.hull : hullJointOf(r.rig, pieceVolumes(pieces));
+    const assembled = assembleRigModel({ scene: skeleton.scene.clone(true), animations: skeleton.animations }, pieces, hullJoint, clips);
+    assembled.model.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      m.receiveShadow = true;
+      m.frustumCulled = true;
+    });
+    const hull = new RigHull(assembled, clips);
+    // Framed as frameModel frames every machine, but on its pieces' real vertices (its struts and door
+    // hang turned on their joints), and through the one call the node test pins the offset with. The
+    // bounds and reach are frameModel's shapes, its fallback box included.
+    const f = hull.frame();
+    if (f) assembled.model.userData.reach = f.reach;
+    const bounds: VehicleSpec['bounds'] = f ? { min: [-f.halfW, 0, -f.halfL], max: [f.halfW, f.h, f.halfL] } : { min: [-0.5, 0, -1], max: [0.5, 1, 1] };
+    return { model: assembled.model, hull, bounds };
+  }
+
+  /**
+   * A shuttle's hull as a vehicle (`rigModel`), prepared before it exists and made with nothing awaited
+   * after. It is a ship to everything that asks, and one nothing may hurt: it carries passengers. Whatever
+   * flies it holds its own line over the ground, so flyShip's ease, ceiling and crash leave it alone. No
+   * glow, no panes and nothing hung: its flames and sounds are its own clips' (`ShuttleRigs`), and a
+   * garage glow would light at the moment it is swapped for the rig on the pad.
+   */
+  private async spawnRig(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, place?: (bounds: VehicleSpec['bounds']) => [number, number, number], opts: BuildOptions = {}): Promise<Vehicle> {
+    const { model, hull, bounds } = await this.rigModel(def);
+    const spec = rigSpec(bounds, def);
+    if (model.userData.reach) spec.reach = model.userData.reach as number;
+    try {
+      if (opts.prepare) await opts.prepare([model]);
+      if (opts.alive && !opts.alive()) throw new SpawnCancelled(def.id);
+    } catch (err) {
+      hull.dispose();
+      throw err;
+    }
+    if (place) [x, y, z] = place(bounds);
+    // Nothing may be awaited after this line: the body is live, falling and unsprung until the world holds it.
+    const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
+    v.def = def;
+    v.rig = hull;
+    v.invulnerable = true;
+    v.lavaImmune = true;
+    v.groundByPilot = true;
+    // Its passengers ride out of sight, as the game drew nobody in a shuttle, and it has no cockpit eye to seat them by.
+    v.riderHidden = true;
+    v.eyeSeat = false;
+    const n2 = (a: THREE.Vector3) => a.toArray().map((n) => n.toFixed(2)).join(', ');
+    console.info(`garage: ${def.id}: a shuttle on its rig, hull joint ${hull.hull} at ${n2(model.position)} in the vehicle (the vehicle's origin at ${n2(hull.offset)} in the joint's frame)${hull.rampFoot ? `, its ramp's foot at ${n2(hull.rampFoot)}` : ''}`);
+    return v;
+  }
+
+  /**
+   * A rig's hull as it would be built, measured and let go of, for the console: its hull joint, where the
+   * vehicle's origin stands in that joint's frame (`offset`; the joint stands at minus it in the vehicle),
+   * its box and its ramp's foot.
+   */
+  async rigReport(def: VehicleDef): Promise<{ hull: string; offset: number[]; box: VehicleSpec['bounds']; rampFoot: number[] | null }> {
+    const { hull, bounds } = await this.rigModel(def);
+    hull.dispose();
+    const r3 = (a: THREE.Vector3) => a.toArray().map((n) => Number(n.toFixed(3)));
+    return { hull: hull.hull, offset: r3(hull.offset), box: bounds, rampFoot: hull.rampFoot ? r3(hull.rampFoot) : null };
   }
 
   /**
@@ -1270,6 +1360,22 @@ function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | nu
     if (!found && hardpointName(o)?.toLowerCase() === want) found = o;
   });
   return found;
+}
+
+/**
+ * A shuttle's handling: a ship's, sized by its box as every ship's is, with the rig hull's own numbers
+ * written over it (`RIG_HULL_TUNE`, read at each spawn). Here rather than in rigHull.ts because
+ * `specFor` comes from vehicle.ts, which node cannot load.
+ */
+function rigSpec(bounds: VehicleSpec['bounds'], def: VehicleDef): VehicleSpec {
+  const spec = specFor('ship', def.id, def.label, bounds);
+  spec.maxSpeed = RIG_HULL_TUNE.maxSpeed;
+  spec.boostSpeed = RIG_HULL_TUNE.boostSpeed;
+  spec.accel = RIG_HULL_TUNE.accel;
+  spec.brake = RIG_HULL_TUNE.brake;
+  spec.turnRate = RIG_HULL_TUNE.turnRate;
+  spec.inertia = RIG_HULL_TUNE.inertia;
+  return spec;
 }
 
 /** A seated pilot's eyes over the seat point, metres: the eye of a ship without a cockpit frame until its bridge is known. */

@@ -328,8 +328,11 @@ export interface ShuttleTimes {
  * clips' own lengths: a transport takes 26.6 s to come down and Theed's 32.3, and a timetable that
  * gave every shuttle the same `glide` would have the collector saying it had landed while it was still
  * a hundred metres up. Without a rig both are `glide`, as they always were.
+ *
+ * `out` is written in place and handed back when it is given, so something that asks every frame (each
+ * stood shuttle does) keeps one record rather than making one a frame.
  */
-export function shuttleAt(name: string, seconds: number, tune = TRAVEL_TUNE, times: ShuttleTimes | null = null): ShuttleState {
+export function shuttleAt(name: string, seconds: number, tune = TRAVEL_TUNE, times: ShuttleTimes | null = null, out?: ShuttleState): ShuttleState {
   const land = times && times.land > 0 ? times.land : tune.glide;
   const lift = times && times.lift > 0 ? times.lift : tune.glide;
   const visit = tune.waits + land + lift;
@@ -339,11 +342,21 @@ export function shuttleAt(name: string, seconds: number, tune = TRAVEL_TUNE, tim
   const room = every - visit;
   const start = slotHash(name, slot) * room;
   const t = seconds - slot * every - start;
-  if (t < 0) return { phase: 'away', until: -t, left: 0, glide: 0 };
-  if (t < land) return { phase: 'landing', until: land - t, left: 0, glide: t / land };
-  if (t < land + tune.waits) return { phase: 'waiting', until: 0, left: land + tune.waits - t, glide: 1 };
-  if (t < visit) return { phase: 'leaving', until: every - t + slotHash(name, slot + 1) * room, left: 0, glide: 1 - (t - land - tune.waits) / lift };
-  return { phase: 'away', until: every - t + slotHash(name, slot + 1) * room, glide: 0, left: 0 };
+  const s: ShuttleState = out ?? { phase: 'away', until: 0, left: 0, glide: 0 };
+  if (t < 0) return roundAt(s, 'away', -t, 0, 0);
+  if (t < land) return roundAt(s, 'landing', land - t, 0, t / land);
+  if (t < land + tune.waits) return roundAt(s, 'waiting', 0, land + tune.waits - t, 1);
+  if (t < visit) return roundAt(s, 'leaving', every - t + slotHash(name, slot + 1) * room, 0, 1 - (t - land - tune.waits) / lift);
+  return roundAt(s, 'away', every - t + slotHash(name, slot + 1) * room, 0, 0);
+}
+
+/** A shuttle's state written into a record. */
+function roundAt(out: ShuttleState, phase: ShuttleState['phase'], until: number, left: number, glide: number): ShuttleState {
+  out.phase = phase;
+  out.until = until;
+  out.left = left;
+  out.glide = glide;
+  return out;
 }
 
 /** A rig's landing and lift-off for one branch, from the clips' own lengths; null where it has none. */

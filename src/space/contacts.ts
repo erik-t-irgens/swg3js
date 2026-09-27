@@ -13,7 +13,7 @@ import type { Vehicle } from '../vehicles/vehicle';
 import { anyHardpoint } from '../vehicles/shipAssembly';
 import { CombatData, type NpcTypeDef } from './combatData.ts';
 import { aggressionOfFaction, sideOfFaction, type ShipFaction } from './factions.ts';
-import { ShipCombat, blameKey, blamed, stockFor, targetable, type CombatFx, type CombatHooks } from './shipCombat.ts';
+import { ShipCombat, blameKey, blamed, joinsTheFight, stockFor, targetable, type CombatFx, type CombatHooks } from './shipCombat.ts';
 import type { HitResult } from './shipDamage.ts';
 import { familyOf, hullClassOf, type Handling, type StatInput } from './shipStats.ts';
 import { TauntGate, fillTaunt, pickLine, type TauntEvent } from './taunts.ts';
@@ -186,7 +186,7 @@ export class ShipContacts {
       if (c.vehicle.disposed || !vehicles.includes(c.vehicle)) this.drop(i);
     }
     for (const v of vehicles) {
-      if (!v.spec.ship || v.disposed || this.byVehicle.has(v)) continue;
+      if (!joinsTheFight(v) || this.byVehicle.has(v)) continue;
       this.adopt(v, { faction: 'neutral' });
     }
     const pc = playerShip ? (this.byVehicle.get(playerShip) ?? null) : null;

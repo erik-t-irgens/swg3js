@@ -104,6 +104,8 @@ import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, s
 import { BandBar } from './ui/bandBar.ts';
 import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
+import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
+import { onPad, vehicleFromJoint } from './world/rigPath.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -1908,10 +1910,11 @@ class App {
        * port's shuttle is in its round; `{ go: true }` puts you at the nearest terminal, which is
        * how to try one without finding a starport first; `{ open: true }` opens the window as E
        * does; `{ tune: { every, waits } }` moves the timetable, every number of which is ours, and
-       * `{ rigs: { reach, solid, effects, near, late, shake, spaceEvery, spaceMove } }` the drawn
-       * shuttles' own. `shuttlesDrawn` is every shuttle standing on its rig: where it is in its round,
-       * whether it is solid just now, the room an indoor one's sounds are in, how many flames it has
-       * lit and how many are still dying away, and whether its idle loop is playing.
+       * `{ rigs: { reach, solid, effects, near, late, shake, spaceEvery, spaceMove, seenFar, releaseNear } }`
+       * the drawn shuttles' own. `shuttlesDrawn` is every shuttle standing on its rig: where it is in its
+       * round, whether something holds it off its pad, whether it is solid just now, the room an indoor
+       * one's sounds are in, how many flames it has lit and how many are still dying away, and whether
+       * its idle loop is playing.
        */
       terminal: (opts: { go?: boolean; open?: boolean; tune?: Partial<typeof TRAVEL_TUNE>; rigs?: Partial<typeof SHUTTLE_RIG_TUNE> } = {}) => {
         if (opts.tune) Object.assign(TRAVEL_TUNE, opts.tune);
@@ -2000,6 +2003,35 @@ class App {
                   : '',
           tune: { ...TRAVEL_TUNE, ship: { ...SHIP_TERMINAL_TUNE }, rigs: { ...SHUTTLE_RIG_TUNE } },
         };
+      },
+      /**
+       * A shuttle flown from its travel rig rather than drawn from the clock (`src/vehicles/rigHull.ts`),
+       * which nothing in play builds yet.
+       *
+       * `await __debug.rigHull()` reports, for every rig and branch this world's travel pack carries, the
+       * joint that carries its hull, where the vehicle's origin stands in that joint's frame (`offset`: the
+       * joint stands at minus it in the vehicle), the box the garage framed it on and its ramp's foot; and
+       * for a hull out, whether nothing may hurt it (`invulnerable`), whether it has a fight (`inContacts`,
+       * which must be false), whether it is ghosted, its colliders, whether it is held, the hold on the
+       * pad it stands on, how far its hull joint stood
+       * from the rig's own when it was swapped in (`swapError`, about a millimetre, and `swapDegrees`), the
+       * programs built preparing it (`programsBuilt`) and on the two frames after it was shown
+       * (`programsOnShow`, which must be 0). `{ spawn: 'nearest' }` builds one for the pad nearest you and
+       * swaps it for the rig standing there, parked on the ground pose; `{ hurt: true }` tries every way a
+       * hull is hurt -- a blow, a bolt, a collision, being rammed and a crash forced into the ground -- and
+       * says whether its health, what struck it, its last hit and its crash are all as they were;
+       * `{ drop: true }` takes it away and gives the pad back; `{ tune }` sets `RIG_HULL_TUNE` for the next
+       * one built. A world left with one out lets go of its pad the next time this is called.
+       */
+      rigHull: async (opts: { spawn?: 'nearest'; hurt?: boolean; drop?: boolean; tune?: Partial<typeof RIG_HULL_TUNE> } = {}) => {
+        if (opts.tune) {
+          const tune = RIG_HULL_TUNE as Record<string, number>;
+          for (const [k, v] of Object.entries(opts.tune as Record<string, unknown>)) if (k in tune && typeof v === 'number' && Number.isFinite(v) && v > 0) tune[k] = v;
+        }
+        if (opts.drop) return this.dropRigHull();
+        if (opts.hurt) return this.hurtRigHull();
+        if (opts.spawn) return this.spawnRigHull();
+        return this.rigHullReport();
       },
       /**
        * The fittings: what the server stood on this world's buildings and no snapshot carries.
@@ -8280,7 +8312,8 @@ class App {
       p.mount(v);
       this.cam.distance = Math.max(this.cam.distance, 9.5);
     }
-    this.lastShipDef = def;
+    // A shuttle carried across is nobody's ship to be put at the controls of on the next trip.
+    if (def.source !== 'rig') this.lastShipDef = def;
     v.launch(speed);
     this.physics.stepOnce();
     return v;
@@ -8962,8 +8995,9 @@ class App {
     // Every vehicle's hits and its state: sparks on a hit, smoke from a battered hull, and the
     // end of one whose hull is gone (its rider thrown off first).
     for (const v of [...this.world.vehicles]) {
-      // On its back for a moment: the rider is thrown, and hurt by it.
-      if (v === player.mounted && v.flipped) {
+      // On its back for a moment: the rider is thrown, and hurt by it. Nothing of any of this reaches
+      // anybody riding a hull nothing may hurt (a shuttle), which the hull's own guards say again.
+      if (v === player.mounted && v.flipped && !v.invulnerable) {
         this.dismountBeside(v);
         player.takeDamage(10);
         // Thrown by the ground, not by anybody: no direction, so the red flash and no arc.
@@ -8973,7 +9007,7 @@ class App {
       if (v.justHit > 0) {
         this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
-        if (v === player.mounted) {
+        if (v === player.mounted && !v.invulnerable) {
           player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)));
           // A jolt through the hull under you: the hull keeps no record of what it ran into, so
           // there is no direction to point at and the flash is the whole of it.
@@ -8983,7 +9017,7 @@ class App {
       if (v.struck > 0) {
         // Bolts in the hull: a jolt to whoever is at the controls, a little of it as hurt. A ship with a fight
         // takes them in its shields and armour: the pilot is jolted and keeps their health until it is destroyed.
-        if (v === player.mounted || v === player.piloting) {
+        if ((v === player.mounted || v === player.piloting) && !v.invulnerable) {
           if (!v.combat) player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
           // Bolts in the hull: the hull counts them but does not keep where they came from, so this
           // one flashes without an arc. The ship's own bars flash in the layer's colour instead.
@@ -9028,7 +9062,7 @@ class App {
       if (this.world.planet.space) this.spaceGate = 'down';
       else if (flown.airborne && spaceZoneOf(this.world.planet) && flown.pos.y - this.world.terrain.heightAt(flown.pos.x, flown.pos.z) > SPACE_GATE_HEIGHT) this.spaceGate = 'up';
     }
-    if (player.piloting?.crashed) {
+    if (player.piloting?.crashed && !player.piloting.invulnerable) {
       const m = player.piloting;
       player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)));
       // Flown into the ground: no side to it.
@@ -9038,7 +9072,7 @@ class App {
     if (player.mounted) {
       player.syncMount();
       const m = player.mounted;
-      if (m.crashed) {
+      if (m.crashed && !m.invulnerable) {
         // Flown into the ground: hurt by the speed, and the crash shown where it happened.
         const dmg = Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95));
         player.takeDamage(dmg);
@@ -9878,9 +9912,11 @@ class App {
       if (rig) {
         const times = rigTimes(rig, t.mood) ?? { land: TRAVEL_TUNE.glide, lift: TRAVEL_TUNE.glide };
         const name = this.shuttleKey(t);
+        // Asked every frame, so it writes one record of its own rather than making one a frame.
+        const kept: ShuttleState = { phase: 'away', until: 0, left: 0, glide: 0 };
         const stood = await this.rigsOf().stand(key, rig, t.mood, { x: t.x, y: t.y, z: t.z, yaw: t.yaw }, t.cell > 0, {
           times,
-          state: () => shuttleAt(name, sharedClock.walkSeconds(), TRAVEL_TUNE, times),
+          state: () => shuttleAt(name, sharedClock.walkSeconds(), TRAVEL_TUNE, times, kept),
         });
         if (this.travelRowsFor !== pack) return;
         if (stood) continue;
@@ -10032,6 +10068,170 @@ class App {
   private shuttleTimes(thing: TravelThing): ShuttleTimes | null {
     const shuttle = thing.kind === 'shuttle' ? thing : this.travelThings().find((t) => t.kind === 'shuttle' && t.bx === thing.bx && t.bz === thing.bz);
     return shuttle?.rig ? rigTimes(this.travelRigs[shuttle.rig], shuttle.mood) : null;
+  }
+
+  /** The console's shuttle hull (`__debug.rigHull`): the vehicle, the pad it stands on and what its swap measured. */
+  private rigHullOut: { v: Vehicle; key: string; swapError: number | null; swapDegrees: number | null; programsBuilt: number; programsOnShow: number } | null = null;
+  /** The drive a held hull is handed: nothing, which it never reads while it is held. */
+  private readonly rigHullDrive: DriveInput = { throttle: 0, steer: 0, boost: false, hop: false, up: false, down: false };
+
+  /**
+   * Every rig and branch of this world's pack as the garage would build its hull, and the console's
+   * hull if one is out. A hull that went with a world left meanwhile gives its pad's hold back here.
+   */
+  private async rigHullReport(): Promise<unknown> {
+    const out = this.rigHullOut;
+    if (out?.v.disposed) {
+      this.shuttleRigs?.release(out.key, true);
+      this.rigHullOut = null;
+    }
+    this.world.garage ??= await Garage.load(import.meta.env.BASE_URL);
+    const g = this.world.garage;
+    const rigs: Record<string, unknown> = {};
+    for (const [name, rig] of Object.entries(this.travelRigs)) {
+      for (const mood of Object.keys(rig.moods)) {
+        const def = rigDef(name, rig, mood);
+        try {
+          rigs[def.id] = await g.rigReport(def);
+        } catch (err) {
+          rigs[def.id] = { error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+    }
+    const h = this.rigHullOut;
+    const v = h?.v ?? null;
+    return {
+      rigs,
+      flown: h && v
+        ? {
+            id: v.spec.id,
+            pad: h.key,
+            padHeld: this.shuttleRigs?.holdState(h.key) ?? null,
+            invulnerable: v.invulnerable,
+            inContacts: !!this.world.ships.of(v),
+            ghosted: v.ghosted,
+            colliders: v.colliderHandles.length,
+            holding: v.holding,
+            groundByPilot: v.groundByPilot,
+            swapError: h.swapError,
+            swapDegrees: h.swapDegrees,
+            programsBuilt: h.programsBuilt,
+            programsOnShow: h.programsOnShow,
+          }
+        : null,
+      tune: { ...RIG_HULL_TUNE },
+      note: Object.keys(this.travelRigs).length ? '' : "this world's travel pack carries no rigs: stand on a world with a starport, or run travel again and reload",
+    };
+  }
+
+  /**
+   * Build a shuttle's hull for the pad nearest the player and swap it in for the rig standing there,
+   * parked on the ground pose: built out of sight (`World.spawnHull`), then in one synchronous step the
+   * rig held off its pad at once, the hull shown, held where the rig parks and made solid, and put in
+   * the world's list with a drive of nothing so nothing mounts it or clears it away.
+   */
+  private async spawnRigHull(): Promise<unknown> {
+    const rigs = this.shuttleRigs;
+    const key = rigs?.nearest(this.player.worldPos) ?? null;
+    const pad = rigs && key ? rigs.padOf(key) : null;
+    if (!rigs || !key || !pad) return 'no shuttle stands on its rig in this world: go to a starport or shuttleport of a world whose travel pack has rigs';
+    if (this.rigHullOut) this.dropRigHull();
+    const name = Object.entries(this.travelRigs).find(([, r]) => r === pad.rig)?.[0] ?? 'shuttle';
+    const def = rigDef(name, pad.rig, pad.mood);
+    const r = this.renderer;
+    const before = r.info.programs?.length ?? 0;
+    let v: Vehicle;
+    try {
+      v = await this.world.spawnHull(def, null, new THREE.Vector3(pad.at.x, pad.at.y, pad.at.z), pad.at.yaw);
+    } catch (err) {
+      return `the hull was not built: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    const programsBuilt = (r.info.programs?.length ?? 0) - before;
+    const hull = v.rig;
+    if (!hull || rigs.padOf(key) === null) {
+      this.world.disposeVehicle(v);
+      return 'the world changed while the hull was built';
+    }
+    // Where the rig parks it: P = Pad × J(ground) × T(offset).
+    const pos = hull.ground.pos.clone();
+    const quat = hull.ground.quat.clone();
+    onPad(pad.at, pos, quat);
+    vehicleFromJoint(pos, quat, hull.offset, pos);
+    const shown = await this.measureSwap(v, async () => {
+      rigs.hold(key, true);
+      v.group.visible = true;
+      v.autopilot = { drive: this.rigHullDrive, unpaused: true };
+      v.resumeFlight();
+      v.hold(null, pos, quat, 0);
+      hull.pose('ground', 0);
+      v.setGhost(false);
+      v.airborne = false;
+      this.world.vehicles.push(v);
+      return null;
+    });
+    // The hull joint as flown against the rig's own posed on the ground: the witness that the swap cannot be seen.
+    const flownAt = new THREE.Vector3();
+    const flownTurn = new THREE.Quaternion();
+    const stoodAt = new THREE.Vector3();
+    const stoodTurn = new THREE.Quaternion();
+    v.group.updateMatrixWorld(true);
+    hull.joints.getObjectByName(hull.hull)?.matrixWorld.decompose(flownAt, flownTurn, new THREE.Vector3());
+    const measured = rigs.jointOf(key, hull.hull, 'ground', 0, stoodAt, stoodTurn);
+    this.rigHullOut = {
+      v,
+      key,
+      swapError: measured ? Number(flownAt.distanceTo(stoodAt).toFixed(4)) : null,
+      swapDegrees: measured ? Number(THREE.MathUtils.radToDeg(flownTurn.angleTo(stoodTurn)).toFixed(3)) : null,
+      programsBuilt,
+      programsOnShow: shown.compiledOnSwap,
+    };
+    return this.rigHullReport();
+  }
+
+  /**
+   * Every way the console's shuttle hull could be hurt, tried on it: a blow, a bolt, a collision, being
+   * rammed by the nearest other ship, and a crash forced by flying it into the ground for one step
+   * with the ground handed back to the flight model, which is the one way that model reaches its crash.
+   * The private paths are reached through a cast, as nothing but this should ever call them from outside.
+   */
+  private hurtRigHull(): unknown {
+    const v = this.rigHullOut?.v;
+    if (!v || v.disposed) return "no shuttle hull out: rigHull({ spawn: 'nearest' }) first";
+    const inside = v as unknown as {
+      hurtHull(amount: number, other: Vehicle | null): void;
+      rammed(by: Vehicle, lost: number, steps: number): void;
+      flyShip(dt: number, drive: DriveInput | null, physics: Physics, groundAt?: (x: number, z: number) => number, waterAt?: (x: number, z: number) => number): boolean;
+    };
+    const was = () => ({ hp: v.hp, struck: v.struck, justHit: v.justHit, crashed: v.crashed });
+    const before = was();
+    v.damage(40, v.pos.clone(), 0, null);
+    const bolt = v.takeBolt({ damage: 40 } as unknown as Bolt, v.pos.clone(), new THREE.Vector3(0, 1, 0));
+    inside.hurtHull(40, null);
+    const other = this.world.vehicles.find((o) => o !== v && o.spec.ship && !o.disposed) ?? v;
+    inside.rammed(other, 40, this.physics.steps);
+    const at = v.pos.clone();
+    const turn = v.group.quaternion.clone();
+    v.release(null);
+    v.groundByPilot = false;
+    v.airborne = true;
+    v.cruise = 30;
+    inside.flyShip(1 / 60, null, this.physics, () => at.y + 100, () => -Infinity);
+    const crashed = v.crashed;
+    v.groundByPilot = true;
+    v.airborne = false;
+    v.hold(null, at, turn, 0);
+    const after = was();
+    return { before, after, bolt, crashed, unchanged: before.hp === after.hp && before.struck === after.struck && before.justHit === after.justHit && before.crashed === after.crashed && crashed === 0 };
+  }
+
+  /** The console's shuttle hull taken away, and its pad given back where the rig parks. */
+  private dropRigHull(): unknown {
+    const out = this.rigHullOut;
+    if (!out) return 'no shuttle hull out';
+    this.rigHullOut = null;
+    if (!out.v.disposed) this.world.disposeVehicle(out.v);
+    this.shuttleRigs?.release(out.key, true);
+    return { dropped: out.v.spec.id, pad: out.key, padHeld: this.shuttleRigs?.holdState(out.key) ?? null };
   }
 
   /** The world's fittings as the pack carries them, what was stood, and which pack both are for. */

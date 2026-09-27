@@ -14,7 +14,7 @@ import { NPC_NEVER, TIER_GRADE, accepts, pickLoadout, seeded } from '../../../sr
 import { anchorRecipes, anchorsOf, groupTypes, stationFaction, type SpacePackLike } from '../../../src/space/roster.ts';
 import { TAUNT_ANY_GAP, TAUNT_SHIP_GAP, TauntGate, fillTaunt, pickLine } from '../../../src/space/taunts.ts';
 import { aimPoint, formationPoint, offNose, slotCruise, steerToward, toLocal, toWorld, type Stick } from '../../../src/space/pilot.ts';
-import { ShipCombat, blameKey, blamed, stockFor, targetable, type CombatHull } from '../../../src/space/shipCombat.ts';
+import { ShipCombat, blameKey, blamed, joinsTheFight, stockFor, targetable, type CombatHull } from '../../../src/space/shipCombat.ts';
 import { NOBODY, PLAYER_KEY } from '../../../src/combat/kit.ts';
 import { CombatData, type CombatFile, type NpcTypeDef } from '../../../src/space/combatData.ts';
 import { componentIndex, resolveFit, type ComponentDef, type FitDef, type FitSlot } from '../../../src/vehicles/shipFit.ts';
@@ -514,6 +514,11 @@ const boltAt = (damage: number, dir = new THREE.Vector3(0, 0, -1)) => ({ damage,
   ok(targetable({ dead: false, vehicle: { ghosted: false } }), 'targetable: alive and not in a jump');
   ok(!targetable({ dead: false, vehicle: { ghosted: true } }), 'targetable: a ghosted hull (in a jump) is not');
   ok(!targetable({ dead: true, vehicle: { ghosted: false } }), 'targetable: a dead ship is not');
+  // Who has a fight at all: every adoption (the contacts' sync, a spawn, a jump's carry) asks this.
+  ok(joinsTheFight({ spec: { ship: true }, disposed: false }) && joinsTheFight({ spec: { ship: true }, disposed: false, invulnerable: false }), 'joinsTheFight: a ship in the world has a fight');
+  ok(!joinsTheFight({ spec: { ship: true }, disposed: false, invulnerable: true }), 'joinsTheFight: a hull nothing may hurt (a shuttle on its rig) has none');
+  ok(!joinsTheFight({ spec: { ship: true }, disposed: true }), 'joinsTheFight: nor has a disposed one');
+  ok(!joinsTheFight({ spec: {}, disposed: false }) && !joinsTheFight({ spec: { ship: false }, disposed: false }), 'joinsTheFight: nor anything that is not a ship');
   // Blame: the player in any form is PLAYER_KEY, and PLAYER_KEY finds the ship they fly now, else the player on foot.
   const onFoot = { key: PLAYER_KEY };
   const flown = { key: 41 };

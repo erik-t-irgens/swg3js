@@ -70,18 +70,27 @@ const rigs = new ShuttleRigs({
   scene,
   physics,
   base: '',
-  prepare: async () => {
+  // As the world's own preparation does it: every mesh made to cast, glass and all.
+  prepare: async (root) => {
     prepared++;
+    root.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) o.castShadow = true;
+    });
   },
   forget: (m) => forgotten.push(...m),
 });
-// The network stood in for: the rig and its pieces handed over as a loader would.
+// The network stood in for: the rig and its pieces handed over as a loader would. The door is glass.
 let loads = 0;
+const glassDoor = () => {
+  const g = box(0.2, 2, 1, 'door');
+  ((g.children[0] as THREE.Mesh).material as THREE.Material).userData.glass = true;
+  return g;
+};
 (rigs as unknown as { loader: { loadAsync(url: string): Promise<unknown> } }).loader = {
   loadAsync: async (url: string) => {
     loads++;
     if (url.endsWith('rig.glb')) return makeRig();
-    return { scene: url.endsWith('hull.glb') ? box(4, 2, 10, 'hull') : box(0.2, 2, 1, 'door'), animations: [] };
+    return { scene: url.endsWith('hull.glb') ? box(4, 2, 10, 'hull') : glassDoor(), animations: [] };
   },
 };
 
@@ -109,6 +118,7 @@ const worldY = (o: THREE.Object3D) => {
   const shuttle = scene.getObjectByName('shuttle:a')!;
   ok(!!shuttle && shuttle.position.equals(new THREE.Vector3(100, 20, -30)) && !shuttle.visible, 'on its pad and not shown until its round says so');
   ok(!!joint('hull') && joint('hull').parent?.parent?.name === 'root' && joint('door').parent?.parent?.name === 'arm', 'each piece hangs on the joint its client data names');
+  ok(joint('hull').castShadow && !joint('door').castShadow, 'its glass casts no shadow though the preparation had every piece cast, as a hull flown from the garage in its place does');
 }
 
 // ---------------------------------------------------------------- posed by its round
@@ -158,6 +168,106 @@ const worldY = (o: THREE.Object3D) => {
   rigs.update(DT, camera);
 }
 
+// ---------------------------------------------------------------- held off its pad
+//
+// A hull flown from the same rig stands in a held shuttle's place. Taking the rig away and giving it
+// back must never happen in front of anybody: softly, it goes only once its round has it away or
+// nobody could see it, and comes back only once it is away or parked where nobody sees it.
+
+{
+  const facing = (x: number, y: number, z: number, away: boolean) => {
+    const c = cameraAt(x, y, z);
+    if (away) c.rotation.y = Math.PI;
+    return c;
+  };
+  // 230 m off, looking straight at the pad or straight away from it.
+  const inSight = facing(100, 22, 200, false);
+  const lookingAway = facing(100, 22, 200, true);
+  const shuttle = () => scene.getObjectByName('shuttle:a')!;
+  const solidNow = () => rigs.describe().shuttles[0].solid;
+  const onPad = () => {
+    physics.stepOnce();
+    return !!physics.world.castRay(new RAPIER.Ray({ x: 100, y: 40, z: -30 }, { x: 0, y: -1, z: 0 }), 19, true);
+  };
+  state = { phase: 'waiting', until: 0, left: 30, glide: 1 };
+  rigs.update(DT, inSight);
+  ok(shuttle().visible && solidNow() && rigs.holdState('a') === null, 'parked and in sight, it is drawn and solid, and nothing holds it');
+
+  rigs.hold('a', true);
+  ok(!shuttle().visible && !solidNow() && rigs.holdState('a') === 'hidden', 'held at once, it is out of the picture and its collider out of the physics in that same call');
+  ok(!onPad(), 'so a hull put in its place in the same step meets nothing on the pad');
+  ok(rigs.describe().shuttles[0].held === 'hidden', 'and the console says it is held');
+  rigs.update(DT, inSight);
+  ok(!shuttle().visible && !solidNow(), 'held, it stays out of both whatever its round says');
+
+  rigs.release('a');
+  rigs.update(DT, inSight);
+  ok(!shuttle().visible && !solidNow() && rigs.holdState('a') === 'releasing', 'let go of softly while parked in plain sight, it does not pop back');
+  rigs.update(DT, lookingAway);
+  ok(shuttle().visible && solidNow() && rigs.holdState('a') === null, 'the first frame nobody is looking, it is back on its pad, drawn and solid, and the hold is over');
+
+  rigs.hold('a');
+  rigs.update(DT, inSight);
+  ok(shuttle().visible && rigs.holdState('a') === 'hiding', 'held softly in plain sight, it is not taken away in front of anybody');
+  rigs.update(DT, lookingAway);
+  ok(!shuttle().visible && !solidNow() && rigs.holdState('a') === 'hidden', 'and goes the first frame nobody is looking');
+
+  rigs.hold('a', true);
+  rigs.release('a', true);
+  rigs.update(DT, lookingAway);
+  ok(!shuttle().visible && rigs.holdState('a') === 'hidden', 'two holds and one let go of, even at once, keep it held');
+
+  rigs.release('a');
+  state = { phase: 'away', until: 100, left: 0, glide: 0 };
+  rigs.update(DT, inSight);
+  ok(!shuttle().visible && rigs.holdState('a') === null, 'let go of while its round has it away, the hold is over at once and there is simply nothing there');
+  // A tenth of the way down it is 450 m out behind the camera that looks at the pad, and in front of the one that looks away.
+  state = { phase: 'landing', until: 9, left: 0, glide: 0.1 };
+  rigs.hold('a');
+  rigs.update(DT, inSight);
+  ok(!shuttle().visible && rigs.holdState('a') === 'hidden', 'held softly while its round has it coming down out of sight, it goes at once');
+  rigs.release('a');
+  rigs.update(DT, lookingAway);
+  ok(!shuttle().visible && rigs.holdState('a') === 'releasing', 'and let go of while its landing is in plain sight, it waits: a shuttle in the air never pops into view');
+  rigs.update(DT, inSight);
+  ok(!shuttle().visible && rigs.holdState('a') === 'releasing', 'nor even out of sight, since it is only ever given back parked or away');
+
+  state = { phase: 'waiting', until: 0, left: 30, glide: 1 };
+  // About 50 m off the pad: inside releaseNear, and far enough out that the made-up rig's 25 m sphere (its
+  // parts carry no bounds) lies wholly behind a camera looking away, so the view alone would not see it.
+  const nearDistance = Math.hypot(0, 2, 50);
+  assert.ok(nearDistance < SHUTTLE_RIG_TUNE.releaseNear && nearDistance > 25 + 1, 'the near camera stands inside releaseNear and clear of the sphere');
+  rigs.update(DT, cameraAt(100, 22, 20));
+  rigs.update(DT, facing(100, 22, 20, true));
+  ok(rigs.holdState('a') === 'releasing', 'nearer than releaseNear it counts as seen whichever way the camera faces');
+  // Looking straight at it past seenFar, with a far plane that reaches it, so only seenFar can call it unseen.
+  const farView = facing(100, 22, 3000, false);
+  farView.far = 1e5;
+  farView.updateProjectionMatrix();
+  assert.ok(3030 > SHUTTLE_RIG_TUNE.seenFar && 3030 < SHUTTLE_RIG_TUNE.reach, 'the far camera stands past seenFar and inside the reach the shuttle is drawn within');
+  rigs.update(DT, farView);
+  ok(shuttle().visible && rigs.holdState('a') === null, 'and past seenFar it is a speck nobody sees, so it comes back');
+
+  rigs.update(DT, inSight);
+  rigs.hold('a', true);
+  rigs.release('a', true);
+  ok(shuttle().visible && solidNow() && rigs.holdState('a') === null, 'let go of at once, it is back where its round has it in that same call, drawn and solid');
+  ok(onPad(), 'and on its pad in the physics');
+
+  ok(rigs.nearest({ x: 95, y: 20, z: -20 }) === 'a' && rigs.nearest({ x: 1e6, y: 0, z: 0 }) === 'a', 'the nearest stood shuttle is found from anywhere');
+  // A second one stood after it on a pad of its own: whichever pad is nearer wins, the later stood as well as the earlier.
+  ok(await rigs.stand('n', rig, '', { x: -400, y: 5, z: 600, yaw: 1 }, false, clock), 'a second shuttle stands on another pad');
+  ok(rigs.nearest({ x: -390, y: 5, z: 590 }) === 'n' && rigs.nearest({ x: 95, y: 20, z: -20 }) === 'a', 'the nearest is the one whose pad is nearer, whichever was stood first');
+  ok(rigs.nearest({ x: -1e6, y: 0, z: 1e6 }) === 'n' && rigs.nearest({ x: 1e6, y: 0, z: -1e6 }) === 'a', 'and so it is from far off either way');
+  const pad = rigs.padOf('a');
+  ok(!!pad && pad.at.x === 100 && pad.at.y === 20 && pad.at.z === -30 && pad.at.yaw === 0 && pad.rig === rig && pad.mood === '' && !pad.inside && pad.body.name === 'root' && pad.clock === clock, 'its pad says where it stands, what it is drawn with and whose clock it keeps');
+  ok(rigs.padOf('nobody') === null, 'and a key nothing stands at has no pad');
+  const at = new THREE.Vector3();
+  const turn = new THREE.Quaternion();
+  ok(rigs.jointOf('a', 'root', 'land', 5, at, turn) && Math.abs(at.y - 70) < 1e-3 && Math.abs(at.z - 220) < 1e-3, `a joint can be read posed at any moment of a clip, held or not (${at.toArray().map((n) => n.toFixed(1)).join(', ')})`);
+  rigs.update(DT, camera);
+}
+
 // ---------------------------------------------------------------- a rig with no lift-off
 
 {
@@ -181,6 +291,26 @@ const worldY = (o: THREE.Object3D) => {
   ok(rigs.describe().stood === 0, 'nothing is left stood');
   const again = await rigs.stand('d', rig, '', pad, false, clock);
   ok(again && loads > 3, 'and the next world loads its rig again rather than using what was disposed');
+}
+
+{
+  // A hull that crosses into the next world still stands in its rig's place there: the holds outlive the
+  // world going, and a key held before it stands starts out of the picture.
+  rigs.hold('d');
+  rigs.hold('e', true);
+  rigs.clear();
+  ok(rigs.holdState('d') === 'hiding' && rigs.holdState('e') === 'hidden', 'holds outlive the world going, soft or at once, stood or not');
+  ok(await rigs.stand('d', rig, '', pad, false, clock), 'the next world stands its shuttle');
+  ok(rigs.holdState('d') === 'hidden', 'and one held before it stood starts out of the picture');
+  state = { phase: 'waiting', until: 0, left: 30, glide: 1 };
+  rigs.update(DT, camera);
+  ok(!scene.getObjectByName('shuttle:d')!.visible && !rigs.describe().shuttles[0].solid, 'neither drawn nor solid while it is held, parked in plain sight');
+  rigs.release('d', true);
+  rigs.release('e', true);
+  ok(scene.getObjectByName('shuttle:d')!.visible && rigs.describe().shuttles[0].solid && rigs.holdState('e') === null, 'and given back at once, it stands; a key never stood is simply let go of');
+  rigs.hold('d');
+  rigs.clearHolds();
+  ok(rigs.holdState('d') === null, 'and the holds can all be let go of at once');
 }
 
 // ---------------------------------------------------------------- what it sounds and shows

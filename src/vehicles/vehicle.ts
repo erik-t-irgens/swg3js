@@ -346,6 +346,20 @@ export class Vehicle {
    * for a hull another player flies), which is right, since none of those stands in a flow.
    */
   lavaImmune = false;
+  /**
+   * Nothing hurts this hull: no blow, no bolt, no collision, no crash. A shuttle drawn on its travel rig,
+   * which carries passengers and is nobody's to shoot out from under them; it never joins the fight
+   * either (`joinsTheFight` in shipCombat.ts).
+   */
+  invulnerable = false;
+  /**
+   * Whatever flies this hull keeps its own line over the ground, so flyShip leaves the ground to it: no
+   * easing of the nose near the ground or the ceiling, no crash, no floor under a sinking hull. A shuttle's
+   * own clips dip under the raw ground where the game's did, and its pilot plans its height itself.
+   */
+  groundByPilot = false;
+  /** The travel rig this hull is built on (a shuttle's), whose clips pose its struts and its door; null for anything else. */
+  rig: import('./rigHull').RigHull | null = null;
   /** The speed lost in a hard hit this step (m/s), read once by the game for the sparks and the damage shown; 0 otherwise. */
   justHit = 0;
   /** In flight, the velocity the last step was told to fly at; what the step took off it is a hit. */
@@ -547,6 +561,8 @@ export class Vehicle {
   private holdFrame: THREE.Matrix4 | null = null;
   private readonly holdPos = new THREE.Vector3();
   private readonly holdQuat = new THREE.Quaternion();
+  /** The speed a held hull is said to move at, for whatever reads `speed` (the camera, the sounds): 0 for a hull held still. */
+  private holdSpeed = 0;
   /** Whether something holds the hull at a pose of its own (a landing, and later a dock or a carrier). */
   get holding(): boolean {
     return this.holdOn;
@@ -556,11 +572,14 @@ export class Vehicle {
    * Fix the hull at a pose, in `frame` (another object's live matrix, read every step) or in the world when it is
    * null. Call it again to move it: the pose is written before the physics step, so nothing lags a frame. The hull
    * keeps its colliders, so a body may still walk on it; `setGhost` is the separate question of what may hit it.
+   * `speed` is what `speed` reads while it is held there: a hull carried along a path by its holder is moving, and
+   * one held still is not.
    */
-  hold(frame: THREE.Matrix4 | null, pos: THREE.Vector3, quat: THREE.Quaternion): void {
+  hold(frame: THREE.Matrix4 | null, pos: THREE.Vector3, quat: THREE.Quaternion, speed = 0): void {
     this.holdFrame = frame;
     this.holdPos.copy(pos);
     this.holdQuat.copy(quat);
+    this.holdSpeed = speed;
     if (!this.holdOn) {
       this.holdOn = true;
       if (this.body.isValid()) this.body.setGravityScale(0, true);
@@ -573,6 +592,7 @@ export class Vehicle {
     if (!this.holdOn) return;
     this.holdOn = false;
     this.holdFrame = null;
+    this.holdSpeed = 0;
     if (!this.body.isValid()) return;
     this.body.setGravityScale(1, true);
     this.body.setLinvel(velocity ? { x: velocity.x, y: velocity.y, z: velocity.z } : STILL, true);
@@ -593,7 +613,7 @@ export class Vehicle {
     this.pos.copy(holdWorld);
     this.group.position.copy(holdWorld);
     this.group.quaternion.copy(holdTurn);
-    this.speed = 0;
+    this.speed = this.holdSpeed;
     this.commandedValid = false;
   }
 
@@ -686,8 +706,12 @@ export class Vehicle {
   }
   /** A ship's fight (shields, armour, parts, chassis), once the world's ship contacts adopt it; null for anything else. */
   combat: import('../space/shipCombat').ShipCombat | null = null;
-  /** What flies it when nobody does (an NPC ship's brain): its drive is read in place of a pilot's. Null for any other vehicle. */
-  autopilot: { readonly drive: DriveInput } | null = null;
+  /**
+   * What flies it when nobody does (an NPC ship's brain, a shuttle's run): its drive is read in place of a pilot's.
+   * `unpaused` says it flies on while play is paused (a shuttle carrying somebody keeps its timetable with a panel
+   * open). Null for any other vehicle.
+   */
+  autopilot: { readonly drive: DriveInput; readonly unpaused?: boolean } | null = null;
   /** Set first thing in `dispose`: whoever holds the vehicle drops it. */
   disposed = false;
   /** Materials made for this vehicle alone (its glow sprite's, each trail's, each clear pane's): World.disposeVehicle forgets and disposes them. */
@@ -845,7 +869,7 @@ export class Vehicle {
     this.commandedValid = false;
     // Down hard: the hull takes it as a crash, as flying into the ground does.
     if (impact > LANDING.hard) {
-      this.crashed = Math.max(this.crashed, impact);
+      this.crashed = this.invulnerable ? 0 : Math.max(this.crashed, impact);
       this.justHit = Math.max(this.justHit, impact);
       this.hurtHull((impact - LANDING.hard) * HIT_DAMAGE);
       this.landNote = 'a hard landing';
@@ -1198,7 +1222,7 @@ export class Vehicle {
    * it has a fight (`combat`), and `source` is remembered there; a vehicle is too heavy for it to shove.
    */
   damage(amount: number, from?: THREE.Vector3, _push?: number, source?: import('../combat/kit').Living | null): void {
-    if (this.destroyed) return;
+    if (this.invulnerable || this.destroyed) return;
     this.struck += amount;
     if (this.combat) this.combat.take(amount, from, source ?? null);
     else this.hp = Math.max(0, this.hp - amount);
@@ -1206,6 +1230,8 @@ export class Vehicle {
 
   /** A bolt struck the hull at `point` (the Hittable contract): a ship with a fight takes it whole ('shown' when its layer's hit effect played, 'taken' when the bolt's own should); false lets the bolt hurt it the plain way. */
   takeBolt(bolt: import('../combat/bolts').Bolt, point: THREE.Vector3, normal: THREE.Vector3): false | 'taken' | 'shown' {
+    // A hull nothing hurts stops the bolt, which bursts on it with its own effect, and takes nothing.
+    if (this.invulnerable) return 'taken';
     if (!this.combat) return false;
     if (this.destroyed) return 'taken';
     this.struck += bolt.damage;
@@ -1214,7 +1240,7 @@ export class Vehicle {
 
   /** A collision's damage: onto the armour of a ship with a fight (with `other`, the ship it met, if it met one: only that is capped), else straight off the hull. */
   private hurtHull(amount: number, other: Vehicle | null = null): void {
-    if (amount <= 0) return;
+    if (this.invulnerable || amount <= 0) return;
     if (this.combat) this.combat.collide(amount, other ? other.body.handle : null);
     else this.hp = Math.max(0, this.hp - amount);
   }
@@ -1250,7 +1276,7 @@ export class Vehicle {
    * step. A ghosted, disposed or destroyed hull takes nothing.
    */
   private rammed(by: Vehicle, lost: number, steps: number): void {
-    if (lost <= SHIP_HIT_LOSS || this.ghost || this.disposed || this.destroyed) return;
+    if (this.invulnerable || lost <= SHIP_HIT_LOSS || this.ghost || this.disposed || this.destroyed) return;
     this.commandedValid = false;
     this.hitCooldown = SHIP_HIT_FREE;
     if (this.airborne) this.cruise = Math.min(this.cruise, Math.max(4, this.cruise * 0.3));
@@ -2075,37 +2101,41 @@ export class Vehicle {
     // A light hand near the ground and the ceiling: within a few seconds of the ground on the
     // present course the nose is eased toward the horizon, gently and only while the stick is
     // slack, so a pilot who keeps pushing can fly into it; the ceiling is eased the same way.
+    // A hull whose pilot keeps its own line over the ground (`groundByPilot`) is left to it.
     const minH = s.fly!.floor + 2;
-    let toGround = fwd.y < -0.02 ? hw / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
-    // The ground ahead as well as below: a slope or a cliff on the course, within a couple of
-    // seconds' flying, counts as ground coming up, so the nose is eased over it.
-    if (!this.space && groundAt && this.cruise > 4) {
-      const ahead = Math.min(2.5 * this.cruise, 200);
-      const gAhead = groundAt(this.pos.x + fwd.x * ahead, this.pos.z + fwd.z * ahead);
-      const belly = this.pos.y + s.bounds.min[1] - this.wingBelow + fwd.y * ahead;
-      if (gAhead + minH > belly) toGround = Math.min(toGround, THREE.MathUtils.clamp(((belly - gAhead) / minH) * 2.5, 0, 2.5));
-    }
-    const tooLow = !this.space && (hw < minH || toGround < 2.5);
-    const tooHigh = !this.space && h > s.fly!.ceiling;
-    const slack = Math.abs(stick.y) < 0.15;
-    if (((tooLow && fwd.y < 0.1) || (tooHigh && fwd.y > 0)) && slack) {
-      const want = tooLow ? 0.1 : -0.05;
-      axis.crossVectors(fwd, WORLD_UP);
-      if (axis.lengthSq() > 1e-6) {
-        const pull = tooLow ? THREE.MathUtils.clamp(1 - toGround / 2.5, 0.25, 1) : 0.5;
-        const angle = THREE.MathUtils.clamp((want - fwd.y) * 1.5 * dt, -rate * 0.5 * dt, rate * 0.5 * dt) * pull;
-        qTmp.setFromAxisAngle(axis.normalize(), angle);
-        a.premultiply(qTmp);
-        fwd.set(0, 0, 1).applyQuaternion(a);
+    if (!this.groundByPilot) {
+      let toGround = fwd.y < -0.02 ? hw / (-fwd.y * Math.max(this.cruise, 1)) : Infinity;
+      // The ground ahead as well as below: a slope or a cliff on the course, within a couple of
+      // seconds' flying, counts as ground coming up, so the nose is eased over it.
+      if (!this.space && groundAt && this.cruise > 4) {
+        const ahead = Math.min(2.5 * this.cruise, 200);
+        const gAhead = groundAt(this.pos.x + fwd.x * ahead, this.pos.z + fwd.z * ahead);
+        const belly = this.pos.y + s.bounds.min[1] - this.wingBelow + fwd.y * ahead;
+        if (gAhead + minH > belly) toGround = Math.min(toGround, THREE.MathUtils.clamp(((belly - gAhead) / minH) * 2.5, 0, 2.5));
+      }
+      const tooLow = !this.space && (hw < minH || toGround < 2.5);
+      const tooHigh = !this.space && h > s.fly!.ceiling;
+      const slack = Math.abs(stick.y) < 0.15;
+      if (((tooLow && fwd.y < 0.1) || (tooHigh && fwd.y > 0)) && slack) {
+        const want = tooLow ? 0.1 : -0.05;
+        axis.crossVectors(fwd, WORLD_UP);
+        if (axis.lengthSq() > 1e-6) {
+          const pull = tooLow ? THREE.MathUtils.clamp(1 - toGround / 2.5, 0.25, 1) : 0.5;
+          const angle = THREE.MathUtils.clamp((want - fwd.y) * 1.5 * dt, -rate * 0.5 * dt, rate * 0.5 * dt) * pull;
+          qTmp.setFromAxisAngle(axis.normalize(), angle);
+          a.premultiply(qTmp);
+          fwd.set(0, 0, 1).applyQuaternion(a);
+        }
       }
     }
     // Into the ground: a crash. The ship stops dead where it hit and drops onto its gear, and
     // the rider is thrown about by the speed (the game reports it as damage). Flown into a
     // slope sideways (the hull ignores the ground's own collider) it is inside the ground with
-    // the nose level: that is a crash too, and the hull is lifted back onto the surface.
+    // the nose level: that is a crash too, and the hull is lifted back onto the surface. Not for
+    // a hull whose pilot has the ground: a shuttle's own clips pass under the raw ground in places.
     const inGround = !this.space && h < 0;
-    if (inGround || (!this.space && h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8)) {
-      this.crashed = Math.max(this.cruise, inGround ? 8 : 0);
+    if (!this.groundByPilot && (inGround || (!this.space && h < s.fly!.floor * 0.5 && fwd.y < -0.05 && this.cruise > 8))) {
+      this.crashed = this.invulnerable ? 0 : Math.max(this.cruise, inGround ? 8 : 0);
       this.cruise = 0;
       this.airborne = false;
       body.setGravityScale(1, true);
@@ -2133,7 +2163,7 @@ export class Vehicle {
     // out, and under the older springs rule, it sinks as it always did.
     const vtol = SHIP_GROUND.rule === 'landing' && this.powered ? (drive?.down ? -1.5 : drive?.up ? 1.5 : 0) : -1.5;
     if (this.cruise < 8 && !this.space) tmp.y += this.cruise < 2 ? vtol : THREE.MathUtils.clamp((minH - hw) * 1.5, -2, 4);
-    if (!this.space && h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
+    if (!this.groundByPilot && !this.space && h < s.fly!.floor + 0.5 && tmp.y < 0) tmp.y = 0;
     // Never ask the engine for more than it will move a body (a boost in space asks 440): the cut would read as a hit.
     if (tmp.lengthSq() > BODY_SPEED_CAP * BODY_SPEED_CAP) tmp.setLength(BODY_SPEED_CAP);
     if (this.hitCooldown > 0) {
@@ -2169,6 +2199,8 @@ export class Vehicle {
     this.combat = null;
     this.interior?.dispose();
     this.interior = null;
+    // A shuttle's rig lets go of its mixer; its pieces' geometry and materials are the garage's and stay.
+    this.rig?.dispose();
     // A parked glow's trail (a refit left it spare) is disposed with the live ones.
     for (const g of this.glows) {
       const t = g.userData.trail as import('./trail').EngineTrail | undefined;

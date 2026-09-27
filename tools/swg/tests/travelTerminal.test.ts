@@ -142,6 +142,26 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
 }
 
 {
+  // A stood shuttle asks every frame, so it hands in a record of its own to be written rather than
+  // taking a new one a frame; the answer must be the very same whichever way it is asked.
+  const kept = { phase: 'waiting' as const, until: 99, left: 99, glide: 0.5 } as ReturnType<typeof shuttleAt>;
+  const times = { land: 26.6, lift: 19.97 };
+  let same = true;
+  let reused = true;
+  for (let t = 0; t < TRAVEL_TUNE.every * 2; t += 0.75) {
+    const got = shuttleAt('a starport', t, TRAVEL_TUNE, times, kept);
+    if (got !== kept) reused = false;
+    try {
+      assert.deepEqual({ ...got }, shuttleAt('a starport', t, TRAVEL_TUNE, times));
+    } catch {
+      same = false;
+    }
+  }
+  ok(reused, 'a record handed in is the record handed back, written in place');
+  ok(same, 'and it says exactly what a fresh answer says, at every moment of two rounds');
+}
+
+{
   // Walk a whole round a second at a time: it must land, wait, leave and go away, in that order,
   // and it must be boardable for exactly as long as it waits.
   const seen: string[] = [];

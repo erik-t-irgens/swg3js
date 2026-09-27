@@ -33,6 +33,16 @@ export function targetable(c: { readonly dead: boolean; readonly vehicle: { read
 }
 
 /**
+ * Whether a vehicle has a fight at all: a ship, still in the world, and not one nothing may hurt (a
+ * shuttle on its travel rig, which carries passengers and is nobody's target). A vehicle this says no
+ * to is never adopted as a contact, so no ship picks it, follows it or fires at it, Tab never reaches
+ * it and it has no combat. Every adoption asks this.
+ */
+export function joinsTheFight(v: { readonly spec: { readonly ship?: boolean }; readonly disposed: boolean; readonly invulnerable?: boolean }): boolean {
+  return !!v.spec.ship && !v.disposed && !v.invulnerable;
+}
+
+/**
  * The key a blow's source is remembered by: the player in any form (on foot, PLAYER_KEY, or the contact
  * of the ship they fly now) is PLAYER_KEY, so retaliation and the death taunt find the player however
  * they struck; anyone else by their own key; nobody, NOBODY.

@@ -23,12 +23,18 @@
 // window is open in the clip playing now, so whoever looks sees the same flames whenever they looked.
 // The effects are the session's own `ParticleEffects`, handed in (`ShuttleRigDeps.fx`) rather than made
 // here, which is also what lets a node test stand one in.
+//
+// A shuttle can also be held off its pad (`hold`), for a hull flown from the same rig to stand in its
+// place (`src/vehicles/rigHull.ts`). A hold is counted and outlives `clear`, and neither taking a rig
+// away nor giving it back ever happens in front of anybody: softly, it goes the first frame it is away
+// or out of sight, and comes back the first frame it is away or parked out of sight.
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
 import type { EffectHandle } from './particles.ts';
+import { poseRigAction, type Pad } from './rigPath.ts';
 import { surfaces } from './surfaces.ts';
 import { markFires, rigPose, shuttleShake, windowOpen, type RigClips, type RigPose, type ShuttleState, type ShuttleTimes, type TravelRig } from './travelTerminal.ts';
 
@@ -65,6 +71,13 @@ export const SHUTTLE_RIG_TUNE = {
   spaceEvery: 0.25,
   /** Metres its hull must have moved since the last such ask before it is asked again; a parked hull asks nothing. */
   spaceMove: 1,
+  /**
+   * Metres past which a held shuttle counts as out of sight whatever the view: a 43 m hull is about a
+   * degree across there, and a hold waiting for it to be unseen would otherwise wait on a speck.
+   */
+  seenFar: 2500,
+  /** Metres within which a held shuttle counts as seen whatever the view: about one and a half transports. */
+  releaseNear: 60,
 };
 
 /** The session's particle effects, as much of them as the shuttles use (`ParticleEffects`). */
@@ -183,6 +196,12 @@ interface Stood {
   clock: ShuttleClock;
   inside: boolean;
   shown: boolean;
+  /** The pad it stands on, the rig it is drawn with and the branch of its clips, for whatever flies a hull in its place. */
+  at: Pad;
+  rig: TravelRig;
+  mood: string;
+  /** Metres: half the diagonal of its biggest piece, the sphere a hold asks the view about. */
+  radius: number;
   /** The hull as it stands parked, in the world, once worked out; and its collider while parked. */
   hull: { vertices: Float32Array; indices: Uint32Array } | null;
   collider: R.Collider | null;
@@ -225,11 +244,24 @@ const tmpPose: RigPose = { role: 'sky', seconds: 0, shown: false };
 const tmpV = new THREE.Vector3();
 const tmpCam = new THREE.Vector3();
 const tmpJoint = new THREE.Vector3();
+/** Scratch for whether a held shuttle would be seen: the view's frustum (made at most once an update) and the sphere tested against it. */
+const viewMatrix = new THREE.Matrix4();
+const viewFrustum = new THREE.Frustum();
+const seenSphere = new THREE.Sphere();
+
+/** Where a hold on a shuttle stands: on its way out of sight, out of sight, or on its way back. */
+export type HoldState = 'hiding' | 'hidden' | 'releasing';
 
 export class ShuttleRigs {
   private readonly deps: ShuttleRigDeps;
   private readonly assets = new Map<string, Promise<RigAsset | null>>();
   private readonly stood: Stood[] = [];
+  /** The same, by key. */
+  private readonly byKey = new Map<string, Stood>();
+  /** The holds on shuttles by key, counted, and kept through `clear` (a key need not be stood to be held). */
+  private readonly holds = new Map<string, { count: number; state: HoldState }>();
+  /** Whether `viewFrustum` is this update's camera's, so it is worked out once an update and only when a hold asks. */
+  private frustumReady = false;
   private readonly loader = surfaces.withPlugin(new GLTFLoader());
   /** Why the last rig that would not stand would not, for the console. */
   note = '';
@@ -243,7 +275,7 @@ export class ShuttleRigs {
   }
 
   /** How many are stood, and each one's pose and what it is doing, for the console. */
-  describe(): { stood: number; note: string; shuttles: { key: string; role: string; shown: boolean; solid: boolean; inside: boolean; room: string | null; lit: number; dying: number; idling: boolean; marks: number }[] } {
+  describe(): { stood: number; note: string; shuttles: { key: string; role: string; shown: boolean; held: HoldState | null; solid: boolean; inside: boolean; room: string | null; lit: number; dying: number; idling: boolean; marks: number }[] } {
     return {
       stood: this.stood.length,
       note: this.note,
@@ -251,6 +283,8 @@ export class ShuttleRigs {
         key: s.key,
         role: s.role,
         shown: s.shown,
+        // Whether something holds it off its pad, and how far that has got.
+        held: this.holdState(s.key),
         solid: !!s.collider,
         inside: s.inside,
         // Which room its sounds are in just now, for a shuttle indoors: "building/cell", or outside.
@@ -341,9 +375,14 @@ export class ShuttleRigs {
       return false;
     }
     // Culled piece by piece, since a piece is a still model whose own box is right; prepareActor
-    // turns that off for the skinned actors it was written for.
+    // turns that off for the skinned actors it was written for. And glass casts no shadow, which
+    // prepareActor also has every mesh do: the garage leaves a hull's glass casting none, and a hull
+    // flown from this rig in its place must throw the same shadow it does.
     root.traverse((o) => {
-      if ((o as THREE.Mesh).isMesh) o.frustumCulled = true;
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      m.frustumCulled = true;
+      if (castsNoShadow(m)) m.castShadow = false;
     });
     const mixer = new THREE.AnimationMixer(joints);
     const actions: Stood['actions'] = {};
@@ -377,7 +416,7 @@ export class ShuttleRigs {
     // so asked for only when its mark came round the first landing anybody watched would be silent.
     const sounds = soundsOf(rig);
     if (sounds.length) this.deps.audio?.prepare(sounds);
-    this.stood.push({
+    const s: Stood = {
       key,
       root,
       mixer,
@@ -386,6 +425,10 @@ export class ShuttleRigs {
       clock,
       inside,
       shown: false,
+      at: { x: at.x, y: at.y, z: at.z, yaw: at.yaw },
+      rig,
+      mood,
+      radius: radiusOf(rig),
       hull: null,
       collider: null,
       role: 'sky',
@@ -403,7 +446,12 @@ export class ShuttleRigs {
       space: { building: OUTSIDE.building, cell: OUTSIDE.cell },
       spaceFrom: new THREE.Vector3(Infinity, Infinity, Infinity),
       spaceClock: 0,
-    });
+    };
+    this.stood.push(s);
+    this.byKey.set(key, s);
+    // Held before it stood (a hull crossed into this world in its place): it starts out of the picture.
+    const h = this.holds.get(key);
+    if (h?.state === 'hiding') h.state = 'hidden';
     return true;
   }
 
@@ -465,17 +513,172 @@ export class ShuttleRigs {
     const reach = SHUTTLE_RIG_TUNE.reach;
     camera.updateMatrixWorld();
     tmpCam.setFromMatrixPosition(camera.matrixWorld);
+    this.frustumReady = false;
     for (const s of this.stood) {
       const pose = rigPose(s.clock.state(), s.clock.times, tmpPose);
       const near = s.root.position.distanceToSquared(tmpCam) < reach * reach;
+      const want = pose.shown && near;
+      const held = this.holds.size > 0 && this.heldNow(s, pose, want, camera);
       s.role = pose.role;
-      s.shown = pose.shown && near;
+      s.shown = want && !held;
       s.root.visible = s.shown;
       if (s.shown) this.pose(s, pose);
       this.solid(s, s.shown && pose.role === 'ground' && SHUTTLE_RIG_TUNE.solid);
       this.effects(s, pose, dt);
     }
     this.deps.fx?.update(dt, camera, fog);
+  }
+
+  // ---------------------------------------------------------------- holds
+
+  /**
+   * Hold a shuttle off its pad, for a hull flown from the same rig to stand in its place. Holds are
+   * counted (two holders and one letting go keep it held) and outlive `clear`, since a world going and
+   * a world coming back is exactly what a hull crossing between them does. Softly, the rig goes the
+   * first frame its round has it away or nobody could see it; `now` takes it out of the picture and its
+   * collider out of the physics in this same call, for a hull put in its place in the same step, since
+   * the rigs are updated after the physics has stepped and two hulls on one pad for one step collide.
+   * A key not stood yet is held all the same, and starts out of the picture when it stands.
+   */
+  hold(key: string, now = false): void {
+    let h = this.holds.get(key);
+    if (!h) {
+      h = { count: 0, state: 'hiding' };
+      this.holds.set(key, h);
+    }
+    h.count++;
+    if (h.state === 'releasing') h.state = 'hidden';
+    if (!now) return;
+    h.state = 'hidden';
+    const s = this.byKey.get(key);
+    if (!s) return;
+    s.shown = false;
+    s.root.visible = false;
+    this.solid(s, false);
+  }
+
+  /**
+   * Let go of one hold on a shuttle. The last one let go of softly gives the rig back only the first
+   * frame its round has it away or parked where nobody sees it, so it never pops into view; `now`
+   * puts it back at once where its round has it, drawn and solid, for a hull taken away in the same
+   * step from exactly where the rig parks.
+   */
+  release(key: string, now = false): void {
+    const h = this.holds.get(key);
+    if (!h) return;
+    h.count = Math.max(0, h.count - 1);
+    if (h.count > 0) return;
+    // Never taken out of the picture yet: nothing to give back.
+    if (now || h.state === 'hiding') {
+      this.holds.delete(key);
+      const s = this.byKey.get(key);
+      if (s && now) this.placeNow(s);
+      return;
+    }
+    h.state = 'releasing';
+  }
+
+  /** Where the hold on a shuttle stands, or null when nothing holds it. */
+  holdState(key: string): HoldState | null {
+    return this.holds.get(key)?.state ?? null;
+  }
+
+  /** Every hold let go of at once, for a session going back to the select screen: the next update draws each rig where its round has it. */
+  clearHolds(): void {
+    this.holds.clear();
+  }
+
+  /** The key of the stood shuttle whose pad is nearest a point, or null with none stood. */
+  nearest(at: { x: number; y: number; z: number }): string | null {
+    let best: Stood | null = null;
+    let bestD = Infinity;
+    for (const s of this.stood) {
+      const d = (s.at.x - at.x) ** 2 + (s.at.y - at.y) ** 2 + (s.at.z - at.z) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+    return best ? best.key : null;
+  }
+
+  /**
+   * A stood shuttle's pad and what it is drawn with, for whatever flies a hull in its place: where it
+   * stands, whether indoors, its clock, its rig and branch, and the joint its body is measured from.
+   */
+  padOf(key: string): { at: Pad; inside: boolean; clock: ShuttleClock; rig: TravelRig; mood: string; body: THREE.Object3D } | null {
+    const s = this.byKey.get(key);
+    return s ? { at: s.at, inside: s.inside, clock: s.clock, rig: s.rig, mood: s.mood, body: s.body } : null;
+  }
+
+  /**
+   * One of a stood shuttle's joints in the world, with the rig posed at a role's clip at `seconds`: the
+   * console's witness that a hull flown in its place stands where the rig does. It poses the rig,
+   * shown or not; the next update poses a shown one where its round has it again. False with no such
+   * shuttle or joint.
+   */
+  jointOf(key: string, name: string, role: RigPose['role'], seconds: number, outPos: THREE.Vector3, outQuat: THREE.Quaternion): boolean {
+    const s = this.byKey.get(key);
+    const joint = s?.root.getObjectByName(name);
+    if (!s || !joint) return false;
+    poseRigAction(s, role, seconds);
+    joint.updateWorldMatrix(true, false);
+    joint.matrixWorld.decompose(outPos, outQuat, tmpV);
+    return true;
+  }
+
+  /**
+   * Whether a held shuttle stays out of the picture this frame, moving its hold on as it goes: one
+   * held softly goes the first frame it is away or out of sight ('hiding' to 'hidden'), and one let go
+   * of softly comes back the first frame it is away or parked out of sight ('releasing', then gone).
+   */
+  private heldNow(s: Stood, pose: RigPose, want: boolean, camera: THREE.Camera): boolean {
+    const h = this.holds.get(s.key);
+    if (!h) return false;
+    if (h.state === 'hiding') {
+      if (want && this.seen(s, pose, camera)) return false;
+      h.state = 'hidden';
+      return true;
+    }
+    if (h.state === 'releasing') {
+      if (want && !(pose.role === 'ground' && !this.seen(s, pose, camera))) return true;
+      this.holds.delete(s.key);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Whether somebody would see a shuttle if it were drawn: posed where its round has it (a paused
+   * action and a mixer update, which is cheap), its body joint tested as a sphere the size of its
+   * biggest piece against the view. Nearer than `releaseNear` it is seen whichever way the camera
+   * faces, and past `seenFar` it is a speck that nobody sees. Nothing is allocated.
+   */
+  private seen(s: Stood, pose: RigPose, camera: THREE.Camera): boolean {
+    this.pose(s, pose);
+    s.body.updateWorldMatrix(true, false);
+    tmpJoint.setFromMatrixPosition(s.body.matrixWorld);
+    const d = tmpJoint.distanceTo(tmpCam);
+    if (d < SHUTTLE_RIG_TUNE.releaseNear) return true;
+    if (d >= SHUTTLE_RIG_TUNE.seenFar) return false;
+    if (!this.frustumReady) {
+      viewFrustum.setFromProjectionMatrix(viewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      this.frustumReady = true;
+    }
+    seenSphere.center.copy(tmpJoint);
+    seenSphere.radius = s.radius;
+    return viewFrustum.intersectsSphere(seenSphere);
+  }
+
+  /** One shuttle put where its round has it, drawn and solid as the last update would have left it, between updates. */
+  private placeNow(s: Stood): void {
+    const reach = SHUTTLE_RIG_TUNE.reach;
+    const pose = rigPose(s.clock.state(), s.clock.times, tmpPose);
+    s.role = pose.role;
+    s.shown = pose.shown && s.root.position.distanceToSquared(tmpCam) < reach * reach;
+    s.root.visible = s.shown;
+    if (s.shown) this.pose(s, pose);
+    this.solid(s, s.shown && pose.role === 'ground' && SHUTTLE_RIG_TUNE.solid);
   }
 
   /**
@@ -647,24 +850,9 @@ export class ShuttleRigs {
     s.loop = 0;
   }
 
+  /** A shuttle's joints where its clip for the role has them (`poseRigAction`, which a hull flown from the rig poses its limbs with too). */
   private pose(s: Stood, pose: RigPose): void {
-    // Parked on the ground with no clip of its own for it: the landing's last instant is the same pose.
-    let action = s.actions[pose.role];
-    let seconds = pose.seconds;
-    if (!action && pose.role === 'ground') {
-      action = s.actions.land!;
-      seconds = action.getClip().duration;
-    }
-    if (!action) return;
-    if (s.current !== action) {
-      s.current?.stop();
-      action.reset();
-      action.play();
-      s.current = action;
-    }
-    action.paused = true;
-    action.time = Math.min(seconds, action.getClip().duration);
-    s.mixer.update(0);
+    poseRigAction(s, pose.role, pose.seconds);
   }
 
   /** A parked shuttle's collider on or off: built the first time it is parked, from the hull as it stands. */
@@ -690,7 +878,8 @@ export class ShuttleRigs {
   /**
    * Take every shuttle down and let go of the rigs: the world they stood in is going. Every effect a
    * shuttle placed goes with it, lit or still dying away, and every sound it started stops, the idle
-   * loop first; the effects themselves are the session's and stay, prepared, for the next world.
+   * loop first; the effects themselves are the session's and stay, prepared, for the next world. The
+   * holds stay too: a hull that crosses into the next world still stands in its rig's place there.
    */
   clear(): void {
     this.generation++;
@@ -715,6 +904,7 @@ export class ShuttleRigs {
       this.deps.scene.remove(s.root);
     }
     this.stood.length = 0;
+    this.byKey.clear();
     const loads = [...this.assets.values()];
     this.assets.clear();
     for (const p of loads) {
@@ -726,6 +916,23 @@ export class ShuttleRigs {
       });
     }
   }
+}
+
+/** Whether a mesh casts no shadow, by the rule the garage keeps for a hull's own glass: glass, see-through, or marked so. */
+function castsNoShadow(m: THREE.Mesh): boolean {
+  const mats = Array.isArray(m.material) ? m.material : [m.material];
+  return mats.some((mat) => mat.userData.glass || (mat.transparent && mat.opacity < 1) || mat.userData.noShadow);
+}
+
+/** Half the diagonal of a rig's biggest piece by the pack's bounds (whichever corner it wrote first), or 25 m with none. */
+function radiusOf(rig: TravelRig): number {
+  let r = 0;
+  for (const p of rig.parts) {
+    const b = p.bounds;
+    if (!b || b.min.length < 3 || b.max.length < 3) continue;
+    r = Math.max(r, Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2);
+  }
+  return r > 0 ? r : 25;
 }
 
 /** Every sound a rig's client data can play: its idle loop and each event's sounds, once apiece. */
