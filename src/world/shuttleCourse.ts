@@ -27,7 +27,7 @@
 // it (`shuttleCourse.test.ts`). A plan allocates its course once; a step allocates nothing. Every
 // number is ours, in `RIDE_PILOT`, live through `__debug.ride({ pilot })`.
 
-import { AVOID_TUNE, PILOT_SKILL, pushApart, skillStick, steerToward, toLocal, toWorld, type PilotSkill, type Q4, type Stick, type V3 } from '../space/pilot.ts';
+import { AVOID_TUNE, PILOT_SKILL, STICK_GAIN, pushApart, skillStick, steerToward, toLocal, toWorld, type PilotSkill, type Q4, type Stick, type V3 } from '../space/pilot.ts';
 
 /** Every number of the shuttles' pilot, all ours; measured over every pair of rigged pads (`shuttleCourse.test.ts`). */
 export const RIDE_PILOT = {
@@ -36,6 +36,18 @@ export const RIDE_PILOT = {
   /** The most of the stick the hand ever uses, and the seconds it takes to move it end to end: gentle turns, no jerks. */
   stickMax: 0.6,
   response: 0.6,
+  /**
+   * Seconds ahead the hand reads how far off the point chased the nose is: the stick answers the error
+   * as it will stand this long from now at the rate it is closing, not only as it stands (a derivative
+   * on the error, so a steady turn or climb along the course is not leaned against, only a swing about
+   * it). The rig hull takes 1.2 s to come round to what its stick asks, and chasing a point two seconds
+   * ahead through that lag on the error alone swayed the hull about its line and its height every four
+   * seconds and shed a tenth of each swing: the stick changed sides every two seconds all the way down
+   * the final approach, and a drop in the height law was dived past by tens of metres before it came back
+   * up (worked out as a third-order loop and measured, `shuttleCourse.test.ts`). At 0.75 s the loop sheds
+   * more than half of a swing each time round; 0 puts the old hand back.
+   */
+  errorLead: 0.75,
   /** The planned turns are this much wider than the hull can fly, which is its room to correct. */
   planMargin: 1.35,
   /** Metres between the course's samples. */
@@ -50,6 +62,13 @@ export const RIDE_PILOT = {
   climbMax: 25,
   descentMax: 32,
   glideMin: 6,
+  /**
+   * Degrees: the steepest it climbs while it is under its own floor (the ground ahead rising faster
+   * than `climbMax` climbs). The ground out of Lake Retreat rises at thirty degrees for half a kilometre;
+   * held to `climbMax` a hull that no longer sways past what it asks for cleared it by two metres, where
+   * the swaying one had cleared it by twenty-eight only by overshooting to thirty degrees.
+   */
+  climbSteep: 35,
   /** Metres: how far ahead the ground is looked over, and how high over it the course is held. */
   look: 2000,
   clear: 150,
@@ -383,6 +402,16 @@ export class ShuttlePilot {
   private readonly skill: PilotSkill = { ...RIDE_SKILL };
   /** The carrot's place, for the report. */
   private readonly carrot: V3 = { x: 0, y: 0, z: 0 };
+  /**
+   * How far off the point chased the nose was at the last step, across (yaw) and up (pitch), radians,
+   * which is what the rate it is closing at is read off (`errorLead`); `errKnown` false until a step of
+   * this course has measured one, since the point chased jumps to another course with a go-around.
+   */
+  private errYaw = 0;
+  private errPitch = 0;
+  private errKnown = false;
+  /** The floor the height law last held the point chased over (the ground from the hull on, and its clearance): under it, it may climb at `climbSteep`. */
+  private floorLine = -Infinity;
 
   /** A course to fly from here, at `top` metres a second: the stick as the hand holds it now is kept, so a go-around does not jerk it. */
   setCourse(course: RideCourse, top: number): void {
@@ -390,6 +419,8 @@ export class ShuttlePilot {
     this.progress = 0;
     this.top = top;
     this.highest = course.seedGround;
+    this.errKnown = false;
+    this.floorLine = -Infinity;
   }
 
   /** Something solid ahead with its near face at `hitY`: climb over it for a moment. */
@@ -479,6 +510,7 @@ export class ShuttlePilot {
       cr.z = j.z + cJ * e;
       cr.y = j.y;
       this.target = cr.y;
+      this.floorLine = -Infinity;
     } else {
       const i = indexAt(c, s, best);
       const span = c.ss[i + 1] - c.ss[i];
@@ -492,13 +524,28 @@ export class ShuttlePilot {
     const wz = cr.z - pos.z;
     const wh = Math.atan2(wx, wz);
     const low = -Math.max(descent + deg(5), deg(tune.descentMax));
-    const gamma = Math.max(low, Math.min(deg(tune.climbMax), Math.atan2(wy, Math.hypot(wx, wz))));
+    const high = deg(pos.y < this.floorLine ? Math.max(tune.climbMax, tune.climbSteep) : tune.climbMax);
+    const gamma = Math.max(low, Math.min(high, Math.atan2(wy, Math.hypot(wx, wz))));
     wantDir.x = Math.sin(wh) * Math.cos(gamma);
     wantDir.y = Math.sin(gamma);
     wantDir.z = Math.cos(wh) * Math.cos(gamma);
     toLocal(q, wantDir, wantLocal);
     toLocal(q, UP, upLocal);
     steerToward(wantLocal, tune.bankBeyond, upLocal, this.stick);
+    // The error as it will stand `errorLead` from now at the rate it is closing, in steerToward's own
+    // gains, so the chase settles rather than swaying about its line through the hull's own lag. The
+    // same two angles steerToward steers by; a point chased that jumps (a go-around, a drop in the height
+    // law) moves the stick for one step by no more than a whole stick, which the hand's own pace spreads.
+    const ey = Math.atan2(-wantLocal.x, wantLocal.z);
+    const ep = Math.atan2(-wantLocal.y, Math.hypot(wantLocal.x, wantLocal.z));
+    if (this.errKnown && dt > 1e-6 && tune.errorLead > 0) {
+      const k = tune.errorLead / dt;
+      this.stick.x += Math.max(-1, Math.min(1, STICK_GAIN.yaw * k * wrap(ey - this.errYaw)));
+      this.stick.y += Math.max(-1, Math.min(1, STICK_GAIN.pitch * k * (ep - this.errPitch)));
+    }
+    this.errYaw = ey;
+    this.errPitch = ep;
+    this.errKnown = true;
     const skill = this.skill;
     skill.stickMax = tune.stickMax;
     skill.response = tune.response;
@@ -570,6 +617,7 @@ export class ShuttlePilot {
     }
     const end = Math.min(s, c.total - s);
     const clearHere = tune.padClear + (tune.floor - tune.padClear) * Math.max(0, Math.min(1, (end - tune.padNear) / Math.max(1, tune.padBlend)));
+    this.floorLine = floor + clearHere;
     let y = Math.max(floor + clearHere, Math.min(up, down, need));
     if (this.now < this.avoidUntil) y = Math.max(y, this.avoidY);
     this.target = y;

@@ -31,6 +31,7 @@
 // ours is `RIDE_TUNE`, live through `__debug.ride({ tune })` and `__debug.rigHull({ ride })`.
 
 import * as THREE from 'three';
+import { CHASE_RISE } from '../core/camera.ts';
 import { AVOID_TUNE, type V3 } from '../space/pilot.ts';
 import { settleEase } from '../vehicles/landing.ts';
 import type { RigHull, RigPaths } from '../vehicles/rigHull.ts';
@@ -67,7 +68,53 @@ export const RIDE_TUNE = {
   flightEvent: 'start',
   /** The nearest a passenger's view comes to the hull they ride (the orbit's own rest): never inside it. */
   minZoom: 7,
+  /**
+   * The passenger's view of a hull standing on a pad, or within `viewLow` metres of it lifting off or
+   * coming down: this share of the distance back the flight's view stands, and this rise over each metre
+   * of it (the flight's is `CHASE_RISE`, 0.32). A pad stands inside walls and under roofs, and the flight's
+   * framing -- 53 m behind and 17 m over a transport -- put the view on the roof of Bestine's starport with
+   * the hull 16 m below behind its walls, and behind a shuttleport's screen wall; at 0.6 and 0.12 it stands
+   * 32 m back and 4 m over the hull's middle, which is inside the walls of every pad and level with a
+   * transport's back, and what is still in the way pulls the view in rather than being looked through.
+   */
+  parkedReach: 0.6,
+  parkedRise: 0.12,
+  /** Metres over its pad under which a hull lifting off or coming down is framed as parked: the height of a starport's walls and a little more. */
+  viewLow: 25,
+  /** Seconds the view takes to go from the parked framing to the flight's or back, eased at both ends: never a jump. */
+  viewEase: 2,
 };
+
+/** How the passenger's view frames the hull, eased between parked (`share` 1) and flying (0): the share of the flight's distance back, and the rise over each metre of it. */
+export interface RideFraming {
+  share: number;
+  reach: number;
+  rise: number;
+}
+
+/** A framing, parked or not. */
+export function rideFraming(parked: boolean): RideFraming {
+  return settleFraming({ share: parked ? 1 : 0, reach: 1, rise: CHASE_RISE });
+}
+
+/**
+ * One frame of the passenger's framing, eased toward parked (`low`) or flying at no more than one
+ * `viewEase` a second, and the distance and rise worked out from where it has got to (smoothstepped, so
+ * it leaves one and arrives at the other gently). Written in place; allocates nothing.
+ */
+export function stepFraming(f: RideFraming, low: boolean, dt: number, tune = RIDE_TUNE): RideFraming {
+  const step = tune.viewEase > 0 ? Math.max(0, dt) / tune.viewEase : 1;
+  f.share = low ? Math.min(1, f.share + step) : Math.max(0, f.share - step);
+  return settleFraming(f, tune);
+}
+
+function settleFraming(f: RideFraming, tune = RIDE_TUNE): RideFraming {
+  const s = f.share;
+  const k = s * s * (3 - 2 * s);
+  f.reach = 1 + (tune.parkedReach - 1) * k;
+  f.rise = CHASE_RISE + (tune.parkedRise - CHASE_RISE) * k;
+  return f;
+}
 
 /** A hull a trip flies, as much of a `Vehicle` as it uses. */
 export interface RideHull {
@@ -146,8 +193,13 @@ export interface RideHost {
   say(text: string): void;
   /** A ticket not flown on, by its id, back in the passenger's hand. */
   giveBack(ticket: string): void;
-  /** Put the passenger down at a port on foot, the old way, where no pad is there to land on. */
+  /**
+   * Put the passenger down at a port on foot, the old way: where no pad is there to land on, and where a
+   * trip already paid for is stopped in the air with nothing else about to move them.
+   */
   walkOff(pack: string, port: string): void;
+  /** The trip is over, however it ended: said exactly once, after its passenger is off and any ticket has gone back. */
+  ended(ride: ShuttleRide): void;
 }
 
 /** How a trip that was begun went: flying, missed (its shuttle was not there to swap), failed (no hull, or clips that give no hand-over), or aborted while its hull was built. */
@@ -225,6 +277,8 @@ export class ShuttleRide {
   private readonly baseQ = new THREE.Quaternion();
   private settle = 1;
   private parkedY = 0;
+  /** Metres the hull stands over the pad it is lifting off or coming down on, as its clip last had it; 0 parked. */
+  private overPad = 0;
   private readonly target = makeLandingTarget();
   private readonly frustum = new THREE.Frustum();
   private readonly view = new THREE.Matrix4();
@@ -267,6 +321,19 @@ export class ShuttleRide {
   /** Whether the others should not see the rider: while they are seated in it, since nobody is drawn in a shuttle and the hull is this browser's alone. */
   get hidden(): boolean {
     return this.seated;
+  }
+
+  /**
+   * Whether the passenger's view frames the hull as it stands on a pad (`RIDE_TUNE.parkedReach`): while
+   * it boards and once it is parked where it landed, and while it lifts off or comes down within
+   * `viewLow` metres of the pad, where the pad's walls still stand round it. Flying, it is framed as a
+   * ship in flight is.
+   */
+  get lowView(): boolean {
+    const k = this.leg?.kind;
+    if (k === 'board' || k === 'off') return true;
+    if (k === 'lift' || k === 'land') return this.overPad < RIDE_TUNE.viewLow;
+    return false;
   }
 
   /** The leg flown now, or null once it has ended. */
@@ -411,10 +478,18 @@ export class ShuttleRide {
     this.finish('failed', `a ${leg.kind} leg is not flown yet`);
   }
 
-  /** Stop the trip where it is: its passenger put down, its hull taken away, its pads given back, its sounds let go of. Nothing when it is not running. */
-  abort(why: string): void {
+  /**
+   * Stop the trip where it is: its passenger put down, its hull taken away, its pads given back, its
+   * sounds let go of. Nothing when it is not running. A passenger stopped before it lifts off is stood
+   * at the foot of its ramp with the ticket back; one stopped after it has lifted off has paid and is
+   * kept at the far end already (`keepPlace`), so they are set down at the port it was flying to, as a
+   * trip with no pad there sets them down, and never left in the air where the hull was. `moved` is a
+   * caller that moves or ends the body itself the moment after (a travel, a teleport, a death, a
+   * respawn, the select screen), which is then left to do so.
+   */
+  abort(why: string, moved = false): void {
     if (!this.running) return;
-    this.finish('aborted', why);
+    this.finish('aborted', why, moved);
   }
 
   /**
@@ -743,7 +818,8 @@ export class ShuttleRide {
     hull.hold(null, vP, vQ, vel.length());
     hull.rig!.pose('land', t, paths.landMood);
     hull.setGhost(true);
-    hull.airborne = vP.y - this.parkedY > 0.5;
+    this.overPad = vP.y - this.parkedY;
+    hull.airborne = this.overPad > 0.5;
     this.drive('land', t);
     if (t >= paths.land.seconds) this.next();
   }
@@ -855,6 +931,7 @@ export class ShuttleRide {
     rig.pose('ground', 0, this.route.mood);
     hull.setGhost(false);
     hull.airborne = false;
+    this.overPad = 0;
     this.drive('ground', 0);
   }
 
@@ -876,7 +953,8 @@ export class ShuttleRide {
     hull.hold(null, vP, jQ, vel.length());
     rig.pose('lift', s, mood);
     hull.setGhost(true);
-    hull.airborne = jP.y - (pad.y + rig.ground.pos.y) > 0.5;
+    this.overPad = jP.y - (pad.y + rig.ground.pos.y);
+    hull.airborne = this.overPad > 0.5;
     this.drive('lift', s);
   }
 
@@ -926,6 +1004,7 @@ export class ShuttleRide {
     hull.rig!.pose('ground', 0, paths.landMood);
     hull.setGhost(false);
     hull.airborne = false;
+    this.overPad = 0;
     this.drive('ground', 0);
     this.findAlight(pad);
   }
@@ -1009,7 +1088,7 @@ export class ShuttleRide {
    * holds are counted, and only the release that takes a pad's count to nought gives it back, so the
    * soft ones go first and the one at once last: a hop back to the pad it left holds that pad twice.
    */
-  private finish(ended: string, why: string): void {
+  private finish(ended: string, why: string, moved = false): void {
     const parked = this.parkedOn();
     const leg = this.running ? this.route.legs[this.index] : undefined;
     this.token++;
@@ -1017,13 +1096,16 @@ export class ShuttleRide {
     this.ended = ended;
     if (why) this.why = why;
     // Whoever is still seated is put down before anything of the hull goes: at the foot of its ramp where
-    // it stands parked, and where it is otherwise (a world going, a death, leaving for the select screen:
-    // each moves or ends the body the moment after).
+    // it stands parked, and where it is otherwise, to be moved on at once -- by whoever stopped the trip
+    // when they move or end the body themselves (a world going, a death, leaving for the select screen),
+    // and otherwise, since it has lifted off and the trip is paid, to the port it was flying to below.
     const seatedIn = this.hull;
+    let setDown = false;
     if (this.seated && seatedIn) {
       if (leg?.kind === 'board') this.findAlight(leg.pad ?? this.route.from);
       else if (leg?.kind !== 'off' || !this.alightFrom) this.alightAt.copy(seatedIn.pos);
       this.host.unseat(seatedIn, this.alightAt);
+      setDown = !moved && !!leg && leg.kind !== 'board' && leg.kind !== 'off';
     }
     this.seated = false;
     // A ticket not flown on goes back: the trip ended before its hull lifted off, however it ended.
@@ -1055,5 +1137,11 @@ export class ShuttleRide {
       if (hull.autopilot === this.autopilot) hull.autopilot = null;
       if (!hull.disposed) this.host.disposeHull(hull);
     }
+    if (setDown) {
+      const port = this.route.to.port;
+      this.host.say(`the shuttle to ${port || 'the far pad'} could not fly on, so you are set down at the port`);
+      this.host.walkOff(this.route.to.pack, port);
+    }
+    this.host.ended(this);
   }
 }

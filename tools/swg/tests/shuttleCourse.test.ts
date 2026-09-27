@@ -9,8 +9,10 @@
 // (`RIG_HULL_TUNE`, which the garage is read to write over a rig hull's spec), over every pair of rigged
 // pads on the converted worlds, the pilot meets every join on ground that is flat about each pad, to 5 m
 // across its line, 8 m up and 10 degrees of heading; it goes over a 500 m ridge rising at 40 degrees a
-// kilometre short of a join and never into it; and the two pads that stand nearest each other are flown
-// a course many times longer than the line between them. A step makes nothing: read in the code,
+// kilometre short of a join and never into it; the two pads that stand nearest each other are flown
+// a course many times longer than the line between them; and over the last half minute before every
+// join it settles rather than sways, which the hand that read the error alone is flown beside it to
+// fail. A step makes nothing: read in the code,
 // measured as what twenty thousand of them leave behind, and as what short stretches of them allocate.
 // The real ground is flown by hand (`shuttleCourseTerrain.ts`).
 //
@@ -20,7 +22,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import v8 from 'node:v8';
 import * as THREE from 'three';
-import { flyCourse, quantile, rigPairs, type RigPair } from './courseFixtures.ts';
+import { SWAY, flyCourse, quantile, rigPairs, type Flight, type RigPair } from './courseFixtures.ts';
 import { RIG_HULL_TUNE } from '../../../src/vehicles/rigHull.ts';
 import type { PadRef } from '../../../src/world/rideRoute.ts';
 import { RIDE_PILOT, ShuttlePilot, dubins, planCourse, planRadius, type RideState } from '../../../src/world/shuttleCourse.ts';
@@ -163,6 +165,36 @@ function rng(seed: number): () => number {
     note(`flown in ${f1(quantile(flights.map(({ f }) => f.seconds), 0.5))} s at the median and ${f1(quantile(flights.map(({ f }) => f.seconds), 1))} s at the most, ${flights.filter(({ f }) => f.goArounds).length} flown round again, never more than ${f1(quantile(flights.map(({ f }) => f.offCourse), 1))} m off the course`);
     const nearest = flights.reduce((a, b) => (b.f.straight < a.f.straight ? b : a));
     ok(nearest.f.course > 10 * nearest.f.straight, `the two pads nearest each other (${nearest.p.label}, ${f1(nearest.f.straight)} m from cut to join) are flown a course more than ten times as long (${f1(nearest.f.course)} m)`);
+
+    // It settles rather than sways. Over the last 30 s before each join the stick changes sides a
+    // handful of times at the most on either axis, the hull goes from climbing to sinking or back a few
+    // times at the most, and it never dives past the steepest the pilot may ask for by more than a
+    // couple of degrees. The hand that read the error alone (`errorLead` 0) is flown the same way beside
+    // it and must fail the same bounds, or they would not be measuring the sway at all: through the rig
+    // hull's 1.2 s of lag it swung about its line and its height every four seconds, the stick changing
+    // sides every two, and dived past a drop in the height law by up to eight degrees too steep.
+    const sway = (fs: { f: Flight }[]) => ({
+      x: fs.map(({ f }) => f.flipsX),
+      y: fs.map(({ f }) => f.flipsY),
+      turns: fs.map(({ f }) => f.heightTurns),
+      dive: fs.map(({ f }) => f.diveOver),
+    });
+    const BOUND = { flips: 8, flipsP90: 4, turns: 5, dive: 2 };
+    const within = (s: ReturnType<typeof sway>) =>
+      quantile(s.x, 1) <= BOUND.flips && quantile(s.y, 1) <= BOUND.flips && quantile(s.x, 0.9) <= BOUND.flipsP90 && quantile(s.y, 0.9) <= BOUND.flipsP90 && quantile(s.turns, 1) <= BOUND.turns && quantile(s.dive, 1) <= BOUND.dive;
+    const said = (s: ReturnType<typeof sway>) =>
+      `stick sides changed ${f1(quantile(s.x, 0.9))}/${f1(quantile(s.x, 1))} across and ${f1(quantile(s.y, 0.9))}/${f1(quantile(s.y, 1))} up (p90/most), climb turned ${f1(quantile(s.turns, 1))} times at most, dived ${f1(quantile(s.dive, 1))}° past the steepest allowed`;
+    const now = sway(flights);
+    ok(within(now), `over the last ${SWAY.window} s before its join no flight sways: ${said(now)} (bounds: ${BOUND.flips} sides, ${BOUND.flipsP90} at p90, ${BOUND.turns} turns, ${BOUND.dive}°)`);
+    const lead = RIDE_PILOT.errorLead;
+    RIDE_PILOT.errorLead = 0;
+    let old: ReturnType<typeof sway>;
+    try {
+      old = sway(pairs.map((p) => ({ p, f: flyCourse(p, flatAbout(p)) })));
+    } finally {
+      RIDE_PILOT.errorLead = lead;
+    }
+    ok(!within(old), `while the hand that read the error alone fails the same bounds: ${said(old)}`);
   }
 }
 

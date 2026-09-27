@@ -193,6 +193,22 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
   ok(shuttleWords(waitingNow).includes('here'), 'a shuttle that is here says so');
   ok(shuttleWords(away).includes('2m'), 'and one that is not says how long, in minutes where there are any');
   ok(shuttleWords({ ...away, until: 20 }).includes('20s'), 'and in seconds where there are not');
+  // The wait is counted up to a whole second once and then split: counting the minutes down and the
+  // seconds up apart said "1m 60s" for anything from 119.0 s to 120 s, and "60s" just under a minute.
+  const said = (until: number) => shuttleWords({ ...away, until }).replace('the next shuttle is ', '').replace(' away', '');
+  const pins: [number, string][] = [
+    [59.5, '1m 0s'],
+    [60, '1m 0s'],
+    [119.2, '2m 0s'],
+    [119.9, '2m 0s'],
+    [61.5, '1m 2s'],
+    [0.2, '1s'],
+  ];
+  const wrong = pins.filter(([t, want]) => said(t) !== want);
+  ok(wrong.length === 0, `a wait is said in whole minutes and seconds with never 60 seconds in it (${pins.map(([t]) => `${t} s: ${said(t)}`).join(', ')})`);
+  let sixty = 0;
+  for (let t = 0; t < 600; t += 0.05) if (/\b60s/.test(shuttleWords({ ...away, until: t }))) sixty++;
+  ok(sixty === 0, `and no wait from nought to ten minutes is ever said with 60 seconds (${sixty} times)`);
 }
 
 // ---------------------------------------------------------------- a shuttle drawn on its rig

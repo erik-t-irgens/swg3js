@@ -55,6 +55,13 @@ const CHASE_LAG = 0.28;
 const FLIP = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 /** A touch of nose-down, so the ship sits below the middle of the view. */
 const chaseTilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.1);
+/** How high the chase stands over what it follows, for each metre it stands behind: a ship in flight's. */
+export const CHASE_RISE = 0.32;
+/** Seconds a chase pulled in by something in the way takes to go back out once it is clear: in at once, out eased. */
+const CHASE_OUT = 0.5;
+/** The nearest a chase that something is in the way of comes to what it follows, in metres, and how far it stops short of the thing. */
+const CHASE_NEAREST = 0.3;
+const CHASE_SHORT = 0.35;
 const frameInverse = new THREE.Quaternion();
 
 /** SWG-style free-orbit third-person camera that becomes first person when zoomed all the way in. */
@@ -88,6 +95,8 @@ export class ThirdPersonCamera {
   private readonly dir = new THREE.Vector3();
   private readonly chaseFrame = new THREE.Quaternion();
   private chasing = false;
+  /** How far out along its line a blocked chase may stand this frame, in metres: pulled in at once, let out again eased. */
+  private chaseClear = Infinity;
   /**
    * The frame the view is upright in: the world's, or aboard a ship the hull's, so the orbit,
    * its up and the yaw all follow the room whatever the hull is doing. Yaw and pitch are in this frame.
@@ -124,8 +133,14 @@ export class ThirdPersonCamera {
   /**
    * Behind a ship in its own frame: above and behind it looking along its nose, rolling and
    * looping with it. The orbit's yaw is kept at the ship's heading so leaving it is seamless.
+   *
+   * `blocked` pulls the camera in along its line to the target in front of whatever it would stand
+   * behind (the orbit's own rule): in at once, so a wall or a roof is never seen from its far side, and
+   * out again over `CHASE_OUT` once it is clear, so a view freed of it does not spring back. A ship's
+   * own chase passes none and stands where it always has. `rise` is how high the camera stands for each
+   * metre it stands back (`CHASE_RISE`, a ship in flight's). Allocates nothing.
    */
-  chase(input: Input, dt: number, target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, reach: number, cockpit: THREE.Vector3 | null): void {
+  chase(input: Input, dt: number, target: THREE.Vector3, attitude: THREE.Quaternion, heading: number, reach: number, cockpit: THREE.Vector3 | null, blocked: CameraBlocker | null = null, rise = CHASE_RISE): void {
     this.orbitDistance = 0;
     // The chase view never aims: let the blend settle so nothing reads a stale aim from before the controls were taken.
     this.aimBlend += (0 - this.aimBlend) * 0.15;
@@ -148,7 +163,15 @@ export class ThirdPersonCamera {
     } else {
       // The wheel sets how far back, scaled to the ship: zoomed out it sits well behind a barge.
       const distance = reach * (0.35 + this.distance / 12);
-      chaseOffset.set(0, distance * 0.32, -distance).applyQuaternion(this.chaseFrame);
+      chaseOffset.set(0, distance * rise, -distance).applyQuaternion(this.chaseFrame);
+      if (blocked) {
+        this.desired.copy(target).add(chaseOffset);
+        const full = chaseOffset.length();
+        const hit = blocked(target, this.desired);
+        const allowed = hit === null ? full : Math.max(CHASE_NEAREST, Math.min(full, hit - CHASE_SHORT));
+        this.chaseClear = allowed <= this.chaseClear ? allowed : this.chaseClear + (allowed - this.chaseClear) * (1 - Math.exp(-dt / CHASE_OUT));
+        if (this.chaseClear < full && full > 1e-6) chaseOffset.multiplyScalar(this.chaseClear / full);
+      } else this.chaseClear = Infinity;
       this.camera.position.copy(target).add(chaseOffset);
       // Cameras look down their own -Z; the ship's nose is its +Z.
       this.camera.quaternion.copy(this.chaseFrame).multiply(FLIP).multiply(chaseTilt);
@@ -199,9 +222,10 @@ export class ThirdPersonCamera {
     this.camera.position.addScaledVector(shakeRight, s.x).addScaledVector(shakeUp, s.y);
   }
 
-  /** Back to orbiting: the next chase starts from the ship's frame afresh. */
+  /** Back to orbiting: the next chase starts from the ship's frame afresh, with nothing in its way. */
   release(): void {
     this.chasing = false;
+    this.chaseClear = Infinity;
   }
 
   /**

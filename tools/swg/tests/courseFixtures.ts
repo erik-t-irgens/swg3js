@@ -124,7 +124,20 @@ export interface Flight {
   /** The highest it flew over the higher pad, and the furthest it strayed off its course across the ground. */
   highest: number;
   offCourse: number;
+  /**
+   * How it swayed over the last `swayWindow` seconds before the join: how many times the stick changed
+   * sides on each axis (past `stickDead` either way), and how many times the hull went from climbing to
+   * sinking or back (past `climbDead` metres a second either way).
+   */
+  flipsX: number;
+  flipsY: number;
+  heightTurns: number;
+  /** Degrees: the most the hull ever dived past the steepest the pilot may ask for (the join's own glide and five, or `descentMax`). */
+  diveOver: number;
 }
+
+/** The stretch before the join the sway is counted over, in seconds, and what counts as a side and as a climb. */
+export const SWAY = { window: 30, stickDead: 0.05, climbDead: 0.5 };
 
 const AX_Y = new THREE.Vector3(0, 1, 0);
 const AX_X = new THREE.Vector3(1, 0, 0);
@@ -170,6 +183,14 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
   let highest = -Infinity;
   let offCourse = 0;
   const highPad = Math.max(p.from.y, p.to.y);
+  // The stick and the climb every step, for the sway before the join; and the steepest dive allowed.
+  const steps = Math.ceil(maxSeconds / dt) + 1;
+  const sx = new Float32Array(steps);
+  const sy = new Float32Array(steps);
+  const climb = new Float32Array(steps);
+  let recorded = 0;
+  let diveOver = -Infinity;
+  const allowed = Math.max((p.join.descent ?? 0) + (5 * Math.PI) / 180, (RIDE_PILOT.descentMax * Math.PI) / 180);
   for (let step = 0; t < maxSeconds; step++) {
     const said = pilot.step(dt, t, pos, q, cruise, groundCached);
     if (said === 'join') {
@@ -193,6 +214,13 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
     nose.set(0, 0, 1).applyQuaternion(q);
     pos.addScaledVector(nose, cruise * dt);
     t += dt;
+    if (recorded < steps) {
+      sx[recorded] = d.stickX;
+      sy[recorded] = d.stickY;
+      climb[recorded] = nose.y * cruise;
+      recorded++;
+    }
+    diveOver = Math.max(diveOver, ((-Math.asin(Math.max(-1, Math.min(1, nose.y))) - allowed) * 180) / Math.PI);
     highest = Math.max(highest, pos.y - highPad);
     const c = pilot.course!;
     const i = pilot.progress;
@@ -210,6 +238,7 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
     }
   }
   const e = pilot.joinError;
+  const from = Math.max(0, recorded - Math.round(SWAY.window / dt));
   return {
     joined,
     error: { across: e.across, up: e.up, heading: e.heading, speed: e.speed },
@@ -223,7 +252,24 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
     deepest,
     highest,
     offCourse,
+    flipsX: sideChanges(sx, from, recorded, SWAY.stickDead),
+    flipsY: sideChanges(sy, from, recorded, SWAY.stickDead),
+    heightTurns: sideChanges(climb, from, recorded, SWAY.climbDead),
+    diveOver,
   };
+}
+
+/** How many times the values from `from` to `to` change sides, a value within `dead` of nought counting as neither. */
+export function sideChanges(xs: Float32Array, from: number, to: number, dead: number): number {
+  let n = 0;
+  let side = 0;
+  for (let i = from; i < to; i++) {
+    const s = xs[i] > dead ? 1 : xs[i] < -dead ? -1 : 0;
+    if (!s) continue;
+    if (side && s !== side) n++;
+    side = s;
+  }
+  return n;
 }
 
 /** A value `f` of the way up a sorted copy of `xs`. */

@@ -456,8 +456,11 @@ export function shuttleWords(s: ShuttleState): string {
   if (s.phase === 'waiting') return `the shuttle is here, leaving in ${Math.ceil(s.left)}s`;
   if (s.phase === 'landing') return 'the shuttle is coming down';
   if (s.phase === 'leaving') return 'the shuttle is lifting off';
-  const m = Math.floor(s.until / 60);
-  const sec = Math.ceil(s.until % 60);
+  // The whole wait is counted up to a second once and only then split, as the waiting line counts: the
+  // minutes floored and the seconds counted up apart said 119.2 s was "1m 60s".
+  const whole = Math.max(0, Math.ceil(s.until));
+  const m = Math.floor(whole / 60);
+  const sec = whole % 60;
   return m ? `the next shuttle is ${m}m ${sec}s away` : `the next shuttle is ${sec}s away`;
 }
 

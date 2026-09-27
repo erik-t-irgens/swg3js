@@ -13,7 +13,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { flyCourse, quantile, rigPairs } from './courseFixtures.ts';
+import { SWAY, flyCourse, quantile, rigPairs } from './courseFixtures.ts';
 import { RIDE_PILOT } from '../../../src/world/shuttleCourse.ts';
 import { attachBitmap, bitmapFiles, parseTerrainTemplate, TerrainSampler } from '../../../src/swg/terrain/trn.ts';
 
@@ -80,6 +80,9 @@ console.log(`least height over the ground beyond 600 m of a pad: min ${n1(quanti
 console.log(`highest over the higher pad: median ${n1(quantile(rows.map((r) => r.f.highest), 0.5))} m, p90 ${n1(quantile(rows.map((r) => r.f.highest), 0.9))}, max ${n1(quantile(rows.map((r) => r.f.highest), 1))}`);
 console.log(`flown seconds, cut to join: median ${n1(quantile(rows.map((r) => r.f.seconds), 0.5))}, max ${n1(quantile(rows.map((r) => r.f.seconds), 1))}`);
 console.log(`under the ground beyond 600 m of a pad: ${under.length} flights`);
+// How it swayed over the last half minute before each join (`SWAY`): stick sides changed and climbs turned.
+const sw = (k: 'flipsX' | 'flipsY' | 'heightTurns' | 'diveOver') => rows.map((r) => r.f[k]);
+console.log(`the last ${SWAY.window} s before the join: stick sides changed across p90 ${quantile(sw('flipsX'), 0.9)}, most ${quantile(sw('flipsX'), 1)}; up p90 ${quantile(sw('flipsY'), 0.9)}, most ${quantile(sw('flipsY'), 1)}; climb turned at most ${quantile(sw('heightTurns'), 1)} times; dived at most ${n1(quantile(sw('diveOver'), 1))} degrees past the steepest allowed`);
 for (const r of under.slice(0, 12)) console.log(`   ${r.label}: ${n1(r.f.under)} s, ${n1(r.f.deepest)} m at the deepest`);
 const missed = rows.filter((r) => !r.within);
 console.log(`outside the tolerance: ${missed.length}`);

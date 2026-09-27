@@ -62,6 +62,12 @@ export interface SpawnOpts {
    * The ticket collector, and everyone else the game had standing at a post. See `Mobile.essential`.
    */
   essential?: boolean;
+  /**
+   * Stood from one of the world's list's own records (`standRecord`), which is what that list may take
+   * down again when it no longer names it (`fromList`, `sweptByList`). A body this browser stood under a
+   * world name of its own -- a ticket collector, a lair's creature, a person standing about -- is not.
+   */
+  listed?: boolean;
 }
 
 export interface MobileManagerDeps {
@@ -343,6 +349,7 @@ export class MobileManager {
     }
     this.held.set(m, held);
     m.essential = !!opts.essential;
+    if (opts.listed) this.listed.add(m);
     if (opts.worldId) {
       this.byWorldId.set(opts.worldId, m);
       this.worldIds.set(m, opts.worldId);
@@ -367,6 +374,8 @@ export class MobileManager {
   private readonly byWorldId = new Map<string, Mobile>();
   /** The other way round, so a mobile met in a list can say what the world calls it. */
   private readonly worldIds = new WeakMap<Mobile, string>();
+  /** The ones stood from the world's list's own records: the only ones that list may take down again. */
+  private readonly listed = new WeakSet<Mobile>();
   /** The records that arrived before the catalogue did; stood the moment it lands. */
   private readonly pending = new PendingSpawns();
 
@@ -410,7 +419,7 @@ export class MobileManager {
     const a = choice.args;
     this.pending.drop(a.id);
     const entry = cat!.byId(a.species)!;
-    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id });
+    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true });
   }
 
   /**
@@ -436,6 +445,11 @@ export class MobileManager {
   /** What the world calls a mobile, or '' for one this browser stood for itself. */
   worldIdOf(m: Mobile): string {
     return this.worldIds.get(m) ?? '';
+  }
+
+  /** Whether a mobile was stood from one of the world's list's own records, which is what that list may take down. */
+  fromList(m: Mobile): boolean {
+    return this.listed.has(m);
   }
 
   /**

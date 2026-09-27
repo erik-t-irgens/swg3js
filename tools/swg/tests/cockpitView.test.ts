@@ -133,4 +133,61 @@ const quatNear = (a: THREE.Quaternion, b: THREE.Quaternion, eps: number) => Math
   ok(!cam.firstPerson && cam.camera.position.distanceTo(eye) > 0.3, 'the frame the view leaves first person is drawn from the orbit, not from the eye');
 }
 
+// The chase with something in the way (a shuttle's passenger watching it on a walled pad): it stands
+// in front of the wall on its own line to the hull, never behind it, the moment the wall is there; it
+// goes back out eased, never in one frame, once the wall has gone; and a chase with nothing to test
+// against (a ship's own) stands exactly where it always did.
+{
+  const target = new THREE.Vector3(10, 5, -20);
+  const turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.8);
+  const reach = 50;
+  const dt = 1 / 60;
+  const settled = (cam: ThirdPersonCamera, blocked: ((a: THREE.Vector3, b: THREE.Vector3) => number | null) | null, rise?: number) => {
+    for (let i = 0; i < 120; i++) cam.chase(asInput(makeInput()), dt, target, turn, 0.8, reach, null, blocked, rise);
+    return cam.camera.position.clone();
+  };
+  const free = new ThirdPersonCamera(1);
+  const plain = settled(free, null);
+  const back = plain.clone().sub(target);
+  const full = back.length();
+  // Exactly the old chase: `reach * (0.35 + distance / 12)` back and 0.32 of that up, in the hull's frame.
+  const d = reach * (0.35 + 7 / 12);
+  const want = new THREE.Vector3(0, d * 0.32, -d).applyQuaternion(turn).add(target);
+  ok(plain.distanceTo(want) < 1e-6, `a chase with nothing to test against stands where it always has (${plain.distanceTo(want).toExponential(1)} m off)`);
+  const low = settled(new ThirdPersonCamera(1), null, 0.12);
+  const lowBack = low.clone().sub(target).applyQuaternion(turn.clone().invert());
+  ok(Math.abs(lowBack.y / -lowBack.z - 0.12) < 1e-6, `and a lower rise stands it lower for the same distance back (${(lowBack.y / -lowBack.z).toFixed(3)} a metre)`);
+
+  // A wall across the line 20 m out from the target.
+  const wallAt = 20;
+  const wall = (a: THREE.Vector3, b: THREE.Vector3) => (a.distanceTo(b) > wallAt ? wallAt : null);
+  const cam = new ThirdPersonCamera(1);
+  settled(cam, null);
+  cam.chase(asInput(makeInput()), dt, target, turn, 0.8, reach, null, wall);
+  const inFront = cam.camera.position.clone().sub(target);
+  ok(Math.abs(inFront.length() - (wallAt - 0.35)) < 1e-6 && inFront.clone().normalize().dot(back.clone().normalize()) > 1 - 1e-9, `on the first frame a wall is there, the view stands just in front of it on its own line (${inFront.length().toFixed(2)} m out of ${full.toFixed(2)})`);
+  // The wall gone: out again, eased.
+  let biggest = 0;
+  let prev = inFront.length();
+  let frames = 0;
+  for (; frames < 600; frames++) {
+    cam.chase(asInput(makeInput()), dt, target, turn, 0.8, reach, null, () => null);
+    const now = cam.camera.position.distanceTo(target);
+    biggest = Math.max(biggest, now - prev);
+    prev = now;
+    if (full - now < 0.01) break;
+  }
+  ok(biggest < 1 && frames > 30 && frames < 600, `the wall gone, it goes back out over ${(frames * dt).toFixed(2)} s, never more than ${biggest.toFixed(2)} m in a frame`);
+  // And back in at once if the wall comes back while it is on its way out.
+  cam.chase(asInput(makeInput()), dt, target, turn, 0.8, reach, null, wall);
+  ok(Math.abs(cam.camera.position.distanceTo(target) - (wallAt - 0.35)) < 1e-6, 'and in again at once if the wall comes back');
+  // A wall right at the target leaves the view at the nearest rather than on the target itself.
+  cam.chase(asInput(makeInput()), dt, target, turn, 0.8, reach, null, () => 0.1);
+  ok(Math.abs(cam.camera.position.distanceTo(target) - 0.3) < 1e-6, 'and a wall right at the target leaves it at the nearest it ever comes, never on the target');
+  // Letting go of the chase forgets the wall.
+  cam.release();
+  cam.chase(asInput(makeInput()), dt, target, turn, 0.8, reach, null, () => null);
+  ok(Math.abs(cam.camera.position.distanceTo(target) - full) < 1e-6, 'and a chase begun afresh has nothing in its way from its first frame');
+}
+
 console.log(`${checks} checks passed`);

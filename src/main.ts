@@ -108,7 +108,7 @@ import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
 import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
 import { padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, type PadRef, type RideRoute } from './world/rideRoute.ts';
 import { RIDE_PILOT } from './world/shuttleCourse.ts';
-import { RIDE_TUNE, ShuttleRide, type RideHost } from './world/shuttleRide.ts';
+import { RIDE_TUNE, ShuttleRide, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -215,7 +215,7 @@ import { OWN_TUNE, owned, tuneOwned, type SpawnRow } from './net/owned.ts';
 import { NPC_TUNE, NpcNet, tuneNpcs } from './net/npcNet.ts';
 import { peerBodies } from './net/remoteBodies.ts';
 // One creature stood by hand, as everything that talks about it says it.
-import { recordFor, type SpawnRecord } from './world/spawnSeed.ts';
+import { recordFor, sweptByList, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
@@ -554,7 +554,7 @@ class App {
    */
   private ride: ShuttleRide | null = null;
   private rideLeaving: ShuttleRide | null = null;
-  /** The ticket the trip was boarded on, kept to put back in hand if it is never flown. */
+  /** The ticket the trip was boarded on, kept to put back in hand if it is never flown; let go of the moment that trip ends (`RideHost.ended`). */
   private rideTicket: Ticket | null = null;
   /** The zoom the passenger had before they were seated, put back when they are let off. */
   private rideZoomKept: number | null = null;
@@ -1365,6 +1365,11 @@ class App {
       walkOff: (_pack, port) => {
         const row = this.placeNames.find((p) => p.name === port);
         if (row) void this.teleport(this.world.planet, row, this.zone, true);
+      },
+      // The player's own trip over: its ticket is spent or already back in hand, and is not the trip's to
+      // report any more. An earlier trip's empty hull ending later leaves the ticket of the one now flown.
+      ended: (r) => {
+        if (r === this.ride) this.rideTicket = null;
       },
     };
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
@@ -5629,10 +5634,12 @@ class App {
         wanted.add(r.id);
         standRow(r, here);
       }
-      // A list is the whole truth about a world: whatever is not in it is not there any more.
+      // A list is the whole truth about the world's own creatures: whatever of those is not in it is not
+      // there any more. It says nothing of what this browser stood under a name of its own (the ticket
+      // collectors, a lair's creatures, the people standing about), which stay (`sweptByList`).
       for (const m of [...mobiles.live]) {
         const id = mobiles.worldIdOf(m);
-        if (id && !wanted.has(id)) mobiles.removeById(id);
+        if (sweptByList(id, mobiles.fromList(m), wanted)) mobiles.removeById(id);
       }
     };
     owned.onAdd = (row) => standRow(row, this.worldKey());
@@ -6813,7 +6820,7 @@ class App {
     // The player's own trip after the place is written, so a passenger is kept where the ticket goes,
     // and before anything gets them off what they ride: the trip puts its passenger down itself. Then
     // whatever still holds a pad, since no hold of this character's may reach the next one's world.
-    this.ride?.abort('leaving for the select screen');
+    this.ride?.abort('leaving for the select screen', true);
     this.shuttleRigs?.clearHolds();
     this.menu.hide();
     this.closePanels();
@@ -8377,7 +8384,7 @@ class App {
     this.hyperspace.abort('travel');
     this.ultraCruise.abort();
     // A shuttle trip stops before the world goes under it: its passenger put down and its hull away.
-    this.ride?.abort('travel');
+    this.ride?.abort('travel', true);
     this.traveling = true;
     this.map.hide();
     this.closePanels();
@@ -8835,7 +8842,7 @@ class App {
     // player no longer is.
     this.ultraCruise.abort();
     // Nor would a shuttle trip, whose passenger would be left seated in a hull a world away from them.
-    if (!fromRide) this.ride?.abort('teleport');
+    if (!fromRide) this.ride?.abort('teleport', true);
     if (this.traveling) return;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       await this.travel(planet, zoneId);
@@ -8901,18 +8908,33 @@ class App {
     }
     // A passenger in a shuttle sees it from outside, and only from outside: chased in its own frame
     // (its drawn turn, since a held hull's flight attitude is not written), never nearer than the
-    // orbit's own rest, the wheel still drawing the view back; Alt orbits it instead.
-    const rh = this.ride?.riding ? (this.ride.hull as Vehicle | null) : null;
-    if (rh) {
+    // orbit's own rest, the wheel still drawing the view back; Alt orbits it instead. On or near a pad
+    // the view comes in closer and lower (`RIDE_TUNE.parkedReach`), eased there and back, since a pad
+    // stands inside walls and under roofs; and whatever still stands between the view and the hull's
+    // middle pulls the view in rather than being looked through, as the player's own orbit is. What
+    // blocks it is only what stands still (`blockDistance`), so the hull itself -- a body of its own,
+    // solid while it is parked -- never does.
+    const ride = this.ride;
+    const rh = ride?.riding ? (ride.hull as Vehicle | null) : null;
+    if (ride && rh) {
       this.holdJumpZoom(this.hyperspace.holdsView(rh));
       if (this.rideZoomKept === null) this.rideZoomKept = this.cam.zoomTarget;
       this.cam.zoomTarget = Math.max(this.cam.zoomTarget, RIDE_TUNE.minZoom);
-      const reach = 6 + rh.radius * 2.2;
+      // A trip met for the first time starts framed as it stands, parked or flying, rather than easing in from elsewhere.
+      if (this.rideFramedFor !== ride) {
+        this.rideFramedFor = ride;
+        this.rideView.share = ride.lowView ? 1 : 0;
+      }
+      const f = stepFraming(this.rideView, ride.lowView, dt);
+      const reach = (6 + rh.radius * 2.2) * f.reach;
+      // Its middle: a hull's origin is the underside of its box, which on a pad is the pad itself.
+      const b = rh.spec.bounds;
+      const mid = this.rideMid.set(0, Math.abs(b.max[1] - b.min[1]) / 2, 0).applyQuaternion(rh.group.quaternion).add(rh.pos);
       if (input.held('freeLook')) {
         this.cam.release();
         this.cam.setFrame(null);
-        this.cam.update(input, rh.pos, null, dt, null, Math.max(1, reach / 6), 1.5, 0);
-      } else this.cam.chase(input, dt, rh.pos, rh.group.quaternion, rh.heading, reach, null);
+        this.cam.update(input, mid, this.rideBlock, dt, null, Math.max(1, reach / 6), 0, 0);
+      } else this.cam.chase(input, dt, mid, rh.group.quaternion, rh.heading, reach, null, this.rideBlock, f.rise);
       this.cam.zoomTarget = Math.max(this.cam.zoomTarget, RIDE_TUNE.minZoom);
       this.showHull(rh, true);
       return;
@@ -8994,6 +9016,20 @@ class App {
       this.showHull(seated, !!seated.cockpitFrame);
     }
   }
+
+  /** How the passenger's view frames the hull of the trip it last framed, kept and written in place, and that trip. */
+  private readonly rideView = rideFraming(true);
+  private rideFramedFor: ShuttleRide | null = null;
+  private readonly rideMid = new THREE.Vector3();
+  /**
+   * What stands between the passenger's view and the hull, kept rather than made a frame: the first
+   * thing that stands still along the line, the orbit's own question (`Physics.blockDistance` is
+   * `cameraBlock` asked without making a ray), indoors leaving the ground and the building's shell out.
+   */
+  private readonly rideBlock: import('./core/camera').CameraBlocker = (from, to) => {
+    const d = this.physics.blockDistance(from.x, from.y, from.z, to.x, to.y, to.z, this.world.inside);
+    return d === Infinity ? null : d;
+  };
 
   /** Show or hide a flown hull for the view, remembering one left hidden so that it is shown again when the view moves on. */
   private showHull(v: Vehicle, shown: boolean): void {
@@ -10012,7 +10048,7 @@ class App {
     this.hyperspace.abort('died');
     this.ultraCruise.abort();
     // Nothing reaches a passenger, but a death that comes by some other way puts them down where they are.
-    this.ride?.abort('died');
+    this.ride?.abort('died', true);
     if (this.dying) return;
     this.dying = true;
     this.closePanels();
@@ -11355,7 +11391,7 @@ class App {
     const f = this.deathChoices[index];
     if (!f || this.traveling) return;
     // A death already stopped any shuttle trip; this says so again before the player is moved.
-    this.ride?.abort('respawn');
+    this.ride?.abort('respawn', true);
     this.deathChoices = [];
     this.death.classList.remove('on');
     this.traveling = true;

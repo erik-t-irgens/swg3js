@@ -25,7 +25,9 @@
 // lifts off and where the ticket goes after; stepping off while it waits gives the ticket back, E in the
 // air only says why not, a hull ready too late or a passenger no longer there is missed with the ticket
 // back, a far pad with no rig sets the passenger down at the port at the cut, and stopping the trip in
-// any leg leaves nobody seated, nobody hidden and nothing held. A ship coming at it and a wall ahead each
+// any leg leaves nobody seated, nobody hidden and nothing held -- once it has lifted off, with the
+// passenger set down at the port it was flying to rather than left in the air, unless whoever stopped
+// it moves the body itself -- and the host is told exactly once that it has ended. A ship coming at it and a wall ahead each
 // send the hull up over them, against the same flight with nothing there; its look ahead never reaches
 // past the end of its course; and a pass knocked wide of the join is flown round again and still lands.
 //
@@ -41,7 +43,8 @@ import { RigHull, assembleRigModel } from '../../../src/vehicles/rigHull.ts';
 import type { DriveInput } from '../../../src/vehicles/vehicle';
 import { planHop, planRoute, type PadRef } from '../../../src/world/rideRoute.ts';
 import { RIG_PATH_TUNE, noseOntoPath, onPad, pathPose, pathVelocity, poseRigAction, turnOnPad, vehicleAt, vehicleFromJoint, type RigActions } from '../../../src/world/rigPath.ts';
-import { RIDE_TUNE, ShuttleRide, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
+import { RIDE_TUNE, ShuttleRide, rideFraming, stepFraming, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
+import { CHASE_RISE } from '../../../src/core/camera.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs, type RigDrive, type RigFx } from '../../../src/world/shuttleRigs.ts';
 import { rigPose, type RigClips, type RigPose, type ShuttleState, type Ticket } from '../../../src/world/travelTerminal.ts';
 
@@ -242,13 +245,15 @@ interface Passenger {
   ships: { pos: THREE.Vector3; vel: THREE.Vector3; radius: number }[];
   rays: number;
   obstacleAt: number;
+  /** Every trip the host was told has ended, in order, and what had been given back and said by then. */
+  ended: { ride: ShuttleRide; running: boolean; given: number; seated: boolean }[];
 }
 function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideRigs, camera: THREE.Camera) {
   const clock = { t: 0 };
   const world = new Set<RideHull>();
   const counts = { shown: 0, disposed: 0 };
   const late = new Map<string, number>();
-  const passenger: Passenger = { canSeat: true, seatedIn: null, seats: 0, offAt: [], given: [], said: [], walkedTo: [], cleared: [], ships: [], rays: 0, obstacleAt: Infinity };
+  const passenger: Passenger = { canSeat: true, seatedIn: null, seats: 0, offAt: [], given: [], said: [], walkedTo: [], cleared: [], ships: [], rays: 0, obstacleAt: Infinity, ended: [] };
   const host: RideHost = {
     clearPad: (pad) => void passenger.cleared.push(pad.key),
     seat: (h) => {
@@ -273,6 +278,7 @@ function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideR
     say: (text) => void passenger.said.push(text),
     giveBack: (id) => void passenger.given.push(id),
     walkOff: (_pack, port) => void passenger.walkedTo.push(port),
+    ended: (ride) => void passenger.ended.push({ ride, running: ride.running, given: passenger.given.length, seated: passenger.seatedIn !== null }),
     buildHull: async () => (typeof hull === 'function' ? hull() : hull),
     showHull: (h) => {
       counts.shown++;
@@ -1008,6 +1014,64 @@ const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 
   ok(Number.isFinite(pastEnd) && pastEnd <= 1e-9, `no look ahead ever reached past the end of its course, where the landing clip has the hull (${f1(pastEnd)} m at the most)`);
   ok(!ride.running && ride.ended === 'gone' && hull.disposed && rigs.tidy() && !ride.riding && !ride.hidden && ride.keepPlace() === null, 'empty, it flies off and is taken away with nothing held, and nobody is hidden or kept anywhere');
   ok(passenger.given.length === 0, 'a ticket flown on is not given back');
+  ok(passenger.ended.length === 1 && passenger.ended[0].ride === ride && !passenger.ended[0].running, `and the host is told the trip has ended once, when it has gone and not before (${passenger.ended.length})`);
+}
+
+{
+  // The passenger's view, framed as the game frames it (`stepFraming`, fed `lowView` every frame): close
+  // and low while the hull stands on a pad or is still near one, as a ship in flight is framed while it
+  // flies, and eased between the two so that nothing about the view ever jumps. A pad stands inside walls
+  // and under roofs; framed as in flight, the view stood on the roof of Bestine's starport.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock } = makeHost(hull, rigs, watching(destination));
+  const ride = new ShuttleRide(planRoute(ticketTo(destination, 'view'), origin, destination, 'test')!, host, true);
+  clock.t = 1;
+  await ride.begin();
+  const f = rideFraming(ride.lowView);
+  const low: Record<string, boolean[]> = {};
+  let stepShare = 0;
+  let stepReach = 0;
+  let stepRise = 0;
+  const seated = { parked: 0, parkedFrames: 0 };
+  for (let i = 0; i < 60 * 300 && ride.running; i++) {
+    clock.t += DT;
+    ride.update(DT);
+    hull.step(DT);
+    const k = ride.leg?.kind ?? 'ended';
+    const was = { share: f.share, reach: f.reach, rise: f.rise };
+    stepFraming(f, ride.lowView, DT);
+    stepShare = Math.max(stepShare, Math.abs(f.share - was.share));
+    stepReach = Math.max(stepReach, Math.abs(f.reach - was.reach));
+    stepRise = Math.max(stepRise, Math.abs(f.rise - was.rise));
+    (low[k] ??= []).push(ride.lowView);
+    if (ride.riding && k === 'off') {
+      seated.parkedFrames++;
+      if (f.share === 1) seated.parked++;
+    }
+  }
+  const all = (k: string, v: boolean) => (low[k] ?? []).length > 0 && low[k].every((x) => x === v);
+  // Starting as `from` and, once it has changed, never going back.
+  const once = (xs: boolean[] | undefined, from: boolean) => !!xs && xs.length > 0 && xs[0] === from && xs.every((x, i) => i === 0 || x === xs[i - 1] || xs[i - 1] === from);
+  ok(all('board', true) && all('off', true) && all('fly', false), 'the view is framed as parked while it boards and while it stands where it landed, and as a ship in flight all the way between');
+  ok(once(low.lift, true) && once(low.land, false), `lifting off it is framed as parked until it is ${RIDE_TUNE.viewLow} m up, and coming down from ${RIDE_TUNE.viewLow} m over the pad, changing once each way (${low.lift?.filter(Boolean).length ?? 0} of ${low.lift?.length ?? 0} lifting frames, ${low.land?.filter(Boolean).length ?? 0} of ${low.land?.length ?? 0} landing)`);
+  const parked = rideFraming(true);
+  const flying = rideFraming(false);
+  ok(parked.reach === RIDE_TUNE.parkedReach && parked.rise === RIDE_TUNE.parkedRise && parked.reach < flying.reach && parked.rise < flying.rise && flying.reach === 1 && flying.rise === CHASE_RISE, `parked it stands ${RIDE_TUNE.parkedReach} of the flight's distance back and ${RIDE_TUNE.parkedRise} up a metre, against the flight's 1 and ${CHASE_RISE}`);
+  ok(stepShare <= DT / RIDE_TUNE.viewEase + 1e-9 && stepReach < 0.01 && stepRise < 0.005, `and it never jumps from one to the other: at the most ${stepShare.toFixed(4)} of the way, ${stepReach.toFixed(4)} of the distance back and ${stepRise.toFixed(4)} of the rise in a frame, over ${RIDE_TUNE.viewEase} s`);
+  ok(seated.parkedFrames > 0 && seated.parked > 0, `and by the time the passenger is let off it is framed as parked (${seated.parked} of ${seated.parkedFrames} seated frames on the far pad)`);
+}
+
+{
+  // What the game passes the passenger's view, read since node cannot load main.ts: the chase and the
+  // free look both test what stands between the view and the hull's middle, and the test is only what
+  // stands still, so the hull itself, solid on its pad, never stands in the way of its own passenger.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  ok(/this\.cam\.chase\(input, dt, mid, rh\.group\.quaternion, rh\.heading, reach, null, this\.rideBlock, f\.rise\)/.test(main) && /this\.cam\.update\(input, mid, this\.rideBlock,/.test(main), "the passenger's chase and free look are both given the view's block, at the hull's middle, with the framing's rise");
+  ok(/private readonly rideBlock[^=]*= \(from, to\) => \{\n\s*const d = this\.physics\.blockDistance\(from\.x, from\.y, from\.z, to\.x, to\.y, to\.z, this\.world\.inside\);/.test(main), 'and the block is the first thing that stands still along the line (`blockDistance`), never a body that moves, the hull among them');
+  const physics = readFileSync(new URL('../../../src/core/physics.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const block = /blockDistance\([^)]*\): number \{[\s\S]*?\n  \}/.exec(physics)?.[0] ?? '';
+  ok(/this\.fixedOnly\)/.test(block) && /return !b \|\| b\.isFixed\(\);/.test(physics), 'which is what `blockDistance` asks: fixed or bodiless colliders only');
 }
 
 {
@@ -1100,7 +1164,62 @@ const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 
       reached && passenger.seatedIn === null && hull.disposed && !ride.hidden && !ride.riding && rigs.tidy() && passenger.given.join() === (leg === 'board' ? leg : ''),
       `stopped in its ${leg} leg (${seated ? 'with the passenger in it' : 'empty'}): nobody left seated, the hull gone, nobody hidden, nothing held${leg === 'board' ? ', and the ticket back' : ', and the ticket kept'}`,
     );
+    // Where they are put down: at the foot of the ramp on either pad, and -- once it has lifted off and
+    // the trip is paid for -- at the port it was flying to, the way a trip with no pad there sets them
+    // down, never in the air where the hull was.
+    const airborne = leg === 'lift' || leg === 'fly' || leg === 'land';
+    ok(
+      passenger.walkedTo.join() === (airborne ? destination.port : '') && (!airborne || passenger.said.some((s) => s.includes('set down at the port'))),
+      `${airborne ? `stopped in the air (${leg}), the passenger is set down at ${destination.port}, as a trip with no pad there is, and told so` : `stopped in its ${leg} leg, nobody is sent anywhere`} (${passenger.walkedTo.join() || 'nowhere'})`,
+    );
+    const ends = passenger.ended;
+    ok(
+      ends.length === 1 && ends[0].ride === ride && !ends[0].running && !ends[0].seated && ends[0].given === passenger.given.length,
+      `and the host is told once that the trip has ended, with it no longer running, nobody seated and any ticket already back (${ends.length} time${ends.length === 1 ? '' : 's'})`,
+    );
   }
+}
+
+{
+  // A stop in the air by whoever moves the body the moment after (a travel, a death, the select screen)
+  // leaves the moving to them: nobody is sent to the port on top of it. A hull taken away under the trip
+  // in the air, with nobody moving the body, sets them down at the port all the same.
+  for (const how of ['moved', 'lost'] as const) {
+    const hull = new FakeHull();
+    const rigs = new FakeRigs();
+    const { host, clock, passenger, world } = makeHost(hull, rigs, watching(destination));
+    const ride = new ShuttleRide(planRoute(ticketTo(destination, how), origin, destination, 'test')!, host, true);
+    clock.t = 1;
+    await ride.begin();
+    for (let i = 0; i < 60 * 300 && ride.running && ride.leg?.kind !== 'fly'; i++) {
+      clock.t += DT;
+      ride.update(DT);
+      hull.step(DT);
+    }
+    const flying = ride.leg?.kind === 'fly' && ride.riding;
+    if (how === 'moved') ride.abort('travel', true);
+    else {
+      world.delete(hull);
+      clock.t += DT;
+      ride.update(DT);
+    }
+    ok(
+      flying && !ride.running && passenger.seatedIn === null && passenger.given.length === 0 && passenger.walkedTo.join() === (how === 'moved' ? '' : destination.port) && passenger.ended.length === 1,
+      how === 'moved'
+        ? 'stopped in the air by a caller that moves the body itself, the passenger is left for it to move: not sent to the port as well, and the ticket kept'
+        : `a hull taken away under the trip in the air sets its passenger down at ${destination.port} (${ride.ended}), the ticket kept`,
+    );
+  }
+}
+
+{
+  // What the game does when the host is told: the player's ticket is let go of once that trip is over,
+  // and only for the trip it is the ticket of. Node cannot load main.ts, so it is read.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  const hook = /\n\s*ended: \(r\) => \{\s*\n\s*if \(r === this\.ride\) this\.rideTicket = null;\s*\n\s*\},/.test(main);
+  ok(hook, "the game's host lets go of the player's ticket the moment that trip ends, and only for that trip");
+  const moved = ['leaving for the select screen', 'travel', 'teleport', 'died', 'respawn'].filter((w) => !main.includes(`abort('${w}', true)`));
+  ok(moved.length === 0, `and every stop whose caller moves the body itself says so, so a passenger is never sent to the port on top of it (${moved.length ? `missing: ${moved.join(', ')}` : '5 of 5'})`);
 }
 
 {

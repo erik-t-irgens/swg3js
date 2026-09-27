@@ -327,6 +327,19 @@ export function decideStand(rec: SpawnRecord, at: StandWhere): StandChoice {
   return { do: 'stand', args: spawnArgsFor(rec) };
 }
 
+/**
+ * Whether the world's list takes a body down: only one that was stood from the list's own records
+ * (`listed`), and only when the list no longer names it. The list is the whole truth about the creatures
+ * a server holds and about nothing else. A body this browser stood for its own reasons under a world name
+ * of its own -- a ticket collector at its post (`travel:`), a lair's creature (`wild:`), a person standing
+ * about (`stood:`) -- is in no list, and it was taken down by every one that came: a line that drops says
+ * so with an empty list, and a server address with nobody answering it says so at every try, so the
+ * ticket collectors went and were stood again, all thirteen of Tatooine's together, every fifteen seconds.
+ */
+export function sweptByList(id: string, listed: boolean, wanted: ReadonlySet<string>): boolean {
+  return !!id && listed && !wanted.has(id);
+}
+
 /** How many records may wait for the catalogue at once; a world's whole list is far inside this. */
 export const PENDING_CAP = 1024;
 

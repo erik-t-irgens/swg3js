@@ -30,6 +30,7 @@ import {
   spawnArgsFor,
   spawnIdFor,
   spawnRefusal,
+  sweptByList,
   wildlifeWanted,
   type SpawnRecord,
   type StandWhere,
@@ -265,6 +266,27 @@ const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
   admin = true;
   ok(spawnRefusal(live) === '', '8: and is refused no longer the moment it becomes one, with nothing to redraw first');
   ok(WORLD_HOLDS_IT.length > 0 && WORLD_HOLDS_IT !== NOT_ADMIN, '8: a machine row that stands one of the world’s creatures has a word of its own');
+}
+
+// --- 9: what the world's list may take down -------------------------------------------------------------
+// The list is the whole truth about the creatures the server holds, and about nothing else. A line that
+// drops says so with an empty list, and a server address that nobody answers says it at every try, which
+// once took down every body this browser had stood under a world name of its own -- all thirteen of
+// Tatooine's ticket collectors at once, every fifteen seconds, to be stood again a second later.
+{
+  const none = new Set<string>();
+  for (const own of ['travel:tatooine:4', 'stood:1234', 'wild:99']) {
+    ok(!sweptByList(own, false, none), `9: an empty list does not take down ${own}, which this browser stood for itself`);
+  }
+  ok(sweptByList('s12', true, none), '9: while one of the world’s own creatures that the list no longer names goes');
+  ok(!sweptByList('s12', true, new Set(['s12'])), '9: and one it still names stays');
+  ok(!sweptByList('', true, none), '9: and a body with no world name is never the list’s to take');
+  // The rule is only worth having if both halves of the game ask it: the manager marks what it stood
+  // from a record, and the list's handler asks that mark rather than the name alone.
+  const manager = src('../../../src/world/mobiles/manager.ts');
+  const main = src('../../../src/main.ts');
+  ok(/worldId: a\.id, listed: true \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
+  ok(/if \(sweptByList\(id, mobiles\.fromList\(m\), wanted\)\) mobiles\.removeById\(id\);/.test(main) && !/if \(id && !wanted\.has\(id\)\) mobiles\.removeById\(id\);/.test(main), '9: and the list’s handler asks that mark, not the name alone');
 }
 
 console.log(`\n${checks} checks passed`);
