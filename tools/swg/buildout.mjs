@@ -143,7 +143,10 @@ export function loadBuildouts(vfs, planet, { events = false } = {}) {
         else containedBy = 0;
       }
       const pos = cellIndex === 0 ? [x0 + Number(r.px), Number(r.py), z0 + Number(r.pz)] : [Number(r.px), Number(r.py), Number(r.pz)];
-      nodes.push({ id, containedBy, template, cellIndex, q: [Number(r.qw), Number(r.qx), Number(r.qy), Number(r.qz)], pos, radius: Number(r.radius) || 0, portalLayoutCrc, children: [], area: name, event: area.eventRequired ? String(area.eventRequired) : undefined });
+      // The table's own id is kept beside the one given here (`rawId`): the ids are renumbered clear of
+      // the snapshot's, but the server named a buildout cell by the table's number, so a person the
+      // server stood in the squill cave or Jabba's palace can only find their room by it.
+      nodes.push({ id, ...(v2 && Number(r.objid) ? { rawId: Number(r.objid) } : {}), containedBy, template, cellIndex, q: [Number(r.qw), Number(r.qx), Number(r.qy), Number(r.qz)], pos, radius: Number(r.radius) || 0, portalLayoutCrc, children: [], area: name, event: area.eventRequired ? String(area.eventRequired) : undefined });
       stats.objects++;
     }
   });
@@ -160,7 +163,7 @@ export function mergeBuildouts(snap, buildout) {
       snap.templates.push(n.template);
       index.set(n.template, ti);
     }
-    snap.nodes.push({ id: n.id, containedBy: n.containedBy, templateIndex: ti, cellIndex: n.cellIndex, q: n.q, pos: n.pos, radius: n.radius, portalLayoutCrc: n.portalLayoutCrc, children: [], buildout: n.area });
+    snap.nodes.push({ id: n.id, ...(n.rawId !== undefined ? { rawId: n.rawId } : {}), containedBy: n.containedBy, templateIndex: ti, cellIndex: n.cellIndex, q: n.q, pos: n.pos, radius: n.radius, portalLayoutCrc: n.portalLayoutCrc, children: [], buildout: n.area });
   }
   return snap;
 }

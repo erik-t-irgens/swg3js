@@ -71,6 +71,12 @@ export interface CreatureDef {
   herd: boolean;
   pack: boolean;
   social: string;
+  /**
+   * Its own numbers, worked out by the catalogue's own rule from its own record (pack format 2, the
+   * converter's `gameOf`): every body is shared by every creature drawn as it, and the body's catalogue
+   * entry carries only one of theirs. Read as data here, so every field is checked where it is used.
+   */
+  game?: { level?: unknown; hp?: unknown; damage?: unknown; aggression?: unknown; attackable?: unknown; killer?: unknown; stalker?: unknown };
 }
 
 /**

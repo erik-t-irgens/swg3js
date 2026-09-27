@@ -2,11 +2,18 @@
 //
 // These are not the wildlife and the difference runs all the way through. A lair is a shape with a
 // weighted list and a cap, and where its animals stand is drawn from a seed on this side because
-// nobody knows where the server put them. A standing person is the opposite: every one of the 4,619
-// rows is a real place the real server used, read out of its own screenplays, with its own facing
-// and its own respawn in seconds. Nothing here is invented except how near you have to be, how many
-// stand at once, how much nearer somebody must be to take another's place and how far one steps
-// about its spot.
+// nobody knows where the server put them. A standing person is the opposite: every row is a real
+// place the real server used, read out of its own screenplays, with its own facing and its own
+// respawn in seconds. Nothing here is invented except how near you have to be, how many stand at
+// once, how much nearer somebody must be to take another's place and how far one steps about its
+// spot.
+//
+// **What a town's row says about the one standing there is the server's, and is kept.** Pack format 2
+// says which rows the town stood with its brain off (`still`: they never wander) and which it made
+// unattackable whatever body it drew (`peaceful`: part of the furniture), and each row's own creature
+// carries its temper and whether it may be struck. The body's catalogue entry is one creature's out of
+// every one drawn as that body, so read alone it had a town's guards, jawas and trainers taking the
+// tempers of whoever else once wore their bodies: the towns opened fire on anybody walking in.
 //
 // **Half of them are indoors**, and that is the whole reason this is a file of its own rather than
 // another branch of the wild pass. A row inside a building carries the room it stands in, and the
@@ -30,6 +37,7 @@ import type { MobileCatalogue } from './mobiles/catalogue.ts';
 import type { MobileEntry } from './mobiles/types.ts';
 import type { Mobile } from './mobiles/mobile.ts';
 import type { Post } from './mobiles/brain.ts';
+import type { Aggression } from '../combat/kit.ts';
 import { intoWorld, tuneTable } from './wildLife.ts';
 
 /**
@@ -48,11 +56,34 @@ export interface StandingRow {
   cell: number;
   /** Which room of its building, where the converter could resolve it; absent outdoors. */
   room?: number | null;
-  /** Seconds before they come back. The data's own, and four in five of them are five minutes. */
+  /**
+   * Seconds before they come back. The data's own, and four in five of them are five minutes. **Nought
+   * is never**: the server ran a body's timer only when it was above nought, so a row written with
+   * nought (a bunker's boss, a trainer, an event's visitor) stays down once killed.
+   */
   respawn: number;
   /** Which part of the world's life this is: a cave, a point of interest, a town, a dungeon. */
   where: string;
+  /** Pack format 2: the town stood it with its brain off, so it never wanders from its spot. */
+  still?: boolean;
+  /** Pack format 2: the town made it unattackable whatever body it drew (its stationary crowd, its strolling patrols). */
+  peaceful?: boolean;
+  /**
+   * Its own creature's temper and whether that creature may be struck at all, out of the pack's fleet
+   * half (format 2's `game`), put on the row when it is taken (`adopt`). A body is shared by every
+   * creature drawn as it and its catalogue entry carries only one of their tempers, which is how a
+   * town's trainer could stand as a body somebody's hired gun once wore.
+   */
+  temper?: Aggression;
+  strikeable?: boolean;
 }
+
+/** What a creature the rows name is by its own numbers, as far as standing it needs: format 2's `game`. */
+export interface PeopleCreature {
+  game?: { aggression?: unknown; attackable?: unknown };
+}
+
+const TEMPERS: readonly Aggression[] = ['passive', 'skittish', 'defensive', 'aggressive'];
 
 /**
  * Whether a standing person is part of the furniture: stands where they were stood, takes no
@@ -78,11 +109,18 @@ export interface PeopleDeps {
   catalogue(): MobileCatalogue | null;
   /**
    * Stand one. `at` is in the world's own frame. `inside` is true for a person in a room, which
-   * changes how the ground is found, and `essential` for one the server marked unattackable (see
-   * `standsStill`).
+   * changes how the ground is found, `essential` for one the server marked unattackable (see
+   * `standsStill`), and `temper` its own creature's temper where the row knows it, over its body's.
    */
-  spawn(entry: MobileEntry, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, seed: number, essential: boolean): Mobile | string;
+  spawn(entry: MobileEntry, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, seed: number, essential: boolean, temper?: Aggression): Mobile | string;
   remove(m: Mobile): void;
+  /**
+   * How many bytes the model memory budget is short of standing `entry` now (nought when it fits), and
+   * how many putting one body down would give back. Both or neither: with them a full budget is a
+   * reason to put somebody farther off down, as a full cap is; without them it refuses as it did.
+   */
+  short?(entry: MobileEntry): number;
+  frees?(m: Mobile): number;
   /** The layout's centre, which the rows are measured from; null before the pack lands, and then nothing stands. */
   centre(): { x: number; z: number } | null;
   held(): boolean;
@@ -161,6 +199,10 @@ export class StandingPeople {
   private readonly near: number[] = [];
   private away = new Float64Array(0);
   private readonly nearer = (a: number, b: number): number => this.away[a] - this.away[b];
+  private readonly farther = (a: number, b: number): number => this.away[b] - this.away[a];
+  /** Kept lists for making room in the memory budget (`makeMemory`): who could go, and who does. */
+  private readonly spare: number[] = [];
+  private readonly chosen: number[] = [];
   /**
    * `up` is the bodies standing, `down` the dead waiting to come back; `stood`, `dropped`, `swapped`
    * (put down to make room for somebody nearer) and `waiting` are what the last pass that really ran
@@ -177,8 +219,11 @@ export class StandingPeople {
    * Take the rows a pack carries. Only those that reach a body, and only those really placed. Each
    * is copied, since the pass carries its own into the world's frame and the pack's are left as the
    * pack wrote them.
+   *
+   * `creatures` is the pack's fleet half, where each row's own creature carries its temper and
+   * whether it may be struck (format 2); a row whose creature says neither stands as its body does.
    */
-  adopt(rows: readonly StandingRow[] | null | undefined): void {
+  adopt(rows: readonly StandingRow[] | null | undefined, creatures?: Readonly<Record<string, PeopleCreature>> | null): void {
     this.rows = [];
     this.up.clear();
     this.framed = false;
@@ -186,7 +231,11 @@ export class StandingPeople {
       // A row indoors whose room could not be resolved is a position in a cell and nowhere on a
       // planet: the converter leaves those out, and this refuses any that slip through.
       if (r.cell && (r.room === null || r.room === undefined)) continue;
-      this.rows.push({ ...r });
+      const row: StandingRow = { ...r };
+      const game = creatures && Object.prototype.hasOwnProperty.call(creatures, r.who) ? creatures[r.who]?.game : undefined;
+      if (game && TEMPERS.includes(game.aggression as Aggression)) row.temper = game.aggression as Aggression;
+      if (game && typeof game.attackable === 'boolean') row.strikeable = game.attackable;
+      this.rows.push(row);
     }
     this.away = new Float64Array(this.rows.length);
     this.near.length = 0;
@@ -268,7 +317,7 @@ export class StandingPeople {
         }
         s.body = null;
       }
-      if (s.diedAt > 0 && (PEOPLE_TUNE.respawns || !s.killed) && now - s.diedAt >= Math.max(1, s.row.respawn)) this.up.delete(i);
+      if (s.diedAt > 0 && !staysDown(s) && now - s.diedAt >= Math.max(1, s.row.respawn)) this.up.delete(i);
     }
 
     // Then who is too far off to keep, and who is near enough to stand.
@@ -288,9 +337,10 @@ export class StandingPeople {
             deps.remove(here.body);
             this.last.dropped++;
           }
-          // With respawning off the killed are remembered however far the player goes, or walking
-          // away and back would be a respawn by another name.
-          if (here.killed && !PEOPLE_TUNE.respawns) here.body = null;
+          // Somebody killed who stays down (respawning off, or a row that never came back) is
+          // remembered however far the player goes, or walking away and back would be a respawn by
+          // another name.
+          if (staysDown(here)) here.body = null;
           else this.up.delete(i);
         }
         continue;
@@ -317,6 +367,14 @@ export class StandingPeople {
       }
       const entry = cat.byId(r.id);
       if (!entry) continue;
+      // **The model memory budget full, the farthest standing make room too**, as they do for the cap
+      // below: people farther off than this row by the margin and in no fight, farthest first, and only
+      // as many as give back what this one needs. Nobody at all when all of them together would not
+      // -- a row that cannot fit would otherwise put people down for nothing on every pass, and they
+      // would stand again behind it. Without this a crowd stood on the way in held the budget and
+      // every nearer person, the cantina's whole room among them, was refused for as long as it stood.
+      const short = deps.short?.(entry) ?? 0;
+      if (short > 0) live -= this.makeMemory(i, short, deps);
       // **The cap full, the farthest standing makes room**, if it is enough farther off than this
       // row and in no fight. Found before this one is stood and put down only once it has been, so
       // a refusal never costs anybody their place. The rows are nearest first, so once one finds
@@ -330,7 +388,11 @@ export class StandingPeople {
       // room's own frame and the manager's own ground lookup would find the terrain under the
       // building instead. Outdoors no height is given, for the reason the wildlife learned.
       const spot = inside ? { x: r.x, z: r.z, y: r.y, heading: r.heading } : { x: r.x, z: r.z, heading: r.heading };
-      const m = deps.spawn(entry, spot, inside, i, standsStill(entry));
+      // Part of the furniture when the town made it so whatever body it drew, or when its own creature
+      // may not be struck; its body's catalogue entry answers only for a row whose creature says
+      // nothing. Its own creature's temper goes with it, since the body's is some other creature's.
+      const essential = r.peaceful === true || (r.strikeable !== undefined ? !r.strikeable : standsStill(entry));
+      const m = deps.spawn(entry, spot, inside, i, essential, r.temper);
       if (typeof m === 'string') {
         this.last.refused = m;
         continue;
@@ -354,6 +416,43 @@ export class StandingPeople {
       this.last.stood++;
     }
     this.count();
+  }
+
+  /**
+   * Put down, farthest first, the fewest people farther than row `i` by the margin and in no fight who
+   * between them give back `short` bytes of the model memory budget, and answer how many. Nought, with
+   * nobody put down, when all of them together would not. Uses the kept scratch lists, so a pass that
+   * makes room allocates nothing.
+   */
+  private makeMemory(i: number, short: number, deps: PeopleDeps): number {
+    if (!deps.frees) return 0;
+    const beyond = this.away[i] + PEOPLE_TUNE.swapMargin;
+    const c = this.spare;
+    c.length = 0;
+    for (const [k, s] of this.up) {
+      const b = s.body;
+      if (!b || b.dead || b.removed || b.engaged || this.away[k] <= beyond) continue;
+      c.push(k);
+    }
+    c.sort(this.farther);
+    const chosen = this.chosen;
+    chosen.length = 0;
+    let got = 0;
+    for (const k of c) {
+      if (got >= short) break;
+      const f = deps.frees(this.up.get(k)!.body!);
+      if (f <= 0) continue;
+      got += f;
+      chosen.push(k);
+    }
+    if (got < short) return 0;
+    for (const k of chosen) {
+      const s = this.up.get(k)!;
+      if (s.body) deps.remove(s.body);
+      this.up.delete(k);
+      this.last.swapped++;
+    }
+    return chosen.length;
   }
 
   /**
@@ -447,11 +546,21 @@ export class StandingPeople {
 }
 
 /**
- * The post a row stands at. Every row is `near` for now: the rows do not yet say which of them the
- * server stood with its brain switched off (the towns' own), which is what `still` is for.
+ * The post a row stands at: `still` for one the town stood with its brain switched off (its named
+ * people and its guards, which the server never let wander and walked home after a fight), `near` for
+ * everyone else, who steps about their spot.
  */
 function postFor(r: StandingRow): Post {
-  return { kind: 'near', heading: r.heading, tune: PEOPLE_TUNE };
+  return { kind: r.still ? 'still' : 'near', heading: r.heading, tune: PEOPLE_TUNE };
+}
+
+/**
+ * Whether somebody killed stays down rather than coming back on their clock: while respawning is
+ * switched off, and always for a row the server wrote with a respawn of nought, which it never brought
+ * back. One the game merely took away (fallen out of the world) is never kept down.
+ */
+function staysDown(s: Stood): boolean {
+  return s.killed && (!PEOPLE_TUNE.respawns || !(s.row.respawn > 0));
 }
 
 /** The one for the session. */

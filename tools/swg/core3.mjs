@@ -47,6 +47,7 @@
 //     rather than as numbers. That is better: `HERD` and `AGGRESSIVE` say what they mean, and no
 //     value from a header this has never seen can be silently wrong.
 
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { findCalls, readLua, LuaCall } from './lua.mjs';
@@ -107,20 +108,78 @@ function headingRadians(deg) {
   return Math.round(r * 10000) / 10000;
 }
 
-/** `getRandomNumber(n)` and a sum containing one, folded to the middle of the range it scatters over. */
-function middleOf(v) {
+/**
+ * Every invented number of the standing people's reader. Live nowhere: the reader runs once, in the
+ * converter, and what it decides is written into the packs.
+ */
+export const STATIC_TUNE = {
+  /**
+   * How far apart, in metres, two people the data puts on one spot are stood. The first keeps the
+   * spot and each after it takes a place on a spiral round it, this far out times the square root
+   * of its turn, so eight people on one point stand in a knot about two metres across rather than
+   * inside each other -- which is what they did, each body shoving the others off its post.
+   */
+  stackSpread: 0.8,
+  /**
+   * How near, in metres across the ground, two people must stand (in the same room, within a metre up
+   * or down) to count as one spot: two bodies of the player's own 0.35 m radius, nearer than which
+   * they stand inside each other.
+   */
+  stackNear: 0.7,
+  /**
+   * The furthest from nought, in metres, a person's height may be and still be a place. Every person
+   * the data stands anywhere is between 600 m down and 600 m up; a row past this is one the data
+   * wrote wrong (a missing comma turns `85.5, -2090.7` into one number two kilometres down) and is
+   * dropped and counted like any other row that will not read.
+   */
+  heightReach: 1000,
+};
+
+/** A value as the text it was written as: the key a row is known by, whatever its numbers come to. */
+function exprText(v) {
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (v instanceof LuaCall) return `${v.call}(${v.args.map(exprText).join(',')})`;
+  return String(v);
+}
+
+/** A number in [0, 1) that depends on nothing but `text`: the one source of every draw below. */
+export function unitOf(text) {
+  return parseInt(createHash('sha1').update(text).digest('hex').slice(0, 8), 16) / 0x100000000;
+}
+
+/**
+ * A value's number, with each `getRandomNumber` in it drawn by `draw(field)`.
+ *
+ * **The data scatters, and reading the scatter as its middle stacks people.** A camp of thirteen
+ * mercenaries is written as thirteen copies of `getRandomNumber(40) + -65.7`: the server drew a place
+ * in a forty-metre box for each of them every time it stood them. Folded to the middle of the box
+ * every one of the thirteen stood on the same point, and 216 of the world's people stood inside
+ * somebody else. So each draw is made once, here, from the row's own key -- one integer in the
+ * range the server's own call would give, `1..n` for one argument and `a..b` for two -- and the
+ * same key always draws the same place, so every browser stands the same thirteen in the same box.
+ * Null when the value is something this cannot count (a variable, another call).
+ */
+function numberOf(v, draw, field) {
   if (typeof v === 'number') return v;
-  if (v instanceof LuaCall && v.call === 'getRandomNumber' && typeof v.args[0] === 'number') return (v.args[0] + 1) / 2;
-  if (v instanceof LuaCall && v.call === '+') {
-    let sum = 0;
-    for (const a of v.args) {
-      const n = middleOf(a);
-      if (n === null) return null;
-      sum += n;
-    }
-    return sum;
+  if (!(v instanceof LuaCall)) return null;
+  if (v.call === 'getRandomNumber' && v.args.every((a) => typeof a === 'number')) {
+    const [a, b] = v.args.length >= 2 ? [v.args[0], v.args[1]] : [1, v.args[0]];
+    return a + Math.floor(draw(field) * (b - a + 1));
+  }
+  if (['+', '-', '*', '/'].includes(v.call) && v.args.length === 2) {
+    // Each side draws on its own, so `getRandomNumber(10) + getRandomNumber(10)` is two draws.
+    const x = numberOf(v.args[0], draw, `${field}.a`);
+    const y = numberOf(v.args[1], draw, `${field}.b`);
+    if (x === null || y === null) return null;
+    return v.call === '+' ? x + y : v.call === '-' ? x - y : v.call === '*' ? x * y : x / y;
   }
   return null;
+}
+
+/** Whether a value holds a draw at all, so a row can say which of its numbers are ours. */
+function drawsIn(v) {
+  return v instanceof LuaCall && (v.call === 'getRandomNumber' || v.args.some(drawsIn));
 }
 
 /**
@@ -160,10 +219,15 @@ export function readRegions(scripts) {
       const label = r[0].startsWith('@') ? (r[0].split(':')[1] ?? r[0]) : r[0];
       const row = { name: label, ...shape };
       if (tier.includes('NAMEDREGION')) named.push(row);
-      if (tier.includes('NOSPAWNAREA') || tier.includes('NOWORLDSPAWNAREA')) noSpawn.push(row);
+      // A place that keeps out only the world-wide spawner (`NOWORLDSPAWNAREA`, the rings round every
+      // town that have spawns of their own) is marked `world`, so it is not taken for a place where
+      // nothing at all may stand; one that keeps out everything is written as it always was.
+      if (tier.includes('NOSPAWNAREA')) noSpawn.push(row);
+      else if (tier.includes('NOWORLDSPAWNAREA')) noSpawn.push({ ...row, world: true });
       if (tier.includes('SPAWNAREA') && Array.isArray(r[5])) {
         const groups = r[5].filter((g) => typeof g === 'string');
-        if (groups.length) spawn.push({ ...row, groups, cap: typeof r[6] === 'number' ? r[6] : 0 });
+        // The world-wide area, one a world, is its fallback: `world` says which it is.
+        if (groups.length) spawn.push({ ...row, groups, cap: typeof r[6] === 'number' ? r[6] : 0, ...(tier.includes('WORLDSPAWNAREA') ? { world: true } : {}) });
       }
     }
     out.set(world, { spawn, noSpawn, named });
@@ -289,8 +353,12 @@ export function readCreatures(scripts) {
     }
     for (const [name, v] of read.values) {
       if (!v || typeof v !== 'object' || v.__class !== 'Creature') continue;
-      const template = Array.isArray(v.templates) ? v.templates.find((t) => typeof t === 'string') : null;
+      const templates = Array.isArray(v.templates) ? v.templates.filter((t) => typeof t === 'string') : [];
+      const template = templates[0] ?? null;
       if (!template) continue;
+      // The weapon groups it fights with, first and second: names of lists of weapon templates
+      // (`readWeaponGroups`). "none" is the absence of one written down.
+      const weapons = [v.primaryWeapon, v.secondaryWeapon].filter((w, i, a) => typeof w === 'string' && w && w !== 'none' && a.indexOf(w) === i);
       const kinds = flagWords(v.creatureBitmask);
       const pvp = flagWords(v.pvpBitmask);
       const mob = flagWords(v.mobType)[0] ?? '';
@@ -318,6 +386,10 @@ export function readCreatures(scripts) {
         ferocity: typeof v.ferocity === 'number' ? v.ferocity : 0,
         hues: Array.isArray(v.hues) ? v.hues.filter((h) => typeof h === 'number') : [],
         weapon: typeof v.primaryWeapon === 'string' ? v.primaryWeapon : '',
+        weapons,
+        // Every body the server could stand it as, drawn at each spawn: a list of templates, or a
+        // dress group's name (`readDressGroups`), which is itself a list. `template` is the first.
+        templates,
         file: basename(file, '.lua'),
       });
     }
@@ -328,96 +400,418 @@ export function readCreatures(scripts) {
 /**
  * The people who stand somewhere and stay there: the whole screenplay tree, not one folder of it.
  *
- * Reading only the folder named for static spawns finds 830 of them. Reading all of it finds 5,257,
- * because most of the world's standing people are in the caves and the points of interest rather
- * than in the folder named after them, and **2,607 of them are inside a building cell** -- the
- * people in a cantina, a cave or a dungeon, who are the whole of what makes a place feel lived in.
- * This converter's older reader skips every one of those, which is why this one exists beside it.
+ * Reading only the folder named for static spawns finds 830 of them. Reading all of it finds several
+ * thousand, because most of the world's standing people are in the caves, the points of interest and
+ * the towns rather than in the folder named after them, and **half of them are inside a building
+ * cell** -- the people in a cantina, a cave or a dungeon, who are the whole of what makes a place feel
+ * lived in.
  *
- * They are placed two ways and both are read. Most are a call per person, and a few worlds instead
- * keep one table of rows and loop over it; the two carry the same seven numbers in the same order,
- * so they come out as one list. **The height is the second of the three coordinates**, not the last.
- * A file that names its world once and writes `self.planet` in every call has that read off its own
- * table, which is 343 rows that would otherwise be lost.
+ * They are written in more shapes than one and every shape is read (`staticsOfFile` says which). The
+ * height is always the second of the three coordinates, never the last. A file that names its world
+ * once and writes `self.planet` in every call has that read off its own table.
  *
  * A call standing inside a conditional is taken anyway and marked, because the condition is quest
  * state this game does not have: somebody who would be there under some circumstance is better
- * standing there than missing. A row whose coordinates are an expression the reader cannot fold is
- * dropped and counted rather than guessed at, except for the scatter the data writes as a random
- * number added to a base, which is folded to the middle of its range.
+ * standing there than missing. A row whose coordinates are an expression the reader cannot count is
+ * dropped and counted rather than guessed at. The scatter the data writes as a random number added
+ * to a base is drawn once, from the row's own key (`settleStatics`), and so is the knot the data ties
+ * when it stands several people on one point.
+ *
+ * Returns `{ statics, dropped, pools, skipped }`: the rows per world, how many were dropped per world
+ * (`?` for none), the named lists a row's body is drawn from per world, and how many statements of
+ * the scripts the Lua reader stepped over.
  */
 export function readStatics(scripts) {
-  const out = new Map();
-  const add = (world, row) => {
-    if (!CORE3_WORLDS.includes(world)) return;
-    if (!out.has(world)) out.set(world, []);
-    out.get(world).push(row);
-  };
-  const dropped = new Map();
   const root = join(scripts, 'screenplays');
+  const raw = new Map();
+  const pools = new Map();
+  const dropped = new Map();
+  let skipped = 0;
   for (const file of luaFiles(root)) {
-    const src = readFileSync(file, 'utf8');
-    if (!src.includes('spawnMobile')) continue;
     // Which part of the world's life this file is: a cave, a point of interest, a town, a dungeon.
     // The folder is the only thing that says so, and it is worth keeping -- a person in a cave and a
     // person in a town are the same row and not the same thing.
     const where = file.slice(root.length + 1).split(/[\\/]/)[0];
-    // A file that names its world once and then writes `self.planet` in every call: read the
-    // screenplay's own table for it. Its logic is stepped over, so a file whose statements this
-    // cannot follow still gives up its world.
-    let own = '';
-    try {
-      for (const [, v] of readLua(src).values) {
-        if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.planet === 'string') {
-          own = v.planet;
-          break;
-        }
+    const got = staticsOfFile(readFileSync(file, 'utf8'), where);
+    skipped += got.skipped;
+    // Which file each row came out of, for telling one person the data writes twice from two people
+    // it writes on one spot (`untie`). Never written into a row.
+    const source = file.slice(root.length + 1).replace(/\\/g, '/');
+    for (const r of got.rows) {
+      if (!CORE3_WORLDS.includes(r.world)) {
+        if (!r.world) dropped.set('?', (dropped.get('?') ?? 0) + 1);
+        continue;
       }
-    } catch {
-      /* the world stays unknown and the rows that need it are counted, not guessed at */
+      if (!raw.has(r.world)) raw.set(r.world, []);
+      raw.get(r.world).push({ ...r, source });
     }
+    for (const [world, n] of got.dropped) dropped.set(world || '?', (dropped.get(world || '?') ?? 0) + n);
+    for (const [world, key, names] of got.pools) {
+      if (!CORE3_WORLDS.includes(world)) continue;
+      if (!pools.has(world)) pools.set(world, new Map());
+      pools.get(world).set(key, names);
+    }
+  }
+  const statics = new Map();
+  for (const world of CORE3_WORLDS) {
+    const rows = raw.get(world);
+    if (!rows) continue;
+    const settled = settleStatics(world, rows);
+    statics.set(world, settled.rows);
+    if (settled.dropped) dropped.set(world, (dropped.get(world) ?? 0) + settled.dropped);
+  }
+  return { statics, dropped, pools, skipped };
+}
 
-    // The per-person form: (planet, who, respawn, x, height, y, heading, cell).
+/** A table read from a file, as against an array, a marker or a word. */
+const isTable = (v) => !!v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof LuaCall);
+/** A string the data wrote that says something (the scripts write `""` for "none"). */
+const said = (v) => (typeof v === 'string' && v ? v : undefined);
+/** A read out of a table (`mob[3]`), by any key, and by a number: the loop over a table of rows. */
+const isAnyRead = (v) => v instanceof LuaCall && v.call === '[]';
+const isRead = (v) => isAnyRead(v) && typeof v.args[1] === 'number';
+
+/**
+ * Every standing person one screenplay file writes, raw: numbers still as the data wrote them, each
+ * row with the world it stands on. Pure, so a node test can hand it a file written by hand.
+ *
+ * The shapes, each measured over the whole tree:
+ *
+ *   - `spawnMobile(world, who, respawn, x, height, y, heading, cell)`, a call per person, anywhere in
+ *     the file (`from: 'call'`);
+ *   - a screenplay's `mobiles`, one row per person in the call's own order with the mood after it
+ *     (`mobiles`): the points of interest, and every town's named people;
+ *   - a town's `stationaryMobiles`, `{respawn, x, height, y, heading, cell, mood}` with no body at
+ *     all: the server drew one each time, four in five from the town's `stationaryCommoners` and one
+ *     in five from its `stationaryNpcs`, so the row names both lists (`draw`, `pools`);
+ *   - a town's `patrolMobiles`, `{points, who, x, height, y, heading, cell, mood, combat}`, walking
+ *     the named list of `patrolPoints` (`{x, height, y, cell, linger}`), the body drawn from
+ *     `patrolNpcs` or `combatPatrol` where the row names one of those instead of a body;
+ *   - a town's `gcwMobs`, `{imperial, rebel, x, height, y, heading, cell, imperialMood, rebelMood,
+ *     scanner}`, the guards, a body for each side (`gcw`), or with one body and one mood where the
+ *     row is shorter than nine;
+ *   - an event's `staticNpcs`, `{who, world, x, height, y, heading, cell}`;
+ *   - the Death Watch bunker's three tables: its static spawns, its quest people (who carry their own
+ *     world last) and the special spawns its events put in their rooms (`gated`);
+ *   - and anywhere, a table naming an `npcTemplate` with `x`, `z` and `y` -- a theme park's or a
+ *     task's `spawnData`, a ticket taker's own row -- whose `z` is its height, its world its own
+ *     `planetName` or the file's; never one placed in a mission building's room (`vectorCellID`).
+ *
+ * **Respawns are the server's own seconds, and nought is never.** The server brings a body back only
+ * when its timer is above nought (a town's guards and combat patrols are brought back by their town's
+ * own five-minute event, and are written with it); a row written with nought -- a bunker's boss, an
+ * event's visitor, a trainer -- was stood once and stayed down once killed.
+ *
+ * A town's rows are the server's static ones (`still`): it stood every one of them with its brain
+ * switched off. The stationary and non-combat patrol rows it also made unattackable whatever body it
+ * drew (`peaceful`).
+ */
+export function staticsOfFile(src, where) {
+  const rows = [];
+  const pools = [];
+  const dropped = new Map();
+  const drop = (world) => dropped.set(world || '', (dropped.get(world || '') ?? 0) + 1);
+  const { values, skipped } = readLua(src);
+  // A file that names its world once: a screenplay's `planet`, a theme park's `planetName`.
+  let own = '';
+  for (const [, v] of values) {
+    if (!isTable(v)) continue;
+    const p = said(v.planet) ?? said(v.planetName);
+    if (p) {
+      own = p;
+      break;
+    }
+  }
+  const town = where === 'cities';
+
+  // The per-person form: (planet, who, respawn, x, height, y, heading, cell). A call that reads its
+  // place out of a table (`mob[3]`) is the loop that stands the file's own `mobiles`, not a person: it
+  // is not a row, but the first one says which element of that table's rows is which (`layout`).
+  let layout = null;
+  if (src.includes('spawnMobile')) {
     for (const c of findCalls(src, ['spawnMobile'])) {
       const a = c.args;
+      if ([a[1], a[3], a[4], a[5]].some(isAnyRead)) {
+        if (!layout && [a[3], a[4], a[5]].every(isRead)) layout = a.map((v) => (isRead(v) ? { index: v.args[1] - 1 } : typeof v === 'number' || (v instanceof LuaCall && !isAnyRead(v)) ? { value: v } : null));
+        continue;
+      }
       const world = typeof a[0] === 'string' && CORE3_WORLDS.includes(a[0]) ? a[0] : own;
-      const who = a[1];
-      if (!world || typeof who !== 'string') {
-        dropped.set(world || '?', (dropped.get(world || '?') ?? 0) + 1);
+      if (!world || typeof a[1] !== 'string') {
+        drop(world);
         continue;
       }
-      const nums = [a[2], a[3], a[4], a[5], a[6], a[7]].map(middleOf);
-      if (nums.slice(0, 5).some((n) => n === null)) {
-        dropped.set(world, (dropped.get(world) ?? 0) + 1);
-        continue;
-      }
-      const [respawn, x, height, y, heading, cell] = nums;
-      add(world, { who, x, y: height, z: y, heading: headingRadians(heading), cell: cell || 0, respawn, gated: c.gated, where });
+      rows.push({ world, who: a[1], respawn: a[2], x: a[3], y: a[4], z: a[5], heading: a[6], cell: a[7] ?? 0, gated: c.gated, where, from: 'call' });
     }
+  }
+  // One element of a `mobiles` row by the call's own argument position: where the loop's call reads
+  // it from the row, what it writes there instead, and otherwise the common layout's own place
+  // (`{who, respawn, x, height, y, heading, cell, mood}`, which is also what a file with no such call
+  // is read as). Most files write exactly that; a few leave the respawn or the facing out of the row
+  // and write it in the call, and read in the common layout their people stood kilometres up.
+  const element = (r, arg, common, otherwise) => {
+    if (!layout) return r[common];
+    const l = layout[arg];
+    if (l && 'index' in l) return r[l.index];
+    if (l && 'value' in l) return l.value;
+    // A variable the call names that this cannot follow: the body is still the row's first word.
+    return arg === 1 ? r[common] : otherwise;
+  };
+  const common = !layout || [1, 2, 3, 4, 5, 6, 7].every((arg) => layout[arg] && 'index' in layout[arg] && layout[arg].index === arg - 1);
 
-    // The one-table form: a screenplay with its own world and a list of rows in the same order.
-    let values;
-    try {
-      ({ values } = readLua(src));
-    } catch {
-      continue;
-    }
-    for (const [, v] of values) {
-      if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
-      if (typeof v.planet !== 'string' || !Array.isArray(v.mobiles)) continue;
-      for (const r of v.mobiles) {
-        if (!Array.isArray(r) || typeof r[0] !== 'string') continue;
-        const nums = [r[1], r[2], r[3], r[4], r[5], r[6]].map(middleOf);
-        if (nums.slice(0, 5).some((n) => n === null)) {
-          dropped.set(v.planet, (dropped.get(v.planet) ?? 0) + 1);
-          continue;
+  for (const [name, v] of values) {
+    if (isTable(v)) {
+      const world = said(v.planet) ?? own;
+      if (Array.isArray(v.mobiles)) {
+        for (const r of v.mobiles) {
+          if (!Array.isArray(r) || typeof r[0] !== 'string') continue;
+          const rowWorld = layout?.[0] && 'index' in layout[0] ? said(r[layout[0].index]) ?? world : world;
+          const who = element(r, 1, 0);
+          if (typeof who !== 'string') continue;
+          rows.push({ world: rowWorld, who, respawn: element(r, 2, 1, 0), x: element(r, 3, 2), y: element(r, 4, 3), z: element(r, 5, 4), heading: element(r, 6, 5, 0), cell: element(r, 7, 6, 0) ?? 0, mood: common ? said(r[7]) : undefined, still: town || undefined, gated: false, where, from: 'mobiles' });
         }
-        const [respawn, x, height, y, heading, cell] = nums;
-        add(v.planet, { who: r[0], x, y: height, z: y, heading: headingRadians(heading), cell: cell || 0, respawn, gated: false, where });
+      }
+      if (Array.isArray(v.stationaryMobiles) && v.stationaryMobiles.length) {
+        const commoners = `${name}.stationaryCommoners`;
+        const npcs = `${name}.stationaryNpcs`;
+        pools.push([world, commoners, names(v.stationaryCommoners)], [world, npcs, names(v.stationaryNpcs)]);
+        for (const r of v.stationaryMobiles) {
+          if (!Array.isArray(r)) continue;
+          rows.push({ world, who: null, respawn: r[0], x: r[1], y: r[2], z: r[3], heading: r[4], cell: r[5] ?? 0, mood: said(r[6]), still: true, peaceful: true, draw: [[commoners, 0.8], [npcs, 0.2]], gated: false, where, from: 'stationary' });
+        }
+      }
+      if (Array.isArray(v.patrolMobiles) && v.patrolMobiles.length) {
+        const walkers = `${name}.patrolNpcs`;
+        const fighters = `${name}.combatPatrol`;
+        pools.push([world, walkers, names(v.patrolNpcs)], [world, fighters, names(v.combatPatrol)]);
+        const points = isTable(v.patrolPoints) ? v.patrolPoints : {};
+        for (const r of v.patrolMobiles) {
+          if (!Array.isArray(r) || typeof r[1] !== 'string') continue;
+          const combat = r[8] === true;
+          const drawn = r[1] === 'patrolNpc' ? walkers : r[1] === 'combatPatrol' ? fighters : null;
+          const route = Array.isArray(points[r[0]]) ? points[r[0]].filter(Array.isArray).map((p) => ({ x: p[0], y: p[1], z: p[2], cell: p[3] ?? 0, linger: p[4] === true })) : [];
+          rows.push({ world, who: drawn ? null : r[1], respawn: combat ? 300 : 0, x: r[2], y: r[3], z: r[4], heading: r[5], cell: r[6] ?? 0, mood: said(r[7]), peaceful: combat ? undefined : true, draw: drawn ? [[drawn, 1]] : undefined, route, gated: false, where, from: 'patrol' });
+        }
+      }
+      if (Array.isArray(v.gcwMobs)) {
+        for (const r of v.gcwMobs) {
+          if (!Array.isArray(r) || typeof r[0] !== 'string') continue;
+          // Shorter than nine is one body for either side; the server's own test.
+          if (r.length < 9) {
+            rows.push({ world, who: r[0], respawn: 300, x: r[1], y: r[2], z: r[3], heading: r[4], cell: r[5] ?? 0, mood: said(r[6]), still: true, gated: false, where, from: 'gcw' });
+          } else if (typeof r[1] === 'string') {
+            const gcw = [{ who: r[0], ...(said(r[7]) ? { mood: r[7] } : {}) }, { who: r[1], ...(said(r[8]) ? { mood: r[8] } : {}) }];
+            rows.push({ world, who: r[0], respawn: 300, x: r[2], y: r[3], z: r[4], heading: r[5], cell: r[6] ?? 0, mood: said(r[7]), still: true, gcw, gated: false, where, from: 'gcw' });
+          }
+        }
+      }
+      if (Array.isArray(v.staticNpcs)) {
+        for (const r of v.staticNpcs) {
+          if (!Array.isArray(r) || typeof r[0] !== 'string') continue;
+          rows.push({ world: said(r[1]) ?? world, who: r[0], respawn: 0, x: r[2], y: r[3], z: r[4], heading: r[5], cell: r[6] ?? 0, gated: false, where, from: 'event' });
+        }
       }
     }
   }
-  return { statics: out, dropped };
+
+  // The Death Watch bunker keeps its people in tables of their own, with its world written only on
+  // the quest people: the bunker's is the world of the one of them standing in one of its rooms.
+  const quest = values.get('deathWatchQuestNpcs');
+  const bunker = (Array.isArray(quest) ? quest.find((r) => Array.isArray(r) && typeof r[6] === 'number' && r[6] && said(r[7])) : null)?.[7] ?? own;
+  const bunkerRow = (r, from, gated) => ({ world: from === 'quest' ? said(r[7]) ?? bunker : bunker, who: r[0], respawn: r[1], x: r[2], y: r[3], z: r[4], heading: r[5], cell: r[6] ?? 0, gated, where, from });
+  for (const r of values.get('deathWatchStaticSpawns') ?? []) if (Array.isArray(r) && typeof r[0] === 'string') rows.push(bunkerRow(r, 'static', false));
+  for (const r of Array.isArray(quest) ? quest : []) if (Array.isArray(r) && typeof r[0] === 'string') rows.push(bunkerRow(r, 'quest', false));
+  const special = values.get('deathWatchSpecialSpawns');
+  if (isTable(special)) for (const r of Object.values(special)) if (Array.isArray(r) && typeof r[0] === 'string') rows.push(bunkerRow(r, 'special', true));
+
+  // Anywhere else: a table naming an npcTemplate and a place. The server stood every such person with a
+  // respawn of one second, whichever script stood them (a theme park's, a task's, a ticket taker's).
+  //
+  // **Not one whose room is a `vectorCellID`.** That is a person inside a building the server puts
+  // down somewhere new each time a mission sends somebody after it (a destructible den, a surveyor's
+  // camp): the place is in that building's room, and the building stands nowhere at all until the
+  // mission is taken. Read as a person standing still, each stood outdoors at the middle of its world.
+  const seen = new Set();
+  const walk = (v) => {
+    if (!v || typeof v !== 'object' || v instanceof LuaCall || seen.has(v)) return;
+    seen.add(v);
+    if (isTable(v) && typeof v.npcTemplate === 'string' && v.x !== undefined && v.y !== undefined && v.z !== undefined) {
+      if (v.vectorCellID !== undefined) return;
+      rows.push({ world: said(v.planetName) ?? own, who: v.npcTemplate, respawn: 1, x: v.x, y: v.z, z: v.y, heading: v.direction ?? 0, cell: v.cellID ?? 0, mood: said(v.mood), sit: v.position === 'SIT' || undefined, gated: false, where, from: 'giver' });
+      return;
+    }
+    for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x);
+  };
+  for (const [, v] of values) walk(v);
+
+  return { rows, pools, dropped, skipped };
+}
+
+/** The names in a list the scripts wrote, strings only. */
+function names(list) {
+  return Array.isArray(list) ? list.filter((s) => typeof s === 'string' && s) : [];
+}
+
+/** The golden angle: consecutive turns of a spiral that never line up with one another. */
+const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+
+/**
+ * One world's raw rows made into the rows a pack carries: each given its key, its numbers counted
+ * (a scatter drawn from the key), its heading in radians, and the knots untied.
+ *
+ * **The key is who, where and which room, as written, and nothing else**: a hash of the row's body
+ * (or the table it draws from), its three coordinates as the data wrote them -- the scatter as its
+ * expression, not as a draw -- and its cell, with a count for rows written exactly alike. So a row
+ * keeps its key and its draw whatever order the files are read in or rows are added round it, and a
+ * body stood from it is known by the same id in every browser and every run.
+ *
+ * **The knots**: people the data puts within `STATIC_TUNE.stackNear` of one another in one room are
+ * one spot. The first in the file keeps it and each after takes a place on a spiral round it
+ * (`nudged`), turned by the first one's own key, so a knot comes out the same every time.
+ *
+ * **One person written twice is not a knot.** A town's table and a quest's own row can both stand the
+ * same named person on the same spot, and nudged apart that is two of one person, one a pace off the
+ * other. So the same body on one spot in one room is dropped (and counted in `dropped`) when the two
+ * rows come out of different files or different tables of one file; the same body written several
+ * times in one table -- a camp of thirteen hired guns -- is that many people, and is untied.
+ */
+export function settleStatics(world, raw) {
+  const seen = new Map();
+  const rows = [];
+  const origin = new Map();
+  let dropped = 0;
+  for (const r of raw) {
+    const base = [world, r.who ?? r.from, exprText(r.x), exprText(r.y), exprText(r.z), exprText(r.cell ?? 0)].join('|');
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    const key = createHash('sha1').update(`${base}#${n}`).digest('hex').slice(0, 12);
+    const draw = (field) => unitOf(`${key}:${field}`);
+    const respawn = numberOf(r.respawn, draw, 'respawn');
+    const x = numberOf(r.x, draw, 'x');
+    const y = numberOf(r.y, draw, 'y');
+    const z = numberOf(r.z, draw, 'z');
+    const heading = numberOf(r.heading, draw, 'heading');
+    const cell = numberOf(r.cell ?? 0, draw, 'cell');
+    if ([respawn, x, y, z, heading].some((v) => v === null) || Math.abs(y) > STATIC_TUNE.heightReach) {
+      dropped++;
+      continue;
+    }
+    const drawn = [r.respawn, r.x, r.y, r.z, r.heading].some(drawsIn);
+    const row = { key, who: r.who, x, y, z, heading: headingRadians(heading), cell: cell || 0, respawn, gated: !!r.gated, where: r.where, from: r.from };
+    if (r.mood) row.mood = r.mood;
+    if (r.still) row.still = true;
+    if (r.peaceful) row.peaceful = true;
+    if (r.sit) row.sit = true;
+    if (r.draw) row.draw = r.draw;
+    if (r.gcw) row.gcw = r.gcw;
+    if (r.route?.length) {
+      const route = [];
+      r.route.forEach((p, i) => {
+        const at = [numberOf(p.x, draw, `route${i}.x`), numberOf(p.y, draw, `route${i}.y`), numberOf(p.z, draw, `route${i}.z`), numberOf(p.cell, draw, `route${i}.cell`)];
+        if (at.every((v) => v !== null)) route.push({ x: at[0], y: at[1], z: at[2], cell: at[3] || 0, linger: p.linger });
+      });
+      if (route.length) row.route = route;
+    }
+    if (drawn) row.drawn = true;
+    rows.push(row);
+    origin.set(row, `${r.source ?? ''}|${r.from ?? ''}`);
+  }
+  const untied = untie(rows, origin);
+  return { rows: untied.rows, dropped: dropped + untied.twice };
+}
+
+/**
+ * Stand people the data put on one spot apart from one another, and drop one person the data wrote
+ * twice (see `settleStatics`). `origin` says which file and table each row came out of.
+ */
+function untie(rows, origin) {
+  const anchors = [];
+  const counts = new Map();
+  const kept = [];
+  let twice = 0;
+  for (const r of rows) {
+    const a = anchors.find((s) => s.cell === r.cell && Math.hypot(s.x - r.x, s.z - r.z) < STATIC_TUNE.stackNear && Math.abs(s.y - r.y) < 1);
+    if (!a) {
+      anchors.push(r);
+      kept.push(r);
+      continue;
+    }
+    if (a.who && a.who === r.who && origin.get(a) !== origin.get(r)) {
+      twice++;
+      continue;
+    }
+    const k = (counts.get(a) ?? 0) + 1;
+    counts.set(a, k);
+    const turn = unitOf(`${a.key}:stack`) * Math.PI * 2 + k * GOLDEN;
+    const out = STATIC_TUNE.stackSpread * Math.sqrt(k);
+    r.x = Math.round((a.x + out * Math.sin(turn)) * 1000) / 1000;
+    r.z = Math.round((a.z + out * Math.cos(turn)) * 1000) / 1000;
+    r.nudged = true;
+    kept.push(r);
+  }
+  return { rows: kept, twice };
+}
+
+/**
+ * The dress groups: a name standing for a list of bodies, one of which the server drew each time it
+ * stood a creature whose template is that name (a commoner, a thug, a noble, a town's police). Each
+ * file declares a list and registers it under a name with `addDressGroup`, which is read as the
+ * registration says rather than by the variable's own name.
+ */
+export function readDressGroups(scripts) {
+  return registeredLists(join(scripts, 'mobile', 'dressgroup'), 'addDressGroup');
+}
+
+/**
+ * The weapon groups: a name standing for the weapon templates a creature naming it may carry, one of
+ * which the server gave it (a Tusken's `primitive_weapons` is a stone knife and two wooden staffs).
+ * Registered with `addWeapon`, read the same way as the dress groups.
+ */
+export function readWeaponGroups(scripts) {
+  return registeredLists(join(scripts, 'mobile', 'weapon', 'groups'), 'addWeapon');
+}
+
+/** Every `register("name", list)` over a folder's files, as name to the list's strings, sorted by name. */
+function registeredLists(dir, register) {
+  const out = new Map();
+  for (const file of luaFiles(dir)) {
+    const { values, calls } = readLua(readFileSync(file, 'utf8'));
+    for (const c of calls) {
+      if (c.call !== register || typeof c.args[0] !== 'string') continue;
+      const list = typeof c.args[1] === 'string' ? values.get(c.args[1]) : c.args[1];
+      if (Array.isArray(list)) out.set(c.args[0], list.filter((s) => typeof s === 'string'));
+    }
+  }
+  return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+}
+
+/**
+ * The Corellian corvette's crews and fittings, by room **name** rather than by cell id: the ship is a
+ * building the server stood a copy of per group, so its rows name the room (`hall10`, `bridge66`)
+ * and whichever copy is used says where that room is. Three crews, one per faction's run, and the
+ * objects every copy stands (terminals, keypads, crates). Kept for the corvette's own wave; the rows
+ * are `{ who, x, y, z, heading, room, name? }` with the height second as everywhere, and the fittings
+ * `{ template, x, y, z, heading, room, name?, fn?, data?, faction? }`.
+ */
+export function readCorvette(scripts) {
+  const file = join(scripts, 'screenplays', 'dungeon', 'corellian_corvette', 'corvetteSpawnMaps.lua');
+  const out = { rebel: [], imperial: [], neutral: [], statics: [] };
+  if (!existsSync(file)) return out;
+  const { values } = readLua(readFileSync(file, 'utf8'));
+  const crew = (list) =>
+    (Array.isArray(list) ? list : [])
+      .filter((r) => Array.isArray(r) && typeof r[0] === 'string' && [1, 2, 3, 4].every((i) => typeof r[i] === 'number') && typeof r[5] === 'string')
+      .map((r) => ({ who: r[0], x: r[1], y: r[2], z: r[3], heading: headingRadians(r[4]), room: r[5], ...(said(r[6]) ? { name: r[6] } : {}) }));
+  out.rebel = crew(values.get('corvetteRebelSpawns'));
+  out.imperial = crew(values.get('corvetteImperialSpawns'));
+  out.neutral = crew(values.get('corvetteNeutralSpawns'));
+  const statics = values.get('corvetteStaticSpawns');
+  // A fitting's tenth element names the one faction's copy it stands in, where it stands in only one:
+  // two computers at one spot in one room are one for each side's run, and the server stood the one
+  // whose faction the copy was stood for. Unnamed, a fitting stands in every copy.
+  out.statics = (Array.isArray(statics) ? statics : [])
+    .filter((r) => Array.isArray(r) && typeof r[0] === 'string' && [1, 2, 3, 5].every((i) => typeof r[i] === 'number') && typeof r[4] === 'string')
+    .map((r) => ({ template: r[0], x: r[1], y: r[2], z: r[3], heading: headingRadians(r[5]), room: r[4], ...(said(r[6]) ? { name: r[6] } : {}), ...(said(r[7]) ? { fn: r[7] } : {}), ...(said(r[8]) ? { data: r[8] } : {}), ...(said(r[9]) ? { faction: r[9] } : {}) }));
+  return out;
 }
 
 /**
@@ -428,8 +822,20 @@ export function readStatics(scripts) {
  * those. About one in eighteen instead names a species, which is a body rather than a template, and
  * those are looked up by the appearance the catalogue records. Anything still unmatched is reported
  * by name rather than dropped in silence.
+ *
+ * **A creature may be several bodies.** Its templates are a list the server drew from at each spawn,
+ * and an entry of that list may be the name of a dress group (`readDressGroups`), which is itself a
+ * list: every commoner, thug, noble and town policeman is written that way, and so is every body a
+ * town's stationary rows draw. Read as its first template alone such a creature had no body at all
+ * -- a group's name is no template -- so 172 of them stood nowhere. Each is now joined through its
+ * lists to every body the catalogue has for it (`bodies`, ids of the ready ones, where there is more
+ * than one), its own `id` the first of them that is ready, and `dress` names every group behind it.
+ *
+ * **`bodies` is what a body is drawn from, and `dress` is only which groups those came out of.** A
+ * creature may name two groups (the Selonian cultists name the men's and the women's) or a group and
+ * templates of its own besides, so drawing from one group would stand only half of what it could be.
  */
-export function joinCatalogue(creatures, entries) {
+export function joinCatalogue(creatures, entries, dressGroups = new Map()) {
   const byTemplate = new Map();
   const byAppearance = new Map();
   const byId = new Map();
@@ -438,21 +844,48 @@ export function joinCatalogue(creatures, entries) {
     if (e.appearance && !byAppearance.has(e.appearance)) byAppearance.set(e.appearance, e);
     if (e.id) byId.set(e.id, e);
   }
+  const bodyOf = (t) => {
+    if (t.endsWith('.iff')) {
+      const hit = byTemplate.get(t.replace(/(^|\/)([^/]+)\.iff$/, '$1shared_$2.iff'));
+      if (hit) return hit;
+    }
+    // A species rather than a template: the body the catalogue knows by that appearance or that id.
+    return byAppearance.get(t) ?? byId.get(t) ?? null;
+  };
   const joined = new Map();
   const missing = [];
   for (const [name, c] of creatures) {
-    const t = c.template;
-    let hit = null;
-    if (t.endsWith('.iff')) {
-      hit = byTemplate.get(t.replace(/(^|\/)([^/]+)\.iff$/, '$1shared_$2.iff')) ?? null;
+    const bodies = [];
+    const dress = [];
+    for (const t of c.templates?.length ? c.templates : [c.template]) {
+      const group = dressGroups.get(t);
+      if (group) {
+        if (!dress.includes(t)) dress.push(t);
+        for (const g of group) {
+          const hit = bodyOf(g);
+          if (hit && !bodies.includes(hit)) bodies.push(hit);
+        }
+        continue;
+      }
+      const hit = bodyOf(t);
+      if (hit && !bodies.includes(hit)) bodies.push(hit);
     }
-    // A species rather than a template: the body the catalogue knows by that appearance or that id.
-    if (!hit) hit = byAppearance.get(t) ?? byId.get(t) ?? null;
+    const hit = bodies.find((b) => b.ready) ?? bodies[0] ?? null;
     if (!hit) {
-      missing.push({ who: name, template: t });
+      missing.push({ who: name, template: c.template });
       continue;
     }
-    joined.set(name, { ...c, id: hit.id, ready: !!hit.ready, kind: hit.kind, group: hit.group, label: hit.name });
+    const ready = bodies.filter((b) => b.ready).map((b) => b.id);
+    joined.set(name, {
+      ...c,
+      id: hit.id,
+      ready: !!hit.ready,
+      kind: hit.kind,
+      group: hit.group,
+      label: hit.name,
+      ...(ready.length > 1 ? { bodies: ready } : {}),
+      ...(dress.length ? { dress } : {}),
+    });
   }
   return { joined, missing };
 }

@@ -163,7 +163,7 @@ export interface AnimPack {
  * the pack's own combat stance and its punches: the row names what has always happened rather than
  * adding anything to it.
  */
-export type CarryWeapon = 'pistol' | 'rifle' | 'sword' | 'polearm' | 'unarmed';
+export type CarryWeapon = 'pistol' | 'rifle' | 'sword' | 'sword2h' | 'polearm' | 'unarmed';
 
 /**
  * How one weapon is carried: the stances, the gaits that hold it, and what it fires or swings.

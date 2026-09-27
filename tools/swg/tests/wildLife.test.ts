@@ -8,7 +8,8 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { WildLife, WILD_TUNE, intoWorld, type WildDeps, type WildManifest, type WildPack } from '../../../src/world/wildLife.ts';
+import { WildLife, WILD_TUNE, intoWorld, readsSpawns, type WildDeps, type WildManifest, type WildPack } from '../../../src/world/wildLife.ts';
+import { SPAWNS_FORMAT } from '../spawnpack.mjs';
 import { LAIR_TUNE, lairHealth, reinforcements, type LairDef } from '../../../src/world/mobiles/lairs.ts';
 import { WildNest } from '../../../src/world/wildNest.ts';
 
@@ -104,6 +105,15 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   const old = new WildLife();
   old.adopt({ ...pack([bigArea]), format: 99 }, manifest);
   ok(!old.ready, 'a pack in a format this build does not know is refused outright');
+
+  // The format the converter writes now is one this build reads, pack and manifest both, and what it
+  // adds beside format 1's fields is handed on rather than lost.
+  ok(readsSpawns(SPAWNS_FORMAT) && readsSpawns(1) && !readsSpawns(SPAWNS_FORMAT + 1) && !readsSpawns('2'), `the converter's format ${SPAWNS_FORMAT} is one this build reads, as is format 1, and nothing it has not seen`);
+  const two = new WildLife();
+  const game = { level: 40, hp: 900, damage: 30, aggression: 'defensive', ranged: null, attackable: true };
+  two.adopt({ ...pack([bigArea]), format: SPAWNS_FORMAT }, { ...manifest, format: SPAWNS_FORMAT, creatures: { thing: { ...manifest.creatures.thing, game } } });
+  ok(two.ready && two.last.sites === w.last.sites, `a format-${SPAWNS_FORMAT} pack lays the same world a format-1 pack of the same areas does (${two.last.sites} sites)`);
+  ok(two.peopleCreatures()?.thing?.game?.aggression === 'defensive' && new WildLife().peopleCreatures() === null, "and hands each creature's own numbers on to the people standing about, where a world with no pack has none");
 }
 
 // ------------------------------------------------------------------ standing and putting away

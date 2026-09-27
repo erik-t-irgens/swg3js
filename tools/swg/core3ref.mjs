@@ -56,6 +56,9 @@ export const CORE3_READERS = {
   readLairs: { file: 'lairs.json', read: (dir) => C3.readLairs(dir) },
   readCreatures: { file: 'creatures.json', read: (dir) => C3.readCreatures(dir) },
   readStatics: { file: 'statics.json', read: (dir) => C3.readStatics(dir) },
+  readDressGroups: { file: 'dress-groups.json', read: (dir) => C3.readDressGroups(dir) },
+  readWeaponGroups: { file: 'weapon-groups.json', read: (dir) => C3.readWeaponGroups(dir) },
+  readCorvette: { file: 'corvette.json', read: (dir) => C3.readCorvette(dir) },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -246,7 +249,8 @@ function sizeOf(v) {
   if (Array.isArray(v)) return v.length;
   if (v && typeof v === 'object') {
     if (Array.isArray(v.objects) || Array.isArray(v.mobiles)) return (v.objects?.length ?? 0) + (v.mobiles?.length ?? 0);
-    if (v.statics instanceof Map) return v.statics.size;
+    if (v.statics instanceof Map) return [...v.statics.values()].reduce((n, rows) => n + rows.length, 0);
+    if (Array.isArray(v.rebel) && Array.isArray(v.statics)) return v.rebel.length + (v.imperial?.length ?? 0) + (v.neutral?.length ?? 0);
     return Object.keys(v).length;
   }
   return null;

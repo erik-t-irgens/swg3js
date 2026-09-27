@@ -4,7 +4,9 @@ What the converter reads from the [SWGEmu Core3](https://github.com/swgemu/Core3
 (`MMOCoreORB/bin/scripts`, AGPL-3.0), kept here so that nobody converting their own Star Wars Galaxies
 install needs the emulator: where the travel terminals, ticket collectors and shuttles stood, the other
 things the server stood on its buildings and the props its screenplays placed, what each deed makes and
-what it cost to keep, where the creatures and people stood, and each mobile's level, health and damage.
+what it cost to keep, where the creatures and people stood, and each mobile's level, health and damage,
+the bodies a dress group is drawn from, the weapons a weapon group holds, and the Corellian corvette's
+crews and fittings by room name.
 
 These files hold only what the converter's own readers take out -- names, places, turns, counts and
 stats -- and never the scripts. They are written by `npm run swg -- core3-reference @CORE3`, which

@@ -9,7 +9,7 @@
 import { form, chunk, W, encode } from './iffWriter.ts';
 import { childOf, childrenOf, isForm, parseIff } from '../iff.mjs';
 import { DIRECTION, directionSuffix, parseLat, flattenAnimationTemplate } from '../skeletal.mjs';
-import { ALLB_ATTACKS, ALLB_RANGED, ALLB_RANGED_STANCES, ALLB_ROLES, ANIM_FORMAT, CURATED_ALL_B, MOBILES_FORMAT, chooseLeaves, resolveRoles, tableNames } from '../mobiles.mjs';
+import { ALLB_ATTACKS, ALLB_CARRIES, ALLB_RANGED, ALLB_RANGED_STANCES, ALLB_ROLES, ANIM_FORMAT, CURATED_ALL_B, CURATED_WITNESS, MOBILES_FORMAT, chooseLeaves, resolveRoles, tableNames } from '../mobiles.mjs';
 import { idleClipFor, ownGunIsPistol, type IdleSituation } from '../../../src/world/mobiles/packClips.ts';
 import type { Roles } from '../../../src/world/mobiles/types.ts';
 
@@ -185,7 +185,19 @@ const planOf = (logical: Record<string, string[]>, speeds: Record<string, number
   check('the three low postures and every way between them', ['loop_kneeling', 'loop_prone', 'loop_crouched', 'trn_standing_to_kneeling', 'trn_kneeling_to_standing', 'trn_kneeling_to_prone', 'trn_prone_to_kneeling', 'trn_standing_to_prone', 'trn_prone_to_standing', 'trn_standing_to_crouched', 'trn_crouched_to_standing', 'trn_crouched_to_kneeling'].every(has));
   check('a kneeling and a prone stance for each weapon, aimed and not', ['loop_pistol_combat_kneeling', 'loop_pistol_combat_kneeling_aimed', 'loop_rifle_kneeling_combat', 'loop_rifle_kneeling_combat_aimed', 'loop_pistol_combat_prone', 'loop_pistol_combat_prone_aimed', 'loop_rifle_combat_prone', 'loop_rifle_combat_prone_aimed'].every(has));
   check('the one-handed sword has a ready stance and six swings', has('loop_sword_1h_ready') && CURATED_ALL_B.filter((n) => /^sword_1h_standing_ready_/.test(n)).length === 6);
-  check('the two-handed sword and the polearm are left out', !CURATED_ALL_B.some((n) => /sword2h|sword_2h|polearm/.test(n)));
+  // The owner's call was yes: a Tusken's lance and a pirate's axe, each weapon's stance and six swings.
+  check('the two-handed sword has a ready stance, six swings and its way in and out', has('loop_sword2h_combat') && CURATED_ALL_B.filter((n) => /^sword_2h_attack_/.test(n)).length === 6 && has('trn_sword_2h_to_sword_2h_combat') && has('trn_sword_2h_combat_to_sword_2h'));
+  check('the polearm has a ready stance and six swings, under the table\'s own word for it', has('loop_polearm_combat') && CURATED_ALL_B.filter((n) => /^pole_standing_ready_/.test(n)).length === 6 && !CURATED_ALL_B.some((n) => /^polearm_standing_/.test(n)));
+  check('and a blaster carrier has its standing dodge', has('trn_pistol_combat_standing_dodge') && has('trn_rifle_combat_standing_dodge'));
+  // Every carry row names clips the curated set bakes, which is the rule the rows' own comment states:
+  // the polearm's once named `polearm_standing_*`, which no table has, and resolved to nothing with
+  // nothing to say so. The one name a row reaches for that the set has never baked is the unarmed way
+  // into a guard, which falls back on the pack's own as it always has.
+  const KNOWN_UNBAKED = new Set(['trn_unarmed_standing_to_unarmed_standing_ready']);
+  const unbaked = Object.entries(ALLB_CARRIES).flatMap(([w, row]) => Object.values(row as Record<string, string[]>).flat().filter((n) => !curated.has(n) && !KNOWN_UNBAKED.has(n)).map((n) => `${w}:${n}`));
+  check('every name a weapon\'s carry row reaches for is one the curated set bakes', unbaked.length === 0, unbaked.join(', '));
+  check('the polearm and the two-handed sword each have a carry row with a stance and six swings', ALLB_CARRIES.polearm.ready.includes('loop_polearm_combat') && ALLB_CARRIES.polearm.swings.length === 6 && ALLB_CARRIES.sword2h.ready.includes('loop_sword2h_combat') && ALLB_CARRIES.sword2h.swings.length === 6);
+  check('the clip status names to tell an old humanoid pack is one the set bakes, and a standing one', has(CURATED_WITNESS) && /^loop_/.test(CURATED_WITNESS));
   // The animation packs' own format is what goes stale, not the whole of `mobiles/`: the models,
   // the colour variants and the wearable folders hold nothing this pass touches, and rebuilding
   // them would be some 600 MiB of byte-identical output.
@@ -196,7 +208,7 @@ const planOf = (logical: Record<string, string[]>, speeds: Record<string, number
   // arriving with no reader should show up here rather than only on the disk bill.
   const readBySomething = new Set([...candidates, 'loop_standing', 'loop_combat_standing', 'loop_swimming']);
   const forLater = CURATED_ALL_B.filter((n) => !readBySomething.has(n) && !n.startsWith('emt_'));
-  const COVER_OR_WEAPON = /^(loop_(kneeling|prone|crouched)|loop_(pistol|rifle)_|loop_sword_1h_ready|(add_)?(pistol|rifle)_[a-z0-9_]*fire_|sword_1h_standing_ready_|trn_(standing|kneeling|prone|crouched)_to_|trn_(pistol|rifle)_|rea_get_hit_)/;
+  const COVER_OR_WEAPON = /^(loop_(kneeling|prone|crouched)|loop_(pistol|rifle)_|loop_(sword_1h_ready|sword2h_combat|polearm_combat)$|(add_)?(pistol|rifle)_[a-z0-9_]*fire_|(sword_1h_standing_ready|sword_2h_attack|pole_standing_ready)_|trn_(standing|kneeling|prone|crouched)_to_|trn_(pistol|rifle|sword_2h)_|rea_get_hit_)/;
   check('what is baked with no reader yet is all cover, blaster or sword', forLater.every((n) => COVER_OR_WEAPON.test(n)), `${forLater.filter((n) => !COVER_OR_WEAPON.test(n)).join(', ')}`);
 }
 

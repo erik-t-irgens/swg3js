@@ -38,7 +38,10 @@
   "readSpawnGroups": "spawn-groups.json",
   "readLairs": "lairs.json",
   "readCreatures": "creatures.json",
-  "readStatics": "statics.json"
+  "readStatics": "statics.json",
+  "readDressGroups": "dress-groups.json",
+  "readWeaponGroups": "weapon-groups.json",
+  "readCorvette": "corvette.json"
  },
  "counts": {
   "readTravelBuildings": 24,
@@ -101,7 +104,10 @@
   "readRegions": 10,
   "readSpawnGroups": 482,
   "readLairs": 1459,
-  "readCreatures": 3618,
-  "readStatics": 10
+  "readCreatures": 3621,
+  "readStatics": 10621,
+  "readDressGroups": 26,
+  "readWeaponGroups": 111,
+  "readCorvette": 268
  }
 }

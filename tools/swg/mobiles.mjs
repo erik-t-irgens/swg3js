@@ -61,8 +61,10 @@ export const FAMILIES = new Map([
  * The blaster, one-handed sword and cover sections below were added once the direction selector
  * could be read at all: the aimed stances and the whole-body shots resolve to nothing without
  * that fix, so asking for them before it would have written a pack that quietly lacked them. The
- * two-handed sword and the polearm are the owner's to call and are deliberately left out; their
- * names are the same shape (`loop_sword2h_combat`, `loop_polearm_combat` and their swings).
+ * two-handed sword and the polearm were the owner's to call, and the call was yes: the server arms a
+ * Tusken with a wooden lance and a pirate with an axe, and without these a body holding one stands
+ * empty-handed. A pack baked before they were asked for is told apart by `bakedBefore`, since a
+ * pack's own record cannot say it (see `status`).
  */
 export const CURATED_ALL_B = [
   'loop_standing', 'loop_combat_standing', 'loop_swimming',
@@ -83,6 +85,8 @@ export const CURATED_ALL_B = [
   'rifle_standing_aimed_fire_1', 'rifle_standing_aimed_fire_3', 'rifle_standing_aimed_fire_5',
   'rifle_standing_aimed_fire_7', 'rifle_standing_aimed_fire_9', 'rifle_standing_aimed_fire_11',
   'trn_rifle_a_standing_hold_to_ready', 'trn_rifle_a_standing_ready_to_aimed', 'trn_rifle_a_standing_aimed_to_ready',
+  // The standing dodge a blaster carrier throws itself aside with, pistol and rifle.
+  'trn_pistol_combat_standing_dodge', 'trn_rifle_combat_standing_dodge',
   // The one-handed sword: its own ready stance (a speed set of its own, so a body with a blade
   // walks and runs holding it) and six swings at three heights, both sides, plus a thrust.
   'loop_sword_1h_ready',
@@ -90,6 +94,18 @@ export const CURATED_ALL_B = [
   'sword_1h_standing_ready_hrz_slash_high_r', 'sword_1h_standing_ready_hrz_slash_low_l',
   'sword_1h_standing_ready_thrust_middle', 'sword_1h_standing_ready_vrt_slash',
   'trn_standing_to_sword_1h_standing_ready', 'trn_cbt_sword_1h_standing_ready_to_standing_2', 'trn_unarmed_standing_ready_to_standing',
+  // The two-handed sword and the polearm, likewise: each one's ready stance and six swings. The
+  // two-handed table names its swings by where they land (`sword_2h_attack_<height>_<side>_<n>`)
+  // rather than by the move, so the six are the ones that resolve to six different moves: the
+  // slashes both ways at the middle, the spins both ways high, and the thrusts middle and low. The
+  // polearm has no way into or out of its stance in the table; the two-handed sword has both.
+  'loop_sword2h_combat',
+  'sword_2h_attack_mid_right_0', 'sword_2h_attack_mid_left_0', 'sword_2h_attack_high_right_0',
+  'sword_2h_attack_high_left_0', 'sword_2h_attack_mid_center_0', 'sword_2h_attack_low_left_0',
+  'trn_sword_2h_to_sword_2h_combat', 'trn_sword_2h_combat_to_sword_2h',
+  'loop_polearm_combat',
+  'pole_standing_ready_hrz_slash_middle_r', 'pole_standing_ready_hrz_slash_middle_l', 'pole_standing_ready_hrz_slash_high_r',
+  'pole_standing_ready_hrz_slash_low_l', 'pole_standing_ready_thrust_high', 'pole_standing_ready_lunge_middle',
   // Cover: kneeling, prone and the crouch, each posture's blaster stances aimed and not, every
   // kneeling and prone shot the game has, and every way in and out between the four postures.
   'loop_kneeling', 'loop_prone', 'loop_crouched',
@@ -651,7 +667,37 @@ export function planPack(def, { header }) {
   const bindPose = clips.some((c) => c.additive);
   const bindBytes = bindPose ? clipBytes({ frames: 2, animatedRotations: joints, animatedTranslations: joints, offsetTranslations: 0 }, joints) : 0;
   const estimatedBytes = clips.reduce((a, c) => a + clipBytes(c, joints), 0) + bindBytes;
-  return { id, key, table, hierarchy, set, joints, clips, bindPose, clipCount: clips.length + (bindPose ? 1 : 0), logical, femaleLogical: variants, missing, skipped, appearances: [], speciesRigs: [], estimatedBytes };
+  // What the curated list asked for that this table could not give -- a name it has not got, or one
+  // whose animation the archives have not got -- so a pack says what it was asked for and a name
+  // missing from it is told apart from a name nobody asked for yet (`bakedBefore`).
+  const absent = set === 'curated' ? CURATED_ALL_B.filter((n) => !logical[n]) : [];
+  return { id, key, table, hierarchy, set, joints, clips, bindPose, clipCount: clips.length + (bindPose ? 1 : 0), logical, femaleLogical: variants, missing, skipped, absent, appearances: [], speciesRigs: [], estimatedBytes };
+}
+
+/**
+ * Whether a curated pack was baked before `name` was asked for: it has no clip for it and does not
+ * say the table had none. **A pack's own record cannot tell `status` this**: the catalogue's planned
+ * signature was written by the run that baked the pack, so the two agree however old the list they
+ * were cut from, and only a planning run over the archives would see the difference. A name the pack
+ * must carry is what can -- the lesson the player's and the species' rigs taught twice -- and a pack
+ * whose table has not got the name says so in `absent`, so it is not asked for again for ever.
+ */
+export function bakedBefore(pack, name) {
+  if (!pack || pack.set !== 'curated') return false;
+  if (pack.logical?.[name]) return false;
+  return !(Array.isArray(pack.absent) && pack.absent.includes(name));
+}
+
+/**
+ * The clip `status` names to tell a humanoid pack baked before the two-handed sword, the polearm and the
+ * standing dodges were asked for (`bakedBefore`). It must be one of `CURATED_ALL_B`, and a *standing*
+ * one: a name some pack of an older bake already carries proves nothing.
+ */
+export const CURATED_WITNESS = 'loop_polearm_combat';
+
+/** How many of `units` (each with its `kind` and its `record` as read off the disk) are humanoid packs baked before `name` was asked for. */
+export function packsBakedBefore(units, name) {
+  return units.filter((u) => u.kind === 'pack' && u.record && bakedBefore(u.record, name)).length;
 }
 
 const CREATURE_ROLES = {
@@ -720,10 +766,10 @@ export const ALLB_RANGED_STANCES = {
  * in an unarmed guard and threw punches. Which logical name means which weapon's carry is a fact
  * about the animation table, and the table is read here, so it is resolved here, once per pack.
  *
- * Every name below is one the curated list already asks for, so no row costs a clip. `polearm` is
- * the exception and is deliberate: its names are the same shape as the sword's, the curated list
- * does not ask for them yet (the owner's call in the design), and so its row resolves to nothing
- * and is left out of the pack -- the day the list asks for them the row fills itself.
+ * Every name below is one the curated list already asks for, so no row costs a clip. The polearm's
+ * row was once written from the sword's names with the weapon's word swapped in, and named nothing
+ * the table has: its swings are `pole_standing_ready_*`, and it has no way in or out of its stance at
+ * all. Read off the table now, as the two-handed sword's are.
  *
  * A stance name is read as a locomotion name (its speed branches are an idle, a walk and a run)
  * exactly as `loop_standing` is, which is how a rifle's held walk and run are found without
@@ -760,15 +806,25 @@ export const ALLB_CARRIES = {
     toCombat: ['trn_standing_to_sword_1h_standing_ready'],
     fromCombat: ['trn_cbt_sword_1h_standing_ready_to_standing_2'],
   },
+  sword2h: {
+    relaxed: [],
+    ready: ['loop_sword2h_combat'],
+    aimed: [],
+    fires: [],
+    recoil: [],
+    swings: ['sword_2h_attack_mid_right_0', 'sword_2h_attack_mid_left_0', 'sword_2h_attack_high_right_0', 'sword_2h_attack_high_left_0', 'sword_2h_attack_mid_center_0', 'sword_2h_attack_low_left_0'],
+    toCombat: ['trn_sword_2h_to_sword_2h_combat'],
+    fromCombat: ['trn_sword_2h_combat_to_sword_2h'],
+  },
   polearm: {
     relaxed: [],
     ready: ['loop_polearm_combat'],
     aimed: [],
     fires: [],
     recoil: [],
-    swings: ['polearm_standing_ready_hrz_slash_middle_r', 'polearm_standing_ready_hrz_slash_middle_l', 'polearm_standing_ready_vrt_slash', 'polearm_standing_ready_thrust_middle'],
-    toCombat: ['trn_standing_to_polearm_combat'],
-    fromCombat: ['trn_polearm_combat_to_standing'],
+    swings: ['pole_standing_ready_hrz_slash_middle_r', 'pole_standing_ready_hrz_slash_middle_l', 'pole_standing_ready_hrz_slash_high_r', 'pole_standing_ready_hrz_slash_low_l', 'pole_standing_ready_thrust_high', 'pole_standing_ready_lunge_middle'],
+    toCombat: [],
+    fromCombat: [],
   },
   unarmed: {
     relaxed: [],
@@ -1245,6 +1301,31 @@ export function heuristicStats({ kind, family = null, sizeClass, bounds = null, 
 const RANGED_WEAPON = /pistol|rifle|carbine|blaster|ranged|heavy|light|medium/;
 const MELEE_WEAPON = /unarmed|melee/;
 
+/**
+ * Whether a Core3 mobile picks a fight with a player on sight, which is the server's own rule for a
+ * player of no faction and no standing: **its pvp status's AGGRESSIVE bit and nothing else**. The
+ * creature bitmask's KILLER and STALKER are not tempers: the server reads KILLER only to let a body
+ * finish off a player already down, and STALKER only to decide whether a masked player is seen, and
+ * shows both beside "aggro" as separate lines of a creature's examine window. Read as tempers they
+ * made nine hundred of the towns' own guards, jawas and hired guns open fire on anybody walking past,
+ * against a server that stood every one of them waiting to be struck first. Exported so the catalogue
+ * and a creature's own numbers in the spawns pack are worked out by one rule.
+ */
+export function core3Temper(mob, heuristic) {
+  if (mob.pvp.includes('AGGRESSIVE')) return 'aggressive';
+  if (!mob.pvp.includes('ATTACKABLE')) return 'passive';
+  return heuristic.aggression === 'skittish' ? 'skittish' : 'defensive';
+}
+
+/**
+ * Whether a catalogue's tempers were worked out before `core3Temper` was the rule: an entry the
+ * server's own numbers call aggressive whose pvp bits have no AGGRESSIVE in them. Nothing in the
+ * catalogue's own format or signatures moves with the rule, so this is how `status` tells.
+ */
+export function oldTempers(catalogue) {
+  return (catalogue?.entries ?? []).filter((e) => e.stats?.source === 'core3' && e.stats.aggression === 'aggressive' && Array.isArray(e.stats.core3?.pvp) && !e.stats.core3.pvp.includes('AGGRESSIVE')).length;
+}
+
 /** The same stats read from Core3's own scripts, where a checkout was given. */
 export function core3StatsFor(mobiles, heuristic, { kind, roles = null } = {}) {
   if (!mobiles || !mobiles.length) return heuristic;
@@ -1252,10 +1333,7 @@ export function core3StatsFor(mobiles, heuristic, { kind, roles = null } = {}) {
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const ham = mob.ham?.[0] ?? 0;
   const dmg = mob.damage ? (mob.damage[0] + mob.damage[1]) / 2 : 0;
-  let aggression;
-  if (mob.pvp.includes('AGGRESSIVE') || mob.creature.includes('KILLER') || mob.creature.includes('STALKER')) aggression = 'aggressive';
-  else if (!mob.pvp.includes('ATTACKABLE')) aggression = 'passive';
-  else aggression = heuristic.aggression === 'skittish' ? 'skittish' : 'defensive';
+  const aggression = core3Temper(mob, heuristic);
   let ranged = heuristic.ranged;
   if (kind === 'npc' || kind === 'dressed') {
     const shoots = mob.weapons.some((w) => RANGED_WEAPON.test(w)) && !mob.weapons.every((w) => MELEE_WEAPON.test(w));
@@ -1625,7 +1703,10 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
       p.file = `mobiles/anims/${packId}.glb`;
       p.json = `mobiles/anims/${packId}.json`;
       p.skeletons = a.skeletons;
-      p.sig = signatureOf({ f: MOBILES_FORMAT, a: ANIM_FORMAT, source: source.key, key, set: p.set, clips: p.clips.map((c) => [c.file, c.timeScale, c.loop, c.additive]) });
+      // A curated pack is signed with the list it was cut from as well as the clips it came to, so a
+      // change to the list goes stale on every humanoid pack -- one whose table has none of the new
+      // names too, since it must now say so (`absent`) -- and on none of the creatures'.
+      p.sig = signatureOf({ f: MOBILES_FORMAT, a: ANIM_FORMAT, source: source.key, key, set: p.set, clips: p.clips.map((c) => [c.file, c.timeScale, c.loop, c.additive]), ...(p.set === 'curated' ? { asked: CURATED_ALL_B } : {}) });
       packs.set(packId, p);
     }
     if (a.playerBody) p.speciesRigs.push(a.playerBody);
@@ -1830,6 +1911,7 @@ export function runMobiles(ctx) {
         // Left out rather than written empty, so a pack with nothing to say about any weapon reads
         // as one the runtime must treat the old way.
         ...(Object.keys(p.carries ?? {}).length ? { carries: p.carries } : {}),
+        ...(p.set === 'curated' ? { absent: p.absent } : {}),
         missing: p.missing, skipped: p.skipped.map((s) => `${s.name}: ${s.why}`), bytes: baked.bytes, tracks: baked.tracks,
       };
       commit(p.json, [[`${p.file}.tmp`, p.file]], body);

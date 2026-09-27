@@ -16,14 +16,25 @@
 //   - bare identifiers, which are the data's own named constants (`CIRCLE`, `NOSPAWNAREA`,
 //     `MOB_HERBIVORE`), resolved against a table the caller hands in and otherwise kept as the name
 //     itself, so a constant nobody has declared is visible rather than silently zero;
-//   - `+` between numbers, which is how a bitmask of those constants is written, and `..` between
+//   - `+` between numbers, which is how a bitmask of those constants is written, `-`, `*`, `/` and
+//     `%` by the manual's own precedence (a week written as `7 * 24 * 60 * 60`), and `..` between
 //     strings;
 //   - a call, `f(a, b)`, which is read as a marker naming the function and its arguments rather than
 //     evaluated, since the ones that appear (`merge`, `getRandomNumber`) are logic and not data.
 //
-// Comments (`--` to the end of the line, and `--[[ ]]` blocks) are skipped everywhere. Anything
+// Comments (`--` to the end of the line, and `--[[ ]]` blocks) are skipped everywhere. A single value
 // outside the subset throws with the line number, which is the point: a file that has grown a
 // construct this does not read must stop the run rather than convert to something plausible.
+//
+// **A whole file is another matter**, and `readLua` does not throw on one. The server's own town
+// scripts are a table of data followed by the functions that spawn it, and a function body is code:
+// `spawnMobile(self.planet, mob[1], ...)` is a statement this was never going to read. Read a line at
+// a time, the first such statement stopped the whole file, and with it the table above it that was
+// perfectly readable: 32 of the 35 town scripts, every cantina patron, trainer, guard and commoner in
+// the game, lost to the loop that stands them. So a `function ... end` is stepped over whole, keyword
+// by keyword to its own `end`, and any top-level statement that still will not read is stepped over
+// and counted (`skipped`) rather than thrown: the data around it is kept, and the count says how much
+// was not.
 
 /** One token: `{ kind, value, line }`. */
 function tokenise(src) {
@@ -88,7 +99,8 @@ function tokenise(src) {
       continue;
     }
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
-      const m = /^(0[xX][0-9a-fA-F]+|[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?)/.exec(src.slice(i));
+      // `0.` is a number in Lua as much as `0.5` is, and the server's own creature files write it.
+      const m = /^(0[xX][0-9a-fA-F]+|(?:[0-9]+(?:\.(?!\.)[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?)/.exec(src.slice(i, i + 64));
       if (!m) throw new Error(`lua: a number that will not read on line ${line}`);
       out.push({ kind: 'number', value: Number(m[1]), line });
       i += m[1].length;
@@ -126,30 +138,128 @@ export class LuaCall {
   }
 }
 
+/** The words that open a block closed by `end` (or, for `repeat`, by `until`). */
+const BLOCK_OPENERS = new Set(['function', 'if', 'for', 'while', 'do', 'repeat']);
+
 /**
- * Parse one value starting at `at`, returning `[value, next]`.
+ * The token after the block that opens at `at` (a `function`, `if`, `for`, `while`, `do` or
+ * `repeat`), counted keyword by keyword to its own closing word. `for` and `while` are not counted
+ * themselves because the `do` after them is, which is the grammar's own shape: every `end` closes
+ * exactly one `function`, `if` or `do`, and `until` closes a `repeat`. Strings and comments are
+ * tokens already, so a keyword inside one is never counted. A block that never closes runs to the
+ * end of the file rather than throwing: what is inside it is code, whatever state it is in.
+ */
+function blockEnd(t, at) {
+  let depth = 0;
+  for (let i = at; i < t.length; i++) {
+    const k = t[i];
+    if (k.kind !== 'name') continue;
+    if (k.value === 'function' || k.value === 'if' || k.value === 'do' || k.value === 'repeat') depth++;
+    else if (k.value === 'end' || k.value === 'until') {
+      depth--;
+      if (depth <= 0) return i + 1;
+    }
+  }
+  return t.length;
+}
+
+/**
+ * Where the next top-level statement starts, from one at `from` that is being stepped over: past
+ * every bracket it opens and every block inside it, to the first token at the outside that begins a
+ * new line. A table that spans twenty lines is one statement, not twenty, so none of its inner
+ * `key = value` lines is ever mistaken for the file's own.
+ */
+function statementEnd(t, from) {
+  let depth = 0;
+  let i = from;
+  while (i < t.length) {
+    const k = t[i];
+    if (i > from && depth === 0 && k.line !== t[i - 1].line) break;
+    if (k.kind === 'name' && BLOCK_OPENERS.has(k.value)) {
+      i = blockEnd(t, i);
+      continue;
+    }
+    if (k.kind === 'op') {
+      if (k.value === '{' || k.value === '(' || k.value === '[') depth++;
+      else if ((k.value === '}' || k.value === ')' || k.value === ']') && depth > 0) depth--;
+    }
+    i++;
+  }
+  return Math.max(i, from + 1);
+}
+
+/**
+ * The operators a value may be built with, and how tightly each binds (the manual's own order, less
+ * the ones no data here uses): `..` loosest and to the right, then `+` and `-`, then `*`, `/` and
+ * `%`. A table's `24 * 60 * 60` is a number like any other, and read without them the one entry
+ * holding it threw away the whole table round it: a town's event, a screenplay's every other field.
+ */
+const BINARY = { '..': [1, true], '+': [2, false], '-': [2, false], '*': [3, false], '/': [3, false], '%': [3, false] };
+
+/** Two values joined by an operator: folded where both are numbers, kept as a marker where not. */
+function combine(op, a, b) {
+  if (op === '..') return `${a}${b}`;
+  if (typeof a === 'number' && typeof b === 'number') {
+    if (op === '+') return a + b;
+    if (op === '-') return a - b;
+    if (op === '*') return a * b;
+    if (op === '/') return a / b;
+    return a - Math.floor(a / b) * b;
+  }
+  // A sum with an unresolved constant or a call in it: keep both so the caller can say which.
+  return new LuaCall(op, [a, b]);
+}
+
+/**
+ * Parse one value starting at `at`, returning `[value, next]`: one operand, then any operators that
+ * bind at least as tightly as `min`, by precedence climbing.
  *
  * `consts` resolves a bare identifier. A name it has not got comes back as the name itself, so a
  * constant nobody declared shows up in the output instead of reading as 0 or undefined.
  */
-function parseValue(t, at, consts) {
+function parseValue(t, at, consts, min = 0) {
+  let [value, i] = parseOperand(t, at, consts);
+  for (;;) {
+    const op = t[i];
+    const rule = op?.kind === 'op' ? BINARY[op.value] : undefined;
+    if (!rule || rule[0] < min) break;
+    const [rhs, next] = parseValue(t, i + 1, consts, rule[1] ? rule[0] : rule[0] + 1);
+    value = combine(op.value, value, rhs);
+    i = next;
+  }
+  return [value, i];
+}
+
+/** One operand: a literal, a name, a call, a constructor or a table, with any unary operator on it. */
+function parseOperand(t, at, consts) {
   const tok = t[at];
   if (!tok) throw new Error('lua: the file ended in the middle of a value');
   if (tok.kind === 'op' && tok.value === '-') {
-    const [v, next] = parseValue(t, at + 1, consts);
-    if (typeof v !== 'number') throw new Error(`lua: a minus in front of something that is not a number on line ${tok.line}`);
-    return [-v, next];
+    // Unary minus binds tighter than any operator above, so `-65.7 + getRandomNumber(40)` is the
+    // sum of a negative number and a call, and not the negative of the whole sum.
+    const [v, next] = parseOperand(t, at + 1, consts);
+    return [typeof v === 'number' ? -v : new LuaCall('-', [0, v]), next];
   }
   if (tok.kind === 'op' && tok.value === '#') {
     // The length operator, which only ever appears in logic this does not evaluate.
-    const [v, next] = parseValue(t, at + 1, consts);
+    const [v, next] = parseOperand(t, at + 1, consts);
     return [new LuaCall('#', [v]), next];
+  }
+  if (tok.kind === 'op' && tok.value === '(') {
+    // A bracketed expression, which the operators above make worth reading.
+    const [v, next] = parseValue(t, at + 1, consts);
+    if (!(t[next]?.kind === 'op' && t[next].value === ')')) throw new Error(`lua: a bracket opened on line ${tok.line} and never closed`);
+    return [v, next + 1];
   }
   let value;
   let i = at;
   if (tok.kind === 'number' || tok.kind === 'string') {
     value = tok.value;
     i = at + 1;
+  } else if (tok.kind === 'name' && tok.value === 'function') {
+    // A function written inside a value (a callback in a table) is code: stepped over whole, and
+    // kept as a marker so a table holding one still reads.
+    return [new LuaCall('function', []), blockEnd(t, at)];
   } else if (tok.kind === 'name') {
     const name = tok.value;
     // `Ident:new { ... }` and `f(...)`: a constructor is its table, a call is a marker.
@@ -185,6 +295,14 @@ function parseValue(t, at, consts) {
     } else {
       value = Object.prototype.hasOwnProperty.call(consts, name) ? consts[name] : name;
       i = at + 1;
+      // `row[3]`, a read out of a table, kept as a marker naming the table and the key: logic, but
+      // the logic that says which element of a row is which (`spawnMobile(p, mob[1], mob[2], ...)`).
+      while (t[i]?.kind === 'op' && t[i].value === '[') {
+        const [k, next] = parseValue(t, i + 1, consts);
+        if (!(t[next]?.kind === 'op' && t[next].value === ']')) throw new Error(`lua: an index that does not close on line ${t[i].line}`);
+        value = new LuaCall('[]', [value, k]);
+        i = next + 1;
+      }
     }
   } else if (tok.kind === 'op' && tok.value === '{') {
     // `Object.create(null)`: these keys come out of a file and must never reach the prototype.
@@ -223,18 +341,6 @@ function parseValue(t, at, consts) {
     }
   } else {
     throw new Error(`lua: ${tok.kind} ${JSON.stringify(tok.value)} on line ${tok.line} cannot start a value`);
-  }
-  // `+` folds a bitmask of named constants; `..` joins strings. Both left to right.
-  while (t[i]?.kind === 'op' && (t[i].value === '+' || t[i].value === '..')) {
-    const op = t[i].value;
-    const [rhs, next] = parseValue(t, i + 1, consts);
-    if (op === '+') {
-      if (typeof value !== 'number' || typeof rhs !== 'number') {
-        // A sum with an unresolved constant in it: keep both so the caller can say which name.
-        value = new LuaCall('+', [value, rhs]);
-      } else value += rhs;
-    } else value = `${value}${rhs}`;
-    i = next;
   }
   return [value, i];
 }
@@ -315,12 +421,21 @@ export function findCalls(src, names, consts = {}) {
  * project's own registration, which is its logic rather than ours to run. The calls *are* returned
  * separately, because which name a file registers itself under is data worth having -- it is not
  * always the variable's own name.
+ *
+ * A function, and a control structure written at the top level, is stepped over **whole**, to its
+ * own `end`: stepping a line at a time walked straight into its body and read its statements as the
+ * file's own, and the first of them that was code rather than data threw away the whole file. An
+ * assignment or a call that will not read is stepped over too, to where the next statement starts,
+ * and counted in `skipped` rather than thrown: the tables around it are the data, and losing them for
+ * one line of logic is what hid every town's people.
  */
 export function readLua(src, consts = {}) {
   const t = tokenise(src);
   const table = Object.assign(Object.create(null), consts);
   const values = new Map();
   const calls = [];
+  let skipped = 0;
+  const skippedLines = [];
   let i = 0;
   while (i < t.length) {
     const tok = t[i];
@@ -329,25 +444,40 @@ export function readLua(src, consts = {}) {
       i++;
       continue;
     }
-    if (tok.kind === 'name' && t[i + 1]?.kind === 'op' && t[i + 1].value === '=' ) {
+    if (tok.kind === 'name' && BLOCK_OPENERS.has(tok.value)) {
+      i = blockEnd(t, i);
+      continue;
+    }
+    if (tok.kind === 'name' && t[i + 1]?.kind === 'op' && t[i + 1].value === '=') {
       const name = tok.value;
-      const [v, next] = parseValue(t, i + 2, table);
-      values.set(name, v);
-      // Later files read constants declared in earlier ones, so a name defined here resolves below.
-      if (typeof v === 'number' || typeof v === 'string') table[name] = v;
-      i = next;
+      try {
+        const [v, next] = parseValue(t, i + 2, table);
+        values.set(name, v);
+        // Later files read constants declared in earlier ones, so a name defined here resolves below.
+        if (typeof v === 'number' || typeof v === 'string') table[name] = v;
+        i = next;
+      } catch {
+        skipped++;
+        skippedLines.push(tok.line);
+        i = statementEnd(t, i);
+      }
       continue;
     }
     if (tok.kind === 'name' && t[i + 1]?.kind === 'op' && t[i + 1].value === '(') {
-      const [v, next] = parseValue(t, i, table);
-      if (v instanceof LuaCall) calls.push(v);
-      i = next;
+      try {
+        const [v, next] = parseValue(t, i, table);
+        if (v instanceof LuaCall) calls.push(v);
+        i = next;
+      } catch {
+        skipped++;
+        skippedLines.push(tok.line);
+        i = statementEnd(t, i);
+      }
       continue;
     }
-    // Anything else at the top level (a function, a control structure, an indexed assignment) is
-    // logic. Step to the next line rather than guessing at it.
-    const line = tok.line;
-    while (i < t.length && t[i].line === line) i++;
+    // Anything else at the top level (a method call, an indexed assignment, the rest of an
+    // expression) is logic. Step over the statement rather than guessing at it.
+    i = statementEnd(t, i);
   }
-  return { values, calls };
+  return { values, calls, skipped, skippedLines };
 }

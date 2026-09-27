@@ -46,6 +46,14 @@ import type { MobileEntry } from './mobiles/types.ts';
 import type { Mobile } from './mobiles/mobile.ts';
 import { WildNest, type NestDeps } from './wildNest.ts';
 
+/** The spawns packs this game reads: format 1, and format 2, which is format 1 with more beside it. */
+export const SPAWNS_READ = [1, 2];
+
+/** Whether a spawns pack's format is one this game reads. */
+export function readsSpawns(format: unknown): boolean {
+  return typeof format === 'number' && SPAWNS_READ.includes(format);
+}
+
 /** A world's own half of the pack: its areas and the people who stand still in it. */
 export interface WildPack {
   format: number;
@@ -210,10 +218,15 @@ export class WildLife {
     }
   }
 
-  /** Take a pack that is already parsed: the half a node test can drive. */
+  /**
+   * Take a pack that is already parsed: the half a node test can drive. Both formats are taken:
+   * format 2 carries every field format 1 did, filled the same way, and what it adds (each row's key,
+   * mood, route and the rest, each creature's own numbers, the camps' pieces) is read by nothing here
+   * yet, so a format-2 pack stands exactly what a format-1 pack of the same rows would.
+   */
   adopt(pack: WildPack | null, manifest: WildManifest | null): void {
-    this.pack = pack?.format === 1 && Array.isArray(pack.areas) ? pack : null;
-    this.manifest = manifest?.format === 1 && manifest.lairs ? manifest : null;
+    this.pack = readsSpawns(pack?.format) && pack && Array.isArray(pack.areas) ? pack : null;
+    this.manifest = readsSpawns(manifest?.format) && manifest?.lairs ? manifest : null;
     this.sites = [];
     this.version++;
     if (!this.pack || !this.manifest) return;
@@ -563,6 +576,15 @@ export class WildLife {
    */
   peopleRows(): readonly unknown[] {
     return this.pack?.statics ?? [];
+  }
+
+  /**
+   * Every creature those rows name, out of the fleet's half of the same pack: each carries its own
+   * numbers there from format 2 on (`game`), which is what a standing person's temper and whether it
+   * may be struck are read from rather than from the body it is drawn as. Nothing before it lands.
+   */
+  peopleCreatures(): Readonly<Record<string, CreatureDef>> | null {
+    return this.manifest?.creatures ?? null;
   }
 
   /** What one site would stand, without standing it: for the console, and for a check. */

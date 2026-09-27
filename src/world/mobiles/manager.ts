@@ -77,6 +77,13 @@ export interface SpawnOpts {
    * world name of its own -- a ticket collector, a lair's creature, a person standing about -- is not.
    */
   listed?: boolean;
+  /**
+   * A fixture the world cannot work without -- a ticket collector, without whom nobody boards a
+   * shuttle -- which the model memory budget never refuses. The budget is there to keep a crowd from
+   * growing without end, and a town's people fill it: a collector stood after them was refused for as
+   * long as they stood, which was for as long as anybody was at the starport. There are a handful.
+   */
+  fixture?: boolean;
 }
 
 export interface MobileManagerDeps {
@@ -221,7 +228,7 @@ export class MobileManager {
    * and applied to the world's list every browser would end up holding a different arbitrary subset
    * of the creatures everyone else can see, with nothing said anywhere.
    */
-  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' | 'world' = 'spawned'): string | null {
+  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' | 'world' = 'spawned', budget = true): string | null {
     const where = this.deps.refuse();
     if (where) return where;
     // The one model the game's own archives cannot give: said as what it is, not as a fault.
@@ -237,7 +244,7 @@ export class MobileManager {
     const failed = this.deps.assets.failure(key);
     if (failed) return `${entry.name}: ${failed}`;
     if (origin === 'spawned' && this.spawnedCount() >= this.cap) return `${this.cap} are out already (Graphics, Distance and detail)`;
-    const cost = this.deps.assets.wouldCost(entry, cat);
+    const cost = budget ? this.deps.assets.wouldCost(entry, cat) : 0;
     if (cost > 0) {
       const room = MOBILE_CACHE.budget - this.deps.assets.referencedBytes();
       if (cost > room) {
@@ -246,6 +253,31 @@ export class MobileManager {
       }
     }
     return null;
+  }
+
+  /**
+   * How many bytes the model memory budget is short of standing `entry` now: nought when it fits. It is
+   * the arithmetic `whyNot` refuses a spawn by, so a caller that means to make room knows how much.
+   */
+  budgetShort(entry: MobileEntry): number {
+    const cat = this.deps.catalogue();
+    if (!cat) return 0;
+    const cost = this.deps.assets.wouldCost(entry, cat);
+    if (cost <= 0) return 0;
+    return Math.max(0, cost - (MOBILE_CACHE.budget - this.deps.assets.referencedBytes()));
+  }
+
+  /**
+   * What putting `m` down would give back to that budget: its model's bytes and its animation pack's,
+   * each only where nothing else standing holds it. A body still loading gives back nothing yet.
+   */
+  freedBy(m: Mobile): number {
+    const held = this.held.get(m);
+    if (!held) return 0;
+    let n = 0;
+    if (held.model && held.model.refs === 1) n += held.model.bytes;
+    if (held.pack && held.pack.refs === 1) n += held.pack.bytes;
+    return n;
   }
 
   /**
@@ -299,7 +331,7 @@ export class MobileManager {
     const origin = opts.origin ?? 'spawned';
     // One the world holds is not this browser's own spawn, whatever it is stored as: it is asked
     // about as `world` so the hand-spawn cap never refuses it (see `whyNot`).
-    const why = this.whyNot(entry, cat, opts.worldId ? 'world' : origin);
+    const why = this.whyNot(entry, cat, opts.worldId ? 'world' : origin, !opts.fixture);
     if (why) {
       this.lastNote = why;
       return why;

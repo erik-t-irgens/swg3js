@@ -1412,7 +1412,7 @@ export class World {
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
     // rows are taken from what that fetch already holds rather than fetched a second time.
-    standingPeople.adopt(wildLife.peopleRows() as StandingRow[]);
+    standingPeople.adopt(wildLife.peopleRows() as StandingRow[], wildLife.peopleCreatures());
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -3215,7 +3215,9 @@ export class World {
   standMobile(id: string, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, worldId: string, essential = false): Mobile | null {
     const entry = this.mobileCatalogue?.byId(id);
     if (!entry) return null;
-    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential });
+    // A fixture: the one caller is the ticket collectors, which the memory budget must never keep off
+    // their pads (`SpawnOpts.fixture`).
+    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, fixture: true });
     return typeof m === 'string' || !m ? null : m;
   }
 
@@ -4604,8 +4606,13 @@ export class World {
         // leaves a spawned one where it was put, the name keeps the hand-spawn cap and the NPC tab's
         // clear off it, and with no `share` it is never put on the wire for a server that has never
         // heard of it to leave frozen.
-        spawn: (entry, at, inside, seed, essential) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}`, essential }) ?? 'no world',
+        // The row's own creature's temper, where the pack says it (`StandingRow.temper`), over the body's:
+        // a body is shared by every creature drawn as it and carries one of their tempers.
+        spawn: (entry, at, inside, seed, essential, temper) =>
+          this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}`, essential, overrides: temper ? { aggression: temper } : undefined }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
+        short: (entry) => this.mobiles?.budgetShort(entry) ?? 0,
+        frees: (m) => this.mobiles?.freedBy(m) ?? 0,
         centre: () => this.layoutCenter,
         held: () => this.streamHold || this.sceneOnly || !this.simulating,
         // A person in a room needs that room's floor to exist first. The streamer builds a

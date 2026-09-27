@@ -6,8 +6,12 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { StandingPeople, PEOPLE_TUNE, standsStill, type PeopleDeps, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { StandingPeople, PEOPLE_TUNE, standsStill, type PeopleCreature, type PeopleDeps, type StandingRow } from '../../../src/world/standingPeople.ts';
 import { intoWorld } from '../../../src/world/wildLife.ts';
+import { hostileSides, sideOf } from '../../../src/combat/targets.ts';
+import { childInWorld, type ChildPlace } from '../../../src/world/travelTerminal.ts';
+import type { Aggression } from '../../../src/combat/kit.ts';
+import type { MobileEntry } from '../../../src/world/mobiles/types.ts';
 import { BRAIN_TUNE, clampWander, decide, keepPost, type BrainSelf, type Decision, type Post } from '../../../src/world/mobiles/brain.ts';
 import { gravityFor, holdAir } from '../../../src/world/mobiles/airless.ts';
 import { Physics, RAPIER } from '../../../src/core/physics.ts';
@@ -36,15 +40,19 @@ interface Body {
   post?: Post | null;
   /** In a fight or holding a grudge (`Mobile.engaged`): never put down to make room. */
   engaged?: boolean;
+  /** What it was stood as: part of the furniture, and with whose temper. */
+  essential?: boolean;
+  temper?: string;
+  /** Which catalogue entry it is. */
+  id?: string;
 }
 
 function game(over: Partial<PeopleDeps> = {}): { deps: PeopleDeps; bodies: Body[] } {
   const bodies: Body[] = [];
   const deps: PeopleDeps = {
     catalogue: () => ({ byId: (id: string) => ({ id, name: id, ready: true }) }) as never,
-    spawn: (entry, at, inside, seed) => {
-      const b: Body = { dead: false, removed: false, x: at.x, z: at.z, y: at.y, heading: at.heading, inside, seed };
-      void entry;
+    spawn: (entry, at, inside, seed, essential, temper) => {
+      const b: Body = { dead: false, removed: false, x: at.x, z: at.z, y: at.y, heading: at.heading, inside, seed, essential, temper, id: (entry as { id: string }).id };
       bodies.push(b);
       return b as never;
     },
@@ -176,6 +184,97 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   p.step(PEOPLE_TUNE.everySeconds + 0.1, 320, at, deps);
   p.step(PEOPLE_TUNE.everySeconds + 0.1, 322, at, deps);
   ok(bodies.length === 2, "and stood again once it is, on the row's own respawn rather than a number of ours");
+}
+
+// ------------------------------------------------------------------ a respawn of nought is never
+{
+  // The server ran a body's timer only when it was above nought: a bunker's boss, a trainer, an event's
+  // visitor, written with nought, stayed down once killed. Read as "back in a second" they were stood
+  // again at their posts on the very next pass.
+  const p = new StandingPeople();
+  p.adopt([row({ respawn: 0 }), row({ z: 3, respawn: 0 })]);
+  const { deps, bodies } = game();
+  const at = new THREE.Vector3(0, 0, 0);
+  p.step(1, 1, at, deps);
+  ok(bodies.length === 2, 'two stood whose rows say nought');
+  bodies[0].dead = true;
+  bodies[1].removed = true;
+  for (let t = 10; t < 700; t += 2) p.step(PEOPLE_TUNE.everySeconds + 0.1, t, at, deps);
+  ok(bodies.filter((b) => b.z === 0).length === 1 && p.last.down === 1, 'the one killed is never stood again');
+  ok(bodies.filter((b) => b.z === 3).length === 2, 'while the one the game merely took away (fallen out of the world) comes straight back');
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 800, new THREE.Vector3(9000, 0, 0), deps);
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 802, at, deps);
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 804, at, deps);
+  ok(bodies.filter((b) => b.z === 0).length === 1, 'nor by walking away and coming back, which would be a respawn by another name');
+}
+
+// ------------------------------------------------------------------ what the town says about the one standing there
+{
+  // The body's catalogue entry is one creature's out of every one drawn as that body; the row's own
+  // creature says its temper and whether it may be struck, and the town says who it stood still and
+  // who it made part of the furniture whatever body they drew.
+  const creatures = {
+    guard: { game: { aggression: 'defensive', attackable: true } },
+    trainer: { game: { aggression: 'passive', attackable: false } },
+    stroller: { game: { aggression: 'aggressive', attackable: true } },
+    odd: { game: { aggression: 'furious', attackable: 'yes' } },
+  };
+  const p = new StandingPeople();
+  p.adopt(
+    [
+      row({ who: 'guard', id: 'furniture_body', z: 1, still: true }),
+      row({ who: 'trainer', id: 'body', z: 2 }),
+      row({ who: 'stroller', id: 'body', z: 3, peaceful: true }),
+      row({ who: 'odd', id: 'body', z: 4 }),
+      row({ who: 'nobody', id: 'furniture_body', z: 5 }),
+      row({ who: 'constructor', id: 'body', z: 6 }),
+    ],
+    creatures,
+  );
+  const unstruck = { pvp: ['NONE'] };
+  const { deps, bodies } = game({ catalogue: () => ({ byId: (id: string) => ({ id, name: id, ready: true, stats: id === 'furniture_body' ? { core3: unstruck } : {} }) }) as never });
+  p.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
+  const at = (z: number) => bodies.find((b) => b.z === z)!;
+  ok(bodies.length === 6, 'all six stand');
+  ok(!at(1).essential && at(1).temper === 'defensive' && at(1).post?.kind === 'still', "a town's guard may be struck whatever its body's own entry says, keeps its own creature's temper, and never wanders off its spot");
+  ok(at(2).essential === true, 'a trainer whose own creature may not be struck is part of the furniture, whatever its body could once be');
+  ok(at(3).essential === true && at(3).post?.kind === 'near', 'one the town made unattackable whatever it drew is part of the furniture too');
+  ok(!at(4).essential && at(4).temper === undefined, 'a creature whose numbers read as nothing this game knows stands as its body does');
+  ok(at(5).essential === true && at(6).essential === false, 'as does a row whose creature the pack says nothing about, by its body\'s own entry, even one named like a language\'s own word');
+}
+
+// ------------------------------------------------------------------ the memory budget full, as the cap full
+{
+  // People stood on the way in hold the model memory; a nearer one whose body will not fit puts down
+  // the farthest who between them give back enough, and nobody at all when they could not.
+  let budget = 3;
+  const up = (bs: Body[]) => bs.filter((b) => !b.removed && !b.dead).length;
+  let bodies: Body[] = [];
+  const short = () => Math.max(0, up(bodies) + 1 - budget);
+  let freed = 1;
+  const g = game({
+    short: () => short(),
+    frees: () => freed,
+  });
+  bodies = g.bodies;
+  const refuse = g.deps.spawn;
+  g.deps.spawn = (entry, at, inside, seed, essential, temper) => (short() > 0 ? 'the creature and NPC models already out fill their memory budget' : refuse(entry, at, inside, seed, essential, temper));
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'far1', z: 100 }), row({ who: 'far2', z: 104 }), row({ who: 'far3', z: 60 }), row({ who: 'near', z: 1 }), row({ who: 'nearer', z: 0.5 })]);
+  p.step(0, 0, new THREE.Vector3(0, 0, 100), g.deps, true);
+  ok(up(bodies) === 3 && !bodies.some((b) => b.z < 50), 'three stood by the far ones fill the budget');
+  freed = 0;
+  p.step(0, 1, new THREE.Vector3(0, 0, 0), g.deps, true);
+  ok(up(bodies) === 3 && bodies.every((b) => !b.removed), 'when putting them down would give nothing back, nobody is put down for nothing');
+  freed = 1;
+  p.step(0, 2, new THREE.Vector3(0, 0, 0), g.deps, true);
+  const standingNow = bodies.filter((b) => !b.removed && !b.dead).map((b) => b.z).sort((a, b) => a - b);
+  ok(standingNow.join() === '0.5,1,60', `walking up to the near ones, the farthest make room for them, farthest first (${standingNow.join(', ')})`);
+  ok(p.last.swapped === 2, 'and each one put down is counted as a swap');
+  const before = bodies.length;
+  for (let t = 3; t < 12; t++) p.step(PEOPLE_TUNE.everySeconds + 0.1, t * 2, new THREE.Vector3(0, 0, 0), g.deps);
+  ok(bodies.length === before, 'and standing there it settles: nothing is put down and stood again pass after pass');
+  budget = 99;
 }
 
 // ------------------------------------------------------------------ the world holding still
@@ -542,6 +641,12 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(/if \(m\.origin === 'spawned' && !this\.worldIds\.has\(m\)\) n\+\+;/.test(manager), "the hand-spawn cap counts only what was stood by hand, never the world's own bodies");
   ok(/if \(m\.origin !== 'spawned' \|\| this\.worldIds\.has\(m\)\) continue;/.test(manager), "and the NPC tab's clear never takes one of the world's");
   ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer');
+
+  // What the town says about each row reaches the body the world stands, and the budget can make room.
+  ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows");
+  ok(/spawn: \(entry, at, inside, seed, essential, temper\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{ origin: 'spawned', seed, inside, worldId: `stood:\$\{seed\}`, essential, overrides: temper \? \{ aggression: temper \} : undefined \}\)/.test(worldSrc), "and stands each with its own creature's temper over its body's");
+  ok(/short: \(entry\) => this\.mobiles\?\.budgetShort\(entry\) \?\? 0,\s*frees: \(m\) => this\.mobiles\?\.freedBy\(m\) \?\? 0,/.test(worldSrc), 'and tells them what the model memory budget is short of and what putting somebody down gives back');
+  ok(/spawn\(entry, at, \{ origin: 'spawned', inside, worldId, essential, fixture: true \}\)/.test(worldSrc) && /const cost = budget \? this\.deps\.assets\.wouldCost\(entry, cat\) : 0;/.test(manager) && /this\.whyNot\(entry, cat, opts\.worldId \? 'world' : origin, !opts\.fixture\)/.test(manager), 'and a ticket collector is a fixture the memory budget never keeps off its pad');
 }
 
 // ------------------------------------------------------------------ a real town, where converted
@@ -609,7 +714,9 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
     const amongThings = framed.filter((r) => nearThing(r.x, r.z)).length / framed.length;
     const unframed = kept.filter((r) => nearThing(r.x, r.z)).length / kept.length;
     ok(framed.length === kept.length && amongThings > 0.8, `the people as the pass frames them stand among the client's own placed objects: ${(amongThings * 100).toFixed(0)}% within 30 m of one`);
-    ok(unframed < 0.05, `while read as the pack writes them, in the world's frame, ${(unframed * 100).toFixed(1)}% do, which is where every one of them used to stand`);
+    // A few do by chance -- with the towns read, the mirror of one town's thousand people falls here and
+    // there among another place's things -- so the witness is how far apart the two shares are.
+    ok(unframed < 0.1 && amongThings > unframed * 8, `while read as the pack writes them, in the world's frame, ${(unframed * 100).toFixed(1)}% do, which is where every one of them used to stand`);
 
     // And walking through it, which is where the cap stopped being nearest first: stood 90 m west of
     // the busiest spot and walked 180 m east through it at a walk.
@@ -635,6 +742,65 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
     const firstWaiting = order.find((o) => o.d <= PEOPLE_TUNE.build && !upNow.has(o.i))?.d ?? Infinity;
     note(`after walking 180 m through it, ${nearestUp} of the ${PEOPLE_TUNE.most} nearest are standing`);
     ok(farUp <= firstWaiting + PEOPLE_TUNE.swapMargin + 1e-6, `and nobody standing is more than the margin farther off than anybody waiting (${farUp.toFixed(1)} m against ${Number.isFinite(firstWaiting) ? firstWaiting.toFixed(1) : 'none'} m)`);
+  }
+}
+
+// ------------------------------------------------------------------ nobody at a starport opens fire, where converted
+{
+  // Stand, with the pass itself, the people round every ticket collector on every converted world, as
+  // the game would stand them arriving there, and ask the game's own rule who would pick a fight with
+  // a player of no faction on sight. The towns hold a few creatures the server really did make
+  // aggressive; none of them may be close enough to a collector to see a passenger step off.
+  const catFile = join('assets-private', 'mobiles', 'catalogue.json');
+  const manFile = join('assets-private', 'spawns', 'manifest.json');
+  const man = existsSync(manFile) ? (JSON.parse(readFileSync(manFile, 'utf8')) as { format: number; creatures: Record<string, PeopleCreature> }) : null;
+  if (!existsSync(catFile) || !man || man.format < 2) note('no format-2 spawns pack and catalogue here, so the starports are not checked');
+  else {
+    const entries = new Map((JSON.parse(readFileSync(catFile, 'utf8')) as { entries: MobileEntry[] }).entries.map((e) => [e.id, e]));
+    const catalogue = () => ({ byId: (id: string) => entries.get(id) ?? null }) as never;
+    const player = { side: 'player' as const, aggression: 'defensive' as const };
+    let collectors = 0;
+    let stood = 0;
+    const near: string[] = [];
+    let townHostile = 0;
+    for (const w of ['tatooine', 'corellia', 'naboo', 'talus', 'rori', 'lok', 'dantooine', 'dathomir', 'endor', 'yavin4']) {
+      const pf = join('assets-private', w, 'spawns.json');
+      const tf = join('assets-private', w, 'travel.json');
+      if (!existsSync(pf) || !existsSync(tf)) continue;
+      const rows = (JSON.parse(readFileSync(pf, 'utf8')) as { statics: StandingRow[] }).statics;
+      for (const c of (JSON.parse(readFileSync(tf, 'utf8')) as { rows: (ChildPlace & { kind: string })[] }).rows.filter((r) => r.kind === 'collector')) {
+        collectors++;
+        const p = new StandingPeople();
+        p.adopt(rows, man.creatures);
+        const g = game({ catalogue, cellReady: () => true });
+        const spot = childInWorld(c, { x: 0, z: 0 });
+        p.step(0, 0, new THREE.Vector3(spot.x, 0, spot.z), g.deps, true);
+        stood += g.bodies.length;
+        for (const b of g.bodies) {
+          const e = entries.get(b.id!)!;
+          if (b.essential || !hostileSides({ side: sideOf(e), aggression: (b.temper as Aggression | undefined) ?? e.stats?.aggression ?? 'defensive' }, player)) continue;
+          const d = Math.hypot(b.x - spot.x, b.z - spot.z);
+          if (d <= BRAIN_TUNE.aggro) near.push(`${w}: ${b.id} ${d.toFixed(0)} m`);
+        }
+      }
+      // The whole of the towns as well, for the note: the few the server itself made aggressive.
+      const p = new StandingPeople();
+      p.adopt(rows.filter((r) => r.where === 'cities'), man.creatures);
+      const g = game({ catalogue, cellReady: () => true });
+      const had = { most: PEOPLE_TUNE.most, build: PEOPLE_TUNE.build, drop: PEOPLE_TUNE.drop };
+      PEOPLE_TUNE.most = 1e6;
+      PEOPLE_TUNE.build = 1e6;
+      PEOPLE_TUNE.drop = 2e6;
+      p.step(0, 0, new THREE.Vector3(0, 0, 0), g.deps, true);
+      Object.assign(PEOPLE_TUNE, had);
+      for (const b of g.bodies) {
+        const e = entries.get(b.id!)!;
+        if (!b.essential && hostileSides({ side: sideOf(e), aggression: (b.temper as Aggression | undefined) ?? e.stats?.aggression ?? 'defensive' }, player)) townHostile++;
+      }
+    }
+    note(`${townHostile} of the towns' own people pick a fight with a player of no faction on sight, every one of them a creature the server itself made aggressive`);
+    ok(collectors > 20 && stood > collectors * 10, `round ${collectors} ticket collectors the pass stood ${stood} people`);
+    ok(near.length === 0, `and not one of them within the ${BRAIN_TUNE.aggro} m a body looks for a fight in picks one with a player stepping off a shuttle${near.length ? `: ${near.join(', ')}` : ''}`);
   }
 }
 

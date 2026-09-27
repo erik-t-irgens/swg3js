@@ -478,6 +478,11 @@ const byTemplate = new Map([['object/mobile/shared_rancor.iff', [core3[1], core3
 const heuristic = M.heuristicStats({ kind: 'creature', family: 'predator', sizeClass: 'huge', bounds: rancorBounds, keywords: [], flags: [], roles: { attacks: ['a'] } });
 const fromCore3 = M.core3StatsFor(byTemplate.get('object/mobile/shared_rancor.iff'), heuristic, { kind: 'creature' });
 ok(fromCore3.source === 'core3' && fromCore3.level === 30 && fromCore3.core3!.mobiles === 2 && fromCore3.aggression === 'defensive' && fromCore3.reach === heuristic.reach, 'the weakest mobile on a template sets its stats, and the reach stays the model\'s');
+// The server's own temper for a player of no faction is its pvp AGGRESSIVE bit and nothing else: KILLER
+// and STALKER are how it treats somebody down and somebody masked, not whether it starts a fight.
+const killer = M.core3StatsFor([{ ...core3[1], creature: ['KILLER', 'STALKER'] }], heuristic, { kind: 'npc' });
+ok(killer.aggression === 'defensive' && M.core3StatsFor([core3[0]], heuristic, { kind: 'creature' }).aggression === 'aggressive', 'a KILLER and STALKER that is not AGGRESSIVE waits to be struck, and an AGGRESSIVE one attacks on sight');
+ok(M.oldTempers({ entries: [{ stats: { source: 'core3', aggression: 'aggressive', core3: { pvp: ['ATTACKABLE'] } } }, { stats: { source: 'core3', aggression: 'aggressive', core3: { pvp: ['AGGRESSIVE'] } } }, { stats: { source: 'heuristic', aggression: 'aggressive' } }] }) === 1, 'and a catalogue whose tempers were worked out the old way is told by the one entry that attacks without the bit');
 const npcRanged = M.core3StatsFor([{ ...core3[1], weapons: ['pirate_weapons_pistol'] }], heuristic, { kind: 'npc' });
 ok(npcRanged.ranged!.range === 20 && M.core3StatsFor([{ ...core3[1], weapons: ['unarmed_weapons'] }], heuristic, { kind: 'npc' }).ranged === null, 'a person with a pistol shoots and one with fists does not');
 const entries = [{ id: 'a', stats: { source: 'heuristic' } }, { id: 'b', stats: { source: 'heuristic' } }];

@@ -59,5 +59,9 @@ const chair = entries.find((e) => snap.templates[e.node.templateIndex] === names
 check('chair follows its building', chair.parentId !== 0 && Math.abs(chair.world!.pos[0] - -5900) < 1e-3 && Math.abs(chair.world!.pos[2] - 4198) < 1e-3, JSON.stringify(chair.world));
 const statue = entries.find((e) => snap.templates[e.node.templateIndex] === names[3])!;
 check('free object at area origin + offset', statue.parentId === 0 && Math.abs(statue.world!.pos[0] - -5990) < 1e-3 && Math.abs(statue.world!.pos[2] - 4020) < 1e-3);
+// The table's own ids are renumbered clear of the snapshot's, and kept beside the new ones: the
+// server named a buildout cell by the table's number, and a person standing in one finds it by that.
+const cell = snap.nodes.find((n: { templateIndex: number }) => snap.templates[n.templateIndex] === names[1]) as { id: number; rawId?: number } | undefined;
+check('a cell keeps the id its table wrote', !!cell && cell.rawId === -8 && cell.id !== -8, JSON.stringify(cell));
 console.log(failures ? `${failures} FAILURES` : 'all passed');
 process.exit(failures ? 1 : 0);

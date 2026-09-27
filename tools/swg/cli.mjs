@@ -216,6 +216,7 @@ import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
+import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { CORE3_WORLDS } from './core3.mjs';
 import { loadEffect } from './texrender.mjs';
@@ -3059,6 +3060,15 @@ function packStatus(dir) {
     if (nonRetail) need(rerun, `${nonRetail} mobile units came from archives outside the retail set`);
     if (toDo && partial) need(rerun, `the last mobiles run converted only ${partial}; this converts the other ${toDo} units and keeps the rest`);
     else if (toDo) need(rerun, `${toDo} mobile models, packs or wearable folders missing or out of date`);
+    // A humanoid pack baked before the two-handed sword, the polearm and the standing dodges were asked
+    // for, which its own record cannot show (`bakedBefore` says why): named by a clip it must carry.
+    const unasked = M.packsBakedBefore(units, M.CURATED_WITNESS);
+    if (unasked) need(rerun, `${unasked} humanoid animation packs were baked before they were asked for the two-handed sword, the polearm and the standing dodges (they carry no ${M.CURATED_WITNESS} and do not say their table has none)`);
+    // A catalogue whose tempers were worked out while KILLER and STALKER still counted as picking a
+    // fight (`core3Temper` says why they do not): nothing in its format or signatures moves with the
+    // rule, and a run rewrites the catalogue without converting anything.
+    const oldTemper = M.oldTempers(mobiles);
+    if (oldTemper) need(rerun, `${oldTemper} catalogue entries attack on sight for a reason the server never did (KILLER or STALKER read as a temper); a run rewrites every entry's stats, even one with nothing to convert`);
     // Where the world's creatures and its standing people were: `spawns`, out of the Core3 reference
     // the converter carries, joined to this catalogue. It was never asked for while it needed the
     // owner's own emulator checkout, so no launcher ever had any of it; it is asked for now whenever a
@@ -3069,20 +3079,15 @@ function packStatus(dir) {
     if (spawnWorlds.length && (unspawned.length || !spawnManifest)) {
       need(`spawns ${dir} --swg=<swg-dir> --retail-only`, unspawned.length ? `the creatures and standing people the server placed on ${unspawned.join(', ')} are not there (spawns.json)` : "the creatures the worlds place have no level, health or damage of the server's (spawns/manifest.json)");
     } else if (spawnWorlds.length) {
-      // A person indoors faces through their building's own turn since the command learned that the
-      // emulator writes the facing in the room's frame as it does the place (`intoRoom` in core3.mjs).
-      // A pack written before says nothing about it and faces everybody in a turned building off by
-      // that building's yaw, so it is told apart by the field the fix added beside every such row.
-      const unturned = spawnWorlds.filter((w) => {
-        try {
-          const text = readFileSync(join(dir, w, 'spawns.json'), 'utf8');
-          return text.includes('"local":') && !text.includes('"localHeading":');
-        } catch {
-          return false;
-        }
-      });
-      if (unturned.length) need(`spawns ${dir} --swg=<swg-dir> --retail-only`, `the people standing indoors on ${unturned.join(', ')} face as though their building stood unturned (written before the facing was carried through the building's own turn)`);
-      else console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
+      // Format 2 is the one that reads the towns (their people, their guards, their patrols), gives
+      // every row a key, draws the scatter the data writes instead of stacking it on one point, faces
+      // a person indoors through their building's own turn (`intoRoom` in core3.mjs), and carries each
+      // creature's own numbers and every camp's pieces. A pack written before any of that is told
+      // apart by its format, the pack and the manifest both.
+      const stale = spawnsStale(Object.fromEntries(spawnWorlds.map((w) => [w, readQuiet(join(dir, w, 'spawns.json'))?.format])), spawnManifest.format);
+      if (stale.stale) {
+        need(`spawns ${dir} --swg=<swg-dir> --retail-only`, `the standing people on ${stale.older.length ? stale.older.join(', ') : 'every world'} are from an older converter (format ${SPAWNS_FORMAT} reads the towns' people, guards and patrols, stands the people the data stacks on one spot apart, faces people indoors through their building's turn, and gives every creature its own numbers and every camp its pieces)`);
+      } else console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
     }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
@@ -7014,25 +7019,37 @@ switch (cmd) {
       }
     };
     const started = Date.now();
+    const sp = await import('./spawnpack.mjs');
     const regions = src.readRegions();
     const groups = src.readSpawnGroups();
     const lairs = src.readLairs();
     const creatures = src.readCreatures();
-    const { statics, dropped } = src.readStatics();
+    const { statics, dropped, pools, skipped: luaSkipped } = src.readStatics();
+    const dressGroups = src.readDressGroups();
+    const weaponGroups = src.readWeaponGroups();
+    // Each mobile's own record by its name, for the numbers every body drawn as it now carries.
+    const mobileByName = new Map();
+    for (const list of src.core3MobileStats().values()) for (const m of list) if (!mobileByName.has(m.name)) mobileByName.set(m.name, m);
     const catFile = join(pos[1], 'mobiles', 'catalogue.json');
     if (!existsSync(catFile)) {
       console.log(`spawns: no mobiles catalogue at ${catFile}; run mobiles first, since every name here has to reach a model`);
       break;
     }
     const cat = JSON.parse(readFileSync(catFile, 'utf8'));
-    const { joined, missing } = c3.joinCatalogue(creatures, cat.entries ?? []);
+    const entryById = new Map((cat.entries ?? []).map((e) => [e.id, e]));
+    const { joined, missing } = c3.joinCatalogue(creatures, cat.entries ?? [], dressGroups);
 
     // The shared half: the creatures, what each lair stands and what each group may put down. One
     // copy for the fleet, since a creature is the same animal on every world that has it.
     const dir = join(pos[1], 'spawns');
     mkdirSync(dir, { recursive: true });
     const creatureOut = {};
+    let withGame = 0;
     for (const [who, c] of joined) {
+      // The creature's own numbers, where its record is found: every body drawn as it shares one
+      // catalogue entry, which carries one mobile's numbers and not this one's (`gameOf`).
+      const game = sp.gameOf(mobileByName.get(who), entryById.get(c.id));
+      if (game) withGame++;
       creatureOut[who] = {
         id: c.id,
         level: c.level,
@@ -7053,8 +7070,22 @@ switch (cmd) {
         tame: c.tame,
         ferocity: c.ferocity,
         hues: c.hues,
+        ...(game ? { game } : {}),
+        ...(c.weapons?.length ? { weapons: c.weapons } : {}),
+        ...(c.dress ? { dress: c.dress } : {}),
+        ...(c.bodies?.length ? { bodies: c.bodies } : {}),
       };
     }
+    // The lists behind the names a creature carries: a dress group's bodies (ids, the ready ones) and a
+    // weapon group's templates, only those some creature here names.
+    const byTemplate = new Map((cat.entries ?? []).filter((e) => e.template && e.ready).map((e) => [e.template, e.id]));
+    const dressOut = {};
+    for (const [name, list] of dressGroups) {
+      const ids = list.map((t) => byTemplate.get(t.replace(/(^|\/)([^/]+)\.iff$/, '$1shared_$2.iff'))).filter((id, i, a) => id && a.indexOf(id) === i);
+      if (ids.length) dressOut[name] = ids;
+    }
+    const weaponOut = {};
+    for (const c of joined.values()) for (const w of c.weapons ?? []) if (!weaponOut[w] && weaponGroups.has(w)) weaponOut[w] = weaponGroups.get(w);
     const lairOut = {};
     for (const [name, l] of lairs) lairOut[name] = { kind: l.kind, mobiles: l.mobiles, boss: l.boss, cap: l.cap, nest: l.nest, building: l.building, people: l.people };
 
@@ -7070,28 +7101,20 @@ switch (cmd) {
     // whose `cellIndex` is the room, and that cell is contained by the building. So the cell's
     // world transform is the building's, and a person's world place is that transform applied to
     // the position they were written with. The room number travels with them so the runtime knows
-    // which cell to put them in rather than guessing from a point.
+    // which cell to put them in rather than guessing from a point. The buildout tables are the second
+    // place the client stands buildings, and are read too (`roomsOf` in spawnpack.mjs says why).
     const roomsOf = (world) => {
-      const out = new Map();
-      if (!options.swg) return out;
+      if (!options.swg) return new Map();
       try {
         const ws = `snapshot/${world}.ws`;
-        if (!spawnVfs.has(ws)) return out;
+        if (!spawnVfs.has(ws)) return new Map();
         const snap = parseSnapshot(parseIff(spawnVfs.read(ws)));
-        const flat = flattenWithWorldTransforms(snap);
-        for (const { node, world } of flat) {
-          if (!node || !world || !(node.cellIndex > 0)) continue;
-          const tpl = snap.templates[node.templateIndex] ?? '';
-          if (!/\/cell\//.test(tpl)) continue;
-          // `world` is the flattener's own answer for this node, which for a cell is its building's
-          // -- a cell's own transform is identity. Reading `node.q`/`node.pos` instead gives exactly
-          // that identity and leaves every person standing at the middle of the world.
-          out.set(node.id, { cellIndex: node.cellIndex, q: world.q, pos: world.pos });
-        }
+        mergeBuildouts(snap, loadBuildouts(spawnVfs, world));
+        return sp.roomsOf(snap);
       } catch {
         /* a world whose snapshot will not read simply keeps its people indoors and unplaced */
+        return new Map();
       }
-      return out;
     };
 
     // The nests themselves, when the archives are to hand.
@@ -7102,6 +7125,8 @@ switch (cmd) {
     // Without `--swg` the rest of the command still runs and the pack simply has no nests, which is
     // a world of herds and no lairs rather than a broken one.
     const nests = {};
+    const camps = {};
+    const campModels = {};
     if (options.swg) {
       const cache = new Map();
       const nestDir = join(dir, 'nests');
@@ -7145,6 +7170,73 @@ switch (cmd) {
         }
       }
       console.log(`spawns: ${made} nest models written${failed ? `, ${failed} that would not convert` : ''}`);
+
+      // What each nest's client data hangs on it, which is where a camp really is. A camp's own
+      // appearance is a marker the size of a pebble; its tents, cots, stools, terminals and banners
+      // are children its client data places (the CHLD and CHL2 chunks `clientfx.mjs` reads), every
+      // one of them in the retail archives. The particles among them -- a creature nest's fog or its
+      // buzzing insects, a camp's fire -- are its effects, converted into this pack's `particles/` as
+      // a world's own are. Each piece is converted once into `nests/` and named by its file.
+      const { clientEffectReader } = await import('./clientfx.mjs');
+      const reader = clientEffectReader(spawnVfs);
+      const paramCache = new Map();
+      let effects = 0;
+      let pieces = 0;
+      let pieceFailed = 0;
+      let skinned = 0;
+      for (const template of [...wanted].sort()) {
+        const fx = reader.effectsOf(template);
+        if (fx.length && nests[template]) {
+          const rows = attachedEffects(spawnVfs, fx, dir).map(({ cell, ...row }) => row);
+          if (rows.length) {
+            nests[template].effects = rows;
+            effects += rows.length;
+          }
+        }
+        let cdf = null;
+        try {
+          cdf = resolveTemplateString(spawnVfs, template, ['clientDataFile'], paramCache);
+        } catch {
+          cdf = null;
+        }
+        if (!cdf || !spawnVfs.has(cdf.replace(/\\/g, '/'))) continue;
+        let children = [];
+        try {
+          children = readClientChildren(parseIff(spawnVfs.read(cdf.replace(/\\/g, '/'))));
+        } catch {
+          children = [];
+        }
+        const found = sp.campPieces(children);
+        skinned += found.skipped;
+        const placed = [];
+        for (const p of found.pieces) {
+          try {
+            let source = p.name;
+            if (p.template) {
+              const r = resolveTemplateMesh(spawnVfs, p.template, cache);
+              source = r.parts?.length === 1 && !r.parts[0].transform ? r.parts[0].mesh : r.appearance;
+            }
+            if (!source) {
+              pieceFailed++;
+              continue;
+            }
+            const file = `nests/${familyOf(source)}.glb`;
+            if (!campModels[file]) {
+              const conv = convertOne(spawnVfs, source, join(dir, file));
+              const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+              campModels[file] = { bounds: conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b, triangles: conv.tris };
+            }
+            // The place and the turn as the client data writes them, in the camp's own frame: the
+            // runtime mirrors them with the camp, as it does every placed object.
+            placed.push({ model: file, place: p.place, angles: p.angles });
+            pieces++;
+          } catch {
+            pieceFailed++;
+          }
+        }
+        if (placed.length) camps[template] = placed;
+      }
+      console.log(`spawns: ${Object.keys(camps).length} camps of ${pieces} pieces (${Object.keys(campModels).length} models${pieceFailed ? `, ${pieceFailed} pieces that would not convert` : ''}${skinned ? `, ${skinned} skinned bodies left out` : ''}), ${effects} effects on ${Object.values(nests).filter((n) => n.effects).length} nests`);
     }
     const groupOut = {};
     for (const [name, g] of groups) groupOut[name] = g;
@@ -7152,14 +7244,30 @@ switch (cmd) {
       join(dir, 'manifest.json'),
       JSON.stringify(
         {
-          format: 1,
+          format: sp.SPAWNS_FORMAT,
           source: 'core3',
           converted: new Date().toISOString(),
-          counts: { creatures: joined.size, unmatched: missing.length, lairs: lairs.size, groups: groups.size, nests: Object.keys(nests).length },
+          counts: {
+            creatures: joined.size,
+            unmatched: missing.length,
+            lairs: lairs.size,
+            groups: groups.size,
+            nests: Object.keys(nests).length,
+            withGame,
+            dressGroups: Object.keys(dressOut).length,
+            weaponGroups: Object.keys(weaponOut).length,
+            camps: Object.keys(camps).length,
+          },
           creatures: creatureOut,
           lairs: lairOut,
           groups: groupOut,
           nests,
+          // A camp's pieces by its template, each `{ model, place, angles }` in the camp's own frame
+          // (the client data's, degrees), and each model's size once.
+          camps,
+          campModels,
+          dressGroups: dressOut,
+          weaponGroups: weaponOut,
           // Named rather than dropped in silence: a creature the server stood that this game has no
           // body for is a hole in the world, and the only way anybody finds out is if it is written.
           unmatched: missing.slice(0, 400).map((m) => `${m.who} (${m.template})`),
@@ -7174,6 +7282,7 @@ switch (cmd) {
     let people = 0;
     let worlds = 0;
     const noWorld = [];
+    const lostBy = { body: 0, room: 0 };
     for (const [world, r] of regions) {
       const out = join(pos[1], world);
       if (!existsSync(out)) {
@@ -7181,25 +7290,28 @@ switch (cmd) {
         continue;
       }
       const rooms = roomsOf(world);
-      let placedIndoors = 0;
-      let lostIndoors = 0;
-      const rows = (statics.get(world) ?? [])
-        .filter((s) => joined.has(s.who))
-        .map((s) => {
-          const row = { ...s, id: joined.get(s.who).id };
-          if (!s.cell) return row;
-          const room = rooms.get(s.cell);
-          if (!room) {
-            // Their position is a spot in a room and nowhere on a planet, so it is not a place.
-            lostIndoors++;
-            return { ...row, room: null };
-          }
-          placedIndoors++;
-          // The place and the facing both, through the room's own turn (`intoRoom` says why both).
-          return { ...row, ...c3.intoRoom(s, room) };
-        })
-        .filter((s) => s.cell === 0 || s.room !== null);
-      if (rooms.size) console.log(`spawns: ${world} — ${placedIndoors} people put in their own rooms${lostIndoors ? `, ${lostIndoors} whose room is in no snapshot and are left out` : ''}`);
+      const worldPools = pools.get(world) ?? new Map();
+      const lost = { body: 0, room: 0 };
+      let routesLost = 0;
+      const rows = [];
+      for (const s of statics.get(world) ?? []) {
+        // The place and the facing both, through the room's own turn (`intoRoom` says why both); a
+        // person in a room no snapshot or buildout holds is a spot in a room and nowhere on a planet.
+        const got = sp.packRow(s, { joined, rooms, pools: worldPools });
+        if (got.lost) {
+          lost[got.lost]++;
+          continue;
+        }
+        if (got.row.routeLost) routesLost++;
+        rows.push(got.row);
+      }
+      lostBy.body += lost.body;
+      lostBy.room += lost.room;
+      const indoors = rows.filter((s) => s.cell).length;
+      if (rooms.size) console.log(`spawns: ${world} — ${rows.length} people, ${indoors} in their own rooms${lost.room ? `, ${lost.room} whose room is in no snapshot and are left out` : ''}${lost.body ? `, ${lost.body} with no body this game has` : ''}${routesLost ? `, ${routesLost} routes through a room nobody holds` : ''}`);
+      // The lists the rows here draw a body from, only those some row names.
+      const poolsOut = {};
+      for (const row of rows) for (const [pool] of row.draw ?? []) if (!poolsOut[pool] && worldPools.has(pool)) poolsOut[pool] = worldPools.get(pool);
       // Which frame the numbers are in, asked of the ground rather than of anything built from the
       // same scripts. `heightCheck` says why that distinction is the whole of it.
       const frame = c3.heightCheck(rows, terrainHeights(out));
@@ -7210,18 +7322,21 @@ switch (cmd) {
         join(out, 'spawns.json'),
         JSON.stringify(
           {
-            format: 1,
+            format: sp.SPAWNS_FORMAT,
             planet: world,
             // Which half of this came from where, because the two halves are not the same kind of
-            // thing. Every standing person is a real place the real server used. Not one creature
-            // coordinate exists anywhere in that data: an area is a shape with a weighted list and
-            // a cap, and where each animal stands is drawn from a seed on this side.
-            source: { areas: 'core3', statics: 'core3', creaturePlaces: 'invented' },
+            // thing. Every standing person is a real place the real server used, save that a place
+            // the data scatters is drawn from the row's own key (`drawn`) and people the data stacks
+            // on one point are stood apart (`nudged`). Not one creature coordinate exists anywhere in
+            // that data: an area is a shape with a weighted list and a cap, and where each animal
+            // stands is drawn from a seed on this side.
+            source: { areas: 'core3', statics: 'core3', creaturePlaces: 'invented', scatter: 'drawn', stacks: 'nudged' },
             frameCheck: frame,
-            counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0 },
+            counts: { areas: r.spawn.length, noSpawn: r.noSpawn.length, statics: rows.length, staticsDropped: dropped.get(world) ?? 0, noBody: lost.body, noRoom: lost.room },
             areas: r.spawn,
             noSpawn: r.noSpawn,
             statics: rows,
+            pools: poolsOut,
           },
           null,
           1,
@@ -7232,7 +7347,7 @@ switch (cmd) {
       worlds++;
     }
     console.log(
-      `spawns: ${worlds} worlds, ${areas} spawn areas, ${people} standing people, ${joined.size} creatures with the server's own level, health and damage (${missing.length} named a body we have not got), ${lairs.size} lairs, ${groups.size} groups in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+      `spawns: ${worlds} worlds, ${areas} spawn areas, ${people} standing people (${lostBy.body} with no body, ${lostBy.room} in no room), ${joined.size} creatures with the server's own level, health and damage (${withGame} with their own numbers; ${missing.length} named a body we have not got), ${Object.keys(dressOut).length} dress groups, ${Object.keys(weaponOut).length} weapon groups, ${lairs.size} lairs, ${groups.size} groups; ${dropped.get('?') ?? 0} rows with no world, ${luaSkipped} script statements stepped over, in ${((Date.now() - started) / 1000).toFixed(1)}s`,
     );
     if (noWorld.length) console.log(`spawns: not converted yet, so left out: ${noWorld.join(', ')}`);
     break;
