@@ -15,7 +15,7 @@
 // `.ts` value imports only.
 
 import * as THREE from 'three';
-import { chainPose, poseRigAction, type ChainLink, type RigActions } from '../world/rigPath.ts';
+import { chainPose, landingJoin, poseRigAction, rigPathOf, takeoffCut, type ChainLink, type RigActions, type RigMoment, type RigPath } from '../world/rigPath.ts';
 import type { RigClips, RigPose, TravelRig } from '../world/travelTerminal.ts';
 import type { VehicleDef } from './garage';
 
@@ -36,6 +36,26 @@ export const RIG_HULL_TUNE = {
   /** Seconds for a turn to build or die away: a big ship's 1.4 overshoots a lane, a fighter's 0.55 is twitchy for a 43 m hull. */
   inertia: 1.2,
 };
+
+/**
+ * The branch a hull flown from a rig lands with. Every pad a shuttle can be flown to plays the calm
+ * branch where a rig has one (Theed's hangar is never a destination: no port stands near it), so a
+ * transport out of Theed lands as every other transport does; a rig with no calm branch, the shuttle's
+ * one unnamed branch, lands with its own.
+ */
+export function landingMood(moods: Record<string, RigClips> | null | undefined, mood: string): string {
+  return moods && moods.calm ? 'calm' : mood;
+}
+
+/** A hull's clips flown as paths for one branch: the take-off and where it lets go, the landing and where it takes back, and the branch it lands with. */
+export interface RigPaths {
+  lift: RigPath;
+  cut: RigMoment | null;
+  land: RigPath;
+  join: RigMoment | null;
+  liftMood: string;
+  landMood: string;
+}
 
 /** A box's volume from a pack's bounds, whichever corner it wrote first. */
 function boundsVolume(b: { min: number[]; max: number[] } | undefined): number {
@@ -247,33 +267,102 @@ export class RigHull {
   /** The hull joint at the ground pose, in the rig's own frame. */
   readonly ground: { pos: THREE.Vector3; quat: THREE.Quaternion };
   private readonly state: RigActions;
+  /** The actions of the branch it was built for, and of any other branch it has been asked to pose, by branch. */
+  private readonly own: RigActions['actions'];
+  private readonly byMood = new Map<string, RigActions['actions']>();
+  /** Every branch of its rig by name (its own alone when it was given no others), and each branch's clips flown as paths once asked for. */
+  private readonly moods: Record<string, RigClips>;
+  private readonly clips: RigClips;
+  private readonly chain: ChainLink[];
+  private readonly fullClips: Map<string, THREE.AnimationClip>;
+  private readonly limbClips: Map<string, THREE.AnimationClip>;
+  private readonly pathsByMood = new Map<string, RigPaths | null>();
   /** The ramp's foot in the model's own frame, where the framing has not yet been taken into account. */
   private readonly rampInModel: THREE.Vector3 | null;
 
-  constructor(assembled: RigModel, clips: RigClips) {
+  /**
+   * `clips` is the branch it is built for; `moods`, every branch of its rig, lets it pose and fly the
+   * others too (a hull out of Theed's hangar lands with the calm branch's clip).
+   */
+  constructor(assembled: RigModel, clips: RigClips, moods: Record<string, RigClips> | null = null) {
     this.model = assembled.model;
     this.joints = assembled.joints;
     this.hull = assembled.hull;
     this.ground = assembled.ground;
+    this.clips = clips;
+    this.moods = moods ?? {};
+    this.chain = assembled.chain;
+    this.fullClips = assembled.fullClips;
+    this.limbClips = assembled.limbClips;
     const mixer = new THREE.AnimationMixer(assembled.joints);
+    this.own = this.actionsOf(mixer, clips);
+    this.state = { mixer, actions: this.own, current: null };
+    this.pose('ground', 0);
+    this.rampInModel = rampFootOf(this.model, assembled.pieces);
+  }
+
+  /** One branch's limb clips as actions on the mixer, a role apiece. */
+  private actionsOf(mixer: THREE.AnimationMixer, clips: RigClips): RigActions['actions'] {
     const actions: RigActions['actions'] = {};
     for (const role of ['land', 'lift', 'ground', 'sky'] as const) {
       const name = clips[role];
-      const clip = name ? assembled.limbClips.get(name) : undefined;
+      const clip = name ? this.limbClips.get(name) : undefined;
       if (!clip) continue;
       const a = mixer.clipAction(clip);
       a.setLoop(THREE.LoopOnce, 1);
       a.clampWhenFinished = true;
       actions[role] = a;
     }
-    this.state = { mixer, actions, current: null };
-    this.pose('ground', 0);
-    this.rampInModel = rampFootOf(this.model, assembled.pieces);
+    return actions;
   }
 
-  /** The limbs where a role's clip has them at `seconds`: struts and door, relative to the pinned hull. */
-  pose(role: RigPose['role'], seconds: number): void {
+  /** The clips of a branch, or its own where it knows no such branch. */
+  private clipsOf(mood: string): RigClips {
+    return this.moods[mood] ?? this.clips;
+  }
+
+  /**
+   * The limbs where a role's clip has them at `seconds`: struts and door, relative to the pinned hull.
+   * `mood` poses another branch's clip (a landing flown with the calm branch); left out, its own.
+   * Allocates nothing once each branch has been posed once.
+   */
+  pose(role: RigPose['role'], seconds: number, mood?: string): void {
+    const clips = mood === undefined ? this.clips : this.clipsOf(mood);
+    let actions = this.own;
+    if (clips !== this.clips) {
+      let a = this.byMood.get(mood!);
+      if (!a) {
+        a = this.actionsOf(this.state.mixer, clips);
+        this.byMood.set(mood!, a);
+      }
+      actions = a;
+    }
+    this.state.actions = actions;
     poseRigAction(this.state, role, seconds);
+  }
+
+  /**
+   * One branch's take-off and landing flown as paths, with where the take-off lets go of the hull (its
+   * cut, no faster than the hull's boost) and where the landing takes it back (its join, no faster than
+   * its cruise), from the whole clips; the landing is the branch it lands with (`landingMood`). Made
+   * the first time a branch is asked for and kept, with the paths themselves kept per clip for the
+   * session (`rigPathOf`), so a hull built again after a crossing works nothing out twice; a retune of
+   * `RIG_PATH_TUNE` or `RIG_HULL_TUNE` is taken by the next hull built. Null for a branch with no
+   * take-off or landing clip.
+   */
+  paths(mood: string): RigPaths | null {
+    if (this.pathsByMood.has(mood)) return this.pathsByMood.get(mood) ?? null;
+    const landMood = landingMood(this.moods, mood);
+    const liftClip = this.fullClips.get(this.clipsOf(mood).lift);
+    const landClip = this.fullClips.get(this.clipsOf(landMood).land);
+    let out: RigPaths | null = null;
+    if (liftClip && landClip) {
+      const lift = rigPathOf(liftClip, this.chain);
+      const land = rigPathOf(landClip, this.chain);
+      out = { lift, cut: takeoffCut(lift, RIG_HULL_TUNE.boostSpeed), land, join: landingJoin(land, RIG_HULL_TUNE.maxSpeed), liftMood: mood, landMood };
+    }
+    this.pathsByMood.set(mood, out);
+    return out;
   }
 
   /**

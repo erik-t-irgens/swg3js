@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { readGlb } from '../glbclips.mjs';
+import { loadGlb, madeUpPieces, madeUpRig, madeUpRigBlock, packRigs, type Pieces, type Skeleton } from './rigFixtures.ts';
 import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf, pieceVolumes, rigDef, rigExtents } from '../../../src/vehicles/rigHull.ts';
 import { frameExtents } from '../../../src/vehicles/shipAssembly.ts';
 import { chainPose, onPad, poseRigAction, vehicleFromJoint, type Pad, type RigActions } from '../../../src/world/rigPath.ts';
@@ -34,9 +34,6 @@ function note(what: string): void {
 const show = (v: THREE.Vector3) => v.toArray().map((n) => n.toFixed(3)).join(', ');
 
 // ---------------------------------------------------------------- the clock rig and the flown hull, side by side
-
-type Skeleton = { scene: THREE.Object3D; animations: THREE.AnimationClip[] };
-type Pieces = { joint: string; model: THREE.Object3D }[];
 
 /** A rig stood as ShuttleRigs stands one: the skeleton cloned under a group on the pad, the pieces hung, the whole clips on a mixer. */
 function clockRig(skeleton: Skeleton, pieces: Pieces, clips: RigClips, pad: Pad): { root: THREE.Group; pieces: THREE.Object3D[]; state: RigActions } {
@@ -129,91 +126,7 @@ function worstGap(clock: THREE.Object3D[], flown: THREE.Object3D[], every = 1): 
 
 // ---------------------------------------------------------------- a rig made up here
 
-// The transport's own trick: its root joint rests turned 180 degrees about (-1, 0, 1)/√2 and its hull
-// joint turns back again, so the hull stands level while the root's own axes point anywhere but where
-// they look. A strut on the root slides, a door on the root swings, and the root carries the ship.
-const ROOT_TURN = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(-1, 0, 1).normalize(), Math.PI);
-function madeUpRig(): Skeleton {
-  const scene = new THREE.Group();
-  const root = new THREE.Bone();
-  root.name = 'root';
-  root.position.set(0, 3.94, -3.82);
-  root.quaternion.copy(ROOT_TURN);
-  const hullJoint = new THREE.Bone();
-  hullJoint.name = 'hold';
-  hullJoint.quaternion.copy(ROOT_TURN).invert();
-  const strut = new THREE.Bone();
-  strut.name = 'hold_strut';
-  strut.position.set(-6, 1.5, 0);
-  strut.quaternion.copy(ROOT_TURN).invert();
-  const door = new THREE.Bone();
-  door.name = 'hold_door';
-  door.position.set(-9, 2.4, -3.7);
-  door.quaternion.copy(ROOT_TURN).invert();
-  root.add(hullJoint, strut, door);
-  scene.add(root);
-  const r = ROOT_TURN.toArray();
-  const back = ROOT_TURN.clone().invert().toArray();
-  const open = ROOT_TURN.clone().invert().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), 0.68)).toArray();
-  const climb = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.4).multiply(ROOT_TURN).toArray();
-  const P = (name: string, times: number[], values: number[]) => new THREE.VectorKeyframeTrack(`${name}.position`, times, values);
-  const Q = (name: string, times: number[], values: number[]) => new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, values);
-  // Every joint keyed in every clip, the hull joint constant at its rest, as the converter writes them.
-  const still = (d: number) => [P('hold', [0, d], [0, 0, 0, 0, 0, 0]), Q('hold', [0, d], [...back, ...back])];
-  return {
-    scene,
-    animations: [
-      new THREE.AnimationClip('land', 10, [
-        P('root', [0, 6, 10], [80, 300, 900, 0, 60, 120, 0, 3.94, -3.82]),
-        Q('root', [0, 10], [...r, ...r]),
-        ...still(10),
-        P('hold_strut', [0, 7, 10], [-6, 2.5, 0, -6, 2.5, 0, -6, 1.5, 0]),
-        Q('hold_strut', [0, 10], [...back, ...back]),
-        P('hold_door', [0, 10], [-9, 2.4, -3.7, -9, 2.4, -3.7]),
-        Q('hold_door', [0, 8, 10], [...back, ...back, ...open]),
-      ]),
-      new THREE.AnimationClip('take_off', 6, [
-        P('root', [0, 2, 6], [0, 3.94, -3.82, 0, 12, -10, 0, 90, -300]),
-        Q('root', [0, 2, 6], [...r, ...r, ...climb]),
-        ...still(6),
-        P('hold_strut', [0, 2, 6], [-6, 1.5, 0, -6, 2.5, 0, -6, 2.5, 0]),
-        Q('hold_strut', [0, 6], [...back, ...back]),
-        P('hold_door', [0, 6], [-9, 2.4, -3.7, -9, 2.4, -3.7]),
-        Q('hold_door', [0, 1, 6], [...open, ...back, ...back]),
-      ]),
-      new THREE.AnimationClip('loop_ground', 1 / 30, [
-        P('root', [0, 1 / 30], [0, 3.94, -3.82, 0, 3.94, -3.82]),
-        Q('root', [0, 1 / 30], [...r, ...r]),
-        ...still(1 / 30),
-        P('hold_strut', [0, 1 / 30], [-6, 1.5, 0, -6, 1.5, 0]),
-        Q('hold_strut', [0, 1 / 30], [...back, ...back]),
-        P('hold_door', [0, 1 / 30], [-9, 2.4, -3.7, -9, 2.4, -3.7]),
-        Q('hold_door', [0, 1 / 30], [...open, ...open]),
-      ]),
-    ],
-  };
-}
-const box = (w: number, h: number, d: number, x = 0, y = 0, z = 0) => {
-  const g = new THREE.Group();
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d).translate(x, y, z), new THREE.MeshStandardMaterial());
-  g.add(m);
-  return g;
-};
-const madeUpPieces = (): Pieces => [
-  { joint: 'hold', model: box(15, 11, 43, 0, 2, 0.8) },
-  { joint: 'hold_strut', model: box(1.8, 2, 4, 0, -1, 0) },
-  { joint: 'hold_door', model: box(3.5, 0.2, 2, 1.75, 0, 0) },
-];
-const madeUpRigBlock: TravelRig = {
-  file: 'travel/rig.glb',
-  parts: [
-    { joint: 'hold', file: 'travel/hull.glb', bounds: { min: [7.5, 7.5, 22.3], max: [-7.5, -3.5, -20.7] } },
-    { joint: 'hold_strut', file: 'travel/strut.glb', bounds: { min: [-0.9, -2, -2], max: [0.9, 0, 2] } },
-    { joint: 'hold_door', file: 'travel/door.glb', bounds: { min: [0, -0.1, -1], max: [3.5, 0.1, 1] } },
-  ],
-  moods: { '': { land: 'land', lift: 'take_off', ground: 'loop_ground' } },
-  seconds: { land: 10, take_off: 6, loop_ground: 1 / 30 },
-};
+// `madeUpRig` (rigFixtures.ts): the transport's own awkward rest turn, a strut that slides and a door that swings.
 const clips = madeUpRigBlock.moods[''];
 
 {
@@ -415,83 +328,14 @@ const clips = madeUpRigBlock.moods[''];
 
 // ---------------------------------------------------------------- the game's own rigs, if this install has them
 
-/** A GLB's nodes as three objects (joints as bones), its meshes' positions and indices, and its clips as the loader makes them. */
-function loadGlb(file: string): Skeleton {
-  const { json, bin } = readGlb(readFileSync(file)) as { json: GltfJson; bin: Buffer };
-  const read = (i: number): Float32Array | Uint32Array => {
-    const a = json.accessors[i];
-    const view = json.bufferViews[a.bufferView];
-    const n = ({ SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 } as Record<string, number>)[a.type];
-    const base = (view.byteOffset ?? 0) + (a.byteOffset ?? 0);
-    const count = a.count * n;
-    if (a.componentType === 5126) {
-      const out = new Float32Array(count);
-      for (let k = 0; k < count; k++) out[k] = bin.readFloatLE(base + k * 4);
-      return out;
-    }
-    const out = new Uint32Array(count);
-    const size = a.componentType === 5125 ? 4 : a.componentType === 5123 ? 2 : 1;
-    for (let k = 0; k < count; k++) out[k] = size === 4 ? bin.readUInt32LE(base + k * 4) : size === 2 ? bin.readUInt16LE(base + k * 2) : bin.readUInt8(base + k);
-    return out;
-  };
-  const joints = new Set<number>((json.skins ?? []).flatMap((s) => s.joints));
-  const nodes = json.nodes.map((n, i) => {
-    let o: THREE.Object3D;
-    if (n.mesh !== undefined) {
-      const group = new THREE.Group();
-      for (const prim of json.meshes![n.mesh].primitives) {
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute('position', new THREE.BufferAttribute(read(prim.attributes.POSITION) as Float32Array, 3));
-        if (prim.indices !== undefined) geo.setIndex(new THREE.BufferAttribute(read(prim.indices), 1));
-        group.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial()));
-      }
-      o = group;
-    } else o = joints.has(i) ? new THREE.Bone() : new THREE.Object3D();
-    o.name = n.name ?? '';
-    if (n.translation) o.position.fromArray(n.translation);
-    if (n.rotation) o.quaternion.fromArray(n.rotation);
-    if (n.scale) o.scale.fromArray(n.scale);
-    return o;
-  });
-  json.nodes.forEach((n, i) => (n.children ?? []).forEach((c) => nodes[i].add(nodes[c])));
-  const scene = new THREE.Group();
-  for (const i of json.scenes[0].nodes) scene.add(nodes[i]);
-  const animations = (json.animations ?? []).map((an) => {
-    const tracks = an.channels.map((c) => {
-      const s = an.samplers[c.sampler];
-      const times = read(s.input) as Float32Array;
-      const values = read(s.output) as Float32Array;
-      const name = `${json.nodes[c.target.node].name}.${c.target.path === 'translation' ? 'position' : c.target.path === 'rotation' ? 'quaternion' : 'scale'}`;
-      return c.target.path === 'rotation' ? new THREE.QuaternionKeyframeTrack(name, times, values) : new THREE.VectorKeyframeTrack(name, times, values);
-    });
-    return new THREE.AnimationClip(an.name, -1, tracks);
-  });
-  return { scene, animations };
-}
-interface GltfJson {
-  nodes: { name?: string; children?: number[]; mesh?: number; translation?: number[]; rotation?: number[]; scale?: number[] }[];
-  scenes: { nodes: number[] }[];
-  skins?: { joints: number[] }[];
-  meshes?: { primitives: { attributes: { POSITION: number }; indices?: number }[] }[];
-  accessors: { bufferView: number; byteOffset?: number; componentType: number; count: number; type: string }[];
-  bufferViews: { byteOffset?: number }[];
-  animations?: { name: string; channels: { sampler: number; target: { node: number; path: string } }[]; samplers: { input: number; output: number }[] }[];
-}
-
 {
   const packs = join(process.cwd(), 'assets-private');
   const convert = 'npm run swg -- travel @SWG assets-private --retail-only';
   // Every rig any converted world's travel pack carries, by name: the rigs live in one folder every
   // world shares, but a world carries only the ones its ports stand (Dantooine, Dathomir, Endor, Lok and
   // Yavin 4 carry the transport alone), so one world's pack could leave a rig out with nothing to say so.
-  const rigs: Record<string, TravelRig> = {};
-  if (existsSync(packs)) {
-    for (const w of readdirSync(packs).sort()) {
-      const file = join(packs, w, 'travel.json');
-      if (!existsSync(file)) continue;
-      for (const [name, rig] of Object.entries((JSON.parse(readFileSync(file, 'utf8')) as { rigs?: Record<string, TravelRig> }).rigs ?? {})) rigs[name] ??= rig;
-    }
-  }
+  const rigs = packRigs(packs, readdirSync, existsSync, join);
+
   const want: Record<string, { hull: string; offset: [number, number, number]; eps: number }> = {
     shuttle: { hull: 'root', offset: [0, 0, 2.33], eps: 0.05 },
     transport: { hull: 'hold_transport', offset: [0, -4.0, 0.83], eps: 0.02 },

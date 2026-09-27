@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { Physics, RAPIER } from '../../../src/core/physics.ts';
-import { SHUTTLE_RIG_TUNE, ShuttleRigs } from '../../../src/world/shuttleRigs.ts';
+import { SHUTTLE_RIG_TUNE, ShuttleRigs, type RigDrive } from '../../../src/world/shuttleRigs.ts';
 import type { ShuttleState, TravelRig } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
@@ -311,6 +311,26 @@ const worldY = (o: THREE.Object3D) => {
   rigs.hold('d');
   rigs.clearHolds();
   ok(rigs.holdState('d') === null, 'and the holds can all be let go of at once');
+  // A pad of a world that has gone, let go of softly: there is no rig there to wait on, so the hold is simply over.
+  rigs.hold('gone', true);
+  rigs.release('gone');
+  ok(rigs.holdState('gone') === null, 'a hold on a pad not stood in this world is over the moment it is let go of, softly or not');
+  // Let go of softly while parked in plain sight, a hold waits to give its shuttle back unseen; the world
+  // going takes away the rig it waits on, so the hold goes too, and whoever comes back to this world
+  // finds the shuttle parked in front of them, drawn and solid, rather than a pad held empty by nobody.
+  state = { phase: 'waiting', until: 0, left: 30, glide: 1 };
+  rigs.update(DT, camera);
+  rigs.hold('d', true);
+  rigs.release('d');
+  rigs.update(DT, camera);
+  ok(rigs.holdState('d') === 'releasing', 'let go of softly with its shuttle parked in plain sight, a hold waits');
+  rigs.hold('kept');
+  rigs.clear();
+  ok(rigs.holdState('d') === null && rigs.holdState('kept') === 'hiding', 'the world going ends a hold nobody has any more, and keeps one somebody still has');
+  ok(await rigs.stand('d', rig, '', pad, false, clock), 'the world comes back');
+  rigs.update(DT, camera);
+  ok(scene.getObjectByName('shuttle:d')!.visible && rigs.describe().shuttles[0].solid && rigs.holdState('d') === null, 'and its shuttle stands parked in plain sight, drawn and solid');
+  rigs.release('kept');
 }
 
 // ---------------------------------------------------------------- what it sounds and shows
@@ -574,6 +594,152 @@ const worldY = (o: THREE.Object3D) => {
   ok(loops.length === loopsAsked + 2, 'and once more the next time it is shown');
   ok(loops[loops.length - 1].space === undefined && asked === roomAsks && fxRigs.describe().shuttles[0].room === null, 'and one standing out in the open is given no room to play in, and never asks for one');
   fxRigs.clear();
+
+  // ---------------------------------------------------------------- lent to a flown hull
+  //
+  // A hull flown from the rig takes a stood shuttle's place: the shuttle's sounds and flames go with it
+  // onto the hull's own joints, the hum playing on and a lit flame staying lit, and the flown set is
+  // stepped here from a pose its flight hands in. It carries its flames across a change of clip: the
+  // engines lit as it lifts off burn on through its flight (the flight's event, in the sky) and into its
+  // landing, one flame all the way rather than one put out and another lit.
+  refuseLoops = false;
+  const carryRig: TravelRig = {
+    ...fxRig,
+    marks: {
+      land: [
+        { t: 1.5, joint: 'arm', event: 'start' },
+        { t: 6, joint: 'root', event: 'land' },
+      ],
+      take_off: [
+        { t: 0, joint: 'root', event: 'takeoff' },
+        { t: 0.5, joint: 'arm', event: 'start' },
+      ],
+    },
+  };
+  ok(await fxRigs.stand('lend', carryRig, '', pad, false, fxClock), 'a shuttle whose lift-off lights its engines stands');
+  // Lifting off, a second in: its engines on the arm are lit and its hum plays.
+  at('leaving', 0.8);
+  const idle = loops[loops.length - 1];
+  const engine = handles.find((h) => h.file === 'travel/particles/flame.json' && !h.removed && h.rateScale > 0)!;
+  ok(!!engine && idle.id === 'sound/idle.snd' && fxRigs.describe().shuttles[0].idling, 'lifting off, its engines are lit and it hums');
+  // A hull of the same rig somewhere else entirely, standing in for it.
+  const flown = new THREE.Group();
+  flown.position.set(900, 60, -700);
+  flown.rotation.y = 0.7;
+  const flownJoints = makeRig().scene;
+  flown.add(flownJoints);
+  fxScene.add(flown);
+  flown.updateMatrixWorld(true);
+  const moved: { key: number; x: number; z: number }[] = [];
+  const plainMove = audio.move;
+  audio.move = ((key: number, x: number, _y: number, z: number) => {
+    moved.push({ key, x, z });
+    plainMove();
+  }) as typeof audio.move;
+  const placedBefore = handles.length;
+  const stoppedBefore = stopped.length;
+  fxRigs.hold('lend', true);
+  const lent = fxRigs.lend('lend', flownJoints)!;
+  const flownArm = flownJoints.getObjectByName('arm')!;
+  const armAt = new THREE.Vector3().setFromMatrixPosition(flownArm.matrixWorld);
+  ok(!!lent && new THREE.Vector3().setFromMatrixPosition(engine.matrix).distanceTo(armAt) < 1e-6 && !engine.removed && engine.rateScale === 1, "lent to a flown hull, its lit flame is moved onto the hull's own joint of that name at once, still lit");
+  const hum = moved.filter((m) => m.key === idle.key).at(-1);
+  const bodyAt = new THREE.Vector3().setFromMatrixPosition(flownJoints.getObjectByName('root')!.matrixWorld);
+  ok(!!hum && Math.hypot(hum.x - bodyAt.x, hum.z - bodyAt.z) < 1e-6 && !stopped.slice(stoppedBefore).includes(idle.key), 'and its hum goes with it, playing on');
+  ok(fxRigs.lend('nobody', flownJoints) === null, 'a key nothing stands at has nothing to lend');
+  const drawn: RigDrive = { role: 'lift', seconds: 1.1, shown: true, carry: true, flight: 'start' };
+  const movesBefore = engine.moves;
+  fxRigs.drive(lent, () => drawn);
+  fxRigs.drive(lent, () => drawn);
+  ok(fxRigs.describe().driven === 1, 'driven, it is stepped here once, however many times it is handed in');
+  fxRigs.update(DT, camera);
+  ok(engine.moves > movesBefore && handles.length === placedBefore && !stopped.slice(stoppedBefore).includes(idle.key), 'and stepped from the pose its flight hands in, the same flame moved on with the hull and nothing lit again');
+  ok(!fxRigs.describe().shuttles[0].shown && fxRigs.describe().shuttles[0].lit === 0 && !fxRigs.describe().shuttles[0].idling, 'while the shuttle it was lent from, held out of the picture, has a fresh set that plays nothing');
+  drawn.role = 'sky';
+  drawn.seconds = 0;
+  fxRigs.update(DT, camera);
+  ok(engine.rateScale === 1 && !engine.removed && handles.length === placedBefore, 'flying on between its clips, the engines lit at its lift-off are carried into the flight, not put out');
+  drawn.role = 'land';
+  drawn.seconds = 2;
+  fxRigs.update(DT, camera);
+  ok(engine.rateScale === 1 && !engine.removed && handles.length === placedBefore, "and into its landing, whose own engine window takes the same flame up: one flame all the way");
+  drawn.seconds = 5.6;
+  fxRigs.update(DT, camera);
+  ok(engine.rateScale === 0, 'which goes out when the landing says');
+  // Without carrying, a change of clip puts a flame out, as a stood shuttle's always has.
+  drawn.carry = false;
+  drawn.role = 'lift';
+  drawn.seconds = 1;
+  fxRigs.update(DT, camera);
+  const second = handles.at(-1)!;
+  drawn.role = 'sky';
+  drawn.seconds = 0;
+  fxRigs.update(DT, camera);
+  ok(second.file === 'travel/particles/flame.json' && second.rateScale === 0, 'without carrying, the same change of clip puts the flame out');
+  fxRigs.undrive(lent);
+  ok(fxRigs.describe().driven === 0 && handles.every((h) => h.removed || h.rateScale === 0 || h.ended) && stopped.includes(idle.key), 'let go of, it is stepped no more and takes its flames and its hum with it');
+  audio.move = plainMove;
+
+  // A fresh set for a hull no stood shuttle has one to lend: its effects prepared once for the session.
+  const newFx: TravelRig = { ...carryRig, events: { ...carryRig.events, start: { particles: [{ file: 'travel/particles/new.json', seconds: 4 }] } } };
+  const preparedBefore = preparedFiles.length;
+  const soundAsks = prepareCalls;
+  const a = fxRigs.fxFor(newFx, '', flownJoints, false);
+  const b = fxRigs.fxFor(newFx, '', flownJoints, false);
+  ok(!!a && !!b && a !== b && preparedFiles.length === preparedBefore + 1 && preparedFiles.at(-1) === 'travel/particles/new.json', `a fresh set is made each time, and an effect is prepared once for the session however many are made (${preparedFiles.slice(preparedBefore).join(', ')})`);
+  ok(prepareCalls === soundAsks + 2, 'and its sounds are asked of the bank for each');
+  fxRigs.drive(a, () => ({ role: 'land', seconds: 2, shown: true, carry: true, flight: 'start' }));
+  fxRigs.update(DT, camera);
+  const newFlame = handles.at(-1)!;
+  ok(newFlame.file === 'travel/particles/new.json' && !newFlame.removed, 'driven, it lights its own flames');
+
+  // A hull that lands with another branch than it took off on (Theed's transport comes down as the calm
+  // one does): its set is bound again from that branch, so its landing burns and sounds at the marks of
+  // the clip it is shown playing, and the engines burning through its flight are carried across.
+  const twoRig: TravelRig = {
+    ...carryRig,
+    moods: {
+      theed: { land: 'land', lift: 'take_off', ground: 'loop_ground', sky: 'loop_sky' },
+      calm: { land: 'land_calm', lift: 'take_off_calm', ground: 'loop_ground', sky: 'loop_sky' },
+    },
+    marks: {
+      land: [
+        { t: 0.1, joint: 'arm', event: 'start' },
+        { t: 9.5, joint: 'root', event: 'land' },
+      ],
+      take_off: [{ t: 0.5, joint: 'arm', event: 'start' }],
+      land_calm: [
+        { t: 3, joint: 'arm', event: 'start' },
+        { t: 6, joint: 'root', event: 'land' },
+      ],
+      take_off_calm: [{ t: 0.2, joint: 'arm', event: 'start' }],
+    },
+  };
+  const branched = fxRigs.fxFor(twoRig, 'theed', flownJoints, false);
+  const flying: RigDrive = { role: 'sky', seconds: 0, shown: true, carry: true, flight: 'start' };
+  fxRigs.drive(branched, () => flying);
+  fxRigs.update(DT, camera);
+  const burning = handles.at(-1)!;
+  ok(burning.file === 'travel/particles/flame.json' && burning.rateScale === 1 && !burning.removed, "flying off one branch's take-off, its engines burn");
+  ok(fxRigs.rebranch(branched, 'calm') && !fxRigs.rebranch(branched, 'nowhere'), 'bound again from the branch it lands with; a branch its rig has not got changes nothing');
+  const placedBranch = handles.length;
+  fxRigs.update(DT, camera);
+  ok(burning.rateScale === 1 && !burning.removed && handles.length === placedBranch, 'the flame burning through the flight is carried across the change of branch, not lit again');
+  flying.role = 'land';
+  flying.seconds = 5;
+  fxRigs.update(DT, camera);
+  ok(burning.rateScale === 1 && handles.length === placedBranch, "5 s into the landing it burns on in the landing's own window (3 to 7 s), where the branch it took off on would have put it out at 4.1 s");
+  const landsBefore = landed();
+  flying.seconds = 6.1;
+  fxRigs.update(DT, camera);
+  ok(landed() === landsBefore + 1, "and its landing sound plays at that landing's own mark, 6 s, not the other branch's 9.5 s");
+  flying.seconds = 7.2;
+  fxRigs.update(DT, camera);
+  ok(burning.rateScale === 0, 'and the flame goes out where that landing puts it out');
+  fxRigs.undrive(branched);
+  fxRigs.clear();
+  ok(fxRigs.describe().driven === 0 && newFlame.removed, "and the world going lets go of every flown hull's set too, flames and all");
+  fxScene.remove(flown);
 }
 
 console.log(`\nshuttle rigs: ${passed} checks passed`);

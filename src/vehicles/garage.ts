@@ -679,7 +679,8 @@ export class Garage {
       m.receiveShadow = true;
       m.frustumCulled = true;
     });
-    const hull = new RigHull(assembled, clips);
+    // Every branch of the rig beside its own, so it can land with another's clip (a hull out of Theed lands as the calm one).
+    const hull = new RigHull(assembled, clips, r.rig.moods);
     // Framed as frameModel frames every machine, but on its pieces' real vertices (its struts and door
     // hang turned on their joints), and through the one call the node test pins the offset with. The
     // bounds and reach are frameModel's shapes, its fallback box included.
@@ -726,13 +727,17 @@ export class Garage {
   /**
    * A rig's hull as it would be built, measured and let go of, for the console: its hull joint, where the
    * vehicle's origin stands in that joint's frame (`offset`; the joint stands at minus it in the vehicle),
-   * its box and its ramp's foot.
+   * its box and its ramp's foot, and where its take-off lets go of a flown hull (`cut`) and its landing
+   * takes one back (`join`, with the branch it lands with): seconds into the clip, speed, and height over
+   * the pad.
    */
-  async rigReport(def: VehicleDef): Promise<{ hull: string; offset: number[]; box: VehicleSpec['bounds']; rampFoot: number[] | null }> {
+  async rigReport(def: VehicleDef): Promise<{ hull: string; offset: number[]; box: VehicleSpec['bounds']; rampFoot: number[] | null; cut: number[] | null; join: number[] | null; landsWith: string | null }> {
     const { hull, bounds } = await this.rigModel(def);
+    const paths = hull.paths(def.rig?.mood ?? '');
     hull.dispose();
     const r3 = (a: THREE.Vector3) => a.toArray().map((n) => Number(n.toFixed(3)));
-    return { hull: hull.hull, offset: r3(hull.offset), box: bounds, rampFoot: hull.rampFoot ? r3(hull.rampFoot) : null };
+    const moment = (m: { t: number; speed: number; height: number } | null | undefined) => (m ? [Number(m.t.toFixed(2)), Number(m.speed.toFixed(1)), Number(m.height.toFixed(1))] : null);
+    return { hull: hull.hull, offset: r3(hull.offset), box: bounds, rampFoot: hull.rampFoot ? r3(hull.rampFoot) : null, cut: moment(paths?.cut), join: moment(paths?.join), landsWith: paths?.landMood ?? null };
   }
 
   /**
