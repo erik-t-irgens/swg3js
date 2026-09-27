@@ -22,6 +22,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { Hittable, Living } from '../combat/kit.ts';
+import { rescaleBody, scaledByDifficulty } from './difficulty.ts';
 
 /** What a nest needs of the world. Narrow, so a node test can be the world. */
 export interface NestDeps {
@@ -76,7 +77,9 @@ export class WildNest implements Hittable {
   halfHeight = 1;
   dead = false;
   hp: number;
-  readonly maxHp: number;
+  /** Its whole at the difficulty in force (`src/world/difficulty.ts`), from the health it was built with. */
+  maxHp: number;
+  private readonly baseHp: number;
   readonly label: string;
   /** The moment it was last struck, on the world's own clock: the reinforcement cooldown reads it. */
   struckAt = -Infinity;
@@ -91,8 +94,14 @@ export class WildNest implements Hittable {
 
   constructor(label: string, hp: number) {
     this.label = label;
-    this.hp = hp;
-    this.maxHp = hp;
+    this.baseHp = hp;
+    this.maxHp = scaledByDifficulty(hp);
+    this.hp = this.maxHp;
+  }
+
+  /** The difficulty knob moved: its whole set again, keeping the share of it it had. */
+  applyDifficulty(scale: number): void {
+    rescaleBody(this, this.baseHp, scale);
   }
 
   /** The collider's handle, so the world can find this from a bolt. */

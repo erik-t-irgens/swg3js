@@ -46,6 +46,7 @@ import { moveSpeeds, stepGait, type GaitStep } from './gait';
 import { BRAIN_TUNE, clampWander, decide, keepPost, type BrainSelf, type BrainTarget, type Decision, type Post } from './brain';
 import { LOD_TUNE, type LodTier } from './lod';
 import { gravityFor, holdAir } from './airless.ts';
+import { rescaleBody, scaledByDifficulty } from '../difficulty.ts';
 import { NavAgent } from '../nav/navAgent.ts';
 import { worldNav } from '../nav/nav.ts';
 import type { CellState } from '../layoutStream';
@@ -103,6 +104,11 @@ export interface MobileExtras {
    * (`IdleSituation.carried`), so a pack nobody has reconverted stands exactly where it did.
    */
   carried?: boolean;
+  /**
+   * The ranged attack the gun its own creature's list put in its hand gives it, where its own numbers
+   * give it none (`ArmsDecision.ranged` in arms.ts): what it holds and whether it shoots are one answer.
+   */
+  ranged?: { range: number; additive: boolean };
 }
 
 /** A weapon off the rack, loaded and prepared, for a person to hold. */
@@ -111,7 +117,8 @@ export interface MobileEquipment {
   id: string;
   /** A fresh copy of the rack's model (its materials and geometry are the rack's, never disposed here). */
   model: THREE.Object3D;
-  kind: 'gun' | 'saber';
+  /** A gun, a lightsaber, or a blade, club, staff or fist weapon that is swung and never shoots. */
+  kind: 'gun' | 'saber' | 'melee';
   /** The gun's bolt, for a gun. */
   gun: GunProfile | null;
   /** The model's length along its barrel, for the muzzle. */
@@ -191,8 +198,13 @@ export interface MobileSpawn {
   hierarchy: BodyInput['hierarchy'];
   /** Else picked in `entry.size.scale`. */
   scale?: number;
-  /** The planet's own values, when it is the planet's wildlife. */
-  overrides?: { hp?: number; damage?: number; aggression?: Aggression };
+  /**
+   * Its own numbers over its body's: the planet's own values for its wildlife, and a standing person's
+   * own creature's (format 2's `game`) -- a body is shared by every creature drawn as it, and its
+   * catalogue entry carries only one of theirs. `ranged` null is a creature that does not shoot, and
+   * left out is the body's own; `level` is only ever shown.
+   */
+  overrides?: { hp?: number; damage?: number; aggression?: Aggression; level?: number; ranged?: { range: number; additive: boolean } | null };
 }
 
 /** What a mobile needs of the game. */
@@ -256,8 +268,19 @@ export class Mobile implements Living, NpcSubject {
   readonly halfHeight: number;
   readonly hologram: boolean;
   hp: number;
-  readonly maxHp: number;
-  readonly blow: number;
+  /**
+   * Its whole health and its blow at the difficulty in force (`src/world/difficulty.ts`): its own
+   * numbers times the knob, set again when the knob moves (`applyDifficulty`) from the two it was
+   * stood with, which never change.
+   */
+  maxHp: number;
+  blow: number;
+  private readonly baseHp: number;
+  private readonly baseBlow: number;
+  /** Its level, where its own creature or its body's entry has one: the nameplate shows it and nothing else reads it. */
+  readonly level: number | null;
+  /** The ranged attack its own numbers give it, or null for none: its row's creature's where it has one, else its body's. */
+  private readonly rangedStat: { range: number; additive: boolean } | null;
   dead = false;
   deadTimer = 0;
   grounded = true;
@@ -503,9 +526,13 @@ export class Mobile implements Living, NpcSubject {
     this.label = e.name;
     this.side = sideOf(e);
     this.aggression = this.hologram ? 'passive' : (spawn.overrides?.aggression ?? e.stats?.aggression ?? 'defensive');
-    this.maxHp = spawn.overrides?.hp ?? e.stats?.hp ?? 80;
+    this.baseHp = spawn.overrides?.hp ?? e.stats?.hp ?? 80;
+    this.baseBlow = spawn.overrides?.damage ?? e.stats?.damage ?? 8;
+    this.maxHp = scaledByDifficulty(this.baseHp);
     this.hp = this.maxHp;
-    this.blow = spawn.overrides?.damage ?? e.stats?.damage ?? 8;
+    this.blow = scaledByDifficulty(this.baseBlow);
+    this.level = spawn.overrides?.level ?? e.stats?.level ?? null;
+    this.rangedStat = spawn.overrides && spawn.overrides.ranged !== undefined ? spawn.overrides.ranged : (e.stats?.ranged ?? null);
     this.heading = spawn.heading;
     this.facing = spawn.heading;
     this.homeX = spawn.x;
@@ -568,6 +595,16 @@ export class Mobile implements Living, NpcSubject {
     if (this.driven || !this.body.isValid()) return;
     if (airless) holdAir(this.body);
     else this.body.setGravityScale(gravityFor(false, this.swimming, this.flyer, this.dead), true);
+  }
+
+  /**
+   * The difficulty knob moved: its whole and its blow set again from its own numbers, keeping the share
+   * of its health it had, so a body half dead stays half dead and nothing on its bar jumps. A dead body
+   * stays dead; a driven one is told its health as a share anyway, so the keeper's knob is what counts.
+   */
+  applyDifficulty(scale: number): void {
+    rescaleBody(this, this.baseHp, scale);
+    this.blow = this.baseBlow * scale;
   }
 
   /**
@@ -652,8 +689,9 @@ export class Mobile implements Living, NpcSubject {
         r.ranged = r.rangedShots?.[0] ?? ownRanged;
         r.rangedAdditive = r.rangedShots?.length ? false : ownAdditive;
       }
-      // Only what the catalogue gives a ranged attack shoots: a pack with a ranged clip is not enough.
-      const ranged = this.entry.stats?.ranged;
+      // Only what its own numbers give a ranged attack shoots, or the gun its own list put in its hand
+      // (`extras.ranged`): a pack with a ranged clip is not enough.
+      const ranged = this.rangedStat && this.rangedStat.range > 0 ? this.rangedStat : (extras?.ranged ?? null);
       this.rangedRange = r.ranged && !this.hologram && ranged && ranged.range > 0 ? ranged.range * Math.max(1, Math.sqrt(this.scale)) : 0;
       this.canSwim = !!(r.swim || r.swimIdle);
       if (this.entry.flags?.includes('static')) this.speeds = { walk: 0, run: 0 };
@@ -713,6 +751,11 @@ export class Mobile implements Living, NpcSubject {
       markActor(blade.group);
       this.blade = blade;
       // A blade is for closing in: no shots from the hand that holds it.
+      this.rangedRange = 0;
+    } else if (e.kind === 'melee') {
+      // A knife, a sword, an axe, a staff, a knuckler: held as the game's own model has it on the
+      // weapon joint, swung by its carry row's clips, and never shot from, for the reason a lightsaber
+      // is not. It has no blade to draw, so its blow lands as a body's own blow does.
       this.rangedRange = 0;
     } else {
       this.gun = e.gun;
@@ -2175,7 +2218,9 @@ export class Mobile implements Living, NpcSubject {
       origin: this.origin,
       state: this.state,
       hp: Number(this.hp.toFixed(1)),
-      maxHp: this.maxHp,
+      maxHp: Number(this.maxHp.toFixed(1)),
+      level: this.level,
+      blow: Number(this.blow.toFixed(1)),
       side: this.side,
       aggression: this.aggression,
       scale: Number(this.scale.toFixed(2)),

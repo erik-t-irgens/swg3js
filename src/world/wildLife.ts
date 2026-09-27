@@ -61,6 +61,8 @@ export interface WildPack {
   areas: SpawnArea[];
   noSpawn: SpawnArea[];
   statics: unknown[];
+  /** Format 2: each town's lists a stationary row that names nobody draws its person from. */
+  pools?: Record<string, string[]>;
 }
 
 /** The fleet's half: what every lair holds and what every creature is. */
@@ -70,6 +72,8 @@ export interface WildManifest {
   lairs: Record<string, LairDef>;
   groups: Record<string, GroupEntry[]>;
   nests?: Record<string, { id: string; file: string }>;
+  /** Format 2: every weapon group a creature names, as the weapon templates it stands for. */
+  weaponGroups?: Record<string, string[]>;
 }
 
 /** What the wild world needs of the game. Narrow on purpose, so a node test can be the game. */
@@ -221,8 +225,10 @@ export class WildLife {
   /**
    * Take a pack that is already parsed: the half a node test can drive. Both formats are taken:
    * format 2 carries every field format 1 did, filled the same way, and what it adds (each row's key,
-   * mood, route and the rest, each creature's own numbers, the camps' pieces) is read by nothing here
-   * yet, so a format-2 pack stands exactly what a format-1 pack of the same rows would.
+   * mood, route and the rest, each creature's own numbers, the towns' lists, the weapon groups, the
+   * camps' pieces) is handed on to the standing people (`peopleRows`, `peopleCreatures`,
+   * `peopleExtras`) and read by nothing else here yet, so a format-2 pack's lairs stand exactly what a
+   * format-1 pack's would.
    */
   adopt(pack: WildPack | null, manifest: WildManifest | null): void {
     this.pack = readsSpawns(pack?.format) && pack && Array.isArray(pack.areas) ? pack : null;
@@ -585,6 +591,20 @@ export class WildLife {
    */
   peopleCreatures(): Readonly<Record<string, CreatureDef>> | null {
     return this.manifest?.creatures ?? null;
+  }
+
+  /**
+   * The rest of the same pack a standing person is drawn from and armed out of (format 2): the world
+   * as the pack names it (whose side holds its towns), the towns' own lists a stationary row draws its
+   * person from, and the fleet's weapon groups. Empty lists before it lands, and on a format-1 pack.
+   */
+  peopleExtras(): { world: string; pools: Readonly<Record<string, readonly string[]>> | null; weaponGroups: Readonly<Record<string, readonly string[]>> | null } {
+    return { world: this.pack?.planet ?? '', pools: this.pack?.pools ?? null, weaponGroups: this.manifest?.weaponGroups ?? null };
+  }
+
+  /** The difficulty knob moved: every nest standing takes it, as a body does (`WildNest.applyDifficulty`). */
+  applyDifficulty(scale: number): void {
+    for (const rec of this.standing.values()) rec.nest?.applyDifficulty(scale);
   }
 
   /** What one site would stand, without standing it: for the console, and for a check. */

@@ -28,6 +28,17 @@ export interface PlateThing {
   /** Where it has them: the bar is left off anything that does not keep a health of its own. */
   readonly hp?: number;
   readonly maxHp?: number;
+  /** Its level, where it has one (a creature or a person the world stands): shown after its name. */
+  readonly level?: number | null;
+}
+
+/**
+ * The words over a thing: its name, and its level after a dot where it has one worth showing
+ * ("Tusken Raider · 116"), which is what the game's own target readout said of anything you could
+ * fight. A level of nought or none is left off rather than written as a nought.
+ */
+export function plateLabel(label: string, level: number | null | undefined): string {
+  return typeof level === 'number' && Number.isFinite(level) && level >= 1 ? `${label} · ${Math.round(level)}` : label;
 }
 
 /** A camera, structurally: three's own satisfies it and nothing here imports three. */
@@ -149,9 +160,10 @@ interface Plate {
   name: HTMLElement;
   bar: HTMLElement;
   fill: HTMLElement;
-  /** What was written last: the key it belongs to, its name, its share and where it stood. */
+  /** What was written last: the key it belongs to, its name and level, its share and where it stood. */
   key: number;
   label: string;
+  level: number | null;
   share: number;
   band: string;
   x: number;
@@ -210,7 +222,7 @@ export class Nameplates {
       const bar = div(root, 'hud-bar good');
       div(bar, 'ghost snap');
       const fill = div(bar, 'fill');
-      this.pool.push({ root, name, bar, fill, key: 0, label: '', share: -1, band: '', x: NaN, y: NaN, on: false, barShown: true });
+      this.pool.push({ root, name, bar, fill, key: 0, label: '', level: null, share: -1, band: '', x: NaN, y: NaN, on: false, barShown: true });
     }
   }
 
@@ -357,6 +369,7 @@ export class Nameplates {
     p.root.hidden = true;
     p.key = 0;
     p.label = '';
+    p.level = null;
     p.x = NaN;
     p.y = NaN;
     this.writes += 2;
@@ -389,9 +402,13 @@ export class Nameplates {
       p.root.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -100%)`;
       this.writes++;
     }
-    if (t.label !== p.label) {
+    // The words are made only when the name or the level has changed, so a plate that stands makes
+    // no string at all.
+    const level = t.level ?? null;
+    if (t.label !== p.label || level !== p.level) {
       p.label = t.label;
-      p.name.textContent = t.label;
+      p.level = level;
+      p.name.textContent = plateLabel(t.label, level);
       this.writes++;
     }
     const share = healthShare(t);

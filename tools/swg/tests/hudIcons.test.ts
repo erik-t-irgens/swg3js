@@ -85,7 +85,7 @@ const built: any[] = [];
 
 const { ICON_IDS, ICON_FALLBACK, glyphFor, handGlyph, iconKey, WING_GLYPHS } = await import('../../../src/ui/hudIcons.ts');
 const { Hud, keyLabel, hudBindingsChanged } = await import('../../../src/ui/hud.ts');
-const { pickPlate, projectPoint, healthShare, makeProjected } = await import('../../../src/ui/nameplate.ts');
+const { pickPlate, projectPoint, healthShare, makeProjected, plateLabel, Nameplates } = await import('../../../src/ui/nameplate.ts');
 
 // --- the sheet and the list ------------------------------------------------------------------------
 const sheet = readFileSync(fileURLToPath(new URL('../../../src/ui/hud.svg', import.meta.url)), 'utf8');
@@ -259,6 +259,43 @@ const camera = { matrixWorldInverse: view, projectionMatrix: proj };
   ok(pickPlate(list, 0, 1, 0, 0, 0, -1, 40, 80, 1) === ahead, 'a wider cone still takes the nearest, not the straightest');
   ok(healthShare({ ...ahead, hp: 30, maxHp: 120 }) === 0.25, 'a health share is what it says');
   ok(Number.isNaN(healthShare(ahead)), 'and a creature that keeps no health of its own shows no bar');
+  ok(plateLabel('Tusken Raider', 116) === 'Tusken Raider · 116', 'a thing with a level shows it after its name');
+  ok(plateLabel('Tusken Raider', null) === 'Tusken Raider' && plateLabel('a crate', 0) === 'a crate' && plateLabel('x', NaN) === 'x', 'and one with none, or a level of nought, shows its name alone');
+  ok(plateLabel('Jawa', 7.6) === 'Jawa · 8', 'as a whole number');
+}
+
+// --- the plate itself, drawn ---------------------------------------------------------------------
+{
+  // The plate is built against the page stand-in above and walked for real: a Tusken straight ahead of
+  // the crosshair, carrying its level as a body the world stands does.
+  const plates = new Nameplates(makeEl());
+  const tusken = { key: 9, label: 'Tusken Raider', level: 116, dead: false, pos: { x: 0, y: 0, z: -5 }, halfHeight: 1, hp: 50, maxHp: 100 } as any;
+  const pool = (plates as any).pool as { on: boolean; name: any }[];
+  // Every write of the words is counted, on an element of the plate's own that counts them.
+  let wrote = 0;
+  let words = '';
+  const counting = {
+    get textContent() {
+      return words;
+    },
+    set textContent(v: string) {
+      words = String(v);
+      wrote++;
+    },
+  };
+  for (const p of pool) p.name = counting;
+  plates.track(0.016, [tusken], 0, 1, 0, 0, 0, -1, camera, 800, 600, 1);
+  const up = pool.find((p) => p.on);
+  ok(!!up && words === 'Tusken Raider · 116' && wrote === 1, `the plate over what the crosshair rests on reads its name and its level (${words})`);
+  plates.track(0.016, [tusken], 0, 1, 0, 0, 0, -1, camera, 800, 600, 1);
+  ok(wrote === 1, 'and a second frame with the same name and level writes no words at all');
+  tusken.level = 117;
+  plates.track(0.016, [tusken], 0, 1, 0, 0, 0, -1, camera, 800, 600, 1);
+  ok(wrote === 2 && words === 'Tusken Raider · 117', 'while a level that moves is written again');
+  const crate = { key: 10, label: 'a crate', dead: false, pos: { x: 0, y: 0, z: -5 }, halfHeight: 1 } as any;
+  plates.clear();
+  plates.track(0.016, [crate], 0, 1, 0, 0, 0, -1, camera, 800, 600, 1);
+  ok(words === 'a crate', 'and a thing with no level shows its name alone');
 }
 
 console.log(`\n${checks} checks passed`);

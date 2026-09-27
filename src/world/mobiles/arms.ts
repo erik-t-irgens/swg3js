@@ -1,7 +1,10 @@
-// What a person from the catalogue fights with: a blaster off the rack in the hand when its pack
-// shoots, a lightsaber when it is a Jedi, and which of the pack's clips carry the gun. A droid's
-// or a creature's ranged attack is its own (a built-in blaster, a spit) and takes no model; its
-// shot leaves from a muzzle bone found by name.
+// What a person from the catalogue fights with: first what its own creature fought with -- the
+// emulator's weapon groups, a Tusken's stone knife and wooden staves, a trooper's carbine, a
+// pirate's axe, mapped onto this game's rack (`ownWeapon`) -- and only where that names nothing the
+// rack has, the old guess from its name: a blaster off the rack in the hand when its pack shoots, a
+// lightsaber when it is a Jedi. And which of the pack's clips carry the weapon. A droid's or a
+// creature's ranged attack is its own (a built-in blaster, a spit) and takes no model; its shot
+// leaves from a muzzle bone found by name.
 //
 // A droid is armed only when it is a combat droid; a protocol droid on the human skeleton has the
 // hand joint but never carried a blaster.
@@ -14,7 +17,7 @@
 // tests): no enum, no namespace, no constructor parameter properties, and a relative import only
 // as `import type` or with its `.ts` extension onto another module that is pure the same way
 // (`saberHit.ts` is: arithmetic, one type import, and node already runs it for its own test).
-import type { CarryRow, CarryWeapon, MobileEntry, PackClipInfo, Roles } from './types';
+import type { CarryRow, CarryWeapon, MobileAggression, MobileEntry, PackClipInfo, Roles } from './types';
 import type { WeaponClass } from '../../player/weapons';
 import { SABER_HIT_STATS } from '../../combat/saberHit.ts';
 
@@ -106,8 +109,14 @@ export function droidArmed(entry: Pick<MobileEntry, 'id' | 'appearance'>): boole
   return ARMED_DROID.test(entry.id.toLowerCase()) || ARMED_DROID.test((entry.appearance ?? '').toLowerCase());
 }
 
-/** What kind of weapon a pick is for: a gun of a carry, or a lightsaber. */
-export type ArmsKind = { kind: 'gun'; carry: 'pistol' | 'rifle'; classes: WeaponClass[]; prefer: string[] } | { kind: 'saber'; classes: WeaponClass[]; prefer: string[] };
+/**
+ * What kind of weapon a pick is for: a gun of a carry, a lightsaber, or a blade, a club, a staff or a
+ * fist weapon, each held in the carry its class fights in (`armsKindOf`).
+ */
+export type ArmsKind =
+  | { kind: 'gun'; carry: 'pistol' | 'rifle'; classes: WeaponClass[]; prefer: string[] }
+  | { kind: 'saber'; classes: WeaponClass[]; prefer: string[] }
+  | { kind: 'melee'; carry: 'sword' | 'sword2h' | 'polearm' | 'unarmed'; classes: WeaponClass[]; prefer: string[] };
 
 /** A Jedi, a Sith, a Dark Jedi or an Inquisitor by its id: it carries a lightsaber and fights with it. */
 export function wantsSaber(id: string): boolean {
@@ -115,16 +124,141 @@ export function wantsSaber(id: string): boolean {
 }
 
 /**
- * What an entry is armed with, or null for nothing off the rack. Only people (the `all_b`
- * skeleton, which has the hand's weapon joint) are armed; a hologram never is, nor a droid that
- * is not a combat droid (`droidArmed`). A Jedi gets a lightsaber; anyone else a gun only when the
- * catalogue gives it a ranged attack, its pack has a ranged clip held as a pistol or a rifle, and
- * it would ever fight.
+ * Whether a body may hold anything off the rack at all: a person (the `all_b` skeleton, which has the
+ * hand's weapon joint), never a hologram, a droid only when it is a combat droid (`droidArmed`), and
+ * never one whose temper is `passive` -- a vendor or a trainer that never fights does not stand behind
+ * its counter with a rifle in its hands, whatever its creature's list says it could fight with.
+ */
+export function mayHoldWeapon(entry: Pick<MobileEntry, 'id' | 'kind' | 'appearance' | 'flags'>, hierarchy: string, aggression: string | null | undefined): boolean {
+  if (hierarchy !== 'all_b') return false;
+  if ((entry.flags ?? []).includes('hologram')) return false;
+  if (entry.kind === 'droid' && !droidArmed(entry)) return false;
+  return aggression !== 'passive';
+}
+
+/** A weapon slot that says the body fights with its hands. */
+export const UNARMED = 'unarmed';
+
+/**
+ * The templates one of a creature's weapons stands for, as the emulator wrote them: a group's name is
+ * its whole list, a template is itself, `unarmed` is itself, and a name no group carries (a creature's
+ * built-in spit is written as its template and the rack has none) comes to nothing.
+ */
+export function slotTemplates(slot: string, groups: Readonly<Record<string, readonly string[]>> | null | undefined): readonly string[] {
+  if (slot === UNARMED) return [UNARMED];
+  const g = groups && Object.prototype.hasOwnProperty.call(groups, slot) ? groups[slot] : undefined;
+  if (Array.isArray(g)) return g;
+  return /^object\/weapon\/.+\.iff$/i.test(slot) ? [slot] : [];
+}
+
+/**
+ * The rack's spellings of one of the server's templates, in the order tried: its client template (the
+ * rack keeps each weapon under its `shared_` name, the server writes the other), then, for the server's
+ * own `_ranged` copies of a blade -- a Dark Jedi's sword that also shoots -- the blade they copy, which
+ * the client never had a template for.
+ */
+export function rackTemplates(template: string): string[] {
+  const m = /^(.*\/)(?:shared_)?([^/]+)\.iff$/.exec(template.toLowerCase().replace(/\\/g, '/'));
+  if (!m) return [];
+  const out = [`${m[1]}shared_${m[2]}.iff`];
+  const plain = m[2].replace(/_ranged$/, '');
+  if (plain !== m[2]) out.push(`${m[1]}shared_${plain}.iff`);
+  return out;
+}
+
+/** A rack by its templates, made once per rack. */
+const racksByTemplate = new WeakMap<readonly { template: string }[], Map<string, { template: string }>>();
+
+/** What a body's own creature's weapons came to: the weapon off the rack, or empty hands, and which template it was. */
+export interface OwnWeapon<W> {
+  def: W | null;
+  unarmed: boolean;
+  template: string;
+}
+
+/**
+ * What a body holds from its own creature's weapons, which the emulator wrote as its first and its
+ * second (`weapons` on the pack's creature): the first that comes to anything on this rack, and one of
+ * that slot's list drawn by `rand`, as the server drew one of a group's templates for each body it
+ * stood. `unarmed` drawn is empty hands, and so is a first slot that says so outright -- the server's
+ * word that this one fights with its fists is never overruled by a guess from its name. A slot whose
+ * every template the rack has not got is stepped over (a creature's spit, a probe droid's own gun).
+ *
+ * Null when neither slot comes to anything at all: the caller falls back on the guess from the body's
+ * name (`armsFor`), which is what every body stood before the rows carried weapons still is.
+ */
+export function ownWeapon<W extends { template: string }>(weapons: readonly string[] | null | undefined, groups: Readonly<Record<string, readonly string[]>> | null | undefined, rack: readonly W[], rand: () => number = Math.random): OwnWeapon<W> | null {
+  if (!weapons?.length) return null;
+  let byTemplate = racksByTemplate.get(rack) as Map<string, W> | undefined;
+  if (!byTemplate) {
+    byTemplate = new Map(rack.map((w) => [w.template.toLowerCase(), w]));
+    racksByTemplate.set(rack, byTemplate);
+  }
+  for (const slot of weapons) {
+    const options: (W | typeof UNARMED)[] = [];
+    const names: string[] = [];
+    for (const t of slotTemplates(slot, groups)) {
+      if (t === UNARMED) {
+        options.push(UNARMED);
+        names.push(UNARMED);
+        continue;
+      }
+      let hit: W | undefined;
+      for (const k of rackTemplates(t)) if ((hit = byTemplate.get(k))) break;
+      if (hit) {
+        options.push(hit);
+        names.push(t);
+      }
+    }
+    if (!options.length) continue;
+    const i = Math.min(options.length - 1, Math.floor(rand() * options.length));
+    const pick = options[i];
+    return pick === UNARMED ? { def: null, unarmed: true, template: UNARMED } : { def: pick, unarmed: false, template: names[i] };
+  }
+  return null;
+}
+
+/**
+ * How a weapon off the rack is held, by its class: a pistol in the pistol's carry, every long gun in the
+ * rifle's, a lightsaber as the blades are, a knife, a sword or a club in the one-handed blade's carry, a
+ * two-handed sword or an axe in its own, a staff or a lance in the polearm's, and a fist weapon in the
+ * body's own unarmed guard. Null for what is not held to fight (a grenade, an instrument, a prop).
+ */
+export function armsKindOf(cls: WeaponClass): ArmsKind | null {
+  switch (cls) {
+    case 'pistol':
+      return { kind: 'gun', carry: 'pistol', classes: [cls], prefer: [] };
+    case 'carbine':
+    case 'rifle':
+    case 'heavy':
+      return { kind: 'gun', carry: 'rifle', classes: [cls], prefer: [] };
+    case 'lightsaber':
+    case 'lightsaber2h':
+    case 'lightsaberStaff':
+      return { kind: 'saber', classes: [cls], prefer: [] };
+    case 'knife':
+    case 'sword1h':
+      return { kind: 'melee', carry: 'sword', classes: [cls], prefer: [] };
+    case 'sword2h':
+      return { kind: 'melee', carry: 'sword2h', classes: [cls], prefer: [] };
+    case 'polearm':
+      return { kind: 'melee', carry: 'polearm', classes: [cls], prefer: [] };
+    case 'fist':
+      return { kind: 'melee', carry: 'unarmed', classes: [cls], prefer: [] };
+    default:
+      return null;
+  }
+}
+
+/**
+ * What an entry is armed with by the guess from its name, or null for nothing off the rack: what a body
+ * whose own creature names no weapon this rack has falls back on (`ownWeapon` comes first). Only a body
+ * that may hold anything at all (`mayHoldWeapon`) is armed. A Jedi gets a lightsaber; anyone else a gun
+ * only when the catalogue gives it a ranged attack, its pack has a ranged clip held as a pistol or a
+ * rifle, and it would ever fight.
  */
 export function armsFor(entry: Pick<MobileEntry, 'id' | 'kind' | 'species' | 'appearance' | 'flags' | 'stats'>, hierarchy: string, roles: Pick<Roles, 'ranged'>, roleSources?: Record<string, string>): ArmsKind | null {
-  if (hierarchy !== 'all_b') return null;
-  if ((entry.flags ?? []).includes('hologram')) return null;
-  if (entry.kind === 'droid' && !droidArmed(entry)) return null;
+  if (!mayHoldWeapon(entry, hierarchy, null)) return null;
   if (wantsSaber(entry.id)) return { kind: 'saber', classes: ['lightsaber'], prefer: ['one_handed_gen', 'one_handed_s'] };
   if (entry.stats?.aggression === 'passive' || !entry.stats?.ranged || !(entry.stats.ranged.range > 0)) return null;
   const held = gunKindForRoles(roleSources, roles);
@@ -132,6 +266,95 @@ export function armsFor(entry: Pick<MobileEntry, 'id' | 'kind' | 'species' | 'ap
   const hint = hintForEntry(entry);
   if (hint) return { kind: 'gun', carry: hint.carry, classes: hint.classes, prefer: hint.prefer };
   return { kind: 'gun', carry: held, classes: held === 'pistol' ? ['pistol'] : ['rifle', 'carbine'], prefer: [] };
+}
+
+/** A body's ranged attack as its numbers carry it: how far it shoots, and whether its shot is laid over its stance. */
+export interface RangedStat {
+  range: number;
+  additive: boolean;
+}
+
+/**
+ * How far a gun its own creature's list put in its hand shoots when its own numbers give it no ranged
+ * attack at all: the converter's `CORE3_MAP.range`, the very 20 m every creature it does count as a
+ * shooter is given (`core3StatsFor` in `tools/swg/mobiles.mjs`; arms.test.ts reads that table so the
+ * two stay one number).
+ */
+export const OWN_GUN_RANGE = 20;
+
+/** What a body's own creature says it fights with and how, over its body's catalogue entry. */
+export interface OwnArms {
+  /** Its weapons, first and second, as the emulator wrote them, and the groups those names stand for. */
+  weapons?: readonly string[];
+  groups?: Readonly<Record<string, readonly string[]>> | null;
+  /** Its temper, where its own numbers say. */
+  aggression?: MobileAggression;
+  /** Its ranged attack: left out is its body's, null is none at all. */
+  ranged?: RangedStat | null;
+}
+
+/** How a weapon is handed to the body: one shot from, a lightsaber, or one swung and never shot from. */
+export type HoldKind = 'gun' | 'saber' | 'melee';
+
+/** How an arms choice is handed over (`MobileEquipment.kind`): only a gun is ever shot from. */
+export function holdOf(choice: ArmsKind): HoldKind {
+  return choice.kind;
+}
+
+/** What a body is armed with: the kind, the weapon its own list drew, how it is held, and what shooting the gun gives it. */
+export interface ArmsDecision<W> {
+  choice: ArmsKind;
+  /** The weapon its own creature's list drew; null where the guess from its name chose the kind and the rack picks one (`chooseWeapon`). */
+  weapon: W | null;
+  hold: HoldKind;
+  /**
+   * The ranged attack the gun in its hand gives it where its own numbers give it none. The converter
+   * decided whether a creature shoots from its weapon groups' *names*, and `jawa_weaker_weapons`,
+   * `corsec_police_weapons` and `stormtrooper_weapons` name no gun although every template in them is
+   * one; left at that, 109 creatures on 456 standing rows over the converted worlds raised a gun they
+   * could never fire and walked in to punch (every Jawa, and the CorSec troopers, who shot before).
+   * Absent whenever its own numbers already shoot, or it holds no gun.
+   */
+  ranged?: RangedStat;
+}
+
+/**
+ * What a body the world stands holds, decided in full: its own creature's weapons first (`ownWeapon`),
+ * empty hands where that list says so or where it never fights (`mayHoldWeapon`), and the guess from
+ * its name (`armsFor`) only where the list names nothing on this rack -- judged on its own creature's
+ * temper and ranged attack where the row has them, rather than whoever else once wore this body, which
+ * is what kept a town's trainers and guards from opening fire on everybody walking in. A gun its own
+ * list drew always comes with a ranged attack to fire it with (`ArmsDecision.ranged`). Null for empty
+ * hands. `rand` draws the weapon out of its list; a body stood from a seed draws it from that.
+ */
+export function decideArms<W extends { template: string; class: WeaponClass }>(
+  entry: Pick<MobileEntry, 'id' | 'kind' | 'species' | 'appearance' | 'flags' | 'stats'>,
+  hierarchy: string,
+  roles: Pick<Roles, 'ranged' | 'rangedAdditive'>,
+  roleSources: Record<string, string> | undefined,
+  own: OwnArms | null | undefined,
+  rack: readonly W[] | null,
+  rand: () => number = Math.random,
+): ArmsDecision<W> | null {
+  if (hierarchy !== 'all_b') return null;
+  const mine = own?.weapons?.length && rack ? ownWeapon(own.weapons, own.groups ?? null, rack, rand) : null;
+  if (mine) {
+    if (mine.unarmed || !mine.def || !mayHoldWeapon(entry, hierarchy, own?.aggression ?? entry.stats?.aggression)) return null;
+    const choice = armsKindOf(mine.def.class);
+    if (!choice) return null;
+    const out: ArmsDecision<W> = { choice, weapon: mine.def, hold: holdOf(choice) };
+    if (choice.kind === 'gun') {
+      const shoots = own && own.ranged !== undefined ? own.ranged : (entry.stats?.ranged ?? null);
+      if (!(shoots && shoots.range > 0)) out.ranged = { range: OWN_GUN_RANGE, additive: !!roles.rangedAdditive };
+    }
+    return out;
+  }
+  const judged =
+    own && (own.aggression !== undefined || own.ranged !== undefined)
+      ? { ...entry, stats: { ...entry.stats, aggression: own.aggression ?? entry.stats.aggression, ranged: own.ranged !== undefined ? own.ranged : entry.stats.ranged } }
+      : entry;
+  const choice = armsFor(judged, hierarchy, roles, roleSources);
+  return choice ? { choice, weapon: null, hold: holdOf(choice) } : null;
 }
 
 /**

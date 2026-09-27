@@ -93,7 +93,8 @@ import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { wildLife, WILD_TUNE } from './world/wildLife.ts';
-import { standingPeople, PEOPLE_TUNE } from './world/standingPeople.ts';
+import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
+import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
@@ -221,7 +222,7 @@ import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
-import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, type Settings } from './core/settings';
+import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -987,6 +988,8 @@ class App {
     this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
+    // How hard the world's own bodies are, before any of them is stood: each reads it as it stands.
+    setDifficulty(S.difficulty);
     // The weather's settings (the world made it; the HUD, made below, shows its note from the loop).
     this.world.weather.configure(S);
     // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
@@ -1769,13 +1772,35 @@ class App {
        * cells are really built, or they would have no floor and fall through the world. `up` is the
        * bodies standing and `down` the dead waiting to come back.
        *
-       * `{ tune: { most: 20, postRadius: 5 } }` moves any number of `PEOPLE_TUNE` live, and
-       * `{ respawn: false }` keeps everybody killed dead until it is turned on again.
+       * `{ tune: { most: 20, mostEssential: 30, postRadius: 5, reuseLook: 0.5 } }` moves any number of
+       * `PEOPLE_TUNE` live, and `{ respawn: false }` keeps everybody killed dead until it is turned on
+       * again.
+       *
+       * `{ where: 'cities', mood: true }` lists who is standing in that part of the world's life (`cities`,
+       * `caves`, `tasks`, `poi`, `dungeons`...), each with who it was stood as, its body, the mood it was
+       * asked for and the idle it really stands in (`idle:<mood>` when a species rig lent one, its own
+       * otherwise), what it holds, its level, its post and whether it is part of the furniture.
+       * `{ gcw: 'rebel' }` hands this world's towns to the other side and stands its guards (Imperial is
+       * the default, the server's own for a world nobody holds), and `{ restand: true }` puts everybody
+       * down to be stood again on the next pass.
        */
-      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean }) => {
+      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean }) => {
         const moved = opts?.tune ? standingPeople.retune(opts.tune) : [];
         if (typeof opts?.respawn === 'boolean') standingPeople.setRespawns(opts.respawn);
+        const deps = this.world.standingPeopleDeps();
+        if (opts?.gcw) standingPeople.setSide(opts.gcw, deps);
+        if (opts?.restand) standingPeople.clear(deps);
         const at = this.player.worldPos;
+        if (opts?.mood || opts?.where) {
+          const list = standingPeople.report(at, opts.where);
+          return {
+            world: standingPeople.world,
+            side: standingPeople.side,
+            count: list.length,
+            ...(moved.length ? { moved } : {}),
+            people: list.map((p) => ({ who: p.who, id: p.id, mood: p.mood, idle: p.idle, holding: p.holding, level: p.level, post: p.post, essential: p.essential, room: p.room, away: p.away, up: p.up })),
+          };
+        }
         const near = standingPeople.nearest(at, Math.max(1, Math.min(20, opts?.near ?? 5)));
         if (opts?.go && near.length) {
           const p = near[0];
@@ -1786,7 +1811,31 @@ class App {
           const cell = p.indoors ? this.world.enterCellAt(to) : 0;
           return { went: p, cell, note: p.indoors ? 'indoors: they stand once the building around them is built' : 'they stand on the next pass' };
         }
-        return { ready: standingPeople.ready, ...standingPeople.last, ...(moved.length ? { moved } : {}), standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
+        return { ready: standingPeople.ready, ...standingPeople.last, side: standingPeople.side, ...(moved.length ? { moved } : {}), standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
+      },
+      /**
+       * How hard the world's own people and creatures are: one scale on the health and the blows of
+       * everything the world stands (the people, the lairs and their nests, what an admin stood, the
+       * fighters), never the player or another player. `__debug.difficulty(0.5)` halves them all now,
+       * a fight already under way included, and keeps the number in this browser as the Gameplay page's
+       * slider does; with no number it says what is in force. Every body keeps the share of its health
+       * it had, so nothing's bar jumps.
+       */
+      difficulty: (x?: number) => {
+        if (x !== undefined) {
+          const v = clampDifficulty(x);
+          this.settings.difficulty = v;
+          saveSettings(this.settings);
+          setDifficulty(v);
+          this.world.applyDifficulty();
+        }
+        const near = this.world.targets()
+          .filter((t) => t !== this.world.playerTarget && !t.dead && (t as { maxHp?: number }).maxHp !== undefined)
+          .map((t) => ({ t, d: t.pos.distanceTo(this.player.worldPos) }))
+          .sort((a, b) => a.d - b.d)
+          .slice(0, 3)
+          .map(({ t, d }) => ({ who: t.label, away: Math.round(d), hp: Math.round((t as { hp?: number }).hp ?? 0), of: Math.round((t as { maxHp?: number }).maxHp ?? 0) }));
+        return { scale: DIFFICULTY.scale, range: { ...DIFFICULTY_RANGE }, kept: this.settings.difficulty, nearest: near };
       },
       /**
        * Put a building on the ground in front of you, and walk into it.
@@ -7044,6 +7093,11 @@ class App {
       case 'mobileCap':
       case 'mobileAnimRange':
         this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
+        break;
+      case 'difficulty':
+        // Numbers on bodies already standing: nothing is stood again and nothing compiles.
+        setDifficulty(S.difficulty);
+        this.world.applyDifficulty();
         break;
       case 'sensitivity':
         this.cam.sensitivity = S.sensitivity;

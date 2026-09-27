@@ -119,6 +119,12 @@ export interface Settings extends FxSettings {
   hudNameplate: boolean;
   /** A crosshair for a Jedi as well as a Bounty Hunter, since a Force power is aimed too. */
   hudJediCrosshair: boolean;
+  // Gameplay.
+  /**
+   * How hard the world's own people and creatures are: one scale on their health and their blows,
+   * 1 their own numbers (`src/world/difficulty.ts`). Never the player's or another player's.
+   */
+  difficulty: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -185,6 +191,8 @@ export const DEFAULT_SETTINGS: Settings = {
   hudDamageNumbers: false,
   hudNameplate: true,
   hudJediCrosshair: true,
+  // Ours, and one: every body stands at its own numbers until the player says otherwise.
+  difficulty: 1,
   ...FX_DEFAULTS,
 };
 

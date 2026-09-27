@@ -41,6 +41,7 @@ import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patc
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
+import { DIFFICULTY } from './difficulty.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
 import type { SunInfo } from '../core/postfx';
@@ -1296,10 +1297,11 @@ export class World {
       // everything else itself; asking ours again after it would search every collider twice for
       // every wall a blade touches, which is most of what a blade touches.
       hittableAt: (h) => (this.npcDeps.hittableAt ? this.npcDeps.hittableAt(h) : this.hittableAt(h)),
-      // A mobile put down inside starts in the room whose box holds it, then is followed through the
-      // portals as the player is. Never the player's room for want of one: that fallback put a person
-      // stood in a cantina a hundred metres off into whichever room the player was standing in.
-      cellAt: (p) => this.layoutStream?.buildingAt(p) ?? null,
+      // A mobile put down inside starts in the room the data names for it, where it names one (a
+      // standing person's row), else the room whose box holds it, then is followed through the portals
+      // as the player is. Never the player's room for want of one: that fallback put a person stood in
+      // a cantina a hundred metres off into whichever room the player was standing in.
+      cellAt: (p, room) => (room !== undefined ? this.layoutStream?.buildingWithRoom(p, room) : null) ?? this.layoutStream?.buildingAt(p) ?? null,
       followCell: (state, prev, pos) => (this.layoutStream ? this.layoutStream.trackCell(state, prev, pos) : null),
       // And whether that room has collision under it this instant, as the fighters ask below: a body
       // in a building the player has walked away from holds its height rather than falling through.
@@ -1412,7 +1414,7 @@ export class World {
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
     // rows are taken from what that fetch already holds rather than fetched a second time.
-    standingPeople.adopt(wildLife.peopleRows() as StandingRow[], wildLife.peopleCreatures());
+    standingPeople.adopt(wildLife.peopleRows() as StandingRow[], wildLife.peopleCreatures(), wildLife.peopleExtras());
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -4596,6 +4598,11 @@ export class World {
     return this.wildDepsKept;
   }
 
+  /** The same, for the console: `__debug.people` puts people down through it to have them stood again. */
+  standingPeopleDeps(): PeopleDeps {
+    return this.peopleDeps();
+  }
+
   /** What the standing people are allowed to ask of this world. Kept, like the wild world's. */
   private peopleDepsKept: PeopleDeps | null = null;
   private peopleDeps(): PeopleDeps {
@@ -4606,11 +4613,26 @@ export class World {
         // leaves a spawned one where it was put, the name keeps the hand-spawn cap and the NPC tab's
         // clear off it, and with no `share` it is never put on the wire for a server that has never
         // heard of it to leave frozen.
-        // The row's own creature's temper, where the pack says it (`StandingRow.temper`), over the body's:
-        // a body is shared by every creature drawn as it and carries one of their tempers.
-        spawn: (entry, at, inside, seed, essential, temper) =>
-          this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}`, essential, overrides: temper ? { aggression: temper } : undefined }) ?? 'no world',
+        // The row's own creature's numbers, mood, weapons and room (`PersonSpawn`), over the body's: a
+        // body is shared by every creature drawn as it and carries one of their numbers.
+        spawn: (entry, at, how) =>
+          this.mobiles?.spawn(entry, at, {
+            origin: 'spawned',
+            seed: how.seed,
+            inside: how.inside,
+            worldId: `stood:${how.index}`,
+            essential: how.essential,
+            overrides: how.overrides,
+            mood: how.mood,
+            weapons: how.weapons,
+            weaponGroups: how.weaponGroups,
+            room: how.room,
+          }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
+        holds: (id) => {
+          const e = this.mobileCatalogue?.byId(id);
+          return !!e && !!this.mobiles?.holdsBody(e);
+        },
         short: (entry) => this.mobiles?.budgetShort(entry) ?? 0,
         frees: (m) => this.mobiles?.freedBy(m) ?? 0,
         centre: () => this.layoutCenter,
@@ -5379,6 +5401,20 @@ export class World {
     else if (now === 'ride') say('the lava is burning what you are riding');
     else if (was === 'you') say('you are out of the lava');
     else say('your ride is out of the lava');
+  }
+
+  /**
+   * The difficulty knob moved (`src/world/difficulty.ts`): every body the world stands and every nest
+   * takes the scale now in force -- the people and the lairs' creatures, what an admin stood, the
+   * fighters, the old wildlife -- keeping the share of its health each had. What is stood later reads
+   * the scale as it is stood. The player and other players are nobody's to scale.
+   */
+  applyDifficulty(): void {
+    const scale = DIFFICULTY.scale;
+    this.mobiles?.applyDifficulty(scale);
+    this.npcs?.applyDifficulty(scale);
+    this.creatures?.applyDifficulty(scale);
+    wildLife.applyDifficulty(scale);
   }
 
   /** The spawner's cap and the mobiles' animation range (the settings), kept for the managers later planets make. */

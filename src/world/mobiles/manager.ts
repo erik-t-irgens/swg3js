@@ -20,7 +20,9 @@ import { Character } from '../../player/character';
 import type { WeaponCatalogue } from '../../player/weapons';
 import { Mobile, type MobileContext, type MobileEquipment, type MobileExtras, type MobileSpawn } from './mobile';
 import { MOBILE_CACHE, MobileAssets, type ModelAsset, type PackAsset } from './assets';
-import { armedRoles, armsFor as armsChoice, carryWeaponFor, chooseWeapon, SABER_SWINGS } from './arms';
+import { armedRoles, carryWeaponFor, chooseWeapon, decideArms, SABER_SWINGS, type OwnArms } from './arms';
+import { withMood } from './moodIdle.ts';
+import { applyDifficultyTo } from '../difficulty.ts';
 import { isLook, lookKey } from './look';
 import { lookBounds, permanentGap } from './spawning';
 import type { PackSummary } from './types';
@@ -84,6 +86,24 @@ export interface SpawnOpts {
    * long as they stood, which was for as long as anybody was at the starport. There are a handful.
    */
   fixture?: boolean;
+  /**
+   * The room of its building it stands in, where the data says (a standing person's row): it seeds the
+   * body's cell rather than the smallest room box that holds the point, since rooms overhang one another
+   * and a person at the cantina's bar was otherwise put in whichever room's box reached over it.
+   */
+  room?: number;
+  /**
+   * The mood it was stood in (a town's row), whose idle is lent from a species rig that is already
+   * parsed (`Character.parsedRigMood`); a mood with no branch there leaves it in its own idle.
+   */
+  mood?: string;
+  /**
+   * What its own creature fought with, first and second, as the emulator wrote them (a group's name, a
+   * template or `unarmed`), and the groups those names stand for: it is armed from these before any
+   * guess from its name (`ownWeapon` in arms.ts).
+   */
+  weapons?: readonly string[];
+  weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
 }
 
 export interface MobileManagerDeps {
@@ -110,9 +130,10 @@ export interface MobileManagerDeps {
    * The room a mobile put down inside a building starts in (it walked through no portal to get
    * there): the smallest room box holding the point, or null. Never the player's room for want of a
    * better answer: a body stood a hundred metres off in a building that has not streamed in is not
-   * in the room the player happens to be in.
+   * in the room the player happens to be in. With `room`, the data's own room of the building that
+   * holds the point, which is the answer wherever it has one (`SpawnOpts.room`).
    */
-  cellAt(p: THREE.Vector3): CellState | null;
+  cellAt(p: THREE.Vector3, room?: number): CellState | null;
   /**
    * Whether that room has collision under it this instant (`LayoutStreamer.cellsSolid`). With no
    * answer wired every room is solid, which is how the mobiles behaved before it existed.
@@ -396,7 +417,7 @@ export class MobileManager {
       cellFrom: m.pos.clone(),
     };
     if (inside) {
-      held.cell = this.deps.cellAt(m.pos);
+      held.cell = this.deps.cellAt(m.pos, opts.room);
       m.room = held.cell?.cell ?? 0;
       m.navCell = held.cell;
     }
@@ -415,8 +436,22 @@ export class MobileManager {
         npcNow()?.add(m);
       }
     }
-    held.loaded = this.load(m, held, entry, cat);
+    held.loaded = this.load(m, held, entry, cat, opts);
     return m;
+  }
+
+  /**
+   * Whether an entry's body is already built here or being built: a look already dressed costs nothing
+   * more to stand again, which is what a crowd drawn from a dress group leans on (`PEOPLE_TUNE.reuseLook`).
+   */
+  holdsBody(entry: MobileEntry): boolean {
+    const cat = this.deps.catalogue();
+    return !!cat && this.deps.assets.holds(entry, cat);
+  }
+
+  /** The difficulty knob moved: every body out takes it (`Mobile.applyDifficulty`). */
+  applyDifficulty(scale: number): void {
+    applyDifficultyTo(this.live, scale);
   }
 
   // ---- the world's own spawns -----------------------------------------------------------------------
@@ -530,7 +565,7 @@ export class MobileManager {
   }
 
   /** The model and the pack for a mobile, then the model hung on the body, unless it has gone meanwhile. */
-  private async load(m: Mobile, held: Held, entry: MobileEntry, cat: MobileCatalogue): Promise<void> {
+  private async load(m: Mobile, held: Held, entry: MobileEntry, cat: MobileCatalogue, opts: SpawnOpts = {}): Promise<void> {
     const assets = this.deps.assets;
     // A plain model's file, or a person's look (a parts body dressed from the entry), built once per entry.
     const look = isLook(entry, cat);
@@ -542,10 +577,11 @@ export class MobileManager {
     // Taken before the first await: a load in flight counts against the budget at its estimate from
     // this moment, so the next spawn in the same tick sees it (`referencedBytes`).
     const guess = assets.estimate(entry, cat);
+    const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged };
     const [model, pack, arms] = await Promise.allSettled([
       assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),
       packInfo ? assets.acquirePack(packInfo.id, packInfo.file, packInfo.json, guess.pack) : Promise.resolve(null),
-      this.armsFor(entry, packInfo, held.seed),
+      this.armsFor(entry, packInfo, held.seed, own),
     ]);
     held.loading = false;
     const gotModel = model.status === 'fulfilled' ? model.value : null;
@@ -568,7 +604,7 @@ export class MobileManager {
       if (gotPack) assets.release(gotPack);
       return;
     }
-    const r = m.attach(gotModel, gotPack, plan?.extras ?? undefined);
+    const r = m.attach(gotModel, gotPack, withMood(plan?.extras ?? undefined, this.moodIdle(entry, packInfo, opts.mood, hologram)));
     if (!r.ok) {
       assets.release(gotModel);
       if (gotPack) assets.release(gotPack);
@@ -594,10 +630,12 @@ export class MobileManager {
   /**
    * What a person holds and plays with (arms.ts): a gun off the rack with its weapon's own carry
    * row out of the pack -- its ready stance, its aimed loop, the gaits that hold it and its
-   * whole-body shots -- or a lightsaber with the blade's row under Jedi Academy's swings, which
-   * are lent from a species rig that has already been parsed (the player's own always has; one is
-   * never fetched for this). The weapon is prepared before it is handed over, so holding it
-   * compiles nothing in play. Nothing for a creature, a droid or a hologram.
+   * whole-body shots -- a blade, club or staff with its own row's stance and swings, or a lightsaber
+   * with the blade's row under Jedi Academy's swings, which are lent from a species rig that has
+   * already been parsed (the player's own always has; one is never fetched for this). Which weapon is
+   * its own creature's first (`own`, the emulator's weapon groups) and the guess from its name only
+   * where that names nothing on the rack. The weapon is prepared before it is handed over, so holding
+   * it compiles nothing in play. Nothing for a creature, a droid or a hologram.
    *
    * A pack with no rows -- every pack converted before they existed -- falls back on the clip-name
    * matching `armedRoles` has always done, which is a rifle's port-arms carry and nothing else.
@@ -607,13 +645,19 @@ export class MobileManager {
    * is armed the same way in every browser. Without one (everything stood before this, and everything
    * stood with no server) it rolls exactly as it did.
    */
-  private async armsFor(entry: MobileEntry, packInfo: PackSummary | null, seed?: number): Promise<ArmsPlan | null> {
+  private async armsFor(entry: MobileEntry, packInfo: PackSummary | null, seed?: number, own?: OwnArms): Promise<ArmsPlan | null> {
     if (!packInfo || packInfo.hierarchy !== 'all_b') return null;
     const rand = seed !== undefined ? armsRng(seed) : Math.random;
     const json = await this.deps.assets.packJson(packInfo.id, packInfo.json);
     const roles = rolesFor(json, entry.gender);
-    const choice = armsChoice(entry, packInfo.hierarchy, roles, json.roleSources);
-    if (!choice) return null;
+    const rack = this.deps.weapons?.() ?? null;
+    // Its own creature's weapons first: what the server armed that creature with, drawn from its group
+    // as the server drew one for each body it stood. Empty hands when its list says so, or when it is
+    // one that never fights; the guess from its name, judged on its own temper and gun, only where its
+    // list names nothing on this rack. The whole decision is `decideArms`, which node tests.
+    const decided = decideArms(entry, packInfo.hierarchy, roles, json.roleSources, own, rack?.weapons ?? null, rand);
+    if (!decided) return null;
+    const choice = decided.choice;
     const carry = carryWeaponFor(choice);
     // Whether the pack really carries a row for that weapon, as against the clip-name matching the
     // fallback does: it is what lets the body's stance choose the clip it stands in at all, so a
@@ -627,7 +671,9 @@ export class MobileManager {
         this.warned.add(`rifle:${packInfo.id}`);
         console.info(`mobiles: pack ${packInfo.id} has no rifle clips; ${entry.id} and the rest on it hold a rifle in its own stance`);
       }
-    } else {
+    } else if (choice.kind === 'saber') {
+      // A knife, a sword, an axe or a staff swings its own carry row's clips (`over`), which is the
+      // game's own table; only a lightsaber is lent anything.
       // The blade's own ready stance and gaits come from the row where the pack has one; the swings
       // stay Jedi Academy's, lent from a rig that is already parsed, because they are the ones this
       // game's blade combat was built around and they cost no bytes.
@@ -636,8 +682,9 @@ export class MobileManager {
       for (const c of rig ?? []) if (SABER_SWINGS.includes(c.name)) swings.set(c.name, c);
       if (swings.size) extras = { clips: swings, roles: { ...over, attacks: [...swings.keys()] }, carry, carried };
     }
-    const rack = this.deps.weapons?.() ?? null;
-    const def = rack ? chooseWeapon(choice, rack.weapons, rand) : null;
+    // A gun its own list drew fires, whatever its numbers said of its group's name (`ArmsDecision.ranged`).
+    if (decided.ranged) extras = { ...extras, ranged: decided.ranged };
+    const def = decided.weapon ?? (rack ? chooseWeapon(choice, rack.weapons, rand) : null);
     // Nothing on the rack of the kind (or no rack yet): it holds nothing, so it carries nothing.
     // Kept apart from the empty overlay above because the overlay is the *weapon's* roles -- a ready
     // stance, a carry gait, a whole-body shot -- and a body with empty hands standing in a weapon's
@@ -656,20 +703,31 @@ export class MobileManager {
       await ready;
     }
     const b = def.bounds;
-    const saber = choice.kind === 'saber';
+    const saber = decided.hold === 'saber';
     return {
       extras,
       equipment: {
         id: def.id,
         model,
-        kind: saber ? 'saber' : 'gun',
-        gun: saber ? null : (GUNS[gunTypeFor(def, def.class)] ?? null),
+        kind: decided.hold,
+        gun: decided.hold === 'gun' ? (GUNS[gunTypeFor(def, def.class)] ?? null) : null,
         length: def.length || 0.6,
         hiltTop: b ? Math.abs(b.max[1] - b.min[1]) / 2 : 0.13,
         blade: saber && def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null,
         color: saber ? (/sith|dark|inquisitor/.test(entry.id) ? DARK_BLADE : LIGHT_BLADES[Math.floor(rand() * LIGHT_BLADES.length)]) : 0xffffff,
       },
     };
+  }
+
+  /**
+   * The idle a mood lends a body (`moodIdle.ts`): a species rig's branch for it, for a person on the
+   * humanoid skeleton, taken from a rig that is already parsed and never fetched. Null for a creature,
+   * a hologram, a mood the rig has no branch for, or before any rig is in, which leaves the body in
+   * its own pack's idle.
+   */
+  private moodIdle(entry: MobileEntry, packInfo: PackSummary | null, mood: string | undefined, hologram: boolean): THREE.AnimationClip | null {
+    if (!mood || hologram || packInfo?.hierarchy !== 'all_b') return null;
+    return Character.parsedRigMood(mood, entry.species ?? undefined);
   }
 
   /**

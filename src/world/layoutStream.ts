@@ -17,6 +17,7 @@ import { floraClearRadius, modelReach } from './floraClear.ts';
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
+import { buildingWithRoomIn } from './roomOf.ts';
 
 export const REGION = 256;
 
@@ -1707,6 +1708,19 @@ export class LayoutStreamer {
       if (cell > 0) return { building: b, cell };
     }
     return null;
+  }
+
+  /**
+   * The room a body stood where the data put it is in: room `room` of the streamed building near the
+   * point that has such a room with the point in its box, or within `ROOM_SLACK` of it
+   * (`buildingWithRoomIn`, which node tests). It is the data's answer, which `buildingAt` cannot give:
+   * rooms overhang one another, and the smallest box that reaches over a person at a cantina's bar is
+   * as often the corridor behind it. Null where no building near has that room, and the caller asks
+   * `buildingAt` instead. Allocates its answer, like `buildingAt`: it is asked once, when a body is stood.
+   */
+  buildingWithRoom(pos: THREE.Vector3, room: number): CellState | null {
+    const best = buildingWithRoomIn(this.buildings, pos, room);
+    return best ? { building: best, cell: room } : null;
   }
 
   /**

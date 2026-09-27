@@ -11,6 +11,7 @@ import { Customizer } from './customizer';
 import { markActor } from '../world/portalRender';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
 import { fitFor, packPartOf, type ItemFit } from '../core/inventory.ts';
+import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -88,6 +89,11 @@ export function loadSpeciesIndex(baseUrl: string): Promise<SpeciesEntry[]> {
 const rigClips = new Map<string, Promise<THREE.AnimationClip[]>>();
 /** The same clips once parsed, by rig URL: what a caller that must not wait (a spawn) may borrow. */
 const rigClipsParsed = new Map<string, THREE.AnimationClip[]>();
+/**
+ * Each parsed rig's selector branches, from its parts manifest, by the same rig URL: what a person
+ * standing in a mood is lent its idle from (`parsedRigMood`).
+ */
+const rigVariantsParsed = new Map<string, RigVariants>();
 /** The wardrobes' catalogues, one fetch per folder however many characters dress from it. */
 const wardrobes = new Map<string, Promise<(Wardrobe & { skeleton?: string }) | null>>();
 
@@ -299,6 +305,7 @@ export class Character {
       if (!clips) {
         clips = loader.loadAsync(rigUrl).then((rig) => {
           rigClipsParsed.set(rigUrl, rig.animations);
+          rigVariantsParsed.set(rigUrl, manifest.variants ?? {});
           return rig.animations;
         });
         rigClips.set(rigUrl, clips);
@@ -336,6 +343,15 @@ export class Character {
       any ??= clips;
     }
     return any;
+  }
+
+  /**
+   * The idle a mood picks in a species rig that has already been parsed (`moodIdleName`), as a clip to
+   * lend a mobile: the rig for `prefer` when it is in, else any, and never a fetch. Null when no rig is
+   * in or the rig has no branch for the mood, which leaves the body in its own idle.
+   */
+  static parsedRigMood(mood: string, prefer?: string): THREE.AnimationClip | null {
+    return pickMoodClip(mood, rigClipsParsed, rigVariantsParsed, prefer);
   }
 
   /**

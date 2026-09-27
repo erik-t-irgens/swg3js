@@ -3,10 +3,12 @@
 // Where the real packs are converted it then stands a real town, which is the only way to know that
 // numbers tuned on a fixture behave over four thousand rows half of which are indoors.
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { StandingPeople, PEOPLE_TUNE, standsStill, type PeopleCreature, type PeopleDeps, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { GCW_SIDES, StandingPeople, PEOPLE_TUNE, overridesOf, personFor, postFor, seedOfRow, standPlaceOf, standsStill, weaponsOf, type PeopleCreature, type PeopleDeps, type PersonSpawn, type PlanContext, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { moodIdleName, moodOfRow, pickMoodClip, withMood, type RigVariants } from '../../../src/world/mobiles/moodIdle.ts';
+import { buildingWithRoomIn, offRoomBox, ROOM_SLACK, type RoomBuilding } from '../../../src/world/roomOf.ts';
 import { intoWorld } from '../../../src/world/wildLife.ts';
 import { hostileSides, sideOf } from '../../../src/combat/targets.ts';
 import { childInWorld, type ChildPlace } from '../../../src/world/travelTerminal.ts';
@@ -45,14 +47,16 @@ interface Body {
   temper?: string;
   /** Which catalogue entry it is. */
   id?: string;
+  /** Everything else it was stood with: its own numbers, mood, weapons and room. */
+  how?: PersonSpawn;
 }
 
 function game(over: Partial<PeopleDeps> = {}): { deps: PeopleDeps; bodies: Body[] } {
   const bodies: Body[] = [];
   const deps: PeopleDeps = {
     catalogue: () => ({ byId: (id: string) => ({ id, name: id, ready: true }) }) as never,
-    spawn: (entry, at, inside, seed, essential, temper) => {
-      const b: Body = { dead: false, removed: false, x: at.x, z: at.z, y: at.y, heading: at.heading, inside, seed, essential, temper, id: (entry as { id: string }).id };
+    spawn: (entry, at, how) => {
+      const b: Body = { dead: false, removed: false, x: at.x, z: at.z, y: at.y, heading: at.heading, inside: how.inside, seed: how.index, essential: how.essential, temper: how.overrides?.aggression, id: (entry as { id: string }).id, how };
       bodies.push(b);
       return b as never;
     },
@@ -258,7 +262,7 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   });
   bodies = g.bodies;
   const refuse = g.deps.spawn;
-  g.deps.spawn = (entry, at, inside, seed, essential, temper) => (short() > 0 ? 'the creature and NPC models already out fill their memory budget' : refuse(entry, at, inside, seed, essential, temper));
+  g.deps.spawn = (entry, at, how) => (short() > 0 ? 'the creature and NPC models already out fill their memory budget' : refuse(entry, at, how));
   const p = new StandingPeople();
   p.adopt([row({ who: 'far1', z: 100 }), row({ who: 'far2', z: 104 }), row({ who: 'far3', z: 60 }), row({ who: 'near', z: 1 }), row({ who: 'nearer', z: 0.5 })]);
   p.step(0, 0, new THREE.Vector3(0, 0, 100), g.deps, true);
@@ -627,7 +631,8 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(/m\.setAirless\(held\.cell !== null && !\(this\.deps\.cellSolid\?\.\(held\.cell\) \?\? true\)\);/.test(manager), "the manager asks every frame whether a body's room has collision under it");
   // The mobiles' deps are the ones whose room falls back on nothing; the fighters' still fall back on
   // the player's, since a fighter is stood beside the player.
-  ok(/cellAt: \(p\) => this\.layoutStream\?\.buildingAt\(p\) \?\? null,[\s\S]{0,700}cellSolid: \(state\) => this\.layoutStream\?\.cellsSolid\(state\) \?\? true,/.test(worldSrc), "the world answers it from the streamer's own colliders, and a body stood where no room holds it is in no room, never in the player's");
+  ok(/cellAt: \(p, room\) => \(room !== undefined \? this\.layoutStream\?\.buildingWithRoom\(p, room\) : null\) \?\? this\.layoutStream\?\.buildingAt\(p\) \?\? null,[\s\S]{0,700}cellSolid: \(state\) => this\.layoutStream\?\.cellsSolid\(state\) \?\? true,/.test(worldSrc), "the world answers it from the streamer's own colliders, a body stood with the data's own room takes that room, and one stood where no room holds it is in no room, never in the player's");
+  ok(/held\.cell = this\.deps\.cellAt\(m\.pos, opts\.room\);/.test(manager), "and the manager seeds a body's cell from the room it was stood with");
   ok((mobile.match(/if \(this\.airless\) holdAir\(this\.body\);/g) ?? []).length >= 2, 'a body in such a room is held after everything else that writes a velocity, alive and dead');
   ok(/if \(airless\) holdAir\(this\.body\);\s*else this\.body\.setGravityScale\(gravityFor\(false, this\.swimming, this\.flyer, this\.dead\), true\);/.test(mobile), 'and takes the gravity the rule gives when its floor comes back');
   ok(/setGravityScale\(gravityFor\(this\.airless, this\.swimming, this\.flyer, this\.dead\), true\)/.test(mobile), 'and when it is handed back from another browser');
@@ -640,13 +645,428 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(/const named = npcNow\(\)\?\.readTarget\(want\) \?\? null;\s*if \(!named\) return;/.test(mobile) && /'key' in named \? t\.key === named\.key : \(t as \{ npcId\?: string \}\)\.npcId === named\.npc/.test(mobile), "a creature handed over reads who it was fighting through the wire's own rule, never as this browser's player");
   ok(/if \(m\.origin === 'spawned' && !this\.worldIds\.has\(m\)\) n\+\+;/.test(manager), "the hand-spawn cap counts only what was stood by hand, never the world's own bodies");
   ok(/if \(m\.origin !== 'spawned' \|\| this\.worldIds\.has\(m\)\) continue;/.test(manager), "and the NPC tab's clear never takes one of the world's");
-  ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer');
+  ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged \|\| s\.essential !== essential\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer, nor anybody of the other cap');
 
   // What the town says about each row reaches the body the world stands, and the budget can make room.
-  ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows");
-  ok(/spawn: \(entry, at, inside, seed, essential, temper\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{ origin: 'spawned', seed, inside, worldId: `stood:\$\{seed\}`, essential, overrides: temper \? \{ aggression: temper \} : undefined \}\)/.test(worldSrc), "and stands each with its own creature's temper over its body's");
+  ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\), wildLife\.peopleExtras\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows, and the towns' lists and weapon groups beside them");
+  ok(/spawn: \(entry, at, how\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{\s*origin: 'spawned',\s*seed: how\.seed,\s*inside: how\.inside,\s*worldId: `stood:\$\{how\.index\}`,\s*essential: how\.essential,\s*overrides: how\.overrides,\s*mood: how\.mood,\s*weapons: how\.weapons,\s*weaponGroups: how\.weaponGroups,\s*room: how\.room,\s*\}\)/.test(worldSrc), "and stands each with its own creature's numbers, mood, weapons and room over its body's");
+  ok(/holds: \(id\) => \{\s*const e = this\.mobileCatalogue\?\.byId\(id\);\s*return !!e && !!this\.mobiles\?\.holdsBody\(e\);\s*\},/.test(worldSrc), 'and tells them which bodies are already built, so an unattackable crowd can lean on them');
   ok(/short: \(entry\) => this\.mobiles\?\.budgetShort\(entry\) \?\? 0,\s*frees: \(m\) => this\.mobiles\?\.freedBy\(m\) \?\? 0,/.test(worldSrc), 'and tells them what the model memory budget is short of and what putting somebody down gives back');
   ok(/spawn\(entry, at, \{ origin: 'spawned', inside, worldId, essential, fixture: true \}\)/.test(worldSrc) && /const cost = budget \? this\.deps\.assets\.wouldCost\(entry, cat\) : 0;/.test(manager) && /this\.whyNot\(entry, cat, opts\.worldId \? 'world' : origin, !opts\.fixture\)/.test(manager), 'and a ticket collector is a fixture the memory budget never keeps off its pad');
+}
+
+// ------------------------------------------------------------------ the mood a row stands in
+{
+  // The human species rig's own table, as its parts manifest writes it (a few rows of it): a branch is
+  // named for its first value, and a shared branch answers for every value in its list.
+  const variants: RigVariants = {
+    idle: { variable: 'gender', values: ['o', 'm'] },
+    'idle:worried': { variable: 'mood', values: ['worried', 'nervous'] },
+    'idle:npc_sad': { variable: 'mood', values: ['npc_sad', 'sad'] },
+    'idle:npc_sitting_chair': { variable: 'mood', values: ['npc_sitting_chair'] },
+    'idle:npc_sitting_table': { variable: 'mood', values: ['npc_sitting_table', 'npc_sitting_table_eating'] },
+    'skill_action_1:dance_18': { variable: 'mood', values: ['sad'] },
+  };
+  const clips = new Set(Object.keys(variants));
+  const hasClip = (c: string) => clips.has(c);
+  ok(moodIdleName('npc_sad', variants, hasClip) === 'idle:npc_sad', 'a mood named for its branch takes that branch');
+  ok(moodIdleName('sad', variants, hasClip) === 'idle:npc_sad' && moodIdleName('nervous', variants, hasClip) === 'idle:worried', 'a mood a shared branch lists takes that branch, never a branch of another state that lists it too');
+  ok(moodIdleName('npc_sitting_table_eating', variants, hasClip) === 'idle:npc_sitting_table', "a town's eating customer sits at the table");
+  ok(moodIdleName('conversation', variants, hasClip) === null && moodIdleName('neutral', variants, hasClip) === null, 'a mood with no branch has no lent idle: the body keeps its own');
+  ok(moodIdleName('o', variants, hasClip) === null, "and a gender's value is never taken for a mood");
+  ok(moodIdleName(undefined, variants, hasClip) === null && moodIdleName('sad', null, () => false) === null, 'no mood, or no rig, lends nothing');
+  ok(moodOfRow({ mood: 'happy' }) === 'happy' && moodOfRow({ sit: true }) === 'npc_sitting_chair' && moodOfRow({ sit: true, mood: 'npc_sitting_table' }) === 'npc_sitting_table' && moodOfRow({}) === null, "a giver the server sat down sits in a chair unless its row says how");
+
+  // Whoever is posed off their feet keeps to the spot; the rest keep the post their row gives.
+  ok(postFor({ heading: 0 }, 'npc_sitting_chair').kind === 'still' && postFor({ heading: 0, sit: true }).kind === 'still' && postFor({ heading: 0 }, 'sad').kind === 'near' && postFor({ heading: 0, still: true }, 'sad').kind === 'still', 'a seated person, a sat giver and a still row never wander; a sad one may step about');
+  const seated = postFor({ heading: 0.7 }, 'npc_sitting_table');
+  const blank: Decision = { state: 'wander', targetKey: null, moveTo: { x: 10, z: 0 }, pace: 'walk', posture: 'stand', cover: false, face: { x: 10, z: 0 }, attack: null, emote: null, wanderAt: 1, goal: { x: 10, z: 0 }, until: 0, blockedSince: null, forgetKey: null, forgetUntil: 0, clearMemory: false };
+  keepPost(blank, { x: 0, z: 0, homeX: 0, homeZ: 0, now: 0 }, seated, 0);
+  ok(blank.state === 'idle' && blank.goal === null && blank.pace === 'stand', 'and the brain offering one a wander is turned down: a still post never wanders');
+
+  // The pass hands the mood on, and the real rig answers for the moods the towns really use.
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'drinker', mood: 'npc_standing_drinking' }), row({ who: 'giver', z: 2, sit: true }), row({ who: 'talker', z: 4, mood: 'conversation' })]);
+  const { deps, bodies } = game();
+  p.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
+  ok(bodies.find((b) => b.z === 0)?.how?.mood === 'npc_standing_drinking' && bodies.find((b) => b.z === 2)?.how?.mood === 'npc_sitting_chair' && bodies.find((b) => b.z === 4)?.how?.mood === 'conversation', 'the pass stands each in its mood, a sat giver in the chair');
+  ok(bodies.find((b) => b.z === 2)?.post?.kind === 'still' && bodies.find((b) => b.z === 0)?.post?.kind === 'near', 'and the one sat down keeps to its seat, while a drinker may step about');
+  // Lending the idle: the clip picked out of whichever rig is already parsed, and laid over the body's
+  // extras. Clips here are names and nothing else, which is all either reads of them.
+  const clip = (name: string) => ({ name });
+  const human = [clip('idle'), clip('idle:npc_sad'), clip('idle:npc_sitting_chair'), clip('BOTH_A1_T__B_')];
+  const rodian = [clip('idle'), clip('idle:npc_sad')];
+  const rigs = new Map([
+    ['/assets-private/characters/rodian_male/rig.glb', rodian],
+    ['/assets-private/characters/human_male/rig.glb', human],
+  ]);
+  const tables = new Map<string, RigVariants>([
+    ['/assets-private/characters/rodian_male/rig.glb', variants],
+    ['/assets-private/characters/human_male/rig.glb', variants],
+  ]);
+  ok(pickMoodClip('sad', rigs, tables, 'human_male') === human[1], "a mood is lent out of the body's own species' rig when it is in, its shared branch and all");
+  ok(pickMoodClip('sad', rigs, tables, 'wookiee_male') === rodian[1], 'else out of whichever rig is in, every humanoid sharing the one skeleton');
+  ok(pickMoodClip('npc_sitting_chair', rigs, tables, 'rodian_male') === null && pickMoodClip('npc_sitting_chair', rigs, tables, 'human_male') === human[2], 'a branch the rig does not really carry is no answer, whatever its table says');
+  ok(pickMoodClip('conversation', rigs, tables) === null && pickMoodClip('sad', new Map(), tables) === null, 'and a mood with no branch, or no rig in yet, lends nothing');
+  const extras = { clips: new Map([['BOTH_A1_T__B_', human[3]]]), roles: { attacks: ['BOTH_A1_T__B_'], rangedStance: 'rifle_ready' }, carry: 'rifle' as const, carried: true, ranged: { range: 20, additive: false } };
+  const moody = withMood(extras as never, human[1] as never)!;
+  ok(moody.clips?.get('idle:npc_sad') === human[1] && moody.clips?.get('BOTH_A1_T__B_') === human[3], "the lent idle is added to what the body plays, beside the clips it was lent already");
+  ok(moody.roles?.idle === 'idle:npc_sad' && moody.roles?.attacks?.[0] === 'BOTH_A1_T__B_' && moody.roles?.rangedStance === 'rifle_ready', 'its idle role points at the lent clip, and every other role is kept');
+  ok(moody.carry === 'rifle' && moody.carried === true && moody.ranged?.range === 20 && extras.roles.rangedStance === 'rifle_ready' && !('idle' in extras.roles), "its carry and its gun's range are kept, and the extras it was handed are left as they were");
+  ok(withMood(extras as never, null) === (extras as never) && withMood(undefined, human[1] as never)?.roles?.idle === 'idle:npc_sad', 'nothing to lay over is the extras themselves, and a body with none still takes the mood');
+
+  const rigFile = join('assets-private', 'characters', 'human_male', 'parts.json');
+  const rigGlb = join('assets-private', 'characters', 'human_male', 'rig.glb');
+  const tat = join('assets-private', 'tatooine', 'spawns.json');
+  if (!existsSync(rigFile) || !existsSync(tat)) note('no species rig or spawns pack here, so the real moods are not checked');
+  else {
+    const parts = JSON.parse(readFileSync(rigFile, 'utf8')) as { variants?: RigVariants; clips?: string[] };
+    const rig = parts.variants ?? {};
+    // What the rig really carries, which is not the branch table: the GLB's own animations where it is
+    // here (its JSON chunk, read without the 200 MB behind it), else the manifest's list of them.
+    let clipNames: Set<string>;
+    let from = 'the manifest';
+    if (existsSync(rigGlb)) {
+      const fd = openSync(rigGlb, 'r');
+      try {
+        const head = Buffer.alloc(20);
+        readSync(fd, head, 0, 20, 0);
+        const len = head.readUInt32LE(12);
+        const json = Buffer.alloc(len);
+        readSync(fd, json, 0, len, 20);
+        clipNames = new Set(((JSON.parse(json.toString('utf8')) as { animations?: { name?: string }[] }).animations ?? []).map((a) => a.name ?? ''));
+        from = 'the GLB';
+      } finally {
+        closeSync(fd);
+      }
+    } else clipNames = new Set(parts.clips ?? []);
+    const rows = (JSON.parse(readFileSync(tat, 'utf8')) as { statics: StandingRow[] }).statics;
+    const moods = rows.map((r) => moodOfRow(r)).filter((m): m is string => !!m);
+    const lent = moods.filter((m) => moodIdleName(m, rig, (c) => clipNames.has(c)));
+    const listed = moods.filter((m) => moodIdleName(m, rig, (c) => c in rig));
+    note(`${moods.length} of the world's ${rows.length} rows carry a mood; ${lent.length} of them take a branch of the human rig (${clipNames.size} clips in ${from}), the rest keep their own idle`);
+    ok(lent.length > 0 && lent.length < moods.length, 'some moods take a branch and some are the plain idle under another name, as the table has them');
+    ok(lent.length === listed.length, `and every branch the table names for a mood is a clip ${from} really carries (${lent.length} of ${listed.length})`);
+    ok(moods.every((m) => m !== 'sad' || moodIdleName(m, rig, (c) => clipNames.has(c)) === 'idle:npc_sad'), "every one of the world's sad people is lent the sad idle");
+  }
+
+  // The wiring, read as text: the body is attached in its mood, the mood out of an already-parsed rig.
+  const src = (p: string): string => readFileSync(new URL(`../../../src/${p}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const manager = src('world/mobiles/manager.ts');
+  const character = src('player/character.ts');
+  ok(/const r = m\.attach\(gotModel, gotPack, withMood\(plan\?\.extras \?\? undefined, this\.moodIdle\(entry, packInfo, opts\.mood, hologram\)\)\);/.test(manager), 'the manager attaches every body with its mood laid over its extras');
+  ok(/if \(!mood \|\| hologram \|\| packInfo\?\.hierarchy !== 'all_b'\) return null;\s*return Character\.parsedRigMood\(mood, entry\.species \?\? undefined\);/.test(manager), 'a person on the humanoid skeleton, never a creature or a hologram, is lent it from a parsed rig');
+  ok(/static parsedRigMood\(mood: string, prefer\?: string\): THREE\.AnimationClip \| null \{\s*return pickMoodClip\(mood, rigClipsParsed, rigVariantsParsed, prefer\);/.test(character) && /rigClipsParsed\.set\(rigUrl, rig\.animations\);\s*rigVariantsParsed\.set\(rigUrl, manifest\.variants \?\? \{\}\);/.test(character), "which is the rig's own parsed clips and its own branch table, kept together as the rig is parsed");
+}
+
+// ------------------------------------------------------------------ who stands at a row, life after life
+{
+  const creatures: Record<string, PeopleCreature> = {
+    commoner: { id: 'c0', bodies: ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'], game: { attackable: false, aggression: 'passive' } },
+    thug: { id: 't0', bodies: ['t0', 't1', 't2'], game: { attackable: true, aggression: 'aggressive' } },
+    trainer: { id: 'tr', game: { attackable: false } },
+    officer: { id: 'o0', bodies: ['o0', 'o1'], game: { attackable: true, aggression: 'defensive', level: 30, hp: 700, damage: 31, ranged: { range: 20, additive: false } } },
+    rebel: { id: 'r0', bodies: ['r0', 'r1'], game: { attackable: true, aggression: 'defensive', level: 28, hp: 690, damage: 30, ranged: null } },
+  };
+  const pools = { 'Town.stationaryCommoners': ['commoner'], 'Town.stationaryNpcs': ['thug', 'trainer', 'nobody_we_know'] };
+  const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({ creatures, pools, side: 'imperial', reuse: PEOPLE_TUNE.reuseLook, ...over });
+  const crowd = (key: string): StandingRow => row({ key, who: 'commoner', id: 'c3', draw: [['Town.stationaryCommoners', 0.8], ['Town.stationaryNpcs', 0.2]], peaceful: true });
+
+  const first = personFor(crowd('a1b2c3d4e5f6'), 0, ctx());
+  ok(first.who === 'commoner' && first.id === 'c3', "a crowd row's first life is who and what the converter drew for it");
+  ok(JSON.stringify(personFor(crowd('a1b2c3d4e5f6'), 3, ctx())) === JSON.stringify(personFor(crowd('a1b2c3d4e5f6'), 3, ctx())), 'and any later life is the same draw every time it is asked, in every browser');
+  const lives = new Set(Array.from({ length: 12 }, (_, l) => `${personFor(crowd('a1b2c3d4e5f6'), l + 1, ctx()).who}/${personFor(crowd('a1b2c3d4e5f6'), l + 1, ctx()).id}`));
+  ok(lives.size > 3, `a row killed and come back draws again: twelve lives stood ${lives.size} different people`);
+
+  // The server's own split: four in five of the stationary crowd are its commoners.
+  let fromCommoners = 0;
+  let known = true;
+  const n = 4000;
+  for (let i = 0; i < n; i++) {
+    const w = personFor(crowd((0x10000000 + i * 7919).toString(16) + 'ab'), 1, ctx());
+    if (w.who === 'commoner') fromCommoners++;
+    if (w.who === 'nobody_we_know') known = false;
+  }
+  ok(Math.abs(fromCommoners / n - 0.8) < 0.03, `the draws keep the server's split: ${((fromCommoners / n) * 100).toFixed(1)}% of ${n} later lives are commoners`);
+  ok(known, 'and a name no creature in the fleet answers to is never drawn');
+
+  // A dress group's creature is a pool of bodies: the draw is stable, spreads over the pool, and an
+  // unattackable crowd leans on the bodies already built.
+  const group = (key: string, life: number, holds?: (id: string) => boolean) => personFor(row({ key, who: 'commoner', id: 'c0', peaceful: true }), life, ctx({ holds }));
+  const spread = new Set(Array.from({ length: 60 }, (_, i) => group((0x20000000 + i * 104729).toString(16), 1).id));
+  ok(spread.size >= 5, `a dress group's bodies are drawn from its whole pool (${spread.size} of 6 over sixty rows)`);
+  const built = new Set(['c4']);
+  let reused = 0;
+  for (let i = 0; i < 2000; i++) if (group((0x30000000 + i * 104729).toString(16), 1, (id) => built.has(id)).id === 'c4') reused++;
+  ok(Math.abs(reused / 2000 - (PEOPLE_TUNE.reuseLook + (1 - PEOPLE_TUNE.reuseLook) / 6)) < 0.05, `an unattackable crowd takes a body already built ${((reused / 2000) * 100).toFixed(0)}% of the time, which is its ${PEOPLE_TUNE.reuseLook} share and the pool's own chance besides`);
+  let thugReuse = 0;
+  for (let i = 0; i < 400; i++) if (personFor(row({ key: (0x40000000 + i * 7).toString(16), who: 'thug', id: 't0' }), 0, ctx({ holds: (id) => id === 't2' })).id === 't2') thugReuse++;
+  ok(thugReuse === 0, 'while somebody who may be fought always stands as the body drawn for them');
+
+  // A guard's row: the side holding the world, and the other where that side has no body.
+  const guard = row({ key: 'feedfacecafe', who: 'officer', id: 'o1', gcw: [{ who: 'officer', id: 'o1' }, { who: 'rebel', id: 'r1', mood: 'angry' }] });
+  const imp = personFor(guard, 0, ctx());
+  const reb = personFor(guard, 0, ctx({ side: 'rebel' }));
+  ok(imp.who === 'officer' && imp.id === 'o1' && reb.who === 'rebel' && reb.id === 'r1' && reb.mood === 'angry', "a guard's row stands the Imperial side unless the world is the rebels', each with its own body and mood");
+  const lonely = row({ who: 'officer', id: 'o1', gcw: [{ who: 'officer', id: 'o1' }, { who: 'rebel' }] });
+  ok(personFor(lonely, 0, ctx({ side: 'rebel' })).who === 'officer', 'and a side the data gives no body stands the other rather than nobody');
+
+  // Its own numbers, weapons and whether it may be struck.
+  ok(personFor(guard, 0, ctx()).essential === false && personFor(row({ who: 'trainer', id: 'tr' }), 0, ctx()).essential === true && personFor(row({ who: 'stranger', id: 'x' }), 0, ctx()).essential === null, 'a creature that may be struck is not furniture, one that may not is, and one the fleet says nothing of is left to its body');
+  const o = overridesOf(creatures.officer)!;
+  ok(o.level === 30 && o.hp === 700 && o.damage === 31 && o.aggression === 'defensive' && o.ranged?.range === 20, "a creature's own numbers become the body's overrides");
+  ok(overridesOf(creatures.rebel)!.ranged === null, 'and one that does not shoot is told so, rather than taking its body\'s gun');
+  ok(overridesOf({ game: { hp: 'lots', level: -Infinity, aggression: 'furious' } }) === undefined && overridesOf(null) === undefined, 'a number that is not a number is never an override');
+  ok(weaponsOf({ weapons: ['tusken_ranged', 'unarmed', 7] })?.join() === 'tusken_ranged,unarmed' && weaponsOf({}) === undefined, "and its weapons, first and second, as the emulator wrote them");
+  ok(seedOfRow({ key: 'a1b2c3d4e5f6' }, 9) === 0xa1b2c3d4 && seedOfRow({}, 9) === 9, "a row rolls from its key's first eight figures, whatever its place in the list");
+
+  // The pass: the numbers, the weapons, the room, a patroller at the first point of its walk, and the
+  // two caps apart. A patroller's points are mirrored with the row.
+  GCW_SIDES.testworld = 'rebel';
+  try {
+    const p = new StandingPeople();
+    const patrol = row({ who: 'thug', id: 't0', x: -5, z: 0, route: [{ x: -6, y: 11, z: 1, room: 3, linger: false }, { x: -9, y: 11, z: 1, linger: true }] });
+    p.adopt([guard, patrol, row({ who: 'trainer', id: 'tr', x: -1, z: 0, cell: 77, room: 2 })], creatures, { world: 'testworld', pools, weaponGroups: { g: ['object/weapon/x.iff'] } });
+    const { deps, bodies } = game();
+    p.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
+    const g = bodies.find((b) => b.id === 'r1');
+    ok(!!g && g.how?.overrides?.level === 28 && g.how.overrides.ranged === null && g.how.mood === 'angry', "the world named the rebels', so its guard stands the rebel side with the rebel's own numbers");
+    ok(g?.how?.weaponGroups?.g?.[0] === 'object/weapon/x.iff' && g.how.weapons === undefined, 'and the weapon groups are handed on with it, beside a creature that names none');
+    const pt = bodies.find((b) => b.id === 't0');
+    ok(!!pt && pt.x === 6 && pt.z === 1 && pt.y === 11 && pt.inside && pt.how?.room === 3, `a patroller stands at the first point of its walk, mirrored with the row, in that point's room (${pt?.x}, ${pt?.z})`);
+    const tr = bodies.find((b) => b.id === 'tr');
+    ok(!!tr && tr.essential === true && tr.how?.room === 2 && tr.inside, "and a person indoors is stood with its own room, which seeds the body's cell");
+    ok(p.side === 'rebel' && p.report(new THREE.Vector3()).some((r) => r.who === 'rebel' && r.mood === 'angry'), 'and the console says who stands and in what mood');
+  } finally {
+    delete GCW_SIDES.testworld;
+  }
+
+  // Forty who may be fought and forty who may not, apart.
+  const had = { most: PEOPLE_TUNE.most, mostEssential: PEOPLE_TUNE.mostEssential };
+  PEOPLE_TUNE.most = 5;
+  PEOPLE_TUNE.mostEssential = 4;
+  try {
+    const p = new StandingPeople();
+    const rows = [...Array.from({ length: 10 }, (_, i) => row({ who: 'thug', id: 't0', x: -i - 1, key: `aa${i}0000000` })), ...Array.from({ length: 10 }, (_, i) => row({ who: 'trainer', id: 'tr', x: i + 1, z: 1, key: `bb${i}0000000` }))];
+    p.adopt(rows, creatures);
+    const { deps, bodies } = game();
+    p.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
+    const up = standing(bodies);
+    ok(up.filter((b) => !b.essential).length === 5 && up.filter((b) => b.essential).length === 4, `the two caps fill apart: ${up.filter((b) => !b.essential).length} who may be fought and ${up.filter((b) => b.essential).length} of the furniture`);
+    ok(Math.max(...up.filter((b) => !b.essential).map((b) => Math.abs(b.x))) === 5 && Math.max(...up.filter((b) => b.essential).map((b) => Math.abs(b.x))) === 4, 'each the nearest of its own kind');
+  } finally {
+    Object.assign(PEOPLE_TUNE, had);
+  }
+
+  // Killed and come back is the next life, which draws again; walked away and back is the same body.
+  const p = new StandingPeople();
+  p.adopt([crowd('c0ffee000001')], creatures, { pools });
+  const { deps, bodies } = game();
+  const at = new THREE.Vector3(0, 0, 0);
+  p.step(0, 0, at, deps, true);
+  const firstBody = bodies[0].id;
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 10, new THREE.Vector3(9000, 0, 0), deps);
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 12, at, deps);
+  ok(bodies.length === 2 && bodies[1].id === firstBody, 'walking away and back stands the same body again');
+  bodies[1].dead = true;
+  const seen = new Set<string>();
+  let t = 20;
+  for (let life = 0; life < 8; life++) {
+    for (let k = 0; k < 3; k++) p.step(PEOPLE_TUNE.everySeconds + 0.1, (t += 400), at, deps);
+    const last = bodies[bodies.length - 1];
+    seen.add(`${last.how?.overrides?.aggression ?? ''}:${last.id}`);
+    last.dead = true;
+  }
+  ok(bodies.length === 10 && seen.size > 2, `killed and come back eight times, the row stood ${seen.size} different bodies`);
+}
+
+// ------------------------------------------------------------------ a row rolls from its key, wherever it sits in the pack
+{
+  // Every draw a body makes (its weapon off its list, a blade's colour) comes from the seed it is stood
+  // with, so the seed must be its key's and never its place in the list: a pack converted again with
+  // its rows in another order would otherwise re-arm the whole town.
+  const rows = [row({ who: 'a', key: 'a1b2c3d4e5f60001', x: -1 }), row({ who: 'b', key: '0badf00d77770002', x: -2 }), row({ who: 'c', x: -3 })];
+  const seeds = (list: StandingRow[]): Map<string, { seed: number; index: number }> => {
+    const p = new StandingPeople();
+    p.adopt(list);
+    const { deps, bodies } = game();
+    p.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
+    return new Map(bodies.map((b) => [list[b.how!.index].who, { seed: b.how!.seed, index: b.how!.index }]));
+  };
+  const first = seeds(rows);
+  ok(first.get('a')?.seed === seedOfRow(rows[0], 0) && first.get('a')?.seed === 0xa1b2c3d4 && first.get('b')?.seed === 0x0badf00d, "a keyed row is stood with its key's seed");
+  const again = seeds([rows[2], rows[1], rows[0]]);
+  ok(again.get('a')?.seed === first.get('a')?.seed && again.get('b')?.seed === first.get('b')?.seed && again.get('a')?.index !== first.get('a')?.index, 'and with the same seed when the pack lists it somewhere else');
+  ok(first.get('c')?.seed === 2 && again.get('c')?.seed === 0, 'while a row with no key (a pack older than keys) rolls from its place, as it always did');
+}
+
+// ------------------------------------------------------------------ a world's side, handed over live
+{
+  const creatures: Record<string, PeopleCreature> = {
+    officer: { id: 'o0', game: { attackable: true, aggression: 'defensive' } },
+    rebel: { id: 'r0', game: { attackable: true, aggression: 'defensive' } },
+    baker: { id: 'bk', game: { attackable: false } },
+  };
+  const guard = row({ key: 'feed0001', who: 'officer', id: 'o1', x: -2, gcw: [{ who: 'officer', id: 'o1' }, { who: 'rebel', id: 'r1' }] });
+  const baker = row({ key: 'feed0002', who: 'baker', id: 'bk', x: -4 });
+  const p = new StandingPeople();
+  p.adopt([guard, baker], creatures, { world: 'sidetest' });
+  const { deps, bodies } = game();
+  const at = new THREE.Vector3(0, 0, 0);
+  try {
+    p.step(0, 0, at, deps, true);
+    const imp = bodies.find((b) => b.id === 'o1')!;
+    const bk = bodies.find((b) => b.id === 'bk')!;
+    ok(p.side === 'imperial' && !!imp && !!bk, 'a world nobody named stands the Imperial guard');
+    ok(p.setSide('rebel', deps) === 'rebel' && p.side === 'rebel' && GCW_SIDES.sidetest === 'rebel', 'handed to the rebels through the knob, the world is theirs and says so');
+    ok(imp.removed && !bk.removed, "and the Imperial guard is put down at once, while the baker is left where he stands");
+    p.step(0.1, 1, at, deps);
+    const reb = bodies.find((b) => b.id === 'r1');
+    ok(!!reb && !reb.removed && bodies.filter((b) => b.id === 'bk').length === 1, "the next pass stands the rebel at the guard's post, and nobody stands the baker twice");
+    ok(p.setSide('rebel', deps) === 'rebel' && !reb!.removed, 'handing it to the side that already holds it puts nobody down');
+  } finally {
+    delete GCW_SIDES.sidetest;
+  }
+}
+
+// ------------------------------------------------------------------ a patroller, and where it is measured from
+{
+  // A patroller stands at the first point of its walk where that lies near its own row, which is where
+  // it is: so that is where every distance is measured from. A first point far from its row is a
+  // script's slip (a power droid on Talus six kilometres from its own route), and stands at the row.
+  ok(standPlaceOf(row({ x: 10, z: 0, route: [{ x: 12, y: 3, z: 1, room: 4 }] })).x === 12 && standPlaceOf(row({ x: 10, z: 0, route: [{ x: 12, y: 3, z: 1, room: 4 }] })).room === 4, 'a first point near its row is where a patroller stands, in its room');
+  const slip = standPlaceOf(row({ x: 505, z: -3026, route: [{ x: 505, y: 0, z: 3025 }] }));
+  ok(slip.x === 505 && slip.z === -3026 && !slip.inside, `one ${Math.round(3025 + 3026)} m from its row stands at the row, as the server stood every patroller`);
+  ok(standPlaceOf(row({ x: 0, z: 0, cell: 9, room: 2 })).inside && standPlaceOf(row({ x: 0, z: 0, cell: 9, room: 2 })).room === 2 && !standPlaceOf(row({})).inside, 'and anybody else at its own spot, in its own room');
+
+  // Two patrollers, each 45 m from its own row: one whose row is out of range but whose walk begins in
+  // it, and one the other way round. Written as the snapshot writes them (x negated; the centre is 0,0).
+  const inward = row({ who: 'inward', x: -150, z: 0, route: [{ x: -105, y: 0, z: 0 }] });
+  const outward = row({ who: 'outward', x: -100, z: 0, route: [{ x: -145, y: 0, z: 0 }] });
+  const faraway = row({ who: 'slip', x: -90, z: 0, route: [{ x: -90, y: 0, z: 6000 }] });
+  const p = new StandingPeople();
+  p.adopt([inward, outward, faraway]);
+  const { deps, bodies } = game();
+  p.step(0, 0, new THREE.Vector3(0, 0, 0), deps, true);
+  ok(bodies.some((b) => b.x === 105) && !bodies.some((b) => Math.abs(b.x - 145) < 1e-9 || b.x === 100), `the one whose walk begins in range is stood there, and the one whose walk begins out of it is not, whatever their rows say (${bodies.map((b) => b.x).join(', ')})`);
+  ok(bodies.some((b) => b.x === 90 && b.z === 0), 'and the slip is stood at its own row, in range, not six kilometres off');
+  const near = p.nearest(new THREE.Vector3(100, 0, 0), 3);
+  ok(near[0].x === 105 && near[0].away === 5, `the console measures a patroller from where it stands, which is where \`go\` takes the player (${JSON.stringify(near[0])})`);
+  ok(p.report(new THREE.Vector3(100, 0, 0)).some((r) => r.away === 5), 'and so does its report of who is standing');
+  // Walked 60 m past the far one's own spot, it is dropped by where it stands.
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 2, new THREE.Vector3(105 + PEOPLE_TUNE.drop + 1, 0, 0), deps);
+  ok(bodies.find((b) => b.x === 105)!.removed, 'and put down past `drop` from where it stands');
+  const was = PEOPLE_TUNE.routeReach;
+  try {
+    ok(p.retune({ routeReach: 10 }).join() === 'routeReach' && p.nearest(new THREE.Vector3(150, 0, 0), 1)[0].x === 150, 'with the reach turned down live, a patroller 45 m from its walk stands at its row again');
+  } finally {
+    p.retune({ routeReach: was });
+  }
+}
+
+// ------------------------------------------------------------------ one cap full, the memory short: nobody put down for nothing
+{
+  // The furniture's cap is full and nobody of its kind is far enough off to make room; the only people
+  // standing far off are of the other kind, and the model memory is short. A row of the full kind must
+  // not put those down for memory and then not be stood: they would stand again on the next pass and go
+  // again on the one after, for as long as the player stood there.
+  const creatures: Record<string, PeopleCreature> = { vendor: { id: 'v', game: { attackable: false } }, thug: { id: 't', game: { attackable: true } } };
+  const had = { most: PEOPLE_TUNE.most, mostEssential: PEOPLE_TUNE.mostEssential };
+  PEOPLE_TUNE.mostEssential = 2;
+  try {
+    const rows = [
+      row({ key: 'e0000001', who: 'vendor', id: 'v', x: -1 }),
+      row({ key: 'e0000002', who: 'vendor', id: 'v', x: -2 }),
+      row({ key: 'e0000003', who: 'vendor', id: 'v', x: -3 }),
+      row({ key: 'f0000001', who: 'thug', id: 't', x: -80 }),
+      row({ key: 'f0000002', who: 'thug', id: 't', x: -90 }),
+    ];
+    let budget = 99;
+    let bodies: Body[] = [];
+    const up = (): number => bodies.filter((b) => !b.removed && !b.dead).length;
+    const g = game({ short: () => Math.max(0, up() + 1 - budget), frees: () => 1 });
+    bodies = g.bodies;
+    const p = new StandingPeople();
+    p.adopt(rows, creatures);
+    const at = new THREE.Vector3(0, 0, 0);
+    p.step(0, 0, at, g.deps, true);
+    ok(up() === 4 && bodies.filter((b) => b.essential).length === 2 && bodies.filter((b) => !b.essential).length === 2, 'two of the furniture at their cap, and two thugs far off, stand');
+    budget = up();
+    const before = bodies.length;
+    for (let t = 1; t < 8; t++) p.step(PEOPLE_TUNE.everySeconds + 0.1, t * 2, at, g.deps);
+    ok(bodies.length === before && bodies.every((b) => !b.removed), `with the budget full, the third of the furniture puts nobody down for memory it could not be stood with (${bodies.length - before} stood, ${bodies.filter((b) => b.removed).length} put down, over seven passes)`);
+    ok(p.last.up === 4 && p.last.swapped === 0, 'and the counts hold still, pass after pass');
+  } finally {
+    Object.assign(PEOPLE_TUNE, had);
+  }
+
+  // With the cap full and one of its own kind far enough off to make room, that one goes for the memory
+  // first -- it goes anyway -- and nobody else need go. A vendor in a room waits for its building while
+  // the rest stand, then comes in with the budget full.
+  PEOPLE_TUNE.mostEssential = 2;
+  try {
+    const rows = [
+      row({ key: 'e1000001', who: 'vendor', id: 'v', x: -60 }),
+      row({ key: 'e1000002', who: 'vendor', id: 'v', x: -2 }),
+      row({ key: 'f1000001', who: 'thug', id: 't', x: -90 }),
+      row({ key: 'e1000003', who: 'vendor', id: 'v', x: -1, cell: 5, room: 1 }),
+    ];
+    let budget = 99;
+    let built = false;
+    let bodies: Body[] = [];
+    const up = (): number => bodies.filter((b) => !b.removed && !b.dead).length;
+    const short = (): number => Math.max(0, up() + 1 - budget);
+    const g = game({ short, frees: () => 1, cellReady: () => built });
+    bodies = g.bodies;
+    const plain = g.deps.spawn;
+    g.deps.spawn = (entry, at, how) => (short() > 0 ? 'the budget is full' : plain(entry, at, how));
+    const p = new StandingPeople();
+    p.adopt(rows, creatures);
+    const at = new THREE.Vector3(0, 0, 0);
+    p.step(0, 0, at, g.deps, true);
+    ok(up() === 3 && p.last.waiting === 1, 'three stand, and the one in a room waits for its building');
+    budget = up();
+    built = true;
+    p.step(PEOPLE_TUNE.everySeconds + 0.1, 2, at, g.deps);
+    const standingNow = bodies.filter((b) => !b.removed && !b.dead).map((b) => b.x).sort((x, y) => x - y);
+    ok(standingNow.join() === '1,2,90', `the nearer one of the furniture takes the far one's place and its memory, and the thug far off stays standing (${standingNow.join(', ')})`);
+    ok(p.last.swapped === 1, 'one put down, not two');
+  } finally {
+    Object.assign(PEOPLE_TUNE, had);
+  }
+}
+
+// ------------------------------------------------------------------ the room the data names, among overlapping boxes
+{
+  // Two buildings, one turned a quarter about y and moved; each has room 1, a big hall, and room 2, a
+  // bar whose box sits inside the hall's. A person the data puts in the bar is in the bar, although the
+  // hall's box holds the same point; the building whose bar holds the point wins over one that merely
+  // has a bar.
+  const building = (x: number, z: number, yaw: number, cells: RoomBuilding['model']['def']['cells']): RoomBuilding & { name: string } => {
+    const m = new THREE.Matrix4().compose(new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw), new THREE.Vector3(1, 1, 1));
+    return { name: `at ${x},${z}`, x, z, radius: 30, inverse: m.clone().invert(), model: { def: { cells } } };
+  };
+  const cells = [
+    { index: 0, bounds: { min: [-30, -1, -30], max: [30, 10, 30] } },
+    { index: 1, bounds: { min: [-20, 0, -20], max: [20, 8, 20] } },
+    // The larger corner written first, as a mesh's BOX holds them.
+    { index: 2, bounds: { min: [4, 3, 4], max: [0, 0, 0] } },
+  ];
+  const a = building(100, 0, 0, cells);
+  const b = building(130, 0, Math.PI / 2, cells);
+  const all = [a, b];
+  const at = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+  ok(offRoomBox(2, 1, 2, cells[2].bounds) === 0 && Math.abs(offRoomBox(7, 1, 2, cells[2].bounds) - 3) < 1e-9, 'a point inside a box is nought from it, and one outside is its distance, whichever corner came first');
+  ok(buildingWithRoomIn(all, at(102, 1, 2), 2) === a, "a person the data puts at a's bar is in a's bar, though a's hall holds the point as well");
+  ok(buildingWithRoomIn(all, at(102, 1, 2), 1) === a, 'and one it puts in the hall at the same spot is in the hall');
+  // In b's frame, turned a quarter: its bar at local (0..4, 0..4) is world x 130..134, z -4..0.
+  ok(buildingWithRoomIn(all, at(131, 1, -2), 2) === b, 'the turned building finds its own bar through its own frame');
+  // a's bar runs from world x 100 to 104.
+  ok(buildingWithRoomIn(all, at(104 + ROOM_SLACK - 0.5, 1, 2), 2) === a && buildingWithRoomIn(all, at(104 + ROOM_SLACK + 0.5, 1, 2), 2) === null, `a place rounded out of its room by under ${ROOM_SLACK} m is still in it, and one further out is in no room the data can name`);
+  ok(buildingWithRoomIn(all, at(102, 1, 2), 7) === null && buildingWithRoomIn(all, at(102, 1, 2), 0) === null, 'a room no building near has is no answer, nor is room nought, which is outside');
+  ok(buildingWithRoomIn(all, at(500, 1, 2), 2) === null, 'nor a building too far off to hold the point');
+  const layout = readFileSync(new URL('../../../src/world/layoutStream.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  ok(/buildingWithRoom\(pos: THREE\.Vector3, room: number\): CellState \| null \{\s*const best = buildingWithRoomIn\(this\.buildings, pos, room\);\s*return best \? \{ building: best, cell: room \} : null;/.test(layout), 'and the streamer answers with it, over the buildings it holds');
 }
 
 // ------------------------------------------------------------------ a real town, where converted
@@ -656,36 +1076,75 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   if (!existsSync(f) || !existsSync(lay)) {
     note('no converted pack here, so the rules above stand on their own');
   } else {
-    const pack = JSON.parse(readFileSync(f, 'utf8')) as { statics: StandingRow[] };
+    const pack = JSON.parse(readFileSync(f, 'utf8')) as { planet?: string; pools?: Record<string, string[]>; statics: StandingRow[] };
     const centre = (JSON.parse(readFileSync(lay, 'utf8')) as { center: { x: number; z: number } }).center;
-    const p = new StandingPeople();
-    p.adopt(pack.statics);
+    // Adopted exactly as the world adopts it: the rows with the fleet's creatures and the rest of the
+    // pack beside them, which is what says who of them is part of the furniture and so which cap each
+    // counts against. A pack older than format 2 carries no creatures, and then only the rows the town
+    // made peaceful are the furniture.
+    const manFile = join('assets-private', 'spawns', 'manifest.json');
+    const man = existsSync(manFile) ? (JSON.parse(readFileSync(manFile, 'utf8')) as { format: number; creatures: Record<string, PeopleCreature>; weaponGroups?: Record<string, string[]> }) : null;
+    const creatures = man && man.format >= 2 ? man.creatures : null;
+    const extras = { world: pack.planet ?? 'tatooine', pools: pack.pools ?? null, weaponGroups: man?.weaponGroups ?? null };
+    const adopted = (): StandingPeople => {
+      const s = new StandingPeople();
+      s.adopt(pack.statics, creatures, extras);
+      return s;
+    };
+    const p = adopted();
     const indoors = pack.statics.filter((r) => r.cell).length;
     note(`a real world carries ${pack.statics.length} people, ${indoors} of them indoors; ${p.last.rows} are standable`);
     ok(p.last.rows > 100, 'which is a world with people in it');
 
-    // Stand the densest place on the planet, in the world's own frame, and see what it costs. The rows
-    // measured are the ones the pass takes, in its order, so a body's seed is its index here too.
+    // Where each of the rows the pass takes stands, in the world's own frame, and which cap it counts
+    // against, worked out as the pass works them out; a body's seed is its row's index here too.
     const kept = pack.statics.filter((r) => !(r.cell && (r.room === null || r.room === undefined)));
-    const world = kept.map((r) => intoWorld(r.x, r.z, centre));
-    let best = { x: 0, z: 0, n: 0 };
-    for (const r of world) {
-      let n = 0;
-      for (const o of world) if (Math.hypot(o.x - r.x, o.z - r.z) < PEOPLE_TUNE.build) n++;
-      if (n > best.n) best = { x: r.x, z: r.z, n };
-    }
+    const world = kept.map((r) => standPlaceOf({ ...r, ...intoWorld(r.x, r.z, centre), route: r.route?.map((q) => ({ ...q, ...intoWorld(q.x, q.z, centre) })) }));
+    const ctx: PlanContext = { creatures, pools: extras.pools, side: 'imperial', reuse: 0 };
+    const furniture = kept.map((r) => personFor(r, 0, ctx).essential ?? false);
+    const busiest = (want: (i: number) => boolean): { x: number; z: number; n: number } => {
+      let best = { x: 0, z: 0, n: 0 };
+      for (const r of world) {
+        let n = 0;
+        for (let i = 0; i < world.length; i++) if (want(i) && Math.hypot(world[i].x - r.x, world[i].z - r.z) < PEOPLE_TUNE.build) n++;
+        if (n > best.n) best = { x: r.x, z: r.z, n };
+      }
+      return best;
+    };
+    const best = busiest(() => true);
     note(`the busiest spot has ${best.n} people within ${PEOPLE_TUNE.build} m of it`);
-    const { deps, bodies } = game({ centre: () => centre, cellReady: () => true });
+
+    // Stood about a spot a while: each cap on its own kind, full wherever its kind is crowded enough to
+    // fill it, and each the nearest of its own kind.
+    const standAt = (spot: { x: number; z: number }, what: string): void => {
+      const s = adopted();
+      const { deps, bodies } = game({ centre: () => centre, cellReady: () => true });
+      const at = new THREE.Vector3(spot.x, 0, spot.z);
+      for (let i = 0; i < 30; i++) s.step(PEOPLE_TUNE.everySeconds + 0.1, i * 2, at, deps);
+      const up = standing(bodies);
+      const d = (i: number) => Math.hypot(world[i].x - at.x, world[i].z - at.z);
+      for (const kind of [false, true]) {
+        const cap = kind ? PEOPLE_TUNE.mostEssential : PEOPLE_TUNE.most;
+        const mine = up.filter((b) => !!b.essential === kind);
+        const inRange = world.map((_, i) => i).filter((i) => furniture[i] === kind && d(i) <= PEOPLE_TUNE.build);
+        const name = kind ? 'of the furniture' : 'who may be fought';
+        ok(mine.length === Math.min(cap, inRange.length), `${what}: ${mine.length} ${name} stand of ${inRange.length} in range, their cap ${cap} on their own kind`);
+        const upSet = new Set(mine.map((b) => b.seed));
+        const farthest = Math.max(-Infinity, ...mine.map((b) => d(b.seed)));
+        const nearestLeft = Math.min(Infinity, ...inRange.filter((i) => !upSet.has(i)).map(d));
+        ok(farthest <= nearestLeft + 1e-6, `and they are the nearest of their kind: the farthest standing is ${Number.isFinite(farthest) ? farthest.toFixed(1) : 'none'} m, the nearest left ${Number.isFinite(nearestLeft) ? nearestLeft.toFixed(1) : 'none'} m`);
+      }
+      ok(up.length > 0 && s.last.up === up.length, `${what}: ${s.last.up} up in all (${s.last.indoors} of them indoors) from ${bodies.length} stood`);
+    };
+    standAt(best, 'the busiest spot');
+    const fought = busiest((i) => !furniture[i]);
+    const still = busiest((i) => furniture[i]);
+    note(`the spot most crowded with people who may be fought has ${fought.n} of them; the one most crowded with the furniture has ${still.n}`);
+    if (creatures) ok(fought.n > PEOPLE_TUNE.most && still.n > PEOPLE_TUNE.mostEssential, 'both crowded past their caps, so each cap is really filled from real rows');
+    standAt(fought, 'crowded with those who may be fought');
+    standAt(still, 'crowded with the furniture');
     const at = new THREE.Vector3(best.x, 0, best.z);
-    for (let i = 0; i < 30; i++) p.step(PEOPLE_TUNE.everySeconds + 0.1, i * 2, at, deps);
-    note(`standing in it put ${p.last.up} up (${p.last.indoors} of them indoors) from ${bodies.length} stood in all`);
-    ok(p.last.up <= PEOPLE_TUNE.most, `and never more than ${PEOPLE_TUNE.most} at once, however crowded the place is`);
-    ok(p.last.up > 0, 'with somebody really standing there');
-    const up = standing(bodies).map((b) => Math.hypot(b.x - at.x, b.z - at.z));
-    const farthest = Math.max(...up);
-    const left = world.map((w, i) => ({ d: Math.hypot(w.x - at.x, w.z - at.z), i })).filter((o) => o.d <= PEOPLE_TUNE.build && !bodies.some((b) => b.seed === o.i));
-    const nearestLeft = Math.min(...left.map((o) => o.d), Infinity);
-    ok(farthest <= nearestLeft + 1e-6, `and the ones standing are the nearest: the farthest is ${farthest.toFixed(1)} m and the nearest left standing nobody is ${Number.isFinite(nearestLeft) ? nearestLeft.toFixed(1) : 'none'} m`);
+    p.step(0, 0, at, game({ centre: () => centre, cellReady: () => true }).deps, true);
 
     // **The frame, against a witness that is not this code.** Every check above works its expected
     // places out with the same `intoWorld` the pass uses, so they show only that the two agree; a pack
@@ -720,8 +1179,7 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
 
     // And walking through it, which is where the cap stopped being nearest first: stood 90 m west of
     // the busiest spot and walked 180 m east through it at a walk.
-    const walk = new StandingPeople();
-    walk.adopt(pack.statics);
+    const walk = adopted();
     const g = game({ centre: () => centre, cellReady: () => true });
     const here = new THREE.Vector3(best.x - 90, 0, best.z);
     walk.step(0, 0, here, g.deps, true);
@@ -736,12 +1194,17 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
       walk.step(PEOPLE_TUNE.everySeconds + 0.1, t, here, g.deps);
     }
     const upNow = new Set(standing(g.bodies).map((b) => b.seed));
-    const order = world.map((w, i) => ({ d: Math.hypot(w.x - here.x, w.z - here.z), i })).sort((a, b) => a.d - b.d);
-    const nearestUp = order.slice(0, PEOPLE_TUNE.most).filter((o) => upNow.has(o.i)).length;
-    const farUp = Math.max(...[...upNow].map((i) => Math.hypot(world[i].x - here.x, world[i].z - here.z)));
-    const firstWaiting = order.find((o) => o.d <= PEOPLE_TUNE.build && !upNow.has(o.i))?.d ?? Infinity;
-    note(`after walking 180 m through it, ${nearestUp} of the ${PEOPLE_TUNE.most} nearest are standing`);
-    ok(farUp <= firstWaiting + PEOPLE_TUNE.swapMargin + 1e-6, `and nobody standing is more than the margin farther off than anybody waiting (${farUp.toFixed(1)} m against ${Number.isFinite(firstWaiting) ? firstWaiting.toFixed(1) : 'none'} m)`);
+    // Each kind against its own: the furniture never waits on those who may be fought, nor they on it.
+    for (const kind of [false, true]) {
+      const cap = kind ? PEOPLE_TUNE.mostEssential : PEOPLE_TUNE.most;
+      const order = world.map((w, i) => ({ d: Math.hypot(w.x - here.x, w.z - here.z), i })).filter((o) => furniture[o.i] === kind).sort((a, b) => a.d - b.d);
+      const nearestUp = order.slice(0, cap).filter((o) => upNow.has(o.i)).length;
+      const farUp = Math.max(-Infinity, ...order.filter((o) => upNow.has(o.i)).map((o) => o.d));
+      const firstWaiting = order.find((o) => o.d <= PEOPLE_TUNE.build && !upNow.has(o.i))?.d ?? Infinity;
+      const name = kind ? 'of the furniture' : 'who may be fought';
+      note(`after walking 180 m through it, ${nearestUp} of the ${cap} nearest ${name} are standing`);
+      ok(farUp <= firstWaiting + PEOPLE_TUNE.swapMargin + 1e-6, `and nobody ${name} standing is more than the margin farther off than anybody of their kind waiting (${Number.isFinite(farUp) ? farUp.toFixed(1) : 'none'} m against ${Number.isFinite(firstWaiting) ? firstWaiting.toFixed(1) : 'none'} m)`);
+    }
   }
 }
 

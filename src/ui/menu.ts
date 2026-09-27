@@ -4,6 +4,7 @@ import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, type Knob } from './hudPage.ts';
+import { GAMEPLAY } from './gameplayPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
 import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
@@ -14,7 +15,7 @@ import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
 export { onBindingsChanged, notifyBindingsChanged } from './hudPage.ts';
 export { MULTIPLAYER_PARTS, multiplayerMarkup, type CharacterCopy, type MultiplayerView } from './multiplayerPage.ts';
 
-type Page = 'main' | 'controls' | 'graphics' | 'interface' | 'sound' | 'emotes' | 'multiplayer';
+type Page = 'main' | 'controls' | 'gameplay' | 'graphics' | 'interface' | 'sound' | 'emotes' | 'multiplayer';
 
 /**
  * What the multiplayer page needs from the game: the address and state of the line, who is here, and
@@ -270,6 +271,7 @@ export class Menu {
           <h1>SWG3JS</h1>
           <button data-page="main" class="on">Menu</button>
           <button data-page="controls">Controls</button>
+          <button data-page="gameplay">Gameplay</button>
           <button data-page="graphics">Graphics</button>
           <button data-page="interface">Interface</button>
           <button data-page="sound">Sound</button>
@@ -330,6 +332,7 @@ export class Menu {
           <button class="big resume">Resume</button>
           <button class="big switch">Switch character</button>
           <button class="big" data-page="controls">Controls</button>
+          <button class="big" data-page="gameplay">Gameplay</button>
           <button class="big" data-page="graphics">Graphics</button>
           <button class="big" data-page="interface">Interface</button>
           <button class="big" data-page="sound">Sound</button>
@@ -436,6 +439,13 @@ export class Menu {
         const note = this.root.querySelector<HTMLElement>('.use-note');
         if (note) note.textContent = net?.mode() === 'server' ? `now ${who} · press Connect again to join as this player` : `now ${who}`;
       });
+    } else if (page === 'gameplay') {
+      body.innerHTML = `<h2>Gameplay</h2><p class="menu-hint">How the game plays. Everything the world stands for you to fight has its own numbers from the game's data; the knob here is ours, it moves them live, and it is kept in this browser.</p>${GAMEPLAY.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-gameplay">Reset gameplay to defaults</button></div>`;
+      this.wireKnobs(body);
+      body.querySelector('.reset-gameplay')!.addEventListener('click', () => {
+        for (const g of GAMEPLAY) for (const k of g.knobs) this.setValue(k.key, DEFAULT_SETTINGS[k.key] as number | boolean | string);
+        this.showPage('gameplay');
+      });
     } else if (page === 'sound') {
       body.innerHTML = `<h2>Sound</h2><p class="menu-hint">Sound starts on your first click, as browsers require. Every sample, and every volume, pitch and gap inside it, is the game's own; how loudness falls off with distance, how many sounds play at once and the room echo are ours.</p>${SOUND.map((g) => `<h3>${g.title}</h3>${this.knobRows(g.knobs)}`).join('')}<div class="menu-actions"><button class="reset-sound">Reset sound to defaults</button></div>`;
       this.wireKnobs(body);
@@ -513,12 +523,12 @@ export class Menu {
 
   /** The name a key is shown under, for the "off while X is off" note. */
   private labelOf(key: keyof Settings): string {
-    for (const g of [...GRAPHICS, ...SOUND, ...INTERFACE]) for (const k of g.knobs) if (k.key === key) return k.label;
+    for (const g of [...GRAPHICS, ...SOUND, ...INTERFACE, ...GAMEPLAY]) for (const k of g.knobs) if (k.key === key) return k.label;
     return String(key);
   }
 
   private wireKnobs(body: HTMLElement): void {
-    const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs), ...SOUND.flatMap((g) => g.knobs), ...INTERFACE.flatMap((g) => g.knobs)];
+    const all = [...CONTROLS, ...GRAPHICS.flatMap((g) => g.knobs), ...SOUND.flatMap((g) => g.knobs), ...INTERFACE.flatMap((g) => g.knobs), ...GAMEPLAY.flatMap((g) => g.knobs)];
     for (const el of body.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]')) {
       const knob = all.find((k) => k.key === el.dataset.key)!;
       const on = () => {

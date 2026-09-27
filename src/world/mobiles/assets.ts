@@ -535,6 +535,18 @@ export class MobileAssets {
   }
 
   /**
+   * Whether an entry's body is held by something standing, or is being built for something: standing it
+   * again adds nothing to `referencedBytes`. A model only cached, held by nobody, would count again.
+   */
+  holds(entry: MobileEntry, cat: MobileCatalogue): boolean {
+    const key = MobileAssets.modelKey(entry, cat);
+    if (!key) return false;
+    const have = this.models.get(key);
+    if (have) return have.refs > 0;
+    return (this.modelJobs.get(key)?.claims ?? 0) > 0;
+  }
+
+  /**
    * What one more spawn of this entry would add to `referencedBytes`: 0 when everything it needs is
    * already held, or already loading for someone (that load counts at its estimate already).
    */

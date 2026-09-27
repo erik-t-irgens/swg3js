@@ -7,6 +7,7 @@ import type { Terrain } from './terrain';
 import { ACTOR_LAYER } from './portalRender';
 import { Ragdoll } from '../combat/ragdoll';
 import { nextLivingKey, type Aggression, type Living, type Side } from '../combat/kit';
+import { applyDifficultyTo, rescaleBody, scaledByDifficulty } from './difficulty.ts';
 
 export type CreatureDef = PlanetDef['creatures'];
 
@@ -79,8 +80,8 @@ export class Creature implements Living {
   /** Told the manager who struck, so the herd may turn together. */
   alert: ((self: Creature, source: Living) => void) | null = null;
   hp: number;
-  /** What it started with, so a readout can show its health as a share of it. */
-  readonly maxHp: number;
+  /** What it started with, so a readout can show its health as a share of it: its own at the difficulty in force. */
+  maxHp: number;
   dead = false;
   deadTimer = 0;
   stunned = 0;
@@ -103,8 +104,8 @@ export class Creature implements Living {
 
   constructor(readonly def: CreatureDef, mat: THREE.Material, private readonly physics: Physics, x: number, y: number, z: number) {
     const s = def.size;
-    this.hp = def.hp;
-    this.maxHp = def.hp;
+    this.maxHp = scaledByDifficulty(def.hp);
+    this.hp = this.maxHp;
     this.halfHeight = 0.5 * s;
     this.label = def.name;
     // The planet's own values read as an aggression: it hunts, it bolts, or it stands its ground.
@@ -142,6 +143,11 @@ export class Creature implements Living {
     );
     this.pos.set(x, y, z);
     this.target.copy(this.pos);
+  }
+
+  /** The difficulty knob moved: its whole set again from the planet's own number, keeping the share of it it had. */
+  applyDifficulty(scale: number): void {
+    rescaleBody(this, this.def.hp, scale);
   }
 
   /** Swap the procedural body for the planet's converted creature model. */
@@ -244,7 +250,9 @@ export class Creature implements Living {
       this.current = null;
       this.play('idle');
     }
-    this.hp = this.def.hp;
+    // Its whole at the difficulty in force, as it was stood with: the planet's own number would come
+    // back as twice its bar at a half.
+    this.hp = this.maxHp;
     this.stunned = 0;
     this.tumble = 0;
     // Everything a body can carry goes with the old one: a creature killed while burning used to
@@ -469,8 +477,8 @@ export class Creature implements Living {
       if (chase && d <= reach + 0.3) {
         if (this.attackCd <= 0) {
           // It bites whatever it is after: the one that hurt it, or the player it hunts.
-          if (foe) foe.damage(this.def.damage, this.pos, 0, this);
-          else onAttack(this.def.damage, this.pos);
+          if (foe) foe.damage(scaledByDifficulty(this.def.damage), this.pos, 0, this);
+          else onAttack(scaledByDifficulty(this.def.damage), this.pos);
           this.attackCd = 1.6;
           if (this.model) this.playOnce('cbt_stand_combat_attack_light', false);
         }
@@ -564,6 +572,11 @@ export class CreatureManager {
       for (const c of this.creatures) c.setModel(m);
       console.info(`creatures: ${name} uses the converted model (${[...m.clips.keys()].join(', ')})`);
     });
+  }
+
+  /** The difficulty knob moved: every creature out takes it (`Creature.applyDifficulty`). */
+  applyDifficulty(scale: number): void {
+    applyDifficultyTo(this.creatures, scale);
   }
 
   spawnAround(center: THREE.Vector3): void {

@@ -75,6 +75,7 @@ import { scarFamilyOf } from '../combat/scars.ts';
 import type { Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
+import { applyDifficultyTo, rescaleBody, scaledByDifficulty } from './difficulty.ts';
 import { PLAYER_KEY, hostileSides } from '../combat/targets';
 import type { Terrain } from './terrain';
 import { markActor } from './portalRender';
@@ -420,9 +421,12 @@ export class Npc implements Living, ErrandBody {
   readonly aggression: Aggression = 'aggressive';
   /** Standing on the ground: a fighter is, except while the Force has it off it. */
   grounded = true;
-  hp = HP;
-  /** What it started with, so a readout can show its health as a share of it. */
-  readonly maxHp = HP;
+  /**
+   * What it started with, so a readout can show its health as a share of it: the fighter's own health
+   * at the difficulty in force (`src/world/difficulty.ts`), set again when the knob moves.
+   */
+  maxHp = scaledByDifficulty(HP);
+  hp = this.maxHp;
   dead = false;
   deadTimer = 0;
   /**
@@ -1165,6 +1169,11 @@ export class Npc implements Living, ErrandBody {
       g.at = this.now;
       g.who = source;
     } else this.memory.set(source.key, { who: source, at: this.now });
+  }
+
+  /** The difficulty knob moved: its whole set again from the fighter's own, keeping the share of it it had. */
+  applyDifficulty(scale: number): void {
+    rescaleBody(this, HP, scale);
   }
 
   damage(amount: number, from?: THREE.Vector3, push = 0, source?: Living | null): void {
@@ -2102,7 +2111,7 @@ export class Npc implements Living, ErrandBody {
       tmp.normalize();
     }
     // Its own gun off the rack, so an enemy's shot sounds like the weapon in its hands.
-    bolts.fire(tmp2, tmp, { owner: 'enemy', damage: Math.max(6, g.primary.damage * 0.6), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
+    bolts.fire(tmp2, tmp, { owner: 'enemy', damage: scaledByDifficulty(Math.max(6, g.primary.damage * 0.6)), speed: g.primary.speed || 2300, color: g.primary.color, size: g.primary.size, push: g.primary.push, exclude: this.body, life: 6, source: this, sound: combatSounds.gunOf(this.weapon), scar: scarFamilyOf(g.type, this.weapon?.fx?.id) });
     effects?.flash(tmp2, g.primary.color, 6, 5, 0.06);
     // The shot it plays is the posture's own and the weapon's own, drawn from the six the pack
     // holds for each rather than the same one every time: standing, kneeling (twelve of them in the
@@ -2696,7 +2705,7 @@ export class Npc implements Living, ErrandBody {
     tmp.copy(t.pos).sub(this.pos);
     if (tmp.length() >= BLADE_SWING.timerReach) return;
     const saber = this.arm === 'saber';
-    t.damage(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee, this.pos, BLADE_SWING.fighterPush, this);
+    t.damage(scaledByDifficulty(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee), this.pos, BLADE_SWING.fighterPush, this);
     tmp2.copy(t.pos).y += t.halfHeight;
     if (saber) combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
     else combatSounds.melee(this.weapon, true, tmp2.x, tmp2.y, tmp2.z);
@@ -2717,7 +2726,7 @@ export class Npc implements Living, ErrandBody {
     const saber = this.arm === 'saber';
     strike.effects = effects;
     strike.now = now;
-    strike.damage = saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee;
+    strike.damage = scaledByDifficulty(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee);
     strike.color = saber ? this.color.getHex() : BLADE_SWING.meleeSpark;
     this.swingSwept = true;
     // The player's readout is one shared record and this blade is swept at a different simulated
@@ -2786,6 +2795,12 @@ export class NpcManager {
   version = 0;
   private deps: NpcDeps = { weapons: null, effects: null, species: [] };
   private disposed = false;
+
+  /** The difficulty knob moved: every fighter out takes it (`Npc.applyDifficulty`). */
+  applyDifficulty(scale: number): void {
+    applyDifficultyTo(this.npcs, scale);
+  }
+
   /**
    * How many long walks are running. A frame with none scans nothing at all: the player's place has
    * to be picked out of the world's list of the living to measure against, and that is a loop over
