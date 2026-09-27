@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { TICKETS_HELD, TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, markFires, pickTicket, rigClip, rigPose, rigTimes, shuttleAt, shuttleShake, shuttleWords, slotHash, thingAt, ticketText, travelPackReadable, travelThingAt, travelThingsOf, windowOpen, type RigPose, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { TICKETS_HELD, TRAVEL_PACK_VERSION, TRAVEL_TUNE, addTicket, canBoard, collectorWords, markFires, pickTicket, rigClip, rigPose, rigTimes, shuttleAt, shuttleShake, shuttleWords, slotHash, thingAt, ticketText, travelPackReadable, tripOf, travelThingAt, travelThingsOf, windowOpen, type RigPose, type Ticket, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -309,6 +309,22 @@ const row = (over: Partial<TravelRow> = {}): TravelRow => ({ kind: 'terminal', b
   ok(pickTicket([], 'a', 'corellia') === null, 'and no tickets is no ticket');
   ok(ticketText(held[0], 'corellia').includes('collector'), 'a ticket from here says where it is handed in');
   ok(ticketText(held[1], 'corellia').includes('tatooine'), 'and one from elsewhere says where it was bought');
+}
+
+{
+  // A ticket to another world says whether the flight through space is skipped or flown; one about a
+  // single world says nothing of space, whatever it carries. What it says is the same rule a trip is
+  // planned by (`tripOf`).
+  const t: Ticket = { id: 's', from: 'naboo', pack: 'tatooine', to: 'Mos Eisley Starport', at: null, price: 1250, bought: 0 };
+  const skipped = ticketText({ ...t, trip: 'skip', skipSpace: true }, 'naboo');
+  const through = ticketText({ ...t, trip: 'space', skipSpace: false }, 'naboo');
+  ok(skipped.endsWith(', space skipped') && skipped.includes('collector'), `a ticket to another world that skips space says so (${skipped})`);
+  ok(through.endsWith(', through space'), `and one that flies through it says that (${through})`);
+  ok(ticketText(t, 'naboo').endsWith(', space skipped') && tripOf(t) === 'skip', 'one that says nothing skips it, as a trip is planned');
+  ok(ticketText({ ...t, trip: undefined, skipSpace: false }, 'naboo').endsWith(', through space') && tripOf({ ...t, skipSpace: false }) === 'space', 'unless its box was left unticked');
+  const local = { ...t, pack: 'naboo', trip: 'skip' as const, skipSpace: true };
+  ok(!ticketText(local, 'naboo').includes('space') && tripOf(local) === 'local', 'and a ticket about one world says nothing of space, whatever it carries');
+  ok(ticketText({ ...t, trip: 'skip' }, 'corellia').startsWith('to Mos Eisley Starport — from naboo'), 'held somewhere else, it still says where it was bought');
 }
 
 {

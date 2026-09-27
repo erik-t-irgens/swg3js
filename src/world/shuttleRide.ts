@@ -26,6 +26,14 @@
 // without them, or a hull that cannot be built or flown, gives the ticket back too. Nothing anybody
 // else sees of it changes: their own clock's shuttles go on, and the rider is simply not drawn.
 //
+// A trip to another world that skips the flight through space leaves at the take-off's cut all the
+// same, and there the passenger is carried across under the loading screen (`RideHost.cross`): the
+// world left goes and the hull with it, and in the world arrived at a hull of the same rig stands on the
+// far pad's landing, held where the trip comes out, which the trip takes up and lands as it would have
+// from its own flight. For as long as that takes the trip has no hull and a frame of it does nothing, so
+// the hull going with its world is not a hull lost. The far pad's own shuttle is held out of the picture
+// across the world going (a hold outlives it), and the new hull's sounds and flames are its own.
+//
 // It talks to the game only through `RideHost` and a hull only through `RideHull`, so a node test flies
 // a whole trip against fakes (`shuttleRide.test.ts`). Nothing in an update allocates. Every number of
 // ours is `RIDE_TUNE`, live through `__debug.ride({ tune })` and `__debug.rigHull({ ride })`.
@@ -37,7 +45,7 @@ import { settleEase } from '../vehicles/landing.ts';
 import type { RigHull, RigPaths } from '../vehicles/rigHull.ts';
 import type { DriveInput } from '../vehicles/vehicle';
 import type { RideRoute, PadRef, RideLeg } from './rideRoute.ts';
-import { alignShare, inSight, landingTarget, makeLandingTarget, noseOntoPath, onPad, pathPose, pathVelocity, settleOnto, settleSeconds, turnOnPad, vehicleAt, vehicleFromJoint, vehicleVelocity, type RigPath } from './rigPath.ts';
+import { RIG_PATH_TUNE, alignShare, inSight, landingTarget, makeLandingTarget, noseOntoPath, onPad, pathPose, pathVelocity, settleOnto, settleSeconds, turnOnPad, vehicleAt, vehicleFromJoint, vehicleVelocity, type RigPath } from './rigPath.ts';
 import { RIDE_PILOT, ShuttlePilot, planCourse, planRadius, type RideState } from './shuttleCourse.ts';
 import { SHUTTLE_RIG_TUNE, type RigDrive, type RigFx } from './shuttleRigs.ts';
 import { rigPose, type RigPose, type ShuttleState, type TravelRig } from './travelTerminal.ts';
@@ -83,6 +91,11 @@ export const RIDE_TUNE = {
   viewLow: 25,
   /** Seconds the view takes to go from the parked framing to the flight's or back, eased at both ends: never a jump. */
   viewEase: 2,
+  /**
+   * Metres over the ground a hull carried across to another world must stand where it comes out: at the
+   * landing's join where it stands that high, and otherwise further along the landing, where it first does.
+   */
+  joinClear: 5,
 };
 
 /** How the passenger's view frames the hull, eased between parked (`share` 1) and flying (0): the share of the flight's distance back, and the rise over each metre of it. */
@@ -200,6 +213,16 @@ export interface RideHost {
   walkOff(pack: string, port: string): void;
   /** The trip is over, however it ended: said exactly once, after its passenger is off and any ticket has gone back. */
   ended(ride: ShuttleRide): void;
+  /** The pack of the world the game stands in now. */
+  world(): string;
+  /**
+   * Carry the passenger across to the world `leg` names, under the loading screen. The world left goes,
+   * and `h` with it; in the world arrived at a hull of the same rig is built, held at `arrival` moving at
+   * `speed`, ghosted, with the passenger seated in it and nothing else done to it, and that hull is what
+   * it resolves with -- or null where no crossing could be made, the passenger then on foot in whichever
+   * world it got as far as (off `h`, if `h` went with its world; still in it, if it did not).
+   */
+  cross(h: RideHull, leg: RideLeg, arrival: { readonly pos: THREE.Vector3; readonly quaternion: THREE.Quaternion }, speed: number): Promise<RideHull | null>;
 }
 
 /** How a trip that was begun went: flying, missed (its shuttle was not there to swap), failed (no hull, or clips that give no hand-over), or aborted while its hull was built. */
@@ -296,6 +319,17 @@ export class ShuttleRide {
   private lineN = -1;
   /** Where a passenger saved mid-trip is put down, kept and written. */
   private readonly kept = { pack: '', x: 0, y: 0, z: 0 };
+  /** The token of the crossing under way, 0 for none: one that comes back under another token belongs to a trip that has since ended. */
+  private crossToken = 0;
+  /** The hull a crossing left, until it is over: gone with its world by then, or, for a crossing that never got going, still here to be taken away. */
+  private crossFrom: RideHull | null = null;
+  /** Where a crossing comes out, and which way the hull faces there; kept and written. */
+  private readonly arrival = { pos: new THREE.Vector3(), quaternion: new THREE.Quaternion() };
+  /** Whether whoever stopped the trip moves the passenger themselves, for a hull that comes out of a crossing after it stopped. */
+  private endMoved = false;
+  /** The moment of its clip a landing about to begin starts at, NaN for its join; and the moment the landing now flown began at. */
+  private landStart = Number.NaN;
+  private landFrom = 0;
   /** The two things the pilot is handed every frame, made once here rather than a closure a frame. */
   private readonly groundAt: (x: number, z: number) => number | null;
   private readonly visitShip: (pos: V3, vel: V3, radius: number) => void;
@@ -321,6 +355,15 @@ export class ShuttleRide {
   /** Whether the others should not see the rider: while they are seated in it, since nobody is drawn in a shuttle and the hull is this browser's alone. */
   get hidden(): boolean {
     return this.seated;
+  }
+
+  /**
+   * Whether the passenger is being carried across to another world just now: from the step the crossing
+   * is asked for until the hull that comes out of it is taken up, which is when the trip has no hull of
+   * its own and the passenger sits in whichever one the crossing has them in.
+   */
+  get crossing(): boolean {
+    return this.crossToken !== 0 && this.running;
   }
 
   /**
@@ -428,7 +471,10 @@ export class ShuttleRide {
     return 'flying';
   }
 
-  /** One frame of the trip: the leg flown now, and on to the next when it is done. Allocates nothing. */
+  /**
+   * One frame of the trip: the leg flown now, and on to the next when it is done. Nothing while a
+   * crossing is made, when the trip has no hull. Allocates nothing.
+   */
   update(dt: number): void {
     const hull = this.hull;
     if (!this.running || !hull) return;
@@ -632,8 +678,12 @@ export class ShuttleRide {
         ? { at: hull.pos.toArray().map(n2), speed: n2(hull.speed), airborne: hull.airborne, ghosted: hull.ghosted, disposed: hull.disposed }
         : null,
       holds: { origin: this.origin || null, destination: this.dest || null },
+      trip: this.route.trip,
+      world: this.route.to.pack,
+      crossing: this.crossToken !== 0,
       cut: moment(p?.cut),
       join: moment(p?.join),
+      landedFrom: this.started.some((s, i) => this.route.legs[i].kind === 'land' && Number.isFinite(s)) ? n2(this.landFrom) : null,
       landsWith: p?.landMood ?? null,
       alight: this.alightFrom ? { at: this.alightAt.toArray().map(n2), from: this.alightFrom } : null,
       unseen: n2(this.unseen),
@@ -683,10 +733,15 @@ export class ShuttleRide {
   }
 
   /**
-   * The console's hop: flown on for a few seconds past the cut, then put straight onto the landing at
-   * its join on the destination pad, whose own shuttle goes out of the picture that same step.
+   * The flight skipped. Into another world, a crossing is begun on the first frame (`crossTo`). In the
+   * same world, the console's hop: flown on for a few seconds past the cut, then put straight onto the
+   * landing at its join on the destination pad, whose own shuttle goes out of the picture that same step.
    */
   private skip(leg: RideLeg, dt: number): void {
+    if (leg.world !== this.host.world()) {
+      this.crossTo(leg);
+      return;
+    }
     const hull = this.hull!;
     this.legClock += dt;
     hull.setGhost(true);
@@ -704,6 +759,137 @@ export class ShuttleRide {
     hull.rig!.pose('land', paths.join.t, paths.landMood);
     hull.airborne = true;
     this.next();
+  }
+
+  /**
+   * A skip into another world, begun, once: the far pad's own shuttle held out of the picture for good (a
+   * hold outlives the world going, and one there when that pad's shuttle is stood starts it hidden), the
+   * hull's sounds and flames let go of, since the world going takes them anyway, and the passenger carried
+   * across to the landing's join over the far pad at the clip's own speed there. Until the crossing is over
+   * the trip has no hull: the one it leaves goes with its world, which is not the hull lost. Allocates the
+   * crossing's own promise and its two answers, once a trip.
+   */
+  private crossTo(leg: RideLeg): void {
+    const hull = this.hull!;
+    const pad = leg.pad ?? this.route.to.pad;
+    const paths = this.paths!;
+    // A crossing carries the player across, so a trip with nobody aboard has nothing to cross with.
+    if (!this.passenger) {
+      this.finish('failed', 'a trip with nobody aboard is not carried to another world');
+      return;
+    }
+    if (!pad || !paths.join || !hull.rig) {
+      this.finish('failed', 'nowhere to land on the far world');
+      return;
+    }
+    landingTarget(pad, paths.land, paths.join, hull.rig.offset, this.target);
+    this.holdDestNow(pad.key);
+    if (this.fx) {
+      this.host.rigs.undrive(this.fx);
+      this.fx = null;
+    }
+    this.arrival.pos.copy(this.target.pos);
+    this.arrival.quaternion.copy(this.target.quat);
+    const token = this.token;
+    this.crossToken = token;
+    this.crossFrom = hull;
+    this.hull = null;
+    this.legClock = 0;
+    let made: Promise<RideHull | null>;
+    try {
+      made = this.host.cross(hull, leg, this.arrival, this.target.speed);
+    } catch (err) {
+      made = Promise.reject(err);
+    }
+    made.then(
+      (h) => this.crossed(token, h, ''),
+      (err: unknown) => this.crossed(token, null, err instanceof Error ? err.message : String(err)),
+    );
+  }
+
+  /**
+   * The crossing over. A trip that ended while it was made lets go of whatever came out of it: that hull
+   * taken away with the passenger off it, and set down at the far port unless whoever stopped the trip
+   * moves them. A crossing that got nowhere takes away the hull it left, if its world did not go with it,
+   * and sets the passenger down at the far port as a ticket always did. Otherwise the hull that came out is
+   * taken up where the other was let go of -- flown by the trip, ghosted, with sounds and flames of its own
+   * -- moved along its landing to where it stands clear of the ground (`clearOfGround`), and landed.
+   */
+  private crossed(token: number, h: RideHull | null, err: string): void {
+    if (this.crossToken === token) this.crossToken = 0;
+    const to = this.route.to;
+    if (token !== this.token || !this.running) {
+      if (h && !h.disposed) {
+        if (this.passenger) this.host.unseat(h, h.pos);
+        if (h.autopilot === this.autopilot) h.autopilot = null;
+        this.host.disposeHull(h);
+        if (this.passenger && !this.endMoved) this.host.walkOff(to.pack, to.port);
+      }
+      return;
+    }
+    const from = this.crossFrom;
+    this.crossFrom = null;
+    if (from && from !== h && !from.disposed) {
+      if (this.seated) this.host.unseat(from, from.pos);
+      if (from.autopilot === this.autopilot) from.autopilot = null;
+      this.host.disposeHull(from);
+    }
+    const leg = this.route.legs[this.index];
+    const pad = leg?.pad ?? to.pad;
+    const rig = h && !h.disposed ? h.rig : null;
+    const paths = rig ? rig.paths(this.route.mood) : null;
+    if (!h || h.disposed || !rig || !paths || !paths.join || !pad) {
+      // Nothing to land: the passenger off whatever did come out, and set down at the far port.
+      if (h && !h.disposed) {
+        if (this.passenger) this.host.unseat(h, h.pos);
+        this.host.disposeHull(h);
+      }
+      this.seated = false;
+      this.finish('walked', h ? 'the hull that came across has no landing to fly' : `the crossing was not made${err ? ` (${err})` : ''}`);
+      if (this.passenger) {
+        this.host.say(`the shuttle to ${to.port || 'the far pad'} could not be flown across, so you are set down at the port`);
+        this.host.walkOff(to.pack, to.port);
+      }
+      return;
+    }
+    this.hull = h;
+    this.paths = paths;
+    this.again = rig.paths(paths.landMood) ?? this.again;
+    h.autopilot = this.autopilot;
+    h.setGhost(true);
+    const rigs = this.host.rigs;
+    const block = h.def?.rig?.rig ?? null;
+    this.fx = block ? rigs.fxFor(block, paths.landMood, rig.joints, pad.cell > 0) : null;
+    this.fxMood = paths.landMood;
+    if (this.fx) rigs.drive(this.fx, this.posing);
+    this.holdDestNow(pad.key);
+    const t = this.clearOfGround(pad, paths, rig.offset);
+    vehicleAt(pad, paths.land, t, rig.offset, vP, vQ);
+    vehicleVelocity(pad, paths.land, t, rig.offset, vel);
+    h.hold(null, vP, vQ, vel.length());
+    rig.pose('land', t, paths.landMood);
+    h.airborne = true;
+    this.drive('land', t);
+    this.landStart = t;
+    this.next();
+  }
+
+  /**
+   * The moment of the landing a hull carried across comes out at: its join, where it stands `joinClear`
+   * metres or more over the ground there, else the first moment after it that it does -- the game's own
+   * clips come in through the hills round a few pads, and a hull put down inside one is the first thing
+   * its passenger would see. Only ground the world already holds is asked; where it holds none, the join
+   * stands, and so it does where the whole landing is buried, which no retail pad is.
+   */
+  private clearOfGround(pad: PadRef, paths: RigPaths, offset: THREE.Vector3): number {
+    const t0 = paths.join!.t;
+    const step = 1 / RIG_PATH_TUNE.fps;
+    for (let t = t0; t < paths.land.seconds; t += step) {
+      vehicleAt(pad, paths.land, t, offset, jP, jQ);
+      const ground = this.host.groundCached(jP.x, jP.z);
+      if (ground === null || jP.y - ground >= RIDE_TUNE.joinClear) return t;
+    }
+    return t0;
   }
 
   /**
@@ -808,12 +994,11 @@ export class ShuttleRide {
     const hull = this.hull!;
     const paths = this.paths!;
     const pad = leg.pad ?? this.route.to.pad!;
-    const t0 = paths.join!.t;
     this.clip = Math.min(paths.land.seconds, this.clip + dt);
     const t = this.clip;
     const offset = hull.rig!.offset;
     vehicleAt(pad, paths.land, t, offset, jP, jQ);
-    settleOnto(this.fromP, this.fromQ, this.baseP, this.baseQ, jP, jQ, settleEase((t - t0) / this.settle), vP, vQ);
+    settleOnto(this.fromP, this.fromQ, this.baseP, this.baseQ, jP, jQ, settleEase((t - this.landFrom) / this.settle), vP, vQ);
     vehicleVelocity(pad, paths.land, t, offset, vel);
     hull.hold(null, vP, vQ, vel.length());
     hull.rig!.pose('land', t, paths.landMood);
@@ -974,15 +1159,18 @@ export class ShuttleRide {
 
   /**
    * The landing begun: the hull's pose now is where it is settled from, and the clip's at its join what
-   * that is measured against. A hull landing with another branch than it took off on (out of Theed, it
-   * comes down as the calm transport does) has its sounds and flames bound to that branch's marks here,
-   * its engines carried across, so what it sounds and burns is timed by the clip it is seen playing.
+   * that is measured against -- or at the later moment a hull carried across came out at (`landStart`).
+   * A hull landing with another branch than it took off on (out of Theed, it comes down as the calm
+   * transport does) has its sounds and flames bound to that branch's marks here, its engines carried
+   * across, so what it sounds and burns is timed by the clip it is seen playing.
    */
   private beginLanding(leg: RideLeg): void {
     const hull = this.hull!;
     const paths = this.paths!;
     const pad = leg.pad ?? this.route.to.pad!;
-    const t0 = paths.join!.t;
+    const t0 = Number.isFinite(this.landStart) ? this.landStart : paths.join!.t;
+    this.landStart = Number.NaN;
+    this.landFrom = t0;
     this.holdDestNow(pad.key);
     if (this.fx && paths.landMood !== this.fxMood && this.host.rigs.rebranch(this.fx, paths.landMood)) this.fxMood = paths.landMood;
     this.fromP.copy(hull.group.position);
@@ -1094,18 +1282,25 @@ export class ShuttleRide {
     this.token++;
     this.running = false;
     this.ended = ended;
+    this.endMoved = moved;
     if (why) this.why = why;
+    // Stopped while a crossing is made: the hull it left is still here only if its world has not gone
+    // yet, with the passenger still in it, and whatever comes out of the crossing is let go of when it
+    // does (`crossed`), which is also where the passenger is set down at the far port.
+    const crossing = this.crossToken !== 0;
+    const left = crossing && this.crossFrom && !this.crossFrom.disposed ? this.crossFrom : null;
+    this.crossFrom = null;
     // Whoever is still seated is put down before anything of the hull goes: at the foot of its ramp where
     // it stands parked, and where it is otherwise, to be moved on at once -- by whoever stopped the trip
     // when they move or end the body themselves (a world going, a death, leaving for the select screen),
     // and otherwise, since it has lifted off and the trip is paid, to the port it was flying to below.
-    const seatedIn = this.hull;
+    const seatedIn = this.hull ?? left;
     let setDown = false;
     if (this.seated && seatedIn) {
       if (leg?.kind === 'board') this.findAlight(leg.pad ?? this.route.from);
       else if (leg?.kind !== 'off' || !this.alightFrom) this.alightAt.copy(seatedIn.pos);
       this.host.unseat(seatedIn, this.alightAt);
-      setDown = !moved && !!leg && leg.kind !== 'board' && leg.kind !== 'off';
+      setDown = !moved && !crossing && !!leg && leg.kind !== 'board' && leg.kind !== 'off';
     }
     this.seated = false;
     // A ticket not flown on goes back: the trip ended before its hull lifted off, however it ended.
@@ -1131,7 +1326,7 @@ export class ShuttleRide {
     }
     for (let i = 0; i < atOnce; i++) rigs.release(parked, i === atOnce - 1);
     this.destNow = false;
-    const hull = this.hull;
+    const hull = this.hull ?? left;
     this.hull = null;
     if (hull) {
       if (hull.autopilot === this.autopilot) hull.autopilot = null;

@@ -41,8 +41,8 @@ import { FLYING, flyingRig } from './rigFixtures.ts';
 import { Physics } from '../../../src/core/physics.ts';
 import { RigHull, assembleRigModel } from '../../../src/vehicles/rigHull.ts';
 import type { DriveInput } from '../../../src/vehicles/vehicle';
-import { planHop, planRoute, type PadRef } from '../../../src/world/rideRoute.ts';
-import { RIG_PATH_TUNE, noseOntoPath, onPad, pathPose, pathVelocity, poseRigAction, turnOnPad, vehicleAt, vehicleFromJoint, type RigActions } from '../../../src/world/rigPath.ts';
+import { SPACE_LATER, planHop, planRoute, type PadRef, type RideLeg } from '../../../src/world/rideRoute.ts';
+import { RIG_PATH_TUNE, landingTarget, makeLandingTarget, noseOntoPath, onPad, pathPose, pathVelocity, poseRigAction, turnOnPad, vehicleAt, vehicleFromJoint, type RigActions } from '../../../src/world/rigPath.ts';
 import { RIDE_TUNE, ShuttleRide, rideFraming, stepFraming, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
 import { CHASE_RISE } from '../../../src/core/camera.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs, type RigDrive, type RigFx } from '../../../src/world/shuttleRigs.ts';
@@ -71,7 +71,8 @@ class FakeHull implements RideHull {
   readonly group = new THREE.Group();
   readonly radius: number;
   readonly spec: { maxSpeed: number; turnRate: number; bounds: { min: number[]; max: number[] } };
-  readonly def = null;
+  /** The rig block carried by value on its def, as a garage hull's is: what a set of sounds is made from afresh after a crossing. */
+  readonly def = { rig: { rig: fly.block } };
   cruise = 0;
   speed = 0;
   airborne = false;
@@ -195,8 +196,12 @@ class FakeRigs implements RideRigs {
     this.lentFrom = key;
     return this.fx;
   }
-  fxFor(): RigFx {
-    return this.fx;
+  /** Every set made afresh (a hull built again after a crossing), with what it was made for. */
+  readonly made: { fx: RigFx; mood: string; inside: boolean }[] = [];
+  fxFor(_rig: unknown, mood: string, _joints: THREE.Object3D, inside: boolean): RigFx {
+    const fx = { made: this.made.length + 1 } as unknown as RigFx;
+    this.made.push({ fx, mood, inside });
+    return fx;
   }
   rebranch(_fx: RigFx, mood: string): boolean {
     this.rebranched.push(mood);
@@ -254,7 +259,12 @@ function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideR
   const counts = { shown: 0, disposed: 0 };
   const late = new Map<string, number>();
   const passenger: Passenger = { canSeat: true, seatedIn: null, seats: 0, offAt: [], given: [], said: [], walkedTo: [], cleared: [], ships: [], rays: 0, obstacleAt: Infinity, ended: [] };
+  /** The pack of the world the game stands in: every pad of the plain tests is on it, and a crossing moves it. */
+  const current = { world: 'test' };
   const host: RideHost = {
+    world: () => current.world,
+    // No crossing unless a test stands one in (`crossings`): a trip that asks for one here gets none.
+    cross: async () => null,
     clearPad: (pad) => void passenger.cleared.push(pad.key),
     seat: (h) => {
       if (!passenger.canSeat) return false;
@@ -313,7 +323,55 @@ function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideR
     floorAt: (_x, y) => y - 2.4,
     inSpace: () => false,
   };
-  return { host, clock, world, counts, late, passenger };
+  return { host, clock, world, counts, late, passenger, current };
+}
+
+/**
+ * A crossing as the game makes one (`travel` with a passenger, then `arriveInShip`), stood in for. It
+ * waits until the test lets it go; then, in one step, the world left goes -- the hull with it, the
+ * passenger off it, and the drawn shuttles' flown sets cleared -- and, unless it is made to fail, a hull
+ * of the same rig comes out in the world arrived at, held where the trip asked, moving at the speed it
+ * asked, ghosted, with the passenger seated in it. A refusal answers null at once with nothing moved, as a
+ * travel that cannot begin does.
+ */
+function crossings(env: ReturnType<typeof makeHost>, rigs: FakeRigs) {
+  const made: { from: RideHull; leg: RideLeg; at: THREE.Vector3; turn: THREE.Quaternion; speed: number; hull: FakeHull | null }[] = [];
+  const state: { mode: 'arrive' | 'fail' | 'refuse'; go: (() => void) | null } = { mode: 'arrive', go: null };
+  env.host.cross = (h, leg, arrival, speed) => {
+    const rec = { from: h, leg, at: arrival.pos.clone(), turn: arrival.quaternion.clone(), speed, hull: null as FakeHull | null };
+    made.push(rec);
+    if (state.mode === 'refuse') return Promise.resolve(null);
+    return new Promise<RideHull | null>((resolve) => {
+      state.go = () => {
+        state.go = null;
+        if (env.passenger.seatedIn === h) env.passenger.seatedIn = null;
+        (h as FakeHull).disposed = true;
+        env.world.delete(h);
+        rigs.driven.clear();
+        env.current.world = leg.world;
+        if (state.mode === 'fail') {
+          resolve(null);
+          return;
+        }
+        const nh = new FakeHull();
+        nh.hold(null, arrival.pos, arrival.quaternion, speed);
+        nh.airborne = true;
+        env.world.add(nh);
+        env.passenger.seatedIn = nh;
+        rec.hull = nh;
+        resolve(nh);
+      };
+    });
+  };
+  return {
+    made,
+    state,
+    /** Let the crossing go, and wait for the trip to have taken up whatever came of it. */
+    async go(): Promise<void> {
+      state.go?.();
+      await new Promise((r) => setTimeout(r, 0));
+    },
+  };
 }
 
 const padAt = (index: number, x: number, y: number, z: number, yaw: number, mood = ''): PadRef => ({
@@ -1223,6 +1281,47 @@ const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 
 }
 
 {
+  // The crossing a trip into another world makes is the game's own `travel` with a passenger, and the
+  // runner's stand-in (`crossings`) never reaches it, so what that crossing must leave alone is read in
+  // main.ts itself. It must not stop the trip it is carrying across (a travel stops any other trip, and
+  // stopping this one at its own cut leaves the passenger 190 m up on one world and nobody at all on the
+  // other), must not offer the trip to the group, wait on the group's word or tell the group where it came
+  // out; and the hull the passenger arrives in is held where the trip comes out, never launched, never
+  // the ship the next trip into space is flown in and never where a death respawns.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const methodOf = (head: string): string => {
+    const at = main.indexOf(head);
+    if (at < 0) return '';
+    const end = main.indexOf('\n  }\n', at);
+    return end < 0 ? '' : main.slice(at, end);
+  };
+  const travel = methodOf('private async travel(planet: PlanetDef');
+  const calls: [string, string][] = [
+    ['this.ride?.abort(', "if (!passenger) this.ride?.abort('travel', true);"],
+    ['this.together.leaving(', 'if (!passenger) this.together.leaving('],
+    ['this.together.followPoint(', 'passenger ? null : await this.together.followPoint('],
+    ['this.together.arrived(', 'if (!passenger) this.together.arrived('],
+  ];
+  const count = (text: string, what: string) => text.split(what).length - 1;
+  const loose = calls.filter(([call, guarded]) => count(travel, call) !== 1 || count(travel, guarded) !== 1).map(([call]) => call.replace(/\($/, ''));
+  ok(
+    travel.length > 0 && travel.includes('const passenger = !!ship?.passenger;') && loose.length === 0,
+    `a travel carrying a passenger leaves their trip running and says nothing to the group: each of its ${calls.length} calls about the trip and the group is made once, and only for somebody who is not a passenger (${loose.length ? `unguarded or repeated: ${loose.join(', ')}` : `${calls.length} of ${calls.length}`})`,
+  );
+  ok(/arriveInShip\([^)]*crossing\.condition \?\? null, passenger\)/.test(travel), 'and it arrives in the hull it carries as a passenger');
+  const arrive = methodOf('private async arriveInShip(');
+  const open = arrive.indexOf('\n    if (passenger) {\n');
+  const close = open < 0 ? -1 : arrive.indexOf('\n    }\n', open);
+  const branch = close < 0 ? '' : arrive.slice(open, close);
+  const before = open < 0 ? '' : arrive.slice(0, open);
+  ok(
+    branch.includes('\n      return v;') && !/launch\(|lastShipDef|this\.spawn\.copy|p\.board\(|piloting =/.test(branch) && !/launch\(|lastShipDef|this\.spawn\.copy/.test(before),
+    "a passenger's hull comes out held and is returned before anything launches it, records it as the ship last flown, moves the respawn to the sky or puts the passenger at its controls",
+  );
+  ok(/\n\s*cross: \(h, leg, arrival, speed\) => \{\n(?:(?!\n\s*\},\n)[\s\S])*?return this\.travel\([^;]*\bpassenger: true \}\);\n\s*\},\n/.test(main), "and the ride host's crossing is that travel, with the passenger marked");
+}
+
+{
   // A far pad with no rig to land on: flown as far as the take-off's cut, then the passenger is set
   // down at the port the old way and the trip is over.
   const hull = new FakeHull();
@@ -1327,6 +1426,182 @@ const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 
   ok(Math.abs(e.across) < 20 && Math.abs(e.up) < 20 && e.heading < 12, `the second pass meets the join close enough to hand over (${f2(e.across)} m across, ${f2(e.up)} m up, ${f2(e.heading)}°)`);
   ok(passenger.offAt.length === 1 && passenger.offAt[0].distanceTo(ride.alightAt) < 1e-9 && ride.alightFrom === 'ramp' && passenger.given.length === 0, 'the passenger is let off at the foot of the ramp, the ticket spent');
   ok(ride.ended === 'gone' && rigs.tidy() && hull.disposed, 'and nothing is left held');
+}
+
+// ---------------------------------------------------------------- a ticket to another world, carried across
+
+/** A pad on another world, and a ticket there that skips the flight through space. */
+const far: PadRef = { ...padAt(2, -2500, 40, 1800, 1.0), pack: 'there', key: 'travel:there:2', clock: 'there|Port 2' };
+const ticketThere = (id: string): Ticket => ({ id, from: 'test', pack: 'there', to: far.port, at: { x: far.x, z: far.z }, price: 0, bought: 0, trip: 'skip', skipSpace: true });
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+/** A trip to the far pad begun, and flown until it asks to be carried across. */
+async function toTheCut(env: ReturnType<typeof makeHost>, ride: ShuttleRide, hull: FakeHull, x: ReturnType<typeof crossings>): Promise<void> {
+  env.clock.t = 1;
+  await ride.begin();
+  for (let i = 0; i < 60 * 300 && ride.running && !x.made.length; i++) {
+    env.clock.t += DT;
+    ride.update(DT);
+    hull.step(DT);
+  }
+}
+
+{
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const env = makeHost(hull, rigs, watching(far));
+  const { host, clock, passenger, world, counts } = env;
+  const x = crossings(env, rigs);
+  const route = planRoute(ticketThere('w1'), origin, far, 'test', SPACE_LATER)!;
+  ok(route.legs.map((l) => `${l.kind}@${l.world}`).join(',') === 'board@test,lift@test,skip@there,land@there,off@there,leave@there', 'a ticket to another world is boarded and lifted off here, then skipped across, landed, stepped off and left there');
+  const ride = new ShuttleRide(route, host, true);
+  await toTheCut(env, ride, hull, x);
+  const paths = hull.rig.paths('')!;
+  const target = landingTarget(far, paths.land, paths.join, hull.rig.offset, makeLandingTarget());
+  const asked = x.made[0];
+  ok(x.made.length === 1 && asked.from === hull && asked.leg.kind === 'skip' && asked.leg.world === 'there' && hull.launches === 1, "at the take-off's cut the passenger is carried across to the far world, once, from the hull that lifted off");
+  ok(asked.at.distanceTo(target.pos) < 1e-9 && asked.turn.angleTo(target.quat) < 1e-9 && Math.abs(asked.speed - target.speed) < 1e-9, `to come out on the far pad's landing, at its join, moving at the clip's own speed there (${f2(target.speed)} m/s)`);
+  ok(ride.crossing && ride.hull === null && ride.riding && ride.hidden && passenger.seatedIn === hull, 'while it is made the trip holds no hull, and the passenger is still in the one that lifted off, still hidden');
+  ok(rigs.held(far.key) === 1 && rigs.nowHolds.includes(far.key) && rigs.held(origin.key) === 0, "the far pad's own shuttle is held out of the picture for good before the world goes, and the pad left is already let go of");
+  ok(rigs.driven.size === 0 && rigs.undriven === 1, "the hull's sounds and flames are let go of, since the world going takes them anyway");
+  const kept = ride.keepPlace();
+  ok(!!kept && kept.pack === 'there' && kept.x === far.collector!.x && kept.z === far.collector!.z, "a passenger saved meanwhile is kept at the far pad's collector, on the far world");
+  // The world goes, and the hull it left with it: frames of the trip meanwhile do nothing, and above all
+  // do not take the hull gone with its world for the hull lost.
+  x.state.go!();
+  for (let i = 0; i < 5; i++) ride.update(DT);
+  ok(hull.disposed && !world.has(hull) && ride.running && ride.crossing && ride.ended === '', 'the hull left goes with its world, and the trip does not take that for its hull lost');
+  await flush();
+  const nh = asked.hull!;
+  ok(!ride.crossing && ride.hull === nh && nh.autopilot === ride.autopilot && nh.ghosted && ride.leg?.kind === 'land' && passenger.seatedIn === nh, 'the hull that came out is taken up: flown by the trip, ghosted, landing, with the passenger in it');
+  ok(rigs.made.length === 1 && rigs.driven.size === 1 && rigs.driven.has(rigs.made[0].fx) && !rigs.driven.has(rigs.fx) && rigs.made[0].mood === paths.landMood && !rigs.made[0].inside, 'with a set of sounds and flames made for it afresh on the far world, bound to the branch it lands with');
+  ok(counts.disposed === 0 && passenger.offAt.length === 0, 'the trip took away no hull and put nobody down: the world going did the one, and the passenger never left a seat');
+  const landedFrom = (ride.report() as { landedFrom: number | null }).landedFrom;
+  ok(landedFrom === Number(paths.join!.t.toFixed(2)), `over open ground it comes out at the landing's join (${landedFrom} s)`);
+  // The landing to the end, against the far pad's own shuttle on the same clip: exactly where it is, since
+  // it came out exactly on the clip and has nothing to settle.
+  const stood = standing(far);
+  const at = new THREE.Vector3();
+  const turn = new THREE.Quaternion();
+  const want = new THREE.Vector3();
+  const wantTurn = new THREE.Quaternion();
+  const kinds: string[] = [];
+  let landT = paths.join!.t;
+  let landErr = 0;
+  let landN = 0;
+  for (let i = 0; i < 60 * 300 && ride.running; i++) {
+    clock.t += DT;
+    const before = ride.leg?.kind ?? '';
+    ride.update(DT);
+    const now = ride.leg?.kind ?? 'ended';
+    if (kinds.at(-1) !== now) kinds.push(now);
+    if (before === 'land' && now === 'land') {
+      landT = Math.min(paths.land.seconds, landT + DT);
+      flownJoint(nh, at, turn);
+      stood.joint('land', landT, want, wantTurn);
+      landErr = Math.max(landErr, at.distanceTo(want), turn.angleTo(wantTurn));
+      landN++;
+    }
+    nh.step(DT);
+  }
+  ok(kinds.join(',') === 'land,off,leave,ended', `it lands, is stepped off and leaves, on the far world (${kinds.join(', ')})`);
+  ok(landN > 100 && landErr < 1e-4, `landing, its hull joint is where the far pad's own shuttle's is on the same clip, every frame (${landErr.toExponential(1)} over ${landN})`);
+  ok(passenger.offAt.length === 1 && passenger.offAt[0].distanceTo(ride.alightAt) < 1e-9 && ride.alightFrom === 'ramp' && passenger.said.includes(`you arrive at ${far.port}`), 'landed, the passenger is let off at the foot of its ramp on the far pad, and told where they are');
+  ok(ride.ended === 'gone' && nh.disposed && rigs.tidy() && passenger.given.length === 0 && passenger.walkedTo.length === 0 && passenger.ended.length === 1, 'and the empty hull flies off there and is taken away: nothing held, the ticket spent, nobody sent anywhere, the host told once');
+}
+
+{
+  // A far pad whose landing comes in through a hill: here the ground stands 30 m over the join and falls
+  // away to the pad's own some way in. The hull comes out along its landing where it first stands clear
+  // of that ground, not inside the hill; with no ground held there at all, at the join.
+  const probe = new FakeHull();
+  const paths = probe.rig.paths('')!;
+  const join = paths.join!;
+  vehicleAt(far, paths.land, join.t, probe.rig.offset, expectPos, expectTurn);
+  const hillR = Math.hypot(expectPos.x - far.x, expectPos.z - far.z) * 0.6;
+  const hillTop = expectPos.y + 30;
+  const ground = (gx: number, gz: number) => (Math.hypot(gx - far.x, gz - far.z) > hillR ? hillTop : far.y - 1);
+  let wantT = Number.NaN;
+  for (let t = join.t; t < paths.land.seconds; t += 1 / RIG_PATH_TUNE.fps) {
+    vehicleAt(far, paths.land, t, probe.rig.offset, expectPos, expectTurn);
+    if (expectPos.y - ground(expectPos.x, expectPos.z) >= RIDE_TUNE.joinClear) {
+      wantT = t;
+      break;
+    }
+  }
+  ok(wantT > join.t + 0.5, `the made-up hill buries the join and the landing comes out of it ${f2(wantT - join.t)} s later`);
+  for (const held of ['hill', 'none'] as const) {
+    const hull = new FakeHull();
+    const rigs = new FakeRigs();
+    const env = makeHost(hull, rigs, watching(far));
+    env.host.groundCached = held === 'hill' ? ground : () => null;
+    const x = crossings(env, rigs);
+    const ride = new ShuttleRide(planRoute(ticketThere(held), origin, far, 'test', SPACE_LATER)!, env.host, true);
+    await toTheCut(env, ride, hull, x);
+    await x.go();
+    const nh = x.made[0].hull!;
+    const t = held === 'hill' ? wantT : join.t;
+    vehicleAt(far, paths.land, t, nh.rig.offset, expectPos, expectTurn);
+    const from = (ride.report() as { landedFrom: number | null }).landedFrom;
+    ok(ride.leg?.kind === 'land' && nh.heldAt.distanceTo(expectPos) < 1e-6 && from === Number(t.toFixed(2)), held === 'hill' ? `over the hill it comes out ${RIDE_TUNE.joinClear} m clear of the ground, along its landing (${from} s against the join's ${f2(join.t)})` : 'with no ground held where it comes out, at the join: nothing is made on the spot to ask');
+    let landed = false;
+    for (let i = 0; i < 60 * 300 && ride.running; i++) {
+      env.clock.t += DT;
+      ride.update(DT);
+      if (ride.leg?.kind === 'off') landed = true;
+      nh.step(DT);
+    }
+    ok(landed && ride.ended === 'gone' && rigs.tidy() && env.passenger.offAt.length === 1, 'and lands, lets its passenger off and leaves all the same');
+  }
+}
+
+{
+  // A crossing that gets nowhere. Failed after the world went: no hull came out, and the passenger, whom
+  // the world going had already taken off the hull, is set down at the far port. Refused before it began:
+  // the hull left is still here with the passenger in it, so the trip takes them off it and takes it
+  // away, and sets them down at the far port all the same.
+  for (const how of ['fail', 'refuse'] as const) {
+    const hull = new FakeHull();
+    const rigs = new FakeRigs();
+    const env = makeHost(hull, rigs, watching(far));
+    const x = crossings(env, rigs);
+    x.state.mode = how;
+    const ride = new ShuttleRide(planRoute(ticketThere(how), origin, far, 'test', SPACE_LATER)!, env.host, true);
+    await toTheCut(env, ride, hull, x);
+    await x.go();
+    const p = env.passenger;
+    ok(!ride.running && ride.ended === 'walked' && p.seatedIn === null && p.walkedTo.join() === far.port && p.given.length === 0 && p.ended.length === 1 && rigs.tidy(), `a crossing ${how === 'fail' ? 'that failed' : 'that was refused'} sets the passenger down at the far port as a ticket always did, the ticket spent, nothing held, the host told once`);
+    ok(
+      how === 'fail' ? hull.disposed && env.counts.disposed === 0 && p.offAt.length === 0 : hull.disposed && env.counts.disposed === 1 && p.offAt.length === 1,
+      how === 'fail' ? 'the hull it left went with its world, the passenger off it' : 'the hull it left is taken away by the trip, with the passenger off it first',
+    );
+  }
+}
+
+{
+  // Stopped while the crossing is made, before the world goes or after, by a caller that moves the
+  // passenger itself or not: the hull that comes out late is let go of, with the passenger off it, and
+  // they are set down at the far port unless the caller moves them; the host is told once, at the stop.
+  for (const when of ['before', 'after'] as const) {
+    for (const moved of [false, true]) {
+      const hull = new FakeHull();
+      const rigs = new FakeRigs();
+      const env = makeHost(hull, rigs, watching(far));
+      const x = crossings(env, rigs);
+      const ride = new ShuttleRide(planRoute(ticketThere(`${when}${moved}`), origin, far, 'test', SPACE_LATER)!, env.host, true);
+      await toTheCut(env, ride, hull, x);
+      if (when === 'after') x.state.go!();
+      ride.abort('test', moved);
+      const p = env.passenger;
+      const told = p.ended.length;
+      ok(!ride.running && !ride.crossing && !ride.riding && !ride.hidden && hull.disposed && told === 1, `stopped ${when} the world goes, the trip is over at once, with nobody seated and the hull it left gone`);
+      await x.go();
+      const nh = x.made[0].hull!;
+      ok(nh.disposed && p.seatedIn === null && rigs.tidy() && p.ended.length === 1, 'the hull that comes out late is let go of, with the passenger off it, and nothing held');
+      ok(p.walkedTo.join() === (moved ? '' : far.port), moved ? 'and the passenger is left for the caller to move' : `and the passenger is set down at ${far.port}`);
+      ok(env.counts.disposed === (when === 'before' ? 2 : 1) && p.offAt.length === (when === 'before' ? 2 : 1), when === 'before' ? 'both hulls taken away by the trip, the passenger off each' : 'the one that came out taken away by the trip: its world took the other');
+    }
+  }
 }
 
 // ---------------------------------------------------------------- a frame makes nothing

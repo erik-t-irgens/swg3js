@@ -12,8 +12,8 @@
 // Pure: no three, no fetch, no DOM. Node runs it (`rideRoute.test.ts`): relative value imports carry
 // their extension, and there are no constructor parameter properties.
 
-import type { Port } from './shuttle.ts';
-import { rigTimes, TRAVEL_TUNE, type ShuttleTimes, type Ticket, type TravelRig, type TravelThing } from './travelTerminal.ts';
+import { portsOf, type Port, type PoiRow } from './shuttle.ts';
+import { rigTimes, travelPackReadable, travelThingsOf, tripOf, TRAVEL_TUNE, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './travelTerminal.ts';
 
 /** What one leg of a trip is. */
 export type LegKind = 'board' | 'lift' | 'fly' | 'climb' | 'up' | 'jump' | 'down' | 'skip' | 'land' | 'off' | 'walkOff' | 'leave';
@@ -192,6 +192,37 @@ export function padOfPort(things: readonly TravelThing[], ports: readonly Port[]
   return best >= 0 && bestD <= reach ? padRefOf(pack, best, things[best], ports, rigs, things) : null;
 }
 
+/** Another world's travel things, its ports and its rigs, as a trip reads them before that world has loaded. */
+export interface FarPads {
+  things: TravelThing[];
+  ports: Port[];
+  rigs: Record<string, TravelRig>;
+}
+
+/**
+ * Another world's shuttle pads out of its own two files as they were fetched (`travel.json` and
+ * `pois.json`, untouched): its travel rows with their rigs, and its places, both measured from the
+ * places' own centre (which the map's list of places throws away), so that its pads, their keys and the
+ * names their rounds run under are exactly what that world stands once it has loaded about its layout's
+ * centre -- the two centres are one on every pack, and `rideRoute.test.ts` holds this very function to
+ * what the world stands over every converted pack. Null for a travel pack this build cannot read, rows
+ * that are not a list, or places with no centre, as the world's own read of its travel pack refuses them.
+ */
+export function farPadsOf(travel: unknown, pois: unknown): FarPads | null {
+  if (!travel || typeof travel !== 'object' || !pois || typeof pois !== 'object') return null;
+  const t = travel as { version?: unknown; rows?: unknown; rigs?: unknown };
+  const p = pois as { center?: { x?: unknown; z?: unknown } | null; pois?: unknown };
+  if (!Array.isArray(t.rows) || !travelPackReadable(t.version)) return null;
+  const c = p.center;
+  if (!c || typeof c !== 'object' || typeof c.x !== 'number' || typeof c.z !== 'number' || !Number.isFinite(c.x) || !Number.isFinite(c.z)) return null;
+  const centre = { x: c.x, z: c.z };
+  return {
+    things: travelThingsOf(t.rows as TravelRow[], centre),
+    ports: portsOf(Array.isArray(p.pois) ? (p.pois as PoiRow[]) : [], centre),
+    rigs: t.rigs && typeof t.rigs === 'object' ? (t.rigs as Record<string, TravelRig>) : {},
+  };
+}
+
 /**
  * The branch a hull flown from a pad lands with, wherever it lands: the calm one, where its rig has one,
  * and otherwise the one it took off on (the shuttle's only branch). No trip ends in Theed's hangar, since
@@ -205,11 +236,20 @@ export function landMood(rig: Pick<TravelRig, 'moods'> | null | undefined, from:
  * A ticket's trip, as legs. A ticket about this world with a rigged pad at the far end is boarded,
  * lifted off on its clip, flown by the shuttle's own pilot to the landing's join, landed, stepped off
  * and left empty to go on its way; with no pad there it is flown as far as the take-off's cut and the
- * passenger put down at the port. Null where no trip can be flown -- a pad with no rig to fly, or a
- * ticket to another world -- and the caller does what a ticket always did.
+ * passenger put down at the port. A ticket to another world that skips the flight through space
+ * (`tripOf`) is boarded and lifted off the same way, and at the cut carried across to the far world
+ * under the loading screen, onto its landing's join over the far pad, then landed, stepped off and left
+ * there; with no rigged pad on the far world it is flown to the cut and the passenger put down at the
+ * port over there, as a ticket to another world always was. `forced` is why the flight through space
+ * was skipped whether or not the player wanted it (the terminal's locked box), and is carried on the
+ * trip. Null where no trip can be flown -- a pad with no rig to fly, or a ticket that flies through
+ * space, which is not flown yet -- and the caller does what a ticket always did.
  */
-export function planRoute(ticket: Ticket, from: PadRef, to: PadRef | null, here: string): RideRoute | null {
-  if (!from.rig || ticket.pack !== here || ticket.from !== here) return null;
+export function planRoute(ticket: Ticket, from: PadRef, to: PadRef | null, here: string, forced: string | null = null): RideRoute | null {
+  if (!from.rig || ticket.from !== here) return null;
+  const trip = tripOf(ticket);
+  if (trip === 'space') return null;
+  const there = ticket.pack;
   const pad = to && to.rig ? to : null;
   const legs: RideLeg[] = [
     { kind: 'board', world: here, pad: from },
@@ -217,21 +257,77 @@ export function planRoute(ticket: Ticket, from: PadRef, to: PadRef | null, here:
   ];
   if (pad) {
     legs.push(
-      { kind: 'fly', world: here, pad, aim: { to: 'join', pack: here, port: ticket.to } },
-      { kind: 'land', world: here, pad },
-      { kind: 'off', world: here, pad },
-      { kind: 'leave', world: here, pad },
+      trip === 'local' ? { kind: 'fly', world: there, pad, aim: { to: 'join', pack: there, port: ticket.to } } : { kind: 'skip', world: there, pad },
+      { kind: 'land', world: there, pad },
+      { kind: 'off', world: there, pad },
+      { kind: 'leave', world: there, pad },
     );
-  } else legs.push({ kind: 'walkOff', world: here, port: ticket.to, aim: { to: 'port', pack: here, port: ticket.to } });
+  } else legs.push({ kind: 'walkOff', world: there, port: ticket.to, aim: { to: 'port', pack: there, port: ticket.to } });
   return {
     ticket: ticket.id,
-    trip: 'local',
+    trip,
     rig: from.rig,
     mood: from.mood,
     from,
-    to: { pack: here, port: ticket.to, pad, at: ticket.at ? { x: ticket.at.x, z: ticket.at.z } : null },
-    skipSpace: false,
-    forced: null,
+    to: { pack: there, port: ticket.to, pad, at: ticket.at ? { x: ticket.at.x, z: ticket.at.z } : null },
+    skipSpace: trip === 'skip',
+    forced: trip === 'skip' ? forced : null,
     legs,
   };
+}
+
+/**
+ * What a trip between worlds needs to know of the galaxy, handed in so that this file stays pure: the
+ * planet a pack is a world of (with the zone, for a pack that is a space zone itself), the orbit a
+ * planet is reached through -- its own, or its system's where it has none of its own, as Talus and Rori
+ * are reached through their neighbour's -- or null where there is none, and the galaxy's own words for
+ * why a world has none. `routeFactsOf` in `galaxy.ts` answers all three from the game's own tables.
+ */
+export interface RouteFacts {
+  worldOf(pack: string): { planet: string; zone?: string } | null;
+  orbitOf(planet: string): string | null;
+  noOrbit(planet: string): string;
+}
+
+/**
+ * What a trip from one pack to another flies between them: a jump, between two systems; a flight, within
+ * one (Corellia to Talus); or none, for a trip about one world, for a pack this build has no world for,
+ * and for an end with no orbit at all (Mustafar), with why in words.
+ */
+export function spaceLegOf(from: string, to: string, facts: RouteFacts): { kind: 'jump' | 'fly' | 'none'; why: string } {
+  if (from === to) return { kind: 'none', why: '' };
+  const a = facts.worldOf(from);
+  const b = facts.worldOf(to);
+  if (!a || !b) return { kind: 'none', why: `this build has no world for ${a ? to : from}` };
+  const oa = a.zone ?? facts.orbitOf(a.planet);
+  const ob = b.zone ?? facts.orbitOf(b.planet);
+  if (!oa) return { kind: 'none', why: facts.noOrbit(a.planet) || `there is no orbit over ${a.planet} to fly out of` };
+  if (!ob) return { kind: 'none', why: facts.noOrbit(b.planet) || `there is no orbit over ${b.planet} to fly into` };
+  return { kind: oa === ob ? 'fly' : 'jump', why: '' };
+}
+
+/** What the box says while no flight through space is flown at all. */
+export const SPACE_LATER = 'the flight through space comes later: for now the shuttle skips it, under a loading screen';
+
+/** The terminal's "skip the flight through space" box: whether it is there, ticked, and free to change, and why not. */
+export interface SkipOffer {
+  show: boolean;
+  checked: boolean;
+  locked: boolean;
+  why: string;
+}
+
+/**
+ * The box for a ticket from one pack to another. Not there for a ticket about one world. Ticked and
+ * locked, with the reason in words, where no flight through space can be flown -- an end with no orbit,
+ * in the galaxy's own words -- and where this build flies none yet (`built` false). Otherwise free and
+ * unticked: the whole trip is the one on offer, the box is the way out of it, and whoever draws it keeps
+ * the player's own choice.
+ */
+export function skipOffer(fromPack: string, toPack: string, facts: RouteFacts, built: boolean): SkipOffer {
+  if (fromPack === toPack) return { show: false, checked: false, locked: false, why: '' };
+  const leg = spaceLegOf(fromPack, toPack, facts);
+  if (leg.kind === 'none') return { show: true, checked: true, locked: true, why: leg.why };
+  if (!built) return { show: true, checked: true, locked: true, why: SPACE_LATER };
+  return { show: true, checked: false, locked: false, why: '' };
 }

@@ -12,8 +12,9 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { GALAXY_SYSTEMS, routeFactsOf } from '../../../src/data/galaxy.ts';
 import { landingMood } from '../../../src/vehicles/rigHull.ts';
-import { PORT_REACH, landMood, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, type PadRef } from '../../../src/world/rideRoute.ts';
+import { PORT_REACH, SPACE_LATER, farPadsOf, landMood, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, spaceLegOf, type PadRef } from '../../../src/world/rideRoute.ts';
 import { portsOf, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
 import { TRAVEL_TUNE, rigTimes, travelThingsOf, type Ticket, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
@@ -105,10 +106,63 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   const walk = planRoute({ ...ticket, to: 'Nowhere Shuttleport', at: { x: 9000, z: 9000 } }, from, null, 'naboo')!;
   ok(walk.legs.map((l) => l.kind).join(',') === 'board,lift,walkOff' && walk.legs[2].port === 'Nowhere Shuttleport' && walk.to.pad === null, `with no pad to land on, it is lifted off and the passenger set down at the port (${walk.legs.map((l) => l.kind).join(', ')})`);
   ok(planRoute(ticket, padRefOf('naboo', 3, things[3], ports, rigs, things), to, 'naboo') === null, 'a pad with no rig to fly flies nothing, and the ticket does what it always did');
-  ok(planRoute({ ...ticket, pack: 'tatooine' }, from, to, 'naboo') === null, 'nor is a ticket to another world flown yet');
+  ok(planRoute({ ...ticket, pack: 'tatooine', trip: 'space', skipSpace: false }, from, to, 'naboo') === null, 'nor is a ticket to another world through space flown yet');
+  const says = planRoute({ ...ticket, trip: 'skip', skipSpace: true }, from, to, 'naboo');
+  ok(says?.trip === 'local' && says.legs[2].kind === 'fly', 'a ticket about this world is flown about it, whatever it says of space');
   ok(JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'and a trip is plain data');
   ok(landMood(rig, from) === 'calm' && landMood(rigs.shuttle, to!) === '' && landMood({ moods: { theed: rig.moods.calm, calm: rig.moods.calm } }, { mood: 'theed' }) === 'calm', 'a hull lands with its calm branch where its rig has one, and its own otherwise');
   ok(landingMood(rigs.shuttle.moods, '') === landMood(rigs.shuttle, { mood: '' }) && landingMood(rig.moods, 'calm') === landMood(rig, { mood: 'calm' }), "and the hull's own rule is that same one");
+}
+
+// ---------------------------------------------------------------- a ticket to another world
+
+{
+  // Boarded and lifted off here; from the cut on, every leg is on the far world at the far pad, and the
+  // flight between is a skip: carried across under the loading screen onto the landing's join.
+  const ports: Port[] = [{ name: 'Theed Spaceport', x: 100, z: 0, kind: 'starport' }];
+  const here = padRefOf('naboo', 1, thing({ bx: 100, bz: 0, x: 120, z: 20 }), ports, { transport: rig });
+  const farPorts: Port[] = [
+    { name: 'Mos Eisley Starport', x: -500, z: 300, kind: 'starport' },
+    { name: 'Bare Shuttleport', x: 4000, z: 0, kind: 'shuttleport' },
+  ];
+  const farThings: TravelThing[] = [thing({ bx: -500, bz: 300, x: -480, z: 320 }), thing({ kind: 'collector', rig: null, bx: -500, bz: 300, x: -470, z: 330 })];
+  const far = padOfPort(farThings, farPorts, 'Mos Eisley Starport', 'tatooine', { transport: rig })!;
+  const ticket: Ticket = { id: 'w1', from: 'naboo', pack: 'tatooine', to: 'Mos Eisley Starport', at: { x: -500, z: 300 }, price: 1250, bought: 1, trip: 'skip', skipSpace: true };
+  const route = planRoute(ticket, here, far, 'naboo', SPACE_LATER)!;
+  const kinds = route.legs.map((l) => l.kind).join(',');
+  ok(kinds === 'board,lift,skip,land,off,leave', `a ticket to another world is boarded, lifted off, skipped across to the far pad's landing, landed, stepped off and left (${kinds})`);
+  ok(route.legs.slice(0, 2).every((l) => l.world === 'naboo' && l.pad === here) && route.legs.slice(2).every((l) => l.world === 'tatooine' && l.pad === far), 'its first two legs are on this world at the pad it leaves, and every one after the cut on the far world at the far pad');
+  ok(route.trip === 'skip' && route.skipSpace && route.forced === SPACE_LATER && route.to.pack === 'tatooine' && route.to.pad === far && route.to.at?.x === -500 && route.ticket === 'w1', 'a skip, on its ticket, carrying why it had to be skipped and where the far port is');
+  ok(!!far.collector && far.key === 'travel:tatooine:0' && far.clock === 'tatooine|Mos Eisley Starport', "the far pad is keyed and clocked as the far world's own shuttles will stand it, with its collector");
+  const bare = planRoute({ ...ticket, to: 'Bare Shuttleport', at: { x: 4000, z: 0 } }, here, null, 'naboo')!;
+  const bareKinds = bare.legs.map((l) => l.kind).join(',');
+  ok(bareKinds === 'board,lift,walkOff' && bare.legs[2].world === 'tatooine' && bare.legs[2].port === 'Bare Shuttleport' && bare.to.pad === null && bare.forced === null, `with no rigged pad on the far world, it is lifted off here and the passenger set down at the far port (${bareKinds})`);
+  ok(planRoute({ ...ticket, trip: undefined, skipSpace: undefined }, here, far, 'naboo')?.trip === 'skip', 'a ticket to another world that says nothing of its trip skips the flight through space');
+  ok(planRoute({ ...ticket, trip: 'space', skipSpace: false }, here, far, 'naboo') === null, 'one that flies through space is not flown yet, and does what a ticket always did');
+  ok(planRoute({ ...ticket, from: 'tatooine' }, here, far, 'naboo') === null, 'nor is a ticket from another world handed in here');
+  ok(JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'and a trip between worlds is plain data');
+}
+
+// ---------------------------------------------------------------- the box that skips the flight through space
+
+{
+  const facts = routeFactsOf();
+  const leg = (a: string, b: string) => spaceLegOf(a, b, facts);
+  ok(leg('naboo', 'tatooine').kind === 'jump' && leg('corellia', 'kashyyyk_main').kind === 'jump', 'between two systems the flight through space is a jump');
+  ok(leg('corellia', 'talus').kind === 'fly' && leg('rori', 'naboo').kind === 'fly', 'within one it is flown: Talus and Rori are reached through their neighbour\'s orbit');
+  const noOrbit = GALAXY_SYSTEMS.find((s) => s.id === 'mustafar')?.worlds[0].noOrbit ?? '';
+  const must = leg('tatooine', 'mustafar');
+  ok(must.kind === 'none' && must.why === noOrbit && noOrbit.length > 0 && leg('mustafar', 'naboo').why === noOrbit, `a trip to or from a world with no orbit has none, in the galaxy's own words (${must.why})`);
+  ok(leg('naboo', 'naboo').kind === 'none' && leg('naboo', 'nowhere').kind === 'none', 'and none for a trip about one world, or to a world this build does not have');
+  const later = skipOffer('naboo', 'tatooine', facts, false);
+  ok(later.show && later.locked && later.checked && later.why === SPACE_LATER, `while no flight through space is flown, the box is ticked and locked, and says so (${later.why})`);
+  const forced = skipOffer('tatooine', 'mustafar', facts, true);
+  ok(forced.show && forced.locked && forced.checked && forced.why === noOrbit, 'where one cannot be flown at all, it is ticked and locked in the galaxy\'s own words');
+  ok(skipOffer('tatooine', 'mustafar', facts, false).why === noOrbit, "and that reason is given over the build's own, which would not be true there even once the flight is flown");
+  const free = skipOffer('naboo', 'tatooine', facts, true);
+  ok(free.show && !free.locked && !free.checked && free.why === '', 'otherwise it is free and unticked: the whole trip is the one on offer');
+  ok(!skipOffer('naboo', 'naboo', facts, true).show, 'and there is no box on a ticket about one world');
+  ok(skipOffer('naboo', 'nowhere', facts, true).locked, 'nor a free one to a world this build does not have');
 }
 
 // ---------------------------------------------------------------- the old names, over the real packs
@@ -186,6 +240,96 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   else {
     ok(none.length === 6, `six ports have no rigged shuttle to land on (${none.join('; ')})`);
     ok(answered > 40, `and every other one of ${answered + none.length} has its pad (${answered}, ${calm} of them flown to by a transport's calm landing)`);
+  }
+}
+
+// ---------------------------------------------------------------- a far world's pads, read before it loads
+
+{
+  // What the game's `padsOf` makes of a far world's two files, as fetched: `farPadsOf`, read about the
+  // places' own centre, and refused where the world's own read of its travel pack would refuse it.
+  const rows: TravelRow[] = [{ kind: 'shuttle', model: null, rig: 'transport', mood: 'calm', building: 'b', x: 3, y: 12, z: 4, yaw: 0.5, cell: 0, bx: 100, by: 10, bz: 40, byaw: 0 }];
+  const places: PoiRow[] = [
+    { name: 'Far Starport', kind: 'starport', x: 110, z: 45 },
+    { name: 'A City', kind: 'city', x: 0, z: 0 },
+  ];
+  const centre = { x: 100, z: 50 };
+  const got = farPadsOf({ version: 1, rows, rigs: { transport: rig } }, { center: centre, pois: places });
+  ok(
+    !!got && JSON.stringify(got.things) === JSON.stringify(travelThingsOf(rows, centre)) && JSON.stringify(got.ports) === JSON.stringify(portsOf(places, centre)) && got.rigs.transport === rig,
+    "another world's pads are its rows and its ports about the places' own centre, with its rigs",
+  );
+  const off = farPadsOf({ version: 1, rows, rigs: { transport: rig } }, { center: { x: 0, z: 0 }, pois: places });
+  ok(!!off && JSON.stringify(off.things) !== JSON.stringify(got!.things) && JSON.stringify(off.ports) !== JSON.stringify(got!.ports), 'and a centre that is not the one the file gives moves them all');
+  ok(farPadsOf({ version: 1, rows }, { center: centre })!.ports.length === 0 && Object.keys(farPadsOf({ version: 1, rows }, { center: centre })!.rigs).length === 0, 'a pack with no places listed or no rigs has no ports and no rigs, not no pads');
+  const refused = [
+    ['no travel file', null, { center: centre, pois: places }],
+    ['no places file', { version: 1, rows }, null],
+    ['rows that are not a list', { version: 1, rows: {} }, { center: centre, pois: places }],
+    ['a travel pack of a later version', { version: 999, rows }, { center: centre, pois: places }],
+    ['a travel pack with no version', { rows }, { center: centre, pois: places }],
+    ['places with no centre', { version: 1, rows }, { pois: places }],
+    ['a centre that is not a number', { version: 1, rows }, { center: { x: 'a', z: 1 }, pois: places }],
+    ['a centre that is not finite', { version: 1, rows }, { center: { x: NaN, z: 1 }, pois: places }],
+  ] as const;
+  const read = refused.filter(([, t, p]) => farPadsOf(t, p) !== null).map(([why]) => why);
+  ok(read.length === 0, `and nothing is read where a world's own read would refuse it (${read.length ? `read anyway: ${read.join(', ')}` : `${refused.length} of ${refused.length} refused`})`);
+}
+
+{
+  // A ticket to another world is planned before that world has loaded, from its own packs: the game's
+  // `padsOf` hands the two files as fetched to `farPadsOf`, which reads them about the places' own
+  // centre. What a far pad is keyed, clocked and placed as must be exactly what that world stands once
+  // it is there, which is its rows and its places about the layout's centre (`travelThings`,
+  // `portsHere`); so the very function the game calls is held to that over every ground pack there is.
+  const packs = join(process.cwd(), 'assets-private');
+  const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => existsSync(join(packs, w, 'pois.json')) && existsSync(join(packs, w, 'layout.json'))) : [];
+  if (!worlds.length) note('no converted ground world carries both a pois.json and a layout.json, so the far pads are not checked over real packs');
+  const centreOff: string[] = [];
+  const unread: string[] = [];
+  let pads = 0;
+  let ports = 0;
+  let travelled = 0;
+  for (const world of worlds) {
+    const poisJson = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    const layout = JSON.parse(readFileSync(join(packs, world, 'layout.json'), 'utf8')) as { center?: { x: number; z: number } };
+    if (!poisJson.center || !layout.center || poisJson.center.x !== layout.center.x || poisJson.center.z !== layout.center.z) centreOff.push(`${world}: ${JSON.stringify(poisJson.center)} against ${JSON.stringify(layout.center)}`);
+    if (!existsSync(join(packs, world, 'travel.json')) || !layout.center) continue;
+    const travelJson = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { version?: number; rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
+    if (!Array.isArray(travelJson.rows)) continue;
+    travelled++;
+    // What a trip reads of it before it goes: the game's own call, on the files as they are.
+    const far = farPadsOf(travelJson, poisJson);
+    if (!far) {
+      unread.push(world);
+      continue;
+    }
+    // What the far world stands once it has loaded: its rows about the layout's centre, its places likewise.
+    const rigs = travelJson.rigs && typeof travelJson.rigs === 'object' ? travelJson.rigs : {};
+    const stood = travelThingsOf(travelJson.rows, layout.center);
+    const stoodPorts = portsOf(poisJson.pois ?? [], layout.center);
+    assert.deepEqual(far.things, stood, `${world}: its travel things read before it loads are the ones it stands`);
+    assert.deepEqual(far.ports, stoodPorts, `${world}: and its ports are the ones it names`);
+    assert.deepEqual(Object.keys(far.rigs), Object.keys(rigs), `${world}: with the same rigs`);
+    for (const p of far.ports) {
+      ports++;
+      const pad = padOfPort(far.things, far.ports, p.name, world, far.rigs);
+      const there = padOfPort(stood, stoodPorts, p.name, world, rigs);
+      assert.deepEqual(pad, there, `${world}: ${p.name}'s pad read before it loads is the pad it has once it has`);
+      if (!pad) continue;
+      const t = stood[pad.index];
+      assert.equal(pad.key, `travel:${world}:${pad.index}`, `${world}: ${p.name}'s pad is keyed as its world stands it`);
+      assert.equal(pad.clock, shuttleClockName(world, t, stoodPorts), `${world}: ${p.name}'s pad runs its round under the name its world gives it`);
+      assert.ok(t.kind === 'shuttle' && t.x === pad.x && t.y === pad.y && t.z === pad.z && t.yaw === pad.yaw, `${world}: ${p.name}'s pad stands where its world stands its shuttle`);
+      pads++;
+    }
+  }
+  if (worlds.length) {
+    ok(centreOff.length === 0, `the places' centre is the layout's on every ground pack there is (${worlds.length}${centreOff.length ? `; off: ${centreOff.join('; ')}` : ''})`);
+    if (travelled) {
+      ok(unread.length === 0, `the game reads every one of ${travelled} worlds' travel packs and places before going there (${unread.length ? `unread: ${unread.join(', ')}` : 'none unread'})`);
+      ok(pads > 0, `and every one of ${pads} far pads (of ${ports} ports) it reads is keyed, clocked and placed as that world stands it, its things and ports the very ones the world stands about its layout's centre`);
+    } else note('no converted ground world carries a travel.json, so the far pads are not checked');
   }
 }
 

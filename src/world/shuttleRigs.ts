@@ -1189,8 +1189,12 @@ export class ShuttleRigs {
    * place there. A hold nobody has any more, only waiting to give its rig back unseen, goes: the rig it
    * waits on is going, and left, it would keep that pad's shuttle out of the picture the next time anybody
    * came to this world, parked in front of them.
+   *
+   * `keepDriven` leaves the flown hulls' sets as they are, for a world that has arrived taking down
+   * whatever was stood before it stands its own: a hull that crossed into it has asked for its set again
+   * by then, and that set is this world's, not the one left behind.
    */
-  clear(): void {
+  clear(keepDriven = false): void {
     this.generation++;
     for (const [key, h] of this.holds) if (h.count <= 0) this.holds.delete(key);
     for (const s of this.stood) {
@@ -1202,8 +1206,10 @@ export class ShuttleRigs {
     }
     this.stood.length = 0;
     this.byKey.clear();
-    for (const d of this.driven) d.fx.clear();
-    this.driven.length = 0;
+    if (!keepDriven) {
+      for (const d of this.driven) d.fx.clear();
+      this.driven.length = 0;
+    }
     const loads = [...this.assets.values()];
     this.assets.clear();
     for (const p of loads) {

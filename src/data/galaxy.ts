@@ -16,6 +16,7 @@
 
 import { PLANETS, spaceZoneOf, type PlanetDef } from './planets.ts';
 import type { Destination, HyperspaceCatalogue, SpacePack } from '../space/spaceData.ts';
+import type { RouteFacts } from '../world/rideRoute.ts';
 
 /** How sure we are of where a system hangs. `ours` and `invented` are said on the map. */
 export type GalaxyConfidence = 'good' | 'fair' | 'ours' | 'invented';
@@ -206,6 +207,27 @@ export function destinationFor(sys: GalaxySystemDef, world: PlanetDef, catalogue
 export function zoneFor(sys: GalaxySystemDef, world: PlanetDef): string | null {
   if (world.space) return world.id;
   return spaceZoneOf(world)?.id ?? sys.zone;
+}
+
+/**
+ * What a shuttle trip between worlds asks of the galaxy (`RouteFacts` in `rideRoute.ts`), answered from
+ * the tables above: the planet a pack is a world of, the orbit it is reached through (`zoneFor`), and the
+ * words a world with none says of itself (Mustafar's `noOrbit`).
+ */
+export function routeFactsOf(): RouteFacts {
+  return {
+    worldOf: (pack) => {
+      const planet = planetOfRouteId(pack);
+      if (!planet) return null;
+      return planet.space ? { planet: planet.id, zone: planet.id } : { planet: planet.id };
+    },
+    orbitOf: (id) => {
+      const planet = PLANETS.find((p) => p.id === id);
+      const sys = systemOf(id);
+      return planet && sys ? zoneFor(sys, planet) : null;
+    },
+    noOrbit: (id) => systemOf(id)?.worlds.find((w) => w.planet === id)?.noOrbit ?? '',
+  };
 }
 
 // ---- The picture each world wears: the planet texture its own orbit already carries ----

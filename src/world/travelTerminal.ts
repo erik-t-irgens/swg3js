@@ -17,6 +17,8 @@
 // tests): relative imports only as `import type`, no enum, no namespace, no constructor parameter
 // properties.
 
+import type { TripKind } from './rideRoute.ts';
+
 /**
  * The pack this file reads. 2 added the model each row is drawn with; 3 the rig each shuttle lands
  * with; 4 what each rig sounds and shows as it comes and goes, and Theed's transport turned square in
@@ -244,6 +246,14 @@ export interface Ticket {
   at: { x: number; z: number } | null;
   price: number;
   bought: number;
+  /**
+   * What kind of trip it is: about one world, to another world with the flight between them skipped,
+   * or to another world through space. Absent on a ticket that says nothing, which is read from where it
+   * goes (`tripOf`). Tickets are not saved, so nothing older has to be read.
+   */
+  trip?: TripKind;
+  /** Whether the flight through space was skipped when it was bought: the terminal's box. */
+  skipSpace?: boolean;
 }
 
 /** How many tickets may be held at once. Ours; a ticket has no weight and this is a sanity bound. */
@@ -275,10 +285,25 @@ export function pickTicket(tickets: readonly Ticket[], using: string, here: stri
   return tickets.find((t) => t.from === here) ?? null;
 }
 
-/** What a ticket reads as in the list. */
+/**
+ * What a ticket reads as in the list: where it goes, where it is handed in, and, for one to another
+ * world, whether the flight through space is skipped or flown.
+ */
 export function ticketText(t: Ticket, here: string): string {
   const where = t.from === here ? 'taken at the collector outside' : `from ${t.from}`;
-  return `to ${t.to} — ${where}`;
+  const trip = tripOf(t);
+  return `to ${t.to} — ${where}${trip === 'skip' ? ', space skipped' : trip === 'space' ? ', through space' : ''}`;
+}
+
+/**
+ * The kind of trip a ticket is: about one world whenever it ends on the world it starts on, whatever it
+ * says; otherwise what it says, and a ticket to another world that says nothing skips the flight through
+ * space unless its box was left unticked.
+ */
+export function tripOf(t: Pick<Ticket, 'from' | 'pack' | 'trip' | 'skipSpace'>): TripKind {
+  if (t.pack === t.from) return 'local';
+  if (t.trip === 'skip' || t.trip === 'space') return t.trip;
+  return t.skipSpace === false ? 'space' : 'skip';
 }
 
 /**

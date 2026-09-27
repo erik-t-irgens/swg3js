@@ -97,7 +97,7 @@ import { standingPeople, PEOPLE_TUNE } from './world/standingPeople.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
-import { loadGalaxyFile, planetOfRouteId, systemOfPack, systemsOfWorlds } from './data/galaxy';
+import { loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
@@ -106,7 +106,7 @@ import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes,
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
 import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
 import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
-import { padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, type PadRef, type RideRoute } from './world/rideRoute.ts';
+import { farPadsOf, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, type FarPads, type PadRef, type RideRoute } from './world/rideRoute.ts';
 import { RIDE_PILOT } from './world/shuttleCourse.ts';
 import { RIDE_TUNE, ShuttleRide, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
@@ -396,7 +396,19 @@ interface ShipCrossing {
   arrival?: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null;
   /** The ship's fight as it left (shields, armour, chassis, parts down, boost, as shares), put on the new hull once it is adopted; null or absent: whole. */
   condition?: import('./space/shipCombat').CarriedCondition | null;
+  /**
+   * A shuttle's passenger carried across (`ShuttleRide`): the hull comes out held where the trip wants it,
+   * never launched, never put at anybody's controls and never the ship the next trip into space is flown
+   * in, and the crossing is the passenger's own -- nothing is offered to the group, waited for from it or
+   * said to it.
+   */
+  passenger?: true;
 }
+/**
+ * Whether a shuttle trip between worlds can be flown through space. Not yet: every ticket to another
+ * world skips it, and the terminal's box says so, ticked and locked.
+ */
+const SPACE_LEG_BUILT = false;
 const tmp2 = new THREE.Vector3();
 /** Where a thrown blade is in the world, for the state that carries it; written once a message. */
 const thrownAt = new THREE.Vector3();
@@ -1362,14 +1374,23 @@ class App {
         this.tickets = addTicket(this.tickets, t);
         this.usingTicket = t.id;
       },
-      walkOff: (_pack, port) => {
-        const row = this.placeNames.find((p) => p.name === port);
-        if (row) void this.teleport(this.world.planet, row, this.zone, true);
-      },
+      // On this world or another: the port by name, as a ticket always put somebody down.
+      walkOff: (pack, port) => this.putDownAtPort(pack, port, true),
       // The player's own trip over: its ticket is spent or already back in hand, and is not the trip's to
       // report any more. An earlier trip's empty hull ending later leaves the ticket of the one now flown.
       ended: (r) => {
         if (r === this.ride) this.rideTicket = null;
+      },
+      world: () => packIdOf(this.world.planet, this.zone),
+      // The ordinary crossing, with the passenger's own hull carried: the loading screen, the world going
+      // (the hull with it), and the hull built again on the far side, held where the trip comes out with the
+      // passenger in it (`arriveInShip`). Any world by its pack, not only the one below an orbit.
+      cross: (h, leg, arrival, speed) => {
+        const v = h as Vehicle;
+        const planet = planetOfRouteId(leg.world);
+        if (!planet || !v.def) return Promise.resolve(null);
+        const zone = planet.zones?.find((z) => z.pack === leg.world)?.id;
+        return this.travel(planet, zone, { def: v.def, speed, height: 0, crew: null, condition: null, arrival: { pos: arrival.pos.clone(), quaternion: arrival.quaternion.clone() }, passenger: true });
       },
     };
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
@@ -2176,12 +2197,19 @@ class App {
        * fits on that port's pad (a transport can land on a shuttle's); `{ abort: true }` stops the player's
        * trip; `{ pilot }` sets any of `RIDE_PILOT` and `{ tune }` any of `RIDE_TUNE`, all ours, taken at once
        * (`tune: { enabled: false }` puts back the old ticket, a loading screen and a step to the port).
+       *
+       * `{ trip: '<pack>:<port>', skip: true }` rides from the pad nearest you to a port of another world with
+       * no ticket, as a ticket there does: lifted off to the cut, carried across under the loading screen onto
+       * the far pad's landing, landed and let off; the report says whether it is `crossing`, and the moment of
+       * the landing it came out at (`landedFrom`, the join or later where that is buried in a hill). Without
+       * `skip` it is refused, since the flight through space is not flown yet.
        */
-      ride: async (opts: { to?: string; empty?: string; abort?: boolean; pilot?: Partial<typeof RIDE_PILOT>; tune?: Partial<typeof RIDE_TUNE> } = {}) => {
+      ride: async (opts: { to?: string; empty?: string; trip?: string; skip?: boolean; abort?: boolean; pilot?: Partial<typeof RIDE_PILOT>; tune?: Partial<typeof RIDE_TUNE> } = {}) => {
         setTune(RIDE_TUNE, opts.tune);
         setTune(RIDE_PILOT, opts.pilot);
         if (opts.pilot?.joinTol) setTune(RIDE_PILOT.joinTol, opts.pilot.joinTol);
         if (opts.abort) this.ride?.abort('stopped from the console');
+        if (opts.trip) return this.debugTrip(opts.trip, !!opts.skip);
         if (opts.to || opts.empty) return this.debugRide((opts.to ?? opts.empty)!, !!opts.to);
         return this.rideReport();
       },
@@ -8245,6 +8273,20 @@ class App {
     // middle of the trip is put down on the ground at one end of it and never in the air.
     const kept = this.ride?.keepPlace() ?? null;
     let at = flying ? this.spawn : p.worldPos;
+    // Kept on another world: a trip there that has lifted off, or is being carried across. That world, at
+    // its pad's collector (or the pad); a port there with no height of its own leaves the place last
+    // written standing, since nothing of that world's ground is here to say how high it is.
+    const keptThere = kept && kept.pack !== packIdOf(this.world.planet, this.zone) ? planetOfRouteId(kept.pack) : null;
+    if (kept && keptThere) {
+      if (!Number.isFinite(kept.y)) return;
+      c.planet = keptThere.id;
+      c.zone = keptThere.zones?.find((z) => z.pack === kept.pack)?.id;
+      c.pos = [Number(kept.x.toFixed(2)), Number(kept.y.toFixed(2)), Number(kept.z.toFixed(2))];
+      c.heading = Number(p.heading.toFixed(3));
+      c.played = Date.now();
+      upsertCharacter(c);
+      return;
+    }
     if (kept && kept.pack === packIdOf(this.world.planet, this.zone)) {
       // A port with no pad has no height of its own: the ground there, where the world holds it; made
       // on the spot only when this is not a frame (the tab closing, the select screen); and otherwise
@@ -8384,7 +8426,9 @@ class App {
     this.hyperspace.abort('travel');
     this.ultraCruise.abort();
     // A shuttle trip stops before the world goes under it: its passenger put down and its hull away.
-    this.ride?.abort('travel', true);
+    // Not the trip carrying its own passenger across, which is what this crossing is.
+    const passenger = !!ship?.passenger;
+    if (!passenger) this.ride?.abort('travel', true);
     this.traveling = true;
     this.map.hide();
     this.closePanels();
@@ -8399,14 +8443,15 @@ class App {
     // either way the group is told that this browser is on its way, which makes stale whatever it
     // last said about where it was standing, so that a group going back to a world it has already
     // been to is never sent to the point it came out at the time before. With no server it says
-    // nothing and sends nothing.
-    this.together.leaving(planet.id, zoneId ?? '', planet.space ? 'space' : 'ground');
-    this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, 'travelling');
+    // nothing and sends nothing. A shuttle's passenger is on a trip of their own, which is nobody's to
+    // take up.
+    if (!passenger) this.together.leaving(planet.id, zoneId ?? '', planet.space ? 'space' : 'ground');
+    this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, passenger ? 'on the shuttle' : 'travelling');
     await new Promise((r) => setTimeout(r, 400));
     // Taking the group's trip up: come out beside whoever led it rather than at this world's own
     // spawn. It waits here, under the loading screen and before anyone steps out of a ship, for the
     // word saying where they came out -- bounded, and usually already in by the time it is asked.
-    const beside = await this.together.followPoint(planet.id, zoneId ?? '', !!planet.space);
+    const beside = passenger ? null : await this.together.followPoint(planet.id, zoneId ?? '', !!planet.space);
     const besideAt = beside ? new THREE.Vector3(beside[0], beside[1], beside[2]) : null;
     // A ship carried across comes out there facing the way a ship spawned at an arrival always has.
     const crossing = besideAt && ship && !ship.arrival ? { ...ship, arrival: { pos: besideAt, quaternion: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI) } } : ship;
@@ -8433,18 +8478,26 @@ class App {
     if (p.mounted) p.dismount(p.pos.clone());
     // A jump's arrival, the group's, or the zone's (above) is where the world streams from, not the zone's spawn.
     this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
-    const arrived = crossing
-      ? await this.arriveInShip(crossing.def, crossing.speed, crossing.height, crossing.crew, crossing.arrival ?? null, crossing.condition ?? null)
-      : planet.space
-        ? await this.arriveInSpace(besideAt ?? undefined)
-        : null;
+    // A ship that cannot be spawned on the far side is a crossing with no ship, not a loading screen
+    // left up for good: the player is in the new world on foot, and the caller is told null.
+    let arrived: Vehicle | null = null;
+    try {
+      arrived = crossing
+        ? await this.arriveInShip(crossing.def, crossing.speed, crossing.height, crossing.crew, crossing.arrival ?? null, crossing.condition ?? null, passenger)
+        : planet.space
+          ? await this.arriveInSpace(besideAt ?? undefined)
+          : null;
+    } catch (err) {
+      console.warn(`travel: nothing could be spawned to arrive in on ${planet.name}`, err);
+      arrived = null;
+    }
     await this.settle();
     // Where this crossing came out, for anyone in the group taking the same trip after it. It is
     // said under the same name the trip was offered under, not the zone `arrive` settled on: a
     // planet with zones and none named resolves to its first, and a member following the world the
     // offer named would never match a word that came back with the resolved name on it.
     const cameOut = arrived?.pos ?? this.player.worldPos;
-    this.together.arrived(planet.id, zoneId ?? '', [cameOut.x, cameOut.y, cameOut.z]);
+    if (!passenger) this.together.arrived(planet.id, zoneId ?? '', [cameOut.x, cameOut.y, cameOut.z]);
     this.savePlace(true);
     await this.loadingScreen.hide();
     this.traveling = false;
@@ -8481,12 +8534,29 @@ class App {
    * they were there, else at its pilot's spot; a fighter is sat in. With `arrival` it comes out there, facing that way,
    * and a death afterwards respawns there (in Ord Mantell the zone's origin is inside its station). With `condition` the
    * new hull arrives as damaged as the one that left (World.spawnVehicle has adopted its fight by the time it returns).
+   * A `passenger` (a shuttle's) arrives otherwise: see below.
    */
-  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, condition: import('./space/shipCombat').CarriedCondition | null = null): Promise<Vehicle> {
+  private async arriveInShip(def: VehicleDef, speed: number, height: number, crew: ShipCrew | null = null, arrival: { pos: THREE.Vector3; quaternion: THREE.Quaternion } | null = null, condition: import('./space/shipCombat').CarriedCondition | null = null, passenger = false): Promise<Vehicle> {
     const p = this.player;
     const at = arrival ? arrival.pos.clone() : this.spawn.clone();
     at.y += height;
     const v = await this.world.spawnVehicle(def, at, Math.PI, def.kind, true, this.fitFor(def));
+    if (passenger) {
+      // A shuttle's passenger: the hull held where the trip comes out, moving at the clip's own speed
+      // there, ghosted as every leg of a trip but a parked one is, and the passenger seated in it last,
+      // once nothing else can fail. Never launched (the trip takes it up where it is held), never put at
+      // its controls, never the ship the next trip into space is flown in, and never where a death
+      // afterwards respawns: that is the world's own spawn, not a point in the sky.
+      const turn = arrival?.quaternion ?? v.group.quaternion;
+      v.teleport(at, turn, 0);
+      v.hold(null, at, turn, speed);
+      v.setGhost(true);
+      v.airborne = true;
+      this.physics.stepOnce();
+      p.mount(v);
+      this.cam.distance = Math.max(this.cam.distance, RIDE_TUNE.minZoom);
+      return v;
+    }
     if (condition) {
       if (v.combat) v.combat.restore(condition);
       else console.warn(`travel: the ${def.id} arrived with no fight to carry its damage onto`);
@@ -8841,8 +8911,10 @@ class App {
     // would notice nothing: it would carry the empty ship off and keep the streamer frozen where the
     // player no longer is.
     this.ultraCruise.abort();
-    // Nor would a shuttle trip, whose passenger would be left seated in a hull a world away from them.
-    if (!fromRide) this.ride?.abort('teleport', true);
+    // Nor would a shuttle trip, whose passenger would be left seated in a hull a world away from them;
+    // but not one being carried across to another world, which a teleport refused for the travel under
+    // way would otherwise stop half way over for nothing.
+    if (!fromRide && !this.traveling) this.ride?.abort('teleport', true);
     if (this.traveling) return;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       await this.travel(planet, zoneId);
@@ -8915,7 +8987,10 @@ class App {
     // blocks it is only what stands still (`blockDistance`), so the hull itself -- a body of its own,
     // solid while it is parked -- never does.
     const ride = this.ride;
-    const rh = ride?.riding ? (ride.hull as Vehicle | null) : null;
+    // Being carried across to another world, the trip has no hull of its own: the view chases the one the
+    // passenger sits in, the hull leaving and then the one held on the far side, so it is the same view on
+    // both sides of the loading screen and nothing jumps as the screen fades.
+    const rh = ride?.riding ? ((ride.hull ?? (ride.crossing && player.mounted?.def?.source === 'rig' ? player.mounted : null)) as Vehicle | null) : null;
     if (ride && rh) {
       this.holdJumpZoom(this.hyperspace.holdsView(rh));
       if (this.rideZoomKept === null) this.rideZoomKept = this.cam.zoomTarget;
@@ -10211,8 +10286,10 @@ class App {
       for (const s of this.travelStood.droids) this.world.unstandMobile(s.droid);
     }
     // The shuttles are this file's own, in the scene and the physics that outlive every world, so they
-    // come down whether or not the world they stood in is still here.
-    this.shuttleRigs?.clear();
+    // come down whether or not the world they stood in is still here. Not the sounds and flames of a
+    // hull flown here: this runs once a world has arrived, after a passenger's shuttle carried across has
+    // asked for a set of its own in it, and the world going already took the old ones (`arrive`).
+    this.shuttleRigs?.clear(true);
     this.travelStood = { pack: '', keys: [], droids: [] };
     this.travelWaiting = [];
     this.travelRefused = '';
@@ -10670,6 +10747,77 @@ class App {
   }
 
   /**
+   * A ticket to another world handed to the collector, flown: the shuttle in the collector's own building
+   * is the pad it leaves from, and the far world's rigged pad nearest the ticket's port (read out of that
+   * world's own packs, `padsOf`) the one it comes down on, the flight through space skipped as the
+   * terminal's box has it. False where no trip can be flown -- the switch is off, the collector's building
+   * has no rig, or the ticket flies through space, which is not flown yet -- and the caller does what a
+   * ticket always did. A world left while the far pads were looked up gives the ticket back, rather than
+   * flying from a pad the player is no longer standing at.
+   */
+  private async rideAcross(collector: TravelThing, ticket: Ticket): Promise<boolean> {
+    if (!RIDE_TUNE.enabled) return false;
+    const here = packIdOf(this.world.planet, this.zone);
+    const things = this.travelThings();
+    const i = things.findIndex((t) => t.kind === 'shuttle' && t.bx === collector.bx && t.bz === collector.bz);
+    if (i < 0) return false;
+    const from = padRefOf(here, i, things[i], this.portsHere(), this.travelRigs, things);
+    if (!from.rig) return false;
+    const there = await this.padsOf(ticket.pack);
+    if (packIdOf(this.world.planet, this.zone) !== here || this.traveling || this.dying) {
+      this.tickets = addTicket(this.tickets, ticket);
+      this.usingTicket = ticket.id;
+      this.messages.system(`the ticket to ${ticket.to} is back in hand`);
+      return true;
+    }
+    // Where the port is in the far world's own frame, which is where somebody saved on the way is kept
+    // when its pad has no collector of its own.
+    const port = there?.ports.find((p) => p.name === ticket.to) ?? null;
+    const to = there ? padOfPort(there.things, there.ports, ticket.to, ticket.pack, there.rigs) : null;
+    const offer = skipOffer(here, ticket.pack, this.routeFacts, SPACE_LEG_BUILT);
+    const route = planRoute({ ...ticket, at: port ? { x: port.x, z: port.z } : ticket.at }, from, to, here, offer.locked ? offer.why : null);
+    if (!route) return false;
+    void this.beginRide(route, true, ticket);
+    return true;
+  }
+
+  /** What a trip between worlds asks of the galaxy: which world a pack is, the orbit it is reached through, and why one has none. */
+  private readonly routeFacts = routeFactsOf();
+
+  /** Each other world's shuttle pads, as `padsOf` read them: asked for once a session, and again only after a null. */
+  private readonly padsFor = new Map<string, Promise<FarPads | null>>();
+
+  /**
+   * Another world's shuttle pads, read out of its own packs before anybody goes there: its travel rows
+   * with their rigs and its places, both about the places' own centre (`farPadsOf`, which
+   * `rideRoute.test.ts` holds to what that world stands once it has loaded, over every converted pack).
+   * Null for a world whose travel pack or places cannot be read, which is asked for again next time.
+   */
+  private padsOf(pack: string): Promise<FarPads | null> {
+    let p = this.padsFor.get(pack);
+    if (p) return p;
+    const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
+    const json = async (file: string): Promise<unknown> => {
+      const res = await fetch(`${base}${file}`);
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
+      return res.json();
+    };
+    p = (async () => {
+      try {
+        const [travel, pois] = await Promise.all([json('travel.json'), json('pois.json')]);
+        return farPadsOf(travel, pois);
+      } catch {
+        return null;
+      }
+    })();
+    this.padsFor.set(pack, p);
+    void p.then((got) => {
+      if (!got && this.padsFor.get(pack) === p) this.padsFor.delete(pack);
+    });
+    return p;
+  }
+
+  /**
    * A trip begun as the player's own. The one before it, if its empty hull is still flying off, is left
    * to finish on its own (at most one: an older one still going is let go of now); one still being built
    * or with the player still in it is stopped, its ticket back in hand, before this one's is taken.
@@ -10723,6 +10871,37 @@ class App {
     this.debugRides.push(ride);
     const outcome = await ride.begin();
     return { outcome, ...ride.report() };
+  }
+
+  /**
+   * The console's trip to a port of another world (`'<pack>:<port>'`) from the pad nearest the player,
+   * ridden with no ticket as a ticket there would be, the flight through space skipped; a port of this
+   * world is the ordinary ride there. Refused without `skip`, since nothing flies through space yet.
+   */
+  private async debugTrip(trip: string, skip: boolean): Promise<unknown> {
+    const at = trip.indexOf(':');
+    if (at <= 0) return "name the trip as '<pack>:<port>', such as 'tatooine:Mos Eisley Starport'";
+    const pack = trip.slice(0, at);
+    const port = trip.slice(at + 1);
+    const here = packIdOf(this.world.planet, this.zone);
+    if (pack === here) return this.debugRide(port, true);
+    if (!skip) return 'the flight through space is not flown yet: pass skip: true to skip it';
+    if (!planetOfRouteId(pack)) return `this build has no world for ${pack}`;
+    const rigs = this.shuttleRigs;
+    const key = rigs?.nearest(this.player.worldPos) ?? null;
+    if (!rigs || !key) return 'no shuttle stands on its rig in this world: go to a starport or shuttleport of a world whose travel pack has rigs';
+    const from = this.padRefFor(key);
+    if (!from?.rig) return `${key} is not a pad a shuttle stands on its rig at`;
+    const there = await this.padsOf(pack);
+    if (!there) return `no travel pack or places could be read for ${pack}: npm run swg -- travel @SWG assets-private --retail-only`;
+    const row = there.ports.find((p) => p.name === port);
+    if (!row) return `${pack} has no port called ${port}; these are: ${there.ports.map((p) => p.name).join(', ')}`;
+    const ticket: Ticket = { id: '', from: here, pack, to: port, at: { x: row.x, z: row.z }, price: 0, bought: Date.now(), trip: 'skip', skipSpace: true };
+    const offer = skipOffer(here, pack, this.routeFacts, SPACE_LEG_BUILT);
+    const route = planRoute(ticket, from, padOfPort(there.things, there.ports, port, pack, there.rigs), here, offer.locked ? offer.why : null);
+    if (!route) return `no trip can be flown from ${key}`;
+    const ride = await this.beginRide(route, true, null);
+    return { outcome: ride.running ? 'flying' : ride.ended, legs: route.legs.map((l) => `${l.kind}@${l.world}`), ...(this.rideReport() as object) };
   }
 
   /** The player's trip (or the last one), the empty hull of the one before, and what the pilot and the trip are tuned to. */
@@ -11031,6 +11210,8 @@ class App {
         note: from ? '' : 'this terminal names no port this world knows, so a fare cannot be worked out',
         tickets: this.tickets.map((t) => ({ id: t.id, text: ticketText(t, here), using: t === pickTicket(this.tickets, this.usingTicket, here) })),
         ship: this.shipSide(from),
+        // A picked world's ports carry the box that skips the flight through space: locked on, for now.
+        skip: this.terminalStage === 'there' && this.terminalThere.pack ? skipOffer(here, this.terminalThere.pack, this.routeFacts, SPACE_LEG_BUILT) : null,
       });
     });
     this.terminalOpening = true;
@@ -11191,15 +11372,21 @@ class App {
     if (!name) return;
     const here = packIdOf(this.world.planet, this.zone);
     if (this.terminalStage === 'there' && this.terminalThere.pack) {
-      const price = this.ridesHere(this.terminalPort ?? { name: '', x: 0, z: 0, kind: 'starport' }).find((r) => r.pack === this.terminalThere.pack)?.price ?? 0;
-      purse.spend(price, `a ticket to ${name}`, () => this.keepTicket({ id: this.newTicketId(), from: here, pack: this.terminalThere.pack, to: name, at: null, price, bought: Date.now() }));
+      const pack = this.terminalThere.pack;
+      const price = this.ridesHere(this.terminalPort ?? { name: '', x: 0, z: 0, kind: 'starport' }).find((r) => r.pack === pack)?.price ?? 0;
+      // What the box says as it is bought, locked or the player's own; and the far world's pads asked for
+      // now, so they are there when the ticket is handed in.
+      const offer = skipOffer(here, pack, this.routeFacts, SPACE_LEG_BUILT);
+      const skip = offer.locked ? offer.checked : this.terminalUi.skip;
+      void this.padsOf(pack);
+      purse.spend(price, `a ticket to ${name}`, () => this.keepTicket({ id: this.newTicketId(), from: here, pack, to: name, at: null, price, bought: Date.now(), trip: skip ? 'skip' : 'space', skipSpace: skip }));
       return;
     }
     const row = this.placeNames.find((p) => p.name === name);
     const c = this.world.layoutCenter;
     if (!row || !c) return;
     const price = Math.max(0, Math.round(this.fares?.local?.[here] ?? 0));
-    purse.spend(price, `a ticket to ${name}`, () => this.keepTicket({ id: this.newTicketId(), from: here, pack: here, to: name, at: { x: -(row.x - c.x), z: row.z - c.z }, price, bought: Date.now() }));
+    purse.spend(price, `a ticket to ${name}`, () => this.keepTicket({ id: this.newTicketId(), from: here, pack: here, to: name, at: { x: -(row.x - c.x), z: row.z - c.z }, price, bought: Date.now(), trip: 'local' }));
   }
 
   private newTicketId(): string {
@@ -11266,8 +11453,8 @@ class App {
       this.messages.system(can.why);
       return;
     }
-    // A hull already being made ready for this player: one ticket at a time.
-    if (this.ride?.running && !this.ride.hull) {
+    // A hull already being made ready for this player, or a far world's pads still being looked up: one ticket at a time.
+    if ((this.ride?.running && !this.ride.hull) || this.rideLooking) {
       this.messages.system('you are already boarding a shuttle');
       return;
     }
@@ -11285,16 +11472,47 @@ class App {
         return;
       }
     }
-    const dest = planetOfRouteId(ticket.pack);
-    if (!dest) {
-      this.messages.system(`this build has no world for ${ticket.pack}`);
+    // A ticket to another world is flown as far as the take-off's cut and carried across from there,
+    // where the pad here has a rig to fly; the far world's pads are fetched first (usually already, since
+    // buying the ticket asked for them), and until they answer another ticket cannot be handed in.
+    if (ticket.pack !== here) {
+      this.rideLooking = true;
+      void this.rideAcross(collector, ticket)
+        .catch((err) => {
+          console.warn('shuttle: the trip to another world could not be begun', err);
+          return false;
+        })
+        .then((flown) => {
+          this.rideLooking = false;
+          if (flown) return;
+          this.messages.system(`the shuttle to ${planetOfRouteId(ticket.pack)?.name ?? ticket.pack}`);
+          this.putDownAtPort(ticket.pack, ticket.to);
+        });
       return;
     }
-    const zone = dest.zones?.find((z) => z.pack === ticket.pack)?.id;
-    this.messages.system(`the shuttle to ${dest.name}`);
-    void this.poisOf(ticket.pack).then((rows) => {
-      const land = rows.find((r) => r.name === ticket.to) ?? landingOn(rows);
-      if (land) void this.teleport(dest, land, zone);
+    this.messages.system(`the shuttle to ${ticket.to}`);
+    this.putDownAtPort(ticket.pack, ticket.to);
+  }
+
+  /** A ticket to another world's pads being looked up at the collector, which nothing else may be handed in during. */
+  private rideLooking = false;
+
+  /**
+   * Put the player down at a port of a world on foot, the way a ticket always did: travelling there first
+   * when it is another world, at the port by name, else that world's own starport, else wherever a travel
+   * there comes out. `fromRide` is a shuttle trip setting its own passenger down, which it has already
+   * let go of.
+   */
+  private putDownAtPort(pack: string, port: string, fromRide = false): void {
+    const dest = planetOfRouteId(pack);
+    if (!dest) {
+      this.messages.system(`this build has no world for ${pack}`);
+      return;
+    }
+    const zone = dest.zones?.find((z) => z.pack === pack)?.id;
+    void this.poisOf(pack).then((rows) => {
+      const land = rows.find((r) => r.name === port) ?? landingOn(rows);
+      if (land) void this.teleport(dest, land, zone, fromRide);
       else void this.travel(dest, zone);
     });
   }

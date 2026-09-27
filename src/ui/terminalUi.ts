@@ -82,6 +82,12 @@ export interface TerminalModel {
    * starports and is what launches the player's own ship. Null where there is none near.
    */
   ship: { trips: TerminalShipTrip[]; note: string } | null;
+  /**
+   * The box that skips the flight through space, for a ticket to another world: whether it is there at
+   * all, whether it is ticked while it is locked (free, it is as the player last left it), whether the
+   * player may change it, and why not. Null on every side but a picked world's ports.
+   */
+  skip: { show: boolean; checked: boolean; locked: boolean; why: string } | null;
 }
 
 const TERMINAL_CSS = `
@@ -117,6 +123,10 @@ const TERMINAL_CSS = `
 #terminal .terminal-ticket .mark { flex: none; width: 1em; color: var(--good); }
 #terminal .terminal-ticket .drop { flex: none; margin-left: auto; font-size: 10px; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 2px; }
 #terminal .terminal-ticket .drop:hover { color: var(--warn); }
+#terminal .terminal-skip-row { display: flex; flex-direction: column; gap: 2px; padding-top: 4px; }
+#terminal .terminal-skip { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text); cursor: pointer; }
+#terminal .terminal-skip.locked { color: var(--muted); cursor: default; }
+#terminal .terminal-skip-why { font-size: 11px; color: var(--muted); margin: 0; }
 `;
 
 let styled = false;
@@ -146,6 +156,12 @@ export class TerminalUi {
 
   private model: TerminalModel | null = null;
   private pickedPort = '';
+  /**
+   * Whether the player has ticked the box that skips the flight through space, kept for the session
+   * across every redraw and every terminal: unticked to begin with, since the whole trip is the one on
+   * offer and the box is the way out of it.
+   */
+  private skipSpace = false;
   /** The box the galaxy is lent into. `draw()` never writes into it; only the game fills it. */
   readonly galaxyBox: HTMLElement;
 
@@ -182,6 +198,13 @@ export class TerminalUi {
   /** Which port is picked, for whoever is going to sell it. */
   get picked(): string {
     return this.pickedPort;
+  }
+
+  /** Whether the ticket about to be bought skips the flight through space: the box as it is locked, else as the player left it. */
+  get skip(): boolean {
+    const s = this.model?.skip;
+    if (!s || !s.show) return false;
+    return s.locked ? s.checked : this.skipSpace;
   }
 
   show(model: TerminalModel): void {
@@ -276,13 +299,21 @@ export class TerminalUi {
           .map((t) => `<div class="terminal-ticket${t.using ? ' using' : ''}" data-ticket="${escapeHtml(t.id)}"><span class="mark">${t.using ? '&#9679;' : ''}</span><span>${escapeHtml(t.text)}</span><button type="button" class="drop" data-drop="${escapeHtml(t.id)}" title="throw this ticket away">&times;</button></div>`)
           .join('')}</div>`
       : '';
+    // The box over Purchase, for a ticket to another world only: ticked and locked, with the reason
+    // under it, where the flight through space cannot be flown (or is not yet), and otherwise the
+    // player's own choice, kept across every redraw. A row of its own, since the Purchase row is a
+    // button most of the width of the column.
+    const s = m.stage === 'there' && m.skip?.show ? m.skip : null;
+    const box = s
+      ? `<div class="terminal-skip-row"><label class="terminal-skip${s.locked ? ' locked' : ''}"${s.why ? ` title="${escapeHtml(s.why)}"` : ''}><input type="checkbox" data-skip${(s.locked ? s.checked : this.skipSpace) ? ' checked' : ''}${s.locked ? ' disabled' : ''}> skip the flight through space</label>${s.locked && s.why ? `<p class="terminal-skip-why">${escapeHtml(s.why)}</p>` : ''}</div>`
+      : '';
     side.innerHTML =
       `<div class="tabs"><button class="tab${m.stage === 'here' ? ' on' : ''}" data-stage="here">This world</button><button class="tab${m.stage === 'worlds' || m.stage === 'there' ? ' on' : ''}" data-stage="worlds">Galaxy</button>${m.ship ? `<button class="tab${ship ? ' on' : ''}" data-stage="ship">Your ship</button>` : ''}</div>` +
       `${m.stage === 'there' ? `<p class="terminal-note">${escapeHtml(m.picked)}: pick a port</p>` : ''}` +
       `<div class="terminal-list">${rows || `<p class="terminal-note">${escapeHtml(empty)}</p>`}</div>` +
       `${ship ? '' : `<div class="terminal-credits">${escapeHtml(m.credits)}</div>${tickets}`}` +
       `<div class="terminal-note${m.note && !picked ? ' bad' : ''}">${escapeHtml(ship ? (m.ship?.note ?? '') : m.note)}</div>` +
-      `${ship ? '' : `<div class="ship-action"><button class="buy"${picked && !picked.why ? '' : ' disabled'}>${picked ? `Purchase — ${escapeHtml(picked.fare)}` : 'Purchase'}</button></div>`}` +
+      `${ship ? '' : `${box}<div class="ship-action"><button class="buy"${picked && !picked.why ? '' : ' disabled'}>${picked ? `Purchase — ${escapeHtml(picked.fare)}` : 'Purchase'}</button></div>`}` +
       `<p class="menu-hint">${ship ? 'Your own ship, and nothing to pay. It launches from the pad outside.' : 'A ticket is taken at the collector outside, when a shuttle has landed. Click a ticket to choose which one.'}</p>`;
     for (const b of this.root.querySelectorAll<HTMLElement>('[data-port]')) {
       b.addEventListener('click', () => {
@@ -302,6 +333,11 @@ export class TerminalUi {
       });
     }
     for (const b of side.querySelectorAll<HTMLElement>('[data-ticket]')) b.addEventListener('click', () => this.onTicket(b.dataset.ticket!, false));
+    // Kept as it is ticked; nothing else on the panel changes with it, so nothing is drawn again.
+    const skipBox = side.querySelector<HTMLInputElement>('[data-skip]');
+    skipBox?.addEventListener('change', () => {
+      if (!skipBox.disabled) this.skipSpace = skipBox.checked;
+    });
     side.querySelector('.buy')?.addEventListener('click', () => this.onBuy());
   }
 }

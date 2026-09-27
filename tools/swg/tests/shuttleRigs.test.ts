@@ -684,6 +684,7 @@ const worldY = (o: THREE.Object3D) => {
   const newFx: TravelRig = { ...carryRig, events: { ...carryRig.events, start: { particles: [{ file: 'travel/particles/new.json', seconds: 4 }] } } };
   const preparedBefore = preparedFiles.length;
   const soundAsks = prepareCalls;
+  const loopsAtA = loops.length;
   const a = fxRigs.fxFor(newFx, '', flownJoints, false);
   const b = fxRigs.fxFor(newFx, '', flownJoints, false);
   ok(!!a && !!b && a !== b && preparedFiles.length === preparedBefore + 1 && preparedFiles.at(-1) === 'travel/particles/new.json', `a fresh set is made each time, and an effect is prepared once for the session however many are made (${preparedFiles.slice(preparedBefore).join(', ')})`);
@@ -737,8 +738,23 @@ const worldY = (o: THREE.Object3D) => {
   fxRigs.update(DT, camera);
   ok(burning.rateScale === 0, 'and the flame goes out where that landing puts it out');
   fxRigs.undrive(branched);
+  // A world that has arrived takes down whatever was stood before it stands its own (`clearTravelStood`),
+  // which is after a hull carried across into it has asked for a set of its own there: told to keep the
+  // flown hulls' sets, it takes every stood shuttle down and leaves that set lit, sounding and stepped.
+  const stoodBefore = fxRigs.describe().shuttles.length;
+  const stopsBefore = stopped.length;
+  // The loops the kept set has playing: started since it was made and not stopped by the other sets' going.
+  const keptLoops = loops.slice(loopsAtA).filter((l) => l.key > 0 && !stopped.includes(l.key)).map((l) => l.key);
+  fxRigs.clear(true);
+  ok(stoodBefore > 0 && fxRigs.describe().shuttles.length === 0, `a world that has arrived, taking down what was stood before it, takes every stood shuttle down (${stoodBefore})`);
+  ok(fxRigs.describe().driven === 1 && !newFlame.removed && newFlame.rateScale === 1, "but told to keep the flown hulls' sets, the set a hull carried across asked for there stays driven, its flame still lit");
+  const keptMoves = newFlame.moves;
+  const placedKept = handles.length;
+  fxRigs.update(DT, camera);
+  ok(newFlame.moves > keptMoves && !newFlame.removed && handles.length === placedKept && fxRigs.describe().driven === 1, 'and is stepped on from its flight as before, the same flame moved rather than lit again');
+  ok(keptLoops.length > 0 && !stopped.slice(stopsBefore).some((k) => keptLoops.includes(k)), `with its hum playing on, not stopped by the clearing (${keptLoops.length} loop${keptLoops.length === 1 ? '' : 's'})`);
   fxRigs.clear();
-  ok(fxRigs.describe().driven === 0 && newFlame.removed, "and the world going lets go of every flown hull's set too, flames and all");
+  ok(fxRigs.describe().driven === 0 && newFlame.removed && keptLoops.every((k) => stopped.includes(k)), "and the world going lets go of every flown hull's set too, flames, hum and all");
   fxScene.remove(flown);
 }
 
