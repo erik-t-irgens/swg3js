@@ -607,6 +607,14 @@ export class World {
   /** How far the weather has faded the cascades' shadows: 1 none, 0 a storm row that turns them off. */
   private weatherShadowScale = 1;
   private readonly groundAtCached = (x: number, z: number): number | null => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES);
+  /**
+   * The ground's height where the world already holds it (a built block, or a far grid), or null: never
+   * made on the spot, as `terrain.heightAt` would. A far grid's lookup builds its key, so a caller on the
+   * frame path asks a few a frame.
+   */
+  groundIfCached(x: number, z: number): number | null {
+    return this.groundAtCached(x, z);
+  }
   private readonly waterAtFn = (x: number, z: number): number => this.terrain.waterHeightAt(x, z);
   /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
   renderer: THREE.WebGLRenderer | null = null;

@@ -250,6 +250,30 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   ok(wait === 0, 'in a jump with nothing to do: the bar is empty');
 }
 
+// --- a shuttle's passenger --------------------------------------------------------------------------------
+
+{
+  // Seated in a shuttle the game flies for you: the one thing on offer is stepping off, while it still
+  // waits on its pad and once it has landed, and nothing at all in the air. Whatever else the gather
+  // might have left standing (the vehicle it is seated in is a ship, the ship menu) never shows.
+  const ship = { kind: 'ship', ship: true, airborne: true, canLand: true, powered: true, wings: true, guns: true, cutKey: 'KeyJ' };
+  const board = fill(at({ ride: 'board', mounted: true, shipMenu: 'here', vehicle: { ...ship, airborne: false } }));
+  ok(board === 1 && words(board)[0] === PROMPT_WORDS.stepOff && keys(board)[0] === 'mount', `a passenger on the pad: step off, on the use key, and nothing else (${show(board).join(', ')})`);
+  const flying = fill(at({ ride: 'flying', mounted: true, shipMenu: 'altitude', vehicle: ship }));
+  ok(flying === 0, `a passenger in the air: nothing to press (${show(flying).join(', ')})`);
+  const arrived = fill(at({ ride: 'arrived', mounted: true, near: 'board', vehicle: { ...ship, airborne: false } }));
+  ok(arrived === 1 && words(arrived)[0] === PROMPT_WORDS.stepOff, `a passenger landed: step off (${show(arrived).join(', ')})`);
+  ok(PROMPT_WORDS.stepOff.length <= PROMPT.maxLabel, `"${PROMPT_WORDS.stepOff}" fits the bar (${PROMPT_WORDS.stepOff.length} of ${PROMPT.maxLabel})`);
+  // A jump still wins over it, as it does over everything, should one ever fly a shuttle: asked with a
+  // passenger state that offers something of its own, so the order of the two is what is read.
+  const jumping = fill(at({ jump: 'piloting', ride: 'board', mounted: true }));
+  ok(jumping === 1 && words(jumping)[0] === PROMPT_WORDS.letGo, `a jump over a passenger who could step off: the jump's own key has the bar (${show(jumping).join(', ')})`);
+  const waiting = fill(at({ jump: 'waiting', ride: 'arrived', mounted: true }));
+  ok(waiting === 0, `and a jump with nothing to offer leaves the bar empty rather than offering to step off (${show(waiting).join(', ')})`);
+  resetPromptState(state);
+  ok(state.ride === '', 'and the reset puts a passenger back to nobody');
+}
+
 // --- two things at once -------------------------------------------------------------------------------
 
 {

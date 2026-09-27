@@ -15,6 +15,7 @@
 // `.ts` value imports only.
 
 import * as THREE from 'three';
+import { landMood } from '../world/rideRoute.ts';
 import { chainPose, landingJoin, poseRigAction, rigPathOf, takeoffCut, type ChainLink, type RigActions, type RigMoment, type RigPath } from '../world/rigPath.ts';
 import type { RigClips, RigPose, TravelRig } from '../world/travelTerminal.ts';
 import type { VehicleDef } from './garage';
@@ -41,10 +42,11 @@ export const RIG_HULL_TUNE = {
  * The branch a hull flown from a rig lands with. Every pad a shuttle can be flown to plays the calm
  * branch where a rig has one (Theed's hangar is never a destination: no port stands near it), so a
  * transport out of Theed lands as every other transport does; a rig with no calm branch, the shuttle's
- * one unnamed branch, lands with its own.
+ * one unnamed branch, lands with its own. The rule is the trip's own (`landMood`), so the hull and the
+ * route it is flown on cannot disagree.
  */
 export function landingMood(moods: Record<string, RigClips> | null | undefined, mood: string): string {
-  return moods && moods.calm ? 'calm' : mood;
+  return landMood(moods ? { moods } : null, { mood });
 }
 
 /** A hull's clips flown as paths for one branch: the take-off and where it lets go, the landing and where it takes back, and the branch it lands with. */

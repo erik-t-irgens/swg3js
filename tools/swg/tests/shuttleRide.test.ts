@@ -18,6 +18,17 @@
 // release that takes its count to nought. A frame of a trip makes nothing: read in the code itself, and
 // measured as what a stretch of frames allocates against the same stretch without the trip's own work.
 //
+// And a trip somebody rides: seated and hidden in the step the hull is swapped in, counted down to the
+// lift-off with the bar offering to step off, flown between its clips by its own pilot through a fake
+// flight model that turns as flyShip does (the drive it reads the same object every frame), landed, and
+// let off at the foot of the ramp after a moment; kept, if saved on the way, where they boarded until it
+// lifts off and where the ticket goes after; stepping off while it waits gives the ticket back, E in the
+// air only says why not, a hull ready too late or a passenger no longer there is missed with the ticket
+// back, a far pad with no rig sets the passenger down at the port at the cut, and stopping the trip in
+// any leg leaves nobody seated, nobody hidden and nothing held. A ship coming at it and a wall ahead each
+// send the hull up over them, against the same flight with nothing there; its look ahead never reaches
+// past the end of its course; and a pass knocked wide of the join is flown round again and still lands.
+//
 // Run: node --expose-gc tools/swg/tests/shuttleRide.test.ts
 
 import assert from 'node:assert/strict';
@@ -28,11 +39,11 @@ import { FLYING, flyingRig } from './rigFixtures.ts';
 import { Physics } from '../../../src/core/physics.ts';
 import { RigHull, assembleRigModel } from '../../../src/vehicles/rigHull.ts';
 import type { DriveInput } from '../../../src/vehicles/vehicle';
-import { planHop, type PadRef } from '../../../src/world/rideRoute.ts';
+import { planHop, planRoute, type PadRef } from '../../../src/world/rideRoute.ts';
 import { RIG_PATH_TUNE, noseOntoPath, onPad, pathPose, pathVelocity, poseRigAction, turnOnPad, vehicleAt, vehicleFromJoint, type RigActions } from '../../../src/world/rigPath.ts';
 import { RIDE_TUNE, ShuttleRide, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs, type RigDrive, type RigFx } from '../../../src/world/shuttleRigs.ts';
-import { rigPose, type RigClips, type RigPose, type ShuttleState } from '../../../src/world/travelTerminal.ts';
+import { rigPose, type RigClips, type RigPose, type ShuttleState, type Ticket } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -43,6 +54,7 @@ function ok(cond: boolean, what: string): void {
 function note(what: string): void {
   console.log(`note ${what}`);
 }
+const f1 = (n: number) => n.toFixed(1);
 const f2 = (n: number) => n.toFixed(2);
 const deg = (rad: number) => THREE.MathUtils.radToDeg(rad).toFixed(3);
 
@@ -108,21 +120,49 @@ class FakeHull implements RideHull {
     this.launchedFrom.copy(this.pos);
     this.launchedTurn.copy(this.group.quaternion);
     this.velocity.set(0, 0, 1).applyQuaternion(this.group.quaternion).multiplyScalar(speed);
+    this.spin.set(0, 0, 0);
   }
   setGhost(on: boolean): void {
     this.ghosted = on;
   }
-  /** What flyShip does between holds, as much as a trip needs: its cruise eased toward the drive's, straight on along its nose. */
+  /** The turn rates flyShip keeps between steps, eased toward the stick's. */
+  private readonly spin = new THREE.Vector3();
+  private readonly turnBy = new THREE.Quaternion();
+  /**
+   * What flyShip does between holds, as much as a trip needs: its cruise eased toward the drive's
+   * within its top speed, the turn rates eased toward the stick's over the rig hull's inertia and the
+   * hull turned by them in its own axes, and straight on along its nose.
+   */
   step(dt: number): void {
     if (this.held || this.disposed) return;
-    const want = this.autopilot?.drive.cruise;
-    if (want !== undefined) this.cruise = this.cruise < want ? Math.min(want, this.cruise + 20 * dt) : Math.max(want, this.cruise - 25 * dt);
+    const d = this.autopilot?.drive;
+    const want = d?.cruise;
+    if (want !== undefined) {
+      const top = Math.min(this.spec.maxSpeed, want);
+      this.cruise = this.cruise < top ? Math.min(top, this.cruise + 20 * dt) : Math.max(top, this.cruise - 25 * dt);
+    }
+    if (d && d.stickX !== undefined) {
+      const rate = this.spec.turnRate;
+      const ease = Math.min(1, dt / 1.2);
+      const easeRoll = Math.min(1, (2 * dt) / 1.2);
+      this.spin.y += (-(d.stickX ?? 0) * rate * 1.5 - this.spin.y) * ease;
+      this.spin.x += ((d.stickY ?? 0) * rate * 1.5 - this.spin.x) * ease;
+      this.spin.z += ((d.steer ?? 0) * rate * 1.6 - this.spin.z) * easeRoll;
+      const q = this.group.quaternion;
+      q.multiply(this.turnBy.setFromAxisAngle(AXIS_Y, this.spin.y * dt));
+      q.multiply(this.turnBy.setFromAxisAngle(AXIS_X, this.spin.x * dt));
+      q.multiply(this.turnBy.setFromAxisAngle(AXIS_Z, this.spin.z * dt));
+      q.normalize();
+    }
     this.speed = this.cruise;
     this.velocity.set(0, 0, 1).applyQuaternion(this.group.quaternion).multiplyScalar(this.cruise);
     this.pos.addScaledVector(this.velocity, dt);
     this.group.position.copy(this.pos);
   }
 }
+const AXIS_X = new THREE.Vector3(1, 0, 0);
+const AXIS_Y = new THREE.Vector3(0, 1, 0);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
 
 /**
  * The drawn shuttles, as a record: each pad's hold count, every hold and release with whether it was at
@@ -185,12 +225,54 @@ class FakeRigs implements RideRigs {
  * then away. `late` puts a pad's round that many seconds behind the clock.
  */
 const WAIT = 5;
+/**
+ * The passenger, as the host keeps them: seated in a hull or not, where they were put down, the tickets
+ * given back and what was said, and whether they were set down at a port the old way. `canSeat` false is
+ * somebody no longer there to board.
+ */
+interface Passenger {
+  canSeat: boolean;
+  seatedIn: RideHull | null;
+  seats: number;
+  offAt: THREE.Vector3[];
+  given: string[];
+  said: string[];
+  walkedTo: string[];
+  cleared: string[];
+  ships: { pos: THREE.Vector3; vel: THREE.Vector3; radius: number }[];
+  rays: number;
+  obstacleAt: number;
+}
 function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideRigs, camera: THREE.Camera) {
   const clock = { t: 0 };
   const world = new Set<RideHull>();
   const counts = { shown: 0, disposed: 0 };
   const late = new Map<string, number>();
+  const passenger: Passenger = { canSeat: true, seatedIn: null, seats: 0, offAt: [], given: [], said: [], walkedTo: [], cleared: [], ships: [], rays: 0, obstacleAt: Infinity };
   const host: RideHost = {
+    clearPad: (pad) => void passenger.cleared.push(pad.key),
+    seat: (h) => {
+      if (!passenger.canSeat) return false;
+      passenger.seatedIn = h;
+      passenger.seats++;
+      return true;
+    },
+    unseat: (h, at) => {
+      assert.ok(passenger.seatedIn === h, 'a passenger is put down off the hull they are seated in');
+      passenger.seatedIn = null;
+      passenger.offAt.push(at.clone());
+    },
+    groundCached: () => 0,
+    castAhead: () => {
+      passenger.rays++;
+      return passenger.obstacleAt;
+    },
+    eachShip: (_h, visit) => {
+      for (const s of passenger.ships) visit(s.pos, s.vel, s.radius);
+    },
+    say: (text) => void passenger.said.push(text),
+    giveBack: (id) => void passenger.given.push(id),
+    walkOff: (_pack, port) => void passenger.walkedTo.push(port),
     buildHull: async () => (typeof hull === 'function' ? hull() : hull),
     showHull: (h) => {
       counts.shown++;
@@ -225,7 +307,7 @@ function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideR
     floorAt: (_x, y) => y - 2.4,
     inSpace: () => false,
   };
-  return { host, clock, world, counts, late };
+  return { host, clock, world, counts, late, passenger };
 }
 
 const padAt = (index: number, x: number, y: number, z: number, yaw: number, mood = ''): PadRef => ({
@@ -823,6 +905,311 @@ function limbTravel(role: RigPose['role'], from: number, to: number): number {
   }
 }
 
+// ---------------------------------------------------------------- a passenger's trip, end to end
+
+const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 'test', to: pad.port, at: { x: pad.x, z: pad.z }, price: 0, bought: 0 });
+
+{
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(destination));
+  const route = planRoute(ticketTo(destination), origin, destination, 'test')!;
+  ok(route.legs.map((l) => l.kind).join(',') === 'board,lift,fly,land,off,leave', `a ticket to a rigged pad on this world is boarded, lifted off, flown, landed, stepped off and left (${route.legs.map((l) => l.kind).join(', ')})`);
+  const ride = new ShuttleRide(route, host, true);
+  clock.t = 1;
+  const outcome = await ride.begin();
+  ok(outcome === 'flying' && ride.riding && ride.hidden && passenger.seatedIn === hull && passenger.seats === 1, 'boarded while its shuttle waits: the passenger is seated in the hull, and hidden from the others');
+  ok(passenger.said[0] === `boarding the shuttle to ${destination.port}…`, `and told so, once, in plain words (${passenger.said[0]})`);
+  ok(passenger.cleared.join() === origin.key && rigs.nowHolds[0] === origin.key, 'an empty hull of an earlier trip about the pad is cleared in the same step as its own shuttle is held out of the picture');
+  ok(hull.autopilot === ride.autopilot && ride.autopilot.drive === ride.pilot.drive, "the hull is flown by the trip's own pilot, its drive the pilot's");
+  const kept = ride.keepPlace();
+  const oc = origin.collector!;
+  ok(
+    !!kept && kept.pack === 'test' && kept.x === oc.x && kept.y === oc.y && kept.z === oc.z,
+    "a passenger saved while it still waits is kept at the collector of the pad they boarded at: a trip ended there gives the ticket back, so a place kept at the far end would be a trip for nothing",
+  );
+  ride.update(DT);
+  const line = ride.promptLine();
+  ok(ride.promptPhase() === 'board' && !!line && line.includes('lifts off in') && line.includes('<b>E</b> steps off') && line.includes('·'), `while it waits, the bar offers stepping off and the line counts down (${line})`);
+  clock.t += DT;
+  ride.update(DT);
+  ok(ride.promptLine() === line, 'the line is the same string until the second it shows changes');
+
+  const kinds: string[] = [];
+  let sameDrive = true;
+  let flewGhosted = true;
+  let steered = 0;
+  let flyFrames = 0;
+  let phases = '';
+  let seatedAtOff = 0;
+  let offAt = -1;
+  let arrivedWhileSeated = false;
+  // Where a passenger is kept once it has lifted off, and which pad the hull is said to stand on in each leg.
+  let keptLifted: { pack: string; x: number; y: number; z: number } | null = null;
+  const stands = { off: 0, offFrames: 0, up: 0, upFrames: 0, away: 0, awayFrames: 0, elsewhere: 0 };
+  // How far past the end of its course a look ahead ever reached: never, since past the join the clip has it.
+  let pastEnd = -Infinity;
+  const cast = host.castAhead;
+  host.castAhead = (h, x, y, z, dx, dy, dz, reach) => {
+    const c = ride.pilot.course;
+    if (c) pastEnd = Math.max(pastEnd, reach - (c.total - c.ss[ride.pilot.progress]));
+    return cast(h, x, y, z, dx, dy, dz, reach);
+  };
+  for (let i = 0; i < 60 * 300 && ride.running; i++) {
+    clock.t += DT;
+    ride.update(DT);
+    const k = ride.leg?.kind ?? 'ended';
+    if (kinds.at(-1) !== k) kinds.push(k);
+    if (k === 'lift' && !keptLifted && ride.riding) keptLifted = { ...ride.keepPlace()! };
+    const at = ride.standsAt(destination.key);
+    if (ride.standsAt(origin.key)) stands.elsewhere++;
+    if (k === 'off') {
+      stands.offFrames++;
+      if (at) stands.off++;
+    } else if (k === 'leave' && hull.launches === 1) {
+      stands.upFrames++;
+      if (at) stands.up++;
+    } else if (k === 'leave') {
+      stands.awayFrames++;
+      if (at) stands.away++;
+    } else if (at) stands.elsewhere++;
+    const p = ride.promptPhase();
+    if (!phases.endsWith(p || '-')) phases += `${phases ? ',' : ''}${p || '-'}`;
+    if (hull.autopilot && hull.autopilot.drive !== ride.pilot.drive) sameDrive = false;
+    if (k === 'fly') {
+      flyFrames++;
+      if (!hull.ghosted) flewGhosted = false;
+      steered = Math.max(steered, Math.abs(ride.pilot.drive.stickX) + Math.abs(ride.pilot.drive.stickY));
+    }
+    if (k === 'off' && ride.riding) {
+      seatedAtOff += DT;
+      if (ride.promptPhase() === 'arrived') arrivedWhileSeated = true;
+    }
+    if (k === 'off' && !ride.riding && offAt < 0) offAt = seatedAtOff;
+    hull.step(DT);
+  }
+  ok(kinds.join(',') === 'board,lift,fly,land,off,leave,ended', `it counts down, lifts off, is flown, lands, is stepped off and leaves (${kinds.join(', ')})`);
+  ok(flyFrames > 60 && flewGhosted && steered > 0.05, `between its clips its pilot flies it, ghosted, over ${f2(flyFrames * DT)} s, the stick really moved`);
+  ok(sameDrive, 'and the drive the hull reads is the same object on every frame');
+  ok(passenger.rays > flyFrames * DT * 2 && passenger.rays < flyFrames * DT * 5, `looking ahead for anything solid about four times a second (${passenger.rays} rays over ${f2(flyFrames * DT)} s)`);
+  const report = ride.report() as { pilot: { goArounds: number; joinError: { across: number; up: number; heading: number } } | null };
+  const e = report.pilot!.joinError;
+  ok(Math.abs(e.across) < 20 && Math.abs(e.up) < 20 && e.heading < 12, `it met the landing's join close enough to hand over (${f2(e.across)} m across, ${f2(e.up)} m up, ${f2(e.heading)}°, ${report.pilot!.goArounds} times round again)`);
+  ok(phases === 'board,flying,arrived,-', `the bar offers stepping off while it waits and once it has landed, and nothing between (${phases})`);
+  ok(arrivedWhileSeated && Math.abs(offAt - RIDE_TUNE.alightAfter) < 2 * DT, `landed, the passenger stays seated ${RIDE_TUNE.alightAfter} s and is then let off on their own (${f2(offAt)} s)`);
+  ok(passenger.offAt.length === 1 && passenger.offAt[0].distanceTo(ride.alightAt) < 1e-9 && ride.alightFrom === 'ramp', 'at the foot of its ramp');
+  ok(passenger.said.includes(`you arrive at ${destination.port}`), 'and told where they have arrived');
+  const dc = destination.collector!;
+  ok(!!keptLifted && keptLifted.x === dc.x && keptLifted.y === dc.y && keptLifted.z === dc.z, "from the lift-off on, a passenger saved mid-trip is kept at the far pad's collector, where the ticket goes");
+  ok(
+    stands.offFrames > 0 && stands.off === stands.offFrames && stands.upFrames > 0 && stands.up === stands.upFrames && stands.awayFrames > 0 && stands.away === 0 && stands.elsewhere === 0,
+    `the hull is said to stand on the far pad while it is parked there and while it lifts off it short of its cut, on no other pad, and on none once it is away (${stands.off}/${stands.offFrames} parked, ${stands.up}/${stands.upFrames} lifting, ${stands.away}/${stands.awayFrames} away, ${stands.elsewhere} elsewhere)`,
+  );
+  ok(Number.isFinite(pastEnd) && pastEnd <= 1e-9, `no look ahead ever reached past the end of its course, where the landing clip has the hull (${f1(pastEnd)} m at the most)`);
+  ok(!ride.running && ride.ended === 'gone' && hull.disposed && rigs.tidy() && !ride.riding && !ride.hidden && ride.keepPlace() === null, 'empty, it flies off and is taken away with nothing held, and nobody is hidden or kept anywhere');
+  ok(passenger.given.length === 0, 'a ticket flown on is not given back');
+}
+
+{
+  // Stepping off while it still waits: the ticket back in hand, the passenger at the foot of the ramp,
+  // and the pad's own shuttle given back at once where the hull stood.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(origin));
+  const ride = new ShuttleRide(planRoute(ticketTo(destination, 't7'), origin, destination, 'test')!, host, true);
+  clock.t = 1;
+  await ride.begin();
+  clock.t += DT;
+  ride.update(DT);
+  const foot = hull.rig.rampFoot!.clone();
+  foot.x += (foot.x < 0 ? -1 : 1) * RIDE_TUNE.alight;
+  hull.group.updateMatrixWorld(true);
+  foot.applyMatrix4(hull.group.matrixWorld);
+  ok(ride.pressE() && !ride.running && ride.ended === 'stepped off', 'E during the countdown steps the passenger off');
+  ok(passenger.given.join() === 't7' && passenger.seatedIn === null && passenger.offAt[0].distanceTo(new THREE.Vector3(foot.x, foot.y - 0.4, foot.z)) < 1e-6, 'at the foot of the ramp, with the ticket back in hand');
+  ok(rigs.gaveBack(origin.key)?.now === true && rigs.tidy() && hull.disposed && !ride.hidden, "and the pad's own shuttle stands again at once, nothing held");
+  ok(passenger.said.some((s) => s.includes('back in hand')), 'which is said');
+}
+
+{
+  // In the air, E does not put anybody down: it says why.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(origin));
+  const ride = new ShuttleRide(planRoute(ticketTo(destination), origin, destination, 'test')!, host, true);
+  clock.t = WAIT + 2;
+  await ride.begin();
+  const said = passenger.said.length;
+  ok(ride.leg?.kind === 'lift' && ride.pressE() && ride.riding && passenger.seatedIn === hull && passenger.said.length === said + 1, `E in the air leaves the passenger seated and says why (${passenger.said.at(-1)})`);
+  ride.abort('test');
+}
+
+{
+  // A hull ready too late: the shuttle it would take the place of is past `lateCut` short of its cut.
+  const cut = new FakeHull().rig.paths('')!.cut!.t;
+  for (const [past, want] of [
+    [RIDE_TUNE.lateCut + 0.5, 'flying'],
+    [RIDE_TUNE.lateCut - 0.5, 'missed'],
+  ] as const) {
+    const hull = new FakeHull();
+    const rigs = new FakeRigs();
+    let resolve: (h: FakeHull) => void = () => {};
+    const { host, clock, passenger } = makeHost(() => new Promise<FakeHull>((r) => (resolve = r)), rigs, watching(origin));
+    const ride = new ShuttleRide(planRoute(ticketTo(destination, 'late'), origin, destination, 'test')!, host, true);
+    clock.t = 1;
+    const begun = ride.begin();
+    clock.t = WAIT + cut - past;
+    resolve(hull);
+    const outcome = await begun;
+    if (want === 'flying') ok(outcome === 'flying' && ride.leg?.kind === 'lift' && ride.riding && passenger.given.length === 0, `a hull ready ${f2(past)} s short of the cut is still swapped in, part way through the lift-off, with the passenger in it`);
+    else ok(outcome === 'missed' && !ride.riding && passenger.seats === 0 && passenger.given.join() === 'late' && hull.disposed && rigs.tidy() && passenger.said.some((s) => s.includes('gone without you')), `one ready only ${f2(past)} s short of it is missed: nobody seated, the ticket back, nothing held, and said`);
+    ride.abort('test');
+  }
+}
+
+{
+  // Somebody no longer there to board (on something else, dead, gone): missed, the ticket back.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(origin));
+  passenger.canSeat = false;
+  const ride = new ShuttleRide(planRoute(ticketTo(destination, 'gone'), origin, destination, 'test')!, host, true);
+  clock.t = 1;
+  ok((await ride.begin()) === 'missed' && passenger.given.join() === 'gone' && hull.disposed && rigs.tidy() && rigs.nowHolds.length === 0 && passenger.cleared.length === 0, 'a passenger who cannot be seated misses it: the ticket back, and the pad never touched');
+}
+
+{
+  // Stopped in every leg: nobody left seated, the hull gone, nobody hidden, no hold on either pad, and
+  // the ticket back only for a trip that never lifted off.
+  for (const leg of ['board', 'lift', 'fly', 'land', 'off', 'leave'] as const) {
+    const hull = new FakeHull();
+    const rigs = new FakeRigs();
+    const { host, clock, passenger } = makeHost(hull, rigs, watching(destination));
+    const ride = new ShuttleRide(planRoute(ticketTo(destination, leg), origin, destination, 'test')!, host, true);
+    clock.t = 1;
+    await ride.begin();
+    for (let i = 0; i < 60 * 300 && ride.running && ride.leg?.kind !== leg; i++) {
+      clock.t += DT;
+      ride.update(DT);
+      hull.step(DT);
+    }
+    const reached = ride.leg?.kind === leg;
+    const seated = ride.riding;
+    ride.abort('test');
+    ok(
+      reached && passenger.seatedIn === null && hull.disposed && !ride.hidden && !ride.riding && rigs.tidy() && passenger.given.join() === (leg === 'board' ? leg : ''),
+      `stopped in its ${leg} leg (${seated ? 'with the passenger in it' : 'empty'}): nobody left seated, the hull gone, nobody hidden, nothing held${leg === 'board' ? ', and the ticket back' : ', and the ticket kept'}`,
+    );
+  }
+}
+
+{
+  // A far pad with no rig to land on: flown as far as the take-off's cut, then the passenger is set
+  // down at the port the old way and the trip is over.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(origin));
+  const route = planRoute(ticketTo(destination, 'walk'), origin, null, 'test')!;
+  ok(route.legs.map((l) => l.kind).join(',') === 'board,lift,walkOff' && route.to.pad === null, `with no rigged pad there, it is boarded, lifted off and walked off at the port (${route.legs.map((l) => l.kind).join(', ')})`);
+  const ride = new ShuttleRide(route, host, true);
+  clock.t = 1;
+  await ride.begin();
+  const boarding = { ...ride.keepPlace()! };
+  const seen: { lifting: { x: number; y: number; z: number } | null } = { lifting: null };
+  fly60(ride, clock, hull, (_before, now) => {
+    if (now === 'lift' && !seen.lifting) seen.lifting = { ...ride.keepPlace()! };
+  });
+  const oc = origin.collector!;
+  ok(boarding.x === oc.x && boarding.y === oc.y && boarding.z === oc.z, 'saved while it waits, kept at the collector of the pad boarded at');
+  const kl = seen.lifting;
+  ok(!!kl && kl.x === destination.x && kl.z === destination.z && Number.isNaN(kl.y), "and from the lift-off on, at the port the ticket names with no height of its own (NaN): the ground there is the caller's to find, never the seated body's");
+  ok(!ride.running && ride.ended === 'walked' && passenger.walkedTo.join() === destination.port && passenger.seatedIn === null, 'at the cut the passenger is set down at the port');
+  ok(hull.launches === 1 && hull.disposed && rigs.tidy() && passenger.given.length === 0, 'once the shuttle has been seen to leave, with nothing held, and the ticket spent');
+}
+
+{
+  // What else is flying is weighed every frame, and something solid ahead is climbed over: each on its own,
+  // against the very same flight with nothing in the way, and read off what the hull does rather than off
+  // what the pilot says of itself. A second into the flight a ship comes straight at it from 150 m ahead,
+  // or a wall stands 100 m ahead of it, and a second and a half later the flight that met one wants to be
+  // well above, and is higher than, the one that met neither.
+  const flown = async (what: 'nothing' | 'ship' | 'wall') => {
+    const hull = new FakeHull();
+    const rigs = new FakeRigs();
+    const { host, clock, passenger } = makeHost(hull, rigs, watching(destination));
+    const ride = new ShuttleRide(planRoute(ticketTo(destination), origin, destination, 'test')!, host, true);
+    clock.t = 1;
+    await ride.begin();
+    const frame = () => {
+      clock.t += DT;
+      ride.update(DT);
+      hull.step(DT);
+    };
+    for (let i = 0; i < 60 * 300 && ride.leg?.kind !== 'fly'; i++) frame();
+    for (let i = 0; i < 60; i++) frame();
+    const nose = new THREE.Vector3(0, 0, 1).applyQuaternion(hull.group.quaternion);
+    if (what === 'ship') passenger.ships.push({ pos: hull.pos.clone().addScaledVector(nose, 150), vel: nose.clone().multiplyScalar(-120), radius: 20 });
+    if (what === 'wall') passenger.obstacleAt = 100;
+    const y0 = hull.pos.y;
+    for (let i = 0; i < 90; i++) frame();
+    const out = { leg: ride.leg?.kind, y0, y: hull.pos.y, target: ride.pilot.target, climbing: (ride.pilot.report() as { climbingOver: number | null }).climbingOver };
+    ride.abort('test');
+    return out;
+  };
+  const none = await flown('nothing');
+  ok(none.leg === 'fly' && none.climbing === null, `with nothing in the way the pilot climbs over nothing (${none.leg}, wanting ${f1(none.target)} m, at ${f1(none.y)} m)`);
+  for (const what of ['ship', 'wall'] as const) {
+    const f = await flown(what);
+    ok(f.leg === 'fly' && f.y0 === none.y0, `the ${what}'s flight is the same flight up to the moment the ${what} is met (${f1(f.y0)} m against ${f1(none.y0)} m)`);
+    ok(f.target > none.target + 20, `${what === 'ship' ? 'a ship on a course to meet it' : 'a wall ahead'} has its pilot want to be well above where it wanted to be with nothing there (${f1(f.target)} m against ${f1(none.target)} m)`);
+    ok(f.y > none.y + 1, `and the hull really goes up over it (${f1(f.y)} m against ${f1(none.y)} m a second and a half later)`);
+  }
+}
+
+{
+  // A pass too far off the join is flown round again, once, and the trip goes on to land all the same:
+  // just short of the join, on its final straight, the hull is knocked 60 m aside, far more than it can
+  // take back in the moment left.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(destination));
+  const ride = new ShuttleRide(planRoute(ticketTo(destination, 'round'), origin, destination, 'test')!, host, true);
+  clock.t = 1;
+  await ride.begin();
+  const kinds: string[] = [];
+  let knocked = false;
+  let first: unknown = null;
+  let replanned = false;
+  let roundAt = -1;
+  for (let i = 0; i < 60 * 400 && ride.running; i++) {
+    clock.t += DT;
+    ride.update(DT);
+    const k = ride.leg?.kind ?? 'ended';
+    if (kinds.at(-1) !== k) kinds.push(k);
+    const c = ride.pilot.course;
+    if (k === 'fly' && c) {
+      first ??= c;
+      if (c !== first && !replanned) {
+        replanned = true;
+        roundAt = ride.pilot.goArounds;
+      }
+      if (!knocked && ride.pilot.progress >= c.finalFrom && c.total - c.ss[ride.pilot.progress] < 100) {
+        knocked = true;
+        const across = new THREE.Vector3(Math.cos(c.join.heading), 0, -Math.sin(c.join.heading));
+        hull.pos.addScaledVector(across, 60);
+        hull.group.position.copy(hull.pos);
+      }
+    }
+    hull.step(DT);
+  }
+  const e = ride.pilot.joinError;
+  ok(knocked && replanned && roundAt === 1 && ride.pilot.goArounds === 1, `knocked wide just short of its join, it is planned again from where it is and flown round once (${ride.pilot.goArounds} time${ride.pilot.goArounds === 1 ? '' : 's'})`);
+  ok(kinds.join(',') === 'board,lift,fly,land,off,leave,ended', `and the trip goes on from there to land, let off and leave (${kinds.join(', ')})`);
+  ok(Math.abs(e.across) < 20 && Math.abs(e.up) < 20 && e.heading < 12, `the second pass meets the join close enough to hand over (${f2(e.across)} m across, ${f2(e.up)} m up, ${f2(e.heading)}°)`);
+  ok(passenger.offAt.length === 1 && passenger.offAt[0].distanceTo(ride.alightAt) < 1e-9 && ride.alightFrom === 'ramp' && passenger.given.length === 0, 'the passenger is let off at the foot of the ramp, the ticket spent');
+  ok(ride.ended === 'gone' && rigs.tidy() && hull.disposed, 'and nothing is left held');
+}
+
 // ---------------------------------------------------------------- a frame makes nothing
 //
 // Read where it can really fail: in the code of every method a frame of a trip runs and every function
@@ -863,7 +1250,7 @@ function limbTravel(role: RigPose['role'], from: number, to: number): number {
   const path = read('../../../src/world/rigPath.ts');
   const hull = read('../../../src/vehicles/rigHull.ts');
   const frame: [string, string, boolean][] = [
-    ...['update', 'board', 'liftOff', 'skip', 'land', 'parked', 'leave', 'next', 'readRound', 'drive', 'parkAtStart', 'flyClip', 'handOver', 'beginLanding', 'park', 'findAlight', 'parkedOn', 'holdDestNow'].map((n) => [ride, n, true] as [string, string, boolean]),
+    ...['update', 'board', 'liftOff', 'skip', 'fly', 'land', 'parked', 'leave', 'next', 'readRound', 'drive', 'parkAtStart', 'flyClip', 'handOver', 'beginLanding', 'park', 'findAlight', 'parkedOn', 'holdDestNow', 'promptPhase', 'keepPlace', 'standsAt'].map((n) => [ride, n, true] as [string, string, boolean]),
     ...['onPad', 'turnOnPad', 'vehicleFromJoint', 'poseRigAction', 'bracket', 'pathPose', 'pathVelocity', 'vehicleAt', 'vehicleVelocity', 'noseOntoPath', 'settleOnto', 'settleSeconds', 'alignShare', 'landingTarget', 'inSight'].map((n) => [path, n, false] as [string, string, boolean]),
     [hull, 'pose', true],
   ];

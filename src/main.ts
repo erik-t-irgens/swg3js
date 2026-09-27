@@ -106,7 +106,8 @@ import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes,
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
 import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
 import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
-import { padRefOf, planHop, portOfThing, shuttleClockName, type PadRef } from './world/rideRoute.ts';
+import { padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, type PadRef, type RideRoute } from './world/rideRoute.ts';
+import { RIDE_PILOT } from './world/shuttleCourse.ts';
 import { RIDE_TUNE, ShuttleRide, type RideHost } from './world/shuttleRide.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
@@ -428,6 +429,18 @@ function copyShipFit(f: ShipFit): ShipFit {
   return { components: { ...f.components }, paint: { ...f.paint }, ...(f.droid ? { droid: f.droid } : {}) };
 }
 
+/** A console hook's knobs set on a table of ours: only a key the table has, only a value of the kind it holds, and never a number below nought. */
+function setTune(tune: object, from: object | undefined): void {
+  const t = tune as Record<string, unknown>;
+  for (const [k, v] of Object.entries((from ?? {}) as Record<string, unknown>)) {
+    if (!(k in t)) continue;
+    const was = t[k];
+    if (typeof was === 'string' && typeof v === 'string') t[k] = v;
+    else if (typeof was === 'boolean' && typeof v === 'boolean') t[k] = v;
+    else if (typeof was === 'number' && typeof v === 'number' && Number.isFinite(v) && v >= 0) t[k] = v;
+  }
+}
+
 class App {
   private torch!: THREE.SpotLight;
   private torchOn = false;
@@ -535,8 +548,19 @@ class App {
   /** What a shuttle trip asks of the game (`src/world/shuttleRide.ts`): made once, here, for every trip flown. */
   private readonly rideHost: RideHost;
   /**
-   * The console's empty shuttle trips (`__debug.rigHull({ fly })`), each flying itself until its hull has
-   * gone, and the last one to end, for the report. Nothing else in play flies a trip yet.
+   * The shuttle trip the player is on (a ticket handed to a collector, or `__debug.ride({ to })`), or the
+   * last one they were on; and at most one empty hull of an earlier trip still flying off after letting
+   * them out, left to go on its own way while they board another.
+   */
+  private ride: ShuttleRide | null = null;
+  private rideLeaving: ShuttleRide | null = null;
+  /** The ticket the trip was boarded on, kept to put back in hand if it is never flown. */
+  private rideTicket: Ticket | null = null;
+  /** The zoom the passenger had before they were seated, put back when they are let off. */
+  private rideZoomKept: number | null = null;
+  /**
+   * The console's empty shuttle trips (`__debug.rigHull({ fly })`, `__debug.ride({ empty })`), each
+   * flying itself until its hull has gone, and the last one to end, for the report.
    */
   private readonly debugRides: ShuttleRide[] = [];
   private lastRide: ShuttleRide | null = null;
@@ -1307,6 +1331,41 @@ class App {
       camera: () => this.cam.camera,
       floorAt: (x, y, z, reach) => this.physics.topSurface(x, z, y, reach, colliderGroups(ColliderGroup.all, ColliderGroup.all), stillOnly),
       inSpace: () => !!this.world.planet.space,
+      // An empty hull still on the very pad a passenger is boarding at (parked there, or lifting off it
+      // short of its cut) goes in the same step as the new one comes, where that pad's shuttle parks. One
+      // at a pad nearby, or already away, flies on and goes once nobody can see it: taken away here, it
+      // would vanish in plain view of the pad next door.
+      clearPad: (pad) => {
+        const leaving = this.rideLeaving;
+        if (leaving?.standsAt(pad.key)) leaving.abort('a new trip took its pad');
+      },
+      seat: (h) => this.seatInShuttle(h as Vehicle),
+      unseat: (h, at) => this.offShuttle(h as Vehicle, at),
+      groundCached: (x, z) => this.world.groundIfCached(x, z),
+      // Only what stands still: a ship is the pilot's to weigh through `eachShip`, and a ghosted hull
+      // (the shuttle itself among them) is in no group a ray can find. Not the ground either, which the
+      // pilot's own height law keeps the hull over.
+      castAhead: (_h, x, y, z, dx, dy, dz, reach) => this.physics.blockDistance(x, y, z, x + dx * reach, y + dy * reach, z + dz * reach, false, false),
+      eachShip: (h, visit) => {
+        const vel = this.rideShipVel;
+        for (const v of this.world.vehicles) {
+          if (v === h || v.disposed || v.ghosted || !v.spec.ship || !v.airborne) continue;
+          vel.set(0, 0, 1).applyQuaternion(v.group.quaternion).multiplyScalar(v.speed);
+          visit(v.pos, vel, v.radius);
+        }
+      },
+      say: (text) => this.messages.system(text),
+      giveBack: (id) => {
+        const t = this.rideTicket;
+        if (!t || t.id !== id) return;
+        this.rideTicket = null;
+        this.tickets = addTicket(this.tickets, t);
+        this.usingTicket = t.id;
+      },
+      walkOff: (_pack, port) => {
+        const row = this.placeNames.find((p) => p.name === port);
+        if (row) void this.teleport(this.world.planet, row, this.zone, true);
+      },
     };
     // The lift menu: E in a shaft lists its levels; a pick, or a number key, rides there.
     this.liftMenu = new LiftMenu(this.ui);
@@ -2055,8 +2114,8 @@ class App {
         };
       },
       /**
-       * A shuttle flown from its travel rig rather than drawn from the clock (`src/vehicles/rigHull.ts`),
-       * which nothing in play builds yet.
+       * A shuttle flown from its travel rig rather than drawn from the clock (`src/vehicles/rigHull.ts`):
+       * the console's own hulls and empty trips, beside the ones a ticket rides (`__debug.ride`).
        *
        * `await __debug.rigHull()` reports, for every rig and branch this world's travel pack carries, the
        * joint that carries its hull, where the vehicle's origin stands in that joint's frame (`offset`: the
@@ -2085,24 +2144,41 @@ class App {
        * `RIDE_TUNE` (all ours), taken by the next hull built.
        */
       rigHull: async (opts: { spawn?: 'nearest'; hurt?: boolean; drop?: boolean; fly?: 'nearest'; to?: string; tune?: Partial<typeof RIG_HULL_TUNE>; path?: Partial<typeof RIG_PATH_TUNE>; ride?: Partial<typeof RIDE_TUNE> } = {}) => {
-        const setAll = (tune: Record<string, number | string>, from: object | undefined) => {
-          for (const [k, v] of Object.entries((from ?? {}) as Record<string, unknown>)) {
-            if (!(k in tune)) continue;
-            if (typeof tune[k] === 'string' && typeof v === 'string') tune[k] = v;
-            else if (typeof tune[k] === 'number' && typeof v === 'number' && Number.isFinite(v) && v >= 0) tune[k] = v;
-          }
-        };
         if (opts.tune) {
           const tune = RIG_HULL_TUNE as Record<string, number>;
           for (const [k, v] of Object.entries(opts.tune as Record<string, unknown>)) if (k in tune && typeof v === 'number' && Number.isFinite(v) && v > 0) tune[k] = v;
         }
-        setAll(RIG_PATH_TUNE, opts.path);
-        setAll(RIDE_TUNE, opts.ride);
+        setTune(RIG_PATH_TUNE, opts.path);
+        setTune(RIDE_TUNE, opts.ride);
         if (opts.drop) return this.dropRigHull();
         if (opts.hurt) return this.hurtRigHull();
         if (opts.spawn) return this.spawnRigHull();
         if (opts.fly) return this.flyRigHull(opts.to);
         return this.rigHullReport();
+      },
+      /**
+       * A shuttle trip somebody rides (`src/world/shuttleRide.ts`), flown between its clips by the shuttle's
+       * own pilot (`src/world/shuttleCourse.ts`): what a ticket about one world does at the collector.
+       *
+       * `__debug.ride()` reports the player's trip, or the last one: its legs and when each began, whether
+       * they are still seated in it, the cut and the join, the holds on both pads, where they are let off,
+       * the pilot's course (its turns and its radius, how long it is and how far along, the height and speed
+       * it wants now, what it is climbing over, its go-arounds and how far off the join it came abeam it),
+       * the programs built on the two frames after the hull was shown (`programsOnShow`, which must be 0),
+       * and the empty hull of the trip before while it still flies off. `{ to: '<port>' }` rides from the
+       * pad nearest you to that port of this world with no ticket, the round permitting (a shuttle not on
+       * its pad is `missed`); `{ empty: '<port>' }` flies an empty hull there instead, to see whether it
+       * fits on that port's pad (a transport can land on a shuttle's); `{ abort: true }` stops the player's
+       * trip; `{ pilot }` sets any of `RIDE_PILOT` and `{ tune }` any of `RIDE_TUNE`, all ours, taken at once
+       * (`tune: { enabled: false }` puts back the old ticket, a loading screen and a step to the port).
+       */
+      ride: async (opts: { to?: string; empty?: string; abort?: boolean; pilot?: Partial<typeof RIDE_PILOT>; tune?: Partial<typeof RIDE_TUNE> } = {}) => {
+        setTune(RIDE_TUNE, opts.tune);
+        setTune(RIDE_PILOT, opts.pilot);
+        if (opts.pilot?.joinTol) setTune(RIDE_PILOT.joinTol, opts.pilot.joinTol);
+        if (opts.abort) this.ride?.abort('stopped from the console');
+        if (opts.to || opts.empty) return this.debugRide((opts.to ?? opts.empty)!, !!opts.to);
+        return this.rideReport();
       },
       /**
        * The fittings: what the server stood on this world's buildings and no snapshot carries.
@@ -3499,8 +3575,8 @@ class App {
             this.stepCombat(dt);
             // The jump's clock (its countdown and phases); the transit itself waits on drawn frames and streaming, which this does not give.
             if (!this.traveling) this.hyperspace.update(dt, dt, false);
-            // The console's shuttle trips, where the frame loop has them, on a clock this moves on
-            // as the wall clock does not, so a trip can be flown end to end with no frames drawn.
+            // The shuttle trips, where the frame loop has them, on a clock this moves on as the wall
+            // clock does not, so a trip can be flown end to end with no frames drawn.
             this.rideAdvanced += dt;
             if (!this.traveling) this.stepRides(dt);
             // The ultra cruise's own clock, before the hulls step, as the frame loop has it: a run
@@ -3510,7 +3586,7 @@ class App {
             if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
             // Where the player stands first, then one step of everything alive: without the first,
             // the brains would all chase where the player was when the helper was called.
-            this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0, (dmg) => this.player.takeDamage(dmg));
+            this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0 && !this.ride?.riding, (dmg) => this.player.takeDamage(dmg));
             this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
             this.physics.step(dt);
             // The blades are drawn and then weighed against one another here as they are in the
@@ -5665,7 +5741,8 @@ class App {
         inSpace: !!this.world.planet?.space,
         flying: !!this.pilotedShip(),
         aboardOther: !!hull && !mine,
-        busy: this.traveling || this.dying || !this.started || !this.inWorld || this.hyperspace.phase !== 'idle',
+        // A passenger in a shuttle is on a trip of their own until it lands.
+        busy: this.traveling || this.dying || !this.started || !this.inWorld || this.hyperspace.phase !== 'idle' || !!this.ride?.riding,
       };
     };
     together.onGo = (move) => void this.crossWithGroup(move);
@@ -6730,11 +6807,14 @@ class App {
     // stood they would land, hum and lift off behind the select screen, heard from wherever the camera
     // was left. The next arrival stands its own world's again.
     this.shuttleRigs?.clear();
-    // The console's shuttle trips and parked hull with them, their hulls taken away and their pads let go of;
-    // and whatever else still holds a pad, since no hold of this character's may reach the next one's world.
+    // The console's shuttle trips and parked hull with them, their hulls taken away and their pads let go of.
     this.endConsoleShuttles('leaving for the select screen');
-    this.shuttleRigs?.clearHolds();
     this.savePlace(true);
+    // The player's own trip after the place is written, so a passenger is kept where the ticket goes,
+    // and before anything gets them off what they ride: the trip puts its passenger down itself. Then
+    // whatever still holds a pad, since no hold of this character's may reach the next one's world.
+    this.ride?.abort('leaving for the select screen');
+    this.shuttleRigs?.clearHolds();
     this.menu.hide();
     this.closePanels();
     // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
@@ -7044,6 +7124,12 @@ class App {
     if (jump) {
       s.jump = !this.hyperspace.crewFree || !room ? 'waiting' : this.liftHere() ? 'lift' : p.piloting ? 'piloting' : room.pilotSpot && p.pos.distanceTo(room.pilotSpot) < CONTROLS_RANGE ? 'controls' : 'waiting';
       s.lift = s.jump === 'lift';
+      return s;
+    }
+    // A passenger in a shuttle: stepping off while it boards and once it has landed, and nothing else.
+    const ride = this.ride;
+    if (ride?.riding) {
+      s.ride = ride.promptPhase();
       return s;
     }
     s.noclip = p.noclip;
@@ -7677,7 +7763,9 @@ class App {
     // first, so that nothing below asks about a hull that is somebody else's. Sending it is what
     // drew two of it; naming it in the hello would have every peer refit their picture of this
     // player's own ship with the fit of the ship they are a passenger in.
-    const own = inHull ? null : v;
+    // Nor is a shuttle a passenger rides: it is this browser's alone and no peer has its def, so none is sent
+    // and the others simply do not draw the rider for the length of the trip (`j`, below).
+    const own = inHull || this.ride?.riding ? null : v;
     // Another fitted ship taken: the hello (with that ship's fit) goes again once, debounced. Two strings compared, nothing allocated.
     const shipId = own?.def?.fit ? own.def.id : this.helloShipId;
     if (shipId !== this.helloShipId) {
@@ -7693,7 +7781,7 @@ class App {
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
     // peer would be handed a place a kilometre from the last one ten times a second, which their side
     // glides through as a teleport and hands to their motion blur as a screen-wide smear.
-    const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running;
+    const hidden = this.hyperspace.hiddenToPeers || this.ultraCruise.running || !!this.ride?.hidden;
     // The blade when it is out of the hand: where it is in the world and how far it has spun, so the
     // others draw it in the air rather than in a hand it is not in. Aboard, `thrown.pos` is in the
     // hull's frame, as everything aboard is, and is carried into the world here.
@@ -8131,6 +8219,9 @@ class App {
     console.info(verdictLine(verdict));
   }
 
+  /** Where a passenger's place is kept; written, not made. */
+  private readonly keptAt = new THREE.Vector3();
+
   /** Write where the character stands into its record, every few seconds or at once. */
   private savePlace(now = false): void {
     const c = this.current;
@@ -8142,7 +8233,20 @@ class App {
     // In a ship in flight over a planet, the place kept is the ground at the arrival point: the
     // ship is not kept, so a character put back in mid-air on foot would only fall.
     const flying = !!(p.mounted ?? p.aboard?.vehicle)?.airborne && !this.world.planet.space;
-    const at = flying ? this.spawn : p.worldPos;
+    // A passenger in a shuttle is kept where the trip says (`keepPlace`): where they boarded while it
+    // still waits there, and where the ticket goes from the lift-off on, so a character put back in the
+    // middle of the trip is put down on the ground at one end of it and never in the air.
+    const kept = this.ride?.keepPlace() ?? null;
+    let at = flying ? this.spawn : p.worldPos;
+    if (kept && kept.pack === packIdOf(this.world.planet, this.zone)) {
+      // A port with no pad has no height of its own: the ground there, where the world holds it; made
+      // on the spot only when this is not a frame (the tab closing, the select screen); and otherwise
+      // the place last written stands until a save that can say. Never the seated body's own height,
+      // which is the pad left behind or the sky, and would be a fall on the way back in.
+      const y = Number.isFinite(kept.y) ? kept.y : (this.world.groundIfCached(kept.x, kept.z) ?? (now ? this.world.terrain.heightAt(kept.x, kept.z) : Number.NaN));
+      if (!Number.isFinite(y)) return;
+      at = this.keptAt.set(kept.x, y, kept.z);
+    }
     c.planet = this.world.planet?.id ?? c.planet;
     c.zone = this.zone;
     c.pos = [Number(at.x.toFixed(2)), Number(at.y.toFixed(2)), Number(at.z.toFixed(2))];
@@ -8272,6 +8376,8 @@ class App {
     if (this.traveling) return null;
     this.hyperspace.abort('travel');
     this.ultraCruise.abort();
+    // A shuttle trip stops before the world goes under it: its passenger put down and its hull away.
+    this.ride?.abort('travel');
     this.traveling = true;
     this.map.hide();
     this.closePanels();
@@ -8401,9 +8507,14 @@ class App {
     return v;
   }
 
-  /** The ship the player flies, from its seat or its bridge, when it is one the garage knows and can spawn again. */
+  /**
+   * The ship the player flies, from its seat or its bridge, when it is one the garage knows and can spawn
+   * again. Never a shuttle somebody is a passenger in: that is flown for them, and the ship menu, the
+   * cruise, a group's crossing and the jump all ask here whose ship it is.
+   */
   private pilotedShip(): Vehicle | null {
     const p = this.player;
+    if (this.ride?.riding) return null;
     const ship = p.mounted ?? p.piloting;
     return ship?.spec.ship && ship.def ? ship : null;
   }
@@ -8712,13 +8823,19 @@ class App {
     this.world.onCameraResized();
   }
 
-  /** Jump to a place on the map: travel first when it is on another planet. */
-  private async teleport(planet: PlanetDef, poi: Poi, zoneId?: string): Promise<void> {
+  /**
+   * Jump to a place on the map: travel first when it is on another planet. `fromRide` is a shuttle trip
+   * setting its passenger down at a port with no pad (its own last step, over by then), which is the one
+   * caller that does not stop the player's trip.
+   */
+  private async teleport(planet: PlanetDef, poi: Poi, zoneId?: string, fromRide = false): Promise<void> {
     this.hyperspace.abort('teleport');
     // A teleport within the same zone changes no zone, destroys no hull and starts no jump, so a run
     // would notice nothing: it would carry the empty ship off and keep the streamer frozen where the
     // player no longer is.
     this.ultraCruise.abort();
+    // Nor would a shuttle trip, whose passenger would be left seated in a hull a world away from them.
+    if (!fromRide) this.ride?.abort('teleport');
     if (this.traveling) return;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       await this.travel(planet, zoneId);
@@ -8781,6 +8898,28 @@ class App {
     if (this.hullHidden && this.hullHidden !== ship) {
       this.hullHidden.group.visible = true;
       this.hullHidden = null;
+    }
+    // A passenger in a shuttle sees it from outside, and only from outside: chased in its own frame
+    // (its drawn turn, since a held hull's flight attitude is not written), never nearer than the
+    // orbit's own rest, the wheel still drawing the view back; Alt orbits it instead.
+    const rh = this.ride?.riding ? (this.ride.hull as Vehicle | null) : null;
+    if (rh) {
+      this.holdJumpZoom(this.hyperspace.holdsView(rh));
+      if (this.rideZoomKept === null) this.rideZoomKept = this.cam.zoomTarget;
+      this.cam.zoomTarget = Math.max(this.cam.zoomTarget, RIDE_TUNE.minZoom);
+      const reach = 6 + rh.radius * 2.2;
+      if (input.held('freeLook')) {
+        this.cam.release();
+        this.cam.setFrame(null);
+        this.cam.update(input, rh.pos, null, dt, null, Math.max(1, reach / 6), 1.5, 0);
+      } else this.cam.chase(input, dt, rh.pos, rh.group.quaternion, rh.heading, reach, null);
+      this.cam.zoomTarget = Math.max(this.cam.zoomTarget, RIDE_TUNE.minZoom);
+      this.showHull(rh, true);
+      return;
+    }
+    if (this.rideZoomKept !== null) {
+      this.cam.zoomTarget = this.rideZoomKept;
+      this.rideZoomKept = null;
     }
     // A jump flying this ship: its pilot's view is the chase behind it at a fixed distance, as the client's was, with no free look.
     const jumpView = !!ship && this.hyperspace.holdsView(ship);
@@ -8954,7 +9093,11 @@ class App {
     // themselves call the walker out (peerHullGone) when that player's ship goes.
     if (player.aboard && !peerRooms()?.idOf(player.aboard) && !this.world.vehicles.includes(player.aboard.vehicle)) this.thrownOutOfShip(player.aboard.vehicle);
     let drive: DriveInput | null = null;
-    const pilot = player.mounted ?? player.piloting;
+    // A passenger in a shuttle flies nothing: its own pilot has it (the ride's autopilot, below), so none
+    // of the pilot's wiring -- the keys, the flight cursor, the dock, the guns, the ship the world thinks
+    // is the player's -- reaches it. What it is to the world's own hazards is still what they ride.
+    const riding = !!this.ride?.riding;
+    const pilot = riding ? null : (player.mounted ?? player.piloting);
     const playerHull = pilot ?? player.aboard?.vehicle ?? null;
     this.world.playerShip = playerHull?.spec.ship ? playerHull : null;
     // What the world's own hazards reach beside the player: whatever they ride or drive, and how big
@@ -8966,7 +9109,7 @@ class App {
     // It must be written every step, including the step it becomes null: a rider the world still
     // thinks is mounted would be announced as burning while the loop's own damage closure, which
     // drops every blow on anyone mounted, quietly threw the blow away.
-    this.world.playerRides = pilot;
+    this.world.playerRides = pilot ?? player.mounted;
     this.world.playerMaxHp = player.maxHp;
     if (simulate && pilot) {
       // The mouse steers: the vehicle turns toward where the camera looks, and a flyer climbs or
@@ -9077,11 +9220,13 @@ class App {
       else player.placeVisual();
     }
     // Every vehicle's hits and its state: sparks on a hit, smoke from a battered hull, and the
-    // end of one whose hull is gone (its rider thrown off first).
+    // end of one whose hull is gone (its rider thrown off first). A shuttle's passenger is nobody's
+    // rider here: nothing of it reaches them, which the hull's own guards say again.
+    const rider = riding ? null : player.mounted;
     for (const v of [...this.world.vehicles]) {
       // On its back for a moment: the rider is thrown, and hurt by it. Nothing of any of this reaches
       // anybody riding a hull nothing may hurt (a shuttle), which the hull's own guards say again.
-      if (v === player.mounted && v.flipped && !v.invulnerable) {
+      if (v === rider && v.flipped && !v.invulnerable) {
         this.dismountBeside(v);
         player.takeDamage(10);
         // Thrown by the ground, not by anybody: no direction, so the red flash and no arc.
@@ -9091,7 +9236,7 @@ class App {
       if (v.justHit > 0) {
         this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
-        if (v === player.mounted && !v.invulnerable) {
+        if (v === rider && !v.invulnerable) {
           player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)));
           // A jolt through the hull under you: the hull keeps no record of what it ran into, so
           // there is no direction to point at and the flash is the whole of it.
@@ -9101,7 +9246,7 @@ class App {
       if (v.struck > 0) {
         // Bolts in the hull: a jolt to whoever is at the controls, a little of it as hurt. A ship with a fight
         // takes them in its shields and armour: the pilot is jolted and keeps their health until it is destroyed.
-        if ((v === player.mounted || v === player.piloting) && !v.invulnerable) {
+        if ((v === rider || v === player.piloting) && !v.invulnerable) {
           if (!v.combat) player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
           // Bolts in the hull: the hull counts them but does not keep where they came from, so this
           // one flashes without an arc. The ship's own bars flash in the layer's colour instead.
@@ -9122,7 +9267,7 @@ class App {
         // The game's own explosion, the death taunt for the player's kill, the NPC ships told; then the rest as before.
         this.world.ships.onDestroyed(v);
         if (v === this.shipTarget) this.shipTarget = null;
-        if (v === player.mounted) {
+        if (v === rider) {
           // Blown up under the rider: thrown clear with its speed and a kick upward, flailing, down prone.
           const lv = v.body.linvel();
           tmp.copy(v.pos).y += 0.6;
@@ -9140,7 +9285,7 @@ class App {
     }
     // The way up and the way down, for whoever flies the ship: near the top of a planet's sky its
     // space zone is within reach; in space, the planet below. Both are taken from the ship menu.
-    const flown = player.mounted ?? player.piloting;
+    const flown = pilot;
     this.spaceGate = null;
     if (flown?.spec.ship && flown.def) {
       if (this.world.planet.space) this.spaceGate = 'down';
@@ -9866,6 +10011,8 @@ class App {
   private die(): void {
     this.hyperspace.abort('died');
     this.ultraCruise.abort();
+    // Nothing reaches a passenger, but a death that comes by some other way puts them down where they are.
+    this.ride?.abort('died');
     if (this.dying) return;
     this.dying = true;
     this.closePanels();
@@ -10337,9 +10484,10 @@ class App {
   }
 
   /**
-   * The console's shuttle trips, a frame of each, and whatever the console left out given back. A trip
-   * that has ended is kept only as the last one, for the report; once none is flying, the clock the
-   * trips read runs on the wall clock alone again. The console's parked hull (`rigHull({ spawn })`) whose
+   * A frame of every shuttle trip -- the player's own, the empty hull of the one before it while that still
+   * flies off, and the console's -- and whatever the console left out given back. A console trip that has
+   * ended is kept only as the last one, for the report; once none is flying, the clock the trips read runs
+   * on the wall clock alone again. The console's parked hull (`rigHull({ spawn })`) whose
    * world has gone under it gives its pad back here too.
    */
   private stepRides(dt: number): void {
@@ -10348,6 +10496,12 @@ class App {
       this.shuttleRigs?.release(out.key, true);
       this.rigHullOut = null;
     }
+    // The player's own trip, and the empty hull of the one before it while that still flies off.
+    const ride = this.ride;
+    if (ride?.running) ride.update(dt);
+    const leaving = this.rideLeaving;
+    if (leaving?.running) leaving.update(dt);
+    if (this.rideLeaving && !this.rideLeaving.running) this.rideLeaving = null;
     const rides = this.debugRides;
     for (let i = rides.length - 1; i >= 0; i--) {
       const r = rides[i];
@@ -10356,7 +10510,7 @@ class App {
       this.lastRide = r;
       rides.splice(i, 1);
     }
-    if (!rides.length) this.rideAdvanced = 0;
+    if (!rides.length && !this.ride?.running && !this.rideLeaving) this.rideAdvanced = 0;
   }
 
   /**
@@ -10371,7 +10525,11 @@ class App {
       this.lastRide = r;
     }
     this.debugRides.length = 0;
-    this.rideAdvanced = 0;
+    // An empty hull still flying off went with the world too; the player's own trip is stopped by
+    // whatever moved them (a travel, the select screen), which must say so before the world goes.
+    this.rideLeaving?.abort(why);
+    this.rideLeaving = null;
+    if (!this.ride?.running) this.rideAdvanced = 0;
   }
 
   /** Everything the console flies or parks on the shuttles' pads, stopped and let go of: its trips, and its parked hull. */
@@ -10423,6 +10581,126 @@ class App {
     };
     this.rideSwaps.set(ride, stats);
     return { outcome, ...stats, ...ride.report() };
+  }
+
+  /** Scratch for the ride's host: another ship's velocity as it is handed to the pilot, and where a passenger is put down. */
+  private readonly rideShipVel = new THREE.Vector3();
+  private readonly rideOffAt = new THREE.Vector3();
+
+  /**
+   * Seat the passenger in a shuttle's hull, in the step it is swapped in: out of sight (the hull says so,
+   * and the frame loop hides a rider it says so of), with the view drawn back to the orbit's rest so the
+   * first frames are never drawn from inside it. Refused for somebody who is not standing free in the
+   * world just now -- on something else, in a ship's rooms, dead, travelling -- who then misses it.
+   */
+  private seatInShuttle(v: Vehicle): boolean {
+    const p = this.player;
+    if (!this.inWorld || this.traveling || this.dying || p.hp <= 0 || p.mounted || p.piloting || p.aboard || p.noclip || p.eva) return false;
+    // Whatever was being put down is given up: its keys are the ride's now.
+    this.stopPlacing();
+    this.stopPlacingProp();
+    p.mount(v);
+    this.cam.distance = Math.max(this.cam.distance, RIDE_TUNE.minZoom);
+    return true;
+  }
+
+  /** The passenger off a shuttle's hull, on their feet at `at` (a hand's breadth over the floor found there). */
+  private offShuttle(v: Vehicle, at: THREE.Vector3): void {
+    const p = this.player;
+    if (p.mounted !== v) return;
+    v.group.visible = true;
+    p.dismount(this.rideOffAt.set(at.x, at.y + 0.15, at.z));
+  }
+
+  /**
+   * A ticket handed to the collector, flown: the shuttle standing in the collector's own building is the
+   * pad it leaves from, the rigged pad nearest the ticket's port the one it lands on, and the trip is
+   * begun with the ticket taken. False where no trip can be flown (the switch is off, the collector's
+   * building has no rig, a ticket to another world), and the caller does what a ticket always did.
+   */
+  private rideFrom(collector: TravelThing, ticket: Ticket): boolean {
+    if (!RIDE_TUNE.enabled) return false;
+    const here = packIdOf(this.world.planet, this.zone);
+    const things = this.travelThings();
+    const i = things.findIndex((t) => t.kind === 'shuttle' && t.bx === collector.bx && t.bz === collector.bz);
+    if (i < 0) return false;
+    const ports = this.portsHere();
+    const from = padRefOf(here, i, things[i], ports, this.travelRigs, things);
+    const to = padOfPort(things, ports, ticket.to, here, this.travelRigs);
+    const route = planRoute(ticket, from, to, here);
+    if (!route) return false;
+    void this.beginRide(route, true, ticket);
+    return true;
+  }
+
+  /**
+   * A trip begun as the player's own. The one before it, if its empty hull is still flying off, is left
+   * to finish on its own (at most one: an older one still going is let go of now); one still being built
+   * or with the player still in it is stopped, its ticket back in hand, before this one's is taken.
+   */
+  private async beginRide(route: RideRoute, passenger: boolean, ticket: Ticket | null): Promise<ShuttleRide> {
+    const old = this.ride;
+    if (old?.running) {
+      if (old.riding || !old.hull) old.abort('another trip was begun');
+      else {
+        this.rideLeaving?.abort('another hull took its place in the sky');
+        this.rideLeaving = old;
+      }
+    }
+    this.rideTicket = ticket;
+    const ride = new ShuttleRide(route, this.rideHost, passenger);
+    this.ride = ride;
+    const r = this.renderer;
+    const before = r.info.programs?.length ?? 0;
+    const outcome = await ride.begin();
+    const programsBuilt = (r.info.programs?.length ?? 0) - before;
+    const v = ride.hull as Vehicle | null;
+    if (outcome === 'flying' && v) {
+      const shown = await this.measureSwap(v, async () => null);
+      this.rideSwaps.set(ride, { swapError: null, swapDegrees: null, programsBuilt, programsOnShow: shown.compiledOnSwap });
+    }
+    return ride;
+  }
+
+  /**
+   * The console's trip to a port of this world from the pad nearest the player: ridden with no ticket,
+   * or flown empty (`passenger` false) to see a hull land on that port's pad.
+   */
+  private async debugRide(port: string, passenger: boolean): Promise<unknown> {
+    const rigs = this.shuttleRigs;
+    const key = rigs?.nearest(this.player.worldPos) ?? null;
+    if (!rigs || !key) return 'no shuttle stands on its rig in this world: go to a starport or shuttleport of a world whose travel pack has rigs';
+    const from = this.padRefFor(key);
+    if (!from?.rig) return `${key} is not a pad a shuttle stands on its rig at`;
+    const here = packIdOf(this.world.planet, this.zone);
+    const ports = this.portsHere();
+    const row = ports.find((p) => p.name === port);
+    if (!row) return `this world has no port called ${port}; these are: ${ports.map((p) => p.name).join(', ')}`;
+    const ticket: Ticket = { id: '', from: here, pack: here, to: port, at: { x: row.x, z: row.z }, price: 0, bought: Date.now() };
+    const route = planRoute(ticket, from, padOfPort(this.travelThings(), ports, port, here, this.travelRigs), here);
+    if (!route) return `no trip can be flown from ${key}`;
+    if (passenger) {
+      const ride = await this.beginRide(route, true, null);
+      return { outcome: ride.running ? 'flying' : ride.ended, ...(this.rideReport() as object) };
+    }
+    const ride = new ShuttleRide(route, this.rideHost, false);
+    this.debugRides.push(ride);
+    const outcome = await ride.begin();
+    return { outcome, ...ride.report() };
+  }
+
+  /** The player's trip (or the last one), the empty hull of the one before, and what the pilot and the trip are tuned to. */
+  private rideReport(): unknown {
+    const r = this.ride;
+    return {
+      ride: r ? { ...r.report(), ...(this.rideSwaps.get(r) ?? {}) } : null,
+      leaving: this.rideLeaving?.report() ?? null,
+      ticket: this.rideTicket ? this.rideTicket.to : null,
+      // How many flown hulls' sounds and flames the drawn shuttles still step: 0 once every trip has ended.
+      driven: this.shuttleRigs?.describe().driven ?? 0,
+      tune: { ...RIDE_TUNE },
+      pilot: { ...RIDE_PILOT, joinTol: { ...RIDE_PILOT.joinTol } },
+    };
   }
 
   /** A pad of this world's drawn shuttles as a trip names it, from its key; null for a key that is not a shuttle's pad here. */
@@ -10952,9 +11230,17 @@ class App {
       this.messages.system(can.why);
       return;
     }
+    // A hull already being made ready for this player: one ticket at a time.
+    if (this.ride?.running && !this.ride.hull) {
+      this.messages.system('you are already boarding a shuttle');
+      return;
+    }
     this.tickets = this.tickets.filter((t) => t !== ticket);
     if (this.usingTicket === ticket!.id) this.usingTicket = this.tickets[this.tickets.length - 1]?.id ?? '';
     if (!ticket) return;
+    // A ticket about this world is flown there by the shuttle itself, where its pad has a rig to fly;
+    // anywhere else it is what it always was.
+    if (ticket.pack === here && ticket.at && this.rideFrom(collector, ticket)) return;
     if (ticket.pack === here && ticket.at) {
       const row = this.placeNames.find((p) => p.name === ticket.to);
       if (row) {
@@ -11068,6 +11354,8 @@ class App {
   private async respawnAt(index: number): Promise<void> {
     const f = this.deathChoices[index];
     if (!f || this.traveling) return;
+    // A death already stopped any shuttle trip; this says so again before the player is moved.
+    this.ride?.abort('respawn');
     this.deathChoices = [];
     this.death.classList.remove('on');
     this.traveling = true;
@@ -11788,6 +12076,11 @@ class App {
     // From the jump's enter stage until control returns, P does nothing but say so.
     if (this.hyperspace.locksControls) {
       this.messages.system('jumping');
+      return;
+    }
+    // Nor for a passenger in a shuttle: there is no ship of theirs to land, dock or jump.
+    if (this.ride?.riding) {
+      this.messages.system('the shuttle is flown for you');
       return;
     }
     // The System Map is a page of the ship menu: the same key closes it.
@@ -13453,11 +13746,15 @@ class App {
           if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey('Digit' + n)) this.shuttleMenu.pickKey(n);
 
       if (active) {
+        // A passenger in a shuttle has the same few keys a jump leaves: the trip is theirs to step off
+        // and nothing else, since the map's teleport or its galaxy jump would take them somewhere the
+        // trip does not know about, and the backpack and the spawner wait until they are let off.
+        const riding = !!this.ride?.riding;
         // Not while a jump flies the ship: the map's teleport would abort it half way into another system's load.
-        if (input.pressedAction('map') && !this.hyperspace.locksControls) this.toggleMap();
+        if (input.pressedAction('map') && !this.hyperspace.locksControls && !riding) this.toggleMap();
         // I and B wait out a jump from its countdown until control returns: closing the ship edit page refits the hull,
         // which would build parts (and maybe programs) on a live frame and could hand the ghosted hull live colliders.
-        const jumpBusy = this.hyperspace.phase === 'countdown' || this.hyperspace.locksControls;
+        const jumpBusy = this.hyperspace.phase === 'countdown' || this.hyperspace.locksControls || riding;
         if (input.pressedAction('inventory') && !jumpBusy) this.toggleInventory();
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
@@ -13487,14 +13784,16 @@ class App {
         }
         // Pick the nearest thing you have put down back up, so a weapon in a case can be taken out
         // and used again. Never while something is already in hand, which would swap one for another.
-        if (input.pressedAction('takeProp') && !this.placing && !this.propPlacing && !this.anyPanelOpen()) this.takeNearestProp();
+        if (input.pressedAction('takeProp') && !this.placing && !this.propPlacing && !this.anyPanelOpen() && !riding) this.takeNearestProp();
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
           // Locked from the jump's enter stage until control returns, but for the crew in the tunnel (`pressJumpE`); the key only:
           // leaving for the select screen and the map's teleport abort the jump first.
           if (input.pressedAction('mount') && !player.noclip) {
-            if (!this.hyperspace.locksControls) {
+            // Seated in a shuttle, E is the passenger's own: stepping off, and nothing else.
+            if (riding) this.ride?.pressE();
+            else if (!this.hyperspace.locksControls) {
               if (!this.handleElevator() && !this.handleTravel() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
@@ -13504,7 +13803,8 @@ class App {
           if (input.pressedAction('flashlight')) this.torchOn = !this.torchOn;
           // The wings key: the pilot of a ship whose wings open picks open or closed over the flight rule, held until the key
           // is pressed again or the seat is left (a ship nobody flies goes back to the rule). Locked while a jump flies the ship.
-          const wingsOf = player.mounted ?? player.piloting;
+          // A passenger flies nothing, so a shuttle's wings, engines, set-down and cruise are nobody's keys.
+          const wingsOf = riding ? null : (player.mounted ?? player.piloting);
           if (input.pressedAction('wings') && wingsOf?.spec.ship && wingsOf.wings.length && !this.hyperspace.locksControls) wingsOf.wings.toggle();
           // Cut the engines: nothing holds the ship up, and it comes down and settles on the ground.
           // Not while a jump flies it, and not on the ground, where the throttle is what lifts it off.
@@ -13517,7 +13817,7 @@ class App {
           if (input.justPressed(CUT_ENGINES_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && this.world.planet.space) wingsOf.askSetDown();
           // The ultra cruise: the same key starts a run and lets go of one. It says for itself where
           // it may run at all, so the only thing asked here is that a jump is not flying the hull.
-          if (input.justPressed(CRUISE_KEY) && !this.hyperspace.locksControls) this.ultraCruise.toggle();
+          if (input.justPressed(CRUISE_KEY) && !this.hyperspace.locksControls && !riding) this.ultraCruise.toggle();
           dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);
@@ -13558,8 +13858,9 @@ class App {
         this.stepCombat(dt);
       }
 
-      // The console's shuttle trips, before the hulls step as the run is: a trip writes its hull's pose
-      // and the hull's own update writes it again on the same frame. Not while a crossing's travel runs.
+      // The shuttle trips -- the player's own and the console's -- before the hulls step as the run is: a
+      // trip writes its hull's pose and its pilot's drive, and the hull's own update reads both on the same
+      // frame. Whatever panel is open, since the shared clock does not wait; not while a crossing's travel runs.
       if (!this.traveling) this.stepRides(dt);
       // Before the hulls step: a run writes its hull's pose, and the hull's own update writes the
       // same pose again on the same frame, so nothing ever lags a step.
@@ -13589,7 +13890,8 @@ class App {
       this.world.weatherHull = player.mounted?.spec.ship ? player.mounted : null;
       this.world.weatherRidden = player.mounted;
       this.hud.setWeatherNote(this.world.weather.heldNote());
-      this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0, hurt);
+      // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
+      this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);
       this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
       // The pool serves the latest request first when it is full (flashes age only in effects.update),
       // so the room lights go last and always keep their lights; the fighters' glows just before them,
@@ -13721,6 +14023,8 @@ class App {
       }
       // A jump's countdown, then "jumping", over whatever the prompt would say; in the tunnel, the crew's lifts and controls.
       prompt = this.jumpPrompt(S8.lift) ?? prompt;
+      // A passenger's own line goes over both, whatever the setting: when it lifts off, and where it has landed.
+      prompt = this.ride?.promptLine() ?? prompt;
       this.hud.setPrompt(prompt);
       // Mouse flight's display (seated or at a bridge's controls, in flight, Alt not held): the aim circle, the ring and the
       // cursor, in pixels, at this frame's field of view. The cursor is the hull's (about its nose, from the pilot's eye), so
@@ -13728,7 +14032,7 @@ class App {
       // own direction lands: in the cockpit that is the middle; in the chase view it drifts off the middle while the view
       // catches a turn up, and sits a little under it (the view looks under the hull). Unsimulated (a panel, the map,
       // death), nothing is on the lead. Allocates nothing.
-      const flownShip = player.mounted ?? player.piloting;
+      const flownShip = this.ride?.riding ? null : (player.mounted ?? player.piloting);
       // One call a frame: `status` refills one kept object, and both the arcs' numbers and the
       // condition block are filled from this one fill rather than asking the fight twice.
       const flownFight = flownShip?.combat ?? null;

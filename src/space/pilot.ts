@@ -195,6 +195,93 @@ export function aimPoint(from: V3, fromVel: V3, at: V3, atVel: V3, boltSpeed: nu
   return out;
 }
 
+/**
+ * How a pilot keeps clear of what is ahead and of other ships, INVENTED as every NPC number is: the
+ * look ahead for anything solid and how long it turns away after seeing it, the gap it keeps from
+ * another hull, and the collision course it dodges. Moved here out of the NPC brain unchanged, so the
+ * shuttles' own pilot (`src/world/shuttleCourse.ts`) keeps clear by the very same numbers.
+ */
+export const AVOID_TUNE = {
+  /** The obstacle look ahead: how often (s), how far (seconds of flight, and at least this many metres), and how long the pilot turns away. */
+  rayEvery: 0.25,
+  rayAhead: 2.5,
+  rayMin: 60,
+  avoidSeconds: 1.5,
+  /** Another ship nearer than this (metres, between the hulls) is turned away from. */
+  separation: 40,
+  /** Ships within this (metres) are checked for a collision course, dodged when passing nearer than the hulls and this margin. */
+  dodgeLook: 400,
+  dodgeMargin: 15,
+  /** Any ship's closest approach within this many seconds nearer than the hulls and `dodgeMargin` is dodged. */
+  collideSeconds: 1.5,
+};
+
+const WORLD_UP: V3 = { x: 0, y: 1, z: 0 };
+
+/** `v` scaled to unit length in place, or left alone when it has none (three's own `normalize`). */
+function unit(v: V3): void {
+  const len = Math.hypot(v.x, v.y, v.z) || 1;
+  v.x /= len;
+  v.y /= len;
+  v.z /= len;
+}
+
+/**
+ * One other ship's pull on where a pilot wants to go: a hull within the separation gap pushes `want`
+ * straight away from it, harder the nearer it is, and one on a collision course (its closest approach
+ * within `collideSeconds`, nearer than the two hulls and a margin) pushes it away from where that
+ * approach would be -- along `up` for a dead-centre one. `want` is a direction and is left unit length;
+ * says whether it was pulled at all. Every velocity is a ship's nose times its speed. Allocates nothing.
+ */
+export function pushApart(pos: V3, vel: V3, radius: number, otherPos: V3, otherVel: V3, otherRadius: number, want: V3, tune = AVOID_TUNE, up: V3 = WORLD_UP): boolean {
+  let pulled = false;
+  const gap = tune.separation + radius + otherRadius;
+  const ox = otherPos.x - pos.x;
+  const oy = otherPos.y - pos.y;
+  const oz = otherPos.z - pos.z;
+  const d2 = ox * ox + oy * oy + oz * oz;
+  if (d2 < gap * gap && d2 > 1e-6) {
+    const d = Math.sqrt(d2);
+    const k = (3 * (1 - d / gap)) / d;
+    want.x -= ox * k;
+    want.y -= oy * k;
+    want.z -= oz * k;
+    unit(want);
+    pulled = true;
+  }
+  if (d2 > tune.dodgeLook * tune.dodgeLook) return pulled;
+  // The closest approach: its time from the relative motion, and how near it passes.
+  const rx = otherVel.x - vel.x;
+  const ry = otherVel.y - vel.y;
+  const rz = otherVel.z - vel.z;
+  const rv2 = rx * rx + ry * ry + rz * rz;
+  if (rv2 < 1) return pulled;
+  const tca = -(ox * rx + oy * ry + oz * rz) / rv2;
+  if (tca <= 0 || tca > tune.collideSeconds) return pulled;
+  let mx = ox + rx * tca;
+  let my = oy + ry * tca;
+  let mz = oz + rz * tca;
+  const miss = Math.hypot(mx, my, mz);
+  const room = radius + otherRadius + tune.dodgeMargin;
+  if (miss >= room) return pulled;
+  // Away from the point of closest approach (straight up past a dead-centre one).
+  if (miss < 1e-3) {
+    mx = up.x;
+    my = up.y;
+    mz = up.z;
+  } else {
+    mx /= -miss;
+    my /= -miss;
+    mz /= -miss;
+  }
+  const k = 4 * (1 - miss / room);
+  want.x += mx * k;
+  want.y += my * k;
+  want.z += mz * k;
+  unit(want);
+  return true;
+}
+
 /** The least cruise a flying NPC keeps (m/s): under 4 a ship lands. */
 export const MIN_CRUISE = 8;
 

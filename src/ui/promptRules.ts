@@ -127,6 +127,9 @@ export type PromptJump = 'none' | 'lift' | 'piloting' | 'controls' | 'waiting';
 /** What is beside you on foot, in the order the game already decides it. */
 export type PromptNear = '' | 'board' | 'mount' | 'flip';
 
+/** Seated in a shuttle as its passenger: waiting on the pad it leaves, in the air, or landed where it goes. */
+export type PromptRide = '' | 'board' | 'flying' | 'arrived';
+
 /** Whether the ship menu is worth offering here, and whether reaching it is news. */
 export type PromptShipMenu = '' | 'here' | 'altitude';
 
@@ -142,6 +145,8 @@ export interface PromptState {
   noclip: boolean;
   /** A jump's own line, which wins over everything else. */
   jump: PromptJump;
+  /** A shuttle's passenger, who can only step off, and only on the ground; everything else is the shuttle's. */
+  ride: PromptRide;
   /** Seated in a vehicle, or at a ship's bridge controls on foot. `vehicle` says which vehicle. */
   mounted: boolean;
   piloting: boolean;
@@ -187,6 +192,7 @@ export function newPromptState(): PromptState {
     live: false,
     noclip: false,
     jump: 'none',
+    ride: '',
     mounted: false,
     piloting: false,
     vehicle: newPromptVehicle(),
@@ -210,6 +216,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.live = false;
   s.noclip = false;
   s.jump = 'none';
+  s.ride = '';
   s.mounted = false;
   s.piloting = false;
   s.lift = false;
@@ -270,6 +277,7 @@ export const PROMPT_WORDS = Object.freeze({
   gate: 'through the gate',
   gateNowhere: 'the gate (nowhere)',
   stepOut: 'step out',
+  stepOff: 'step off',
   takeControls: 'take the controls',
   climbIn: 'climb in',
   bootsOff: 'boots off',
@@ -355,6 +363,13 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     if (s.jump === 'lift') n = push(out, n, 'mount', W.lift);
     else if (s.jump === 'piloting') n = push(out, n, 'mount', W.letGo);
     else if (s.jump === 'controls') n = push(out, n, 'mount', W.takeControls);
+    return n;
+  }
+
+  // A shuttle's passenger: the one key is stepping off, while it still waits on its pad and once it has
+  // landed, and nothing at all while it flies. Everything else is the shuttle's, flown for them.
+  if (s.ride) {
+    if (s.ride !== 'flying') n = push(out, n, 'mount', W.stepOff);
     return n;
   }
 

@@ -408,8 +408,9 @@ export class Physics {
    * cover code; and it takes two point objects, which a caller with nothing but numbers would have
    * to build. Nothing that moves on its own may answer either way, or a body takes cover behind the
    * very creature it is fighting, behind the player, or behind a speeder that is about to drive off.
+   * `ground` false leaves the terrain out as well (a flyer that keeps its own line over the ground).
    */
-  blockDistance(ax: number, ay: number, az: number, bx: number, by: number, bz: number, inside = false): number {
+  blockDistance(ax: number, ay: number, az: number, bx: number, by: number, bz: number, inside = false, ground = true): number {
     const dx = bx - ax;
     const dy = by - ay;
     const dz = bz - az;
@@ -422,7 +423,7 @@ export class Physics {
     r.dir.x = dx / len;
     r.dir.y = dy / len;
     r.dir.z = dz / len;
-    const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, ground ? Group.all : Group.all & ~Group.terrain);
     const hit = this.world.castRay(r, len, true, undefined, filter, undefined, undefined, this.fixedOnly);
     return hit ? hit.timeOfImpact : Infinity;
   }

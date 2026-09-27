@@ -14,7 +14,7 @@ import { RAPIER, type Physics } from '../core/physics';
 import type { DriveInput } from '../vehicles/vehicle';
 import { ShipContact, type ShipContacts } from './contacts';
 import { shipHostile } from './factions';
-import { PILOT_SKILL, aimPoint, formationPoint, skillOfTier, skillStick, slotCruise, steerToward, toLocal, type PilotSkill, type Stick } from './pilot';
+import { AVOID_TUNE, PILOT_SKILL, aimPoint, formationPoint, pushApart, skillOfTier, skillStick, slotCruise, steerToward, toLocal, type PilotSkill, type Stick } from './pilot';
 import { targetable } from './shipCombat';
 import type { NpcShip } from './npcShips';
 import { combatSounds } from '../audio/combatSounds';
@@ -30,7 +30,10 @@ export const LEASH = 4000;
 /** The least height over the ground a pilot flies at on a planet (invented). */
 export const MIN_ALTITUDE = 60;
 
-/** The rest of the brain's invented numbers, in one place. */
+/**
+ * The rest of the brain's invented numbers, in one place. How it keeps clear of what is ahead and of
+ * other ships is `AVOID_TUNE` in pilot.ts, which the shuttles' pilot keeps clear by as well.
+ */
 const TUNE = {
   /** Past this off the nose the pilot rolls the target overhead and pulls, as a fighter turns (radians). */
   bankBeyond: THREE.MathUtils.degToRad(35),
@@ -48,8 +51,6 @@ const TUNE = {
   /** A break-off: the target's closest approach within `breakAhead` s passing nearer than the hulls and `collideMargin` (m). */
   breakAhead: 0.8,
   collideMargin: 25,
-  /** Any ship's closest approach within this many seconds nearer than the hulls and `dodgeMargin` is dodged. */
-  collideSeconds: 1.5,
   /** A jink: this long in all, each turn this long (plus up to as much again), this far off the nose (radians). */
   evadeSeconds: 3,
   jinkEvery: 0.6,
@@ -61,16 +62,6 @@ const TUNE = {
   fleeSeconds: 12,
   /** Seconds without a target before the pilot turns back. */
   lostSeconds: 8,
-  /** The obstacle look ahead: how often (s), how far (seconds of flight, and at least this many metres), and how long the pilot turns away. */
-  rayEvery: 0.25,
-  rayAhead: 2.5,
-  rayMin: 60,
-  avoidSeconds: 1.5,
-  /** Another ship nearer than this (metres, between the hulls) is turned away from. */
-  separation: 40,
-  /** Ships within this (metres) are checked for a collision course, dodged when passing nearer than the hulls and this margin. */
-  dodgeLook: 400,
-  dodgeMargin: 15,
   /** A patrol's next point once within this (metres), at this share of the top speed. */
   waypointReach: 150,
   patrolShare: 0.5,
@@ -112,6 +103,7 @@ const slotV = new THREE.Vector3();
 const leaderNose = new THREE.Vector3();
 const local = new THREE.Vector3();
 const localUp = new THREE.Vector3();
+const shipUp = new THREE.Vector3();
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
 const shotFrom = new THREE.Vector3();
@@ -178,7 +170,7 @@ export class NpcBrain {
     this.skill = skillOfTier(ship.type.tier);
     // Staggered, so a group does not all choose and look on the same frame.
     this.nextPick = rng() * this.skill.reaction;
-    this.nextRay = rng() * TUNE.rayEvery;
+    this.nextRay = rng() * AVOID_TUNE.rayEvery;
   }
 
   /** Forget the target (it went into a jump, or the world changed). */
@@ -364,8 +356,8 @@ export class NpcBrain {
     if (this.keepApart(v, ctx)) urgent = true;
     if (!space && ctx.groundAt) {
       const g = ctx.groundAt(pos.x, pos.z);
-      const gAhead = ctx.groundAt(pos.x + vel.x * TUNE.rayAhead, pos.z + vel.z * TUNE.rayAhead);
-      const h = Math.min(pos.y - g, pos.y + vel.y * TUNE.rayAhead - gAhead);
+      const gAhead = ctx.groundAt(pos.x + vel.x * AVOID_TUNE.rayAhead, pos.z + vel.z * AVOID_TUNE.rayAhead);
+      const h = Math.min(pos.y - g, pos.y + vel.y * AVOID_TUNE.rayAhead - gAhead);
       if (h < MIN_ALTITUDE) {
         want.y += 1 + (MIN_ALTITUDE - h) / MIN_ALTITUDE;
         want.normalize();
@@ -470,8 +462,8 @@ export class NpcBrain {
   /** The obstacle ray, every quarter second: something ahead within 2.5 s of flight turns the pilot away for 1.5 s. */
   private lookAhead(now: number, v: NpcShip['vehicle'], ctx: BrainContext): void {
     if (now < this.nextRay || !ctx.physics) return;
-    this.nextRay = now + TUNE.rayEvery;
-    const reach = Math.max(TUNE.rayMin, Math.abs(v.speed) * TUNE.rayAhead);
+    this.nextRay = now + AVOID_TUNE.rayEvery;
+    const reach = Math.max(AVOID_TUNE.rayMin, Math.abs(v.speed) * AVOID_TUNE.rayAhead);
     this.rayOrigin.x = pos.x;
     this.rayOrigin.y = pos.y;
     this.rayOrigin.z = pos.z;
@@ -483,44 +475,23 @@ export class NpcBrain {
     this.avoid.set(hit.normal.x, hit.normal.y, hit.normal.z);
     if (this.avoid.lengthSq() < 1e-6) this.avoid.copy(WORLD_UP);
     this.avoid.normalize();
-    this.avoidUntil = now + TUNE.avoidSeconds;
+    this.avoidUntil = now + AVOID_TUNE.avoidSeconds;
   }
 
   /**
    * Other ships: one within the separation distance is turned away from, and one on a collision course (its closest
-   * approach within `collideSeconds`, nearer than the hulls and a margin) is dodged, away from where that approach is.
-   * Every ship's velocity is its nose times its speed, so nothing is asked of the physics. Says whether it pulled at all.
+   * approach within `collideSeconds`, nearer than the hulls and a margin) is dodged, away from where that approach is
+   * (`pushApart`, a pair at a time; a dead-centre one straight up the ship's own up). Every ship's velocity is its nose
+   * times its speed, so nothing is asked of the physics. Says whether it pulled at all.
    */
   private keepApart(v: NpcShip['vehicle'], ctx: BrainContext): boolean {
     const me = this.ship.contact;
     let pulled = false;
+    shipUp.set(0, 1, 0).applyQuaternion(v.group.quaternion);
     for (const c of ctx.ships.list) {
       if (c === me || c.vehicle.disposed) continue;
       const other = c.vehicle;
-      const gap = TUNE.separation + v.radius + other.radius;
-      const d2 = other.pos.distanceToSquared(pos);
-      if (d2 < gap * gap && d2 > 1e-6) {
-        const d = Math.sqrt(d2);
-        want.addScaledVector(tmp.copy(pos).sub(other.pos).divideScalar(d), 3 * (1 - d / gap)).normalize();
-        pulled = true;
-      }
-      if (d2 > TUNE.dodgeLook * TUNE.dodgeLook) continue;
-      // The closest approach: its time from the relative motion, and how near it passes.
-      velocityOf(other, tmp2).sub(vel);
-      const rv2 = tmp2.lengthSq();
-      if (rv2 < 1) continue;
-      tmp.copy(other.pos).sub(pos);
-      const tca = -tmp.dot(tmp2) / rv2;
-      if (tca <= 0 || tca > TUNE.collideSeconds) continue;
-      tmp.addScaledVector(tmp2, tca);
-      const miss = tmp.length();
-      const room = v.radius + other.radius + TUNE.dodgeMargin;
-      if (miss >= room) continue;
-      // Away from the point of closest approach (straight up past a dead-centre one).
-      if (miss < 1e-3) tmp.set(0, 1, 0).applyQuaternion(v.group.quaternion);
-      else tmp.divideScalar(-miss);
-      want.addScaledVector(tmp, 4 * (1 - miss / room)).normalize();
-      pulled = true;
+      if (pushApart(pos, vel, v.radius, other.pos, velocityOf(other, tmp2), other.radius, want, AVOID_TUNE, shipUp)) pulled = true;
     }
     return pulled;
   }

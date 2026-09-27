@@ -1,5 +1,6 @@
 // A shuttle trip as data (src/world/rideRoute.ts): the pads a trip names, the one rule for which port a
-// travel thing belongs to, and the hop the console flies.
+// travel thing belongs to, the hop the console flies, a ticket's trip about one world, and the pad each
+// of the game's ports is flown to.
 //
 // The port rule used to live in main.ts twice over (the terminal's port and the name a shuttle's round
 // runs under); it lives here now, so the names every shuttle's round has always run under are checked
@@ -11,9 +12,10 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { PORT_REACH, padRefOf, planHop, portOfThing, shuttleClockName, type PadRef } from '../../../src/world/rideRoute.ts';
+import { landingMood } from '../../../src/vehicles/rigHull.ts';
+import { PORT_REACH, landMood, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, type PadRef } from '../../../src/world/rideRoute.ts';
 import { portsOf, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
-import { TRAVEL_TUNE, rigTimes, travelThingsOf, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
+import { TRAVEL_TUNE, rigTimes, travelThingsOf, type Ticket, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -75,6 +77,40 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   ok(JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'a route is plain data');
 }
 
+// ---------------------------------------------------------------- a ticket's trip
+
+{
+  const ports: Port[] = [
+    { name: 'Keren Starport', x: 100, z: 0, kind: 'starport' },
+    { name: 'Keren Shuttleport', x: -3000, z: 900, kind: 'shuttleport' },
+    { name: 'Nowhere Shuttleport', x: 9000, z: 9000, kind: 'shuttleport' },
+  ];
+  const things: TravelThing[] = [
+    thing({ kind: 'collector', rig: null, bx: 110, bz: 5, x: 120, z: 30 }),
+    thing({ bx: 110, bz: 5, x: 130, z: 40 }),
+    thing({ rig: 'shuttle', mood: '', bx: -2950, bz: 880, x: -2940, z: 870 }),
+    thing({ rig: null, bx: 9000, bz: 9010, x: 9005, z: 9020 }),
+  ];
+  const rigs: Record<string, TravelRig> = { transport: rig, shuttle: { ...rig, moods: { '': { land: 'land', lift: 'take_off' } } } };
+  const from = padRefOf('naboo', 1, things[1], ports, rigs, things);
+  const to = padOfPort(things, ports, 'Keren Shuttleport', 'naboo', rigs);
+  ok(!!to && to.index === 2 && to.rig === 'shuttle' && to.port === 'Keren Shuttleport', "a port's pad is the rigged shuttle nearest it");
+  ok(padOfPort(things, ports, 'Nowhere Shuttleport', 'naboo', rigs) === null, 'a port whose only shuttle has no rig has no pad to fly to');
+  ok(padOfPort(things, ports, 'Nowhere Starport', 'naboo', rigs) === null, 'nor has a port this world does not name');
+  const ticket: Ticket = { id: 't3', from: 'naboo', pack: 'naboo', to: 'Keren Shuttleport', at: { x: -3000, z: 900 }, price: 20, bought: 1 };
+  const route = planRoute(ticket, from, to, 'naboo')!;
+  ok(route.legs.map((l) => l.kind).join(',') === 'board,lift,fly,land,off,leave', `a ticket to a rigged pad on this world is boarded, lifted off, flown, landed, stepped off and left (${route.legs.map((l) => l.kind).join(', ')})`);
+  ok(route.legs.slice(0, 2).every((l) => l.pad === from) && route.legs.slice(2).every((l) => l.pad === to) && route.legs[2].aim?.to === 'join', 'its first two legs are at the pad it leaves, the rest at the far pad, and it is flown to the landing\'s join');
+  ok(route.ticket === 't3' && route.trip === 'local' && route.rig === 'transport' && route.mood === 'calm' && route.to.port === 'Keren Shuttleport' && route.to.at?.x === -3000, 'on its ticket, about one world, flown with the rig it leaves on, and knowing where the port is');
+  const walk = planRoute({ ...ticket, to: 'Nowhere Shuttleport', at: { x: 9000, z: 9000 } }, from, null, 'naboo')!;
+  ok(walk.legs.map((l) => l.kind).join(',') === 'board,lift,walkOff' && walk.legs[2].port === 'Nowhere Shuttleport' && walk.to.pad === null, `with no pad to land on, it is lifted off and the passenger set down at the port (${walk.legs.map((l) => l.kind).join(', ')})`);
+  ok(planRoute(ticket, padRefOf('naboo', 3, things[3], ports, rigs, things), to, 'naboo') === null, 'a pad with no rig to fly flies nothing, and the ticket does what it always did');
+  ok(planRoute({ ...ticket, pack: 'tatooine' }, from, to, 'naboo') === null, 'nor is a ticket to another world flown yet');
+  ok(JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'and a trip is plain data');
+  ok(landMood(rig, from) === 'calm' && landMood(rigs.shuttle, to!) === '' && landMood({ moods: { theed: rig.moods.calm, calm: rig.moods.calm } }, { mood: 'theed' }) === 'calm', 'a hull lands with its calm branch where its rig has one, and its own otherwise');
+  ok(landingMood(rigs.shuttle.moods, '') === landMood(rigs.shuttle, { mood: '' }) && landingMood(rig.moods, 'calm') === landMood(rig, { mood: 'calm' }), "and the hull's own rule is that same one");
+}
+
 // ---------------------------------------------------------------- the old names, over the real packs
 
 {
@@ -117,6 +153,40 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
     }
   }
   if (things) ok(true, `over ${worlds.length} converted worlds, every one of ${things} travel things runs its round under the name main.ts always gave it, and ${pads} shuttle pads (${named} with a port's name) are keyed as the drawn shuttles stand them`);
+}
+
+// ---------------------------------------------------------------- every port's pad, over the real packs
+
+{
+  // Six of the game's ports have no shuttle standing on a rig by them, and a ticket there is flown as far
+  // as the take-off and set down at the port; every other port a ticket can name has a pad to land on.
+  const packs = join(process.cwd(), 'assets-private');
+  const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => !w.startsWith('space_') && existsSync(join(packs, w, 'travel.json')) && existsSync(join(packs, w, 'pois.json'))) : [];
+  const none: string[] = [];
+  let answered = 0;
+  let calm = 0;
+  for (const world of worlds) {
+    const travel = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
+    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    if (!pois.center || !Array.isArray(travel.rows)) continue;
+    const rigs = travel.rigs ?? {};
+    const all = travelThingsOf(travel.rows, pois.center);
+    for (const p of portsOf(pois.pois ?? [], pois.center)) {
+      const pad = padOfPort(all, portsOf(pois.pois ?? [], pois.center), p.name, world, rigs);
+      if (!pad) {
+        none.push(`${world}: ${p.name}`);
+        continue;
+      }
+      assert.ok(pad.rig && rigs[pad.rig] && Math.hypot(p.x - all[pad.index].bx, p.z - all[pad.index].bz) <= PORT_REACH, `${world}: ${p.name}'s pad has a rig and stands by it`);
+      answered++;
+      if (landMood(rigs[pad.rig], pad) === 'calm') calm++;
+    }
+  }
+  if (!answered) note('no converted world carries rigged shuttle pads, so the ports are not checked: npm run swg -- travel @SWG assets-private --retail-only');
+  else {
+    ok(none.length === 6, `six ports have no rigged shuttle to land on (${none.join('; ')})`);
+    ok(answered > 40, `and every other one of ${answered + none.length} has its pad (${answered}, ${calm} of them flown to by a transport's calm landing)`);
+  }
 }
 
 console.log(`\nride route: ${passed} checks passed`);

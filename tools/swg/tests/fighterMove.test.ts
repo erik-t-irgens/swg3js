@@ -72,6 +72,22 @@ await Physics.create();
   ok(camera !== null && Math.abs(camera - far) < 1e-6, 'and it is `cameraBlock`’s own answer to the letter, which is the point of it being that predicate and not a new one');
 }
 
+{
+  // The same ray asked to leave the ground out (`ground` false), as a shuttle's pilot asks it: the pilot
+  // keeps its own line over the ground, and a look ahead that saw the ground too held the hull up over
+  // rising ground on its way down to a join. What stands on the ground still stops it.
+  const physics = Physics.local();
+  const world = physics.world;
+  world.createCollider(RAPIER.ColliderDesc.cuboid(40, 0.5, 40).setTranslation(0, -0.5, 0).setCollisionGroups(groups(Group.terrain, Group.all)));
+  world.createCollider(RAPIER.ColliderDesc.cuboid(1, 1, 1).setTranslation(4, 1, 0));
+  physics.stepOnce();
+  const down = physics.blockDistance(0, 5, 0, 0, -5, 0);
+  ok(down > 4.9 && down < 5.1, `a ray straight down meets the ground five metres below (${down.toFixed(2)} m)`);
+  ok(physics.blockDistance(0, 5, 0, 0, -5, 0, false, false) === Infinity, 'and with the ground left out it meets nothing');
+  const crate = physics.blockDistance(0, 1, 0, 10, 1, 0, false, false);
+  ok(crate > 2.9 && crate < 3.1, `while the crate standing on it still stops a ray three metres out (${crate.toFixed(2)} m)`);
+}
+
 // --- 2: the adapter the manager really builds ------------------------------------------------------
 //
 // Built here out of the same two engine calls `NpcManager.coverDeps` is built out of -- the ray

@@ -13,7 +13,7 @@
 // their extension, and there are no constructor parameter properties.
 
 import type { Port } from './shuttle.ts';
-import { rigTimes, TRAVEL_TUNE, type ShuttleTimes, type TravelRig, type TravelThing } from './travelTerminal.ts';
+import { rigTimes, TRAVEL_TUNE, type ShuttleTimes, type Ticket, type TravelRig, type TravelThing } from './travelTerminal.ts';
 
 /** What one leg of a trip is. */
 export type LegKind = 'board' | 'lift' | 'fly' | 'climb' | 'up' | 'jump' | 'down' | 'skip' | 'land' | 'off' | 'walkOff' | 'leave';
@@ -67,8 +67,9 @@ export interface RideLeg {
 
 /**
  * A whole trip: the ticket it is flown on (empty for none), what kind of trip, the rig and branch it is
- * flown with, where it leaves from and where it goes, whether the flight between worlds is skipped and
- * why it had to be (null when it was chosen, or not skipped), and its legs.
+ * flown with, where it leaves from and where it goes (the port's own place in its world's frame where
+ * the ticket says it, which is where somebody saved mid-trip is put down), whether the flight between
+ * worlds is skipped and why it had to be (null when it was chosen, or not skipped), and its legs.
  */
 export interface RideRoute {
   ticket: string;
@@ -76,7 +77,7 @@ export interface RideRoute {
   rig: string;
   mood: string;
   from: PadRef;
-  to: { pack: string; port: string; pad: PadRef | null };
+  to: { pack: string; port: string; pad: PadRef | null; at?: { x: number; z: number } | null };
   skipSpace: boolean;
   forced: string | null;
   legs: RideLeg[];
@@ -166,5 +167,71 @@ export function planHop(from: PadRef, to: PadRef): RideRoute {
       { kind: 'off', world: there, pad: to },
       { kind: 'leave', world: there, pad: to },
     ],
+  };
+}
+
+/**
+ * The pad a ticket's port is flown to: the rigged shuttle row nearest that port's own place, within the
+ * reach a thing belongs to a port by. Null for a port this world does not name, or one with no shuttle
+ * standing on a rig by it (six of the retail ports: a trip there is flown as far as the take-off and
+ * the passenger put down at the port, as a ticket always was).
+ */
+export function padOfPort(things: readonly TravelThing[], ports: readonly Port[], port: string, pack: string, rigs: Readonly<Record<string, TravelRig>>, reach = PORT_REACH): PadRef | null {
+  const p = ports.find((x) => x.name === port);
+  if (!p) return null;
+  let best = -1;
+  let bestD = Infinity;
+  for (let i = 0; i < things.length; i++) {
+    const t = things[i];
+    if (t.kind !== 'shuttle' || !t.rig || !rigs[t.rig]) continue;
+    const d = Math.hypot(p.x - t.bx, p.z - t.bz);
+    if (d >= bestD) continue;
+    bestD = d;
+    best = i;
+  }
+  return best >= 0 && bestD <= reach ? padRefOf(pack, best, things[best], ports, rigs, things) : null;
+}
+
+/**
+ * The branch a hull flown from a pad lands with, wherever it lands: the calm one, where its rig has one,
+ * and otherwise the one it took off on (the shuttle's only branch). No trip ends in Theed's hangar, since
+ * no port stands near it, so a transport out of Theed comes down as every other transport does.
+ */
+export function landMood(rig: Pick<TravelRig, 'moods'> | null | undefined, from: { mood: string }): string {
+  return rig?.moods?.calm ? 'calm' : from.mood;
+}
+
+/**
+ * A ticket's trip, as legs. A ticket about this world with a rigged pad at the far end is boarded,
+ * lifted off on its clip, flown by the shuttle's own pilot to the landing's join, landed, stepped off
+ * and left empty to go on its way; with no pad there it is flown as far as the take-off's cut and the
+ * passenger put down at the port. Null where no trip can be flown -- a pad with no rig to fly, or a
+ * ticket to another world -- and the caller does what a ticket always did.
+ */
+export function planRoute(ticket: Ticket, from: PadRef, to: PadRef | null, here: string): RideRoute | null {
+  if (!from.rig || ticket.pack !== here || ticket.from !== here) return null;
+  const pad = to && to.rig ? to : null;
+  const legs: RideLeg[] = [
+    { kind: 'board', world: here, pad: from },
+    { kind: 'lift', world: here, pad: from },
+  ];
+  if (pad) {
+    legs.push(
+      { kind: 'fly', world: here, pad, aim: { to: 'join', pack: here, port: ticket.to } },
+      { kind: 'land', world: here, pad },
+      { kind: 'off', world: here, pad },
+      { kind: 'leave', world: here, pad },
+    );
+  } else legs.push({ kind: 'walkOff', world: here, port: ticket.to, aim: { to: 'port', pack: here, port: ticket.to } });
+  return {
+    ticket: ticket.id,
+    trip: 'local',
+    rig: from.rig,
+    mood: from.mood,
+    from,
+    to: { pack: here, port: ticket.to, pad, at: ticket.at ? { x: ticket.at.x, z: ticket.at.z } : null },
+    skipSpace: false,
+    forced: null,
+    legs,
   };
 }
