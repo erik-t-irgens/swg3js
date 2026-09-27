@@ -10,10 +10,12 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
 import { loadGlb, packRigs } from './rigFixtures.ts';
+import { lookRotation } from '../../../src/space/hyperspaceMath.ts';
 import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf } from '../../../src/vehicles/rigHull.ts';
-import { padOfPort, type PadRef } from '../../../src/world/rideRoute.ts';
+import { downArrival, padOfPort, type PadRef } from '../../../src/world/rideRoute.ts';
 import { landingTarget, makeLandingTarget, noseOntoPath, onPad, pathPose, pathVelocity, turnOnPad, vehicleFromJoint } from '../../../src/world/rigPath.ts';
 import { RIDE_PILOT, ShuttlePilot, planCourse, planRadius, type RideCourse, type RideState } from '../../../src/world/shuttleCourse.ts';
+import { RIDE_TUNE, downGlideOf } from '../../../src/world/shuttleRide.ts';
 import { portsOf, ridesFrom, type PoiRow } from '../../../src/world/shuttle.ts';
 import { travelThingsOf, type TravelRig, type TravelRow } from '../../../src/world/travelTerminal.ts';
 
@@ -108,6 +110,78 @@ export function rigPairs(packs = join(process.cwd(), 'assets-private')): RigPair
   return out;
 }
 
+/**
+ * Every rigged pad a ticket can land on (a port's pad, `padOfPort`) with each landing a hull can bring to
+ * it -- every rig, landing with the branch its take-off branches land with, once each -- and where the
+ * crossing down onto that pad comes out, worked out exactly as the ride works it out (`landingTarget`,
+ * `downArrival` at `reach`, `downGlideOf`), as a pair whose "cut" is that arrival: the hull there, facing
+ * along its glide, at the pilot's cruise. The pad is both ends of the pair, which is what flat ground and
+ * the clearance a flight is held to beyond it are measured about. `byTicket` is whether any ticket flies
+ * that rig down there: only a starport leaves its world and a trip's hull is its boarding pad's own rig, so
+ * a crossing down is only ever flown by a rig that stands on some world's starport (on the converted worlds
+ * every one is the transport), and an arrival of any other rig is flown here for its numbers alone. Empty
+ * with no converted worlds.
+ */
+export function rigArrivals(packs = join(process.cwd(), 'assets-private'), reach = RIDE_TUNE.downReach): (RigPair & { run: number; glide: number; byTicket: boolean })[] {
+  const out: (RigPair & { run: number; glide: number; byTicket: boolean })[] = [];
+  if (!existsSync(packs)) return out;
+  const rigsAll = packRigs(packs, readdirSync, existsSync, join);
+  const hullOf = hullsOf(packs);
+  const target = makeLandingTarget();
+  const speed = Math.min(RIDE_PILOT.cruise, RIG_HULL_TUNE.maxSpeed);
+  // Every world's rigged pads first, and which rigs stand on a starport's pad on any of them.
+  const worlds: { pack: string; rigs: Record<string, TravelRig>; pads: Map<string, PadRef> }[] = [];
+  const leaving = new Set<string>();
+  for (const pack of readdirSync(packs).sort()) {
+    const tp = join(packs, pack, 'travel.json');
+    const pp = join(packs, pack, 'pois.json');
+    if (pack.startsWith('space_') || !existsSync(tp) || !existsSync(pp)) continue;
+    const travel = JSON.parse(readFileSync(tp, 'utf8')) as { rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
+    const pois = JSON.parse(readFileSync(pp, 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    if (!pois.center || !Array.isArray(travel.rows)) continue;
+    const rigs = { ...rigsAll, ...(travel.rigs ?? {}) };
+    const things = travelThingsOf(travel.rows, pois.center);
+    const ports = portsOf(pois.pois ?? [], pois.center);
+    const pads = new Map<string, PadRef>();
+    for (const port of ports) {
+      const pad = padOfPort(things, ports, port.name, pack, rigs);
+      if (!pad?.rig) continue;
+      pads.set(pad.key, pad);
+      if (port.kind === 'starport') leaving.add(pad.rig);
+    }
+    worlds.push({ pack, rigs, pads });
+  }
+  for (const { pack, rigs, pads } of worlds) {
+    for (const to of pads.values()) {
+      for (const [rigName, rig] of Object.entries(rigs)) {
+        const landings = new Set<string>();
+        for (const mood of Object.keys(rig.moods)) {
+          const hull = hullOf(rigName, rig, mood);
+          const paths = hull?.paths(mood);
+          if (!hull || !paths?.join || landings.has(paths.landMood)) continue;
+          landings.add(paths.landMood);
+          landingTarget(to, paths.land, paths.join, hull.offset, target);
+          const glide = downGlideOf(-target.climb);
+          const a = downArrival([to.x, to.y, to.z], { at: [target.pos.x, target.pos.y, target.pos.z], dirX: Math.sin(target.heading), dirZ: Math.cos(target.heading) }, reach, glide);
+          const q = lookRotation(a.forward);
+          out.push({
+            pack,
+            from: to,
+            to,
+            label: `${pack}: down onto ${to.port || to.key} (${rigName} landing ${paths.landMood || 'its own'})`,
+            cut: { pos: new THREE.Vector3(a.at[0], a.at[1], a.at[2]), quat: new THREE.Quaternion(q[0], q[1], q[2], q[3]), speed },
+            join: { x: target.pos.x, y: target.pos.y, z: target.pos.z, heading: target.heading, speed: target.speed, descent: -target.climb, ground: to.y },
+            run: a.run,
+            glide,
+            byTicket: leaving.has(rigName),
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /** How a flight went: whether and where it met the join, how long it took, and what it flew over. */
 export interface Flight {
   joined: boolean;
@@ -134,6 +208,11 @@ export interface Flight {
   heightTurns: number;
   /** Degrees: the most the hull ever dived past the steepest the pilot may ask for (the join's own glide and five, or `descentMax`). */
   diveOver: number;
+  /** Degrees: how much the first course planned turns in all (every bend's own angle added up), and how much the hull really turned, flown. */
+  courseTurn: number;
+  flownTurn: number;
+  /** Degrees: the steepest the hull's nose ever pointed down. */
+  steepest: number;
 }
 
 /** The stretch before the join the sway is counted over, in seconds, and what counts as a side and as a climb. */
@@ -151,7 +230,7 @@ const AX_Z = new THREE.Vector3(0, 0, 1);
  * is planned again from where it is, as the ride does. `padNear` is how far from either pad a flight is
  * held to the ground at all: the game's own clips pass under the raw ground near some pads.
  */
-export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, opts: { dt?: number; maxSeconds?: number; padNear?: number } = {}): Flight {
+export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, opts: { dt?: number; maxSeconds?: number; padNear?: number; startGround?: number | undefined } = {}): Flight {
   const dt = opts.dt ?? 1 / 30;
   const maxSeconds = opts.maxSeconds ?? 900;
   const padNear = opts.padNear ?? 600;
@@ -172,8 +251,16 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
     pilot.setCourse(course, top);
     return course;
   };
-  let course = plan(p.from.y);
+  // The ground under where it is let go: the pad it leaves, straight off a take-off, and nothing known for
+  // a start that is not (a crossing down plans its course knowing nothing of the ground yet).
+  let course = plan('startGround' in opts ? opts.startGround : p.from.y);
   const first = course;
+  let courseTurn = 0;
+  for (let i = 1; i < first.n; i++) courseTurn += Math.abs(Math.atan2(Math.sin(first.hs[i] - first.hs[i - 1]), Math.cos(first.hs[i] - first.hs[i - 1])));
+  let flownTurn = 0;
+  let steepest = 0;
+  nose.set(0, 0, 1).applyQuaternion(q);
+  let lastHeading = Math.atan2(nose.x, nose.z);
   const groundCached = (x: number, z: number): number => ground(x, z);
   let t = 0;
   let joined = false;
@@ -214,6 +301,10 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
     nose.set(0, 0, 1).applyQuaternion(q);
     pos.addScaledVector(nose, cruise * dt);
     t += dt;
+    const heading = Math.atan2(nose.x, nose.z);
+    flownTurn += Math.abs(Math.atan2(Math.sin(heading - lastHeading), Math.cos(heading - lastHeading)));
+    lastHeading = heading;
+    steepest = Math.max(steepest, -Math.asin(Math.max(-1, Math.min(1, nose.y))));
     if (recorded < steps) {
       sx[recorded] = d.stickX;
       sy[recorded] = d.stickY;
@@ -256,6 +347,9 @@ export function flyCourse(p: RigPair, ground: (x: number, z: number) => number, 
     flipsY: sideChanges(sy, from, recorded, SWAY.stickDead),
     heightTurns: sideChanges(climb, from, recorded, SWAY.climbDead),
     diveOver,
+    courseTurn: (courseTurn * 180) / Math.PI,
+    flownTurn: (flownTurn * 180) / Math.PI,
+    steepest: (steepest * 180) / Math.PI,
   };
 }
 

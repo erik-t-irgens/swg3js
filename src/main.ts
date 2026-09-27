@@ -108,7 +108,7 @@ import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
 import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
 import { discDirection, farPadsOf, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, tripSeconds, zonePlace, type FarPads, type PadRef, type RideRoute, type SpacePlan } from './world/rideRoute.ts';
 import { RIDE_PILOT } from './world/shuttleCourse.ts';
-import { RIDE_TUNE, ShuttleRide, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
+import { RIDE_TUNE, ShuttleRide, downReachOf, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -403,6 +403,12 @@ interface ShipCrossing {
    * said to it.
    */
   passenger?: true;
+  /**
+   * What the passenger's trip makes of the hull it came out in, handed that hull the moment it exists and
+   * waited for, behind the loading screen and before the world arrived at is compiled behind it: its flames'
+   * batches, so the screen builds their programs rather than the first frames after it lifts.
+   */
+  ready?: (v: Vehicle) => Promise<unknown>;
 }
 /**
  * Whether a shuttle trip between worlds can be flown through space. It can: the terminal's box is free
@@ -1396,17 +1402,17 @@ class App {
       // The ordinary crossing, with the passenger's own hull carried: the loading screen, the world going
       // (the hull with it), and the hull built again on the far side, held where the trip comes out with the
       // passenger in it (`arriveInShip`). Any world by its pack, not only the one below an orbit.
-      cross: (h, leg, arrival, speed) => {
+      cross: (h, leg, arrival, speed, ready) => {
         const v = h as Vehicle;
         const planet = planetOfRouteId(leg.world);
         if (!planet || !v.def) return Promise.resolve(null);
         const zone = planet.zones?.find((z) => z.pack === leg.world)?.id;
-        return this.travel(planet, zone, { def: v.def, speed, height: 0, crew: null, condition: null, arrival: { pos: arrival.pos.clone(), quaternion: arrival.quaternion.clone() }, passenger: true });
+        return this.travel(planet, zone, { def: v.def, speed, height: 0, crew: null, condition: null, arrival: { pos: arrival.pos.clone(), quaternion: arrival.quaternion.clone() }, passenger: true, ready });
       },
       // The flight through space: the game's own heights, the zones' packs (the System Map's catalogue,
       // fetched the first time anything asks), where a world is reached in its zone, the disc a world
       // hangs in the sky, the jump every ship makes, and how far a ground world's starports load out to.
-      heights: { gate: SPACE_GATE_HEIGHT, arrive: SPACE_ARRIVAL_HEIGHT },
+      heights: { gate: SPACE_GATE_HEIGHT },
       prefetchSpace: () => void this.catalogue().catch(() => null),
       spacePlace: async (aim, towards, out) => {
         const cat = await this.catalogue().catch(() => null);
@@ -2261,6 +2267,7 @@ class App {
         setTune(RIDE_TUNE, opts.tune);
         setTune(RIDE_PILOT, opts.pilot);
         if (opts.pilot?.joinTol) setTune(RIDE_PILOT.joinTol, opts.pilot.joinTol);
+        if (opts.pilot?.straightIn) setTune(RIDE_PILOT.straightIn, opts.pilot.straightIn);
         if (opts.abort) this.ride?.abort('stopped from the console');
         if (opts.trip) return this.debugTrip(opts.trip, !!opts.skip, !!opts.legs);
         if (opts.to || opts.empty) return this.debugRide((opts.to ?? opts.empty)!, !!opts.to);
@@ -8571,6 +8578,16 @@ class App {
       console.warn(`travel: nothing could be spawned to arrive in on ${planet.name}`, err);
       arrived = null;
     }
+    // Whatever a shuttle's trip will show of the hull its passenger came out in -- its flames and their
+    // batches -- made now, behind this screen and before the settle below compiles the world arrived at,
+    // so none of it is built on the first frames after the screen lifts.
+    if (arrived && crossing?.ready) {
+      try {
+        await crossing.ready(arrived);
+      } catch (err) {
+        console.warn('travel: what the shuttle shows of its hull could not be made ready behind the screen', err);
+      }
+    }
     await this.settle();
     // Where this crossing came out, for anyone in the group taking the same trip after it. It is
     // said under the same name the trip was offered under, not the zone `arrive` settled on: a
@@ -10592,6 +10609,8 @@ class App {
    * the world's list with a drive of nothing so nothing mounts it or clears it away.
    */
   private async spawnRigHull(): Promise<unknown> {
+    const busy = this.consoleRideRefusal();
+    if (busy) return busy;
     const rigs = this.shuttleRigs;
     const key = rigs?.nearest(this.player.worldPos) ?? null;
     const pad = rigs && key ? rigs.padOf(key) : null;
@@ -10769,6 +10788,8 @@ class App {
    * swap measured as the console's parked hull's is.
    */
   private async flyRigHull(to?: string): Promise<unknown> {
+    const busy = this.consoleRideRefusal();
+    if (busy) return busy;
     const rigs = this.shuttleRigs;
     const key = rigs?.nearest(this.player.worldPos) ?? null;
     if (!rigs || !key) return 'no shuttle stands on its rig in this world: go to a starport or shuttleport of a world whose travel pack has rigs';
@@ -10964,10 +10985,24 @@ class App {
   }
 
   /**
+   * Why the console may not begin a shuttle trip or build a shuttle's hull just now, in words, or null
+   * when it may: not while a loading screen is up or a world is being travelled to, and not before there
+   * is a world at all. Asked before anything is planned or built, so a trip asked for then builds no hull
+   * and is not reported as one its passenger missed: they were only waiting for a world to load.
+   */
+  private consoleRideRefusal(): string | null {
+    if (this.loadingScreen.open || this.traveling) return 'the world is still loading: wait for it to finish loading, then ask for the shuttle again';
+    if (!this.started || !this.inWorld) return 'there is no world to ride a shuttle in yet: pick a character and wait for its world to finish loading';
+    return null;
+  }
+
+  /**
    * The console's trip to a port of this world from the pad nearest the player: ridden with no ticket,
    * or flown empty (`passenger` false) to see a hull land on that port's pad.
    */
   private async debugRide(port: string, passenger: boolean): Promise<unknown> {
+    const busy = this.consoleRideRefusal();
+    if (busy) return busy;
     const rigs = this.shuttleRigs;
     const key = rigs?.nearest(this.player.worldPos) ?? null;
     if (!rigs || !key) return 'no shuttle stands on its rig in this world: go to a starport or shuttleport of a world whose travel pack has rigs';
@@ -10999,6 +11034,8 @@ class App {
   private async debugTrip(trip: string, skip: boolean, legs = false): Promise<unknown> {
     const at = trip.indexOf(':');
     if (at <= 0) return "name the trip as '<pack>:<port>', such as 'tatooine:Mos Eisley Starport'";
+    const busy = this.consoleRideRefusal();
+    if (busy) return busy;
     const pack = trip.slice(0, at);
     const port = trip.slice(at + 1);
     const here = packIdOf(this.world.planet, this.zone);
@@ -11011,6 +11048,9 @@ class App {
     if (!from?.rig) return `${key} is not a pad a shuttle stands on its rig at`;
     const there = await this.padsOf(pack);
     if (!there) return `no travel pack or places could be read for ${pack}: npm run swg -- travel @SWG assets-private --retail-only`;
+    // Asked again: a world may have begun loading while the far pads were read.
+    const busyNow = this.consoleRideRefusal();
+    if (busyNow) return busyNow;
     const row = there.ports.find((p) => p.name === port);
     if (!row) return `${pack} has no port called ${port}; these are: ${there.ports.map((p) => p.name).join(', ')}`;
     const offer = skipOffer(here, pack, this.routeFacts, SPACE_LEG_BUILT);
@@ -11039,8 +11079,8 @@ class App {
       climbDeg: RIDE_TUNE.climbDeg,
       gate: SPACE_GATE_HEIGHT,
       gateMargin: RIDE_TUNE.gateMargin,
-      arrive: SPACE_ARRIVAL_HEIGHT,
-      downReach: Math.max(RIDE_TUNE.downReachMin, Math.min(RIDE_TUNE.downReach, this.world.streamNearRange() - RIDE_TUNE.downReachMargin)),
+      downGlide: RIDE_TUNE.downGlide,
+      downReach: downReachOf(this.world.streamNearRange()),
       // A whole jump, by the game's own scene: the countdown, the enter stage to the transit, the tunnel's least time, the exit.
       jump: JUMP_COUNTDOWN + transitAt(scene) + TUNNEL_TIMES.min + exitEnd(scene),
     };

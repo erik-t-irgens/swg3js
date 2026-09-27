@@ -414,18 +414,31 @@ export function discDirection(pack: SpacePack, planet: string): Vec3 | null {
 }
 
 /**
- * Where the crossing down onto a world comes out: `reach` metres from the pad over the ground, back
- * along the way the landing clip is travelling at its join, and `height` metres over the pad; facing the
- * join, so the pilot has the whole glide down in front of it. Game frame.
+ * Where the crossing down onto a world comes out: on the landing's own line, back along the way its clip
+ * is travelling at the join, `reach` metres from the pad over the ground, and on a straight glide of
+ * `glideDeg` degrees down to the join; facing along that glide, so the pilot has the whole of it in front
+ * of it and nothing to turn. `run` is how far over the ground it is from there to the join.
+ *
+ * The game's own arrival height is not used: 700 m over the pad at a kilometre and a half comes down onto
+ * a join barely 1.2 km off at nearly thirty degrees, and back along the way in from the pad rather than from
+ * the join (which stands 47 m off that line on the transport), the course could only get onto the landing's
+ * line by flying a whole circle first -- which it did, after diving five hundred metres. The glide is ours
+ * (`RIDE_TUNE.downGlide`). Game frame.
  */
-export function downArrival(pad: Vec3, join: { at: Vec3; dirX: number; dirZ: number }, reach: number, height: number): { at: Vec3; forward: Vec3 } {
+export function downArrival(pad: Vec3, join: { at: Vec3; dirX: number; dirZ: number }, reach: number, glideDeg: number): { at: Vec3; forward: Vec3; run: number } {
   const l = Math.hypot(join.dirX, join.dirZ) || 1;
-  const at: Vec3 = [pad[0] - (join.dirX / l) * reach, pad[1] + height, pad[2] - (join.dirZ / l) * reach];
-  const dx = join.at[0] - at[0];
-  const dy = join.at[1] - at[1];
-  const dz = join.at[2] - at[2];
-  const d = Math.hypot(dx, dy, dz) || 1;
-  return { at, forward: [dx / d, dy / d, dz / d] };
+  const dx = join.dirX / l;
+  const dz = join.dirZ / l;
+  // The distance back from the join along its line at which the pad is `reach` away: the root of
+  // |join - pad - dir * run| = reach on the far side of the join.
+  const vx = join.at[0] - pad[0];
+  const vz = join.at[2] - pad[2];
+  const b = vx * dx + vz * dz;
+  const disc = b * b - (vx * vx + vz * vz) + reach * reach;
+  const run = Math.max(0, disc >= 0 ? b + Math.sqrt(disc) : b);
+  const g = (Math.max(0, Math.min(89, glideDeg)) * Math.PI) / 180;
+  const at: Vec3 = [join.at[0] - dx * run, join.at[1] + run * Math.tan(g), join.at[2] - dz * run];
+  return { at, forward: [dx * Math.cos(g), -Math.sin(g), dz * Math.cos(g)], run };
 }
 
 /** A rig's clips as a trip's estimate reads them: when the take-off lets go and how high, when the landing takes back, how high and how far out, and when it touches down. */
@@ -438,14 +451,15 @@ export interface TripClip {
   down: number;
 }
 
-/** The pace a trip's estimate reckons with: the speeds over a planet and in space, the climb, the heights, the crossing down's reach, the disc run and a whole jump. */
+/** The pace a trip's estimate reckons with: the speeds over a planet and in space, the climb, the heights, the crossing down's reach and glide, the disc run and a whole jump. */
 export interface TripPace {
   cruise: number;
   spaceCruise: number;
   climbDeg: number;
   gate: number;
   gateMargin: number;
-  arrive: number;
+  /** Degrees: the glide the crossing down comes out on (`downArrival`). */
+  downGlide: number;
   downReach: number;
   jump: number;
   /** Metres flown across a system between two of its worlds, for a trip within one; 0 otherwise. */
@@ -474,7 +488,7 @@ export function tripSeconds(route: RideRoute, clip: TripClip, pace: TripPace): n
       case 'fly':
         if (leg.aim?.to === 'zonePlace') s += (pace.across ?? 0) / Math.max(1, pace.spaceCruise);
         else if (leg.aim?.to === 'disc') s += leg.aim.seconds;
-        else if (route.legs.some((l) => l.kind === 'down')) s += Math.hypot(pace.arrive - clip.joinH, pace.downReach - clip.joinOut) / Math.max(1, pace.cruise);
+        else if (route.legs.some((l) => l.kind === 'down')) s += Math.max(0, pace.downReach - clip.joinOut) / Math.cos((pace.downGlide * Math.PI) / 180) / Math.max(1, pace.cruise);
         break;
       case 'land':
         s += Math.max(0, clip.down - clip.join);

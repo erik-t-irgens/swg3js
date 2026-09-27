@@ -694,6 +694,62 @@ const worldY = (o: THREE.Object3D) => {
   const newFlame = handles.at(-1)!;
   ok(newFlame.file === 'travel/particles/new.json' && !newFlame.removed, 'driven, it lights its own flames');
 
+  // Made ready before a hull is shown, and waited for: every file the branches it is asked for light
+  // prepared once for the session -- the one it takes off on and the one it lands with, whose marks light
+  // different files here, as Theed's transport lands with the calm branch -- and every sound it can play
+  // asked of the bank, with no set made, driven or placed: the set it is shown with is still lent or made
+  // when it is. The prepare is held open, as a real one is while its textures load, because what the trip
+  // and a crossing's loading screen wait on is the answer settling, not the prepare merely being asked for.
+  const readyRig: TravelRig = {
+    ...carryRig,
+    events: {
+      ...carryRig.events,
+      start: { particles: [{ file: 'travel/particles/ready.json', seconds: 4 }] },
+      calmStart: { particles: [{ file: 'travel/particles/ready_calm.json', seconds: 3 }] },
+    },
+    moods: {
+      theed: { land: 'land', lift: 'take_off', ground: 'loop_ground', sky: 'loop_sky' },
+      calm: { land: 'land_calm', lift: 'take_off_calm', ground: 'loop_ground', sky: 'loop_sky' },
+    },
+    marks: {
+      land: [{ t: 0.1, joint: 'arm', event: 'start' }],
+      take_off: [{ t: 0.5, joint: 'arm', event: 'start' }],
+      land_calm: [{ t: 3, joint: 'arm', event: 'calmStart' }],
+      take_off_calm: [{ t: 0.2, joint: 'arm', event: 'calmStart' }],
+    },
+  };
+  const filesBefore = preparedFiles.length;
+  const asksBefore = prepareCalls;
+  const placedAtReady = handles.length;
+  const drivenBefore = fxRigs.describe().driven;
+  const plainPrepare = fx.prepare;
+  const heldOpen = new Map<string, () => void>();
+  fx.prepare = (file: string) => {
+    preparedFiles.push(file);
+    return new Promise<boolean>((r) => heldOpen.set(file, () => r(true)));
+  };
+  const turn = () => new Promise((r) => setTimeout(r, 0));
+  let settled = false;
+  const readying = fxRigs.ready(readyRig, ['theed', 'calm', 'nowhere'], flownJoints).then(() => {
+    settled = true;
+  });
+  await turn();
+  const askedFor = preparedFiles.slice(filesBefore).sort().join();
+  ok(
+    askedFor === 'travel/particles/ready.json,travel/particles/ready_calm.json' && !settled && prepareCalls === asksBefore + 1 && handles.length === placedAtReady && fxRigs.describe().driven === drivenBefore,
+    `made ready, the files both branches light are asked for and its sounds asked of the bank, with nothing lit or driven, and a branch its rig has not got asks for nothing (${askedFor})`,
+  );
+  heldOpen.get('travel/particles/ready_calm.json')?.();
+  await turn();
+  ok(!settled, "and what it hands back does not settle while any file it asked for is still being prepared -- here the take-off branch's, with the landing branch's done");
+  heldOpen.get('travel/particles/ready.json')?.();
+  await readying;
+  ok(settled, 'but does once every one of them is');
+  const filesAfter = preparedFiles.length;
+  await fxRigs.ready(readyRig, ['theed'], flownJoints);
+  ok(preparedFiles.length === filesAfter && prepareCalls === asksBefore + 2, 'made ready again, nothing is prepared twice for the session, and its sounds are asked of the bank again (which keeps them once)');
+  fx.prepare = plainPrepare;
+
   // A hull that lands with another branch than it took off on (Theed's transport comes down as the calm
   // one does): its set is bound again from that branch, so its landing burns and sounds at the marks of
   // the clip it is shown playing, and the engines burning through its flight are carried across.

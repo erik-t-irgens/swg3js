@@ -949,6 +949,27 @@ export class ShuttleRigs {
   }
 
   /**
+   * Everything a hull flown from a rig can light and sound in the branches it will play (`moods`: the one
+   * it takes off on and the one it lands with), made ready and waited for: each particle file its marks
+   * light prepared once for the session -- its batches made, hidden, and its textures uploaded -- and its
+   * sounds asked of the bank. Nothing is bound to be played: the set it is shown with is still lent or made
+   * when it is. What a trip waits on before it swaps its hull in on the pad, and while a crossing's loading
+   * screen is still up, so every batch a flame of it draws in exists before anybody can see the hull, and a
+   * batch made behind a loading screen is compiled by that screen. Allocates, once a trip and once a crossing.
+   */
+  ready(rig: TravelRig, moods: readonly string[], joints: THREE.Object3D): Promise<unknown> {
+    const files = new Set<string>();
+    for (const mood of moods) {
+      const clips = rig.moods[mood];
+      if (!clips) continue;
+      for (const f of bindFx(rig, clips, joints).files) files.add(f);
+    }
+    const sounds = soundsOf(rig);
+    if (sounds.length) this.deps.audio?.prepare(sounds);
+    return files.size && this.deps.fx ? this.prepareFx([...files]) : Promise.resolve();
+  }
+
+  /**
    * A flown hull's set bound again from another branch of its rig (`RigFx.rebranch`), for a hull that
    * lands with a branch other than the one it took off on: its flames carried across, and any particle
    * file the new branch lights and the old did not prepared once for the session, not waited on.

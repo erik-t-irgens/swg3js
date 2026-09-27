@@ -16,6 +16,9 @@
 // when it is taken over banked, and climbs more steeply over ground that rises faster; in space it turns its nose onto a point behind it with no roll at all,
 // and a ship coming at it bends its way. A step makes nothing: read in the code,
 // measured as what twenty thousand of them leave behind, and as what short stretches of them allocate.
+// A start already on the landing's own line is one straight run in; and from where every crossing down
+// onto a rigged pad comes out, the course is within 15% of the straight line, turns no more than 90
+// degrees planned or flown and meets its join, where the old way out of a crossing down flew a circle.
 // The real ground is flown by hand (`shuttleCourseTerrain.ts`).
 //
 // Run: node --expose-gc tools/swg/tests/shuttleCourse.test.ts
@@ -24,10 +27,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import v8 from 'node:v8';
 import * as THREE from 'three';
-import { SWAY, flyCourse, quantile, rigPairs, type Flight, type RigPair } from './courseFixtures.ts';
+import { SWAY, flyCourse, quantile, rigArrivals, rigPairs, type Flight, type RigPair } from './courseFixtures.ts';
+import { lookRotation } from '../../../src/space/hyperspaceMath.ts';
 import { RIG_HULL_TUNE } from '../../../src/vehicles/rigHull.ts';
 import type { PadRef } from '../../../src/world/rideRoute.ts';
 import { RIDE_PILOT, ShuttlePilot, dubins, planClimb, planCourse, planRadius, type RideState } from '../../../src/world/shuttleCourse.ts';
+import { RIDE_TUNE } from '../../../src/world/shuttleRide.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -224,6 +229,60 @@ function rng(seed: number): () => number {
   const f = flyCourse(p, ridge, { padNear: 0 });
   ok(f.under === 0 && f.minClear > 0, `a 500 m ridge at 40 degrees on the way is gone over and never into (${f1(f.minClear)} m clear at the least)`);
   ok(f.joined && Math.abs(f.error.up) < 250 && Math.abs(f.error.across) < 5, `and the join a kilometre past its foot is still met (${f1(f.error.up)} m up, ${f1(f.error.across)} m across)`);
+}
+
+// ---------------------------------------------------------------- straight in, from a crossing down
+
+{
+  // A start on the landing's own line and facing down it is flown straight in on the glide from where it
+  // is, whatever the distance: a course of one straight, all of it the final one, no turn at all.
+  const join: RideState = { x: 500, y: 140, z: 800, heading: 0.9, speed: 91, descent: 0.52, ground: 13 };
+  const back = 700;
+  const from: RideState = { x: join.x - Math.sin(0.9) * back, y: join.y + back * Math.tan((6 * Math.PI) / 180), z: join.z - Math.cos(0.9) * back, heading: 0.9, speed: 150 };
+  const c = planCourse(from, join, planRadius(150, RIG_HULL_TUNE.turnRate), RIDE_PILOT);
+  let turn = 0;
+  for (let i = 1; i < c.n; i++) turn += Math.abs(wrap(c.hs[i] - c.hs[i - 1]));
+  ok(c.word === 'S' && c.finalFrom === 0 && Math.abs(c.total - back) < 1e-6 && turn < 1e-9, `a start on the landing's own line, ${back} m out, is one straight run in with no turn (${c.word}, ${f1(c.total)} m), where a gate ${RIDE_PILOT.finalLen} m out would stand behind it`);
+  ok(Math.abs(c.xs[0] - from.x) < 1e-9 && Math.abs(c.xs[c.n - 1] - join.x) < 1e-9 && Math.abs(c.zs[c.n - 1] - join.z) < 1e-9 && Math.abs(c.glide - (6 * Math.PI) / 180) < 1e-9, `from where it starts to the join, on the glide it starts on (${f2((c.glide * 180) / Math.PI)}°)`);
+  // Off the line, or facing across it, it is the ordinary course of turns.
+  const off = planCourse({ ...from, x: from.x + Math.cos(0.9) * (RIDE_PILOT.straightIn.across + 5), z: from.z - Math.sin(0.9) * (RIDE_PILOT.straightIn.across + 5) }, join, planRadius(150, RIG_HULL_TUNE.turnRate), RIDE_PILOT);
+  const across = planCourse({ ...from, heading: 0.9 + ((RIDE_PILOT.straightIn.heading + 2) * Math.PI) / 180 }, join, planRadius(150, RIG_HULL_TUNE.turnRate), RIDE_PILOT);
+  ok(off.word !== 'S' && off.glide === 0 && across.word !== 'S', `and a start ${RIDE_PILOT.straightIn.across + 5} m off it, or turned ${RIDE_PILOT.straightIn.heading + 2}° across it, is planned the ordinary way (${off.word}, ${across.word})`);
+}
+
+{
+  // Every rigged pad a ticket can land on, with every landing a hull can bring to it, from where the
+  // crossing down onto it comes out, as the ride works that out -- at the usual reach, and at the least
+  // the reach is ever let fall to: flown in by the pilot through flyShip's own integration on ground flat
+  // about the pad, each is one straight run in, no longer than 15% over the straight line, turning no more
+  // than 90 degrees in all as planned or as flown, never diving steeper than its glide and two, and meeting
+  // its join within the pilot's own tolerance. The old way out of a crossing down (700 m over the pad, a
+  // kilometre and a half back along the way in from the pad) is flown the same way beside it and must fail:
+  // it dived and flew a whole circle before running in.
+  const tol = RIDE_PILOT.joinTol;
+  for (const reach of [RIDE_TUNE.downReach, RIDE_TUNE.downReachMin]) {
+    const arrivals = rigArrivals(undefined, reach);
+    if (!arrivals.length) {
+      note('no converted world carries rigged shuttle pads, so the crossings down are not flown: npm run swg -- travel @SWG assets-private --retail-only');
+      break;
+    }
+    const flights = arrivals.map((p) => ({ p, f: flyCourse(p, () => p.to.y, { startGround: undefined }) }));
+    const bad = flights.filter(({ p, f }) => !(f.joined && Math.abs(f.error.across) <= tol.across && Math.abs(f.error.up) <= tol.up && f.error.heading <= tol.heading) || f.course > 1.15 * f.straight || f.courseTurn > 90 || f.flownTurn > 90 || f.steepest > p.glide + 2);
+    const most = (k: (x: (typeof flights)[number]) => number) => f1(quantile(flights.map(k), 1));
+    ok(
+      bad.length === 0,
+      `every one of ${flights.length} crossings down (${reach} m out) runs straight in and meets its join: course at most ${most(({ f }) => f.course / f.straight)}x the straight line, turned at most ${most(({ f }) => f.courseTurn)}° planned and ${most(({ f }) => f.flownTurn)}° flown, dived at most ${most(({ f }) => f.steepest)}°, at the join ${most(({ f }) => Math.abs(f.error.across))} m across, ${most(({ f }) => Math.abs(f.error.up))} m up and ${most(({ f }) => f.error.heading)}°${bad.length ? `; not: ${bad.slice(0, 4).map(({ p, f }) => `${p.label} ${f.word} ${f1(f.course)}/${f1(f.straight)} m, ${f1(f.courseTurn)}°, ${f.joined ? `${f1(f.error.up)} m up` : 'never joined'}`).join('; ')}` : ''}`,
+    );
+  }
+  const old = rigArrivals().map((p) => {
+    // As it was: `downReach` back from the pad (not the join) along the way in, 700 m over the pad, facing the join.
+    const dx = Math.sin(p.join.heading);
+    const dz = Math.cos(p.join.heading);
+    const at = new THREE.Vector3(p.to.x - dx * RIDE_TUNE.downReach, p.to.y + 700, p.to.z - dz * RIDE_TUNE.downReach);
+    const q = lookRotation([p.join.x - at.x, p.join.y - at.y, p.join.z - at.z]);
+    return flyCourse({ ...p, cut: { pos: at, quat: new THREE.Quaternion(q[0], q[1], q[2], q[3]), speed: p.cut.speed } }, () => p.to.y, { startGround: undefined });
+  });
+  if (old.length) ok(old.some((f) => f.courseTurn > 270 && f.course > 2 * f.straight), `while the old way out of a crossing down flies a circle into some pads (turned up to ${f1(quantile(old.map((f) => f.courseTurn), 1))}°, up to ${f1(quantile(old.map((f) => f.course / f.straight), 1))}x the straight line)`);
 }
 
 // ---------------------------------------------------------------- a step makes nothing

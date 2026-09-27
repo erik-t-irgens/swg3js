@@ -146,7 +146,48 @@ export const RIDE_TUNE = {
   downReach: 1500,
   downReachMin: 800,
   downReachMargin: 150,
+  /**
+   * Degrees: the glide the crossing down comes out on, back along the landing's own line from its join
+   * (`downArrival`), and flown straight down to it: under the least the pilot ever comes in on
+   * (`RIDE_PILOT.glideMin`) and far inside its steepest (`descentMax`), about 130 m over the join at the
+   * usual reach. Held no steeper than the landing's own glide at its join, whatever it is set to.
+   */
+  downGlide: 6,
+  /** Metres over the ground under it, where the world arrived at knows its ground, the crossing down comes out at the least. */
+  downClear: 100,
+  /** Metres a passenger kept at, or put down by, a ticket collector is stood clear of it, toward the pad it serves. */
+  collectorClear: 1.5,
 };
+
+/**
+ * How far from the far pad the crossing down comes out: `downReach`, but inside the range a ground world's
+ * starports load out to (`nearRange`), less `downReachMargin`, and never nearer than `downReachMin`.
+ */
+export function downReachOf(nearRange: number, tune = RIDE_TUNE): number {
+  return Math.max(tune.downReachMin, Math.min(tune.downReach, nearRange - tune.downReachMargin));
+}
+
+/** The glide the crossing down comes out on, in degrees: `downGlide`, never steeper than the landing's own at its join (`descent`, radians). */
+export function downGlideOf(descent: number, tune = RIDE_TUNE, pilot = RIDE_PILOT): number {
+  const landing = Math.max((Math.max(0, descent) * 180) / Math.PI, pilot.glideMin);
+  return Math.max(0, Math.min(tune.downGlide, landing));
+}
+
+/**
+ * A place a small step clear of a ticket collector, on its own floor: `collectorClear` metres from its
+ * spot toward the pad it serves (along +X where the two stand on one spot), at the collector's own height.
+ * Whoever is kept at a collector, or put down by one, is stood there rather than inside the droid.
+ * Written into `out`; allocates nothing.
+ */
+export function besideCollector(collector: { readonly x: number; readonly y: number; readonly z: number }, pad: { readonly x: number; readonly z: number }, out: { x: number; y: number; z: number }, clear = RIDE_TUNE.collectorClear): { x: number; y: number; z: number } {
+  const dx = pad.x - collector.x;
+  const dz = pad.z - collector.z;
+  const l = Math.hypot(dx, dz);
+  out.x = collector.x + (l > 1e-6 ? dx / l : 1) * clear;
+  out.y = collector.y;
+  out.z = collector.z + (l > 1e-6 ? dz / l : 0) * clear;
+  return out;
+}
 
 /** How the passenger's view frames the hull, eased between parked (`share` 1) and flying (0): the share of the flight's distance back, and the rise over each metre of it. */
 export interface RideFraming {
@@ -205,6 +246,8 @@ export interface RideRigs {
   release(key: string, now?: boolean): void;
   lend(key: string, joints: THREE.Object3D): RigFx | null;
   fxFor(rig: TravelRig, mood: string, joints: THREE.Object3D, inside: boolean): RigFx;
+  /** Every particle file and sound a rig's branches can play, made ready and waited for (`ShuttleRigs.ready`): what is done before a hull is shown. */
+  ready(rig: TravelRig, moods: readonly string[], joints: THREE.Object3D): Promise<unknown>;
   /** A set's marks bound again from another branch of its rig, its lit flames carried across; false for a branch the rig has not got. */
   rebranch(fx: RigFx, mood: string): boolean;
   drive(fx: RigFx, pose: () => RigDrive | null): void;
@@ -270,11 +313,17 @@ export interface RideHost {
    * and `h` with it; in the world arrived at a hull of the same rig is built, held at `arrival` moving at
    * `speed`, ghosted, with the passenger seated in it and nothing else done to it, and that hull is what
    * it resolves with -- or null where no crossing could be made, the passenger then on foot in whichever
-   * world it got as far as (off `h`, if `h` went with its world; still in it, if it did not).
+   * world it got as far as (off `h`, if `h` went with its world; still in it, if it did not). `ready` is
+   * handed the hull that came out as soon as it exists, while the loading screen is still up and before the
+   * world arrived at is compiled behind it, and is waited for: whatever the trip will show of that hull is
+   * made there, so the screen compiles it rather than the first frames after it lifts.
    */
-  cross(h: RideHull, leg: RideLeg, arrival: { readonly pos: THREE.Vector3; readonly quaternion: THREE.Quaternion }, speed: number): Promise<RideHull | null>;
-  /** The game's own heights for space: how high over the ground a ship is offered it, and how high over a world one coming down out of it arrives. */
-  readonly heights: { readonly gate: number; readonly arrive: number };
+  cross(h: RideHull, leg: RideLeg, arrival: { readonly pos: THREE.Vector3; readonly quaternion: THREE.Quaternion }, speed: number, ready: (h: RideHull) => Promise<unknown>): Promise<RideHull | null>;
+  /**
+   * The game's own height for space: how high over the ground a ship is offered it. (How high a ship coming
+   * down out of it arrives is not the trip's: a crossing down comes out on a glide of its own, `downArrival`.)
+   */
+  readonly heights: { readonly gate: number };
   /** Start reading what a flight through space will want (the zones' packs), not waited on. */
   prefetchSpace(): void;
   /**
@@ -555,6 +604,22 @@ export class ShuttleRide {
       if (this.passenger) this.host.say(`the shuttle to ${to} cannot be flown (${this.why})${this.ticketBack()}`);
       return 'failed';
     }
+    // Everything its flames and sounds can play, on the branch it takes off on and the one it lands with,
+    // made ready while it is still out of sight (its hull was compiled as it was built): the swap below shows
+    // a hull whose every effect batch already exists, however its set comes to it. A trip ended meanwhile
+    // throws the hull away as one ended while it was built does.
+    const block = hull.def?.rig?.rig ?? null;
+    if (block) {
+      try {
+        await this.host.rigs.ready(block, paths.landMood === this.route.mood ? [this.route.mood] : [this.route.mood, paths.landMood], rig.joints);
+      } catch {
+        // Only the effects: a hull whose flames could not be made ready flies without them, as it always could.
+      }
+      if (token !== this.token) {
+        if (!hull.disposed) this.host.disposeHull(hull);
+        return 'aborted';
+      }
+    }
     this.readRound(from);
     const role = this.roundPose.role;
     if (!(role === 'ground' || (role === 'lift' && this.roundPose.seconds < paths.cut.t - RIDE_TUNE.lateCut))) {
@@ -749,11 +814,12 @@ export class ShuttleRide {
 
   /**
    * Where a passenger saved in the middle of the trip is put down again. While it still waits on the pad
-   * it leaves, where they boarded it: that pad's collector, else the foot of the hull's ramp, since a trip
-   * ended there gives the ticket back and a place kept at the far end would be a trip for nothing. From
-   * the lift-off on, where the ticket goes: the far pad's collector, else the port itself (whose height
-   * the caller finds, `y` NaN), else the far pad. Null unseated, where they stand is where they are. The
-   * record is kept and written, not made.
+   * it leaves, where they boarded it: beside that pad's collector, else the foot of the hull's ramp, since a
+   * trip ended there gives the ticket back and a place kept at the far end would be a trip for nothing. From
+   * the lift-off on, where the ticket goes: beside the far pad's collector, else the port itself (whose
+   * height the caller finds, `y` NaN), else the far pad. Beside a collector is a step clear of it toward its
+   * pad (`besideCollector`), never its own spot, which is inside the droid. Null unseated, where they stand
+   * is where they are. The record is kept and written, not made.
    */
   keepPlace(): { pack: string; x: number; y: number; z: number } | null {
     if (!this.seated) return null;
@@ -762,11 +828,8 @@ export class ShuttleRide {
     if (leg?.kind === 'board') {
       const from = leg.pad ?? this.route.from;
       k.pack = from.pack;
-      if (from.collector) {
-        k.x = from.collector.x;
-        k.y = from.collector.y;
-        k.z = from.collector.z;
-      } else {
+      if (from.collector) besideCollector(from.collector, from, k);
+      else {
         this.findAlight(from);
         k.x = this.alightAt.x;
         k.y = this.alightAt.y;
@@ -777,11 +840,8 @@ export class ShuttleRide {
     const to = this.route.to;
     k.pack = to.pack;
     const pad = to.pad;
-    if (pad?.collector) {
-      k.x = pad.collector.x;
-      k.y = pad.collector.y;
-      k.z = pad.collector.z;
-    } else if (to.at) {
+    if (pad?.collector) besideCollector(pad.collector, pad, k);
+    else if (to.at) {
       k.x = to.at.x;
       k.y = Number.NaN;
       k.z = to.at.z;
@@ -972,10 +1032,11 @@ export class ShuttleRide {
 
   /**
    * The crossing down onto the far world, once the jump has quite let go of the hull: the far pad's own
-   * shuttle held out of the picture for good, and the passenger carried down to a point `downReach` out
-   * from that pad back along its landing's own approach and the game's arrival height over it, facing the
-   * join, at the pilot's own cruise over a planet (`downArrival`). The reach is kept inside the range the
-   * far world's starports load out to, so the pad is in and compiled under the crossing's loading screen.
+   * shuttle held out of the picture for good, and the passenger carried down to a point on the landing's
+   * own line, `downReach` out from that pad and on a straight glide of `downGlide` down to the join, facing
+   * along it, at the pilot's own cruise over a planet (`downArrival`): a straight run in, with nothing to
+   * turn and nothing to dive. The reach is kept inside the range the far world's starports load out to, so
+   * the pad is in and compiled under the crossing's loading screen.
    */
   private crossDown(leg: RideLeg): void {
     const hull = this.hull!;
@@ -988,8 +1049,7 @@ export class ShuttleRide {
     landingTarget(pad, paths.land, paths.join, hull.rig.offset, this.target);
     this.holdDestNow(pad.key);
     const t = this.target;
-    const reach = Math.max(RIDE_TUNE.downReachMin, Math.min(RIDE_TUNE.downReach, this.host.nearRange() - RIDE_TUNE.downReachMargin));
-    const a = downArrival([pad.x, pad.y, pad.z], { at: [t.pos.x, t.pos.y, t.pos.z], dirX: Math.sin(t.heading), dirZ: Math.cos(t.heading) }, reach, this.host.heights.arrive);
+    const a = downArrival([pad.x, pad.y, pad.z], { at: [t.pos.x, t.pos.y, t.pos.z], dirX: Math.sin(t.heading), dirZ: Math.cos(t.heading) }, downReachOf(this.host.nearRange()), downGlideOf(-t.climb));
     const q = lookRotation(a.forward);
     this.arrival.pos.set(a.at[0], a.at[1], a.at[2]);
     this.arrival.quaternion.set(q[0], q[1], q[2], q[3]);
@@ -1019,7 +1079,7 @@ export class ShuttleRide {
     this.legClock = 0;
     let made: Promise<RideHull | null>;
     try {
-      made = this.host.cross(from, leg, this.arrival, speed);
+      made = this.host.cross(from, leg, this.arrival, speed, (h) => this.readyAcross(token, h));
     } catch (err) {
       made = Promise.reject(err);
     }
@@ -1027,6 +1087,20 @@ export class ShuttleRide {
       (h) => this.crossed(token, h, ''),
       (err: unknown) => this.crossed(token, null, err instanceof Error ? err.message : String(err)),
     );
+  }
+
+  /**
+   * The hull a crossing has just brought out, while its loading screen is still up and before the world
+   * arrived at is compiled behind it: everything its flames and sounds can play made ready -- the branch it
+   * flew on and the one it lands with -- so their batches are that screen's to compile, and the set made for
+   * it once the crossing is over (`crossed`) finds them there. Nothing for a trip that has since ended.
+   */
+  private readyAcross(token: number, h: RideHull): Promise<unknown> {
+    const rig = h.rig;
+    const block = h.def?.rig?.rig ?? null;
+    if (token !== this.token || !this.running || !rig || !block) return Promise.resolve();
+    const land = rig.paths(this.route.mood)?.landMood ?? this.route.mood;
+    return this.host.rigs.ready(block, land === this.route.mood ? [this.route.mood] : [this.route.mood, land], rig.joints);
   }
 
   /**
@@ -1101,6 +1175,17 @@ export class ShuttleRide {
       this.fx = block ? rigs.fxFor(block, this.route.mood, rig.joints, leg?.kind === 'down' && !!pad && pad.cell > 0) : null;
       this.fxMood = this.route.mood;
       if (this.fx) rigs.drive(this.fx, this.posing);
+      // Over the far world, never under its ground: the glide was worked out from the pad and its join
+      // alone, before that world was there to ask, and the settle behind the screen has brought in the
+      // ground about where it came out. Raised straight up, before any frame has shown it anywhere.
+      if (leg?.kind === 'down') {
+        const ground = this.host.groundCached(h.pos.x, h.pos.z);
+        if (ground !== null && Number.isFinite(ground) && h.pos.y < ground + RIDE_TUNE.downClear) {
+          vP.set(h.pos.x, ground + RIDE_TUNE.downClear, h.pos.z);
+          vQ.copy(h.group.quaternion);
+          h.hold(null, vP, vQ, this.crossSpeed);
+        }
+      }
       h.release(null);
       h.launch(this.crossSpeed);
       h.airborne = true;
@@ -1791,7 +1876,8 @@ export class ShuttleRide {
   /**
    * Where a passenger steps off a parked hull: off the foot of its ramp, `alight` metres further out the
    * way the ramp runs; for a hull with no ramp, off the side of its box that faces the pad's collector
-   * (its right with no collector). Put on the floor found there within `alightDrop`, else at the collector.
+   * (its right with no collector). Put on the floor found there within `alightDrop`, else beside the
+   * collector (`besideCollector`, on the floor there where one is found), never on its own spot.
    */
   private findAlight(pad: PadRef): void {
     const hull = this.hull!;
@@ -1823,7 +1909,9 @@ export class ShuttleRide {
     const floor = this.host.floorAt(local.x, local.y + 2, local.z, 2 + RIDE_TUNE.alightDrop);
     if (floor !== null) this.alightAt.set(local.x, floor, local.z);
     else if (pad.collector) {
-      this.alightAt.set(pad.collector.x, pad.collector.y, pad.collector.z);
+      const a = besideCollector(pad.collector, pad, this.alightAt);
+      const there = this.host.floorAt(a.x, a.y + 2, a.z, 2 + RIDE_TUNE.alightDrop);
+      if (there !== null) a.y = there;
       this.alightFrom = 'collector';
     } else {
       this.alightAt.copy(local);

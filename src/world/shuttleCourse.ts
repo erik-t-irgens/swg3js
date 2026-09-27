@@ -6,7 +6,8 @@
 // its landing. It is planned once, as the take-off lets go of the hull: straight on the way it climbed
 // out for a little, then the shortest two turns and a straight between them (a Dubins path, at the
 // radius this pilot really turns at) to a gate on the landing's own line, and down that line to where
-// the landing clip takes the hull back. The pilot chases a point a couple of seconds ahead on that
+// the landing clip takes the hull back; a start already on that line and facing down it, which is where a
+// crossing down comes out, is flown straight in on its own glide. The pilot chases a point a couple of seconds ahead on that
 // course, wings level, with its stick capped and slowed by a hand as every NPC pilot's is
 // (`skillStick`), and never rolls a passenger over to pull a turn (`steerToward`'s level branch only).
 //
@@ -99,6 +100,14 @@ export const RIDE_PILOT = {
   groundPerFrame: 8,
   /** How far off the join (metres across its line and up, degrees of heading) is close enough to hand over. */
   joinTol: { across: 20, up: 20, heading: 12 },
+  /**
+   * A start already on the landing's own line, behind its join and facing down it -- within `across`
+   * metres of the line and `heading` degrees of its way, as a crossing down comes out -- is flown straight
+   * in down that line, on the straight glide from where it is to the join, and not round through a turn
+   * and a gate `finalLen` out: from a kilometre and a quarter the gate stood behind where it started, and
+   * the course flew a whole circle to reach it.
+   */
+  straightIn: { across: 5, heading: 3 },
   /** How many times a pass too far off is flown again. */
   goArounds: 1,
 };
@@ -285,7 +294,9 @@ export interface RideState {
  * A course, sampled every `step` metres: each sample's place over the ground, its heading and how far
  * along the course it is, and the ground under it as far as it has been read (NaN until then). The
  * final straight starts at `finalFrom`; `join` is where it ends, `cutY` how high it began, `seedGround`
- * what unknown ground reads as before any is known, and `word` the turns it makes.
+ * what unknown ground reads as before any is known, and `word` the turns it makes ('S' for a start flown
+ * straight in). `glide` is the straight glide from where a straight-in course starts down to its join
+ * (radians, 0 for any other course), which the ground ahead never pulls the height under.
  */
 export interface RideCourse {
   xs: Float64Array;
@@ -302,6 +313,7 @@ export interface RideCourse {
   word: string;
   radius: number;
   step: number;
+  glide: number;
 }
 
 /**
@@ -316,6 +328,10 @@ export function planCourse(from: RideState, join: RideState, radius: number, tun
   const fin = Math.max(0, tune.finalLen);
   const step = Math.max(1, tune.step);
   const R = Math.max(1, radius);
+  // Already on the landing's own line and facing down it: straight in, whatever the distance.
+  const along = (join.x - from.x) * Math.sin(hJ) + (join.z - from.z) * Math.cos(hJ);
+  const across = (from.x - join.x) * Math.cos(hJ) - (from.z - join.z) * Math.sin(hJ);
+  if (along > step && Math.abs(across) <= tune.straightIn.across && Math.abs(wrap(hC - hJ)) * (180 / Math.PI) <= tune.straightIn.heading) return straightIn(from, join, R, step, tune);
   const d0x = from.x + Math.sin(hC) * dep;
   const d0z = from.z + Math.cos(hC) * dep;
   const gx = join.x - Math.sin(hJ) * fin;
@@ -361,6 +377,52 @@ export function planCourse(from: RideState, join: RideState, radius: number, tun
     word: path.word,
     radius: R,
     step,
+    glide: 0,
+  };
+}
+
+/**
+ * A course from a start on the landing's own line straight in to its join: the straight between the two,
+ * sampled every `step` metres, all of it the final straight, and the glide from the start's height down to
+ * the join's held as the least the ground ahead may bring it down to -- no steeper than the join's own
+ * descent or the least glide the pilot comes in on, which the height law's own glide back from the join is.
+ * Allocates the course, once per plan.
+ */
+function straightIn(from: RideState, join: RideState, R: number, step: number, tune = RIDE_PILOT): RideCourse {
+  const dx = join.x - from.x;
+  const dz = join.z - from.z;
+  const len = Math.hypot(dx, dz);
+  const n = Math.max(2, Math.ceil(len / step) + 1);
+  const heading = Math.atan2(dx, dz);
+  const xs = new Float64Array(n);
+  const zs = new Float64Array(n);
+  const hs = new Float64Array(n).fill(heading);
+  const ss = new Float64Array(n);
+  const ground = new Float32Array(n).fill(Number.NaN);
+  for (let i = 0; i < n; i++) {
+    const k = i / (n - 1);
+    xs[i] = from.x + dx * k;
+    zs[i] = from.z + dz * k;
+    ss[i] = len * k;
+  }
+  const known = Math.max(from.ground ?? -Infinity, join.ground ?? -Infinity);
+  const most = Math.max(join.descent ?? 0, deg(tune.glideMin));
+  return {
+    xs,
+    zs,
+    hs,
+    ss,
+    ground,
+    n,
+    total: len,
+    finalFrom: 0,
+    join: { x: join.x, y: join.y, z: join.z, heading: join.heading, speed: join.speed, descent: join.descent ?? 0, ground: join.ground },
+    cutY: from.y,
+    seedGround: Number.isFinite(known) ? known : Math.min(from.y, join.y) - tune.floor,
+    word: 'S',
+    radius: R,
+    step,
+    glide: len > 1e-6 ? Math.max(0, Math.min(most, Math.atan2(from.y - join.y, len))) : 0,
   };
 }
 
@@ -752,7 +814,10 @@ export class ShuttlePilot {
     }
     const over = Math.max(0, c.join.y - (c.join.ground ?? c.seedGround));
     const atEnd = Math.max(high + over, c.join.y);
-    const need = atEnd + (high + tune.clear - atEnd) * Math.max(0, Math.min(1, (left - tune.padNear) / Math.max(1, tune.padBlend)));
+    let need = atEnd + (high + tune.clear - atEnd) * Math.max(0, Math.min(1, (left - tune.padNear) / Math.max(1, tune.padBlend)));
+    // Straight in, the ground ahead lifts it over what it must but never pulls it under its own glide: a
+    // crossing down comes out on that glide, and held to `clear` over the ground it dived to it first.
+    if (c.glide > 0) need = Math.max(need, c.join.y + left * Math.tan(c.glide));
     const floorTo = Math.min(c.n - 1, i + Math.ceil(tune.floorAhead / c.step));
     let floor = -Infinity;
     for (let k = Math.min(iHull, floorTo); k <= floorTo; k++) {

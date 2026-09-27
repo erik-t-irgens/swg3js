@@ -28,7 +28,8 @@ import { HyperspaceCatalogue, arrivalAt, destinationsOf, landmarksOf, type Desti
 import { RigHull, assembleRigModel, hullJointOf, landingMood } from '../../../src/vehicles/rigHull.ts';
 import { PORT_REACH, SPACE_LATER, discDirection, downArrival, farPadsOf, landMood, padOfPort, padRefOf, planHop, planRoute, portOfThing, replanSkip, shuttleClockName, skipOffer, spaceLegOf, tripSeconds, zonePlace, type PadRef, type RideRoute, type SpacePlan } from '../../../src/world/rideRoute.ts';
 import { landingTarget, makeLandingTarget } from '../../../src/world/rigPath.ts';
-import { RIDE_TUNE } from '../../../src/world/shuttleRide.ts';
+import { RIDE_PILOT } from '../../../src/world/shuttleCourse.ts';
+import { RIDE_TUNE, downGlideOf } from '../../../src/world/shuttleRide.ts';
 import { portsOf, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
 import { TRAVEL_TUNE, rigTimes, travelThingsOf, type Ticket, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
@@ -357,7 +358,6 @@ const constOf = (src: string, name: string): number => {
 };
 const mainSrc = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
 const GATE = constOf(mainSrc, 'SPACE_GATE_HEIGHT');
-const ARRIVE = constOf(mainSrc, 'SPACE_ARRIVAL_HEIGHT');
 const facts = routeFactsOf();
 const SPACE: SpacePlan = { facts, gate: GATE, discSeconds: RIDE_TUNE.discSeconds };
 /** A trip's legs in words: a flight named by what it flies to. */
@@ -459,18 +459,27 @@ const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`
 }
 
 {
-  // The crossing down comes out exactly `reach` from the pad over the ground and the game's own arrival
-  // height over it, facing the join.
+  // The crossing down comes out on the landing's own line, back along the way it comes in from its join,
+  // exactly `reach` from the pad over the ground and on a straight glide of the ride's own down to the join,
+  // facing along that glide -- so nothing is left to turn and nothing to dive. The join here stands 60 m off
+  // the line through the pad along the way in, as a transport's does: measured from the pad instead, the
+  // hull came out off the landing's line and had to fly a circle to get onto it.
   const pad: [number, number, number] = [100, 20, -30];
-  const jn: { at: [number, number, number]; dirX: number; dirZ: number } = { at: [100 + 180, 147, -30 + 240], dirX: -0.6, dirZ: -0.8 };
-  const a = downArrival(pad, jn, 1500, ARRIVE);
+  const jn: { at: [number, number, number]; dirX: number; dirZ: number } = { at: [100 + 180 + 48, 147, -30 + 240 - 36], dirX: -0.6, dirZ: -0.8 };
+  const G = RIDE_TUNE.downGlide;
+  const a = downArrival(pad, jn, 1500, G);
   const out = Math.hypot(a.at[0] - pad[0], a.at[2] - pad[2]);
+  const across = (a.at[0] - jn.at[0]) * -jn.dirZ - (a.at[2] - jn.at[2]) * -jn.dirX;
+  const behind = (a.at[0] - jn.at[0]) * jn.dirX + (a.at[2] - jn.at[2]) * jn.dirZ;
+  const run = Math.hypot(a.at[0] - jn.at[0], a.at[2] - jn.at[2]);
   const f = new THREE.Vector3(...a.forward);
   const toJoin = new THREE.Vector3(jn.at[0] - a.at[0], jn.at[1] - a.at[1], jn.at[2] - a.at[2]).normalize();
-  ok(Math.abs(out - 1500) < 1e-9 && Math.abs(a.at[1] - pad[1] - ARRIVE) < 1e-9 && Math.abs(f.length() - 1) < 1e-9 && f.angleTo(toJoin) < 1e-9, `the crossing down comes out 1500 m from the pad and ${ARRIVE} m over it, facing the join`);
-  ok(a.at[0] - pad[0] > 0 && a.at[2] - pad[2] > 0, 'back along the way the landing comes in');
-  // And against the game's own landings, when they are converted: a glide of 24 to 29 degrees from where
-  // the crossing comes out down to each landing's join, at the reach the ride keeps.
+  const glide = THREE.MathUtils.radToDeg(Math.atan2(a.at[1] - jn.at[1], run));
+  ok(Math.abs(out - 1500) < 1e-9 && Math.abs(across) < 1e-9 && behind < 0 && Math.abs(run - a.run) < 1e-9, `the crossing down comes out 1500 m from the pad, on the landing's own line ${a.run.toFixed(1)} m back from its join (${across.toExponential(1)} m off it)`);
+  ok(Math.abs(glide - G) < 1e-9 && Math.abs(f.length() - 1) < 1e-9 && f.angleTo(toJoin) < 1e-9, `on a straight glide of ${G} degrees down to the join, facing along it (${glide.toFixed(3)}°)`);
+  // And against the game's own landings, when they are converted: on each landing's own line, `downReach`
+  // from its pad, behind the join and never beyond the pad, on a glide of `downGlide` that is never steeper
+  // than the landing's own at its join -- which is what the pilot's height law holds it to all the way in.
   const packs = join(process.cwd(), 'assets-private');
   const rigs = packRigs(packs, readdirSync, existsSync, join);
   const glides: string[] = [];
@@ -499,17 +508,23 @@ const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`
       const padRef = padOn('glide');
       const target = landingTarget(padRef, paths.land, paths.join, hull.offset, makeLandingTarget());
       // The way the landing travels at its join, read off the clip's own velocity rather than its heading.
-      const d = downArrival([padRef.x, padRef.y, padRef.z], { at: [target.pos.x, target.pos.y, target.pos.z], dirX: target.vel.x, dirZ: target.vel.z }, RIDE_TUNE.downReach, ARRIVE);
+      const g = downGlideOf(-target.climb);
+      const d = downArrival([padRef.x, padRef.y, padRef.z], { at: [target.pos.x, target.pos.y, target.pos.z], dirX: target.vel.x, dirZ: target.vel.z }, RIDE_TUNE.downReach, g);
       const glide = THREE.MathUtils.radToDeg(Math.atan2(d.at[1] - target.pos.y, Math.hypot(d.at[0] - target.pos.x, d.at[2] - target.pos.z)));
-      glides.push(`${name}/${mood} ${glide.toFixed(1)}°`);
-      if (!(glide >= 24 && glide <= 29)) worst = `${name}/${mood} ${glide.toFixed(1)}°`;
+      const own = THREE.MathUtils.radToDeg(-target.climb);
+      glides.push(`${name}/${mood} ${glide.toFixed(1)}° onto its own ${own.toFixed(1)}°`);
+      if (Math.abs(glide - RIDE_TUNE.downGlide) > 1e-6 || glide > Math.max(own, RIDE_PILOT.glideMin) + 1e-9) worst = `${name}/${mood} ${glide.toFixed(1)}°`;
+      // On the landing's own line, `downReach` from the pad.
+      const sp = Math.hypot(target.vel.x, target.vel.z);
+      const off = ((d.at[0] - target.pos.x) * target.vel.z - (d.at[2] - target.pos.z) * target.vel.x) / sp;
+      if (Math.abs(off) > 1e-6 || Math.abs(Math.hypot(d.at[0] - padRef.x, d.at[2] - padRef.z) - RIDE_TUNE.downReach) > 1e-6) worst = `${name}/${mood} off its line by ${off.toFixed(3)} m`;
       // Behind the join along the way it comes in, never beyond the pad.
-      if ((d.at[0] - padRef.x) * target.vel.x + (d.at[2] - padRef.z) * target.vel.z >= 0) worst = `${name}/${mood} comes out beyond the pad`;
+      if ((d.at[0] - padRef.x) * target.vel.x + (d.at[2] - padRef.z) * target.vel.z >= 0 || (d.at[0] - target.pos.x) * target.vel.x + (d.at[2] - target.pos.z) * target.vel.z >= 0) worst = `${name}/${mood} comes out beyond the join or the pad`;
       hull.dispose();
     }
   }
   if (!glides.length) note('no converted rig to glide down onto, so the glide is not measured: npm run swg -- travel @SWG assets-private --retail-only');
-  else ok(!worst && glides.length === branches, `from the crossing down, behind the pad along its landing's way in, to each landing's join is a glide of 24 to 29 degrees (${glides.join(', ')}; ${glides.length} of ${branches} branches)`);
+  else ok(!worst && glides.length === branches, `the crossing down comes out on each landing's own line, ${RIDE_TUNE.downReach} m from its pad and behind its join, on a glide of ${RIDE_TUNE.downGlide}° no steeper than the landing's own (${glides.join(', ')}; ${glides.length} of ${branches} branches)${worst ? `: ${worst}` : ''}`);
 }
 
 {
@@ -661,7 +676,7 @@ const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`
   // `rigPath.test.ts` measures them, its touch-down at 22.33 s): 82 seconds or so, loading screens aside.
   const route = planRoute(spaceTicket('naboo', 'tatooine'), padOn('naboo'), padOn('tatooine'), 'naboo', null, SPACE)!;
   const calm = { cut: 12.8, cutH: 190.93, join: 8.2, joinH: 127.33, joinOut: 276.55, down: 22.33 };
-  const s = tripSeconds(route, calm, { cruise: 150, spaceCruise: RIDE_TUNE.spaceCruise, climbDeg: RIDE_TUNE.climbDeg, gate: GATE, gateMargin: RIDE_TUNE.gateMargin, arrive: ARRIVE, downReach: RIDE_TUNE.downReach, jump: 17.8 });
+  const s = tripSeconds(route, calm, { cruise: 150, spaceCruise: RIDE_TUNE.spaceCruise, climbDeg: RIDE_TUNE.climbDeg, gate: GATE, gateMargin: RIDE_TUNE.gateMargin, downGlide: RIDE_TUNE.downGlide, downReach: RIDE_TUNE.downReach, jump: 17.8 });
   ok(Math.abs(s - 82) <= 3, `a calm transport's trip through space flies for about ${s.toFixed(1)} s, as the design reckoned (82 ± 3)`);
 }
 

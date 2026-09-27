@@ -102,6 +102,7 @@ export class PortalRenderer {
   private readonly portalMat: THREE.MeshBasicMaterial;
   private readonly resetMat: THREE.ShaderMaterial;
   private readonly resetQuad: THREE.Mesh;
+  private readonly portalStandIn: THREE.Mesh;
   private readonly portalMeshes = new WeakMap<Building, THREE.Mesh[]>();
   /** Passes drawn last frame, for the stats overlay. */
   passes = 0;
@@ -241,11 +242,28 @@ export class PortalRenderer {
     this.resetQuad.frustumCulled = false;
     // Drawn on its own whatever layer the camera is set to for the current pass.
     this.resetQuad.layers.enableAll();
+    // A doorway's polygon stood in for, to warm its program by: a building's own are made as it is first
+    // drawn, and each is a position-only mesh of the one material, which is all its program is keyed on.
+    this.portalStandIn = new THREE.Mesh(g, this.portalMat);
+    this.portalStandIn.frustumCulled = false;
+    this.portalStandIn.layers.enableAll();
     this.shadowProbe.layers.enableAll();
     this.shadowProbe.position.set(0, -1e6, 0);
     this.shadowProbe.updateMatrixWorld();
     renderer.autoClear = false;
     renderer.shadowMap.autoUpdate = false;
+  }
+
+  /**
+   * What this renderer draws of its own, each as a scene of its own with no lights and no fog: a doorway's
+   * stencil polygon (stood in for) and the depth reset behind the doorways. Neither is in any scene a
+   * loading screen compiles, so their two programs were built on the first live frame that drew a doorway
+   * -- the first time a view looked at a building's doors from outside or stood inside one, which on a
+   * shuttle's first lift-off of a session is the view rising over its own starport. Compiled exactly as
+   * they are drawn, by the world's own sweep behind every loading screen (`World.compileEverything`).
+   */
+  ownDraws(): THREE.Object3D[] {
+    return [this.portalStandIn, this.resetQuad];
   }
 
   /** Every material must take part in the stencil test (the second argument is kept for callers). */

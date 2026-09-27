@@ -3906,6 +3906,15 @@ export class World {
     // same target, so the first rain compiles nothing. Its links are finished here too.
     this.withTarget(r, target, () => this.weather.compile(r, camera, false));
     this.programs.countLinks(resolveLinks(r, this.weather.scene));
+    // The portal renderer's own draws -- a doorway's stencil polygon and the depth reset behind it -- are
+    // each drawn as a scene of their own, with no lights and no fog, and are in no scene this sweep walks:
+    // compiled here the same way, each its own root, for the same target. Left to their first draw they
+    // were built on the first live frame a doorway was in view, which a shuttle's first lift-off of a
+    // session, rising over its own starport, always was.
+    for (const o of this.portals?.ownDraws() ?? []) {
+      this.withTarget(r, target, () => r.compile(o, camera));
+      this.programs.countLinks(resolveLinks(r, o));
+    }
     return (r.info.programs?.length ?? 0) - before;
   }
 

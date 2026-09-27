@@ -9,12 +9,23 @@
 // game's own clips pass under the raw ground nearer than that at several pads). It prints the worst
 // flights so the ones that miss can be looked at.
 //
+// And every crossing down onto a rigged pad over the same ground (`rigArrivals`), raised over the ground
+// where it comes out as the ride raises it: those must all plan a course no longer than the straight run
+// and turning nowhere, and never go under the ground. And it is judged on what is flown, not only on what
+// is planned: every crossing down a ticket can make (the rig a starport stands, `byTicket`) must meet its
+// join within the tolerance, never go round again and never turn more than 90 degrees flying it, unless
+// its pad is on `KNOWN_HIGH` -- named there with the ground that makes it so, the same ground its
+// pad-to-pad trips miss on -- which is printed every run as a known miss rather than passed over. A
+// crossing down no ticket makes (a shuttle's landing onto a starport's pad) is flown and printed, not
+// judged on how it meets its join.
+//
 // Run: node tools/swg/tests/shuttleCourseTerrain.ts [pack]
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SWAY, flyCourse, quantile, rigPairs } from './courseFixtures.ts';
+import { SWAY, flyCourse, quantile, rigArrivals, rigPairs } from './courseFixtures.ts';
 import { RIDE_PILOT } from '../../../src/world/shuttleCourse.ts';
+import { RIDE_TUNE } from '../../../src/world/shuttleRide.ts';
 import { attachBitmap, bitmapFiles, parseTerrainTemplate, TerrainSampler } from '../../../src/swg/terrain/trn.ts';
 
 const packs = join(process.cwd(), 'assets-private');
@@ -87,6 +98,62 @@ for (const r of under.slice(0, 12)) console.log(`   ${r.label}: ${n1(r.f.under)}
 const missed = rows.filter((r) => !r.within);
 console.log(`outside the tolerance: ${missed.length}`);
 for (const r of missed.slice(0, 20)) console.log(`   ${r.label}: across ${n1(r.f.error.across)}, up ${n1(r.f.error.up)}, heading ${n1(r.f.error.heading)}, round again ${r.f.goArounds}, ${r.f.joined ? 'joined' : 'never joined'}`);
-const pass = joined.length >= rows.length - 14 && under.length === 0;
+
+// Every crossing down onto a rigged pad, over the same ground: where it comes out (`downArrival`), raised
+// to `downClear` over the ground there as the ride raises it once that world is in, and flown in from
+// nothing known of the ground, as the ride flies it. Straight in on its glide wherever the ground allows.
+const arrivals = rigArrivals(packs).filter((p) => !only || p.pack === only);
+
+/**
+ * The pads a crossing down a ticket makes is known not to come in on one glide to, over this ground, each
+ * with what stands in the way as measured here. Printed every run as a known miss, never passed over; a
+ * pad on it whose crossing comes to meet its join is printed as such, to be taken off.
+ */
+const KNOWN_HIGH = new Map<string, string>([
+  [
+    'naboo: Lake Retreat Shuttleport',
+    "a ridge up to 375 m over the pad stands on the landing's own line 300 to 1000 m behind its join, which is 127 m up: held clear over it the hull dives at 35 degrees, still comes to the join 34 m high and goes round once, as its pad-to-pad trips there do",
+  ],
+]);
+
+type DownRow = { label: string; pad: string; byTicket: boolean; f: ReturnType<typeof flyCourse>; within: boolean; raised: number };
+const downRows: DownRow[] = [];
+for (const p of arrivals) {
+  const g = groundOf(p.pack);
+  if (!g) continue;
+  if (p.pack !== lastPack) {
+    grounds.get(lastPack)?.sampler.invalidateAll();
+    lastPack = p.pack;
+    console.log(`${p.pack} (crossings down)...`);
+  }
+  const floor = g.at(p.cut.pos.x, p.cut.pos.z) + RIDE_TUNE.downClear;
+  const raised = Math.max(0, floor - p.cut.pos.y);
+  const pair = raised > 0 ? { ...p, cut: { ...p.cut, pos: p.cut.pos.clone().setY(floor) } } : p;
+  const f = flyCourse(pair, g.at, { startGround: undefined });
+  const within = f.joined && Math.abs(f.error.across) <= tol.across && Math.abs(f.error.up) <= tol.up && f.error.heading <= tol.heading;
+  downRows.push({ label: p.label, pad: `${p.pack}: ${p.to.port || p.to.key}`, byTicket: p.byTicket, f, within, raised });
+}
+/** Whether a crossing down flew as it must: met its join, went round nowhere, turned nowhere, and never dived more than a degree past the steepest allowed. */
+const flownWell = (r: DownRow) => r.within && r.f.goArounds === 0 && r.f.flownTurn <= 90 && r.f.diveOver <= 1;
+const downUnder = downRows.filter((r) => r.f.under > 0);
+const downLong = downRows.filter((r) => r.f.course > 1.15 * r.f.straight || r.f.courseTurn > 90);
+const ticketed = downRows.filter((r) => r.byTicket);
+const downFailing = ticketed.filter((r) => !flownWell(r) && !KNOWN_HIGH.has(r.pad));
+const downKnown = ticketed.filter((r) => KNOWN_HIGH.has(r.pad));
+const untried = [...KNOWN_HIGH.keys()].filter((pad) => !only || pad.startsWith(`${only}: `)).filter((pad) => !ticketed.some((r) => r.pad === pad));
+const maxOf = (xs: number[]) => (xs.length ? Math.max(...xs) : 0);
+console.log(`\n${downRows.length} crossings down flown over the real ground, ${ticketed.length} of them ones a ticket makes (the rig a starport stands); ${downRows.filter((r) => r.raised > 0).length} came out raised over the ground there (most ${n1(maxOf(downRows.map((r) => r.raised)))} m)`);
+console.log(`course against the straight line: max ${n1(maxOf(downRows.map((r) => r.f.course / r.f.straight)))}x; planned turn at most ${n1(maxOf(downRows.map((r) => r.f.courseTurn)))}°`);
+console.log(`of those a ticket makes: ${ticketed.filter(flownWell).length} of ${ticketed.length} flown in as they must be; met the join ${ticketed.filter((r) => r.within).length}; flown round again ${ticketed.filter((r) => r.f.goArounds).length}; flown turn at most ${n1(maxOf(ticketed.map((r) => r.f.flownTurn)))}°; steepest dive ${n1(maxOf(ticketed.map((r) => r.f.steepest)))}° (${n1(maxOf(ticketed.filter(flownWell).map((r) => r.f.steepest)))}° of those flown in as they must be)`);
+console.log(`under the ground beyond 600 m of the pad: ${downUnder.length} flights; longer than the straight run by 15% or turning more than 90° as planned: ${downLong.length}`);
+const line = (r: DownRow) => `${r.label}: across ${n1(r.f.error.across)}, up ${n1(r.f.error.up)}, heading ${n1(r.f.error.heading)}, round again ${r.f.goArounds}, flown turn ${n1(r.f.flownTurn)}°, steepest ${n1(r.f.steepest)}°, under ${n1(r.f.under)} s, raised ${n1(r.raised)} m, ${r.f.joined ? 'joined' : 'never joined'}`;
+for (const r of downUnder.slice(0, 12)) console.log(`   under the ground: ${line(r)}`);
+for (const r of downFailing.slice(0, 12)) console.log(`   not flown in as it must be: ${line(r)}`);
+for (const r of downKnown) console.log(`   ${flownWell(r) ? 'known to miss, but flown in as it must be now (take it off KNOWN_HIGH)' : 'known miss'}: ${line(r)}\n      (${KNOWN_HIGH.get(r.pad)})`);
+for (const pad of untried) console.log(`   known miss not flown this run (no ticketed crossing down onto it): ${pad}`);
+const unticketed = downRows.filter((r) => !r.byTicket && !flownWell(r));
+if (unticketed.length) console.log(`no ticket flies these, so they are shown and not judged: ${unticketed.length}`);
+for (const r of unticketed.slice(0, 12)) console.log(`   ${line(r)}`);
+const pass = joined.length >= rows.length - 14 && under.length === 0 && downUnder.length === 0 && downLong.length === 0 && downFailing.length === 0;
 console.log(pass ? '\nPASS' : '\nFAIL');
 process.exit(pass ? 0 : 1);
