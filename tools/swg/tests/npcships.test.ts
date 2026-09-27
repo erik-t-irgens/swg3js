@@ -222,7 +222,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 // ship of the player's, so nothing hostile ever picks it, taunts it or strikes it with lightning.
 // contacts.ts, world.ts and main.ts cannot be loaded by node, so what they say is read.
 {
-  const read = (rel: string) => readFileSync(join(here, '..', '..', '..', rel), 'utf8');
+  // A checkout that writes Windows line endings must read the same as one that does not.
+  const read = (rel: string) => readFileSync(join(here, '..', '..', '..', rel), 'utf8').replace(/\r\n/g, '\n');
   const contacts = read('src/space/contacts.ts');
   const sync = /\n {2}sync\([^\n]*\{\n([\s\S]*?)\n {2}\}\n/.exec(contacts)?.[1] ?? '';
   const adoptsInSync = sync.match(/this\.adopt\(/g)?.length ?? 0;

@@ -130,7 +130,37 @@ export const WILD_TUNE = {
    * `LAIR_TUNE.liveLairs` or it never binds at all.
    */
   sitesPerPass: 2,
+  /**
+   * Whether a broken lair comes back at all. Off, a lair somebody cleared stays cleared for the life
+   * of the world, however far the player walks away and back; on again, each comes back when next
+   * come near.
+   */
+  respawns: true,
 };
+
+/**
+ * Move numbers in one of the tuning tables, live, and answer which moved.
+ *
+ * A number is only ever replaced by a finite number, a switch by a switch and a pair by two numbers,
+ * so a console typo cannot turn a cap into a word; a key the table has not got is ignored. Pairs are
+ * written in place, so anything holding the table's own pair sees the change.
+ */
+export function tuneTable(table: object, t: Record<string, unknown> | null | undefined): string[] {
+  const moved: string[] = [];
+  if (!t || typeof t !== 'object') return moved;
+  const into = table as Record<string, unknown>;
+  for (const [key, value] of Object.entries(t)) {
+    if (!Object.prototype.hasOwnProperty.call(into, key)) continue;
+    const had = into[key];
+    if (typeof had === 'number' && typeof value === 'number' && Number.isFinite(value)) into[key] = value;
+    else if (typeof had === 'boolean' && typeof value === 'boolean') into[key] = value;
+    else if (Array.isArray(had) && Array.isArray(value) && value.length === had.length && value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+      for (let i = 0; i < had.length; i++) had[i] = value[i];
+    } else continue;
+    moved.push(key);
+  }
+  return moved;
+}
 
 export class WildLife {
   private pack: WildPack | null = null;
@@ -140,8 +170,19 @@ export class WildLife {
   private token = 0;
   private since = 0;
   private readonly lastAt = new THREE.Vector3(NaN, NaN, NaN);
+  /**
+   * The sites cleared while respawning was off, by key: never stood again until it is turned back on.
+   * `open` is every site less those, rebuilt only when the set or the sites change.
+   */
+  private readonly cleared = new Set<string>();
+  private open: LairSite[] = [];
+  /** Bumped whenever the sites or the cleared set change; `open` is good while it matches `openAt`. */
+  private version = 0;
+  private openAt = -1;
+  /** The game the last step was given, kept (the world's own object) so a restand can take bodies down. */
+  private deps: WildDeps | null = null;
   /** For the console: what the last pass did and what is up now. */
-  readonly last = { sites: 0, up: 0, bodies: 0, stood: 0, dropped: 0, refused: '' };
+  readonly last = { sites: 0, up: 0, bodies: 0, stood: 0, dropped: 0, cleared: 0, refused: '' };
 
   /** Whether there is anything to run at all. */
   get ready(): boolean {
@@ -155,6 +196,7 @@ export class WildLife {
   async load(planetId: string, base = ''): Promise<void> {
     const token = ++this.token;
     this.clear();
+    this.forgetCleared();
     if (!planetId) return;
     try {
       const [packRes, manRes] = await Promise.all([fetch(`${base}assets-private/${planetId}/spawns.json`), fetch(`${base}assets-private/spawns/manifest.json`)]);
@@ -173,6 +215,7 @@ export class WildLife {
     this.pack = pack?.format === 1 && Array.isArray(pack.areas) ? pack : null;
     this.manifest = manifest?.format === 1 && manifest.lairs ? manifest : null;
     this.sites = [];
+    this.version++;
     if (!this.pack || !this.manifest) return;
     const world = this.pack.planet;
     for (const area of this.pack.areas) {
@@ -189,17 +232,80 @@ export class WildLife {
   unload(): void {
     this.token++;
     this.clear();
+    this.forgetCleared();
     this.pack = null;
     this.manifest = null;
     this.sites = [];
+    this.version++;
     this.last.sites = 0;
+    this.deps = null;
   }
 
-  /** Put every standing body down without touching the pack: what a reload of the rules wants. */
+  /**
+   * Put every standing body down without touching the pack: what a reload of the rules wants. The
+   * bodies go with their records -- dropping only the records left every one of them standing in the
+   * world with nothing that would ever take it down again.
+   */
   restand(): void {
+    const deps = this.deps;
+    if (deps) for (const rec of this.standing.values()) for (const m of rec.bodies) deps.remove(m);
     this.clear();
     this.lastAt.set(NaN, NaN, NaN);
     this.since = WILD_TUNE.everySeconds;
+  }
+
+  /**
+   * Move any of the numbers of `LAIR_TUNE` and `WILD_TUNE`, live; answers which it moved. A change to
+   * how sites are laid (`spacing`, `perArea`) lays the world out again and stands it afresh.
+   */
+  retune(t: Record<string, unknown>): string[] {
+    const moved = [...tuneTable(LAIR_TUNE, t), ...tuneTable(WILD_TUNE, t)];
+    if (moved.includes('spacing') || moved.includes('perArea')) {
+      this.restand();
+      this.adopt(this.pack, this.manifest);
+    }
+    return moved;
+  }
+
+  /**
+   * Whether a broken lair comes back. Turned on again, every one cleared meanwhile is forgotten and
+   * stands on the next pass that comes near it.
+   */
+  setRespawns(on: boolean): void {
+    WILD_TUNE.respawns = on;
+    if (on) this.forgetCleared();
+  }
+
+  private forgetCleared(): void {
+    if (!this.cleared.size) return;
+    this.cleared.clear();
+    this.version++;
+    this.last.cleared = 0;
+  }
+
+  /** A site cleared while respawning is off: it never stands again until that is turned back on. */
+  private clearSite(key: string): void {
+    if (this.cleared.has(key)) return;
+    this.cleared.add(key);
+    this.version++;
+    this.last.cleared = this.cleared.size;
+  }
+
+  /** The sites a pass may stand: all of them, less any cleared while respawning was off. */
+  private openSites(): readonly LairSite[] {
+    if (!this.cleared.size) return this.sites;
+    if (this.openAt !== this.version) {
+      this.open = this.sites.filter((s) => !this.cleared.has(s.key));
+      this.openAt = this.version;
+    }
+    return this.open;
+  }
+
+  /** How many bodies all the standing sites hold between them. */
+  private liveBodies(): number {
+    let n = 0;
+    for (const rec of this.standing.values()) n += rec.bodies.length;
+    return n;
   }
 
   private clear(): void {
@@ -220,12 +326,13 @@ export class WildLife {
    * is how much of it has passed. Both come from `stepLiving`, so `__debug.advance` drives all of it.
    */
   step(dt: number, now: number, at: THREE.Vector3, deps: WildDeps): void {
-    this.last.stood = 0;
-    this.last.dropped = 0;
+    this.deps = deps;
     if (!this.ready || deps.held()) return;
     const cat = deps.catalogue();
     const centre = deps.centre();
     if (!cat || !centre) return;
+    // Turned back on by the table rather than the switch: what was cleared meanwhile stands again.
+    if (WILD_TUNE.respawns && this.cleared.size) this.forgetCleared();
     this.since += dt;
     const moved = !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > WILD_TUNE.moveMetres;
     if (this.since < WILD_TUNE.everySeconds && !moved) {
@@ -236,12 +343,15 @@ export class WildLife {
     }
     this.since = 0;
     this.lastAt.copy(at);
+    // What this pass did, reset only by a pass that really runs, so the console reads the last one.
+    this.last.stood = 0;
+    this.last.dropped = 0;
 
     // The pass works in the pack's own frame, because that is what the sites are in; the player's
     // place is carried back into it rather than every site being carried forward.
     const mine = { x: centre.x - at.x, z: at.z + centre.z };
     const live = new Set(this.standing.keys());
-    const { add, drop } = wanted(this.sites, mine, live);
+    const { add, drop } = wanted(this.openSites(), mine, live);
     for (const key of drop) this.put(key, deps);
     let stood = 0;
     for (const site of add) {
@@ -256,7 +366,11 @@ export class WildLife {
   private stand(site: LairSite, now: number, cat: MobileCatalogue, centre: { x: number; z: number }, deps: WildDeps): boolean {
     const def = this.manifest?.lairs[site.lair];
     if (!def) return false;
-    const n = standingAt(def, site.seed);
+    // Never past the most wild bodies there may be at once, whatever the lairs would stand: that
+    // number was declared and never read, and a few struck nests could take the count past it.
+    const room = LAIR_TUNE.liveBodies - this.liveBodies();
+    if (room <= 0) return false;
+    const n = Math.min(standingAt(def, site.seed), room);
     const spread = spreadOf(def);
     const rec: Standing = { site, def, bodies: [], nest: null, helpedAt: -Infinity, brokeAt: 0, wait: respawnWait(site.seed), killed: 0 };
     for (let i = 0; i < n; i++) {
@@ -314,6 +428,9 @@ export class WildLife {
   private put(key: string, deps: WildDeps): void {
     const rec = this.standing.get(key);
     if (!rec) return;
+    // A lair somebody broke while respawning is off stays broken after the player has walked away,
+    // or walking off and back would be a respawn by another name.
+    if (rec.brokeAt > 0 && !WILD_TUNE.respawns) this.clearSite(key);
     rec.nest?.dispose();
     rec.nest = null;
     for (const m of rec.bodies) deps.remove(m);
@@ -343,7 +460,7 @@ export class WildLife {
       nest.wantsHelp = false;
       // Broken is broken: nothing more comes out of it, ever, which is what killing it is for.
       if (nest.dead) continue;
-      const n = reinforcements(rec.def, rec.bodies.length, now - rec.helpedAt);
+      const n = Math.min(reinforcements(rec.def, rec.bodies.length, now - rec.helpedAt), LAIR_TUNE.liveBodies - this.liveBodies());
       if (n <= 0) continue;
       rec.helpedAt = now;
       const spread = spreadOf(rec.def);
@@ -396,7 +513,8 @@ export class WildLife {
       }
       // Once its clock is out the site is forgotten, and the next pass that comes near stands it
       // again from the same seed: the same animals in the same places, as the same world should.
-      if (rec.brokeAt > 0 && now - rec.brokeAt >= rec.wait) {
+      // With respawning off the clock never runs out.
+      if (rec.brokeAt > 0 && WILD_TUNE.respawns && now - rec.brokeAt >= rec.wait) {
         this.standing.delete(key);
         this.count();
       }

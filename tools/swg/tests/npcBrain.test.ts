@@ -26,7 +26,8 @@ function ok(cond: boolean, what: string): void {
   ok(cleanNpcBrain([]) === undefined, 'an array is not a mind');
 
   const b = cleanNpcBrain({ t: 'p', st: 2, sl: 1.5, bd: 7, bs: 4, gx: 100, gz: -200 });
-  ok(b?.t === 'p', 'the player crosses as the one word that is not an id, since there is exactly one of them');
+  ok(b?.t === 'p', "a bare 'p' from a browser built before players were named by relay id still crosses");
+  ok(cleanNpcBrain({ t: 'p:12' })?.t === 'p:12', 'and a player named by the relay id of their browser crosses as the id-shaped word it is');
   ok(b?.st === 2 && b?.sl === 1.5, 'a stun and a slow cross as the seconds they have left');
   ok(b?.bd === 7 && b?.bs === 4, 'and a burn as how much a second and for how much longer');
   ok(b?.gx === 100 && b?.gz === -200, 'and where it was walking');
@@ -65,13 +66,16 @@ function ok(cond: boolean, what: string): void {
   const mobile = readFileSync(new URL('../../../src/world/mobiles/mobile.ts', import.meta.url), 'utf8');
 
   // A target cannot cross as a key: every living thing's key is handed out by the browser it was
-  // made in, so one browser's number is another browser's rock.
-  ok(/t\.key === PLAYER_KEY \? 'p' :/.test(mobile), "the player is written as the one word that means the same everywhere, never as a key");
+  // made in, so one browser's number is another browser's rock. A player is named by the relay id of
+  // the browser they are at (`targetWord` in npcNet.ts, tested in npcWire.test.ts), never as 'p',
+  // which the new keeper read as its own player.
+  ok(/npcNow\(\)\?\.nameTarget\(t\.key, /.test(mobile), 'a player is written as the word that means the same person everywhere, never as a key');
+  ok(!/t\.key === PLAYER_KEY \? 'p' :/.test(mobile), "and never as the bare 'p' that meant whoever received it");
   ok(/npcId\?: string \}\)\.npcId \?\? ''/.test(mobile), 'and any other creature as the id the world knows it by');
   ok(!/b\.t = t\.key/.test(mobile), 'and never as a key, which would name something else entirely on the browser it arrived at');
 
   // Kept while driven, applied when it is handed over: a driven copy thinks nothing.
-  ok(/if \(row\.b\) this\.heldBrain = row\.b;/.test(mobile), 'a driven copy keeps the last mind it was told, which costs nothing');
+  ok(/this\.heldBrain = row\.b \? copyBrain\(row\.b, this\.heldBrain\) : null;/.test(mobile), 'a driven copy keeps its own copy of the last mind it was told, which costs nothing');
   ok(/this\.adoptBrain\(this\.heldBrain\);/.test(mobile), 'and takes it on at the moment it is asked to do the thinking');
   ok(/this\.heldBrain = null;/.test(mobile), 'and lets it go, so a second hand-over is not given a stale one');
 

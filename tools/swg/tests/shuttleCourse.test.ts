@@ -290,6 +290,8 @@ function rng(seed: number): () => number {
 {
   const read = (rel: string) =>
     readFileSync(new URL(rel, import.meta.url), 'utf8')
+      // A checkout that writes Windows line endings must read the same as one that does not.
+      .replace(/\r\n/g, '\n')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/[^\n]*/g, '');
   const bodyOf = (src: string, name: string, method: boolean): string | null => {

@@ -3069,7 +3069,20 @@ function packStatus(dir) {
     if (spawnWorlds.length && (unspawned.length || !spawnManifest)) {
       need(`spawns ${dir} --swg=<swg-dir> --retail-only`, unspawned.length ? `the creatures and standing people the server placed on ${unspawned.join(', ')} are not there (spawns.json)` : "the creatures the worlds place have no level, health or damage of the server's (spawns/manifest.json)");
     } else if (spawnWorlds.length) {
-      console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
+      // A person indoors faces through their building's own turn since the command learned that the
+      // emulator writes the facing in the room's frame as it does the place (`intoRoom` in core3.mjs).
+      // A pack written before says nothing about it and faces everybody in a turned building off by
+      // that building's yaw, so it is told apart by the field the fix added beside every such row.
+      const unturned = spawnWorlds.filter((w) => {
+        try {
+          const text = readFileSync(join(dir, w, 'spawns.json'), 'utf8');
+          return text.includes('"local":') && !text.includes('"localHeading":');
+        } catch {
+          return false;
+        }
+      });
+      if (unturned.length) need(`spawns ${dir} --swg=<swg-dir> --retail-only`, `the people standing indoors on ${unturned.join(', ')} face as though their building stood unturned (written before the facing was carried through the building's own turn)`);
+      else console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
     }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
@@ -7080,16 +7093,6 @@ switch (cmd) {
       }
       return out;
     };
-    /** A point in a room's own frame, put into the world by that room's transform. */
-    const intoWorld = (room, p) => {
-      const [w, x, y, z] = room.q;
-      const t = [2 * (y * p.z - z * p.y), 2 * (z * p.x - x * p.z), 2 * (x * p.y - y * p.x)];
-      return {
-        x: room.pos[0] + p.x + w * t[0] + (y * t[2] - z * t[1]),
-        y: room.pos[1] + p.y + w * t[1] + (z * t[0] - x * t[2]),
-        z: room.pos[2] + p.z + w * t[2] + (x * t[1] - y * t[0]),
-      };
-    };
 
     // The nests themselves, when the archives are to hand.
     //
@@ -7192,8 +7195,8 @@ switch (cmd) {
             return { ...row, room: null };
           }
           placedIndoors++;
-          const at = intoWorld(room, { x: s.x, y: s.y, z: s.z });
-          return { ...row, ...at, room: room.cellIndex, local: [s.x, s.y, s.z] };
+          // The place and the facing both, through the room's own turn (`intoRoom` says why both).
+          return { ...row, ...c3.intoRoom(s, room) };
         })
         .filter((s) => s.cell === 0 || s.room !== null);
       if (rooms.size) console.log(`spawns: ${world} — ${placedIndoors} people put in their own rooms${lostIndoors ? `, ${lostIndoors} whose room is in no snapshot and are left out` : ''}`);

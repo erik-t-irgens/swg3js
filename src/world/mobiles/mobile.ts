@@ -39,12 +39,13 @@ import { BLADE_RADIUS, BladePath, type Striker } from '../../combat/sweep';
 import { CLASH } from '../../combat/clash.ts';
 import { nextLivingKey, PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../../combat/kit';
 import { hostileSides, sideOf } from '../../combat/targets';
-import { npcNow, NPC_TUNE, type NpcBrain, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
+import { copyBrain, npcNow, NPC_TUNE, type NpcBrain, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
 import { markActor } from '../portalRender';
 import { planBody, radiusToward, type BodyInput, type BodyPlan } from './shape';
 import { moveSpeeds, stepGait, type GaitStep } from './gait';
-import { BRAIN_TUNE, decide, type BrainSelf, type BrainTarget, type Decision } from './brain';
+import { BRAIN_TUNE, clampWander, decide, keepPost, type BrainSelf, type BrainTarget, type Decision, type Post } from './brain';
 import { LOD_TUNE, type LodTier } from './lod';
+import { gravityFor, holdAir } from './airless.ts';
 import { NavAgent } from '../nav/navAgent.ts';
 import { worldNav } from '../nav/nav.ts';
 import type { CellState } from '../layoutStream';
@@ -306,6 +307,19 @@ export class Mobile implements Living, NpcSubject {
    * drawn, animated, lit, culled, followed through a building's portals and stood on the floor.
    */
   essential = false;
+  /**
+   * The spot the data put it on, for a standing person, and how it keeps to it (`keepPost` in
+   * `brain.ts`); null for everything else, whose wander is the brain's own.
+   */
+  post: Post | null = null;
+  /**
+   * Whether the room it stands in has no collision under it this instant. A building's colliders
+   * come and go with the player's distance while the room a body is in goes on answering from model
+   * data, so a body left in a building the player has walked away from stands on a floor that is no
+   * longer there. While this is set it holds the height it had, as the fighters do (`cellSolid`), and
+   * stands on its own floor again the moment the colliders come back. The manager sets it.
+   */
+  private airless = false;
   /** The model's meshes, whose shadow flag the manager sets. */
   meshes: THREE.Mesh[] = [];
   model: THREE.Object3D | null = null;
@@ -544,6 +558,27 @@ export class Mobile implements Living, NpcSubject {
     if (this.inside === inside || this.disposed) return;
     this.inside = inside;
     this.plan.colliders.forEach((c, i) => this.colliders[i]?.setCollisionGroups(this.groupsFor(c.terrain)));
+  }
+
+  /** Whether the room under it has no collision just now (see `airless`). The manager asks every frame; only a change does anything. */
+  setAirless(airless: boolean): void {
+    if (this.airless === airless || this.disposed) return;
+    this.airless = airless;
+    // A driven body is kinematic and goes where it is told; its gravity is set again when it is ours.
+    if (this.driven || !this.body.isValid()) return;
+    if (airless) holdAir(this.body);
+    else this.body.setGravityScale(gravityFor(false, this.swimming, this.flyer, this.dead), true);
+  }
+
+  /**
+   * Whether it is in a fight or has been in one lately: a target, a grudge it still holds, or a
+   * fight's state. What makes room for somebody nearer must never put such a body down
+   * (`StandingPeople`): somebody you are fighting does not vanish.
+   */
+  get engaged(): boolean {
+    if (this.targetKey !== null || this.memory.size > 0) return true;
+    const s = this.state;
+    return s === 'alert' || s === 'chase' || s === 'attack' || s === 'cover' || s === 'flee' || s === 'return' || s === 'knockdown';
   }
 
   /**
@@ -833,8 +868,10 @@ export class Mobile implements Living, NpcSubject {
     }
     // What it is thinking, so whoever takes it over next does not start it over. Written only when
     // there is something to say: a creature standing about with nothing on its mind costs no bytes.
+    // A player is named by the relay id of the browser they are at (`p:<id>`), never as `'p'`, which
+    // the new keeper read as its own player and so turned the creature on somebody else.
     const t = this.targetRef;
-    const target = t ? (t.key === PLAYER_KEY ? 'p' : ((t as { npcId?: string }).npcId ?? '')) : '';
+    const target = t ? (npcNow()?.nameTarget(t.key, (t as { npcId?: string }).npcId ?? '') ?? '') : '';
     if (target || this.stunned > 0 || this.slowed > 0 || this.dotLeft > 0 || this.goal) {
       const b: NpcBrain = {};
       if (target) b.t = target;
@@ -884,8 +921,12 @@ export class Mobile implements Living, NpcSubject {
     const want = this.wantTarget;
     this.wantTarget = null;
     if (!want) return;
+    // The word names this browser's own player, another player's figure here, or one of the world's
+    // creatures; a player this browser holds no figure for is nobody, and it picks its own fight.
+    const named = npcNow()?.readTarget(want) ?? null;
+    if (!named) return;
     for (const t of targets) {
-      const mine = want === 'p' ? t.key === PLAYER_KEY : (t as { npcId?: string }).npcId === want;
+      const mine = 'key' in named ? t.key === named.key : (t as { npcId?: string }).npcId === named.npc;
       if (!mine || t.dead) continue;
       this.targetRef = t;
       this.targetKey = t.key;
@@ -903,8 +944,9 @@ export class Mobile implements Living, NpcSubject {
     if (this.disposed || this.dead) return;
     // Kept, not applied: a driven copy thinks nothing, so its mind is only worth having at the
     // moment this browser is asked to take it over. Holding the last one said is what makes that
-    // moment cost nothing and need no extra word on the wire.
-    if (row.b) this.heldBrain = row.b;
+    // moment cost nothing and need no extra word on the wire. Copied, because the row it arrived in
+    // is refilled by the next one; and a row with nothing on its mind means exactly that.
+    this.heldBrain = row.b ? copyBrain(row.b, this.heldBrain) : null;
     this.toldAt.set(row.p[0], row.p[1], row.p[2]);
     this.toldHeading = row.h;
     this.toldSpeed = row.v;
@@ -980,7 +1022,7 @@ export class Mobile implements Living, NpcSubject {
       this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
       this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-      this.body.setGravityScale(this.flyer || this.swimming ? 0 : 1, true);
+      this.body.setGravityScale(gravityFor(this.airless, this.swimming, this.flyer, this.dead), true);
     }
     this.state = this.state === 'loading' ? 'loading' : this.dead ? this.state : 'idle';
     // It thinks at once rather than standing still for a think's worth of seconds, and the stuck
@@ -1220,8 +1262,8 @@ export class Mobile implements Living, NpcSubject {
     this.dropAim();
     const v = this.body.linvel();
     this.body.setLinvel({ x: 0, y: this.flyer ? Math.min(0, v.y) : v.y, z: 0 }, true);
-    // A flyer falls out of the air; a swimmer stays afloat.
-    if (!this.swimming) this.body.setGravityScale(1, true);
+    // A flyer falls out of the air; a swimmer stays afloat, and so does one in a room with no floor built.
+    if (!this.swimming && !this.airless) this.body.setGravityScale(1, true);
     if (this.hologram) {
       this.fading = HOLOGRAM_FADE;
       this.deadTimer = HOLOGRAM_FADE + 0.05;
@@ -1528,6 +1570,7 @@ export class Mobile implements Living, NpcSubject {
         const v = this.body.linvel();
         this.body.setLinvel({ x: v.x * 0.9, y: v.y * 0.8, z: v.z * 0.9 }, true);
       }
+      if (this.airless) holdAir(this.body);
       this.animate(sdt, tier);
       this.updateBlade(dt, ctx.camera);
       this.deadTimer -= dt;
@@ -1564,6 +1607,8 @@ export class Mobile implements Living, NpcSubject {
     this.stepStance(this.targetRef);
     this.act(sdt, ctx, tier);
     this.holdHeight(t, sdt);
+    // After everything that writes a velocity this frame, so nothing it did can start a fall.
+    if (this.airless) holdAir(this.body);
     this.animate(sdt, tier);
     // After the mixer and before the blade: the fold goes on top of the pose the clip has just
     // written, and the blade's own ends are worked out from the hand the fold has just moved.
@@ -1648,7 +1693,8 @@ export class Mobile implements Living, NpcSubject {
     const terrain = this.deps.terrain;
     const filter = this.inside ? INSIDE : undefined;
     const gd = this.deps.physics.groundDistance(t.x, t.y, t.z, this.plan.feet + 0.4, this.body, filter);
-    this.grounded = gd !== null || (!this.inside && this.pos.y <= terrain.heightAt(this.pos.x, this.pos.z) + 0.25);
+    // A room with no floor built is stood on as though it had one: the height is held for it.
+    this.grounded = gd !== null || this.airless || (!this.inside && this.pos.y <= terrain.heightAt(this.pos.x, this.pos.z) + 0.25);
     if (this.inside) {
       this.swimming = false;
       return;
@@ -1659,7 +1705,7 @@ export class Mobile implements Living, NpcSubject {
     const swimming = this.canSwim && deep && this.pos.y < surface;
     if (swimming !== this.swimming) {
       this.swimming = swimming;
-      this.body.setGravityScale(swimming || (this.flyer && !this.dead) ? 0 : 1, true);
+      this.body.setGravityScale(gravityFor(this.airless, swimming, this.flyer, this.dead), true);
     }
   }
 
@@ -1731,6 +1777,11 @@ export class Mobile implements Living, NpcSubject {
       forgetUntil: this.forgetUntil,
     };
     const d = decide(self, list);
+    // A standing person keeps to the spot the data put it on (`keepPost`): the brain's wander is drawn
+    // for animals on open ground. And indoors no wander reaches past the indoor leash, the fighters'
+    // own rule, or the body paces out and back for as long as it is left alone.
+    if (this.post) keepPost(d, self, this.post, self.wanderAt);
+    if (this.inside) clampWander(d, this.homeX, this.homeZ, BRAIN_TUNE.leashInside * BRAIN_TUNE.wanderInsideShare);
     if (d.clearMemory) this.memory.clear();
     if (d.targetKey !== this.targetKey) {
       this.stuck = 0;
@@ -2095,6 +2146,8 @@ export class Mobile implements Living, NpcSubject {
     this.inner.scale.setScalar(this.scale);
     this.homeX = x;
     this.homeZ = z;
+    // Stood again on open ground, where the terrain is always a floor.
+    this.airless = false;
     this.body.setEnabled(true);
     this.body.setGravityScale(this.flyer ? 0 : 1, true);
     this.body.setTranslation({ x, y: y + this.plan.feet + 0.05, z }, true);
@@ -2143,6 +2196,10 @@ export class Mobile implements Living, NpcSubject {
       visible: this.group.visible,
       inside: this.inside,
       room: this.room,
+      // Its room has no collision built under it just now, so it is holding its height.
+      airless: this.airless,
+      // The spot a standing person keeps to, and how far it is off it.
+      post: this.post ? `${this.post.kind} ${Math.hypot(this.pos.x - this.homeX, this.pos.z - this.homeZ).toFixed(1)} m off` : null,
       swimming: this.swimming,
       ragdoll: this.ragdoll?.status ?? null,
       ranged: this.rangedRange ? Number(this.rangedRange.toFixed(0)) : 0,

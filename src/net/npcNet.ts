@@ -48,8 +48,71 @@
 // on its own 4 Hz pass, and the world's list (`src/net/owned.ts`) is what stands them in the first
 // place.
 
-import type { Living } from '../combat/kit.ts';
+import { PLAYER_KEY, type Living } from '../combat/kit.ts';
 import type { Authority } from './session.ts';
+
+/**
+ * Whether a body stood under a world name goes on the wire at all.
+ *
+ * Only a body stood from one of the server's own records does (`standRecord` asks for it). Everything
+ * else with a world name -- a lair's creature (`wild:`), a person standing about (`stood:`), a ticket
+ * collector (`travel:`) -- is seeded here, stands the same in every browser from the same data, and is
+ * a name the server has never heard. Handed to this module one was marked driven the moment a server
+ * answered, because nobody had been granted it, and so every one of them stood frozen and could not
+ * be hurt for as long as the line was up. So sharing is asked for, never assumed.
+ */
+export function sharesOnWire(worldId: string | undefined, share: boolean | undefined): boolean {
+  return !!worldId && share === true;
+}
+
+/**
+ * What a creature is fighting, as a word every browser reads the same way.
+ *
+ * A living key means nothing on another browser (each hands its own out), so a player crosses as
+ * `p:` and the relay id of the browser that player is at -- this browser's own for its own player,
+ * and the peer's for another player's figure -- and a creature as the id the world knows it by. It
+ * was `'p'` alone, which the new keeper read as its **own** player: a creature fighting one player
+ * turned on another the moment the second took it over.
+ *
+ * An empty word is nobody nameable: a relay id of nought, or a thing with no world name.
+ */
+export function targetWord(key: number, npcId: string, self: number, peerOf: (key: number) => number): string {
+  if (key === PLAYER_KEY) return self > 0 ? `p:${self}` : '';
+  const peer = peerOf(key);
+  if (peer > 0) return `p:${peer}`;
+  return npcId;
+}
+
+/** A player named on the wire: `p:` and a relay id. */
+const PLAYER_WORD = /^p:(\d{1,9})$/;
+
+/**
+ * A target word back to what it names here: a living key (this browser's own player, or another
+ * player's figure), or a creature's world id to be looked for. Null for a player this browser holds no
+ * figure for, which is an ordinary answer -- the creature then picks its own fight.
+ */
+export function targetOf(word: string, self: number, keyOfPeer: (id: number) => number): { key: number } | { npc: string } | null {
+  if (!word) return null;
+  const m = PLAYER_WORD.exec(word);
+  if (!m) return { npc: word };
+  const id = Number(m[1]);
+  if (id > 0 && id === self) return { key: PLAYER_KEY };
+  const key = id > 0 ? keyOfPeer(id) : 0;
+  return key > 0 ? { key } : null;
+}
+
+/** A mind copied into a kept object (made the first time), so nothing holds on to a row that is refilled. */
+export function copyBrain(from: NpcBrain, into: NpcBrain | null): NpcBrain {
+  const out = into ?? {};
+  out.t = from.t;
+  out.st = from.st;
+  out.sl = from.sl;
+  out.bd = from.bd;
+  out.bs = from.bs;
+  out.gx = from.gx;
+  out.gz = from.gz;
+  return out;
+}
 
 /**
  * The words this module answers. The socket (`src/net/net.ts`) hands a word over rather than reading
@@ -172,8 +235,10 @@ export interface NpcRow {
  *
  * **A target cannot cross as a key.** Every living thing's key is handed out by the browser it was
  * made in (`nextLivingKey`), so the number one browser calls a bantha is another browser's rock.
- * What does mean the same everywhere is the id the world knows a creature by and the fact that
- * there is one player, so a target crosses as `'p'` or as that id and is looked up on arrival.
+ * What does mean the same everywhere is the id the world knows a creature by and the relay id of the
+ * browser a player is at, so a target crosses as `p:<relay id>` or as that creature's id and is
+ * looked up on arrival (`targetWord`, `targetOf`). A bare `'p'` is what a browser built before that
+ * sends, and it means the player at the keeper's browser, which is how it is read.
  *
  * The timers cross as the seconds they have left rather than as the moment they end, because the
  * two browsers' clocks are their own and a moment is meaningless between them.
@@ -182,7 +247,7 @@ export interface NpcRow {
  * shape the rest of this protocol already has.
  */
 export interface NpcBrain {
-  /** What it is fighting: `'p'` for the player, else the id the world knows that creature by. */
+  /** What it is fighting: `p:<relay id>` for a player, else the id the world knows that creature by. */
   t?: string;
   /** Seconds of stun and of slow left on it. */
   st?: number;
@@ -278,8 +343,13 @@ const MARKS: readonly string[] = ['hit', 'leap'];
  * A row read off the wire into a kept object; false when it was not one. The place is read number
  * by number rather than through `point`, because this runs once per creature in every batch and a
  * batch comes four times a second: a triple made here would be rubbish made on a clock.
+ *
+ * Its mind is read into `brain`, which is kept beside the row and refilled, and hung on the row only
+ * when there was one. It was never read at all until now: the keeper wrote it, the server passed it
+ * on, and this dropped it on the floor, so a creature changing hands forgot everything on its mind.
+ * `keeper` is the relay id the batch came from, which is what a bare `'p'` names.
  */
-function readRow(raw: unknown, into: NpcRow): boolean {
+function readRow(raw: unknown, into: NpcRow, brain: NpcBrain, keeper: number): boolean {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
   const o = raw as Record<string, unknown>;
   const i = idOf(o.i);
@@ -298,7 +368,57 @@ function readRow(raw: unknown, into: NpcRow): boolean {
   into.v = Math.max(0, num(o.v));
   into.hp = Math.min(1, Math.max(0, num(o.hp, 1)));
   into.f = MARKS.includes(String(o.f)) ? (o.f as NpcMark) : undefined;
+  into.b = readBrain(o.b, brain, keeper) ? brain : undefined;
   return true;
+}
+
+/** A mind off the wire into a kept object; false when there was nothing on it worth keeping. */
+function readBrain(raw: unknown, into: NpcBrain, keeper: number): boolean {
+  into.t = undefined;
+  into.st = undefined;
+  into.sl = undefined;
+  into.bd = undefined;
+  into.bs = undefined;
+  into.gx = undefined;
+  into.gz = undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const o = raw as Record<string, unknown>;
+  let any = false;
+  if (o.t === 'p') {
+    // A browser built before a player was named by relay id: its player, whose browser sent this.
+    if (keeper > 0) {
+      into.t = `p:${keeper}`;
+      any = true;
+    }
+  } else {
+    const t = idOf(o.t);
+    if (t) {
+      into.t = t;
+      any = true;
+    }
+  }
+  const st = num(o.st);
+  if (st > 0) {
+    into.st = st;
+    any = true;
+  }
+  const sl = num(o.sl);
+  if (sl > 0) {
+    into.sl = sl;
+    any = true;
+  }
+  const bs = num(o.bs);
+  if (bs > 0) {
+    into.bs = bs;
+    into.bd = Math.max(0, num(o.bd));
+    any = true;
+  }
+  if (typeof o.gx === 'number' && typeof o.gz === 'number' && Number.isFinite(o.gx) && Number.isFinite(o.gz)) {
+    into.gx = o.gx;
+    into.gz = o.gz;
+    any = true;
+  }
+  return any;
 }
 
 /** A fresh row, for the pools. */
@@ -361,6 +481,16 @@ export class NpcNet {
   buried: (id: string) => boolean = () => false;
   /** Something the player should read (a creature refused, a keeper lost). */
   onNote: (text: string) => void = () => {};
+  /**
+   * The relay id this browser speaks as, which is what names its own player to everybody else; 0
+   * while it has none. With nothing wired a player is nobody nameable and a hand-over carries no
+   * player as a target, which is what it carried before any of this.
+   */
+  selfId: () => number = () => 0;
+  /** Which peer, by relay id, a living key belongs to here (another player's figure); 0 for none. */
+  peerOfKey: (key: number) => number = () => 0;
+  /** The living key a peer's figure holds here, from their relay id; 0 when they have none. */
+  keyOfPeer: (id: number) => number = () => 0;
   /** The clock the rates are measured on, in seconds; a test hands in its own. */
   private readonly now: () => number;
 
@@ -394,8 +524,14 @@ export class NpcNet {
   /** The rows sent, filled in place; the list is kept and truncated, and the socket writes it before we are given the frame back. */
   private readonly pool: NpcRow[] = [];
   private readonly out: NpcRow[] = [];
-  /** The one row a heard batch is read into, refilled per row. */
+  /** The one row a heard batch is read into, refilled per row, and the mind read beside it. */
   private readonly heardRow: NpcRow = blankRow();
+  private readonly heardBrain: NpcBrain = {};
+  /** `p:` and this browser's own relay id, made once per id rather than once per row in a batch. */
+  private selfWord = '';
+  private selfWordFor = 0;
+  /** The same for other players, by relay id: a peer being fought is named four times a second. */
+  private readonly peerWords = new Map<number, string>();
   private clock = 0;
   private readonly stat: NpcStats = { active: false, held: 0, kept: 0, driven: 0, sent: 0, rowsSent: 0, heard: 0, rowsHeard: 0, waiting: 0, refused: 0, asked: 0, applied: 0, deaths: 0, silent: 0, handedBack: 0 };
 
@@ -509,6 +645,62 @@ export class NpcNet {
   /** The creature this browser holds under that id, or null. */
   find(id: string): NpcSubject | null {
     return this.subjects.get(id) ?? null;
+  }
+
+  // ---- naming what a creature is fighting ----------------------------------------------------------
+
+  /**
+   * What a creature is fighting, as the word that crosses (`targetWord`). Asked once a batch for each
+   * creature this browser keeps that has a target, so the players' words are made once and kept
+   * rather than made again four times a second.
+   */
+  nameTarget(key: number, npcId: string): string {
+    if (key === PLAYER_KEY) {
+      const self = this.ask(this.selfId);
+      if (self !== this.selfWordFor) {
+        this.selfWordFor = self;
+        this.selfWord = self > 0 ? `p:${self}` : '';
+      }
+      return this.selfWord;
+    }
+    let peer = 0;
+    try {
+      peer = who(this.peerOfKey(key));
+    } catch {
+      peer = 0;
+    }
+    if (peer > 0) {
+      let word = this.peerWords.get(peer);
+      if (!word) {
+        word = `p:${peer}`;
+        this.peerWords.set(peer, word);
+      }
+      return word;
+    }
+    return npcId;
+  }
+
+  /**
+   * A word a keeper wrote, back to what it names here (`targetOf`): asked once, when this browser is
+   * handed a creature, never in a frame.
+   */
+  readTarget(word: string): { key: number } | { npc: string } | null {
+    return targetOf(word, this.ask(this.selfId), (id) => {
+      try {
+        return who(this.keyOfPeer(id));
+      } catch {
+        return 0;
+      }
+    });
+  }
+
+  /** A number out of one of the game's hooks: one that throws, or answers nonsense, is nobody. */
+  private ask(hook: () => number): number {
+    try {
+      return who(hook());
+    } catch {
+      return 0;
+    }
   }
 
   // ---- what goes out --------------------------------------------------------------------------------
@@ -787,10 +979,13 @@ export class NpcNet {
     if (!Array.isArray(rows)) return;
     this.stat.heard++;
     const now = this.now();
+    // Who kept these: the relay stamps every batch with the browser it came from, which is what a
+    // bare `'p'` from an older browser names.
+    const keeper = who(msg.id);
     let n = 0;
     for (const raw of rows) {
       if (n >= 64) break;
-      if (!readRow(raw, this.heardRow)) continue;
+      if (!readRow(raw, this.heardRow, this.heardBrain, keeper)) continue;
       n++;
       const id = this.heardRow.i;
       // Dead is dead: a late batch from the keeper that had it, or the world's own list of places
@@ -846,6 +1041,9 @@ export class NpcNet {
     row.hp = from.hp;
     // A mark is a thing that happened once, and a body that does not exist yet cannot have seen it.
     row.f = undefined;
+    // Its mind is kept in a copy of its own, made once for this row: the one it was read into is
+    // refilled by the very next row of the batch.
+    row.b = from.b ? copyBrain(from.b, row.b ?? null) : undefined;
     this.stat.waiting = this.waiting.size;
   }
 
@@ -896,6 +1094,7 @@ export class NpcNet {
     this.notedAt = -Infinity;
     this.cursor = 0;
     this.clock = 0;
+    this.peerWords.clear();
     this.stat.held = 0;
     this.stat.kept = 0;
     this.stat.driven = 0;

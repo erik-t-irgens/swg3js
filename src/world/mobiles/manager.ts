@@ -35,7 +35,7 @@ import type { CellState } from '../layoutStream';
 import type { FighterGlow } from '../npcs';
 import { keepNearestGlow } from '../../combat/bladeLights';
 import { PendingSpawns, armsRng, decideStand, rollsFor, scaleFrom, type SpawnRecord } from '../spawnSeed.ts';
-import { npcNow } from '../../net/npcNet.ts';
+import { npcNow, sharesOnWire } from '../../net/npcNet.ts';
 
 export interface SpawnOpts {
   origin?: 'spawned' | 'ambient';
@@ -52,10 +52,19 @@ export interface SpawnOpts {
   seed?: number;
   /**
    * The name the world knows this one by, when it is one the world holds rather than one this
-   * browser stood for itself. It is what `removeById` takes it down by and what everything that talks
-   * about it across a wire says; a spawn without one is this browser's own business, as before.
+   * browser stood for itself. It is what `removeById` takes it down by, and it keeps the hand-spawn
+   * cap and the NPC tab's clear off the body; a spawn without one is this browser's own business.
    */
   worldId?: string;
+  /**
+   * Whether it goes on the wire to be kept by whichever browser the server grants it to
+   * (`sharesOnWire`). Only a body stood from one of the server's own records asks for that
+   * (`standRecord`). Everything else under a world name -- a lair's creature, a person standing
+   * about, a ticket collector -- is seeded from the same data in every browser and is a name the
+   * server has never heard, so it stays this browser's own: shared, it was driven by nobody and stood
+   * frozen and unhurtable for as long as a server was answering.
+   */
+  share?: boolean;
   /**
    * Part of the furniture: it stands where it is stood, takes no damage and never dies.
    *
@@ -92,9 +101,16 @@ export interface MobileManagerDeps {
   hittableAt?(handle: number): Hittable | undefined;
   /**
    * The room a mobile put down inside a building starts in (it walked through no portal to get
-   * there): the smallest room box holding the point, else the player's room, or null.
+   * there): the smallest room box holding the point, or null. Never the player's room for want of a
+   * better answer: a body stood a hundred metres off in a building that has not streamed in is not
+   * in the room the player happens to be in.
    */
   cellAt(p: THREE.Vector3): CellState | null;
+  /**
+   * Whether that room has collision under it this instant (`LayoutStreamer.cellsSolid`). With no
+   * answer wired every room is solid, which is how the mobiles behaved before it existed.
+   */
+  cellSolid?(state: CellState | null): boolean;
   /**
    * Follow a body through a building's portals, as the player is followed (`trackCell`): outside
    * until its path crosses a portal into a room, in that room until it crosses one out. Not by
@@ -232,13 +248,18 @@ export class MobileManager {
     return null;
   }
 
+  /**
+   * How many this browser stood by hand. A body with a world name is the world's -- a lair's creature,
+   * a person standing about, a collector, one the server stood -- and is never counted, or forty people
+   * standing in a town used up the whole of the NPC tab's allowance and it refused everything.
+   */
   private spawnedCount(): number {
     let n = 0;
-    for (const m of this.live) if (m.origin === 'spawned') n++;
+    for (const m of this.live) if (m.origin === 'spawned' && !this.worldIds.has(m)) n++;
     return n;
   }
 
-  /** How many stood by hand are out (what the cap counts; the planet's own wildlife is not). */
+  /** How many stood by hand are out (what the cap counts; the planet's own wildlife is not, nor anything the world holds). */
   get spawnedOut(): number {
     return this.spawnedCount();
   }
@@ -353,11 +374,14 @@ export class MobileManager {
     if (opts.worldId) {
       this.byWorldId.set(opts.worldId, m);
       this.worldIds.set(m, opts.worldId);
-      // One of the world's: the wire is told, so whichever browser the server grants it to thinks
+      // One the server stood: the wire is told, so whichever browser the server grants it to thinks
       // for it and every other one holds the same body with its brain switched off. With no server
-      // this costs a map insert and nothing else, and every creature stays this browser's own.
-      m.shareAs(opts.worldId);
-      npcNow()?.add(m);
+      // this costs a map insert and nothing else, and every creature stays this browser's own. One
+      // this browser seeded for itself is never told to the wire at all (`share`).
+      if (sharesOnWire(opts.worldId, opts.share)) {
+        m.shareAs(opts.worldId);
+        npcNow()?.add(m);
+      }
     }
     held.loaded = this.load(m, held, entry, cat);
     return m;
@@ -419,7 +443,7 @@ export class MobileManager {
     const a = choice.args;
     this.pending.drop(a.id);
     const entry = cat!.byId(a.species)!;
-    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true });
+    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true, share: true });
   }
 
   /**
@@ -719,11 +743,16 @@ export class MobileManager {
     this.version++;
   }
 
-  /** Take away every spawned mobile the filter picks (all spawned ones without one); the wildlife stays. Returns how many. */
+  /**
+   * Take away every spawned mobile the filter picks (all spawned ones without one); the wildlife
+   * stays, and so does everything the world holds. A body with a world name is never this call's:
+   * the NPC tab's clear took the town's people and a lair's creatures down with the ones stood by
+   * hand, and they came straight back on the world's next pass. Returns how many.
+   */
   clear(filter?: (m: Mobile) => boolean): number {
     let n = 0;
     for (const m of [...this.live]) {
-      if (m.origin !== 'spawned') continue;
+      if (m.origin !== 'spawned' || this.worldIds.has(m)) continue;
       if (filter && !filter(m)) continue;
       this.remove(m);
       n++;
@@ -829,6 +858,10 @@ export class MobileManager {
         // Under the ground outside (the planet's heights came in after it was stood): back on top.
         if (m.liftToGround()) held.cellFrom.copy(m.pos);
       }
+      // Whether that room has collision under it this instant, asked every frame and not on the
+      // follow's quarter-second, as the fighters ask it: it is two lookups, and a quarter of a second
+      // of falling through a floor that has gone is half a metre nobody asked for.
+      m.setAirless(held.cell !== null && !(this.deps.cellSolid?.(held.cell) ?? true));
       const tier = this.tierOf(m, camera, ctx.playerPos, shadows, tune, held.tier);
       // The whole cull: a group that is not visible is in no pass at all.
       const visible = tier.visible || !!m.ragdoll;

@@ -9,7 +9,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { NPC_WIRE, NpcPlaces, cleanNpcBatch, cleanNpcDrop, cleanNpcGone, cleanNpcHit, cleanNpcRow, npcId } from '../../../server/npcWire.mjs';
-import { NPC_TUNE, NpcNet, type NpcRow, type NpcSubject } from '../../../src/net/npcNet.ts';
+import { NPC_TUNE, NpcNet, copyBrain, sharesOnWire, targetOf, targetWord, type NpcRow, type NpcSubject } from '../../../src/net/npcNet.ts';
+import { PLAYER_KEY } from '../../../src/combat/kit.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -156,7 +157,9 @@ class Stand implements NpcSubject {
   }
 
   npcDrive(row: NpcRow, snap: boolean): void {
-    this.drives.push({ row: { ...row, p: [...row.p] }, snap });
+    // The mind copied as the row stood at this moment, as the mobile copies it: the object it arrived
+    // in is refilled by the next row of the batch.
+    this.drives.push({ row: { ...row, p: [...row.p], b: row.b ? { ...row.b } : undefined }, snap });
     this.at = [row.p[0], row.p[1], row.p[2]];
     this.health = row.hp;
   }
@@ -516,6 +519,123 @@ const BEAT = 1 / NPC_TUNE.batchHz + 1e-6;
   ok(n.debug().waiting === 0, '17: arriving on a world forgets where the last one\'s creatures were');
   ok(n.isDead('buried:1'), '17: and forgets no death, because forgetting one is how a creature comes back to life');
   NPC_TUNE.remembered = wasRemembered;
+}
+
+// --- 18: what this browser seeded for itself never goes on the wire ------------------------------
+{
+  // A lair's creature, a person standing about and a ticket collector each stand under a world name
+  // the server has never heard. Handed to this module, one was marked driven the moment a server
+  // answered -- nobody had been granted it -- and stood frozen and unhurtable for as long as the line
+  // was up. Only a body stood from one of the server's own records asks to be shared.
+  for (const id of ['wild:1234', 'stood:17', 'travel:tatooine:4', 'ours:3']) ok(!sharesOnWire(id, undefined), `18: ${id} is not shared unless it asks to be`);
+  ok(sharesOnWire('w:1:7', true), '18: while one the server stood asks, and is');
+  ok(!sharesOnWire('', true) && !sharesOnWire(undefined, true), '18: and nothing with no world name can be');
+
+  // What this module does with a body that *is* handed to it, which is the freeze itself: with a server
+  // answering and nobody granted it, a body on the wire is driven. The gate above is what keeps a
+  // seeded one from ever being handed over, and the text check below is what pins the manager to that
+  // gate -- together they are the real guard, since the manager cannot be loaded here.
+  const { net: n } = net({ keeps: () => false });
+  const served = new Stand('w:1:7');
+  n.add(served);
+  for (let i = 0; i < 4; i++) n.step(BEAT);
+  ok(served.driven, "18: a body on the wire that nobody here was granted is driven, which is why a seeded one must never reach it");
+  ok(n.find('stood:17') === null && n.debug().held === 1, '18: and one never handed to it is unknown to it');
+
+  // The wiring, read as text, since the manager cannot be loaded here.
+  const manager = readFileSync(new URL('../../../src/world/mobiles/manager.ts', import.meta.url), 'utf8');
+  ok(/if \(sharesOnWire\(opts\.worldId, opts\.share\)\) \{\s*m\.shareAs\(opts\.worldId\);\s*npcNow\(\)\?\.add\(m\);/.test(manager), '18: the manager puts a body on the wire only through that gate');
+  ok(/worldId: a\.id, listed: true, share: true \}\)/.test(manager), "18: and a record of the server's own is the one that asks for it");
+  const world = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8');
+  ok(!/worldId: `(wild|stood):\$\{seed\}`[^}]*share: true/.test(world), '18: while the lairs and the standing people never do');
+}
+
+// --- 19: naming what a creature is fighting ---------------------------------------------------------
+{
+  // Two browsers, 4 and 9. On 4 the player is PLAYER_KEY and 9's figure holds key 55; on 9 the other
+  // way round, with 4's figure at key 61. A creature crosses naming who it fights by relay id.
+  const peersOn4 = new Map([[55, 9]]);
+  const peersOn9 = new Map([[61, 4]]);
+  const peerOf = (m: Map<number, number>) => (key: number) => m.get(key) ?? 0;
+  const keyOf = (m: Map<number, number>) => (id: number) => [...m].find(([, v]) => v === id)?.[0] ?? 0;
+
+  ok(targetWord(PLAYER_KEY, '', 4, peerOf(peersOn4)) === 'p:4', "19: a keeper names its own player by its own relay id");
+  ok(targetWord(55, '', 4, peerOf(peersOn4)) === 'p:9', "19: and another player's figure by that player's");
+  ok(targetWord(123, 'w:1:7', 4, peerOf(peersOn4)) === 'w:1:7', '19: and a creature by the id the world knows it by');
+  ok(targetWord(PLAYER_KEY, '', 0, peerOf(peersOn4)) === '' && targetWord(123, '', 4, peerOf(peersOn4)) === '', '19: with no relay id, or nothing nameable, it names nobody');
+
+  // Read on the other browser, each word lands on the same person it was written about.
+  const on9 = (w: string) => targetOf(w, 9, keyOf(peersOn9));
+  const on4 = (w: string) => targetOf(w, 4, keyOf(peersOn4));
+  ok(JSON.stringify(on9('p:4')) === JSON.stringify({ key: 61 }), "19: 4's own player, read on 9, is 4's figure there -- not 9's own player, which is what 'p' was read as");
+  ok(JSON.stringify(on9('p:9')) === JSON.stringify({ key: PLAYER_KEY }), "19: and 9's player, named on 4, is 9's own player");
+  ok(JSON.stringify(on4(targetWord(61, '', 9, peerOf(peersOn9)))) === JSON.stringify({ key: PLAYER_KEY }), '19: round the other way it maps back to the player it began with');
+  ok(on9('p:12') === null, '19: a player this browser holds no figure for is nobody, and the creature picks its own fight');
+  ok(JSON.stringify(on9('w:1:7')) === JSON.stringify({ npc: 'w:1:7' }), '19: a creature is looked for by its id');
+  ok(on9('') === null, '19: and nothing is nothing');
+
+  // The module's own methods ask the game's hooks and make each player's word once.
+  const n = new NpcNet(() => 0);
+  n.selfId = () => 4;
+  n.peerOfKey = (key) => peersOn4.get(key) ?? 0;
+  n.keyOfPeer = (id) => keyOf(peersOn4)(id);
+  ok(n.nameTarget(PLAYER_KEY, '') === 'p:4' && n.nameTarget(55, '') === 'p:9' && n.nameTarget(3, 'w:1:7') === 'w:1:7', '19: the module names targets exactly as the rule does');
+  // A reconnect hands out a new relay id, and the word kept for this browser's own player must follow
+  // it, or a creature handed over afterwards is sent after whoever holds the old number.
+  n.selfId = () => 7;
+  ok(n.nameTarget(PLAYER_KEY, '') === 'p:7' && JSON.stringify(n.readTarget('p:7')) === JSON.stringify({ key: PLAYER_KEY }), '19: a new relay id names the player by the new number, not the one the word was first made for');
+  n.selfId = () => 4;
+  ok(JSON.stringify(n.readTarget('p:4')) === JSON.stringify({ key: PLAYER_KEY }) && JSON.stringify(n.readTarget('p:9')) === JSON.stringify({ key: 55 }), '19: and reads them back through the same hooks');
+  n.peerOfKey = () => {
+    throw new Error('no');
+  };
+  ok(n.nameTarget(55, '') === '', '19: a hook that throws names nobody rather than taking the batch down');
+}
+
+// --- 20: a creature's mind arrives with its row ----------------------------------------------------
+{
+  // The keeper wrote it and the server passed it on, and this side dropped it on the floor: a
+  // creature changing hands forgot everything on its mind.
+  const { net: n } = net({ keeps: () => false });
+  const yours = new Stand('w:1:2');
+  n.add(yours);
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:2', b: { t: 'p:4', st: 2, gx: 5, gz: -3 } })] });
+  const b1 = yours.drives[0]?.row.b;
+  ok(b1?.t === 'p:4' && b1.st === 2 && b1.gx === 5 && b1.gz === -3, `20: what it is fighting, its stun and where it was walking arrive with the row (${JSON.stringify(b1)})`);
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:2', b: { t: 'p' } })] });
+  ok(yours.drives[1]?.row.b?.t === 'p:6', "20: a bare 'p' from an older browser is its keeper's own player, named by the id the relay stamped the batch with");
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:2', b: 'nonsense' }), row({ i: 'w:1:2' })] });
+  ok(yours.drives[2]?.row.b === undefined && yours.drives[3]?.row.b === undefined, '20: a mind that is not one, and a row with none, carry none');
+  // The mind is read into one object kept beside the row, so one creature's must not reach the next
+  // row of the same batch: a row with a stun and no target is a creature fighting nobody.
+  const other = new Stand('w:1:3');
+  n.add(other);
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:2', b: { t: 'p:4', gx: 1, gz: 2 } }), row({ i: 'w:1:3', b: { sl: 1 } })] });
+  const first = yours.drives[yours.drives.length - 1]?.row.b;
+  const second = other.drives[other.drives.length - 1]?.row.b;
+  ok(first?.t === 'p:4' && second?.sl === 1 && second.t === undefined && second.gx === undefined, `20: one creature's target and walk do not carry over to the next row of the batch (${JSON.stringify(second)})`);
+
+  // A row kept for a body not yet built keeps its own mind, **after** later batches about other
+  // creatures have refilled the object it was read into.
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:9', b: { t: 'p:4', sl: 1 } })] });
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:10', b: { t: 'w:1:3', st: 5 } })] });
+  n.handle({ t: 'npcState', id: 6, r: [row({ i: 'w:1:2', b: { gx: 9, gz: 9 } })] });
+  const later = new Stand('w:1:9');
+  n.add(later);
+  const kept = later.drives[0]?.row.b;
+  ok(kept?.t === 'p:4' && kept.sl === 1 && kept.st === undefined && kept.gx === undefined, `20: and a row kept for a body not yet built keeps its own mind for it, whatever was heard since (${JSON.stringify(kept)})`);
+
+  // Copied field by field, into a fresh object or over one already kept.
+  const full = { t: 'p:4', st: 1, sl: 2, bd: 3, bs: 4, gx: 5, gz: 6 };
+  const fresh = copyBrain(full, null);
+  ok(fresh !== full && JSON.stringify(fresh) === JSON.stringify(full), `20: a mind is copied whole, every field of it (${JSON.stringify(fresh)})`);
+  const held = { t: 'w:1:1', st: 9, sl: 9, bd: 9, bs: 9, gx: 9, gz: 9 };
+  const over = copyBrain({ sl: 2 }, held);
+  ok(over === held && over.sl === 2 && Object.values({ ...over, sl: undefined }).every((v) => v === undefined), '20: and over a kept one, what the new mind leaves out is cleared rather than left from the last');
+
+  // The mobile copies what it is told rather than holding the row, which is refilled.
+  const mobile = readFileSync(new URL('../../../src/world/mobiles/mobile.ts', import.meta.url), 'utf8');
+  ok(/this\.heldBrain = row\.b \? copyBrain\(row\.b, this\.heldBrain\) : null;/.test(mobile), '20: a driven copy keeps its own copy of the last mind it was told');
 }
 
 console.log(`\n${checks} checks passed`);

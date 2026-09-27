@@ -4,12 +4,24 @@
 // weighted list and a cap, and where its animals stand is drawn from a seed on this side because
 // nobody knows where the server put them. A standing person is the opposite: every one of the 4,619
 // rows is a real place the real server used, read out of its own screenplays, with its own facing
-// and its own respawn in seconds. Nothing here is invented except how near you have to be.
+// and its own respawn in seconds. Nothing here is invented except how near you have to be, how many
+// stand at once, how much nearer somebody must be to take another's place and how far one steps
+// about its spot.
 //
 // **Half of them are indoors**, and that is the whole reason this is a file of its own rather than
 // another branch of the wild pass. A row inside a building carries the room it stands in, and the
-// converter has already carried its position out of that room's own frame into the world; what is
+// converter has already carried its position and its facing out of that room's own frame into the
+// snapshot's (`intoRoom` in `tools/swg/core3.mjs`; a pack written before the facing was carried faces
+// everybody in a turned building off by that building's yaw, and `status` asks for it again); what is
 // left is to stand it in the right cell, which a lair never has to do.
+//
+// **The rows are in the snapshot's frame and the world is not.** Every placed object goes through
+// `LayoutStreamer`'s mirror -- `gx = -(x - centre.x)`, `gz = z - centre.z` -- and so do these, once,
+// on the first pass that knows the layout's centre, with the heading negated beside them (a mirror
+// in x turns a yaw into its negative). Until that was done every one of the 4,619 stood on the
+// wrong side of its planet: outdoors on empty ground, and indoors nowhere at all, since a cantina's
+// floor is not where its mirror image is. It escaped notice because the console's `go` walked the
+// player to the same wrong spot and always found somebody standing there.
 //
 // Pure of three and of rapier: it asks the game for everything, so a node test can be the game.
 
@@ -17,14 +29,20 @@ import * as THREE from 'three';
 import type { MobileCatalogue } from './mobiles/catalogue.ts';
 import type { MobileEntry } from './mobiles/types.ts';
 import type { Mobile } from './mobiles/mobile.ts';
+import type { Post } from './mobiles/brain.ts';
+import { intoWorld, tuneTable } from './wildLife.ts';
 
-/** One person, as the converter wrote them. Positions are already in the world's own frame. */
+/**
+ * One person, as the converter wrote them: x and z in the snapshot's frame, as every placed object
+ * is. The height is the snapshot's too, which is the world's, since the mirror is in x alone.
+ */
 export interface StandingRow {
   who: string;
   id: string;
   x: number;
   y: number;
   z: number;
+  /** The way they face, `atan2(x, z)` in the snapshot's frame, indoors as well as out (see the head of this file). */
   heading: number;
   /** The emulator's own id for the cell, or 0 outdoors. Kept for the report, never resolved here. */
   cell: number;
@@ -59,15 +77,17 @@ export function standsStill(entry: MobileEntry | null | undefined): boolean {
 export interface PeopleDeps {
   catalogue(): MobileCatalogue | null;
   /**
-   * Stand one. `inside` is true for a person in a room, which changes how the ground is found, and
-   * `essential` for one the server marked unattackable (see `standsStill`).
+   * Stand one. `at` is in the world's own frame. `inside` is true for a person in a room, which
+   * changes how the ground is found, and `essential` for one the server marked unattackable (see
+   * `standsStill`).
    */
   spawn(entry: MobileEntry, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, seed: number, essential: boolean): Mobile | string;
   remove(m: Mobile): void;
+  /** The layout's centre, which the rows are measured from; null before the pack lands, and then nothing stands. */
   centre(): { x: number; z: number } | null;
   held(): boolean;
   /**
-   * Whether the building a room belongs to is really built here yet.
+   * Whether the building a room belongs to is really built here yet, asked in the world's frame.
    *
    * A person stood in a cantina before its cell exists has no floor and falls through the world, so
    * the pass waits. Null where the game cannot say, which is taken as "yes" -- an outdoor world
@@ -77,67 +97,134 @@ export interface PeopleDeps {
 }
 
 /**
- * Every invented number here. There are only four, because everything else is the server's.
- * Live through `__debug.people`.
+ * Every invented number here; everything else is the server's. Live through `__debug.people`.
  */
 export const PEOPLE_TUNE = {
   /** Stood within this, put away past `drop`. Tighter than the lairs': a town is dense. */
   build: 110,
   drop: 190,
-  /** Most standing at once, and most stood in one pass. The owner's number. */
+  /** Most standing at once, nearest first, and most stood in one pass. `most` is the owner's number. */
   most: 40,
   perPass: 3,
+  /**
+   * With the cap full, how much nearer a row in range must be than the farthest person standing
+   * before that person is put down to make room for it, metres. Without it the cap was nearest first
+   * only for a player who stood still: people stood on the way in were kept until they were `drop`
+   * behind, so walking into a town left the room you walked into empty while the street behind you
+   * stood. The margin is what keeps two people at nearly the same distance from swapping places on
+   * every pass as the player shuffles about.
+   */
+  swapMargin: 20,
   /** How often the pass runs, in seconds of the world's own clock. */
   everySeconds: 1.5,
   /** How far the player must move before it looks again. */
   moveMetres: 15,
+  /**
+   * How far a person may step about the spot the data put them on, metres, and how often, seconds.
+   * The brain's own wander is eight to thirty metres every three to eight seconds, which is an animal
+   * ranging over open ground; a person at a counter went walking off it into the street.
+   */
+  postRadius: 3,
+  postEvery: [8, 20] as [number, number],
+  /**
+   * Whether the dead come back at all. Off, a person killed stays killed for the life of the world,
+   * whether or not the player walks away and back; on again, each comes back on its own clock. One
+   * the game merely took away rather than killed comes back on its clock either way.
+   */
+  respawns: true,
 };
 
 interface Stood {
   row: StandingRow;
   body: Mobile | null;
-  /** When it died, on the world's own clock; 0 while it is up. */
+  /** When it died or was taken away, on the world's own clock; 0 while it is up. */
   diedAt: number;
+  /**
+   * Whether it was really killed, as against taken away by the game (fallen out of the world, say).
+   * Only a kill is remembered while respawning is off: see the dead loop in `step`.
+   */
+  killed: boolean;
 }
 
 export class StandingPeople {
   private rows: StandingRow[] = [];
+  /** Whether the rows have been carried into the world's frame yet (see the head of this file). */
+  private framed = false;
   private readonly up = new Map<number, Stood>();
   private since = 0;
   private readonly lastAt = new THREE.Vector3(NaN, NaN, NaN);
-  readonly last = { rows: 0, up: 0, indoors: 0, stood: 0, dropped: 0, waiting: 0, refused: '' };
+  /**
+   * The rows in range this pass and how far each is, kept rather than made per pass, and the one
+   * comparator that sorts them: the cap is filled nearest first, not in the file's order, which had
+   * forty people standing fifty to seventy metres off while the ones beside the player never stood.
+   */
+  private readonly near: number[] = [];
+  private away = new Float64Array(0);
+  private readonly nearer = (a: number, b: number): number => this.away[a] - this.away[b];
+  /**
+   * `up` is the bodies standing, `down` the dead waiting to come back; `stood`, `dropped`, `swapped`
+   * (put down to make room for somebody nearer) and `waiting` are what the last pass that really ran
+   * did, and are left alone by a step that returns before it looks -- reset at the top of every
+   * step, they read nought almost always.
+   */
+  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '' };
 
   get ready(): boolean {
     return this.rows.length > 0;
   }
 
-  /** Take the rows a pack carries. Only those that reach a body, and only those really placed. */
+  /**
+   * Take the rows a pack carries. Only those that reach a body, and only those really placed. Each
+   * is copied, since the pass carries its own into the world's frame and the pack's are left as the
+   * pack wrote them.
+   */
   adopt(rows: readonly StandingRow[] | null | undefined): void {
     this.rows = [];
     this.up.clear();
+    this.framed = false;
     for (const r of rows ?? []) {
       // A row indoors whose room could not be resolved is a position in a cell and nowhere on a
       // planet: the converter leaves those out, and this refuses any that slip through.
       if (r.cell && (r.room === null || r.room === undefined)) continue;
-      this.rows.push(r);
+      this.rows.push({ ...r });
     }
+    this.away = new Float64Array(this.rows.length);
+    this.near.length = 0;
+    this.lastAt.set(NaN, NaN, NaN);
     this.last.rows = this.rows.length;
     this.last.up = 0;
+    this.last.down = 0;
   }
 
   clear(deps?: PeopleDeps): void {
     if (deps) for (const s of this.up.values()) if (s.body) deps.remove(s.body);
     this.up.clear();
     this.last.up = 0;
+    this.last.down = 0;
     this.last.indoors = 0;
   }
 
   unload(): void {
     this.rows = [];
+    this.framed = false;
     this.up.clear();
+    this.away = new Float64Array(0);
+    this.near.length = 0;
     this.last.rows = 0;
     this.last.up = 0;
+    this.last.down = 0;
     this.last.indoors = 0;
+  }
+
+  /** Every row carried into the world's frame, once: the mirror every placed object goes through. */
+  private frame(centre: { x: number; z: number }): void {
+    for (const r of this.rows) {
+      const w = intoWorld(r.x, r.z, centre);
+      r.x = w.x;
+      r.z = w.z;
+      r.heading = -r.heading;
+    }
+    this.framed = true;
   }
 
   /**
@@ -146,17 +233,21 @@ export class StandingPeople {
    * `now` is the world's own clock, which every respawn keys off, so `__debug.advance` drives it.
    */
   step(dt: number, now: number, at: THREE.Vector3, deps: PeopleDeps, force = false): void {
-    this.last.stood = 0;
-    this.last.dropped = 0;
-    this.last.waiting = 0;
     if (!this.ready || (deps.held() && !force)) return;
     const cat = deps.catalogue();
     if (!cat) return;
+    const centre = deps.centre();
+    if (!centre) return;
+    if (!this.framed) this.frame(centre);
     this.since += dt;
     const moved = force || !Number.isFinite(this.lastAt.x) || this.lastAt.distanceTo(at) > PEOPLE_TUNE.moveMetres;
     if (this.since < PEOPLE_TUNE.everySeconds && !moved) return;
     this.since = 0;
     this.lastAt.copy(at);
+    this.last.stood = 0;
+    this.last.dropped = 0;
+    this.last.swapped = 0;
+    this.last.waiting = 0;
 
     // The dead first, so a place somebody cleared fills again on its own time.
     for (const [i, s] of this.up) {
@@ -164,33 +255,60 @@ export class StandingPeople {
       // the rest of the loop on a null body is how a dead row waits for ever: the first pass takes
       // the body away, and every pass after that steps over the very record it is waiting on.
       if (s.body && (s.body.dead || s.body.removed)) {
-        // Killed is not the same as taken away here either, but the answer is the same both ways: a
-        // row is stood again once its own wait is out, and the wait is the server's own number.
-        if (s.diedAt === 0) s.diedAt = now;
+        // **Killed is not the same as taken away**, and `dead` alone cannot tell them apart: disposing
+        // a mobile sets `dead` too, so a body the game took away (fallen out of the world, say) reads
+        // exactly like one somebody fought. The corpse does: a body really killed is dead and still in
+        // the world for its death clip and its timer, which is far longer than a pass, while one taken
+        // away is dead and gone in the same instant (`WildLife.reap` reads it the same way). Both come
+        // back once the row's own wait is out, which is the server's number; only a kill is kept down
+        // while respawning is off, or a person the game merely lost would stay lost for good.
+        if (s.diedAt === 0) {
+          s.diedAt = now;
+          s.killed = !s.body.removed;
+        }
         s.body = null;
       }
-      if (s.diedAt > 0 && now - s.diedAt >= Math.max(1, s.row.respawn)) this.up.delete(i);
+      if (s.diedAt > 0 && (PEOPLE_TUNE.respawns || !s.killed) && now - s.diedAt >= Math.max(1, s.row.respawn)) this.up.delete(i);
     }
 
-    let stood = 0;
+    // Then who is too far off to keep, and who is near enough to stand.
+    const near = this.near;
+    near.length = 0;
     for (let i = 0; i < this.rows.length; i++) {
       const r = this.rows[i];
       const away = Math.hypot(r.x - at.x, r.z - at.z);
+      this.away[i] = away;
       const here = this.up.get(i);
       if (here) {
-        // Never dropped while still near: somebody you are fighting does not vanish.
+        // Past `drop` everyone goes. Nearer than that a body is only ever put down to make room for
+        // somebody nearer still, and never one in a fight (`farthestFree`): somebody you are
+        // fighting does not vanish.
         if (away > PEOPLE_TUNE.drop) {
-          if (here.body) deps.remove(here.body);
-          this.up.delete(i);
-          this.last.dropped++;
+          if (here.body) {
+            deps.remove(here.body);
+            this.last.dropped++;
+          }
+          // With respawning off the killed are remembered however far the player goes, or walking
+          // away and back would be a respawn by another name.
+          if (here.killed && !PEOPLE_TUNE.respawns) here.body = null;
+          else this.up.delete(i);
         }
         continue;
       }
+      if (away <= PEOPLE_TUNE.build) near.push(i);
+    }
+    near.sort(this.nearer);
+
+    let live = 0;
+    for (const s of this.up.values()) if (s.body) live++;
+    let stood = 0;
+    for (const i of near) {
       // Three a pass in play, so walking into a town brings them a few at a time and nothing
       // compiles in a lump on a live frame. Behind the loading screen that is exactly backwards --
       // there is no live frame to spare and the whole point is to have them standing before it lifts
       // -- so a forced pass stands everything in range at once and the warm-up compiles the lot.
-      if (away > PEOPLE_TUNE.build || this.up.size >= PEOPLE_TUNE.most || (!force && stood >= PEOPLE_TUNE.perPass)) continue;
+      if (!force && stood >= PEOPLE_TUNE.perPass) break;
+      const r = this.rows[i];
       const inside = !!r.cell;
       // A person in a room whose building is not built yet waits rather than falling through it.
       if (inside && deps.cellReady?.(r.x, r.y, r.z) === false) {
@@ -199,6 +317,15 @@ export class StandingPeople {
       }
       const entry = cat.byId(r.id);
       if (!entry) continue;
+      // **The cap full, the farthest standing makes room**, if it is enough farther off than this
+      // row and in no fight. Found before this one is stood and put down only once it has been, so
+      // a refusal never costs anybody their place. The rows are nearest first, so once one finds
+      // nobody to take the place of, every row after it would find nobody too.
+      let makeRoom = -1;
+      if (live >= PEOPLE_TUNE.most) {
+        makeRoom = this.farthestFree(this.away[i] + PEOPLE_TUNE.swapMargin);
+        if (makeRoom < 0) break;
+      }
       // Indoors the height is the floor's and is given, because the converter worked it out from the
       // room's own frame and the manager's own ground lookup would find the terrain under the
       // building instead. Outdoors no height is given, for the reason the wildlife learned.
@@ -208,25 +335,78 @@ export class StandingPeople {
         this.last.refused = m;
         continue;
       }
+      if (makeRoom >= 0) {
+        const out = this.up.get(makeRoom);
+        if (out?.body) deps.remove(out.body);
+        this.up.delete(makeRoom);
+        live--;
+        this.last.swapped++;
+      }
       // They stand where they were put. A person placed by the server is not a wanderer: their home
-      // is their own spot, so the brain's roaming keeps them about it rather than walking them off.
+      // is their own spot, and their post keeps them on it (`keepPost`) rather than roaming the
+      // street the way the brain roams an animal about its range.
       m.homeX = r.x;
       m.homeZ = r.z;
-      this.up.set(i, { row: r, body: m, diedAt: 0 });
+      m.post = postFor(r);
+      this.up.set(i, { row: r, body: m, diedAt: 0, killed: false });
       stood++;
+      live++;
       this.last.stood++;
     }
     this.count();
   }
 
+  /**
+   * The row of the farthest person standing past `beyond` who may be put down to make room: alive,
+   * and in no fight and holding no grudge (`Mobile.engaged`). -1 for nobody. Walks the forty standing
+   * and allocates nothing but the loop's own entries, once per person a full pass stands.
+   */
+  private farthestFree(beyond: number): number {
+    let best = -1;
+    let bestAway = beyond;
+    for (const [k, s] of this.up) {
+      const b = s.body;
+      if (!b || b.dead || b.removed || b.engaged) continue;
+      const away = this.away[k];
+      if (away > bestAway) {
+        bestAway = away;
+        best = k;
+      }
+    }
+    return best;
+  }
+
   private count(): void {
-    this.last.up = this.up.size;
+    let up = 0;
+    let down = 0;
     let inside = 0;
-    for (const s of this.up.values()) if (s.row.cell) inside++;
+    for (const s of this.up.values()) {
+      if (s.body) up++;
+      else down++;
+      if (s.body && s.row.cell) inside++;
+    }
+    this.last.up = up;
+    this.last.down = down;
     this.last.indoors = inside;
   }
 
-  /** For the console: who is standing, nearest first. */
+  /**
+   * Whether the dead come back. Turned on again, every one already waiting comes back once its own
+   * clock is out, which for somebody killed long ago is on the next pass.
+   */
+  setRespawns(on: boolean): void {
+    PEOPLE_TUNE.respawns = on;
+  }
+
+  /**
+   * Move any of the numbers above, live; answers which it moved. A number, a pair or a switch is
+   * only ever replaced by one of its own kind, so a console typo cannot turn the cap into a word.
+   */
+  retune(t: Record<string, unknown>): string[] {
+    return tuneTable(PEOPLE_TUNE, t);
+  }
+
+  /** For the console: who is standing, nearest first, in the world's own frame. */
   report(at: THREE.Vector3): { who: string; where: string; room: number | null; away: number; up: boolean; dead: boolean }[] {
     const out: { who: string; where: string; room: number | null; away: number; up: boolean; dead: boolean }[] = [];
     for (const s of this.up.values()) {
@@ -236,19 +416,42 @@ export class StandingPeople {
         room: s.row.cell ? (s.row.room ?? null) : null,
         away: Math.round(Math.hypot(s.row.x - at.x, s.row.z - at.z)),
         up: !!s.body,
-        dead: s.diedAt > 0,
+        dead: s.killed,
       });
     }
     return out.sort((a, b) => a.away - b.away);
   }
 
-  /** For the console: the rows nearest a point, standing or not. */
-  nearest(at: THREE.Vector3, n = 5): { who: string; where: string; x: number; z: number; indoors: boolean; away: number }[] {
+  /**
+   * For the console: the rows nearest a point, standing or not, in the world's own frame. Nothing
+   * until a pass has known the layout's centre, since before that a row is a number in another frame.
+   */
+  nearest(at: THREE.Vector3, n = 5): { who: string; where: string; x: number; y: number; z: number; heading: number; indoors: boolean; room: number | null; away: number; up: boolean }[] {
+    if (!this.framed) return [];
     return this.rows
-      .map((r) => ({ who: r.who, where: r.where, x: Math.round(r.x), z: Math.round(r.z), indoors: !!r.cell, away: Math.round(Math.hypot(r.x - at.x, r.z - at.z)) }))
+      .map((r, i) => ({
+        who: r.who,
+        where: r.where,
+        x: Math.round(r.x * 10) / 10,
+        y: Math.round(r.y * 10) / 10,
+        z: Math.round(r.z * 10) / 10,
+        heading: Math.round(r.heading * 1000) / 1000,
+        indoors: !!r.cell,
+        room: r.cell ? (r.room ?? null) : null,
+        away: Math.round(Math.hypot(r.x - at.x, r.z - at.z)),
+        up: !!this.up.get(i)?.body,
+      }))
       .sort((a, b) => a.away - b.away)
       .slice(0, n);
   }
+}
+
+/**
+ * The post a row stands at. Every row is `near` for now: the rows do not yet say which of them the
+ * server stood with its brain switched off (the towns' own), which is what `still` is for.
+ */
+function postFor(r: StandingRow): Post {
+  return { kind: 'near', heading: r.heading, tune: PEOPLE_TUNE };
 }
 
 /** The one for the session. */

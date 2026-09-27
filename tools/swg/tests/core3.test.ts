@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findCalls, parseLuaValue, readLua, LuaCall } from '../lua.mjs';
-import { flagWords, frameCheck, heightCheck, joinCatalogue, readCreatures, readLairs, readRegions, readSpawnGroups, readStatics, CORE3_WORLDS } from '../core3.mjs';
+import { flagWords, frameCheck, heightCheck, intoRoom, joinCatalogue, readCreatures, readLairs, readRegions, readSpawnGroups, readStatics, CORE3_WORLDS } from '../core3.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -101,6 +101,29 @@ function note(what: string): void {
   ok(frameCheck(named, [{ name: 'Alpha', x: 3460, z: -4768 }]).median === 0, 'the name check says the two readers of these scripts still agree, which is all it says');
   const dup = frameCheck([{ name: 'Ruins', shape: 'circle', x: 0, z: 0, r: 1 }], [{ name: 'Ruins', x: 5000, z: 5000 }, { name: 'Ruins', x: 0, z: 0 }]);
   ok(dup.pairs === 0, 'a name that is not unique on both sides is left out, since matching one to another puts them kilometres apart');
+}
+
+// ------------------------------------------------------------------ a person indoors, out of their room's frame
+{
+  // A building turned a quarter round about the vertical and standing at (1000, 50, -2000): the cell's
+  // world transform as the snapshot's flattener hands it over, `q` as w, x, y, z. A person two metres
+  // along the room's own x, facing along the room's own x (a heading of a quarter turn), in room 4.
+  const turn = Math.PI / 2;
+  const room = { cellIndex: 4, q: [Math.cos(turn / 2), 0, Math.sin(turn / 2), 0], pos: [1000, 50, -2000] };
+  const s = { x: 2, y: 1.5, z: 0, heading: Math.PI / 2 };
+  const out = intoRoom(s, room);
+  // The witness is the room's own turn applied to a second point: where the person stands a metre
+  // ahead of themselves, in the room, carried into the snapshot by the very same place rule. The way
+  // they face is the way from the first place to the second, whatever convention anything else uses.
+  const ahead = intoRoom({ x: s.x + Math.sin(s.heading), y: s.y, z: s.z + Math.cos(s.heading), heading: 0 }, room);
+  const seen = Math.atan2(ahead.x - out.x, ahead.z - out.z);
+  const off = Math.abs(Math.atan2(Math.sin(out.heading - seen), Math.cos(out.heading - seen)));
+  ok(off < 1e-3, `a person indoors faces through their building's own turn: heading ${out.heading} against the ${seen.toFixed(4)} the room's turn gives a step ahead of them`);
+  ok(Math.abs(out.heading - s.heading) > 1, "which is not the heading they were written with: the emulator writes a facing in the room's frame, as it does the place, and read as it stood every person in a turned building faced off by the building's yaw");
+  ok(Math.abs(out.x - 1000) < 1e-9 && Math.abs(out.z - -2002) < 1e-9 && out.y === 51.5, `and stands at the room's place turned the same way (${out.x}, ${out.y}, ${out.z})`);
+  ok(out.room === 4 && out.local.join() === '2,1.5,0' && out.localHeading === s.heading, 'with the room named and the numbers it was written with kept beside it');
+  const still = intoRoom(s, { cellIndex: 1, q: [1, 0, 0, 0], pos: [0, 0, 0] });
+  ok(Math.abs(still.heading - s.heading) < 1e-4, 'while a building that is not turned leaves the facing alone');
 }
 
 // ------------------------------------------------------------------ the join to our own models

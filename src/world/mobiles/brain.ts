@@ -184,6 +184,14 @@ export interface BrainTune {
    * further and the brain answers the plain chase it always answered.
    */
   coverRange: number;
+  /**
+   * Inside a building, the share of the indoor leash a wander may reach. The wander above is drawn
+   * for the open ground (8 to 30 m from home) and is farther than the leash kept indoors (25 m), so a
+   * goal past that trips the leash the moment the body crosses it: it turns round, runs home and
+   * sets off again, pacing instead of idling. The fighters' own rule and number
+   * (`FIGHTER_TUNE.wanderInsideShare`), here so a creature indoors keeps to it as well.
+   */
+  wanderInsideShare: number;
 }
 
 export const BRAIN_TUNE: BrainTune = {
@@ -207,7 +215,126 @@ export const BRAIN_TUNE: BrainTune = {
   alertRange: 8,
   home: 2,
   coverRange: 1.5,
+  wanderInsideShare: 0.8,
 };
+
+/**
+ * The numbers a post keeps to. The standing people's own table satisfies it (`PEOPLE_TUNE`), and a
+ * post holds that table by reference, so a live change reaches every post already standing.
+ */
+export interface PostTune {
+  /** How far from its own spot a `near` post may wander, metres. */
+  postRadius: number;
+  /** Seconds between one such wander and the next, least and most. */
+  postEvery: readonly [number, number];
+}
+
+/**
+ * Where a standing person belongs, as against where a creature merely came from.
+ *
+ * A creature's home is only the middle of the ground it ranges over. A person the data put on a spot
+ * belongs on that spot: a `near` post may step about it, a `still` one does not leave it at all, and
+ * once nothing is on its mind it walks back and turns to the way it was stood facing.
+ */
+export interface Post {
+  kind: 'still' | 'near';
+  /** The way it faced when it was stood. */
+  heading: number;
+  tune: PostTune;
+}
+
+/**
+ * A wander goal pulled back inside `max` of home, in place. Indoors that is `leashInside` times
+ * `wanderInsideShare`: see the note on the share. The brain hands one object back as the goal, as
+ * where it walks and as what it faces; the other two are written from it all the same, so that this
+ * stays right if that ever changes.
+ */
+export function clampWander(d: Decision, homeX: number, homeZ: number, max: number): void {
+  const g = d.goal;
+  if (d.state !== 'wander' || !g) return;
+  const dx = g.x - homeX;
+  const dz = g.z - homeZ;
+  const far = Math.hypot(dx, dz);
+  if (far <= max || far < 1e-6) return;
+  const k = Math.max(0, max) / far;
+  moveGoal(d, homeX + dx * k, homeZ + dz * k);
+}
+
+/** The goal written in place, and where it walks and what it faces with it. */
+function moveGoal(d: Decision, x: number, z: number): void {
+  const g = d.goal;
+  if (!g) return;
+  g.x = x;
+  g.z = z;
+  if (d.moveTo && d.moveTo !== g) {
+    d.moveTo.x = x;
+    d.moveTo.z = z;
+  }
+  if (d.face && d.face !== g) {
+    d.face.x = x;
+    d.face.z = z;
+  }
+}
+
+/**
+ * A decision kept to a post, in place.
+ *
+ * Nothing about a fight changes: a post that is attacked defends itself, chases and comes back on the
+ * brain's own leash exactly as anything else does. What changes is the idle half of the ladder. The
+ * brain's wander is drawn for animals on open ground, every three to eight seconds and eight to
+ * thirty metres out; a person stood at a counter by the data went walking off it into the street. So
+ * a `near` post wanders only within `postRadius` of its spot and only every `postEvery` seconds, and
+ * a `still` one never wanders at all.
+ *
+ * `wanderAtWas` is the wander clock before the brain was asked: wherever the brain set a fresh one,
+ * the post's own takes its place, so the brain's few seconds never reach a post.
+ */
+export function keepPost(d: Decision, self: { x: number; z: number; homeX: number; homeZ: number; now: number }, post: Post, wanderAtWas: number, tune: BrainTune = BRAIN_TUNE, rand: () => number = Math.random): void {
+  const t = post.tune;
+  if (d.wanderAt !== wanderAtWas) {
+    const [a, b] = t.postEvery;
+    d.wanderAt = self.now + a + rand() * Math.max(0, b - a);
+  }
+  if (post.kind === 'still') {
+    // A walk back to its own spot is the one wander a still post takes, and it is one this function
+    // started: told apart from the brain's own by where it ends.
+    const g = d.goal;
+    const toSpot = !!g && Math.hypot(g.x - self.homeX, g.z - self.homeZ) <= tune.home;
+    if (d.state === 'wander' && !toSpot) {
+      d.state = 'idle';
+      d.goal = null;
+      d.moveTo = null;
+      d.face = null;
+      d.pace = 'stand';
+    }
+    if (d.state !== 'idle' || d.targetKey !== null) return;
+    if (Math.hypot(self.x - self.homeX, self.z - self.homeZ) > tune.home) {
+      const spot = { x: self.homeX, z: self.homeZ };
+      d.state = 'wander';
+      d.goal = spot;
+      d.moveTo = spot;
+      d.face = spot;
+      d.pace = 'walk';
+      return;
+    }
+    // Home and at peace: it turns back to the way it was stood.
+    d.face = { x: self.x + Math.sin(post.heading), z: self.z + Math.cos(post.heading) };
+    return;
+  }
+  const g = d.goal;
+  if (d.state !== 'wander' || !g) return;
+  const dx = g.x - self.homeX;
+  const dz = g.z - self.homeZ;
+  const far = Math.hypot(dx, dz);
+  const radius = Math.max(0, t.postRadius);
+  if (far <= radius) return;
+  // Drawn again inside the post, along the bearing the brain chose, square-rooted so the steps are
+  // spread over the circle rather than crowding its middle. A goal already inside is left alone, so
+  // a wander under way is never drawn again part way through.
+  const a = far > 1e-6 ? Math.atan2(dx, dz) : rand() * Math.PI * 2;
+  const r = radius * Math.sqrt(rand());
+  moveGoal(d, self.homeX + Math.sin(a) * r, self.homeZ + Math.cos(a) * r);
+}
 
 /** Whether `me` picks a fight with `them` on sight: the matrix lives in targets.ts, one place for every body. */
 export function hostile(me: { side: Side; aggression: Aggression }, them: { side: Side; aggression: Aggression }): boolean {

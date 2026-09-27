@@ -500,6 +500,47 @@ export function heightCheck(statics, heightAt) {
   };
 }
 
+/** A vector turned by a w,x,y,z quaternion, the whole rotation and nothing else. */
+function turnBy(q, v) {
+  const [w, x, y, z] = q;
+  const t = [2 * (y * v.z - z * v.y), 2 * (z * v.x - x * v.z), 2 * (x * v.y - y * v.x)];
+  return {
+    x: v.x + w * t[0] + (y * t[2] - z * t[1]),
+    y: v.y + w * t[1] + (z * t[0] - x * t[2]),
+    z: v.z + w * t[2] + (x * t[1] - y * t[0]),
+  };
+}
+
+/**
+ * A person inside a building, carried out of their room's own frame into the snapshot's.
+ *
+ * `room` is the cell's world transform as the snapshot's flattener gives it, which for a cell is its
+ * building's (`q` w, x, y, z and `pos`). **Both halves of a person are in the room's frame**: the
+ * emulator writes an object in a cell with its place and its facing relative to that cell, exactly
+ * as the client keeps an object's transform relative to its parent. The place was always carried
+ * through the room's turn and the facing never was, so every person in a turned building -- and
+ * nearly every building is turned; on one world every measurable cell is -- faced off by the
+ * building's own yaw. The facing is carried the same way the place is: the way they face, turned by
+ * the room, read back as a heading about the vertical, so a building that also pitches or rolls
+ * still gives the heading a person on its floor sees.
+ *
+ * A heading is `atan2(x, z)` of the way a body faces, in the snapshot's frame, which is what an
+ * outdoor row already carries and what the runtime's mirror negates.
+ */
+export function intoRoom(s, room) {
+  const at = turnBy(room.q, { x: s.x, y: s.y, z: s.z });
+  const facing = turnBy(room.q, { x: Math.sin(s.heading), y: 0, z: Math.cos(s.heading) });
+  return {
+    x: room.pos[0] + at.x,
+    y: room.pos[1] + at.y,
+    z: room.pos[2] + at.z,
+    heading: Math.round(Math.atan2(facing.x, facing.z) * 10000) / 10000,
+    room: room.cellIndex,
+    local: [s.x, s.y, s.z],
+    localHeading: s.heading,
+  };
+}
+
 /**
  * How far apart this data and the pack's places say the same named place is.
  *

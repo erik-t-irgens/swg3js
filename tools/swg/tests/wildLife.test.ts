@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import * as THREE from 'three';
 import { WildLife, WILD_TUNE, intoWorld, type WildDeps, type WildManifest, type WildPack } from '../../../src/world/wildLife.ts';
 import { LAIR_TUNE, lairHealth, reinforcements, type LairDef } from '../../../src/world/mobiles/lairs.ts';
+import { WildNest } from '../../../src/world/wildNest.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -29,6 +30,8 @@ interface Body {
   z: number;
   heading: number;
   entry: string;
+  /** Where it stands, for the console's report. */
+  pos: { x: number; y: number; z: number };
 }
 
 /** A game that is entirely made up, so the rules are what is being measured. */
@@ -38,7 +41,7 @@ function game(over: Partial<WildDeps> = {}): { deps: WildDeps; bodies: Body[]; c
   const deps: WildDeps = {
     catalogue: () => ({ byId: (id: string) => ({ id, name: id, ready: true }) }) as never,
     spawn: (entry, at) => {
-      const b: Body = { dead: false, removed: false, x: at.x, z: at.z, heading: at.heading ?? 0, entry: (entry as { id: string }).id };
+      const b: Body = { dead: false, removed: false, x: at.x, z: at.z, heading: at.heading ?? 0, entry: (entry as { id: string }).id, pos: { x: at.x, y: 0, z: at.z } };
       bodies.push(b);
       return b as never;
     },
@@ -224,6 +227,123 @@ const bigArea = { name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 3000, grou
   const after = bodies.length;
   w.step(WILD_TUNE.everySeconds + 0.1, 32, at, deps);
   ok(bodies.length === after, 'while a lair that was really cleared stays cleared until its own clock is out');
+}
+
+// ------------------------------------------------------------------ the most wild bodies at once
+{
+  // `liveBodies` was declared and never read, so a few struck nests could take the count past it.
+  const had = LAIR_TUNE.liveBodies;
+  LAIR_TUNE.liveBodies = 6;
+  try {
+    const w = new WildLife();
+    w.adopt(pack(nearAreas), manifest);
+    const { deps, bodies } = game();
+    const at = new THREE.Vector3(0, 0, 0);
+    let most = 0;
+    for (let i = 0; i < 8; i++) {
+      w.step(WILD_TUNE.everySeconds + 0.1, i * 2, at, deps);
+      most = Math.max(most, bodies.filter((b) => !b.removed && !b.dead).length);
+    }
+    ok(most > 0 && most <= 6, `with the cap at 6 the lairs stand ${most} bodies between them, never more`);
+    ok(w.last.bodies <= 6, 'and the count the console reads agrees');
+  } finally {
+    LAIR_TUNE.liveBodies = had;
+  }
+}
+
+// ------------------------------------------------------------------ respawning switched off
+{
+  const w = new WildLife();
+  w.adopt(pack(nearAreas), manifest);
+  const { deps, bodies } = game();
+  const at = new THREE.Vector3(0, 0, 0);
+  for (let i = 0; i < 4; i++) w.step(WILD_TUNE.everySeconds + 0.1, i * 2, at, deps);
+  const up = w.last.up;
+  w.setRespawns(false);
+  try {
+    for (const b of bodies) b.dead = true;
+    w.step(WILD_TUNE.everySeconds + 0.1, 100, at, deps);
+    const made = bodies.length;
+    w.step(1, 100 + LAIR_TUNE.respawn[1] + 1, at, deps);
+    w.step(WILD_TUNE.everySeconds + 0.1, 100 + LAIR_TUNE.respawn[1] + 5, at, deps);
+    ok(bodies.length === made && w.last.up === up, 'with respawning off a broken lair stays broken when its clock is out');
+    const broken = new Set(w.report(at, { x: 0, z: 0 }).map((r) => r.key));
+    // Walking away puts a broken site down; walking back must not stand it again.
+    w.step(WILD_TUNE.everySeconds + 0.1, 800, new THREE.Vector3(20000, 0, 20000), deps);
+    ok(w.last.cleared === up, `walking away remembers the ${up} it broke as cleared`);
+    for (let i = 0; i < 4; i++) w.step(WILD_TUNE.everySeconds + 0.1, 810 + i * 2, at, deps);
+    const back = w.report(at, { x: 0, z: 0 }).map((r) => r.key);
+    ok(back.every((k) => !broken.has(k)), `and coming back stands none of them, which would be a respawn by another name (${back.length} other sites stand instead)`);
+    w.setRespawns(true);
+    w.step(WILD_TUNE.everySeconds + 0.1, 900, new THREE.Vector3(20000, 0, 20000), deps);
+    for (let i = 0; i < 4; i++) w.step(WILD_TUNE.everySeconds + 0.1, 902 + i * 2, at, deps);
+    const again = w.report(at, { x: 0, z: 0 }).map((r) => r.key);
+    ok(w.last.cleared === 0 && again.some((k) => broken.has(k)), 'turned on again, they stand once more when next come near');
+  } finally {
+    w.setRespawns(true);
+  }
+
+  // A restand takes every body down with its record, rather than leaving them standing with nothing
+  // that would ever take them down again.
+  const standingNow = bodies.filter((b) => !b.removed && !b.dead);
+  w.restand();
+  ok(standingNow.length > 0 && standingNow.every((b) => b.removed) && w.last.up === 0, 'a restand takes the bodies down with their records');
+
+  // The live knob moves a number only for one of its own kind, in either table.
+  const was = { build: LAIR_TUNE.build, sitesPerPass: WILD_TUNE.sitesPerPass };
+  const moved = w.retune({ build: 150, sitesPerPass: 1, guards: [3, 3], liveLairs: 'many' });
+  ok(moved.join() === 'build,guards,sitesPerPass' && LAIR_TUNE.build === 150 && WILD_TUNE.sitesPerPass === 1 && LAIR_TUNE.guards[0] === 3, `the live knob moves what it is given of the right kind (${moved.join()})`);
+  w.retune({ build: was.build, sitesPerPass: was.sitesPerPass, guards: [4, 5] });
+
+  // Moving how sites are laid lays the world out again. It needs an area whose span the spacing
+  // decides below the per-area cap: the small areas above lay one site each at either spacing.
+  const laid = new WildLife();
+  const kilometre = { name: 'k', shape: 'circle' as const, x: 0, z: 0, r: 500, groups: ['g'], cap: 64 };
+  laid.adopt(pack([kilometre]), manifest);
+  const sites = laid.last.sites;
+  const spacing = LAIR_TUNE.spacing;
+  try {
+    laid.retune({ spacing: spacing / 2 });
+    ok(sites < LAIR_TUNE.perArea && laid.last.sites > sites, `and moving how sites are laid lays the world out again (${sites} to ${laid.last.sites} sites at half the spacing)`);
+  } finally {
+    laid.retune({ spacing });
+  }
+  ok(laid.last.sites === sites, 'and back again when it is put back');
+}
+
+// ------------------------------------------------------------------ a struck nest and the most wild bodies at once
+{
+  // `liveBodies` holds a nest's reinforcements as well as a site standing: a few struck nests could
+  // otherwise take the count past it. A node test has no world to build a nest's model in, so the
+  // nest is hung on its site by hand and struck, which is all `reinforce` reads of it.
+  const w = new WildLife();
+  w.adopt(pack(nearAreas), manifest);
+  const { deps, bodies } = game();
+  const at = new THREE.Vector3(0, 0, 0);
+  for (let i = 0; i < 4; i++) w.step(WILD_TUNE.everySeconds + 0.1, i * 2, at, deps);
+  const standing = (w as unknown as { standing: Map<string, { nest: WildNest | null; bodies: unknown[] }> }).standing;
+  const site = [...standing.values()][0];
+  ok(!!site && site.bodies.length > 0, `a site is standing with ${site?.bodies.length} of its own`);
+  const had = LAIR_TUNE.liveBodies;
+  const up = (): number => bodies.filter((b) => !b.removed && !b.dead).length;
+  try {
+    LAIR_TUNE.liveBodies = up();
+    const nest = new WildNest('nest', 1000);
+    site.nest = nest;
+    nest.damage(10);
+    const before = bodies.length;
+    w.step(0.1, 10, at, deps);
+    ok(!nest.wantsHelp && bodies.length === before && w.last.bodies <= LAIR_TUNE.liveBodies, `struck with the cap already reached (${LAIR_TUNE.liveBodies}), it sends nobody out`);
+    // The control: the same strike with room under the cap does send them, so the check above is the
+    // cap and not a nest that would have sent nobody anyway.
+    LAIR_TUNE.liveBodies = up() + 50;
+    nest.damage(10);
+    w.step(0.1, 200, at, deps);
+    ok(bodies.length > before, `and with room it sends ${bodies.length - before} out, which is what the cap held back`);
+    site.nest = null;
+  } finally {
+    LAIR_TUNE.liveBodies = had;
+  }
 }
 
 // ------------------------------------------------------------------ homed on the nest, not on the spot

@@ -285,7 +285,7 @@ const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
   // from a record, and the list's handler asks that mark rather than the name alone.
   const manager = src('../../../src/world/mobiles/manager.ts');
   const main = src('../../../src/main.ts');
-  ok(/worldId: a\.id, listed: true \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
+  ok(/worldId: a\.id, listed: true, share: true \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
   ok(/if \(sweptByList\(id, mobiles\.fromList\(m\), wanted\)\) mobiles\.removeById\(id\);/.test(main) && !/if \(id && !wanted\.has\(id\)\) mobiles\.removeById\(id\);/.test(main), '9: and the list’s handler asks that mark, not the name alone');
 }
 

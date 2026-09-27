@@ -1296,10 +1296,14 @@ export class World {
       // everything else itself; asking ours again after it would search every collider twice for
       // every wall a blade touches, which is most of what a blade touches.
       hittableAt: (h) => (this.npcDeps.hittableAt ? this.npcDeps.hittableAt(h) : this.hittableAt(h)),
-      // A mobile put down inside starts in the room whose box holds it (else the player's, who is
-      // inside when anything is), then is followed through the portals as the player is.
-      cellAt: (p) => this.layoutStream?.buildingAt(p) ?? this.cellState,
+      // A mobile put down inside starts in the room whose box holds it, then is followed through the
+      // portals as the player is. Never the player's room for want of one: that fallback put a person
+      // stood in a cantina a hundred metres off into whichever room the player was standing in.
+      cellAt: (p) => this.layoutStream?.buildingAt(p) ?? null,
       followCell: (state, prev, pos) => (this.layoutStream ? this.layoutStream.trackCell(state, prev, pos) : null),
+      // And whether that room has collision under it this instant, as the fighters ask below: a body
+      // in a building the player has walked away from holds its height rather than falling through.
+      cellSolid: (state) => this.layoutStream?.cellsSolid(state) ?? true,
       spawnSpot: (from, forward, distance, inside) => this.spawnSpot(from, forward, distance, inside),
       refuse: () => (this.planet?.space ? 'nothing can be stood in space' : (this.refuseMobiles?.() ?? null)),
       shadows: () => this.renderer?.shadowMap.enabled ?? false,
@@ -4565,7 +4569,8 @@ export class World {
         // one to a fresh spot near the player rather than leaving it be (`manager.ts:784`). A lair's
         // creatures belong at their lair, so they are `spawned`, which the manager only ever takes
         // away when it is dead or has fallen out of the world. The `worldId` is what keeps the hand
-        // -spawn cap and the NPC tab's clear off them, since `spawn` reads that as origin `world`.
+        // -spawn cap and the NPC tab's clear off them. No `share`: every browser seeds the same lair
+        // from the same data, and a name the server has never heard is never put on the wire.
         spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, worldId: `wild:${seed}` }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
@@ -4595,9 +4600,10 @@ export class World {
     if (!this.peopleDepsKept) {
       this.peopleDepsKept = {
         catalogue: () => this.mobileCatalogue,
-        // Stood as `spawned` with a world name, for the same two reasons the wildlife is: the
-        // manager leaves a spawned one where it was put, and the name keeps the hand-spawn cap and
-        // the NPC tab's clear off it.
+        // Stood as `spawned` with a world name, for the same reasons the wildlife is: the manager
+        // leaves a spawned one where it was put, the name keeps the hand-spawn cap and the NPC tab's
+        // clear off it, and with no `share` it is never put on the wire for a server that has never
+        // heard of it to leave frozen.
         spawn: (entry, at, inside, seed, essential) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, inside, worldId: `stood:${seed}`, essential }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
