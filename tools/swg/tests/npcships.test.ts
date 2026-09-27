@@ -214,8 +214,31 @@ const unfitted = combatStatus({ ...f, chassis: { ...f.chassis, tiefighter_tier1:
 ok(unfitted.stale && unfitted.clause === 'NPC ships: 4 types on 3 hulls, 0 tier fits' && /no tier fits/.test(unfitted.why!), 'types with no tier fit at all: a to-do, the clause kept');
 ok(!combatStatus({ version: COMBAT_FORMAT, types: [], chassis: {} }).stale, 'no types and no fits: nothing to ask for');
 
-// The owner's pack, when converted with combat.json.
 const here = dirname(fileURLToPath(import.meta.url));
+
+// A shuttle's hull is in nobody's fight, out in space among the NPC ships as anywhere: the contacts'
+// own sync, which goes over every ship vehicle every frame, never adopts one nothing may hurt, nor does
+// the world's spawn or a jump's carry across; and while a passenger rides one, the world is told of no
+// ship of the player's, so nothing hostile ever picks it, taunts it or strikes it with lightning.
+// contacts.ts, world.ts and main.ts cannot be loaded by node, so what they say is read.
+{
+  const read = (rel: string) => readFileSync(join(here, '..', '..', '..', rel), 'utf8');
+  const contacts = read('src/space/contacts.ts');
+  const sync = /\n {2}sync\([^\n]*\{\n([\s\S]*?)\n {2}\}\n/.exec(contacts)?.[1] ?? '';
+  const adoptsInSync = sync.match(/this\.adopt\(/g)?.length ?? 0;
+  ok(adoptsInSync === 1 && /if \(!joinsTheFight\(v\) \|\| this\.byVehicle\.has\(v\)\) continue;\s*\n\s*this\.adopt\(v, /.test(sync), "the contacts' sync adopts a ship only where it joins the fight, never a hull nothing may hurt");
+  const world = read('src/world/world.ts');
+  const adopts = world.match(/this\.ships\.adopt\(v, \{ faction: 'neutral' \}\)/g)?.length ?? 0;
+  const guarded = world.match(/if \(joinsTheFight\(v\)\)( \{\s*const combat =)? this\.ships\.adopt\(v, \{ faction: 'neutral' \}\)/g)?.length ?? 0;
+  ok(adopts === 2 && guarded === 2, `nor do the world's spawn and a jump's carry across (${guarded} of ${adopts} guarded)`);
+  const main = read('src/main.ts');
+  ok(
+    /const pilot = riding \? null : \(player\.mounted \?\? player\.piloting\);/.test(main) && /const playerHull = pilot \?\? player\.aboard\?\.vehicle \?\? null;\s*\n\s*this\.world\.playerShip = playerHull\?\.spec\.ship \? playerHull : null;/.test(main),
+    "and while a shuttle's passenger rides, the player's ship the NPC ships go after stays nobody",
+  );
+}
+
+// The owner's pack, when converted with combat.json.
 const packFile = join(here, '..', '..', '..', 'assets-private', 'ships', 'combat.json');
 if (!existsSync(packFile)) console.log('skip the ships pack has no combat.json yet (the ships command writes it)');
 else {

@@ -26,6 +26,10 @@ const TIERS = [
   { minRadius: 3, range: 750 },
   { minRadius: 0, range: 320 },
 ];
+/** Metres out to which the biggest placed objects (a starport's buildings among them) load, at the game's own reach. */
+export function nearTierRange(): number {
+  return TIERS[0].range;
+}
 const UNLOAD_SLACK = 1.15;
 /**
  * Interiors exist only this far from the building's edge. The portal renderer draws a room

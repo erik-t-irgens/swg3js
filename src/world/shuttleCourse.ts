@@ -23,6 +23,12 @@
 // It says when it has come abeam the landing's join, and whether it is close enough there to hand over;
 // a pass too far off asks, once, to be planned again from where it is (a go-around).
 //
+// The same hand flies the rest of a trip between worlds. Out of the sky it climbs on along the heading
+// its take-off left it on, nose up at a fixed angle and wings level, steeper only where the ground
+// ahead rises faster (`climbStep`). In space there is no ground to keep over and no up to level to: it
+// turns its nose onto a point or a direction with yaw and pitch alone, never rolling (`spaceStep`), and
+// another ship too near or on a course to meet it bends the way it wants to go, as it bends an NPC's.
+//
 // Pure: it imports the NPC pilot's own arithmetic (`src/space/pilot.ts`) and nothing else, so node runs
 // it (`shuttleCourse.test.ts`). A plan allocates its course once; a step allocates nothing. Every
 // number is ours, in `RIDE_PILOT`, live through `__debug.ride({ pilot })`.
@@ -358,6 +364,32 @@ export function planCourse(from: RideState, join: RideState, radius: number, tun
   };
 }
 
+/**
+ * A climb out of a planet's sky: on along `heading` (a hull's, `atan2(dx, dz)`), nose up at `pitch`
+ * radians, until the hull is `toY` high; and how far over the ground it runs getting there from `from`.
+ */
+export interface RideClimb {
+  heading: number;
+  pitch: number;
+  toY: number;
+  run: number;
+}
+
+/**
+ * The climb from where the take-off let the hull go, on the heading it came off its clip on, at
+ * `pitchDeg` (kept between one and eighty-nine degrees), to `toY`. Nothing else about it is planned: the
+ * ground is read as it is flown over, and the hull climbs more steeply only where it has to. Written into
+ * `out` where one is given.
+ */
+export function planClimb(from: RideState, heading: number, toY: number, pitchDeg: number, out: RideClimb = { heading: 0, pitch: 0, toY: 0, run: 0 }): RideClimb {
+  const pitch = (Math.max(1, Math.min(89, pitchDeg)) * Math.PI) / 180;
+  out.heading = heading;
+  out.pitch = pitch;
+  out.toY = toY;
+  out.run = Math.max(0, toY - from.y) / Math.tan(pitch);
+  return out;
+}
+
 // ---------------------------------------------------------------- the pilot
 
 /** Scratch for a step, which makes nothing: one pilot steps at a time. */
@@ -412,6 +444,8 @@ export class ShuttlePilot {
   private errKnown = false;
   /** The floor the height law last held the point chased over (the ground from the hull on, and its clearance): under it, it may climb at `climbSteep`. */
   private floorLine = -Infinity;
+  /** The way a flight in space wants to go, of unit length: kept and written. */
+  private readonly spaceWant: V3 = { x: 0, y: 0, z: 1 };
 
   /** A course to fly from here, at `top` metres a second: the stick as the hand holds it now is kept, so a go-around does not jerk it. */
   setCourse(course: RideCourse, top: number): void {
@@ -529,9 +563,29 @@ export class ShuttlePilot {
     wantDir.x = Math.sin(wh) * Math.cos(gamma);
     wantDir.y = Math.sin(gamma);
     wantDir.z = Math.cos(wh) * Math.cos(gamma);
-    toLocal(q, wantDir, wantLocal);
-    toLocal(q, UP, upLocal);
-    steerToward(wantLocal, tune.bankBeyond, upLocal, this.stick);
+    this.steer(dt, now, q, wantDir, true, now < this.avoidUntil);
+    // Slowing into the landing's own speed over the last of the course.
+    const left = c.total - sHere;
+    const top = this.top;
+    const want = Math.min(top, j.speed + (top - j.speed) * Math.max(0, Math.min(1, (left - tune.slowEnd) / Math.max(1, tune.slowSpan))));
+    const d = this.drive;
+    d.cruise = want;
+    d.throttle = cruise < want - 1 ? 1 : 0;
+    return 'fly';
+  }
+
+  /**
+   * The hand on the stick, turning the nose onto a world direction `dir`: yaw and pitch toward it, the
+   * wings levelled to the world's up where `level` (over a planet) and left as they are where not (in
+   * space, where there is no up), never rolled over to pull a turn; led by the rate the error closes at,
+   * then capped and paced by the hand (`skillStick`), the whole stick at once where `urgent`. Writes the
+   * drive's stick. Allocates nothing.
+   */
+  private steer(dt: number, now: number, q: Q4, dir: V3, level: boolean, urgent: boolean): void {
+    const tune = RIDE_PILOT;
+    toLocal(q, dir, wantLocal);
+    if (level) toLocal(q, UP, upLocal);
+    steerToward(wantLocal, tune.bankBeyond, level ? upLocal : null, this.stick);
     // The error as it will stand `errorLead` from now at the rate it is closing, in steerToward's own
     // gains, so the chase settles rather than swaying about its line through the hull's own lag. The
     // same two angles steerToward steers by; a point chased that jumps (a go-around, a drop in the height
@@ -549,18 +603,109 @@ export class ShuttlePilot {
     const skill = this.skill;
     skill.stickMax = tune.stickMax;
     skill.response = tune.response;
-    skillStick(this.stick, skill, dt, this.held, now < this.avoidUntil);
-    // Slowing into the landing's own speed over the last of the course.
-    const left = c.total - sHere;
-    const top = this.top;
-    const want = Math.min(top, j.speed + (top - j.speed) * Math.max(0, Math.min(1, (left - tune.slowEnd) / Math.max(1, tune.slowSpan))));
+    skillStick(this.stick, skill, dt, this.held, urgent);
     const d = this.drive;
     d.stickX = this.held.x;
     d.stickY = this.held.y;
     d.steer = this.held.roll;
-    d.cruise = want;
-    d.throttle = cruise < want - 1 ? 1 : 0;
-    return 'fly';
+  }
+
+  /**
+   * Another flight begun with this hand (a climb, a flight in space): the error it last led by was about
+   * another point, so the lead starts afresh rather than reading a jump between the two as a swing.
+   */
+  resetHand(): void {
+    this.errKnown = false;
+  }
+
+  /**
+   * One step of a climb out of the sky (`planClimb`): on along its heading, nose up at its angle, wings
+   * level, at `top` metres a second; up to `climbSteep` where the ground under the hull or a little ahead
+   * of it stands nearer than `floor` under where the climb has it (the ground read where the world holds
+   * it, two samples a step). Allocates nothing.
+   */
+  climbStep(dt: number, now: number, pos: V3, q: Q4, cruise: number, climb: RideClimb, top: number, groundCached: (x: number, z: number) => number | null): void {
+    const tune = RIDE_PILOT;
+    this.now = now;
+    const sh = Math.sin(climb.heading);
+    const ch = Math.cos(climb.heading);
+    const ahead = Math.max(tune.carrotMin, cruise * tune.carrotSeconds);
+    const g0 = groundCached(pos.x, pos.z);
+    const g1 = groundCached(pos.x + sh * ahead, pos.z + ch * ahead);
+    let ground = -Infinity;
+    if (g0 !== null && Number.isFinite(g0)) ground = g0;
+    if (g1 !== null && Number.isFinite(g1) && g1 > ground) ground = g1;
+    if (ground > this.highest) this.highest = ground;
+    this.floorLine = ground + tune.floor;
+    const under = pos.y + ahead * Math.tan(climb.pitch) < this.floorLine;
+    const gamma = under ? Math.max(climb.pitch, deg(tune.climbSteep)) : climb.pitch;
+    wantDir.x = sh * Math.cos(gamma);
+    wantDir.y = Math.sin(gamma);
+    wantDir.z = ch * Math.cos(gamma);
+    this.target = pos.y + ahead * Math.tan(gamma);
+    this.steer(dt, now, q, wantDir, true, false);
+    const d = this.drive;
+    d.cruise = top;
+    d.throttle = cruise < top - 1 ? 1 : 0;
+  }
+
+  /**
+   * Where a flight in space wants to go this step: toward the point `at` from `pos` (`toward`), or along
+   * the direction `dir` (`along`); either may then be bent by the ships about (`noteShipInSpace`) before
+   * `spaceStep` flies it. The wanted way is kept and written, never made.
+   */
+  toward(pos: V3, at: V3): number {
+    const dx = at.x - pos.x;
+    const dy = at.y - pos.y;
+    const dz = at.z - pos.z;
+    const l = Math.hypot(dx, dy, dz);
+    const w = this.spaceWant;
+    if (l > 1e-6) {
+      w.x = dx / l;
+      w.y = dy / l;
+      w.z = dz / l;
+    }
+    return l;
+  }
+
+  along(dir: V3): void {
+    const l = Math.hypot(dir.x, dir.y, dir.z);
+    if (l < 1e-6) return;
+    this.spaceWant.x = dir.x / l;
+    this.spaceWant.y = dir.y / l;
+    this.spaceWant.z = dir.z / l;
+  }
+
+  /** Another ship in space too near, or on a course to meet this hull, bends the way it wants to go away from it (`pushApart`, the NPC pilots' own rule). */
+  noteShipInSpace(pos: V3, vel: V3, r: number, selfPos: V3, selfVel: V3, selfR: number): void {
+    pushApart(selfPos, selfVel, selfR, pos, vel, r, this.spaceWant);
+  }
+
+  /**
+   * One step of flight in space: the nose turned onto the way wanted (`toward` or `along`) with yaw and
+   * pitch alone -- no ground to keep over and no up to level to -- at `top` metres a second. Allocates
+   * nothing.
+   */
+  spaceStep(dt: number, now: number, q: Q4, cruise: number, top: number): void {
+    this.now = now;
+    this.steer(dt, now, q, this.spaceWant, false, false);
+    const d = this.drive;
+    d.cruise = top;
+    d.throttle = cruise < top - 1 ? 1 : 0;
+  }
+
+  /** The stick let go of: straight on, at `cruise` (a jump flying the hull, or a hull flown on with nothing to fly toward). */
+  coast(cruise: number): void {
+    const d = this.drive;
+    d.stickX = 0;
+    d.stickY = 0;
+    d.steer = 0;
+    d.throttle = 0;
+    d.cruise = cruise;
+    this.held.x = 0;
+    this.held.y = 0;
+    this.held.roll = 0;
+    this.errKnown = false;
   }
 
   /** The ground under up to `groundPerFrame` samples not read yet, from the hull's own on over the look ahead, where the world already holds it. */

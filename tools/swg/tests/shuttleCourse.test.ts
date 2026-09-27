@@ -12,7 +12,9 @@
 // kilometre short of a join and never into it; the two pads that stand nearest each other are flown
 // a course many times longer than the line between them; and over the last half minute before every
 // join it settles rather than sways, which the hand that read the error alone is flown beside it to
-// fail. A step makes nothing: read in the code,
+// fail. Out of the sky it climbs on its heading at its angle with its wings level, rolls them level
+// when it is taken over banked, and climbs more steeply over ground that rises faster; in space it turns its nose onto a point behind it with no roll at all,
+// and a ship coming at it bends its way. A step makes nothing: read in the code,
 // measured as what twenty thousand of them leave behind, and as what short stretches of them allocate.
 // The real ground is flown by hand (`shuttleCourseTerrain.ts`).
 //
@@ -25,7 +27,7 @@ import * as THREE from 'three';
 import { SWAY, flyCourse, quantile, rigPairs, type Flight, type RigPair } from './courseFixtures.ts';
 import { RIG_HULL_TUNE } from '../../../src/vehicles/rigHull.ts';
 import type { PadRef } from '../../../src/world/rideRoute.ts';
-import { RIDE_PILOT, ShuttlePilot, dubins, planCourse, planRadius, type RideState } from '../../../src/world/shuttleCourse.ts';
+import { RIDE_PILOT, ShuttlePilot, dubins, planClimb, planCourse, planRadius, type RideState } from '../../../src/world/shuttleCourse.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -251,7 +253,7 @@ function rng(seed: number): () => number {
   const course = read('../../../src/world/shuttleCourse.ts');
   const pilot = read('../../../src/space/pilot.ts');
   const frame: [string, string, boolean][] = [
-    ...['step', 'readGround', 'heightAt', 'noteObstacle', 'noteShip', 'climbOver'].map((n) => [course, n, true] as [string, string, boolean]),
+    ...['step', 'readGround', 'heightAt', 'noteObstacle', 'noteShip', 'climbOver', 'steer', 'resetHand', 'climbStep', 'toward', 'along', 'noteShipInSpace', 'spaceStep', 'coast'].map((n) => [course, n, true] as [string, string, boolean]),
     [course, 'indexAt', false],
     ...['pushApart', 'unit', 'steerToward', 'skillStick', 'toLocal', 'toWorld', 'rotate'].map((n) => [pilot, n, false] as [string, string, boolean]),
   ];
@@ -338,7 +340,136 @@ function rng(seed: number): () => number {
     const LIMIT = 1024;
     ok(step < LIMIT, `a step makes next to nothing of its own (${f1(step)} bytes, under ${LIMIT})`);
     ok(junk > LIMIT, `while a step that also wrote out the report would show (${f1(junk)} bytes)`);
+    // The climb and the flight in space, the same way.
+    const climb = planClimb(from, 0.3, 1250, 20);
+    const far = { x: 8000, y: 500, z: -3000 };
+    // A step of one or the other, turn about: each is a step of the pilot on its own.
+    function runSpace(n: number): void {
+      for (let i = 0; i < n; i++) {
+        if (i % 2 === 0) pilot.climbStep(1 / 30, i / 30, pos, turn, 150, climb, 150, ground);
+        else {
+          pilot.toward(pos, far);
+          pilot.noteShipInSpace(ship, shipVel, 20, pos, selfVel, 22);
+          pilot.spaceStep(1 / 30, i / 30, turn, 150, 300);
+        }
+      }
+    }
+    runSpace(60000);
+    const space = perStep(runSpace);
+    ok(space < LIMIT, `a step of the climb or of a flight in space makes next to nothing of its own (${f1(space)} bytes, under ${LIMIT})`);
   }
+}
+
+// ---------------------------------------------------------------- out of the sky and through space
+
+/**
+ * A hull flown by the hand alone, as flyShip flies one (the turn rates eased toward the stick's over the
+ * rig hull's inertia, the roll twice as fast, straight on along the nose at its cruise), with nothing
+ * about the ground: what the climb and a flight in space are flown through here.
+ */
+function handFlight(pilot: ShuttlePilot, pos: THREE.Vector3, turn: THREE.Quaternion, seconds: number, each: (t: number, cruise: number) => void): { rolled: number; cruise: number } {
+  const dt = 1 / 30;
+  const spin = new THREE.Vector3();
+  const by = new THREE.Quaternion();
+  const d = pilot.drive;
+  let cruise = 150;
+  let rolled = 0;
+  for (let t = 0; t < seconds; t += dt) {
+    each(t, cruise);
+    const rate = RIG_HULL_TUNE.turnRate;
+    const ease = Math.min(1, dt / RIG_HULL_TUNE.inertia);
+    spin.y += (-d.stickX * rate * 1.5 - spin.y) * ease;
+    spin.x += (d.stickY * rate * 1.5 - spin.x) * ease;
+    spin.z += (d.steer * rate * 1.6 - spin.z) * Math.min(1, (2 * dt) / RIG_HULL_TUNE.inertia);
+    turn.multiply(by.setFromAxisAngle(new THREE.Vector3(0, 1, 0), spin.y * dt));
+    turn.multiply(by.setFromAxisAngle(new THREE.Vector3(1, 0, 0), spin.x * dt));
+    turn.multiply(by.setFromAxisAngle(new THREE.Vector3(0, 0, 1), spin.z * dt));
+    turn.normalize();
+    rolled = Math.max(rolled, Math.abs(d.steer));
+    cruise = cruise < d.cruise ? Math.min(d.cruise, cruise + RIG_HULL_TUNE.accel * dt) : Math.max(d.cruise, cruise - RIG_HULL_TUNE.brake * dt);
+    pos.addScaledVector(new THREE.Vector3(0, 0, 1).applyQuaternion(turn), cruise * dt);
+  }
+  return { rolled, cruise };
+}
+
+{
+  // The climb out of the sky: on along the heading it was let go on, nose up at its angle, wings level;
+  // and steeper where the ground ahead rises faster than that.
+  const from: RideState = { x: 0, y: 190, z: 0, heading: 1.1, speed: 150 };
+  const out = { heading: 0, pitch: 0, toY: 0, run: 0 };
+  const climb = planClimb(from, 1.1, 1250, 20, out);
+  ok(climb === out && Math.abs(climb.pitch - (20 * Math.PI) / 180) < 1e-12 && Math.abs(climb.run - 1060 / Math.tan((20 * Math.PI) / 180)) < 1e-9 && climb.toY === 1250, `a climb is planned at its angle to its height, written into what it is handed (${f1(climb.run)} m over the ground)`);
+  // The ground flat, or rising at 30 degrees -- faster than the climb -- from 600 m ahead on.
+  const along = (x: number, z: number) => x * Math.sin(1.1) + z * Math.cos(1.1);
+  for (const [what, ground] of [['flat ground', () => 0], ['ground rising at 30 degrees ahead', (x: number, z: number) => Math.max(0, along(x, z) - 600) * Math.tan(Math.PI / 6)]] as const) {
+    const pilot = new ShuttlePilot();
+    pilot.resetHand();
+    const pos = new THREE.Vector3(from.x, from.y, from.z);
+    const turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 1.1);
+    let gamma = 0;
+    let steepest = 0;
+    let heading = 0;
+    let lowest = Infinity;
+    const flown = handFlight(pilot, pos, turn, 40, (t, cruise) => {
+      pilot.climbStep(1 / 30, t, pos, turn, cruise, climb, 150, ground);
+      const nose = new THREE.Vector3(0, 0, 1).applyQuaternion(turn);
+      gamma = Math.asin(nose.y) * DEG;
+      steepest = Math.max(steepest, gamma);
+      heading = Math.atan2(nose.x, nose.z);
+      lowest = Math.min(lowest, pos.y - ground(pos.x, pos.z));
+    });
+    if (what === 'flat ground') ok(Math.abs(gamma - 20) < 1.5 && steepest < 21.5 && Math.abs(wrap(heading - 1.1)) * DEG < 1.5 && flown.rolled < 0.05, `over ${what} it climbs at ${f1(gamma)} degrees on its heading (${f1(Math.abs(wrap(heading - 1.1)) * DEG)} degrees off), wings level`);
+    else ok(steepest > 25 && lowest > RIDE_PILOT.floor * 0.5, `over ${what} it climbs more steeply (up to ${f1(steepest)} degrees) and keeps over it (${f1(lowest)} m clear at the lowest)`);
+  }
+  // Taken over banked, as a take-off's cut can leave a hull: the climb rolls its wings back to level
+  // (measured as how far its right wing stands out of the level) and keeps them there.
+  const pilot = new ShuttlePilot();
+  pilot.resetHand();
+  const pos = new THREE.Vector3(from.x, from.y, from.z);
+  const turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 1.1).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), (20 * Math.PI) / 180));
+  const bank = () => Math.abs(Math.asin(THREE.MathUtils.clamp(new THREE.Vector3(1, 0, 0).applyQuaternion(turn).y, -1, 1))) * DEG;
+  const banked = bank();
+  let firstSteer = 0;
+  let levelBy = Infinity;
+  let worstAfter = 0;
+  handFlight(pilot, pos, turn, 20, (t, cruise) => {
+    pilot.climbStep(1 / 30, t, pos, turn, cruise, climb, 150, () => 0);
+    if (t === 0) firstSteer = pilot.drive.steer;
+    const b = bank();
+    if (b < 2 && levelBy === Infinity) levelBy = t;
+    if (t > 8) worstAfter = Math.max(worstAfter, b);
+  });
+  ok(Math.abs(banked - 20) < 1e-6 && firstSteer !== 0 && levelBy < 8 && worstAfter < 2, `taken over banked ${f1(banked)} degrees, the climb rolls its wings level (under 2 degrees by ${f1(levelBy)} s, at most ${f1(worstAfter)} after 8 s)`);
+}
+
+{
+  // In space: the nose onto a point behind it, with yaw and pitch alone and never a roll; and a ship
+  // coming straight at it bends the way it goes.
+  const pilot = new ShuttlePilot();
+  pilot.resetHand();
+  const pos = new THREE.Vector3(0, 0, 0);
+  const turn = new THREE.Quaternion();
+  const at = { x: -30000, y: 8000, z: -60000 };
+  let off = 180;
+  const flown = handFlight(pilot, pos, turn, 30, (t, cruise) => {
+    pilot.toward(pos, at);
+    pilot.spaceStep(1 / 30, t, turn, cruise, 300);
+    const nose = new THREE.Vector3(0, 0, 1).applyQuaternion(turn);
+    off = nose.angleTo(new THREE.Vector3(at.x - pos.x, at.y - pos.y, at.z - pos.z)) * DEG;
+  });
+  ok(off < 3 && flown.rolled === 0 && Math.abs(flown.cruise - 300) < 1, `in space it turns its nose onto a point behind it (${f1(off)} degrees off after 30 s) with no roll at all, at the space cruise`);
+  const a = new ShuttlePilot();
+  const b = new ShuttlePilot();
+  const q = new THREE.Quaternion();
+  const here = { x: 0, y: 0, z: 0 };
+  a.toward(here, { x: 0, y: 0, z: 5000 });
+  b.toward(here, { x: 0, y: 0, z: 5000 });
+  b.noteShipInSpace({ x: 0, y: 0, z: 150 }, { x: 0, y: 0, z: -200 }, 30, here, { x: 0, y: 0, z: 300 }, 30);
+  a.spaceStep(1 / 30, 0, q, 300, 300);
+  b.spaceStep(1 / 30, 0, q, 300, 300);
+  ok(a.drive.stickX === 0 && a.drive.stickY === 0 && (b.drive.stickX !== 0 || b.drive.stickY !== 0), 'a ship coming straight at it bends the way it goes, where nothing else would turn it');
+  b.coast(120);
+  ok(b.drive.stickX === 0 && b.drive.stickY === 0 && b.drive.steer === 0 && b.drive.cruise === 120 && b.drive.throttle === 0, 'let go of, the stick is in the middle and the cruise is what it is handed');
 }
 
 console.log(`\nshuttle course: ${passed} checks passed`);

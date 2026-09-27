@@ -211,8 +211,10 @@ export function zoneFor(sys: GalaxySystemDef, world: PlanetDef): string | null {
 
 /**
  * What a shuttle trip between worlds asks of the galaxy (`RouteFacts` in `rideRoute.ts`), answered from
- * the tables above: the planet a pack is a world of, the orbit it is reached through (`zoneFor`), and the
- * words a world with none says of itself (Mustafar's `noOrbit`).
+ * the tables above: the planet a pack is a world of, the orbit it is reached through (`zoneFor`), the
+ * words a world with none says of itself (Mustafar's `noOrbit`), and whether a zone's sky hangs that
+ * world's own disc, which is so only of the world the zone is the orbit of (Talus and Rori, reached
+ * through their neighbour's orbit, hang nowhere in it).
  */
 export function routeFactsOf(): RouteFacts {
   return {
@@ -227,6 +229,10 @@ export function routeFactsOf(): RouteFacts {
       return planet && sys ? zoneFor(sys, planet) : null;
     },
     noOrbit: (id) => systemOf(id)?.worlds.find((w) => w.planet === id)?.noOrbit ?? '',
+    hasDisc: (zone, id) => {
+      const planet = PLANETS.find((p) => p.id === id);
+      return !!planet && !planet.space && spaceZoneOf(planet)?.id === zone;
+    },
   };
 }
 

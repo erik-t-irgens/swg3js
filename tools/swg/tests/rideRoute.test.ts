@@ -7,14 +7,28 @@
 // against a transcription of the old code over every converted world's own travel rows and places: a
 // round that changed its name would have every shuttle land at another moment than the one it did.
 //
+// A trip through space as legs, over the game's own routes (22 jumps, 4 flights within a system, 4 to or
+// from a world with no orbit); a trip given up for a skip from any leg; where the crossing down comes out
+// and the glide it leaves onto each of the game's own landings; where Talus and Rori are reached in their
+// neighbour's orbits; each orbit's disc where the sky draws it; nothing standing in the way out of any
+// world's crossing up or across any system; the numbers read out of the files node cannot load that the
+// ride's own must stay inside; and about how long a trip through space flies.
+//
 // Run: node tools/swg/tests/rideRoute.test.ts
 
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { GALAXY_SYSTEMS, routeFactsOf } from '../../../src/data/galaxy.ts';
-import { landingMood } from '../../../src/vehicles/rigHull.ts';
-import { PORT_REACH, SPACE_LATER, farPadsOf, landMood, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, spaceLegOf, type PadRef } from '../../../src/world/rideRoute.ts';
+import * as THREE from 'three';
+import { loadGlb, packRigs } from './rigFixtures.ts';
+import { GALAXY_SYSTEMS, destinationFor, routeFactsOf, systemOf } from '../../../src/data/galaxy.ts';
+import { PLANETS } from '../../../src/data/planets.ts';
+import { JUMP_COUNTDOWN, enterSpeed, sceneOf, toGame, transitAt } from '../../../src/space/hyperspaceMath.ts';
+import { HyperspaceCatalogue, arrivalAt, destinationsOf, landmarksOf, type Destination, type SpacePack } from '../../../src/space/spaceData.ts';
+import { RigHull, assembleRigModel, hullJointOf, landingMood } from '../../../src/vehicles/rigHull.ts';
+import { PORT_REACH, SPACE_LATER, discDirection, downArrival, farPadsOf, landMood, padOfPort, padRefOf, planHop, planRoute, portOfThing, replanSkip, shuttleClockName, skipOffer, spaceLegOf, tripSeconds, zonePlace, type PadRef, type RideRoute, type SpacePlan } from '../../../src/world/rideRoute.ts';
+import { landingTarget, makeLandingTarget } from '../../../src/world/rigPath.ts';
+import { RIDE_TUNE } from '../../../src/world/shuttleRide.ts';
 import { portsOf, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
 import { TRAVEL_TUNE, rigTimes, travelThingsOf, type Ticket, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
@@ -138,7 +152,7 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   const bareKinds = bare.legs.map((l) => l.kind).join(',');
   ok(bareKinds === 'board,lift,walkOff' && bare.legs[2].world === 'tatooine' && bare.legs[2].port === 'Bare Shuttleport' && bare.to.pad === null && bare.forced === null, `with no rigged pad on the far world, it is lifted off here and the passenger set down at the far port (${bareKinds})`);
   ok(planRoute({ ...ticket, trip: undefined, skipSpace: undefined }, here, far, 'naboo')?.trip === 'skip', 'a ticket to another world that says nothing of its trip skips the flight through space');
-  ok(planRoute({ ...ticket, trip: 'space', skipSpace: false }, here, far, 'naboo') === null, 'one that flies through space is not flown yet, and does what a ticket always did');
+  ok(planRoute({ ...ticket, trip: 'space', skipSpace: false }, here, far, 'naboo') === null, 'one that flies through space with nothing to plan it by is not flown, and does what a ticket always did');
   ok(planRoute({ ...ticket, from: 'tatooine' }, here, far, 'naboo') === null, 'nor is a ticket from another world handed in here');
   ok(JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'and a trip between worlds is plain data');
 }
@@ -331,6 +345,324 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
       ok(pads > 0, `and every one of ${pads} far pads (of ${ports} ports) it reads is keyed, clocked and placed as that world stands it, its things and ports the very ones the world stands about its layout's centre`);
     } else note('no converted ground world carries a travel.json, so the far pads are not checked');
   }
+}
+
+// ---------------------------------------------------------------- a trip through space
+
+/** A number the game keeps in a file node cannot load, read out of the file itself. */
+const constOf = (src: string, name: string): number => {
+  const m = new RegExp(`const ${name} = (\\d+(?:\\.\\d+)?);`).exec(src);
+  assert.ok(m, `${name} is read out of its file`);
+  return Number(m![1]);
+};
+const mainSrc = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+const GATE = constOf(mainSrc, 'SPACE_GATE_HEIGHT');
+const ARRIVE = constOf(mainSrc, 'SPACE_ARRIVAL_HEIGHT');
+const facts = routeFactsOf();
+const SPACE: SpacePlan = { facts, gate: GATE, discSeconds: RIDE_TUNE.discSeconds };
+/** A trip's legs in words: a flight named by what it flies to. */
+const words = (r: RideRoute): string => r.legs.map((l) => (l.kind === 'fly' ? `fly(${l.aim?.to ?? '?'})` : l.kind)).join(',');
+const CROSSINGS = new Set(['up', 'jump', 'down', 'skip']);
+/** A pad on a world, rigged, for a trip that needs one at either end. */
+const padOn = (pack: string, i = 1): PadRef => padRefOf(pack, i, thing({ bx: 100 * i, bz: 0, x: 100 * i + 20, z: 20 }), [{ name: `${pack} port`, x: 100 * i, z: 0, kind: 'starport' }], { transport: rig });
+const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`, from, pack: to, to: `${to} port`, at: { x: 100, z: 0 }, price: 0, bought: 0, trip: 'space', skipSpace: false });
+
+{
+  ok(facts.hasDisc('space_corellia', 'corellia') && !facts.hasDisc('space_corellia', 'talus') && !facts.hasDisc('space_naboo', 'rori') && !facts.hasDisc('space_light1', 'space_light1'), "a zone hangs a world's own disc only for the world it is the orbit of");
+  const route = planRoute(spaceTicket('naboo', 'tatooine'), padOn('naboo'), padOn('tatooine'), 'naboo', null, SPACE)!;
+  ok(words(route) === 'board,lift,climb,up,jump,fly(disc),down,fly(join),land,off,leave', `a ticket through space between two systems climbs out, crosses up, jumps, turns to the far world, crosses down and flies in to land (${words(route)})`);
+  const at = (k: string) => route.legs.find((l) => l.kind === k)!;
+  ok(at('climb').world === 'naboo' && at('climb').aim?.to === 'height' && (at('climb').aim as { over: number }).over === GATE, `it climbs over the world it left, to the game's own space gate (${GATE} m)`);
+  ok(at('up').world === 'space_naboo' && at('up').aim?.to === 'zonePlace' && (at('up').aim as { world: string }).world === 'naboo', "up into the orbit of the world it left, where that world is in it");
+  ok(at('jump').world === 'space_tatooine' && (at('jump').aim as { world: string; zone: string }).world === 'tatooine' && (at('jump').aim as { zone: string }).zone === 'space_tatooine', 'a jump to where the far world is reached in its own orbit');
+  const disc = route.legs.find((l) => l.aim?.to === 'disc')!;
+  ok(disc.world === 'space_tatooine' && (disc.aim as { seconds: number }).seconds === RIDE_TUNE.discSeconds, 'turning toward the far world in its sky for the ride\'s own seconds');
+  ok(at('down').world === 'tatooine' && at('down').pad?.key === 'travel:tatooine:1' && route.legs.slice(-4).every((l) => l.world === 'tatooine' && l.pad?.key === 'travel:tatooine:1'), 'down onto the far world over its pad, and flown in, landed, stepped off and left there');
+  ok(route.trip === 'space' && !route.skipSpace && route.forced === null && JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'a trip through space, not skipped, and plain data');
+  const across = planRoute(spaceTicket('corellia', 'talus'), padOn('corellia'), padOn('talus'), 'corellia', null, SPACE)!;
+  ok(words(across) === 'board,lift,climb,up,fly(zonePlace),down,fly(join),land,off,leave' && (across.legs[3].aim as { world: string }).world === 'corellia' && (across.legs[4].aim as { world: string; zone: string }).world === 'talus' && across.legs[4].world === 'space_corellia', `within one system it flies across it, and Talus hangs no disc of its own (${words(across)})`);
+  const back = planRoute(spaceTicket('talus', 'corellia'), padOn('talus'), padOn('corellia'), 'talus', null, SPACE)!;
+  ok(words(back) === 'board,lift,climb,up,fly(zonePlace),fly(disc),down,fly(join),land,off,leave' && (back.legs[3].aim as { world: string }).world === 'talus' && back.legs[3].world === 'space_corellia', `out of Talus it comes up into its neighbour's orbit, flies across to Corellia and turns to its disc (${words(back)})`);
+  const bare = planRoute(spaceTicket('corellia', 'kashyyyk_main'), padOn('corellia'), null, 'corellia', null, SPACE)!;
+  ok(words(bare) === 'board,lift,climb,up,jump,fly(disc),walkOff' && bare.legs.at(-1)!.world === 'kashyyyk_main', `with no pad over there, the flight through space ends with the passenger set down at the port (${words(bare)})`);
+  const noOrbit = GALAXY_SYSTEMS.find((s) => s.id === 'mustafar')!.worlds[0].noOrbit!;
+  const must = planRoute(spaceTicket('tatooine', 'mustafar'), padOn('tatooine'), null, 'tatooine', null, SPACE)!;
+  ok(words(must) === 'board,lift,walkOff' && must.trip === 'skip' && must.forced === noOrbit, `a world with no orbit is skipped to whatever the ticket says, in the galaxy's own words (${words(must)})`);
+  ok(planRoute(spaceTicket('naboo', 'tatooine'), padOn('naboo'), padOn('tatooine'), 'naboo', null, null) === null, 'and a trip through space with nothing to plan it by is not flown');
+}
+
+{
+  // Over the game's own routes: 22 jumps between systems, 4 flights within one, and 4 to or from
+  // Mustafar, which has no orbit; every trip is boarded and lifted off and ends parked and left, or
+  // with the passenger set down at the port; every crossing up comes after a climb, into a space zone
+  // other than the one a jump goes to; nothing crosses anywhere where an end has no orbit, nor on a
+  // ticket that skips the flight.
+  const file = join(process.cwd(), 'assets-private', 'galaxy.json');
+  if (!existsSync(file)) note('no galaxy.json converted, so the game\'s own routes are not planned: npm run swg -- maps @SWG assets-private --retail-only');
+  else {
+    const routes = (JSON.parse(readFileSync(file, 'utf8')) as { routes: { from: string; to: string }[] }).routes;
+    const count = { jump: 0, fly: 0, none: 0 };
+    let mustafar = 0;
+    const packs = join(process.cwd(), 'assets-private');
+    const hasPad = (pack: string): boolean => {
+      const f = join(packs, pack, 'travel.json');
+      if (!existsSync(f)) return false;
+      const t = JSON.parse(readFileSync(f, 'utf8')) as { rows?: TravelRow[]; rigs?: Record<string, TravelRig> };
+      return (t.rows ?? []).some((r) => r.kind === 'shuttle' && !!r.rig && !!t.rigs?.[r.rig]);
+    };
+    const bad: string[] = [];
+    for (const r of routes) {
+      const leg = spaceLegOf(r.from, r.to, facts);
+      count[leg.kind]++;
+      if (r.from === 'mustafar' || r.to === 'mustafar') mustafar++;
+      const trip = planRoute(spaceTicket(r.from, r.to), padOn(r.from), hasPad(r.to) ? padOn(r.to) : null, r.from, null, SPACE);
+      const skip = planRoute({ ...spaceTicket(r.from, r.to), trip: 'skip', skipSpace: true }, padOn(r.from), hasPad(r.to) ? padOn(r.to) : null, r.from, null, SPACE);
+      if (!trip || !skip) {
+        bad.push(`${r.from}>${r.to}: not planned`);
+        continue;
+      }
+      const k = trip.legs.map((l) => l.kind);
+      const end = k.slice(-2).join(',');
+      if (k[0] !== 'board' || k[1] !== 'lift' || !(end === 'off,leave' || k.at(-1) === 'walkOff')) bad.push(`${r.from}>${r.to}: ${k.join(',')}`);
+      const up = k.indexOf('up');
+      if (up >= 0 && (k[up - 1] !== 'climb' || !trip.legs[up].world.startsWith('space_'))) bad.push(`${r.from}>${r.to}: the crossing up is ${trip.legs[up - 1]?.kind} then into ${trip.legs[up].world}`);
+      const jump = trip.legs.find((l) => l.kind === 'jump');
+      if (jump && jump.world === trip.legs[up].world) bad.push(`${r.from}>${r.to}: a jump within the zone it came up into`);
+      if (leg.kind === 'none' && trip.legs.some((l) => CROSSINGS.has(l.kind) && l.kind !== 'skip')) bad.push(`${r.from}>${r.to}: crosses through space with no orbit`);
+      if (skip.legs.some((l) => l.kind === 'up' || l.kind === 'jump' || l.kind === 'down' || l.kind === 'climb')) bad.push(`${r.from}>${r.to}: a skip that flies through space`);
+      if ((leg.kind === 'jump') !== !!jump) bad.push(`${r.from}>${r.to}: a ${leg.kind} trip ${jump ? 'with' : 'without'} a jump`);
+    }
+    ok(count.jump === 22 && count.fly === 4 && count.none === 4 && mustafar === 4, `the game's ${routes.length} routes: ${count.jump} jump between systems, ${count.fly} fly within one, ${count.none} have no flight through space (${mustafar} touch Mustafar)`);
+    ok(bad.length === 0, `every route is boarded and lifted off, ends parked or on foot at the port, climbs before it crosses up, and crosses nothing it cannot (${bad.join('; ') || `${routes.length} of ${routes.length}`})`);
+  }
+}
+
+{
+  // Given up for a skip from any leg: what was flown is kept, and from there it is one skip onto the far
+  // pad's landing and nothing else crossed after it; a skip that fails is never tried again, and with no
+  // pad there it is the port on foot.
+  const route = planRoute(spaceTicket('naboo', 'tatooine'), padOn('naboo'), padOn('tatooine'), 'naboo', null, SPACE)!;
+  const bad: string[] = [];
+  for (let i = 0; i < route.legs.length; i++) {
+    const r = replanSkip(route, i, 'test');
+    const tail = r.legs.slice(i).map((l) => l.kind).join(',');
+    if (JSON.stringify(r.legs.slice(0, i)) !== JSON.stringify(route.legs.slice(0, i))) bad.push(`${i}: the flown legs changed`);
+    if (tail !== 'skip,land,off,leave') bad.push(`${i}: ${tail}`);
+    if (r.trip !== 'skip' || !r.skipSpace || r.forced !== 'test') bad.push(`${i}: not marked a skip`);
+    const again = replanSkip(r, i, 'again').legs.slice(i).map((l) => l.kind).join(',');
+    if (again !== 'walkOff') bad.push(`${i}: a failed skip is ${again}`);
+  }
+  ok(bad.length === 0, `given up for a skip at any of ${route.legs.length} legs, the flown legs stay, one skip onto the pad follows and nothing is crossed after it, and a skip that failed becomes the port on foot (${bad.join('; ') || 'all'})`);
+  const bare = planRoute(spaceTicket('corellia', 'kashyyyk_main'), padOn('corellia'), null, 'corellia', null, SPACE)!;
+  ok(replanSkip(bare, 4, 'x').legs.slice(4).map((l) => l.kind).join(',') === 'walkOff', 'with no pad over there, given up means the port on foot');
+  ok(route.legs.length === 11 && route.trip === 'space', 'and the trip it was made from is left as it was');
+}
+
+{
+  // The crossing down comes out exactly `reach` from the pad over the ground and the game's own arrival
+  // height over it, facing the join.
+  const pad: [number, number, number] = [100, 20, -30];
+  const jn: { at: [number, number, number]; dirX: number; dirZ: number } = { at: [100 + 180, 147, -30 + 240], dirX: -0.6, dirZ: -0.8 };
+  const a = downArrival(pad, jn, 1500, ARRIVE);
+  const out = Math.hypot(a.at[0] - pad[0], a.at[2] - pad[2]);
+  const f = new THREE.Vector3(...a.forward);
+  const toJoin = new THREE.Vector3(jn.at[0] - a.at[0], jn.at[1] - a.at[1], jn.at[2] - a.at[2]).normalize();
+  ok(Math.abs(out - 1500) < 1e-9 && Math.abs(a.at[1] - pad[1] - ARRIVE) < 1e-9 && Math.abs(f.length() - 1) < 1e-9 && f.angleTo(toJoin) < 1e-9, `the crossing down comes out 1500 m from the pad and ${ARRIVE} m over it, facing the join`);
+  ok(a.at[0] - pad[0] > 0 && a.at[2] - pad[2] > 0, 'back along the way the landing comes in');
+  // And against the game's own landings, when they are converted: a glide of 24 to 29 degrees from where
+  // the crossing comes out down to each landing's join, at the reach the ride keeps.
+  const packs = join(process.cwd(), 'assets-private');
+  const rigs = packRigs(packs, readdirSync, existsSync, join);
+  const glides: string[] = [];
+  let worst = '';
+  let branches = 0;
+  for (const [name, r] of Object.entries(rigs)) {
+    if (!existsSync(join(packs, r.file)) || !r.parts.every((p) => existsSync(join(packs, p.file)))) {
+      note(`the ${name} rig is not converted whole, so its glides are not measured`);
+      continue;
+    }
+    const skeleton = loadGlb(join(packs, r.file));
+    const pieces = r.parts.map((p) => ({ joint: p.joint, model: loadGlb(join(packs, p.file)).scene as THREE.Object3D }));
+    const hullJoint = hullJointOf(r);
+    for (const [mood, clips] of Object.entries(r.moods)) {
+      branches++;
+      const assembled = assembleRigModel({ scene: skeleton.scene.clone(true), animations: skeleton.animations }, pieces.map((p) => ({ joint: p.joint, model: p.model.clone(true) })), hullJoint, clips);
+      const hull = new RigHull(assembled, clips, { [mood]: clips });
+      hull.frame();
+      const paths = hull.paths(mood);
+      if (!paths?.join) {
+        // `rigPath.test.ts` holds every retail branch to a join; one without is said here, never passed over.
+        note(`the ${name}/${mood} branch gives no join to glide down onto`);
+        hull.dispose();
+        continue;
+      }
+      const padRef = padOn('glide');
+      const target = landingTarget(padRef, paths.land, paths.join, hull.offset, makeLandingTarget());
+      // The way the landing travels at its join, read off the clip's own velocity rather than its heading.
+      const d = downArrival([padRef.x, padRef.y, padRef.z], { at: [target.pos.x, target.pos.y, target.pos.z], dirX: target.vel.x, dirZ: target.vel.z }, RIDE_TUNE.downReach, ARRIVE);
+      const glide = THREE.MathUtils.radToDeg(Math.atan2(d.at[1] - target.pos.y, Math.hypot(d.at[0] - target.pos.x, d.at[2] - target.pos.z)));
+      glides.push(`${name}/${mood} ${glide.toFixed(1)}°`);
+      if (!(glide >= 24 && glide <= 29)) worst = `${name}/${mood} ${glide.toFixed(1)}°`;
+      // Behind the join along the way it comes in, never beyond the pad.
+      if ((d.at[0] - padRef.x) * target.vel.x + (d.at[2] - padRef.z) * target.vel.z >= 0) worst = `${name}/${mood} comes out beyond the pad`;
+      hull.dispose();
+    }
+  }
+  if (!glides.length) note('no converted rig to glide down onto, so the glide is not measured: npm run swg -- travel @SWG assets-private --retail-only');
+  else ok(!worst && glides.length === branches, `from the crossing down, behind the pad along its landing's way in, to each landing's join is a glide of 24 to 29 degrees (${glides.join(', ')}; ${glides.length} of ${branches} branches)`);
+}
+
+{
+  // Where the worlds are reached in their zones, from the game's own packs: Talus and Rori beside their
+  // stations in their neighbour's orbit, a flight of 8370 and 6886 metres from its launch point, both short
+  // of a jump; a world's own orbit reached at its launch point; and a world's own disc in its orbit's sky.
+  const packs = join(process.cwd(), 'assets-private');
+  const zones = PLANETS.filter((p) => p.space && existsSync(join(packs, p.id, 'space.json')));
+  if (!zones.length) note('no space zone converted, so where the worlds are reached is not measured: npm run swg -- space @SWG all assets-private --retail-only');
+  else {
+    const packOf = (z: string): SpacePack => {
+      const raw = JSON.parse(readFileSync(join(packs, z, 'space.json'), 'utf8')) as Partial<SpacePack>;
+      return { ...raw, zone: z, stations: raw.stations ?? [], scenery: raw.scenery ?? [], planets: raw.planets ?? [] } as SpacePack;
+    };
+    const cat = new HyperspaceCatalogue(
+      zones.map((z) => {
+        const pack = packOf(z.id);
+        const below = PLANETS.find((p) => p.id === z.space && !p.space)?.name ?? null;
+        return { id: z.id, name: z.name, title: z.name, pack, destinations: destinationsOf(pack, below) };
+      }),
+    );
+    for (const [world, zone, want] of [['talus', 'space_corellia', 8370], ['rori', 'space_naboo', 6886]] as const) {
+      const pack = cat.pack(zone);
+      if (!pack) {
+        note(`${zone} is not converted, so where ${world} is reached in it is not measured: npm run swg -- space @SWG all assets-private --retail-only`);
+        continue;
+      }
+      const dest = destinationFor(systemOf(world)!, PLANETS.find((p) => p.id === world)!, cat)!;
+      const place = zonePlace(pack, dest, null);
+      const launch = arrivalAt(pack)!;
+      const d = Math.hypot(place.at[0] - launch[0], place.at[1] - launch[1], place.at[2] - launch[2]);
+      ok(dest.kind === 'station' && Math.abs(d - want) <= 5 && d < RIDE_TUNE.jumpBeyond, `${world} is reached beside its station, ${d.toFixed(0)} m from ${zone}'s launch point (${want} ± 5), which is flown and not jumped`);
+    }
+    const own: string[] = [];
+    const missing: string[] = [];
+    for (const z of zones) {
+      const below = PLANETS.find((p) => p.id === z.space && !p.space);
+      if (!below) continue;
+      const pack = cat.pack(z.id)!;
+      const dest = destinationFor(systemOf(below.id)!, below, cat);
+      const place = dest ? zonePlace(pack, dest, [0, 0, 1000]) : null;
+      const launch = arrivalAt(pack);
+      const disc = discDirection(pack, below.id);
+      if (!place || !launch || Math.hypot(place.at[0] - launch[0], place.at[1] - launch[1], place.at[2] - launch[2]) > 1e-6 || !disc || Math.abs(Math.hypot(...disc) - 1) > 1e-9) missing.push(z.id);
+      else own.push(below.id);
+      // Asked to face a point a kilometre along +Z from a launch point at the origin, it faces +Z.
+      if (place && launch && launch[0] === 0 && launch[1] === 0 && launch[2] === 0 && place.forward[2] < 1 - 1e-9) missing.push(`${z.id} does not face where it was asked to`);
+    }
+    ok(missing.length === 0 && own.length > 0, `every orbit reaches its own world at its launch point, and hangs that world's disc in its sky (${own.join(', ')}${missing.length ? `; not: ${missing.join(', ')}` : ''})`);
+    const talusSky = cat.pack('space_corellia');
+    if (talusSky) ok(discDirection(talusSky, 'talus') === null, "and Talus hangs no disc of its own in Corellia's sky");
+
+    // The disc is turned toward where the sky draws it: `World` hangs each body along its pack direction
+    // with X mirrored, and skips one shorter than a metre. Built that way here, never through the function
+    // under test, and at least one orbit's disc must stand off the X = 0 plane or the mirror is not tried.
+    const drawnOff: string[] = [];
+    let mirrored = 0;
+    for (const z of zones) {
+      const below = PLANETS.find((p) => p.id === z.space && !p.space);
+      if (!below) continue;
+      const pack = cat.pack(z.id)!;
+      const body = pack.planets.find((b) => b.appearance.replace(/^.*\//, '').replace(/\.[^.]*$/, '').toLowerCase() === `planet_${below.id}`);
+      const got = discDirection(pack, below.id);
+      if (!body || !got) continue;
+      const drawn = new THREE.Vector3(-body.direction[0], body.direction[1], body.direction[2]);
+      if (drawn.lengthSq() < 1) continue;
+      drawn.normalize();
+      if (Math.abs(drawn.x) > 1e-3) mirrored++;
+      const err = drawn.distanceTo(new THREE.Vector3(...got));
+      if (err > 1e-9) drawnOff.push(`${z.id} ${err.toExponential(1)}`);
+    }
+    ok(drawnOff.length === 0 && mirrored > 0, `every orbit's disc is turned toward where the sky draws that body, X mirrored (${mirrored} off the X = 0 plane${drawnOff.length ? `; off: ${drawnOff.join(', ')}` : ''})`);
+
+    // Nothing stands in the way out of a crossing up. With nowhere to fly across to it is followed by a
+    // jump, flown straight on along the nose through the countdown (at most the space cruise) and the
+    // enter stage up to the transit (at most the scene's own curve from that cruise); within one system
+    // it is faced toward the far world and flown the whole way there. Every station and capital ship the
+    // zone stands is kept that far off the line, its bounding radius and a hull's margin clear.
+    const MARGIN = 50;
+    const inTheWay = (pack: SpacePack, from: readonly number[], dir: readonly number[], run: number): string => {
+      for (const m of landmarksOf(pack)) {
+        const t = (m.at[0] - from[0]) * dir[0] + (m.at[1] - from[1]) * dir[1] + (m.at[2] - from[2]) * dir[2];
+        const s = Math.max(0, Math.min(run, t));
+        const off = Math.hypot(from[0] + dir[0] * s - m.at[0], from[1] + dir[1] * s - m.at[1], from[2] + dir[2] * s - m.at[2]);
+        if (off < (m.radius || 0) + MARGIN) return `a thing ${Math.round(m.radius)} m across ${Math.round(t)} m along, ${Math.round(off)} m off the line`;
+      }
+      return '';
+    };
+    const worlds = PLANETS.filter((p) => !p.space && !!systemOf(p.id)?.zone);
+    const places = new Map<string, { dest: Destination; pack: SpacePack }>();
+    for (const w of worlds) {
+      const dest = destinationFor(systemOf(w.id)!, w, cat);
+      const pack = dest ? cat.pack(dest.zone) : null;
+      if (dest && pack) places.set(w.id, { dest, pack });
+    }
+    const blocked: string[] = [];
+    const runs: string[] = [];
+    let across = 0;
+    for (const [id, { dest, pack }] of places) {
+      const s = sceneOf(pack);
+      const T = transitAt(s);
+      let enter = 0;
+      for (let i = 0; i < 1000; i++) enter += (enterSpeed(((i + 0.5) * T) / 1000, RIDE_TUNE.spaceCruise, s) * T) / 1000;
+      const run = JUMP_COUNTDOWN * RIDE_TUNE.spaceCruise + enter;
+      const up = zonePlace(pack, dest, null);
+      const why = inTheWay(pack, up.at, up.forward, run);
+      if (why) blocked.push(`${id} (${dest.kind}): ${why}`);
+      runs.push(`${id} ${Math.round(run)}`);
+      // The same system's other worlds, faced toward and flown to.
+      for (const [other, there] of places) {
+        if (other === id || there.dest.zone !== dest.zone) continue;
+        const to = zonePlace(pack, there.dest, null).at;
+        const from = zonePlace(pack, dest, to);
+        const d = Math.hypot(to[0] - from.at[0], to[1] - from.at[1], to[2] - from.at[2]);
+        const facing = (from.forward[0] * (to[0] - from.at[0]) + from.forward[1] * (to[1] - from.at[1]) + from.forward[2] * (to[2] - from.at[2])) / d;
+        const w = inTheWay(pack, from.at, from.forward, d);
+        if (w || facing < 1 - 1e-9) blocked.push(`${id} across to ${other}: ${w || `faces ${facing.toFixed(3)} of the way`}`);
+        across++;
+      }
+    }
+    if (places.size < worlds.length) note(`${worlds.length - places.size} of ${worlds.length} worlds with an orbit have no converted zone, so their way out is not checked`);
+    ok(blocked.length === 0 && places.size > 0, `out of every crossing up, the countdown and the enter stage run clear of every station and capital ship (${places.size} worlds, ${runs.join(', ')} m), and the ${across} flights across a system face their far end and pass nothing on the way${blocked.length ? `: ${blocked.join('; ')}` : ''}`);
+    for (const [id, { dest, pack }] of places) {
+      if (dest.kind !== 'station') continue;
+      const up = zonePlace(pack, dest, null);
+      const st = toGame(dest.at);
+      const away = up.forward[0] * (st[0] - up.at[0]) + up.forward[1] * (st[1] - up.at[1]) + up.forward[2] * (st[2] - up.at[2]);
+      ok(away < 0, `${id} comes up beside its station facing away from it, into the open a jump is flown into`);
+    }
+  }
+}
+
+{
+  // What is read out of other files and must stay true: the crossing down comes out inside the range a
+  // starport's buildings load out to; the climb ends under the height where a ship's own flight eases a
+  // slack nose back down; space's cruise is under what a body can be moved at.
+  const layout = readFileSync(new URL('../../../src/world/layoutStream.ts', import.meta.url), 'utf8');
+  const vehicle = readFileSync(new URL('../../../src/vehicles/vehicle.ts', import.meta.url), 'utf8');
+  const near = Number(/\{ minRadius: 12, range: (\d+) \}/.exec(layout)?.[1]);
+  const ceiling = Number(/fly: \{ climb: big \? 6 : 10, ceiling: (\d+), floor/.exec(vehicle)?.[1]);
+  const cap = constOf(vehicle, 'BODY_SPEED_CAP');
+  ok(near > 0 && RIDE_TUNE.downReachMin < near && RIDE_TUNE.downReach <= near - RIDE_TUNE.downReachMargin, `the crossing down comes out ${RIDE_TUNE.downReach} m from the pad (never nearer than ${RIDE_TUNE.downReachMin}), inside the ${near} m a starport loads out to`);
+  ok(ceiling > 0 && GATE + RIDE_TUNE.gateMargin < ceiling, `the climb goes to ${GATE + RIDE_TUNE.gateMargin} m over the ground, under the ship's ceiling of ${ceiling}`);
+  ok(RIDE_TUNE.spaceCruise < cap, `space's cruise of ${RIDE_TUNE.spaceCruise} m/s is under the ${cap} a body can be moved at`);
+}
+
+{
+  // About how long a trip through space flies, from the game's own calm transport (its cut and join as
+  // `rigPath.test.ts` measures them, its touch-down at 22.33 s): 82 seconds or so, loading screens aside.
+  const route = planRoute(spaceTicket('naboo', 'tatooine'), padOn('naboo'), padOn('tatooine'), 'naboo', null, SPACE)!;
+  const calm = { cut: 12.8, cutH: 190.93, join: 8.2, joinH: 127.33, joinOut: 276.55, down: 22.33 };
+  const s = tripSeconds(route, calm, { cruise: 150, spaceCruise: RIDE_TUNE.spaceCruise, climbDeg: RIDE_TUNE.climbDeg, gate: GATE, gateMargin: RIDE_TUNE.gateMargin, arrive: ARRIVE, downReach: RIDE_TUNE.downReach, jump: 17.8 });
+  ok(Math.abs(s - 82) <= 3, `a calm transport's trip through space flies for about ${s.toFixed(1)} s, as the design reckoned (82 ± 3)`);
 }
 
 console.log(`\nride route: ${passed} checks passed`);

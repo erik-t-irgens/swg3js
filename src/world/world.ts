@@ -36,7 +36,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
-import { LayoutStreamer, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
+import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
@@ -4631,6 +4631,15 @@ export class World {
     const total = this.packProgress * 0.45 + ground * 0.2 + objects * 0.35;
     const stage = this.packProgress < 0.12 ? 'the planet\'s pack' : this.packProgress < 0.55 ? 'the terrain' : this.packProgress < 0.92 ? 'the flora, the ground and the sky' : ground < 1 ? 'the ground underfoot' : objects < 1 ? 'the buildings and the props' : 'the last of it';
     return { total, stage };
+  }
+
+  /**
+   * Metres out to which a ground world's biggest buildings load around whoever plays, at the reach the
+   * settings give: whatever world stands now, since it is asked from space about the world a shuttle is
+   * about to come down onto, whose starport must be in and compiled under the crossing's loading screen.
+   */
+  streamNearRange(): number {
+    return nearTierRange() * this.objectReach;
   }
 
   /** How far placed objects load, live: the streamer re-ranges, and the ground radii re-stream on the next move. */

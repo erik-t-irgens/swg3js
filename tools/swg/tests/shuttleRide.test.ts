@@ -31,6 +31,19 @@
 // send the hull up over them, against the same flight with nothing there; its look ahead never reaches
 // past the end of its course; and a pass knocked wide of the join is flown round again and still lands.
 //
+// And a trip through space, with a jump stood in that runs the game's own stages in the game's own frame
+// order: every leg flown in order and started and ended in pairs, the crossing up made only past the space
+// gate (or after `climbMaxSeconds` over ground that never falls away) and the one down exactly where it
+// should come out -- how far from the pad, on which side of it and facing what, clamped to the reach the far
+// world loads out to -- the hull ghosted on every frame it flies, the jump's own release included, the
+// jump flown with the trip's own hull for that leg alone and its stick let go of while the jump has it; a
+// trip within one system faced across and flown to the far world's place, jumped instead past
+// `jumpBeyond`, and gone on from after `acrossMaxSeconds` where the place is never worked out; a jump
+// refused, or failing twice, and a crossing up that gets nowhere, each given up for a skip that still
+// lands on the far pad; no pad over there setting the passenger down at the port after the flight; a
+// hull lost in space setting its passenger down at the port exactly once; and legs put in only after the
+// one flown now.
+//
 // Run: node --expose-gc tools/swg/tests/shuttleRide.test.ts
 
 import assert from 'node:assert/strict';
@@ -44,6 +57,8 @@ import type { DriveInput } from '../../../src/vehicles/vehicle';
 import { SPACE_LATER, planHop, planRoute, type PadRef, type RideLeg } from '../../../src/world/rideRoute.ts';
 import { RIG_PATH_TUNE, landingTarget, makeLandingTarget, noseOntoPath, onPad, pathPose, pathVelocity, poseRigAction, turnOnPad, vehicleAt, vehicleFromJoint, type RigActions } from '../../../src/world/rigPath.ts';
 import { RIDE_TUNE, ShuttleRide, rideFraming, stepFraming, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
+import { RIDE_PILOT } from '../../../src/world/shuttleCourse.ts';
+import { lookRotation } from '../../../src/space/hyperspaceMath.ts';
 import { CHASE_RISE } from '../../../src/core/camera.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs, type RigDrive, type RigFx } from '../../../src/world/shuttleRigs.ts';
 import { rigPose, type RigClips, type RigPose, type ShuttleState, type Ticket } from '../../../src/world/travelTerminal.ts';
@@ -321,7 +336,17 @@ function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideR
     rigs,
     camera: () => camera,
     floorAt: (_x, y) => y - 2.4,
-    inSpace: () => false,
+    inSpace: () => current.world.startsWith('space_'),
+    // No flight through space unless a test stands one in (`spaceTrips`).
+    heights: { gate: 1100, arrive: 700 },
+    prefetchSpace: () => {},
+    spacePlace: async () => false,
+    discDirection: () => false,
+    jump: () => 'no jumps here',
+    jumpPhase: () => 'idle',
+    jumpDrives: () => false,
+    jumpAbort: () => {},
+    nearRange: () => 1700,
   };
   return { host, clock, world, counts, late, passenger, current };
 }
@@ -336,11 +361,13 @@ function makeHost(hull: FakeHull | (() => Promise<FakeHull | null>), rigs: RideR
  */
 function crossings(env: ReturnType<typeof makeHost>, rigs: FakeRigs) {
   const made: { from: RideHull; leg: RideLeg; at: THREE.Vector3; turn: THREE.Quaternion; speed: number; hull: FakeHull | null }[] = [];
-  const state: { mode: 'arrive' | 'fail' | 'refuse'; go: (() => void) | null } = { mode: 'arrive', go: null };
+  /** `mode` for every crossing, unless `plan` still holds one for the next crossing made. */
+  const state: { mode: 'arrive' | 'fail' | 'refuse'; plan: ('arrive' | 'fail' | 'refuse')[]; go: (() => void) | null } = { mode: 'arrive', plan: [], go: null };
   env.host.cross = (h, leg, arrival, speed) => {
     const rec = { from: h, leg, at: arrival.pos.clone(), turn: arrival.quaternion.clone(), speed, hull: null as FakeHull | null };
     made.push(rec);
-    if (state.mode === 'refuse') return Promise.resolve(null);
+    const mode = state.plan.shift() ?? state.mode;
+    if (mode === 'refuse') return Promise.resolve(null);
     return new Promise<RideHull | null>((resolve) => {
       state.go = () => {
         state.go = null;
@@ -349,7 +376,7 @@ function crossings(env: ReturnType<typeof makeHost>, rigs: FakeRigs) {
         env.world.delete(h);
         rigs.driven.clear();
         env.current.world = leg.world;
-        if (state.mode === 'fail') {
+        if (mode === 'fail') {
           resolve(null);
           return;
         }
@@ -1604,6 +1631,452 @@ async function toTheCut(env: ReturnType<typeof makeHost>, ride: ShuttleRide, hul
   }
 }
 
+// ---------------------------------------------------------------- a trip through space
+
+/** The galaxy as the trips here know it: two worlds, each the one world its own orbit hangs over. */
+const spaceFacts = {
+  worldOf: (pack: string) => (pack === 'test' ? { planet: 'home' } : pack === 'there' ? { planet: 'yonder' } : null),
+  orbitOf: (planet: string) => (planet === 'home' ? 'space_home' : planet === 'yonder' ? 'space_yonder' : null),
+  noOrbit: () => '',
+  hasDisc: (zone: string, planet: string) => zone === 'space_yonder' && planet === 'yonder',
+};
+const spacePlan = { facts: spaceFacts, gate: 1100, discSeconds: RIDE_TUNE.discSeconds };
+const ticketThrough = (id: string): Ticket => ({ ...ticketThere(id), trip: 'space', skipSpace: false });
+
+/**
+ * The jump every ship makes, stood in on the test's own clock with the game's own stage lengths: a
+ * countdown, the enter stage and the transit it flies the hull through, and the exit that lets go of the
+ * hull and says where it came out, as the game's `onArrived` does. `refuse` turns a jump down before it
+ * begins; `stalls` has that many go idle in the transit without coming out, as a jump that could not
+ * carry its hull across does.
+ */
+class FakeJump {
+  phase: 'idle' | 'countdown' | 'enter' | 'transit' | 'exit' = 'idle';
+  t = 0;
+  zone = '';
+  hull: RideHull | null = null;
+  released = false;
+  starts = 0;
+  aborts = 0;
+  refuse = '';
+  stalls = 0;
+  ride: ShuttleRide | null = null;
+  start(zone: string, hull: RideHull | null): string | null {
+    if (this.refuse) return this.refuse;
+    if (!hull) return "the pilot's call";
+    if (this.phase !== 'idle') return 'already jumping';
+    this.starts++;
+    this.phase = 'countdown';
+    this.t = 0;
+    this.zone = zone;
+    this.hull = hull;
+    this.released = false;
+    return null;
+  }
+  drives(h: RideHull | null): boolean {
+    return !!h && h === this.hull && (this.phase === 'enter' || this.phase === 'transit' || (this.phase === 'exit' && !this.released));
+  }
+  step(dt: number, env: ReturnType<typeof makeHost>): void {
+    if (this.phase === 'idle') return;
+    this.t += dt;
+    if (this.phase === 'countdown' && this.t >= 5) this.go('enter');
+    else if (this.phase === 'enter' && this.t >= 3.6) {
+      if (this.stalls > 0) {
+        this.stalls--;
+        this.finish();
+        return;
+      }
+      env.current.world = this.zone;
+      this.go('transit');
+    } else if (this.phase === 'transit' && this.t >= 4) this.go('exit');
+    else if (this.phase === 'exit') {
+      if (!this.released && this.t >= 5.011) {
+        this.released = true;
+        // As the game's `releaseHull` does: the hull let go of is solid again, and then told it came out.
+        this.hull?.setGhost(false);
+        this.ride?.jumped(this.zone);
+      }
+      if (this.t >= 5.2) this.finish();
+    }
+  }
+  abort(): void {
+    if (this.phase === 'idle') return;
+    this.aborts++;
+    this.finish();
+  }
+  private go(phase: FakeJump['phase']): void {
+    this.phase = phase;
+    this.t = 0;
+  }
+  private finish(): void {
+    this.phase = 'idle';
+    this.t = 0;
+    this.hull = null;
+    this.released = false;
+  }
+}
+
+/**
+ * The flight through space's half of the host, stood in: where a world is reached in its zone (its own
+ * orbit's launch point, at the origin, facing +Z; the far zone's four kilometres out), the far world's disc
+ * along +X, and the jump. Counts what was asked of it.
+ */
+function spaceTrips(env: ReturnType<typeof makeHost>, jumper: FakeJump): { prefetched: number; placed: number } {
+  const counts = { prefetched: 0, placed: 0 };
+  env.host.prefetchSpace = () => void counts.prefetched++;
+  env.host.spacePlace = async (aim, _towards, out) => {
+    counts.placed++;
+    if (aim.zone !== 'space_home' && aim.zone !== 'space_yonder') return false;
+    out.pos.set(aim.zone === 'space_home' ? 0 : 4000, 0, 0);
+    out.quaternion.identity();
+    return true;
+  };
+  env.host.discDirection = (world, out) => {
+    if (world !== 'yonder') return false;
+    out.set(1, 0, 0);
+    return true;
+  };
+  env.host.jump = (zone) => jumper.start(zone, jumper.ride?.jumpHull ?? null);
+  env.host.jumpPhase = () => jumper.phase;
+  env.host.jumpDrives = (h) => jumper.drives(h);
+  env.host.jumpAbort = () => jumper.abort();
+  return counts;
+}
+
+/**
+ * A trip flown frame by frame with the clock, the jump and its crossings moving with it, in the game's
+ * own order -- the jump (`hyperspace.update`), then the trip (`stepRides`), then the hull (`stepVehicles`):
+ * `each` sees every frame after the trip's own update and before the hull is stepped, and a crossing asked
+ * for is let go at once. Until `until`.
+ */
+async function flyThrough(env: ReturnType<typeof makeHost>, ride: ShuttleRide, x: ReturnType<typeof crossings>, jumper: FakeJump, each: (before: string, now: string) => void = () => {}, until: () => boolean = () => false, frames = 60 * 900): Promise<void> {
+  for (let i = 0; i < frames && ride.running && !until(); i++) {
+    env.clock.t += DT;
+    jumper.step(DT, env);
+    const before = ride.leg?.kind ?? '';
+    ride.update(DT);
+    each(before, ride.leg?.kind ?? 'ended');
+    if (x.state.go) await x.go();
+    else if (ride.busy) await flush();
+    (ride.hull as FakeHull | null)?.step(DT);
+  }
+}
+
+/** The legs a hull flies rather than stands parked in: ghosted, every frame of every one of them. */
+const FLOWN_LEGS = new Set(['lift', 'climb', 'up', 'jump', 'fly', 'down', 'land']);
+
+/** A trip through space from the first pad to the far one, with everything it needs stood in. */
+function spaceTrip(id: string) {
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const env = makeHost(hull, rigs, watching(far));
+  const x = crossings(env, rigs);
+  const jumper = new FakeJump();
+  const asked = spaceTrips(env, jumper);
+  const ride = new ShuttleRide(planRoute(ticketThrough(id), origin, far, 'test', null, spacePlan)!, env.host, true);
+  jumper.ride = ride;
+  return { hull, rigs, env, x, jumper, asked, ride };
+}
+
+{
+  const { rigs, env, x, jumper, asked, ride } = spaceTrip('s1');
+  const plan = ride.route.legs.map((l) => (l.kind === 'fly' ? `fly(${l.aim?.to})` : l.kind)).join(',');
+  ok(plan === 'board,lift,climb,up,jump,fly(disc),down,fly(join),land,off,leave', `a ticket through space: boarded, lifted off, climbed out, up, jumped, turned to the far world, down, flown in and landed (${plan})`);
+  const events: string[] = [];
+  ride.onLeg = (leg, i, phase) => void events.push(`${phase} ${i} ${leg.kind}`);
+  env.clock.t = 1;
+  await ride.begin();
+  const drive = ride.autopilot.drive;
+  const kinds: string[] = [];
+  let sameDrive = true;
+  let jumpHullAway = 0;
+  let jumpHullSeen = 0;
+  let driven = 0;
+  let neutral = 0;
+  let climbTop = -Infinity;
+  let spaceAt = 0;
+  let flown = 0;
+  const solid: string[] = [];
+  await flyThrough(env, ride, x, jumper, (_before, now) => {
+    if (kinds.at(-1) !== now) kinds.push(now);
+    if (ride.autopilot.drive !== drive) sameDrive = false;
+    // Only parked is it solid: on every frame of every other leg the hull is ghosted before it is stepped,
+    // the frame a jump lets go of it included.
+    if (ride.hull && FLOWN_LEGS.has(now)) {
+      flown++;
+      if (!ride.hull.ghosted && solid.length < 5) solid.push(`${now} ${f2(env.clock.t)}`);
+    }
+    if (ride.jumpHull) {
+      jumpHullSeen++;
+      if (ride.leg?.kind !== 'jump') jumpHullAway++;
+    }
+    const h = ride.hull;
+    if (h && jumper.drives(h)) {
+      driven++;
+      if (drive.stickX === 0 && drive.stickY === 0 && drive.steer === 0) neutral++;
+    }
+    if (now === 'climb' && h) climbTop = Math.max(climbTop, h.pos.y);
+    if (env.host.inSpace()) spaceAt++;
+  });
+  ok(kinds.join(',') === 'board,lift,climb,up,jump,fly,down,fly,land,off,leave,ended', `it flies every leg in order (${kinds.join(', ')})`);
+  const up = x.made[0];
+  const down = x.made[1];
+  ok(x.made.length === 2 && up.leg.kind === 'up' && up.leg.world === 'space_home' && down.leg.kind === 'down' && down.leg.world === 'there', 'two crossings: up into the orbit, and down onto the far world');
+  ok(up.at.length() < 1e-9 && up.speed >= 60 && up.from.pos.y >= 1100 + RIDE_TUNE.gateMargin - 1, `up once it has climbed ${RIDE_TUNE.gateMargin} m past the space gate (${f1(up.from.pos.y)} m, at ${f1(up.speed)} m/s), to where its world is reached in its orbit`);
+  const outFromPad = Math.hypot(down.at.x - far.x, down.at.z - far.z);
+  ok(Math.abs(outFromPad - RIDE_TUNE.downReach) < 1e-6 && Math.abs(down.at.y - far.y - 700) < 1e-6 && Math.abs(down.speed - Math.min(RIDE_PILOT.cruise, 150)) < 1e-9, `down ${RIDE_TUNE.downReach} m from the far pad and the game's own 700 m over it, at the pilot's cruise`);
+  // Which side of the pad, and which way it faces: back along the way the far pad's landing comes in,
+  // measured off the landing's own velocity at its join here rather than any heading the trip keeps, and
+  // with its nose on the join.
+  const downRig = (down.from as FakeHull).rig;
+  const downPaths = downRig.paths('')!;
+  const farJoin = landingTarget(far, downPaths.land, downPaths.join, downRig.offset, makeLandingTarget());
+  const inFlat = new THREE.Vector3(farJoin.vel.x, 0, farJoin.vel.z);
+  const toPadFlat = new THREE.Vector3(far.x - down.at.x, 0, far.z - down.at.z);
+  const downNose = new THREE.Vector3(0, 0, 1).applyQuaternion(down.turn);
+  const toJoin = farJoin.pos.clone().sub(down.at).normalize();
+  ok(toPadFlat.angleTo(inFlat) < 1e-6 && downNose.angleTo(toJoin) < 1e-6, `it comes out on the side the far pad's landing comes in from, the pad straight on along its way in (${deg(toPadFlat.angleTo(inFlat))}°), its nose on the landing's join (${deg(downNose.angleTo(toJoin))}°)`);
+  ok(flown > 0 && solid.length === 0, `ghosted on every frame it flies, the jump's own release included, and solid only parked (${flown} frames${solid.length ? `; solid at ${solid.join(', ')}` : ''})`);
+  ok(jumper.starts === 1 && jumpHullSeen > 0 && jumpHullAway === 0 && ride.jumpHull === null, `one jump, flown with the trip's own hull for the length of the jump leg and never outside it (${jumpHullSeen} frames)`);
+  ok(driven > 0 && neutral === driven, `while the jump flies the hull, the trip's stick is let go of on every frame (${neutral} of ${driven})`);
+  ok(sameDrive, 'the drive handed to the hull is the same object on every frame');
+  ok(asked.prefetched === 1 && asked.placed >= 1 && spaceAt > 0, 'the zones asked for once as it boards, and flown through in space');
+  const paired = events.every((e, i) => {
+    const [phase, n] = e.split(' ');
+    const want = i % 2 === 0 ? 'start' : 'end';
+    return phase === want && Number(n) === Math.floor(i / 2);
+  });
+  ok(paired && events.length === ride.route.legs.length * 2, `every leg is started and ended in turn, in pairs (${events.length / 2} legs)`);
+  ok(env.passenger.offAt.length === 1 && env.passenger.said.includes(`you arrive at ${far.port}`) && ride.ended === 'gone' && rigs.tidy() && env.passenger.walkedTo.length === 0 && env.passenger.ended.length === 1, 'and lands on the far pad, lets its passenger off and leaves, with nothing held, nobody set down elsewhere, the host told once');
+  ok((ride.report() as { rescues: number }).rescues === 0 && climbTop > far.y, 'nobody needed rescuing');
+}
+
+{
+  // A jump turned down: the rest of the trip is a skip straight onto the far pad, from space.
+  const { rigs, env, x, jumper, ride } = spaceTrip('refused');
+  jumper.refuse = 'not today';
+  env.clock.t = 1;
+  await ride.begin();
+  await flyThrough(env, ride, x, jumper);
+  const plan = ride.route.legs.map((l) => l.kind).join(',');
+  ok(jumper.starts === 0 && x.made.map((m) => m.leg.kind).join(',') === 'up,skip' && plan === 'board,lift,climb,up,skip,land,off,leave', `a jump refused becomes a skip onto the far pad from where the trip is (${plan})`);
+  ok(ride.route.trip === 'skip' && /refused: not today/.test(ride.route.forced ?? '') && env.passenger.said.some((s) => /could not go on/.test(s)), `the trip says why it was skipped (${ride.route.forced})`);
+  ok(ride.ended === 'gone' && env.passenger.offAt.length === 1 && rigs.tidy() && env.passenger.walkedTo.length === 0, 'and it lands there all the same');
+}
+
+{
+  // A jump that goes idle without coming out is begun once more; twice, and the rest is a skip.
+  for (const stalls of [1, 2]) {
+    const { rigs, env, x, jumper, ride } = spaceTrip(`stall${stalls}`);
+    jumper.stalls = stalls;
+    env.clock.t = 1;
+    await ride.begin();
+    await flyThrough(env, ride, x, jumper);
+    const crossed = x.made.map((m) => m.leg.kind).join(',');
+    ok(
+      jumper.starts === 2 && crossed === (stalls === 1 ? 'up,down' : 'up,skip') && ride.ended === 'gone' && rigs.tidy() && env.passenger.offAt.length === 1,
+      stalls === 1 ? `a jump that fails once is begun again and the trip goes on (${crossed})` : `one that fails again is given up for a skip onto the far pad (${crossed}), and it lands all the same`,
+    );
+  }
+}
+
+{
+  // A hull lost out in space sets its passenger down at the far port: exactly once.
+  const { env, x, jumper, ride } = spaceTrip('lost');
+  env.clock.t = 1;
+  await ride.begin();
+  await flyThrough(env, ride, x, jumper, () => {}, () => ride.route.legs[ride.index]?.aim?.to === 'disc' && !!ride.hull);
+  const h = ride.hull as FakeHull;
+  ok(!!h && env.host.inSpace(), 'out in space, turning toward the far world');
+  h.disposed = true;
+  env.world.delete(h);
+  for (let i = 0; i < 120; i++) ride.update(DT);
+  ok(!ride.running && ride.ended === 'lost' && env.passenger.walkedTo.join() === far.port && env.passenger.ended.length === 1 && (ride.report() as { rescues: number }).rescues === 1 && !ride.riding, 'a hull lost in space sets its passenger down at the port it was flying to, once, and the host is told once');
+}
+
+{
+  // The crossing up that gets nowhere gives the flight through space up for a skip: out of the hull that
+  // lifted off where it was refused before it began, and out of whatever the crossing left once its world
+  // had gone -- either way onto the far pad, and landed.
+  for (const how of ['refuse', 'fail'] as const) {
+    const { rigs, env, x, jumper, ride, hull } = spaceTrip(`up-${how}`);
+    x.state.plan = [how];
+    env.clock.t = 1;
+    await ride.begin();
+    await flyThrough(env, ride, x, jumper);
+    const crossed = x.made.map((m) => m.leg.kind).join(',');
+    ok(
+      crossed === 'up,skip' && x.made[1].from === hull && ride.ended === 'gone' && rigs.tidy() && env.passenger.offAt.length === 1 && env.passenger.walkedTo.length === 0 && jumper.starts === 0,
+      how === 'refuse' ? 'a crossing up refused is given up for a skip out of the same hull, which lands on the far pad' : 'a crossing up that failed once its world had gone is given up for a skip carried out of that hull as it was, and lands on the far pad',
+    );
+  }
+}
+
+{
+  // More legs are put in only after the leg flown now.
+  const { env, ride } = spaceTrip('insert');
+  env.clock.t = 1;
+  await ride.begin();
+  const n = ride.route.legs.length;
+  const extra: RideLeg = { kind: 'fly', world: 'space_home', zone: 'space_home', aim: { to: 'disc', zone: 'space_home', world: 'home', seconds: 1 } };
+  ok(!ride.insert(ride.index, [extra]) && !ride.insert(ride.index - 1, [extra]) && ride.route.legs.length === n, 'a leg is not put in at or before the one flown now');
+  ok(ride.insert(ride.index + 2, [extra]) && ride.route.legs.length === n + 1 && ride.route.legs[ride.index + 2] === extra, 'and is after it');
+  ride.abort('test');
+  ok(!ride.insert(ride.index + 1, [extra]), 'nor into a trip that has ended');
+}
+
+/** The galaxy with both worlds in one system (Corellia and Talus, Naboo and Rori): one orbit, the far world's disc hung in it. */
+const oneSystem = {
+  worldOf: (pack: string) => (pack === 'test' ? { planet: 'home' } : pack === 'there' ? { planet: 'yonder' } : null),
+  orbitOf: (planet: string) => (planet === 'home' || planet === 'yonder' ? 'space_home' : null),
+  noOrbit: () => '',
+  hasDisc: (zone: string, planet: string) => zone === 'space_home' && planet === 'yonder',
+};
+
+/**
+ * A trip within one system, with everything it needs stood in: where each world is reached in the orbit
+ * they share (home at the origin, the far world at `there`, or never worked out at all with `there` null),
+ * faced toward the place the trip names next as `zonePlace` faces it, and every `towards` asked with.
+ */
+function acrossTrip(id: string, there: THREE.Vector3 | null) {
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const env = makeHost(hull, rigs, watching(far));
+  const x = crossings(env, rigs);
+  const jumper = new FakeJump();
+  spaceTrips(env, jumper);
+  const towards: string[] = [];
+  const here = new THREE.Vector3();
+  env.host.spacePlace = (aim, next, out) => {
+    towards.push(next ? `${next.zone}:${next.world}` : '');
+    if (aim.world === 'yonder' && !there) return new Promise<boolean>(() => {});
+    const at = aim.world === 'yonder' ? there! : here;
+    out.pos.copy(at);
+    const to = next ? (next.world === 'yonder' ? there : here) : null;
+    if (to && to.distanceTo(at) > 1e-3) {
+      const q = lookRotation([to.x - at.x, to.y - at.y, to.z - at.z]);
+      out.quaternion.set(q[0], q[1], q[2], q[3]);
+    } else out.quaternion.identity();
+    return Promise.resolve(true);
+  };
+  const ride = new ShuttleRide(planRoute(ticketThrough(id), origin, far, 'test', null, { facts: oneSystem, gate: 1100, discSeconds: RIDE_TUNE.discSeconds })!, env.host, true);
+  jumper.ride = ride;
+  return { hull, rigs, env, x, jumper, ride, towards };
+}
+
+{
+  // Within one system: up into the orbit both worlds share, faced toward the far world's place and flown
+  // across to it, turned to its disc, then down onto it and landed. No jump.
+  const there = new THREE.Vector3(7000, 400, 3000);
+  const { rigs, env, x, jumper, ride, towards } = acrossTrip('across', there);
+  const plan = ride.route.legs.map((l) => (l.kind === 'fly' ? `fly(${l.aim?.to})` : l.kind)).join(',');
+  env.clock.t = 1;
+  await ride.begin();
+  let acrossAt = -1;
+  let wasAcross = false;
+  await flyThrough(env, ride, x, jumper, () => {
+    const across = ride.leg?.aim?.to === 'zonePlace' && ride.leg.kind === 'fly';
+    // Where the hull stood as the trip judged the flight over: this frame's update has not moved it.
+    if (wasAcross && !across && acrossAt < 0 && ride.hull) acrossAt = ride.hull.pos.distanceTo(there);
+    wasAcross = across;
+  });
+  const times = ride.legTimes();
+  const acrossSeconds = times.find((t) => t.kind === 'fly' && t.aim?.startsWith('zonePlace'))?.seconds ?? Infinity;
+  ok(plan === 'board,lift,climb,up,fly(zonePlace),fly(disc),down,fly(join),land,off,leave' && jumper.starts === 0 && x.made.map((m) => m.leg.kind).join(',') === 'up,down', `within one system it comes up, flies across, turns to the far world's disc and comes down, with no jump (${plan})`);
+  ok(towards[0] === 'space_home:yonder', `the crossing up is faced toward where the far world is reached, the next place the trip flies to (${towards[0] || 'nothing'})`);
+  ok(acrossAt >= 0 && acrossAt <= RIDE_TUNE.arriveWithin && acrossSeconds < RIDE_TUNE.acrossMaxSeconds, `the flight across ends within ${RIDE_TUNE.arriveWithin} m of it (${f1(acrossAt)} m, after ${acrossSeconds} s)`);
+  ok(ride.ended === 'gone' && env.passenger.offAt.length === 1 && rigs.tidy() && env.passenger.walkedTo.length === 0 && (ride.report() as { rescues: number }).rescues === 0, 'and it lands on the far pad and lets its passenger off, with nobody rescued');
+}
+
+{
+  // Across more of one system than `jumpBeyond`, the flight is jumped instead: the same leg made a jump
+  // to the same place, and the trip lands all the same.
+  const there = new THREE.Vector3(RIDE_TUNE.jumpBeyond + 5000, 0, 0);
+  const { rigs, env, x, jumper, ride } = acrossTrip('beyond', there);
+  env.clock.t = 1;
+  await ride.begin();
+  await flyThrough(env, ride, x, jumper);
+  const at = ride.route.legs.findIndex((l) => l.kind === 'jump');
+  const leg = ride.route.legs[at];
+  ok(at === 4 && leg.aim?.to === 'zonePlace' && leg.aim.world === 'yonder' && jumper.starts === 1 && jumper.zone === 'space_home', `a flight across ${f1((RIDE_TUNE.jumpBeyond + 5000) / 1000)} km is jumped instead, to the same place (leg ${at}: ${leg?.kind})`);
+  ok(ride.ended === 'gone' && env.passenger.offAt.length === 1 && rigs.tidy() && x.made.map((m) => m.leg.kind).join(',') === 'up,down', 'and it comes down and lands on the far pad');
+}
+
+{
+  // A far world's place never worked out: flown straight on, and after `acrossMaxSeconds` the trip goes on
+  // from wherever it is rather than keeping anybody in space.
+  const was = RIDE_TUNE.acrossMaxSeconds;
+  RIDE_TUNE.acrossMaxSeconds = 20;
+  try {
+    const { rigs, env, x, jumper, ride } = acrossTrip('never', null);
+    env.clock.t = 1;
+    await ride.begin();
+    await flyThrough(env, ride, x, jumper);
+    const acrossSeconds = ride.legTimes().find((t) => t.kind === 'fly' && t.aim?.startsWith('zonePlace'))?.seconds ?? Number.NaN;
+    ok(Math.abs(acrossSeconds - RIDE_TUNE.acrossMaxSeconds) < 0.1 && ride.ended === 'gone' && env.passenger.offAt.length === 1 && rigs.tidy() && x.made.map((m) => m.leg.kind).join(',') === 'up,down', `a flight across to a place never worked out goes on after ${RIDE_TUNE.acrossMaxSeconds} s (${acrossSeconds} s), and the trip comes down and lands`);
+  } finally {
+    RIDE_TUNE.acrossMaxSeconds = was;
+  }
+}
+
+{
+  // A climb that can never reach its height over the ground (ground rising under it all the way): the
+  // crossing up is made after `climbMaxSeconds` whatever the height.
+  const was = RIDE_TUNE.climbMaxSeconds;
+  RIDE_TUNE.climbMaxSeconds = 12;
+  try {
+    const { rigs, env, x, jumper, ride } = spaceTrip('steep');
+    env.host.groundCached = () => (ride.leg?.kind === 'climb' || ride.leg?.kind === 'up' ? (ride.hull?.pos.y ?? 0) - 100 : 0);
+    env.clock.t = 1;
+    await ride.begin();
+    await flyThrough(env, ride, x, jumper);
+    const climbSeconds = ride.legTimes().find((t) => t.kind === 'climb')?.seconds ?? Number.NaN;
+    ok(Math.abs(climbSeconds - RIDE_TUNE.climbMaxSeconds) < 0.1 && x.made[0]?.leg.kind === 'up' && ride.ended === 'gone' && rigs.tidy(), `a climb whose ground never falls away crosses up after ${RIDE_TUNE.climbMaxSeconds} s (${climbSeconds} s), and the trip goes on and lands`);
+  } finally {
+    RIDE_TUNE.climbMaxSeconds = was;
+  }
+}
+
+{
+  // The crossing down comes out inside the reach the far world's starports load out to, less a margin,
+  // and never nearer than `downReachMin`.
+  for (const [range, want] of [
+    [1200, 1200 - RIDE_TUNE.downReachMargin],
+    [500, RIDE_TUNE.downReachMin],
+  ] as const) {
+    const { env, x, jumper, ride } = spaceTrip(`near${range}`);
+    env.host.nearRange = () => range;
+    env.clock.t = 1;
+    await ride.begin();
+    await flyThrough(env, ride, x, jumper, () => {}, () => x.made.length >= 2);
+    const down = x.made[1];
+    const out = down ? Math.hypot(down.at.x - far.x, down.at.z - far.z) : Number.NaN;
+    ok(down?.leg.kind === 'down' && Math.abs(out - want) < 1e-6, `with starports loading out to ${range} m the crossing down comes out ${f1(out)} m from the pad (${want})`);
+    ride.abort('test');
+  }
+}
+
+{
+  // No pad on the far world: the flight through space is flown, and the passenger is set down at the port.
+  const hull = new FakeHull();
+  const rigs = new FakeRigs();
+  const env = makeHost(hull, rigs, watching(far));
+  const x = crossings(env, rigs);
+  const jumper = new FakeJump();
+  spaceTrips(env, jumper);
+  const ride = new ShuttleRide(planRoute(ticketThrough('bare'), origin, null, 'test', null, spacePlan)!, env.host, true);
+  jumper.ride = ride;
+  env.clock.t = 1;
+  await ride.begin();
+  const kinds: string[] = [];
+  await flyThrough(env, ride, x, jumper, (_b, now) => {
+    if (kinds.at(-1) !== now) kinds.push(now);
+  });
+  const p = env.passenger;
+  ok(kinds.join(',') === 'board,lift,climb,up,jump,fly,walkOff,ended', `with no pad over there it is flown up, through the jump and toward the far world, and then ends (${kinds.join(', ')})`);
+  ok(ride.ended === 'walked' && p.walkedTo.join() === far.port && p.seatedIn === null && !ride.riding && rigs.tidy() && p.ended.length === 1 && jumper.starts === 1 && x.made.length === 1 && env.world.size === 0, 'with the passenger set down at the port it was flying to, off the hull, the hull taken away, nothing held, the host told once');
+}
+
 // ---------------------------------------------------------------- a frame makes nothing
 //
 // Read where it can really fail: in the code of every method a frame of a trip runs and every function
@@ -1644,7 +2117,7 @@ async function toTheCut(env: ReturnType<typeof makeHost>, ride: ShuttleRide, hul
   const path = read('../../../src/world/rigPath.ts');
   const hull = read('../../../src/vehicles/rigHull.ts');
   const frame: [string, string, boolean][] = [
-    ...['update', 'board', 'liftOff', 'skip', 'fly', 'land', 'parked', 'leave', 'next', 'readRound', 'drive', 'parkAtStart', 'flyClip', 'handOver', 'beginLanding', 'park', 'findAlight', 'parkedOn', 'holdDestNow', 'promptPhase', 'keepPlace', 'standsAt'].map((n) => [ride, n, true] as [string, string, boolean]),
+    ...['update', 'board', 'liftOff', 'skip', 'fly', 'land', 'parked', 'leave', 'next', 'readRound', 'drive', 'parkAtStart', 'flyClip', 'handOver', 'beginLanding', 'park', 'findAlight', 'parkedOn', 'holdDestNow', 'promptPhase', 'keepPlace', 'standsAt', 'startClimb', 'climb', 'climbOn', 'upWait', 'jumpLeg', 'flySpace', 'downLeg', 'planetTop', 'spaceTop'].map((n) => [ride, n, true] as [string, string, boolean]),
     ...['onPad', 'turnOnPad', 'vehicleFromJoint', 'poseRigAction', 'bracket', 'pathPose', 'pathVelocity', 'vehicleAt', 'vehicleVelocity', 'noseOntoPath', 'settleOnto', 'settleSeconds', 'alignShare', 'landingTarget', 'inSight'].map((n) => [path, n, false] as [string, string, boolean]),
     [hull, 'pose', true],
   ];
