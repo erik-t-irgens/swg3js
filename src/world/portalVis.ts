@@ -63,6 +63,13 @@ export interface PortalCullTune {
   exitNarrow: boolean;
   /** A door's range grows with its size, so a big door is seen into from farther away (commit 1c). */
   doorRange: boolean;
+  /**
+   * Bodies, ships and stood shuttles are drawn only in the passes of the rooms they stand in, and left out
+   * of the frame when none of those rooms is seen (commit 2a, `portalCull.ts`).
+   */
+  actorRoutes: boolean;
+  /** The creatures and people read last frame's set: one in a room nobody can see is off screen (commit 2c). */
+  seenTiers: boolean;
 }
 
 export const PORTAL_CULL: PortalCullTune = {
@@ -80,6 +87,8 @@ export const PORTAL_CULL: PortalCullTune = {
   seenRooms: true,
   exitNarrow: true,
   doorRange: true,
+  actorRoutes: true,
+  seenTiers: true,
 };
 
 /** The fixed door range the renderer used before a door's range grew with its size. */
@@ -98,7 +107,7 @@ export const MAX_BUILDINGS = 6;
 export const DOOR_HEADROOM = 4;
 
 /** Whether the cut this switch names is on: the set is worked out, the mode lets it cut, and the switch is on. */
-export function cullOn(sw: 'insideSkip' | 'seenRooms' | 'exitNarrow' | 'doorRange', tune: PortalCullTune = PORTAL_CULL): boolean {
+export function cullOn(sw: 'insideSkip' | 'seenRooms' | 'exitNarrow' | 'doorRange' | 'actorRoutes' | 'seenTiers', tune: PortalCullTune = PORTAL_CULL): boolean {
   return tune.on && tune.mode === 'rooms' && tune[sw];
 }
 
@@ -621,6 +630,55 @@ export class PortalVisibility {
     for (let i = 0; i < 4; i++) out[i] = r.rect[cell * 4 + i];
     return true;
   }
+
+  /**
+   * The rooms beyond the portals of room `cell` (0: the building's exits, seen from the world) that a
+   * sphere reaches, written into `out` without repeats; answers how many, which is `max + 1` when there
+   * were more than `max` (the caller then knows the list is short). A room past an exit is 0. The sphere
+   * is `sphere[0..3]` (middle and radius) in the world, and is tested against each portal's own
+   * triangles, after the portal's own sphere, so a body passing a doorway counts in both of its rooms.
+   * Nothing is allocated once the building has a record (its first call makes one).
+   */
+  touching(b: VisBuilding, cell: number, sphere: ArrayLike<number>, out: Int32Array, max: number): number {
+    const r = this.recOf(b);
+    const t = r.topo;
+    if (cell < 0 || cell >= t.ncell) return 0;
+    const q = this.touchQ;
+    q[0] = sphere[0];
+    q[1] = sphere[1];
+    q[2] = sphere[2];
+    const rad = sphere[3];
+    q[3] = rad * rad;
+    let n = 0;
+    for (let a = t.adjStart[cell]; a < t.adjStart[cell + 1]; a++) {
+      const k = t.adjPortal[a];
+      const to = t.adjTarget[a];
+      let seen = false;
+      for (let i = 0; i < n && i < max; i++) if (out[i] === to) seen = true;
+      if (seen) continue;
+      const o = k * 4;
+      const dx = r.pc[o] - q[0];
+      const dy = r.pc[o + 1] - q[1];
+      const dz = r.pc[o + 2] - q[2];
+      const reach = rad + r.pc[o + 3];
+      if (dx * dx + dy * dy + dz * dz > reach * reach) continue;
+      const v0 = t.vStart[k];
+      let hit = false;
+      for (let i = t.triStart[k]; i < t.triStart[k + 1]; i += 3) {
+        if (triWithin(r.wv, (v0 + t.tri[i]) * 3, (v0 + t.tri[i + 1]) * 3, (v0 + t.tri[i + 2]) * 3, q)) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) continue;
+      if (n >= max) return max + 1;
+      out[n++] = to;
+    }
+    return n;
+  }
+
+  /** Scratch for `touching`: the sphere's middle and its squared radius. */
+  private readonly touchQ = new Float64Array(4);
 
   /** Nothing is known this frame (the set is off): every reader then cuts nothing. */
   invalidate(): void {
@@ -1159,6 +1217,20 @@ export interface NarrowRoot {
 
 /** How many roots were offered for the narrowing and how many were refused because a light hangs under them. */
 export const NARROW_STATS = { roots: 0, unhideable: 0 };
+
+/**
+ * Mark an object the portal renderer hid because it fails to draw (`PortalRenderer.quarantine`). Whatever
+ * writes `visible` on meshes pass by pass -- a building's rooms and furniture, a furniture switch -- must
+ * leave such a one hidden, or it is shown again, throws again and is logged again on every frame.
+ */
+export function markQuarantined(o: THREE.Object3D): void {
+  o.userData.quarantined = true;
+}
+
+/** Whether the portal renderer hid this object for failing to draw (`markQuarantined`). */
+export function isQuarantined(o: THREE.Object3D): boolean {
+  return o.userData.quarantined === true;
+}
 
 /**
  * Offer an object to the exit narrowing with its world sphere. A root with a light anywhere under it is

@@ -16,12 +16,19 @@
 // seen from inside through its exits leaves out the ground and placed objects outside the exits'
 // rectangle. `PORTAL_CULL.mode = 'all'` puts the old behaviour back whole, and each cut has its own
 // switch in the frame report (`__debug.perf({ switches: true })`).
+//
+// What moves on its own is routed by the room it stands in (`portalCull.ts`): drawn in the passes of
+// its own rooms and nowhere else. The furniture standing in a building's rooms is drawn with those rooms
+// in that building's pass (`furnitureHost.ts`, `Building.furniture`), and no room of the building the
+// camera is in is drawn into the sun's shadows, which no room receives.
 
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 import { isShadowOnly } from '../core/fxRegistry.ts';
 import { CNT, PASS, PERF, perf } from '../core/perf.ts';
-import { ExitNarrowing, MAX_BUILDINGS, PORTAL_CULL, PortalVisibility, walkCameraCell, type CameraCell } from './portalVis.ts';
+import { cullOn, ExitNarrowing, exitFrustum, isQuarantined, markQuarantined, MAX_BUILDINGS, PORTAL_CULL, PortalVisibility, walkCameraCell, type CameraCell } from './portalVis.ts';
+import { ActorRoutes, ROUTE_PASS } from './portalCull.ts';
+import { furnitureOn, maskSeen } from './furnitureHost.ts';
 
 export { crossing } from './portalVis.ts';
 
@@ -115,6 +122,12 @@ export class PortalRenderer {
   worldSkipped = false;
   /** Room meshes shown in the last frame's views (not its shadow pass). */
   roomMeshes = 0;
+  /** Furniture groups shown in the last frame's views, with the rooms they can be seen in. */
+  furnitureShown = 0;
+  /** What moves on its own, routed by its room: filled by the game before each frame (`portalCull.ts`). */
+  readonly actors = new ActorRoutes();
+  /** The frustum through the exits' rectangle, for what the world pass from inside may show of the routed. */
+  private readonly routeFrustum = new THREE.Frustum();
   /** The world pass from inside narrowed to the exits' rectangle (commit 1d, `portalVis.ts`). */
   private readonly narrowing = new ExitNarrowing();
   /** The containers whose children the exit narrowing may hide for the world pass: the scene and the ground's root. */
@@ -233,6 +246,8 @@ export class PortalRenderer {
     const why = String((err as Error)?.message ?? err);
     if (culprit) {
       culprit.visible = false;
+      // For good: a room's meshes and its furniture are shown pass by pass, and would be shown again.
+      markQuarantined(culprit);
       const m = culprit as THREE.Mesh;
       const geo = m.geometry as THREE.BufferGeometry | undefined;
       const mat = (Array.isArray(m.material) ? m.material[0] : m.material) as THREE.Material | undefined;
@@ -395,8 +410,22 @@ export class PortalRenderer {
         const c = cells[i];
         show = c < 0 || c >= seen.length || seen[c] === 1;
       }
+      // A mesh hidden for failing to draw stays hidden: shown again, it would throw on every frame.
+      if (show && isQuarantined(list[i])) show = false;
       list[i].visible = show;
       if (show) shown++;
+    }
+    // Its furniture, drawn per building (commit 2b): a group is shown with the rooms when one of the rooms
+    // its copies can be in is seen, and only once its programs exist. A group not routed is the streamer's.
+    const f = b.furniture;
+    if (f) {
+      for (let i = 0; i < f.length; i++) {
+        const g = f[i];
+        if (!g.routed) continue;
+        const show = on && g.ready && (seen === null || maskSeen(g.lo, g.hi, g.any, seen)) && !isQuarantined(g.mesh);
+        g.mesh.visible = show;
+        if (show && on) this.furnitureShown++;
+      }
     }
     return shown;
   }
@@ -485,6 +514,9 @@ export class PortalRenderer {
       SHADOW_STRAYS.seen = 0;
       return;
     }
+    // The rooms of the building the camera is in cast into the sun's shadows only with furniture drawn
+    // everywhere, as before (commit 2b): no room is lit by the sun, and the shell outside casts the same shadow.
+    if (furnitureOn()) view = null;
     if (view) this.showInterior(view, true);
     r.shadowMap.needsUpdate = true;
     this.shadingShadows = true;
@@ -528,8 +560,12 @@ export class PortalRenderer {
     const skipWorld = rooms && view !== null && PORTAL_CULL.insideSkip && !this.vis.result.worldSeen;
     const seenRooms = rooms && PORTAL_CULL.seenRooms;
     const narrow = rooms && PORTAL_CULL.exitNarrow;
+    // What moves on its own, drawn in its own rooms' passes only (commit 2a): the game collected this
+    // frame's records and hid the unseen before the frame; each pass below chooses from the rest.
+    const routes = rooms && cullOn('actorRoutes') && this.actors.active ? this.actors : null;
     this.worldSkipped = skipWorld;
     this.roomMeshes = 0;
+    this.furnitureShown = 0;
     this.narrowStats.tested = 0;
     this.narrowStats.hidden = 0;
     // Once a pass has taken the whole scene its matrices are fresh for the rest of the frame
@@ -544,7 +580,11 @@ export class PortalRenderer {
       if (skipWorld) {
         SHADOW_STRAYS.seen = 0;
         perf.count(CNT.cullSkips, 1);
-      } else this.renderShadows(scene, view);
+      } else {
+        // Only what stands outdoors casts into the sun's shadows.
+        routes?.route(ROUTE_PASS.shadows, null, null);
+        this.renderShadows(scene, view);
+      }
       // The shadow pass, when there is one, walked the scene.
       if (this.passes > 0 && this.matrixOnce) scene.matrixWorldAutoUpdate = false;
       r.state.buffers.stencil.setClear(1);
@@ -553,6 +593,7 @@ export class PortalRenderer {
 
       if (view) {
         // Inside: the whole building fills the screen; the world only through its exits.
+        routes?.route(ROUTE_PASS.building, view, null);
         this.roomMeshes += this.showInterior(view, true, seenRooms ? this.vis.seenOf(view) : null);
         this.renderLayer(scene, camera, INTERIOR_LAYER);
         if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
@@ -566,6 +607,8 @@ export class PortalRenderer {
         // Hide, for this pass only, every ground chunk, far tile and placed object whose sphere misses the
         // frustum through the exits' rectangle; the shadows were drawn already and the projection is untouched.
         if (narrow && this.vis.result.worldSeen) this.narrowing.hide(this.vis.result.exitRect, projView);
+        // What stands outdoors, and of that only what the exits' rectangle can show.
+        if (routes) routes.route(ROUTE_PASS.world, null, this.vis.result.worldSeen && exitFrustum(this.vis.result.exitRect, projView, this.routeFrustum) ? this.routeFrustum : null);
         try {
           this.renderLayer(scene, camera, 0);
         } finally {
@@ -575,6 +618,7 @@ export class PortalRenderer {
       }
 
       // Outside: the world, then each nearby building's interior through its doors.
+      routes?.route(ROUTE_PASS.world, null, null);
       this.renderLayer(scene, camera, 0);
       if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
       const n = this.selectNear(camera, buildings);
@@ -587,6 +631,8 @@ export class PortalRenderer {
         this.drawPortals(this.exitList, doors, camera, 1, true);
         this.resetDepth(2, camera);
         this.setRef(2);
+        // What stands in this building's rooms, and nothing else.
+        routes?.route(ROUTE_PASS.building, b, null);
         this.roomMeshes += this.showInterior(b, true, seenRooms ? this.vis.seenOf(b) : null);
         this.renderLayer(scene, camera, INTERIOR_LAYER);
         this.showInterior(b, false);
@@ -595,8 +641,17 @@ export class PortalRenderer {
       }
     } finally {
       scene.matrixWorldAutoUpdate = auto;
+      // Every routed thing back as the frame left it; what no view pass drew stays hidden through the effects.
+      routes?.endPasses();
       perf.count(CNT.cullRooms, this.roomMeshes);
       perf.count(CNT.cullNarrowed, this.narrowStats.hidden);
+      perf.count(CNT.furnitureShown, this.furnitureShown);
+      if (routes) {
+        const st = routes.stats;
+        perf.count(CNT.routeRecords, st.records);
+        perf.count(CNT.routeHidden, st.hidden);
+        perf.count(CNT.routeUndrawn, st.undrawn);
+      }
     }
   }
 }

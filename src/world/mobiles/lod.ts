@@ -69,6 +69,13 @@ export interface LodInput {
   playerDist: number;
   /** The live setting, not `tune.animRange`. */
   animRange: number;
+  /**
+   * The rooms it counts in as the portal renderer's last frame saw them (commit 2c, `ActorRoutes.levelOf`):
+   * 0 none seen, 1 one seen, 2 none seen but one is one room past a seen one, -1 (or absent) left to the
+   * frustum. Unseen is off screen whatever the frustum says, and throws no shadow; one room past a seen one
+   * is the hidden tier and never frozen.
+   */
+  room?: number;
 }
 
 /**
@@ -79,24 +86,33 @@ export interface LodInput {
  * filled and returned (the manager keeps one per mobile rather than making one a frame).
  */
 export function lodTier(i: LodInput, tune: LodTune = LOD_TUNE, out?: LodTier): LodTier {
-  const castShadow = i.shadows && i.nearScreen && i.dist < (tune.shadow[i.sizeClass] ?? 0);
+  // A room nobody could see last frame, or one just past a seen one, is off the screen and out of the
+  // shadows whatever the frustum says: the walls are in the way, and no room is lit by the sun.
+  const room = i.room ?? -1;
+  const walled = room === 0 || room === 2;
+  const onScreen = i.onScreen && !walled;
+  const nearScreen = i.nearScreen && !walled;
+  const castShadow = i.shadows && nearScreen && i.dist < (tune.shadow[i.sizeClass] ?? 0);
+  // Whether it is drawn is still the frustum's alone: the room's say is last frame's, and the portal
+  // renderer's routing hides what this frame cannot see (`portalCull.ts`), so a room coming round a
+  // corner never shows its people a frame late.
   const visible = i.nearScreen || i.dist < tune.near;
   let name: LodName;
   let animEvery: number;
   let think: number;
-  if (i.onScreen && i.dist < tune.near) {
+  if (onScreen && i.dist < tune.near) {
     name = 'near';
     animEvery = 1;
     think = tune.think[0];
-  } else if (i.onScreen && i.dist < tune.mid) {
+  } else if (onScreen && i.dist < tune.mid) {
     name = 'mid';
     animEvery = 2;
     think = i.playerDist < tune.thinkNear ? tune.think[0] : tune.think[1];
-  } else if (i.onScreen && i.dist < i.animRange) {
+  } else if (onScreen && i.dist < i.animRange) {
     name = 'far';
     animEvery = 4;
     think = tune.think[1];
-  } else if (!i.onScreen && !castShadow && !i.busy) {
+  } else if (!onScreen && !castShadow && !i.busy && room !== 2) {
     name = 'frozen';
     animEvery = 0;
     think = tune.think[2];

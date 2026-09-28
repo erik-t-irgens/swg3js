@@ -9,7 +9,9 @@ import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
 import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
 import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
-import { NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
+import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
+import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
+import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
 import { Input, type Action } from './core/input';
 import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
@@ -132,7 +134,7 @@ interface TravelWait {
   inside: boolean;
 }
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
-import type { PlacedObject } from './world/layoutStream';
+import type { Building, PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, turnBy as houseTurnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
@@ -366,6 +368,10 @@ interface CullDebugOptions {
   mode?: 'all' | 'rooms';
   /** Any of `PORTAL_CULL`'s numbers and switches, live. */
   tune?: Partial<PortalCullTune>;
+  /** `FURNITURE_TUNE`: `perBuilding` live; the two pads when the next world is read. */
+  furniture?: Partial<FurnitureTune>;
+  /** `ROUTE_TUNE`: `lightEvery` and `outdoorReach` live; `maxRooms` is read when the renderer is made. */
+  routes?: Partial<typeof ROUTE_TUNE>;
 }
 
 interface PerfDebugOptions {
@@ -1064,6 +1070,10 @@ class App {
     registerPerfSwitch('seenRooms', { get: () => PORTAL_CULL.seenRooms, set: (v) => (PORTAL_CULL.seenRooms = !!v), values: [false, true], note: 'only the rooms the portal flood reached are drawn, inside and through doors' });
     registerPerfSwitch('exitNarrow', { get: () => PORTAL_CULL.exitNarrow, set: (v) => (PORTAL_CULL.exitNarrow = !!v), values: [false, true], note: "inside, the world pass leaves out ground and placed objects outside the exits' rectangle" });
     registerPerfSwitch('doorRange', { get: () => PORTAL_CULL.doorRange, set: (v) => (PORTAL_CULL.doorRange = !!v), values: [false, true], note: "a door is drawn from farther the bigger it is (the old fixed 120 m when off)" });
+    // Step 2, the bodies and the furniture drawn only where they can be seen: each commit apart.
+    registerPerfSwitch('actorRoutes', { get: () => PORTAL_CULL.actorRoutes, set: (v) => (PORTAL_CULL.actorRoutes = !!v), values: [false, true], note: "creatures, people, fighters, ships and stood shuttles drawn only in their own rooms' passes, and not at all when no room of theirs is seen" });
+    registerPerfSwitch('furniture', { get: () => FURNITURE_TUNE.perBuilding, set: (v) => (FURNITURE_TUNE.perBuilding = !!v), values: [false, true], note: "a building's furniture drawn with its rooms in that building's pass alone, casting nothing, and no room of the building you stand in drawn into the sun's shadows" });
+    registerPerfSwitch('seenTiers', { get: () => PORTAL_CULL.seenTiers, set: (v) => (PORTAL_CULL.seenTiers = !!v), values: [false, true], note: "a creature or person in a room nobody saw last frame is off screen: frozen unless busy, and no shadow" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -10645,10 +10655,13 @@ class App {
   private cullDebug(o: CullDebugOptions = {}): unknown {
     if (o.show !== undefined) this.cullShow = o.show === 'cells' || o.show === true;
     if (o.mode === 'all' || o.mode === 'rooms') PORTAL_CULL.mode = o.mode;
-    if (o.tune) {
-      const T = PORTAL_CULL as unknown as Record<string, unknown>;
-      for (const [k, v] of Object.entries(o.tune)) if (k in T && typeof v === typeof T[k] && (typeof v !== 'number' || Number.isFinite(v))) T[k] = v;
-    }
+    const retune = (T: Record<string, unknown>, from: object | undefined) => {
+      if (!from) return;
+      for (const [k, v] of Object.entries(from)) if (k in T && typeof v === typeof T[k] && (typeof v !== 'number' || Number.isFinite(v))) T[k] = v;
+    };
+    retune(PORTAL_CULL as unknown as Record<string, unknown>, o.tune);
+    retune(FURNITURE_TUNE as unknown as Record<string, unknown>, o.furniture);
+    retune(ROUTE_TUNE as unknown as Record<string, unknown>, o.routes);
     const vis = this.portals.vis;
     const res = vis.result;
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -10672,11 +10685,33 @@ class App {
       e.passes++;
       e.calls += p.calls;
     }
+    // What moves on its own, routed by its room (step 2a): by kind, hidden for the whole frame, drawn in no
+    // view pass, and shown summed over each sort of pass, as the last frame drew it.
+    const st = this.portals.actors.stats;
+    const byKind: Record<string, { routed: number; hidden: number }> = {};
+    ROUTE_KIND_NAMES.forEach((name, k) => (byKind[name] = { routed: st.byKind[k], hidden: st.hiddenByKind[k] }));
+    const bodies = {
+      routed: st.records,
+      byKind,
+      hidden: st.hidden,
+      inNoPass: st.undrawn,
+      untouched: st.unhideable,
+      inTwoRooms: st.doorway,
+      shown: { shadows: st.shownShadows, world: st.shownWorld, rooms: st.shownRooms },
+      passes: { shadows: st.passes[0], world: st.passes[1], rooms: st.passes[2] },
+    };
     return {
       on: PORTAL_CULL.on,
       mode: PORTAL_CULL.mode,
-      switches: { insideSkip: PORTAL_CULL.insideSkip, seenRooms: PORTAL_CULL.seenRooms, exitNarrow: PORTAL_CULL.exitNarrow, doorRange: PORTAL_CULL.doorRange },
+      switches: { insideSkip: PORTAL_CULL.insideSkip, seenRooms: PORTAL_CULL.seenRooms, exitNarrow: PORTAL_CULL.exitNarrow, doorRange: PORTAL_CULL.doorRange, actorRoutes: PORTAL_CULL.actorRoutes, furniture: FURNITURE_TUNE.perBuilding, seenTiers: PORTAL_CULL.seenTiers },
       tune: { ...PORTAL_CULL },
+      bodies,
+      // A building's furniture drawn with its rooms (step 2b): how the layout's indoor objects were hosted
+      // when the world was read, the groups standing now, and how many the last frame showed.
+      furniture: { ...(this.world.furnitureReport() ?? {}), shownLastFrame: this.portals.furnitureShown, tune: { ...FURNITURE_TUNE } },
+      // The creatures and people the manager last took off screen for their room (step 2c).
+      offByRoom: this.world.mobiles?.walled ?? 0,
+      routeTune: { ...ROUTE_TUNE },
       valid: res.valid,
       camera: { building: res.inside?.model.def.id ?? null, cell: res.cell },
       worldSeen: res.worldSeen,
@@ -10735,9 +10770,117 @@ class App {
     const at = this.player.worldPos;
     const eye = this.cameraEye.set(at.x, at.y + 1.5, at.z);
     const view = this.portals.cameraCell(this.world.cellState, eye, cam.position, this.world.buildings).building;
+    // The furniture drawn per building or everywhere, as the switch stands (only a change does anything).
+    this.world.syncFurniture();
     // The frame's visible set, once, with the camera's final pose: which rooms can be seen and whether
     // the world can be from inside, which is what the portal renderer draws less of.
     this.portals.computeVisibility(cam, this.world.buildings);
+    // What moves on its own, by the room it stands in, and hidden now where none of its rooms is seen.
+    // Every pass chooses from the rest, and what this hides is put back once the effects are drawn.
+    this.collectRoutes();
+    try {
+      this.drawFrameRouted(cam, view);
+    } finally {
+      this.portals.actors.restoreFrame();
+    }
+  }
+
+  /** The routing's record for one stood shuttle, refilled (`ShuttleRigs.routeOf`). */
+  private readonly rigRoute = { root: null as THREE.Object3D | null, inside: false, x: 0, y: 0, z: 0, radius: 0 };
+
+  /**
+   * This frame's records for the portal renderer's routing (`portalCull.ts`): the catalogue's creatures
+   * and people by the room the manager follows them in, the fighters by theirs, the ships the world
+   * follows through the portals, and the shuttles stood on their pads out in the open. Left alone: the
+   * player and whatever they ride, fly or stand aboard, a vehicle whose room is not followed, a shuttle on
+   * a pad in a room (it flies in and out through the door on its own clock), and the other players, whose
+   * rooms are not known. Nothing allocated.
+   */
+  private collectRoutes(): void {
+    const r = this.portals.actors;
+    // Collected for the routing, and for the creatures' tiers (which read how each body's rooms were seen)
+    // even when only that switch is on; bodies are hidden and routed only with the routing's own.
+    const routing = cullOn('actorRoutes');
+    if (!r.begin(this.portals.vis, routing || cullOn('seenTiers'))) return;
+    // Each record's sphere is written into `r.at` rather than handed over as numbers, which would be boxed;
+    // `at[4]` is how far the body has gone since its room was last followed, which grows the doorway test.
+    const at = r.at;
+    const w = this.world;
+    const mobiles = w.mobiles;
+    if (mobiles) {
+      const live = mobiles.live;
+      for (let i = 0; i < live.length; i++) {
+        const m = live[i];
+        if (!m.ready || m.removed) continue;
+        const cell = mobiles.cellOf(m);
+        const from = mobiles.cellFromOf(m);
+        const c = m.plan.cull;
+        at[0] = m.pos.x;
+        at[1] = m.pos.y + c.y;
+        at[2] = m.pos.z;
+        at[3] = m.ragdoll ? 2 * c.radius : c.radius;
+        at[4] = from ? m.pos.distanceTo(from) : 0;
+        r.add(ROUTE_KIND.mobile, m.group, m.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0);
+      }
+    }
+    const npcs = w.npcs?.npcs;
+    if (npcs) {
+      for (let i = 0; i < npcs.length; i++) {
+        const n = npcs[i];
+        const cell = n.cell;
+        at[0] = n.pos.x;
+        // A fallen fighter's place is its ragdoll's middle; a standing one's, its feet.
+        at[1] = n.ragdoll ? n.pos.y : n.pos.y + n.bodyLift;
+        at[2] = n.pos.z;
+        at[3] = n.ragdoll ? 2.4 : 1.3;
+        at[4] = n.pos.distanceTo(n.cellFrom);
+        r.add(ROUTE_KIND.fighter, n.group, n.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0);
+      }
+    }
+    const p = this.player;
+    const carrier = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    const vehicles = w.vehicles;
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
+      if (v === carrier || v.disposed) continue;
+      const cell = w.vehicleRoomOf(v);
+      if (cell === undefined) continue;
+      const b = v.spec.bounds;
+      const mid = this.routeMid.set(0, (b.min[1] + b.max[1]) / 2, 0).applyQuaternion(v.group.quaternion).add(v.pos);
+      at[0] = mid.x;
+      at[1] = mid.y;
+      at[2] = mid.z;
+      const sx = b.max[0] - b.min[0];
+      const sy = b.max[1] - b.min[1];
+      const sz = b.max[2] - b.min[2];
+      at[3] = 0.5 * Math.sqrt(sx * sx + sy * sy + sz * sz);
+      // The tracker samples from the hull's middle, which is where this measures from as well.
+      const from = w.vehicleRoomFrom(v);
+      at[4] = from ? mid.distanceTo(from) : 0;
+      r.add(ROUTE_KIND.vehicle, v.group, null, cell ? cell.building : null, cell ? cell.cell : 0);
+    }
+    const rigs = this.shuttleRigs;
+    if (rigs) {
+      const out = this.rigRoute;
+      for (let i = 0; i < rigs.stoodCount; i++) {
+        if (!rigs.routeOf(i, out) || !out.root || out.inside) continue;
+        at[0] = out.x;
+        at[1] = out.y;
+        at[2] = out.z;
+        at[3] = out.radius;
+        at[4] = 0;
+        r.add(ROUTE_KIND.rig, out.root, null, null, 0);
+      }
+      out.root = null;
+    }
+    r.hideFrame(routing);
+  }
+
+  /** Scratch for a hull's middle in `collectRoutes`. */
+  private readonly routeMid = new THREE.Vector3();
+
+  /** The frame drawn once its visible set is worked out and what moves on its own is routed (`drawFrame`). */
+  private drawFrameRouted(cam: THREE.PerspectiveCamera, view: Building | null): void {
     // The room's air, before the scene is drawn (its motes are in it): which room this frame is
     // drawn from, its doorway beams, its lamps and its motes. The effects read it after, in the fill below.
     const ra = this.roomAirInput;
@@ -15602,6 +15745,7 @@ class App {
         perf.count(CNT.syncBlocks, Math.max(0, sync - this.perfSyncMark));
         perf.gauge(CNT.portalMaterials, this.portals.materials.size);
         perf.gauge(CNT.mobiles, this.world.mobiles?.live.length ?? 0);
+        perf.count(CNT.seenOff, this.world.mobiles?.walled ?? 0);
       }
       this.perfSyncMark = sync;
       // A frame the game did not simulate (the Escape menu, which is up whenever the console has the

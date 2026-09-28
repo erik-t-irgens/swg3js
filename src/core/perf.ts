@@ -114,6 +114,14 @@ const COUNTER_DEFS = [
   { key: 'cullRooms', group: 'cull', label: 'room meshes', kind: 'mean', scale: 1 },
   { key: 'cullSkips', group: 'cull', label: 'world skipped', kind: 'sum', scale: 1 },
   { key: 'cullNarrowed', group: 'cull', label: 'narrowed out', kind: 'mean', scale: 1 },
+  // Step 2: what moves on its own routed by its room (the records, those hidden for the whole frame, those
+  // no view pass drew), the furniture groups drawn with their rooms, and the creatures and people the
+  // manager took off screen because their room was not seen last frame.
+  { key: 'routeRecords', group: 'cull', label: 'bodies routed', kind: 'mean', scale: 1 },
+  { key: 'routeHidden', group: 'cull', label: 'bodies hidden', kind: 'mean', scale: 1 },
+  { key: 'routeUndrawn', group: 'cull', label: 'bodies in no pass', kind: 'mean', scale: 1 },
+  { key: 'furnitureShown', group: 'cull', label: 'furniture groups shown', kind: 'mean', scale: 1 },
+  { key: 'seenOff', group: 'cull', label: 'bodies off by room', kind: 'mean', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },

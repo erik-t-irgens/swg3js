@@ -10,7 +10,8 @@ import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef } from '.
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
-import { INTERIOR_LEAD, PORTAL_RANGE, interiorBuildRange, markNarrowRoot } from './portalVis.ts';
+import { INTERIOR_LEAD, PORTAL_RANGE, interiorBuildRange, isQuarantined, markNarrowRoot } from './portalVis.ts';
+import { FURNITURE_ROLE, FURNITURE_TUNE, FurnitureIndex, HOST_FLAG, furnitureDraw, furnitureHosts, furnitureOn, markFurniture, splitCopies, type FurnitureDraw, type FurnitureGroup, type HostAnswer } from './furnitureHost.ts';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces';
 import { marks } from './marks.ts';
@@ -111,6 +112,16 @@ export interface PlacedObject {
   solid?: boolean;
   /** The object template whose client-data effects it carries, where `template` is a name of its own (a thing put down in play). */
   effectsOf?: string;
+  /**
+   * For a thing standing in a building's rooms: the placed building that holds it (`furnitureHost.ts`),
+   * absent where no room box holds it or where it stands in a doorway, and the rooms it can be seen in.
+   * It is drawn with that building's rooms, in that building's pass, and nowhere else.
+   */
+  host?: PlacedObject;
+  roomsLo?: number;
+  roomsHi?: number;
+  /** `HOST_FLAG` bits. */
+  hostFlags?: number;
 }
 
 /**
@@ -181,6 +192,13 @@ export interface Building {
   /** Whether `interior` is currently built, so the sweep can tell "not yet" from "has none". */
   interiorBuilt: boolean;
   /**
+   * The furniture standing in its rooms, one group per tier, model and piece (commit 2b): the portal
+   * renderer shows each with the rooms it can be seen in, in this building's pass. The one list for this
+   * placed building whatever tier its furniture loads in, so the building and its furniture may arrive in
+   * either order. Optional only for a hand-built stand-in in a test.
+   */
+  furniture?: FurnitureGroup[];
+  /**
    * The placed object this building was made from, which is the key its **collision** is held
    * under: a building's colliders come and go with the player's distance while the building
    * itself stays, so anything standing on its floors has to be able to ask whether there is one
@@ -197,6 +215,8 @@ interface LoadedTier {
   effects: EffectHandle[];
   /** The water standing in its fountains' and pools' basins, drawn by the world's water system. */
   waters: WaterSurfaceHandle[];
+  /** Its furniture groups and the building each is filed under (null: one of a switch's pairs), so an unload takes each out of its list. */
+  furniture: { g: FurnitureGroup; host: PlacedObject | null }[];
 }
 
 /**
@@ -273,6 +293,16 @@ export interface CellState {
 /** The one empty effect list every object without any shares, so a lookup allocates nothing. */
 const NO_EFFECTS: readonly PackEffect[] = [];
 
+/** What one object placed in play brought with it, so taking it out again is exact. */
+interface RuntimeRec {
+  tier: LoadedTier;
+  meshes: THREE.Object3D[];
+  building: Building | null;
+  effects: EffectHandle[];
+  waters: WaterSurfaceHandle[];
+  furniture: { g: FurnitureGroup; host: PlacedObject | null }[];
+}
+
 export class LayoutStreamer {
   readonly buildings = new Set<Building>();
   readonly objects: PlacedObject[] = [];
@@ -302,7 +332,7 @@ export class LayoutStreamer {
    * (an instanced mesh of one, which is what the pack's materials and the portal renderer expect to
    * see) and this is where they are kept.
    */
-  private readonly runtime = new Map<PlacedObject, { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[]; waters: WaterSurfaceHandle[] }>();
+  private readonly runtime = new Map<PlacedObject, RuntimeRec>();
   /**
    * What each object placed in play was filed under, which is its `template`: the runtime ones are
    * given a name of their own (a home carries the id the server gave it) and it is a name nothing
@@ -311,6 +341,28 @@ export class LayoutStreamer {
   private readonly placedByKey = new Map<string, PlacedObject>();
   /** Huge objects whose collision is still being built, a few pieces an update. A field initialiser, as `huge`. */
   private readonly hugeQueue: HugeJob[] = [];
+  /**
+   * The buildings that can host furniture, over the ground (`furnitureHost.ts`), by an index of their own:
+   * the layout's objects at the places they were read in (`hostObjects`, a copy, since `objects` is spliced
+   * when something put down in play is taken up), and a house put down in play after them. Field
+   * initialisers, as `huge`: the constructor's own pass fills them.
+   */
+  private furnitureIndex = new FurnitureIndex(FURNITURE_TUNE);
+  private readonly hostObjects: PlacedObject[] = [];
+  private readonly hostIds = new Map<PlacedObject, number>();
+  /** Each placed building's furniture groups, one list whatever tier they load in; the `Building` shares it. */
+  private readonly furnitureByHost = new Map<PlacedObject, FurnitureGroup[]>();
+  /** The meshes a furniture switch flip trades between (`FURNITURE_ROLE.whenOn`, `whenOff`), filed under no building. */
+  private readonly furnitureSwaps = new Set<FurnitureGroup>();
+  /** What `applyFurniture` works a group's drawing out into, kept. */
+  private readonly furnitureNow: FurnitureDraw = { wait: true, routed: false, visible: false, rooms: false, castShadow: false };
+  /** The group a tier's mesh is, so its reveal and the switch know it. */
+  private readonly furnitureOfMesh = new WeakMap<THREE.Object3D, FurnitureGroup>();
+  /** Whether the groups are drawn per building now (`syncFurniture`), as the switch stands when the world is read. */
+  private furnitureRouted = furnitureOn();
+  /** What hosting found when the layout was read, for the console. */
+  furnitureStats = { contained: 0, hosted: 0, noBox: 0, twoHosts: 0, doorway: 0, hosts: 0 };
+  private readonly hostAnswer: HostAnswer = { host: -1, lo: 0, hi: 0, flags: 0 };
   private loads = 0;
   private readonly failed = new Set<string>();
   /** The widest object's radius, which widens the region sweep for colliders. */
@@ -477,6 +529,108 @@ export class LayoutStreamer {
       if (!p.contained) this.largestRadius = Math.max(this.largestRadius, Math.min(p.radius, COLLIDER_RADIUS_CAP));
       if (hugeColliders && !p.contained && p.radius > COLLIDER_RADIUS_CAP) this.huge.add(p);
     }
+    // Which building each thing standing in a room belongs to (commit 2b): read once, from the manifest's
+    // own room boxes, so no model need be loaded. A lookup by id rather than `pack.find`, which walks every
+    // entry and would be asked once for each of tens of thousands of objects.
+    const defs = new Map<string, PackModelDef>();
+    for (const list of Object.values(pack.manifest.categories)) for (const d of list) defs.set(d.id, d);
+    const hosted = furnitureHosts(this.objects, (id) => defs.get(id), FURNITURE_TUNE);
+    this.furnitureIndex = hosted.index;
+    this.furnitureStats = hosted.stats;
+    for (let i = 0; i < this.objects.length; i++) {
+      const p = this.objects[i];
+      this.hostObjects.push(p);
+      if (!p.contained || hosted.host[i] < 0) continue;
+      const f = hosted.flags[i];
+      p.hostFlags = f;
+      // A thing in a doorway stands partly outside: it keeps the old rule, drawn in every pass.
+      if (f & HOST_FLAG.doorway) continue;
+      p.host = this.objects[hosted.host[i]];
+      p.roomsLo = hosted.rooms[i * 2];
+      p.roomsHi = hosted.rooms[i * 2 + 1];
+    }
+  }
+
+  /** A placed building's furniture list, made the first time anything asks for it. */
+  private furnitureList(host: PlacedObject): FurnitureGroup[] {
+    let list = this.furnitureByHost.get(host);
+    if (!list) this.furnitureByHost.set(host, (list = []));
+    return list;
+  }
+
+  /**
+   * Draw one group as the switch now says, once its programs exist (`furnitureDraw`): a building's own,
+   * per building, is on the rooms' layer alone, casts nothing and is shown only by the portal renderer,
+   * with its building's rooms; with the switch off its twin, the old rule's one mesh of every indoor copy,
+   * is drawn on the actor layer in its place (or, a thing put down in play, its own mesh of one is). Nothing
+   * about it is in a program's key, and a room's furniture is compiled for both passes whatever layer it is
+   * on (`markFurniture`). A group whose programs are still being built is left hidden and on the layers it
+   * was built with. One the portal renderer hid for failing to draw is never shown again.
+   */
+  private applyFurniture(g: FurnitureGroup): void {
+    const d = furnitureDraw(g, this.furnitureRouted, isQuarantined(g.mesh), this.furnitureNow);
+    g.routed = d.routed;
+    if (d.wait) return;
+    const m = g.mesh;
+    if (d.rooms) m.layers.set(INTERIOR_LAYER);
+    else {
+      m.layers.set(0);
+      m.layers.enable(ACTOR_LAYER);
+    }
+    (m as THREE.Mesh).castShadow = d.castShadow;
+    m.visible = d.visible;
+  }
+
+  /**
+   * Draw the furniture per building or everywhere, as `on` says (`furnitureOn()`, asked every frame): only
+   * a change walks the groups.
+   */
+  syncFurniture(on: boolean): void {
+    if (on === this.furnitureRouted) return;
+    this.furnitureRouted = on;
+    for (const list of this.furnitureByHost.values()) for (const g of list) this.applyFurniture(g);
+    for (const g of this.furnitureSwaps) this.applyFurniture(g);
+  }
+
+  /** A tier's mesh shown once its programs exist: a furniture group as the switch says, anything else plainly. */
+  private reveal(mesh: THREE.Object3D): void {
+    const g = this.furnitureOfMesh.get(mesh);
+    if (!g) {
+      mesh.visible = true;
+      return;
+    }
+    g.ready = true;
+    this.applyFurniture(g);
+  }
+
+  /**
+   * What the furniture came to, for the console: hosting as read, and the meshes standing now -- per
+   * building (`groups`, of which `ready` have their programs and `perBuilding` are drawn with their rooms),
+   * the rest of the indoor copies drawn beside them with the switch on (`whenOn`), and the old rule's
+   * meshes drawn in their place with it off (`whenOff`).
+   */
+  furnitureReport(): { routed: boolean; hosting: LayoutStreamer['furnitureStats']; buildings: number; groups: number; ready: number; perBuilding: number; standing: number; whenOn: number; whenOff: number } {
+    let groups = 0;
+    let ready = 0;
+    let routedGroups = 0;
+    let buildings = 0;
+    for (const list of this.furnitureByHost.values()) {
+      if (list.length) buildings++;
+      for (const g of list) {
+        groups++;
+        if (g.ready) ready++;
+        if (g.routed) routedGroups++;
+      }
+    }
+    let whenOn = 0;
+    let whenOff = 0;
+    for (const g of this.furnitureSwaps) {
+      if (g.role === FURNITURE_ROLE.whenOn) whenOn++;
+      else if (g.role === FURNITURE_ROLE.whenOff) whenOff++;
+    }
+    let standing = 0;
+    for (const b of this.buildings) if (b.furniture?.length) standing++;
+    return { routed: this.furnitureRouted, hosting: this.furnitureStats, buildings, groups, ready, perBuilding: routedGroups, standing, whenOn, whenOff };
   }
 
   /**
@@ -512,6 +666,25 @@ export class LayoutStreamer {
     };
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
+    // A house can host what is put down in it, and a thing put down in a room is drawn with that room.
+    const def = this.defOf(p.model);
+    if (!placed.contained) {
+      const id = this.hostObjects.length;
+      if (this.furnitureIndex.add(id, placed, def)) {
+        this.hostObjects.push(placed);
+        this.hostIds.set(placed, id);
+      }
+    } else {
+      const a = this.furnitureIndex.assign(placed, def, this.hostAnswer);
+      if (a.host >= 0) {
+        placed.hostFlags = a.flags;
+        if (!(a.flags & HOST_FLAG.doorway)) {
+          placed.host = this.hostObjects[a.host];
+          placed.roomsLo = a.lo;
+          placed.roomsHi = a.hi;
+        }
+      }
+    }
     const rx = Math.floor(p.x / REGION);
     const rz = Math.floor(p.z / REGION);
     const key = `${rx},${rz}`;
@@ -551,6 +724,14 @@ export class LayoutStreamer {
     this.placedByKey.delete(template);
     const i = this.objects.indexOf(placed);
     if (i >= 0) this.objects.splice(i, 1);
+    // A house taken up hosts nothing more, and what stood in it is drawn as it was before anything was
+    // drawn with its rooms: its building is going, and only that building's pass ever showed it.
+    const hostId = this.hostIds.get(placed);
+    if (hostId !== undefined) {
+      this.furnitureIndex.remove(hostId);
+      this.hostIds.delete(placed);
+      this.unhost(placed);
+    }
     const region = this.regions.get(`${Math.floor(placed.x / REGION)},${Math.floor(placed.z / REGION)}`);
     if (region) {
       const list = region.objects[placed.tier];
@@ -560,6 +741,31 @@ export class LayoutStreamer {
     this.dropFromTier(placed);
     this.lastColliderX = NaN;
     return true;
+  }
+
+  /**
+   * A building put down in play is being taken up: everything filed under it is let go of. Only things
+   * put down in play can stand in such a building (the layout's own furniture was hosted when the world
+   * was read, before any house was), so those are the ones walked. Each loses its host, so a mesh made for
+   * it later is an ordinary one, and each mesh already standing becomes `plain` -- drawn on the actor layer
+   * in every pass as the old rule drew it -- rather than waiting on a building's pass that will never come.
+   * A house put down again is a new building, and what was left standing is not filed under it.
+   */
+  private unhost(house: PlacedObject): void {
+    for (const p of this.placedByKey.values()) {
+      if (p.host !== house) continue;
+      p.host = undefined;
+      p.roomsLo = undefined;
+      p.roomsHi = undefined;
+    }
+    const list = this.furnitureByHost.get(house);
+    if (!list) return;
+    this.furnitureByHost.delete(house);
+    for (const g of list) {
+      g.role = FURNITURE_ROLE.plain;
+      g.twinned = false;
+      this.applyFurniture(g);
+    }
   }
 
   /**
@@ -864,7 +1070,7 @@ export class LayoutStreamer {
       console.warn('snapshot: a tier could not be compiled ahead of its first draw; shown anyway', err);
     }
     if (this.disposed || region.tiers[tier] !== loaded) return;
-    for (const mesh of loaded.meshes) mesh.visible = true;
+    for (const mesh of loaded.meshes) this.reveal(mesh);
   }
 
   /** The loading half of a tier, holding one of the streamer's slots for exactly as long as it loads. */
@@ -930,6 +1136,7 @@ export class LayoutStreamer {
     const buildings: Building[] = [];
     const effects: EffectHandle[] = [];
     const waters: WaterSurfaceHandle[] = [];
+    const furniture: LoadedTier['furniture'] = [];
     const localFx = new THREE.Matrix4();
     if (this.effects) {
       for (const o of objects) {
@@ -959,7 +1166,7 @@ export class LayoutStreamer {
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-        const b: Building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p };
+        const b: Building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p, furniture: this.furnitureList(p) };
         buildings.push(b);
         this.buildings.add(b);
         return b;
@@ -985,9 +1192,13 @@ export class LayoutStreamer {
         // ones want the actor layer and a mesh wears its layers whole. One chair in a cantina used
         // to put every chair of that model on the street onto the actor layer as well, which outside
         // a building is drawn over the whole screen with no stencil -- so a chair behind a wall two
-        // streets away was drawn through it.
-        const groupsOf = [all.filter((p) => !p.contained), all.filter((p) => p.contained)].filter((g) => g.length);
-        for (const instanced of groupsOf) {
+        // streets away was drawn through it. And the indoor copies go in one mesh per building that
+        // holds them (commit 2b), so each building's furniture can be drawn with its own rooms, and those
+        // in no room box, or in a doorway, in one more. The mesh of all of them together, exactly as the
+        // old rule made it, is built beside those and drawn instead while the furniture switch is off
+        // (`splitCopies`): it shares their geometry, their material and so their programs, and the old
+        // way is one flip away rather than a third more meshes than it ever drew.
+        for (const { list: instanced, role, host } of splitCopies<PlacedObject, PlacedObject>(all)) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, instanced.length);
         instanced.forEach((p, i) => {
           tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
@@ -1009,12 +1220,52 @@ export class LayoutStreamer {
         if (this.prepare) mesh.visible = false;
         this.scene.add(mesh);
         meshes.push(mesh);
+        if (role >= 0) furniture.push({ g: this.furnitureGroup(mesh, instanced, role, role === FURNITURE_ROLE.room, host), host });
         }
       }
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects, effects, waters };
+    return { meshes, buildings, objects, effects, waters, furniture };
+  }
+
+  /**
+   * A furniture mesh (`FURNITURE_ROLE`): one standing in one building's rooms is filed under that building
+   * with the rooms its copies can be seen in, one of the pair a switch flip trades between is kept apart;
+   * each keeps the shadow the old rule gave it and whether its programs exist yet (with no `prepare` they
+   * need not wait). Drawn as the switch says from the moment it is ready.
+   */
+  private furnitureGroup(mesh: THREE.InstancedMesh, copies: readonly PlacedObject[], role: number, twinned: boolean, host: PlacedObject | null): FurnitureGroup {
+    let lo = 0;
+    let hi = 0;
+    let any = false;
+    for (const p of copies) {
+      lo = (lo | (p.roomsLo ?? 0)) >>> 0;
+      hi = (hi | (p.roomsHi ?? 0)) >>> 0;
+      if ((p.hostFlags ?? 0) & HOST_FLAG.anyRoom) any = true;
+    }
+    const g: FurnitureGroup = { mesh, lo, hi, any, ready: !this.prepare, routed: false, cast: mesh.castShadow, role, twinned };
+    this.furnitureOfMesh.set(mesh, g);
+    if (host) this.furnitureList(host).push(g);
+    else this.furnitureSwaps.add(g);
+    // Its layers move with the switch: every sweep that compiles it builds both passes' programs.
+    if (role === FURNITURE_ROLE.room) markFurniture(mesh);
+    this.applyFurniture(g);
+    return g;
+  }
+
+  /** A group taken out of its building's list (or the switch's pairs), its tier or its placement gone. */
+  private dropFurniture(entries: readonly { g: FurnitureGroup; host: PlacedObject | null }[]): void {
+    for (const e of entries) {
+      if (!e.host) {
+        this.furnitureSwaps.delete(e.g);
+        continue;
+      }
+      const list = this.furnitureByHost.get(e.host);
+      if (!list) continue;
+      const i = list.indexOf(e.g);
+      if (i >= 0) list.splice(i, 1);
+    }
   }
 
   /**
@@ -1027,7 +1278,7 @@ export class LayoutStreamer {
    * already expect to be handed -- and `runtime` remembers them so that taking it away is exact.
    */
   private async addToTier(loaded: LoadedTier, p: PlacedObject): Promise<Building | null> {
-    const rec: { tier: LoadedTier; meshes: THREE.Object3D[]; building: Building | null; effects: EffectHandle[]; waters: WaterSurfaceHandle[] } = { tier: loaded, meshes: [], building: null, effects: [], waters: [] };
+    const rec: RuntimeRec = { tier: loaded, meshes: [], building: null, effects: [], waters: [], furniture: [] };
     this.runtime.set(p, rec);
     this.loadedInstances++;
     const def = this.defOf(p.model);
@@ -1066,7 +1317,7 @@ export class LayoutStreamer {
     let building: Building | null = null;
     if (model.interiorBoxes.length > 0) {
       const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
-      building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p };
+      building = { model, template: p.template, x: p.x, z: p.z, radius: model.radius, matrix, inverse: matrix.clone().invert(), interior: [], interiorBuilt: false, object: p, furniture: this.furnitureList(p) };
       loaded.buildings.push(building);
       this.buildings.add(building);
       rec.building = building;
@@ -1097,6 +1348,13 @@ export class LayoutStreamer {
       this.scene.add(mesh);
       rec.meshes.push(mesh);
       loaded.meshes.push(mesh);
+      // Standing in a building's room: drawn with that building's rooms, as the layout's own furniture is.
+      // Its own mesh of one is what the old rule drew it with too, so with the switch off it is drawn as that.
+      if (p.contained && p.host) {
+        const entry = { g: this.furnitureGroup(mesh, [p], FURNITURE_ROLE.room, false, p.host), host: p.host };
+        rec.furniture.push(entry);
+        loaded.furniture.push(entry);
+      }
     }
     if (this.prepare && rec.meshes.length) {
       try {
@@ -1105,7 +1363,7 @@ export class LayoutStreamer {
         console.warn('snapshot: an object placed in play could not be compiled ahead of its first draw; shown anyway', err);
       }
       if (this.disposed || this.runtime.get(p) !== rec) return building;
-      for (const mesh of rec.meshes) mesh.visible = true;
+      for (const mesh of rec.meshes) this.reveal(mesh);
     }
     // A house is put down where somebody is standing, so its rooms are wanted now rather than at the
     // next sweep. NaN before the first sweep, which fails the test and leaves it to the sweep.
@@ -1132,6 +1390,11 @@ export class LayoutStreamer {
       const i = rec.tier.meshes.indexOf(mesh);
       if (i >= 0) rec.tier.meshes.splice(i, 1);
       if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+    }
+    this.dropFurniture(rec.furniture);
+    for (const e of rec.furniture) {
+      const i = rec.tier.furniture.indexOf(e);
+      if (i >= 0) rec.tier.furniture.splice(i, 1);
     }
     for (const w of rec.waters) {
       w.remove();
@@ -1271,6 +1534,7 @@ export class LayoutStreamer {
       this.scene.remove(mesh);
       if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
     }
+    this.dropFurniture(t.furniture);
     for (const b of t.buildings) this.buildings.delete(b);
     for (const o of t.objects) {
       this.removeColliders(o);
@@ -1825,5 +2089,7 @@ export class LayoutStreamer {
     for (const o of [...this.colliders.keys()]) this.removeColliders(o);
     this.hugeQueue.length = 0;
     this.buildings.clear();
+    this.furnitureByHost.clear();
+    this.furnitureSwaps.clear();
   }
 }

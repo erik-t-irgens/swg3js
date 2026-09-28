@@ -462,6 +462,11 @@ export class Npc implements Living, ErrandBody {
   private holder: THREE.Group | null = null;
   private hiltTop = 0.13;
   private blade: SaberBlade | null = null;
+
+  /** Its lit blade's own group, which hangs beside the body rather than under it; null with no blade. */
+  get bladeRoot(): THREE.Object3D | null {
+    return this.blade ? this.blade.group : null;
+  }
   /**
    * This fighter's blade emitter and full-length tip this frame, world space. Each fighter keeps
    * its own: they were once shared by every fighter, and every glow sat at the last one's blade.

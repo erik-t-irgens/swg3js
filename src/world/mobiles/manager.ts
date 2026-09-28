@@ -153,6 +153,13 @@ export interface MobileManagerDeps {
   refuse(): string | null;
   /** Whether shadows are on at all. */
   shadows(): boolean;
+  /**
+   * How the portal renderer's last frame saw the rooms of the body under this root (its group): 0 unseen,
+   * 1 seen, 2 one room past a seen one, -1 left to the frustum (the switch off, nothing drawn since, a body
+   * that frame did not route, or one that counts outdoors). With no answer wired the frustum alone decides,
+   * as it always did.
+   */
+  roomSeen?(root: THREE.Object3D): number;
   /** The weapons rack, once it has loaded (a person's gun or lightsaber comes off it); null until then, or without one. */
   weapons?(): WeaponCatalogue | null;
 }
@@ -180,7 +187,7 @@ const sphere = new THREE.Sphere();
 const tmp = new THREE.Vector3();
 const ZERO = new THREE.Vector3();
 /** The tier's input, filled per mobile every frame rather than made anew. */
-const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange };
+const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange, room: -1 };
 /** Ambient wildlife this far from the player comes back somewhere nearer. */
 const AMBIENT_RANGE = 260;
 /** How often (seconds) a mobile's inside-or-out is asked again, and its shadow flag set. */
@@ -221,6 +228,8 @@ export class MobileManager {
   animRange = LOD_TUNE.animRange;
   /** The last refusal or failure, for the spawner's count line. */
   lastNote = '';
+  /** How many the last step put off screen because their room was not seen, or one room past it (commit 2c). */
+  walled = 0;
   private readonly held = new Map<Mobile, Held>();
   private readonly ragdollQueue: Mobile[] = [];
   private readonly warned = new Set<string>();
@@ -922,6 +931,7 @@ export class MobileManager {
     } else this.camPos.copy(ctx.playerPos);
     const shadows = this.deps.shadows();
     const tune = LOD_TUNE;
+    this.walled = 0;
     for (let i = this.live.length - 1; i >= 0; i--) {
       const m = this.live[i];
       const held = this.held.get(m);
@@ -968,11 +978,16 @@ export class MobileManager {
         m.group.visible = visible;
         held.visible = visible;
       }
-      if (ctx.now - held.lastShadow >= SHADOW_EVERY || held.cast === null) {
+      // A shadow is put on the step it is wanted and taken off on the half-second: a body the frustum or its
+      // room has just brought into view throws its shadow on the frame it is first drawn, never half a second late.
+      const cast = tier.castShadow && !m.hologram;
+      if (ctx.now - held.lastShadow >= SHADOW_EVERY || held.cast === null || (cast && held.cast === false)) {
         held.lastShadow = ctx.now;
-        const cast = tier.castShadow && !m.hologram;
-        if (held.cast !== cast || m.meshes.some((x) => x.castShadow !== cast)) {
-          for (const mesh of m.meshes) mesh.castShadow = cast;
+        const meshes = m.meshes;
+        let differs = held.cast !== cast;
+        for (let k = 0; !differs && k < meshes.length; k++) if (meshes[k].castShadow !== cast) differs = true;
+        if (differs) {
+          for (let k = 0; k < meshes.length; k++) meshes[k].castShadow = cast;
           held.cast = cast;
         }
       }
@@ -986,7 +1001,10 @@ export class MobileManager {
     }
   }
 
-  /** The tier for one mobile: its world sphere against the frustum as it is and grown by the shadow slack. */
+  /**
+   * The tier for one mobile: its world sphere against the frustum as it is and grown by the shadow slack,
+   * and its rooms as the portal renderer's last frame saw them (commit 2c).
+   */
   private tierOf(m: Mobile, camera: THREE.Camera | null, playerPos: THREE.Vector3, shadows: boolean, tune: LodTune, out: LodTier): LodTier {
     const cull = m.plan.cull;
     const radius = (m.ragdoll ? 2 : 1) * cull.radius;
@@ -1011,7 +1029,25 @@ export class MobileManager {
     i.shadows = shadows;
     i.playerDist = m.pos.distanceTo(playerPos);
     i.animRange = this.animRange;
+    // A ragdoll is left to the frustum: its pieces leave the room it fell in.
+    const room = this.deps.roomSeen && !m.ragdoll ? this.deps.roomSeen(m.group) : -1;
+    i.room = room;
+    if (room === 0 || room === 2) this.walled++;
     return lodTier(i, tune, out);
+  }
+
+  /** The building room a mobile is followed in (null out in the open), for the portal renderer's routing. */
+  cellOf(m: Mobile): CellState | null {
+    return this.held.get(m)?.cell ?? null;
+  }
+
+  /**
+   * Where a mobile's feet were when its room was last followed, or null for one not held: how far it has
+   * gone since is how far its room may be behind it (a quarter of a second or two metres while it lives,
+   * everything since its death once it has fallen, since a dead body's room is no longer followed).
+   */
+  cellFromOf(m: Mobile): THREE.Vector3 | null {
+    return this.held.get(m)?.cellFrom ?? null;
   }
 
   /** For `__debug.mobileCull`: every mobile's world sphere, whether it is on and near the screen, drawn, casting, and its tier. */
@@ -1041,6 +1077,8 @@ export class MobileManager {
         visible: m.group.visible,
         castShadow: m.meshes.some((x) => x.castShadow),
         tier: m.tier?.name ?? null,
+        // Its rooms as the portal renderer last saw them: 0 unseen, 1 seen, 2 one room past a seen one, -1 left to the frustum.
+        room: this.deps.roomSeen ? this.deps.roomSeen(m.group) : -1,
       };
     });
   }

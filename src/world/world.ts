@@ -80,7 +80,8 @@ import { ZONE_TIER } from '../space/roster';
 import { SPACE_SKY_TUNE, spaceBodyStandIn, standingBodyMaxDepth, standingBodyPlace, type StandingBodyPlace } from '../space/suns';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
-import { markNarrowRoot } from './portalVis.ts';
+import { cullOn, markNarrowRoot } from './portalVis.ts';
+import { furnitureOn, isFurniture } from './furnitureHost.ts';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
@@ -1331,6 +1332,8 @@ export class World {
       shadows: () => this.renderer?.shadowMap.enabled ?? false,
       // A getter: the rack arrives after the world is made, and a person spawned before it is unarmed.
       weapons: () => this.npcDeps.weapons ?? null,
+      // How the portal renderer's last frame saw a body's rooms: one nobody could see is off screen (commit 2c).
+      roomSeen: (root) => this.roomSeen(root),
     });
     // The fighters stand on a building's floor as the mobiles do: their room followed through the
     // portals (the floor under them is then found by a ray, the terrain outside).
@@ -3610,7 +3613,9 @@ export class World {
     // What first person hides of the player is drawn in every pass once it is shown again: warmed for both.
     const actor = o.layers.isEnabled(ACTOR_LAYER) || isShadowOnly(o.layers.mask);
     const world = o.layers.isEnabled(0);
-    if (actor) return [0, INTERIOR_LAYER];
+    // A room's furniture moves between the rooms' layer alone and the actor layer as its switch is flipped
+    // (`furnitureHost.ts`): warmed for both whatever it is on now, or the next flip builds on a live frame.
+    if (actor || isFurniture(o)) return [0, INTERIOR_LAYER];
     if (interior && !world) return [INTERIOR_LAYER];
     return [0];
   }
@@ -4038,6 +4043,44 @@ export class World {
 
   /** Each ship followed through a building's rooms: where it was last sampled, its room, and the wait until the next sample. */
   private readonly vehicleRooms = new WeakMap<Vehicle, { cell: CellState | null; from: THREE.Vector3; due: number }>();
+
+  /**
+   * The room a ship is followed in (`trackVehicleRoom`): its building and room, null out in the open, and
+   * undefined for a vehicle that is not followed at all (not a ship, or not sampled yet), whose room is
+   * not known -- the portal renderer's routing leaves such a one alone.
+   */
+  vehicleRoomOf(v: Vehicle): CellState | null | undefined {
+    const held = this.vehicleRooms.get(v);
+    return held ? held.cell : undefined;
+  }
+
+  /**
+   * Where the hull's middle was when its room was last followed (`vehicleRoomOf`), or null for a vehicle
+   * not followed: how far it has gone since is how far its room may be behind it.
+   */
+  vehicleRoomFrom(v: Vehicle): THREE.Vector3 | null {
+    return this.vehicleRooms.get(v)?.from ?? null;
+  }
+
+  /**
+   * How the portal renderer's last frame saw the rooms of the body under `root` (commit 2c,
+   * `ActorRoutes.levelOf`): 0 unseen, 1 seen, 2 one room past a seen one, -1 left to the frustum (the
+   * switch off, a body that frame did not route or that counts outdoors, or no frame drawn since the last
+   * step). The routing's own answer, doorways included, so a body it draws is never tiered as walled up.
+   */
+  roomSeen(root: THREE.Object3D): number {
+    return cullOn('seenTiers') && this.portals ? this.portals.actors.levelOf(root) : -1;
+  }
+
+  /** Draw the furniture per building, or everywhere as before, as the switch now says: only a change does anything. */
+  syncFurniture(): void {
+    this.layoutStream?.syncFurniture(furnitureOn());
+  }
+
+  /** What the furniture came to (`__debug.cull()`), or null with no world streaming. */
+  furnitureReport(): ReturnType<LayoutStreamer['furnitureReport']> | null {
+    return this.layoutStream?.furnitureReport() ?? null;
+  }
 
   /**
    * Follow a ship through a building's portals, as a mobile is followed: four times a second, and sooner
@@ -5442,6 +5485,9 @@ export class World {
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     perf.end(SEC.creatures);
     perf.begin(SEC.mobiles);
+    // A step has passed since the last frame was drawn: how that frame saw each body's rooms is read
+    // below, and only while it is the one frame just drawn (`ActorRoutes.levelOf`).
+    this.portals?.actors.tick();
     this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell });
     perf.end(SEC.mobiles);
     perf.begin(SEC.people);

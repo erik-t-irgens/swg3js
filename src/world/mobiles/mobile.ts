@@ -408,6 +408,8 @@ export class Mobile implements Living, NpcSubject {
   private now = 0;
   private frame = 0;
   private animAcc = 0;
+  /** Whether the mixer has run since the model was hung or the bones were put back to rest (`animate`). */
+  private posed = false;
   /** What the body moves at: what the chosen gait's feet show. */
   private speed = 0;
   /** The acceleration's own progress toward the pace, from which the gait is chosen (never overwritten by the gait). */
@@ -638,6 +640,11 @@ export class Mobile implements Living, NpcSubject {
     return !!this.model;
   }
 
+  /** Its lit blade's own group, which hangs beside the body rather than under it; null with no blade. */
+  get bladeRoot(): THREE.Object3D | null {
+    return this.blade ? this.blade.group : null;
+  }
+
   /** Whether it has been taken out of the world. */
   get removed(): boolean {
     return this.disposed;
@@ -714,6 +721,8 @@ export class Mobile implements Living, NpcSubject {
     markActor(scene);
     this.inner.add(scene);
     this.model = scene;
+    // A new skeleton in its rest pose: posed on its first step, whatever its tier.
+    this.posed = false;
     let warning: string | null = null;
     if (pack) {
       this.roles = rolesFor(pack.json, this.entry.gender);
@@ -2459,16 +2468,24 @@ export class Mobile implements Living, NpcSubject {
     this.body.setLinvel({ x: v.x, y: vy, z: v.z }, true);
   }
 
-  /** The mixer at the tier's rate; its time kept, so a thinned mobile's clips run at the right speed. */
+  /**
+   * The mixer at the tier's rate; its time kept, so a thinned mobile's clips run at the right speed. A
+   * body whose mixer has not run since it was hung or stood again is in its rest pose, and is posed once
+   * whatever its tier: one frozen from the start -- in a room nobody could see (commit 2c), or off the
+   * screen -- is otherwise shown in the rest pose on the frame its room or the view first reaches it.
+   */
   private animate(dt: number, tier: LodTier): void {
     const a = this.animator;
     if (!a) return;
     this.animAcc = Math.min(2, this.animAcc + dt);
     const every = tier.animEvery;
-    if (every <= 0) return;
-    if (every > 1 && (this.frame + this.key) % every !== 0) return;
+    if (this.posed) {
+      if (every <= 0) return;
+      if (every > 1 && (this.frame + this.key) % every !== 0) return;
+    }
     a.update(this.animAcc);
     this.animAcc = 0;
+    this.posed = true;
   }
 
   /**
@@ -2503,6 +2520,8 @@ export class Mobile implements Living, NpcSubject {
       bone.quaternion.copy(r.q);
       bone.scale.copy(r.s);
     }
+    // Back in the rest pose: posed again on its next step, whatever its tier.
+    this.posed = false;
     this.dead = false;
     this.deadTimer = 0;
     this.hp = this.maxHp;
