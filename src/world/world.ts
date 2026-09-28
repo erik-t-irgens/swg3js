@@ -69,6 +69,7 @@ import { dropForceLightning, loadForceLightning, stepForceLightning } from '../c
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
 import { liveSettings } from '../core/settings.ts';
+import { CNT, perf, SEC } from '../core/perf.ts';
 import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
 import { remoteInteriors, type RemoteInteriors } from '../net/remoteInterior.ts';
 import { watchPeers } from '../net/remotePlayers.ts';
@@ -4422,11 +4423,13 @@ export class World {
 
   /**
    * A player put down somewhere without walking there (a teleport): stand them in whatever room
-   * holds the point, since no portal was crossed to get in. Returns the cell, or 0 outside.
+   * holds the point, since no portal was crossed to get in. Returns the cell, or 0 outside. `room`,
+   * when the caller knows it (a saved place), is asked for first (`buildingWithRoom`): rooms overhang
+   * one another, and the first box that holds a point is often the room next door.
    */
-  enterCellAt(pos: THREE.Vector3): number {
+  enterCellAt(pos: THREE.Vector3, room = 0): number {
     if (!this.layoutStream) return 0;
-    const state = this.layoutStream.buildingAt(pos);
+    const state = (room > 0 ? this.layoutStream.buildingWithRoom(pos, room) : null) ?? this.layoutStream.buildingAt(pos);
     this.cellState = state;
     this.prevPlayerPos.copy(pos);
     return state?.cell ?? 0;
@@ -5289,9 +5292,15 @@ export class World {
 
   /** `target` is whom the turrets shoot at, or null while nothing should be shot (noclip, riding). */
   update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number, from?: THREE.Vector3) => void, target: TurretTarget | null = null): void {
+    // The frame report's sections (`__debug.perf()`): each is a clock pair on a fixed id, nothing when timing is off.
+    perf.begin(SEC.stream);
     this.stream(playerPos, STREAM_BUDGET);
+    perf.end(SEC.stream);
+    perf.begin(SEC.streamFar);
     this.streamFar(playerPos, 1);
+    perf.end(SEC.streamFar);
     if (this.layoutStream) {
+      perf.begin(SEC.layout);
       // The building the player is in keeps its interior however far its wings reach.
       // Held: nothing is loaded and nothing is dropped. An ultra-fast cruise crosses a region every
       // few dozen milliseconds, and a tier built at that speed would be a collider and a program on
@@ -5299,14 +5308,18 @@ export class World {
       // waits for what stands round where it stopped before the ship is handed back.
       if (!this.streamHold) this.layoutStream.update(playerPos, this.cellState?.building ?? null);
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
+      perf.end(SEC.layout);
     }
+    perf.begin(SEC.particles);
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
     if (this.camera) {
       const fog = this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null;
       this.shipFx.update(dt, this.camera, fog);
       this.weaponFx.update(dt, this.camera, fog);
     }
+    perf.end(SEC.particles);
     this.updateInterior(playerPos);
+    perf.begin(SEC.sky);
     this.day.update(dt, fastTime);
     if (this.swgSky) {
       // What the sky needs from the weather (the area, the level, the blend, the wind) comes first.
@@ -5315,6 +5328,7 @@ export class World {
       this.applySwgLighting(this.swgSky.update(this.day, camPos, dt), playerPos);
       this.refreshEnvironment(dt);
     } else this.applyLighting();
+    perf.end(SEC.sky);
     this.waterBodies.envLight = this.waterEnvLight();
     this.sky.position.copy(camPos);
     this.spaceBodies?.position.copy(camPos);
@@ -5360,10 +5374,14 @@ export class World {
     // in on the first frame and then leave the player standing wherever they were on it.
     if (!this.playerTargetSet) this.setPlayerTarget(playerPos, true, onAttack);
     this.playerTargetSet = false;
+    perf.begin(SEC.living);
     this.stepLiving(dt, playerPos, this.camera);
+    perf.end(SEC.living);
     if (target) this.turrets.update(dt, target, this.bolts);
     this.gallery?.update(dt, playerPos);
+    perf.begin(SEC.ambience);
     this.updateAmbience(dt);
+    perf.end(SEC.ambience);
   }
 
   /**
@@ -5416,8 +5434,13 @@ export class World {
     this.simTime += dt;
     surfaces.update(this.simTime, this.renderer);
     const targets = this.targets(true);
+    perf.begin(SEC.creatures);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
+    perf.end(SEC.creatures);
+    perf.begin(SEC.mobiles);
     this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell });
+    perf.end(SEC.mobiles);
+    perf.begin(SEC.people);
     // The world's own lairs and herds, stood and put away as the player moves. On this clock and
     // not the frame's, so `__debug.advance` drives every respawn it has.
     wildLife.step(dt, this.simTime, playerPos, this.wildDeps());
@@ -5425,11 +5448,15 @@ export class World {
     // The people of ours after the data's own, since they take only the places the data's leave: the
     // travellers at the ports and the fillers in the buildings nobody else stands in.
     ambientPeople.step(dt, this.simTime, playerPos, this.ambientDeps());
+    perf.end(SEC.people);
+    perf.begin(SEC.npcs);
     // `playerPos` is only read by a fighter under a long walk (`src/world/errand.ts`), which measures
     // how far the body was from the player to know whether anything along the route was solid. It is
     // handed in rather than picked out of `targets`, because the player leaves that list while
     // noclipping, aboard or dead and the walk's account must not go blind on any of those.
     this.npcs.update(dt, targets, this.bolts, camera, this.simTime, playerPos);
+    perf.end(SEC.npcs);
+    perf.begin(SEC.ships);
     // The ships that fight: the contacts in step with the vehicles (the player's ship marked), the NPC ships'
     // brains (held, thinking nothing, while play is paused), then every combat's shields, boost and damage bands.
     this.ships.sync(this.vehicles, this.playerShip, this.playerTarget, this.simTime);
@@ -5439,6 +5466,7 @@ export class World {
     // a second, so a held run would otherwise sweep every anchor in the zone and wake all of them.
     this.npcShips?.update(dt, this.simTime, this.simulating && !this.streamHold);
     this.ships.update(dt, this.simTime, this.simulating);
+    perf.end(SEC.ships);
     // A fire the player is carrying is **not** put out from here, and the reason is worth keeping.
     // The obvious line -- while play is simulated, a burning player who has become untargetable has
     // the fire put out -- was here, and it could not do the one job it was written for. The record's
@@ -6107,6 +6135,7 @@ export class World {
     }
     this.terrain.evict(center, this.viewRadius + 2);
     let changed = made > 0;
+    let dropped = 0;
 
     for (const [key, c] of this.chunks) {
       const far = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz));
@@ -6114,13 +6143,23 @@ export class World {
         this.disposeChunk(c);
         this.chunks.delete(key);
         changed = true;
+        dropped++;
       } else if (far <= PHYSICS_RADIUS) {
         this.addChunkPhysics(c);
       } else {
         this.removeChunkPhysics(c);
       }
     }
-    if (changed) for (const t of this.farTiles.values()) this.refreshFarTile(t);
+    // The frame report's streaming counters: what this frame made and dropped, and what re-indexing
+    // the far tiles over them cost.
+    perf.count(CNT.chunksMade, made);
+    perf.count(CNT.chunksDropped, dropped);
+    if (changed) {
+      perf.begin(SEC.farRefresh);
+      for (const t of this.farTiles.values()) this.refreshFarTile(t);
+      perf.end(SEC.farRefresh);
+      perf.count(CNT.farTiles, this.farTiles.size);
+    }
   }
 
   /**

@@ -13,6 +13,7 @@
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 import { isShadowOnly } from '../core/fxRegistry.ts';
+import { CNT, PASS, PERF, perf } from '../core/perf.ts';
 
 export const ACTOR_LAYER = 31;
 export const INTERIOR_LAYER = 1;
@@ -124,15 +125,18 @@ export class PortalRenderer {
    * so one bad mesh costs its own pixels rather than the rest of the frame (which left the
    * water and the doorways half drawn whenever it came into view).
    */
-  private pass(label: string, target: THREE.Object3D, camera: THREE.Camera): void {
+  private pass(label: string, target: THREE.Object3D, camera: THREE.Camera, kind: number): void {
     const info = this.renderer.info.render;
     const c0 = info.calls;
     const t0 = info.triangles;
+    // The frame report counts every draw from here against this kind of pass (`__debug.perf()`).
+    perf.passBegin(kind);
     try {
       this.renderer.render(target as THREE.Scene, camera);
     } catch (err) {
       this.quarantine(target, camera, err);
     }
+    perf.passEnd(kind, info.triangles - t0);
     this.passLog.push({ label, calls: info.calls - c0, triangles: info.triangles - t0 });
     this.passes++;
   }
@@ -190,6 +194,9 @@ export class PortalRenderer {
           if (!SHADOW_STRAYS.keep) return;
         } else SHADOW_STRAYS.foreign++;
       }
+      // Counted for the frame report: a shadow pass's draw with no scene is a real caster, and the
+      // light's camera says which cascade it went into.
+      if (PERF.timing) perf.draw(object, this.shadingShadows && scene === null ? camera : null);
       this.drawing = object;
       direct(camera, scene, geometry, material, object, group);
     };
@@ -333,18 +340,19 @@ export class PortalRenderer {
     }
     m.stencilFuncMask = 0xff;
     m.depthTest = depthTest;
-    for (const mesh of meshes) this.pass('portal', mesh, camera);
+    for (const mesh of meshes) this.pass('portal', mesh, camera, PASS.doorways);
   }
 
   private resetDepth(ref: number, camera: THREE.Camera): void {
     this.resetMat.stencilRef = ref;
-    this.pass('depth reset', this.resetQuad, camera);
+    this.pass('depth reset', this.resetQuad, camera, PASS.doorways);
   }
 
   private renderLayer(scene: THREE.Scene, camera: THREE.Camera, layer: number): void {
     camera.layers.set(layer);
     camera.layers.enable(ACTOR_LAYER);
-    this.pass(layer === INTERIOR_LAYER ? 'interior' : 'world', scene, camera);
+    const interior = layer === INTERIOR_LAYER;
+    this.pass(interior ? 'interior' : 'world', scene, camera, interior ? PASS.interior : PASS.world);
   }
 
   private showInterior(b: Building, on: boolean): void {
@@ -386,13 +394,14 @@ export class PortalRenderer {
     r.shadowMap.needsUpdate = true;
     this.shadingShadows = true;
     try {
-      this.pass('shadows', scene, this.shadowProbe);
+      this.pass('shadows', scene, this.shadowProbe, PASS.shadows);
     } finally {
       this.shadingShadows = false;
       // Once for the pass, not once for each stray: read as its own sentence ("what the last
       // shadow pass met"), a count written only where there was something to count says N for ever
       // after the frame that last met one.
       SHADOW_STRAYS.seen = this.strays;
+      perf.count(CNT.strays, this.strays);
     }
     if (view) this.showInterior(view, false);
   }
