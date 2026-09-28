@@ -18,6 +18,7 @@ import { surfaces } from './surfaces.ts';
 // because an emitter wrongly refused there is indistinguishable from an effect that never played.
 import { FOUNTAIN_SPRAY_TUNE, emitterKept, isFountainSpray, type DrawableEmitter } from './particleDraw.ts';
 import { SWOOSH_TUNE, SwooshTrail, stripQuads, writeStrip, type SwooshDef } from './swooshTrail.ts';
+import { keepUploadRange, type UploadRange } from './uploadRange.ts';
 
 export interface WaveForm {
   /** 0 linear, 1 spline (drawn as linear). */
@@ -405,6 +406,11 @@ interface Batch {
   entries: QueueEntry[];
   /** Ribbons drawn in this batch this frame, after its particles (a kept array, emptied each frame). */
   strips: SwooshInstance[];
+  /**
+   * The upload range each attribute is handed (position, colour, uv), one kept object apiece
+   * (`keepUploadRange`): a batch refilled on frames nothing draws it must not pile ranges up.
+   */
+  ranges: [UploadRange, UploadRange, UploadRange];
 }
 
 /**
@@ -1498,7 +1504,7 @@ export class ParticleEffects {
     mesh.visible = false;
     this.scene.add(mesh);
     this.batchMaterials.push(material);
-    b = { key, blend, mesh, material, capacity: 0, positions: new Float32Array(0), colors: new Float32Array(0), uvs: new Float32Array(0), queue: [], entries: [], strips: [] };
+    b = { key, blend, mesh, material, capacity: 0, positions: new Float32Array(0), colors: new Float32Array(0), uvs: new Float32Array(0), queue: [], entries: [], strips: [], ranges: [{ start: 0, count: 0 }, { start: 0, count: 0 }, { start: 0, count: 0 }] };
     this.grow(b, 256);
     this.batches.set(key, b);
     return b;
@@ -1863,12 +1869,17 @@ export class ParticleEffects {
     g.setDrawRange(0, total * 6);
     b.mesh.visible = total > 0;
     if (total > 0) {
-      (g.getAttribute('position') as THREE.BufferAttribute).addUpdateRange(0, total * 12);
-      (g.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
-      (g.getAttribute('aColor') as THREE.BufferAttribute).addUpdateRange(0, total * 16);
-      (g.getAttribute('aColor') as THREE.BufferAttribute).needsUpdate = true;
-      (g.getAttribute('uv') as THREE.BufferAttribute).addUpdateRange(0, total * 8);
-      (g.getAttribute('uv') as THREE.BufferAttribute).needsUpdate = true;
+      // One kept range per attribute, never three's `addUpdateRange`, which makes one a call and lets
+      // them pile up on every frame nothing draws the batch (the weather's, while a room hides the world).
+      const position = g.getAttribute('position') as THREE.BufferAttribute;
+      keepUploadRange(position.updateRanges, b.ranges[0], 0, total * 12);
+      position.needsUpdate = true;
+      const colour = g.getAttribute('aColor') as THREE.BufferAttribute;
+      keepUploadRange(colour.updateRanges, b.ranges[1], 0, total * 16);
+      colour.needsUpdate = true;
+      const uvs = g.getAttribute('uv') as THREE.BufferAttribute;
+      keepUploadRange(uvs.updateRanges, b.ranges[2], 0, total * 8);
+      uvs.needsUpdate = true;
     }
     return total;
   }

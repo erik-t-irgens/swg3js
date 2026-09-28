@@ -80,6 +80,7 @@ import { ZONE_TIER } from '../space/roster';
 import { SPACE_SKY_TUNE, spaceBodyStandIn, standingBodyMaxDepth, standingBodyPlace, type StandingBodyPlace } from '../space/suns';
 import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
+import { markNarrowRoot } from './portalVis.ts';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
@@ -2996,6 +2997,9 @@ export class World {
   attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean, portals: PortalRenderer): void {
     this.portals = portals;
     this.camera = camera;
+    // The world pass drawn from inside a building may leave out what these hold when it misses the
+    // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
+    if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
     // The sun, sky light and their shadows stay on the world layer: rooms are lit by their own
     // lights, as in the client, and never by sunlight through the walls.
     if (!shadows || this.csm) return;
@@ -6203,6 +6207,10 @@ export class World {
       if (!geometry) continue;
       const mesh = new THREE.Mesh(geometry, this.groundMaterial);
       mesh.receiveShadow = true;
+      // Its vertices never move (only which quads are indexed does), and it stands at the origin, so
+      // its geometry's sphere is its sphere in the world, for the world pass from inside (`markNarrowRoot`).
+      if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+      if (geometry.boundingSphere) markNarrowRoot(mesh, geometry.boundingSphere);
       this.chunkRoot.add(mesh);
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
       this.refreshFarTile(mesh);
@@ -6238,6 +6246,10 @@ export class World {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });
     group.add(propGroup);
+    // The chunk's sphere in the world, ground and plants together, so the world pass drawn from inside a
+    // building can leave the chunk out when it misses the exits' view (`markNarrowRoot`).
+    const sphere = chunkSphere(group);
+    if (sphere) markNarrowRoot(group, sphere);
     this.chunkRoot.add(group);
     this.chunks.set(key, { key, cx, cz, group, colliders, heights, physics: null });
     const b = this.groundHiddenFor;
@@ -6249,6 +6261,35 @@ export class World {
       }
     }
   }
+}
+
+const chunkBox = new THREE.Box3();
+const chunkPart = new THREE.Sphere();
+
+/**
+ * A terrain chunk's sphere in the world, over its ground and whatever grows on it: every mesh's own
+ * sphere (an instanced mesh's covers its copies) put into the world and boxed. Made once, with the chunk.
+ */
+function chunkSphere(group: THREE.Group): THREE.Sphere | null {
+  group.updateMatrixWorld(true);
+  chunkBox.makeEmpty();
+  group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    let s: THREE.Sphere | null = null;
+    if ((m as THREE.InstancedMesh).isInstancedMesh) s = (m as THREE.InstancedMesh).boundingSphere;
+    else {
+      if (!m.geometry.boundingSphere) m.geometry.computeBoundingSphere();
+      s = m.geometry.boundingSphere;
+    }
+    if (!s || s.isEmpty()) return;
+    chunkPart.copy(s).applyMatrix4(m.matrixWorld);
+    const c = chunkPart.center;
+    const r = chunkPart.radius;
+    chunkBox.expandByPoint(tmpV.set(c.x - r, c.y - r, c.z - r));
+    chunkBox.expandByPoint(tmpV.set(c.x + r, c.y + r, c.z + r));
+  });
+  return chunkBox.isEmpty() ? null : chunkBox.getBoundingSphere(new THREE.Sphere());
 }
 
 /** Yaw of a w,x,y,z quaternion: the heading of its forward vector, as the client uses for terrain layers. */

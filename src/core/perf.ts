@@ -108,6 +108,12 @@ const COUNTER_DEFS = [
   { key: 'programsPlay', group: 'streaming', label: 'programs in play', kind: 'sum', scale: 1 },
   { key: 'portalMaterials', group: 'scene', label: 'portal materials', kind: 'last', scale: 1 },
   { key: 'mobiles', group: 'scene', label: 'mobiles', kind: 'last', scale: 1 },
+  // The portal renderer's visible set (step 1): the flood's room visits, the room meshes shown in the
+  // views, the frames inside that drew no world at all, and the roots the exit narrowing left out.
+  { key: 'cullVisits', group: 'cull', label: 'visits', kind: 'mean', scale: 1 },
+  { key: 'cullRooms', group: 'cull', label: 'room meshes', kind: 'mean', scale: 1 },
+  { key: 'cullSkips', group: 'cull', label: 'world skipped', kind: 'sum', scale: 1 },
+  { key: 'cullNarrowed', group: 'cull', label: 'narrowed out', kind: 'mean', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },
