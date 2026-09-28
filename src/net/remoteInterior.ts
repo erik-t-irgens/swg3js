@@ -44,7 +44,7 @@
 // this file makes the place and takes it down again.
 import * as THREE from 'three';
 import { measureBox } from './remoteBodies.ts';
-import type { Physics } from '../core/physics.ts';
+import { isEngineFault, type Physics } from '../core/physics.ts';
 import type { Garage, VehicleDef } from '../vehicles/garage.ts';
 import type { ShipInterior } from '../vehicles/interior.ts';
 import type { Vehicle, VehicleSpec } from '../vehicles/vehicle.ts';
@@ -401,8 +401,12 @@ export class RemoteInteriors implements PeerWatcher {
       hull.interior = null;
       try {
         hull.dispose(deps.physics, deps.scene);
-      } catch {
-        // The world went under it; its body belongs to a world that has been freed and is gone with it.
+      } catch (e) {
+        // A panic of the engine's breaks the world the stand-in's body is in, and is said so there, where
+        // the recovery starts, rather than swallowed here and met again as "recursive use" a frame later
+        // with nothing to say where it began. Anything else is this dispose's own: the world went under it.
+        if (isEngineFault(e)) deps.physics.fail(e);
+        else console.warn('remote rooms: the stand-in hull of rooms that could not be built did not go quietly', e);
       }
       throw err;
     }
@@ -493,7 +497,9 @@ export class RemoteInteriors implements PeerWatcher {
       try {
         room.hull.dispose(deps.physics, deps.scene);
       } catch (err) {
-        console.warn(`remote rooms: ${room.label}: its stand-in hull did not go quietly`, err);
+        // As when a build fails: the engine's panic is the world's, and is said there; anything else is ours.
+        if (isEngineFault(err)) deps.physics.fail(err);
+        else console.warn(`remote rooms: ${room.label}: its stand-in hull did not go quietly`, err);
       }
     } else {
       // The world it was built in has been freed: its body went with it, and only the rooms' own

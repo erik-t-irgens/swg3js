@@ -217,6 +217,34 @@ const main = await Physics.create();
   still.dispose();
 }
 
+/**
+ * How many times a room's own world is freed, counted as it happens (and still freed): the only honest
+ * witness of the rule below, since whether a world was freed cannot be read back off it afterwards.
+ */
+function watchFree(room: SurfaceRoom): { freed: number } {
+  const w = room.physics.world;
+  const tally = { freed: 0 };
+  const free = w.free.bind(w);
+  w.free = () => {
+    tally.freed++;
+    free();
+  };
+  return tally;
+}
+
+/** What a call says through `console.warn`, kept rather than printed. */
+function warnings(run: () => void): string[] {
+  const said: string[] = [];
+  const was = console.warn;
+  console.warn = (...a: unknown[]) => void said.push(a.map(String).join(' '));
+  try {
+    run();
+  } finally {
+    console.warn = was;
+  }
+  return said;
+}
+
 // --- 5c: the room's world is never freed under something else that lives in it -----------------------
 {
   const R = 20;
@@ -226,10 +254,29 @@ const main = await Physics.create();
   // have the next frame reading bodies that are gone.
   const stranger = room.physics.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 2, 0));
   room.physics.world.createCollider(RAPIER.ColliderDesc.ball(0.3), stranger);
-  room.dispose();
+  const tally = watchFree(room);
+  const said = warnings(() => room.dispose());
   ok(room.contains(new THREE.Vector3()) === false, '5c: the room is given up');
-  // Freed, this throws: the world is still there, because something else was in it.
-  ok(room.physics.world.bodies.len() > 0, '5c: and its world is left alone rather than freed under what is still in it');
+  ok(tally.freed === 0 && room.physics.world.bodies.len() > 0, '5c: and its world is left alone rather than freed under what is still in it');
+  ok(said.length === 1 && /1 bodies that are not its own/.test(said[0]), `5c: and it says so, counting the one body that is not its own and not the wrapper's (${said[0] ?? 'nothing said'})`);
+}
+
+// --- 5d: and a room that holds nothing but its own pieces is freed -----------------------------------
+// The other half of the same rule, and the half a leak would break silently: the physics wrapper keeps a
+// body of its own in every world (src/core/physics.ts, `keeper`), so a room that counted the world's
+// bodies rather than the wrapper's would always find one more than its own, never free its world, and say
+// only a warning -- every time the boots let go, a whole Rapier world left behind.
+{
+  const R = 20;
+  const room = SurfaceRoom.take(main, new THREE.Vector3(0, R, 0), new THREE.Vector3(0, 1, 0), null, anyShip, 10);
+  if (!room) throw new Error('no room');
+  ok(room.physics.world.bodies.len() === room.physics.bodyCount() + 1, '5d: the world holds one body more than anybody put in it, the wrapper\'s own');
+  const tally = watchFree(room);
+  const said = warnings(() => room.dispose());
+  ok(tally.freed === 1, '5d: a room holding nothing but its own pieces frees its world when it is given up, the wrapper\'s body notwithstanding');
+  ok(said.length === 0, `5d: and has nothing to warn about (${said.join('; ') || 'nothing said'})`);
+  room.dispose();
+  ok(tally.freed === 1, '5d: and given up twice, frees it once');
 }
 
 // --- 6: a surface that moves -----------------------------------------------------------------------

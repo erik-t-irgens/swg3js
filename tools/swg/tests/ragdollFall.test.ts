@@ -101,10 +101,12 @@ function floorIn(w: Physics): void {
   w.world.createCollider(RAPIER.ColliderDesc.cuboid(60, 0.5, 60).setTranslation(0, -0.5, 0).setFriction(1));
 }
 
-/** The one body in a world of one piece. */
+/** The one body in a world of one piece (the wrapper's own collider-less keeper is not a piece: src/core/physics.ts). */
 function onlyBody(w: Physics): RAPIER.RigidBody {
   const found: RAPIER.RigidBody[] = [];
-  w.world.forEachRigidBody((b) => found.push(b));
+  w.world.forEachRigidBody((b) => {
+    if (!w.isKeeper(b)) found.push(b);
+  });
   assert.equal(found.length, 1, 'the limb worlds hold exactly one body');
   return found[0];
 }
@@ -462,7 +464,13 @@ ok(near(physics.world.gravity.y, -GRAVITY, 1e-9), `0: the game pulls everything 
   ok(w.steps === steps + 1, '10: and it counts as a step, so whatever was waiting for the world to move knows that it has');
   rd.dispose();
   const source = readFileSync(new URL('../../../src/core/physics.ts', import.meta.url), 'utf8');
-  ok(/stepOnce\(\): void \{\s*if \(this\.ragdolls\.size\) this\.refreshMovers\(\);\s*this\.world\.step\(this\.events, this\.hooks\);/.test(source), '10: and it refreshes what the filter needs first, exactly as the loop does');
+  // Through `readMovers`, which is `refreshMovers` behind the step's own catch (tools/swg/tests/physicsStep.test.ts, 3b).
+  ok(/stepOnce\(\): void \{\s*if \(this\.broken\) return;\s*if \(this\.ragdolls\.size && !this\.readMovers\(\)\) return;\s*this\.stepWorld\(\);/.test(source), '10: and it refreshes what the filter needs first, exactly as the loop does');
+  ok(/if \(this\.ragdolls\.size && !this\.readMovers\(\)\) return;\s*let n = 0;/.test(source) && /private readMovers\(\): boolean \{\s*try \{\s*this\.refreshMovers\(\);/.test(source), '10: the loop and the one-off step read the movers the same way, and it is the walk the filter needs');
+  // Both go through the one engine step, which is the one that passes the queue (and writes the
+  // keeper first: tools/swg/tests/physicsStep.test.ts).
+  const one = /private stepWorld\(\): boolean \{[\s\S]*?\n  \}/.exec(source)?.[0] ?? '';
+  ok(/this\.world\.step\(this\.events, this\.hooks\);/.test(one) && (source.match(/this\.world\.step\(/g) ?? []).length === 1, '10: and that step is the only call into the engine\'s own, and it passes the queue');
   // The pass the filter needs is over every body in the streamed world; the closure that walks it
   // is kept rather than made afresh on every frame anything is dead.
   ok(/private readonly noteMover = \(b: RAPIER\.RigidBody\): void =>/.test(source) && /forEachRigidBody\(this\.noteMover\)/.test(source), '10: and the walk over every body is one kept arrow, not one made per step');

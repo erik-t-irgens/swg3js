@@ -2212,7 +2212,9 @@ export class Vehicle {
     // The paint's own copies leave the world's material sets (its `forget`) and are disposed; the GLB's materials stay.
     this.paint?.dispose();
     this.paint = null;
-    physics.world.removeRigidBody(this.body);
+    // Never a body the world no longer holds: a second dispose would otherwise be a panic that breaks the
+    // whole world (src/core/physics.ts, `removeBody`).
+    physics.removeBody(this.body);
     scene.remove(this.group);
     this.group.traverse((o) => {
       const m = o as THREE.Mesh;

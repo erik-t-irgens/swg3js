@@ -84,10 +84,73 @@ interface RagdollPiece {
   ignore: Set<number>;
 }
 
+/**
+ * What happens when the engine panics anyway, in its own step or anywhere else (see `Physics.broken`).
+ * `reload` is whether the game then saves the character where it stands and reloads the page into it,
+ * which is the only way back to a world that steps; off, the game stops where it is (no frame touches
+ * the world again, the last picture stays) and the message line says to reload. The console knob is
+ * `__debug.physics({ reload: false })`, which a driven tab wants, since a reload takes its frame pump
+ * with it.
+ */
+export const PHYSICS_RECOVERY = { reload: true };
+
+/**
+ * Whether a thrown error came out of the physics engine itself, which is the one piece of WebAssembly
+ * in the game: a panic inside it (a WebAssembly trap, `RuntimeError: unreachable`), or the "recursive
+ * use of an object detected" that every later call into that world meets, because a panic unwinds past
+ * the code that would have handed back what the call had borrowed. Either one means a world that can
+ * never be called into again. A call on a body or a collider the world no longer holds is the usual
+ * way in -- reading, writing or removing a body already removed is a panic -- and it can happen
+ * anywhere a frame reaches the engine, not only in the step.
+ */
+export function isEngineFault(err: unknown): boolean {
+  if (typeof WebAssembly !== 'undefined' && err instanceof WebAssembly.RuntimeError) return true;
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return /recursive use of an object detected/.test(message);
+}
+
 /** Thin wrapper around a Rapier world with a fixed-step accumulator. */
 export class Physics {
   readonly world: RAPIER.World;
   private acc = 0;
+  /**
+   * A body of the engine's own that nothing else ever touches: fixed, with no collider, so it is in
+   * no query, no contact and no island. It is written, to the very value it already holds, before
+   * every step (`stepWorld`), and that write is the whole of the fix for the one panic the engine
+   * has been seen to throw from inside its own step.
+   *
+   * Rapier 0.35 (@dimforge/rapier3d-compat 0.20) keeps, for its continuous collision pass, a list of
+   * every fixed collider in the world with its box -- while there are 512 of them or fewer; past that
+   * the pass uses the broad phase's own tree, which is always current, and that is why this struck in
+   * open country and never in a town. It throws the list away only on a step that both runs the pass
+   * (something is moving fast) **and** carries a user change, a body or a collider added, removed or
+   * written since the step before. A collider taken away on a step where nothing was fast is therefore
+   * never struck off, and the next step on which something fast crosses the box it had with nothing
+   * written that step -- in play the second and later of a frame's catch-up steps -- looks it up by a
+   * handle the world no longer holds: `colliders[handle]`, a panic inside `World.step`, after which
+   * every call into this world fails as "recursive use of an object". What falls there is a corpse, a
+   * creature or a prop left lying on ground the streamer has just taken away under a player who went
+   * a long way off. Upstream fixed it in rapier 0.36 (rapier3d-compat 0.21): "the CCD no longer
+   * sweeps against a stale list of fixed colliders after they were added, removed or moved during a
+   * step where no body needed CCD". Writing this body makes every step one that carries a user change,
+   * so the list is made afresh on every step that reads it; it costs one call a step and, on a step
+   * with something fast, the engine's rebuild of the list (about 0.03 ms, measured). The failing
+   * sequence is built in a real world, and both halves pinned, in `tools/swg/tests/physicsStep.test.ts`.
+   */
+  private readonly keeper: RAPIER.RigidBody;
+  /**
+   * The engine's panic, once this world has met one (`fail`). A panic leaves what the call had
+   * borrowed of this world borrowed for good -- inside the step that is every set it has -- so nothing
+   * on this world can be called again, and nothing here tries: `step` and `stepOnce` return at once
+   * from then on and never throw. The engine itself survives it -- another world, made before or after,
+   * with an event queue of its own, steps and answers as before -- but every body and collider the game
+   * holds in this one would have to be made again, which is a whole session's worth; see
+   * `Physics.onBroken`. Whatever else in a frame calls into this world still throws; the game stops
+   * running its frames once told (main.ts, `physicsBroke`).
+   */
+  broken: Error | null = null;
+  /** Told once for each world that breaks, the main one or a room's: the game saves the character and reloads into it (`PHYSICS_RECOVERY`). */
+  static onBroken: ((physics: Physics, err: Error) => void) | null = null;
   /** The ragdolls' colliders: they touch only what stands still, and one another only by the rule in `hooks`. */
   private readonly ragdolls = new Map<number, RagdollPiece>();
   /** Group numbers handed out one to a corpse, so no two corpses ever share one. */
@@ -159,6 +222,96 @@ export class Physics {
     // More solver passes than the default four: a ragdoll is a chain of twenty jointed pieces
     // against the ground, and with four they shiver where they lie.
     this.world.integrationParameters.numSolverIterations = 8;
+    this.keeper = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  }
+
+  /**
+   * How many bodies the world holds besides the one of its own (`keeper`): what a caller that counts
+   * the bodies in a world it made means by "every body in it".
+   */
+  bodyCount(): number {
+    return this.world.bodies.len() - 1;
+  }
+
+  /** Whether a body is the one this wrapper keeps for itself, for anything that walks every body. */
+  isKeeper(body: RAPIER.RigidBody): boolean {
+    return body.handle === this.keeper.handle;
+  }
+
+  /**
+   * One step of the engine, with the keeper written first so that the step carries a user change
+   * (see `keeper`), and a throw caught here rather than left to fail the frame: false once the world
+   * has broken, and nothing is asked of it again.
+   */
+  private stepWorld(): boolean {
+    if (this.broken) return false;
+    try {
+      // The value it already holds: nothing moves, and the write is what the engine counts.
+      this.keeper.setLinearDamping(0);
+      // The hooks run only on the step that takes an event queue; without one they are silently left out.
+      this.world.step(this.events, this.hooks);
+    } catch (err) {
+      // Nothing thrown out of the step is anything but the engine's: a throw inside one of the hooks
+      // is swallowed by the engine's own glue and never reaches here.
+      this.fail(err);
+      return false;
+    }
+    this.steps++;
+    return true;
+  }
+
+  /**
+   * This world has met a panic of the engine's (`isEngineFault`), in its own step or anywhere else a
+   * caller reached it -- the frame loop's catch, a dispose that found the world already gone bad --
+   * and can never be called into again: kept in `broken`, said once, and told once to `onBroken`, which
+   * is where the game saves and reloads. The step's own catch comes here, and so does anything that
+   * meets the fault first; asked again once broken it does nothing.
+   */
+  fail(err: unknown): void {
+    if (this.broken) return;
+    this.broken = err instanceof Error ? err : new Error(String(err));
+    this.acc = 0;
+    console.error('physics: the engine panicked and this world cannot be called into again:', this.broken);
+    const tell = Physics.onBroken;
+    if (!tell) return;
+    try {
+      tell(this, this.broken);
+    } catch (e) {
+      console.error('physics: the recovery failed', e);
+    }
+  }
+
+  /**
+   * Whether a call into this world still goes through, asked without stepping it: a write to the keeper
+   * takes the bodies for writing and a count takes the colliders for reading, which between them fail on
+   * every panic that leaves the bodies borrowed (every call on a body, the step, the queries and the
+   * character controller) and on one that left the colliders held for writing. A collider read panicked
+   * on leaves them held only for reading, which this cannot see and the next step or collider write
+   * will; it is for telling which of two worlds went bad, not a promise that one is sound. The count is
+   * the engine's own (`raw`): the wrapper's `colliders.len()` is answered on the JavaScript side and
+   * never reaches the engine at all.
+   */
+  answers(): boolean {
+    if (this.broken) return false;
+    try {
+      this.keeper.setLinearDamping(0);
+      this.world.colliders.raw.len();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Take a body out, once. A body the world no longer holds is left alone rather than removed again:
+   * the engine's own removal asks the body for its colliders first, and on a body already gone that is a
+   * panic that leaves the whole world unusable. A world already broken is not asked at all. Anything the
+   * engine throws here is not caught: a fault met in a dispose is the frame's to report, not a thing to
+   * swallow where it happened.
+   */
+  removeBody(body: RAPIER.RigidBody): void {
+    if (this.broken || !body.isValid()) return;
+    this.world.removeRigidBody(body);
   }
 
   /** A group number of its own for one corpse: every piece of it is marked with this and no other body ever takes it. */
@@ -241,15 +394,17 @@ export class Physics {
   steps = 0;
 
   step(dt: number): void {
+    if (this.broken) return;
     this.acc += dt;
     // Which bodies move on their own, for the contact filter, which cannot ask once the step has
     // begun. Only while there is a corpse in the world: nothing else reaches that branch.
-    if (this.ragdolls.size) this.refreshMovers();
+    if (this.ragdolls.size && !this.readMovers()) return;
     let n = 0;
     while (this.acc >= FIXED_DT && n < 4) {
-      // The hooks run only on the step that takes an event queue; without one they are silently left out.
-      this.world.step(this.events, this.hooks);
-      this.steps++;
+      if (!this.stepWorld()) {
+        this.acc = 0;
+        return;
+      }
       this.acc -= FIXED_DT;
       n++;
     }
@@ -266,9 +421,25 @@ export class Physics {
    * raw call is not used anywhere a body can be dead.
    */
   stepOnce(): void {
-    if (this.ragdolls.size) this.refreshMovers();
-    this.world.step(this.events, this.hooks);
-    this.steps++;
+    if (this.broken) return;
+    if (this.ragdolls.size && !this.readMovers()) return;
+    this.stepWorld();
+  }
+
+  /**
+   * `refreshMovers` behind the same catch as the step: it walks every body in the world, so on a world
+   * a panic elsewhere has left its bodies held for writing it is the first call of the step to find
+   * out, and a throw from here would fail the frame every frame without the world ever being called
+   * broken. False once the world has broken.
+   */
+  private readMovers(): boolean {
+    try {
+      this.refreshMovers();
+      return true;
+    } catch (err) {
+      this.fail(err);
+      return false;
+    }
   }
 
   /**

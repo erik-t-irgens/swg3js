@@ -67,7 +67,8 @@ export interface NestEffect {
 /** What a nest needs of the world. Narrow, so a node test can be the world. */
 export interface NestDeps {
   scene: THREE.Object3D;
-  physics: { world: RAPIER.World };
+  /** The world's physics; its bodies are taken out through `removeBody`, which never removes one twice (src/core/physics.ts). */
+  physics: { world: RAPIER.World; removeBody(body: RAPIER.RigidBody): void };
   /** The collision groups a thing standing outdoors takes. */
   outdoorGroups(): number;
   /** Give a material back before it is disposed: the portal set and the cascades both hold them. */
@@ -568,13 +569,9 @@ export class WildNest implements Hittable {
     const deps = this.deps;
     for (const h of this.fxHandles) deps?.effects?.remove(h);
     this.fxHandles.length = 0;
-    if (this.body) {
-      try {
-        deps?.physics.world.removeRigidBody(this.body);
-      } catch {
-        /* the world may already have gone */
-      }
-    }
+    // Once, and never a body the world no longer holds: removing one twice is a panic that breaks the
+    // whole world, and a catch here would only have hidden where it happened.
+    if (this.body) deps?.physics.removeBody(this.body);
     this.body = null;
     this.collider = null;
     this.group?.removeFromParent();
@@ -795,13 +792,8 @@ export class WildCamp {
     const deps = this.deps;
     for (const h of this.fxHandles) deps?.effects?.remove(h);
     this.fxHandles.length = 0;
-    if (this.body) {
-      try {
-        deps?.physics.world.removeRigidBody(this.body);
-      } catch {
-        /* the world may already have gone */
-      }
-    }
+    // As a nest's: once, and never a body the world no longer holds.
+    if (this.body) deps?.physics.removeBody(this.body);
     this.body = null;
     this.colliders.length = 0;
     this.group?.removeFromParent();

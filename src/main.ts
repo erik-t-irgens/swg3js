@@ -10,7 +10,7 @@ import type { ClassId, Kit, KitContext } from './combat/kit';
 import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
 import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { Input, type Action } from './core/input';
-import { Group as ColliderGroup, Physics, groups as colliderGroups } from './core/physics';
+import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
 import { MARK_WORLD, marks, type MarkPlace } from './world/marks.ts';
@@ -465,6 +465,16 @@ function setTune(tune: object, from: object | undefined): void {
     else if (typeof was === 'number' && typeof v === 'number' && Number.isFinite(v) && v >= 0) t[k] = v;
   }
 }
+
+/**
+ * What a page reloaded out of a broken physics world leaves for the page it reloads into
+ * (`App.physicsBroke`, `App.resumeAfterBreak`): the character to go straight back into, and when that
+ * last happened, so a world that breaks again within `BREAK_RELOAD_GAP` milliseconds stops instead of
+ * reloading for ever. Session storage, so it belongs to this tab and nothing else.
+ */
+const BREAK_RESUME = 'swg3js.physics.resume';
+const BREAK_RELOADED_AT = 'swg3js.physics.reloadedAt';
+const BREAK_RELOAD_GAP = 120_000;
 
 class App {
   private torch!: THREE.SpotLight;
@@ -3054,6 +3064,28 @@ class App {
       ragdoll: (tune?: Partial<typeof RAGDOLL>) => {
         if (tune) Object.assign(RAGDOLL, tune);
         return { ...RAGDOLL, hooks: { ...this.physics.hookStats }, bodies: [...this.world.creatures.creatures.map((c) => c.ragdoll?.status ?? null), ...this.world.npcs.npcs.map((n) => n.ragdoll?.status ?? null), this.player.ragdoll?.status ?? null].filter(Boolean) };
+      },
+      /**
+       * The engine's own step (src/core/physics.ts): how many steps the world has taken, whether it has
+       * broken and on what, and whether a break reloads the page into the same character where it
+       * stood (`PHYSICS_RECOVERY.reload`). `physics({ reload: false })` leaves a broken world stopped
+       * instead, which a driven tab wants, since a reload takes its frame pump with it.
+       */
+      physics: (opts?: Partial<typeof PHYSICS_RECOVERY>) => {
+        if (opts && typeof opts.reload === 'boolean') PHYSICS_RECOVERY.reload = opts.reload;
+        const room = this.player.aboard?.physics ?? null;
+        // Nothing is asked of a world that has broken: every call into it would throw.
+        const sound = !this.physics.broken;
+        return {
+          steps: this.physics.steps,
+          bodies: sound ? this.physics.bodyCount() : null,
+          colliders: sound ? (this.physics.world.colliders?.len() ?? null) : null,
+          broken: this.physics.broken ? String(this.physics.broken.message) : null,
+          room: room ? { steps: room.steps, broken: room.broken ? String(room.broken.message) : null } : null,
+          // Whether the frames have stopped for it (`physicsBroke`), which a room's world breaking does too.
+          stopped: this.physicsFailed,
+          ...PHYSICS_RECOVERY,
+        };
       },
       /**
        * The loose props: `props()` says how many are standing, awake and asleep; `props({ sleep: 4 })`
@@ -6856,6 +6888,104 @@ class App {
     this.select.show(loadCharacters());
     // Where the character stands is written back now and then, and when the page goes.
     window.addEventListener('pagehide', () => this.savePlace(true));
+    // A physics world that breaks is not stepped again; the page is reloaded into the character that
+    // was playing, and here is where the reloaded page picks it back up.
+    Physics.onBroken = (p, err) => this.physicsBroke(p, err);
+    this.resumeAfterBreak();
+  }
+
+  /**
+   * Whether a broken physics world has already been dealt with in this page. From the moment it is set
+   * the frame loop stops at its top (`run`), so nothing calls into the world again.
+   */
+  private physicsFailed = false;
+
+  /**
+   * A frame failed on a panic of the physics engine's (`isEngineFault`) somewhere other than in a step's
+   * own catch -- the commonest way in is a call on a body the world no longer holds, which breaks the
+   * world wherever it is made, and every frame after it then fails at its first call into that world,
+   * before the step is ever reached. Which world is asked of the two a frame calls into, the world's own
+   * and the room the player stands in (`Physics.answers`); when neither says, it is the world's own,
+   * which is the one every frame reaches. From there it is exactly a broken step (`physicsBroke`).
+   */
+  private engineFault(err: unknown): void {
+    if (this.physicsFailed) return;
+    const room = this.player.aboard?.physics ?? null;
+    const at = room && room !== this.physics && !room.answers() && this.physics.answers() ? room : this.physics;
+    at.fail(err);
+    // A world broken already, whose telling went nowhere: the frames stop all the same.
+    if (!this.physicsFailed) this.physicsBroke(at, at.broken ?? (err instanceof Error ? err : new Error(String(err))));
+  }
+
+  /**
+   * A physics world has broken (src/core/physics.ts, `Physics.broken`), in its own step or wherever else
+   * the engine panicked: nothing in that world can be called again, and every body, collider and
+   * controller the game holds is in it, the player's own included. The engine itself survives -- a world
+   * made afresh steps -- but there is no one path in the game that makes every one of those things
+   * again, so the way back is the one path that does: the character is saved where it stands and the
+   * page is reloaded straight back into it (`resumeAfterBreak`). Said once, in words, whichever world
+   * broke. The frames stop here either way (`run`) and the sound with them, since nothing can be moved
+   * again. Not reloaded twice within `BREAK_RELOAD_GAP`, so a world that breaks as it loads stops and says
+   * so rather than reloading for ever; nor when `PHYSICS_RECOVERY.reload` is off: the game is left
+   * stopped where it was, with a line saying to reload and the mouse given back.
+   */
+  private physicsBroke(p: Physics, err: Error): void {
+    if (this.physicsFailed) return;
+    this.physicsFailed = true;
+    try {
+      this.audio.stopAll();
+    } catch {
+      /* the sound is a courtesy */
+    }
+    const which = p === this.physics ? 'the world' : 'a ship’s rooms';
+    const c = this.current;
+    let last = 0;
+    try {
+      last = Number(sessionStorage.getItem(BREAK_RELOADED_AT) ?? 0) || 0;
+    } catch {
+      /* no storage: treated as never */
+    }
+    const again = Date.now() - last < BREAK_RELOAD_GAP;
+    if (!PHYSICS_RECOVERY.reload || !c || !this.inWorld || this.creating || again) {
+      this.messages.system(`the physics engine failed in ${which} (${err.message}) and it cannot move again; ${again ? 'it failed again just after a reload, so ' : ''}reload the page to go on`);
+      // Nothing more happens in this page, so the pointer is handed back for the menu and the browser.
+      this.freeMouse(true);
+      return;
+    }
+    this.messages.system(`the physics engine failed in ${which}; you are being put back where you stood`);
+    try {
+      this.savePlace(true);
+    } catch (e) {
+      console.warn('physics: could not save the place before reloading; the last place saved stands', e);
+    }
+    try {
+      sessionStorage.setItem(BREAK_RESUME, c.id);
+      sessionStorage.setItem(BREAK_RELOADED_AT, String(Date.now()));
+    } catch {
+      /* no storage: the page reloads to the select screen */
+    }
+    try {
+      this.loadingScreen.show(this.world.planet, 'Rebuilding the world', 'the physics engine failed');
+    } catch {
+      /* the curtain is a courtesy */
+    }
+    setTimeout(() => location.reload(), 1200);
+  }
+
+  /** Straight back into the character a broken physics world reloaded the page out of (`physicsBroke`). */
+  private resumeAfterBreak(): void {
+    let id: string | null = null;
+    try {
+      id = sessionStorage.getItem(BREAK_RESUME);
+      sessionStorage.removeItem(BREAK_RESUME);
+    } catch {
+      return;
+    }
+    if (!id) return;
+    const c = loadCharacters().find((x) => x.id === id);
+    if (!c) return;
+    console.info('physics: the last page reloaded out of a broken physics world; going straight back in');
+    this.select.onPlay?.(c);
   }
 
   // ---- The Escape menu and its settings. ----
@@ -7123,6 +7253,9 @@ class App {
     // Nobody's music carries to the next character.
     band.clear();
     this.map.hide();
+    // A death still on the screen goes with the world (`endDeath`), and before the ship is left: a corpse
+    // aboard lies in the room's own physics, which goes with the hull.
+    this.endDeath();
     if (this.player.mounted) this.handleMount();
     // Off the ship before its room's physics world goes with the world.
     if (this.player.aboard) this.leaveShip(true);
@@ -12053,10 +12186,31 @@ class App {
     this.fade.textContent = 'YOU HAVE BECOME ONE WITH THE FORCE';
     this.fade.classList.add('on');
     await new Promise((r) => setTimeout(r, 1400));
+    // Put away meanwhile, for the select screen (`endDeath`): there is no world left to come round in.
+    if (!this.dying) return;
     this.respawn();
     this.drawFrame();
     await new Promise((r) => setTimeout(r, 200));
     this.fade.classList.remove('on');
+  }
+
+  /**
+   * A death put away without a respawn, because the world it happened in is being left for the select
+   * screen: the card and its choices (which are this world's facilities), a shuttle rescue that was
+   * waiting on the respawn, and the corpse, whose pieces are in this world's physics or a ship's room's.
+   * Nothing else ends a death on that road, so without it the next character played -- the same one or
+   * another -- arrived dead, under the card, with the camera following the last body's pieces as they fell
+   * through the ground that had gone from under them, and from a room's world freed with its hull the
+   * pieces could not be read at all. The place the body lay is where the character is kept; the next
+   * arrival stands it up there whole (`Player.reset`).
+   */
+  private endDeath(): void {
+    this.death.classList.remove('on');
+    this.fade.classList.remove('on');
+    this.deathChoices = [];
+    this.rideRescue = null;
+    this.player.endRagdoll();
+    this.dying = false;
   }
 
   /**
@@ -14365,6 +14519,12 @@ class App {
       try {
         step();
       } catch (err) {
+        // A panic of the physics engine's, met anywhere in the frame and not only in the step: a call
+        // on a body the world no longer holds breaks the world wherever it is made, and every frame
+        // after it would fail here, at the first call into that world, long before the step's own
+        // catch is reached. So the frame names it (`engineFault`), which stops the frames and starts
+        // the recovery exactly as a panic in the step does.
+        if (isEngineFault(err)) this.engineFault(err);
         const key = String((err as Error)?.message ?? err);
         const now = performance.now();
         if ((seen.get(key) ?? -Infinity) < now - 5000) {
@@ -14396,6 +14556,17 @@ class App {
         // The mixer still steps: the select screen and the creator have their own clicks, and the
         // bank's slices and the loops' clocks must go on whether a world is up or not.
         this.stepAudio(dt);
+        input.endFrame();
+        return;
+      }
+      // A physics world that has broken is never called into again (`physicsBroke`), and nearly all of
+      // the rest of this frame calls into one -- the body, the creatures, the vehicles, the camera's own
+      // block test, even the room's air as the picture is drawn -- so the frame ends here, before any of
+      // it: the last picture stays on the screen, the line saying what happened stays with it, and
+      // nothing moves or fails again until the page is reloaded (by itself, or by hand when the recovery
+      // is off or has just been tried). Nothing ages either, the message line included, which is what
+      // keeps that line up.
+      if (this.physicsFailed) {
         input.endFrame();
         return;
       }
