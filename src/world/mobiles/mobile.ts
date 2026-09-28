@@ -52,6 +52,7 @@ import { NavAgent } from '../nav/navAgent.ts';
 import { DOOR_TUNE, DoorLegs, doorwayNav, placeOfCell, placeOfWalk, wallBetween, type GoalPlace } from '../nav/doorway.ts';
 import { MOBILE_GRID_ACROSS, outdoorNav } from '../nav/outdoorNav.ts';
 import { PATROL_TUNE, keepPatrol, thinkWalking, type Patrol } from '../patrols.ts';
+import { walkDecision, type RoutineWalk } from '../ambient/routines.ts';
 import type { CellState } from '../layoutStream';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
 import { describeRoles, idleClipFor, ownGunIsPistol, rolesFor } from './packClips';
@@ -320,6 +321,23 @@ export class Mobile implements Living, NpcSubject {
   homeCell: CellState | null = null;
   /** The round a town's walker walks (`patrols.ts`); null for everything else. */
   patrol: Patrol | null = null;
+  /**
+   * One of ours walked by a routine rather than a brain (`src/world/ambient/`): where it is going and in
+   * which room, or what it faces while it stands, written in place by whatever walks it. It is read on
+   * every thought of a body that is part of the furniture, which every one of ours is.
+   */
+  routine: RoutineWalk | null = null;
+  /**
+   * Whether the mood it was stood in is for sitting down alone: a person of ours bound for a seat is
+   * lent the chair's idle and stands in its own until it really sits (`sit`), since a lent sitting idle
+   * played in a doorway is a body sitting on the air.
+   */
+  seatedIdleOnly = false;
+  /** Where it sits, while it sits (`sit`): held there, out of the solver. Null while it stands. */
+  private seatAt: { x: number; y: number; z: number; heading: number } | null = null;
+  /** Its own pack's idle and the one laid over it (a mood's): what `sit` and `rise` move between. */
+  private plainIdle: string | null = null;
+  private laidIdle: string | null = null;
   /** Every time the stuck check has found it stuck, for the console: never reset, unlike `stuck`. */
   stuckEvents = 0;
   /**
@@ -703,8 +721,13 @@ export class Mobile implements Living, NpcSubject {
       // clips the bake left out falls back on, below.
       const ownRanged = this.roles.ranged;
       const ownAdditive = this.roles.rangedAdditive;
+      // Its own idle, kept before anything is laid over it, so one of ours bound for a seat stands in
+      // it until it sits and in the lent one only once it does (`sit`, `rise`).
+      this.plainIdle = this.roles.idle;
       // A rifle's carry, a Jedi's swings: laid over the pack's roles, with any clips they name.
       if (extras?.roles) Object.assign(this.roles, extras.roles);
+      this.laidIdle = this.roles.idle;
+      if (this.seatedIdleOnly && !this.seatAt) this.roles.idle = this.plainIdle;
       const clips = extras?.clips?.size ? new Map([...pack.clips, ...extras.clips]) : pack.clips;
       const animator = new MobileAnimator(scene, clips, pack.additive);
       this.animator = animator;
@@ -1242,8 +1265,10 @@ export class Mobile implements Living, NpcSubject {
 
   knock(dir: THREE.Vector3, power: number): void {
     // Driven from elsewhere: where it goes is the keeper's to say, and a shove written into a
-    // kinematic body here would be undone by the next word about it anyway.
-    if (this.dead || this.disposed || this.driven) return;
+    // kinematic body here would be undone by the next word about it anyway. Sat on a seat (`sit`) it is
+    // held there out of the solver, and the seated branch of `update` runs none of the timers that
+    // would get it up off the floor again: a knockdown there would lie at the chair until its stay ran out.
+    if (this.dead || this.disposed || this.driven || this.seatAt) return;
     const k = power * this.plan.knockResist;
     // A strong shove throws it up as well; a bolt's nudge does not make it hop.
     const lift = k >= 6 ? Math.max(k * 0.55, 2) : k * 0.25;
@@ -1297,8 +1322,9 @@ export class Mobile implements Living, NpcSubject {
 
   holdAt(point: THREE.Vector3, dt: number): void {
     // Held by the Force is a thing done to a body, and a driven one is not this browser's body to
-    // move: the power fires and the creature goes on walking wherever its keeper says.
-    if (this.dead || this.disposed || this.driven || !this.plan.canHold) return;
+    // move: the power fires and the creature goes on walking wherever its keeper says. One sat on a
+    // seat is held there (`sit`) and stays sat, as it does under a shove (`knock`).
+    if (this.dead || this.disposed || this.driven || this.seatAt || !this.plan.canHold) return;
     this.heldUntil = this.now + Math.max(0.05, dt * 3);
     this.stunned = Math.max(this.stunned, 0.3);
     this.grounded = false;
@@ -1674,6 +1700,16 @@ export class Mobile implements Living, NpcSubject {
       this.updateBlade(dt, ctx.camera);
       return;
     }
+    // 6b. Sat down by one of ours (`sit`): held on its seat, out of the solver, in its seated idle. It
+    // still thinks, since whatever walks it says when it gets up; nothing else of it runs.
+    if (this.seatAt) {
+      if (this.routine && this.now >= this.thinkAt) {
+        this.thinkRoutine();
+        this.thinkAt = this.now + tier.think;
+      }
+      this.animate(sdt, tier);
+      return;
+    }
     // 7. Timers.
     this.stunned = Math.max(0, this.stunned - sdt);
     // On the simulated clock beside the rest, so `__debug.advance` moves the recoil window the aim
@@ -1688,8 +1724,13 @@ export class Mobile implements Living, NpcSubject {
     // 9. Think. One that is essential does not: it stands where it was stood, faces the way it was
     // faced, and takes no interest in anything. Skipping the whole brain rather than gating each of
     // its branches is the point -- there is no state it can be left in and nothing to come out of.
-    // The one thing such a body does do is walk a town's round, which asks nothing of the brain.
-    if (this.now >= this.thinkAt && !this.downPhase && (!this.essential || this.patrol)) {
+    // The one thing such a body does do is walk a town's round, which asks nothing of the brain -- or,
+    // for one of ours, the walk its routine gives it, which asks nothing of the brain either.
+    if (this.routine && this.now >= this.thinkAt && !this.downPhase) {
+      this.thinkRoutine();
+      this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
+    }
+    if (!this.routine && this.now >= this.thinkAt && !this.downPhase && (!this.essential || this.patrol)) {
       if (this.essential) this.thinkWalker();
       else this.think(ctx);
       this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
@@ -1971,6 +2012,75 @@ export class Mobile implements Living, NpcSubject {
   }
 
   /**
+   * One of ours: no brain and no targets, only the walk its routine has given it (`walkDecision`), in
+   * the one decision the body keeps for its life. Its home follows the point it walks to, so nothing
+   * that measures a leash from home ever pulls it back to where it was stood.
+   */
+  private thinkRoutine(): void {
+    const w = this.routine;
+    if (!w) return;
+    const d = walkDecision(this.walkerDecision, w);
+    this.walkerDecision = d;
+    if (w.going) {
+      this.homeX = w.goal.x;
+      this.homeZ = w.goal.z;
+    }
+    this.goal = d.goal;
+    this.state = d.state;
+    this.decision = d;
+  }
+
+  /**
+   * Sit on a seat: put exactly there, facing the way the seat faces, held out of the solver (a seat is
+   * solid, and a body stood inside one would be shoved off it) and playing the idle it was lent for
+   * sitting. For the people of ours; nothing else sits.
+   */
+  sit(x: number, y: number, z: number, heading: number): void {
+    if (this.disposed || this.dead) return;
+    this.seatAt = { x, y, z, heading };
+    if (this.body.isValid()) {
+      this.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+      this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    }
+    this.placeAt(x, y, z, heading);
+    this.speed = 0;
+    this.ramp = 0;
+    this.heldUntil = 0;
+    // Knocked down on the way to the seat: up at once, since nothing in the seated branch of `update`
+    // would ever get it up again, and a knockdown's hold ending in `lieDown` would lay it on the chair.
+    if (this.downPhase) {
+      this.downPhase = null;
+      this.state = 'idle';
+      this.stunned = 0;
+      this.animator?.stopShot(0.1);
+    }
+    if (this.roles && this.laidIdle) this.roles.idle = this.laidIdle;
+    this.animator?.loop(this.idleNow(), 1);
+  }
+
+  /** Get up off a seat onto the spot in front of it, a body in the solver again standing in its own idle. */
+  rise(x: number, z: number): void {
+    if (!this.seatAt || this.disposed) return;
+    const y = this.seatAt.y;
+    const heading = this.seatAt.heading;
+    this.seatAt = null;
+    if (this.body.isValid()) {
+      this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+      this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      this.body.setGravityScale(gravityFor(this.airless, this.swimming, this.flyer, this.dead), true);
+    }
+    this.placeAt(x, y + 0.05, z, heading);
+    resetStepWalker(this.stepWalk);
+    if (this.roles && this.plainIdle && this.seatedIdleOnly) this.roles.idle = this.plainIdle;
+    this.thinkAt = 0;
+  }
+
+  /** Whether it is sitting on a seat just now. */
+  get seated(): boolean {
+    return this.seatAt !== null;
+  }
+
+  /**
    * Whether a wall stands between this body and a living thing (see `apart`): in different places by
    * the rooms the two are followed in, and no open doorway between their middles (`wallBetween`).
    */
@@ -2001,6 +2111,15 @@ export class Mobile implements Living, NpcSubject {
    */
   private placeOfGoal(d: Decision | null): GoalPlace | null {
     if (!d) return null;
+    // One of ours: its routine says where the point it walks to is -- a room of a building, or out in
+    // the open -- so the doorway join walks it in through a door and out of one.
+    const w = this.routine;
+    if (w) {
+      if (!w.going) return null;
+      this.goalPlace.building = w.building;
+      this.goalPlace.room = w.building ? w.room : 0;
+      return this.goalPlace;
+    }
     const p = this.patrol;
     const onRound = !!p && (d.goal === p.goal || d.state === 'return');
     return placeOfWalk(this.goalPlace, d.state, onRound, p ? p.anchor.room : undefined, this.homeCell, this.navCell);

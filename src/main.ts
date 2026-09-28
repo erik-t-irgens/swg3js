@@ -94,6 +94,9 @@ import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { wildLife, NEST_MODEL_TUNE, WILD_TUNE, tuneTable } from './world/wildLife.ts';
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
+import { ambientPeople, OURS_TUNE, type AmbientPort } from './world/ambient/ambientPeople.ts';
+import { ROUTINE_TUNE } from './world/ambient/routines.ts';
+import { FILLER_TUNE } from './world/ambient/fillers.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
@@ -1841,6 +1844,58 @@ class App {
           return { went: p, cell, note: p.indoors ? 'indoors: they stand once the building around them is built' : 'they stand on the next pass' };
         }
         return { ready: standingPeople.ready, ...standingPeople.last, side: standingPeople.side, ...(moved.length ? { moved } : {}), standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
+      },
+      /**
+       * The people of ours (`src/world/ambient/`): the travellers who come to a port for each round of its
+       * shuttle -- in through the starport's door, to a terminal, out to the collector, up the ramp when
+       * the shuttle really waits -- and the ones it brings, and the people in the buildings the data
+       * leaves empty. With nothing it counts them by stage, says how much of the cap on part-of-the-
+       * furniture people the data's own left them and how much model memory is in use, and tallies what
+       * has become of them (stood, boarded, missed the shuttle, arrived, let go stuck, left a building).
+       *
+       * `{ list: true }` lists every one of them, each marked `ours: true`, with what it is doing and how
+       * far it has to go. `{ port: true }` is the nearest port as its travellers see it -- the shuttle's
+       * phase, its rounds about now, and each traveller's moment, phase and stage -- and `{ port: 'Mos
+       * Eisley' }` a port by name. `{ buildings: true }` is the buildings near you: each one's kind,
+       * whether the data leaves it empty, its places and who is in them. `{ go: 'port' }` puts you by the
+       * nearest port's collector (or the one `port` names), `{ go: 'building' }` inside the nearest empty
+       * building, and `{ go: 'cantina' }` (any kind) the nearest empty one of that kind. `{ tune: { ours:
+       * { perPass: 4 }, routine: { stagger: 20 }, fillers: { stay: [30, 60] } } }` moves any number of
+       * `OURS_TUNE`, `ROUTINE_TUNE` and `FILLER_TUNE` live, each under its own name; a key only one of
+       * them has may be given bare (`{ tune: { stagger: 20 } }`), and a bare key two of them have
+       * (`build`, `drop`, `reach`, `front`) moves nothing and is named back under `ambiguous`. `{ on:
+       * false }` puts every one of them away, and `{ restand: true }` puts them away to be stood again on
+       * the next pass.
+       */
+      ours: (opts?: { tune?: Record<string, unknown>; port?: boolean | string; list?: boolean; buildings?: boolean; go?: string; on?: boolean; restand?: boolean }) => {
+        const deps = this.world.ambientDeps();
+        const tuned = opts?.tune ? ambientPeople.retune(opts.tune) : null;
+        const moved = tuned ? { ...(tuned.moved.length ? { moved: tuned.moved } : {}), ...(tuned.ambiguous.length ? { ambiguous: tuned.ambiguous } : {}) } : {};
+        if (typeof opts?.on === 'boolean') OURS_TUNE.on = opts.on;
+        if (opts?.restand) ambientPeople.clear(deps);
+        const at = this.player.worldPos;
+        const seconds = sharedClock.walkSeconds();
+        const named = typeof opts?.port === 'string' ? opts.port : undefined;
+        if (opts?.go === 'port') {
+          const p = ambientPeople.portReport(at, seconds, named) as { name: string; collector: { x: number; z: number } | null } | null;
+          if (!p || !p.collector) return { went: null, note: 'no port with a shuttle and a collector on this world' };
+          const to = new THREE.Vector3(p.collector.x + 2, this.world.terrain.heightAt(p.collector.x + 2, p.collector.z) + 0.3, p.collector.z);
+          this.player.reset(to);
+          const cell = this.world.enterCellAt(to);
+          return { went: p.name, cell, note: 'by its collector: its travellers are stood on the next pass, where their day has got to' };
+        }
+        if (opts?.go) {
+          const b = ambientPeople.emptyNear(at, deps, opts.go === 'building' ? undefined : opts.go);
+          if (!b) return { went: null, note: `no empty ${opts.go === 'building' ? 'building' : opts.go} with room for anybody has streamed in near you` };
+          const inside = this.world.enterBuilding(b);
+          if (!inside) return { went: null, note: 'that building has no room to stand in' };
+          this.player.reset(inside.at.clone());
+          return { went: String((b.model.def as { id?: string }).id ?? b.template), cell: inside.cell, note: 'its people of ours stand on the next pass once its rooms are built' };
+        }
+        if (opts?.list) return { ...moved, ours: ambientPeople.list(at) };
+        if (opts?.port) return { ...moved, port: ambientPeople.portReport(at, seconds, named), ports: ambientPeople.portList(at).slice(0, 6) };
+        if (opts?.buildings) return { ...moved, buildings: ambientPeople.buildingReport(at, deps) };
+        return { ...ambientPeople.report(deps), ...moved, tune: { ours: { ...OURS_TUNE }, routine: { ...ROUTINE_TUNE }, fillers: { ...FILLER_TUNE } } };
       },
       /**
        * How hard the world's own people and creatures are: one scale on the health and the blows of
@@ -10741,6 +10796,7 @@ class App {
     this.travelStood.pack = pack;
     const things = this.travelThings();
     const rigged = new Set<number>();
+    const clocks = new Map<number, { name: string; times: ShuttleTimes }>();
     for (const [i, t] of things.entries()) {
       if (this.travelRowsFor !== pack) return;
       // A shuttle with a rig is the rig, landing and lifting off on the round everybody shares; one
@@ -10756,9 +10812,49 @@ class App {
         state: () => shuttleAt(name, sharedClock.walkSeconds(), TRAVEL_TUNE, times, kept),
       });
       if (this.travelRowsFor !== pack) return;
-      if (stood) rigged.add(i);
+      if (stood) {
+        rigged.add(i);
+        clocks.set(i, { name, times });
+      }
     }
+    // The people of ours who travel: every port with a shuttle and a collector, on the very clock its
+    // stood shuttle is posed by, so the travellers board the shuttle that is drawn.
+    ambientPeople.usePorts(pack, this.ambientPortsOf(pack, things, clocks), this.world.ambientDeps());
     void this.standTravelRest(pack, things, rigged);
+  }
+
+  /**
+   * A world's ports as the people of ours use them: each shuttle with its clock's name and times (the
+   * stood rig's own, else the name the collector's words use and the old glide), its pad, the collector
+   * and terminals of its own building, and where somebody boarding it walks to -- the stood rig's ramp or
+   * side (`ShuttleRigs.boardingSpot`), or for a shuttle standing as its still model, six metres off it
+   * toward the collector.
+   */
+  private ambientPortsOf(pack: string, things: readonly TravelThing[], clocks: ReadonlyMap<number, { name: string; times: ShuttleTimes }>): AmbientPort[] {
+    const out: AmbientPort[] = [];
+    for (const [i, t] of things.entries()) {
+      if (t.kind !== 'shuttle') continue;
+      const same = things.filter((o) => o.bx === t.bx && o.bz === t.bz);
+      const c = same.find((o) => o.kind === 'collector') ?? null;
+      const clock = clocks.get(i);
+      const key = `travel:${pack}:${i}`;
+      out.push({
+        name: this.portOfBuilding(t)?.name ?? `${Math.round(t.bx)},${Math.round(t.bz)}`,
+        clock: clock?.name ?? this.shuttleKey(t),
+        times: clock?.times ?? this.shuttleTimes(t),
+        pad: { x: t.x, y: t.y, z: t.z, yaw: t.yaw, cell: t.cell },
+        collector: c ? { x: c.x, y: c.y, z: c.z, yaw: c.yaw, cell: c.cell } : null,
+        terminals: same.filter((o) => o.kind === 'terminal').map((o) => ({ x: o.x, y: o.y, z: o.z, yaw: o.yaw, cell: o.cell })),
+        bx: t.bx,
+        bz: t.bz,
+        boarding: (towards, into) => {
+          if (clock) return this.shuttleRigs?.boardingSpot(key, towards, into) ?? null;
+          const d = Math.hypot(towards.x - t.x, towards.z - t.z) || 1;
+          return into.set(t.x + ((towards.x - t.x) / d) * 6, t.y, t.z + ((towards.z - t.z) / d) * 6);
+        },
+      });
+    }
+    return out;
   }
 
   /** The rest of a world's travel things, once its shuttles stand: the terminals, the collectors, and any shuttle whose rig would not stand, as its still model. */

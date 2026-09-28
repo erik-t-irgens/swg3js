@@ -16,7 +16,7 @@
 
 import * as THREE from 'three';
 import { landMood } from '../world/rideRoute.ts';
-import { chainPose, landingJoin, poseRigAction, rigPathOf, takeoffCut, type ChainLink, type RigActions, type RigMoment, type RigPath } from '../world/rigPath.ts';
+import { chainPose, landingJoin, poseRigAction, rampFootOf, rigPathOf, takeoffCut, type ChainLink, type RigActions, type RigMoment, type RigPath } from '../world/rigPath.ts';
 import type { RigClips, RigPose, TravelRig } from '../world/travelTerminal.ts';
 import type { VehicleDef } from './garage';
 
@@ -180,35 +180,6 @@ export function assembleRigModel(skeleton: { scene: THREE.Object3D; animations: 
   else chainPose(chain, null, 0, ground.pos, ground.quat);
   model.updateMatrixWorld(true);
   return { model, carrier, joints, hull, chain, limbClips, fullClips, ground, pieces: hung };
-}
-
-/**
- * The foot of a hull's ramp in the model's frame, as it stands now: the lowest point of the piece on a
- * door joint, and of the points within five centimetres of that the one farthest out from the hull's
- * long axis, which is the ramp's far edge on the ground. Null for a rig with no door.
- */
-function rampFootOf(model: THREE.Object3D, pieces: readonly { joint: string; model: THREE.Object3D }[]): THREE.Vector3 | null {
-  model.updateMatrixWorld(true);
-  const toModel = new THREE.Matrix4().copy(model.matrixWorld).invert();
-  const m = new THREE.Matrix4();
-  const v = new THREE.Vector3();
-  const points: THREE.Vector3[] = [];
-  for (const p of pieces) {
-    if (!/door/i.test(p.joint)) continue;
-    p.model.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      const pos = mesh.isMesh ? mesh.geometry.getAttribute('position') : undefined;
-      if (!pos) return;
-      m.multiplyMatrices(toModel, mesh.matrixWorld);
-      for (let i = 0; i < pos.count; i++) points.push(v.fromBufferAttribute(pos, i).applyMatrix4(m).clone());
-    });
-  }
-  if (!points.length) return null;
-  let low = Infinity;
-  for (const p of points) low = Math.min(low, p.y);
-  let best: THREE.Vector3 | null = null;
-  for (const p of points) if (p.y - low < 0.05 && (!best || Math.abs(p.x) > Math.abs(best.x))) best = p;
-  return best;
 }
 
 /** A box as the garage frames a machine on it: its middle across and along, its underside, its height, half its width and length, and its reach. */

@@ -43,6 +43,10 @@ import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
+import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
+import { sharedClock } from './sharedClock.ts';
+import { worldNav } from './nav/nav.ts';
+import { MOBILE_CACHE } from './mobiles/assets.ts';
 import { DIFFICULTY } from './difficulty.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
@@ -1651,6 +1655,7 @@ export class World {
     outdoorNav.unload();
     wildLife.unload();
     standingPeople.unload();
+    ambientPeople.unload();
     // The water's height field holds a mesh and a material per thing that waded here, and the keys
     // are the bodies themselves: a world left with them still in the map holds every one of them.
     for (const body of this.simBodies.values()) body.dispose();
@@ -3982,6 +3987,9 @@ export class World {
     // the warm-up that follows instead of a few at a time on live frames as the player walks in.
     // The cap is the same forty; what the force changes is only the three-a-pass trickle.
     standingPeople.step(0, this.simTime, new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z), this.peopleDeps(), true);
+    // And the people of ours in what is left, for the same reason: whoever is due at a port or in an
+    // empty building is stood now and compiled behind the screen with everybody else.
+    ambientPeople.step(0, this.simTime, new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z), this.ambientDeps(), true);
     markActor(this.creatures.group);
     // Turrets are spawned from the NPC tab (B) now, not stood around the arrival point.
     markActor(this.turrets.group);
@@ -4740,6 +4748,71 @@ export class World {
     return this.peopleDepsKept;
   }
 
+  /** What the people of ours are allowed to ask of this world. Kept, like the wild world's. */
+  private ambientDepsKept: AmbientDeps | null = null;
+  ambientDeps(): AmbientDeps {
+    if (!this.ambientDepsKept) {
+      const none: Building[] = [];
+      this.ambientDepsKept = {
+        catalogue: () => this.mobileCatalogue,
+        // `ours:` and never shared: no server has heard of one of ours, and none will (`sharesOnWire`).
+        // Part of the furniture always, and stood as `spawned` under a world name for the reasons the
+        // data's own people are: left where it was put, and never counted by the hand-spawn cap.
+        spawn: (entry, at, how) =>
+          this.mobiles?.spawn(entry, at, {
+            origin: 'spawned',
+            seed: how.seed,
+            inside: how.inside,
+            worldId: `ours:${how.id}`,
+            essential: true,
+            overrides: how.overrides,
+            mood: how.mood,
+            weapons: how.weapons,
+            weaponGroups: how.weaponGroups,
+            room: how.room,
+          }) ?? 'no world',
+        remove: (m) => this.mobiles?.remove(m),
+        held: () => this.streamHold || this.sceneOnly || !this.simulating,
+        world: () => (this.planet?.space ? '' : standingPeople.world || this.packId),
+        seconds: () => sharedClock.walkSeconds(),
+        buildings: () => this.layoutStream?.buildings ?? none,
+        buildingAt: (x, z) => this.layoutStream?.buildingPlacedAt(x, z) ?? null,
+        containedNear: (x, z, reach, out) => this.layoutStream?.containedNear(x, z, reach, out) ?? 0,
+        cellAt: (b, x, y, z) => this.layoutStream?.cellAt(b, tmpV.set(x, y, z)) ?? 0,
+        exits: (b) => doorwayNav.exits(b),
+        floor: (b, cell) => worldNav.floorFor(b, cell),
+        groundAt: (x, z) => this.terrain.heightAt(x, z),
+        // Open ground on the walk grid, and not a building's own footprint; with no grid, anywhere.
+        walkable: (x, z) => (outdoorNav.ready ? outdoorNav.walkable(x, z) && !outdoorNav.indoors(x, z) : null),
+        reachable: (x, z, gx, gz) => outdoorNav.reachable(x, z, gx, gz),
+        cellReady: (x, y, z) => this.groundAt(x, y + 2, z, true) !== null,
+        // Only what stands still: a body walking over the spot is not a table on it (`stillOnly`).
+        floorsAt: (x, z, top, bottom) => this.physics.floorsAt(x, z, top, bottom, true),
+        memory: () => ({ used: this.mobiles?.assets.referencedBytes() ?? 0, budget: MOBILE_CACHE.budget }),
+        cost: (entry) => {
+          const cat = this.mobileCatalogue;
+          return cat && this.mobiles ? this.mobiles.assets.wouldCost(entry, cat) : 0;
+        },
+        people: standingPeople,
+        peopleDeps: () => this.peopleDeps(),
+      };
+    }
+    return this.ambientDepsKept;
+  }
+
+  /**
+   * Put the player inside a building: a standing spot in the room its way in opens into, and the cell.
+   * For the console's own way to the people of ours (`__debug.ours({ go })`). Null when the building has
+   * no rooms to stand in.
+   */
+  enterBuilding(b: Building): { at: THREE.Vector3; cell: number } | null {
+    const entry = this.layoutStream?.entryOf(b);
+    if (!entry) return null;
+    this.cellState = { building: b, cell: entry.cell };
+    this.prevPlayerPos.copy(entry.at);
+    return { at: entry.at, cell: entry.cell };
+  }
+
   get layoutCenter(): { x: number; z: number } | null {
     return this.pack?.layout?.center ?? null;
   }
@@ -5349,6 +5422,9 @@ export class World {
     // not the frame's, so `__debug.advance` drives every respawn it has.
     wildLife.step(dt, this.simTime, playerPos, this.wildDeps());
     standingPeople.step(dt, this.simTime, playerPos, this.peopleDeps());
+    // The people of ours after the data's own, since they take only the places the data's leave: the
+    // travellers at the ports and the fillers in the buildings nobody else stands in.
+    ambientPeople.step(dt, this.simTime, playerPos, this.ambientDeps());
     // `playerPos` is only read by a fighter under a long walk (`src/world/errand.ts`), which measures
     // how far the body was from the player to know whether anything along the route was solid. It is
     // handed in rather than picked out of `targets`, because the player leaves that list while

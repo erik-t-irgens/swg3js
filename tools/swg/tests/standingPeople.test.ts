@@ -348,6 +348,24 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   ok(m.standingIds() === 'farthest,near', `only the one whose memory is needed is put down, though the farther one was counted first (${m.standingIds()})`);
   ok(p.last.swapped === 1, 'one put down');
 }
+{
+  // Nobody of its own far enough off to give back what a near one needs: nobody is put down, and the
+  // pass says how much it was short, for the people of ours (`src/world/ambient/`) to give back. A pass
+  // that really ran is numbered, so the shortfall is answered once.
+  const m = memory({ far1: 1, far2: 1, near: 6 });
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'far1', id: 'far1', z: 100 }), row({ who: 'far2', id: 'far2', z: 104 }), row({ who: 'near', id: 'near', z: 0 })]);
+  p.step(0, 0, new THREE.Vector3(0, 0, 200), m.deps, true);
+  m.fill();
+  const before = p.last.pass;
+  p.step(0, 1, new THREE.Vector3(0, 0, 0), m.deps, true);
+  ok(m.standingIds() === 'far1,far2' && p.last.short === 1 && p.last.shortBytes === 6, `short of 6 with only 2 farther off to give back, nobody is put down and the pass says so (${p.last.short} row short by ${p.last.shortBytes})`);
+  ok(p.last.pass === before + 1, 'and the pass is numbered');
+  p.step(0.1, 1.1, new THREE.Vector3(0, 0, 0), m.deps);
+  ok(p.last.pass === before + 1 && p.last.shortBytes === 6, "a step that returns before it looks neither numbers a pass nor forgets the last one's shortfall");
+  p.unload();
+  ok(p.last.short === 0 && p.last.shortBytes === 0, 'and a world unloaded is short of nothing');
+}
 
 // ------------------------------------------------------------------ the world holding still
 {

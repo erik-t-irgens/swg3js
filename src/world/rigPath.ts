@@ -180,6 +180,37 @@ export function poseRigAction(state: RigActions, role: RigPose['role'], seconds:
   state.mixer.update(0);
 }
 
+/**
+ * The foot of a hull's ramp in the model's frame, as it stands now: the lowest point of the piece on a
+ * door joint, and of the points within five centimetres of that the one farthest out from the hull's
+ * long axis, which is the ramp's far edge on the ground. Null for a rig with no door. The hull a trip is
+ * flown in and the shuttle stood on its pad both find their ramps with it, so a passenger boarding the
+ * one and a traveller boarding the other walk to the same place.
+ */
+export function rampFootOf(model: THREE.Object3D, pieces: readonly { joint: string; model: THREE.Object3D }[]): THREE.Vector3 | null {
+  model.updateMatrixWorld(true);
+  const toModel = new THREE.Matrix4().copy(model.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  const v = new THREE.Vector3();
+  const points: THREE.Vector3[] = [];
+  for (const p of pieces) {
+    if (!/door/i.test(p.joint)) continue;
+    p.model.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      const pos = mesh.isMesh ? mesh.geometry.getAttribute('position') : undefined;
+      if (!pos) return;
+      m.multiplyMatrices(toModel, mesh.matrixWorld);
+      for (let i = 0; i < pos.count; i++) points.push(v.fromBufferAttribute(pos, i).applyMatrix4(m).clone());
+    });
+  }
+  if (!points.length) return null;
+  let low = Infinity;
+  for (const p of points) low = Math.min(low, p.y);
+  let best: THREE.Vector3 | null = null;
+  for (const p of points) if (p.y - low < 0.05 && (!best || Math.abs(p.x) > Math.abs(best.x))) best = p;
+  return best;
+}
+
 // ---------------------------------------------------------------- a clip as a path
 
 /**

@@ -41,7 +41,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
 import type { EffectHandle } from './particles.ts';
-import { inSight, poseRigAction, type Pad } from './rigPath.ts';
+import { inSight, poseRigAction, rampFootOf, type Pad } from './rigPath.ts';
 import { surfaces } from './surfaces.ts';
 import { markFires, rigPose, shuttleShake, windowOpen, type RigClips, type RigPose, type ShuttleState, type ShuttleTimes, type TravelRig } from './travelTerminal.ts';
 
@@ -695,12 +695,23 @@ interface Stood {
   fx: RigFx;
   /** The joint its body is measured from: whether it would be seen, and where a hull flown in its place is measured against. */
   body: THREE.Object3D;
+  /** Its pieces hung on door joints, whose parked pose has the foot of its ramp (`boardingSpot`). */
+  doors: { joint: string; model: THREE.Object3D }[];
+  /**
+   * Where somebody boarding walks to, in its root's own frame, worked out the first time anybody asks:
+   * the foot of its ramp, or null for a rig with no door; and the flat box of its parked hull, for the
+   * side of one with none. Undefined until asked.
+   */
+  ramp?: THREE.Vector3 | null;
+  footprint?: { minX: number; maxX: number; minZ: number; maxZ: number } | null;
 }
 
 const tmpPose: RigPose = { role: 'sky', seconds: 0, shown: false };
 const tmpV = new THREE.Vector3();
 const tmpCam = new THREE.Vector3();
 const tmpJoint = new THREE.Vector3();
+/** The inverse of a stood shuttle's root, for where a boarder comes from in its own frame (`boardingSpot`). */
+const tmpInv = new THREE.Matrix4();
 /** Scratch for whether a held shuttle would be seen: the view's frustum, made at most once an update. */
 const viewMatrix = new THREE.Matrix4();
 const viewFrustum = new THREE.Frustum();
@@ -817,13 +828,16 @@ export class ShuttleRigs {
     root.rotation.y = at.yaw;
     const joints = asset.joints.clone(true);
     root.add(joints);
+    const doors: Stood['doors'] = [];
     for (const p of asset.parts) {
       const joint = joints.getObjectByName(p.joint);
       if (!joint) {
         this.note = `the rig ${rig.file} has no joint ${p.joint}`;
         continue;
       }
-      joint.add(p.model.clone(true));
+      const piece = p.model.clone(true);
+      joint.add(piece);
+      if (/door/i.test(p.joint)) doors.push({ joint: p.joint, model: piece });
     }
     root.visible = false;
     this.deps.scene.add(root);
@@ -893,6 +907,7 @@ export class ShuttleRigs {
       role: 'sky',
       fx,
       body: joints.getObjectByName('root') ?? joints,
+      doors,
     };
     this.stood.push(s);
     this.byKey.set(key, s);
@@ -1110,6 +1125,40 @@ export class ShuttleRigs {
   }
 
   /**
+   * Where somebody boarding a stood shuttle walks to, in the world, written into `out`: the foot of its
+   * ramp as it stands parked (`rampFootOf`, the very point a hull flown from the rig finds), or, for a
+   * rig with no door, a metre out from the side of its parked hull nearest `towards`. Worked out the
+   * first time it is asked of a shuttle, on the parked pose, and kept: it costs a walk of the door's or
+   * the hull's vertices once. The rig is left posed on the ground, which the next update puts right for
+   * one that is shown, as `jointOf` does. Null with no shuttle stood at that key.
+   */
+  boardingSpot(key: string, towards: { x: number; z: number }, out: THREE.Vector3): THREE.Vector3 | null {
+    const s = this.byKey.get(key);
+    if (!s) return null;
+    if (s.ramp === undefined) {
+      poseRigAction(s, 'ground', 0);
+      s.root.updateMatrixWorld(true);
+      s.ramp = s.doors.length ? rampFootOf(s.root, s.doors) : null;
+      s.footprint = s.ramp ? null : footprintOf(s.root);
+    }
+    if (s.ramp) return out.copy(s.ramp).applyMatrix4(s.root.matrixWorld);
+    const f = s.footprint;
+    if (!f) return null;
+    // The side of the parked hull nearest where the walker comes from, in the root's own frame, and a
+    // metre out from it.
+    s.root.updateMatrixWorld(true);
+    tmpInv.copy(s.root.matrixWorld).invert();
+    tmpV.set(towards.x, s.at.y, towards.z).applyMatrix4(tmpInv);
+    const cx = (f.minX + f.maxX) / 2;
+    const cz = (f.minZ + f.maxZ) / 2;
+    const dx = (tmpV.x - cx) / Math.max(0.1, (f.maxX - f.minX) / 2);
+    const dz = (tmpV.z - cz) / Math.max(0.1, (f.maxZ - f.minZ) / 2);
+    if (Math.abs(dx) >= Math.abs(dz)) tmpV.set(dx >= 0 ? f.maxX + 1 : f.minX - 1, 0, Math.min(f.maxZ, Math.max(f.minZ, tmpV.z)));
+    else tmpV.set(Math.min(f.maxX, Math.max(f.minX, tmpV.x)), 0, dz >= 0 ? f.maxZ + 1 : f.minZ - 1);
+    return out.copy(tmpV).applyMatrix4(s.root.matrixWorld);
+  }
+
+  /**
    * One of a stood shuttle's joints in the world, with the rig posed at a role's clip at `seconds`: the
    * console's witness that a hull flown in its place stands where the rig does. It poses the rig,
    * shown or not; the next update poses a shown one where its round has it again. False with no such
@@ -1267,6 +1316,31 @@ function soundsOf(rig: TravelRig): string[] {
   if (rig.ambient) out.add(rig.ambient);
   for (const ev of Object.values(rig.events ?? {})) for (const id of ev.sounds ?? []) if (id) out.add(id);
   return [...out];
+}
+
+/** The flat box of every mesh under a posed root, in the root's own frame; null with no vertices. */
+function footprintOf(root: THREE.Object3D): { minX: number; maxX: number; minZ: number; maxZ: number } | null {
+  root.updateMatrixWorld(true);
+  const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    const pos = mesh.isMesh ? mesh.geometry.getAttribute('position') : undefined;
+    if (!pos) return;
+    m.multiplyMatrices(toRoot, mesh.matrixWorld);
+    for (let i = 0; i < pos.count; i++) {
+      tmpV.fromBufferAttribute(pos, i).applyMatrix4(m);
+      minX = Math.min(minX, tmpV.x);
+      maxX = Math.max(maxX, tmpV.x);
+      minZ = Math.min(minZ, tmpV.z);
+      maxZ = Math.max(maxZ, tmpV.z);
+    }
+  });
+  return minX <= maxX ? { minX, maxX, minZ, maxZ } : null;
 }
 
 /** The hull's triangles in the world, from every mesh under a posed root; null when there are none. */
