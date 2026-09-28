@@ -48,7 +48,9 @@ import { LOD_TUNE, type LodTier } from './lod';
 import { gravityFor, holdAir } from './airless.ts';
 import { rescaleBody, scaledByDifficulty } from '../difficulty.ts';
 import { NavAgent } from '../nav/navAgent.ts';
-import { worldNav } from '../nav/nav.ts';
+import { DOOR_TUNE, DoorLegs, doorwayNav, placeOfCell, placeOfWalk, wallBetween, type GoalPlace } from '../nav/doorway.ts';
+import { MOBILE_GRID_ACROSS, outdoorNav } from '../nav/outdoorNav.ts';
+import { PATROL_TUNE, keepPatrol, thinkWalking, type Patrol } from '../patrols.ts';
 import type { CellState } from '../layoutStream';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
 import { describeRoles, idleClipFor, ownGunIsPistol, rolesFor } from './packClips';
@@ -236,6 +238,14 @@ export interface MobileContext {
   camera: THREE.Camera | null;
   playerPos: THREE.Vector3;
   targets: readonly Living[];
+  /**
+   * Which room a living thing is in, as the world follows it: the player's own followed room, a
+   * body's, a fighter's; null for open ground and undefined for something nobody follows. It is what
+   * lets a body outside make for the door of the building somebody went into (`doorway.ts`), and
+   * tell a wall between it and what it is fighting from a doorway it can strike through. With none,
+   * every body steers exactly as it did before it could be told.
+   */
+  cellOf?(t: Living): CellState | null | undefined;
 }
 
 interface Grudge {
@@ -297,6 +307,18 @@ export class Mobile implements Living, NpcSubject {
   navCell: CellState | null = null;
   /** Its own path: the corners still to walk and the clock that says when to ask for fresh ones. */
   readonly navAgent = new NavAgent();
+  /** Its walk between the street and a room, when what it is after is on the other side of a wall (`doorway.ts`). */
+  readonly legs = new DoorLegs();
+  /**
+   * The room it was stood in, and null for a body stood on open ground: where home is, which a body
+   * walking home from a fight is sent to the door of, and which leash it keeps -- a creature from the
+   * sand that follows somebody into a cantina is still on the sand's leash, not a room's.
+   */
+  homeCell: CellState | null = null;
+  /** The round a town's walker walks (`patrols.ts`); null for everything else. */
+  patrol: Patrol | null = null;
+  /** Every time the stuck check has found it stuck, for the console: never reset, unlike `stuck`. */
+  stuckEvents = 0;
   /**
    * The way the **feet** go: the direction it travels, the yaw its body is held at and the number
    * that crosses the wire. Everything that has ever read it still means that.
@@ -372,6 +394,17 @@ export class Mobile implements Living, NpcSubject {
   private readonly gaitOut: GaitStep = { clip: null, timeScale: 1, speed: 0, ramp: 0 };
   /** Where a chase faces this frame, kept rather than made anew. */
   private readonly faceAt = { x: 0, z: 0 };
+  /** Where its goal is, written for the doorway join each frame it walks, never made. */
+  private readonly goalPlace: GoalPlace = { building: null, room: 0 };
+  /**
+   * Whether what it is fighting stands on the other side of a wall from it: one of them in a building
+   * and the other not, or the two in different buildings. A blow through a wall is not a blow, so a
+   * body told this walks round to the door instead of stopping to swing at the plaster.
+   */
+  private apart = false;
+  /** A walker's decision when it is part of the furniture and has no brain to make one, kept. */
+  private walkerDecision: Decision | null = null;
+  private readonly walkerSelf = { x: 0, z: 0, now: 0 };
   private stunned = 0;
   private slowed = 0;
   private dotDps = 0;
@@ -538,6 +571,7 @@ export class Mobile implements Living, NpcSubject {
     this.homeX = spawn.x;
     this.homeZ = spawn.z;
     this.inside = spawn.inside;
+    this.legs.who = e.name;
 
     const feet = this.plan.feet;
     tmpQ.setFromAxisAngle(UP, this.heading);
@@ -1640,8 +1674,10 @@ export class Mobile implements Living, NpcSubject {
     // 9. Think. One that is essential does not: it stands where it was stood, faces the way it was
     // faced, and takes no interest in anything. Skipping the whole brain rather than gating each of
     // its branches is the point -- there is no state it can be left in and nothing to come out of.
-    if (this.now >= this.thinkAt && !this.downPhase && !this.essential) {
-      this.think(ctx);
+    // The one thing such a body does do is walk a town's round, which asks nothing of the brain.
+    if (this.now >= this.thinkAt && !this.downPhase && (!this.essential || this.patrol)) {
+      if (this.essential) this.thinkWalker();
+      else this.think(ctx);
       this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
     }
     // 10. The carry it stands in (before acting: `act` chooses the loop from it), 11. act,
@@ -1764,6 +1800,7 @@ export class Mobile implements Living, NpcSubject {
     if (this.wantTarget) this.takeWantedTarget(ctx.targets);
     let current: Living | null = null;
     const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
+    const reach = (this.entry.stats?.reach ?? 1.5) * this.scale;
     for (const t of ctx.targets) {
       if (t === (this as Living) || t.key === this.key) continue;
       const dx = t.pos.x - this.pos.x;
@@ -1789,6 +1826,10 @@ export class Mobile implements Living, NpcSubject {
       b.dead = t.dead;
       b.attackedMeAt = grudge ? grudge.at : -Infinity;
       b.hasLine = isCurrent && this.rangedRange > 0 && !t.dead ? this.lineTo(t) : false;
+      // Whether a wall stands between: asked only of what a blow could nearly reach, which is the one
+      // rule that reads it, so a ray is cast for a handful of bodies at most and none at all for most.
+      // Left undefined past that, which says "not asked" rather than "no wall".
+      b.apart = this.melee && !t.dead && Math.hypot(dx, dz) - b.radius <= reach + DOOR_TUNE.wallLook ? this.apartFrom(ctx, t) : undefined;
       list.push(b);
     }
     const self: BrainSelf = {
@@ -1802,8 +1843,9 @@ export class Mobile implements Living, NpcSubject {
       side: this.side,
       aggression: this.aggression,
       inside: this.inside,
+      homeInside: this.homeCell !== null,
       big: this.entry.stats?.sizeClass === 'large' || this.entry.stats?.sizeClass === 'huge',
-      reach: (this.entry.stats?.reach ?? 1.5) * this.scale,
+      reach,
       ranged: this.rangedRange,
       melee: this.melee,
       halfHeight: this.halfHeight,
@@ -1823,7 +1865,16 @@ export class Mobile implements Living, NpcSubject {
     // A standing person keeps to the spot the data put it on (`keepPost`): the brain's wander is drawn
     // for animals on open ground. And indoors no wander reaches past the indoor leash, the fighters'
     // own rule, or the body paces out and back for as long as it is left alone.
-    if (this.post) keepPost(d, self, this.post, self.wanderAt);
+    //
+    // A town's walker keeps to its round instead (`keepPatrol`), and its home is the point of the
+    // round it is making for, written **before** the indoor clamp reads it: so the leash, the walk home
+    // after a fight and the clamp all measure from the round, and a walker who was fought comes back to
+    // the very point it was on its way to.
+    if (this.patrol) {
+      keepPatrol(d, self, this.patrol, Math.random, PATROL_TUNE, !this.tier?.move);
+      this.homeX = this.patrol.anchor.x;
+      this.homeZ = this.patrol.anchor.z;
+    } else if (this.post) keepPost(d, self, this.post, self.wanderAt);
     if (this.inside) clampWander(d, this.homeX, this.homeZ, BRAIN_TUNE.leashInside * BRAIN_TUNE.wanderInsideShare);
     if (d.clearMemory) this.memory.clear();
     if (d.targetKey !== this.targetKey) {
@@ -1832,6 +1883,18 @@ export class Mobile implements Living, NpcSubject {
     }
     this.targetKey = d.targetKey;
     this.targetRef = d.targetKey === null ? null : d.targetKey === current?.key ? current : (ctx.targets.find((t) => t.key === d.targetKey) ?? null);
+    // The wall between it and what it is now after, for the frames until the next thought (the stop
+    // to strike in `act` reads it): the answer the list already has, else one ray for this one body.
+    this.apart = false;
+    if (this.targetRef && this.melee) {
+      let asked: boolean | undefined;
+      for (const b of list) {
+        if (b.key !== d.targetKey) continue;
+        asked = b.apart;
+        break;
+      }
+      this.apart = asked ?? this.apartFrom(ctx, this.targetRef);
+    }
     this.wanderAt = d.wanderAt;
     this.goal = d.goal;
     this.until = d.until;
@@ -1869,6 +1932,78 @@ export class Mobile implements Living, NpcSubject {
     }
   }
 
+  /**
+   * A walker that is part of the furniture: no brain, no targets, nothing on its mind but its round
+   * (`thinkWalking`, which the node test walks). One decision kept for the life of the body and
+   * written over each thought, since a thought here makes nothing the brain would.
+   */
+  private thinkWalker(): void {
+    const p = this.patrol;
+    if (!p) return;
+    const self = this.walkerSelf;
+    self.x = this.pos.x;
+    self.z = this.pos.z;
+    self.now = this.now;
+    const d = thinkWalking(this.walkerDecision, self, p, Math.random, PATROL_TUNE, !this.tier?.move);
+    this.walkerDecision = d;
+    this.homeX = p.anchor.x;
+    this.homeZ = p.anchor.z;
+    this.goal = d.goal;
+    this.state = d.state;
+    this.decision = d;
+  }
+
+  /**
+   * Whether a wall stands between this body and a living thing (see `apart`): in different places by
+   * the rooms the two are followed in, and no open doorway between their middles (`wallBetween`).
+   */
+  private apartFrom(ctx: MobileContext, t: Living): boolean {
+    return wallBetween(
+      this.deps.physics,
+      this.navCell,
+      ctx.cellOf ? ctx.cellOf(t) : undefined,
+      this.inside,
+      this.pos.x,
+      this.pos.y + this.halfHeight,
+      this.pos.z,
+      t.pos.x,
+      t.pos.y + t.halfHeight,
+      t.pos.z,
+    );
+  }
+
+  /** Where a living thing it is after is, for the doorway join (`placeOfCell`); null where nobody follows it. */
+  private placeOf(ctx: MobileContext, t: Living): GoalPlace | null {
+    return placeOfCell(ctx.cellOf ? ctx.cellOf(t) : undefined, this.goalPlace);
+  }
+
+  /**
+   * Where the goal of a walk that is not a chase is (`placeOfWalk`): a walker's point of its round,
+   * home for a walk home, home's building for a wander about it; anything else (a flight) nobody can
+   * place, and the old rules decide.
+   */
+  private placeOfGoal(d: Decision | null): GoalPlace | null {
+    if (!d) return null;
+    const p = this.patrol;
+    const onRound = !!p && (d.goal === p.goal || d.state === 'return');
+    return placeOfWalk(this.goalPlace, d.state, onRound, p ? p.anchor.room : undefined, this.homeCell, this.navCell);
+  }
+
+  /**
+   * Whether it may be handed the outdoor grid's corners: a grid baked no steeper than a mobile climbs
+   * at a walk (`outdoorNav.forMobiles`), and a body no wider than the grid's own margin
+   * (`MOBILE_GRID_ACROSS`). Never anything that flies or is swimming: the grid is the dry ground.
+   *
+   * People and creatures alike, and that is a decision rather than a default. The grid was kept from
+   * the creatures because it was cut at an angle their bodies stall on; a person here is the very same
+   * dynamic body a creature is, so whatever made the grid safe for one makes it safe for the other,
+   * and at 45 degrees it promises neither a face it cannot walk up. What still keeps the biggest
+   * creatures off it is their width, which the grid was never grown for.
+   */
+  private walksGrid(): boolean {
+    return outdoorNav.forMobiles && !this.flyer && !this.swimming && this.plan.across <= MOBILE_GRID_ACROSS;
+  }
+
   private act(dt: number, ctx: MobileContext, tier: LodTier): void {
     const move = this.entry.move;
     const d = this.decision;
@@ -1889,9 +2024,10 @@ export class Mobile implements Living, NpcSubject {
       face.z = target.pos.z;
       if (d.state === 'chase' || (d.state === 'cover' && !!d.moveTo)) {
         moveTo = face;
-        // Close enough to strike: stop rather than run on until the next thought.
+        // Close enough to strike: stop rather than run on until the next thought. Not with a wall
+        // between (`apart`): that is the doorway's to answer, and it is round the corner.
         const gap = Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z) - target.radiusToward(this.pos) - this.radiusToward(target.pos);
-        if (this.melee && gap <= (this.entry.stats?.reach ?? 1.5) * this.scale * 0.8) pace = 'stand';
+        if (this.melee && !this.apart && gap <= (this.entry.stats?.reach ?? 1.5) * this.scale * 0.8) pace = 'stand';
       }
     }
     // Where the **gun** points, which from here on is a different question from where the feet go:
@@ -1907,15 +2043,21 @@ export class Mobile implements Living, NpcSubject {
     // The side-step below is the same trap from the other side, and is applied to the heading only.
     // `fighterMove.test.ts` pins the order as text, because nothing else can.
     const look = face;
-    // The way out of the room. Indoors, the building's own floors say which corner to walk at next
-    // on the way to where the brain is sending it; only where it **travels** is taken from the path,
-    // so the arrival test below still measures the real goal and a body walking the last corner of a
-    // path does not stop a stride short of it. Outdoors, in a room whose floor the pack has not
-    // got with the goal in that same room, and for anything that flies, `corner` is null and every
-    // line below is the line it always was.
-    if (moveTo && pace !== 'stand' && this.navCell && !this.flyer && !this.driven) {
-      const goalY = target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert') ? target.pos.y : this.pos.y;
-      const corner = worldNav.corner(this.navAgent, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.plan.across, this.now);
+    // The way there. Indoors, the building's own floors say which corner to walk at next on the way
+    // to where the brain is sending it; outdoors, the world's baked grid does, for a body it is given
+    // to (`walksGrid`); and between the two, when what it is after is on the other side of a wall,
+    // the doorway join (`doorway.ts`) walks it to a door and through it, told where the goal is by the
+    // room the world follows it in (`placeOf`, `placeOfGoal`). Only where it **travels** is taken from
+    // the path, so the arrival test below still measures the real goal and a body walking the last
+    // corner of a path does not stop a stride short of it. In a room whose floor the pack has not got
+    // with the goal in that same room, out of doors for a body the grid is not given to with its goal
+    // on open ground, and for anything that flies, `corner` is null and every line below is the line
+    // it always was.
+    if (moveTo && pace !== 'stand' && !this.flyer && !this.driven) {
+      const fighting = !!target && !!d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
+      const goalY = fighting && target ? target.pos.y : this.pos.y;
+      const place = fighting && target ? this.placeOf(ctx, target) : this.placeOfGoal(d);
+      const corner = doorwayNav.corner(this.navAgent, this.legs, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, place, this.plan.across, this.now, this.walksGrid());
       if (corner) face = corner;
     }
     if (this.waterAhead && pace !== 'stand') pace = 'stand';
@@ -1983,6 +2125,7 @@ export class Mobile implements Living, NpcSubject {
     const covered = Math.hypot(this.pos.x - this.stuckFrom.x, this.pos.z - this.stuckFrom.z);
     if (avg > 1 && covered < 0.2 * avg * this.stuckClock) {
       this.stuck++;
+      this.stuckEvents++;
       this.sidestepUntil = this.now + 1;
       this.sidestep = (Math.random() < 0.5 ? -1 : 1) * SIDESTEP;
     }
@@ -2177,6 +2320,9 @@ export class Mobile implements Living, NpcSubject {
     // of it. The manager gives it its room again on its next follow.
     this.navCell = null;
     this.navAgent.clear();
+    this.legs.reset();
+    this.homeCell = null;
+    this.apart = false;
     // A fresh life has not been spoken about yet, and owes the wire nothing about the last one.
     this.toldOnce = false;
     this.mark = null;
@@ -2245,6 +2391,12 @@ export class Mobile implements Living, NpcSubject {
       airless: this.airless,
       // The spot a standing person keeps to, and how far it is off it.
       post: this.post ? `${this.post.kind} ${Math.hypot(this.pos.x - this.homeX, this.pos.z - this.homeZ).toFixed(1)} m off` : null,
+      // A town walker's round: the point it is at and the one it walks to, legs and rounds walked.
+      patrol: this.patrol ? `${this.patrol.walking ? `walking ${this.patrol.at} -> ${this.patrol.to}` : `waiting at ${this.patrol.at}`} of ${this.patrol.points.length}, ${this.patrol.legs} legs (${this.patrol.skipped} given up), ${this.patrol.rounds} rounds` : null,
+      // Its walk through a doorway, and whether the ground's grid is handed to it at all.
+      door: this.legs.phase === 0 ? null : `${this.legs.phase === 1 ? 'approaching' : 'walking through'} way in ${this.legs.exit}`,
+      grid: this.walksGrid(),
+      stuckEvents: this.stuckEvents,
       swimming: this.swimming,
       ragdoll: this.ragdoll?.status ?? null,
       ranged: this.rangedRange ? Number(this.rangedRange.toFixed(0)) : 0,

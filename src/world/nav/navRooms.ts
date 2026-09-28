@@ -184,6 +184,76 @@ export function nextDoor(graph: RoomGraph, from: number, to: number): RoomDoor |
   return null;
 }
 
+/**
+ * How far every door of a building is from a point in one of its rooms, walking the rooms only: the
+ * whole of the search `nextDoor` stops part way through, run to the end, into the graph's own
+ * working room (`work.cost`, and `work.first` the first door of each way). It starts from the point
+ * itself rather than the middle of its room, since a doorway picked for somebody at one end of a
+ * long hall should be picked from where they stand.
+ *
+ * Cell 0 is **not** walked through, unlike `nextDoor`: what this answers is which way out, or which
+ * way in, and a way that goes out of the front door and in at the back is two ways, not one. Nor is a
+ * lift shaft, as nowhere else. Never allocates; the next search writes over what this left.
+ */
+export function doorCosts(graph: RoomGraph, from: number, fx: number, fz: number): void {
+  const n = graph.doors.length;
+  const { cost, first, done } = graph.work;
+  cost.fill(Infinity);
+  first.fill(-1);
+  done.fill(0);
+  if (n === 0 || from <= 0) return;
+  const start = graph.byCell.get(from);
+  if (!start) return;
+  for (const i of start) {
+    const d = graph.doors[i];
+    if (!d.passable || acrossFrom(d, from) < 0) continue;
+    cost[i] = Math.hypot(d.x - fx, d.z - fz);
+    first[i] = i;
+  }
+  for (;;) {
+    let best = -1;
+    for (let i = 0; i < n; i++) if (!done[i] && cost[i] < Infinity && (best < 0 || cost[i] < cost[best])) best = i;
+    if (best < 0) break;
+    done[best] = 1;
+    const door = graph.doors[best];
+    if (door.a > 0 && !graph.shafts.has(door.a)) relax(graph, best, door.a, cost, first, done);
+    if (door.b > 0 && !graph.shafts.has(door.b)) relax(graph, best, door.b, cost, first, done);
+  }
+}
+
+/** Whether a door is a way between the building's rooms and the world outside. */
+export function isExit(door: RoomDoor): boolean {
+  return door.passable && (door.a === 0) !== (door.b === 0);
+}
+
+/**
+ * The first doorway of the best way out of a building toward a point outside it, both in the
+ * building's model frame: of every door to cell 0, the one whose walk from where the body stands
+ * plus the straight line from it to the goal is least, and of that way the first door. Null when no
+ * way out can be walked from this room.
+ *
+ * It is what `nextDoor(…, 0)` would answer if it knew where outside the goal was. That one measures
+ * only the way to *a* door out and stops at the nearest, so a body in a building with a front and a
+ * back door walked out of whichever was nearer itself and round the whole building to somebody
+ * standing at the other one.
+ */
+export function exitToward(graph: RoomGraph, from: number, fx: number, fz: number, gx: number, gz: number): RoomDoor | null {
+  doorCosts(graph, from, fx, fz);
+  const { cost, first } = graph.work;
+  let best = -1;
+  let bestCost = Infinity;
+  for (let i = 0; i < graph.doors.length; i++) {
+    const d = graph.doors[i];
+    if (!isExit(d) || !(cost[i] < Infinity)) continue;
+    const c = cost[i] + Math.hypot(gx - d.x, gz - d.z);
+    if (c < bestCost) {
+      bestCost = c;
+      best = i;
+    }
+  }
+  return best >= 0 && first[best] >= 0 ? graph.doors[first[best]] : null;
+}
+
 /** Every other door of one room, measured from the door just settled. Never allocates. */
 function relax(graph: RoomGraph, best: number, cell: number, cost: Float64Array, first: Int32Array, done: Uint8Array): void {
   const list = graph.byCell.get(cell);

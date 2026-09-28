@@ -91,20 +91,25 @@ export const BODY_TOP = 1.6;
  * does **not** scrabble up faces a fighter refuses. It is stopped by faces a fighter walks,
  * everywhere between about 45 and 55 degrees.
  *
- * The default is therefore **47**, which is the owner's call and is written down here as theirs.
- * Their words were that "even in real life 45 is pretty difficult", and 47 is the run-flat-out
- * figure above: it is the angle at which every body in the game, the wildlife included, can really
- * get up the ground the grid is about to promise it.
+ * The default was 47, the run-flat-out figure above, and is now **45**, which is the owner's call
+ * twice over and written down here as theirs: their words were that "even in real life 45 is
+ * pretty difficult", and when the catalogue's own people and creatures were given this grid to walk
+ * (the NPC pass's D8) they chose the angle that covers a mobile **at a walk**, since a patrol, a
+ * wander and a body walking home all go at one and 47 promised them faces they stall on at 1.8 m/s.
+ * The game reads the angle a grid was baked at (`slopeDegrees` in `nav.json`) and hands a catalogue
+ * mobile no grid steeper than `MOBILE_CLIMB_DEGREES` in `src/world/nav/outdoorNav.ts`, so a world
+ * still carrying a 47-degree bake paths its fighters as before and its creatures not at all until
+ * `status` has asked for the re-bake and it has run.
  *
- * **What it costs, plainly.** Ground between 47 and 55 degrees is ground a *fighter* can climb and
+ * **What it costs, plainly.** Ground between 45 and 55 degrees is ground a *fighter* can climb and
  * this grid now refuses, so a route for a fighter may go round a face it could have walked up. That
  * is a deliberate trade and not an oversight: a grid that routes a creature up a face it cannot
  * climb leaves it leaning on the hill until its stuck watch throws the route away, while a grid
  * that walks a fighter round a slope merely takes it the long way. One failure is visible for the
  * rest of the evening and the other is a longer walk, so the grid is cut to the body that can do
- * least. `--slope=` moves it for a run: 55 is the old grid exactly, 45 covers a mobile at a walk.
+ * least. `--slope=` moves it for a run: 55 is the first grid exactly, 47 the one before this.
  */
-export const SLOPE_CLIMB_DEGREES = 47;
+export const SLOPE_CLIMB_DEGREES = 45;
 /** Chest deep: past this the game calls it swimming and there are no feet at all. */
 export const SWIM_DEPTH = 1.2;
 

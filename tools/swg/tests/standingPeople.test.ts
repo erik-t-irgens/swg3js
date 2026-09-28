@@ -707,7 +707,8 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   ok(/grounded = gd !== null \|\| this\.airless \|\|/.test(mobile), 'and counts as standing, so it does not play a fall');
 
   // The post and the indoor wander, which the brain's own tests reach only through a copy of `think`.
-  ok(/const d = decide\(self, list\);\s*(?:\/\/[^\n]*\n\s*)*if \(this\.post\) keepPost\(d, self, this\.post, self\.wanderAt\);\s*if \(this\.inside\) clampWander\(d, this\.homeX, this\.homeZ, BRAIN_TUNE\.leashInside \* BRAIN_TUNE\.wanderInsideShare\);/.test(mobile), "a body's own thinking keeps a person to their post and every wander indoors inside the leash");
+  // A town's walker keeps to its round instead, and its home moves onto the round before the clamp.
+  ok(/const d = decide\(self, list\);\s*(?:\/\/[^\n]*\n\s*)*if \(this\.patrol\) \{\s*keepPatrol\(d, self, this\.patrol(?:, [^;]*)?\);\s*this\.homeX = this\.patrol\.anchor\.x;\s*this\.homeZ = this\.patrol\.anchor\.z;\s*\} else if \(this\.post\) keepPost\(d, self, this\.post, self\.wanderAt\);\s*if \(this\.inside\) clampWander\(d, this\.homeX, this\.homeZ, BRAIN_TUNE\.leashInside \* BRAIN_TUNE\.wanderInsideShare\);/.test(mobile), "a body's own thinking keeps a person to their post (a walker to its round) and every wander indoors inside the leash");
 
   // The hand-over's reading side, and what the hand-spawn cap and the NPC tab's clear may take.
   ok(/const named = npcNow\(\)\?\.readTarget\(want\) \?\? null;\s*if \(!named\) return;/.test(mobile) && /'key' in named \? t\.key === named\.key : \(t as \{ npcId\?: string \}\)\.npcId === named\.npc/.test(mobile), "a creature handed over reads who it was fighting through the wire's own rule, never as this browser's player");

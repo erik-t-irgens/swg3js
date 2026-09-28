@@ -82,7 +82,7 @@ import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
 import type { CellState, NearBlocker } from './layoutStream';
 import { NavAgent } from './nav/navAgent.ts';
-import { worldNav } from './nav/nav.ts';
+import { DOOR_TUNE, DoorLegs, doorwayNav, placeOfCell, wallBetween, type GoalPlace } from './nav/doorway.ts';
 // Whether a place cannot be walked to at all, which only the baked grid can say. A world with no
 // grid answers "yes" to everything, so a cover spot behind a wall on ground this body's ground is
 // not joined to is refused where there is a bake and taken on trust where there is not.
@@ -341,6 +341,12 @@ export interface NpcDeps {
    * before it existed.
    */
   cellSolid?: (state: CellState | null) => boolean;
+  /**
+   * Which room a living thing is in as the world follows it (null outside, undefined for nobody
+   * followed): what sends a fighter outside to a door of the building its foe went into
+   * (`src/world/nav/doorway.ts`). With none wired it steers as it always did.
+   */
+  cellOf?: (t: Living) => CellState | null | undefined;
   /**
    * What stands within reach of a point that a body could hide behind: the streamer's own placed
    * objects, each as a disc over its model's box and the height of its top
@@ -722,6 +728,26 @@ export class Npc implements Living, ErrandBody {
   private liftedBy = 0;
   /** Its own path: the corners still to walk, and the clock that says when to ask for fresh ones. */
   readonly navAgent = new NavAgent();
+  /** Its walk between the street and a room, when its foe is on the other side of a wall (`doorway.ts`). */
+  readonly legs = new DoorLegs();
+  /** Which room a living thing is in (`NpcDeps.cellOf`), handed over by the manager each step; null with none wired. */
+  cellOf: ((t: Living) => CellState | null | undefined) | null = null;
+  /** Where its foe is, written for the doorway join, never made. */
+  private readonly goalPlace: GoalPlace = { building: null, room: 0 };
+  /**
+   * Whether its home is in a building: the room it was stood in, as `NpcManager.spawnAt` found it,
+   * and outdoors again the moment a long walk moves its home onto the ground (`NpcManager.send`). It
+   * is what says which leash it keeps, as `Mobile.homeCell` says for a catalogue body: a fighter stood
+   * on the sand that chases somebody through a cantina door is on the sand's leash in there, not the
+   * room's, or it is past the room's the moment it steps through and turns straight round.
+   */
+  homeInside = false;
+  /**
+   * Whether what it is fighting stands on the other side of a wall from it (`wallBetween`), as the
+   * last thought found: a blade does not go through plaster, so a body told this walks round to the
+   * door rather than stopping to swing at the wall.
+   */
+  private apart = false;
   /** Where it stood when its room was last followed, and when (sim time). */
   readonly cellFrom = new THREE.Vector3();
   followAt = -Infinity;
@@ -748,6 +774,7 @@ export class Npc implements Living, ErrandBody {
 
   constructor(readonly species: string, private readonly physics: Physics, x: number, y: number, z: number) {
     this.name = `${species.replace(/_/g, ' ')} fighter`;
+    this.legs.who = this.name;
     this.homeX = x;
     this.homeZ = z;
     this.pos.set(x, y, z);
@@ -1237,6 +1264,7 @@ export class Npc implements Living, ErrandBody {
     this.hitThisSwing.clear();
     this.bladePath.reset();
     this.navAgent.clear();
+    this.legs.reset();
     this.heldAt = null;
     this.memory.clear();
     this.target = null;
@@ -1362,6 +1390,7 @@ export class Npc implements Living, ErrandBody {
     let line = false;
     const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
     const ranged = this.arm === 'gun' && this.gun ? FIGHTER_TUNE.gunRange : 0;
+    const melee = this.arm !== 'gun';
     for (const t of foes) {
       if (t.key === this.key) continue;
       const dx = t.pos.x - this.pos.x;
@@ -1390,6 +1419,9 @@ export class Npc implements Living, ErrandBody {
       // stared at for a tick before it is shot at, which is the rule the creatures fight by too.
       b.hasLine = isCurrent && ranged > 0 && !t.dead ? this.lineTo(t) : false;
       if (isCurrent) line = b.hasLine;
+      // Whether a wall stands between, as the mobiles ask it: only of what a blade or a fist could
+      // nearly reach, since the blow is the one rule that reads it. Undefined past that ("not asked").
+      b.apart = melee && !t.dead && Math.hypot(dx, dz) - b.radius <= FIGHTER_TUNE.reach + DOOR_TUNE.wallLook ? this.apartFrom(t) : undefined;
       list.push(b);
     }
     const self: BrainSelf = {
@@ -1403,11 +1435,13 @@ export class Npc implements Living, ErrandBody {
       side: this.side,
       aggression: this.nerve,
       inside: !!this.cell,
+      // The leash is home's, not the room's it has walked into (`homeInside`).
+      homeInside: this.homeInside,
       // A person is never a big body: the far sight is a bantha's and a rancor's.
       big: false,
       reach: FIGHTER_TUNE.reach,
       ranged,
-      melee: this.arm !== 'gun',
+      melee,
       halfHeight: this.halfHeight,
       hpRatio: this.hp / this.maxHp,
       state: this.state,
@@ -1468,6 +1502,18 @@ export class Npc implements Living, ErrandBody {
       }
     }
     this.target = next;
+    // The wall between it and what it is now after, for the frames until the next thought (the stop
+    // to strike in `act` reads it): the answer the list already has, else one ray for this one body.
+    this.apart = false;
+    if (next && melee) {
+      let asked: boolean | undefined;
+      for (const b of list) {
+        if (b.key !== d.targetKey) continue;
+        asked = b.apart;
+        break;
+      }
+      this.apart = asked ?? this.apartFrom(next);
+    }
     this.wanderAt = d.wanderAt;
     this.goal = d.goal;
     this.until = d.until;
@@ -1519,6 +1565,30 @@ export class Npc implements Living, ErrandBody {
     this.spreadZ = sz * k;
   }
 
+  /** Where a foe it is chasing is, for the doorway join (`placeOfCell`); null where nobody follows it or nothing is wired. */
+  private placeOf(t: Living): GoalPlace | null {
+    return placeOfCell(this.cellOf ? this.cellOf(t) : undefined, this.goalPlace);
+  }
+
+  /**
+   * Whether a wall stands between this fighter and a living thing (see `apart`): in different places by
+   * the rooms the two are followed in, and no open doorway between their middles (`wallBetween`).
+   */
+  private apartFrom(t: Living): boolean {
+    return wallBetween(
+      this.physics,
+      this.cell,
+      this.cellOf ? this.cellOf(t) : undefined,
+      !!this.cell,
+      this.pos.x,
+      this.pos.y + this.halfHeight,
+      this.pos.z,
+      t.pos.x,
+      t.pos.y + t.halfHeight,
+      t.pos.z,
+    );
+  }
+
   /**
    * One frame of what the last thought decided: the brain gives a goal, a pace and something to
    * face, and the fighter walks at it. The attack is the one the brain chose, on its own clock and
@@ -1557,7 +1627,9 @@ export class Npc implements Living, ErrandBody {
         // shoot through would leave it there for good. What a **tiered** gunner does with that is
         // `stepStandoff` below, which holds it on a ring instead of walking into your face -- and
         // which still closes whenever the shot is blocked, for exactly the reason in this comment.
-        if (this.arm !== 'gun' && gap - t.radiusToward(this.pos) - this.radiusToward() <= FIGHTER_TUNE.reach) pace = 'stand';
+        // Not with a wall between (`apart`): the brain has already said chase, and the way is round
+        // to the door, which the doorway join below walks it.
+        if (this.arm !== 'gun' && !this.apart && gap - t.radiusToward(this.pos) - this.radiusToward() <= FIGHTER_TUNE.reach) pace = 'stand';
       }
     }
     // Stunned, or with a blade already on its way through a swing, it stands where it is.
@@ -1597,14 +1669,20 @@ export class Npc implements Living, ErrandBody {
     this.stepPosture(sdt, pace, t, d, combat);
     pace = paceInPosture(pace, this.posture);
     // The way out of the room (src/world/nav/). Indoors, the building's own floors say which corner
-    // to walk at next; only where it **walks** is taken from the path, so the arrival test further
-    // down still measures the real goal. Never while it is attacking. Outdoors, and in a room the
-    // pack has no floor for with the goal in that same room, `corner` is null and every line below
-    // is the line it was.
+    // to walk at next; only where it **walks** is taken from the path (`via`), so the arrival test
+    // further down still measures the real goal (`moveTo`). Never while it is attacking. Outdoors,
+    // and in a room the pack has no floor for with the goal in that same room, `corner` is null and
+    // every line below is the line it was.
     //
     // Before the split this wrote `face`, because facing and travel were one number and the only
     // way to walk at a corner was to point at it. It writes the travel point now, which is the same
-    // body walking the same corners -- and a gunner rounding one keeps its gun where it was.
+    // body walking the same corners -- and a gunner rounding one keeps its gun where it was. It
+    // must never write `moveTo`, which is also the arrival test: a body measured against each corner
+    // stops `arrive` short of every one, which on a doorway's walk through is short of the doorway's
+    // own plane at any `DOOR_TUNE.step` under `arrive` plus `lead`, so the room never flips and every
+    // door is given up on; and the floors' own corners are passed only within `NAV_TUNE.reach`, under
+    // `arrive`, so a body that happened to stop between the two stood at a corner for good.
+    let via: { x: number; z: number } | null = moveTo;
     if (moveTo && pace !== 'stand' && d && d.state !== 'attack') {
       const goalY = t && (d.state === 'chase' || d.state === 'alert') ? t.pos.y : this.pos.y;
       // Indoors the building's own floors say which corner to walk at next; **outdoors the world's
@@ -1617,17 +1695,22 @@ export class Npc implements Living, ErrandBody {
       // The two share one `NavAgent` on purpose: the agent keys its path on the building it was
       // planned in and the outdoor path puts a sentinel in that slot, so a body that walks out of
       // a door finds the building changed and throws its indoor corners away on the spot.
-      const corner = this.cell
-        ? worldNav.corner(this.navAgent, this.cell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now)
-        : outdoorNav.corner(this.navAgent, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, this.radiusToward(), this.now);
-      if (corner) moveTo = corner;
+      //
+      // And the doorway join between them (`doorway.ts`): chasing a foe on the other side of a wall,
+      // it is walked to a door of that building and through it, or out of this one by the door
+      // nearest its foe, told where the foe is by the room the world follows it in. Any other walk
+      // passes no place, and the two halves answer exactly as they did on their own.
+      const place = t && moveTo === this.faceAt ? this.placeOf(t) : null;
+      const corner = doorwayNav.corner(this.navAgent, this.legs, this.cell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, place, this.radiusToward(), this.now, true);
+      if (corner) via = corner;
     }
     // Two wants, and for every body that has not earned the split they are one number: the travel
     // falls back to the facing when there is nowhere to go (a body standing and shooting still
     // turns onto what it is shooting at), and the facing falls back to the travel when there is
     // nothing to aim at, which is every creature, every blade and every tier-0 fighter there is.
+    // The travel is along the path (`via`); whether it has arrived is the goal's (`goTo`).
     const goTo = pace === 'stand' ? null : moveTo;
-    const wantTravel = goTo ? Math.atan2(goTo.x - this.pos.x, goTo.z - this.pos.z) : Number.NaN;
+    const wantTravel = goTo && via ? Math.atan2(via.x - this.pos.x, via.z - this.pos.z) : Number.NaN;
     let wantFace = face ? Math.atan2(face.x - this.pos.x, face.z - this.pos.z) : Number.NaN;
     let wantHead = Number.isFinite(wantTravel) ? wantTravel : wantFace;
     if (!Number.isFinite(wantFace)) wantFace = wantHead;
@@ -2943,6 +3026,9 @@ export class NpcManager {
     npc.cover = this.coverDeps;
     npc.cellFrom.copy(npc.pos);
     if (at.inside) npc.cell = this.deps.cellAt?.(npc.pos) ?? null;
+    // Home is where it was stood: a room, or the ground. It keeps that room's leash, or the ground's,
+    // wherever a chase through a door then takes it.
+    npc.homeInside = npc.cell !== null;
     npc.cellSolid = this.deps.cellSolid?.(npc.cell) ?? true;
     this.scene.add(npc.group);
     this.npcs.push(npc);
@@ -2992,6 +3078,9 @@ export class NpcManager {
     }
     const e = new Errand(npc, { x, z, place }, this.lastNow, FIGHTER_TUNE.run);
     e.begin(w);
+    // The walk moves its home onto the ground at the far end (an errand names a point outdoors and is
+    // never walked into a room), so the ground's leash is the one it keeps from here on.
+    npc.homeInside = false;
     npc.errand = e;
     this.errands++;
     return e;
@@ -3105,6 +3194,7 @@ export class NpcManager {
       // own quarter-second: it is two lookups, and a quarter of a second of falling through a
       // floor that has gone is half a metre nobody asked for.
       if (solid && !npc.dead) npc.cellSolid = solid(npc.cell);
+      npc.cellOf = this.deps.cellOf ?? null;
       npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now, this.deps.hittableAt ?? null);
       // The walk, after the body has taken its step: what it records is what really happened this
       // frame, never what was asked for. A walk that ends here takes the count down with it.

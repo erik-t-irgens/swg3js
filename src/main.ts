@@ -92,7 +92,7 @@ import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
-import { wildLife, NEST_MODEL_TUNE, WILD_TUNE } from './world/wildLife.ts';
+import { wildLife, NEST_MODEL_TUNE, WILD_TUNE, tuneTable } from './world/wildLife.ts';
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
@@ -238,6 +238,8 @@ import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { SWOOSH_TUNE } from './world/swooshTrail.ts';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
+import { doorwayNav, type DoorTune } from './world/nav/doorway.ts';
+import { PATROL_TUNE, type PatrolTune } from './world/patrols.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
 // has to turn a place name or a pair of coordinates into a point, because the world's own named
 // places are the App's (`placesHere`) and nothing under `src/world/` can see them.
@@ -5185,19 +5187,80 @@ class App {
        * `berthCost` of 0 is the search exactly as it was before bodies gave anything a wide berth,
        * and `berth` cannot usefully be raised past `clearMax` cells, which is what the bake stored.
        * `ready: false` there is a world nobody has run `npm run swg -- navgrid` over, and every
-       * body outdoors in it steers straight at its goal as it always did.
+       * body outdoors in it steers straight at its goal as it always did. `outdoor.slopeDegrees` is
+       * the angle the grid was baked at and `forMobiles` whether that lets the world's people and
+       * creatures walk it too; `nav({ outdoor: { mobiles: false } })` takes it off them for a
+       * comparison, which is them steering as they did before they had one.
+       *
+       * `nav({ door: true })` adds the join between the two (`src/world/nav/doorway.ts`): how many
+       * buildings' ways in have been worked out, how many doors were chosen, walked through and given
+       * up, how many goals were in a building with no way in on foot, and `last`, the last time a
+       * body's room flipped under it -- who, in or out, which building and room, the door, and how
+       * long the walk in took; and `near`, the ways in of the building with rooms nearest you, each
+       * with its room, its middle, its sill and the two points a body is walked through it by.
+       * `nav({ door: { legs: false } })` is the comparison: every body steering
+       * as it did before the join, outside at the wall and inside by the rooms' boxes; any number of
+       * `DOOR_TUNE` moves the same way.
        */
       nav: (tune?: Partial<import('./world/nav/navMesh').NavTune> & {
         describe?: boolean;
-        outdoor?: Partial<import('./world/nav/outdoorGrid').OutdoorTune & import('./world/nav/outdoorNav').OutdoorAgentTune>;
+        outdoor?: Partial<import('./world/nav/outdoorGrid').OutdoorTune & import('./world/nav/outdoorNav').OutdoorAgentTune> & { mobiles?: boolean | number };
+        door?: boolean | Partial<DoorTune>;
       }) => {
-        const { outdoor, ...indoor } = tune ?? {};
+        const { outdoor, door, ...indoor } = tune ?? {};
         if (Object.keys(indoor).length) worldNav.set(indoor);
         if (outdoor) outdoorNav.set(outdoor);
+        if (door && typeof door === 'object') doorwayNav.set(door);
         // `buildingAt` allocates a CellState, which is why this is a thing to type rather than
         // something a frame does.
         const here = tune?.describe ? this.world.buildingAt(this.player.worldPos) : null;
-        return { ...worldNav.status(), outdoor: outdoorNav.status(), building: here ? worldNav.describe(here.building) : null };
+        return { ...worldNav.status(), outdoor: outdoorNav.status(), ...(door ? { door: { ...doorwayNav.status(), near: this.world.waysInNear(this.player.worldPos) } } : {}), building: here ? worldNav.describe(here.building) : null };
+      },
+      /**
+       * The towns' walkers (`src/world/patrols.ts`): every body standing with a round, nearest first --
+       * who, the point it waits at or walks from and the one it walks to, how many points the round
+       * has, legs and rounds walked, how long the last leg took, the last few waits, where it is (its
+       * room indoors), what it is doing, whether it is walking a doorway, and its stuck count.
+       * `{ go: true }` puts you at the nearest round that walks, standing or not; `{ tune: { pause: 2,
+       * linger: [5, 10] } }` moves `PATROL_TUNE` live (`walks: false` stands every walker at its first
+       * point, `combat: true` walks the combat walkers the server never set going).
+       */
+      patrols: (opts?: { go?: boolean; near?: number; tune?: Partial<PatrolTune> }) => {
+        const moved = opts?.tune ? tuneTable(PATROL_TUNE, opts.tune as Record<string, unknown>) : [];
+        const at = this.player.worldPos;
+        if (opts?.go) {
+          const r = standingPeople.walkers(at, 1)[0];
+          if (!r) return { went: null, note: 'no round on this world walks' };
+          const to = new THREE.Vector3(r.x, r.indoors ? r.y + 0.3 : this.world.terrain.heightAt(r.x, r.z) + 0.3, r.z);
+          this.player.reset(to);
+          const cell = r.indoors ? this.world.enterCellAt(to) : 0;
+          return { went: r, cell, note: 'the walker stands on the next pass and sets off 50 to 70 seconds after it stands' };
+        }
+        const walkers = (this.world.mobiles?.live ?? [])
+          .filter((m) => m.patrol && !m.dead)
+          .map((m) => {
+            const p = m.patrol!;
+            return {
+              who: m.label,
+              away: Math.round(m.pos.distanceTo(at)),
+              points: p.points.length,
+              at: p.at,
+              to: p.to,
+              walking: p.walking,
+              legs: p.legs,
+              skipped: p.skipped,
+              rounds: p.rounds,
+              lastLeg: Number(p.lastLeg.toFixed(1)),
+              waits: p.waits.slice(),
+              setsOffIn: p.walking ? 0 : Number(Math.max(0, p.waitUntil - this.world.simTime).toFixed(1)),
+              room: m.room,
+              state: m.state,
+              door: m.legs.phase === 0 ? null : m.legs.phase === 1 ? 'approaching' : 'walking through',
+              stuck: m.stuckEvents,
+            };
+          })
+          .sort((a, b) => a.away - b.away);
+        return { walkers: walkers.slice(0, Math.max(1, opts?.near ?? 40)), count: walkers.length, rows: standingPeople.walkers(at, 5), ...(moved.length ? { moved } : {}), tune: { ...PATROL_TUNE } };
       },
       /**
        * Where a body would get to, out of the line of fire, and what looking for it cost

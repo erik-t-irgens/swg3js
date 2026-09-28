@@ -79,6 +79,32 @@ export const OUTDOOR_AGENT: OutdoorAgentTune = {
   stuckMoved: 2,
 };
 
+/**
+ * The steepest ground a catalogue mobile -- a person, a droid or a creature from the catalogue, which
+ * is a dynamic body driven by its velocity and not a character controller -- may be handed a route
+ * up, degrees. A grid baked steeper than this is handed to the fighters alone, whose controller
+ * climbs 55.
+ *
+ * It is 45 because that is what such a body was measured climbing **at a walk** (the whole account is
+ * at `SLOPE_CLIMB_DEGREES` in `tools/swg/navgrid.mjs`): it gets the whole of a 48-degree face at a
+ * run and under four metres of a 44-degree one at 1.8 m/s, and a patrol, a wander and a body walking
+ * home all go at a walk. So the rule reads the grid's own stamp rather than trusting that whatever is
+ * on disk is the bake this build asked for: a world still carrying the 47-degree bake of the pass
+ * before paths its fighters exactly as it did, its people and creatures steer straight until `status`
+ * has asked for the re-bake and it has run, and a node test fails if the converter's default and
+ * this ever part.
+ */
+export const MOBILE_CLIMB_DEGREES = 45;
+
+/**
+ * The widest body a grid route is handed to, as its half-width across, metres. The bake grew every
+ * blocked cell by one cell for the player's 0.35 m, which leaves a body standing in the middle of an
+ * open cell a whole cell's half -- a metre -- clear of anything blocked; wider than that and a
+ * corridor the grid calls open may not be one this body fits, so it steers as it always did. A
+ * bantha is past it; a person, a womp rat and a kaadu are well inside. Ours.
+ */
+export const MOBILE_GRID_ACROSS = 1;
+
 export interface OutdoorStatus {
   /** Whether a grid is loaded at all: false is a world nobody has run the command over. */
   ready: boolean;
@@ -93,6 +119,14 @@ export interface OutdoorStatus {
    * cell out there carries the same number. 0 is a grid with no clearance in it at all.
    */
   clearMax: number;
+  /**
+   * The angle the grid was baked at, and whether that lets the world's people and creatures walk it
+   * too (`MOBILE_CLIMB_DEGREES`), or only its fighters. `mobiles` is the switch that turns the second
+   * off for a comparison.
+   */
+  slopeDegrees: number | null;
+  forMobiles: boolean;
+  mobiles: boolean;
   /** Searches asked for, and what they came to. */
   asked: number;
   found: number;
@@ -106,6 +140,8 @@ export interface OutdoorStatus {
   deferred: number;
   /** Plans answered out of the refusal ring with no search at all. */
   remembered: number;
+  /** Short plans the coarse plane refused that the fine cells alone found a way for (`nearFine`). */
+  nearFine: number;
   /** Routes thrown away because the body was making no headway on them. */
   unstuck: number;
   /** What the last search that really ran cost. */
@@ -166,6 +202,23 @@ export class OutdoorNav {
   get ready(): boolean {
     return this.grid !== null;
   }
+
+  /**
+   * Whether the grid loaded may be handed to a catalogue mobile at all: there is one, and it was
+   * baked no steeper than such a body climbs at a walk (`MOBILE_CLIMB_DEGREES`). A grid with no stamp
+   * is taken as steeper, since what it promises cannot be known. `mobiles` is the live switch
+   * (`__debug.nav({ outdoor: { mobiles: 0 } })`), which is how a run is compared with the people and
+   * creatures steering as they did before they had a grid.
+   */
+  get forMobiles(): boolean {
+    const g = this.grid;
+    if (!g || !this.mobilesOn) return false;
+    const slope = Number(g.header.slopeDegrees);
+    return Number.isFinite(slope) && slope <= MOBILE_CLIMB_DEGREES;
+  }
+
+  /** The switch `forMobiles` reads; on unless the console turned it off. */
+  mobilesOn = true;
 
   /**
    * Fetch and decode one world's grid. A world with no grid, a header this build does not read, a
@@ -392,6 +445,9 @@ export class OutdoorNav {
       nz: h?.nz ?? 0,
       bytes: this.bytes,
       clearMax: h?.clearMax ?? 0,
+      slopeDegrees: Number.isFinite(Number(h?.slopeDegrees)) ? Number(h!.slopeDegrees) : null,
+      forMobiles: this.forMobiles,
+      mobiles: this.mobilesOn,
       asked: this.asked,
       found: this.foundCount,
       straight: this.straightCount,
@@ -401,6 +457,7 @@ export class OutdoorNav {
       spent: this.spentCount,
       deferred: this.deferred,
       remembered: this.work?.remembered ?? 0,
+      nearFine: this.work?.nearFound ?? 0,
       unstuck: this.unstuckCount,
       lastCoarse: this.lastCoarse,
       lastFine: this.lastFine,
@@ -413,9 +470,15 @@ export class OutdoorNav {
     };
   }
 
-  /** Move one of the invented numbers for a run; anything else is left alone. */
-  set(values: Partial<OutdoorTune & OutdoorAgentTune>): OutdoorStatus {
+  /**
+   * Move one of the invented numbers for a run; anything else is left alone. `mobiles` (a switch, or
+   * 0 and 1) says whether the world's people and creatures walk the grid at all.
+   */
+  set(values: Partial<OutdoorTune & OutdoorAgentTune> & { mobiles?: boolean | number }): OutdoorStatus {
+    const m = values.mobiles;
+    if (typeof m === 'boolean' || typeof m === 'number') this.mobilesOn = !!m;
     for (const k of Object.keys(values) as (keyof (OutdoorTune & OutdoorAgentTune))[]) {
+      if ((k as string) === 'mobiles') continue;
       const v = (values as Record<string, unknown>)[k];
       if (typeof v !== 'number' || !Number.isFinite(v)) continue;
       if (k in this.agent) {

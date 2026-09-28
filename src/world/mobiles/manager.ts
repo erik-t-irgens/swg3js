@@ -426,6 +426,8 @@ export class MobileManager {
       held.cell = this.deps.cellAt(m.pos, opts.room);
       m.room = held.cell?.cell ?? 0;
       m.navCell = held.cell;
+      // Where home is: the room it was stood in, which a walk home after a fight is sent to the door of.
+      m.homeCell = held.cell;
     }
     this.held.set(m, held);
     m.essential = !!opts.essential;

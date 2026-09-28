@@ -39,6 +39,7 @@ import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgT
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
+import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -484,6 +485,14 @@ export class World {
   /** The player as something that can be hurt and fought: its place and state are set each frame. */
   readonly playerTarget = new PlayerTarget();
   /**
+   * Which room a living thing is in, as this world follows it: the player's own followed room, a
+   * catalogue body's (`navCell`), a fighter's (`cell`); null for open ground, undefined for anything
+   * nobody follows (another player, a turret). One arrow for the session, handed to the mobiles on
+   * every step and to the fighters once, which is how a body outside finds the door of the building
+   * somebody went into (`src/world/nav/doorway.ts`).
+   */
+  private readonly livingCell = (t: Living): CellState | null | undefined => cellOfLiving(t, this.playerTarget, this.cellState);
+  /**
    * Seconds of simulated play since the world loaded: advanced by `stepLiving`, by dt, never from
    * a wall clock, so `__debug.advance` exercises everything that runs on a timer.
    */
@@ -741,6 +750,9 @@ export class World {
     // in a physics world that is about to be freed), and what puts them in earshot of the peers.
     // Nothing is built until somebody asks for a hull to be made a place.
     this.remoteRooms();
+    // The ground a doorway's sill is measured against, so a door up in the air is never a way in on
+    // foot (`doorway.ts`). Read at the call: the terrain is this world's and changes with each travel.
+    doorwayNav.ground = (x, z) => this.terrain.heightAt(x, z);
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     markActor(this.splashes.points);
     markActor(this.dust.points);
@@ -1322,6 +1334,9 @@ export class World {
       // go with the player's distance while the room a body is in goes on answering, so a fighter
       // with a character controller under it has to be able to ask for the floor and not the room.
       cellSolid: (state) => this.layoutStream?.cellsSolid(state) ?? true,
+      // Which room whatever a fighter is chasing is in, so a fighter outside makes for a door of the
+      // building rather than the wall nearest it (`doorway.ts`), as the mobiles do.
+      cellOf: this.livingCell,
       // What stands near a body that it could get behind: the streamer's own placed objects, each
       // as a disc over its model's box. It is the only thing the cover search has to be given --
       // every ray it casts it casts itself -- and with nothing wired it finds no blockers and
@@ -4525,6 +4540,22 @@ export class World {
     return { at: entry.at, cell: entry.cell };
   }
 
+  /**
+   * The ways in from the street of the building with rooms nearest a point, for the console
+   * (`__debug.nav({ door: true })`): each doorway's room, its middle and its sill, and the two points
+   * a body is walked through it by (`src/world/nav/doorway.ts`), rounded to the centimetre.
+   */
+  waysInNear(pos: THREE.Vector3): { building: string; away: number; exits: { room: number; at: number[]; sill: number; out: number[]; in: number[] }[] } | null {
+    const b = this.layoutStream?.nearestBuilding(pos);
+    if (!b) return null;
+    const r = (n: number): number => Math.round(n * 100) / 100;
+    return {
+      building: String((b.model.def as { id?: string }).id ?? b.template),
+      away: Math.round(Math.hypot(b.x - pos.x, b.z - pos.z)),
+      exits: doorwayNav.exits(b).map((e) => ({ room: e.room, at: [r(e.x), r(e.y), r(e.z)], sill: r(e.sill), out: [r(e.outX), r(e.outZ)], in: [r(e.inX), r(e.inZ)] })),
+    };
+  }
+
   /** Flora planted so far and the appearances the pack lacked (diagnostics). */
   get floraStatus(): { planted: number; models: number; missing: string[] } | null {
     return this.flora ? { planted: this.flora.planted, models: this.flora.modelCount, missing: [...this.flora.missing] } : null;
@@ -5289,7 +5320,7 @@ export class World {
     surfaces.update(this.simTime, this.renderer);
     const targets = this.targets(true);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
-    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets });
+    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell });
     // The world's own lairs and herds, stood and put away as the player moves. On this clock and
     // not the frame's, so `__debug.advance` drives every respawn it has.
     wildLife.step(dt, this.simTime, playerPos, this.wildDeps());

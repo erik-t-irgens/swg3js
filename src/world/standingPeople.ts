@@ -53,6 +53,7 @@ import type { Aggression } from '../combat/kit.ts';
 import { intoWorld, tuneTable } from './wildLife.ts';
 import { roll } from './spawnSeed.ts';
 import { SEATED_MOOD, moodOfRow } from './mobiles/moodIdle.ts';
+import { Patrol, walksRound } from './patrols.ts';
 
 /**
  * One person, as the converter wrote them: x and z in the snapshot's frame, as every placed object
@@ -838,6 +839,9 @@ export class StandingPeople {
       m.homeX = st.x;
       m.homeZ = st.z;
       m.post = postFor(r, who.mood);
+      // A town's walker walks its round from the first point, where it was stood, on the server's own
+      // clock (`patrols.ts`); its post is kept beside it for the console and nothing reads it.
+      m.patrol = patrolFor(r, st, now);
       this.up.set(i, { row: r, stand: st, body: m, diedAt: 0, killed: false, essential, who: who.who, mood: who.mood });
       stood++;
       if (essential) liveKept++;
@@ -1020,6 +1024,35 @@ export class StandingPeople {
   }
 
   /**
+   * For the console: the rows nearest a point whose body walks a round (`patrolFor`'s rule), standing or
+   * not, each where it stands -- the first point of its round -- with how many points the round has and
+   * how many of them are lingered at. Nothing until a pass has known the layout's centre.
+   */
+  walkers(at: THREE.Vector3, n = 5): WalkerRow[] {
+    if (!this.framed) return [];
+    const out: WalkerRow[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      const st = this.stands[i];
+      const first = r.route?.[0];
+      if (!first || !walksRound(r.route, first.x === st.x && first.z === st.z, r.peaceful === true)) continue;
+      out.push({
+        who: r.who,
+        x: Math.round(st.x * 10) / 10,
+        y: Math.round(st.y * 10) / 10,
+        z: Math.round(st.z * 10) / 10,
+        indoors: st.inside,
+        room: st.inside ? (st.room ?? null) : null,
+        points: r.route!.length,
+        lingers: r.route!.filter((p) => p.linger).length,
+        away: Math.round(Math.hypot(st.x - at.x, st.z - at.z)),
+        up: !!this.up.get(i)?.body,
+      });
+    }
+    return out.sort((a, b) => a.away - b.away).slice(0, n);
+  }
+
+  /**
    * For the console: the rows nearest a point, standing or not, in the world's own frame, each where
    * its body stands (`standPlaceOf`: a patroller at the first point of its walk), which is where `go`
    * takes the player. Nothing until a pass has known the layout's centre, since before that a row is a
@@ -1046,6 +1079,20 @@ export class StandingPeople {
       .sort((a, b) => a.away - b.away)
       .slice(0, n);
   }
+}
+
+/** One row that walks a round, as the console reads it (`StandingPeople.walkers`). */
+export interface WalkerRow {
+  who: string;
+  x: number;
+  y: number;
+  z: number;
+  indoors: boolean;
+  room: number | null;
+  points: number;
+  lingers: number;
+  away: number;
+  up: boolean;
 }
 
 /** One person standing, as the console reads it (`StandingPeople.report`). */
@@ -1075,6 +1122,18 @@ export interface PersonReport {
 export function postFor(r: Pick<StandingRow, 'still' | 'sit' | 'heading'>, mood?: string | null): Post {
   const seated = !!mood && SEATED_MOOD.test(mood);
   return { kind: r.still || r.sit || seated ? 'still' : 'near', heading: r.heading, tune: PEOPLE_TUNE };
+}
+
+/**
+ * The round a row's body walks, or null: a round of two points or more that it was stood at the start
+ * of (`standPlaceOf` put it on the first point rather than at its own row), walked by a walker the town
+ * made unattackable and, only with `PATROL_TUNE.combat`, by one of its combat walkers too
+ * (`walksRound`). Made when the body is stood, so its clock starts then.
+ */
+export function patrolFor(r: Pick<StandingRow, 'route' | 'peaceful'>, st: Pick<StandPlace, 'x' | 'z'>, now: number, rand: () => number = Math.random): Patrol | null {
+  const first = r.route?.[0];
+  const atFirst = !!first && first.x === st.x && first.z === st.z;
+  return walksRound(r.route, atFirst, r.peaceful === true) ? new Patrol(r.route!, now, rand) : null;
 }
 
 /**

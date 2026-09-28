@@ -65,6 +65,12 @@ export interface OutdoorHeader {
   clearBytes: number;
   /** The clearance the bake stopped counting at, in cells: every cell further off reads this. */
   clearMax: number;
+  /**
+   * The steepest ground the bake called climbable, degrees: the grid's own stamp of which bodies it
+   * was cut for (`SLOPE_CLIMB_DEGREES` in `tools/swg/navgrid.mjs`). Absent on nothing the game reads
+   * today, and read as unknown -- steeper than anything -- if it ever is.
+   */
+  slopeDegrees?: number;
 }
 
 export interface OutdoorTune {
@@ -211,6 +217,17 @@ export interface OutdoorTune {
    * say which of the two it measured.
    */
   berthPull: number;
+  /**
+   * How short a plan may be and still be searched on the fine cells alone when the sixteen-metre
+   * plane will not join its two ends, metres. The plane refuses a cell that is less than a third
+   * open, so an alley between two buildings or a yard behind a gate is a gap in it even where the
+   * ground is one region: measured over every leg of the towns' patrol rounds, 69 of 1,236 were
+   * refused that way, most of them under fifty metres, and a body refused a route steers straight at
+   * a wall. A search of the few coarse cells along the straight line between the two ends, padded as
+   * the second corridor is, costs a few thousand fine cells and finds the way through wherever the
+   * ground has one. 0 turns it off, and the plan is the one that shipped before it. Ours.
+   */
+  nearFine: number;
 }
 
 export const OUTDOOR_TUNE: OutdoorTune = {
@@ -233,6 +250,7 @@ export const OUTDOOR_TUNE: OutdoorTune = {
   berthCost: 3,
   berthCurve: 1,
   berthPull: 6,
+  nearFine: 64,
 };
 
 /**
@@ -403,6 +421,8 @@ export class OutdoorWork {
   refusedAt = 0;
   /** How many plans were answered out of that ring rather than searched. */
   remembered = 0;
+  /** How many short plans the plane refused were found on the fine cells alone (`nearFine`). */
+  nearFound = 0;
 
   /** Forget every refusal. Nothing in play calls it: a work object is made afresh with each world. */
   forget(): void {
@@ -1061,6 +1081,51 @@ export function nearestOpenIn(g: OutdoorGrid, x: number, z: number, metres: numb
   return -1;
 }
 
+/**
+ * A short plan searched on the fine cells alone (`nearFine`): the coarse cells the straight line
+ * between the two ends crosses, padded as the second corridor is, and the fine search inside them.
+ * Answers 'found' with the corners in `w.pulled`, or `otherwise` -- whatever the plan would have said
+ * without it -- when the fine cells hold no way either. Nothing is allocated: the line goes into the
+ * chain the coarse route would have used.
+ */
+function nearOrSay(g: OutdoorGrid, w: OutdoorWork, startK: number, goalK: number, tune: OutdoorTune, deadline: number, otherwise: PlanOutcome): PlanOutcome {
+  const h = g.header;
+  const j0 = Math.floor(startK / h.nx);
+  const j1 = Math.floor(goalK / h.nx);
+  let ci = Math.floor((startK - j0 * h.nx) / h.coarse);
+  let cj = Math.floor(j0 / h.coarse);
+  const ci1 = Math.floor((goalK - j1 * h.nx) / h.coarse);
+  const cj1 = Math.floor(j1 / h.coarse);
+  const di = Math.abs(ci1 - ci);
+  const dj = Math.abs(cj1 - cj);
+  const si = ci < ci1 ? 1 : -1;
+  const sj = cj < cj1 ? 1 : -1;
+  let err = di - dj;
+  let n = 0;
+  for (;;) {
+    if (n >= w.chain.length) return otherwise;
+    w.chain[n++] = cj * h.cnx + ci;
+    if (ci === ci1 && cj === cj1) break;
+    const e2 = 2 * err;
+    if (e2 > -dj) {
+      err -= dj;
+      ci += si;
+    }
+    if (e2 < di) {
+      err += di;
+      cj += sj;
+    }
+  }
+  if (!markCorridor(g, w, 0, n - 1, tune.corridorAgain)) return otherwise;
+  const count = corridorSearch(g, w, startK, goalK, tune, deadline);
+  if (!count) return otherwise;
+  w.rawCount = count;
+  w.pulledCount = stringPull(g, w.raw, count, w.pulled, tune);
+  if (!(w.pulledCount > 0)) return otherwise;
+  w.nearFound++;
+  return 'found';
+}
+
 /** The nearest coarse cell the plane offers, within `rings` coarse cells; the one given back if none. */
 function nearestCoarse(g: OutdoorGrid, c: number, rings: number): number {
   const h = g.header;
@@ -1123,6 +1188,9 @@ export function planRoute(
   const gxc = cellX(g, goalK);
   const gzc = cellZ(g, goalK);
   if (Math.hypot(gxc - sxc, gzc - szc) <= tune.straight && lineClear(g, sxc, szc, gxc, gzc)) return 'straight';
+  // Short enough that, where the coarse plane cannot answer, the fine cells are searched directly
+  // (`nearFine`): the plane's gaps are alleys and yards, and the ground often has a way through.
+  const short = tune.nearFine > 0 && Math.hypot(gxc - sxc, gzc - szc) <= tune.nearFine;
 
   const coarseOf = (k: number): number => {
     const j = Math.floor(k / h.nx);
@@ -1144,14 +1212,16 @@ export function planRoute(
   for (let i = 0; i < w.refusedA.length; i++) {
     if (w.refusedA[i] === startC && w.refusedB[i] === goalC) {
       w.remembered++;
-      return 'unjoined';
+      return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'unjoined') : 'unjoined';
     }
   }
+  // The pair goes into the ring whatever the fine cells then say: it is a fact about the plane, and
+  // a short plan asked again goes straight to the fine search without the flood or the coarse one.
   const refuse = (): PlanOutcome => {
     w.refusedA[w.refusedAt] = startC;
     w.refusedB[w.refusedAt] = goalC;
     w.refusedAt = (w.refusedAt + 1) % w.refusedA.length;
-    return 'unjoined';
+    return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'unjoined') : 'unjoined';
   };
   // The cheap question, asked from the goal's end, before the expensive one is asked from the
   // body's. The A* below costs the **body's** component, so a body in a pocket is answered in a few
@@ -1169,7 +1239,7 @@ export function planRoute(
     if (w.flood === 0) return refuse();
   }
   const end = coarseSearch(g, w, startC, goalC, tune, deadline);
-  if (end === -2) return 'spent';
+  if (end === -2) return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'spent') : 'spent';
   // The search exhausted the body's own component without reaching the goal: the plane holds no
   // route between them, whatever the ground under it says, and that will be true next time too.
   if (end < 0) return refuse();

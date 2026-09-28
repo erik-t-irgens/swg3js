@@ -2626,6 +2626,14 @@ function packStatus(dir) {
     if (terrain && objects && !navGrid) need(`navgrid ${planet} ${dir}`, `${planet} has no outdoor walkability grid: bodies outdoors steer straight at their goal`);
     else if (navMoved) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid was baked around the centre ${navGrid.center.x},${navGrid.center.z} and the pack's is now ${layout.center.x},${layout.center.z}: every cell in it is that far from the ground it describes`);
     else if (navNoIndoor) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid has ${navGrid.stats.buildings} portal buildings and no footprints for any of them: a route may cut straight through one`);
+    // The angle it was baked at, which is the grid's own stamp: one baked steeper than the bodies
+    // that walk it can climb promises them faces they stall on, and the game hands such a grid to
+    // its fighters alone (`MOBILE_CLIMB_DEGREES`), so its people and creatures outdoors steer
+    // straight until it is baked again. A grid baked gentler than asked is only more careful, and
+    // is left alone rather than asked for for ever.
+    // Only of a grid that is there: with no terrain or no objects and no grid, every branch above
+    // falls through to here, and a pack stopped half way through its first snapshot is exactly that.
+    else if (navGrid && !(Number(navGrid.slopeDegrees) <= SLOPE_CLIMB_DEGREES)) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid calls ${navGrid.slopeDegrees ?? 'an unrecorded number of'} degrees climbable, steeper than the ${SLOPE_CLIMB_DEGREES} the world's people and creatures can walk up: only its fighters take it until it is baked again`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
@@ -7391,10 +7399,10 @@ switch (cmd) {
       : [[pos[1], join(pos[2], pos[1])]];
     if (!targets.length) console.log(`no planet packs under ${pos[2]} yet; run snapshot first`);
     const cell = options.cell ? Number(options.cell) : undefined;
-    // The angle the grid calls climbable. The default is 47, which is what a catalogue mobile --
-    // a dynamic body, not a character controller -- was measured to climb at a hard run; the
-    // player's own controller and every fighter climb 55, so the grid is cut to the body that can
-    // do least. `SLOPE_CLIMB_DEGREES` in navgrid.mjs carries the whole of the owner's reasoning.
+    // The angle the grid calls climbable. The default is 45, which is what a catalogue mobile --
+    // a dynamic body, not a character controller -- was measured to climb at a walk; the player's
+    // own controller and every fighter climb 55, so the grid is cut to the body that can do least.
+    // `SLOPE_CLIMB_DEGREES` in navgrid.mjs carries the whole of the owner's reasoning.
     const slope = options.slope ? Number(options.slope) : undefined;
     let built = 0;
     for (const [planet, outDir] of targets) {
@@ -7408,7 +7416,15 @@ switch (cmd) {
       // either leaves the tree looking converted and the game with no pathing on that world, with
       // `status` in the same session asking for the very bake this just declined to do.
       if (flags.has('--skip-existing')) {
-        const there = readJson(join(outDir, 'nav.json'));
+        // Read here rather than through `packStatus`'s own reader, which is local to it: this path
+        // named that one and threw on its first world until the 45-degree re-bake was the first run
+        // ever to take it. A file that will not parse is a bake to do again, as it is there.
+        let there = null;
+        try {
+          there = existsSync(join(outDir, 'nav.json')) ? JSON.parse(readFileSync(join(outDir, 'nav.json'), 'utf8')) : null;
+        } catch {
+          there = null;
+        }
         const want = slope ?? SLOPE_CLIMB_DEGREES;
         if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want)) {
           console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);

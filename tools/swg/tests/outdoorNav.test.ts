@@ -11,6 +11,11 @@
 // coarse cells with a wall on their shared border must not be offered as a hop however much of
 // each of them is open -- which is the bug that made four cross-country routes stop dead.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   CLEARANCE_MAX,
   COARSE,
@@ -61,7 +66,7 @@ import {
   type OutdoorHeader,
   type OutdoorTune,
 } from '../../../src/world/nav/outdoorGrid.ts';
-import { OutdoorNav } from '../../../src/world/nav/outdoorNav.ts';
+import { MOBILE_CLIMB_DEGREES, MOBILE_GRID_ACROSS, OutdoorNav } from '../../../src/world/nav/outdoorNav.ts';
 import { NavAgent } from '../../../src/world/nav/navAgent.ts';
 
 let checks = 0;
@@ -629,6 +634,66 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
   w.work.forget();
 }
 
+// ---- a short plan the plane refuses is searched on the fine cells ---------------------------------
+// The same shape at a town's scale: two yards joined by a gap two cells wide in a wall, so near each
+// other that a body is sent from one to the other every few seconds by a patrol's round. The plane
+// offers neither the gap's coarse cell nor, here, the second yard's, so the coarse answer is
+// 'unjoined'; the fine cells hold the way through, and a plan this short searches them directly.
+{
+  const nx = 40;
+  const nz = 24;
+  const rows: string[] = [];
+  for (let j = 0; j < nz; j++) {
+    let line = '';
+    for (let i = 0; i < nx; i++) {
+      const wall = i >= 16 && i < 24 && !(j === 11 || j === 12);
+      const shutB = i >= 24 && (j < 8 || j >= 16);
+      line += wall || shutB ? '#' : '.';
+    }
+    rows.push(line);
+  }
+  const w = draw(rows);
+  const off: OutdoorTune = { ...OUTDOOR_TUNE, nearFine: 0, planMs: 0 };
+  const on: OutdoorTune = { ...OUTDOOR_TUNE, planMs: 0 };
+  const plain = planRoute(w.grid, w.work, ...at(4, 4), ...at(34, 12), off);
+  w.work.forget();
+  const fine = planRoute(w.grid, w.work, ...at(4, 4), ...at(34, 12), on);
+  ok(plain !== 'found' && plain !== 'straight', `without it the plane cannot join two yards ${Math.round(Math.hypot(30, 8) * CELL)} m apart (${plain})`);
+  ok(fine === 'found' && w.work.nearFound === 1 && w.work.pulledCount > 0, `with it the same short plan is found on the fine cells (${fine})`);
+  let through = false;
+  for (let n = 0; n < w.work.pulledCount; n++) {
+    const x = w.work.pulled[n * 2] / CELL;
+    const z = w.work.pulled[n * 2 + 1] / CELL;
+    if (x >= 15 && x <= 25 && z >= 10 && z <= 14) through = true;
+  }
+  ok(through, '... and its corners go through the gap in the wall');
+  ok(planRoute(w.grid, w.work, ...at(4, 4), ...at(34, 12), on) === 'found' && w.work.remembered > 0, 'asked again, the refusal ring sends it straight to the fine cells');
+  const far = { ...on, nearFine: 10 };
+  w.work.forget();
+  ok(planRoute(w.grid, w.work, ...at(4, 4), ...at(34, 12), far) === plain, 'a plan longer than `nearFine` answers what the plane says, as it always did');
+}
+
+// And a coarse search that runs out of its budget before it answers is no more reason than a refusal
+// for a plan this short to go without: the fine cells are searched the same way. A wall with its way
+// round below it, and a coarse search allowed no expansions at all, which is a spent budget on demand.
+{
+  const rows: string[] = [];
+  for (let j = 0; j < 24; j++) {
+    let line = '';
+    for (let i = 0; i < 24; i++) line += i === 12 && j < 16 ? '#' : '.';
+    rows.push(line);
+  }
+  const w = draw(rows);
+  const spend: OutdoorTune = { ...OUTDOOR_TUNE, planMs: 0, coarseExpand: 0 };
+  ok(planRoute(w.grid, w.work, ...at(4, 4), ...at(20, 4), { ...spend, nearFine: 0 }) === 'spent', 'a coarse search with no budget left says so, with the fine search off');
+  w.work.forget();
+  const before = w.work.nearFound;
+  const fine = planRoute(w.grid, w.work, ...at(4, 4), ...at(20, 4), spend);
+  let under = false;
+  for (let n = 0; n < w.work.pulledCount; n++) if (w.work.pulled[n * 2 + 1] / CELL >= 16) under = true;
+  ok(fine === 'found' && w.work.nearFound === before + 1 && under, `with it on, the same short plan is found on the fine cells, round the end of the wall (${fine})`);
+}
+
 // ---- nothing is allocated by a plan -------------------------------------------------------------
 {
   const nx = 120;
@@ -900,10 +965,70 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
 // ---- the angle the grid calls climbable ----------------------------------------------------------
 // It is the owner's choice and not a fact about the game, so what is pinned is the choice: a
 // catalogue mobile is stopped between about 45 degrees at a walk and 49 at a run, and the grid is
-// cut to the body that can do least rather than to the fighter's own 55.
+// cut to the body that can do least -- a mobile at a walk, since the world's people and creatures
+// were given it to walk (the NPC pass's D8) -- rather than to the fighter's own 55.
 {
-  ok(SLOPE_CLIMB_DEGREES === 47, `the grid calls ${SLOPE_CLIMB_DEGREES} degrees climbable`);
+  ok(SLOPE_CLIMB_DEGREES === 45, `the grid calls ${SLOPE_CLIMB_DEGREES} degrees climbable`);
   ok(SLOPE_CLIMB_DEGREES >= 45 && SLOPE_CLIMB_DEGREES < 50, 'which is inside the span a dynamic body was measured at, and under the 50 that stopped every one of them');
+  ok(SLOPE_CLIMB_DEGREES <= MOBILE_CLIMB_DEGREES, `and no steeper than the ${MOBILE_CLIMB_DEGREES} the game hands a mobile a grid at, so a fresh bake is walked by everyone`);
+
+  // The grid's own stamp decides who is handed it, never an assumption about what is on disk.
+  const stamped = (slope: number | undefined): OutdoorNav => {
+    const d = draw(['....', '....', '....', '....']);
+    const n = new OutdoorNav();
+    n.adopt('drawn', { ...d.header, ...(slope === undefined ? {} : { slopeDegrees: slope }) }, d.bytes);
+    return n;
+  };
+  ok(stamped(45).forMobiles, 'a grid baked at 45 degrees is handed to the people and creatures');
+  ok(!stamped(47).forMobiles && stamped(47).ready, '... one still carrying the 47-degree bake of the pass before is not, though the fighters go on using it');
+  ok(!stamped(undefined).forMobiles, '... nor one that does not say what it was baked at');
+  const off = stamped(45);
+  off.set({ mobiles: false });
+  ok(!off.forMobiles && off.status().mobiles === false, 'and the console switch takes it off them for a comparison');
+  ok(!new OutdoorNav().forMobiles, 'no grid at all is handed to nobody');
+
+  // Who else it is kept from: a body wider than the margin the bake grew every blocked cell by. The
+  // margin is one cell for the player's 0.35 m, which leaves a body in the middle of an open cell half
+  // a cell -- a metre -- clear of anything blocked, and that is the whole of the number.
+  ok(MOBILE_GRID_ACROSS === CELL / 2, `a mobile is handed the grid only up to ${MOBILE_GRID_ACROSS} m across, the half cell the bake's margin leaves it`);
+  ok(MOBILE_GRID_ACROSS < 1.5, '... which a person, a womp rat and a kaadu are inside and a bantha is not');
+}
+
+// ---- how the stamp gets from the converter to the game, and how status asks for a new one ---------
+// The converter writes the angle into the grid's header under a key the game reads by name; renamed on
+// one side only, every grid in every pack would read as unstamped and be taken off every mobile with
+// nothing to say so. And `status` asks for a re-bake of a grid baked steeper than the converter now
+// bakes, and of no other -- read here out of a pack drawn in a scratch folder, through the real CLI.
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const navgridSrc = readFileSync(join(here, '..', 'navgrid.mjs'), 'utf8').replace(/\r\n/g, '\n');
+  const headerAt = navgridSrc.indexOf('const header = {');
+  const stampAt = navgridSrc.indexOf('slopeDegrees: Number(opts.slope ?? SLOPE_CLIMB_DEGREES),', headerAt);
+  ok(headerAt > 0 && stampAt > headerAt && stampAt - headerAt < 3000, 'the converter writes the angle it baked at into the header as `slopeDegrees`');
+  ok(/const out = \{ \.\.\.header,/.test(navgridSrc), '... which goes into nav.json whole, under the very key the game reads it by (the block above hands `forMobiles` a header stamped that way and no other)');
+
+  const dir = mkdtempSync(join(tmpdir(), 'navstamp-'));
+  try {
+    const world = join(dir, 'tatooine');
+    mkdirSync(world, { recursive: true });
+    writeFileSync(join(world, 'manifest.json'), '{}');
+    writeFileSync(join(world, 'terrain.trn'), '');
+    writeFileSync(join(world, 'layout.json'), JSON.stringify({ objects: [{ template: 'object/tangible/furniture/shared_drawn.iff' }] }));
+    const statusAt = (slope: number | undefined): { command: string; reasons: string[] }[] => {
+      writeFileSync(join(world, 'nav.json'), JSON.stringify({ version: NAV_GRID_VERSION, planet: 'tatooine', nx: 4, nz: 4, cell: 2, ...(slope === undefined ? {} : { slopeDegrees: slope }) }));
+      const r = spawnSync(process.execPath, [join(here, '..', 'cli.mjs'), 'status', dir, '--json'], { encoding: 'utf8' });
+      assert.equal(r.status, 0, `status runs over the drawn pack: ${r.stderr}`);
+      return (JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))) as { steps: { command: string; reasons: string[] }[] }).steps;
+    };
+    const navSteps = (steps: { command: string; reasons: string[] }[]) => steps.filter((s) => s.command === 'navgrid');
+    const steep = navSteps(statusAt(47));
+    ok(steep.length === 1 && steep[0].reasons.some((w) => /steeper than the 45/.test(w)), 'status asks for the grid again over a world still carrying the 47-degree bake, and says why');
+    ok(navSteps(statusAt(undefined)).length === 1, '... and over one that does not say what it was baked at');
+    ok(navSteps(statusAt(SLOPE_CLIMB_DEGREES)).length === 0, `... and not over one baked at ${SLOPE_CLIMB_DEGREES}`);
+    ok(navSteps(statusAt(40)).length === 0, '... nor over one baked gentler, which is only more careful and would be asked for for ever');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n${checks} checks passed`);

@@ -298,6 +298,25 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok(setAside([cutFile], cutDir).moved === 0 && setAside(undefined, cutDir).moved === 0, 'a file already gone, or an older status with no list, moves nothing');
   const after = readStatus(spawnSync(process.execPath, [join(root, 'tools', 'swg', 'cli.mjs'), 'status', cutDir, '--json'], { encoding: 'utf8' }).stdout);
   ok(after.unreadable.length === 0 && after.steps[0].command === 'snapshot', 'after which status asks for the planets as for a folder that never had them');
+
+  // A snapshot stopped while it wrote the layout, before the grid was ever baked: the manifest reads,
+  // the layout does not and there is no nav.json. Every branch of the grid's own questions falls
+  // through with no grid in hand, and the last of them must not read the angle off nothing -- status
+  // has to print its JSON, or the drive cannot set the cut file aside and never gets past it.
+  const halfDir = join(scratch, 'half a snapshot');
+  mkdirSync(join(halfDir, 'tatooine'), { recursive: true });
+  writeFileSync(join(halfDir, 'tatooine', 'manifest.json'), '{}');
+  writeFileSync(join(halfDir, 'tatooine', 'terrain.trn'), '');
+  const halfLayout = join(halfDir, 'tatooine', 'layout.json');
+  writeFileSync(halfLayout, '{"objects":[{"a":');
+  const halfJson = spawnSync(process.execPath, [join(root, 'tools', 'swg', 'cli.mjs'), 'status', halfDir, '--json'], { encoding: 'utf8' });
+  ok(halfJson.status === 0, `status --json does not stop on a world with a manifest, a layout cut short and no grid${halfJson.status === 0 ? '' : `: ${halfJson.stderr.split('\n').find((l) => /Error/.test(l)) ?? halfJson.stderr.split('\n')[0]}`}`);
+  const half = readStatus(halfJson.stdout);
+  ok(half.unreadable.length === 1 && resolve(half.unreadable[0]) === resolve(halfLayout), '... and names the layout as the file it could not read');
+  const bare = join(scratch, 'manifest only');
+  mkdirSync(join(bare, 'tatooine'), { recursive: true });
+  writeFileSync(join(bare, 'tatooine', 'manifest.json'), '{}');
+  ok(spawnSync(process.execPath, [join(root, 'tools', 'swg', 'cli.mjs'), 'status', bare, '--json'], { encoding: 'utf8' }).status === 0, 'nor on a world that is a manifest and nothing else');
 }
 
 // ---------------------------------------------------------------------------------------------

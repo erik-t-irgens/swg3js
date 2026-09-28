@@ -501,8 +501,11 @@ function fakeBuilding(cells: CellDef[], portals: PortalDef[], offsetX = 0): { bu
   // never the goal it is measured as having arrived at.
   const mobile = src('../../../src/world/mobiles/mobile.ts');
   const manager = src('../../../src/world/mobiles/manager.ts');
-  const hook = /if \(moveTo && pace !== 'stand' && this\.navCell[^}]*?\n\s*\}/.exec(mobile);
-  ok(hook !== null, 'a creature asks for its corner only with somewhere to go, a pace to go at, and a room to be in');
+  // Since the doorway join the hook no longer needs a room: outdoors it asks the same join, which hands
+  // it the grid's corners where it walks the grid and the way to a door where its goal is inside.
+  const hook = /if \(moveTo && pace !== 'stand' && !this\.flyer[^}]*?\n\s*\}/.exec(mobile);
+  ok(hook !== null, 'a creature asks for its corner only with somewhere to go and a pace to go at');
+  ok(hook !== null && /this\.navCell/.test(hook[0]), '... handing over the room it is in, which is what decides floors or ground');
   ok(hook !== null && /if \(corner\) face = corner;/.test(hook[0]), 'and only what it faces is taken from the path');
   ok(hook !== null && !/moveTo\s*=/.test(hook[0]), 'the goal it is measured against is never overridden, so it cannot stop a stride short of every corner');
   ok(hook !== null && /!this\.flyer/.test(hook[0]), 'and nothing that flies is pathed across a floor');

@@ -30,7 +30,7 @@ import * as THREE from 'three';
 import type { Building, CellState } from '../layoutStream.ts';
 import { LIFT_CELL } from '../lifts.ts';
 import { NAV_TUNE, buildFloor, pathIn, type FloorSource, type NavFloor, type NavTune } from './navMesh.ts';
-import { buildRoomGraph, cellOfPoint, nextDoor, throughPoint, type CellDef, type PortalDef, type RoomGraph } from './navRooms.ts';
+import { buildRoomGraph, cellOfPoint, exitToward, nextDoor, throughPoint, type CellDef, type PortalDef, type RoomGraph } from './navRooms.ts';
 import type { NavAgent } from './navAgent.ts';
 
 const local = new THREE.Vector3();
@@ -181,7 +181,7 @@ export class WorldNav {
    * `tune.agent`) and anything fatter has each corner pulled off the wall by its own width and
    * then checked against the mesh, rather than a second mesh being baked for it.
    */
-  corner(agent: NavAgent, cell: CellState, x: number, y: number, z: number, goalX: number, goalY: number, goalZ: number, radius: number, now: number): { x: number; z: number } | null {
+  corner(agent: NavAgent, cell: CellState, x: number, y: number, z: number, goalX: number, goalY: number, goalZ: number, radius: number, now: number, goalRoom = -1): { x: number; z: number } | null {
     const nav = this.forBuilding(cell.building);
     // A building carrying nothing out of a floor file is a building out of a pack converted before
     // any of this, and such a pack must play exactly as it plays today: the doorways alone would
@@ -209,25 +209,36 @@ export class WorldNav {
       } else {
         this.stepPlans++;
         this.asked++;
-        this.plan(agent, nav, cell, x, y, z, goalX, goalY, goalZ, radius, now);
+        this.plan(agent, nav, cell, x, y, z, goalX, goalY, goalZ, radius, now, goalRoom);
       }
     }
     if (!agent.advance(x, z, this.tune)) return null;
     return agent.corner();
   }
 
-  private plan(agent: NavAgent, nav: BuildingNav, cell: CellState, x: number, y: number, z: number, goalX: number, goalY: number, goalZ: number, radius: number, now: number): void {
+  /**
+   * `goalRoom` is where the goal is, when the caller knows it better than a box can (`doorway.ts`):
+   * -1 is "work it out from the point", which is every call there was before a body could be told
+   * where somebody it chases is standing; 0 is outside, which is how a body in here is sent after
+   * somebody in the street or in another building; any other number is that room of this building.
+   * The rooms' boxes overhang one another and the hull, so the smallest box that holds a point in the
+   * street beside a cantina is a room of the cantina, and a body asked to go there stayed inside.
+   */
+  private plan(agent: NavAgent, nav: BuildingNav, cell: CellState, x: number, y: number, z: number, goalX: number, goalY: number, goalZ: number, radius: number, now: number, goalRoom: number): void {
     const b = cell.building;
     const key = b as unknown as object;
     local.set(x, y, z).applyMatrix4(b.inverse);
     localGoal.set(goalX, goalY, goalZ).applyMatrix4(b.inverse);
-    const goalCell = cellOfPoint(nav.rooms, localGoal.x, localGoal.y, localGoal.z, 0.5);
+    const goalCell = goalRoom >= 0 ? goalRoom : cellOfPoint(nav.rooms, localGoal.x, localGoal.y, localGoal.z, 0.5);
     let endX = localGoal.x;
     let endY = localGoal.y;
     let endZ = localGoal.z;
     let crossing = false;
     if (goalCell !== cell.cell) {
-      const door = nextDoor(nav.rooms, cell.cell, goalCell);
+      // A goal outside is walked to by the way out nearest **it**, not nearest the body: see
+      // `exitToward`. Only a caller that said the goal is outside gets that; a point a box merely
+      // failed to hold is walked out of by the old rule, as it always was.
+      const door = goalRoom === 0 ? exitToward(nav.rooms, cell.cell, local.x, local.z, localGoal.x, localGoal.z) : nextDoor(nav.rooms, cell.cell, goalCell);
       if (!door) {
         agent.took(key, cell.cell, goalX, goalZ, now, 0);
         this.missed++;

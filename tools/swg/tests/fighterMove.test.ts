@@ -176,7 +176,7 @@ await Physics.create();
 {
   ok(/\n  facing = this\.heading;/.test(npcSrc), 'a fighter carries a facing beside its heading, started on it');
   ok(npcSrc.includes('Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - this.facing'), 'whether the weapon comes up is measured off the **gun** and not off the feet, or a body sliding sideways with its gun squarely on you would drop out of the aimed carry for as long as it slid');
-  ok(npcSrc.includes('if (corner) moveTo = corner;'), 'a room’s corner moves the feet now, where it used to turn the whole body: a gunner rounding one keeps its gun where it was');
+  ok(npcSrc.includes('if (corner) via = corner;') && npcSrc.includes('const wantTravel = goTo && via ? Math.atan2(via.x - this.pos.x, via.z - this.pos.z) : Number.NaN;'), 'a room’s corner moves the feet now, where it used to turn the whole body: a gunner rounding one keeps its gun where it was (and the arrival is still the goal’s, `doorway.test.ts` 5c)');
   ok(npcSrc.includes('this.wish.x = ax * step;') && npcSrc.includes('let ax = Math.sin(this.heading);'), 'and the ground it asks for still goes along its own nose, which is the movement model this game has always had — the nose is simply not the gun any more');
   ok(/private get split\(\)[\s\S]{0,200}this\.skill\.strafe > 0/.test(npcSrc), 'the split is the tier’s strafe share and not a flag of its own, so the two bottom rungs are the body the owner already knows');
   ok(npcSrc.includes('if (!this.split) wantFace = wantHead;'), 'and a body that has not earned it has one number on every frame, exactly as before');

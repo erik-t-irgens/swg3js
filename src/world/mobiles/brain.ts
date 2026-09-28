@@ -26,6 +26,13 @@ export interface BrainSelf {
   side: Side;
   aggression: Aggression;
   inside: boolean;
+  /**
+   * Whether its home is in a building, which is what says which leash it keeps. Left out, it is
+   * `inside`, which is every body there was before a creature from the sand could follow somebody
+   * into a cantina: kept to the room's leash there, measured from a home out on the sand, it was past
+   * it the moment it stepped through the door and turned straight round.
+   */
+  homeInside?: boolean;
   /** A large or huge body: it sees farther (`aggroBig`). */
   big: boolean;
   /** Melee reach beyond both bodies (stats.reach at its scale); only counts with `melee`. */
@@ -94,6 +101,13 @@ export interface BrainTarget {
   attackedMeAt: number;
   /** Whether a shot from this mobile would reach it (a ray on the think tick). */
   hasLine: boolean;
+  /**
+   * Whether a wall stands between the two: one of them in a building and the other not, or the two in
+   * different buildings, as the rooms they are followed in say. A blow does not go through a wall, so
+   * a body told this chases -- round to the door -- rather than swinging at the plaster. Left out, it
+   * is not, which is what every body was told before anything could say.
+   */
+  apart?: boolean;
 }
 
 export interface Decision {
@@ -415,7 +429,7 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
   };
   const home = { x: self.homeX, z: self.homeZ };
   const fromHome = Math.hypot(self.x - self.homeX, self.z - self.homeZ);
-  const leash = self.inside ? tune.leashInside : tune.leash;
+  const leash = (self.homeInside ?? self.inside) ? tune.leashInside : tune.leash;
   const goHome = (): Decision => {
     d.state = 'return';
     d.targetKey = null;
@@ -518,7 +532,7 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
       d.cover = seeks;
       return d;
     }
-    if (self.melee && dist - target.radius <= self.reach && isLevel) {
+    if (self.melee && dist - target.radius <= self.reach && isLevel && !target.apart) {
       d.state = 'attack';
       d.attack = 'melee';
       d.pace = 'stand';
