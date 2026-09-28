@@ -533,6 +533,51 @@ export function recipeVariables(r: Recipe): Set<string> {
   return out;
 }
 
+/**
+ * Every value a recipe's colour render reads, in the order it reads them, as one string: two sets of
+ * values that give the same string render the same picture, since `renderRecipe` reads nothing else of
+ * them. Each is resolved as the render resolves it, default and all, so a value left unset and one set
+ * to its default are the same key. What lets two people of one colouring share one texture.
+ */
+export function recipeValueKey(r: Recipe, values: Values): string {
+  const out: number[] = [];
+  const fromShader = (s: ShaderDef | null) => {
+    if (!s) return;
+    for (const c of s.choices) out.push(valueOf(values, c.variable, c.default, c.private, r.mesh));
+    for (const p of s.palettes) out.push(valueOf(values, p.variable, p.default, p.private, r.mesh));
+  };
+  fromShader(r.shader);
+  for (const slot of r.slots) {
+    for (const s of slot.blueprint.shaders) fromShader(s);
+    for (const v of slot.blueprint.variables) out.push(valueOf(values, v.name, v.default, v.private, r.mesh));
+  }
+  return out.join(',');
+}
+
+/**
+ * The files a recipe's normal map can be made from for these values, the CNRM tag's then the NRML
+ * tag's, each as every file the live shader would try for that tag in order (its own texture, then
+ * each choice's pick); null for a tag it has none for. `recipeNormal` reads nothing but the image
+ * those end at, so two sets of values with the same answer make the same normal map.
+ */
+export function recipeNormalFiles(r: Recipe, values: Values): [string | null, string | null] {
+  const def = r.shader;
+  if (!def) return [null, null];
+  const filesFor = (tag: string): string | null => {
+    const files: string[] = [];
+    const own = def.textures[tag];
+    if (own) files.push(own);
+    for (const c of def.choices) {
+      if (c.tag !== tag) continue;
+      const v = Math.min(Math.max(valueOf(values, c.variable, c.default, c.private, r.mesh), 0), c.files.length - 1);
+      const f = c.files[v];
+      if (f) files.push(f);
+    }
+    return files.length ? files.join('>') : null;
+  };
+  return [filesFor('CNRM'), filesFor('NRML')];
+}
+
 /** Every variable a recipe reads, with whether it is the mesh's own. */
 export function recipeVariableDefs(r: Recipe): { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number }[] {
   const out: { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number }[] = [];

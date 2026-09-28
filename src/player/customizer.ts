@@ -4,7 +4,7 @@
 // path in idle time, one after another, so a slider that moves fast lands on its last value.
 import * as THREE from 'three';
 // The two imports carry their extensions so the node tests can load this module (a ship's paint uses it).
-import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender.ts';
+import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeNormalFiles, recipeValueKey, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender.ts';
 import { decodePng } from './png.ts';
 
 /**
@@ -13,6 +13,62 @@ import { decodePng } from './png.ts';
  * in. Null when the render was dropped (a newer paint won), and nothing is put then.
  */
 export type RecipeRender = (r: Recipe, values: Values, palettes: Record<string, number[][]>, imageDir: string) => Promise<Img | null>;
+
+/**
+ * Where one character's renders are shared with every other of the same colours (the dressed people
+ * the mobiles stand, src/world/mobiles/lookShare.ts): asked for a render by its key, it hands back the
+ * one already made, or has `make` make it once however many ask at the same moment. Null when there is
+ * nothing to put (the render came to nothing, or the look it was for has gone). Everything it hands out
+ * is somebody else's as well, so a customizer given one never writes into, re-renders or disposes a
+ * texture it was handed.
+ */
+export interface RenderShare {
+  claim(key: string, kind: 'render' | 'normal', make: () => Promise<THREE.Texture | null>): Promise<THREE.Texture | null>;
+}
+
+/**
+ * Each parsed recipe's number, for the keys its renders are shared under: a recipe is one object for
+ * the session however many characters read it (`loadCustomizeFile` parses a folder once), so the
+ * object is the recipe, and two recipes of one file are never taken for each other by content.
+ */
+const recipeIds = new WeakMap<Recipe, number>();
+let nextRecipeId = 1;
+function recipeId(r: Recipe): number {
+  let id = recipeIds.get(r);
+  if (id === undefined) {
+    id = nextRecipeId++;
+    recipeIds.set(r, id);
+  }
+  return id;
+}
+
+/**
+ * The key a recipe's colour render is shared under for these values, and its normal map's (null when
+ * its shader has none): the recipe and every value it reads for the first, the files the second is made
+ * from for the second, since that reads nothing else. Two recipes that name one normal map (a body's and
+ * a head's neck) share it.
+ */
+export function renderKeys(r: Recipe, values: Values, imageDir: string): { render: string; normal: string | null } {
+  const [cnrm, nrml] = recipeNormalFiles(r, values);
+  return {
+    render: `${recipeId(r)}|${recipeValueKey(r, values)}`,
+    normal: cnrm || nrml ? `${imageDir}|${cnrm ?? ''}|${nrml ?? ''}`.toLowerCase() : null,
+  };
+}
+
+/** A texture for a render's pixels, as every render is put on a material: a colour in sRGB, a normal map as it stands, mipmapped and repeating. */
+function renderTexture(img: Img, normal: boolean): THREE.DataTexture {
+  const tex = new THREE.DataTexture(new Uint8Array(img.rgba), img.width, img.height, THREE.RGBAFormat);
+  tex.colorSpace = normal ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+  tex.flipY = false;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 /**
  * Each pack folder's recipes, fetched and parsed once however many characters read them: a
@@ -59,6 +115,12 @@ export class Customizer {
   onPut: (r: Recipe, img: Img) => void = () => {};
   /** Where recipes render when not here (a worker); null renders them on this thread, between frames. */
   private readonly renderOff: RecipeRender | null;
+  /**
+   * Where this character's renders are shared with others of the same colours (`RenderShare`), set only
+   * for a look the mobiles build once and never colour again; null renders every recipe for this
+   * character alone, which is what the player, another player and the wardrobe's doll always do.
+   */
+  share: RenderShare | null = null;
 
   constructor(renderOff: RecipeRender | null = null) {
     this.renderOff = renderOff;
@@ -235,6 +297,10 @@ export class Customizer {
           if (img) this.put(r, img);
           continue;
         }
+        if (this.share) {
+          await this.runShared(r, this.share);
+          continue;
+        }
         await this.loadImagesFor(r);
         // Between recipes the frame gets a turn, so a whole re-render does not freeze the game.
         await new Promise((resolve) => setTimeout(resolve, 0));
@@ -293,19 +359,63 @@ export class Customizer {
     return out;
   }
 
+  /**
+   * One recipe through the share: its colour render and its normal map each taken from the one already
+   * made for the same key, or made here once and handed to the share. The values are copied before the
+   * key is taken, so what is made is always what the key says even when a value moves while it renders
+   * (the recipe is queued again for the new value, and that is another key).
+   */
+  private async runShared(r: Recipe, share: RenderShare): Promise<void> {
+    const dir = this.dirOf.get(r) ?? '';
+    const values: Values = new Map(this.values);
+    const keys = renderKeys(r, values, dir);
+    const lookup = (file: string | null) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null);
+    const colour = await share.claim(keys.render, 'render', async () => {
+      await this.loadImagesFor(r);
+      // Between recipes the frame gets a turn, as it does unshared.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const t0 = performance.now();
+      const img = renderRecipe(r, values, this.palettes, lookup);
+      const ms = performance.now() - t0;
+      if (img && ms > 250) console.info(`customize: ${r.material} rendered in ${ms.toFixed(0)} ms (${img.width}x${img.height})`);
+      return img ? renderTexture(img, false) : null;
+    });
+    // A render that came to nothing puts nothing, and no normal map either, as unshared.
+    if (!colour) return;
+    this.putShared(r, colour as THREE.DataTexture, false);
+    if (!keys.normal) return;
+    const normal = await share.claim(keys.normal, 'normal', async () => {
+      await this.loadImagesFor(r);
+      const img = recipeNormal(r, values, this.palettes, lookup);
+      return img ? renderTexture(img, true) : null;
+    });
+    if (normal) this.putShared(r, normal as THREE.DataTexture, true);
+  }
+
+  /** A shared texture on every material a recipe feeds: as `put`/`putNormal`, but never written into. */
+  private putShared(r: Recipe, tex: THREE.DataTexture, normal: boolean): void {
+    this.textures.set(normal ? `${r.material}#normal` : r.material, tex);
+    for (const m of this.materialsFor(r.material)) {
+      const std = m as THREE.MeshStandardMaterial;
+      if (normal) {
+        if (std.normalMap !== tex) {
+          std.normalMap = tex;
+          std.normalScale.copy(this.normalScale);
+          std.needsUpdate = true;
+        }
+      } else if (std.map !== tex) {
+        std.map = tex;
+        std.needsUpdate = true;
+      }
+    }
+  }
+
   private put(r: Recipe, img: Img): void {
     if (!this.accept(r, img)) return;
     let tex = this.textures.get(r.material);
     if (!tex || tex.image.width !== img.width || tex.image.height !== img.height) {
       tex?.dispose();
-      tex = new THREE.DataTexture(new Uint8Array(img.rgba), img.width, img.height, THREE.RGBAFormat);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.flipY = false;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      tex.minFilter = THREE.LinearMipmapLinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.generateMipmaps = true;
-      tex.anisotropy = 4;
+      tex = renderTexture(img, false);
       this.textures.set(r.material, tex);
     } else (tex.image.data as Uint8Array).set(img.rgba);
     tex.needsUpdate = true;
@@ -347,14 +457,7 @@ export class Customizer {
     let tex = this.textures.get(key);
     if (!tex || tex.image.width !== img.width || tex.image.height !== img.height) {
       tex?.dispose();
-      tex = new THREE.DataTexture(new Uint8Array(img.rgba), img.width, img.height, THREE.RGBAFormat);
-      tex.colorSpace = THREE.NoColorSpace;
-      tex.flipY = false;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      tex.minFilter = THREE.LinearMipmapLinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tex.generateMipmaps = true;
-      tex.anisotropy = 4;
+      tex = renderTexture(img, true);
       this.textures.set(key, tex);
     } else (tex.image.data as Uint8Array).set(img.rgba);
     tex.needsUpdate = true;
@@ -464,7 +567,8 @@ export class Customizer {
   dispose(): void {
     // Nothing more is rendered for a dropped customizer: a loop mid-queue ends after the render in hand.
     this.queued.clear();
-    for (const t of this.textures.values()) t.dispose();
+    // A shared render is the share's to let go of, never this customizer's.
+    if (!this.share) for (const t of this.textures.values()) t.dispose();
     this.textures.clear();
   }
 }

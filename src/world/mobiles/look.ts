@@ -2,13 +2,16 @@
 // NPC, or the NPC's own parts model) with the entry's shape sliders and colours, and its outfit on,
 // each piece in its own colours, the textures drawn before anything is cloned. A look is fixed by
 // its entry, so one prototype serves every spawn of it: the clones share its geometry, its rendered
-// textures and its materials, and so its compiled programs.
+// textures and its materials, and so its compiled programs. Built with a hold (lookShare.ts), it also
+// shares every piece it has in common with the other looks: the same body's textures and geometry, the
+// same clothes, and every render of the same colours.
 //
 // No rig is fetched: a species rig is two hundred megabytes of clips, and an NPC plays its animation
 // pack, which the mobile's animator binds to the clone by joint name.
 import * as THREE from 'three';
-import { Character } from '../../player/character';
+import { Character } from '../../player/character.ts';
 import type { MobileCatalogue } from './catalogue';
+import { shareLook, type LookHold } from './lookShare.ts';
 import type { MobileEntry } from './types';
 
 export interface BuiltLook {
@@ -45,14 +48,19 @@ export function lookFolder(entry: MobileEntry, cat: MobileCatalogue): string | n
  * the catalogue names, with its own colours as that item's private values; then wait until every
  * colour recipe has been drawn. Throws when the body will not load; a piece that will not go on is
  * left off and named in `missing`.
+ *
+ * With `hold`, the colours are drawn through the shared renders and the finished look is put on the
+ * shared pieces before it is handed back (`shareLook`), so nothing it has in common with another look
+ * is kept, uploaded or counted twice; the hold is then what the look holds of them. Without, the look
+ * is built alone, as every look was before the pieces were shared.
  */
-export async function buildLook(baseUrl: string, entry: MobileEntry, cat: MobileCatalogue): Promise<BuiltLook> {
+export async function buildLook(baseUrl: string, entry: MobileEntry, cat: MobileCatalogue, hold: LookHold | null = null): Promise<BuiltLook> {
   const folder = lookFolder(entry, cat);
   if (!folder) throw new Error(`${entry.id} has no parts body to build`);
   const dressed = entry.kind === 'dressed';
   // A dressed body starts bare (its outfit is the catalogue's, not the species pack's default
   // clothes); an NPC's own parts model wears what it was converted wearing.
-  const character = await Character.load(baseUrl, dressed ? (entry.species ?? 'human_male') : (entry.appearance ?? entry.id), dressed ? [] : undefined, { dir: folder, skipRig: true });
+  const character = await Character.load(baseUrl, dressed ? (entry.species ?? 'human_male') : (entry.appearance ?? entry.id), dressed ? [] : undefined, { dir: folder, skipRig: true, share: hold ?? undefined });
   for (const [name, v] of Object.entries(entry.morphs ?? {})) character.setMorph(name, v);
   const missing: string[] = [];
   const itemValues: Record<string, number> = {};
@@ -82,6 +90,9 @@ export async function buildLook(baseUrl: string, entry: MobileEntry, cat: Mobile
     if (Object.keys(itemValues).length) cz.setAll(itemValues);
     await cz.settled();
   }
+  // Every piece onto the shared one, now that nothing about the look will change again.
+  const sources = hold ? character.lookSources() : null;
+  if (hold && sources) shareLook(hold, sources);
   const scene = character.group;
   scene.name = `look:${entry.id}`;
   scene.updateMatrixWorld(true);

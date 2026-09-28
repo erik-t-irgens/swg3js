@@ -149,6 +149,7 @@ import { MOTION_TUNING, MOVER_LIMITS } from './core/fx/velocityMath.ts';
 import type { MotionBlurPass } from './core/fx/motionBlur';
 import { HeatSources, plumeNoiseFrequency } from './world/heatSources';
 import { MobileAssets } from './world/mobiles/assets';
+import { LOOK_SHARE } from './world/mobiles/lookShare.ts';
 import type { Mobile } from './world/mobiles/mobile';
 import { vehiclePlumes } from './vehicles/enginePlumes';
 import { Notice } from './ui/notice';
@@ -5094,14 +5095,54 @@ class App {
         if (!e) return `nothing in the catalogue matches "${id}"`;
         return this.world.mobiles.rolesReport(e);
       },
-      /** The model and pack cache: what is held, by whom, how many bytes, the referenced total against the budget, loads in flight. `mobileAssets(true)` trims now. */
-      mobileAssets: (trim = false) => {
+      /**
+       * The model and pack cache: what is held, by whom, how many bytes, the referenced total against the
+       * budget, loads in flight. `mobileAssets(true)` (or `{ trim: true }`) trims now. `shared` is what the
+       * people's looks share between them (src/world/mobiles/lookShare.ts): how many pieces of each kind
+       * (a part's texture, a colour render, a normal map, a geometry), their bytes each counted once, how
+       * many looks wear them, and how many looks are out, kept or being built; a look's own row then
+       * carries `bytes` (its alone), `shared` (what it wears of the shared pieces) and `alone` (of those,
+       * what no other look wears). `{ share: false }` builds every look from then on alone, as before the
+       * pieces were shared, and `{ share: true }` shares again; looks already built keep what they have,
+       * so compare on a fresh page.
+       */
+      mobileAssets: (opts: boolean | { trim?: boolean; share?: boolean } = false) => {
+        const o = typeof opts === 'boolean' ? { trim: opts } : opts;
+        // Before the world check, so it can be set before the first look of a session is built.
+        if (typeof o.share === 'boolean') LOOK_SHARE.on = o.share;
         const mobiles = this.world.mobiles;
-        if (!mobiles) return 'no world loaded';
-        const trimmed = trim ? mobiles.assets.trim() : null;
+        if (!mobiles) return { share: LOOK_SHARE.on, note: 'no world loaded' };
+        const trimmed = o.trim ? mobiles.assets.trim() : null;
         const s = mobiles.assets.stats();
         const mb = (n: number) => Number((n / 1e6).toFixed(1));
-        return { megabytes: mb(s.bytes), referencedMegabytes: mb(s.referenced), budgetMegabytes: mb(s.budget), loading: s.loading, failed: s.failed, trimmed, models: s.models, packs: s.packs };
+        const kinds: Record<string, { pieces: number; megabytes: number; worn: number }> = {};
+        for (const [k, v] of Object.entries(s.shared.kinds)) kinds[k] = { pieces: v.n, megabytes: mb(v.bytes), worn: v.worn };
+        // The looks out: a look only kept in the cache (worn by nobody) is not what the budget holds.
+        const looks = s.models.filter((m) => m.shared !== undefined && m.refs > 0);
+        return {
+          megabytes: mb(s.bytes),
+          referencedMegabytes: mb(s.referenced),
+          budgetMegabytes: mb(s.budget),
+          loading: s.loading,
+          failed: s.failed,
+          trimmed,
+          shared: {
+            on: s.shared.on,
+            pieces: s.shared.entries,
+            megabytes: mb(s.shared.bytes),
+            referencedMegabytes: mb(s.shared.referenced),
+            kinds,
+            looks: s.shared.looks,
+            // What the looks out would weigh built alone, against what they weigh sharing (the share's
+            // `referencedMegabytes` beside their own bytes).
+            lookCount: looks.length,
+            wholeMegabytes: mb(looks.reduce((n, m) => n + m.bytes + (m.shared ?? 0), 0)),
+            sharingMegabytes: mb(looks.reduce((n, m) => n + m.bytes, 0) + s.shared.referenced),
+            uniqueShare: s.shared.uniqueShare,
+          },
+          models: s.models,
+          packs: s.packs,
+        };
       },
       /** Read or change live the brain's, the tiers' and the gaits' numbers, the cache budget (`{ budget: 260e6 }`), the cap and the animation range; `{ passMatrices: 'every' }` puts the portal renderer's scene walk back to once a pass, to measure what `'once'` saves. */
       mobileTune: (tune?: Parameters<import('./world/mobiles/manager').MobileManager['tune']>[0] & { passMatrices?: 'once' | 'every' }) => {

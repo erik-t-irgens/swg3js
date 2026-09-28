@@ -4634,7 +4634,8 @@ export class World {
           return !!e && !!this.mobiles?.holdsBody(e);
         },
         short: (entry) => this.mobiles?.budgetShort(entry) ?? 0,
-        frees: (m) => this.mobiles?.freedBy(m) ?? 0,
+        freeStart: () => this.mobiles?.freeStart(),
+        frees: (m) => this.mobiles?.frees(m) ?? 0,
         centre: () => this.layoutCenter,
         held: () => this.streamHold || this.sceneOnly || !this.simulating,
         // A person in a room needs that room's floor to exist first. The streamer builds a

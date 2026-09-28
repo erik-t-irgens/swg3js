@@ -8,15 +8,21 @@
 // Every model is made ready once, before the first mobile wearing it is shown (the world's
 // `prepareActor`: the portal stencil, the shadow cascades, its textures uploaded and its programs
 // compiled a mesh at a time), so only the first of a species ever waits and no first sight stalls.
+//
+// A person's look shares every piece it has in common with the other looks (lookShare.ts): the look's
+// own bytes are then only what is its alone, and the shared pieces are counted once each, referenced
+// while any look that is out holds them.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { surfaces } from '../surfaces';
+// The value imports carry their extensions so the node tests can drive the cache itself (lookBudget.test.ts).
+import { surfaces } from '../surfaces.ts';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { AnimPack, MobileEntry, Vec3 } from './types';
 import type { MobileCatalogue } from './catalogue';
-import { makeAdditiveOnce, missingCarries, missingRoles, rolesFor, type PackClipSource } from './packClips';
-import { makeHologram } from './hologram';
-import { buildLook, isLook, lookKey } from './look';
+import { makeAdditiveOnce, missingCarries, missingRoles, rolesFor, type PackClipSource } from './packClips.ts';
+import { makeHologram } from './hologram.ts';
+import { buildLook, isLook, lookFolder, lookKey } from './look.ts';
+import { FreeTally, LOOK_SHARE, LookShare, geometryBytes, textureBytes, texturesOf, type LookHold } from './lookShare.ts';
 
 /** The cache's numbers: the bytes it may hold, loads at once, and how long a failed file is not asked for again (ms). */
 export const MOBILE_CACHE = { budget: 180e6, concurrency: 2, failFor: 30_000 };
@@ -49,6 +55,11 @@ export interface ModelAsset {
   look?: boolean;
   /** A look's outfit pieces that would not go on. */
   missing?: string[];
+  /**
+   * What a look holds of the shared pieces (lookShare.ts), for one built to share: `bytes` is then only
+   * what is its alone, and what it holds is counted by the share, once however many looks hold it.
+   */
+  hold?: LookHold;
 }
 
 export interface PackAsset extends PackClipSource {
@@ -67,6 +78,9 @@ export interface AssetStat {
   bytes: number;
   /** Seconds since something last took it. */
   age: number;
+  /** A look built to share: the bytes of the shared pieces it wears (counted once, by the share), and of those no other look wears. */
+  shared?: number;
+  alone?: number;
 }
 
 // The hologram's look lives in hologram.ts; re-exported for anything that took it from here.
@@ -95,25 +109,12 @@ function dressedGuess(entry: MobileEntry): number {
   return (LOOK_BODY_BYTES + LOOK_PIECE_BYTES * (entry.outfit?.length ?? 0)) * DISK_TO_GPU;
 }
 
-/** Every texture a material holds. */
-function texturesOf(m: THREE.Material, out: Set<THREE.Texture>): void {
-  for (const v of Object.values(m as unknown as Record<string, unknown>)) if (v && (v as THREE.Texture).isTexture) out.add(v as THREE.Texture);
-}
-
-/** GPU bytes of a texture, with its mips. */
-function textureBytes(t: THREE.Texture): number {
-  const img = t.image as { width?: number; height?: number } | null;
-  const w = img?.width ?? 0;
-  const h = img?.height ?? 0;
-  return w * h * 4 * 1.34;
-}
-
-function geometryBytes(g: THREE.BufferGeometry): number {
-  let n = g.index ? g.index.array.byteLength : 0;
-  for (const a of Object.values(g.attributes)) n += (a as THREE.BufferAttribute).array.byteLength;
-  for (const list of Object.values(g.morphAttributes)) for (const a of list) n += (a as THREE.BufferAttribute).array.byteLength;
-  return n;
-}
+/**
+ * The share of a look's bytes that are its own when another look of its body is out, as measured, never
+ * below or above these: what a look's estimate is scaled by then (`uniqueShare`).
+ */
+const UNIQUE_MIN = 0.05;
+const UNIQUE_MAX = 1;
 
 function clipBytes(c: THREE.AnimationClip): number {
   let n = 0;
@@ -166,8 +167,22 @@ export class MobileAssets {
    * largest ratio seen), so the budget check for the next look of that species is not too low.
    */
   private readonly lookScale = new Map<string, number>();
+  /** The pieces the looks share (lookShare.ts), counted once each whoever holds them. */
+  readonly shared = new LookShare();
+  /**
+   * Per body folder, the share of a look's bytes that standing it really added while another look of
+   * that body was out (the largest seen, as `lookScale` keeps the largest ratio, so a budget check made on
+   * the estimate is not too low): what the next one's estimate is scaled by while its body is out or being
+   * built (`estimate`).
+   */
+  private readonly uniqueShare = new Map<string, number>();
+  /** The one set the standing people make room by (`MobileManager.frees`), counted together. */
+  readonly freeTally = new FreeTally();
+  private readonly baseUrl: string;
 
-  private constructor(private readonly baseUrl: string) {}
+  private constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
 
   private url(path: string): string {
     return `${this.baseUrl}assets-private/${path}`;
@@ -262,8 +277,12 @@ export class MobileAssets {
     return asset;
   }
 
-  /** A fresh asset around a parsed scene: its meshes, materials and textures, and the GPU bytes they hold. */
-  private static measure(file: string, scene: THREE.Group, bounds?: { min: Vec3; max: Vec3 }): ModelAsset {
+  /**
+   * A fresh asset around a parsed scene: its meshes, materials and textures, and the GPU bytes they hold.
+   * With `shared`, a geometry or texture that is one of the shared pieces is neither counted nor listed
+   * as the asset's own: the share counts it, once, and disposes it when the last look lets go.
+   */
+  private static measure(file: string, scene: THREE.Group, bounds?: { min: Vec3; max: Vec3 }, shared?: LookShare): ModelAsset {
     const meshes: THREE.Mesh[] = [];
     const materials = new Set<THREE.Material>();
     const textures = new Set<THREE.Texture>();
@@ -274,7 +293,7 @@ export class MobileAssets {
       const m = o as THREE.Mesh;
       if (!m.isMesh) return;
       meshes.push(m);
-      geometries.add(m.geometry);
+      if (!shared?.owns(m.geometry)) geometries.add(m.geometry);
       for (const mat of Array.isArray(m.material) ? m.material : [m.material]) {
         materials.add(mat);
         texturesOf(mat, textures);
@@ -282,6 +301,7 @@ export class MobileAssets {
       const s = o as THREE.SkinnedMesh;
       if (s.isSkinnedMesh && s.skeleton) joints = Math.max(joints, s.skeleton.bones.length);
     });
+    if (shared) for (const t of [...textures]) if (shared.owns(t)) textures.delete(t);
     for (const g of geometries) bytes += geometryBytes(g);
     for (const t of textures) bytes += textureBytes(t);
     return {
@@ -309,18 +329,38 @@ export class MobileAssets {
    * with the model loads, so a burst of dressed spawns cannot start a dozen builds at once.
    */
   private async loadLook(key: string, spec: LookSpec, bounds?: { min: Vec3; max: Vec3 }): Promise<ModelAsset> {
+    // Taken before the build starts, so a look of the same body built meanwhile counts as already out.
+    const hold = LOOK_SHARE.on ? this.shared.hold(lookFolder(spec.entry, spec.cat) ?? '') : null;
     let built;
     try {
-      built = await this.slot(() => buildLook(this.baseUrl, spec.entry, spec.cat));
+      built = await this.slot(() => buildLook(this.baseUrl, spec.entry, spec.cat, hold));
     } catch (err) {
+      hold?.release();
       throw this.fail(key, err);
     }
-    const asset = MobileAssets.measure(key, built.scene, bounds);
+    const asset = MobileAssets.measure(key, built.scene, bounds, hold ? this.shared : undefined);
     asset.look = true;
-    if (spec.entry.kind === 'dressed' && spec.entry.species && asset.bytes > 0) {
-      const ratio = asset.bytes / dressedGuess(spec.entry);
+    if (hold) {
+      asset.hold = hold;
+      hold.owner = asset;
+    }
+    // What the look weighs whole, shared pieces and all: what its species' estimates are measured
+    // against, since a guess is of a whole look whoever else is out.
+    const whole = asset.bytes + (hold ? this.shared.holdBytes(hold) : 0);
+    if (spec.entry.kind === 'dressed' && spec.entry.species && whole > 0) {
+      const ratio = whole / dressedGuess(spec.entry);
       const scale = THREE.MathUtils.clamp(Math.max(ratio, this.lookScale.get(spec.entry.species) ?? 0), LOOK_SCALE_MIN, LOOK_SCALE_MAX);
       this.lookScale.set(spec.entry.species, scale);
+    }
+    // And what standing it adds, when another look of its body is out now: its own bytes and every shared
+    // piece no look that is out holds, whoever else keeps it (a piece shared only with a look kept or
+    // still being built is referenced the moment this one stands). What the next such look's estimate is
+    // scaled by (`estimate`), as the largest seen. Measured only while another of its body is out, since
+    // with none out the whole look is its own and says nothing about what a second one adds.
+    if (hold && whole > 0 && this.shared.folderOut(hold.folder, hold)) {
+      const own = (asset.bytes + this.shared.soleBytes(hold)) / whole;
+      const was = this.uniqueShare.get(hold.folder) ?? 0;
+      this.uniqueShare.set(hold.folder, THREE.MathUtils.clamp(Math.max(was, own), UNIQUE_MIN, UNIQUE_MAX));
     }
     asset.missing = built.missing;
     if (built.missing.length) console.warn(`mobiles: ${spec.entry.id} wears ${built.missing.length} piece${built.missing.length === 1 ? '' : 's'} this pack has not got: ${built.missing.join(', ')}`);
@@ -459,11 +499,12 @@ export class MobileAssets {
     a.lastUsed = performance.now();
   }
 
+  /** Every byte held, each shared piece once. */
   private total(): number {
     let n = 0;
     for (const a of this.models.values()) n += a.bytes;
     for (const a of this.packs.values()) n += a.bytes;
-    return n;
+    return n + this.shared.bytes();
   }
 
   /** Dispose unreferenced assets, oldest first, while the bytes held are over the budget. */
@@ -478,19 +519,22 @@ export class MobileAssets {
     for (const a of idle) {
       if (total <= budget) break;
       if (a.refs > 0) continue;
-      total -= a.bytes;
-      freed += a.bytes;
+      // A look gives back its own bytes and the shared pieces nothing else holds.
+      let gone = a.bytes;
       disposed++;
       if (a.kind === 'model') {
         const base = a.hologram ? a.base : null;
-        this.disposeModel(a);
+        gone += this.disposeModel(a);
         if (base && base.refs === 0 && this.models.get(base.key) === base && !idle.includes(base)) idle.push(base);
       } else this.packs.delete(a.key);
+      total -= gone;
+      freed += gone;
     }
     return { disposed, bytes: freed };
   }
 
-  private disposeModel(a: ModelAsset): void {
+  /** Dispose a model; answers the bytes of shared pieces that went with it (the last look to hold them). */
+  private disposeModel(a: ModelAsset): number {
     this.models.delete(a.key);
     this.forget?.(a.materials);
     for (const m of a.materials) m.dispose();
@@ -498,17 +542,20 @@ export class MobileAssets {
       // Its geometry and textures are the plain asset's; only the reference goes back.
       if (a.base) this.release(a.base);
       a.base = null;
-      return;
+      return 0;
     }
+    // Its own geometry only: a shared one is the share's, and goes when the last look lets go of it.
     const geometries = new Set<THREE.BufferGeometry>();
-    for (const m of a.meshes) geometries.add(m.geometry);
+    for (const m of a.meshes) if (!this.shared.owns(m.geometry)) geometries.add(m.geometry);
     for (const g of geometries) g.dispose();
     for (const t of a.textures) t.dispose();
+    return a.hold ? a.hold.release() : 0;
   }
 
   /**
    * Bytes held by assets something still points at: what a trim can never free, and what the spawn
-   * cap must respect. A load in flight that someone has asked for counts at its estimate.
+   * cap must respect. A load in flight that someone has asked for counts at its estimate. A shared
+   * piece counts once, while any look that is out holds it.
    */
   referencedBytes(): number {
     let n = 0;
@@ -516,12 +563,15 @@ export class MobileAssets {
     for (const a of this.packs.values()) if (a.refs > 0) n += a.bytes;
     for (const j of this.modelJobs.values()) if (j.claims > 0) n += j.estimate;
     for (const j of this.packJobs.values()) if (j.claims > 0) n += j.estimate;
-    return n;
+    return n + this.shared.referencedBytes();
   }
 
   /**
    * What an entry's model and pack are expected to weigh before they have been loaded and measured:
-   * the model's share of its appearance's bytes on disk, as GPU bytes, and the pack's bytes.
+   * the model's share of its appearance's bytes on disk, as GPU bytes, and the pack's bytes. A look
+   * whose body another look already has out is expected to add only its own share of that
+   * (`uniqueShare`), since the body, the clothes it has in common and every render of the same
+   * colours are held already.
    */
   estimate(entry: MobileEntry, cat: MobileCatalogue): { model: number; pack: number } {
     const app = cat.appearanceOf(entry);
@@ -529,7 +579,11 @@ export class MobileAssets {
     // A dressed look has no appearance of its own: a species body and head, and its outfit's pieces,
     // scaled by what this species' looks have measured so far.
     const dressed = entry.kind === 'dressed' ? dressedGuess(entry) * (this.lookScale.get(entry.species ?? '') ?? 1) : 0;
-    const model = dressed || (app?.bytes ? (app.bytes / files) * DISK_TO_GPU : UNKNOWN_BYTES);
+    let model = dressed || (app?.bytes ? (app.bytes / files) * DISK_TO_GPU : UNKNOWN_BYTES);
+    if (LOOK_SHARE.on && isLook(entry, cat)) {
+      const folder = lookFolder(entry, cat);
+      if (folder !== null && this.shared.folderHeld(folder)) model *= this.uniqueShare.get(folder) ?? LOOK_SHARE.unique;
+    }
     const info = cat.packOf(entry);
     return { model, pack: info ? (info.bytes ?? UNKNOWN_BYTES) : 0 };
   }
@@ -558,7 +612,7 @@ export class MobileAssets {
       const plain = this.models.get(file);
       if (!plain) {
         if (!this.modelJobs.has(file)) bytes += guess.model;
-      } else if (plain.refs === 0) bytes += plain.bytes;
+      } else if (plain.refs === 0) bytes += plain.bytes + (plain.hold ? this.shared.soleBytes(plain.hold) : 0);
     }
     const pack = cat.packOf(entry);
     if (pack) {
@@ -570,11 +624,30 @@ export class MobileAssets {
     return bytes;
   }
 
-  stats(): { models: AssetStat[]; packs: AssetStat[]; bytes: number; referenced: number; budget: number; loading: number; failed: string[] } {
+  stats(): {
+    models: AssetStat[];
+    packs: AssetStat[];
+    bytes: number;
+    referenced: number;
+    budget: number;
+    loading: number;
+    failed: string[];
+    shared: ReturnType<LookShare['stats']> & { on: boolean; uniqueShare: Record<string, number> };
+  } {
     const now = performance.now();
-    const stat = (a: ModelAsset | PackAsset): AssetStat => ({ key: a.key, refs: a.refs, bytes: Math.round(a.bytes), age: Number(((now - a.lastUsed) / 1000).toFixed(1)) });
+    const stat = (a: ModelAsset | PackAsset): AssetStat => {
+      const s: AssetStat = { key: a.key, refs: a.refs, bytes: Math.round(a.bytes), age: Number(((now - a.lastUsed) / 1000).toFixed(1)) };
+      const hold = a.kind === 'model' ? a.hold : undefined;
+      if (hold) {
+        s.shared = Math.round(this.shared.holdBytes(hold));
+        s.alone = Math.round(this.shared.onlyBytes(hold));
+      }
+      return s;
+    };
     const failed: string[] = [];
     for (const [file, f] of this.failures) if (now - f.at <= MOBILE_CACHE.failFor) failed.push(file);
+    const uniqueShare: Record<string, number> = {};
+    for (const [folder, v] of this.uniqueShare) uniqueShare[folder] = Number(v.toFixed(2));
     return {
       models: [...this.models.values()].map(stat),
       packs: [...this.packs.values()].map(stat),
@@ -583,6 +656,7 @@ export class MobileAssets {
       budget: MOBILE_CACHE.budget,
       loading: this.loading,
       failed,
+      shared: { on: LOOK_SHARE.on, ...this.shared.stats(), uniqueShare },
     };
   }
 
@@ -592,5 +666,6 @@ export class MobileAssets {
     this.models.clear();
     this.packs.clear();
     this.jsons.clear();
+    this.shared.dispose();
   }
 }

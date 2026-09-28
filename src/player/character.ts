@@ -6,9 +6,10 @@
 // of muscle, and the skin underneath is hidden only while something actually covers it.
 
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Customizer } from './customizer';
-import { markActor } from '../world/portalRender';
+import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { Customizer, type RenderShare } from './customizer.ts';
+import { recordPartSources, type LookSources, type PartFile, type PartSources } from '../world/mobiles/lookShare.ts';
+import { markActor } from '../world/portalRender.ts';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
 import { fitFor, packPartOf, type ItemFit } from '../core/inventory.ts';
 import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
@@ -141,6 +142,12 @@ export interface CharacterOptions {
    * clips; an NPC that plays its own animation pack must never pay for it.
    */
   skipRig?: boolean;
+  /**
+   * Built once to be shared with other characters of the same body (a look the mobiles stand, never a
+   * player): its renders go through this share, and where each mesh and texture came from is kept so
+   * the finished look can be put on the shared pieces (`lookSources`, src/world/mobiles/lookShare.ts).
+   */
+  share?: RenderShare;
 }
 
 /** Re-point a skinned mesh's joint indices from its own skeleton's order to `target`'s, by joint name; a joint the target lacks goes to its root. */
@@ -315,6 +322,7 @@ export class Character {
     }
     const character = new Character(manifest, clipList);
     character.dir = dir;
+    if (opts.share) character.sources = { meshes: new WeakMap(), textures: new WeakMap() };
     const dress = new Set(wear ?? manifest.defaultWear ?? []);
     const wanted = manifest.parts.filter((def) => def.occlusionLayer === 0 || dress.has(def.name));
     if (!wanted.length) throw new Error(`${id}: the parts pack has nothing to show`);
@@ -322,6 +330,7 @@ export class Character {
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
     const customizer = new Customizer();
+    customizer.share = opts.share ?? null;
     customizer.normalScale.copy(Character.normalScale);
     customizer.materialsFor = (name) => character.materialsNamed(name);
     // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
@@ -433,12 +442,16 @@ export class Character {
     const fullIndices: Uint32Array[] = [];
     const scenes: THREE.Object3D[] = [];
     for (const def of defs) {
-      const gltf = await new GLTFLoader().loadAsync((def.dir ?? this.dir) + def.file);
+      const url = (def.dir ?? this.dir) + def.file;
+      const gltf = await new GLTFLoader().loadAsync(url);
       scenes.push(gltf.scene);
+      const own: THREE.SkinnedMesh[] = [];
       gltf.scene.traverse((o) => {
         const s = o as THREE.SkinnedMesh;
-        if (s.isSkinnedMesh) meshes.push(s);
+        if (s.isSkinnedMesh) own.push(s);
       });
+      meshes.push(...own);
+      if (this.sources) await this.recordSources(gltf, url, own);
     }
     const first = !this.skeleton;
     if (first) {
@@ -544,6 +557,34 @@ export class Character {
 
   /** Worn meshes whose bare skin is waiting for a body to take its colour from. */
   private readonly bareSkin = new Set<THREE.SkinnedMesh>();
+
+  /**
+   * Where each mesh and each part texture came from, kept only for a character built to share
+   * (`CharacterOptions.share`), as `recordPartSources` (src/world/mobiles/lookShare.ts) keys them. Null
+   * for everyone else, who pays nothing for it.
+   */
+  private sources: PartSources | null = null;
+
+  /** One part file's meshes and textures into `sources`, read from what the parser already holds. */
+  private recordSources(gltf: GLTF, file: string, meshes: THREE.SkinnedMesh[]): Promise<void> {
+    return recordPartSources(gltf.parser as unknown as PartFile, file, meshes, this.sources!);
+  }
+
+  /**
+   * What a character built to share is made of and where each piece came from, for putting it on the
+   * shared pieces once it is finished (`shareLook`); null for a character not built that way. The
+   * skeleton is named by the folder it came from: every part is fitted to that folder's first part.
+   */
+  lookSources(): LookSources | null {
+    const src = this.sources;
+    if (!src) return null;
+    return {
+      root: this.group,
+      skeleton: this.dir,
+      meshSource: (m) => src.meshes.get(m) ?? null,
+      textureSource: (t) => src.textures.get(t) ?? null,
+    };
+  }
 
   /**
    * The wearer's own material for one part of the body: the one whose name ends the same way the

@@ -70,6 +70,27 @@ function game(over: Partial<PeopleDeps> = {}): { deps: PeopleDeps; bodies: Body[
   return { deps, bodies };
 }
 
+/**
+ * What putting a set of bodies down gives back, counted of the set as the game counts it: `each(b)` for
+ * every body in it, and `together` more once every body `with` picks is in it (a piece of a look only
+ * those bodies share, which none of them gives back alone).
+ */
+function setFrees(each: (b: Body) => number, together?: { with: ((b: Body) => boolean)[]; bytes: number }): Pick<PeopleDeps, 'freeStart' | 'frees'> {
+  const set: Body[] = [];
+  return {
+    freeStart: () => {
+      set.length = 0;
+    },
+    frees: (m) => {
+      set.push(m as unknown as Body);
+      let n = 0;
+      for (const b of set) n += each(b);
+      if (together && together.with.every((pick) => set.some(pick))) n += together.bytes;
+      return n;
+    },
+  };
+}
+
 /** The bodies still standing: stood, not taken down, not dead. */
 const standing = (bodies: Body[]): Body[] => bodies.filter((b) => !b.removed && !b.dead);
 
@@ -258,7 +279,7 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   let freed = 1;
   const g = game({
     short: () => short(),
-    frees: () => freed,
+    ...setFrees(() => freed),
   });
   bodies = g.bodies;
   const refuse = g.deps.spawn;
@@ -279,6 +300,53 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   for (let t = 3; t < 12; t++) p.step(PEOPLE_TUNE.everySeconds + 0.1, t * 2, new THREE.Vector3(0, 0, 0), g.deps);
   ok(bodies.length === before, 'and standing there it settles: nothing is put down and stood again pass after pass');
   budget = 99;
+}
+
+// ------------------------------------------------------------------ what a set gives back, together
+/**
+ * A model memory made of each body's own bytes and one piece `sharers` hold between them, counted once
+ * while any of them stands: what `short` is worked out from, and a spawn refused while it is short.
+ */
+function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) {
+  let bodies: Body[] = [];
+  let budget = Infinity;
+  const upId = (id: string) => bodies.some((b) => b.id === id && !b.removed && !b.dead);
+  const pieceUp = () => sharers.some(upId);
+  const used = () => bodies.filter((b) => !b.removed && !b.dead).reduce((n, b) => n + own[b.id!], 0) + (pieceUp() ? piece : 0);
+  const short = (entry: MobileEntry) => Math.max(0, used() + own[entry.id] + (sharers.includes(entry.id) && !pieceUp() ? piece : 0) - budget);
+  const g = game({ short, ...setFrees((b) => own[b.id!], sharers.length ? { with: sharers.map((id) => (b: Body) => b.id === id), bytes: piece } : undefined) });
+  bodies = g.bodies;
+  const plain = g.deps.spawn;
+  g.deps.spawn = (entry, at, how) => (short(entry as MobileEntry) > 0 ? 'the budget is full' : plain(entry, at, how));
+  const standingIds = () => bodies.filter((b) => !b.removed && !b.dead).map((b) => b.id!).sort().join();
+  return { deps: g.deps, upId, standingIds, fill: () => (budget = used()) };
+}
+{
+  // Two far people of one species share its body between them (5): neither gives it back alone, and
+  // added up one by one the three far people (1 each) come nowhere near the 6 the near one needs, but
+  // the two together do. The third far one, of another body, is not needed and stays.
+  const m = memory({ far1: 1, far2: 1, far3: 1, near: 6 }, ['far1', 'far2'], 5);
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'far1', id: 'far1', z: 100 }), row({ who: 'far2', id: 'far2', z: 104 }), row({ who: 'far3', id: 'far3', z: 90 }), row({ who: 'near', id: 'near', z: 0 })]);
+  p.step(0, 0, new THREE.Vector3(0, 0, 180), m.deps, true);
+  ok(m.standingIds() === 'far1,far2,far3', `three far people stand, and the near one is out of range (${m.standingIds()})`);
+  m.fill();
+  p.step(0, 1, new THREE.Vector3(0, 0, 0), m.deps, true);
+  ok(m.standingIds() === 'far3,near', `the two who share a body are put down together for the near one, which one by one they could never make room for, and the third stays (${m.standingIds()})`);
+  ok(p.last.swapped === 2, 'two put down, not three');
+}
+{
+  // The farthest gives back a little and the next a lot: once the next alone is enough, the farthest
+  // is let stay rather than put down for nothing.
+  const m = memory({ farthest: 1, far: 5, near: 5 });
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'farthest', id: 'farthest', z: 110 }), row({ who: 'far', id: 'far', z: 104 }), row({ who: 'near', id: 'near', z: 0 })]);
+  p.step(0, 0, new THREE.Vector3(0, 0, 200), m.deps, true);
+  ok(m.standingIds() === 'far,farthest', `two far people stand (${m.standingIds()})`);
+  m.fill();
+  p.step(0, 1, new THREE.Vector3(0, 0, 0), m.deps, true);
+  ok(m.standingIds() === 'farthest,near', `only the one whose memory is needed is put down, though the farther one was counted first (${m.standingIds()})`);
+  ok(p.last.swapped === 1, 'one put down');
 }
 
 // ------------------------------------------------------------------ the world holding still
@@ -651,7 +719,7 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\), wildLife\.peopleExtras\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows, and the towns' lists and weapon groups beside them");
   ok(/spawn: \(entry, at, how\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{\s*origin: 'spawned',\s*seed: how\.seed,\s*inside: how\.inside,\s*worldId: `stood:\$\{how\.index\}`,\s*essential: how\.essential,\s*overrides: how\.overrides,\s*mood: how\.mood,\s*weapons: how\.weapons,\s*weaponGroups: how\.weaponGroups,\s*room: how\.room,\s*\}\)/.test(worldSrc), "and stands each with its own creature's numbers, mood, weapons and room over its body's");
   ok(/holds: \(id\) => \{\s*const e = this\.mobileCatalogue\?\.byId\(id\);\s*return !!e && !!this\.mobiles\?\.holdsBody\(e\);\s*\},/.test(worldSrc), 'and tells them which bodies are already built, so an unattackable crowd can lean on them');
-  ok(/short: \(entry\) => this\.mobiles\?\.budgetShort\(entry\) \?\? 0,\s*frees: \(m\) => this\.mobiles\?\.freedBy\(m\) \?\? 0,/.test(worldSrc), 'and tells them what the model memory budget is short of and what putting somebody down gives back');
+  ok(/short: \(entry\) => this\.mobiles\?\.budgetShort\(entry\) \?\? 0,\s*freeStart: \(\) => this\.mobiles\?\.freeStart\(\),\s*frees: \(m\) => this\.mobiles\?\.frees\(m\) \?\? 0,/.test(worldSrc), 'and tells them what the model memory budget is short of and what putting a set of people down gives back, counted of the set');
   ok(/spawn\(entry, at, \{ origin: 'spawned', inside, worldId, essential, fixture: true \}\)/.test(worldSrc) && /const cost = budget \? this\.deps\.assets\.wouldCost\(entry, cat\) : 0;/.test(manager) && /this\.whyNot\(entry, cat, opts\.worldId \? 'world' : origin, !opts\.fixture\)/.test(manager), 'and a ticket collector is a fixture the memory budget never keeps off its pad');
 }
 
@@ -984,7 +1052,7 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
     let budget = 99;
     let bodies: Body[] = [];
     const up = (): number => bodies.filter((b) => !b.removed && !b.dead).length;
-    const g = game({ short: () => Math.max(0, up() + 1 - budget), frees: () => 1 });
+    const g = game({ short: () => Math.max(0, up() + 1 - budget), ...setFrees(() => 1) });
     bodies = g.bodies;
     const p = new StandingPeople();
     p.adopt(rows, creatures);
@@ -1016,7 +1084,7 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
     let bodies: Body[] = [];
     const up = (): number => bodies.filter((b) => !b.removed && !b.dead).length;
     const short = (): number => Math.max(0, up() + 1 - budget);
-    const g = game({ short, frees: () => 1, cellReady: () => built });
+    const g = game({ short, ...setFrees(() => 1), cellReady: () => built });
     bodies = g.bodies;
     const plain = g.deps.spawn;
     g.deps.spawn = (entry, at, how) => (short() > 0 ? 'the budget is full' : plain(entry, at, how));

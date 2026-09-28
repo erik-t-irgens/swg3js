@@ -389,10 +389,15 @@ export interface PeopleDeps {
   holds?(id: string): boolean;
   /**
    * How many bytes the model memory budget is short of standing `entry` now (nought when it fits), and
-   * how many putting one body down would give back. Both or neither: with them a full budget is a
-   * reason to put somebody farther off down, as a full cap is; without them it refuses as it did.
+   * how many putting a set of bodies down together would give back: `freeStart` begins a set, and
+   * `frees(m)` puts `m` in it and answers what the whole set gives back so far. Counted together and
+   * never added up body by body, since a model, a pack or a piece of a look that only the set holds
+   * goes when the last of them does and is in none of their figures alone. All three or none: with them
+   * a full budget is a reason to put somebody farther off down, as a full cap is; without them it
+   * refuses as it did.
    */
   short?(entry: MobileEntry): number;
+  freeStart?(): void;
   frees?(m: Mobile): number;
   /** The layout's centre, which the rows are measured from; null before the pack lands, and then nothing stands. */
   centre(): { x: number; z: number } | null;
@@ -845,13 +850,17 @@ export class StandingPeople {
   /**
    * Put down, farthest first, the fewest people farther than row `i` by the margin and in no fight who
    * between them give back `short` bytes of the model memory budget, and answer how many. `first` is the
-   * one the cap is putting down for this row anyway (`farthestFree`), or -1: it goes before anybody else,
-   * since it goes whatever happens and what it gives back is memory nobody more need be put down for.
-   * Nought, with nobody put down, when all of them together would not. Uses the kept scratch lists, so a
-   * pass that makes room allocates nothing.
+   * one the cap is putting down for this row anyway (`farthestFree`), or -1: it is counted before anybody
+   * else, since it goes whatever happens and what it gives back is memory nobody more need be put down
+   * for. What they give back is asked of the set as it grows (`PeopleDeps.frees`) and never added up body
+   * by body: two far people of one species give back that species' body only together, and neither of
+   * them alone. Once the set is enough, anybody the rest cover without is let stay after all, the nearest
+   * tried first and the one the cap is putting down last (it goes after the stand in any case, and the
+   * others would not). Nought, with nobody put down, when all of them together would not. Uses the kept
+   * scratch lists, so a pass that makes room allocates nothing.
    */
   private makeMemory(i: number, short: number, deps: PeopleDeps, first = -1): number {
-    if (!deps.frees) return 0;
+    if (!deps.frees || !deps.freeStart) return 0;
     const beyond = this.away[i] + PEOPLE_TUNE.swapMargin;
     const c = this.spare;
     c.length = 0;
@@ -863,23 +872,28 @@ export class StandingPeople {
     c.sort(this.farther);
     const chosen = this.chosen;
     chosen.length = 0;
+    deps.freeStart();
     let got = 0;
     const lead = first >= 0 ? this.up.get(first)?.body : null;
     if (lead) {
-      const f = deps.frees(lead);
-      if (f > 0) {
-        got += f;
-        chosen.push(first);
-      }
+      chosen.push(first);
+      got = deps.frees(lead);
     }
     for (const k of c) {
       if (got >= short) break;
-      const f = deps.frees(this.up.get(k)!.body!);
-      if (f <= 0) continue;
-      got += f;
       chosen.push(k);
+      got = deps.frees(this.up.get(k)!.body!);
     }
     if (got < short) return 0;
+    // Everybody the rest cover without stays, asked of the set without them.
+    for (let j = chosen.length - 1; j >= 0; j--) {
+      deps.freeStart();
+      let without = 0;
+      for (let t = 0; t < chosen.length; t++) if (t !== j) without = deps.frees(this.up.get(chosen[t])!.body!);
+      if (without < short) continue;
+      for (let t = j; t < chosen.length - 1; t++) chosen[t] = chosen[t + 1];
+      chosen.length--;
+    }
     for (const k of chosen) {
       const s = this.up.get(k)!;
       if (s.body) deps.remove(s.body);

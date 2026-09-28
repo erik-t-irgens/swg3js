@@ -289,16 +289,22 @@ export class MobileManager {
   }
 
   /**
-   * What putting `m` down would give back to that budget: its model's bytes and its animation pack's,
-   * each only where nothing else standing holds it. A body still loading gives back nothing yet.
+   * What putting a set of bodies down together would give back to that budget, counted as the set grows
+   * (`FreeTally`, src/world/mobiles/lookShare.ts): `freeStart` begins a set, and `frees(m)` puts `m` in
+   * it and answers what the whole set gives back so far -- each model and animation pack once nothing
+   * standing outside the set holds it, and each piece people's looks share once no look outside the set
+   * that is out holds it. Never a sum of what each would give back alone: a piece only the set shares
+   * (one species' body, one look worn twice) is in none of those. A body still loading gives back
+   * nothing yet. One set at a time.
    */
-  freedBy(m: Mobile): number {
+  freeStart(): void {
+    this.deps.assets.freeTally.reset();
+  }
+
+  frees(m: Mobile): number {
+    const tally = this.deps.assets.freeTally;
     const held = this.held.get(m);
-    if (!held) return 0;
-    let n = 0;
-    if (held.model && held.model.refs === 1) n += held.model.bytes;
-    if (held.pack && held.pack.refs === 1) n += held.pack.bytes;
-    return n;
+    return held ? tally.add(held.model, held.pack) : tally.total;
   }
 
   /**
