@@ -12,6 +12,11 @@ import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
 import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
 import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
+import { SKELETON_FRAME, SKELETON_TUNE } from './core/skeletonOnce.ts';
+import { LOD_TUNE } from './world/mobiles/lod.ts';
+import { FAR_TILE_TUNE } from './world/farTile.ts';
+import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
+import { FLORA_WARM } from './world/flora.ts';
 import { Input, type Action } from './core/input';
 import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
@@ -1074,6 +1079,61 @@ class App {
     registerPerfSwitch('actorRoutes', { get: () => PORTAL_CULL.actorRoutes, set: (v) => (PORTAL_CULL.actorRoutes = !!v), values: [false, true], note: "creatures, people, fighters, ships and stood shuttles drawn only in their own rooms' passes, and not at all when no room of theirs is seen" });
     registerPerfSwitch('furniture', { get: () => FURNITURE_TUNE.perBuilding, set: (v) => (FURNITURE_TUNE.perBuilding = !!v), values: [false, true], note: "a building's furniture drawn with its rooms in that building's pass alone, casting nothing, and no room of the building you stand in drawn into the sun's shadows" });
     registerPerfSwitch('seenTiers', { get: () => PORTAL_CULL.seenTiers, set: (v) => (PORTAL_CULL.seenTiers = !!v), values: [false, true], note: "a creature or person in a room nobody saw last frame is off screen: frozen unless busy, and no shadow" });
+    // Step 3, the bodies' skeletons and their culling: each commit apart.
+    registerPerfSwitch('skeletonShare', {
+      get: () => SKELETON_TUNE.share,
+      set: (v) => {
+        SKELETON_TUNE.share = !!v;
+        this.world.mobiles?.reshare(!!v);
+      },
+      values: [false, true],
+      note: "a creature's or person's worn pieces on one skeleton (the model's) rather than one each; flipped on every body out at once",
+    });
+    registerPerfSwitch('skeletonOnce', { get: () => SKELETON_TUNE.once, set: (v) => (SKELETON_TUNE.once = !!v), values: [false, true], note: "every skeleton worked out and uploaded once a frame, not once for each pass and cascade that draws it" });
+    registerPerfSwitch('cullSphere', {
+      get: () => SKELETON_TUNE.cullSphere,
+      set: (v) => {
+        SKELETON_TUNE.cullSphere = !!v;
+        this.world.mobiles?.applyCullSphere();
+        this.world.npcs?.applyCullSphere();
+      },
+      values: [false, true],
+      note: "creatures', people's and fighters' meshes culled one by one in every pass and shadow cascade against a sphere set once",
+    });
+    registerPerfSwitch('shadowReach', { get: () => LOD_TUNE.shadowClamp, set: (v) => (LOD_TUNE.shadowClamp = !!v), values: [false, true], note: "a creature whose sphere reaches none of the shadow cascades' light boxes throws no shadow (and may freeze)" });
+    // The four of step 3 at once, so the whole step is put beside the old way in one drift-cancelling run
+    // (`perf({ ab: { key: 'step3' } })`) rather than read off windows taken one after another. It reads true
+    // with all four on, false with all four off and 'mixed' otherwise, and a mixed state is kept aside the
+    // first time it is overwritten and put back when an A/B run hands 'mixed' back at its end.
+    const step3Keys = ['skeletonShare', 'skeletonOnce', 'cullSphere', 'shadowReach'] as const;
+    let step3Mixed: unknown[] | null = null;
+    const step3Get = (): boolean | 'mixed' => {
+      let on = 0;
+      for (const k of step3Keys) if (PERF_SWITCHES.get(k)?.get() === true) on++;
+      return on === step3Keys.length ? true : on === 0 ? false : 'mixed';
+    };
+    registerPerfSwitch('step3', {
+      get: step3Get,
+      set: (v) => {
+        if (v === true || v === false) {
+          if (step3Mixed === null && step3Get() === 'mixed') step3Mixed = step3Keys.map((k) => PERF_SWITCHES.get(k)?.get());
+          for (const k of step3Keys) {
+            const sw = PERF_SWITCHES.get(k);
+            if (sw && sw.get() !== v) sw.set(v);
+          }
+        } else if (v === 'mixed' && step3Mixed !== null) {
+          const saved = step3Mixed;
+          step3Mixed = null;
+          step3Keys.forEach((k, i) => PERF_SWITCHES.get(k)?.set(saved[i]));
+        }
+      },
+      values: [false, true],
+      note: 'the whole of step 3 at once: the shared skeleton, once a frame, the per-mesh cull and the cascades\' shadow rule',
+    });
+    // Step 4, moving about without hitches: each commit apart.
+    registerPerfSwitch('farTileLocal', { get: () => FAR_TILE_TUNE.local, set: (v) => this.world.setFarTileLocal(!!v), values: [false, true], note: "a chunk coming or going re-cuts the one far tile it lies in, in place, rather than every far tile from scratch" });
+    registerPerfSwitch('farProbeCached', { get: () => FAR_PROBE.cached, set: (v) => (FAR_PROBE.cached = !!v), values: [false, true], note: "a creature or person far from the player reads the ground the world holds, and never makes terrain on the spot" });
+    registerPerfSwitch('floraWarm', { get: () => FLORA_WARM.on, set: (v) => (FLORA_WARM.on = !!v), values: [false, true], note: "every plant compiled behind the loading screen (from the next arrival) and a chunk's materials adopted as it is made" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -2712,7 +2772,9 @@ class App {
           // back from being shown, and the worst play frame so far.
           pace: this.world.shaderPace(),
           remade: this.shaderWatch.remade(),
-          builtInPlay: this.shaderWatch.builtInPlay(),
+          // The newest twenty, or with `full` every one the history still holds (`keys` of them at most):
+          // a count read off the short list is a lower bound and nothing else.
+          builtInPlay: this.shaderWatch.builtInPlay(opts?.full ? Number.POSITIVE_INFINITY : 20),
         };
         if (opts?.since) out.since = this.shaderWatch.takeSince();
         if (opts?.groups) out.groups = grouped.groups;
@@ -2783,6 +2845,41 @@ class App {
        * draws everything as before; `{ tune: { padPx: 4 } }` moves any number live.
        */
       cull: (o?: CullDebugOptions) => this.cullDebug(o),
+      /**
+       * The bodies' skeletons and their per-mesh cull (step 3): the switches, how many skeletons were
+       * worked out and skipped since the session began, and for the creatures and people out now the
+       * bodies, their skinned meshes, the skeletons those stand on and the meshes culled one by one.
+       * `{ share, once, cullSphere, shadowClamp }` flips a switch as the frame report does; `{ sphereScale }`
+       * grows or shrinks every body's sphere and sets them all again (a tail or a swing cut at the screen's
+       * edge, or a shadow lost at a cascade's, is what it is for).
+       */
+      skeletons: (o?: { share?: boolean; once?: boolean; cullSphere?: boolean; shadowClamp?: boolean; sphereScale?: number }) => {
+        if (o) {
+          for (const k of ['share', 'once', 'cullSphere'] as const) {
+            const v = o[k];
+            if (typeof v === 'boolean') PERF_SWITCHES.get(k === 'share' ? 'skeletonShare' : k === 'once' ? 'skeletonOnce' : 'cullSphere')?.set(v);
+          }
+          if (typeof o.shadowClamp === 'boolean') LOD_TUNE.shadowClamp = o.shadowClamp;
+          if (typeof o.sphereScale === 'number' && Number.isFinite(o.sphereScale) && o.sphereScale > 0) {
+            SKELETON_TUNE.sphereScale = o.sphereScale;
+            this.world.mobiles?.refitCull();
+            this.world.npcs?.refitCull();
+          }
+        }
+        return { tune: { ...SKELETON_TUNE, shadowClamp: LOD_TUNE.shadowClamp }, updated: SKELETON_FRAME.updated, skipped: SKELETON_FRAME.skipped, mobiles: this.world.mobiles?.skeletonReport() ?? null, fighters: this.world.npcs?.npcs.length ?? 0 };
+      },
+      /**
+       * Moving about without hitches (step 4): the far tiles (how many, how many are cut in place and carry
+       * their own index, the quads kept of all), how the far bodies' ground reads were answered since the
+       * session began (the terrain, the world's cache, or unknown), and the plants' warm-up. `{ local, probe,
+       * floraWarm }` flips each switch as the frame report does.
+       */
+      farTiles: (o?: { local?: boolean; probe?: boolean; floraWarm?: boolean }) => {
+        if (typeof o?.local === 'boolean') this.world.setFarTileLocal(o.local);
+        if (typeof o?.probe === 'boolean') FAR_PROBE.cached = o.probe;
+        if (typeof o?.floraWarm === 'boolean') FLORA_WARM.on = o.floraWarm;
+        return { ...this.world.farTileReport(), probe: { on: FAR_PROBE.cached, fromTerrain: FAR_PROBE_STATS.terrain, fromCache: FAR_PROBE_STATS.cached, unknown: FAR_PROBE_STATS.unknown }, floraWarm: FLORA_WARM.on, floraStandIns: this.world.floraStandIns, floraPrograms: this.world.floraWarmReport(), syncBlocks: this.world.terrain.swg?.syncGenerations ?? 0 };
+      },
       /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
       postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
         const fx = this.postfx;

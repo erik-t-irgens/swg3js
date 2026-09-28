@@ -19,6 +19,13 @@ import { CHUNK_SIZE } from './terrain';
 /** Collidable flora tiles are 16 m in the engine regardless of the template's tile size. */
 const COLLIDABLE_TILE = 16;
 
+/**
+ * The switch for commit 4c: every plant's program compiled behind the loading screen from a stand-in
+ * (`standIns`), and a chunk's materials adopted the moment it is made rather than at the next
+ * quarter-second scan. False is the old behaviour (the stand-ins take effect from the next arrival).
+ */
+export const FLORA_WARM = { on: true };
+
 interface Placement {
   child: FloraChild;
   model: LoadedModel;
@@ -50,6 +57,47 @@ export class FloraPlanter {
 
   get modelCount(): number {
     return this.models.size;
+  }
+
+  /**
+   * One instanced mesh of a single copy for every primitive of every flora model the planet can plant
+   * (commit 4c): the very geometry and material a chunk's own draws, instanced as a chunk's are, so its
+   * program is the one a chunk's plants are drawn with. The world compiles these behind the loading screen
+   * and never shows them, which is what keeps a species met for the first time mid-session -- walking into
+   * a forest, flying over a new biome -- from building its program on the frame its first chunk appears.
+   * They share everything with the models and are let go, never disposed of their geometry or material.
+   */
+  standIns(): THREE.InstancedMesh[] {
+    const out: THREE.InstancedMesh[] = [];
+    const seen = new Set<LoadedModel>();
+    for (const model of this.models.values()) {
+      if (seen.has(model)) continue;
+      seen.add(model);
+      for (const prim of model.primitives) {
+        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+        mesh.setMatrixAt(0, tmpM.identity());
+        mesh.name = 'flora stand-in';
+        out.push(mesh);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Every material of every flora model the planet can plant, which is what the stand-ins carry and what
+   * any chunk's plants are drawn with. The world forgets them all when it lets the planet go: each joined
+   * the portal renderer's set and the cascades' map when it was adopted (the stand-ins adopt the whole list
+   * at arrival), both hold them strongly, and the pack that owns them is disposed with the world.
+   */
+  materials(out: Set<THREE.Material> = new Set()): Set<THREE.Material> {
+    for (const model of this.models.values()) {
+      for (const prim of model.primitives) {
+        const m = prim.material as THREE.Material | THREE.Material[];
+        if (Array.isArray(m)) for (const x of m) out.add(x);
+        else out.add(m);
+      }
+    }
+    return out;
   }
 
   /** ProceduralTerrainAppearance's flora tile index: floor, with exact negative multiples pushed down. */

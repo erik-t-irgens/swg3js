@@ -29,6 +29,7 @@ import { CNT, PASS, PERF, perf } from '../core/perf.ts';
 import { cullOn, ExitNarrowing, exitFrustum, isQuarantined, markQuarantined, MAX_BUILDINGS, PORTAL_CULL, PortalVisibility, walkCameraCell, type CameraCell } from './portalVis.ts';
 import { ActorRoutes, ROUTE_PASS } from './portalCull.ts';
 import { furnitureOn, maskSeen } from './furnitureHost.ts';
+import { beginSkeletonFrame, endSkeletonFrame, installSkeletonOnce } from '../core/skeletonOnce.ts';
 
 export { crossing } from './portalVis.ts';
 
@@ -265,6 +266,8 @@ export class PortalRenderer {
 
   constructor(private readonly renderer: THREE.WebGLRenderer) {
     this.hookDraws();
+    // A skeleton is worked out once a frame inside `render`, not once a pass (commit 3b, `skeletonOnce.ts`).
+    installSkeletonOnce();
     this.portalMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false, depthTest: true, side: THREE.DoubleSide });
     this.portalMat.stencilWrite = true;
     this.portalMat.stencilZPass = THREE.ReplaceStencilOp;
@@ -570,6 +573,9 @@ export class PortalRenderer {
     this.narrowStats.hidden = 0;
     // Once a pass has taken the whole scene its matrices are fresh for the rest of the frame
     // (turned off inline at each such pass, so no closure is made per frame).
+    // And so are the bones: every skeleton is worked out on its first draw of the frame and skipped on
+    // every later one, in every pass and cascade, until the `finally` below closes the frame (commit 3b).
+    beginSkeletonFrame();
     try {
       this.passes = 0;
       this.strays = 0;
@@ -641,6 +647,7 @@ export class PortalRenderer {
       }
     } finally {
       scene.matrixWorldAutoUpdate = auto;
+      endSkeletonFrame();
       // Every routed thing back as the frame left it; what no view pass drew stays hidden through the effects.
       routes?.endPasses();
       perf.count(CNT.cullRooms, this.roomMeshes);

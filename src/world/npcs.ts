@@ -114,6 +114,8 @@ import { FIGHTER_BODY, POSTURE_TUNE, STANCE_TUNE, aimMode, aimPointFor, applyBod
 // player's does, never by a rule of its own: `BladePath` steps the same capsule along the ground the
 // blade covered, and a `Striker` of this fighter's own is what puts it behind the blow.
 import { BLADE_RADIUS, BladePath, type Striker } from '../combat/sweep';
+// Its meshes culled one by one against a sphere about the figure, set once (commit 3c).
+import { cullsOneByOne, fighterCull, fitCullSpheres, setBodyCulled, type BodyPose } from './bodyCull.ts';
 
 /** What a fighter carries, and so how it fights. */
 type Arm = 'saber' | 'melee' | 'gun';
@@ -292,6 +294,11 @@ const UP = new THREE.Vector3(0, 1, 0);
 const Y = new THREE.Vector3(0, 1, 0);
 const Z = new THREE.Vector3(0, 0, 1);
 const tmpQ = new THREE.Quaternion();
+/** Where a fighter's feet are and its cull sphere, while `fitCull` measures it (once, when it is dressed). */
+const cullAt = new THREE.Vector3();
+const fighterSphere = { y: 0, radius: 0 };
+/** Metres from the head joint to the top of the head, for a fighter's height (ours). */
+const FIGHTER_CROWN = 0.22;
 /** The two ends of a line-of-sight test, written rather than made: one ray a thought, no objects. */
 const LINE_FROM = { x: 0, y: 0, z: 0 };
 const LINE_TO = { x: 0, y: 0, z: 0 };
@@ -914,8 +921,55 @@ export class Npc implements Living, ErrandBody {
     await this.armUp(deps);
     if (this.dead || !this.rig) return;
     rig.root.updateMatrixWorld(true);
+    this.fitCull(rig);
     if (deps.compile) await deps.compile([rig.root]);
     rig.root.visible = true;
+  }
+
+  /**
+   * Each of its meshes culled on its own in every pass and shadow cascade (commit 3c, `bodyCull.ts`): the
+   * skinned ones against one sphere about the whole figure, set once in each mesh's frame, the weapon by
+   * its own. The figure's height is its head joint's over its feet as it stands dressed, with a crown on
+   * top; a rig with no head joint takes the drawn body `FIGHTER_BODY` is measured from.
+   */
+  private fitCull(rig: CharacterRig): void {
+    // Measured once, as it stands when dressed: a refit later must not take a crouch for its height.
+    if (this.cullTall <= 0) {
+      this.group.updateWorldMatrix(true, true);
+      const head = rig.boneFor('head');
+      const tall = head ? head.getWorldPosition(tmp).y - this.group.getWorldPosition(cullAt).y + FIGHTER_CROWN : 2 * FIGHTER_BODY.halfHeight;
+      this.cullTall = Number.isFinite(tall) && tall > 0.5 ? tall : 2 * FIGHTER_BODY.halfHeight;
+    }
+    const c = fighterCull(this.cullTall, FIGHTER_BODY.radius, fighterSphere);
+    this.cullMeshes.length = 0;
+    fitCullSpheres(rig.root, this.group, c.y, c.radius, this.cullMeshes);
+    this.applyCull();
+  }
+
+  /** The meshes the per-mesh cull may take, from `fitCull`, and the figure's height it measured (0 before). */
+  private readonly cullMeshes: THREE.Mesh[] = [];
+  private cullTall = 0;
+
+  /** What `applyCull` reads, filled rather than made each time it is asked. */
+  private readonly cullPose: BodyPose = { ragdoll: false, dead: false, down: false, idle: null };
+
+  /**
+   * Whether its meshes are culled one by one now (`cullsOneByOne`): the switch, and only while it is on
+   * its feet. Flat on the ground -- prone, playing its death clip, or a ragdoll -- it reaches past the
+   * standing figure's sphere and is drawn whole. Asked again when it is dressed, goes prone or gets up
+   * from it, dies and falls to the physics.
+   */
+  applyCull(): void {
+    const p = this.cullPose;
+    p.ragdoll = this.ragdoll !== null;
+    p.dead = this.dead;
+    p.down = this.posture === 'prone';
+    setBodyCulled(this.cullMeshes, cullsOneByOne(p));
+  }
+
+  /** Its spheres set again (the console moved the scale); nothing before it is dressed, or once it has fallen. */
+  refitCull(): void {
+    if (this.rig && !this.ragdoll && this.cullMeshes.length) this.fitCull(this.rig);
   }
 
   /** A weapon off the rack: a lightsaber most often, else a sword or a gun, hung on the hand as the game hangs it. */
@@ -1099,7 +1153,10 @@ export class Npc implements Living, ErrandBody {
       warnedProne = true;
       console.warn('fighters: this rig has none of the prone loops, so a body put flat by hand is drawn standing; the rule never asks for prone on such a rig.');
     }
+    const wasProne = this.posture === 'prone';
     this.posture = p;
+    // Flat on the ground a figure reaches past its standing sphere: drawn whole until it is up (`applyCull`).
+    if ((p === 'prone') !== wasProne) this.applyCull();
     const low = p !== 'stand';
     if (low === this.lowBody) return;
     this.lowBody = low;
@@ -1286,6 +1343,8 @@ export class Npc implements Living, ErrandBody {
         this.ragdollIn = Math.min(3, (rig.clipDuration(clip) ?? 1) - 0.05);
       }
     }
+    // The death clip lays it out past its standing sphere before the ragdoll takes it: drawn whole from here.
+    this.applyCull();
     // The handle goes out of the lookup at the moment the collider goes, not ten seconds later
     // when the fighter is disposed: rapier recycles handles, so a fresh body landing on this one
     // in the meantime would otherwise be found as this corpse.
@@ -1303,6 +1362,8 @@ export class Npc implements Living, ErrandBody {
     this.ragdoll = new Ragdoll(this.physics, this.rig.root, { velocity: this.push.clone() });
     this.deadTimer = 10;
     if (this.blade) this.blade.group.visible = false;
+    // Its pieces leave the figure's sphere as it falls: not culled mesh by mesh for the ragdoll's life.
+    this.applyCull();
   }
 
   /** Where a gun's muzzle is: the far end of the model's long axis, as the rack reads it. */
@@ -2887,6 +2948,16 @@ export class NpcManager {
   /** The difficulty knob moved: every fighter out takes it (`Npc.applyDifficulty`). */
   applyDifficulty(scale: number): void {
     applyDifficultyTo(this.npcs, scale);
+  }
+
+  /** The per-mesh cull switched (`SKELETON_TUNE.cullSphere`, commit 3c): every fighter out takes it, each but one flat on the ground. */
+  applyCullSphere(): void {
+    for (const n of this.npcs) n.applyCull();
+  }
+
+  /** The spheres set again on every fighter dressed (the console moved `SKELETON_TUNE.sphereScale`). */
+  refitCull(): void {
+    for (const n of this.npcs) n.refitCull();
   }
 
   /**

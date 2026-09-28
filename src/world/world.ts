@@ -29,7 +29,7 @@ import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type Pl
 import type { HeatSources, LavaHeatTable } from './heatSources';
 import { REFLECTIONS, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
-import { FloraPlanter } from './flora';
+import { FLORA_WARM, FloraPlanter } from './flora.ts';
 import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
 import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
@@ -82,6 +82,8 @@ import { CSM } from 'three/examples/jsm/csm/CSM.js';
 import { ACTOR_LAYER, INTERIOR_LAYER, markActor, type PortalRenderer } from './portalRender';
 import { cullOn, markNarrowRoot } from './portalVis.ts';
 import { furnitureOn, isFurniture } from './furnitureHost.ts';
+import { coverChunk, coverFrom, FAR_TILE_TUNE, makeFarTileCut, writeKept, type FarTileCut } from './farTile.ts';
+import { refreshCascadeBoxes } from './bodyCull.ts';
 import { createPlaceholderSpeeder } from '../vehicles/speeder';
 import { Dust } from '../vehicles/dust';
 import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../vehicles/garage';
@@ -633,6 +635,19 @@ export class World {
    */
   groundIfCached(x: number, z: number): number | null {
     return this.groundAtCached(x, z);
+  }
+  /** The chunk the ground streams round, as the last `stream` found it (NaN before the first). */
+  private streamPcx = Number.NaN;
+  private streamPcz = Number.NaN;
+  /**
+   * Whether the ground under a point is within the physics' reach of where it streams from: the chunks
+   * whose heightfields are colliders, and whose terrain is always held, so asking it there makes nothing.
+   * True before anything has streamed, where nothing better is known.
+   */
+  groundSolidAt(x: number, z: number): boolean {
+    if (!Number.isFinite(this.streamPcx)) return true;
+    const far = Math.max(Math.abs(Math.floor(x / CHUNK_SIZE) - this.streamPcx), Math.abs(Math.floor(z / CHUNK_SIZE) - this.streamPcz));
+    return far <= PHYSICS_RADIUS;
   }
   private readonly waterAtFn = (x: number, z: number): number => this.terrain.waterHeightAt(x, z);
   /** Set by main: needed to filter the sky into an environment map for reflective surfaces. */
@@ -1330,6 +1345,12 @@ export class World {
       spawnSpot: (from, forward, distance, inside) => this.spawnSpot(from, forward, distance, inside),
       refuse: () => (this.planet?.space ? 'nothing can be stood in space' : (this.refuseMobiles?.() ?? null)),
       shadows: () => this.renderer?.shadowMap.enabled ?? false,
+      // The cascades' light boxes: a body in none of them throws no shadow anything draws (commit 3c).
+      shadowBoxes: () => (this.csm ? this.cascadeBoxes : null),
+      // The ground a body far out in the open reads, never made on the spot (commit 4b): past the physics'
+      // reach the terrain's own answer can mean generating a whole block on this frame.
+      groundIfCached: (x, z) => this.groundIfCached(x, z),
+      groundSolid: (x, z) => this.groundSolidAt(x, z),
       // A getter: the rack arrives after the world is made, and a person spawned before it is unarmed.
       weapons: () => this.npcDeps.weapons ?? null,
       // How the portal renderer's last frame saw a body's rooms: one nobody could see is off screen (commit 2c).
@@ -1691,6 +1712,13 @@ export class World {
     this.farTiles.clear();
     this.lastTx = Number.NaN;
     this.lastTz = Number.NaN;
+    // The plants' stand-ins share the pack's geometry and materials: let go, never disposed of those. But
+    // every plant's material joined the portal renderer's set and the cascades' map when it was adopted --
+    // the whole list at arrival through the stand-ins (commit 4c), and whatever was planted through the
+    // scan before that -- and both hold it strongly, so all of them are forgotten here, before the pack
+    // that owns them is disposed below, or each world visited would leave its whole flora list behind.
+    if (this.flora) this.forgetMaterials(this.flora.materials());
+    this.floraWarm = [];
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
     this.layoutStream?.dispose();
@@ -2699,7 +2727,42 @@ export class World {
     });
     const families = swg.template.generator.floraGroup.families.size;
     this.flora = new FloraPlanter(swg, byAppearance);
+    // Every plant this planet can grow, one stand-in a primitive, adopted now and compiled by the loading
+    // screen's sweep (`compileEverything`) so no species builds its program in play (commit 4c). Never in the scene.
+    this.floraWarm = FLORA_WARM.on ? this.flora.standIns() : [];
+    for (const o of this.floraWarm) this.adoptMaterials(o);
     console.info(`flora: ${byAppearance.size} models for ${families} families`);
+  }
+
+  /** One instanced stand-in per flora primitive, compiled behind the loading screen and never drawn (commit 4c). */
+  private floraWarm: THREE.InstancedMesh[] = [];
+
+  /** How many plant stand-ins the last arrival compiled, for the console. */
+  get floraStandIns(): number {
+    return this.floraWarm.length;
+  }
+
+  /**
+   * For the console: every plant's material the planet can grow (the stand-ins carry the same list), how
+   * many of them already have a program in the renderer, which after an arrival with the warm-up on should
+   * be all of them, and how many programs they hold between them. That last is the flight's own witness,
+   * read before a flight and after it: a plant drawn in play with a program its warm-up did not build adds
+   * one here, whether or not the program cache happened to hold it already, so it answers for every plant
+   * and not for the newest twenty programs `shaders()` lists.
+   */
+  floraWarmReport(): { materials: number; compiled: number; programs: number } {
+    const props = this.renderer?.properties as unknown as { has?(m: THREE.Material): boolean; get(m: THREE.Material): { programs?: Map<unknown, unknown>; currentProgram?: unknown } } | undefined;
+    const mats = this.flora ? this.flora.materials() : new Set<THREE.Material>();
+    let compiled = 0;
+    let programs = 0;
+    for (const m of mats) {
+      if (!props || (props.has && !props.has(m))) continue;
+      const rec = props.get(m);
+      const n = rec.programs?.size ?? 0;
+      programs += n;
+      if (n > 0 || rec.currentProgram) compiled++;
+    }
+    return { materials: mats.size, compiled, programs };
   }
 
   /**
@@ -3931,6 +3994,11 @@ export class World {
       const m = o as THREE.Mesh;
       if ((m.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite) && m.material) objects.push(o);
     });
+    // Every plant the planet can grow, as its chunks draw it, whether or not any stands near yet (commit 4c).
+    for (const o of this.floraWarm) {
+      this.adoptMaterials(o);
+      objects.push(o);
+    }
     const before = r.info.programs?.length ?? 0;
     const BATCH = 8;
     for (let i = 0; i < objects.length; i += BATCH) {
@@ -3958,12 +4026,20 @@ export class World {
     return (r.info.programs?.length ?? 0) - before;
   }
 
+  /**
+   * The cascades' light boxes as they stand after this frame's `csm.update`, for the creatures' shadow
+   * rule (commit 3c, `refreshCascadeBoxes`): the very frusta three culls each cascade's casters against.
+   * Refilled in place every frame; empty until the first.
+   */
+  private readonly cascadeBoxes: THREE.Frustum[] = [];
+
   /** Call once per frame after the camera has moved. */
   updateShadows(now: number): void {
     const csm = this.csm;
     if (csm) {
       csm.lightDirection.copy(this.day.lightDir).negate().normalize();
       csm.update();
+      refreshCascadeBoxes(csm.lights, this.cascadeBoxes);
     }
     if (now - this.csmScanAt > 250) {
       this.csmScanAt = now;
@@ -6159,6 +6235,8 @@ export class World {
     if (this.planet.space) return;
     const pcx = Math.floor(center.x / CHUNK_SIZE);
     const pcz = Math.floor(center.z / CHUNK_SIZE);
+    this.streamPcx = pcx;
+    this.streamPcz = pcz;
     if (pcx === this.lastCx && pcz === this.lastCz && budget !== Infinity) return;
 
     const wanted: { cx: number; cz: number; d: number }[] = [];
@@ -6177,6 +6255,7 @@ export class World {
       // With SWG terrain the pole grids come from a worker; skip until they arrive.
       if (!this.terrain.prepareChunk(w.cx, w.cz, sync)) continue;
       this.createChunk(w.cx, w.cz);
+      this.noteChunk(w.cx, w.cz, true);
       made++;
     }
     if (wanted.length <= made) {
@@ -6192,6 +6271,7 @@ export class World {
       if (far > this.viewRadius + 1) {
         this.disposeChunk(c);
         this.chunks.delete(key);
+        this.noteChunk(c.cx, c.cz, false);
         changed = true;
         dropped++;
       } else if (far <= PHYSICS_RADIUS) {
@@ -6206,15 +6286,125 @@ export class World {
     perf.count(CNT.chunksDropped, dropped);
     if (changed) {
       perf.begin(SEC.farRefresh);
-      for (const t of this.farTiles.values()) this.refreshFarTile(t);
+      // Only the tiles the chunks that came and went lie in, each cut in place (commit 4a); the switch off,
+      // every tile rebuilt from scratch as before.
+      const rebuilt = FAR_TILE_TUNE.local ? this.cutChangedTiles() : this.refreshAllFarTiles();
       perf.end(SEC.farRefresh);
-      perf.count(CNT.farTiles, this.farTiles.size);
+      perf.count(CNT.farTiles, rebuilt);
     }
+    this.changedN = 0;
+  }
+
+  /** Each far tile's cut (commit 4a, `farTile.ts`), for as long as the tile stands. */
+  private readonly farCuts = new WeakMap<THREE.Mesh, FarTileCut>();
+  /** The chunks that came (1) and went (0) in this `stream` call: kept arrays, written by index. */
+  private changedCx = new Int32Array(64);
+  private changedCz = new Int32Array(64);
+  private changedIn = new Uint8Array(64);
+  private changedN = 0;
+  /** The tiles a stream call's chunks lie in, written by index and never shortened. */
+  private readonly dirtyTiles: (THREE.Mesh | null)[] = [];
+  /** Whether a chunk is loaded, for a tile's first cut: one closure, made with the world. */
+  private readonly chunkLoaded = (cx: number, cz: number): boolean => this.chunks.has(`${cx},${cz}`);
+
+  private noteChunk(cx: number, cz: number, loaded: boolean): void {
+    if (this.changedN >= this.changedCx.length) {
+      const cap = this.changedCx.length * 2;
+      const x = new Int32Array(cap);
+      x.set(this.changedCx);
+      const z = new Int32Array(cap);
+      z.set(this.changedCz);
+      const l = new Uint8Array(cap);
+      l.set(this.changedIn);
+      this.changedCx = x;
+      this.changedCz = z;
+      this.changedIn = l;
+    }
+    const i = this.changedN++;
+    this.changedCx[i] = cx;
+    this.changedCz[i] = cz;
+    this.changedIn[i] = loaded ? 1 : 0;
+  }
+
+  /**
+   * The far tiles that the chunks made and dropped in this stream call lie in, each cut in place: a 64 m
+   * chunk lies in exactly one 512 m tile, so a step over a chunk boundary touches one or two tiles rather
+   * than every one of them. Answers how many tiles were cut.
+   */
+  private cutChangedTiles(): number {
+    const dirty = this.dirtyTiles;
+    let nd = 0;
+    for (let k = 0; k < this.changedN; k++) {
+      const cx = this.changedCx[k];
+      const cz = this.changedCz[k];
+      const tx = Math.floor((cx * CHUNK_SIZE) / FAR_TILE);
+      const tz = Math.floor((cz * CHUNK_SIZE) / FAR_TILE);
+      const tile = this.farTiles.get(`${tx},${tz}`);
+      if (!tile) continue;
+      const cut = this.farCuts.get(tile);
+      if (!cut) continue;
+      if (!coverChunk(cut, cx, cz, this.changedIn[k] === 1)) continue;
+      let seen = false;
+      for (let d = 0; d < nd; d++) if (dirty[d] === tile) seen = true;
+      if (!seen) dirty[nd++] = tile;
+    }
+    for (let d = 0; d < nd; d++) {
+      const tile = dirty[d] as THREE.Mesh;
+      writeKept(this.farCuts.get(tile) as FarTileCut, tile.geometry);
+      dirty[d] = null;
+    }
+    return nd;
+  }
+
+  /** Every far tile rebuilt from scratch, the old way (the switch off). Answers how many. */
+  private refreshAllFarTiles(): number {
+    for (const t of this.farTiles.values()) this.refreshFarTile(t);
+    return this.farTiles.size;
+  }
+
+  /**
+   * One tile's cut worked out whole from what is loaded now: a tile just made, or every tile when the switch
+   * comes back on (the old rebuild leaves the marks behind). The old rebuild instead when the switch is off.
+   */
+  private cutWhole(tile: THREE.Mesh): void {
+    const cut = FAR_TILE_TUNE.local ? this.farCuts.get(tile) : undefined;
+    if (!cut) {
+      this.refreshFarTile(tile);
+      return;
+    }
+    coverFrom(cut, this.chunkLoaded);
+    writeKept(cut, tile.geometry);
+  }
+
+  /** The far tiles' cut switched (`FAR_TILE_TUNE.local`, the frame report's `farTileLocal`): every tile redone the new way or the old. */
+  setFarTileLocal(on: boolean): void {
+    if (FAR_TILE_TUNE.local === on) return;
+    FAR_TILE_TUNE.local = on;
+    for (const t of this.farTiles.values()) this.cutWhole(t);
+  }
+
+  /** For the console (`__debug.farTiles()`): how many tiles, how the last cut left them, and whether the index attribute is each tile's own. */
+  farTileReport(): { local: boolean; tiles: number; cut: number; ownIndex: number; quadsKept: number; quadsTotal: number } {
+    let cut = 0;
+    let own = 0;
+    let kept = 0;
+    let total = 0;
+    for (const t of this.farTiles.values()) {
+      const c = this.farCuts.get(t);
+      if (!c) continue;
+      cut++;
+      if (t.geometry.index === c.index) own++;
+      kept += Math.max(0, c.kept);
+      total += c.n * c.n;
+    }
+    return { local: FAR_TILE_TUNE.local, tiles: this.farTiles.size, cut, ownIndex: own, quadsKept: kept, quadsTotal: total };
   }
 
   /**
    * Coarse far tiles overlap the detailed chunks and, on cliffs, poke through them. Drop the
-   * quads of a far tile that lie under loaded chunks so only one ground ever shows.
+   * quads of a far tile that lie under loaded chunks so only one ground ever shows. This is the old
+   * rebuild, kept behind `FAR_TILE_TUNE.local` false: a new array and a new index attribute every call,
+   * and the one it replaces is never freed on the card.
    */
   private refreshFarTile(tile: THREE.Mesh): void {
     const u = tile.geometry.userData as { fullIndex?: ArrayLike<number>; n: number; ox: number; oz: number; step: number };
@@ -6231,6 +6421,7 @@ export class World {
       }
     }
     tile.geometry.setIndex(out);
+    tile.geometry.setDrawRange(0, Infinity);
   }
 
   private streamFar(center: THREE.Vector3, budget: number): void {
@@ -6259,7 +6450,10 @@ export class World {
       if (geometry.boundingSphere) markNarrowRoot(mesh, geometry.boundingSphere);
       this.chunkRoot.add(mesh);
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
-      this.refreshFarTile(mesh);
+      // Its cut, kept for its life: which quads the chunks cover and one index attribute of its own (commit 4a).
+      const u = geometry.userData as { fullIndex?: ArrayLike<number>; n: number; ox: number; oz: number; step: number };
+      if (u.fullIndex) this.farCuts.set(mesh, makeFarTileCut(u.fullIndex, u.n, u.ox, u.oz, u.step, CHUNK_SIZE));
+      this.cutWhole(mesh);
       made++;
     }
     if (wanted.length <= made) {
@@ -6296,6 +6490,13 @@ export class World {
     // building can leave the chunk out when it misses the exits' view (`markNarrowRoot`).
     const sphere = chunkSphere(group);
     if (sphere) markNarrowRoot(group, sphere);
+    // Its materials join the stencil, the cascades and the rain now, before it is ever drawn, rather than at
+    // the next quarter-second scan (commit 4c): each is a set lookup, the planet's plants having been adopted
+    // and compiled behind the loading screen. Anything new after all is queued as the scan would queue it.
+    if (FLORA_WARM.on) {
+      const fresh = this.adoptMaterials(group);
+      if (fresh.length) this.compileObjects(fresh);
+    }
     this.chunkRoot.add(group);
     this.chunks.set(key, { key, cx, cz, group, colliders, heights, physics: null });
     const b = this.groundHiddenFor;

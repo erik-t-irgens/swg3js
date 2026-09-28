@@ -22,7 +22,9 @@
 // With no server none of this runs: `driven` is never set, `mine` answers yes for everything, and
 // every creature is this browser's own with its damage applied where it lands.
 import * as THREE from 'three';
-import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { cloneShared, reshareSkeletons } from './cloneShared.ts';
+import { cullsOneByOne, fitCullSpheres, setBodyCulled, type BodyPose } from '../bodyCull.ts';
+import { groundUnder, standingOn } from './groundProbe.ts';
 import { combatSounds, type GunSound } from '../../audio/combatSounds';
 import { Group, groups, RAPIER, type Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
@@ -234,6 +236,12 @@ export interface MobileDeps {
   hittableAt?(handle: number): Hittable | undefined;
   /** Asking for the ragdoll, which the manager starts a couple a frame. */
   wantRagdoll(self: Mobile): void;
+  /**
+   * The ground where the world already holds it, and whether a point is within the physics' reach: a body
+   * outdoors past that reach reads the first and never makes terrain on the spot (commit 4b, `groundProbe.ts`).
+   */
+  groundIfCached?(x: number, z: number): number | null;
+  groundSolid?(x: number, z: number): boolean;
 }
 
 export interface MobileContext {
@@ -697,7 +705,8 @@ export class Mobile implements Living, NpcSubject {
    */
   attach(model: MobileBody, pack: PackAsset | null, extras?: MobileExtras): { ok: boolean; warning: string | null } {
     if (this.disposed || this.dead) return { ok: false, warning: null };
-    const scene = cloneSkeleton(model.scene);
+    // One skeleton for the meshes that shared one in the model (commit 3a), not one for each.
+    const scene = cloneShared(model.scene);
     const names = new Set<string>();
     const spines: THREE.Bone[] = [];
     scene.traverse((o) => {
@@ -705,7 +714,7 @@ export class Mobile implements Living, NpcSubject {
       const m = o as THREE.Mesh;
       if (m.isMesh) {
         this.meshes.push(m);
-        // Culled as a whole by the manager, never mesh by mesh (a mesh's own sphere would be in its own frame).
+        // Culled as a whole by the manager, and mesh by mesh only through the sphere set below.
         m.frustumCulled = false;
       }
       if ((o as THREE.Bone).isBone) {
@@ -721,6 +730,8 @@ export class Mobile implements Living, NpcSubject {
     markActor(scene);
     this.inner.add(scene);
     this.model = scene;
+    // Each mesh culled on its own in every pass and cascade (commit 3c).
+    this.refitCull();
     // A new skeleton in its rest pose: posed on its first step, whatever its tier.
     this.posed = false;
     let warning: string | null = null;
@@ -783,6 +794,8 @@ export class Mobile implements Living, NpcSubject {
     }
     this.state = 'idle';
     this.animator?.loop(this.idleNow(), 1, 0);
+    // Asked again now its idle is known: a mood's idle may lay it at full length (`refitCull` above ran before the roles).
+    this.applyCull();
     return { ok: true, warning };
   }
 
@@ -814,6 +827,8 @@ export class Mobile implements Living, NpcSubject {
       m.frustumCulled = false;
       this.meshes.push(m);
     });
+    // Rigid, and culled by its own geometry's sphere along with the body (commit 3c): it hangs in the model now.
+    this.refitCull();
     this.holder = holder;
     this.weapon = e.id;
     if (e.kind === 'saber') {
@@ -1303,6 +1318,8 @@ export class Mobile implements Living, NpcSubject {
         // A body on its way to the floor cuts nothing more: the window shuts with the swing.
         this.swingUntil = 0;
         this.shotsLeft = 0;
+        // Laid out along the ground until it is up again: drawn whole, not mesh by mesh.
+        this.applyCull();
       }
     }
   }
@@ -1327,6 +1344,7 @@ export class Mobile implements Living, NpcSubject {
     this.state = 'idle';
     this.stunned = 0;
     this.animator?.loop(this.idleNow(), 1, 0.2);
+    this.applyCull();
   }
 
   holdAt(point: THREE.Vector3, dt: number): void {
@@ -1406,6 +1424,9 @@ export class Mobile implements Living, NpcSubject {
     const heap = !this.sharedLive;
     const d = this.animator?.once(clip, { hold: true, priority: SHOT_PRIORITY.down, fadeIn: 0.08, onEnd: heap ? () => this.deps.wantRagdoll(this) : undefined }) ?? null;
     if (d === null && heap) this.deps.wantRagdoll(this);
+    // The death clip lays it out along the ground, past the standing body's sphere, and with a server
+    // holding the world it lies in that clip for the whole of its time rather than turning ragdoll.
+    this.applyCull();
   }
 
   /** Hand the skinned body to the physics from the pose the death clip left. Called by the manager's queue. */
@@ -1425,12 +1446,58 @@ export class Mobile implements Living, NpcSubject {
     this.animator?.reset();
     this.deadTimer = DEAD_FOR;
     this.state = 'dead';
+    // Its pieces leave the body's sphere as it falls: not culled mesh by mesh for the ragdoll's life.
+    this.applyCull();
   }
 
   private endRagdoll(): void {
     if (!this.ragdoll) return;
     this.ragdoll.dispose();
     this.ragdoll = null;
+    this.applyCull();
+  }
+
+  /**
+   * The meshes the per-mesh cull may take (commit 3c): the model's, each skinned one carrying the body's
+   * own sphere in its frame, and a weapon's. Filled when the body is hung and a weapon taken up.
+   */
+  private readonly cullMeshes: THREE.Mesh[] = [];
+
+  /** What `applyCull` reads, filled rather than made each time it is asked. */
+  private readonly cullPose: BodyPose = { ragdoll: false, dead: false, down: false, idle: null };
+
+  /**
+   * Whether its meshes are culled one by one now (`cullsOneByOne`): the switch, and only while it is on
+   * its feet. Dead (in its held death clip or a ragdoll), knocked down, or standing in an idle that lays it
+   * at full length, it reaches past the standing body's sphere and is drawn whole whenever its group is.
+   * Asked again whenever one of those changes: hung, dying, knocked down and up, sat and risen, stood again.
+   */
+  applyCull(): void {
+    const p = this.cullPose;
+    p.ragdoll = this.ragdoll !== null;
+    p.dead = this.dead;
+    p.down = this.downPhase !== null;
+    p.idle = this.roles?.idle ?? null;
+    setBodyCulled(this.cullMeshes, cullsOneByOne(p));
+  }
+
+  /**
+   * Every mesh of the hung model given its cull sphere again (commit 3c): the manager's own sphere for the
+   * body, which in the inner group's frame (at the feet, scaled with the body) is `plan.cull` over the scale,
+   * grown by `SKELETON_TUNE.sphereScale`. When it is hung, when a weapon is put in its hand, and when the
+   * console moves the scale.
+   */
+  refitCull(): void {
+    this.cullMeshes.length = 0;
+    if (!this.model) return;
+    const cull = this.plan.cull;
+    fitCullSpheres(this.model, this.inner, cull.y / this.scale, cull.radius / this.scale, this.cullMeshes);
+    this.applyCull();
+  }
+
+  /** The share switch flipped (commit 3a): its hung meshes one skeleton, or one each; how many it has now. */
+  reshare(share: boolean): number {
+    return this.model ? reshareSkeletons(this.model, share) : 0;
   }
 
   /** Where a shot leaves from: a muzzle bone, else the head, else the middle of its front. */
@@ -1839,14 +1906,17 @@ export class Mobile implements Living, NpcSubject {
     const terrain = this.deps.terrain;
     const filter = this.inside ? INSIDE : undefined;
     const gd = this.deps.physics.groundDistance(t.x, t.y, t.z, this.plan.feet + 0.4, this.body, filter);
+    // Outdoors, the ground under it -- read where the world holds it when it is past the physics' reach,
+    // and unknown (null) where it holds nothing, which changes nothing below (commit 4b).
+    const ground = this.inside ? null : groundUnder(this.pos.x, this.pos.z, terrain, this.deps);
     // A room with no floor built is stood on as though it had one: the height is held for it.
-    this.grounded = gd !== null || this.airless || (!this.inside && this.pos.y <= terrain.heightAt(this.pos.x, this.pos.z) + 0.25);
+    this.grounded = standingOn(this.grounded, gd !== null, this.airless, this.inside, this.pos.y, ground);
     if (this.inside) {
       this.swimming = false;
       return;
     }
+    if (ground === null) return;
     const surface = terrain.waterHeightAt(this.pos.x, this.pos.z);
-    const ground = terrain.heightAt(this.pos.x, this.pos.z);
     const deep = surface - ground > (this.entry.size?.swimHeight ?? 1) * this.scale;
     const swimming = this.canSwim && deep && this.pos.y < surface;
     if (swimming !== this.swimming) {
@@ -1978,7 +2048,9 @@ export class Mobile implements Living, NpcSubject {
       const nx = this.pos.x + Math.sin(this.heading) * ahead;
       const nz = this.pos.z + Math.cos(this.heading) * ahead;
       const terrain = this.deps.terrain;
-      if (terrain.waterHeightAt(nx, nz) - terrain.heightAt(nx, nz) > (this.entry.size?.swimHeight ?? 1) * this.scale * 0.8) {
+      // The same far read as the ground's (commit 4b): ground not held out there is no water known ahead.
+      const ahead0 = groundUnder(nx, nz, terrain, this.deps);
+      if (ahead0 !== null && terrain.waterHeightAt(nx, nz) - ahead0 > (this.entry.size?.swimHeight ?? 1) * this.scale * 0.8) {
         this.waterAhead = true;
         if (d.state === 'wander') {
           this.goal = null;
@@ -2065,6 +2137,8 @@ export class Mobile implements Living, NpcSubject {
     }
     if (this.roles && this.laidIdle) this.roles.idle = this.laidIdle;
     this.animator?.loop(this.idleNow(), 1);
+    // Up from a knockdown, and in the seat's idle, which may lay it down at full length.
+    this.applyCull();
   }
 
   /** Get up off a seat onto the spot in front of it, a body in the solver again standing in its own idle. */
@@ -2082,6 +2156,7 @@ export class Mobile implements Living, NpcSubject {
     resetStepWalker(this.stepWalk);
     if (this.roles && this.plainIdle && this.seatedIdleOnly) this.roles.idle = this.plainIdle;
     this.thinkAt = 0;
+    this.applyCull();
   }
 
   /** Whether it is sitting on a seat just now. */
@@ -2454,9 +2529,12 @@ export class Mobile implements Living, NpcSubject {
       const swell = this.deps.seaSwellAt?.(this.pos.x, this.pos.z, flat) ?? 0;
       wantY = flat + swell - this.plan.swimDepth + this.plan.feet;
     } else if (this.flyer) {
-      const ground = this.deps.groundAt(this.pos.x, t.y, this.pos.z, this.inside) ?? this.deps.terrain.heightAt(this.pos.x, this.pos.z);
-      wantY = ground + this.plan.hover + this.plan.feet;
+      // Outdoors past the physics' reach, only the ground the world holds (commit 4b); with none, it holds
+      // the height it is at -- asked to stay where it is, so a climb or a dive under way is damped out
+      // rather than carried on unchecked, with no gravity, for as long as the ground stays unknown.
+      const ground = this.deps.groundAt(this.pos.x, t.y, this.pos.z, this.inside) ?? (this.inside ? this.deps.terrain.heightAt(this.pos.x, this.pos.z) : groundUnder(this.pos.x, this.pos.z, this.deps.terrain, this.deps));
       if (this.body.gravityScale() !== 0) this.body.setGravityScale(0, true);
+      wantY = ground === null ? t.y : ground + this.plan.hover + this.plan.feet;
     }
     if (wantY === null) return;
     const v = this.body.linvel();
@@ -2496,8 +2574,9 @@ export class Mobile implements Living, NpcSubject {
    */
   liftToGround(): boolean {
     if (this.dead || this.disposed || this.inside || this.ragdoll || this.swimming || this.heldUntil > this.now) return false;
-    const ground = this.deps.terrain.heightAt(this.pos.x, this.pos.z);
-    if (this.pos.y > ground - 1) return false;
+    // Past the physics' reach, only where the world already holds the ground (commit 4b): unknown moves nothing.
+    const ground = groundUnder(this.pos.x, this.pos.z, this.deps.terrain, this.deps);
+    if (ground === null || this.pos.y > ground - 1) return false;
     const t = this.body.translation();
     this.body.setTranslation({ x: t.x, y: ground + this.plan.feet + 0.05 + (this.flyer ? this.plan.hover : 0), z: t.z }, true);
     const v = this.body.linvel();
@@ -2595,6 +2674,8 @@ export class Mobile implements Living, NpcSubject {
       this.animator.reset();
       this.animator.loop(this.idleNow(), 1, 0);
     }
+    // On its feet again (a death played as a clip never had a ragdoll to end): culled mesh by mesh once more.
+    this.applyCull();
   }
 
   /** What the console shows of it. */
@@ -2698,5 +2779,6 @@ export class Mobile implements Living, NpcSubject {
       this.model = null;
     }
     this.meshes.length = 0;
+    this.cullMeshes.length = 0;
   }
 }

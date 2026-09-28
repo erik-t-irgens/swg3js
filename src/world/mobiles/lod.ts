@@ -21,6 +21,12 @@ export interface LodTune {
   ragdollsPerFrame: number;
   /** How far each size class throws a shadow. */
   shadow: Record<SizeClass, number>;
+  /**
+   * Whether a body whose sphere reaches none of the shadow cascades' light boxes throws no shadow
+   * (`LodInput.inCascades`, commit 3c): three would draw it into no shadow map anyway, and it is then
+   * free to freeze. False is the old rule, the size class's reach alone.
+   */
+  shadowClamp: boolean;
   /** Seconds between thoughts: near, the rest, frozen. */
   think: [number, number, number];
   /** Within this of the player a mid-tier mobile still thinks at the near rate. */
@@ -35,6 +41,7 @@ export const LOD_TUNE: LodTune = {
   shadowSlack: 8,
   ragdollsPerFrame: 2,
   shadow: { tiny: 0, small: 45, medium: 110, large: 260, huge: 1e9 },
+  shadowClamp: true,
   think: [0.1, 0.4, 1.5],
   thinkNear: 60,
 };
@@ -70,6 +77,15 @@ export interface LodInput {
   /** The live setting, not `tune.animRange`. */
   animRange: number;
   /**
+   * Whether its sphere, grown by `shadowSlack`, reaches any of the shadow cascades' light boxes
+   * (`reachesCascades`, from the boxes the cascades last stood in): a caster outside all of them is drawn
+   * into no shadow map. The boxes and not a distance from the camera, because the cascades' reach is a
+   * depth along the view -- a body at the side of the screen stands farther off than that depth while
+   * inside the last cascade -- and because a box reaches past the view toward the sun, so a body beyond
+   * the last cascade can still throw its shadow back into it. Absent, no limit.
+   */
+  inCascades?: boolean;
+  /**
    * The rooms it counts in as the portal renderer's last frame saw them (commit 2c, `ActorRoutes.levelOf`):
    * 0 none seen, 1 one seen, 2 none seen but one is one room past a seen one, -1 (or absent) left to the
    * frustum. Unseen is off screen whatever the frustum says, and throws no shadow; one room past a seen one
@@ -92,7 +108,10 @@ export function lodTier(i: LodInput, tune: LodTune = LOD_TUNE, out?: LodTier): L
   const walled = room === 0 || room === 2;
   const onScreen = i.onScreen && !walled;
   const nearScreen = i.nearScreen && !walled;
-  const castShadow = i.shadows && nearScreen && i.dist < (tune.shadow[i.sizeClass] ?? 0);
+  // A size class's reach, and never for a body in none of the cascades' light boxes: three would draw it
+  // into no shadow map, so no shadow of it lands anywhere drawn.
+  const outOfCascades = tune.shadowClamp && i.inCascades === false;
+  const castShadow = i.shadows && nearScreen && i.dist < (tune.shadow[i.sizeClass] ?? 0) && !outOfCascades;
   // Whether it is drawn is still the frustum's alone: the room's say is last frame's, and the portal
   // renderer's routing hides what this frame cannot see (`portalCull.ts`), so a room coming round a
   // corner never shows its people a frame late.

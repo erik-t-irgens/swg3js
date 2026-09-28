@@ -16,7 +16,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // The value imports carry their extensions so the node tests can drive the cache itself (lookBudget.test.ts).
 import { surfaces } from '../surfaces.ts';
-import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { cloneShared } from './cloneShared.ts';
 import type { AnimPack, MobileEntry, Vec3 } from './types';
 import type { MobileCatalogue } from './catalogue';
 import { makeAdditiveOnce, missingCarries, missingRoles, rolesFor, type PackClipSource } from './packClips.ts';
@@ -372,7 +372,8 @@ export class MobileAssets {
   private async loadHologram(file: string, bounds?: { min: Vec3; max: Vec3 }, estimate?: number, look?: LookSpec): Promise<ModelAsset> {
     // The plain asset first (a model, or a look), held for the hologram's life.
     const base = await this.acquireModel(file, { hologram: false, bounds, estimate, look });
-    const scene = cloneSkeleton(base.scene) as THREE.Group;
+    // One skeleton for the meshes that shared one (commit 3a), so every body cloned from this shares one too.
+    const scene = cloneShared(base.scene) as THREE.Group;
     const materials = makeHologram(scene);
     const meshes: THREE.Mesh[] = [];
     scene.traverse((o) => {

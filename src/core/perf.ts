@@ -18,6 +18,7 @@
 
 import * as THREE from 'three';
 import { abKeep, abLength, abSide, EMPTY_SPREAD, formatAb, formatReport, spreadOf, type AbReport, type AbSide, type PassRow, type PerfReport, type SectionRow, type Spread } from './perfMath.ts';
+import { installSkeletonOnce, SKELETON_HOOKS } from './skeletonOnce.ts';
 
 /** How many frames the report covers, the A/B block length, and whether each pass is timed on the GPU. */
 export const PERF_TUNE = { frames: 120, block: 12, gpu: false };
@@ -525,21 +526,27 @@ function skeletonUpdated(s: StampedSkeleton): void {
   if (tex && !tex.onUpdate) tex.onUpdate = onBoneUpload;
 }
 
+function skeletonSkipped(): void {
+  if (PERF.timing) PERF.c[CNT.skelSkipped]++;
+}
+
+function skeletonHooked(s: THREE.Skeleton): void {
+  if (PERF.timing) skeletonUpdated(s as StampedSkeleton);
+}
+
 /**
- * Hook three's `Skeleton.update` once, to count. The hook checks the timing flag first, so with the
- * timing off it costs one test a call; it is put in only when the timing is first turned on.
+ * Count three's `Skeleton.update`: through the one patch the once-a-frame rule puts on the prototype
+ * (`skeletonOnce.ts`), which tells this of every real update and every skip. Wrapping the prototype
+ * here as well would count a skipped update as a real one or not at all, depending only on which of
+ * the two wrappers went on last. The hooks check the timing flag first, so with the timing off each
+ * costs one test a call; they are put in only when the timing is first turned on.
  */
 function installSkeletonHook(): void {
   if (PERF.hooked) return;
   PERF.hooked = true;
-  const proto = THREE.Skeleton.prototype as THREE.Skeleton & { perfHooked?: boolean };
-  if (proto.perfHooked) return;
-  proto.perfHooked = true;
-  const original = proto.update;
-  proto.update = function update(this: THREE.Skeleton): void {
-    original.call(this);
-    if (PERF.timing) skeletonUpdated(this as StampedSkeleton);
-  };
+  installSkeletonOnce();
+  SKELETON_HOOKS.updated = skeletonHooked;
+  SKELETON_HOOKS.skipped = skeletonSkipped;
 }
 
 // ---------------------------------------------------------------------------------------------
