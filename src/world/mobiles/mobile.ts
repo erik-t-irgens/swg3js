@@ -46,6 +46,7 @@ import { moveSpeeds, stepGait, type GaitStep } from './gait';
 import { BRAIN_TUNE, clampWander, decide, keepPost, type BrainSelf, type BrainTarget, type Decision, type Post } from './brain';
 import { LOD_TUNE, type LodTier } from './lod';
 import { gravityFor, holdAir } from './airless.ts';
+import { easeShare, onFeet, resetStepWalker, stepAhead, stepHeightOf, stepWalker, stoodStill, walkStep, type StepRay, type StepShape, type StepTrace, type StepWalker } from './stepUp.ts';
 import { rescaleBody, scaledByDifficulty } from '../difficulty.ts';
 import { NavAgent } from '../nav/navAgent.ts';
 import { DOOR_TUNE, DoorLegs, doorwayNav, placeOfCell, placeOfWalk, wallBetween, type GoalPlace } from '../nav/doorway.ts';
@@ -77,6 +78,8 @@ const blowFrom = new THREE.Vector3();
 /** Written into by the driven body every frame; the engine copies out of them at the call. */
 const driveAt = { x: 0, y: 0, z: 0 };
 const driveTurn = { x: 0, y: 0, z: 0, w: 1 };
+/** What the step-up's rays found, written in place by every mobile in turn and read at once. */
+const stepHit: StepRay = { toi: 0, ny: 0 };
 const UP = new THREE.Vector3(0, 1, 0);
 /** What a blade faces while no camera is given (a headless step). */
 const IDLE_CAMERA = new THREE.PerspectiveCamera();
@@ -509,6 +512,14 @@ export class Mobile implements Living, NpcSubject {
   private stuck = 0;
   private stuckClock = 0;
   private stuckCommanded = 0;
+  /** What the step-up keeps between frames (`stepUp.ts`): the pace it was set at, when it may ask again, and its lifts. */
+  private readonly stepWalk: StepWalker = stepWalker();
+  /** The body the step-up climbs with, written in place before each ask (`stepShapeNow`). */
+  private readonly stepShape: StepShape = { along: 0, rim: 0, step: 0, feet: 0 };
+  /** The lifts the picture has already been eased over, and how far behind the body it is still drawn, in the body's own frame (up, forward). */
+  private liftsSeen = 0;
+  private liftLagY = 0;
+  private liftLagZ = 0;
   private readonly stuckFrom = new THREE.Vector3();
   private sidestepUntil = 0;
   private sidestep = 0;
@@ -1109,6 +1120,7 @@ export class Mobile implements Living, NpcSubject {
     this.stuck = 0;
     this.stuckClock = 0;
     this.stuckCommanded = 0;
+    resetStepWalker(this.stepWalk);
     this.ramp = this.speed;
     // And its mind, as the last keeper left it. Without this a creature changes hands and forgets
     // what it was fighting, where it was going and everything on it -- so a bantha being led away
@@ -1616,12 +1628,14 @@ export class Mobile implements Living, NpcSubject {
       this.stepDriven(dt, ctx, tier);
       return;
     }
-    // 2. The body's place, and the heading it is held at.
+    // 2. The body's place, and the heading it is held at; and the picture still catching up with a
+    //    step it was lifted onto.
     const t = this.body.translation();
     this.pos.set(t.x, t.y - this.plan.feet, t.z);
     this.group.position.set(t.x, t.y, t.z);
     tmpQ.setFromAxisAngle(UP, this.heading);
     this.group.quaternion.copy(tmpQ);
+    if (this.liftLagY !== 0 || this.liftLagZ !== 0) this.easeLift(dt);
     // 3. Slowed by the Force, it lives at a crawl.
     this.slowed = Math.max(0, this.slowed - dt);
     const own = this.slowed > 0 ? 0.12 : 1;
@@ -1737,6 +1751,9 @@ export class Mobile implements Living, NpcSubject {
     }
     this.group.position.copy(driveAt);
     this.group.quaternion.copy(tmpQ);
+    // A body handed over part way through catching up with a step it was lifted onto goes on catching
+    // up here, rather than snapping onto its body the moment it changed hands.
+    if (this.liftLagY !== 0 || this.liftLagZ !== 0) this.easeLift(dt);
     // 3. Dead: the death clip plays out where it fell and the timer runs, exactly as it does for one
     //    this browser killed itself, so the manager takes the body down in its own good time.
     if (this.dead) {
@@ -2096,15 +2113,27 @@ export class Mobile implements Living, NpcSubject {
     const gait = stepGait(this.ramp, wanted, accel, dt, this.gaitsNow(), this.idleNow(), this.scale, undefined, this.gaitOut);
     this.ramp = gait.ramp;
     this.speed = gait.speed;
-    const moving = this.speed > 0.05 && (this.grounded || this.flyer || this.swimming) && this.stunned <= 0 && !this.downPhase && tier.move;
+    // On its feet is on the ground, or just lifted onto a step and not yet found it (`onFeet`).
+    const feet = onFeet(this.stepWalk, this.grounded, this.pos.y);
+    const moving = this.speed > 0.05 && (feet || this.flyer || this.swimming) && this.stunned <= 0 && !this.downPhase && tier.move;
     if (moving) {
-      const vy = this.body.linvel().y;
-      this.body.setLinvel({ x: Math.sin(this.heading) * this.speed, y: vy, z: Math.cos(this.heading) * this.speed }, true);
-    } else if (this.grounded && tier.move) {
-      // Braking: a fifth off per sixtieth of a second, whatever the frame rate.
       const v = this.body.linvel();
-      const brake = Math.pow(0.8, dt * 60);
-      this.body.setLinvel({ x: v.x * brake, y: v.y, z: v.z * brake }, true);
+      const sx = Math.sin(this.heading);
+      const sz = Math.cos(this.heading);
+      // Held back since the last step, walking on its own feet on the ground: a step it can climb,
+      // perhaps, and then it is set on the tread and any fall it carried is dropped (`stepUp.ts`).
+      // Refused, it does not ask again for `retry` seconds.
+      const vy = walkStep(this.deps.physics, this.body, this.stepWalk, this.now, this.grounded && !this.flyer && !this.swimming, this.speed, v.x, v.y, v.z, sx, sz, this.stepShapeNow(), this.pos.x, this.pos.y, this.pos.z, this.inside ? INSIDE : OUTSIDE, stepHit);
+      if (this.stepWalk.lifts !== this.liftsSeen) this.noteLift();
+      this.body.setLinvel({ x: sx * this.speed, y: vy, z: sz * this.speed }, true);
+    } else {
+      if (this.grounded && tier.move) {
+        // Braking: a fifth off per sixtieth of a second, whatever the frame rate.
+        const v = this.body.linvel();
+        const brake = Math.pow(0.8, dt * 60);
+        this.body.setLinvel({ x: v.x * brake, y: v.y, z: v.z * brake }, true);
+      }
+      stoodStill(this.stepWalk);
     }
     if (tier.move) {
       tmpQ.setFromAxisAngle(UP, this.heading);
@@ -2113,6 +2142,82 @@ export class Mobile implements Living, NpcSubject {
     if (!this.downPhase) this.animator?.loop(gait.clip ?? this.idleNow(), gait.timeScale);
     this.checkStuck(dt, moving ? this.speed : 0);
     this.fight(ctx, d);
+  }
+
+  /**
+   * The body the step-up climbs with, written into the one struct it keeps: its support's place along
+   * its heading (off the origin only on a long creature, whose support capsule sits under its middle
+   * rather than its origin), the support's rim, its template's own step height at its size, and how
+   * high its origin sits over its feet.
+   */
+  private stepShapeNow(): StepShape {
+    const s = this.stepShape;
+    const support = this.plan.colliders[0];
+    s.along = support ? support.at[2] : 0;
+    s.rim = support ? support.radius : this.plan.across;
+    s.step = stepHeightOf(this.entry.size?.stepHeight, this.scale);
+    s.feet = this.plan.feet;
+    return s;
+  }
+
+  /**
+   * A lift has just set the body up on a step and along onto its tread, in one step of the physics:
+   * the picture is held back by as much and let catch up (`easeLift`), so a body is seen stepping up
+   * rather than jumping. Held back in the body's own frame, up and forward, since the lift went along
+   * its heading; a lag still being eased when another lift comes is added to, not dropped.
+   */
+  private noteLift(): void {
+    const w = this.stepWalk;
+    this.liftsSeen = w.lifts;
+    this.liftLagY -= w.rise;
+    this.liftLagZ -= w.ahead;
+  }
+
+  /** The picture a frame nearer the body it was held back from, and put exactly on it once it is under a millimetre. */
+  private easeLift(dt: number): void {
+    const k = easeShare(dt);
+    this.liftLagY *= k;
+    this.liftLagZ *= k;
+    if (Math.abs(this.liftLagY) + Math.abs(this.liftLagZ) < 1e-3) {
+      this.liftLagY = 0;
+      this.liftLagZ = 0;
+    }
+    this.inner.position.set(0, this.liftLagY - this.plan.feet, this.liftLagZ);
+  }
+
+  /** No lag at all: a respawn, or anything else that puts the body somewhere new. */
+  private dropLiftLag(): void {
+    this.liftsSeen = this.stepWalk.lifts;
+    this.liftLagY = 0;
+    this.liftLagZ = 0;
+    this.inner.position.set(0, -this.plan.feet, 0);
+  }
+
+  /**
+   * For the console (`__debug.stepProbe`): the step-up's probe cast now from where it stands along its
+   * heading, as `walkStep` would cast it, with every ray it cast and what each met. It lifts nothing,
+   * is counted among the probes' asks like any other, and allocates: nothing in a frame calls it.
+   */
+  probeStep(): Record<string, unknown> {
+    const shape = this.stepShapeNow();
+    const sx = Math.sin(this.heading);
+    const sz = Math.cos(this.heading);
+    const trace: StepTrace[] = [];
+    const hit: StepRay = { toi: 0, ny: 0 };
+    const top = stepAhead(this.deps.physics, this.pos.x + sx * shape.along, this.pos.y, this.pos.z + sz * shape.along, sx, sz, shape.rim, shape.step, this.inside ? INSIDE : OUTSIDE, hit, undefined, trace);
+    const r = (n: number): number => Number(n.toFixed(3));
+    return {
+      who: this.label,
+      key: this.key,
+      feet: this.pos.toArray().map(r),
+      heading: [r(sx), r(sz)],
+      rim: r(shape.rim),
+      step: r(shape.step),
+      top: Number.isNaN(top) ? null : r(top),
+      lifts: this.stepWalk.lifts,
+      footing: this.stepWalk.footing,
+      rays: trace.map((t) => ({ ray: t.ray, from: t.from.map(r), dir: t.dir.map(r), len: r(t.len), hit: t.hit, toi: t.hit ? r(t.toi) : null, ny: t.hit ? r(t.ny) : null })),
+    };
   }
 
   /** Every window, the ground covered against the speed commanded: under a fifth is stuck, and it side-steps. */
@@ -2314,6 +2419,8 @@ export class Mobile implements Living, NpcSubject {
     this.forgetKey = null;
     this.stuck = 0;
     this.stuckClock = 0;
+    resetStepWalker(this.stepWalk);
+    this.dropLiftLag();
     this.wanderAt = -1;
     this.thinkAt = 0;
     // A path is a path through one room of one building; a body stood somewhere else carries none

@@ -71,6 +71,52 @@ export interface OutdoorHeader {
    * today, and read as unknown -- steeper than anything -- if it ever is.
    */
   slopeDegrees?: number;
+  /**
+   * The rules the bake ran by (`NAV_BAKE_RULES` in `tools/swg/navgrid.mjs`): 2 grew an object's cell
+   * only across the sides its geometry hugs, 1 (or absent) grew every blocked cell a whole cell. It
+   * decides how much room the grid already keeps round an object, and so how much more a wide body's
+   * legs must keep (`legInset`).
+   */
+  rules?: number;
+}
+
+/**
+ * How far a grid grown by the side keeps an object's sampled geometry off the side of an open cell
+ * next to it, metres: the player's half-width, which is what the bake grows by (`AGENT_RADIUS` in
+ * `tools/swg/navgrid.mjs`, and a node test fails if the two ever part).
+ */
+export const GRID_SIDE_MARGIN = 0.35;
+
+/**
+ * The room a grid already keeps between an object's geometry and the open cells beside it, metres:
+ * the half-width for one grown by the side (`rules` 2), and a whole cell for one grown a whole cell
+ * every way, which is every grid baked before that.
+ */
+export function gridMargin(h: OutdoorHeader): number {
+  return Number(h.rules ?? 1) >= 2 ? GRID_SIDE_MARGIN : h.cell;
+}
+
+/**
+ * How far a body `across` metres from its middle to its rim must keep a route's legs off every cell
+ * the grid does not call open, metres: its half-width less the room the grid already keeps
+ * (`gridMargin`), never less than nothing and never more than 0.45 of a cell.
+ *
+ * It is here because the string-pull joins cell middles with lines, and a line may run anywhere inside
+ * an open cell -- along the very side it shares with an object's cell. On a grid grown by a whole cell
+ * that side stood a cell off the object itself, and a body a metre across still fitted; on one grown
+ * only by the side (`rules` 2, which is what opened Fort Tusken's lanes) the object's geometry can be
+ * the player's half-width off that side and no more, so a leg that hugs it puts anything wider than
+ * the player into the wall -- measured on a drawn object, the nearest a line between two open cell
+ * middles comes to sampled geometry fell from 1.56 m to 0.57 m. So a wide body is handed only legs
+ * that keep its own width, less that half-width, off anything not open (`lineThick`), and where no
+ * leg does, the steps of the path itself, which run cell middle to cell middle and keep half a cell
+ * off both sides. A person, 0.38 m, is kept 0.03 m further off than the grid already keeps it; a bol,
+ * 0.98 m, 0.63 m. Capped under half a cell, since that is what the path's own steps keep and what the
+ * three-line test (`lineThick`) can vouch for.
+ */
+export function legInset(h: OutdoorHeader, across: number): number {
+  if (!(across > 0)) return 0;
+  return Math.min(0.45 * h.cell, Math.max(0, across - gridMargin(h)));
 }
 
 export interface OutdoorTune {
@@ -580,6 +626,31 @@ export function lineClear(g: OutdoorGrid, ax: number, az: number, bx: number, bz
 }
 
 /**
+ * Whether a body could walk the line and keep `inset` metres either side of it off every cell the
+ * grid does not call open: the line itself, and the two lines beside it at that distance, all clear.
+ *
+ * Three lines are enough because the band between the outer two is narrower than a cell: a cell that
+ * reached into the band without crossing either of them would have to fit inside it, and a two-metre
+ * cell does not fit in a band under two metres wide (`legInset` keeps it under 0.9 of a cell). The
+ * ends are open cells' middles, which the side lines leave from within the same cell.
+ */
+export function lineThick(g: OutdoorGrid, ax: number, az: number, bx: number, bz: number, inset: number): boolean {
+  return lineClearance(g, ax, az, bx, bz) >= 0 && sidesClear(g, ax, az, bx, bz, inset);
+}
+
+/** The two side lines of `lineThick`, `inset` metres either side; clear at once for no inset or no length. */
+function sidesClear(g: OutdoorGrid, ax: number, az: number, bx: number, bz: number, inset: number): boolean {
+  if (!(inset > 0)) return true;
+  const dx = bx - ax;
+  const dz = bz - az;
+  const len = Math.hypot(dx, dz);
+  if (len < 1e-9) return true;
+  const px = (-dz / len) * inset;
+  const pz = (dx / len) * inset;
+  return lineClearance(g, ax + px, az + pz, bx + px, bz + pz) >= 0 && lineClearance(g, ax - px, az - pz, bx - px, bz - pz) >= 0;
+}
+
+/**
  * The same walk, answering **how much room** the line keeps: the least clearance, in cells, of any
  * cell it passes through, or -1 when a body could not walk it at all.
  *
@@ -1003,8 +1074,14 @@ export function corridorSearch(g: OutdoorGrid, w: OutdoorWork, startK: number, g
  * the thing the route bowed round. So a leg is preferred while it holds `berthPull` of room, and
  * the farthest merely walkable leg is taken only when no leg holds it -- which is what happens in a
  * town, where every cell is near a wall and the corners are the ones this always gave.
+ *
+ * `inset` is the body's own room (`legInset`): a leg counts as walkable only when it keeps that much
+ * off every cell the grid does not call open (`lineThick`). The next step of the path is taken
+ * whatever it keeps, as it always was, and it runs between two cell middles, half a cell off
+ * everything either side, so a wide body in a narrow lane is walked down the lane's middle cell by
+ * cell rather than handed a straighter leg along its wall. 0 is the pull that shipped before it.
  */
-export function stringPull(g: OutdoorGrid, raw: Float64Array, rawCount: number, out: Float64Array, tune: OutdoorTune = OUTDOOR_TUNE): number {
+export function stringPull(g: OutdoorGrid, raw: Float64Array, rawCount: number, out: Float64Array, tune: OutdoorTune = OUTDOOR_TUNE, inset = 0): number {
   if (rawCount <= 0) return 0;
   const cap = Math.floor(out.length / 2);
   const want = tune.berthPull > 0 ? tune.berthPull / g.header.cell : 0;
@@ -1031,7 +1108,7 @@ export function stringPull(g: OutdoorGrid, raw: Float64Array, rawCount: number, 
         if (c < held) held = c;
       }
       const room = lineClearance(g, ax, az, x, z);
-      if (room >= 0) {
+      if (room >= 0 && sidesClear(g, ax, az, x, z, inset)) {
         best = k;
         if (want > 0 && room >= held) wide = k;
         misses = 0;
@@ -1088,7 +1165,7 @@ export function nearestOpenIn(g: OutdoorGrid, x: number, z: number, metres: numb
  * without it -- when the fine cells hold no way either. Nothing is allocated: the line goes into the
  * chain the coarse route would have used.
  */
-function nearOrSay(g: OutdoorGrid, w: OutdoorWork, startK: number, goalK: number, tune: OutdoorTune, deadline: number, otherwise: PlanOutcome): PlanOutcome {
+function nearOrSay(g: OutdoorGrid, w: OutdoorWork, startK: number, goalK: number, tune: OutdoorTune, deadline: number, otherwise: PlanOutcome, inset: number): PlanOutcome {
   const h = g.header;
   const j0 = Math.floor(startK / h.nx);
   const j1 = Math.floor(goalK / h.nx);
@@ -1120,7 +1197,7 @@ function nearOrSay(g: OutdoorGrid, w: OutdoorWork, startK: number, goalK: number
   const count = corridorSearch(g, w, startK, goalK, tune, deadline);
   if (!count) return otherwise;
   w.rawCount = count;
-  w.pulledCount = stringPull(g, w.raw, count, w.pulled, tune);
+  w.pulledCount = stringPull(g, w.raw, count, w.pulled, tune, inset);
   if (!(w.pulledCount > 0)) return otherwise;
   w.nearFound++;
   return 'found';
@@ -1157,6 +1234,9 @@ function nearestCoarse(g: OutdoorGrid, c: number, rings: number): number {
  * metre plane refusing what the ground allows, which is a fact about the plane and is remembered.
  * 'spent' is a budget that ran out, which says nothing about the world at all and must never be
  * read as a refusal or remembered. 'found' is corners.
+ *
+ * `inset` is the body's own room (`legInset`): every leg it is handed, the straight line included,
+ * keeps that much off anything the grid does not call open, save the path's own steps.
  */
 export function planRoute(
   g: OutdoorGrid,
@@ -1166,6 +1246,7 @@ export function planRoute(
   gx: number,
   gz: number,
   tune: OutdoorTune = OUTDOOR_TUNE,
+  inset = 0,
 ): PlanOutcome {
   const h = g.header;
   w.rawCount = 0;
@@ -1187,7 +1268,7 @@ export function planRoute(
   const szc = cellZ(g, startK);
   const gxc = cellX(g, goalK);
   const gzc = cellZ(g, goalK);
-  if (Math.hypot(gxc - sxc, gzc - szc) <= tune.straight && lineClear(g, sxc, szc, gxc, gzc)) return 'straight';
+  if (Math.hypot(gxc - sxc, gzc - szc) <= tune.straight && lineThick(g, sxc, szc, gxc, gzc, inset)) return 'straight';
   // Short enough that, where the coarse plane cannot answer, the fine cells are searched directly
   // (`nearFine`): the plane's gaps are alleys and yards, and the ground often has a way through.
   const short = tune.nearFine > 0 && Math.hypot(gxc - sxc, gzc - szc) <= tune.nearFine;
@@ -1212,7 +1293,7 @@ export function planRoute(
   for (let i = 0; i < w.refusedA.length; i++) {
     if (w.refusedA[i] === startC && w.refusedB[i] === goalC) {
       w.remembered++;
-      return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'unjoined') : 'unjoined';
+      return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'unjoined', inset) : 'unjoined';
     }
   }
   // The pair goes into the ring whatever the fine cells then say: it is a fact about the plane, and
@@ -1221,7 +1302,7 @@ export function planRoute(
     w.refusedA[w.refusedAt] = startC;
     w.refusedB[w.refusedAt] = goalC;
     w.refusedAt = (w.refusedAt + 1) % w.refusedA.length;
-    return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'unjoined') : 'unjoined';
+    return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'unjoined', inset) : 'unjoined';
   };
   // The cheap question, asked from the goal's end, before the expensive one is asked from the
   // body's. The A* below costs the **body's** component, so a body in a pocket is answered in a few
@@ -1239,7 +1320,7 @@ export function planRoute(
     if (w.flood === 0) return refuse();
   }
   const end = coarseSearch(g, w, startC, goalC, tune, deadline);
-  if (end === -2) return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'spent') : 'spent';
+  if (end === -2) return short ? nearOrSay(g, w, startK, goalK, tune, deadline, 'spent', inset) : 'spent';
   // The search exhausted the body's own component without reaching the goal: the plane holds no
   // route between them, whatever the ground under it says, and that will be true next time too.
   if (end < 0) return refuse();
@@ -1287,7 +1368,7 @@ export function planRoute(
   }
   if (count === 0) return 'spent';
   w.rawCount = count;
-  w.pulledCount = stringPull(g, w.raw, count, w.pulled, tune);
+  w.pulledCount = stringPull(g, w.raw, count, w.pulled, tune, inset);
   return w.pulledCount > 0 ? 'found' : 'spent';
 }
 

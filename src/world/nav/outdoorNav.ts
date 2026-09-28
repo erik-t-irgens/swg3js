@@ -29,6 +29,7 @@ import {
   cellOf,
   decodeGrid,
   isOpen,
+  legInset,
   nibbleAt,
   planRoute,
   regionAt,
@@ -97,11 +98,18 @@ export const OUTDOOR_AGENT: OutdoorAgentTune = {
 export const MOBILE_CLIMB_DEGREES = 45;
 
 /**
- * The widest body a grid route is handed to, as its half-width across, metres. The bake grew every
- * blocked cell by one cell for the player's 0.35 m, which leaves a body standing in the middle of an
- * open cell a whole cell's half -- a metre -- clear of anything blocked; wider than that and a
- * corridor the grid calls open may not be one this body fits, so it steers as it always did. A
- * bantha is past it; a person, a womp rat and a kaadu are well inside. Ours.
+ * The widest body a grid route is handed to, as its half-width across, metres: half a cell.
+ *
+ * What a route promises a body is set by the legs it is handed, and every leg is one of two kinds. A
+ * string-pulled leg may run anywhere inside the open cells it crosses -- along the very side an open
+ * cell shares with an object's -- and on a grid grown only by the side (`rules` 2, `growMargin` in the
+ * bake) that side can stand the player's 0.35 m off the object and no more, so a wide body is handed
+ * such a leg only when it keeps the body's own width, less that, off everything not open
+ * (`legInset`, which is where the body's width is read). Where no leg does, it is handed the path's own
+ * steps, which run between cell middles and so keep half a cell -- a metre -- off both sides, the
+ * object's geometry the 0.35 m further. So a body up to half a cell across always has a route it
+ * fits, and a wider one might be handed a single-cell gap it does not, and steers as it always did.
+ * A bantha is past it; a person, a womp rat, a kaadu and a bol are inside. Ours.
  */
 export const MOBILE_GRID_ACROSS = 1;
 
@@ -304,11 +312,12 @@ export class OutdoorNav {
    * The next corner a body outdoors should walk to on its way to a point, in the world's frame, or
    * null when there is nothing to add to walking straight at it.
    *
-   * `radius` is the body's own half-width, and is read for nothing today: the grid was baked with
-   * the player's own 0.35 m already grown into it, so a fatter body walks the same corridor. It is
-   * in the signature because the indoor call takes one and the two call sites are the same line.
+   * `radius` is the body's own half-width: the grid was baked with the player's own 0.35 m already
+   * grown into it, and a body wider than the room the grid keeps is handed only legs that keep the
+   * rest of its width off anything not open (`legInset`). A person and a fighter walk the legs they
+   * always did, near enough.
    */
-  corner(agent: NavAgent, x: number, _y: number, z: number, goalX: number, _goalY: number, goalZ: number, _radius: number, now: number): { x: number; z: number } | null {
+  corner(agent: NavAgent, x: number, _y: number, z: number, goalX: number, _goalY: number, goalZ: number, radius: number, now: number): { x: number; z: number } | null {
     const g = this.grid;
     const w = this.work;
     if (!g || !w) {
@@ -331,7 +340,7 @@ export class OutdoorNav {
       } else {
         this.stepPlans++;
         this.asked++;
-        this.plan(agent, g, w, x, z, goalX, goalZ, now);
+        this.plan(agent, g, w, x, z, goalX, goalZ, now, legInset(g.header, radius));
       }
     }
     if (!agent.advance(x, z, this.agentTune)) return null;
@@ -385,9 +394,9 @@ export class OutdoorNav {
     this.unstuckCount++;
   }
 
-  private plan(agent: NavAgent, g: OutdoorGrid, w: OutdoorWork, x: number, z: number, goalX: number, goalZ: number, now: number): void {
+  private plan(agent: NavAgent, g: OutdoorGrid, w: OutdoorWork, x: number, z: number, goalX: number, goalZ: number, now: number, inset: number): void {
     const t0 = typeof performance === 'object' ? performance.now() : 0;
-    const outcome: PlanOutcome = planRoute(g, w, x, z, goalX, goalZ, this.tune);
+    const outcome: PlanOutcome = planRoute(g, w, x, z, goalX, goalZ, this.tune, inset);
     this.lastMs = typeof performance === 'object' ? performance.now() - t0 : 0;
     if (this.lastMs > this.worstMs) this.worstMs = this.lastMs;
     this.lastCoarse = w.opened;

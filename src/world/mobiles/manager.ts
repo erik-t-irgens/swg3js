@@ -30,6 +30,7 @@ import { CATALOGUE_COMMAND, type MobileCatalogue } from './catalogue';
 import { BRAIN_TUNE, type BrainTune } from './brain';
 import { GAIT_LIMITS, moveSpeeds, type GaitLimits } from './gait';
 import { LOD_TUNE, lodTier, type LodInput, type LodTier, type LodTune } from './lod';
+import { STEP_STATS, STEP_TUNE, tuneStep, type StepTune } from './stepUp.ts';
 import { describeRoles, rolesFor } from './packClips';
 import type { BodyInput } from './shape';
 import type { MobileEntry } from './types';
@@ -1076,11 +1077,14 @@ export class MobileManager {
   }
 
   /**
-   * For `__debug.mobileTune`: read, or change live, the brain's, the tiers' and the gaits' numbers
-   * and the cache's budget; `cap` and `animRange` are this planet's settings. Returns them all.
+   * For `__debug.mobileTune`: read, or change live, the brain's, the tiers' and the gaits' numbers,
+   * the step-up's (`step`, `stepUp.ts`) and the cache's budget; `cap` and `animRange` are this
+   * planet's settings. Returns them all, with what the step-up's probes have found since the session
+   * began and every walking body's stuck count summed.
    */
-  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number }): Record<string, unknown> {
+  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number }): Record<string, unknown> {
     if (t) {
+      if (t.step) tuneStep(t.step);
       if (t.brain) Object.assign(BRAIN_TUNE, t.brain);
       if (t.lod) {
         const { shadow, ...rest } = t.lod;
@@ -1095,7 +1099,17 @@ export class MobileManager {
       if (t.animRange !== undefined) this.animRange = t.animRange;
       if (t.budget !== undefined) this.deps.assets.trim();
     }
-    return { brain: { ...BRAIN_TUNE }, lod: { ...LOD_TUNE, shadow: { ...LOD_TUNE.shadow } }, gait: { ...GAIT_LIMITS }, cache: { ...MOBILE_CACHE }, cap: this.cap, animRange: this.animRange };
+    let stuck = 0;
+    for (const m of this.live) stuck += m.stuckEvents;
+    return {
+      brain: { ...BRAIN_TUNE },
+      lod: { ...LOD_TUNE, shadow: { ...LOD_TUNE.shadow } },
+      gait: { ...GAIT_LIMITS },
+      step: { ...STEP_TUNE, found: { ...STEP_STATS }, stuck },
+      cache: { ...MOBILE_CACHE },
+      cap: this.cap,
+      animRange: this.animRange,
+    };
   }
 
   /** Every mobile and every queued load goes (the world is unloading). The assets are released, not disposed: the cache outlives the planet. */

@@ -5201,6 +5201,21 @@ class App {
         if (!mobiles) return 'no world loaded';
         return { ...mobiles.tune(tune), passMatrices: this.portals.matrixOnce ? 'once' : 'every' };
       },
+      /**
+       * The walking bodies' step-up (`src/world/mobiles/stepUp.ts`), asked now of one body: the key
+       * of a live mobile (`mobiles()` lists them), or the nearest to you with none. It casts the probe
+       * from its feet along its heading exactly as it would when held back, lifts nothing, and answers
+       * with its feet, its step, the tread it would be set on (`top`, null for none), its lifts so far,
+       * whether it is on its footing, and every ray -- `low` for the face, `foot` for the riser's own
+       * foot, `down` for the tread, `across` for a foot's room over it, `room` for the whole body's
+       * over the next step -- with what each met.
+       */
+      stepProbe: (key?: number) => {
+        const live = (this.world.mobiles?.live ?? []).filter((m) => !m.dead && m.ready);
+        const at = this.player.worldPos;
+        const m = key !== undefined ? live.find((x) => x.key === key) : live.sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0];
+        return m ? m.probeStep() : key !== undefined ? `no live mobile with key ${key}` : 'no live mobile';
+      },
       /** Every mobile's cull sphere, whether it is on and near the screen, whether it is drawn and casts, and its tier: the check that the one sphere is in the frame it claims. */
       mobileCull: () => this.world.mobiles?.cullReport(this.cam.camera, this.player.pos) ?? 'no world loaded',
       /**

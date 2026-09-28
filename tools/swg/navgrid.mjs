@@ -21,17 +21,21 @@
 //            somebody outside walks into the shell, not into the furniture.
 //   water    standing water is deeper than 1.2 m, which is where the game calls it swimming.
 //
-// Then the whole blocked set is grown by one four-neighbour step, which is the body's own 0.35 m
-// half-width rounded up to the cell. That over-blocks -- a two-metre margin against a body 0.7 m
-// wide refuses some real gaps -- and it over-blocks in the safe direction: a route round a gap the
-// body could have squeezed through still arrives, and a route through a gap it could not would not.
+// Then the blocked set is grown by one four-neighbour step, which is the body's own 0.35 m
+// half-width rounded up to the cell: the slope's and the water's cells on every side, and an
+// object's only across the sides its geometry comes within that half-width of (`growMargin`), so a
+// four-metre lane between two walls is still a lane. It still over-blocks, a little, and in the safe
+// direction: a route round a gap the body could have squeezed through still arrives, and a route
+// through a gap it could not would not.
 //
 // **A building's floor is not walkable ground.** The rasteriser deliberately skips interior cells,
 // so a building's inside would otherwise be as free as the open desert and a string-pull would walk
 // a body straight through a cantina. Every portal building's interior footprint is therefore marked
 // `indoor` rather than blocked, which is the better of the two answers: the outdoor search refuses
 // to cross it and stops at the door, and the indoor pathing that pass 6 built -- which has the
-// client's own authored floor for that very room -- takes the body from there.
+// client's own authored floor for that very room -- takes the body from there. A footprint is where
+// the building's rooms come near the ground **and** the building rises out of it (`INDOOR_RISE`),
+// so a courtyard over a cellar is ground and not a floor.
 //
 // What comes out is one nibble a cell: 0 blocked, 1..13 the rank of the walkable region the cell is
 // in (1 the largest on the world), 14 some other, smaller region, 15 indoor. The ranks are the one
@@ -173,6 +177,46 @@ export const INDOOR_BELOW = 3;
 export const INDOOR_ABOVE = 5;
 
 /**
+ * How far a building's rooms must rise over the ground at a cell for that cell to be the building's
+ * footprint, metres: the autostep, the height the grid already calls something a body walks over.
+ *
+ * The band above says which room geometry is **near** the ground, and on its own it was one rule too
+ * few. Fort Tusken's courtyard is open sky over rooms dug into the rock, and two of those rooms have
+ * their ceilings a metre or two under the sand (the ninth room's is 2.45 m down, the eleventh's 1.28),
+ * so the band called the ground over them the fort's footprint. The small Tatooine house has the same
+ * shape the other way round: a basement reaching out under its own yard. What tells a courtyard over
+ * a cellar from a cantina's floor is not how near the ground a room comes but whether the building
+ * comes **up out of it** there: a room somebody on the ground walks into has a wall, a ceiling, a roof
+ * or at the least a doorway standing over the ground, while a room under the ground has nothing higher
+ * than its own ceiling, and that is under the feet. So a cell is a footprint when some room comes near
+ * the ground there and the highest of the building's geometry over it -- a room's or the shell's, at
+ * any height -- stands more than this above the ground. A tall hall whose ceiling is past the band
+ * still counts, because the rise is measured over every triangle and not only the band's; a hillside
+ * that covers a room dug into it opens, which is the ground a body really walks on there.
+ */
+export const INDOOR_RISE = AUTOSTEP;
+
+/**
+ * The rules a grid was baked by, written into `nav.json` as `rules` so a grid baked by older ones can
+ * be told from a new one: 1 (or absent) a footprint by the band alone and every blocked cell grown by
+ * a whole cell; 2 a footprint by the band and the rise (`INDOOR_RISE`) and an object's cell grown only
+ * across the sides its geometry hugs (`growMargin`). The game reads grids of either and never looks
+ * at this; `status` and `--skip-existing` ask for a bake again under a grid older than this, since
+ * nothing else about such a grid would ever say it was baked by the old rules.
+ */
+export const NAV_BAKE_RULES = 2;
+
+/**
+ * Whether a cell is a building's footprint: some room of the building comes near the ground there
+ * (`near`, the band), and the highest of the building's geometry over the cell -- a room's or its
+ * shell's -- stands more than `INDOOR_RISE` above the ground (`highestOver`, metres over the ground;
+ * -Infinity for none).
+ */
+export function isFootprint(near, highestOver) {
+  return near && highestOver > INDOOR_RISE;
+}
+
+/**
  * Whether a placed object is a portal building, which is the one thing that decides whether its
  * rooms are read as a footprint at all. It is `def.cells`, the manifest's own record of the cells
  * the converter found in that model, and nothing else: a model with no `cells` has no rooms to
@@ -201,6 +245,247 @@ const BLOCK_SLOPE = 1;
 const BLOCK_OBJECT = 2;
 const BLOCK_WATER = 4;
 const MARK_INDOOR = 8;
+/** A cell some room came near the ground at, whether or not it rose over it: what the band alone would have marked. */
+const MARK_NEAR = 16;
+
+/** A cell's reasons, as the bake keeps them one byte a cell (and returns them, for a census). */
+export const NAV_FLAGS = { slope: BLOCK_SLOPE, object: BLOCK_OBJECT, water: BLOCK_WATER, indoor: MARK_INDOOR, near: MARK_NEAR };
+
+/** The sides of a cell an object's geometry comes within a body's half-width of: -x, +x, -z, +z. */
+export const EDGE = { west: 1, east: 2, north: 4, south: 8 };
+
+/**
+ * How many samples a triangle is given per cell of its length in the ground plane: a metre apart at
+ * two-metre cells, as the bake has always sampled. The cap is on samples along one edge, so a vast
+ * triangle costs no more than one forty-eight cells long.
+ *
+ * It was measured at four, half a metre apart, which would let the margin (`growMargin`) see more
+ * nearly where a wall crosses a cell's side, and it was put back, because denser samples do not only
+ * place geometry better, they find more of it: thin branches, a cave room's rim closed into a ring.
+ * At four the rebaked worlds lost ground as well as gaining it -- 0.43 km² of Mustafar's main region
+ * cut off behind its monster lairs' rooms, 0.18 km² of the Rryatt Trail's behind its trees -- where at
+ * two the grid baked by `rules: 2` is the older grid with cells taken away from what it blocked and
+ * called a floor and nothing added, so no place anybody could walk to before is lost. What the margin
+ * then promises is a body's half-width off every **sample**; a wall between two samples can come up
+ * to half a metre nearer, which is the thin geometry the bake has always under-blocked and the solver
+ * slides a body along.
+ */
+export const SAMPLES_PER_CELL = 2;
+const SAMPLE_CAP = 48 * SAMPLES_PER_CELL;
+
+/**
+ * Which sides of its cell a point at `u, v` (its place across the cell, 0 to 1 each way) stands
+ * within `reach` of (`reach` too in cells), as `EDGE` bits.
+ */
+export function edgesNear(u, v, reach) {
+  return (u < reach ? EDGE.west : 0) | (1 - u < reach ? EDGE.east : 0) | (v < reach ? EDGE.north : 0) | (1 - v < reach ? EDGE.south : 0);
+}
+
+/**
+ * The body's own margin: the blocked set grown by `grow` cells, four-neighbour, one byte a cell of
+ * the answer non-zero for blocked. `flags` is the bake's reasons a cell (`NAV_FLAGS`) and `edgeNear`
+ * which sides of an object-blocked cell its geometry hugs (`EDGE`).
+ *
+ * Every cell blocked by the slope or by water grows by the whole margin, as the grid always did:
+ * a steep cell is steep all over, and the ground's own edges are where a body should stand off most.
+ *
+ * A cell blocked only by an object grows, when `byEdge`, into a neighbour only across a side its
+ * geometry comes within a body's half-width of. Grown by a whole cell on every side, as it was, a
+ * wall stood two metres thicker on each face than the body it stands off is wide, and every lane and
+ * yard narrower than about six metres closed in the grid while a body 0.7 m wide walks down all of
+ * them. Fort Tusken is where that showed: its courtyard is lanes about four metres wide between the
+ * huts, and its seven doors on the ground let out onto five separate islands of one to forty-one cells,
+ * so nothing standing in the courtyard could be routed to a door it was not already beside. Grown by
+ * the side, five of the seven let out onto one courtyard of 154 cells. Growing across a side only where
+ * something stands within the half-width of it keeps what the margin is for across every side -- no
+ * open cell that shares a side with an object's cell has any of its sampled geometry nearer that side
+ * than a body's half-width -- and drops the metre and a half more it was also taking. It only ever
+ * blocks a subset of what the whole-cell margin blocked.
+ *
+ * What it does not promise, and what the runtime answers for instead: a line may run anywhere inside
+ * an open cell, so a route between cell middles can pass that half-width from geometry and no more,
+ * and a cell that meets an object's cell only at a corner is not grown into at all (geometry hugging
+ * that corner blocks the two cells beside it, so the corner is a notch a line cannot enter, but the
+ * line can come to its point). A body wider than the half-width is kept off both by the runtime's
+ * string-pull, which holds its legs the body's own width less this margin off anything the grid does
+ * not call open (`legInset` in `src/world/nav/outdoorGrid.ts`). It does not open the fort's gate,
+ * which is a single two-metre cell between the wall's ends and is narrower than a two-metre grid can
+ * be sure of. `byEdge` false is the whole-cell margin exactly, for a comparison.
+ *
+ * By the side only while the margin is one cell: at a cell under the half-width (`--cell=0.3`,
+ * `grow` 2), geometry within the half-width of a side can reach past the next cell, and one neighbour
+ * would be too little, so there every object's cell grows the whole diamond as it always did.
+ */
+export function growMargin(nx, nz, flags, edgeNear, grow, byEdge = true) {
+  const solid = new Uint8Array(nx * nz);
+  const whole = BLOCK_SLOPE | BLOCK_WATER | (byEdge && grow <= 1 ? 0 : BLOCK_OBJECT);
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const k = j * nx + i;
+      const f = flags[k];
+      if (f & whole) {
+        for (let dj = -grow; dj <= grow; dj++) {
+          for (let di = -grow; di <= grow; di++) {
+            if (Math.abs(di) + Math.abs(dj) > grow) continue;
+            const jj = j + dj, ii = i + di;
+            if (jj < 0 || ii < 0 || jj >= nz || ii >= nx) continue;
+            solid[jj * nx + ii] = 1;
+          }
+        }
+        continue;
+      }
+      if (!(f & BLOCK_OBJECT)) continue;
+      solid[k] = 1;
+      if (!grow) continue;
+      const e = edgeNear[k];
+      if (e & EDGE.west && i > 0) solid[k - 1] = 1;
+      if (e & EDGE.east && i + 1 < nx) solid[k + 1] = 1;
+      if (e & EDGE.north && j > 0) solid[k - nx] = 1;
+      if (e & EDGE.south && j + 1 < nz) solid[k + nx] = 1;
+    }
+  }
+  return solid;
+}
+
+/**
+ * The rules one bake runs by, out of its options, and the stamp it writes for them: the margin by the
+ * side (`byEdge`, false under `margin: 'cell'`) and the footprint by the band alone (`byBand`, under
+ * `footprint: 'band'`). Both older ones together are the older bake byte for byte, and anything short
+ * of both newer ones is stamped 1, so `status` asks for such a grid again.
+ */
+export function bakeRules(opts = {}) {
+  const byEdge = opts.margin !== 'cell';
+  const byBand = opts.footprint === 'band';
+  return { byEdge, byBand, stamp: byEdge && !byBand ? NAV_BAKE_RULES : 1 };
+}
+
+/**
+ * Where one placed object stands in the grid's frame: its place (`gx`, `y`, `gz`) and the rotation of
+ * the runtime's own placed quaternion, (q[1], -q[2], -q[3], q[0]), which is the X mirror, as nine
+ * numbers. `cx`, `cz` are the pack's centre.
+ */
+export function placementFrame(o, cx, cz) {
+  const qx = o.q[1], qy = -o.q[2], qz = -o.q[3], qw = o.q[0];
+  return {
+    gx: cx - o.x,
+    y: o.y,
+    gz: o.z - cz,
+    r00: 1 - 2 * (qy * qy + qz * qz), r01: 2 * (qx * qy - qz * qw), r02: 2 * (qx * qz + qy * qw),
+    r10: 2 * (qx * qy + qz * qw), r11: 1 - 2 * (qx * qx + qz * qz), r12: 2 * (qy * qz - qx * qw),
+    r20: 2 * (qx * qz - qy * qw), r21: 2 * (qy * qz + qx * qw), r22: 1 - 2 * (qx * qx + qy * qy),
+  };
+}
+
+/** A placement standing at the grid's origin unturned: what a node test draws a model in. */
+export const IDENTITY_FRAME = Object.freeze({ gx: 0, y: 0, gz: 0, r00: 1, r01: 0, r02: 0, r10: 0, r11: 1, r12: 0, r20: 0, r21: 0, r22: 1 });
+
+/**
+ * One placement of one model, rasterised into the bake's cells: the whole of what a placed object
+ * does to the grid, and a function of its own so a node test can draw a building and bake it exactly
+ * as a planet's are baked.
+ *
+ * `bake` is the world's cells and the arithmetic over them -- `nx`, `nz`, `x0`, `z0`, `cell`, the
+ * `flags` a cell (`NAV_FLAGS`), the `edgeNear` sides a cell's object geometry hugs (`EDGE`), the ground
+ * `heightAt(x, z)`, `byBand` (`bakeRules`), and the scratch `nearGround` set and `highest` map it
+ * empties and fills for this placement. `positions` are the model's triangles, three corners of three
+ * numbers each, and `cells` each triangle's portal cell (0 the shell, above it a room). `frame` is
+ * `placementFrame`'s.
+ *
+ * What it does: the shell's geometry that stands between the autostep and the top of a body blocks
+ * its cell as an object and says which of the cell's sides it comes within a body's half-width of;
+ * a building's rooms and shell are gathered -- where a room comes near the ground, and how high the
+ * highest of the building stands over the ground at each cell -- and once the whole placement is read
+ * each cell a room came near is its footprint (`indoor`) where the building rises over it and is left
+ * open ground where it does not (`isFootprint`), or is a footprint anyway under the older band rule.
+ * Answers how many triangles it read and how many cells it newly marked as objects, as footprints,
+ * and opened.
+ */
+export function rasterPlacement(bake, positions, cells, isBuilding, frame) {
+  const { nx, nz, x0, z0, cell, flags, edgeNear, heightAt, byBand, nearGround, highest } = bake;
+  const { gx, y: gy, gz, r00, r01, r02, r10, r11, r12, r20, r21, r22 } = frame;
+  const reach = AGENT_RADIUS / cell;
+  let triangles = 0;
+  let objectCells = 0;
+  let indoorCells = 0;
+  nearGround.clear();
+  highest.clear();
+  for (let t2 = 0; t2 < cells.length; t2++) {
+    const inside = cells[t2] > 0;
+    // The shell marks what a body outside walks into; the rooms mark where the indoor pathing
+    // takes over. Nothing else in the model matters to somebody outdoors.
+    if (inside && !isBuilding) continue;
+    triangles++;
+    const p = [];
+    for (let k = 0; k < 3; k++) {
+      const b = (t2 * 3 + k) * 3;
+      const X = positions[b], Y = positions[b + 1], Z = positions[b + 2];
+      p.push([
+        gx + r00 * X + r01 * Y + r02 * Z,
+        gy + r10 * X + r11 * Y + r12 * Z,
+        gz + r20 * X + r21 * Y + r22 * Z,
+      ]);
+    }
+    const e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+    const e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+    // Sampled at no more than `SAMPLES_PER_CELL` to a cell in the ground plane, capped so that
+    // one huge triangle cannot cost more than the rest of the model. It under-blocks very thin
+    // or very large geometry, which errs the opposite way from taking the model's box.
+    const n1 = Math.min(SAMPLE_CAP, Math.max(1, Math.ceil((Math.hypot(e1[0], e1[2]) * SAMPLES_PER_CELL) / cell)));
+    const n2 = Math.min(SAMPLE_CAP, Math.max(1, Math.ceil((Math.hypot(e2[0], e2[2]) * SAMPLES_PER_CELL) / cell)));
+    for (let a = 0; a <= n1; a++) {
+      for (let b = 0; a / n1 + b / n2 <= 1 && b <= n2; b++) {
+        const u = a / n1, v = b / n2;
+        const X = p[0][0] + e1[0] * u + e2[0] * v;
+        const Y = p[0][1] + e1[1] * u + e2[1] * v;
+        const Z = p[0][2] + e1[2] * u + e2[2] * v;
+        const i = Math.floor((X - x0) / cell);
+        const j = Math.floor((Z - z0) / cell);
+        if (i < 0 || j < 0 || i >= nx || j >= nz) continue;
+        const g = heightAt(X, Z);
+        const k = j * nx + i;
+        if (inside) {
+          // A room's own geometry near the ground, where some of the building also rises over it, is
+          // the building's footprint, by the rules `indoorFootprint` and `isFootprint` hold. Both are
+          // gathered here and decided once the whole placement is read, since the ceiling that rises
+          // over a cell may come after the floor that is near it.
+          const over = Y - g;
+          const had = highest.get(k);
+          if (had === undefined || over > had) highest.set(k, over);
+          if (indoorFootprint(Y, g)) nearGround.add(k);
+          continue;
+        }
+        // A building's shell rises over its rooms as well: the roof over a stair down, the walls
+        // round a room whose own triangles stop short of them.
+        if (isBuilding) {
+          const over = Y - g;
+          const had = highest.get(k);
+          if (had === undefined || over > had) highest.set(k, over);
+        }
+        if (Y < g + AUTOSTEP || Y > g + BODY_TOP) continue;
+        if (!(flags[k] & BLOCK_OBJECT)) {
+          flags[k] |= BLOCK_OBJECT;
+          objectCells++;
+        }
+        // Which of the cell's sides the geometry comes within a body's half-width of, which is
+        // all the margin needs to know about where in the cell it stands (`growMargin`).
+        edgeNear[k] |= edgesNear((X - x0) / cell - i, (Z - z0) / cell - j, reach);
+      }
+    }
+  }
+  let opened = 0;
+  for (const k of nearGround) {
+    flags[k] |= MARK_NEAR;
+    if (!byBand && !isFootprint(true, highest.get(k) ?? -Infinity)) {
+      opened++;
+      continue;
+    }
+    if (!(flags[k] & MARK_INDOOR)) {
+      flags[k] |= MARK_INDOOR;
+      indoorCells++;
+    }
+  }
+  return { triangles, objectCells, indoorCells, opened };
+}
 
 /** Yaw (rotation about Y) of a w,x,y,z quaternion, as the rest of the converter reads one. */
 function yawOf(q) {
@@ -753,6 +1038,8 @@ export async function buildNavGrid(dir, opts = {}) {
   }
 
   const flags = new Uint8Array(nx * nz);
+  // Which sides of an object-blocked cell its geometry hugs (`EDGE`), for the margin.
+  const edgeNear = new Uint8Array(nx * nz);
   const cellCenterX = (i) => x0 + (i + 0.5) * cell;
   const cellCenterZ = (j) => z0 + (j + 0.5) * cell;
 
@@ -827,6 +1114,19 @@ export async function buildNavGrid(dir, opts = {}) {
   }
   let objectCells = 0;
   let indoorCells = 0;
+  // Cells a building's rooms came near the ground at without the building rising over them, by the
+  // model that did it, for the log: the census of what the rise opened, so a bake says which buildings
+  // it read as standing over their rooms rather than leaving that to be found in play. A cell another
+  // building covers is still counted against this one, so the sum can pass the world's `opened`.
+  const openedBy = new Map();
+  // The bake before `rules: 2`, for a comparison run and nothing else: `margin: 'cell'` grows every
+  // blocked cell a whole cell, and `footprint: 'band'` calls every cell a room comes near the ground
+  // at a footprint, as it did. Both together write the grid the older rules wrote, byte for byte.
+  const rules = bakeRules(opts);
+  // The world's cells and the arithmetic over them, as `rasterPlacement` reads them; its scratch -- a
+  // building's rooms at the cells one placement of it touches, which come near the ground and how
+  // high the highest stands over it -- is made once and emptied per placement.
+  const bake = { nx, nz, x0, z0, cell, flags, edgeNear, heightAt, byBand: rules.byBand, nearGround: new Set(), highest: new Map() };
   let placed = 0;
   let missing = 0;
   let triangles = 0;
@@ -857,68 +1157,19 @@ export async function buildNavGrid(dir, opts = {}) {
       for (const o of list) {
         placed++;
         if (isBuilding) buildings++;
-        const gx = cx - o.x;
-        const gz = o.z - cz;
-        // The runtime's own placed quaternion: (q[1], -q[2], -q[3], q[0]), which is the X mirror.
-        const qx = o.q[1], qy = -o.q[2], qz = -o.q[3], qw = o.q[0];
-        const r00 = 1 - 2 * (qy * qy + qz * qz), r01 = 2 * (qx * qy - qz * qw), r02 = 2 * (qx * qz + qy * qw);
-        const r10 = 2 * (qx * qy + qz * qw), r11 = 1 - 2 * (qx * qx + qz * qz), r12 = 2 * (qy * qz - qx * qw);
-        const r20 = 2 * (qx * qz - qy * qw), r21 = 2 * (qy * qz + qx * qw), r22 = 1 - 2 * (qx * qx + qy * qy);
-        for (let t2 = 0; t2 < cells.length; t2++) {
-          const inside = cells[t2] > 0;
-          // The shell marks what a body outside walks into; the rooms mark where the indoor pathing
-          // takes over. Nothing else in the model matters to somebody outdoors.
-          if (inside && !isBuilding) continue;
-          triangles++;
-          const p = [];
-          for (let k = 0; k < 3; k++) {
-            const b = (t2 * 3 + k) * 3;
-            const X = positions[b], Y = positions[b + 1], Z = positions[b + 2];
-            p.push([
-              gx + r00 * X + r01 * Y + r02 * Z,
-              o.y + r10 * X + r11 * Y + r12 * Z,
-              gz + r20 * X + r21 * Y + r22 * Z,
-            ]);
-          }
-          const e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
-          const e2 = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
-          // Sampled at no more than half a cell apart in the ground plane, capped so that one huge
-          // triangle cannot cost more than the rest of the model. It under-blocks very thin or very
-          // large geometry, which errs the opposite way from taking the model's box.
-          const n1 = Math.min(96, Math.max(1, Math.ceil((Math.hypot(e1[0], e1[2]) * 2) / cell)));
-          const n2 = Math.min(96, Math.max(1, Math.ceil((Math.hypot(e2[0], e2[2]) * 2) / cell)));
-          for (let a = 0; a <= n1; a++) {
-            for (let b = 0; a / n1 + b / n2 <= 1 && b <= n2; b++) {
-              const u = a / n1, v = b / n2;
-              const X = p[0][0] + e1[0] * u + e2[0] * v;
-              const Y = p[0][1] + e1[1] * u + e2[1] * v;
-              const Z = p[0][2] + e1[2] * u + e2[2] * v;
-              const i = Math.floor((X - x0) / cell);
-              const j = Math.floor((Z - z0) / cell);
-              if (i < 0 || j < 0 || i >= nx || j >= nz) continue;
-              const g = heightAt(X, Z);
-              const k = j * nx + i;
-              if (inside) {
-                // A room's own geometry near the ground is the building's footprint, by the rule
-                // `indoorFootprint` holds and the node test pins.
-                if (!indoorFootprint(Y, g)) continue;
-                if (!(flags[k] & MARK_INDOOR)) {
-                  flags[k] |= MARK_INDOOR;
-                  indoorCells++;
-                }
-                continue;
-              }
-              if (Y < g + AUTOSTEP || Y > g + BODY_TOP) continue;
-              if (!(flags[k] & BLOCK_OBJECT)) {
-                flags[k] |= BLOCK_OBJECT;
-                objectCells++;
-              }
-            }
-          }
-        }
+        const r = rasterPlacement(bake, positions, cells, isBuilding, placementFrame(o, cx, cz));
+        triangles += r.triangles;
+        objectCells += r.objectCells;
+        indoorCells += r.indoorCells;
+        if (r.opened) openedBy.set(model, (openedBy.get(model) ?? 0) + r.opened);
       }
     }
     log(`  ${placed} placed objects (${buildings} of them portal buildings, ${missing} without a model), ${triangles} triangles, in ${((Date.now() - t) / 1000).toFixed(1)} s`);
+    if (openedBy.size) {
+      const top = [...openedBy].sort((a, b) => b[1] - a[1]);
+      const cells = top.reduce((n, [, c]) => n + c, 0);
+      log(`  ${cells} cells near a building's rooms left open, since nothing of the building rises over the ground there, in ${top.length} models: ${top.slice(0, 8).map(([m, c]) => `${m} ${c}`).join(', ')}${top.length > 8 ? ', ...' : ''}`);
+    }
     // A world with buildings and not one indoor cell is the silent failure this bake can have: the
     // manifest entries carried no `cells`, every building inside is open ground, and a string-pull
     // would walk a body through a cantina with nothing anywhere saying so. Say it here, and again
@@ -930,25 +1181,13 @@ export async function buildNavGrid(dir, opts = {}) {
 
   // ---- the body's own margin --------------------------------------------------------------------
   const grow = Math.max(0, Math.ceil(AGENT_RADIUS / cell));
-  const solid = new Uint8Array(nx * nz);
-  {
-    const blockedBits = BLOCK_SLOPE | BLOCK_OBJECT | BLOCK_WATER;
-    for (let j = 0; j < nz; j++) {
-      for (let i = 0; i < nx; i++) {
-        if (!(flags[j * nx + i] & blockedBits)) continue;
-        for (let dj = -grow; dj <= grow; dj++) {
-          for (let di = -grow; di <= grow; di++) {
-            if (Math.abs(di) + Math.abs(dj) > grow) continue;
-            const jj = j + dj, ii = i + di;
-            if (jj < 0 || ii < 0 || jj >= nz || ii >= nx) continue;
-            solid[jj * nx + ii] = 1;
-          }
-        }
-      }
-    }
-  }
+  const solid = growMargin(nx, nz, flags, edgeNear, grow, rules.byEdge);
   let blockedCells = 0;
   for (let k = 0; k < solid.length; k++) if (solid[k]) blockedCells++;
+  // What the rise opened on this world: cells the band alone would have called a footprint and no
+  // building rises over. The census the rule is judged by, kept in the header beside `indoor`.
+  let openedCells = 0;
+  for (let k = 0; k < flags.length; k++) if ((flags[k] & MARK_NEAR) && !(flags[k] & MARK_INDOOR)) openedCells++;
 
 
   // The regions, the nibbles, the coarse plane and its edges. It is one call because a node test
@@ -1040,6 +1279,10 @@ export async function buildNavGrid(dir, opts = {}) {
     regions: regions.slice(0, RANKS).map((r, i) => ({ rank: i + 1, cells: r.cells, km2: Number(((r.cells * cell * cell) / 1e6).toFixed(3)) })),
     otherRegions: Math.max(0, regions.length - RANKS),
     slopeDegrees: Number(opts.slope ?? SLOPE_CLIMB_DEGREES),
+    // The rules it was baked by (`NAV_BAKE_RULES`), which nothing in the grid itself would otherwise
+    // show: a grid baked by the older ones loads and routes exactly as a new one does, and only walks
+    // at the wall of a courtyard. A comparison bake by the older rules says so.
+    rules: rules.stamp,
     // Where each named town ended up, so `status` can say it tomorrow and two bakes at two angles
     // can be held against each other without re-measuring either. `rank1` is metres to the nearest
     // cell of the largest walkable region, or null when it is further off than `TOWN_LOOK`.
@@ -1053,6 +1296,9 @@ export async function buildNavGrid(dir, opts = {}) {
       objects: objectCells,
       water: waterCells,
       indoor: indoorCells,
+      // Cells a building's rooms come near the ground at and the building nowhere rises over, which the
+      // band alone would have called its footprint: courtyards and yards over cellars (`INDOOR_RISE`).
+      opened: openedCells,
       blocked: blockedCells,
       margin: grow * cell,
       placed,
@@ -1064,7 +1310,10 @@ export async function buildNavGrid(dir, opts = {}) {
       seconds: Number(seconds.toFixed(1)),
     },
   };
-  return { header, nibbles, coarse, edges, clear, regions };
+  // `flags` is every cell's reasons before the margin and the regions -- blocked by slope (1), by an
+  // object (2), by water (4), a footprint (8), a room near the ground (16) -- which nothing writes,
+  // for a census that wants to know why a cell came out as it did rather than only what.
+  return { header, nibbles, coarse, edges, clear, regions, flags };
 }
 
 /**

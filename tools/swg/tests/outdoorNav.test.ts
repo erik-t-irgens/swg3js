@@ -1,4 +1,4 @@
-﻿// The outdoor pathing: the grid the converter bakes, the two-pass search over it, the string-pull
+// The outdoor pathing: the grid the converter bakes, the two-pass search over it, the string-pull
 // that turns a path into corners, and the game's side that hands a body one corner at a time.
 //
 // Every world here is drawn by hand in this file, a character a cell, and packed by the converter's
@@ -23,20 +23,34 @@ import {
   INDOOR,
   INDOOR_ABOVE,
   INDOOR_BELOW,
+  INDOOR_RISE,
+  EDGE,
+  NAV_BAKE_RULES,
+  NAV_FLAGS,
   NAV_GRID_VERSION,
   OTHER_REGION,
+  SAMPLES_PER_CELL,
   RANKS,
   SLOPE_CLIMB_DEGREES,
   TOWN_LOOK,
   TOWN_RING,
+  AGENT_RADIUS,
+  IDENTITY_FRAME,
+  bakeRules,
   clearanceNibbles,
+  edgesNear,
+  growMargin,
   indoorFootprint,
   isBuildingDef,
+  isFootprint,
   packGrid,
+  placementFrame,
+  rasterPlacement,
   readGlbTriangles,
   townStanding,
 } from '../navgrid.mjs';
 import {
+  GRID_SIDE_MARGIN,
   NAV_GRID_VERSION as RUNTIME_VERSION,
   NAV_INDOOR,
   NAV_OTHER,
@@ -53,14 +67,18 @@ import {
   coarseJoins,
   coarseSearch,
   decodeGrid,
+  gridMargin,
   isIndoor,
   isOpen,
+  legInset,
   lineClear,
   lineClearance,
+  lineThick,
   nearestOpen,
   nibbleAt,
   planRoute,
   regionAt,
+  stringPull,
   unwindCoarse,
   type OutdoorGrid,
   type OutdoorHeader,
@@ -788,10 +806,15 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
   ok(status.found > 0 && status.spent === 0 && status.nowhere === 0, `the whole walk was ${status.found} routes and ${status.straight} straight answers, with nothing spent`);
   ok(status.worstMs >= 0, 'and it reports what its worst search cost');
 
-  // The knob.
+  // The knob. Its tables are the module's own, so what it moves is put back from a copy taken first:
+  // put back from `OUTDOOR_TUNE` itself, it would put back the number it had just moved, and every
+  // search after this block would run on a 123 m horizon.
+  const horizonWas = OUTDOOR_TUNE.horizon;
+  const reachWas = nav.status().agent.reach;
   const moved = nav.set({ horizon: 123, reach: 9, notANumber: Number.NaN } as never);
   ok(moved.tune.horizon === 123 && moved.agent.reach === 9, 'the knob moves a number on either table');
-  ok(nav.set({ horizon: OUTDOOR_TUNE.horizon, reach: 3 } as never).tune.horizon === OUTDOOR_TUNE.horizon, 'and moves it back');
+  const back = nav.set({ horizon: horizonWas, reach: reachWas } as never);
+  ok(back.tune.horizon === horizonWas && horizonWas !== 123 && back.agent.reach === reachWas, 'and moves it back');
 
   nav.unload();
   ok(!nav.ready && nav.corner(agent, 0, 0, 0, 5, 0, 5, 0.35, 99) === null, 'and letting the world go leaves nothing behind');
@@ -869,6 +892,97 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
   ok(nav.status().asked === 2, 'so a goal that walks away is planned for at the next `every`, not in `retry` seconds');
 }
 
+// ---- a wide body's legs keep its own width ------------------------------------------------------
+// On a grid grown by the side an object's geometry can stand the player's half-width off the side of
+// the open cell beside it and no more, and a string-pulled leg may run right along that side. So a body
+// wider than that is handed only legs that keep the rest of its width off every cell not open
+// (`legInset`, `lineThick`), and the path's own steps where none does.
+{
+  // One blocked cell, and a line from the middle of (0, 1) to the middle of (8, 2) that passes 0.12 m
+  // under its corner: a line the plain sight test takes, and a wide body would scrape.
+  const w = draw([
+    '..........',
+    '..........',
+    '...#......',
+    '..........',
+    '..........',
+  ]);
+  const g2: OutdoorGrid = { ...w.grid, header: { ...w.grid.header, rules: 2 } };
+  const g1: OutdoorGrid = { ...w.grid, header: { ...w.grid.header } };
+  ok(GRID_SIDE_MARGIN === AGENT_RADIUS, `the room the runtime reads a side-grown grid as keeping is the bake's own half-width, ${AGENT_RADIUS} m`);
+  ok(gridMargin(g2.header) === AGENT_RADIUS && gridMargin(g1.header) === CELL, '... and a grid grown a whole cell, or saying nothing, keeps a whole cell');
+  ok(Math.abs(legInset(g2.header, 0.38) - 0.03) < 1e-9 && Math.abs(legInset(g2.header, 1) - 0.65) < 1e-9 && legInset(g2.header, 0.3) === 0, 'a person 0.38 m round is kept 0.03 m more off, a body a metre round 0.65, and one inside the half-width nothing');
+  ok(legInset(g1.header, 1) === 0 && legInset(g2.header, 5) === 0.45 * CELL, '... on a grid grown a whole cell nothing more for anything a grid route is handed to, and never more than 0.45 of a cell');
+  ok(lineClear(g2, ...at(0, 1), ...at(8, 2)) && lineThick(g2, ...at(0, 1), ...at(8, 2), 0), 'the line under the corner is clear, and clear with no width');
+  ok(lineThick(g2, ...at(0, 1), ...at(8, 2), 0.1) && !lineThick(g2, ...at(0, 1), ...at(8, 2), 0.2), '... and clear for 0.1 m either side of it but not 0.2, since it passes 0.12 m from the cell');
+  ok(!lineThick(g2, ...at(0, 1), ...at(8, 2), 0.65), '... so it is no leg for a body a metre round');
+  // A path that bends round that corner, cell by cell, and the pull over it.
+  const raw = new Float64Array(64);
+  const path: [number, number][] = [[0, 1], [1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 2], [7, 2], [8, 2]];
+  path.forEach(([i, j], n) => {
+    raw[n * 2] = at(i, j)[0];
+    raw[n * 2 + 1] = at(i, j)[1];
+  });
+  const out = new Float64Array(64);
+  const legs = (count: number): [number, number, number, number][] => {
+    const list: [number, number, number, number][] = [];
+    let ax = raw[0];
+    let az = raw[1];
+    for (let n = 0; n < count; n++) {
+      list.push([ax, az, out[n * 2], out[n * 2 + 1]]);
+      ax = out[n * 2];
+      az = out[n * 2 + 1];
+    }
+    return list;
+  };
+  const thin = legs(stringPull(g2, raw, path.length, out, NO_BERTH, 0));
+  ok(thin.length === 1 && !lineThick(g2, ...thin[0], 0.65), `with no width the pull takes the one straight leg, which passes under the corner (${thin.length} leg)`);
+  const wide = legs(stringPull(g2, raw, path.length, out, NO_BERTH, 0.65));
+  const step = (l: [number, number, number, number]): boolean => Math.hypot(l[2] - l[0], l[3] - l[1]) <= CELL * Math.SQRT2 + 1e-9;
+  ok(wide.length > 1 && wide.every((l) => lineThick(g2, ...l, 0.65) || step(l)), `with a metre's width every leg keeps 0.65 m off the corner, or is one of the path's own steps (${wide.length} legs)`);
+  ok(Math.hypot(wide[wide.length - 1][2] - at(8, 2)[0], wide[wide.length - 1][3] - at(8, 2)[1]) < 1e-9, '... and it still ends where the path does');
+  // A whole plan: two hundred metres through a one-cell gap in a wall. Every leg a wide body is handed
+  // keeps its width off the gap's sides or is one of the path's own steps, and it needs more corners
+  // for it; and the game's side hands the body's own width to the plan.
+  const rows: string[] = [];
+  for (let j = 0; j < 40; j++) {
+    let line = '';
+    for (let i = 0; i < 120; i++) line += i === 60 && j !== 35 ? '#' : '.';
+    rows.push(line);
+  }
+  const gap = draw(rows);
+  const gapHeader = { ...gap.header, rules: 2 };
+  const gapGrid: OutdoorGrid = { ...gap.grid, header: gapHeader };
+  const legsOf = (work: OutdoorWork, from: [number, number]): [number, number, number, number][] => {
+    const list: [number, number, number, number][] = [];
+    let ax = from[0];
+    let az = from[1];
+    for (let n = 0; n < work.pulledCount; n++) {
+      list.push([ax, az, work.pulled[n * 2], work.pulled[n * 2 + 1]]);
+      ax = work.pulled[n * 2];
+      az = work.pulled[n * 2 + 1];
+    }
+    return list;
+  };
+  const from = at(5, 5);
+  const to = at(110, 5);
+  const workNarrow = new OutdoorWork(gapHeader, 4096);
+  ok(planRoute(gapGrid, workNarrow, ...from, ...to, OUTDOOR_TUNE, 0) === 'found', 'a route through the gap is found with no width');
+  const narrowLegs = legsOf(workNarrow, from);
+  const workBroad = new OutdoorWork(gapHeader, 4096);
+  ok(planRoute(gapGrid, workBroad, ...from, ...to, OUTDOOR_TUNE, legInset(gapHeader, 1)) === 'found', '... and with a metre\'s width');
+  const broadLegs = legsOf(workBroad, from);
+  ok(narrowLegs.some((l) => !lineThick(gapGrid, ...l, 0.65)), `with no width a leg is handed that runs through the gap closer than a body a metre round fits (${narrowLegs.length} corners)`);
+  ok(broadLegs.every((l) => lineThick(gapGrid, ...l, 0.65) || step(l)) && broadLegs.length > narrowLegs.length, `with a metre's width every leg keeps 0.65 m off the gap's sides or is one of the path's own steps, for ${broadLegs.length} corners`);
+  const handed = (radius: number): number => {
+    const n = new OutdoorNav();
+    n.adopt('drawn', gapHeader, gap.bytes);
+    n.corner(new NavAgent(), from[0], 0, from[1], to[0], 0, to[1], radius, 1);
+    return n.status().lastCorners;
+  };
+  ok(handed(1) === broadLegs.length && handed(0.35) === narrowLegs.length, `\`OutdoorNav.corner\` plans at the body's own width: ${handed(1)} corners for a body a metre round, ${handed(0.35)} for one the player's size`);
+}
+
 // ---- the bake's own rules, apart from the rasteriser --------------------------------------------
 // Both of these decide something no census would notice afterwards. A manifest whose entries carry
 // no `cells` bakes with not one indoor cell: every building's inside is open ground and a string
@@ -880,6 +994,212 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
   ok(indoorFootprint(10, 10) && indoorFootprint(10 - INDOOR_BELOW, 10) && indoorFootprint(10 + INDOOR_ABOVE, 10), 'a room near the ground is its building\'s footprint');
   ok(!indoorFootprint(10 - INDOOR_BELOW - 0.01, 10), 'a dungeon room under the desert is not a footprint on it');
   ok(!indoorFootprint(10 + INDOOR_ABOVE + 0.01, 10), 'and an upper storey is not one either: the ground floor covers the same ground');
+
+  // The rise (`INDOOR_RISE`), with Fort Tusken's own numbers: the ninth room's ceiling is 2.45 m under
+  // the courtyard and the eleventh's 1.28, both inside the band, and nothing of the fort rises over
+  // the courtyard there.
+  ok(!isFootprint(true, -2.45) && !isFootprint(true, -1.28), 'ground over a cellar whose ceiling is under it is not a footprint, however near the band calls it');
+  ok(isFootprint(true, 4.0) && isFootprint(true, 8.0), 'a room with walls or a ceiling over the ground is one, and so is a tall hall whose ceiling is past the band');
+  ok(!isFootprint(true, INDOOR_RISE) && isFootprint(true, INDOOR_RISE + 0.01), `the line is the autostep, ${INDOOR_RISE} m: what rises no higher than a body walks over is walked over`);
+  ok(!isFootprint(false, 8.0), 'and nothing is a footprint where no room comes near the ground at all, which is the band\'s own rule unchanged');
+}
+
+// ---- the margin, by the side ---------------------------------------------------------------------
+// `growMargin` over worlds drawn by hand, with the converter's own flag bits: the slope and water grow
+// by the whole margin as they always did, an object's cell only across the sides its geometry hugs, and
+// `byEdge` false is the whole-cell margin exactly.
+{
+  const nx = 7;
+  const nz = 5;
+  const at = (i: number, j: number) => j * nx + i;
+  const grown = (solid: Uint8Array): string[] => {
+    const rows: string[] = [];
+    for (let j = 0; j < nz; j++) {
+      let r = '';
+      for (let i = 0; i < nx; i++) r += solid[at(i, j)] ? '#' : '.';
+      rows.push(r);
+    }
+    return rows;
+  };
+  // A post in the middle of its cell, clear of every side.
+  const flags = new Uint8Array(nx * nz);
+  const near = new Uint8Array(nx * nz);
+  flags[at(3, 2)] = NAV_FLAGS.object;
+  near[at(3, 2)] = edgesNear(0.5, 0.5, 0.35 / CELL);
+  ok(grown(growMargin(nx, nz, flags, near, 1)).join('|') === '.......|.......|...#...|.......|.......', 'an object in the middle of its cell blocks that cell and nothing round it');
+  ok(grown(growMargin(nx, nz, flags, near, 1, false)).join('|') === '.......|...#...|..###..|...#...|.......', '... where the whole-cell margin blocked a plus ten metres across');
+  // A wall standing along the east side of its cell.
+  near[at(3, 2)] = edgesNear(0.95, 0.5, 0.35 / CELL);
+  ok(near[at(3, 2)] === EDGE.east, 'geometry within a body\'s half-width of a side hugs that side and no other');
+  ok(grown(growMargin(nx, nz, flags, near, 1)).join('|') === '.......|.......|...##..|.......|.......', '... and grows across it alone');
+  // A corner.
+  near[at(3, 2)] = edgesNear(0.05, 0.05, 0.35 / CELL);
+  ok(near[at(3, 2)] === (EDGE.west | EDGE.north), 'geometry in a corner hugs both its sides');
+  // The ground's own reasons grow whole, as they always did.
+  const steep = new Uint8Array(nx * nz);
+  steep[at(3, 2)] = NAV_FLAGS.slope;
+  ok(grown(growMargin(nx, nz, steep, new Uint8Array(nx * nz), 1)).join('|') === '.......|...#...|..###..|...#...|.......', 'a cell too steep grows by the whole margin');
+  const wet = new Uint8Array(nx * nz);
+  wet[at(3, 2)] = NAV_FLAGS.water | NAV_FLAGS.object;
+  ok(grown(growMargin(nx, nz, wet, new Uint8Array(nx * nz), 1)).join('|') === '.......|...#...|..###..|...#...|.......', '... and so does one too deep, whatever stands in it');
+  // A lane between two walls: the wall cells a lane apart, each wall hugging the lane's side. The lane
+  // is one cell, a cell's width plus the two half-widths clear, and it stays open.
+  const lane = new Uint8Array(nx * nz);
+  const laneNear = new Uint8Array(nx * nz);
+  for (let j = 0; j < nz; j++) {
+    lane[at(2, j)] = NAV_FLAGS.object;
+    laneNear[at(2, j)] = edgesNear(0.5, 0.5, 0.35 / CELL);
+    lane[at(4, j)] = NAV_FLAGS.object;
+    laneNear[at(4, j)] = edgesNear(0.5, 0.5, 0.35 / CELL);
+  }
+  ok(grown(growMargin(nx, nz, lane, laneNear, 1)).every((r) => r === '..#.#..'), 'a lane between two walls standing clear of it stays a lane');
+  ok(grown(growMargin(nx, nz, lane, laneNear, 1, false)).every((r) => r === '.#####.'), '... which the whole-cell margin closed');
+  for (let j = 0; j < nz; j++) laneNear[at(4, j)] = edgesNear(0.1, 0.5, 0.35 / CELL);
+  ok(grown(growMargin(nx, nz, lane, laneNear, 1)).every((r) => r === '..###..'), 'and a wall hugging the lane closes it, since a body in it would be inside the half-width');
+  // The property the rebake rests on: grown by the side, the margin never blocks a cell the whole-cell
+  // margin left open, so a grid of `rules: 2` can only have gained ground. Tried over worlds scattered
+  // at random with every reason and every side a cell can hug.
+  let seed = 7;
+  const rnd = (): number => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
+  let subset = true;
+  let fewer = 0;
+  for (let n = 0; n < 200; n++) {
+    const W = 12;
+    const H = 9;
+    const f = new Uint8Array(W * H);
+    const e = new Uint8Array(W * H);
+    for (let k = 0; k < W * H; k++) {
+      const r = rnd();
+      f[k] = r < 0.08 ? NAV_FLAGS.slope : r < 0.12 ? NAV_FLAGS.water : r < 0.35 ? NAV_FLAGS.object : 0;
+      e[k] = Math.floor(rnd() * 16);
+    }
+    const bySide = growMargin(W, H, f, e, 1);
+    const whole = growMargin(W, H, f, e, 1, false);
+    for (let k = 0; k < W * H; k++) {
+      if (bySide[k] && !whole[k]) subset = false;
+      if (whole[k] && !bySide[k]) fewer++;
+    }
+  }
+  ok(subset && fewer > 0, `the margin by the side blocks only cells the whole-cell margin blocked, and fewer of them (${fewer} cells opened over 200 drawn worlds)`);
+  // The sampling is the other half of that property, and only half: the same samples find the same
+  // object cells, so the margin can only open ground and the rise can only take footprints away. The
+  // whole of it -- no cell a body could walk on under the older rules is closed under these -- is
+  // shown on drawn buildings baked both ways below.
+  ok(SAMPLES_PER_CELL === 2, 'and the bake samples a triangle a metre apart, as it always has, so a rebake finds the very object cells the older grid found');
+  // At a cell under the half-width the margin is two cells, and one neighbour across a side would be
+  // too little: there an object's cell grows the whole diamond, as it always did.
+  const fine = growMargin(nx, nz, flags, near, 2);
+  ok(fine[at(3, 0)] === 1 && fine[at(1, 2)] === 1 && fine[at(4, 3)] === 1 && fine[at(0, 2)] === 0, 'with a margin of two cells an object\'s cell grows the whole diamond, whatever sides it hugs');
+}
+
+// ---- the bake's rasteriser, over buildings drawn by hand -----------------------------------------
+// `rasterPlacement` is the whole of what a placed object does to the grid, and `bakeRules` which rules
+// a bake runs by; `buildNavGrid` is those two, `growMargin` and `packGrid` over a planet's models. So
+// a world drawn here -- flat ground, and a model of triangles a portal cell each -- baked through the
+// very same calls says what a planet's bake does with the same shapes.
+{
+  const W = 32;
+  const H = 8;
+  /** A triangle soup a portal cell a triangle, in the converter's own layout. */
+  const soup = (): { pos: number[]; cells: number[]; tri: (a: number[], b: number[], c: number[], cell: number) => void; quad: (a: number[], b: number[], c: number[], d: number[], cell: number) => void; box: (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, cell: number) => void } => {
+    const pos: number[] = [];
+    const cells: number[] = [];
+    const tri = (a: number[], b: number[], c: number[], cell: number): void => {
+      pos.push(...a, ...b, ...c);
+      cells.push(cell);
+    };
+    const quad = (a: number[], b: number[], c: number[], d: number[], cell: number): void => {
+      tri(a, b, c, cell);
+      tri(a, c, d, cell);
+    };
+    const box = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, cell: number): void => {
+      quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], cell);
+      quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], cell);
+      quad([x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0], cell);
+      quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], cell);
+      quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], cell);
+      quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], cell);
+    };
+    return { pos, cells, tri, quad, box };
+  };
+  /** A fence: a wall along z at `x`, from 0.6 to 1.4 m up, which is all of it between the autostep and a body's top. */
+  const fence = (s: ReturnType<typeof soup>, x: number, z0: number, z1: number): void => s.quad([x, 0.6, z0], [x, 1.4, z0], [x, 1.4, z1], [x, 0.6, z1], 0);
+  // A: a courtyard over a cellar -- a room whose ceiling is 1.28 m under the ground, Fort Tusken's
+  // eleventh room's own depth, and nothing of the building over it.
+  const cellar = soup();
+  cellar.box(2.2, 7.8, -4, -1.28, 2.2, 7.8, 1);
+  // B: a hall on the ground, four metres to its ceiling.
+  const hall = soup();
+  hall.box(12.2, 17.8, 0, 4, 2.2, 7.8, 1);
+  // C: a stair down under a roof: the room is all under the ground, and only the building's shell, a
+  // roof three metres up, rises over it.
+  const stair = soup();
+  stair.box(22.2, 25.8, -3.5, -1, 2.2, 5.8, 1);
+  stair.quad([22, 3, 2], [22, 3, 6], [26, 3, 6], [26, 3, 2], 0);
+  // D: fences, not a building, in the row of cells from z 10 to 16: one standing in the middle of its
+  // cell, one hugging its cell's east side, and two a lane apart.
+  const fences = soup();
+  fence(fences, 5.0, 10.2, 15.8);
+  fence(fences, 13.9, 10.2, 15.8);
+  fence(fences, 21.0, 10.2, 15.8);
+  fence(fences, 27.0, 10.2, 15.8);
+  const bakeWith = (opts: Record<string, string>): { flags: Uint8Array; solid: Uint8Array; rules: ReturnType<typeof bakeRules>; opened: number; objects: number; indoor: number } => {
+    const rules = bakeRules(opts);
+    const flags = new Uint8Array(W * H);
+    const edgeNear = new Uint8Array(W * H);
+    const bake = { nx: W, nz: H, x0: 0, z0: 0, cell: CELL, flags, edgeNear, heightAt: () => 0, byBand: rules.byBand, nearGround: new Set<number>(), highest: new Map<number, number>() };
+    let opened = 0;
+    let objects = 0;
+    let indoor = 0;
+    for (const [s, building] of [[cellar, true], [hall, true], [stair, true], [fences, false]] as const) {
+      const r = rasterPlacement(bake, Float32Array.from(s.pos), Int32Array.from(s.cells), building, IDENTITY_FRAME);
+      opened += r.opened;
+      objects += r.objectCells;
+      indoor += r.indoorCells;
+    }
+    const solid = growMargin(W, H, flags, edgeNear, Math.ceil(0.35 / CELL), rules.byEdge);
+    return { flags, solid, rules, opened, objects, indoor };
+  };
+  const cellOfXZ = (x: number, z: number): number => Math.floor(z / CELL) * W + Math.floor(x / CELL);
+  const now = bakeWith({});
+  const was = bakeWith({ margin: 'cell', footprint: 'band' });
+  const F = NAV_FLAGS;
+  ok(now.rules.stamp === NAV_BAKE_RULES && now.rules.byEdge && !now.rules.byBand, `a bake with no options runs by the rules it stamps, ${NAV_BAKE_RULES}: the margin by the side and the footprint by the rise`);
+  ok(was.rules.stamp === 1 && bakeRules({ margin: 'cell' }).stamp === 1 && bakeRules({ footprint: 'band' }).stamp === 1, '... and one that runs by either older rule is stamped 1, so `status` asks for it again');
+  const overCellar = [cellOfXZ(3, 3), cellOfXZ(5, 5), cellOfXZ(7, 7)];
+  ok(overCellar.every((k) => now.flags[k] & F.near && !(now.flags[k] & F.indoor) && !now.solid[k]), 'A: the ground over a cellar whose ceiling is under it is a room come near the ground and not a footprint: open ground');
+  ok(overCellar.every((k) => was.flags[k] & F.indoor) && now.opened >= overCellar.length, `... which the band alone called a footprint (${now.opened} cells opened here)`);
+  const inHall = [cellOfXZ(13, 3), cellOfXZ(15, 5), cellOfXZ(17, 7)];
+  ok(inHall.every((k) => now.flags[k] & F.indoor), 'B: a hall on the ground is its building\'s footprint');
+  const underRoof = [cellOfXZ(23, 3), cellOfXZ(25, 5)];
+  ok(underRoof.every((k) => now.flags[k] & F.indoor), 'C: a stair down under a roof is a footprint too, since the building\'s shell rises over it though no room does');
+  const row = 6;
+  const at6 = (i: number): number => row * W + i;
+  ok(now.solid[at6(2)] === 1 && now.solid[at6(1)] === 0 && now.solid[at6(3)] === 0, 'D: a fence standing in the middle of its cell blocks that cell and neither beside it');
+  ok(was.solid[at6(1)] === 1 && was.solid[at6(3)] === 1, '... where the whole-cell margin blocked both');
+  ok(now.solid[at6(6)] === 1 && now.solid[at6(7)] === 1 && now.solid[at6(5)] === 0, '... a fence hugging its cell\'s east side blocks the cell east of it, which is the side it hugs, and not the one west');
+  ok(now.solid[at6(11)] === 0 && now.solid[at6(12)] === 0 && was.solid[at6(11)] === 1 && was.solid[at6(12)] === 1, '... and two fences a lane apart, each in the middle of its cell, leave the two cells of the lane open, which the whole-cell margin closed');
+  ok(now.objects === was.objects && now.objects > 0, `the same samples find the same object cells under either rules (${now.objects})`);
+  // No cell a body could walk on under the older rules is closed under these: every cell open in the
+  // older grid -- not blocked and not a footprint -- is open in this one. A footprint opened can show a
+  // blocked cell under it, which was never walkable either.
+  const open = (b: typeof now, k: number): boolean => !b.solid[k] && !(b.flags[k] & F.indoor);
+  let lost = 0;
+  let gained = 0;
+  for (let k = 0; k < W * H; k++) {
+    if (open(was, k) && !open(now, k)) lost++;
+    if (!open(was, k) && open(now, k)) gained++;
+  }
+  ok(lost === 0 && gained > 0, `baked both ways, not one cell open under the older rules is closed under these, and ${gained} more are open`);
+  // The converter's own bake is these same calls, under the same rules, and stamps what it ran by.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const navgridSrc = readFileSync(join(here, '..', 'navgrid.mjs'), 'utf8').replace(/\r\n/g, '\n');
+  const bakeSrc = navgridSrc.slice(navgridSrc.indexOf('export async function buildNavGrid('));
+  ok(/const rules = bakeRules\(opts\);/.test(bakeSrc) && /byBand: rules\.byBand/.test(bakeSrc) && /rasterPlacement\(bake, positions, cells, isBuilding, placementFrame\(o, cx, cz\)\)/.test(bakeSrc), '`buildNavGrid` rasterises every placement through `rasterPlacement`, under `bakeRules`\' footprint rule');
+  ok(/growMargin\(nx, nz, flags, edgeNear, grow, rules\.byEdge\)/.test(bakeSrc) && /rules: rules\.stamp,/.test(bakeSrc), '... grows its margin by `bakeRules`\' margin rule, and stamps the rules it ran by');
+  // A placement's own frame: the X mirror of the runtime's placed objects.
+  const pf = placementFrame({ x: 5, y: 1, z: 7, q: [1, 0, 0, 0] }, 10, 3);
+  ok(pf.gx === 5 && pf.gz === 4 && pf.y === 1 && pf.r00 === 1 && pf.r11 === 1 && pf.r22 === 1 && pf.r01 === 0, 'a placement unturned stands at the pack\'s centre less its x, and its z less the centre\'s');
 }
 
 // ---- the converter's GLB reader ------------------------------------------------------------------
@@ -987,11 +1307,13 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
   ok(!off.forMobiles && off.status().mobiles === false, 'and the console switch takes it off them for a comparison');
   ok(!new OutdoorNav().forMobiles, 'no grid at all is handed to nobody');
 
-  // Who else it is kept from: a body wider than the margin the bake grew every blocked cell by. The
-  // margin is one cell for the player's 0.35 m, which leaves a body in the middle of an open cell half
-  // a cell -- a metre -- clear of anything blocked, and that is the whole of the number.
-  ok(MOBILE_GRID_ACROSS === CELL / 2, `a mobile is handed the grid only up to ${MOBILE_GRID_ACROSS} m across, the half cell the bake's margin leaves it`);
-  ok(MOBILE_GRID_ACROSS < 1.5, '... which a person, a womp rat and a kaadu are inside and a bantha is not');
+  // Who else it is kept from: a body wider than half a cell. A wide body's pulled legs keep its own
+  // width off everything not open (`legInset`, above), and where none does it walks the path's own
+  // steps, cell middle to cell middle, half a cell off both sides -- so half a cell is the widest
+  // body every route fits, and that is the whole of the number.
+  ok(MOBILE_GRID_ACROSS === CELL / 2, `a mobile is handed the grid only up to ${MOBILE_GRID_ACROSS} m across, the half cell the path's own steps keep off both sides`);
+  ok(MOBILE_GRID_ACROSS < 1.5, '... which a person, a womp rat, a kaadu and a bol are inside and a bantha is not');
+  ok(legInset({ ...draw(['....', '....', '....', '....']).header, rules: 2 }, MOBILE_GRID_ACROSS) <= 0.45 * CELL, '... and the width that widest body asks its legs to keep is one the three-line test can vouch for');
 }
 
 // ---- how the stamp gets from the converter to the game, and how status asks for a new one ---------
@@ -1014,8 +1336,8 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
     writeFileSync(join(world, 'manifest.json'), '{}');
     writeFileSync(join(world, 'terrain.trn'), '');
     writeFileSync(join(world, 'layout.json'), JSON.stringify({ objects: [{ template: 'object/tangible/furniture/shared_drawn.iff' }] }));
-    const statusAt = (slope: number | undefined): { command: string; reasons: string[] }[] => {
-      writeFileSync(join(world, 'nav.json'), JSON.stringify({ version: NAV_GRID_VERSION, planet: 'tatooine', nx: 4, nz: 4, cell: 2, ...(slope === undefined ? {} : { slopeDegrees: slope }) }));
+    const statusAt = (slope: number | undefined, rules: number | null = NAV_BAKE_RULES): { command: string; reasons: string[] }[] => {
+      writeFileSync(join(world, 'nav.json'), JSON.stringify({ version: NAV_GRID_VERSION, planet: 'tatooine', nx: 4, nz: 4, cell: 2, ...(slope === undefined ? {} : { slopeDegrees: slope }), ...(rules === null ? {} : { rules }) }));
       const r = spawnSync(process.execPath, [join(here, '..', 'cli.mjs'), 'status', dir, '--json'], { encoding: 'utf8' });
       assert.equal(r.status, 0, `status runs over the drawn pack: ${r.stderr}`);
       return (JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))) as { steps: { command: string; reasons: string[] }[] }).steps;
@@ -1026,6 +1348,9 @@ const NO_BERTH: OutdoorTune = { ...OUTDOOR_TUNE, berthCost: 0, berthPull: 0 };
     ok(navSteps(statusAt(undefined)).length === 1, '... and over one that does not say what it was baked at');
     ok(navSteps(statusAt(SLOPE_CLIMB_DEGREES)).length === 0, `... and not over one baked at ${SLOPE_CLIMB_DEGREES}`);
     ok(navSteps(statusAt(40)).length === 0, '... nor over one baked gentler, which is only more careful and would be asked for for ever');
+    const oldRules = navSteps(statusAt(SLOPE_CLIMB_DEGREES, null));
+    ok(oldRules.length === 1 && oldRules[0].reasons.some((w) => /older rules/.test(w)), 'and asks again over a grid that does not say it was baked by the rules this build bakes by, since nothing else about it would say so');
+    ok(navSteps(statusAt(SLOPE_CLIMB_DEGREES, 1)).length === 1, '... or says it was baked by the older ones');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

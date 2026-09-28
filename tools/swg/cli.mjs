@@ -159,7 +159,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { resolveParts } from './appearance.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
-import { GOAL_SNAP, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
+import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
 import { buildGlb } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
@@ -2634,6 +2634,10 @@ function packStatus(dir) {
     // Only of a grid that is there: with no terrain or no objects and no grid, every branch above
     // falls through to here, and a pack stopped half way through its first snapshot is exactly that.
     else if (navGrid && !(Number(navGrid.slopeDegrees) <= SLOPE_CLIMB_DEGREES)) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid calls ${navGrid.slopeDegrees ?? 'an unrecorded number of'} degrees climbable, steeper than the ${SLOPE_CLIMB_DEGREES} the world's people and creatures can walk up: only its fighters take it until it is baked again`);
+    // The rules it was baked by, which nothing in the grid itself would show: one baked by the older
+    // ones calls a courtyard over a cellar a building's floor and closes every lane narrower than six
+    // metres, and routes perfectly happily round both.
+    else if (navGrid && !(Number(navGrid.rules ?? 1) >= NAV_BAKE_RULES)) need(`navgrid ${planet} ${dir}`, `${planet}'s nav grid was baked by older rules: a courtyard over rooms under the ground is walled off as a floor, and lanes a body walks down are closed`);
     // Its own `if`: exportWater always writes the file, so its existence is the whole test.
     if (terrain && !water) need(`water <swg-dir> all ${dir} --retail-only`, `${planet} has no water.json`);
     // A lava entry written before the lava look has no `lava` block: the game draws it in a stand-in look.
@@ -7486,19 +7490,25 @@ switch (cmd) {
           there = null;
         }
         const want = slope ?? SLOPE_CLIMB_DEGREES;
-        if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want)) {
+        const rules = Number(there?.rules ?? 1);
+        if (there && there.version === NAV_GRID_VERSION && there.nx && Number(there.slopeDegrees) === Number(want) && rules >= NAV_BAKE_RULES) {
           console.log(`${planet}: nav.json is there already, version ${there.version} at ${there.slopeDegrees} degrees`);
           continue;
         }
         if (there) {
-          console.log(`${planet}: re-baking: the nav.json there is ${there.version === NAV_GRID_VERSION ? `at ${there.slopeDegrees} degrees, not ${want}` : `version ${there.version}, which this build does not read`}`);
+          const why = there.version !== NAV_GRID_VERSION
+            ? `version ${there.version}, which this build does not read`
+            : Number(there.slopeDegrees) !== Number(want)
+              ? `at ${there.slopeDegrees} degrees, not ${want}`
+              : `baked by rules ${rules}, not ${NAV_BAKE_RULES}`;
+          console.log(`${planet}: re-baking: the nav.json there is ${why}`);
         }
       }
       try {
         const grid = await buildNavGrid(outDir, { cell, slope, log: (line) => console.log(line) });
         const out = writeNavGrid(outDir, grid);
         const stats = out.stats;
-        console.log(`  blocked before the body's ${stats.margin} m margin: slope ${stats.slope}, objects ${stats.objects}, water ${stats.water}; after it ${stats.blocked} (${((100 * stats.blocked) / (out.nx * out.nz)).toFixed(2)}%), plus ${stats.indoor} cells inside ${stats.buildings} portal buildings, which the rooms' own pathing has`);
+        console.log(`  blocked before the body's ${stats.margin} m margin: slope ${stats.slope}, objects ${stats.objects}, water ${stats.water}; after it ${stats.blocked} (${((100 * stats.blocked) / (out.nx * out.nz)).toFixed(2)}%), plus ${stats.indoor} cells inside ${stats.buildings} portal buildings, which the rooms' own pathing has, and ${stats.opened} cells over rooms under the ground left open`);
         console.log(`  the largest walkable region holds ${out.regions[0] ? out.regions[0].km2 : 0} km^2; ${out.regions.length} are ranked and ${out.otherRegions} more are smaller still`);
         // How much room this world has to stand a route off anything, which is the whole of what
         // the clearance plane is for: a world whose walkable ground is nearly all at the cap can

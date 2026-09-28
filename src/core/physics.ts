@@ -599,6 +599,36 @@ export class Physics {
     return hit ? hit.timeOfImpact : Infinity;
   }
 
+  /** The step-up's own ray, kept: a body held back at a step casts up to six of these an ask. */
+  private readonly standingRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+
+  /**
+   * The first thing that **stands still** along a ray from a point in a unit direction, within
+   * `len`, under the collision filter a body walks with: how far along it, and the upward share of
+   * the surface's normal there, written into `out`. False when the ray is clear.
+   *
+   * It is what a walking mobile's step-up asks (`src/world/mobiles/stepUp.ts`), and it is the cover
+   * ray's predicate with the normal added, for the same reason: nothing that moves may answer -- not
+   * the body's own capsule the ray starts in, not the creature in front of it, not a corpse -- or a
+   * body climbs onto whatever it is walking into. Sensors are left out too, since nobody stands on a
+   * trigger. The engine hands its answer back as an object of its own; nothing here makes one.
+   */
+  standingHit(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, len: number, filter: number, out: { toi: number; ny: number }): boolean {
+    if (!(len > 1e-4)) return false;
+    const r = this.standingRay;
+    r.origin.x = ox;
+    r.origin.y = oy;
+    r.origin.z = oz;
+    r.dir.x = dx;
+    r.dir.y = dy;
+    r.dir.z = dz;
+    const hit = this.world.castRayAndGetNormal(r, len, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, filter, undefined, undefined, this.fixedOnly);
+    if (!hit) return false;
+    out.toi = hit.timeOfImpact;
+    out.ny = hit.normal.y;
+    return true;
+  }
+
   /** A static cylinder, or null for a degenerate one (the physics engine aborts on non-positive or NaN sizes). */
   createStaticCylinder(x: number, y: number, z: number, radius: number, halfHeight: number): RAPIER.Collider | null {
     if (![x, y, z, radius, halfHeight].every(Number.isFinite) || radius <= 0.01 || halfHeight <= 0.01) return null;
