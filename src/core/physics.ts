@@ -466,15 +466,18 @@ export class Physics {
    */
   /**
    * Heights of every upward-facing interior surface on the vertical line through a point,
-   * highest first, between `top` and `bottom` (the floors an elevator can reach).
+   * highest first, between `top` and `bottom` (the floors an elevator can reach). With `stillOnly`
+   * only what stands still is counted (fixed or bodiless colliders): a body standing on the line is
+   * then no surface, which is what a question about the room's own floor and furniture wants.
    */
-  floorsAt(x: number, z: number, top: number, bottom: number): number[] {
+  floorsAt(x: number, z: number, top: number, bottom: number, stillOnly = false): number[] {
     const floors: number[] = [];
     const filter = groups(Group.all, Group.interior);
+    const include = stillOnly ? this.fixedOnly : undefined;
     let y = top;
     for (let i = 0; i < 24 && y > bottom; i++) {
       const ray = new RAPIER.Ray({ x, y, z }, { x: 0, y: -1, z: 0 });
-      const hit = this.world.castRayAndGetNormal(ray, y - bottom, true, undefined, filter);
+      const hit = this.world.castRayAndGetNormal(ray, y - bottom, true, undefined, filter, undefined, undefined, include);
       if (!hit) break;
       const hy = y - hit.timeOfImpact;
       if (hit.normal.y > 0.5) floors.push(hy);

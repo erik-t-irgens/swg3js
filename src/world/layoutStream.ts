@@ -1482,6 +1482,34 @@ export class LayoutStreamer {
   }
 
   /**
+   * The placed objects standing inside buildings within `reach` metres of a point, flat, written into
+   * `out` (emptied first); answers how many. A building's own furniture -- its chairs, its tables, its
+   * counters -- is what the people of ours sit on and keep clear of (`src/world/ambient/`). It walks the
+   * regions the circle touches, as `nearestPlaced` does, and is asked once a building, never a frame.
+   */
+  containedNear(x: number, z: number, reach: number, out: PlacedObject[]): number {
+    out.length = 0;
+    const rx0 = Math.floor((x - reach) / REGION);
+    const rx1 = Math.floor((x + reach) / REGION);
+    const rz0 = Math.floor((z - reach) / REGION);
+    const rz1 = Math.floor((z + reach) / REGION);
+    for (let rz = rz0; rz <= rz1; rz++) {
+      for (let rx = rx0; rx <= rx1; rx++) {
+        const region = this.regions.get(`${rx},${rz}`);
+        if (!region) continue;
+        for (const list of region.objects) {
+          for (const o of list) {
+            if (!o.contained) continue;
+            if (Math.hypot(o.x - x, o.z - z) > reach) continue;
+            out.push(o);
+          }
+        }
+      }
+    }
+    return out.length;
+  }
+
+  /**
    * How many of those have a standing shape a body could get behind (`blockersNear`'s own list).
    *
    * It is the number to read before anything else about cover: nought here in a town is a wire that

@@ -94,6 +94,9 @@ import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
 import { wildLife, NEST_MODEL_TUNE, WILD_TUNE, tuneTable } from './world/wildLife.ts';
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
+import { ambientPeople, OURS_TUNE, type AmbientPort } from './world/ambient/ambientPeople.ts';
+import { ROUTINE_TUNE } from './world/ambient/routines.ts';
+import { FILLER_TUNE } from './world/ambient/fillers.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
@@ -279,6 +282,7 @@ import { RANGE } from './world/gallery';
 import { castsShadow, surfaces } from './world/surfaces';
 import { compilerVerdict, groupPrograms, loadingLine, machineAside, measureCompiler, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 import { census as programFamilies } from './core/fx/programCensus.ts';
+import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
 
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
@@ -351,6 +355,25 @@ const CAMERA_REST_PITCH = 0.32;
  * pixel), and shows the red flash alone.
  */
 const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true, promptHz: 8, nearbyHz: 4, hurtRange: 400 };
+
+/** What `__debug.perf()` takes; see `App.perfDebug` and the README's Debugging section. */
+interface PerfDebugOptions {
+  /** The report's window in frames of play (the ring is made long enough at once), or an A/B run's length. */
+  frames?: number;
+  block?: number;
+  census?: boolean;
+  ab?: { key: string; a?: unknown; b?: unknown };
+  fly?: { speed?: number; seconds?: number; heading?: number; alt?: number };
+  mark?: string;
+  at?: string;
+  marks?: boolean;
+  gpu?: boolean;
+  off?: boolean;
+  switches?: boolean;
+  cancel?: boolean;
+  /** Return the object without printing the table. */
+  quiet?: boolean;
+}
 
 /** Debug counters, readable from the console as window.__stats. */
 const stats = { frameMs: 0, physicsMs: 0, renderMs: 0, rawDt: 0, grounded: false, vel: [0, 0, 0] as number[], calls: 0, triangles: 0, pack: '', terrain: '', chunks: 0 };
@@ -489,6 +512,14 @@ class App {
   private readonly shaderWatch = new ProgramWatch();
   /** Said once a session, after the machine has been measured behind the first loading screen. */
   private shaderVerdictSaid = false;
+  /** The terrain's count of blocks made on the main thread, as the last frame left it (the frame report's). */
+  private perfSyncMark = 0;
+  /**
+   * The frame report's flight in progress (`__debug.perf({ fly })`), or null. `askedAt` is when it was
+   * asked for and `startedAt` the first frame of play it moved on (-1 until then), which is what its
+   * safety timer measures from.
+   */
+  private perfFlight: { speed: number; heading: number; seconds: number; alt: number; t: number; dist: number; wasNoclip: boolean; wasTiming: boolean; askedAt: number; startedAt: number; resolve: (r: TraceReport | null) => void } | null = null;
   private readonly canvas = document.getElementById('game') as HTMLCanvasElement;
   private readonly ui = document.getElementById('ui') as HTMLElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -1011,6 +1042,11 @@ class App {
     this.torch = new THREE.SpotLight(0xfff1d6, 0, 70, 0.42, 0.45, 1.6);
     this.scene.add(this.torch, this.torch.target);
     this.portals = new PortalRenderer(this.renderer);
+    // The frame report (`__debug.perf()`) times each pass on the GPU through this context when asked,
+    // and can put the portal renderer's matrix walk side by side with its old behaviour. (The shadow
+    // strays' knob is deliberately not a switch: keeping them builds programs on a live frame.)
+    perf.attach(this.renderer.getContext() as WebGL2RenderingContext);
+    registerPerfSwitch('passMatrices', { get: () => this.portals.matrixOnce, set: (v) => (this.portals.matrixOnce = !!v), values: [false, true], note: 'false walks the scene matrices every pass (the old way), true once a frame' });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -1843,6 +1879,58 @@ class App {
         return { ready: standingPeople.ready, ...standingPeople.last, side: standingPeople.side, ...(moved.length ? { moved } : {}), standing: standingPeople.report(at), nearest: near, tune: { ...PEOPLE_TUNE } };
       },
       /**
+       * The people of ours (`src/world/ambient/`): the travellers who come to a port for each round of its
+       * shuttle -- in through the starport's door, to a terminal, out to the collector, up the ramp when
+       * the shuttle really waits -- and the ones it brings, and the people in the buildings the data
+       * leaves empty. With nothing it counts them by stage, says how much of the cap on part-of-the-
+       * furniture people the data's own left them and how much model memory is in use, and tallies what
+       * has become of them (stood, boarded, missed the shuttle, arrived, let go stuck, left a building).
+       *
+       * `{ list: true }` lists every one of them, each marked `ours: true`, with what it is doing and how
+       * far it has to go. `{ port: true }` is the nearest port as its travellers see it -- the shuttle's
+       * phase, its rounds about now, and each traveller's moment, phase and stage -- and `{ port: 'Mos
+       * Eisley' }` a port by name. `{ buildings: true }` is the buildings near you: each one's kind,
+       * whether the data leaves it empty, its places and who is in them. `{ go: 'port' }` puts you by the
+       * nearest port's collector (or the one `port` names), `{ go: 'building' }` inside the nearest empty
+       * building, and `{ go: 'cantina' }` (any kind) the nearest empty one of that kind. `{ tune: { ours:
+       * { perPass: 4 }, routine: { stagger: 20 }, fillers: { stay: [30, 60] } } }` moves any number of
+       * `OURS_TUNE`, `ROUTINE_TUNE` and `FILLER_TUNE` live, each under its own name; a key only one of
+       * them has may be given bare (`{ tune: { stagger: 20 } }`), and a bare key two of them have
+       * (`build`, `drop`, `reach`, `front`) moves nothing and is named back under `ambiguous`. `{ on:
+       * false }` puts every one of them away, and `{ restand: true }` puts them away to be stood again on
+       * the next pass.
+       */
+      ours: (opts?: { tune?: Record<string, unknown>; port?: boolean | string; list?: boolean; buildings?: boolean; go?: string; on?: boolean; restand?: boolean }) => {
+        const deps = this.world.ambientDeps();
+        const tuned = opts?.tune ? ambientPeople.retune(opts.tune) : null;
+        const moved = tuned ? { ...(tuned.moved.length ? { moved: tuned.moved } : {}), ...(tuned.ambiguous.length ? { ambiguous: tuned.ambiguous } : {}) } : {};
+        if (typeof opts?.on === 'boolean') OURS_TUNE.on = opts.on;
+        if (opts?.restand) ambientPeople.clear(deps);
+        const at = this.player.worldPos;
+        const seconds = sharedClock.walkSeconds();
+        const named = typeof opts?.port === 'string' ? opts.port : undefined;
+        if (opts?.go === 'port') {
+          const p = ambientPeople.portReport(at, seconds, named) as { name: string; collector: { x: number; z: number } | null } | null;
+          if (!p || !p.collector) return { went: null, note: 'no port with a shuttle and a collector on this world' };
+          const to = new THREE.Vector3(p.collector.x + 2, this.world.terrain.heightAt(p.collector.x + 2, p.collector.z) + 0.3, p.collector.z);
+          this.player.reset(to);
+          const cell = this.world.enterCellAt(to);
+          return { went: p.name, cell, note: 'by its collector: its travellers are stood on the next pass, where their day has got to' };
+        }
+        if (opts?.go) {
+          const b = ambientPeople.emptyNear(at, deps, opts.go === 'building' ? undefined : opts.go);
+          if (!b) return { went: null, note: `no empty ${opts.go === 'building' ? 'building' : opts.go} with room for anybody has streamed in near you` };
+          const inside = this.world.enterBuilding(b);
+          if (!inside) return { went: null, note: 'that building has no room to stand in' };
+          this.player.reset(inside.at.clone());
+          return { went: String((b.model.def as { id?: string }).id ?? b.template), cell: inside.cell, note: 'its people of ours stand on the next pass once its rooms are built' };
+        }
+        if (opts?.list) return { ...moved, ours: ambientPeople.list(at) };
+        if (opts?.port) return { ...moved, port: ambientPeople.portReport(at, seconds, named), ports: ambientPeople.portList(at).slice(0, 6) };
+        if (opts?.buildings) return { ...moved, buildings: ambientPeople.buildingReport(at, deps) };
+        return { ...ambientPeople.report(deps), ...moved, tune: { ours: { ...OURS_TUNE }, routine: { ...ROUTINE_TUNE }, fillers: { ...FILLER_TUNE } } };
+      },
+      /**
        * How hard the world's own people and creatures are: one scale on the health and the blows of
        * everything the world stands (the people, the lairs and their nests, what an admin stood, the
        * fighters), never the player or another player. `__debug.difficulty(0.5)` halves them all now,
@@ -2649,6 +2737,16 @@ class App {
         return opts ? pass.debug(opts) : pass.describe();
       },
       passes: () => this.portals.passes,
+      /**
+       * The frame report: `await perf()` turns the timing on, waits `PERF_TUNE.frames` frames and prints
+       * where they went (the sections, each pass's draws, the skeletons, streaming). `{ census: true }`
+       * walks the scene once; `{ ab: { key, a, b }, frames: 240 }` alternates a registered switch in
+       * blocks and reports each side; `{ fly: { speed, seconds, heading } }` flies over the ground and
+       * reports what streaming cost; `{ mark: 'name' }` saves this spot and view and `{ at: 'name' }`
+       * comes back to it; `{ gpu: true }` times each pass on the GPU; `{ switches: true }` lists the
+       * switches; `{ off: true }` stops the timing.
+       */
+      perf: (o?: PerfDebugOptions) => this.perfDebug(o),
       /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
       postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
         const fx = this.postfx;
@@ -10322,6 +10420,195 @@ class App {
     if (sky) sky.sheets = !pass.wouldDraw(!!this.world.planet?.space, this.world.inside);
   }
 
+  /**
+   * `__debug.perf()`, the frame report: the owner's own measuring tool as well as ours, so everything
+   * it says is also printed as a short table. See the README's Debugging section for what to paste.
+   */
+  private async perfDebug(o: PerfDebugOptions = {}): Promise<unknown> {
+    const say = (text: string) => {
+      if (!o.quiet) console.log(text);
+    };
+    // Only frames of play are measured, and typing into the console takes the mouse from the game,
+    // which puts the Escape menu up and pauses it: say so, rather than seem to hang.
+    const paused = !PERF.played || this.menu.open;
+    const waitForPlay = (what: string) => {
+      if (paused) say(`perf: the game is paused${this.menu.open ? ' behind the Escape menu' : ''} and only frames of play are measured: ${this.menu.open ? 'click Resume' : 'close what is open'} and ${what}`);
+    };
+    if (o.off) {
+      PERF.on = false;
+      return 'timing off';
+    }
+    if (o.cancel) return perf.cancelAb() ?? 'no A/B run is going';
+    if (typeof o.gpu === 'boolean') {
+      PERF_TUNE.gpu = o.gpu;
+      perf.resetGpu();
+    }
+    if (o.switches) return Object.fromEntries([...PERF_SWITCHES].map(([k, s]) => [k, { now: s.get(), values: s.values, note: s.note ?? '' }]));
+    if (o.marks) return readMarks();
+    if (o.mark) {
+      if (!this.inWorld) return 'enter the world first';
+      if (this.player.mounted || this.player.aboard || this.ride?.riding) return 'get off or out first: a mark is a place on foot';
+      const at = this.player.worldPos;
+      // The zoom the wheel asked for, not the distance part way there: the camera eases to its target,
+      // and whether the view is first person is read off where it ends up.
+      const m = { planet: this.world.planet.id, zone: this.zone ?? '', x: at.x, y: at.y, z: at.z, yaw: this.cam.yaw, pitch: this.cam.pitch, zoom: this.cam.zoomTarget, cell: this.world.cellState?.cell ?? 0, saved: new Date().toISOString() };
+      const saved = writeMark(o.mark, m);
+      return { saved: saved ? o.mark : null, mark: m, marks: Object.keys(readMarks()), note: saved ? `__debug.perf({ at: '${o.mark}' }) comes back to it` : 'this browser keeps nothing (a private window?), so the mark is not saved' };
+    }
+    if (o.at) return this.perfGoTo(o.at, say);
+    if (o.census) {
+      const c = censusOf(this.scene);
+      const out = { ...c, portalMaterials: this.portals.materials.size, programs: this.renderer.info.programs?.length ?? 0, mobiles: this.world.mobiles?.live.length ?? 0 };
+      say(`census: ${out.nodes} nodes, ${out.visibleMeshes} visible meshes (${out.instancedMeshes} instanced holding ${out.instances}, ${out.skinnedMeshes} skinned over ${out.skeletons} skeletons), ${out.casters} casting shadows, ${out.lights} lights, ${out.materials} materials; ${out.onActorLayer} on the actor layer, ${out.onInteriorLayer} rooms shown; portal materials ${out.portalMaterials}, programs ${out.programs}, mobiles ${out.mobiles}`);
+      return out;
+    }
+    if (o.ab) {
+      const sw = PERF_SWITCHES.get(o.ab.key);
+      if (!sw) return `no switch named '${o.ab.key}' (there are: ${[...PERF_SWITCHES.keys()].join(', ')})`;
+      const a = 'a' in o.ab ? o.ab.a : sw.values[0];
+      const b = 'b' in o.ab ? o.ab.b : sw.values[1];
+      const frames = o.frames ?? 240;
+      waitForPlay(`the run starts then (${frames} frames of play); \`await __debug.perf({ cancel: true })\` stops it`);
+      const r = await perf.ab(o.ab.key, a, b, frames, o.block ?? PERF_TUNE.block);
+      say(perf.formatAb(r));
+      return r;
+    }
+    if (o.fly) {
+      if (this.perfFlight) return 'a flight is already going';
+      if (!this.inWorld || this.world.planet.space) return 'a flight is over a planet';
+      if (this.player.mounted || this.player.aboard || this.ride?.riding) return 'get off or out first: the flight carries the body';
+      const speed = o.fly.speed ?? 40;
+      const seconds = o.fly.seconds ?? 16;
+      const heading = o.fly.heading ?? this.cam.yaw;
+      const alt = o.fly.alt ?? 30;
+      const wasNoclip = this.player.noclip;
+      const wasTiming = PERF.on;
+      PERF.on = true;
+      perf.installSkeletonHook();
+      perf.traceStart(Math.ceil(seconds * 250) + 60);
+      if (!wasNoclip) this.player.toggleNoclip();
+      waitForPlay('the flight starts then');
+      const r = await new Promise<TraceReport | null>((resolve) => {
+        const rec = { speed, heading, seconds, alt, t: 0, dist: 0, wasNoclip, wasTiming, askedAt: performance.now(), startedAt: -1, resolve };
+        this.perfFlight = rec;
+        // A flight that stops being stepped (a panel left open, a crossing), or never starts because the
+        // game is never resumed, still ends. Only its own: a later flight is never cut short by this one.
+        const check = () => {
+          if (this.perfFlight !== rec) return;
+          const now = performance.now();
+          const late = rec.startedAt < 0 ? now - rec.askedAt > PERF_WAIT_MS : now - rec.startedAt > (seconds * 4 + 30) * 1000;
+          if (late) this.endPerfFlight();
+          else setTimeout(check, 1000);
+        };
+        setTimeout(check, 1000);
+      });
+      if (!r) return 'the flight recorded nothing';
+      const f = (s: { p50: number; p95: number; max: number }) => `p50 ${s.p50} p95 ${s.p95} max ${s.max}`;
+      say(`fly ${speed} m/s for ${seconds} s: ${r.frames} frames${r.paused ? ` (${r.paused} paused left out)` : ''}; frame ${f(r.frame)} ms; ${r.chunkFrames} made or dropped a terrain chunk: ${f(r.chunkFrame)} ms, the rest ${f(r.otherFrame)} ms; far-tile refresh on those ${f(r.farRefresh)} ms; ${r.syncBlocks} terrain blocks made on the main thread (${r.syncBlocksPerFrame} a frame); ${r.programsBuilt} programs built in play`);
+      return { speed, seconds, heading, alt, ...r };
+    }
+    const n = Math.max(8, Math.floor(o.frames ?? PERF_TUNE.frames));
+    // The ring is made long enough now, not on the next frame, and every wait is for a fresh window of
+    // frames of play after this call (so the GPU times, reset above, are from frames it timed).
+    perf.ensureFrames(n);
+    if (o.gpu === true && this.postfx?.timer.enabled) say('perf: the effects chain\'s own timer is on and holds the GPU timer for the whole scene; `__debug.fxTiming(false)` first for GPU times by pass');
+    waitForPlay(`the report prints here after ${n} frames of play`);
+    const fresh = await perf.whenTimed(n);
+    const r = perf.report(n);
+    if (fresh < n) r.notes.push(`the wait ran out with ${fresh} of ${n} frames of play since it was asked; the rest are from before`);
+    say(perf.format(r));
+    return r;
+  }
+
+  /**
+   * `__debug.perf({ at })`: back to a saved mark the way the game's own teleport goes anywhere -- the
+   * player held behind a loading screen, the world moved there and waited for, and only then the mark's
+   * room entered, once the building it is in has streamed in and the world has stepped with it.
+   */
+  private async perfGoTo(name: string, say: (text: string) => void): Promise<unknown> {
+    const m = readMarks()[name];
+    if (!m) return `no mark named '${name}' (saved: ${Object.keys(readMarks()).join(', ') || 'none'})`;
+    if (!this.inWorld || !this.started) return 'enter the world first';
+    if (this.traveling) return 'a crossing is under way; ask again when it is over';
+    if (this.dying) return 'come round first';
+    if (this.player.mounted || this.player.aboard || this.ride?.riding) return 'get off or out first: a mark is a place on foot';
+    if (this.perfFlight) return 'a flight is going; ask again when it is over';
+    if (PERF.run) return 'an A/B run is going; `await __debug.perf({ cancel: true })` first';
+    if (m.planet !== this.world.planet.id || m.zone !== (this.zone ?? '')) {
+      await this.travel(planetById(m.planet), m.zone || undefined);
+      if (this.world.planet.id !== m.planet) return `the travel to ${m.planet} did not arrive`;
+    }
+    if (this.traveling) return 'a crossing is under way; ask again when it is over';
+    const to = new THREE.Vector3(m.x, m.y, m.z);
+    const p = this.player;
+    let cell = 0;
+    this.traveling = true;
+    this.map.hide();
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, name, 'a measuring spot');
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      p.reset(to);
+      this.world.jumpTo(to);
+      this.physics.stepOnce();
+      await this.settle();
+      // The building round the mark is in by now: its room, the mark's own one first.
+      cell = this.world.enterCellAt(to, m.cell ?? 0);
+      p.reset(to);
+      this.physics.stepOnce();
+      this.cam.yaw = m.yaw;
+      this.cam.pitch = m.pitch;
+      this.cam.zoomTarget = m.zoom;
+      this.cam.distance = m.zoom;
+      this.savePlace(true);
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+    }
+    const wanted = m.cell ?? 0;
+    const note = wanted !== cell ? `the mark was in room ${wanted} and this is room ${cell}: its building may not have come in` : `${this.menu.open ? 'click Resume, ' : ''}let it settle a few seconds, then \`await __debug.perf()\``;
+    say(`perf: at '${name}' on ${m.planet}, room ${cell}`);
+    return { at: name, planet: m.planet, cell, note };
+  }
+
+  /** One frame of the report's flight: the body moved along at its speed, over the ground where the ground is known, facing the way it goes. */
+  private stepPerfFlight(dt: number): void {
+    const f = this.perfFlight;
+    if (!f) return;
+    if (f.startedAt < 0) f.startedAt = performance.now();
+    const p = this.player;
+    const step = f.speed * dt;
+    p.pos.x -= Math.sin(f.heading) * step;
+    p.pos.z -= Math.cos(f.heading) * step;
+    // Only where the ground is already held: asking for it anywhere else would make it on this frame, which is the cost being measured.
+    const ground = this.world.groundIfCached(p.pos.x, p.pos.z);
+    if (ground !== null) p.pos.y = ground + f.alt;
+    this.cam.yaw = f.heading;
+    p.placeVisual();
+    f.t += dt;
+    f.dist += step;
+    if (f.t >= f.seconds) this.endPerfFlight();
+  }
+
+  private endPerfFlight(): void {
+    const f = this.perfFlight;
+    if (!f) return;
+    this.perfFlight = null;
+    const r = perf.traceEnd();
+    const p = this.player;
+    if (!f.wasNoclip && p.noclip) {
+      // Down on the ground before the body is given back to the walk, not dropped from the flight's
+      // height: that is a fall, and a fall that high takes most of a character's health. The ground is
+      // asked for outright here, where nothing is being measured any more.
+      const ground = this.world.groundIfCached(p.pos.x, p.pos.z) ?? this.world.terrain.heightAt(p.pos.x, p.pos.z);
+      p.toggleNoclip();
+      p.jka.reset();
+      p.stand(new THREE.Vector3(p.pos.x, ground + 0.3, p.pos.z));
+    }
+    PERF.on = f.wasTiming;
+    f.resolve(r);
+  }
+
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
@@ -10348,7 +10635,9 @@ class App {
     ra.overcast = wfx ? wfx.overcast : 0;
     ra.dust = wfx ? wfx.dust : 0;
     ra.bufferHeight = this.renderer.getDrawingBufferSize(this.roomAirBuffer).y;
+    perf.begin(SEC.roomAir);
     this.roomAir.update(ra);
+    perf.end(SEC.roomAir);
     const info = this.renderer.info.render;
     // Every renderer.render() resets these, so sum them as the passes go by.
     const auto = this.renderer.info.autoReset;
@@ -10365,9 +10654,13 @@ class App {
     // about who adds the water's environment term this frame.
     this.world.beginWaterFrame(cam, this.postfx?.passWanted('waterReflections') ?? false);
     postfx?.begin();
+    perf.begin(SEC.portals);
     this.portals.render(this.scene, cam, view, this.world.buildings);
+    perf.end(SEC.portals);
     // The falling weather, into whatever the scene was drawn into; from inside, only through the exits.
+    perf.passBegin(PASS.weather);
     this.world.weather.draw(this.renderer, cam, view !== null);
+    perf.passEnd(PASS.weather);
     if (postfx) {
       const f = this.fxInput;
       f.camera = cam;
@@ -10439,7 +10732,10 @@ class App {
       const standingIn = this.player.aboard;
       if (standingIn) blades.up.set(0, 1, 0).transformDirection(roomFrame(standingIn));
       else blades.up.set(0, 1, 0);
+      // Timed on the GPU only while the chain's own timer is not, since two timer queries can never be open at once.
+      perf.passBegin(PASS.post, !postfx.timer.enabled);
       postfx.end(f);
+      perf.passEnd(PASS.post);
     }
     this.frameCalls = info.calls;
     this.frameTriangles = info.triangles;
@@ -10741,6 +11037,7 @@ class App {
     this.travelStood.pack = pack;
     const things = this.travelThings();
     const rigged = new Set<number>();
+    const clocks = new Map<number, { name: string; times: ShuttleTimes }>();
     for (const [i, t] of things.entries()) {
       if (this.travelRowsFor !== pack) return;
       // A shuttle with a rig is the rig, landing and lifting off on the round everybody shares; one
@@ -10756,9 +11053,49 @@ class App {
         state: () => shuttleAt(name, sharedClock.walkSeconds(), TRAVEL_TUNE, times, kept),
       });
       if (this.travelRowsFor !== pack) return;
-      if (stood) rigged.add(i);
+      if (stood) {
+        rigged.add(i);
+        clocks.set(i, { name, times });
+      }
     }
+    // The people of ours who travel: every port with a shuttle and a collector, on the very clock its
+    // stood shuttle is posed by, so the travellers board the shuttle that is drawn.
+    ambientPeople.usePorts(pack, this.ambientPortsOf(pack, things, clocks), this.world.ambientDeps());
     void this.standTravelRest(pack, things, rigged);
+  }
+
+  /**
+   * A world's ports as the people of ours use them: each shuttle with its clock's name and times (the
+   * stood rig's own, else the name the collector's words use and the old glide), its pad, the collector
+   * and terminals of its own building, and where somebody boarding it walks to -- the stood rig's ramp or
+   * side (`ShuttleRigs.boardingSpot`), or for a shuttle standing as its still model, six metres off it
+   * toward the collector.
+   */
+  private ambientPortsOf(pack: string, things: readonly TravelThing[], clocks: ReadonlyMap<number, { name: string; times: ShuttleTimes }>): AmbientPort[] {
+    const out: AmbientPort[] = [];
+    for (const [i, t] of things.entries()) {
+      if (t.kind !== 'shuttle') continue;
+      const same = things.filter((o) => o.bx === t.bx && o.bz === t.bz);
+      const c = same.find((o) => o.kind === 'collector') ?? null;
+      const clock = clocks.get(i);
+      const key = `travel:${pack}:${i}`;
+      out.push({
+        name: this.portOfBuilding(t)?.name ?? `${Math.round(t.bx)},${Math.round(t.bz)}`,
+        clock: clock?.name ?? this.shuttleKey(t),
+        times: clock?.times ?? this.shuttleTimes(t),
+        pad: { x: t.x, y: t.y, z: t.z, yaw: t.yaw, cell: t.cell },
+        collector: c ? { x: c.x, y: c.y, z: c.z, yaw: c.yaw, cell: c.cell } : null,
+        terminals: same.filter((o) => o.kind === 'terminal').map((o) => ({ x: o.x, y: o.y, z: o.z, yaw: o.yaw, cell: o.cell })),
+        bx: t.bx,
+        bz: t.bz,
+        boarding: (towards, into) => {
+          if (clock) return this.shuttleRigs?.boardingSpot(key, towards, into) ?? null;
+          const d = Math.hypot(towards.x - t.x, towards.z - t.z) || 1;
+          return into.set(t.x + ((towards.x - t.x) / d) * 6, t.y, t.z + ((towards.z - t.z) / d) * 6);
+        },
+      });
+    }
+    return out;
   }
 
   /** The rest of a world's travel things, once its shuttles stand: the terminals, the collectors, and any shuttle whose rig would not stand, as its still model. */
@@ -14575,6 +14912,8 @@ class App {
         // catch is reached. So the frame names it (`engineFault`), which stops the frames and starts
         // the recovery exactly as a panic in the step does.
         if (isEngineFault(err)) this.engineFault(err);
+        // Whatever the frame report had begun in the frame that threw is dropped with it.
+        perf.abandon();
         const key = String((err as Error)?.message ?? err);
         const now = performance.now();
         if ((seen.get(key) ?? -Infinity) < now - 5000) {
@@ -14620,6 +14959,9 @@ class App {
         input.endFrame();
         return;
       }
+      // The frame report's frame (`__debug.perf()`): from here to `frameEnd` below. It also sets
+      // this frame's value of any switch an A/B run is alternating.
+      perf.frameStart(tFrame);
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
       // The jump's countdown (held still while the Escape menu is open) and its phases; during a crossing's travel it waits.
@@ -14732,6 +15074,7 @@ class App {
       }
       // Dead: the body keeps falling and settling under the camera while the respawn waits.
       if (this.dying && player.ragdoll) player.ragdollStep();
+      perf.begin(SEC.player);
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
         // The thrown and orbiting sabers and the hilt glow from the pooled flash lights (so no light comes
@@ -14740,7 +15083,12 @@ class App {
         this.scorch(dt);
         this.stepCombat(dt);
       }
+      // The frame report's flight (`__debug.perf({ fly })`): the body carried along over the ground at a
+      // set speed, on frames of play only, which are the only ones its trace records.
+      if (this.perfFlight && simulate) this.stepPerfFlight(dt);
+      perf.end(SEC.player);
 
+      perf.begin(SEC.vehicles);
       // The shuttle trips -- the player's own and the console's -- before the hulls step as the run is: a
       // trip writes its hull's pose and its pilot's drive, and the hull's own update reads both on the same
       // frame. Whatever panel is open, since the shared clock does not wait; not while a crossing's travel runs.
@@ -14749,12 +15097,15 @@ class App {
       // same pose again on the same frame, so nothing ever lags a step.
       this.ultraCruise.update(dt);
       this.stepVehicles(dt, simulate);
+      perf.end(SEC.vehicles);
+      perf.begin(SEC.net);
       this.stepNet(dt);
       // The rooms of a hull another player flies step themselves, here, once a frame: a room outlives
       // the player whose hull it was (somebody standing in a ship whose pilot has just dropped off the
       // line is standing in a floor that must go on being simulated), and the peers' own pass says
       // nothing at all about a player who is gone. Called twice in a frame it does the work once.
       this.world.remoteRooms().step();
+      perf.end(SEC.net);
 
       const fast = simulate && input.held('fastForward');
       for (const m of this.shown) m.update(dt);
@@ -14775,7 +15126,9 @@ class App {
       this.hud.setWeatherNote(this.world.weather.heldNote());
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
       this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);
+      perf.begin(SEC.world);
       this.world.update(dt, player.worldPos, this.cam.camera.position, fast, hurt, simulate && !player.mounted && !player.noclip && !player.aboard ? player : null);
+      perf.end(SEC.world);
       // The pool serves the latest request first when it is full (flashes age only in effects.update),
       // so the room lights go last and always keep their lights; the fighters' glows just before them,
       // farthest first, so the nearest win; this frame's shots, powers and muzzle flashes came earlier
@@ -14791,7 +15144,9 @@ class App {
         if (player.aboard) for (const l of player.aboard.roomLights(player.pos, 3, roomLightSpots)) this.effects.flash(l.pos, l.color, l.intensity, l.distance, 0.08);
       }
       const tPhys = performance.now();
+      perf.begin(SEC.physics);
       this.physics.step(dt);
+      perf.end(SEC.physics);
       stats.physicsMs = performance.now() - tPhys;
       this.effects.update(dt);
 
@@ -14799,10 +15154,14 @@ class App {
 
       player.inside = this.world.inside || !!player.aboard;
       const room = player.aboard;
+      perf.begin(SEC.camera);
       this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
+      perf.end(SEC.camera);
       // The ear sits at the camera, set after the frame's last camera move: aboard a ship, in the
       // cockpit or on foot, what is heard is what the picture is drawn from.
+      perf.begin(SEC.audio);
       this.stepAudio(dt);
+      perf.end(SEC.audio);
       this.torch.intensity = this.torchOn ? 260 : 0;
       if (this.torchOn) {
         this.torch.position.copy(this.cam.camera.position);
@@ -14852,6 +15211,7 @@ class App {
       // doorless building near and the nearest vehicle — and never the words. It is emptied at once
       // on any frame that is not simulated, rather than waiting for the next gather: a row of things
       // you cannot press, standing over the death card, is exactly the fault to avoid.
+      perf.begin(SEC.hud);
       if (!simulate) {
         if (this.promptLive) {
           this.promptLive = false;
@@ -15047,6 +15407,7 @@ class App {
         this.plateDir.set(-pm[8], -pm[9], -pm[10]);
         this.plates.track(rawDt, this.world.targets(), this.plateEye.x, this.plateEye.y, this.plateEye.z, this.plateDir.x, this.plateDir.y, this.plateDir.z, this.cam.camera, window.innerWidth, window.innerHeight, this.world.playerTarget.key);
       }
+      perf.end(SEC.hud);
 
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       // The blades are drawn from where the hands ended up this frame, so they never trail the pose.
@@ -15072,12 +15433,16 @@ class App {
       // the sky never re-blends to the hour a picture is being taken at -- but a draw from the
       // player's own camera in between would put that view into the motion blur's history and its
       // focus into the lens, which is what smeared every picture of the first run.
+      perf.begin(SEC.draw);
       this.drawFrame();
+      perf.end(SEC.draw);
       stats.renderMs = performance.now() - tRender;
       // The display's shapes, over the picture and under every panel. Nothing is drawn and the canvas
       // is cleared once whenever the game is not simulating, so no reticle stands frozen over the
       // death card, an open panel or the map.
+      perf.begin(SEC.overlay);
       this.drawOverlay(simulate);
+      perf.end(SEC.overlay);
       stats.frameMs = performance.now() - tFrame;
       // A shader compiled on a live frame is a stall: say which frame, how many, and WHAT, so the
       // cause can be found rather than only counted. The renderer's own `programs.length` cannot
@@ -15092,6 +15457,7 @@ class App {
       // built, and the line below is written for a live frame of real play and for nothing else.
       const phase = this.shaderPhase();
       const made = this.sampleShaders(phase);
+      if (phase === 'play') perf.count(CNT.programsPlay, made.made);
       if (made.made > 0 && phase === 'play' && this.lastPrograms > 0) {
         const churn = made.dropped > 0 ? `, ${made.dropped} dropped` : '';
         const over = made.made > SHADER_TUNE.playBudget ? ' — over the one a frame this game holds to' : '';
@@ -15106,6 +15472,18 @@ class App {
       stats.pack = this.world.packStatus;
       stats.terrain = this.world.terrain.swg ? `${this.world.terrain.swg.template.name}: ${this.world.terrain.swg.syncGenerations} sync grids` : 'procedural';
       stats.chunks = this.world.chunkCount;
+      // The frame report's gauges and the terrain blocks generated on the main thread this frame (the
+      // mark moves every frame, timed or not, so the first timed frame does not count the whole session).
+      const sync = this.world.terrain.swg?.syncGenerations ?? 0;
+      if (PERF.timing) {
+        perf.count(CNT.syncBlocks, Math.max(0, sync - this.perfSyncMark));
+        perf.gauge(CNT.portalMaterials, this.portals.materials.size);
+        perf.gauge(CNT.mobiles, this.world.mobiles?.live.length ?? 0);
+      }
+      this.perfSyncMark = sync;
+      // A frame the game did not simulate (the Escape menu, which is up whenever the console has the
+      // mouse, a panel, the map, a loading screen, a death) is left out of the report and only counted.
+      perf.frameEnd(performance.now(), this.frameCalls, simulate);
       input.endFrame();
     };
     frame();

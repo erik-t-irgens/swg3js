@@ -555,8 +555,14 @@ export class StandingPeople {
    * (put down to make room for somebody nearer) and `waiting` are what the last pass that really ran
    * did, and are left alone by a step that returns before it looks -- reset at the top of every
    * step, they read nought almost always.
+   *
+   * `short` is how many rows that pass could not stand for want of model memory with nobody of their
+   * own farther off to give it back, and `shortBytes` the least of what those rows were short by: what
+   * the people of ours are asked to give back (`src/world/ambient/`), since whatever covers the least of
+   * them stands somebody of the data's on the next pass. `pass` counts the passes that really ran and is
+   * never reset, so a shortfall is answered once and not once for every time it is read.
    */
-  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '' };
+  readonly last = { rows: 0, up: 0, down: 0, indoors: 0, stood: 0, dropped: 0, swapped: 0, waiting: 0, refused: '', essential: 0, short: 0, shortBytes: 0, pass: 0 };
 
   get ready(): boolean {
     return this.rows.length > 0;
@@ -603,6 +609,9 @@ export class StandingPeople {
     this.last.up = 0;
     this.last.down = 0;
     this.last.indoors = 0;
+    this.last.essential = 0;
+    this.last.short = 0;
+    this.last.shortBytes = 0;
   }
 
   unload(): void {
@@ -619,6 +628,9 @@ export class StandingPeople {
     this.last.up = 0;
     this.last.down = 0;
     this.last.indoors = 0;
+    this.last.essential = 0;
+    this.last.short = 0;
+    this.last.shortBytes = 0;
   }
 
   /** Every row carried into the world's frame, once: the mirror every placed object goes through, its route's points with it. */
@@ -664,6 +676,9 @@ export class StandingPeople {
     this.last.dropped = 0;
     this.last.swapped = 0;
     this.last.waiting = 0;
+    this.last.short = 0;
+    this.last.shortBytes = 0;
+    this.last.pass++;
 
     // The dead first, so a place somebody cleared fills again on its own time.
     for (const [i, s] of this.up) {
@@ -791,7 +806,13 @@ export class StandingPeople {
       // crowd stood on the way in held the budget and every nearer person, the cantina's whole room
       // among them, was refused for as long as it stood.
       const short = deps.short?.(entry) ?? 0;
-      if (short > 0 && this.makeMemory(i, short, deps, makeRoom) > 0) {
+      // Short of memory with nobody of its own farther off to give it back: counted, with the least any
+      // such row was short by, for the people of ours, who stand only in what the data's own leave and
+      // give it back when these are short.
+      if (short > 0 && this.makeMemory(i, short, deps, makeRoom) === 0) {
+        this.last.short++;
+        if (!(this.last.shortBytes > 0) || short < this.last.shortBytes) this.last.shortBytes = short;
+      } else if (short > 0) {
         liveFought = 0;
         liveKept = 0;
         for (const s of this.up.values()) {
@@ -932,14 +953,88 @@ export class StandingPeople {
     let up = 0;
     let down = 0;
     let inside = 0;
+    let essential = 0;
     for (const s of this.up.values()) {
       if (s.body) up++;
       else down++;
       if (s.body && s.stand.inside) inside++;
+      if (s.body && s.essential) essential++;
     }
     this.last.up = up;
     this.last.down = down;
     this.last.indoors = inside;
+    this.last.essential = essential;
+  }
+
+  // ---- what the people of ours ask of the data's (`src/world/ambient/`) ------------------------------
+
+  /**
+   * How many places of the cap on part-of-the-furniture people the data's own are standing in: the
+   * people of ours stand only in what is left, after the data's own rows (the design's W6).
+   */
+  get essentialUp(): number {
+    return this.last.essential;
+  }
+
+  /**
+   * The lists the stationary crowd of the town nearest a point draws its people from, with their
+   * shares -- four in five from its commoners and one in five from its named people, the server's own
+   * split -- or null where no town on this world has any (a world the emulator never populated). The
+   * row nearest the point that names nobody and draws from a town's stationary lists says which town
+   * that is. Asked once a port and once a building.
+   */
+  townDraw(x: number, z: number): [string, number][] | null {
+    if (!this.framed) return null;
+    let best: [string, number][] | null = null;
+    let bestD = Infinity;
+    for (const r of this.rows) {
+      const d = r.draw;
+      if (!d?.length || !d.some(([pool]) => /stationary/i.test(pool))) continue;
+      const away = Math.hypot(r.x - x, r.z - z);
+      if (away >= bestD) continue;
+      bestD = away;
+      best = d;
+    }
+    return best;
+  }
+
+  /**
+   * Somebody out of a town's own lists, drawn as a row that names nobody draws its person for a life
+   * after its first (`personFor`): the list by its share, a name on it, and a body out of that
+   * creature's own, leaning on the bodies already built (`reuseLook`) since nobody of ours is ever
+   * fought or shared. The same draw, seed and life give the same person wherever the same bodies are
+   * built. Null where the lists name nobody the fleet knows.
+   */
+  drawPerson(draw: readonly [string, number][], seed: number, life: number, deps: PeopleDeps, reuse: number = PEOPLE_TUNE.reuseLook): PersonPlan | null {
+    const plan = this.plan;
+    plan.creatures = this.creatures;
+    plan.pools = this.extras.pools ?? null;
+    plan.side = gcwSideOf(this.extras.world);
+    plan.reuse = reuse;
+    this.holdsVia = deps;
+    plan.holds = deps.holds ? this.holdsOf : undefined;
+    const row: StandingRow = { who: '', id: '', x: 0, y: 0, z: 0, heading: 0, cell: 0, respawn: 0, where: 'ours', peaceful: true, draw: draw as [string, number][], key: (seed >>> 0).toString(16).padStart(8, '0') };
+    const who = personFor(row, Math.max(1, life), plan);
+    return who.who ? who : null;
+  }
+
+  /**
+   * Whether any of the data's own people stands where `inside` says, among the rows within `reach` of a
+   * point: what says a building is the data's and not one of ours to fill. Measured from where each
+   * row's body stands (`standPlaceOf`). False before the rows are in the world's frame.
+   */
+  anyStanding(x: number, z: number, reach: number, inside: (st: StandPlace) => boolean): boolean {
+    if (!this.framed) return false;
+    for (const st of this.stands) {
+      if (Math.abs(st.x - x) > reach || Math.abs(st.z - z) > reach) continue;
+      if (inside(st)) return true;
+    }
+    return false;
+  }
+
+  /** Whether the rows have been carried into the world's frame yet, which everything the people of ours ask needs. */
+  get inWorld(): boolean {
+    return this.framed;
   }
 
   /**

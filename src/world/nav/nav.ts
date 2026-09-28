@@ -174,6 +174,15 @@ export class WorldNav {
   }
 
   /**
+   * One room's walkable floor, in the building's own model frame, read the first time it is asked for;
+   * null where the pack has none. What the people of ours find open floor to stand on with
+   * (`src/world/ambient/fillers.ts`), asked once a building.
+   */
+  floorFor(building: Building, cell: number): NavFloor | null {
+    return this.floorOf(this.forBuilding(building), cell);
+  }
+
+  /**
    * The next corner a body in `cell` should walk to on its way to a point, in the world's frame, or
    * null when there is nothing to add to walking straight at it.
    *

@@ -371,8 +371,49 @@ export function shuttleAt(name: string, seconds: number, tune = TRAVEL_TUNE, tim
   if (t < 0) return roundAt(s, 'away', -t, 0, 0);
   if (t < land) return roundAt(s, 'landing', land - t, 0, t / land);
   if (t < land + tune.waits) return roundAt(s, 'waiting', 0, land + tune.waits - t, 1);
-  if (t < visit) return roundAt(s, 'leaving', every - t + slotHash(name, slot + 1) * room, 0, 1 - (t - land - tune.waits) / lift);
-  return roundAt(s, 'away', every - t + slotHash(name, slot + 1) * room, 0, 0);
+  // Until the next round's landing, which is the next slot's own start: the rest of this slot (less where
+  // in it this round began, which `t` is counted from) and the next one's offset into its own.
+  if (t < visit) return roundAt(s, 'leaving', every - start - t + slotHash(name, slot + 1) * room, 0, 1 - (t - land - tune.waits) / lift);
+  return roundAt(s, 'away', every - start - t + slotHash(name, slot + 1) * room, 0, 0);
+}
+
+/**
+ * The moments of one of a port's rounds, on the shared wall clock: when its shuttle starts to come down
+ * (`land`), when it has landed and may be boarded (`wait`), when it starts to lift off (`leave`) and
+ * when it is gone (`gone`). The very arithmetic `shuttleAt` answers a phase by, laid out for a whole
+ * round rather than asked of one moment, so that something keeping time by a round -- somebody walking
+ * to the collector ahead of a landing (`src/world/ambient/routines.ts`) -- keeps the time the drawn
+ * shuttle and the collector's words keep; `routines.test.ts` holds the two to each other.
+ */
+export interface ShuttleRound {
+  slot: number;
+  land: number;
+  wait: number;
+  leave: number;
+  gone: number;
+}
+
+/** How long a round is, seconds, for a port whose shuttle takes `times` (null: the old glide both ways). */
+export function shuttleEvery(tune = TRAVEL_TUNE, times: ShuttleTimes | null = null): number {
+  const land = times && times.land > 0 ? times.land : tune.glide;
+  const lift = times && times.lift > 0 ? times.lift : tune.glide;
+  return Math.max(tune.waits + land + lift + 1, tune.every);
+}
+
+/** One round of a port's shuttle, `slot` counted from the clock's nought (`shuttleAt`'s own slot), written into `out`. */
+export function shuttleRound(name: string, slot: number, tune = TRAVEL_TUNE, times: ShuttleTimes | null = null, out?: ShuttleRound): ShuttleRound {
+  const land = times && times.land > 0 ? times.land : tune.glide;
+  const lift = times && times.lift > 0 ? times.lift : tune.glide;
+  const visit = tune.waits + land + lift;
+  const every = Math.max(visit + 1, tune.every);
+  const start = slot * every + slotHash(name, slot) * (every - visit);
+  const r: ShuttleRound = out ?? { slot: 0, land: 0, wait: 0, leave: 0, gone: 0 };
+  r.slot = slot;
+  r.land = start;
+  r.wait = start + land;
+  r.leave = start + land + tune.waits;
+  r.gone = start + visit;
+  return r;
 }
 
 /** A shuttle's state written into a record. */
