@@ -66,6 +66,11 @@ const index = JSON.parse(readFileSync(join(CORE3_REF_DIR, 'index.json'), 'utf8')
   const kids = [...travel.values()][0];
   kids[0].writtenByACommand = true;
   ok([...src.readTravelBuildings().values()][0][0].writtenByACommand === undefined, 'a second read does not see what a command wrote into the first');
+  // What the server called each travel point, which names a town's shuttleports apart (`namePorts`).
+  const points = src.readTravelPoints();
+  const naboo = points instanceof Map ? (points.get('naboo') as { name: string; x: number; z: number; starport: boolean }[] | undefined) : undefined;
+  ok(!!naboo && ['Theed Shuttle A', 'Theed Shuttle B', 'Theed Shuttle C'].every((n) => naboo.some((p) => p.name === n && !p.starport)), "the server's travel points are kept per world, Theed's three shuttleports named apart");
+  ok(!!naboo && naboo.some((p) => p.name === 'Theed Spaceport' && p.starport && Math.abs(p.x + 4858.8) < 1 && Math.abs(p.z - 4164.1) < 1), "with where each stands on the ground (the server's x and y) and whether a shuttle leaves the world from it");
   const tatooine = src.readServerProps('tatooine');
   const nowhere = src.readServerProps('gallery');
   ok(Array.isArray(tatooine) && tatooine.length > 0, `a world the screenplays name has its props (${tatooine.length} on tatooine)`);

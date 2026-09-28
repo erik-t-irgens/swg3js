@@ -40,7 +40,8 @@ export const RIG_HULL_TUNE = {
 
 /**
  * The branch a hull flown from a rig lands with. Every pad a shuttle can be flown to plays the calm
- * branch where a rig has one (Theed's hangar is never a destination: no port stands near it), so a
+ * branch where a rig has one (Theed's hangar is never a pad to land at: its transport stands in a room,
+ * which `padOfPort` passes over, and a trip to Theed Starport sets its passenger down there), so a
  * transport out of Theed lands as every other transport does; a rig with no calm branch, the shuttle's
  * one unnamed branch, lands with its own. The rule is the trip's own (`landMood`), so the hull and the
  * route it is flown on cannot disagree.

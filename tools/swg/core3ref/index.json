@@ -28,6 +28,7 @@
  ],
  "files": {
   "readTravelBuildings": "travel-buildings.json",
+  "readTravelPoints": "travel-points.json",
   "readFittingBuildings": "fitting-buildings.json",
   "readServerProps": "server-props.json",
   "readDeeds": "deeds.json",
@@ -45,6 +46,7 @@
  },
  "counts": {
   "readTravelBuildings": 24,
+  "readTravelPoints": 10,
   "readFittingBuildings": 320,
   "readServerProps": {
    "corellia": 18,

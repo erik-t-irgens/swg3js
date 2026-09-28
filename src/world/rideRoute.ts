@@ -182,9 +182,14 @@ export function planHop(from: PadRef, to: PadRef): RideRoute {
 
 /**
  * The pad a ticket's port is flown to: the rigged shuttle row nearest that port's own place, within the
- * reach a thing belongs to a port by. Null for a port this world does not name, or one with no shuttle
- * standing on a rig by it (six of the retail ports: a trip there is flown as far as the take-off and
- * the passenger put down at the port, as a ticket always was).
+ * reach a thing belongs to a port by, standing out in the open. Null for a port this world does not
+ * name, or one with no shuttle standing on a rig by it (seven of the retail ports: a trip there is flown
+ * as far as the take-off and the passenger put down at the port, as a ticket always was).
+ *
+ * A shuttle standing in a room is never landed at: Theed's transport parks inside the royal hangar
+ * (its cell 5), and a hull a trip lands with comes down on its calm branch (`landMood`), made for an
+ * open pad, so a trip to Theed Starport sets its passenger down at the port instead. Landing inside on
+ * Theed's own branch is a piece of work of its own.
  */
 export function padOfPort(things: readonly TravelThing[], ports: readonly Port[], port: string, pack: string, rigs: Readonly<Record<string, TravelRig>>, reach = PORT_REACH): PadRef | null {
   const p = ports.find((x) => x.name === port);
@@ -193,7 +198,7 @@ export function padOfPort(things: readonly TravelThing[], ports: readonly Port[]
   let bestD = Infinity;
   for (let i = 0; i < things.length; i++) {
     const t = things[i];
-    if (t.kind !== 'shuttle' || !t.rig || !rigs[t.rig]) continue;
+    if (t.kind !== 'shuttle' || !t.rig || !rigs[t.rig] || t.cell > 0) continue;
     const d = Math.hypot(p.x - t.bx, p.z - t.bz);
     if (d >= bestD) continue;
     bestD = d;
@@ -235,8 +240,9 @@ export function farPadsOf(travel: unknown, pois: unknown): FarPads | null {
 
 /**
  * The branch a hull flown from a pad lands with, wherever it lands: the calm one, where its rig has one,
- * and otherwise the one it took off on (the shuttle's only branch). No trip ends in Theed's hangar, since
- * no port stands near it, so a transport out of Theed comes down as every other transport does.
+ * and otherwise the one it took off on (the shuttle's only branch). No trip lands in Theed's hangar --
+ * Theed Starport is a port, but its transport stands in a room and `padOfPort` never lands at one -- so
+ * a transport out of Theed comes down as every other transport does.
  */
 export function landMood(rig: Pick<TravelRig, 'moods'> | null | undefined, from: { mood: string }): string {
   return rig?.moods?.calm ? 'calm' : from.mood;

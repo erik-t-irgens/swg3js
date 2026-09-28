@@ -202,7 +202,7 @@ import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
 const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
-import { frameCheck, mergePlaceLists, placeKey, portLabel, readClientPlaces, title } from './places.mjs';
+import { frameCheck, mergePlaceLists, namePorts, placeKey, portKindOf, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { decodeTga, encodeHeightmap } from './tga.mjs';
 import { exportSky } from './sky.mjs';
@@ -2645,6 +2645,13 @@ function packStatus(dir) {
     // A file written before the client's own table was read carries no count of it at all; one that
     // read the table and found nothing there (the tree world's trail and dungeon zones) carries 0.
     else if (pois.clientPlaces === undefined) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s places were written before the client's own named places were read`);
+    // A port building with no row of its own at its origin has terminals that name no port, or the
+    // wrong one: a pack written before `portKindOf` has none for Theed's hangar, none for a town's
+    // second and third shuttleport, and Mos Entha's starport row on a sign 85 m off.
+    else if (layout && portsWithoutRow(layout.objects, pois.pois ?? []).length) {
+      const lost = portsWithoutRow(layout.objects, pois.pois ?? []);
+      need(`pois <swg-dir> all ${dir} --retail-only`, `${planet} has ${lost.length} port building${lost.length === 1 ? '' : 's'} with no row of ${lost.length === 1 ? 'its' : 'their'} own in its places (${lost.slice(0, 3).map((o) => `${o.template.split('/').pop()} at ${Math.round(o.x)},${Math.round(o.z)}`).join(', ')}${lost.length > 3 ? ', ...' : ''}), so their terminals name no port or the wrong one`);
+    }
     // A world whose layout carries gates between its zones but no gates.json was converted before the
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
@@ -3177,11 +3184,14 @@ function autoCenter(snap, entries) {
  * (`places.mjs`), the planet's named places from the emulator's region scripts
  * (regions/regions.json: cities, landmarks and areas, with names from the client's string
  * tables), the client's own region table when it has one, and every starport and shuttleport
- * in the snapshot named after the city it stands in.
+ * in the snapshot (`portKindOf`) named after the city it stands in, one row each at the building's
+ * own origin, which is what ties a travel terminal, collector and shuttle to their own port.
  *
  * The client's table wins a name clash and the names only we have are kept (`mergePlaceLists`).
+ * `travelPoints` is the server's own list of this world's travel points (the Core3 reference), which
+ * names the ports of a town that has more than one of a kind (`namePorts`).
  */
-function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = true, archive: wantArchive = true } = {}) {
+function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = true, archive: wantArchive = true, travelPoints = [] } = {}) {
   const strings = new Map();
   const ours = [];
   for (const r of REGIONS[planet] ?? []) {
@@ -3206,31 +3216,75 @@ function pointsOfInterest(vfs, planet, snap, entries, { regions: wantRegions = t
   // X mirrored, and the answer goes into the pack beside them.
   const frame = frameCheck(archive.rows, entries.filter((e) => e.world && e.parentId === 0).map((e) => ({ x: e.world.pos[0], z: e.world.pos[2] })));
   let namedAfterPlace = 0;
+  let sameSpot = 0;
+  // Every port building its own row. Where two or three share a label (a town's second and third
+  // shuttleport), the second and third used to be dropped, and their terminals belonged to no port or
+  // to the starport down the street; `namePorts` names each of them apart instead.
+  const found = [];
   for (const e of entries) {
     if (!e.world || e.parentId !== 0) continue;
     const template = snap.templates[e.node.templateIndex];
-    const kind = template.includes('starport') ? 'starport' : template.includes('shuttleport') ? 'shuttleport' : null;
+    const kind = portKindOf(template);
     if (!kind) continue;
     const [x, , z] = e.world.pos;
+    // One building placed twice (a snapshot and a buildout both carrying it) is one port.
+    if (found.some((f) => f.kind === kind && Math.hypot(f.x - x, f.z - z) < 1)) {
+      sameSpot++;
+      continue;
+    }
     const label = portLabel(x, z, places, kind === 'starport' ? 'Starport' : 'Shuttleport');
     if (label.from === 'place') namedAfterPlace++;
-    const k = placeKey(label.name);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    places.push({ name: label.name, x, z, r: 0, kind });
+    found.push({ x, z, kind, label: label.name, template });
   }
+  const named = namePorts(found, travelPoints, seen);
+  found.forEach((f, i) => places.push({ name: named.names[i], x: f.x, z: f.z, r: 0, kind: f.kind }));
+  const ports = {
+    found: found.length,
+    fromServer: named.fromServer,
+    lettered: named.lettered,
+    sameSpot,
+    renamed: found.map((f, i) => (named.names[i] !== f.label ? `${f.label} -> ${named.names[i]}` : null)).filter(Boolean),
+    byException: found.filter((f) => !f.template.includes('starport') && !f.template.includes('shuttleport')).map((f) => f.template.split('/').pop()),
+  };
   const order = { city: 0, starport: 1, shuttleport: 2, place: 3, landmark: 4, area: 5 };
   places.sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9) || a.name.localeCompare(b.name));
-  return { places, stats: { ...merged, archive: archive.rows.length, unnamed: archive.unnamed, missing: archive.missing, ours: ours.length, namedAfterPlace, frame } };
+  return { places, stats: { ...merged, archive: archive.rows.length, unnamed: archive.unnamed, missing: archive.missing, ours: ours.length, namedAfterPlace, frame, ports } };
+}
+
+/** Every world's travel points as the server listed them, read once a run; see `serverTravelPoints`. */
+let travelPointsRead = null;
+/** Why there are none, when there are none: no reference, `--core3=none`, a reference written before they were kept. */
+let travelPointsWhy = '';
+
+/**
+ * One world's travel points as the emulator's server listed them (`readTravelPoints`, read from the
+ * Core3 reference like everything else the converter takes from it, or from `--core3=<dir>`): what
+ * names a town's second and third shuttleport the way the game named them. None is not an error:
+ * the ports are then named apart by a letter of ours, and the run says so.
+ */
+function serverTravelPoints(planet) {
+  if (!travelPointsRead) {
+    travelPointsRead = new Map();
+    try {
+      const src = core3SourceFor(options);
+      if (!src) travelPointsWhy = '--core3=none';
+      else if (src.missing) travelPointsWhy = src.missing;
+      else travelPointsRead = src.readTravelPoints();
+    } catch (err) {
+      travelPointsWhy = err.message;
+    }
+  }
+  return travelPointsRead.get(planet) ?? [];
 }
 
 /** Write <out>/pois.json for a planet; a broken table costs that table's places, never the snapshot. */
 function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   let result = null;
+  const travelPoints = serverTravelPoints(planet);
   // Each step sheds one source, so one unreadable table never costs the others.
   for (const opts of [{}, { archive: false }, { regions: false }, { regions: false, archive: false }]) {
     try {
-      result = pointsOfInterest(vfs, planet, snap, entries, opts);
+      result = pointsOfInterest(vfs, planet, snap, entries, { ...opts, travelPoints });
       break;
     } catch (err) {
       console.warn(`points of interest: ${err.message}`);
@@ -3244,6 +3298,12 @@ function writePois(vfs, planet, snap, entries, cx, cz, outDir) {
   console.log(`points of interest: ${counts} -> ${join(outDir, 'pois.json')}`);
   if (s) {
     console.log(`  places: the client's table gave ${s.archive}${s.unnamed ? ` (${s.unnamed} whose Name column names the wrong table, named by its own key instead)` : ''}${s.missing ? ` (${s.missing} whose name string the table is missing, labelled from its key)` : ''}, ours gave ${s.ours}, ${s.clashed} names were in both (the client's won${s.ringsKept ? `, except ${s.ringsKept} where ours is a ring with a reach and keeps its row` : ''})${s.repeats ? `, ${s.repeats} names the client's table itself repeats elsewhere` : ''}${s.sameSpot ? `, ${s.sameSpot} repeated in the same spot and dropped` : ''}${s.namedAfterPlace ? `, ${s.namedAfterPlace} port(s) named after a place rather than a city` : ''}`);
+    const p = s.ports;
+    if (p.found) {
+      console.log(`  ports: ${p.found} buildings, a row each${p.fromServer ? `, ${p.fromServer} named apart from a neighbour of the same name by the server's own travel points` : ''}${p.lettered ? `, ${p.lettered} named apart by a letter of ours (the server names nothing near them)` : ''}${p.sameSpot ? `, ${p.sameSpot} placed twice on one spot and kept once` : ''}${p.byException.length ? `; by name as well as by word: ${p.byException.join(', ')}` : ''}`);
+      if (p.renamed.length) console.log(`    ${p.renamed.join('; ')}`);
+      if (!travelPoints.length && p.lettered) console.log(`    (no travel points of the server's for ${planet}${travelPointsWhy ? `: ${travelPointsWhy}` : ''})`);
+    }
     if (s.frame.rows) {
       console.log(`  frame: ${s.frame.rows} places, nearest built thing ${s.frame.asIs} m away as they stand against ${s.frame.mirrored} m with X mirrored; worst ${s.frame.worst.m} m (${s.frame.worst.name})`);
       if (s.frame.mirrored < s.frame.asIs) console.warn(`  WARNING: ${planet}'s named places sit closer to the snapshot with X mirrored; the table may not be in the snapshot's frame`);

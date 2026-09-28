@@ -46,6 +46,7 @@ import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeo
 import { DIFFICULTY } from './difficulty.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
 import { isLiftCell, liftStops, stopAt, type LiftStop } from './lifts';
+import { roomOverhead } from './nav/navMesh.ts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowOnly } from '../core/fxRegistry.ts';
@@ -4516,6 +4517,29 @@ export class World {
     const b = this.layoutStream.buildingPlacedAt(x, z, template);
     if (!b) return null;
     const entry = this.layoutStream.namedEntryOf(b, SPAWN_CELL_NAME);
+    if (!entry) return null;
+    this.cellState = { building: b, cell: entry.cell };
+    this.prevPlayerPos.copy(entry.at);
+    return entry.at;
+  }
+
+  /**
+   * Put the player inside the building placed at a point, when a body with its feet at `y` there
+   * stands under one of that building's rooms' own floors and on none of them (`roomOverhead`): a
+   * standing spot in the building's way in (`entryOf`) and the cell, else null and the player stays
+   * where they are. The game asks it only at a port's own place (`isPortKind`, `portPlacedAt`), which is
+   * its building's origin: open ground at every port but Theed Starport, the royal hangar, whose origin
+   * lies under its landing deck, some eight metres over the ground there. The way in there is the
+   * foyer, clear of the transport parked on the deck. Null too when that building's region has not
+   * streamed in, and the world must have stepped since it did, since the spot is found by a ray.
+   */
+  roomOverAt(x: number, y: number, z: number): THREE.Vector3 | null {
+    if (!this.layoutStream) return null;
+    const b = this.layoutStream.buildingPlacedAt(x, z);
+    if (!b) return null;
+    tmpV.set(x, y, z).applyMatrix4(b.inverse);
+    if (!roomOverhead(b.model.def.cells, tmpV.x, tmpV.y, tmpV.z)) return null;
+    const entry = this.layoutStream.entryOf(b);
     if (!entry) return null;
     this.cellState = { building: b, cell: entry.cell };
     this.prevPlayerPos.copy(entry.at);

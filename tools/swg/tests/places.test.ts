@@ -7,7 +7,7 @@
 // of the retail table it stands for.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { CLIENT_POI_TABLE, PORT_NEAR_M, RING_M, SAME_SPOT_M, frameCheck, mergePlaceLists, placeKey, portLabel, readClientPlaces, title } from '../places.mjs';
+import { CLIENT_POI_TABLE, PORT_BUILDINGS, PORT_NEAR_M, PORT_ROW_M, RING_M, SAME_SPOT_M, SERVER_POINT_NEAR_M, frameCheck, mergePlaceLists, namePorts, placeKey, portKindOf, portLabel, portsWithoutRow, readClientPlaces, title } from '../places.mjs';
 import { chunk, encode, form, W } from './iffWriter.ts';
 
 let checks = 0;
@@ -194,6 +194,90 @@ ok(portLabel(40000, 40000, places, 'Shuttleport').name === 'Shuttleport (40000, 
 // A city's own reach wins over a place nearer than it: the city is the bigger truth about a port.
 const inTown = [{ name: 'Big Town', x: 0, z: 0, r: 900, kind: 'city' }, { name: 'A Well', x: 50, z: 0, r: 0, kind: 'place' }];
 ok(portLabel(60, 0, inTown, 'Starport').name === 'Big Town Starport', "a city holding the port wins over a place a few metres from it");
+// Theed's royal hangar, where the city's starport really is: its origin 540 m from the city's own point,
+// inside the city's 840 m ring, so it is called what the owner asked for by name.
+const theed = [{ name: 'Theed', x: -5320, z: 4368, r: 840, kind: 'city' }];
+ok(portLabel(-4795.27, 4238.79, theed, 'Starport').name === 'Theed Starport', "Theed's hangar is Theed Starport, named after the city whose ring holds it");
+
+// ---- which buildings are ports ----
+
+ok(portKindOf('object/building/naboo/shared_hangar_naboo_theed.iff') === 'starport', "Theed's royal hangar is a starport, although its name says neither word");
+ok(portKindOf('object/building/naboo/hangar_naboo_theed.iff') === 'starport' && PORT_BUILDINGS.size === 2, "under the server's spelling of its template as well, and it is the one building named so");
+ok(portKindOf('object/building/tatooine/shared_starport_tatooine.iff') === 'starport' && portKindOf('object/building/military/shared_outpost_starport.iff') === 'starport', 'a building whose template says starport is a starport, the outposts included');
+ok(portKindOf('object/building/naboo/shared_shuttleport_naboo.iff') === 'shuttleport' && portKindOf('object/building/general/shared_shuttleport_general.iff') === 'shuttleport', 'and one that says shuttleport a shuttleport');
+ok(portKindOf('object/static/worldbuilding/sign/shared_thm_sign_starport.iff') === null, "a starport's sign is not a starport: only a building is (one took Mos Entha's row 85 m off its port)");
+ok(portKindOf('object/building/naboo/shared_hangar_naboo_private.iff') === null && portKindOf('object/building/poi/shared_coa2_rebel_drall_camp.iff') === null, 'nor is any other hangar, nor a camp with a lone shuttle');
+ok(portKindOf('') === null && portKindOf(undefined) === null, 'and nothing is nothing');
+
+// ---- naming a town's ports apart ----
+
+{
+  // The shape of Theed: three shuttleports that all read "Theed Shuttleport", the server's own points
+  // 20 m from each building's origin (where its shuttle lands), and the starport's point 98 m from the
+  // hangar, which is a starport and never lends a shuttleport its name.
+  const found = [
+    { x: -5876.1, z: 4172.2, kind: 'shuttleport', label: 'Theed Shuttleport' },
+    { x: -5411.0, z: 4302.3, kind: 'shuttleport', label: 'Theed Shuttleport' },
+    { x: -4795.3, z: 4238.8, kind: 'starport', label: 'Theed Starport' },
+    { x: -4989.6, z: 4090.9, kind: 'shuttleport', label: 'Theed Shuttleport' },
+    { x: 5137.2, z: 6601.6, kind: 'shuttleport', label: 'Kaadara Shuttleport' },
+  ];
+  const points = [
+    { name: 'Theed Shuttle A', x: -5856.1, z: 4172.2, starport: false },
+    { name: 'Theed Shuttle B', x: -5005, z: 4072, starport: false },
+    { name: 'Theed Shuttle C', x: -5411.0, z: 4322.3, starport: false },
+    { name: 'Theed Spaceport', x: -4858.8, z: 4164.1, starport: true },
+    { name: 'Kaadara Shuttleport', x: 5123.4, z: 6616.0, starport: false },
+  ];
+  const named = namePorts(found, points, new Set(['theed']));
+  ok(named.names.join('|') === 'Theed Shuttle A|Theed Shuttle C|Theed Starport|Theed Shuttle B|Kaadara Shuttleport', `a town's shuttleports that share a label take the server's own names, each the point beside it (${named.names.join(', ')})`);
+  ok(named.fromServer === 3 && named.lettered === 0, 'and the run is told how many the server named');
+  ok(named.names[2] === 'Theed Starport', "a port whose label is its own keeps it: the hangar stays Theed Starport, not the server's Theed Spaceport");
+  // No point near enough, or none at all: the label and a letter, never a repeat.
+  const bare = namePorts(found.slice(0, 2), []);
+  ok(bare.names.join('|') === 'Theed Shuttleport A|Theed Shuttleport B' && bare.lettered === 2, 'with no server point near, each takes the label and a letter of ours');
+  const far = namePorts(found.slice(0, 2), [{ name: 'Theed Shuttle A', x: -5876.1 + SERVER_POINT_NEAR_M + 1, z: 4172.2, starport: false }]);
+  ok(far.names.join('|') === 'Theed Shuttleport A|Theed Shuttleport B', `a point further than ${SERVER_POINT_NEAR_M} m off names nothing`);
+  const wrongKind = namePorts(found.slice(0, 2), [{ name: 'Theed Spaceport', x: -5876.1, z: 4172.2, starport: true }]);
+  ok(!wrongKind.names.includes('Theed Spaceport'), "a starport's point never names a shuttleport, however near it stands");
+  const half = namePorts(found.slice(0, 2), [points[0]]);
+  ok(half.names.join('|') === 'Theed Shuttle A|Theed Shuttleport A' && half.fromServer === 1 && half.lettered === 1, 'one the server names and one it does not: the first takes its name, the second a letter');
+  const one = namePorts(found.slice(0, 2), [points[0], { name: 'Theed Shuttle A', x: -5411.0, z: 4322.3, starport: false }]);
+  ok(new Set(one.names).size === 2, `a name the server gives twice is given once (${one.names.join(', ')})`);
+  const clash = namePorts([{ x: 0, z: 0, kind: 'starport', label: 'Big Town Starport' }], [], new Set(['big town starport']));
+  ok(clash.names[0] === 'Big Town Starport A', 'a port whose label a place already has is kept under a letter rather than dropped');
+  const aPoint = namePorts(found.slice(0, 2), [{ ...points[0], name: 'Theed' }], new Set(['theed']));
+  ok(!aPoint.names.includes('Theed'), 'and a server name the place list already holds is not taken');
+}
+
+// ---- a port building with no row ----
+
+{
+  const objects = [
+    { template: 'object/building/tatooine/shared_starport_tatooine.iff', x: 1238.2, z: 3061.9 },
+    { template: 'object/static/worldbuilding/sign/shared_thm_sign_starport.iff', x: 1292.3, z: 3127.0 },
+    { template: 'object/building/tatooine/shared_shuttleport_tatooine.iff', x: 1730.9, z: 3204.6 },
+    { template: 'object/building/tatooine/shared_shuttleport_tatooine.iff', x: 1395.7, z: 3487.0 },
+    { template: 'object/building/naboo/shared_hangar_naboo_theed.iff', x: -4795.3, z: 4238.8 },
+    { template: 'object/building/tatooine/shared_shuttleport_tatooine.iff', x: 9, z: 9, contained: true },
+  ];
+  // Mos Entha as a pack written before: the starport's row on the sign, one shuttleport's row, no hangar's.
+  const old = [
+    { name: 'Mos Entha Starport', kind: 'starport', x: 1292.3, z: 3127.0 },
+    { name: 'Mos Entha Shuttleport', kind: 'shuttleport', x: 1730.9, z: 3204.6 },
+    { name: 'Mos Entha', kind: 'city', x: 1238.2, z: 3061.9 },
+  ];
+  const lost = portsWithoutRow(objects, old);
+  ok(lost.length === 3 && lost.map((o) => o.kind).join(',') === 'starport,shuttleport,starport', `a pack written before names ${lost.length} port buildings with no row of their own: the starport whose row stood on a sign, the second shuttleport and the hangar`);
+  const fresh = [
+    { name: 'Mos Entha Starport', kind: 'starport', x: 1238.2, z: 3061.9 },
+    { name: 'Mos Entha Shuttle A', kind: 'shuttleport', x: 1730.9, z: 3204.6 },
+    { name: 'Mos Entha Shuttle B', kind: 'shuttleport', x: 1395.7 + PORT_ROW_M / 2, z: 3487.0 },
+    { name: 'Theed Starport', kind: 'starport', x: -4795.3, z: 4238.8 },
+  ];
+  ok(portsWithoutRow(objects, fresh).length === 0, 'and one written now names none: every port building has its row at its origin, a building inside another ignored');
+  ok(portsWithoutRow(objects, fresh.map((r) => (r.name === 'Theed Starport' ? { ...r, kind: 'shuttleport' } : r))).length === 1, 'a row of the wrong kind is not the building\'s row');
+}
 
 // ---- the frame check ----
 

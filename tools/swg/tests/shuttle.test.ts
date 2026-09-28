@@ -8,9 +8,11 @@
 // Run: node tools/swg/tests/shuttle.test.ts
 
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type FareTable, type PoiRow, type Port } from '../../../src/world/shuttle.ts';
+import * as THREE from 'three';
+import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type PoiRow, type Port } from '../../../src/world/shuttle.ts';
+import { roomOverhead, type FloorSource } from '../../../src/world/nav/navMesh.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -132,6 +134,83 @@ const fares: FareTable = {
   ok(landingOn([poi('s', 1, 1, 'shuttleport')])?.name === 's', 'or at whatever port a world has, if it has no starport');
   ok(landingOn([poi('c', 1, 1, 'city')]) === null, 'a world whose only places are cities lands you wherever the world would have anyway');
   ok(landingOn([]) === null, 'and so does one with no places at all');
+}
+
+// ---------------------------------------------------------------- the room over a port's place
+
+{
+  // Only a port's place is ever stood inside its building, and a place saved to the centimetre is still
+  // that port's place when it is read back. (The floors themselves are `roomOverhead`'s, in nav.test.ts.)
+  ok(isPortKind('starport') && isPortKind('shuttleport'), 'an arrival at a starport or a shuttleport is an arrival at a port');
+  ok(!['landmark', 'city', 'place', 'area', 'region', ''].some(isPortKind), 'and at a landmark, a city or anything else it is not');
+  const ports = [port('Theed Starport', 10090.42, -2425.07, 'starport'), port('Theed Shuttle B', 10285.3, -2573.2, 'shuttleport')];
+  ok(portPlacedAt(ports, { x: Number((10090.42).toFixed(2)), z: Number((-2425.07).toFixed(2)) })?.name === 'Theed Starport', "a place kept at a port's own place and written to the centimetre is that port's");
+  ok(portPlacedAt(ports, { x: 10090.42 + 0.99, z: -2425.07 - 0.99 })?.name === 'Theed Starport' && portPlacedAt(ports, { x: 10090.42 + 1.01, z: -2425.07 }) === null, 'to within a metre each way, the metre the building at that place is found by');
+  ok(portPlacedAt(ports, { x: 10200, z: -2500 }) === null && portPlacedAt([], { x: 0, z: 0 }) === null, "and a place between the ports is nobody's");
+}
+
+{
+  // Every named place of every converted world, arrived at as the game arrives (`teleport`, then
+  // `World.roomOverAt`): the row mirrored into the world, the portal building placed within a metre each
+  // way of it (`buildingPlacedAt`), the body stood 0.3 m over the ground there -- taken as the building's
+  // own height, which is its ground to within half a metre at every such place -- in the building's own
+  // frame, and the rooms' floors asked whether one stands over it with the body on none (`roomOverhead`).
+  // Of the ports, only Theed Starport, whose place is the royal hangar's origin under its deck. Of every
+  // place, one landmark as well, which is why only a port's place is asked: this pins that list, so a
+  // place added to it is a decision rather than an accident. Of the landmarks with a room's floor over
+  // their place in plan, the two military sheds' and the Temple of Exar Kun's are the floor the body
+  // stands on, and the Jedi enclave's auditorium is 26 m underground: none of them is overhead.
+  const packs = join(process.cwd(), 'assets-private');
+  const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => ['layout.json', 'manifest.json', 'floors.json', 'pois.json'].every((f) => existsSync(join(packs, w, f)))) : [];
+  type Placed = { template: string; model: string; x: number; y: number; z: number; q: number[]; contained?: boolean };
+  let rows = 0;
+  let atBuildings = 0;
+  const ports: string[] = [];
+  const others: string[] = [];
+  let theedKept = false;
+  const m = new THREE.Matrix4();
+  const at = new THREE.Vector3();
+  for (const w of worlds) {
+    const layout = JSON.parse(readFileSync(join(packs, w, 'layout.json'), 'utf8')) as { center: { x: number; z: number }; objects: Placed[] };
+    const manifest = JSON.parse(readFileSync(join(packs, w, 'manifest.json'), 'utf8')) as { categories?: Record<string, { id: string; cells?: { index: number }[] }[]> };
+    const floors = JSON.parse(readFileSync(join(packs, w, 'floors.json'), 'utf8')) as { models?: Record<string, Record<string, { floor?: FloorSource }>> };
+    const pois = (JSON.parse(readFileSync(join(packs, w, 'pois.json'), 'utf8')) as { pois?: PoiRow[] }).pois ?? [];
+    const defs = new Map<string, { id: string; cells?: { index: number }[] }>();
+    for (const list of Object.values(manifest.categories ?? {})) for (const d of list) defs.set(d.id, d);
+    const c = layout.center;
+    for (const row of pois) {
+      rows++;
+      const gx = -(row.x - c.x);
+      const gz = row.z - c.z;
+      const o = layout.objects.find((b) => !b.contained && !!defs.get(b.model)?.cells?.length && Math.abs(-(b.x - c.x) - gx) < 1 && Math.abs(b.z - c.z - gz) < 1);
+      if (!o) continue;
+      atBuildings++;
+      m.compose(new THREE.Vector3(-(o.x - c.x), o.y, o.z - c.z), new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), new THREE.Vector3(1, 1, 1)).invert();
+      at.set(gx, o.y + 0.3, gz).applyMatrix4(m);
+      const byCell = floors.models?.[o.model] ?? {};
+      const cells = (defs.get(o.model)?.cells ?? []).map((cell) => ({ index: cell.index, floor: byCell[String(cell.index)]?.floor }));
+      const room = roomOverhead(cells, at.x, at.y, at.z);
+      if (!room) continue;
+      const line = `${w}: ${row.kind} ${row.name}, ${o.model} room ${room}`;
+      (isPortKind(row.kind) ? ports : others).push(line);
+      // The place a passenger saved on the way there is kept at, read back: still that port's place.
+      if (row.name === 'Theed Starport') theedKept = portPlacedAt(portsOf(pois, c), { x: Number(gx.toFixed(2)), z: Number(gz.toFixed(2)) })?.name === 'Theed Starport';
+    }
+  }
+  if (!rows) note('no converted world carries a layout, a manifest, floors and its places, so no arrival is replayed: npm run swg -- snapshot @SWG all assets-private --radius=all --retail-only, then pois');
+  else {
+    const theed = 'naboo: starport Theed Starport, thm_nboo_thed_hangar room 5';
+    if (worlds.includes('naboo')) ok(ports.length === 1 && ports[0] === theed, `of ${rows} places (${atBuildings} of them at a portal building's origin), the one port whose arrival stands under its own building's floor is Theed Starport, under the royal hangar's deck (${ports.join('; ') || 'none'})`);
+    else ok(ports.length === 0, `no port on these worlds has its arrival under its own building's floor (${ports.join('; ') || 'none'})`);
+    if (worlds.includes('naboo')) ok(theedKept, "and the place a passenger saved on the way there is kept at is Theed Starport's own place, so the way back in stands them in the hangar too");
+    const temple = 'yavin4: landmark Great Masassi Temple, thm_yavn_great_massassi_temple room 10';
+    ok(others.every((e) => e === temple), `of the places that are not ports, only the Great Massassi Temple stands under a floor (its ceremony hall, 55 m up), and a map jump there is left on the ground as it always was (${others.join('; ') || 'none'})`);
+  }
+  // The game asks it at a port's place and nowhere else: the arrival, and the way back in to a place saved there.
+  const main = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+  ok(/if \(isPortKind\(poi\.kind\) && this\.standInPort\(\)\)/.test(main), 'an arrival is stood in its building only when it is at a port');
+  ok(/await this\.settle\(\);\s*(?:\/\/[^\n]*\n\s*)*if \(c\.pos && !planet\.space && \(await this\.atPortPlace\(\)\)\) this\.standInPort\(\);/.test(main), "and a character put back where it was saved is too, once its world is in, only at a port's place");
+  ok((main.match(/this\.standInPort\(\)/g) ?? []).length === 2 && (main.match(/this\.world\.roomOverAt\(/g) ?? []).length === 1, 'in those two places and through the one stand-in, which is the only caller of the world\'s');
 }
 
 // ---------------------------------------------------------------- the real worlds

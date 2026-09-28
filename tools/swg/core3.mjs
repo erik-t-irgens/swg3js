@@ -235,6 +235,34 @@ export function readRegions(scripts) {
   return out;
 }
 
+/**
+ * Each world's travel points as the server listed them (`managers/planet/planet_manager.lua`, a
+ * `planetTravelPoints` table under each world's own): the name its terminals showed, where on the
+ * ground it stands (the spot its shuttle lands, about 20 m from the port building's origin), its
+ * height, and whether a shuttle leaves the world from it (`starport`) and lands there from another
+ * (`incoming`). The names are the game's own -- `Theed Shuttle A`, `Keren Shuttleport South`,
+ * `Mos Espa Shuttleport East` -- and are what tells a town's shuttleports apart where the client's
+ * archives call them all the same thing. A row's `x, z, y` are ground, height, ground, as everywhere
+ * in these scripts, and the ground plane is the snapshot's own frame.
+ */
+export function readTravelPoints(scripts) {
+  const file = join(scripts, 'managers', 'planet', 'planet_manager.lua');
+  const out = new Map();
+  if (!existsSync(file)) return out;
+  const { values } = readLua(readFileSync(file, 'utf8'));
+  for (const [world, v] of values) {
+    const rows = v && typeof v === 'object' && !Array.isArray(v) ? v.planetTravelPoints : null;
+    if (!Array.isArray(rows)) continue;
+    const points = [];
+    for (const r of rows) {
+      if (!r || typeof r !== 'object' || typeof r.name !== 'string' || typeof r.x !== 'number' || typeof r.y !== 'number') continue;
+      points.push({ name: r.name, x: r.x, y: typeof r.z === 'number' ? r.z : 0, z: r.y, starport: r.interplanetaryTravelAllowed === 1, incoming: r.incomingTravelAllowed === 1 });
+    }
+    out.set(world, points);
+  }
+  return out;
+}
+
 /** One region's shape, in this game's own frame: x and z metres, with the size the shape needs. */
 function shapeOf(x, y, size) {
   if (!Array.isArray(size) || typeof size[0] !== 'number') return null;

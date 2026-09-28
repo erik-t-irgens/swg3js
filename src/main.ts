@@ -96,7 +96,7 @@ import { wildLife, NEST_MODEL_TUNE, WILD_TUNE, tuneTable } from './world/wildLif
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
-import { SHUTTLE_TUNE, fareText, landingOn, portAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
+import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { homes } from './net/homes.ts';
@@ -8525,6 +8525,10 @@ class App {
     this.inWorld = true;
     this.started = true;
     await this.settle();
+    // A character saved in the air on a shuttle trip to a port with no pad was kept at that port's place
+    // with the ground's height (`ShuttleRide.keepPlace`), and at Theed Starport that ground is under the
+    // royal hangar's deck: back at a port's own place, it is stood in as an arrival there is.
+    if (c.pos && !planet.space && (await this.atPortPlace())) this.standInPort();
     c.played = Date.now();
     upsertCharacter(c);
     this.savePlace(true);
@@ -8699,7 +8703,9 @@ class App {
       // A port with no pad has no height of its own: the ground there, where the world holds it; made
       // on the spot only when this is not a frame (the tab closing, the select screen); and otherwise
       // the place last written stands until a save that can say. Never the seated body's own height,
-      // which is the pad left behind or the sky, and would be a fall on the way back in.
+      // which is the pad left behind or the sky, and would be a fall on the way back in. Where a room's
+      // floor stands over that ground (Theed Starport's deck), the way back in stands the character in
+      // the building instead (`play`, `standInPort`), since the building may not be streamed in here.
       const y = Number.isFinite(kept.y) ? kept.y : (this.world.groundIfCached(kept.x, kept.z) ?? (now ? this.world.terrain.heightAt(kept.x, kept.z) : Number.NaN));
       if (!Number.isFinite(y)) return;
       at = this.keptAt.set(kept.x, y, kept.z);
@@ -9384,10 +9390,39 @@ class App {
     this.world.jumpTo(pos);
     this.physics.stepOnce();
     await this.settle();
+    // A port whose place lies under its own building's floor (Theed Starport: the royal hangar's origin
+    // is under its landing deck) is arrived at in that building's way in rather than on the ground
+    // beneath it. Only a port's place: a landmark is stood where it always was.
+    if (isPortKind(poi.kind) && this.standInPort()) this.spawn.copy(p.pos);
     this.savePlace(true);
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+  }
+
+  /**
+   * Stand the player, put down at a port's own place, in the way in of the building that place stands
+   * at, when one of its rooms' floors is over them and they are on none (`World.roomOverAt`): Theed
+   * Starport alone, whose place is the royal hangar's origin, under its landing deck. The caller has
+   * made sure it is a port's place. A ray finds nothing until the world has stepped since the building
+   * streamed in, so the world steps first, as a respawn's does. True when the player was moved.
+   */
+  private standInPort(): boolean {
+    const p = this.player;
+    this.physics.stepOnce();
+    const inside = this.world.roomOverAt(p.pos.x, p.pos.y, p.pos.z);
+    if (!inside) return false;
+    p.reset(inside);
+    this.physics.stepOnce();
+    return true;
+  }
+
+  /** Whether the player stands at one of this world's ports' own places (`portPlacedAt`), its places read (or waited for) first. */
+  private async atPortPlace(): Promise<boolean> {
+    const centre = this.world.layoutCenter;
+    if (!centre) return false;
+    const rows = await this.poisOf(packIdOf(this.world.planet, this.zone)).catch(() => [] as Poi[]);
+    return portPlacedAt(portsOf(rows, centre), this.player.pos) !== null;
   }
 
   /** The camera after everything has moved: chasing a ship in flight in its own frame, the cockpit, else orbiting the player. */

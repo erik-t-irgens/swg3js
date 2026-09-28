@@ -2,7 +2,8 @@
 
 What the converter reads from the [SWGEmu Core3](https://github.com/swgemu/Core3) server scripts
 (`MMOCoreORB/bin/scripts`, AGPL-3.0), kept here so that nobody converting their own Star Wars Galaxies
-install needs the emulator: where the travel terminals, ticket collectors and shuttles stood, the other
+install needs the emulator: where the travel terminals, ticket collectors and shuttles stood, what the
+server called each world's travel points, the other
 things the server stood on its buildings and the props its screenplays placed, what each deed makes and
 what it cost to keep, where the creatures and people stood, and each mobile's level, health and damage,
 the bodies a dress group is drawn from, the weapons a weapon group holds, and the Corellian corvette's

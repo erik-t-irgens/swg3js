@@ -4,7 +4,8 @@
 // the travel terminals, ticket collectors and shuttles a starport stands (`travel`), the other
 // children of a building and the props the screenplays put down (`fittings`, and the outdoor half in
 // `snapshot`), what a deed makes and what it costs (`deeds`), where the world's creatures and people
-// stood (`spawns`), and each mobile's health and damage (`mobiles`). They used to open the owner's own
+// stood (`spawns`), each mobile's health and damage (`mobiles`), and what the server called each travel
+// point, which names a town's second and third shuttleport apart (`pois`). They used to open the owner's own
 // Core3 checkout for them, which meant nobody else could have any of it: the launcher has no such
 // folder, and a player was never going to be asked to install an emulator to get a travel terminal.
 //
@@ -45,6 +46,7 @@ const OTHER = '*';
  */
 export const CORE3_READERS = {
   readTravelBuildings: { file: 'travel-buildings.json', read: (dir) => T.readTravelBuildings(dir) },
+  readTravelPoints: { file: 'travel-points.json', read: (dir) => C3.readTravelPoints(dir) },
   readFittingBuildings: { file: 'fitting-buildings.json', read: (dir) => F.readFittingBuildings(dir) },
   readServerProps: { file: 'server-props.json', zone: true, read: (dir, zone) => F.readServerProps(dir, zone) },
   readDeeds: { file: 'deeds.json', read: (dir) => D.readDeeds(dir) },

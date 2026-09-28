@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import {
   NAV_TUNE,
+  OVERHEAD_CLEAR,
   buildFloor,
   findCorridor,
   fitsAt,
@@ -22,6 +23,7 @@ import {
   insetPath,
   locate,
   pathIn,
+  roomOverhead,
   type FloorSource,
   type NavFloor,
 } from '../../../src/world/nav/navMesh.ts';
@@ -512,6 +514,46 @@ function fakeBuilding(cells: CellDef[], portals: PortalDef[], offsetX = 0): { bu
   ok(/this\.navAgent\.clear\(\)/.test(mobile), 'a creature that respawns drops the corners it was walking');
   ok(/m\.navCell = held\.cell;/.test(manager) && /m\.navCell = null;/.test(manager), "the manager writes the room the path is keyed on beside the room it already wrote, and clears it on open ground");
   ok((manager.match(/m\.navCell/g) ?? []).length === 3, 'in the three places it writes the room and nowhere else');
+}
+
+// --- 16: a room's floor over a body that stands on none ----------------------------------------------------
+{
+  // What an arrival at a port asks of the building its place stands at (`roomOverhead`), on Theed's own
+  // shape in the building's frame: the royal hangar's deck, cell 5, 8 m over the origin, and its foyer,
+  // cell 1, at 0.75 m well off to one side. The body stands 0.3 m over ground at 0.05 m, as a teleport
+  // stands it. Every floor is a square of 4 by 4 about the origin unless it says otherwise.
+  const shifted = (g: { v: number[]; t: number[] }, dx: number, dz: number) => ({ v: g.v.map((n, i) => (i % 3 === 0 ? n + dx : i % 3 === 2 ? n + dz : n)), t: g.t });
+  const square = (h: number) => shifted(gridFloor(4, 4, () => true, h), -2, -2);
+  const deck = { index: 5, floor: fileRecords(square(8)) };
+  const foyer = { index: 1, floor: shifted(gridFloor(1, 1, () => true, 0.75), -0.5, -9) };
+  const ground = 0.35;
+  ok(roomOverhead([foyer, deck], 0, ground, 0) === 5, "a body on the ground under a room's own floor is under that room: Theed's deck over the hangar's origin");
+  ok(roomOverhead([foyer, deck], 0, 8, 0) === 0 && roomOverhead([foyer, deck], 0, 8 - OVERHEAD_CLEAR, 0) === 0, 'a body on the deck, or on a step or a ramp just under it, stands on it and is under nothing');
+  ok(roomOverhead([foyer, deck], 0, 8 - OVERHEAD_CLEAR - 0.1, 0) === 5, 'and one a storey under it is under it');
+  ok(roomOverhead([foyer, deck], 0, ground, -8.5) === 0, 'a body on the foyer, which the deck does not reach, is under nothing');
+  ok(roomOverhead([foyer, deck], 5, ground, 5) === 0, 'and neither is a point no floor holds');
+  ok(roomOverhead([foyer, deck], 2, ground, 2) === 5 && roomOverhead([foyer, deck], 2.01, ground, 0) === 0, "a floor's edge holds the point, a hair past it does not");
+  // Every triangle is read, not only a floor's first: these two lie in the last two the converter wrote,
+  // the one under the square's diagonal and the one over it.
+  ok(roomOverhead([deck], 1.9, ground, 1.2) === 5 && roomOverhead([deck], 1.2, ground, 1.9) === 5, 'every triangle of the floor is read, the last two as well as the first');
+  ok(roomOverhead([{ index: 5, floor: square(8) }], 1.2, ground, 1.9) === 5, "and a floor written three numbers a triangle reads the same as the converter's ten");
+  // The shell is the world outside: its floor under the feet is not a room's, and never hides the room over it.
+  const shell = { index: 0, floor: shifted(gridFloor(8, 8, () => true, 0), -4, -4) };
+  ok(roomOverhead([shell, deck], 0, ground, 0) === 5, "the shell's own floor under the feet is the world outside, not a room the body stands in, and the deck over it still counts");
+  ok(roomOverhead([{ index: 0, floor: deck.floor }], 0, ground, 0) === 0, 'nor is the shell ever the room overhead, whatever floor it names');
+  // A room whose floor the body stands on answers nothing, whatever stands over it: a house of two storeys.
+  const hall = { index: 2, floor: square(0.13) };
+  ok(roomOverhead([deck, hall], 0, ground, 0) === 0, 'a body on a room at the ground with a storey over it stands in that room, and is moved out of nothing');
+  const cellar = { index: 3, floor: square(-26.6) };
+  ok(roomOverhead([cellar], 0, ground, 0) === 0, 'a floor under the feet (a hall 26 m underground) is nothing overhead');
+  ok(roomOverhead([cellar, deck], 0, ground, 0) === 5, 'and does not hide the one that is');
+  const roof = { index: 6, floor: square(20) };
+  ok(roomOverhead([roof, deck], 0, ground, 0) === 5 && roomOverhead([deck, roof], 0, ground, 0) === 5, 'of two floors overhead, the lowest, whichever is listed first');
+  ok(roomOverhead([{ index: 2 }], 0, ground, 0) === 0 && roomOverhead(undefined, 0, ground, 0) === 0 && roomOverhead([], 0, ground, 0) === 0, 'a building with no floors converted is under nothing anywhere, and so is one with no rooms');
+  ok(roomOverhead([{ index: 3, floor: { v: [0, 9, 0, 1, 9, 0, 0, 9, 1], t: [0, 1, 9] } }], 0.2, ground, 0.2) === 0, 'a floor naming a corner it has not got is passed over rather than read');
+  ok(roomOverhead([{ index: 3, floor: { v: [-1, 9, 0, 0, 9, 0, 1, 9, 0], t: [0, 1, 2] } }], 0, ground, 0) === 0 && roomOverhead([{ index: 3, floor: { v: [0, 9, 0, 0, 9, 0, 0, 9, 0], t: [0, 1, 2] } }], 0, ground, 0) === 0, 'a triangle with no area in plan holds nothing, along its line or at its point');
+  const wound = { index: 4, floor: { v: [-2, 8, -2, 2, 8, -2, 2, 8, 2], t: [2, 1, 0] } };
+  ok(roomOverhead([wound], 1, ground, -1) === 4 && roomOverhead([{ ...wound, floor: { ...wound.floor, t: [0, 1, 2] } }], 1, ground, -1) === 4, 'whichever way a triangle is wound');
 }
 
 console.log(`\n${checks} checks passed`);

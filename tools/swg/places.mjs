@@ -255,6 +255,143 @@ export function frameCheck(rows, points) {
 }
 
 /**
+ * The buildings a shuttle leaves from whose template says neither `starport` nor `shuttleport`, with
+ * the kind of port each is. There is one: Theed's royal hangar, the city's starport, whose transports
+ * land inside it. Measured over the Core3 reference's travel buildings, it and a rebel camp's lone
+ * shuttle (a camp, not a port) are the only two templates that carry a terminal, a collector or a
+ * shuttle without either word in their name, and the server's own list of Naboo's travel points
+ * makes the hangar a place a shuttle leaves the world from. Both spellings are here because the
+ * snapshot names a building by its shared template and the server's scripts by its own.
+ */
+export const PORT_BUILDINGS = new Map([
+  ['object/building/naboo/shared_hangar_naboo_theed.iff', 'starport'],
+  ['object/building/naboo/hangar_naboo_theed.iff', 'starport'],
+]);
+
+/**
+ * Which kind of port a placed object is, by its template: `starport`, `shuttleport` or null. A named
+ * building of `PORT_BUILDINGS` is what that says; otherwise the template's own name, and only under
+ * `object/building/`. The name test alone once took a starport *sign* for a starport: one stands 85 m
+ * from Mos Entha's starport, came first in the snapshot and so took the port's row onto the sign,
+ * and every sign of the kind in a town is a `static` object and never a building.
+ */
+export function portKindOf(template) {
+  const t = String(template ?? '');
+  const named = PORT_BUILDINGS.get(t);
+  if (named) return named;
+  if (!t.startsWith('object/building/')) return null;
+  return t.includes('starport') ? 'starport' : t.includes('shuttleport') ? 'shuttleport' : null;
+}
+
+/**
+ * How near one of the server's own travel points must be to a port building to lend it its name,
+ * metres. Measured over the sixteen port buildings that share their label with another on the ten
+ * worlds the emulator covers: each one's own point is 20 to 24 m from its origin (the spot its shuttle
+ * lands), and the nearest point of the same kind that is another port's is 250 m off. Ours.
+ */
+export const SERVER_POINT_NEAR_M = 60;
+
+/** The letter a port takes when nothing names it apart from its neighbours: A, B, C, ... then 27, 28. */
+function portLetter(n) {
+  return n < 26 ? String.fromCharCode(65 + n) : String(n + 1);
+}
+
+/**
+ * Names for the ports a world's snapshot places, one each, never two alike.
+ *
+ * `found` is every port building in the order the scan met it, `{ x, z, kind, label }` with `label`
+ * what `portLabel` calls it; `points` is the server's own travel points on that world, `{ name, x, z,
+ * starport }` in the snapshot's frame (the Core3 reference's `readTravelPoints`); `taken` is the keys
+ * (`placeKey`) of the names the place list already holds, which no port may take.
+ *
+ * A port whose label is its own keeps it, so a name is exactly what it always was. Where two or three
+ * ports share a label -- a town with more than one shuttleport, which Coronet, Tyrena, Bela Vistal,
+ * Theed, Keren, Mos Entha and Mos Espa all have -- the whole group is named the way the game named
+ * them, by the server's own travel point of the same kind standing nearest each (`Theed Shuttle A`,
+ * `Keren Shuttleport South`, `Mos Espa Shuttleport East`), and one the server names nothing near is
+ * given the label and a letter (`Theed Shuttleport B`), which is ours. Before this the second and third
+ * of a label were dropped, and their terminals belonged to no port or to the wrong one.
+ *
+ * Returns the names in `found`'s order and how many came from the server and how many were lettered.
+ */
+export function namePorts(found, points = [], taken = new Set(), near = SERVER_POINT_NEAR_M) {
+  const names = found.map(() => null);
+  const used = new Set(taken);
+  const groups = new Map();
+  found.forEach((p, i) => {
+    const k = placeKey(p.label);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(i);
+  });
+  // The ports whose label is theirs alone, first, so no group can take a name one of them carries.
+  for (const [k, idx] of groups) {
+    if (idx.length !== 1 || used.has(k)) continue;
+    names[idx[0]] = found[idx[0]].label;
+    used.add(k);
+  }
+  let fromServer = 0;
+  let lettered = 0;
+  for (const idx of groups.values()) {
+    if (names[idx[0]] !== null) continue;
+    // Each point to the nearest port of its own kind, the nearest pairs first, so a point stands for
+    // one port and a port takes one point.
+    const pairs = [];
+    for (const i of idx) {
+      for (let j = 0; j < points.length; j++) {
+        const q = points[j];
+        if (!q || typeof q.name !== 'string' || !q.name.trim() || !!q.starport !== (found[i].kind === 'starport')) continue;
+        const d = Math.hypot(q.x - found[i].x, q.z - found[i].z);
+        if (d <= near) pairs.push({ i, j, d });
+      }
+    }
+    pairs.sort((a, b) => a.d - b.d || a.i - b.i || a.j - b.j);
+    const pointTaken = new Set();
+    for (const { i, j } of pairs) {
+      if (names[i] !== null || pointTaken.has(j)) continue;
+      const name = points[j].name.trim();
+      if (used.has(placeKey(name))) continue;
+      names[i] = name;
+      used.add(placeKey(name));
+      pointTaken.add(j);
+      fromServer++;
+    }
+    let n = 0;
+    for (const i of idx) {
+      if (names[i] !== null) continue;
+      let name;
+      do name = `${found[i].label} ${portLetter(n++)}`;
+      while (used.has(placeKey(name)));
+      names[i] = name;
+      used.add(placeKey(name));
+      lettered++;
+    }
+  }
+  return { names, fromServer, lettered };
+}
+
+/** How far from its building a port's row may stand and still be that building's: the scan writes it at the origin. */
+export const PORT_ROW_M = 1;
+
+/**
+ * The port buildings a world's layout places that have no row of their own kind in its place list
+ * (`rows`, a `pois.json`'s list), each `{ template, x, z, kind }`: what `status` asks `pois` again for.
+ * A pack written before `portKindOf` has none for Theed's hangar, none for the second and third
+ * shuttleport of a town, and Mos Entha's starport row on a sign 85 m from the building.
+ */
+export function portsWithoutRow(objects, rows) {
+  const ports = (rows ?? []).filter((r) => r && (r.kind === 'starport' || r.kind === 'shuttleport'));
+  const out = [];
+  for (const o of objects ?? []) {
+    if (!o || o.contained) continue;
+    const kind = portKindOf(o.template);
+    if (!kind) continue;
+    if (ports.some((r) => r.kind === kind && Math.hypot(r.x - o.x, r.z - o.z) <= PORT_ROW_M)) continue;
+    out.push({ template: o.template, x: o.x, z: o.z, kind });
+  }
+  return out;
+}
+
+/**
  * What to call a port: the city it stands in (the smallest whose reach, or 300 m, holds it), else
  * the client's own name for the nearest named place within `PORT_NEAR_M`, else its coordinates. The
  * second branch is what gives the tree world's own port a name at last; it is ours, and it can only

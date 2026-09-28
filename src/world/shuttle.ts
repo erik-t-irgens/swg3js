@@ -161,6 +161,27 @@ export function landingOn<T extends PoiRow>(pois: readonly T[]): T | null {
   return pois.find((p) => p.kind === 'starport') ?? pois.find((p) => p.kind === 'shuttleport') ?? null;
 }
 
+/**
+ * Whether an arrival at a place of the map is an arrival at a port: only a port's place is ever stood
+ * inside the building it stands at (`roomOverhead`, `World.roomOverAt`). A landmark whose building has
+ * a floor over its origin (Yavin 4's Great Massassi Temple) is stood where it always was.
+ */
+export function isPortKind(kind: string): kind is Port['kind'] {
+  return kind === 'starport' || kind === 'shuttleport';
+}
+
+/**
+ * The port whose own place a point is, to within a metre each way, or null: a place written down to
+ * the centimetre and read back, which is how a character saved on a shuttle trip to a port with no pad
+ * comes back (`ShuttleRide.keepPlace` keeps it at that port's place with only the ground under it to
+ * say how high), and how the arrival that puts it back knows it is a port's place it stands at. The
+ * metre is the one `LayoutStreamer.buildingPlacedAt` finds the building at that place by.
+ */
+export function portPlacedAt(ports: readonly Port[], at: { x: number; z: number }): Port | null {
+  for (const p of ports) if (Math.abs(p.x - at.x) < 1 && Math.abs(p.z - at.z) < 1) return p;
+  return null;
+}
+
 /** What the fare reads as on the panel: the game's own number with its thousands marked. */
 export function fareText(price: number): string {
   if (!Number.isFinite(price) || price <= 0) return 'free';

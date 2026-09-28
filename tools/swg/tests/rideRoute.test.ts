@@ -21,7 +21,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
 import { loadGlb, packRigs } from './rigFixtures.ts';
-import { GALAXY_SYSTEMS, destinationFor, routeFactsOf, systemOf } from '../../../src/data/galaxy.ts';
+import { GALAXY_SYSTEMS, destinationFor, planetOfRouteId, routeFactsOf, systemOf } from '../../../src/data/galaxy.ts';
 import { PLANETS } from '../../../src/data/planets.ts';
 import { JUMP_COUNTDOWN, enterSpeed, sceneOf, toGame, transitAt } from '../../../src/space/hyperspaceMath.ts';
 import { HyperspaceCatalogue, arrivalAt, destinationsOf, landmarksOf, type Destination, type SpacePack } from '../../../src/space/spaceData.ts';
@@ -30,7 +30,8 @@ import { PORT_REACH, SPACE_LATER, discDirection, downArrival, farPadsOf, landMoo
 import { landingTarget, makeLandingTarget } from '../../../src/world/rigPath.ts';
 import { RIDE_PILOT } from '../../../src/world/shuttleCourse.ts';
 import { RIDE_TUNE, downGlideOf } from '../../../src/world/shuttleRide.ts';
-import { portsOf, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
+import { portsOf, ridesFrom, type FareTable, type Port, type PoiRow } from '../../../src/world/shuttle.ts';
+import { PORT_ROW_M, portKindOf } from '../places.mjs';
 import { TRAVEL_TUNE, rigTimes, travelThingsOf, type Ticket, type TravelRig, type TravelRow, type TravelThing } from '../../../src/world/travelTerminal.ts';
 
 let passed = 0;
@@ -127,6 +128,23 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   ok(JSON.stringify(structuredClone(route)) === JSON.stringify(route), 'and a trip is plain data');
   ok(landMood(rig, from) === 'calm' && landMood(rigs.shuttle, to!) === '' && landMood({ moods: { theed: rig.moods.calm, calm: rig.moods.calm } }, { mood: 'theed' }) === 'calm', 'a hull lands with its calm branch where its rig has one, and its own otherwise');
   ok(landingMood(rigs.shuttle.moods, '') === landMood(rigs.shuttle, { mood: '' }) && landingMood(rig.moods, 'calm') === landMood(rig, { mood: 'calm' }), "and the hull's own rule is that same one");
+}
+
+// ---------------------------------------------------------------- a shuttle standing in a room is not a pad to land at
+
+{
+  // Theed's shape: the starport is the royal hangar, and its transport parks on the deck, its cell 5, a
+  // room. A hull a trip lands with comes down on the calm branch, made for an open pad, so a trip there
+  // is set down at the port; and a shuttle out in the open a little further off is still not taken for
+  // the port's own, since it is past the reach a thing belongs to a port by.
+  const ports: Port[] = [{ name: 'Theed Starport', x: 0, z: 0, kind: 'starport' }];
+  const inside = thing({ cell: 5, bx: 0, bz: 0, x: 0, z: 0 });
+  const rigs = { transport: rig };
+  ok(padOfPort([inside], ports, 'Theed Starport', 'naboo', rigs) === null, 'a port whose only rigged shuttle stands in a room has no pad to land at');
+  ok(padOfPort([inside, thing({ bx: PORT_REACH + 1, bz: 0 })], ports, 'Theed Starport', 'naboo', rigs) === null, 'nor does one out in the open past the reach become its pad');
+  const open = padOfPort([inside, thing({ bx: 30, bz: 0, x: 40, z: 0 })], ports, 'Theed Starport', 'naboo', rigs);
+  ok(!!open && open.index === 1 && open.cell === 0, 'while a rigged shuttle in the open beside it is, the one in the room passed over');
+  ok(padRefOf('naboo', 0, inside, ports, rigs).port === 'Theed Starport', 'and the shuttle in the room still belongs to its port, so the trips out of it are its port\'s');
 }
 
 // ---------------------------------------------------------------- a ticket to another world
@@ -227,8 +245,10 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
 // ---------------------------------------------------------------- every port's pad, over the real packs
 
 {
-  // Six of the game's ports have no shuttle standing on a rig by them, and a ticket there is flown as far
-  // as the take-off and set down at the port; every other port a ticket can name has a pad to land on.
+  // Seven of the game's ports have no shuttle standing on a rig by them out in the open, and a ticket there
+  // is flown as far as the take-off and set down at the port: six with no shuttle at all (Dathomir's two
+  // dead starports, Restuss's two, Talus's lone shuttleport and Kachirho), and Theed Starport, whose
+  // transport parks in the royal hangar's room. Every other port a ticket can name has a pad to land on.
   const packs = join(process.cwd(), 'assets-private');
   const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => !w.startsWith('space_') && existsSync(join(packs, w, 'travel.json')) && existsSync(join(packs, w, 'pois.json'))) : [];
   const none: string[] = [];
@@ -253,8 +273,77 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   }
   if (!answered) note('no converted world carries rigged shuttle pads, so the ports are not checked: npm run swg -- travel @SWG assets-private --retail-only');
   else {
-    ok(none.length === 6, `six ports have no rigged shuttle to land on (${none.join('; ')})`);
+    ok(none.length === 7 && none.includes('naboo: Theed Starport'), `seven ports have no rigged shuttle in the open to land on, Theed Starport among them (${none.join('; ')})`);
     ok(answered > 40, `and every other one of ${answered + none.length} has its pad (${answered}, ${calm} of them flown to by a transport's calm landing)`);
+  }
+}
+
+// ---------------------------------------------------------------- every travel building's own port, over the real packs
+
+{
+  // Every port building has its own row at its own origin (`portKindOf`, `namePorts`), so every terminal,
+  // collector and shuttle joins the port of the building it stands in and no other: before, the second
+  // and third shuttleport of a town had no row, their terminals named no port, and two of Mos Espa's
+  // joined the starport down the street, offering other worlds from a shuttleport. And Theed's royal
+  // hangar, whose template says neither word, is Theed Starport.
+  const packs = join(process.cwd(), 'assets-private');
+  const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => !w.startsWith('space_') && existsSync(join(packs, w, 'travel.json')) && existsSync(join(packs, w, 'pois.json'))) : [];
+  const galaxyFile = join(packs, 'galaxy.json');
+  const fares = existsSync(galaxyFile) ? (JSON.parse(readFileSync(galaxyFile, 'utf8')) as FareTable) : null;
+  let buildings = 0;
+  let joined = 0;
+  const wrong: string[] = [];
+  const twice: string[] = [];
+  const transports: string[] = [];
+  let theedRides: ReturnType<typeof ridesFrom> | null = null;
+  let nabooLists = 0;
+  let nabooPorts = 0;
+  for (const world of worlds) {
+    const travel = JSON.parse(readFileSync(join(packs, world, 'travel.json'), 'utf8')) as { rows?: TravelRow[] };
+    const pois = JSON.parse(readFileSync(join(packs, world, 'pois.json'), 'utf8')) as { center?: { x: number; z: number }; pois?: PoiRow[] };
+    if (!pois.center || !Array.isArray(travel.rows)) continue;
+    const ports = portsOf(pois.pois ?? [], pois.center);
+    const names = new Set<string>();
+    for (const p of ports) {
+      if (names.has(p.name)) twice.push(`${world}: ${p.name}`);
+      names.add(p.name);
+    }
+    const all = travelThingsOf(travel.rows, pois.center);
+    const seen = new Set<string>();
+    for (const t of all) {
+      const key = `${t.bx},${t.bz}`;
+      const kind = portKindOf(t.building);
+      if (!seen.has(key)) {
+        seen.add(key);
+        buildings++;
+      }
+      const port = portOfThing(ports, t);
+      // A thing of a building that is no port (a camp's lone shuttle) is not held to a row.
+      if (!kind) continue;
+      if (!port || Math.hypot(port.x - t.bx, port.z - t.bz) > PORT_ROW_M || port.kind !== kind) wrong.push(`${world}: a ${t.kind} of ${t.building.split('/').pop()} at ${Math.round(t.bx)},${Math.round(t.bz)} joins ${port ? `${port.name} (${port.kind}, ${Math.round(Math.hypot(port.x - t.bx, port.z - t.bz))} m)` : 'no port'}`);
+      else joined++;
+      if (t.kind === 'shuttle' && t.rig === 'transport' && port?.kind !== 'starport') transports.push(`${world}: ${t.building.split('/').pop()}`);
+    }
+    if (world === 'naboo' && fares) {
+      const theedPort = ports.find((p) => p.name === 'Theed Starport');
+      const label = (id: string) => planetOfRouteId(id)?.name ?? null;
+      if (theedPort) theedRides = ridesFrom(theedPort, ports, world, fares, label);
+      for (const p of ports) {
+        if (p.name === 'Theed Starport') continue;
+        nabooPorts++;
+        if (ridesFrom(p, ports, world, fares, label).some((r) => r.kind === 'local' && r.name === 'Theed Starport')) nabooLists++;
+      }
+    }
+  }
+  if (!buildings) note('no converted world carries both a travel.json and a pois.json, so the ports are not checked against their buildings');
+  else {
+    ok(wrong.length === 0, `every one of ${joined} travel things over ${buildings} buildings joins the row of its own building, of its own kind, within ${PORT_ROW_M} m${wrong.length ? `; not: ${wrong.slice(0, 6).join('; ')}` : ''}`);
+    ok(twice.length === 0, `no world names two ports alike${twice.length ? `: ${twice.join('; ')}` : ''}`);
+    ok(transports.length === 0, `every building a transport stands on is a starport${transports.length ? `; not: ${transports.join('; ')}` : ''}`);
+    if (worlds.includes('naboo') && fares) {
+      ok(!!theedRides && theedRides.some((r) => r.kind === 'world') && theedRides.some((r) => r.kind === 'local'), `Theed Starport, the royal hangar, is a port: its terminals offer ${theedRides?.filter((r) => r.kind === 'local').length ?? 0} places on Naboo and ${theedRides?.filter((r) => r.kind === 'world').length ?? 0} other worlds`);
+      ok(nabooPorts > 0 && nabooLists === nabooPorts, `and every other one of Naboo's ${nabooPorts} ports lists it`);
+    } else note("no galaxy.json or no naboo pack, so Theed Starport's trips are not checked: npm run swg -- maps @SWG assets-private --retail-only");
   }
 }
 

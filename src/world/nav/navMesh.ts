@@ -419,6 +419,58 @@ export function locate(floor: NavFloor, x: number, y: number, z: number, yTol: n
   return best;
 }
 
+/**
+ * How far above or below a body's feet a room's floor may lie and still be the floor it stands on, in
+ * metres, for `roomOverhead`: a floor higher than this over the feet is one the body stands under.
+ * INVENTED: a step, a ramp and a pavement laid a little off the ground are well inside it, a storey
+ * is well outside it.
+ */
+export const OVERHEAD_CLEAR = 2;
+
+/**
+ * The room of a building one of whose rooms' own floors stands over a point, where the point is on
+ * none of them: some room's floor holds the point in plan more than `clear` above `y`, and no room's
+ * floor holds it within `clear` of `y`. The room of the lowest such floor, or 0. Everything is in the
+ * building's own model frame, as the cells' floors are.
+ *
+ * It is what an arrival at a port asks of the building that port's place stands at. A port's place
+ * is its building's origin, which is open ground on every port but one: Theed Starport is the royal
+ * hangar, whose origin lies under its landing deck (cell 5, 7.94 m up), so a body stood on the ground
+ * there stands under the floor with no way out. A body already on a room's floor is left where it is
+ * (a building whose rooms stand at ground level, or somebody on the deck itself); a floor below the
+ * feet (a basement, a cellar under open ground) is nothing overhead; the shell, cell 0, is the world
+ * outside and never a room; a cell whose floor this cannot read is passed over, so a pack converted
+ * before the floors answers 0 everywhere. Each floor is read afresh: it is asked once an arrival.
+ */
+export function roomOverhead(cells: readonly { index: number; floor?: FloorSource | null }[] | null | undefined, x: number, y: number, z: number, clear: number = OVERHEAD_CLEAR): number {
+  let room = 0;
+  let lowest = Infinity;
+  for (const cell of cells ?? []) {
+    if (!(cell.index > 0) || !cell.floor) continue;
+    const floor = buildFloor(cell.floor);
+    if (!floor || x < floor.min[0] || x > floor.max[0] || z < floor.min[2] || z > floor.max[2]) continue;
+    const v = floor.verts;
+    const boxes = floor.boxes;
+    for (let t = 0; t < floor.count; t++) {
+      if (x < boxes[t * 4] || x > boxes[t * 4 + 2] || z < boxes[t * 4 + 1] || z > boxes[t * 4 + 3]) continue;
+      // A triangle with no area in plan stands on its edge: it has no one height at a point, and
+      // `inTriangle` would take the point for inside it wherever the line it lies along passes.
+      const a = floor.tris[t * 3] * 3;
+      const b = floor.tris[t * 3 + 1] * 3;
+      const c = floor.tris[t * 3 + 2] * 3;
+      if (Math.abs((v[b] - v[a]) * (v[c + 2] - v[a + 2]) - (v[c] - v[a]) * (v[b + 2] - v[a + 2])) < 1e-9) continue;
+      if (!inTriangle(floor, t, x, z)) continue;
+      const h = heightIn(floor, t, x, z);
+      if (Math.abs(h - y) <= clear) return 0;
+      if (h > y + clear && h < lowest) {
+        lowest = h;
+        room = cell.index;
+      }
+    }
+  }
+  return room;
+}
+
 // --- the search -------------------------------------------------------------------------------
 
 /** Pushes one triangle, or answers false when the open list is full: see the heap's own comment. */
