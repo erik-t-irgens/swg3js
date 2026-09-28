@@ -10,6 +10,7 @@ import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef } from '.
 import { CHUNK_SIZE } from './terrain';
 import type { Exclusion } from './props';
 import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
+import { INTERIOR_LEAD, PORTAL_RANGE, interiorBuildRange, markNarrowRoot } from './portalVis.ts';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
 import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces';
 import { marks } from './marks.ts';
@@ -33,12 +34,14 @@ export function nearTierRange(): number {
 }
 const UNLOAD_SLACK = 1.15;
 /**
- * Interiors exist only this far from the building's edge. The portal renderer draws a room
- * only through a doorway within PORTAL_RANGE (120 m) that is actually on screen, so anything
- * past this is scene-graph weight that can never be seen. Dropped a little farther out than
- * it is built so walking a threshold does not build and drop it every frame.
+ * Interiors exist only this far from the building's edge (160 m). The portal renderer draws a room
+ * only through a doorway within its range (120 m, farther for a big door: `interiorRange`) that
+ * is actually on screen, so anything past this is scene-graph weight that can never be seen; the
+ * 40 m between the two (`INTERIOR_LEAD`) is the walk the rooms' programs have to compile in before
+ * a door can show them. Dropped a little farther out than it is built so walking a threshold does
+ * not build and drop it every frame.
  */
-const INTERIOR_RANGE = 160;
+const INTERIOR_RANGE = PORTAL_RANGE + INTERIOR_LEAD;
 const INTERIOR_DROP = 220;
 const COLLIDER_RANGE = 170;
 const COLLIDER_MIN_RADIUS = 1.5;
@@ -170,6 +173,11 @@ export interface Building {
    * is the bulk of its geometry and is never visible from across the valley.
    */
   interior: THREE.Mesh[];
+  /**
+   * The room each of `interior`'s meshes belongs to, index for index, so the portal renderer can show
+   * only the rooms the frame's visible set reached. Absent until the interior is built.
+   */
+  interiorCell?: Int16Array;
   /** Whether `interior` is currently built, so the sweep can tell "not yet" from "has none". */
   interiorBuilt: boolean;
   /**
@@ -901,7 +909,7 @@ export class LayoutStreamer {
       for (const o of objects) if (this.huge.has(o) && !this.colliders.has(o)) this.queueHuge(o);
       // A region that arrives already under the player's nose needs its interiors now.
       for (const b of loaded.buildings) {
-        if (Math.hypot(b.x - this.lastInteriorX, b.z - this.lastInteriorZ) - b.radius <= INTERIOR_RANGE) this.buildInterior(b);
+        if (Math.hypot(b.x - this.lastInteriorX, b.z - this.lastInteriorZ) - b.radius <= this.interiorRange(b)) this.buildInterior(b);
       }
       // Models that finished loading after the last collider pass get their collision next update.
       this.lastColliderX = Number.NaN;
@@ -994,6 +1002,9 @@ export class LayoutStreamer {
         mesh.receiveShadow = true;
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
+        // The mesh stands at the scene's origin with its copies' places in its instances, so its own
+        // sphere is its sphere in the world: the world pass from inside may leave it out when it misses the exits.
+        if (mesh.boundingSphere) markNarrowRoot(mesh, mesh.boundingSphere);
         // Hidden until its programs exist (loadTier shows it); with no `prepare` set it is shown at once, as it always was.
         if (this.prepare) mesh.visible = false;
         this.scene.add(mesh);
@@ -1081,6 +1092,7 @@ export class LayoutStreamer {
       mesh.receiveShadow = true;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.computeBoundingSphere();
+      if (mesh.boundingSphere) markNarrowRoot(mesh, mesh.boundingSphere);
       if (this.prepare) mesh.visible = false;
       this.scene.add(mesh);
       rec.meshes.push(mesh);
@@ -1097,7 +1109,7 @@ export class LayoutStreamer {
     }
     // A house is put down where somebody is standing, so its rooms are wanted now rather than at the
     // next sweep. NaN before the first sweep, which fails the test and leaves it to the sweep.
-    if (building && Math.hypot(building.x - this.lastInteriorX, building.z - this.lastInteriorZ) - building.radius <= INTERIOR_RANGE) this.buildInterior(building);
+    if (building && Math.hypot(building.x - this.lastInteriorX, building.z - this.lastInteriorZ) - building.radius <= this.interiorRange(building)) this.buildInterior(building);
     this.lastColliderX = Number.NaN;
     return building;
   }
@@ -1145,8 +1157,10 @@ export class LayoutStreamer {
     b.interiorBuilt = true;
     if (!b.model.portals.length) return;
     const made: THREE.Mesh[] = [];
+    const cells: number[] = [];
     for (const prim of b.model.primitives) {
       if (prim.cell <= 0) continue;
+      cells.push(prim.cell);
       const mesh = new THREE.Mesh(prim.geometry, prim.material);
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(b.matrix);
@@ -1159,6 +1173,7 @@ export class LayoutStreamer {
       b.interior.push(mesh);
       made.push(mesh);
     }
+    b.interiorCell = Int16Array.from(cells);
     if (!made.length) return;
     // Into the scene now, hidden, as they always have been: the portal renderer writes `visible`
     // itself for the cells it draws.
@@ -1186,7 +1201,18 @@ export class LayoutStreamer {
     if (!b.interiorBuilt) return;
     for (const mesh of b.interior) this.scene.remove(mesh);
     b.interior.length = 0;
+    b.interiorCell = undefined;
     b.interiorBuilt = false;
+  }
+
+  /**
+   * How far from its edge a building's rooms are built: `INTERIOR_RANGE`, or farther for a building
+   * whose widest door is drawn from farther away (the door range grows with a door's size, and a big
+   * door drawn from 300 m with no rooms built behind it would show nothing through it). Either way
+   * `INTERIOR_LEAD` past the door's own range, so the rooms and their programs are there first.
+   */
+  private interiorRange(b: Building): number {
+    return interiorBuildRange(b);
   }
 
   /**
@@ -1202,8 +1228,9 @@ export class LayoutStreamer {
         continue;
       }
       const edge = Math.hypot(b.x - px, b.z - pz) - b.radius;
-      if (edge <= INTERIOR_RANGE) this.buildInterior(b);
-      else if (edge > INTERIOR_DROP) this.dropInterior(b);
+      const range = this.interiorRange(b);
+      if (edge <= range) this.buildInterior(b);
+      else if (edge > range + INTERIOR_DROP - INTERIOR_RANGE) this.dropInterior(b);
     }
   }
 

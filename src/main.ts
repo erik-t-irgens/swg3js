@@ -9,6 +9,7 @@ import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
 import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
 import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
+import { NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
 import { Input, type Action } from './core/input';
 import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
@@ -357,6 +358,16 @@ const CAMERA_REST_PITCH = 0.32;
 const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true, promptHz: 8, nearbyHz: 4, hurtRange: 400 };
 
 /** What `__debug.perf()` takes; see `App.perfDebug` and the README's Debugging section. */
+/** `__debug.cull(o)`: the portal renderer's visible set. */
+interface CullDebugOptions {
+  /** 'cells' (or true) outlines the seen rooms' and the exits' rectangles on the overlay; false or null stops. */
+  show?: 'cells' | boolean | null;
+  /** 'all' draws everything as before; 'rooms' lets the cuts apply. */
+  mode?: 'all' | 'rooms';
+  /** Any of `PORTAL_CULL`'s numbers and switches, live. */
+  tune?: Partial<PortalCullTune>;
+}
+
 interface PerfDebugOptions {
   /** The report's window in frames of play (the ring is made long enough at once), or an A/B run's length. */
   frames?: number;
@@ -1047,6 +1058,12 @@ class App {
     // strays' knob is deliberately not a switch: keeping them builds programs on a live frame.)
     perf.attach(this.renderer.getContext() as WebGL2RenderingContext);
     registerPerfSwitch('passMatrices', { get: () => this.portals.matrixOnce, set: (v) => (this.portals.matrixOnce = !!v), values: [false, true], note: 'false walks the scene matrices every pass (the old way), true once a frame' });
+    // Step 1, drawing only what can be seen through the portals: the whole of it, and each cut apart.
+    registerPerfSwitch('insideCull', { get: () => PORTAL_CULL.mode, set: (v) => (PORTAL_CULL.mode = v === 'all' ? 'all' : 'rooms'), values: ['all', 'rooms'], note: "'all' draws every room, the world and its shadows as before; 'rooms' lets the four cuts below apply" });
+    registerPerfSwitch('insideSkip', { get: () => PORTAL_CULL.insideSkip, set: (v) => (PORTAL_CULL.insideSkip = !!v), values: [false, true], note: 'inside with no exit reachable: no world pass, no shadow pass, no weather' });
+    registerPerfSwitch('seenRooms', { get: () => PORTAL_CULL.seenRooms, set: (v) => (PORTAL_CULL.seenRooms = !!v), values: [false, true], note: 'only the rooms the portal flood reached are drawn, inside and through doors' });
+    registerPerfSwitch('exitNarrow', { get: () => PORTAL_CULL.exitNarrow, set: (v) => (PORTAL_CULL.exitNarrow = !!v), values: [false, true], note: "inside, the world pass leaves out ground and placed objects outside the exits' rectangle" });
+    registerPerfSwitch('doorRange', { get: () => PORTAL_CULL.doorRange, set: (v) => (PORTAL_CULL.doorRange = !!v), values: [false, true], note: "a door is drawn from farther the bigger it is (the old fixed 120 m when off)" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -2747,6 +2764,15 @@ class App {
        * switches; `{ off: true }` stops the timing.
        */
       perf: (o?: PerfDebugOptions) => this.perfDebug(o),
+      /**
+       * The frame's visible set, the portal renderer's cut (step 1): the camera's building and room,
+       * whether the world is seen from inside and through how much of the screen, each drawn
+       * building's seen rooms and the rooms one beyond them, the flood's visits and whether it gave
+       * up, and what the last frame skipped and narrowed. `{ show: 'cells' }` outlines the seen rooms'
+       * rectangles (and the exits' in amber) on the overlay, `{ show: false }` stops; `{ mode: 'all' }`
+       * draws everything as before; `{ tune: { padPx: 4 } }` moves any number live.
+       */
+      cull: (o?: CullDebugOptions) => this.cullDebug(o),
       /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
       postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
         const fx = this.postfx;
@@ -7815,6 +7841,7 @@ class App {
     this.hud.draw();
     this.shipHud.draw();
     this.feedback.draw();
+    if (this.cullShow) this.drawCullRects(o);
     o.end();
   }
 
@@ -10609,6 +10636,96 @@ class App {
     f.resolve(r);
   }
 
+  /** Whether the overlay outlines the visible set's rectangles (`__debug.cull({ show: 'cells' })`). */
+  private cullShow = false;
+  private readonly cullPts = new Float32Array(8);
+  private readonly cullRect = new Float64Array(4);
+
+  /** `__debug.cull()`: see the helper's own comment. */
+  private cullDebug(o: CullDebugOptions = {}): unknown {
+    if (o.show !== undefined) this.cullShow = o.show === 'cells' || o.show === true;
+    if (o.mode === 'all' || o.mode === 'rooms') PORTAL_CULL.mode = o.mode;
+    if (o.tune) {
+      const T = PORTAL_CULL as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(o.tune)) if (k in T && typeof v === typeof T[k] && (typeof v !== 'number' || Number.isFinite(v))) T[k] = v;
+    }
+    const vis = this.portals.vis;
+    const res = vis.result;
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const round = (v: number) => Math.round(v * 10) / 10;
+    const rectPx = (r: ArrayLike<number>) => {
+      const x0 = Math.max(-1, r[0]);
+      const y0 = Math.max(-1, r[1]);
+      const x1 = Math.min(1, r[2]);
+      const y1 = Math.min(1, r[3]);
+      if (!(x1 > x0 && y1 > y0)) return { x: 0, y: 0, w: 0, h: 0, share: 0 };
+      return { x: round(((x0 + 1) / 2) * size.x), y: round(((1 - y1) / 2) * size.y), w: round(((x1 - x0) / 2) * size.x), h: round(((y1 - y0) / 2) * size.y), share: round(((x1 - x0) * (y1 - y0) * 100) / 4) };
+    };
+    const buildings = (res.drawn.slice(0, res.drawnCount) as VisBuilding[]).map((b) => {
+      const d = vis.describe(b);
+      return { model: b.model.def.id ?? '?', at: [Math.round(b.x), Math.round(b.z)], ...(d ?? {}) };
+    });
+    const log = this.portals.passLog;
+    const byLabel: Record<string, { passes: number; calls: number }> = {};
+    for (const p of log) {
+      const e = (byLabel[p.label] ??= { passes: 0, calls: 0 });
+      e.passes++;
+      e.calls += p.calls;
+    }
+    return {
+      on: PORTAL_CULL.on,
+      mode: PORTAL_CULL.mode,
+      switches: { insideSkip: PORTAL_CULL.insideSkip, seenRooms: PORTAL_CULL.seenRooms, exitNarrow: PORTAL_CULL.exitNarrow, doorRange: PORTAL_CULL.doorRange },
+      tune: { ...PORTAL_CULL },
+      valid: res.valid,
+      camera: { building: res.inside?.model.def.id ?? null, cell: res.cell },
+      worldSeen: res.worldSeen,
+      exitRect: res.inside ? (res.worldSeen ? rectPx(res.exitRect) : null) : 'outside: the whole screen',
+      visits: res.visits,
+      fallback: res.fallback || null,
+      buildings,
+      lastFrame: { worldSkipped: this.portals.worldSkipped, roomMeshes: this.portals.roomMeshes, narrowed: { ...this.portals.narrowStats }, passes: byLabel },
+      narrowRoots: NARROW_STATS.roots,
+      unhideable: NARROW_STATS.unhideable,
+      show: this.cullShow ? 'cells' : false,
+    };
+  }
+
+  /** The visible set's rectangles on the overlay: each seen room's, and from inside the exits' union in amber. */
+  private drawCullRects(o: HudCanvas): void {
+    const vis = this.portals.vis;
+    const res = vis.result;
+    if (!res.valid) return;
+    const r = this.cullRect;
+    for (let i = 0; i < res.drawnCount; i++) {
+      const b = res.drawn[i];
+      const cells = b?.model.def.cells;
+      if (!b || !cells) continue;
+      for (let c = 0; c < cells.length; c++) {
+        if (cells[c].index > 0 && vis.rectOf(b, cells[c].index, r)) this.cullQuad(o, r, COL.good, 1);
+      }
+    }
+    if (res.inside && res.worldSeen) this.cullQuad(o, res.exitRect, COL.warn, 2);
+  }
+
+  private cullQuad(o: HudCanvas, r: ArrayLike<number>, colour: number, width: number): void {
+    const x0 = ((Math.max(-1, r[0]) + 1) / 2) * o.w;
+    const x1 = ((Math.min(1, r[2]) + 1) / 2) * o.w;
+    const y0 = ((1 - Math.min(1, r[3])) / 2) * o.h;
+    const y1 = ((1 - Math.max(-1, r[1])) / 2) * o.h;
+    if (!(x1 > x0 && y1 > y0)) return;
+    const p = this.cullPts;
+    p[0] = x0;
+    p[1] = y0;
+    p[2] = x1;
+    p[3] = y0;
+    p[4] = x1;
+    p[5] = y1;
+    p[6] = x0;
+    p[7] = y1;
+    o.poly(p, 4, width, colour, 0.9);
+  }
+
   private drawFrame(): void {
     const cam = this.cam.camera;
     cam.updateMatrixWorld();
@@ -10617,7 +10734,10 @@ class App {
     // cloned per frame.
     const at = this.player.worldPos;
     const eye = this.cameraEye.set(at.x, at.y + 1.5, at.z);
-    const view = this.portals.cameraBuilding(this.world.cellState, eye, cam.position, this.world.buildings);
+    const view = this.portals.cameraCell(this.world.cellState, eye, cam.position, this.world.buildings).building;
+    // The frame's visible set, once, with the camera's final pose: which rooms can be seen and whether
+    // the world can be from inside, which is what the portal renderer draws less of.
+    this.portals.computeVisibility(cam, this.world.buildings);
     // The room's air, before the scene is drawn (its motes are in it): which room this frame is
     // drawn from, its doorway beams, its lamps and its motes. The effects read it after, in the fill below.
     const ra = this.roomAirInput;
@@ -10657,10 +10777,13 @@ class App {
     perf.begin(SEC.portals);
     this.portals.render(this.scene, cam, view, this.world.buildings);
     perf.end(SEC.portals);
-    // The falling weather, into whatever the scene was drawn into; from inside, only through the exits.
-    perf.passBegin(PASS.weather);
-    this.world.weather.draw(this.renderer, cam, view !== null);
-    perf.passEnd(PASS.weather);
+    // The falling weather, into whatever the scene was drawn into; from inside, only through the exits,
+    // and not at all when no exit could be seen and the world was not drawn.
+    if (!this.portals.worldSkipped) {
+      perf.passBegin(PASS.weather);
+      this.world.weather.draw(this.renderer, cam, view !== null);
+      perf.passEnd(PASS.weather);
+    }
     if (postfx) {
       const f = this.fxInput;
       f.camera = cam;

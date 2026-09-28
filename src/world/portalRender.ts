@@ -9,11 +9,21 @@
 // Layers: 0 = the world (terrain, shells, props), 1 = interior meshes (each building owns its
 // own, hidden except while that building is being drawn), 31 = actors (player, creatures,
 // vehicles, effects, lights, objects inside buildings) which are drawn in every pass.
+//
+// What is drawn at all is cut by the frame's visible set (`portalVis.ts`, worked out once a frame
+// before any pass): from inside with no exit reachable the world, its shadows and the weather are
+// not drawn; only the rooms the flood reached are shown, inside and through doors; and the world
+// seen from inside through its exits leaves out the ground and placed objects outside the exits'
+// rectangle. `PORTAL_CULL.mode = 'all'` puts the old behaviour back whole, and each cut has its own
+// switch in the frame report (`__debug.perf({ switches: true })`).
 
 import * as THREE from 'three';
 import type { Building, CellState } from './layoutStream';
 import { isShadowOnly } from '../core/fxRegistry.ts';
 import { CNT, PASS, PERF, perf } from '../core/perf.ts';
+import { ExitNarrowing, MAX_BUILDINGS, PORTAL_CULL, PortalVisibility, walkCameraCell, type CameraCell } from './portalVis.ts';
+
+export { crossing } from './portalVis.ts';
 
 export const ACTOR_LAYER = 31;
 export const INTERIOR_LAYER = 1;
@@ -71,10 +81,6 @@ export const SHADOW_STRAYS: ShadowStrays = { keep: baselineAsked(), seen: 0, for
 // Said out loud, because a session that reads the baseline as the game's ordinary behaviour
 // concludes the cut does nothing.
 if (SHADOW_STRAYS.keep) console.warn('shaders: ?shadowStrays=1 is set, so the shadow pass keeps its stray draws — the old behaviour, one light set more. Take it off the address for the cut.');
-const PORTAL_RANGE = 120;
-const MAX_BUILDINGS = 6;
-/** Doorways count as reaching this far above their polygon when deciding which side the camera is on. */
-const DOOR_HEADROOM = 4;
 
 /**
  * Actors are visible from inside and outside alike; what first person has put on the shadow-only
@@ -86,15 +92,35 @@ export function markActor(o: THREE.Object3D): void {
   });
 }
 
-const tmpV = new THREE.Vector3();
-const tmpA = new THREE.Vector3();
-const tmpB = new THREE.Vector3();
 const tmpS = new THREE.Sphere();
 const frustum = new THREE.Frustum();
 const projView = new THREE.Matrix4();
 
 export class PortalRenderer {
   readonly materials = new Set<THREE.Material>();
+  /** The frame's visible set: which rooms, and whether the world, can be seen (`portalVis.ts`). */
+  readonly vis = new PortalVisibility();
+  /** The camera's building and room, as `cameraCell` last found them. Kept and refilled. */
+  readonly camCell: CameraCell<Building> = { building: null, cell: 0 };
+  private readonly camNear: (Building | null)[] = [];
+  /** Whether `computeVisibility` ran since the last `render`: a set from an older frame is never read. */
+  private visFresh = false;
+  /** The buildings drawn through their doors from outside, nearest first, and their distances; kept. */
+  private readonly near: (Building | null)[] = new Array<Building | null>(MAX_BUILDINGS).fill(null);
+  private readonly nearD = new Float64Array(MAX_BUILDINGS);
+  /** The doors `exitPortals` found, as many as it answers: written by index and never shortened (emptying an array frees its store). */
+  private readonly exitList: THREE.Mesh[] = [];
+  private readonly bufferSize = new THREE.Vector2();
+  /** The last frame skipped the world, its shadows and the weather from inside: no exit could be seen. */
+  worldSkipped = false;
+  /** Room meshes shown in the last frame's views (not its shadow pass). */
+  roomMeshes = 0;
+  /** The world pass from inside narrowed to the exits' rectangle (commit 1d, `portalVis.ts`). */
+  private readonly narrowing = new ExitNarrowing();
+  /** The containers whose children the exit narrowing may hide for the world pass: the scene and the ground's root. */
+  readonly narrowParents: THREE.Object3D[] = this.narrowing.parents;
+  /** What the last frame's exit narrowing tested and left out. */
+  readonly narrowStats = this.narrowing.stats;
   /**
    * Shadow maps are shaded through this camera: it sees every layer (so every caster counts)
    * but its frustum holds nothing, so the render that carries the shadow pass draws nothing.
@@ -322,7 +348,7 @@ export class PortalRenderer {
    * increment it. `restore` instead moves the region these polygons opened (2) on to 3, undoing a
    * pass while marking where rooms were drawn.
    */
-  private drawPortals(meshes: THREE.Mesh[], camera: THREE.Camera, from: number, depthTest: boolean, restore = false): void {
+  private drawPortals(meshes: THREE.Mesh[], n: number, camera: THREE.Camera, from: number, depthTest: boolean, restore = false): void {
     const m = this.portalMat;
     if (restore) {
       // Leave the doors' rooms region at 3 instead of writing 1 back: a later building's doors
@@ -340,7 +366,7 @@ export class PortalRenderer {
     }
     m.stencilFuncMask = 0xff;
     m.depthTest = depthTest;
-    for (const mesh of meshes) this.pass('portal', mesh, camera, PASS.doorways);
+    for (let i = 0; i < n; i++) this.pass('portal', meshes[i], camera, PASS.doorways);
   }
 
   private resetDepth(ref: number, camera: THREE.Camera): void {
@@ -355,28 +381,97 @@ export class PortalRenderer {
     this.pass(interior ? 'interior' : 'world', scene, camera, interior ? PASS.interior : PASS.world);
   }
 
-  private showInterior(b: Building, on: boolean): void {
-    for (const m of b.interior) m.visible = on;
+  /**
+   * Show a building's rooms, or hide them. With `seen` (the frame's set, commit 1c) only the rooms it
+   * marks seen are shown; a room it knows nothing of is shown. Answers how many meshes it showed.
+   */
+  private showInterior(b: Building, on: boolean, seen: Uint8Array | null = null): number {
+    const list = b.interior;
+    const cells = seen ? b.interiorCell : undefined;
+    let shown = 0;
+    for (let i = 0; i < list.length; i++) {
+      let show = on;
+      if (show && seen && cells && i < cells.length) {
+        const c = cells[i];
+        show = c < 0 || c >= seen.length || seen[c] === 1;
+      }
+      list[i].visible = show;
+      if (show) shown++;
+    }
+    return shown;
   }
 
-  /** The building's exit portals (doors and windows onto the world) that could be on screen. */
-  private exitPortals(b: Building, camera: THREE.Camera): THREE.Mesh[] {
-    if (Math.abs(b.x - camera.position.x) > b.radius + PORTAL_RANGE || Math.abs(b.z - camera.position.z) > b.radius + PORTAL_RANGE) return [];
-    const meshes = this.meshesFor(b);
-    const out: THREE.Mesh[] = [];
-    b.model.portals.forEach((p, index) => {
-      if (!p.links.some((l) => l.from === 0 || l.to === 0)) return;
-      tmpV.set(0, 0, 0);
-      for (const v of p.verts) tmpV.add(v);
-      tmpV.multiplyScalar(1 / p.verts.length).applyMatrix4(b.matrix);
-      if (tmpV.distanceTo(camera.position) > PORTAL_RANGE) return;
-      let r = 0;
-      for (const v of p.verts) r = Math.max(r, tmpA.copy(v).applyMatrix4(b.matrix).distanceTo(tmpV));
-      tmpS.set(tmpV, r);
-      if (!frustum.intersectsSphere(tmpS)) return;
-      out.push(meshes[index]);
-    });
-    return out;
+  /**
+   * The building's exit portals (doors and windows onto the world) that could be on screen: within
+   * their range of the camera (`doorRangeOf`, the old fixed 120 m while the door range is off) and with
+   * their sphere in the frustum. Fills the kept `exitList` and answers how many.
+   */
+  private exitPortals(b: Building, camera: THREE.Camera): number {
+    const out = this.exitList;
+    let n = 0;
+    if (this.vis.withinReach(b, camera.position, true)) {
+      const meshes = this.meshesFor(b);
+      const np = b.model.portals.length;
+      for (let k = 0; k < np; k++) {
+        if (!this.vis.isExit(b, k) || !this.vis.doorInRange(b, k, camera.position)) continue;
+        if (!frustum.intersectsSphere(this.vis.portalSphere(b, k, tmpS))) continue;
+        out[n++] = meshes[k];
+      }
+    }
+    return n;
+  }
+
+  /**
+   * The buildings drawn through their doors from outside: those whose middle is within their radius and
+   * their widest door's range of the camera, nearest first, at most `MAX_BUILDINGS`. Kept arrays, and
+   * the same answer a stable sort by distance gave; answers how many.
+   */
+  private selectNear(camera: THREE.Camera, buildings: Iterable<Building>): number {
+    const near = this.near;
+    const nd = this.nearD;
+    const measured = this.vis.measured;
+    let n = 0;
+    for (const b of buildings) {
+      if (!this.vis.withinReach(b, camera.position, false)) continue;
+      const d = measured[0];
+      if (n === MAX_BUILDINGS && d >= nd[n - 1]) continue;
+      let i = n < MAX_BUILDINGS ? n++ : n - 1;
+      while (i > 0 && nd[i - 1] > d) {
+        near[i] = near[i - 1];
+        nd[i] = nd[i - 1];
+        i--;
+      }
+      near[i] = b;
+      nd[i] = d;
+    }
+    for (let i = n; i < MAX_BUILDINGS; i++) near[i] = null;
+    return n;
+  }
+
+  /**
+   * The camera's building and room, walked from the player's room along the line from the eye to the
+   * camera (`walkCameraCell`). Answers the kept `camCell`.
+   */
+  cameraCell(player: CellState | null, eye: THREE.Vector3, cam: THREE.Vector3, buildings: Iterable<Building>): CameraCell<Building> {
+    return walkCameraCell(player?.building ?? null, player?.cell ?? 0, eye, cam, buildings, this.camCell, this.camNear);
+  }
+
+  /**
+   * Work out the frame's visible set, once, after `cameraCell` and before `render`, with the camera's
+   * final pose (commit 1a). With the set switched off nothing is known and nothing is cut.
+   */
+  computeVisibility(camera: THREE.PerspectiveCamera, buildings: Iterable<Building>): void {
+    if (!PORTAL_CULL.on) {
+      this.vis.invalidate();
+      this.visFresh = false;
+      return;
+    }
+    this.renderer.getDrawingBufferSize(this.bufferSize);
+    const inside = this.camCell.building;
+    const n = inside ? 0 : this.selectNear(camera, buildings);
+    this.vis.compute(camera, inside, this.camCell.cell, this.near as Building[], n, this.bufferSize.x, this.bufferSize.y);
+    this.visFresh = true;
+    perf.count(CNT.cullVisits, this.vis.result.visits);
   }
 
   /**
@@ -424,6 +519,19 @@ export class PortalRenderer {
   render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, view: Building | null, buildings: Iterable<Building>): void {
     const r = this.renderer;
     const auto = scene.matrixWorldAutoUpdate;
+    // The frame's visible set, read only when it was worked out for this very frame and this view.
+    const vis = this.visFresh && this.vis.result.valid && this.vis.result.inside === view ? this.vis : null;
+    this.visFresh = false;
+    const rooms = vis !== null && PORTAL_CULL.mode === 'rooms';
+    // Inside with no exit reachable: no world pass, no shadow pass (sunlight reaches no pixel of a room,
+    // and only world pixels read the cascades), and main skips the weather (commit 1b).
+    const skipWorld = rooms && view !== null && PORTAL_CULL.insideSkip && !this.vis.result.worldSeen;
+    const seenRooms = rooms && PORTAL_CULL.seenRooms;
+    const narrow = rooms && PORTAL_CULL.exitNarrow;
+    this.worldSkipped = skipWorld;
+    this.roomMeshes = 0;
+    this.narrowStats.tested = 0;
+    this.narrowStats.hidden = 0;
     // Once a pass has taken the whole scene its matrices are fresh for the rest of the frame
     // (turned off inline at each such pass, so no closure is made per frame).
     try {
@@ -432,7 +540,11 @@ export class PortalRenderer {
       this.passLog.length = 0;
       projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projView);
-      this.renderShadows(scene, view);
+      // The frame an exit comes into view the shadows are drawn here, before the world pass, so nothing pops.
+      if (skipWorld) {
+        SHADOW_STRAYS.seen = 0;
+        perf.count(CNT.cullSkips, 1);
+      } else this.renderShadows(scene, view);
       // The shadow pass, when there is one, walked the scene.
       if (this.passes > 0 && this.matrixOnce) scene.matrixWorldAutoUpdate = false;
       r.state.buffers.stencil.setClear(1);
@@ -441,116 +553,50 @@ export class PortalRenderer {
 
       if (view) {
         // Inside: the whole building fills the screen; the world only through its exits.
-        this.showInterior(view, true);
+        this.roomMeshes += this.showInterior(view, true, seenRooms ? this.vis.seenOf(view) : null);
         this.renderLayer(scene, camera, INTERIOR_LAYER);
         if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
         this.showInterior(view, false);
+        if (skipWorld) return;
         const exits = this.exitPortals(view, camera);
-        if (!exits.length) return;
-        this.drawPortals(exits, camera, 1, true);
+        if (!exits) return;
+        this.drawPortals(this.exitList, exits, camera, 1, true);
         this.resetDepth(2, camera);
         this.setRef(2);
-        this.renderLayer(scene, camera, 0);
+        // Hide, for this pass only, every ground chunk, far tile and placed object whose sphere misses the
+        // frustum through the exits' rectangle; the shadows were drawn already and the projection is untouched.
+        if (narrow && this.vis.result.worldSeen) this.narrowing.hide(this.vis.result.exitRect, projView);
+        try {
+          this.renderLayer(scene, camera, 0);
+        } finally {
+          this.narrowing.restore();
+        }
         return;
       }
 
       // Outside: the world, then each nearby building's interior through its doors.
       this.renderLayer(scene, camera, 0);
       if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
-      const near: { b: Building; d: number }[] = [];
-      for (const b of buildings) {
-        const d = Math.hypot(b.x - camera.position.x, b.z - camera.position.z);
-        if (d < b.radius + PORTAL_RANGE) near.push({ b, d });
-      }
-      near.sort((a, c) => a.d - c.d);
-      for (const { b } of near.slice(0, MAX_BUILDINGS)) {
+      const n = this.selectNear(camera, buildings);
+      for (let i = 0; i < n; i++) {
+        const b = this.near[i] as Building;
+        // No room of it can be seen through any door on screen: nothing to draw (commit 1c).
+        if (seenRooms && !this.vis.anySeen(b)) continue;
         const doors = this.exitPortals(b, camera);
-        if (!doors.length) continue;
-        this.drawPortals(doors, camera, 1, true);
+        if (!doors) continue;
+        this.drawPortals(this.exitList, doors, camera, 1, true);
         this.resetDepth(2, camera);
         this.setRef(2);
-        this.showInterior(b, true);
+        this.roomMeshes += this.showInterior(b, true, seenRooms ? this.vis.seenOf(b) : null);
         this.renderLayer(scene, camera, INTERIOR_LAYER);
         this.showInterior(b, false);
         this.setRef(1);
-        this.drawPortals(doors, camera, 1, false, true);
+        this.drawPortals(this.exitList, doors, camera, 1, false, true);
       }
     } finally {
       scene.matrixWorldAutoUpdate = auto;
+      perf.count(CNT.cullRooms, this.roomMeshes);
+      perf.count(CNT.cullNarrowed, this.narrowStats.hidden);
     }
   }
-
-  /**
-   * The building the camera is in, if any: starting from the player's side of things, walk the
-   * line from the eye to the camera through whichever exit portals it crosses. Doorways are
-   * taken to reach up to the ceiling, since a camera above the lintel got there through the door.
-   */
-  cameraBuilding(player: CellState | null, eye: THREE.Vector3, cam: THREE.Vector3, buildings: Iterable<Building>): Building | null {
-    let inside: Building | null = player?.building ?? null;
-    const near: Building[] = [];
-    for (const b of buildings) if (Math.abs(b.x - cam.x) < b.radius + 30 && Math.abs(b.z - cam.z) < b.radius + 30) near.push(b);
-    let from = eye;
-    for (let hop = 0; hop < 4; hop++) {
-      let best: { b: Building; t: number } | null = null;
-      for (const b of inside ? [inside] : near) {
-        tmpA.copy(from).applyMatrix4(b.inverse);
-        tmpB.copy(cam).applyMatrix4(b.inverse);
-        for (const p of b.model.portals) {
-          if (!p.links.some((l) => l.from === 0 || l.to === 0)) continue;
-          const t = crossing(p, tmpA, tmpB, DOOR_HEADROOM);
-          if (t !== null && (!best || t < best.t)) best = { b, t };
-        }
-      }
-      if (!best) return inside;
-      const hit = best as { b: Building; t: number };
-      inside = inside ? null : hit.b;
-      from = from.clone().lerp(cam, Math.min(1, hit.t + 1e-3));
-    }
-    return inside;
-  }
-}
-
-/**
- * Parameter along a-b where the segment crosses one of the portal's triangles, or null. With
- * `headroom`, a crossing up to that far above the polygon still counts (the doorway is taken to
- * continue upward).
- */
-export function crossing(portal: import('./assetPack').Portal, a: THREE.Vector3, b: THREE.Vector3, headroom = 0): number | null {
-  const da = portal.normal.dot(a) - portal.d;
-  const db = portal.normal.dot(b) - portal.d;
-  if ((da > 0 && db > 0) || (da < 0 && db < 0) || da === db) return null;
-  const t = da / (da - db);
-  const hit = tmpV.copy(a).lerp(b, t);
-  const idx = portal.indices;
-  const v = portal.verts;
-  if (headroom > 0) {
-    let top = -Infinity;
-    for (const p of v) top = Math.max(top, p.y);
-    if (hit.y > top && hit.y < top + headroom) hit.y = top - 1e-3;
-  }
-  for (let k = 0; k + 2 < idx.length; k += 3) {
-    if (pointInTriangle(hit, v[idx[k]], v[idx[k + 1]], v[idx[k + 2]])) return t;
-  }
-  return null;
-}
-
-const e0 = new THREE.Vector3();
-const e1 = new THREE.Vector3();
-const e2 = new THREE.Vector3();
-
-function pointInTriangle(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3): boolean {
-  e0.subVectors(c, a);
-  e1.subVectors(b, a);
-  e2.subVectors(p, a);
-  const dot00 = e0.dot(e0);
-  const dot01 = e0.dot(e1);
-  const dot02 = e0.dot(e2);
-  const dot11 = e1.dot(e1);
-  const dot12 = e1.dot(e2);
-  const denom = dot00 * dot11 - dot01 * dot01;
-  if (Math.abs(denom) < 1e-12) return false;
-  const inv = 1 / denom;
-  const u = (dot11 * dot02 - dot01 * dot12) * inv;
-  const w = (dot00 * dot12 - dot01 * dot02) * inv;
-  return u >= -1e-4 && w >= -1e-4 && u + w <= 1 + 1e-4;
 }
