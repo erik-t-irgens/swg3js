@@ -40,6 +40,7 @@ import { LayoutStreamer, nearTierRange, type Building, type CellState, type Plac
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
+import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { DIFFICULTY } from './difficulty.ts';
 import { CLONING_TUNE, facilitiesNear, SPAWN_CELL_NAME, type FacilityChoice, type NamedPlace } from './cloning.ts';
@@ -4574,13 +4575,28 @@ export class World {
         // creatures belong at their lair, so they are `spawned`, which the manager only ever takes
         // away when it is dead or has fallen out of the world. The `worldId` is what keeps the hand
         // -spawn cap and the NPC tab's clear off them. No `share`: every browser seeds the same lair
-        // from the same data, and a name the server has never heard is never put on the wire.
-        spawn: (entry, at, seed) => this.mobiles?.spawn(entry, at, { origin: 'spawned', seed, worldId: `wild:${seed}` }) ?? 'no world',
+        // from the same data, and a name the server has never heard is never put on the wire. Its own
+        // creature's numbers and weapons go with it (`WildSpawn`), as a standing person's do.
+        spawn: (entry, at, how) =>
+          this.mobiles?.spawn(entry, at, {
+            origin: 'spawned',
+            seed: how.seed,
+            worldId: `wild:${how.id}`,
+            overrides: how.overrides,
+            weapons: how.weapons,
+            weaponGroups: how.weaponGroups,
+          }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
         // A nest's own height is this world's to answer, unlike a creature's: the manager works one
-        // out for a body it is standing, and a nest is not one of those.
+        // out for a body it is standing, and a nest is not one of those. A camp's pieces stand on it too.
         groundAt: (x, z) => this.terrain.heightAt(x, z),
+        // Whether that ground is generated about a site already: a site waits a pass for the terrain
+        // worker rather than having `heightAt` generate its blocks on the main thread.
+        groundReady: (x, z, reach) => this.terrain.prepareArea(x - reach, z - reach, 2 * reach),
+        // The outdoor walk grid, once this world has one: a site laid on a cliff or in a lake is moved
+        // to open ground, or not stood.
+        walkable: (x, z) => (outdoorNav.ready ? outdoorNav.walkable(x, z) : null),
         nest: {
           scene: this.scene,
           physics: this.physics,
@@ -4589,6 +4605,20 @@ export class World {
           prepare: (root) => this.prepareActor(root),
           markActor,
           baseUrl: import.meta.env.BASE_URL,
+          // A nest's fog and a camp's fire are the world's own standing effects, read at the call
+          // since every world has its own. The spawns pack names its effects relative to itself and
+          // the effects resolve against the world's pack, so each file is re-rooted there, as a guest
+          // pack's are.
+          effects: {
+            prepare: async (file) => {
+              const fx = this.particles;
+              return fx ? fx.prepare(this.spawnsEffect(file), this.renderer) : false;
+            },
+            place: (file, matrix) => this.particles?.place(this.spawnsEffect(file), matrix, false) ?? null,
+            remove: (h) => {
+              if (h) this.particles?.remove(h as EffectHandle);
+            },
+          },
         },
         // It holds when the streamer holds (an ultra cruise pins both), and never runs at all for
         // the creation and selection screens, which are a cut-out world with no streaming.
@@ -4596,6 +4626,15 @@ export class World {
       };
     }
     return this.wildDepsKept;
+  }
+
+  /**
+   * A file the spawns pack names (a nest's fog, a camp's fire), as this world's particle effects must be
+   * handed it: they resolve every file against the world's own pack, so it is named from there.
+   */
+  private spawnsEffect(file: string): string {
+    const root = this.pack?.root ?? `${import.meta.env.BASE_URL}assets-private/${this.packId}/`;
+    return relativeRoot(root, `${import.meta.env.BASE_URL}assets-private/spawns/`) + file;
   }
 
   /** The same, for the console: `__debug.people` puts people down through it to have them stood again. */

@@ -31,7 +31,7 @@ const { DIFFICULTY, DIFFICULTY_RANGE, applyDifficultyTo, clampDifficulty, rescal
 const { DEFAULT_SETTINGS, loadSettings, saveSettings } = await import('../../../src/core/settings.ts');
 const { GAMEPLAY } = await import('../../../src/ui/gameplayPage.ts');
 const { WildNest } = await import('../../../src/world/wildNest.ts');
-const { WildLife, WILD_TUNE } = await import('../../../src/world/wildLife.ts');
+const { WildLife, WILD_TUNE, LAIR_TUNE } = await import('../../../src/world/wildLife.ts');
 const THREE = await import('three');
 
 // ------------------------------------------------------------------ the arithmetic
@@ -86,8 +86,15 @@ const THREE = await import('three');
     lairs: { L: { kind: 'creature_lair', mobiles: [{ who: 'thing', n: 1 }], boss: [], cap: 15, nest: 'nest.iff', building: '', people: false } },
     groups: { g: [{ lair: 'L', weight: 1, count: 15, size: 25, limit: -1, minDiff: 1, maxDiff: 8 }] },
   };
-  const areas = Array.from({ length: 8 }, (_, i) => ({ name: `a${i}`, shape: 'circle' as const, x: Math.cos((i / 8) * Math.PI * 2) * 70, z: Math.sin((i / 8) * Math.PI * 2) * 70, r: 60, groups: ['g'], cap: 64 }));
-  w.adopt({ format: 1, planet: 'w', areas, noSpawn: [], statics: [] } as never, manifest as never);
+  // One area about the player, laid on a fine grid so several sites are in reach (wildLife.test.ts says why).
+  const areas = [{ name: 'a', shape: 'circle' as const, x: 0, z: 0, r: 400, groups: ['g'], cap: 64 }];
+  const laid = { cell: LAIR_TUNE.cell, gap: LAIR_TUNE.gap };
+  Object.assign(LAIR_TUNE, { cell: 50, gap: 0 });
+  try {
+    w.adopt({ format: 1, planet: 'w', areas, noSpawn: [], statics: [] } as never, manifest as never);
+  } finally {
+    Object.assign(LAIR_TUNE, laid);
+  }
   const deps = {
     catalogue: () => ({ byId: (id: string) => ({ id, name: id, ready: true }) }),
     spawn: (_e: unknown, at: { x: number; z: number }) => ({ dead: false, removed: false, x: at.x, z: at.z, pos: { x: at.x, y: 0, z: at.z } }),

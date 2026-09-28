@@ -102,6 +102,15 @@ export class Terrain {
     return this.swg.prepareArea(cx * CHUNK_SIZE - step, cz * CHUNK_SIZE - step, CHUNK_SIZE + 2 * step, sync);
   }
 
+  /**
+   * Whether the ground over a game-space square can be sampled without generating anything on the main
+   * thread. With SWG terrain, the pole grids missing under it are queued on the worker and false is
+   * returned, so the caller asks again later; with none it is always true.
+   */
+  prepareArea(gx0: number, gz0: number, size: number): boolean {
+    return this.swg ? this.swg.prepareArea(gx0, gz0, size, false) : true;
+  }
+
   /** Ground height from data already generated, or null when nothing covers the point yet. */
   heightIfCached(x: number, z: number, farSize: number, farRes: number): number | null {
     if (this.swg) return this.swg.heightIfCached(x, z, farSize, farRes);

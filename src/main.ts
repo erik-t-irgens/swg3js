@@ -92,7 +92,7 @@ import { createCloudLayers, createSkyLights, flareLook, tuneFlareLook } from './
 import { MAX_CLOUD_LAYERS, MAX_FLARE_SOURCES } from './core/fx/flareMath';
 import { SPACE_SKY_TUNE, tuneSpaceSky, type SunRule } from './space/suns';
 import { heatTuning, type HeatProduct } from './core/fx/heat';
-import { wildLife, WILD_TUNE } from './world/wildLife.ts';
+import { wildLife, NEST_MODEL_TUNE, WILD_TUNE } from './world/wildLife.ts';
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
@@ -1738,22 +1738,37 @@ class App {
        * stand before it stands them. With no pack converted it answers `ready: false` and the world
        * has exactly the wildlife it always had.
        *
-       * `{ tune: { liveBodies: 12, build: 300 } }` moves any number of `LAIR_TUNE` and `WILD_TUNE`
-       * live (a change to `spacing` or `perArea` lays the world out again), and `{ respawn: false }`
-       * stops a broken lair ever coming back until it is turned on again.
+       * `{ tune: { liveBodies: 12, build: 300 } }` moves any number of `LAIR_TUNE`, `WILD_TUNE` and
+       * `NEST_MODEL_TUNE` live (a change to `cell`, `fill`, `gap` or `levels` lays the world out again),
+       * and `{ respawn: false }` stops a broken lair ever coming back until it is turned on again.
+       * `models` is the nests' and camps' model cache: held, idle, loading, and what they weigh.
+       * `{ go: true }` passes by a site that can never stand (`open: false`).
+       *
+       * `{ coverage: true }` says how much of this world has a site within `build` of it, over the whole
+       * square (`coverage` in lairs.ts, the node test's own function), how many sites of each kind there
+       * are, and, once the world's walk grid is in, the same for the sites moved onto walkable ground
+       * (those with none dropped). The server's flatness test a site must pass as well when it stands is
+       * not in that figure: asked of every site at once it would generate the whole world's ground.
        */
-      wild: (opts?: { go?: boolean; restand?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean }) => {
+      wild: (opts?: { go?: boolean; restand?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; coverage?: boolean }) => {
         const moved = opts?.tune ? wildLife.retune(opts.tune) : [];
         if (typeof opts?.respawn === 'boolean') wildLife.setRespawns(opts.respawn);
         if (opts?.restand) wildLife.restand();
         const centre = this.world.layoutCenter;
         const at = this.player.worldPos;
+        if (opts?.coverage) {
+          return { ready: wildLife.ready, grid: outdoorNav.ready, coverage: wildLife.coverageReport(centre, outdoorNav.ready ? (x, z) => outdoorNav.walkable(x, z) : null) };
+        }
         const near = wildLife.nearest(at, centre, Math.max(1, Math.min(20, opts?.near ?? 5)));
-        if (opts?.go && near.length) {
-          const s = near[0];
+        if (opts?.go) {
+          // The nearest that can stand at all: one with no walkable, level ground near it, or one
+          // cleared while respawning is off, would put you on a spot where nothing will ever appear.
+          const s = wildLife.nearest(at, centre, 50).find((x) => x.open);
+          if (!s) return { went: null, note: 'none of the fifty sites nearest can stand' };
           const y = this.world.terrain.heightAt(s.x, s.z) + 0.3;
           this.player.reset(new THREE.Vector3(s.x, y, s.z));
-          return { went: s, holds: wildLife.holds(s.key), note: 'the site stands on the next pass, which is a second or two' };
+          const note = s.up ? 'it is standing now' : 'it stands on a pass in a second or two, unless its ground turns out too steep or unwalkable, which then marks it open: false for the next go to pass by';
+          return { went: s, holds: wildLife.holds(s.key), note };
         }
         return {
           ready: wildLife.ready,
@@ -1761,7 +1776,8 @@ class App {
           ...(moved.length ? { moved } : {}),
           standing: wildLife.report(at, centre),
           nearest: near,
-          tune: { ...WILD_TUNE, ...LAIR_TUNE },
+          models: wildLife.modelStats(),
+          tune: { ...WILD_TUNE, ...LAIR_TUNE, ...NEST_MODEL_TUNE },
         };
       },
       /**
