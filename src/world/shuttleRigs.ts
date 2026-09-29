@@ -767,6 +767,30 @@ export class ShuttleRigs {
     };
   }
 
+  /** How many shuttles are stood, for the portal renderer's routing (`routeOf`). */
+  get stoodCount(): number {
+    return this.stood.length;
+  }
+
+  /**
+   * One stood shuttle as the portal renderer's routing wants it: its root, whether its pad is in a room,
+   * and a sphere about its hull where the hull is now (its body joint, which flies while the root stays on
+   * the pad), twice its biggest piece's half-diagonal across so its struts and doors are inside it. False
+   * past the count. Allocates nothing.
+   */
+  routeOf(i: number, out: { root: THREE.Object3D | null; inside: boolean; x: number; y: number; z: number; radius: number }): boolean {
+    const s = this.stood[i];
+    if (!s) return false;
+    out.root = s.root;
+    out.inside = s.inside;
+    const e = s.body.matrixWorld.elements;
+    out.x = e[12];
+    out.y = e[13];
+    out.z = e[14];
+    out.radius = 2 * s.radius;
+    return true;
+  }
+
   /** Every stood shuttle's root, for the motion blur: the root stays on its pad and the joints move. */
   roots(out: THREE.Object3D[]): THREE.Object3D[] {
     out.length = 0;

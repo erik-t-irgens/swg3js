@@ -5,10 +5,12 @@
 // A mobile is culled as a whole, against one sphere of its own, by setting its group's
 // visibility: an invisible group is skipped by the renderer outright, so none of its meshes is
 // drawn, none of its skeletons updated and none of its bone textures uploaded, in any of the
-// portal renderer's passes. Its meshes keep `frustumCulled` false, so no per-mesh test runs and a
-// skinned mesh never walks its vertices for a sphere of its own. The manager owns three flags on
-// every mesh from the moment it is attached: the group's visibility, the shadow casting (at
-// 2 Hz, by size and screen), and `frustumCulled` left false.
+// portal renderer's passes. Within that, each mesh is culled on its own by three in every pass
+// and shadow cascade (commit 3c, `bodyCull.ts`): a skinned mesh carries the same sphere, set once
+// in its own frame when the body is hung, so it never walks its vertices for one. The manager owns
+// three flags on every mesh from the moment it is attached: the group's visibility, the shadow
+// casting (at 2 Hz, by size, screen and the cascades' light boxes), and `frustumCulled` (the switch,
+// off while the body lies off its feet: dead, a ragdoll, knocked down, or in an idle lying at full length).
 import * as THREE from 'three';
 import type { Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
@@ -30,6 +32,7 @@ import { CATALOGUE_COMMAND, type MobileCatalogue } from './catalogue';
 import { BRAIN_TUNE, type BrainTune } from './brain';
 import { GAIT_LIMITS, moveSpeeds, type GaitLimits } from './gait';
 import { LOD_TUNE, lodTier, type LodInput, type LodTier, type LodTune } from './lod';
+import { reachesCascades } from '../bodyCull.ts';
 import { STEP_STATS, STEP_TUNE, tuneStep, type StepTune } from './stepUp.ts';
 import { describeRoles, rolesFor } from './packClips';
 import type { BodyInput } from './shape';
@@ -153,6 +156,27 @@ export interface MobileManagerDeps {
   refuse(): string | null;
   /** Whether shadows are on at all. */
   shadows(): boolean;
+  /**
+   * The shadow cascades' light boxes where they last stood (`World.shadowBoxes`, refreshed after the
+   * cascades move each frame, so a frame behind here): a body whose sphere reaches none of them throws no
+   * shadow (commit 3c, `lodTier`'s `inCascades`). None wired, or none yet, no limit.
+   */
+  shadowBoxes?(): readonly THREE.Frustum[] | null;
+  /**
+   * The ground's height where the world already holds it, never made on the spot (`World.groundIfCached`),
+   * and whether the ground under a point has its colliders (within the physics' reach of the player): a
+   * body outdoors past that reach asks the first and never the terrain itself (commit 4b, `groundProbe.ts`).
+   * None wired, every body asks the terrain as it always did.
+   */
+  groundIfCached?(x: number, z: number): number | null;
+  groundSolid?(x: number, z: number): boolean;
+  /**
+   * How the portal renderer's last frame saw the rooms of the body under this root (its group): 0 unseen,
+   * 1 seen, 2 one room past a seen one, -1 left to the frustum (the switch off, nothing drawn since, a body
+   * that frame did not route, or one that counts outdoors). With no answer wired the frustum alone decides,
+   * as it always did.
+   */
+  roomSeen?(root: THREE.Object3D): number;
   /** The weapons rack, once it has loaded (a person's gun or lightsaber comes off it); null until then, or without one. */
   weapons?(): WeaponCatalogue | null;
 }
@@ -180,7 +204,7 @@ const sphere = new THREE.Sphere();
 const tmp = new THREE.Vector3();
 const ZERO = new THREE.Vector3();
 /** The tier's input, filled per mobile every frame rather than made anew. */
-const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange };
+const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange, room: -1, inCascades: undefined };
 /** Ambient wildlife this far from the player comes back somewhere nearer. */
 const AMBIENT_RANGE = 260;
 /** How often (seconds) a mobile's inside-or-out is asked again, and its shadow flag set. */
@@ -221,6 +245,8 @@ export class MobileManager {
   animRange = LOD_TUNE.animRange;
   /** The last refusal or failure, for the spawner's count line. */
   lastNote = '';
+  /** How many the last step put off screen because their room was not seen, or one room past it (commit 2c). */
+  walled = 0;
   private readonly held = new Map<Mobile, Held>();
   private readonly ragdollQueue: Mobile[] = [];
   private readonly warned = new Set<string>();
@@ -403,6 +429,8 @@ export class MobileManager {
       seaSwellAt: this.deps.seaSwellAt ? (x, z, flat) => this.deps.seaSwellAt!(x, z, flat) : undefined,
       hittableAt: (h) => this.deps.hittableAt?.(h),
       wantRagdoll: (self) => this.queueRagdoll(self),
+      groundIfCached: this.deps.groundIfCached ? this.groundCached : undefined,
+      groundSolid: this.deps.groundSolid ? this.groundSolid : undefined,
     });
     this.live.push(m);
     for (const c of m.colliders) this.byCollider.set(c.handle, m);
@@ -921,7 +949,9 @@ export class MobileManager {
       camera.getWorldPosition(this.camPos);
     } else this.camPos.copy(ctx.playerPos);
     const shadows = this.deps.shadows();
+    this.shadowBoxes = shadows && this.deps.shadowBoxes ? this.deps.shadowBoxes() : null;
     const tune = LOD_TUNE;
+    this.walled = 0;
     for (let i = this.live.length - 1; i >= 0; i--) {
       const m = this.live[i];
       const held = this.held.get(m);
@@ -968,11 +998,16 @@ export class MobileManager {
         m.group.visible = visible;
         held.visible = visible;
       }
-      if (ctx.now - held.lastShadow >= SHADOW_EVERY || held.cast === null) {
+      // A shadow is put on the step it is wanted and taken off on the half-second: a body the frustum or its
+      // room has just brought into view throws its shadow on the frame it is first drawn, never half a second late.
+      const cast = tier.castShadow && !m.hologram;
+      if (ctx.now - held.lastShadow >= SHADOW_EVERY || held.cast === null || (cast && held.cast === false)) {
         held.lastShadow = ctx.now;
-        const cast = tier.castShadow && !m.hologram;
-        if (held.cast !== cast || m.meshes.some((x) => x.castShadow !== cast)) {
-          for (const mesh of m.meshes) mesh.castShadow = cast;
+        const meshes = m.meshes;
+        let differs = held.cast !== cast;
+        for (let k = 0; !differs && k < meshes.length; k++) if (meshes[k].castShadow !== cast) differs = true;
+        if (differs) {
+          for (let k = 0; k < meshes.length; k++) meshes[k].castShadow = cast;
           held.cast = cast;
         }
       }
@@ -986,7 +1021,10 @@ export class MobileManager {
     }
   }
 
-  /** The tier for one mobile: its world sphere against the frustum as it is and grown by the shadow slack. */
+  /**
+   * The tier for one mobile: its world sphere against the frustum as it is and grown by the shadow slack,
+   * and its rooms as the portal renderer's last frame saw them (commit 2c).
+   */
   private tierOf(m: Mobile, camera: THREE.Camera | null, playerPos: THREE.Vector3, shadows: boolean, tune: LodTune, out: LodTier): LodTier {
     const cull = m.plan.cull;
     const radius = (m.ragdoll ? 2 : 1) * cull.radius;
@@ -1002,6 +1040,14 @@ export class MobileManager {
         nearScreen = frustum.intersectsSphere(sphere);
       }
     }
+    // Whether it reaches a cascade's light box at all, with the same slack the screen test gives a shadow:
+    // the boxes are the ones the cascades last stood in, a frame behind (commit 3c).
+    let inCascades: boolean | undefined;
+    const boxes = this.shadowBoxes;
+    if (boxes !== null && boxes.length > 0 && nearScreen) {
+      sphere.radius = radius + tune.shadowSlack;
+      inCascades = reachesCascades(boxes, sphere);
+    }
     const i = lodInput;
     i.dist = dist;
     i.onScreen = onScreen;
@@ -1011,7 +1057,76 @@ export class MobileManager {
     i.shadows = shadows;
     i.playerDist = m.pos.distanceTo(playerPos);
     i.animRange = this.animRange;
+    i.inCascades = inCascades;
+    // A ragdoll is left to the frustum: its pieces leave the room it fell in.
+    const room = this.deps.roomSeen && !m.ragdoll ? this.deps.roomSeen(m.group) : -1;
+    i.room = room;
+    if (room === 0 || room === 2) this.walled++;
     return lodTier(i, tune, out);
+  }
+
+  /** The shadow cascades' light boxes, read once at the top of `update` for every body's tier; null with shadows off or none wired. */
+  private shadowBoxes: readonly THREE.Frustum[] | null = null;
+
+  /** The world's far ground readers, handed to every body as the same two closures (commit 4b). */
+  private readonly groundCached = (x: number, z: number): number | null => this.deps.groundIfCached?.(x, z) ?? null;
+  private readonly groundSolid = (x: number, z: number): boolean => this.deps.groundSolid?.(x, z) ?? true;
+
+  /**
+   * The per-mesh cull switched (`SKELETON_TUNE.cullSphere`, commit 3c): every body out takes it at once,
+   * each but one lying off its feet (`cullsOneByOne`), which reaches past its sphere.
+   */
+  applyCullSphere(): void {
+    for (const m of this.live) m.applyCull();
+  }
+
+  /** The spheres set again on every body hung (the console moved `SKELETON_TUNE.sphereScale`). */
+  refitCull(): void {
+    for (const m of this.live) m.refitCull();
+  }
+
+  /**
+   * For `__debug.skeletons()`: the bodies hung, their skinned meshes and the skeletons those stand on, and
+   * how many meshes the per-mesh cull takes now.
+   */
+  skeletonReport(): { bodies: number; skinned: number; skeletons: number; culled: number } {
+    const skeletons = new Set<THREE.Skeleton>();
+    let bodies = 0;
+    let skinned = 0;
+    let culled = 0;
+    for (const m of this.live) {
+      if (!m.model) continue;
+      bodies++;
+      for (const mesh of m.meshes) {
+        if (mesh.frustumCulled) culled++;
+        const s = mesh as THREE.SkinnedMesh;
+        if (!s.isSkinnedMesh) continue;
+        skinned++;
+        if (s.skeleton) skeletons.add(s.skeleton);
+      }
+    }
+    return { bodies, skinned, skeletons: skeletons.size, culled };
+  }
+
+  /** The skeleton share switched (`SKELETON_TUNE.share`, commit 3a): every body hung takes it now; answers the skeletons out. */
+  reshare(share: boolean): number {
+    let n = 0;
+    for (const m of this.live) n += m.reshare(share);
+    return n;
+  }
+
+  /** The building room a mobile is followed in (null out in the open), for the portal renderer's routing. */
+  cellOf(m: Mobile): CellState | null {
+    return this.held.get(m)?.cell ?? null;
+  }
+
+  /**
+   * Where a mobile's feet were when its room was last followed, or null for one not held: how far it has
+   * gone since is how far its room may be behind it (a quarter of a second or two metres while it lives,
+   * everything since its death once it has fallen, since a dead body's room is no longer followed).
+   */
+  cellFromOf(m: Mobile): THREE.Vector3 | null {
+    return this.held.get(m)?.cellFrom ?? null;
   }
 
   /** For `__debug.mobileCull`: every mobile's world sphere, whether it is on and near the screen, drawn, casting, and its tier. */
@@ -1041,6 +1156,8 @@ export class MobileManager {
         visible: m.group.visible,
         castShadow: m.meshes.some((x) => x.castShadow),
         tier: m.tier?.name ?? null,
+        // Its rooms as the portal renderer last saw them: 0 unseen, 1 seen, 2 one room past a seen one, -1 left to the frustum.
+        room: this.deps.roomSeen ? this.deps.roomSeen(m.group) : -1,
       };
     });
   }

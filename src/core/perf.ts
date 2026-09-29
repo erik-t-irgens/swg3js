@@ -18,6 +18,7 @@
 
 import * as THREE from 'three';
 import { abKeep, abLength, abSide, EMPTY_SPREAD, formatAb, formatReport, spreadOf, type AbReport, type AbSide, type PassRow, type PerfReport, type SectionRow, type Spread } from './perfMath.ts';
+import { installSkeletonOnce, SKELETON_HOOKS } from './skeletonOnce.ts';
 
 /** How many frames the report covers, the A/B block length, and whether each pass is timed on the GPU. */
 export const PERF_TUNE = { frames: 120, block: 12, gpu: false };
@@ -53,6 +54,8 @@ const SECTION_DEFS = [
   { key: 'camera', parent: '' },
   { key: 'audio', parent: '' },
   { key: 'hud', parent: '' },
+  // The material scan a few times a second (step 6): the roots added since, or the whole scene.
+  { key: 'scan', parent: '' },
   { key: 'draw', parent: '' },
   { key: 'roomAir', parent: 'draw' },
   { key: 'portals', parent: 'draw' },
@@ -114,6 +117,23 @@ const COUNTER_DEFS = [
   { key: 'cullRooms', group: 'cull', label: 'room meshes', kind: 'mean', scale: 1 },
   { key: 'cullSkips', group: 'cull', label: 'world skipped', kind: 'sum', scale: 1 },
   { key: 'cullNarrowed', group: 'cull', label: 'narrowed out', kind: 'mean', scale: 1 },
+  // Step 2: what moves on its own routed by its room (the records, those hidden for the whole frame, those
+  // no view pass drew), the furniture groups drawn with their rooms, and the creatures and people the
+  // manager took off screen because their room was not seen last frame.
+  { key: 'routeRecords', group: 'cull', label: 'bodies routed', kind: 'mean', scale: 1 },
+  { key: 'routeHidden', group: 'cull', label: 'bodies hidden', kind: 'mean', scale: 1 },
+  { key: 'routeUndrawn', group: 'cull', label: 'bodies in no pass', kind: 'mean', scale: 1 },
+  { key: 'furnitureShown', group: 'cull', label: 'furniture groups shown', kind: 'mean', scale: 1 },
+  { key: 'seenOff', group: 'cull', label: 'bodies off by room', kind: 'mean', scale: 1 },
+  // Step 5: the chunks' plant groups the reach sweep left shown and hidden, and the plants shown.
+  { key: 'floraShown', group: 'flora', label: 'plant groups shown', kind: 'last', scale: 1 },
+  { key: 'floraHidden', group: 'flora', label: 'plant groups hidden', kind: 'last', scale: 1 },
+  { key: 'floraInstances', group: 'flora', label: 'plants shown', kind: 'last', scale: 1 },
+  // Step 6: the material scan -- roots it walked from the queue of what was added, and the whole-scene
+  // backstop's finds, which the queue should have left it none of.
+  { key: 'scanRoots', group: 'scan', label: 'roots walked', kind: 'sum', scale: 1 },
+  { key: 'scanWhole', group: 'scan', label: 'whole-scene scans', kind: 'sum', scale: 1 },
+  { key: 'scanMissed', group: 'scan', label: 'found by the backstop', kind: 'sum', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },
@@ -517,21 +537,27 @@ function skeletonUpdated(s: StampedSkeleton): void {
   if (tex && !tex.onUpdate) tex.onUpdate = onBoneUpload;
 }
 
+function skeletonSkipped(): void {
+  if (PERF.timing) PERF.c[CNT.skelSkipped]++;
+}
+
+function skeletonHooked(s: THREE.Skeleton): void {
+  if (PERF.timing) skeletonUpdated(s as StampedSkeleton);
+}
+
 /**
- * Hook three's `Skeleton.update` once, to count. The hook checks the timing flag first, so with the
- * timing off it costs one test a call; it is put in only when the timing is first turned on.
+ * Count three's `Skeleton.update`: through the one patch the once-a-frame rule puts on the prototype
+ * (`skeletonOnce.ts`), which tells this of every real update and every skip. Wrapping the prototype
+ * here as well would count a skipped update as a real one or not at all, depending only on which of
+ * the two wrappers went on last. The hooks check the timing flag first, so with the timing off each
+ * costs one test a call; they are put in only when the timing is first turned on.
  */
 function installSkeletonHook(): void {
   if (PERF.hooked) return;
   PERF.hooked = true;
-  const proto = THREE.Skeleton.prototype as THREE.Skeleton & { perfHooked?: boolean };
-  if (proto.perfHooked) return;
-  proto.perfHooked = true;
-  const original = proto.update;
-  proto.update = function update(this: THREE.Skeleton): void {
-    original.call(this);
-    if (PERF.timing) skeletonUpdated(this as StampedSkeleton);
-  };
+  installSkeletonOnce();
+  SKELETON_HOOKS.updated = skeletonHooked;
+  SKELETON_HOOKS.skipped = skeletonSkipped;
 }
 
 // ---------------------------------------------------------------------------------------------

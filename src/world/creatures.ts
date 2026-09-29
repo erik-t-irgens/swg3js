@@ -552,6 +552,12 @@ export class CreatureManager {
   /** Whether the converted model has been asked for: only once a creature of this kind is stood. */
   private modelAsked = false;
   private disposed = false;
+  /**
+   * Told when the converted model has been hung on every body already standing, with the group they all
+   * stand in: the model is hung under each body's own group, deeper than anything the world's material
+   * scan listens to, so the world queues the group for it (`World.noteAdded`). Null says nothing.
+   */
+  onModel: ((root: THREE.Object3D) => void) | null = null;
 
   constructor(private readonly planet: PlanetDef, private readonly terrain: Terrain, private readonly physics: Physics) {
     this.mat = new THREE.MeshStandardMaterial({ color: planet.creatures.color, flatShading: true, roughness: 0.9 });
@@ -570,6 +576,7 @@ export class CreatureManager {
       if (!m || this.disposed) return;
       this.model = m;
       for (const c of this.creatures) c.setModel(m);
+      this.onModel?.(this.group);
       console.info(`creatures: ${name} uses the converted model (${[...m.clips.keys()].join(', ')})`);
     });
   }

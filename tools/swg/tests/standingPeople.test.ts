@@ -722,7 +722,8 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   ok((mobile.match(/if \(this\.airless\) holdAir\(this\.body\);/g) ?? []).length >= 2, 'a body in such a room is held after everything else that writes a velocity, alive and dead');
   ok(/if \(airless\) holdAir\(this\.body\);\s*else this\.body\.setGravityScale\(gravityFor\(false, this\.swimming, this\.flyer, this\.dead\), true\);/.test(mobile), 'and takes the gravity the rule gives when its floor comes back');
   ok(/setGravityScale\(gravityFor\(this\.airless, this\.swimming, this\.flyer, this\.dead\), true\)/.test(mobile), 'and when it is handed back from another browser');
-  ok(/grounded = gd !== null \|\| this\.airless \|\|/.test(mobile), 'and counts as standing, so it does not play a fall');
+  // Written out, or through `standingOn` (groundProbe.ts, whose own test holds that an airless body stands).
+  ok(/grounded = gd !== null \|\| this\.airless \|\||grounded = standingOn\(this\.grounded, gd !== null, this\.airless,/.test(mobile), 'and counts as standing, so it does not play a fall');
 
   // The post and the indoor wander, which the brain's own tests reach only through a copy of `think`.
   // A town's walker keeps to its round instead, and its home moves onto the round before the clamp.

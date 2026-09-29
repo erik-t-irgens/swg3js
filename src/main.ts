@@ -1,3 +1,7 @@
+// First, before anything can make a material: the one stencil reference's accessor goes on three's
+// `Material.prototype` when this is evaluated (src/world/stencilRef.ts), so every material the game makes
+// keeps a shape V8 can read fast. A material made before it would carry a plain field of its own instead.
+import './world/stencilRef.ts';
 import * as THREE from 'three';
 // The display's own rules, apart from the panels'. The stylesheet in index.html carries the named
 // colours on `:root`; this one carries what is drawn from them.
@@ -9,7 +13,18 @@ import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext } from './combat/kit';
 import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
 import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
-import { NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
+import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
+import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
+import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
+import { SKELETON_FRAME, SKELETON_TUNE } from './core/skeletonOnce.ts';
+import { LOD_TUNE } from './world/mobiles/lod.ts';
+import { FAR_TILE_TUNE } from './world/farTile.ts';
+import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
+import { FLORA_WARM } from './world/flora.ts';
+import { applyReachOption, FLORA_TUNE, type ReachOption } from './world/floraReach.ts';
+import { PLACED_TUNE } from './world/placedTiers.ts';
+import { legacyCount as legacyStencilCount, PORTAL_REF } from './world/stencilRef.ts';
+import { SCAN_TUNE } from './world/sceneAdds.ts';
 import { Input, type Action } from './core/input';
 import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
@@ -132,7 +147,7 @@ interface TravelWait {
   inside: boolean;
 }
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
-import type { PlacedObject } from './world/layoutStream';
+import type { Building, PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, turnBy as houseTurnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
@@ -366,6 +381,10 @@ interface CullDebugOptions {
   mode?: 'all' | 'rooms';
   /** Any of `PORTAL_CULL`'s numbers and switches, live. */
   tune?: Partial<PortalCullTune>;
+  /** `FURNITURE_TUNE`: `perBuilding` live; the two pads when the next world is read. */
+  furniture?: Partial<FurnitureTune>;
+  /** `ROUTE_TUNE`: `lightEvery` and `outdoorReach` live; `maxRooms` is read when the renderer is made. */
+  routes?: Partial<typeof ROUTE_TUNE>;
 }
 
 interface PerfDebugOptions {
@@ -1064,6 +1083,71 @@ class App {
     registerPerfSwitch('seenRooms', { get: () => PORTAL_CULL.seenRooms, set: (v) => (PORTAL_CULL.seenRooms = !!v), values: [false, true], note: 'only the rooms the portal flood reached are drawn, inside and through doors' });
     registerPerfSwitch('exitNarrow', { get: () => PORTAL_CULL.exitNarrow, set: (v) => (PORTAL_CULL.exitNarrow = !!v), values: [false, true], note: "inside, the world pass leaves out ground and placed objects outside the exits' rectangle" });
     registerPerfSwitch('doorRange', { get: () => PORTAL_CULL.doorRange, set: (v) => (PORTAL_CULL.doorRange = !!v), values: [false, true], note: "a door is drawn from farther the bigger it is (the old fixed 120 m when off)" });
+    // Step 2, the bodies and the furniture drawn only where they can be seen: each commit apart.
+    registerPerfSwitch('actorRoutes', { get: () => PORTAL_CULL.actorRoutes, set: (v) => (PORTAL_CULL.actorRoutes = !!v), values: [false, true], note: "creatures, people, fighters, ships and stood shuttles drawn only in their own rooms' passes, and not at all when no room of theirs is seen" });
+    registerPerfSwitch('furniture', { get: () => FURNITURE_TUNE.perBuilding, set: (v) => (FURNITURE_TUNE.perBuilding = !!v), values: [false, true], note: "a building's furniture drawn with its rooms in that building's pass alone, casting nothing, and no room of the building you stand in drawn into the sun's shadows" });
+    registerPerfSwitch('seenTiers', { get: () => PORTAL_CULL.seenTiers, set: (v) => (PORTAL_CULL.seenTiers = !!v), values: [false, true], note: "a creature or person in a room nobody saw last frame is off screen: frozen unless busy, and no shadow" });
+    // Step 3, the bodies' skeletons and their culling: each commit apart.
+    registerPerfSwitch('skeletonShare', {
+      get: () => SKELETON_TUNE.share,
+      set: (v) => {
+        SKELETON_TUNE.share = !!v;
+        this.world.mobiles?.reshare(!!v);
+      },
+      values: [false, true],
+      note: "a creature's or person's worn pieces on one skeleton (the model's) rather than one each; flipped on every body out at once",
+    });
+    registerPerfSwitch('skeletonOnce', { get: () => SKELETON_TUNE.once, set: (v) => (SKELETON_TUNE.once = !!v), values: [false, true], note: "every skeleton worked out and uploaded once a frame, not once for each pass and cascade that draws it" });
+    registerPerfSwitch('cullSphere', {
+      get: () => SKELETON_TUNE.cullSphere,
+      set: (v) => {
+        SKELETON_TUNE.cullSphere = !!v;
+        this.world.mobiles?.applyCullSphere();
+        this.world.npcs?.applyCullSphere();
+      },
+      values: [false, true],
+      note: "creatures', people's and fighters' meshes culled one by one in every pass and shadow cascade against a sphere set once",
+    });
+    registerPerfSwitch('shadowReach', { get: () => LOD_TUNE.shadowClamp, set: (v) => (LOD_TUNE.shadowClamp = !!v), values: [false, true], note: "a creature whose sphere reaches none of the shadow cascades' light boxes throws no shadow (and may freeze)" });
+    // The four of step 3 at once, so the whole step is put beside the old way in one drift-cancelling run
+    // (`perf({ ab: { key: 'step3' } })`) rather than read off windows taken one after another. It reads true
+    // with all four on, false with all four off and 'mixed' otherwise, and a mixed state is kept aside the
+    // first time it is overwritten and put back when an A/B run hands 'mixed' back at its end.
+    const step3Keys = ['skeletonShare', 'skeletonOnce', 'cullSphere', 'shadowReach'] as const;
+    let step3Mixed: unknown[] | null = null;
+    const step3Get = (): boolean | 'mixed' => {
+      let on = 0;
+      for (const k of step3Keys) if (PERF_SWITCHES.get(k)?.get() === true) on++;
+      return on === step3Keys.length ? true : on === 0 ? false : 'mixed';
+    };
+    registerPerfSwitch('step3', {
+      get: step3Get,
+      set: (v) => {
+        if (v === true || v === false) {
+          if (step3Mixed === null && step3Get() === 'mixed') step3Mixed = step3Keys.map((k) => PERF_SWITCHES.get(k)?.get());
+          for (const k of step3Keys) {
+            const sw = PERF_SWITCHES.get(k);
+            if (sw && sw.get() !== v) sw.set(v);
+          }
+        } else if (v === 'mixed' && step3Mixed !== null) {
+          const saved = step3Mixed;
+          step3Mixed = null;
+          step3Keys.forEach((k, i) => PERF_SWITCHES.get(k)?.set(saved[i]));
+        }
+      },
+      values: [false, true],
+      note: 'the whole of step 3 at once: the shared skeleton, once a frame, the per-mesh cull and the cascades\' shadow rule',
+    });
+    // Step 4, moving about without hitches: each commit apart.
+    registerPerfSwitch('farTileLocal', { get: () => FAR_TILE_TUNE.local, set: (v) => this.world.setFarTileLocal(!!v), values: [false, true], note: "a chunk coming or going re-cuts the one far tile it lies in, in place, rather than every far tile from scratch" });
+    registerPerfSwitch('farProbeCached', { get: () => FAR_PROBE.cached, set: (v) => (FAR_PROBE.cached = !!v), values: [false, true], note: "a creature or person far from the player reads the ground the world holds, and never makes terrain on the spot" });
+    registerPerfSwitch('floraWarm', { get: () => FLORA_WARM.on, set: (v) => (FLORA_WARM.on = !!v), values: [false, true], note: "every plant compiled behind the loading screen (from the next arrival) and a chunk's materials adopted as it is made" });
+    // Step 5, the plants shown only as near as the client drew them.
+    registerPerfSwitch('floraReach', { get: () => FLORA_TUNE.on, set: (v) => this.world.setFloraReach(!!v), values: [false, true], note: "a chunk's plants (not its trees) shown only while its middle is within twice the terrain file's own plant distance of the eye (64 m at least)" });
+    // Step 6, placed objects loading to their own size and the two per-frame scans gone: each apart.
+    registerPerfSwitch('placedTiers', { get: () => PLACED_TUNE.tierRule, set: (v) => (PLACED_TUNE.tierRule = v === 'snapshot' ? 'snapshot' : 'model'), values: ['snapshot', 'model'], note: "'model' files a placed object by its own model's size (1.7 km, 750 m or 320 m); 'snapshot' by the snapshot's radius, the old streamer exactly, which put almost everything at 1.7 km. A world is filed when it is read, so this takes effect at the next arrival or at once under a loading screen with `placed({ rule, reload: true })`: an in-session `ab` on it compares nothing, and the two are compared on fresh loads (`perf()` after each)" });
+    registerPerfSwitch('sharedStencilRef', { get: () => PORTAL_REF.shared, set: (v) => this.portals.setSharedRef(!!v), values: [false, true], note: "every portal material reads one shared stencil reference through an accessor on three's Material prototype, where the renderer used to write it into each of them several times a frame; both sides keep every material in V8's fast mode, and `localStorage['swg.stencilAccessor'] = '0'` leaves the accessor out altogether from the next load" });
+    registerPerfSwitch('scanNew', { get: () => SCAN_TUNE.queued, set: (v) => (SCAN_TUNE.queued = !!v), values: [false, true], note: "the quarter-second material scan walks only what was added since, with the whole scene every two seconds behind it" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -2702,7 +2786,9 @@ class App {
           // back from being shown, and the worst play frame so far.
           pace: this.world.shaderPace(),
           remade: this.shaderWatch.remade(),
-          builtInPlay: this.shaderWatch.builtInPlay(),
+          // The newest twenty, or with `full` every one the history still holds (`keys` of them at most):
+          // a count read off the short list is a lower bound and nothing else.
+          builtInPlay: this.shaderWatch.builtInPlay(opts?.full ? Number.POSITIVE_INFINITY : 20),
         };
         if (opts?.since) out.since = this.shaderWatch.takeSince();
         if (opts?.groups) out.groups = grouped.groups;
@@ -2773,6 +2859,77 @@ class App {
        * draws everything as before; `{ tune: { padPx: 4 } }` moves any number live.
        */
       cull: (o?: CullDebugOptions) => this.cullDebug(o),
+      /**
+       * The bodies' skeletons and their per-mesh cull (step 3): the switches, how many skeletons were
+       * worked out and skipped since the session began, and for the creatures and people out now the
+       * bodies, their skinned meshes, the skeletons those stand on and the meshes culled one by one.
+       * `{ share, once, cullSphere, shadowClamp }` flips a switch as the frame report does; `{ sphereScale }`
+       * grows or shrinks every body's sphere and sets them all again (a tail or a swing cut at the screen's
+       * edge, or a shadow lost at a cascade's, is what it is for).
+       */
+      skeletons: (o?: { share?: boolean; once?: boolean; cullSphere?: boolean; shadowClamp?: boolean; sphereScale?: number }) => {
+        if (o) {
+          for (const k of ['share', 'once', 'cullSphere'] as const) {
+            const v = o[k];
+            if (typeof v === 'boolean') PERF_SWITCHES.get(k === 'share' ? 'skeletonShare' : k === 'once' ? 'skeletonOnce' : 'cullSphere')?.set(v);
+          }
+          if (typeof o.shadowClamp === 'boolean') LOD_TUNE.shadowClamp = o.shadowClamp;
+          if (typeof o.sphereScale === 'number' && Number.isFinite(o.sphereScale) && o.sphereScale > 0) {
+            SKELETON_TUNE.sphereScale = o.sphereScale;
+            this.world.mobiles?.refitCull();
+            this.world.npcs?.refitCull();
+          }
+        }
+        return { tune: { ...SKELETON_TUNE, shadowClamp: LOD_TUNE.shadowClamp }, updated: SKELETON_FRAME.updated, skipped: SKELETON_FRAME.skipped, mobiles: this.world.mobiles?.skeletonReport() ?? null, fighters: this.world.npcs?.npcs.length ?? 0 };
+      },
+      /**
+       * Moving about without hitches (step 4): the far tiles (how many, how many are cut in place and carry
+       * their own index, the quads kept of all), how the far bodies' ground reads were answered since the
+       * session began (the terrain, the world's cache, or unknown), and the plants' warm-up. `{ local, probe,
+       * floraWarm }` flips each switch as the frame report does.
+       */
+      farTiles: (o?: { local?: boolean; probe?: boolean; floraWarm?: boolean }) => {
+        if (typeof o?.local === 'boolean') this.world.setFarTileLocal(o.local);
+        if (typeof o?.probe === 'boolean') FAR_PROBE.cached = o.probe;
+        if (typeof o?.floraWarm === 'boolean') FLORA_WARM.on = o.floraWarm;
+        return { ...this.world.farTileReport(), probe: { on: FAR_PROBE.cached, fromTerrain: FAR_PROBE_STATS.terrain, fromCache: FAR_PROBE_STATS.cached, unknown: FAR_PROBE_STATS.unknown }, floraWarm: FLORA_WARM.on, floraStandIns: this.world.floraStandIns, floraPrograms: this.world.floraWarmReport(), syncBlocks: this.world.terrain.swg?.syncGenerations ?? 0 };
+      },
+      /**
+       * Placed objects loading to their own size, and the two per-frame scans gone (step 6). `tiers` is the rule
+       * this world was filed by (`filing`: `'model'`, a placed object loads as far as its own model's box says,
+       * or `'snapshot'`, as far as the snapshot's radius said, which is the old streamer exactly) and the rule
+       * asked for (`wanted`), how many of this world's objects each tier holds by each rule, the ranges the
+       * settings' object reach has made of them, how far a building's rooms can be built from (`roomRange`), and
+       * how many region tiers are loaded now and how many of them hold furniture whose rooms' range raised them
+       * (`raised`); `warm` is what the last loading screen built for the models the old rule would have loaded
+       * round the arrival; `stencil` is whether the portal materials read one shared stencil reference, whether
+       * its accessor is installed (false with `localStorage['swg.stencilAccessor'] = '0'`, the old field at the
+       * next load), how many there are and how many writes to one were refused; `scan` is whether the
+       * quarter-second material scan walks only what was added, how many roots it has walked, and what the
+       * whole-scene backstop found that the queue missed (`lastMissed` names them).
+       *
+       * `{ rule }` is taken by the next world read (a travel); `{ rule, reload: true }` files this world again by
+       * it at once, behind a loading screen, and puts the player back where they stood -- which is how to put the
+       * two rules side by side on fresh loads in one session (`perf()` after each). `{ warm }` switches the
+       * placed warm for the next loading screen; `{ stencil, scan }` flip as the frame report's
+       * `sharedStencilRef` and `scanNew` do; `{ backstopMs }` moves the backstop's clock.
+       */
+      placed: (o?: { rule?: 'model' | 'snapshot'; reload?: boolean; warm?: boolean; warmWaitMs?: number; stencil?: boolean; scan?: boolean; backstopMs?: number }) => {
+        if (o?.rule === 'model' || o?.rule === 'snapshot') PLACED_TUNE.tierRule = o.rule;
+        if (typeof o?.warm === 'boolean') PLACED_TUNE.warm = o.warm;
+        if (typeof o?.warmWaitMs === 'number' && Number.isFinite(o.warmWaitMs) && o.warmWaitMs >= 0) PLACED_TUNE.warmWaitMs = o.warmWaitMs;
+        if (typeof o?.stencil === 'boolean') this.portals.setSharedRef(o.stencil);
+        if (typeof o?.backstopMs === 'number' && Number.isFinite(o.backstopMs) && o.backstopMs >= SCAN_TUNE.everyMs) SCAN_TUNE.backstopMs = o.backstopMs;
+        const report = () => ({
+          tiers: this.world.placedTierReport(),
+          warm: this.world.placedWarmReport,
+          stencil: { shared: PORTAL_REF.shared, installed: PORTAL_REF.installed, value: PORTAL_REF.value, materials: this.portals.materials.size, legacy: legacyStencilCount(), refusedWrites: PORTAL_REF.foreignWrites },
+          scan: this.world.scanReport(typeof o?.scan === 'boolean' ? o.scan : undefined),
+        });
+        // A reload is a loading screen: the answer is a promise that says how it went, with the report after.
+        if (o?.reload) return this.placedReload(PLACED_TUNE.tierRule).then((reloaded) => ({ reloaded, ...report() }));
+        return report();
+      },
       /** The effects chain: every pass with its setting, whether it drew, why not, and what it cost. `postfx({ godRays: false })` forces one off, `{ godRays: null }` gives it back to the settings. */
       postfx: (changes?: Partial<Record<FxPassId, boolean | null>>) => {
         const fx = this.postfx;
@@ -3022,13 +3179,28 @@ class App {
        * and `'snapshot'` the streaming radius the game read for years, which on some worlds is
        * kilometres and left them with no flora whatsoever. `flora({ rule: 'snapshot' })` puts that
        * back for comparison at the next world load; it changes nothing already streamed in.
+       *
+       * `reach` is how far from the eye the small plants stand (step 5, `src/world/floraReach.ts`): the
+       * result's `reach` block says the reach in force, the terrain file's own plant distance it is a
+       * multiple of, and how many chunks' plants and plants the last sweep showed and hid. `reach: false`
+       * shows every plant as before; `true` puts the reach back exactly as shipped (`FLORA_DEFAULTS`: twice
+       * the file's distance, 64 m at least, measured from the eye, and any reach typed in metres or number
+       * moved let go of); a number is the reach in metres outright, in place of that rule until `true`; and
+       * an object moves any of `FLORA_TUNE`'s fields live (`{ plantReachFactor: 3 }`, `{ plantReachMin: 100 }`,
+       * `{ treeReach: 400 }`, `{ hysteresis: 16 }`, `{ sweepHz: 2 }`, `{ planar: true }` to measure along the
+       * ground so a ring of plants stays under a flying eye). The captured places of the creation and
+       * selection screens keep every plant whatever this says.
        */
-      flora: (opts?: { near?: number; rule?: 'model' | 'snapshot'; pad?: number; cap?: number }) => {
+      flora: (opts?: { near?: number; rule?: 'model' | 'snapshot'; pad?: number; cap?: number; reach?: ReachOption }) => {
         if (opts?.rule) FLORA_CLEAR.rule = opts.rule;
         if (typeof opts?.pad === 'number' && Number.isFinite(opts.pad)) FLORA_CLEAR.pad = Math.max(0, opts.pad);
         if (typeof opts?.cap === 'number' && Number.isFinite(opts.cap)) FLORA_CLEAR.cap = Math.max(1, opts.cap);
+        if (opts?.reach !== undefined) {
+          applyReachOption(FLORA_TUNE, opts.reach);
+          this.world.refreshFloraReach();
+        }
         const status = this.world.floraStatus;
-        const out: Record<string, unknown> = { ...(status ?? {}), clear: { ...FLORA_CLEAR } };
+        const out: Record<string, unknown> = { ...(status ?? {}), clear: { ...FLORA_CLEAR }, reach: this.world.floraReachReport() };
         if (opts?.near !== undefined) {
           const p = this.player.pos;
           const r = Math.max(1, Math.min(200, opts.near));
@@ -8688,6 +8860,10 @@ class App {
    */
   private async settle(timeoutMs = 30000): Promise<void> {
     const t0 = performance.now();
+    // The placed models the old rule would have loaded round here start loading behind this screen, so the
+    // sweep below builds their programs (step 6, `World.warmPlaced`); a world whose pack is not in yet starts
+    // them itself when it is.
+    this.world.warmPlaced(this.player.worldPos);
     // The world position: aboard a hull's rooms `player.pos` is in the hull's frame, near its origin, not where the hull is.
     while (performance.now() - t0 < timeoutMs) {
       if (this.world.settled(this.player.worldPos)) break;
@@ -8728,6 +8904,14 @@ class App {
     // frame and rebuilds every reflective material in the world at once (a jump already waited).
     this.loadingScreen.setWhat('reflections');
     await this.world.reflectionsReady(3000);
+    // The placed models the old rule would have loaded round here, which the sweep below builds programs for
+    // from stand-ins (step 6): given `PLACED_TUNE.warmWaitMs` more to come in (nought as shipped, since the wait
+    // costs more screen than the programs it saves), since what is not in by the sweep builds its programs in
+    // play as its tier comes into range.
+    if (PLACED_TUNE.warmWaitMs > 0) {
+      this.loadingScreen.setWhat('the placed objects round you');
+      await this.world.placedWarmSettled(PLACED_TUNE.warmWaitMs);
+    }
     const tCompile = performance.now();
     // The line under the title is the one the screen always said on a machine where a program costs
     // a millisecond, and says why the wait is long on one where it costs a third of a second: a
@@ -10598,6 +10782,44 @@ class App {
     return { at: name, planet: m.planet, cell, note };
   }
 
+  /**
+   * This world's placed objects filed again by a rule (step 6, `__debug.placed({ rule, reload: true })`), behind a
+   * loading screen: every tier is dropped and the world round the player loaded and compiled again by the new
+   * rule, exactly as an arrival loads it, and the player is put back where they stood and in the room they
+   * were in. It is what makes a fresh load under each rule possible in one session. Answers what it did, or
+   * why not.
+   */
+  private async placedReload(rule: 'model' | 'snapshot'): Promise<string> {
+    if (!this.inWorld || !this.started) return 'enter the world first';
+    if (this.traveling) return 'a crossing is under way; ask again when it is over';
+    if (this.dying) return 'come round first';
+    if (this.player.mounted || this.player.aboard || this.ride?.riding) return 'get off or out first';
+    if (this.perfFlight || PERF.run) return 'a measurement is going; ask again when it is over';
+    const p = this.player;
+    const to = p.pos.clone();
+    const room = this.world.cellState?.cell ?? 0;
+    this.traveling = true;
+    this.map.hide();
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, `placed objects by ${rule === 'model' ? "each model's own size" : "the snapshot's radius"}`, 'filing the world again');
+    let cell = 0;
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      if (!this.world.refilePlaced(rule)) return `already filed by '${rule}'`;
+      p.reset(to);
+      this.world.jumpTo(to);
+      this.physics.stepOnce();
+      await this.settle();
+      cell = this.world.enterCellAt(to, room);
+      p.reset(to);
+      this.physics.stepOnce();
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+    }
+    return `filed by '${rule}' and loaded again${room ? `, back in room ${cell} (was ${room})` : ''}; let it settle a few seconds, then \`await __debug.perf()\``;
+  }
+
   /** One frame of the report's flight: the body moved along at its speed, over the ground where the ground is known, facing the way it goes. */
   private stepPerfFlight(dt: number): void {
     const f = this.perfFlight;
@@ -10645,10 +10867,13 @@ class App {
   private cullDebug(o: CullDebugOptions = {}): unknown {
     if (o.show !== undefined) this.cullShow = o.show === 'cells' || o.show === true;
     if (o.mode === 'all' || o.mode === 'rooms') PORTAL_CULL.mode = o.mode;
-    if (o.tune) {
-      const T = PORTAL_CULL as unknown as Record<string, unknown>;
-      for (const [k, v] of Object.entries(o.tune)) if (k in T && typeof v === typeof T[k] && (typeof v !== 'number' || Number.isFinite(v))) T[k] = v;
-    }
+    const retune = (T: Record<string, unknown>, from: object | undefined) => {
+      if (!from) return;
+      for (const [k, v] of Object.entries(from)) if (k in T && typeof v === typeof T[k] && (typeof v !== 'number' || Number.isFinite(v))) T[k] = v;
+    };
+    retune(PORTAL_CULL as unknown as Record<string, unknown>, o.tune);
+    retune(FURNITURE_TUNE as unknown as Record<string, unknown>, o.furniture);
+    retune(ROUTE_TUNE as unknown as Record<string, unknown>, o.routes);
     const vis = this.portals.vis;
     const res = vis.result;
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -10672,11 +10897,33 @@ class App {
       e.passes++;
       e.calls += p.calls;
     }
+    // What moves on its own, routed by its room (step 2a): by kind, hidden for the whole frame, drawn in no
+    // view pass, and shown summed over each sort of pass, as the last frame drew it.
+    const st = this.portals.actors.stats;
+    const byKind: Record<string, { routed: number; hidden: number }> = {};
+    ROUTE_KIND_NAMES.forEach((name, k) => (byKind[name] = { routed: st.byKind[k], hidden: st.hiddenByKind[k] }));
+    const bodies = {
+      routed: st.records,
+      byKind,
+      hidden: st.hidden,
+      inNoPass: st.undrawn,
+      untouched: st.unhideable,
+      inTwoRooms: st.doorway,
+      shown: { shadows: st.shownShadows, world: st.shownWorld, rooms: st.shownRooms },
+      passes: { shadows: st.passes[0], world: st.passes[1], rooms: st.passes[2] },
+    };
     return {
       on: PORTAL_CULL.on,
       mode: PORTAL_CULL.mode,
-      switches: { insideSkip: PORTAL_CULL.insideSkip, seenRooms: PORTAL_CULL.seenRooms, exitNarrow: PORTAL_CULL.exitNarrow, doorRange: PORTAL_CULL.doorRange },
+      switches: { insideSkip: PORTAL_CULL.insideSkip, seenRooms: PORTAL_CULL.seenRooms, exitNarrow: PORTAL_CULL.exitNarrow, doorRange: PORTAL_CULL.doorRange, actorRoutes: PORTAL_CULL.actorRoutes, furniture: FURNITURE_TUNE.perBuilding, seenTiers: PORTAL_CULL.seenTiers },
       tune: { ...PORTAL_CULL },
+      bodies,
+      // A building's furniture drawn with its rooms (step 2b): how the layout's indoor objects were hosted
+      // when the world was read, the groups standing now, and how many the last frame showed.
+      furniture: { ...(this.world.furnitureReport() ?? {}), shownLastFrame: this.portals.furnitureShown, tune: { ...FURNITURE_TUNE } },
+      // The creatures and people the manager last took off screen for their room (step 2c).
+      offByRoom: this.world.mobiles?.walled ?? 0,
+      routeTune: { ...ROUTE_TUNE },
       valid: res.valid,
       camera: { building: res.inside?.model.def.id ?? null, cell: res.cell },
       worldSeen: res.worldSeen,
@@ -10735,9 +10982,117 @@ class App {
     const at = this.player.worldPos;
     const eye = this.cameraEye.set(at.x, at.y + 1.5, at.z);
     const view = this.portals.cameraCell(this.world.cellState, eye, cam.position, this.world.buildings).building;
+    // The furniture drawn per building or everywhere, as the switch stands (only a change does anything).
+    this.world.syncFurniture();
     // The frame's visible set, once, with the camera's final pose: which rooms can be seen and whether
     // the world can be from inside, which is what the portal renderer draws less of.
     this.portals.computeVisibility(cam, this.world.buildings);
+    // What moves on its own, by the room it stands in, and hidden now where none of its rooms is seen.
+    // Every pass chooses from the rest, and what this hides is put back once the effects are drawn.
+    this.collectRoutes();
+    try {
+      this.drawFrameRouted(cam, view);
+    } finally {
+      this.portals.actors.restoreFrame();
+    }
+  }
+
+  /** The routing's record for one stood shuttle, refilled (`ShuttleRigs.routeOf`). */
+  private readonly rigRoute = { root: null as THREE.Object3D | null, inside: false, x: 0, y: 0, z: 0, radius: 0 };
+
+  /**
+   * This frame's records for the portal renderer's routing (`portalCull.ts`): the catalogue's creatures
+   * and people by the room the manager follows them in, the fighters by theirs, the ships the world
+   * follows through the portals, and the shuttles stood on their pads out in the open. Left alone: the
+   * player and whatever they ride, fly or stand aboard, a vehicle whose room is not followed, a shuttle on
+   * a pad in a room (it flies in and out through the door on its own clock), and the other players, whose
+   * rooms are not known. Nothing allocated.
+   */
+  private collectRoutes(): void {
+    const r = this.portals.actors;
+    // Collected for the routing, and for the creatures' tiers (which read how each body's rooms were seen)
+    // even when only that switch is on; bodies are hidden and routed only with the routing's own.
+    const routing = cullOn('actorRoutes');
+    if (!r.begin(this.portals.vis, routing || cullOn('seenTiers'))) return;
+    // Each record's sphere is written into `r.at` rather than handed over as numbers, which would be boxed;
+    // `at[4]` is how far the body has gone since its room was last followed, which grows the doorway test.
+    const at = r.at;
+    const w = this.world;
+    const mobiles = w.mobiles;
+    if (mobiles) {
+      const live = mobiles.live;
+      for (let i = 0; i < live.length; i++) {
+        const m = live[i];
+        if (!m.ready || m.removed) continue;
+        const cell = mobiles.cellOf(m);
+        const from = mobiles.cellFromOf(m);
+        const c = m.plan.cull;
+        at[0] = m.pos.x;
+        at[1] = m.pos.y + c.y;
+        at[2] = m.pos.z;
+        at[3] = m.ragdoll ? 2 * c.radius : c.radius;
+        at[4] = from ? m.pos.distanceTo(from) : 0;
+        r.add(ROUTE_KIND.mobile, m.group, m.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0);
+      }
+    }
+    const npcs = w.npcs?.npcs;
+    if (npcs) {
+      for (let i = 0; i < npcs.length; i++) {
+        const n = npcs[i];
+        const cell = n.cell;
+        at[0] = n.pos.x;
+        // A fallen fighter's place is its ragdoll's middle; a standing one's, its feet.
+        at[1] = n.ragdoll ? n.pos.y : n.pos.y + n.bodyLift;
+        at[2] = n.pos.z;
+        at[3] = n.ragdoll ? 2.4 : 1.3;
+        at[4] = n.pos.distanceTo(n.cellFrom);
+        r.add(ROUTE_KIND.fighter, n.group, n.bladeRoot, cell ? cell.building : null, cell ? cell.cell : 0);
+      }
+    }
+    const p = this.player;
+    const carrier = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    const vehicles = w.vehicles;
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
+      if (v === carrier || v.disposed) continue;
+      const cell = w.vehicleRoomOf(v);
+      if (cell === undefined) continue;
+      const b = v.spec.bounds;
+      const mid = this.routeMid.set(0, (b.min[1] + b.max[1]) / 2, 0).applyQuaternion(v.group.quaternion).add(v.pos);
+      at[0] = mid.x;
+      at[1] = mid.y;
+      at[2] = mid.z;
+      const sx = b.max[0] - b.min[0];
+      const sy = b.max[1] - b.min[1];
+      const sz = b.max[2] - b.min[2];
+      at[3] = 0.5 * Math.sqrt(sx * sx + sy * sy + sz * sz);
+      // The tracker samples from the hull's middle, which is where this measures from as well.
+      const from = w.vehicleRoomFrom(v);
+      at[4] = from ? mid.distanceTo(from) : 0;
+      r.add(ROUTE_KIND.vehicle, v.group, null, cell ? cell.building : null, cell ? cell.cell : 0);
+    }
+    const rigs = this.shuttleRigs;
+    if (rigs) {
+      const out = this.rigRoute;
+      for (let i = 0; i < rigs.stoodCount; i++) {
+        if (!rigs.routeOf(i, out) || !out.root || out.inside) continue;
+        at[0] = out.x;
+        at[1] = out.y;
+        at[2] = out.z;
+        at[3] = out.radius;
+        at[4] = 0;
+        r.add(ROUTE_KIND.rig, out.root, null, null, 0);
+      }
+      out.root = null;
+    }
+    r.hideFrame(routing);
+  }
+
+  /** Scratch for a hull's middle in `collectRoutes`. */
+  private readonly routeMid = new THREE.Vector3();
+
+  /** The frame drawn once its visible set is worked out and what moves on its own is routed (`drawFrame`). */
+  private drawFrameRouted(cam: THREE.PerspectiveCamera, view: Building | null): void {
     // The room's air, before the scene is drawn (its motes are in it): which room this frame is
     // drawn from, its doorway beams, its lamps and its motes. The effects read it after, in the fill below.
     const ra = this.roomAirInput;
@@ -12806,12 +13161,26 @@ class App {
     await this.world.prepareActor(shown);
     this.closePanelsForPlacing();
     this.ghost.hold(shown);
-    if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
+    this.hangGhost();
     this.placing = { deed, reach: GHOST_TUNE.reach, yaw: this.player.heading, lift: 0, state: null };
     this.placingBar.show(deed.name, false, 'move it where you want it', this.placeKeys(), 0);
     const k = this.placeKeys();
     this.messages.system(`placing ${deed.name}: the wheel moves it, ${k.left} and ${k.right} turn it, ${k.up} and ${k.down} raise and lower it, a click puts it down`);
     return null;
+  }
+
+  /**
+   * The ghost's group into the scene the first time, with the material scan's queue listening under it (its
+   * footprint grid is hung there after the model), and whatever it holds now adopted at once: its see-through
+   * copies are new materials hung under a group already standing in the scene, which the queue does not hear
+   * after the first time, and they are drawn on the very next frame (step 6, `sceneAdds.ts`).
+   */
+  private hangGhost(): void {
+    if (!this.ghost.group.parent) {
+      this.world.scene.add(this.ghost.group);
+      this.world.watchAdds(this.ghost.group);
+    }
+    this.world.adoptNow(this.ghost.group);
   }
 
   /** What the four placing keys are called just now, for the bar and the line that explains them. */
@@ -12906,7 +13275,7 @@ class App {
     this.stopPlacingProp();
     this.closePanelsForPlacing();
     this.ghost.hold(model);
-    if (!this.ghost.group.parent) this.world.scene.add(this.ghost.group);
+    this.hangGhost();
     this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null, from: null };
     const k = this.placeKeys();
     this.placingBar.show(def.name || def.id, true, 'move it where you want it', k, 0);
@@ -15602,6 +15971,7 @@ class App {
         perf.count(CNT.syncBlocks, Math.max(0, sync - this.perfSyncMark));
         perf.gauge(CNT.portalMaterials, this.portals.materials.size);
         perf.gauge(CNT.mobiles, this.world.mobiles?.live.length ?? 0);
+        perf.count(CNT.seenOff, this.world.mobiles?.walled ?? 0);
       }
       this.perfSyncMark = sync;
       // A frame the game did not simulate (the Escape menu, which is up whenever the console has the
