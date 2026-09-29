@@ -17,6 +17,7 @@ import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuildin
 import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
 import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
 import { SKELETON_FRAME, SKELETON_TUNE } from './core/skeletonOnce.ts';
+import { LOW_CULL } from './world/bodyCull.ts';
 import { LOD_TUNE } from './world/mobiles/lod.ts';
 import { FAR_TILE_TUNE } from './world/farTile.ts';
 import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
@@ -130,7 +131,7 @@ import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
 import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
 import { discDirection, farPadsOf, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, tripSeconds, zonePlace, type FarPads, type PadRef, type RideRoute, type SpacePlan } from './world/rideRoute.ts';
 import { RIDE_PILOT } from './world/shuttleCourse.ts';
-import { RIDE_TUNE, ShuttleRide, downReachOf, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
+import { RIDE_TUNE, ShuttleRide, downReachOf, heldHeading, holdRoomHeading, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
 import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
@@ -226,6 +227,7 @@ import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
 import { TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
 import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
+import { DebugMenu } from './ui/debugMenu.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 // The moods: one word that is two things at once, the body's branch and the chat's mark.
 import { MOOD_TUNE, cleanMoodName, findMood, isMoodOff, moodListLine, moodNote, moodReport, tuneMoods } from './player/moods.ts';
@@ -422,6 +424,8 @@ const liftAt = new THREE.Vector3();
 /** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
 const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
+/** The way the camera looks, written each frame into the world's record of the player's aim. */
+const aimLook = new THREE.Vector3();
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
 /**
@@ -630,6 +634,13 @@ class App {
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
+  /**
+   * The debug menu: every `__debug` helper run from a window. It holds the mouse without joining
+   * `anyPanelOpen`, as the group's panel does, so the world goes on simulating while it is up.
+   */
+  private readonly debugMenu: DebugMenu;
+  /** The timer that gives the game its keys back after Escape has shut the debug menu; 0 when none is out. */
+  private keyHold = 0;
   private readonly shipMenu: ShipMenu;
   /**
    * Docking at a station: the lane asked for from the ship menu, flown by its own autopilot. Made in
@@ -1111,6 +1122,29 @@ class App {
       note: "creatures', people's and fighters' meshes culled one by one in every pass and shadow cascade against a sphere set once",
     });
     registerPerfSwitch('shadowReach', { get: () => LOD_TUNE.shadowClamp, set: (v) => (LOD_TUNE.shadowClamp = !!v), values: [false, true], note: "a creature whose sphere reaches none of the shadow cascades' light boxes throws no shadow (and may freeze)" });
+    // A body fighting on one knee: culled mesh by mesh against its standing sphere, or drawn whole.
+    registerPerfSwitch('kneelWhole', {
+      get: () => LOW_CULL.kneelWhole,
+      set: (v) => {
+        LOW_CULL.kneelWhole = !!v;
+        this.world.mobiles?.applyCullSphere();
+        this.world.npcs?.applyCullSphere();
+      },
+      values: [false, true],
+      note: 'false culls a kneeling person or fighter mesh by mesh against its standing sphere, which holds a kneel; true draws it whole while it kneels',
+    });
+    // How the world's people fight, flipped in place over one fight: 0 is the mobile before any of it,
+    // null each person's own level's tier. Behaviour takes seconds to show, so an A/B of it wants long
+    // blocks (`perf({ ab: { key: 'fightTier', a: 0, b: 5 }, block: 300, frames: 3600 })`), each
+    // thrown block the fight settling into the new rung.
+    registerPerfSwitch('fightTier', {
+      get: () => this.world.mobiles?.fightTier ?? null,
+      set: (v) => {
+        this.world.mobiles?.tune({ tier: typeof v === 'number' && Number.isFinite(v) ? v : null });
+      },
+      values: [0, null],
+      note: "0 fights as the mobile before tiers (no postures, cover, slide, roll or jump); null each person's own level's tier; a number that rung for everybody",
+    });
     // The four of step 3 at once, so the whole step is put beside the old way in one drift-cancelling run
     // (`perf({ ab: { key: 'step3' } })`) rather than read off windows taken one after another. It reads true
     // with all four on, false with all four off and 'mixed' otherwise, and a mixed state is kept aside the
@@ -1155,6 +1189,13 @@ class App {
     registerPerfSwitch('exactRooms', { get: () => FURNITURE_TUNE.exactRooms, set: (v) => (FURNITURE_TUNE.exactRooms = !!v), values: [false, true], note: "a room's furniture hosted by the building the snapshot names (a pack converted with them) rather than the one the rooms' boxes find, and seen from the room it names as well as every room the boxes find. Read when a world is read, so it takes effect at the next arrival: an in-session `ab` on it compares nothing" });
     registerPerfSwitch('floraRegions', { get: () => FLORA_BATCH.on, set: (v) => this.world.setFloraRegions(!!v), values: [false, true], note: "the plants and trees drawn one batch per 256 m region, model and level, rather than one mesh per 64 m chunk, model and piece (the levels ride on these)" });
     // Step 8, detail coming in nearer while the eye moves fast.
+    // Step 9, the Theed hangar landing: behaviour, not frame time -- a trip planned with it on lands in the room.
+    registerPerfSwitch('roomPads', { get: () => RIDE_TUNE.roomPads, set: (v) => (RIDE_TUNE.roomPads = !!v), values: [false, true], note: "a transport's trip to Theed Starport lands in the royal hangar on the hangar's own branch and its passenger keeps the room stepping on and off; off, set down at the port as before. Read when a trip is planned, so an in-session `ab` on it compares nothing: flip it and fly a trip" });
+    // Step 10, the travellers at the starports: behaviour, not frame time, compared through `__debug.ours({ trace: true })`.
+    registerPerfSwitch('oursOpenOut', { get: () => Math.max(0, ROUTINE_TUNE.clearOut), set: (v) => (ROUTINE_TUNE.clearOut = Number(v) > 0 ? Number(v) : 0), values: [0, 8], note: "a traveller of ours is stood and sent from the first open ground of the walk grid outside a door (up to this many metres out), and sent only where that ground's ranked region reaches; 0 is the old step outside, any goal counted reachable and the nearest cantina as a fallback. Read when a port is planned and a traveller stood, so it shows over minutes, not in an ab" });
+    registerPerfSwitch('oursReplan', { get: () => ROUTINE_TUNE.replanOnce, set: (v) => (ROUTINE_TUNE.replanOnce = !!v), values: [false, true], note: 'a stalled walk of ours is sent once to the nearest spot it can surely reach, on a fresh route, before it is let go' });
+    registerPerfSwitch('navSightAdvance', { get: () => outdoorNav.agent.sight > 0, set: (v) => (outdoorNav.agent.sight = v ? 1 : 0), values: [false, true], note: "a body outdoors drops a path's corner within reach only where the leg after it can be walked from where it stands, so a tight turn round an obstacle is walked round rather than cut into it (every arrival at Mos Eisley was let go in the junk such a turn cut through). Ships off, the reach alone every body outdoors has always walked by: on, it did not get one arrival more past that junk, and it has been measured on nothing else. It changes every creature, person and fighter out of doors, so compare it over minutes of a town, not in an ab" });
+    registerPerfSwitch('oursOffScreen',{ get: () => ROUTINE_TUNE.letGoOffScreen, set: (v) => (ROUTINE_TUNE.letGoOffScreen = !!v), values: [false, true], note: 'a stalled walk of ours is let go only while it is off the screen, or after `ROUTINE_TUNE.letGoWait` seconds held in view' });
     registerPerfSwitch('rideLodBias', { get: () => RIDE_LOD_TUNE.on, set: (v) => { RIDE_LOD_TUNE.on = !!v; this.world.refreshDetail(); }, values: [false, true], note: "the detail levels' switch distances and the plant reach divided by 1 + (speed - 20) / 30 (at most 5) while the eye moves faster than 20 m/s: a shuttle ride, a fast ship. Ships off: on a flown trip it saved nothing (RIDE_LOD_DEFAULTS says what was measured)" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
@@ -1529,8 +1570,8 @@ class App {
         const leaving = this.rideLeaving;
         if (leaving?.standsAt(pad.key)) leaving.abort('a new trip took its pad');
       },
-      seat: (h) => this.seatInShuttle(h as Vehicle),
-      unseat: (h, at) => this.offShuttle(h as Vehicle, at),
+      seat: (h, room) => this.seatInShuttle(h as Vehicle, room ?? 0),
+      unseat: (h, at, room) => this.offShuttle(h as Vehicle, at, room ?? 0),
       groundCached: (x, z) => this.world.groundIfCached(x, z),
       // Only what stands still: a ship is the pilot's to weigh through `eachShip`, and a ghosted hull
       // (the shuttle itself among them) is in no group a ray can find. Not the ground either, which the
@@ -2009,12 +2050,22 @@ class App {
        * false }` puts every one of them away, and `{ restand: true }` puts them away to be stood again on
        * the next pass.
        */
-      ours: (opts?: { tune?: Record<string, unknown>; port?: boolean | string; list?: boolean; buildings?: boolean; go?: string; on?: boolean; restand?: boolean }) => {
+      ours: (opts?: { tune?: Record<string, unknown>; port?: boolean | string; list?: boolean; buildings?: boolean; go?: string; on?: boolean; restand?: boolean; trace?: boolean }) => {
         const deps = this.world.ambientDeps();
         const tuned = opts?.tune ? ambientPeople.retune(opts.tune) : null;
         const moved = tuned ? { ...(tuned.moved.length ? { moved: tuned.moved } : {}), ...(tuned.ambiguous.length ? { ambiguous: tuned.ambiguous } : {}) } : {};
         if (typeof opts?.on === 'boolean') OURS_TUNE.on = opts.on;
         if (opts?.restand) ambientPeople.clear(deps);
+        // The trace (step 10): on from the first ask, answered with what it holds so far; `false` answers it once more and drops it.
+        if (opts?.trace === false) {
+          const last = ambientPeople.traceReport();
+          ambientPeople.setTracing(false);
+          return { ...moved, ...last, on: false };
+        }
+        if (opts?.trace === true) {
+          if (!ambientPeople.tracingOn) ambientPeople.setTracing(true);
+          return { ...moved, ...ambientPeople.traceReport() };
+        }
         const at = this.player.worldPos;
         const seconds = sharedClock.walkSeconds();
         const named = typeof opts?.port === 'string' ? opts.port : undefined;
@@ -6602,7 +6653,9 @@ class App {
         return n;
       },
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
-      freeMouse: (free) => this.freeMouse(free),
+      // Given back through the game's own check, so the panel shutting under the trade window or the
+      // debug menu leaves the mouse with them rather than locking it (and shutting them with it).
+      freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
     });
     // The group's panel moves by its title and sizes by its corner, as every other window does.
     draggable(groupUi.root, '.group-panel', 'h3', 'group');
@@ -6770,14 +6823,37 @@ class App {
       // Whether anything else is holding the mouse. The trade window is deliberately allowed over
       // the backpack (that is where its own Trade button is), so the panel asks before it hands the
       // mouse back -- and, the other way round, it knows that nobody will hand it back for it when
-      // what refused the window was a travel, a death or a jump rather than another panel.
-      elseHasMouse: () => this.anyPanelOpen() || this.map.open,
+      // what refused the window was a travel, a death or a jump rather than another panel. The
+      // windows that hold the mouse without being panels count too (the group's, whose roster has a
+      // Trade button of its own, and the debug menu), or a trade ending under one locks the pointer
+      // and that window stands down with it.
+      elseHasMouse: () => this.anyPanelOpen() || this.map.open || this.mouseHeldElsewhere(),
     });
     // The trade window moves by its head (its find field still takes a click) and sizes by its corner.
     draggable(tradeUi.root, '.trade-panel', '.trade-head', 'trade');
-    // The two windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
-    // hands it back, so a panel closing under either of them leaves the pointer where it is.
-    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open;
+    // The debug menu: every `__debug` helper from a window. It frees the mouse and does not join
+    // `anyPanelOpen`, so play goes on simulating under it and `__debug.perf()` measures with it up;
+    // it is built here, before the game's own Escape listener is put on, so its Escape is asked first.
+    // It may stand over a tab panel or the map, which are what it is often opened to look at, so the
+    // mouse goes back through `handBackMouse` and stays with whatever is still up under it.
+    this.debugMenu = new DebugMenu(this.ui, {
+      keys: () => this.input.bindings.debugMenu,
+      canOpen: () => this.started && this.inWorld && !this.traveling,
+      freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
+      holdKeys: (ms) => this.holdGameKeys(ms),
+    });
+    draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
+    if (debugRoot) {
+      // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
+      // tab with no keyboard, a run being waited on before the report comes back.
+      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean }) => {
+        await this.debugMenu.drive(o ?? {});
+        return this.debugMenu.report();
+      };
+    }
+    // The windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
+    // hands it back, so a panel closing under any of them leaves the pointer where it is.
+    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open || this.debugMenu.open;
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
@@ -7158,6 +7234,13 @@ class App {
     };
     this.menu.onResume = () => this.resume();
     this.menu.onSwitchCharacter = () => this.switchToSelect();
+    // Debug, in the Escape menu: that menu goes and the debug menu comes up with the mouse still free,
+    // so the lock is never taken and given back in between.
+    this.menu.onDebugMenu = () => {
+      this.menuClosedAt = performance.now();
+      this.menu.hide();
+      this.debugMenu.show();
+    };
     // The menu's own clicks, from the game's interface table.
     this.menu.onUiSound = (action) => void this.audio.ui.play(action);
     this.menu.onSetting = (key) => this.applySetting(key);
@@ -7609,6 +7692,8 @@ class App {
     // Nobody's music carries to the next character.
     band.clear();
     this.map.hide();
+    // The debug menu goes too, leaving the mouse to the select screen.
+    this.debugMenu.standDown();
     // A death still on the screen goes with the world (`endDeath`), and before the ship is left: a corpse
     // aboard lies in the room's own physics, which goes with the hull.
     this.endDeath();
@@ -9854,11 +9939,17 @@ class App {
       // Its middle: a hull's origin is the underside of its box, which on a pad is the pad itself.
       const b = rh.spec.bounds;
       const mid = this.rideMid.set(0, Math.abs(b.max[1] - b.min[1]) / 2, 0).applyQuaternion(rh.group.quaternion).add(rh.pos);
+      // Coming down into a room (Theed's hangar) and standing there: from the frame the hull is followed
+      // into the room, the view keeps the heading it had coming through the door, level, rather than
+      // swinging round the hull as it turns half round on the spot (`RIDE_TUNE.roomHeadingHold`).
+      const held = holdRoomHeading(this.rideHeld, ride, RIDE_TUNE.roomHeadingHold && ride.roomLanding && !!this.world.vehicleRoomOf(rh), rh.group.quaternion);
+      const turn: THREE.Quaternion = held ? this.rideHeld.turn : rh.group.quaternion;
+      const heading = held ? this.rideHeld.heading : rh.heading;
       if (input.held('freeLook')) {
         this.cam.release();
         this.cam.setFrame(null);
         this.cam.update(input, mid, this.rideBlock, dt, null, Math.max(1, reach / 6), 0, 0);
-      } else this.cam.chase(input, dt, mid, rh.group.quaternion, rh.heading, reach, null, this.rideBlock, f.rise);
+      } else this.cam.chase(input, dt, mid, turn, heading, reach, null, this.rideBlock, f.rise);
       this.cam.zoomTarget = Math.max(this.cam.zoomTarget, RIDE_TUNE.minZoom);
       this.showHull(rh, true);
       return;
@@ -9945,6 +10036,8 @@ class App {
   private readonly rideView = rideFraming(true);
   private rideFramedFor: ShuttleRide | null = null;
   private readonly rideMid = new THREE.Vector3();
+  /** The heading the passenger's view holds while a hull comes down into a room, and the trip it was taken for (`holdRoomHeading`, `RIDE_TUNE.roomHeadingHold`). */
+  private readonly rideHeld = heldHeading();
   /**
    * What stands between the passenger's view and the hull, kept rather than made a frame: the first
    * thing that stands still along the line, the orbit's own question (`Physics.blockDistance` is
@@ -10968,6 +11061,15 @@ class App {
       furniture: { ...(this.world.furnitureReport() ?? {}), shownLastFrame: this.portals.furnitureShown, tune: { ...FURNITURE_TUNE } },
       // The creatures and people the manager last took off screen for their room (step 2c).
       offByRoom: this.world.mobiles?.walled ?? 0,
+      // Each ship's room as its tracker follows it (step 9: a shuttle landing in Theed's hangar is in its cell 5),
+      // and the room the rooms' lights are lit for (the player's own, or one a landing hull is in).
+      ships: this.world.vehicles
+        .filter((v) => v.spec.ship && !v.disposed)
+        .map((v) => {
+          const room = this.world.vehicleRoomOf(v);
+          return { id: v.spec.id, room: room === undefined ? 'not followed' : room ? { model: room.building.model.def.id, cell: room.cell } : 'outside' };
+        }),
+      litRoom: this.world.litRoom,
       routeTune: { ...ROUTE_TUNE },
       valid: res.valid,
       camera: { building: res.inside?.model.def.id ?? null, cell: res.cell },
@@ -11997,6 +12099,11 @@ class App {
       rides.splice(i, 1);
     }
     if (!rides.length && !this.ride?.running && !this.rideLeaving) this.rideAdvanced = 0;
+    // A hull coming down into a room, parked in it or lifting off out of it again (Theed's hangar): that
+    // room's own lights are lit for whoever looks in on it from outside, when the player is in no room.
+    let pad = RIDE_TUNE.roomPads ? (this.ride?.roomPad() ?? this.rideLeaving?.roomPad() ?? null) : null;
+    for (let i = 0; RIDE_TUNE.roomPads && !pad && i < rides.length; i++) pad = rides[i].roomPad();
+    this.world.hintRoomLight(pad, pad?.cell ?? 0);
   }
 
   /**
@@ -12043,7 +12150,7 @@ class App {
       const pads = this.travelThings().flatMap((t, i) => (t.kind === 'shuttle' && t.rig ? [`travel:${from.pack}:${i}`] : []));
       return `${destKey} is not a pad a shuttle stands on its rig at in this world; these are: ${pads.join(', ')}`;
     }
-    const ride = new ShuttleRide(planHop(from, dest), this.rideHost);
+    const ride = new ShuttleRide(planHop(from, dest, RIDE_TUNE.roomPads), this.rideHost);
     this.debugRides.push(ride);
     const r = this.renderer;
     const before = r.info.programs?.length ?? 0;
@@ -12081,7 +12188,7 @@ class App {
    * first frames are never drawn from inside it. Refused for somebody who is not standing free in the
    * world just now -- on something else, in a ship's rooms, dead, travelling -- who then misses it.
    */
-  private seatInShuttle(v: Vehicle): boolean {
+  private seatInShuttle(v: Vehicle, room = 0): boolean {
     const p = this.player;
     if (!this.inWorld || this.traveling || this.dying || p.hp <= 0 || p.mounted || p.piloting || p.aboard || p.noclip || p.eva) return false;
     // Whatever was being put down is given up: its keys are the ride's now.
@@ -12089,15 +12196,34 @@ class App {
     this.stopPlacingProp();
     p.mount(v);
     this.cam.distance = Math.max(this.cam.distance, RIDE_TUNE.minZoom);
+    // Seated in a hull parked in a room (Theed's hangar): carried a dozen metres from the collector to the
+    // seat, which a walk takes for a teleport and would leave the room for; the room is kept, and followed
+    // from wherever the seat stands once the hull is parked in this same step.
+    if (room > 0 && RIDE_TUNE.roomPads) this.world.enterRoom(this.rideOffAt.set(v.pos.x, v.pos.y + 1, v.pos.z), room, true);
     return true;
   }
 
-  /** The passenger off a shuttle's hull, on their feet at `at` (a hand's breadth over the floor found there). */
-  private offShuttle(v: Vehicle, at: THREE.Vector3): void {
+  /**
+   * The passenger off a shuttle's hull, on their feet at `at` (a hand's breadth over the floor found there),
+   * and in `room` of the building the hull stands in where it stands in one (Theed's hangar): the step off
+   * the seat is a dozen metres, which a walk takes for a teleport and would leave the room for. Where that
+   * room is not there at that point, the room holding it, as a teleport's is found.
+   */
+  private offShuttle(v: Vehicle, at: THREE.Vector3, room = 0): void {
     const p = this.player;
     if (p.mounted !== v) return;
     v.group.visible = true;
     p.dismount(this.rideOffAt.set(at.x, at.y + 0.15, at.z));
+    if (room > 0 && RIDE_TUNE.roomPads && !this.world.enterRoom(this.rideOffAt, room)) this.world.enterCellAt(this.rideOffAt);
+  }
+
+  /**
+   * The rig a trip from `from` is flown with, as `padOfPort` weighs a pad in a room by it (Theed's hangar
+   * is landed at by its own transport alone), or null with room pads switched off (`RIDE_TUNE.roomPads`),
+   * which passes every room over as before.
+   */
+  private roomPadRig(from: PadRef): string | null {
+    return RIDE_TUNE.roomPads ? from.rig : null;
   }
 
   /**
@@ -12114,7 +12240,7 @@ class App {
     if (i < 0) return false;
     const ports = this.portsHere();
     const from = padRefOf(here, i, things[i], ports, this.travelRigs, things);
-    const to = padOfPort(things, ports, ticket.to, here, this.travelRigs);
+    const to = padOfPort(things, ports, ticket.to, here, this.travelRigs, undefined, this.roomPadRig(from));
     const route = planRoute(ticket, from, to, here);
     if (!route) return false;
     void this.beginRide(route, true, ticket);
@@ -12148,7 +12274,7 @@ class App {
     // Where the port is in the far world's own frame, which is where somebody saved on the way is kept
     // when its pad has no collector of its own.
     const port = there?.ports.find((p) => p.name === ticket.to) ?? null;
-    const to = there ? padOfPort(there.things, there.ports, ticket.to, ticket.pack, there.rigs) : null;
+    const to = there ? padOfPort(there.things, there.ports, ticket.to, ticket.pack, there.rigs, undefined, this.roomPadRig(from)) : null;
     const offer = skipOffer(here, ticket.pack, this.routeFacts, SPACE_LEG_BUILT);
     const route = planRoute({ ...ticket, at: port ? { x: port.x, z: port.z } : ticket.at }, from, to, here, offer.locked ? offer.why : null, SPACE_LEG_BUILT ? this.spacePlan() : null);
     if (!route) return false;
@@ -12255,7 +12381,7 @@ class App {
     const row = ports.find((p) => p.name === port);
     if (!row) return `this world has no port called ${port}; these are: ${ports.map((p) => p.name).join(', ')}`;
     const ticket: Ticket = { id: '', from: here, pack: here, to: port, at: { x: row.x, z: row.z }, price: 0, bought: Date.now() };
-    const route = planRoute(ticket, from, padOfPort(this.travelThings(), ports, port, here, this.travelRigs), here);
+    const route = planRoute(ticket, from, padOfPort(this.travelThings(), ports, port, here, this.travelRigs, undefined, this.roomPadRig(from)), here);
     if (!route) return `no trip can be flown from ${key}`;
     if (passenger) {
       const ride = await this.beginRide(route, true, null);
@@ -12298,7 +12424,7 @@ class App {
     const offer = skipOffer(here, pack, this.routeFacts, SPACE_LEG_BUILT);
     const skipped = skip || (offer.locked && offer.checked);
     const ticket: Ticket = { id: '', from: here, pack, to: port, at: { x: row.x, z: row.z }, price: 0, bought: Date.now(), trip: skipped ? 'skip' : 'space', skipSpace: skipped };
-    const route = planRoute(ticket, from, padOfPort(there.things, there.ports, port, pack, there.rigs), here, offer.locked ? offer.why : null, this.spacePlan());
+    const route = planRoute(ticket, from, padOfPort(there.things, there.ports, port, pack, there.rigs, undefined, this.roomPadRig(from)), here, offer.locked ? offer.why : null, this.spacePlan());
     if (!route) return `no trip can be flown from ${key}`;
     const ride = await this.beginRide(route, true, null);
     if (legs) return this.rideLegs();
@@ -13953,6 +14079,20 @@ class App {
   }
 
   /**
+   * Keep the game's keys standing aside a moment after Escape has shut a window from a typed line, so
+   * the press that shut it is not also taken as the player's own Escape, the chat line's rule. The keys
+   * come back when the moment is up unless something else on the screen has them by then.
+   */
+  private holdGameKeys(ms: number): void {
+    this.input.captured = true;
+    window.clearTimeout(this.keyHold);
+    this.keyHold = window.setTimeout(() => {
+      this.keyHold = 0;
+      if (!this.anyPanelOpen() && !this.map.open && !this.mouseHeldElsewhere()) this.input.captured = false;
+    }, ms);
+  }
+
+  /**
    * Give the mouse back, unless something else on the screen still wants it.
    *
    * What a panel knows is that it has closed; whether the pointer goes back to the game is the
@@ -13966,7 +14106,7 @@ class App {
     this.freeMouse(false);
   }
 
-  /** Whether one of the two windows that hold the mouse without joining `anyPanelOpen` has it. */
+  /** Whether one of the windows that hold the mouse without joining `anyPanelOpen` (the group's, the trade window, the debug menu) has it. */
   private mouseHeldElsewhere: () => boolean = () => false;
 
   /** B: the spawner, the garage or the NPCs tab; the key toggles the last tab used, a tab click swaps. */
@@ -15521,6 +15661,9 @@ class App {
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
+        // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
+        // it itself, and from one of its boxes it types a character and Escape is the way out.
+        if (input.pressedAction('debugMenu')) this.debugMenu.toggle();
         // A building in hand takes the click and its own four keys before anything else does: a
         // click puts it down, two keys turn it and two raise and lower it. They are keys of their
         // own rather than the strafe keys, so a player can still walk the building to where they
@@ -15660,6 +15803,20 @@ class App {
       this.world.aboard = !!player.aboard;
       this.world.weatherHull = player.mounted?.spec.ship ? player.mounted : null;
       this.world.weatherRidden = player.mounted;
+      // Where the player's gun is pointed while it is up: what a fighter or a person reads to know it is
+      // aimed at, and throw itself aside (`src/world/evade.ts`). The crosshair is the camera's own line.
+      const aim = this.world.playerAim;
+      aim.on = simulate && player.classId === 'bounty_hunter' && !player.fists && player.gunReady && !player.mounted && !player.aboard && !player.noclip;
+      if (aim.on) {
+        const eye = this.cam.camera;
+        eye.getWorldDirection(aimLook);
+        aim.x = eye.position.x;
+        aim.y = eye.position.y;
+        aim.z = eye.position.z;
+        aim.dx = aimLook.x;
+        aim.dy = aimLook.y;
+        aim.dz = aimLook.z;
+      }
       this.hud.setWeatherNote(this.world.weather.heldNote());
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
       this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);

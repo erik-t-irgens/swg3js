@@ -86,6 +86,13 @@ export interface RideRoute {
   trip: TripKind;
   rig: string;
   mood: string;
+  /**
+   * The branch the hull lands with where the pad it lands on decides it: a pad in a room lands on its own
+   * branch (Theed's hangar on `theed`, whose landing comes in through the hangar's door), and null leaves it
+   * to the hull's own rule (`landMood`: the calm branch where its rig has one, else the one it took off on).
+   * Absent on a route made before there was such a rule, which reads as null.
+   */
+  landMood?: string | null;
   from: PadRef;
   to: { pack: string; port: string; pad: PadRef | null; at?: { x: number; z: number } | null };
   skipSpace: boolean;
@@ -155,9 +162,10 @@ export function padRefOf(pack: string, index: number, thing: TravelThing, ports:
  * A hop from one pad to another on the same world with nothing flown between: boarded at the first,
  * its take-off played to the cut, then put straight onto the second's landing at its join, landed,
  * parked and left empty to go on its way. What the console flies to try a hull's clips end to end;
- * a trip somebody rides flies the middle instead.
+ * a trip somebody rides flies the middle instead. A hop onto a pad in a room lands on that pad's own
+ * branch (`landMoodFor`) unless `rooms` is false, which is the old way (`RIDE_TUNE.roomPads`).
  */
-export function planHop(from: PadRef, to: PadRef): RideRoute {
+export function planHop(from: PadRef, to: PadRef, rooms = true): RideRoute {
   const here = from.pack;
   const there = to.pack;
   return {
@@ -165,6 +173,7 @@ export function planHop(from: PadRef, to: PadRef): RideRoute {
     trip: 'local',
     rig: from.rig ?? '',
     mood: from.mood,
+    landMood: rooms ? landMoodFor(from, to) : null,
     from,
     to: { pack: there, port: to.port, pad: to },
     skipSpace: false,
@@ -186,25 +195,44 @@ export function planHop(from: PadRef, to: PadRef): RideRoute {
  * name, or one with no shuttle standing on a rig by it (seven of the retail ports: a trip there is flown
  * as far as the take-off and the passenger put down at the port, as a ticket always was).
  *
- * A shuttle standing in a room is never landed at: Theed's transport parks inside the royal hangar
- * (its cell 5), and a hull a trip lands with comes down on its calm branch (`landMood`), made for an
- * open pad, so a trip to Theed Starport sets its passenger down at the port instead. Landing inside on
- * Theed's own branch is a piece of work of its own.
+ * A shuttle standing in a room is landed at only by a hull of its own rig whose rig has its branch
+ * (`hullRig`, the rig the trip is flown with): Theed's transport parks inside the royal hangar (its cell
+ * 5), and only its own branch's landing comes in through the hangar's door -- the calm landing every other
+ * transport comes down on arrives from the far side, through the hangar's back wall. So a transport lands
+ * in the hangar on `theed` (`landMoodFor`), and a trip flown with the plain shuttle, or with `hullRig`
+ * null (`RIDE_TUNE.roomPads` off, the old way), passes the room over and sets its passenger down at the port.
  */
-export function padOfPort(things: readonly TravelThing[], ports: readonly Port[], port: string, pack: string, rigs: Readonly<Record<string, TravelRig>>, reach = PORT_REACH): PadRef | null {
+export function padOfPort(things: readonly TravelThing[], ports: readonly Port[], port: string, pack: string, rigs: Readonly<Record<string, TravelRig>>, reach = PORT_REACH, hullRig: string | null = null): PadRef | null {
   const p = ports.find((x) => x.name === port);
   if (!p) return null;
   let best = -1;
   let bestD = Infinity;
   for (let i = 0; i < things.length; i++) {
     const t = things[i];
-    if (t.kind !== 'shuttle' || !t.rig || !rigs[t.rig] || t.cell > 0) continue;
+    if (t.kind !== 'shuttle' || !t.rig || !rigs[t.rig]) continue;
+    if (t.cell > 0 && !roomPadFor(t, rigs, hullRig)) continue;
     const d = Math.hypot(p.x - t.bx, p.z - t.bz);
     if (d >= bestD) continue;
     bestD = d;
     best = i;
   }
   return best >= 0 && bestD <= reach ? padRefOf(pack, best, things[best], ports, rigs, things) : null;
+}
+
+/** Whether a shuttle standing in a room is a pad a hull of `hullRig` may land at: its own rig, and a rig that has its branch. */
+export function roomPadFor(t: Pick<TravelThing, 'rig' | 'mood'>, rigs: Readonly<Record<string, TravelRig>>, hullRig: string | null): boolean {
+  if (!hullRig || !t.rig || t.rig !== hullRig) return false;
+  const moods = rigs[t.rig]?.moods;
+  return !!moods && Object.prototype.hasOwnProperty.call(moods, t.mood);
+}
+
+/**
+ * The branch a hull flown from `from` lands with where the pad decides it: a pad in a room, of the hull's
+ * own rig, lands on its own branch (Theed's hangar on `theed`); every other pad answers null, and the hull
+ * keeps its own rule (`landMood`: calm, or its only branch). A trip's `landMood`.
+ */
+export function landMoodFor(from: Pick<PadRef, 'rig'>, to: Pick<PadRef, 'cell' | 'rig' | 'mood'> | null): string | null {
+  return to && to.cell > 0 && !!to.rig && to.rig === from.rig ? to.mood : null;
 }
 
 /** Another world's travel things, its ports and its rigs, as a trip reads them before that world has loaded. */
@@ -239,10 +267,10 @@ export function farPadsOf(travel: unknown, pois: unknown): FarPads | null {
 }
 
 /**
- * The branch a hull flown from a pad lands with, wherever it lands: the calm one, where its rig has one,
- * and otherwise the one it took off on (the shuttle's only branch). No trip lands in Theed's hangar --
- * Theed Starport is a port, but its transport stands in a room and `padOfPort` never lands at one -- so
- * a transport out of Theed comes down as every other transport does.
+ * The branch a hull flown from a pad lands with where the pad it lands on does not decide it: the calm
+ * one, where its rig has one, and otherwise the one it took off on (the shuttle's only branch). So a
+ * transport out of Theed comes down on an open pad as every other transport does; one landing in Theed's
+ * hangar lands on the hangar's own branch instead (`landMoodFor`, the trip's `landMood`).
  */
 export function landMood(rig: Pick<TravelRig, 'moods'> | null | undefined, from: { mood: string }): string {
   return rig?.moods?.calm ? 'calm' : from.mood;
@@ -314,6 +342,8 @@ export function planRoute(ticket: Ticket, from: PadRef, to: PadRef | null, here:
     trip,
     rig: from.rig,
     mood: from.mood,
+    // A pad in a room lands on its own branch: `padOfPort` hands one over only for a hull of its own rig.
+    landMood: landMoodFor(from, pad),
     from,
     to: { pack: there, port: ticket.to, pad, at: ticket.at ? { x: ticket.at.x, z: ticket.at.z } : null },
     skipSpace: trip === 'skip',
@@ -370,7 +400,8 @@ export function replanSkip(route: RideRoute, at: number, why: string): RideRoute
           { kind: 'leave', world: there, pad },
         ]
       : [{ kind: 'walkOff', world: there, port: to.port, aim: { to: 'port', pack: there, port: to.port } }];
-  return { ...route, trip: 'skip', skipSpace: true, forced: why, legs: [...kept, ...tail] };
+  // The pad it lands on, if any, is the same one, and so is the branch it lands with.
+  return { ...route, landMood: pad && !tried ? landMoodFor(route.from, pad) : null, trip: 'skip', skipSpace: true, forced: why, legs: [...kept, ...tail] };
 }
 
 /**

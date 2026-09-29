@@ -21,7 +21,8 @@
 // sphere is a standing body's, so anything that lays the body out along the ground turns the cull
 // off for as long as it lies there (`cullsOneByOne`): a ragdoll, whose pieces leave the sphere; a
 // body dead in its held death clip (every death on a world a server holds, and every one waiting in
-// the ragdoll queue); a knockdown; a fighter prone; and an idle that is itself a body lying at full
+// the ragdoll queue); a knockdown; a fighter prone; a body kneeling, prone, rolling or in the air on
+// a jump (`low`, which a fighter and a person from the catalogue fight in); and an idle that is itself a body lying at full
 // length (`LYING_IDLE`: the scene NPCs' dead poses, the restrained Wookiee), whose head lies about two
 // metres from the feet and so outside a sphere centred at mid-height. The manager's own group cull
 // and the portal renderer's routing still apply on top, since a hidden root hides everything under
@@ -98,9 +99,30 @@ export interface BodyPose {
   dead: boolean;
   /** Off its feet some other way: a knockdown's fall, lie and getting up, or a fighter prone. */
   down: boolean;
+  /**
+   * Down low or in the air for a moment on purpose: flat, tumbling through a roll or off the ground on
+   * a jump. Each lays the body out or carries it by clips the standing sphere was never measured against
+   * (a prone body's length, a roll's tumble, a jump's tuck and landing), so the cull is off for as long
+   * as it lasts, which for all but prone is under a second. Left out, it is not.
+   */
+  low?: boolean;
+  /**
+   * On one knee, which is kept apart from `low` because it is the one low posture a body holds for a
+   * long time in a fight, so what it costs is worth a switch of its own (`LOW_CULL.kneelWhole`).
+   */
+  kneel?: boolean;
   /** The idle it stands in, when an idle can itself lie a body down (a mood's); null for none. */
   idle: string | null;
 }
+
+/**
+ * Whether a body on one knee is drawn whole rather than culled mesh by mesh. A kneel is lower than the
+ * standing body and no wider than its bind pose's arm span, so it lies inside the standing sphere by
+ * the sphere's own arithmetic, and culled it costs nothing; but it is the one low posture held for
+ * seconds at a time, so which way it goes is measured rather than assumed (`__debug.perf({ ab: { key:
+ * 'kneelWhole' } })`) and live here. Read when a body next asks the rule, which is every change of posture.
+ */
+export const LOW_CULL = { kneelWhole: true };
 
 /**
  * Whether a body's meshes are culled one by one against the standing body's sphere: the switch on, and
@@ -109,8 +131,9 @@ export interface BodyPose {
  * half a metre short), so for as long as it lies there the cull is off and the body is drawn whole
  * whenever its group is.
  */
-export function cullsOneByOne(pose: BodyPose, on: boolean = SKELETON_TUNE.cullSphere): boolean {
-  if (!on || pose.ragdoll || pose.dead || pose.down) return false;
+export function cullsOneByOne(pose: BodyPose, on: boolean = SKELETON_TUNE.cullSphere, kneelWhole: boolean = LOW_CULL.kneelWhole): boolean {
+  if (!on || pose.ragdoll || pose.dead || pose.down || pose.low) return false;
+  if (pose.kneel && kneelWhole) return false;
   return pose.idle === null || !LYING_IDLE.test(pose.idle);
 }
 

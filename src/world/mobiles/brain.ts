@@ -84,6 +84,15 @@ export interface BrainSelf {
    * behind something and says `chase` while it is still looking.
    */
   inCover?: boolean;
+  /**
+   * How much higher it can get on a jump, metres (`jumpHeight` in `src/world/evade.ts`): nought for
+   * a body that does not jump, which is every creature, every droid and every person below the tier
+   * that earns one. A target whose feet stand no higher than that over this body's is not given up
+   * for its height (rule 4, `withinJump`), and nothing else reads it: a blow still wants the two level, since a body cannot swing at
+   * somebody over its head, and getting up there is the body's own jump to make. Left out, it is
+   * nought, which is every body there was before any of them could jump.
+   */
+  jumpReach?: number;
 }
 
 export interface BrainTarget {
@@ -373,6 +382,26 @@ function level(self: BrainSelf, t: BrainTarget, tune: BrainTune): boolean {
 }
 
 /**
+ * Whether a target stands on something this body can jump up onto, and so is not one to give up on:
+ * its **feet** no higher over this body's feet than the jump reaches. That is exactly the rise the
+ * ledge jump itself will take (`ledgeJump` in `src/world/evade.ts`, which jumps only while the feet's
+ * rise is within `jumpHeight`), and it must be: a target the brain kept for a jump that the body then
+ * never makes is a chase at the foot of a wall until the stuck count gives it up, where before the
+ * jump it went home after `giveUp` seconds. It is the reach of the jump and not the jump added on top
+ * of `level`'s band, since the band is measured middle to middle and a body stood on the ledge is
+ * level with the target from there. Only upward: a body drops off an edge with no jump at all and
+ * nothing about one reaches a pit. For the plain hop and the first Force level the reach sits inside
+ * the band that already counts as level, so this changes nothing for them; it is the second Force
+ * level's 4.9 m that it keeps.
+ */
+export function withinJump(self: BrainSelf, t: BrainTarget): boolean {
+  const reach = self.jumpReach ?? 0;
+  if (!(reach > 0)) return false;
+  const rise = t.y - self.y;
+  return rise > 0 && rise <= reach;
+}
+
+/**
  * What to do now. The first rule that applies wins:
  *
  * 1. Past the leash (or already on the way home): run home with no target.
@@ -381,7 +410,8 @@ function level(self: BrainSelf, t: BrainTarget, tune: BrainTune): boolean {
  * 3. Nobody hurt it: an aggressive one takes the nearest it is hostile to within `aggro` (or
  *    `aggroBig`) and `aggroVertical`; a skittish one bolts from the player inside `fleeRange`.
  * 4. A target out of reach in height for `giveUp` seconds, or stuck `stuckGiveUp` times: home,
- *    and that target forgotten for `forget` seconds.
+ *    and that target forgotten for `forget` seconds. Stood on something a jumper can jump up onto
+ *    (feet within `jumpReach` of its own) is not out of reach.
  * 5. With a target: shoot it (in range, with a line), strike it (in reach and level), stare at a
  *    fresh one that is far, else chase it. A body whose `seeksCover` flag is set gets behind
  *    something while it does: see the cover note below.
@@ -499,10 +529,12 @@ export function decide(self: BrainSelf, targets: readonly BrainTarget[], tune: B
   }
 
   if (target) {
-    // 4. Out of reach in height too long, or stuck too often: give it up and go home.
+    // 4. Out of reach in height too long, or stuck too often: give it up and go home. A jumper keeps
+    //    one stood above it within its jump, which is the whole of what the jump changes in here.
     const sameTarget = self.targetKey === target.key;
     const isLevel = level(self, target, tune);
-    const blockedSince = isLevel ? null : sameTarget && self.blockedSince !== null ? self.blockedSince : now;
+    const reachable = isLevel || withinJump(self, target);
+    const blockedSince = reachable ? null : sameTarget && self.blockedSince !== null ? self.blockedSince : now;
     if ((blockedSince !== null && now - blockedSince >= tune.giveUp) || (sameTarget && self.stuck >= tune.stuckGiveUp)) {
       goHome();
       d.forgetKey = target.key;

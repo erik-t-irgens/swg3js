@@ -43,10 +43,15 @@ import {
   arrivalPhase,
   departurePhase,
   departureStart,
+  firstOpenOut,
   giveBack,
+  nearestRanked,
   newWalk,
   newHeadway,
+  openRegion,
+  rankedRegion,
   restartHeadway,
+  sameRankedRegion,
   stalled,
   standFacing,
   stepDeparture,
@@ -54,6 +59,7 @@ import {
   walkTo,
   type DepartureState,
   type Headway,
+  type OpenOut,
   type RoutineWalk,
   type TravellerPlan,
 } from './routines.ts';
@@ -161,6 +167,11 @@ export interface AmbientDeps {
   walkable(x: number, z: number): boolean | null;
   /** Whether the walk grid can say a body at one point could walk to another at all; true where it cannot say. */
   reachable(x: number, z: number, goalX: number, goalZ: number): boolean;
+  /**
+   * The walk grid's region at a point: 0 blocked, 1 to 13 a ranked region, 14 a smaller one, 15 a
+   * building's own footprint; -1 with no grid, which leaves every rule of ours as it was before.
+   */
+  region(x: number, z: number): number;
   /** Whether a room's floor is really there at a point (its collision built). */
   cellReady(x: number, y: number, z: number): boolean;
   /**
@@ -184,6 +195,25 @@ interface Place {
   z: number;
   building: Building | null;
   room: number;
+}
+
+/**
+ * Where an arrival walks into town to, and what it does there. `x`, `z` the point it walks to, out on
+ * open ground. A cantina's or a hotel's has its doorstep in `stepX`, `stepZ`, which it walks on to from
+ * there, straight along the door's own line, and goes in at: made for at the open ground outside the door
+ * (the doorstep is the building's own footprint on the walk grid, which plans no way to it), it would
+ * otherwise vanish in the open street several metres short of the door, in plain view. NaN for none: a
+ * spot in town is where it is finished, as it always was. `hold` is a goal that is neither -- the open
+ * ground outside the starport's door, when nowhere was sure to be reachable from there, or the nearest
+ * ground it could reach after a stall -- where it is finished only while nobody sees it go
+ * (`letGoOffScreen`, at most `letGoWait` held in view).
+ */
+interface ArrivalGoal {
+  x: number;
+  z: number;
+  stepX: number;
+  stepZ: number;
+  hold: boolean;
 }
 
 /** A way into a building from outside: the point a step outside it, and the way out through it. */
@@ -213,6 +243,16 @@ interface PortPlan {
   padDoor: Door | null;
   streetDoor: Door | null;
   /**
+   * The first open ground of the walk grid out along its street door's line (`firstOpenOut`; on every
+   * Tatooine starport a ranked region), or null with no grid, no street door, or `clearOut` off: where an
+   * arrival steps out to before it makes for town, where its walk into town is measured from, and where
+   * one with nowhere it can reach is finished. Worked out for the `clearOut` in force (`streetFor`, NaN
+   * before it has been), and again whenever that moves, so the switch is one flip either way
+   * (`streetOf`).
+   */
+  street: OpenOut | null;
+  streetFor: number;
+  /**
    * Its terminals as their users see them: `x`, `z` the spot somebody using one stands on, in front of
    * it; `faceX`, `faceZ` the terminal itself, which that somebody faces; `yaw` the way from the one to the
    * other, which the second and third of a round stand either side of.
@@ -221,9 +261,15 @@ interface PortPlan {
   collector: Place & { yaw: number };
   pad: Place;
   board: Place | null;
-  /** Cantina and hotel doors near the pad, nearest first, and when they were last looked for. */
-  towns: { x: number; z: number }[];
+  /**
+   * Cantina and hotel doors near the pad, nearest first, when they were last looked for, and the
+   * `clearOut` they were found with (they are looked for again when it moves): each one as an arrival
+   * makes for it (`ArrivalGoal`), and the walk grid's region of the ground it makes for (-1 with no grid
+   * or none found), which is what an arrival's reach to it is judged by.
+   */
+  towns: (ArrivalGoal & { region: number })[];
   townsAt: number;
+  townsFor: number;
   draw: [string, number][] | null;
   /** The straight lengths of a departure's two walks, which place one met part way through its day. */
   legs: { toTerminal: number; toCollector: number };
@@ -266,9 +312,11 @@ interface OursRecord {
   state: DepartureState;
   terminal: PortPlan['terminals'][number] | null;
   wait: Place | null;
-  dest: { x: number; z: number } | null;
+  dest: ArrivalGoal | null;
   fill: FillPlan | null;
   slot: number;
+  /** An arrival on the last leg from the open ground outside a cantina or a hotel to its doorstep (`ArrivalGoal.stepX`). */
+  doorstep: boolean;
   /** An arrival still to pass through its starport's building on the way into town. */
   through: boolean;
   /**
@@ -276,6 +324,59 @@ interface OursRecord {
    * is still inside, and an arrival's way from the ramp to that same door before it goes in.
    */
   via: Door | null;
+  /**
+   * An arrival still to step out of the starport's street door onto the open ground of the walk grid past
+   * its doorstep (`PortPlan.street`) before it makes for town: from the doorstep, which is the building's own
+   * footprint on the grid, the grid could plan it no way anywhere, and it steered straight at a cantina round
+   * the corner of the starport's own front.
+   */
+  out: boolean;
+  /** Whether its walk has been sent once to the nearest spot it can reach, after it stalled (`ROUTINE_TUNE.replanOnce`). */
+  replanned: boolean;
+  /**
+   * Where a walk stalled off the walk grid's open ground (pressed into the clutter round a prop, whose cells
+   * the grid calls blocked) is sent first by its one try more: the nearest ranked ground about it, of its
+   * goal's region where that is one, from which the grid can plan it a way round; null otherwise.
+   */
+  detour: { x: number; z: number } | null;
+  /**
+   * When a stalled walk was first held from being let go because it was on screen, or an arrival from being
+   * finished at a goal that is not a door (`ArrivalGoal.hold`), NaN while it is not (`letGoOffScreen`).
+   */
+  heldSince: number;
+  /** Its account for `__debug.ours({ trace: true })`, while tracing; null otherwise. */
+  trace: OursTrace | null;
+}
+
+/**
+ * One of ours as the console's trace keeps it (`__debug.ours({ trace: true })`): the seconds it spent in
+ * each room (keyed by the room's number, 0 outside), the step-up lifts its body made, the tier it was
+ * last drawn at, how it ended, and for a let-go where it stood and where it was going, with the walk
+ * grid's regions of both.
+ */
+export interface OursTrace {
+  id: string;
+  kind: 'depart' | 'arrive' | 'filler';
+  port: string;
+  since: number;
+  seconds: number;
+  rooms: Record<string, number>;
+  lifts: number;
+  /**
+   * The step-up lifts by the room the body was in when a pass counted them (the same keys as `rooms`): the
+   * one measure that says how a walk through a hall with a flight of steps in it (Mos Eisley's arrivals hall,
+   * cell 7) was spent, since the whole walk's lifts take in every porch and doorstep on the way.
+   */
+  liftsByRoom: Record<string, number>;
+  liftsAt: number;
+  tier: string;
+  replanned: boolean;
+  ended: string;
+  letGo: { at: [number, number]; goal: [number, number] | null; atRegion: number; goalRegion: number; onScreen: boolean } | null;
+  /** When the account was last passed, whether the body was in a building then, and the seconds at which it first came out of one (NaN for not yet). */
+  at: number;
+  wasInside: boolean;
+  doorAfter: number;
 }
 
 /** What a pass stands, nearest first: a traveller of a port, or a filler's place in a building. */
@@ -294,6 +395,21 @@ const tmpBoard = new THREE.Vector3();
 
 /** A seat's mood: the chair's idle, lent from a species rig as a town's seated people are (`moodIdle.ts`). */
 export const SEATED = 'npc_sitting_chair';
+
+/** How many finished accounts the console's trace keeps (`__debug.ours({ trace: true })`). */
+const TRACE_KEPT = 80;
+
+/** `ROUTINE_TUNE.clearOut` as it is used: its metres, or 0 for off (a negative number or none at all). */
+function clearOutNow(): number {
+  const c = ROUTINE_TUNE.clearOut;
+  return c > 0 ? c : 0;
+}
+
+/** Whether a body is drawn on the screen as its tier last had it: near, mid or far are on it; hidden, frozen or none yet are not. */
+function onScreen(m: Mobile): boolean {
+  const t = m.tier?.name;
+  return t === 'near' || t === 'mid' || t === 'far';
+}
 
 export class AmbientPeople {
   private ports: PortPlan[] = [];
@@ -325,7 +441,10 @@ export class AmbientPeople {
   };
   private readonly yieldAdd = (r: OursRecord): number => this.yieldDeps?.frees?.(r.body) ?? 0;
   /** What has happened since the world loaded, for the console. */
-  readonly tally = { stood: 0, boarded: 0, missed: 0, arrived: 0, outwalked: 0, letGo: 0, left: 0, shed: 0, refused: '' };
+  readonly tally = { stood: 0, boarded: 0, missed: 0, arrived: 0, outwalked: 0, letGo: 0, left: 0, shed: 0, replanned: 0, heldInView: 0, refused: '' };
+  /** Whether the console's trace is kept (`__debug.ours({ trace: true })`), and the accounts of those whose day is over, the latest last. */
+  private tracing = false;
+  private readonly traced: OursTrace[] = [];
 
   /**
    * The ports of the world just stood, with their shuttles' clocks; handed over again whenever the
@@ -349,12 +468,15 @@ export class AmbientPeople {
       doors: [],
       padDoor: null,
       streetDoor: null,
+      street: null,
+      streetFor: Number.NaN,
       terminals: [],
       collector: { x: 0, y: 0, z: 0, building: null, room: 0, yaw: 0 },
       pad: { x: port.pad.x, y: port.pad.y, z: port.pad.z, building: null, room: 0 },
       board: null,
       towns: [],
       townsAt: -Infinity,
+      townsFor: Number.NaN,
       draw: null,
       legs: { toTerminal: 20, toCollector: 40 },
       rounds: [0, 1, 2].map(() => ({ slot: 0, land: 0, wait: 0, leave: 0, gone: 0 })),
@@ -380,10 +502,17 @@ export class AmbientPeople {
     this.shedChosen.length = 0;
   }
 
-  /** One of ours taken off the books: out of the records, and out of the travellers when it is one. */
+  /** One of ours taken off the books: out of the records, and out of the travellers when it is one; its trace kept as done. */
   private drop(r: OursRecord): void {
     this.records.delete(r.id);
     if (r.num >= 0 && this.travelling.get(r.num) === r) this.travelling.delete(r.num);
+    const t = r.trace;
+    if (t) {
+      if (!t.ended) t.ended = 'put away';
+      this.traced.push(t);
+      if (this.traced.length > TRACE_KEPT) this.traced.shift();
+      r.trace = null;
+    }
   }
 
   /** The world going: everything of ours is forgotten (the manager takes the bodies with it). */
@@ -409,7 +538,10 @@ export class AmbientPeople {
     this.tally.letGo = 0;
     this.tally.left = 0;
     this.tally.shed = 0;
+    this.tally.replanned = 0;
+    this.tally.heldInView = 0;
     this.tally.refused = '';
+    this.traced.length = 0;
   }
 
   /** Everybody of ours put away now; the buildings are met afresh, and the travellers stood again where their day has got to. */
@@ -503,9 +635,11 @@ export class AmbientPeople {
       if (away > OURS_TUNE.build) continue;
       if (!pp.ready && now - pp.triedAt >= 2) this.planPort(pp, now, deps);
       if (!pp.ready) continue;
-      // The cantinas and hotels an arrival walks to stream in on their own time: looked for again while there are none.
-      if (!pp.towns.length && now - pp.townsAt >= 5) {
+      // The cantinas and hotels an arrival walks to stream in on their own time: looked for again while there
+      // are none, and at once when `clearOut` moves, since where each is made for is worked out with it.
+      if ((!pp.towns.length && now - pp.townsAt >= 5) || pp.townsFor !== clearOutNow()) {
         pp.townsAt = now;
+        pp.townsFor = clearOutNow();
         pp.towns = townDoors(pp.port.pad.x, pp.port.pad.z, pp.building, deps);
       }
       this.roundsOf(pp, seconds);
@@ -632,7 +766,7 @@ export class AmbientPeople {
     let heading = 0;
     let terminal: PortPlan['terminals'][number] | null = null;
     let wait: Place | null = null;
-    let dest: { x: number; z: number } | null = null;
+    let dest: ArrivalGoal | null = null;
     if (p.kind === 'depart') {
       terminal = p.terminal >= 0 && pp.terminals.length ? pp.terminals[p.terminal % pp.terminals.length] : null;
       wait = this.waitSpot(pp, p, deps);
@@ -702,10 +836,17 @@ export class AmbientPeople {
       dest,
       fill: null,
       slot: 0,
+      doorstep: false,
       through: p.kind === 'arrive' && !pp.pad.building && !!this.throughSpot(pp),
       via: p.kind === 'arrive' && !pp.pad.building && !!this.throughSpot(pp) ? pp.padDoor : null,
+      out: p.kind === 'arrive' && !!pp.building && !!this.streetOf(pp, deps),
+      replanned: false,
+      detour: null,
+      heldSince: Number.NaN,
+      trace: null,
     };
     m.routine = r.walk;
+    this.traceStart(r, now);
     this.aim(r);
     this.records.set(key, r);
     this.travelling.set(num, r);
@@ -725,7 +866,9 @@ export class AmbientPeople {
     let heading = spot.heading;
     if (slot.state === 'entering') {
       const door = f.doors[Math.floor(slotDraw(f.seed, i, slot.life, 3) * f.doors.length) % f.doors.length];
-      where = { x: door.outX + door.dirX * ROUTINE_TUNE.outside, y: 0, z: door.outZ + door.dirZ * ROUTINE_TUNE.outside, building: null, room: 0 };
+      // First seen on the open ground outside the door, where the walk grid can say it walks in from.
+      const along = this.openAlong(door, deps);
+      where = { x: door.outX + door.dirX * along, y: 0, z: door.outZ + door.dirZ * along, building: null, room: 0 };
       heading = Math.atan2(-door.dirX, -door.dirZ);
     } else {
       where = { x: spot.x, y: spot.y, z: spot.z, building: b, room: spot.cell };
@@ -774,12 +917,18 @@ export class AmbientPeople {
       dest: null,
       fill: f,
       slot: i,
+      doorstep: false,
       through: false,
       via: null,
+      out: false,
+      replanned: false,
+      detour: null,
+      heldSince: Number.NaN,
+      trace: null,
     };
     m.routine = r.walk;
-    if (slot.state === 'staying') this.settle(r);
-    else walkTo(r.walk, spot.seat ? spot.frontX : spot.x, spot.seat ? spot.frontZ : spot.z, b, spot.cell);
+    this.traceStart(r, now);
+    this.aimFiller(r);
     f.bodies[i] = r;
     this.records.set(id, r);
     this.tally.stood++;
@@ -796,9 +945,37 @@ export class AmbientPeople {
 
   // ---------------------------------------------------------------- walking
 
-  /** Where a traveller walks, or what it faces, for the stage it is in. */
+  /**
+   * Where a filler walks, or how it stands, for the state of its place: in to its spot (the front of its
+   * seat), settled there, or out through the door its leaving draws. Where it is first sent, and where it
+   * is sent on from anything that took it aside (a stalled walk's detour, `replan`).
+   */
+  private aimFiller(r: OursRecord): void {
+    const f = r.fill;
+    if (!f) return;
+    const i = r.slot;
+    const slot = f.slots[i];
+    const spot = f.spots[i];
+    if (slot.state === 'staying') {
+      this.settle(r);
+      return;
+    }
+    if (slot.state === 'leaving' && f.doors.length) {
+      const door = f.doors[Math.floor(slotDraw(f.seed, i, slot.life, 4) * f.doors.length) % f.doors.length];
+      walkTo(r.walk, door.outX + door.dirX * 1.5, door.outZ + door.dirZ * 1.5, null, 0);
+      return;
+    }
+    walkTo(r.walk, spot.seat ? spot.frontX : spot.x, spot.seat ? spot.frontZ : spot.z, f.building, spot.cell);
+  }
+
+  /** Where a traveller walks, or what it faces, for the stage it is in; a filler's is `aimFiller`. */
   private aim(r: OursRecord): void {
-    const pp = r.port!;
+    if (r.kind === 'filler') {
+      this.aimFiller(r);
+      return;
+    }
+    const pp = r.port;
+    if (!pp) return;
     const w = r.walk;
     if (r.kind === 'arrive') {
       // Through the starport first, where its pads are walled in behind it, and then out into town.
@@ -807,6 +984,10 @@ export class AmbientPeople {
       const via = r.through ? this.throughSpot(pp) : null;
       if (r.via) walkTo(w, r.via.outX + r.via.dirX * 0.5, r.via.outZ + r.via.dirZ * 0.5, null, 0);
       else if (via) walkTo(w, via.x, via.z, via.building, via.room);
+      // Out of the street door onto the open ground past its doorstep, where the walk grid plans from.
+      else if (r.out && pp.street) walkTo(w, pp.street.x, pp.street.z, null, 0);
+      // On from the open ground outside a cantina's or a hotel's door to the doorstep it goes in at.
+      else if (r.doorstep && r.dest && Number.isFinite(r.dest.stepX)) walkTo(w, r.dest.stepX, r.dest.stepZ, null, 0);
       else walkTo(w, r.dest!.x, r.dest!.z, null, 0);
       return;
     }
@@ -843,6 +1024,7 @@ export class AmbientPeople {
       this.lose(r, now, deps, false);
       return;
     }
+    if (r.trace) this.tracePass(r, now);
     const away = Math.hypot(m.pos.x - at.x, m.pos.z - at.z);
     // Out of range, a traveller is put away and stood again where its day has got to when the player
     // comes back; a filler goes with its building (`scanBuildings`).
@@ -854,13 +1036,20 @@ export class AmbientPeople {
     const w = r.walk;
     const d = w.going ? Math.hypot(w.goal.x - m.pos.x, w.goal.z - m.pos.z) : 0;
     const still = !m.ready || !(m.tier?.move ?? true) || m.seated;
+    // Off the clutter it was stalled in (`replan`'s detour) and on open ground again: back to where it was going.
+    if (r.detour && d <= ROUTINE_TUNE.reach * 1.5) {
+      r.detour = null;
+      restartHeadway(r.track, now);
+      this.aim(r);
+      return;
+    }
     if (r.kind === 'depart') {
       // Late -- its shuttle down and waiting -- it hurries.
       w.pace = seconds >= r.plan!.wait ? 'run' : 'walk';
       // A door still to go by first is passed, and the walk sent on to the collector, before anything is
       // taken for having got there: the goal is the point outside the door until then, and reaching it
       // before the manager has followed the body out of its room would have it wait by the door.
-      if (r.via && (!m.inside || d <= ROUTINE_TUNE.reach)) {
+      if (r.via && !r.detour && (!m.inside || d <= ROUTINE_TUNE.reach)) {
         r.via = null;
         restartHeadway(r.track, now);
         this.aim(r);
@@ -868,11 +1057,11 @@ export class AmbientPeople {
       }
       const was = r.state.stage;
       const reach = was === 'board' ? ROUTINE_TUNE.board : ROUTINE_TUNE.reach;
-      const stage = stepDeparture(r.state, r.plan!, seconds, !r.via && w.going && d <= reach);
+      const stage = stepDeparture(r.state, r.plan!, seconds, !r.detour && !r.via && w.going && d <= reach);
       if (stage === 'boarded' || stage === 'gone') {
         if (stage === 'boarded') this.tally.boarded++;
         else this.tally.missed++;
-        this.finish(r, deps);
+        this.finish(r, deps, stage === 'boarded' ? 'boarded' : 'missed its shuttle');
         return;
       }
       if (stage !== was) {
@@ -885,32 +1074,210 @@ export class AmbientPeople {
     } else if (r.kind === 'arrive') {
       if (arrivalPhase(r.plan!, seconds) === 'gone') {
         this.tally.outwalked++;
-        this.finish(r, deps);
+        this.finish(r, deps, 'outwalked');
         return;
       }
-      if (r.via && d <= ROUTINE_TUNE.reach * 2) {
+      if (r.via && !r.detour && d <= ROUTINE_TUNE.reach * 2) {
         r.via = null;
         restartHeadway(r.track, now);
         this.aim(r);
         return;
       }
       // Into the building and on to its terminals, whose room is by the street door, before making for town.
-      if (r.through && !r.via && m.inside && d <= ROUTINE_TUNE.reach * 3) {
+      if (r.through && !r.via && !r.detour && m.inside && d <= ROUTINE_TUNE.reach * 3) {
         r.through = false;
         restartHeadway(r.track, now);
         this.aim(r);
         return;
       }
-      if (!r.through && !r.via && d <= ROUTINE_TUNE.reach) {
+      // Out of the street door and onto the open ground past its doorstep, then on to town.
+      if (r.out && !r.through && !r.via && !r.detour && !m.inside && d <= ROUTINE_TUNE.reach * 2) {
+        r.out = false;
+        restartHeadway(r.track, now);
+        this.aim(r);
+        return;
+      }
+      if (!r.through && !r.via && !r.out && !r.detour && d <= ROUTINE_TUNE.reach) {
+        const g = r.dest;
+        // At the open ground outside a cantina's or a hotel's door: on to its doorstep, straight along the
+        // door's own line, and in there -- never gone in the open street short of the door.
+        if (g && !r.doorstep && Number.isFinite(g.stepX)) {
+          r.doorstep = true;
+          restartHeadway(r.track, now);
+          this.aim(r);
+          return;
+        }
+        // Finished at a goal that is no door (`ArrivalGoal.hold`): only while nobody sees it go, at most
+        // `letGoWait` held there in view.
+        if (g && g.hold && ROUTINE_TUNE.letGoOffScreen && onScreen(m)) {
+          if (Number.isNaN(r.heldSince)) r.heldSince = now;
+          if (now - r.heldSince < ROUTINE_TUNE.letGoWait) return;
+        }
         this.tally.arrived++;
-        this.finish(r, deps);
+        this.finish(r, deps, 'arrived');
         return;
       }
     } else if (this.walkFiller(r, now, d, deps)) return;
     if (w.going && stalled(r.track, d, m.pos.x, m.pos.z, now, still, ROUTINE_TUNE.giveUp, ROUTINE_TUNE.lost)) {
+      // Once, sent to the nearest spot it can surely reach, on a fresh route and a fresh account of its walk.
+      if (ROUTINE_TUNE.replanOnce && !r.replanned) {
+        this.replan(r, now, deps);
+        this.tally.replanned++;
+        return;
+      }
+      // Let go only where nobody sees it vanish: held while it is on screen, at most `letGoWait`.
+      const seen = onScreen(m);
+      if (ROUTINE_TUNE.letGoOffScreen && seen) {
+        if (Number.isNaN(r.heldSince)) {
+          r.heldSince = now;
+          this.tally.heldInView++;
+        }
+        if (now - r.heldSince < ROUTINE_TUNE.letGoWait) return;
+      }
       this.tally.letGo++;
+      if (r.trace) this.traceLetGo(r, deps, seen);
       this.lose(r, now, deps, true);
+    } else if (!Number.isNaN(r.heldSince)) r.heldSince = Number.NaN;
+  }
+
+  /**
+   * A stalled walk sent once more before it is let go (`ROUTINE_TUNE.replanOnce`): its route thrown away so
+   * the grid or the floors are asked afresh from where it stands, its headway begun again, and one walking
+   * out in the open to a spot of its own in town (an arrival past its building) sent instead to the nearest
+   * ground to that spot in the ranked region it is standing in (`nearestRanked`), which it can surely reach.
+   */
+  private replan(r: OursRecord, now: number, deps: AmbientDeps): void {
+    r.replanned = true;
+    if (r.trace) r.trace.replanned = true;
+    const m = r.body;
+    const w = r.walk;
+    m.navAgent.clear();
+    restartHeadway(r.track, now);
+    if (m.inside || !(ROUTINE_TUNE.clearOut > 0)) return;
+    const here = deps.region(m.pos.x, m.pos.z);
+    const goal = deps.region(w.goal.x, w.goal.z);
+    // Stalled off open ground, out in the open (pressed into the clutter round a prop): first to the nearest
+    // ranked ground about it -- of its goal's region where that is one -- from which the grid can plan it a
+    // way round, and then on to where it was going.
+    if (here >= 0 && !openRegion(here)) {
+      const o = this.openNear(m.pos.x, m.pos.z, deps, rankedRegion(goal) ? goal : 0);
+      if (o) {
+        r.detour = { x: o.x, z: o.z };
+        walkTo(w, o.x, o.z, null, 0);
+      }
+      return;
     }
+    if (r.kind !== 'arrive' || r.via || r.through || r.out) return;
+    if (!rankedRegion(here) || goal === here) return;
+    const o = this.openNear(w.goal.x, w.goal.z, deps, here);
+    if (!o) return;
+    // No door there: finished only while nobody sees it go (`ArrivalGoal.hold`).
+    r.dest = { x: o.x, z: o.z, stepX: Number.NaN, stepZ: Number.NaN, hold: true };
+    r.doorstep = false;
+    walkTo(w, o.x, o.z, null, 0);
+  }
+
+  // ---------------------------------------------------------------- the console's trace
+
+  /** Whether the console's trace is being kept. */
+  get tracingOn(): boolean {
+    return this.tracing;
+  }
+
+  /** The trace switched on or off (`__debug.ours({ trace })`): on, everybody stood from now on keeps an account; off, the accounts are dropped. */
+  setTracing(on: boolean): void {
+    this.tracing = on;
+    if (on) return;
+    for (const r of this.records.values()) r.trace = null;
+    this.traced.length = 0;
+  }
+
+  /** A fresh account for one of ours just stood, while tracing. */
+  private traceStart(r: OursRecord, now: number): void {
+    if (!this.tracing) return;
+    r.trace = {
+      id: `ours:${r.id}`,
+      kind: r.kind,
+      port: r.port?.port.name ?? '',
+      since: now,
+      seconds: 0,
+      rooms: {},
+      lifts: 0,
+      liftsByRoom: {},
+      liftsAt: r.body.stepLifts,
+      tier: r.body.tier?.name ?? '',
+      replanned: false,
+      ended: '',
+      letGo: null,
+      at: now,
+      wasInside: r.body.inside,
+      doorAfter: Number.NaN,
+    };
+  }
+
+  /** One pass of an account: the seconds since the last spent in the room the body is in now, its lifts, its tier, and when it first came out of a building it was in. */
+  private tracePass(r: OursRecord, now: number): void {
+    const t = r.trace!;
+    const m = r.body;
+    const key = m.inside ? String(m.room) : '0';
+    t.rooms[key] = (t.rooms[key] ?? 0) + Math.max(0, now - t.at);
+    t.at = now;
+    t.seconds = now - t.since;
+    const lifts = m.stepLifts - t.liftsAt;
+    if (lifts > t.lifts) t.liftsByRoom[key] = (t.liftsByRoom[key] ?? 0) + (lifts - t.lifts);
+    t.lifts = lifts;
+    t.tier = m.tier?.name ?? '';
+    if (t.wasInside && !m.inside && Number.isNaN(t.doorAfter)) t.doorAfter = t.seconds;
+    t.wasInside = m.inside;
+  }
+
+  /** A let-go written into its account: where it stood and where it was going, with the walk grid's regions of both, and whether it was on screen. */
+  private traceLetGo(r: OursRecord, deps: AmbientDeps, seen: boolean): void {
+    const t = r.trace!;
+    const m = r.body;
+    const w = r.walk;
+    const round = (n: number): number => Math.round(n * 10) / 10;
+    t.letGo = {
+      at: [round(m.pos.x), round(m.pos.z)],
+      goal: w.going ? [round(w.goal.x), round(w.goal.z)] : null,
+      atRegion: deps.region(m.pos.x, m.pos.z),
+      goalRegion: w.going ? deps.region(w.goal.x, w.goal.z) : -1,
+      onScreen: seen,
+    };
+    t.ended = 'let go';
+  }
+
+  /**
+   * The console's trace: every account still running and the last `TRACE_KEPT` finished, each with its
+   * seconds by room, its lifts, its tier and how it ended; and for the arrivals, the mean seconds spent in
+   * each room and how long it took them from the ramp to come out of the building's front door.
+   */
+  traceReport(): Record<string, unknown> {
+    const live = [...this.records.values()].map((r) => r.trace).filter((t): t is OursTrace => !!t);
+    const all = [...this.traced, ...live];
+    const round = (n: number): number => Math.round(n * 10) / 10;
+    const show = (t: OursTrace) => ({ id: t.id, kind: t.kind, port: t.port, seconds: round(t.seconds), rooms: Object.fromEntries(Object.entries(t.rooms).map(([k, v]) => [k, round(v)])), lifts: t.lifts, liftsByRoom: { ...t.liftsByRoom }, tier: t.tier, replanned: t.replanned, ended: t.ended || 'walking', out: Number.isNaN(t.doorAfter) ? null : round(t.doorAfter), letGo: t.letGo });
+    const arrivals = all.filter((t) => t.kind === 'arrive');
+    const rooms: Record<string, number> = {};
+    for (const t of arrivals) for (const [k, v] of Object.entries(t.rooms)) rooms[k] = (rooms[k] ?? 0) + v;
+    const liftsIn: Record<string, number> = {};
+    for (const t of arrivals) for (const [k, v] of Object.entries(t.liftsByRoom)) liftsIn[k] = (liftsIn[k] ?? 0) + v;
+    const outs = arrivals.map((t) => t.doorAfter).filter((v) => !Number.isNaN(v));
+    return {
+      on: this.tracing,
+      tally: { ...this.tally },
+      arrivals: {
+        count: arrivals.length,
+        meanSecondsByRoom: Object.fromEntries(Object.entries(rooms).map(([k, v]) => [k, round(v / Math.max(1, arrivals.length))])),
+        outOfTheBuilding: outs.length ? { n: outs.length, mean: round(outs.reduce((a, b) => a + b, 0) / outs.length), max: round(Math.max(...outs)) } : null,
+        liftsEach: arrivals.length ? round(arrivals.reduce((a, t) => a + t.lifts, 0) / arrivals.length) : null,
+        // The lifts each arrival made in each room: Mos Eisley's arrivals hall is cell 7.
+        meanLiftsByRoom: Object.fromEntries(Object.entries(liftsIn).map(([k, v]) => [k, round(v / Math.max(1, arrivals.length))])),
+      },
+      letGo: all.filter((t) => t.letGo).map(show),
+      live: live.map(show),
+      done: this.traced.map(show),
+    };
   }
 
   /** A filler's pass: in to its place, its stay, and out through a door. Answers whether it is done with. */
@@ -938,13 +1305,14 @@ export class AmbientPeople {
       }
       const spot = f.spots[i];
       if (m.seated) m.rise(spot.frontX, spot.frontZ);
-      const door = f.doors[Math.floor(slotDraw(f.seed, i, slot.life, 4) * f.doors.length) % f.doors.length];
-      walkTo(r.walk, door.outX + door.dirX * 1.5, door.outZ + door.dirZ * 1.5, null, 0);
+      // Out through the door its leaving draws.
+      this.aimFiller(r);
       restartHeadway(r.track, now);
       return false;
     }
     // Out of the building, or gone: the place waits for the next.
     this.tally.left++;
+    if (r.trace) r.trace.ended = 'left';
     deps.remove(m);
     this.drop(r);
     f.bodies[i] = null;
@@ -952,7 +1320,8 @@ export class AmbientPeople {
   }
 
   /** A traveller whose day is over: gone from the world and remembered for its round. */
-  private finish(r: OursRecord, deps: AmbientDeps): void {
+  private finish(r: OursRecord, deps: AmbientDeps, why = 'done'): void {
+    if (r.trace) r.trace.ended = why;
     if (!r.body.removed) deps.remove(r.body);
     this.drop(r);
     if (r.plan) this.done.set(r.num, r.plan.round);
@@ -964,6 +1333,7 @@ export class AmbientPeople {
    * waits for somebody new.
    */
   private lose(r: OursRecord, now: number, deps: AmbientDeps, letGo: boolean): void {
+    if (r.trace && !r.trace.ended) r.trace.ended = letGo ? 'let go' : 'taken by the game';
     if (!r.body.removed) deps.remove(r.body);
     this.drop(r);
     if (r.fill) {
@@ -1085,6 +1455,9 @@ export class AmbientPeople {
         }
       }
     }
+    // The open ground outside the street door, which the walk grid can say where from is reachable.
+    pp.streetFor = Number.NaN;
+    this.streetOf(pp, deps);
     pp.terminals = port.terminals.map((t) => {
       const room = t.cell > 0 && b ? t.cell : 0;
       const fx = Math.sin(t.yaw);
@@ -1114,6 +1487,7 @@ export class AmbientPeople {
     pp.board = { x: foot.x + (ox / ol) * ROUTINE_TUNE.clear, y: foot.y, z: foot.z + (oz / ol) * ROUTINE_TUNE.clear, building: pp.pad.building, room: pp.pad.room };
     pp.towns = townDoors(port.pad.x, port.pad.z, b, deps);
     pp.townsAt = now;
+    pp.townsFor = clearOutNow();
     const t0 = pp.terminals[0];
     const d0 = pp.doors[0];
     pp.legs.toTerminal = t0 && d0 ? Math.hypot(t0.x - d0.outX, t0.z - d0.outZ) : t0 ? ROUTINE_TUNE.approach[0] : 0;
@@ -1160,8 +1534,14 @@ export class AmbientPeople {
     if (pp.building && door && p.terminal >= 0 && pp.terminals.some((t) => t.room > 0)) {
       // In from the street, by the door nearest the terminals that is not the one onto the pads; a little
       // to one side of it for each of a round's departures, so two coming in together are not one on the other.
-      const side = ((p.index % 3) - 1) * ROUTINE_TUNE.beside;
-      return { x: door.outX + door.dirX * ROUTINE_TUNE.outside - door.dirZ * side, y: 0, z: door.outZ + door.dirZ * ROUTINE_TUNE.outside + door.dirX * side, building: null, room: 0 };
+      // Out on the open ground of the walk grid (`openAlong`), and a step to one side only where that is too.
+      const along = this.openAlong(door, deps);
+      let side = ((p.index % 3) - 1) * ROUTINE_TUNE.beside;
+      if (side !== 0 && ROUTINE_TUNE.clearOut > 0) {
+        const r = deps.region(door.outX + door.dirX * along - door.dirZ * side, door.outZ + door.dirZ * along + door.dirX * side);
+        if (r >= 0 && !openRegion(r)) side = 0;
+      }
+      return { x: door.outX + door.dirX * along - door.dirZ * side, y: 0, z: door.outZ + door.dirZ * along + door.dirX * side, building: null, room: 0 };
     }
     const from = p.terminal >= 0 && pp.terminals.length ? pp.terminals[p.terminal % pp.terminals.length] : pp.collector;
     const span = ROUTINE_TUNE.approach;
@@ -1176,18 +1556,29 @@ export class AmbientPeople {
   }
 
   /** Where an arrival walks to: a cantina's or a hotel's door near the pad, most of the time, and otherwise off into town. */
-  private destination(pp: PortPlan, p: TravellerPlan, deps: AmbientDeps): { x: number; z: number } | null {
+  private destination(pp: PortPlan, p: TravellerPlan, deps: AmbientDeps): ArrivalGoal | null {
     // Out into the street in front of the starport's street door, where it has one: a spot out from the
     // pad itself may be round the back of a building whose pads are walled in, which no walk reaches.
     // And only somewhere the walk grid says can be walked to from there.
     const door = pp.building ? pp.streetDoor : null;
-    const ox = door ? door.outX : pp.pad.x;
-    const oz = door ? door.outZ : pp.pad.z;
+    // Measured from open ground the arrival really stands on on its way (`originOf`): the first open ground
+    // outside that door, not the doorstep, which is the building's own footprint on the grid; or, at a pad
+    // out in the open, the ranked ground nearest the foot of its ramp, since a shuttleport's pad is blocked
+    // ground for metres round. Where that ground is ranked, reachable is the strict answer, both ends in
+    // that one region (`sameRankedRegion`), which the general one never refuses when either end is
+    // unranked. Where there is no such ground -- no grid, `clearOut` off, or none near enough to say -- the
+    // general answer from where it always was measured, and the nearest cantina as the last resort, as it
+    // always was: a strict rule with nothing to be strict from would refuse every arrival at the port.
+    const from = this.originOf(pp, door, deps);
+    const strict = !!from && rankedRegion(from.region);
+    const ox = from ? from.x : door ? door.outX : pp.pad.x;
+    const oz = from ? from.z : door ? door.outZ : pp.pad.z;
+    const reach = (x: number, z: number, region = deps.region(x, z)): boolean => (strict ? sameRankedRegion(from!.region, region) : deps.reachable(ox, oz, x, z));
     if (pp.towns.length && p.door < ROUTINE_TUNE.toDoor) {
       const k = Math.min(pp.towns.length - 1, Math.floor(p.spot * Math.min(3, pp.towns.length)));
       for (let j = 0; j < pp.towns.length; j++) {
         const t = pp.towns[(k + j) % pp.towns.length];
-        if (deps.reachable(ox, oz, t.x, t.z)) return t;
+        if (reach(t.x, t.z, t.region)) return t;
       }
     }
     const span = ROUTINE_TUNE.townWalk;
@@ -1197,9 +1588,69 @@ export class AmbientPeople {
       const a = door ? base + (((p.spot + k / 8) % 1) - 0.5) * 2 * ROUTINE_TUNE.spread : base + (k / 8) * Math.PI * 2;
       const x = ox + Math.sin(a) * r;
       const z = oz + Math.cos(a) * r;
-      if (deps.walkable(x, z) === true && deps.reachable(ox, oz, x, z)) return { x, z };
+      if (deps.walkable(x, z) === true && reach(x, z)) return { x, z, stepX: Number.NaN, stepZ: Number.NaN, hold: false };
     }
+    // Nowhere it can be sure of reaching: it is finished on that open ground, and only while nobody sees it
+    // go, rather than sent at a cantina whose region nobody asked.
+    if (strict) return { x: from!.x, z: from!.z, stepX: Number.NaN, stepZ: Number.NaN, hold: true };
     return pp.towns[0] ?? null;
+  }
+
+  /**
+   * The open ground an arrival's walk into town is judged from (`destination`): past its starport's street
+   * door, the first open ground out along the door's line (`streetOf`); at a pad out in the open, the
+   * ranked ground nearest the foot of its ramp (the pad itself where there is none yet), within twice
+   * `clearOut` -- measured over every converted world, a shuttleport's pad is blocked ground for fourteen
+   * to seventeen metres round its middle, and ranked ground is found within that reach of the ramp at every
+   * one but four, whose pads stand in blocked ground for tens of metres and which keep the general rule
+   * (`oursStreet.test.ts`). Null with no grid, `clearOut` off, or nothing found.
+   */
+  private originOf(pp: PortPlan, door: Door | null, deps: AmbientDeps): OpenOut | null {
+    const out = clearOutNow();
+    if (!(out > 0)) return null;
+    if (door) return this.streetOf(pp, deps);
+    const at = pp.board ?? pp.pad;
+    return this.openNear(at.x, at.z, deps, 0, 2 * out);
+  }
+
+  /**
+   * A port's `street` for the `clearOut` in force: worked out the first time it is asked for and again
+   * whenever `clearOut` has moved since (`streetFor`), so flipping the switch in play takes effect for the
+   * next traveller stood, both ways. Allocates only when it is worked out.
+   */
+  private streetOf(pp: PortPlan, deps: AmbientDeps): OpenOut | null {
+    const out = clearOutNow();
+    if (pp.streetFor === out) return pp.street;
+    pp.streetFor = out;
+    pp.street = null;
+    if (pp.streetDoor && out > 0) {
+      const o: OpenOut = { x: 0, z: 0, d: 0, region: -1 };
+      if (firstOpenOut(pp.streetDoor, deps.region, o, out)) pp.street = o;
+    }
+    return pp.street;
+  }
+
+  /** The kept answer `openAlong` and `openNear` write into. */
+  private readonly openScratch: OpenOut = { x: 0, z: 0, d: 0, region: -1 };
+
+  /**
+   * How far out along a door's line one of ours is stood or sent to the street by (`firstOpenOut`): the
+   * first open ground of the walk grid, or the old `outside` where that is already on the same
+   * ground (a step clear of the doorway), or where there is no grid or `clearOut` is off.
+   */
+  private openAlong(door: Door, deps: AmbientDeps): number {
+    const old = ROUTINE_TUNE.outside;
+    if (!(ROUTINE_TUNE.clearOut > 0)) return old;
+    const o = this.openScratch;
+    if (!firstOpenOut(door, deps.region, o)) return old;
+    if (o.d < old && deps.region(door.outX + door.dirX * old, door.outZ + door.dirZ * old) === o.region) return old;
+    return o.d;
+  }
+
+  /** The nearest open, ranked ground about a point (`nearestRanked`), within `max` (`clearOut` by default), as a record of its own; null with none or no grid. */
+  private openNear(x: number, z: number, deps: AmbientDeps, want = 0, max = ROUTINE_TUNE.clearOut): OpenOut | null {
+    const o: OpenOut = { x: 0, z: 0, d: 0, region: -1 };
+    return nearestRanked(x, z, deps.region, want, Math.max(1, max), o) ? o : null;
   }
 
   // ---------------------------------------------------------------- the buildings
@@ -1330,7 +1781,7 @@ export class AmbientPeople {
           at: [Math.round(m.pos.x * 10) / 10, Math.round(m.pos.z * 10) / 10],
           inside: m.inside,
           door: m.legs.phase === 0 ? null : m.legs.phase === 1 ? 'approaching' : 'walking through',
-          via: r.via ? 'a door first' : r.through ? 'through the building' : null,
+          via: r.via ? 'a door first' : r.through ? 'through the building' : r.out ? 'out onto the street' : r.doorstep ? 'in at the door' : null,
           seated: m.seated,
           going: r.walk.going ? Math.round(Math.hypot(r.walk.goal.x - m.pos.x, r.walk.goal.z - m.pos.z) * 10) / 10 : null,
           port: r.port?.port.name ?? null,
@@ -1528,20 +1979,36 @@ function onFloor(b: Building, room: number, x: number, y: number, z: number, dep
   return locate(floor, tmpV.x, tmpV.y, tmpV.z, 1.5, 0.2) >= 0;
 }
 
-/** The doors of the cantinas and hotels near a point, nearest first, each the door of its building nearest the point. */
-function townDoors(x: number, z: number, not: Building | null, deps: AmbientDeps): { x: number; z: number }[] {
-  const found: { x: number; z: number; d: number }[] = [];
+/**
+ * The doors of the cantinas and hotels near a point, nearest first, each the door of its building nearest
+ * the point, as an arrival makes for it: where the walk grid has open ground outside it (`firstOpenOut`),
+ * that ground and its region, which is where an arrival bound for it is sent and its reach judged -- the
+ * doorstep itself is the building's footprint on the grid, which the grid plans no way to, and an arrival
+ * sent at it was steered straight and stuck on whatever stood between -- and then the doorstep, half a
+ * metre off its outside step, which it walks on to from there and goes in at (`ArrivalGoal`); and
+ * otherwise, with no grid or `clearOut` off, the doorstep itself as before, with a region of -1.
+ */
+function townDoors(x: number, z: number, not: Building | null, deps: AmbientDeps): (ArrivalGoal & { region: number })[] {
+  const found: (ArrivalGoal & { d: number; region: number })[] = [];
+  const open: OpenOut = { x: 0, z: 0, d: 0, region: -1 };
+  const out = clearOutNow();
   for (const b of deps.buildings()) {
     if (b === not || !/cantina|hotel/i.test(b.template)) continue;
     if (Math.hypot(b.x - x, b.z - z) > ROUTINE_TUNE.town) continue;
-    let best: { x: number; z: number; d: number } | null = null;
+    let best: (ArrivalGoal & { d: number; region: number }) | null = null;
     for (const door of doorsOf(b, deps)) {
       const d = Math.hypot(door.outX - x, door.outZ - z);
-      if (!best || d < best.d) best = { x: door.outX + door.dirX * 0.5, z: door.outZ + door.dirZ * 0.5, d };
+      if (best && d >= best.d) continue;
+      const stepX = door.outX + door.dirX * 0.5;
+      const stepZ = door.outZ + door.dirZ * 0.5;
+      best =
+        out > 0 && firstOpenOut(door, deps.region, open, out)
+          ? { x: open.x, z: open.z, stepX, stepZ, hold: false, d, region: open.region }
+          : { x: stepX, z: stepZ, stepX: Number.NaN, stepZ: Number.NaN, hold: false, d, region: -1 };
     }
     if (best) found.push(best);
   }
-  return found.sort((a, b) => a.d - b.d).map((f) => ({ x: f.x, z: f.z }));
+  return found.sort((a, b) => a.d - b.d).map((f) => ({ x: f.x, z: f.z, stepX: f.stepX, stepZ: f.stepZ, hold: false, region: f.region }));
 }
 
 /** The one for the session. */

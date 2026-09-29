@@ -63,7 +63,7 @@ import { RigHull, assembleRigModel } from '../../../src/vehicles/rigHull.ts';
 import type { DriveInput } from '../../../src/vehicles/vehicle';
 import { SPACE_LATER, planHop, planRoute, type PadRef, type RideLeg } from '../../../src/world/rideRoute.ts';
 import { RIG_PATH_TUNE, landingTarget, makeLandingTarget, noseOntoPath, onPad, pathPose, pathVelocity, poseRigAction, turnOnPad, vehicleAt, vehicleFromJoint, type RigActions } from '../../../src/world/rigPath.ts';
-import { RIDE_TUNE, ShuttleRide, besideCollector, downGlideOf, rideFraming, stepFraming, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
+import { RIDE_TUNE, ShuttleRide, besideCollector, downGlideOf, heldHeading, holdRoomHeading, rideFraming, stepFraming, type RideHost, type RideHull, type RideRigs } from '../../../src/world/shuttleRide.ts';
 import { RIDE_PILOT, type RideCourse } from '../../../src/world/shuttleCourse.ts';
 import { lookRotation } from '../../../src/space/hyperspaceMath.ts';
 import { CHASE_RISE } from '../../../src/core/camera.ts';
@@ -865,6 +865,122 @@ function limbTravel(role: RigPose['role'], from: number, to: number): number {
   ok(ride.ended === 'gone' && rigs.tidy(), 'and the trip runs to its end all the same');
 }
 
+// ---------------------------------------------------------------- a hull that lands in a room (step 9)
+
+{
+  // The same rig flown from a pad in the open on its calm branch -- as a transport from Keren takes off -- to
+  // a pad in a room of another branch of its own (Theed's hangar): both branches are made ready before it is
+  // shown, it lands with the room's branch and not the calm one it took off on (its sounds and flames bound
+  // to that branch's marks as the landing begins, once), its sounds follow the rooms from the start, the room
+  // is named for the lights and the held view through its landing, its wait and its leaving, and the
+  // passenger is put down in that room.
+  const moods = { theed: fly.clips, calm: fly.clips };
+  const hull = new FakeHull(moods);
+  const rigs = new FakeRigs();
+  const from = padAt(0, 100, 20, -30, 0.3, 'calm');
+  const room: PadRef = { ...padAt(1, 2000, 5, 800, 2.0, 'theed'), cell: 5 };
+  const { host, clock, passenger } = makeHost(hull, rigs, watching(room));
+  const rooms: number[] = [];
+  const seatRooms: number[] = [];
+  const unseat = host.unseat;
+  host.unseat = (h, at, r) => {
+    rooms.push(r ?? -1);
+    unseat(h, at, r);
+  };
+  const seat = host.seat;
+  host.seat = (h, r) => {
+    seatRooms.push(r ?? -1);
+    return seat(h, r);
+  };
+  const route = planHop(from, room);
+  ok(route.landMood === 'theed' && planHop(from, room, false).landMood === null, "a hop onto a room's pad lands on that pad's own branch, and as before with room pads off");
+  const ride = new ShuttleRide(route, host, true);
+  clock.t = 2;
+  await ride.begin();
+  ok((rigs.fx as unknown as { inside?: boolean }).inside === true && seatRooms.join() === '0', 'the sounds and flames lent it follow the rooms, since it lands in one, and the passenger boarding in the open is seated with no room');
+  ok(rigs.readied.length === 1 && rigs.readied[0].join() === 'calm,theed', `taking off on the calm branch for the room's, both are made ready before it is shown (${rigs.readied.map((m) => m.join(', ')).join(' / ') || 'nothing'})`);
+  const landing: string[] = [];
+  let heldIn = 0;
+  let named = 0;
+  let boundBefore = -1;
+  let boundAt = -1;
+  fly60(ride, clock, hull, (before, now) => {
+    if (now === 'skip') boundBefore = rigs.rebranched.length;
+    if (before === 'skip' && now === 'land') boundAt = rigs.rebranched.length;
+    if (now === 'land' || now === 'off' || now === 'leave') {
+      if (ride.roomPad()?.key === room.key) named++;
+      if (ride.roomLanding) heldIn++;
+    } else if (ride.roomPad() !== null) landing.push(now);
+  });
+  const r = ride.report() as { landsWith: string | null; landsInRoom: number };
+  ok(r.landsWith === 'theed' && r.landsInRoom === 5, `it lands with the room's own branch (${r.landsWith}), in its room ${r.landsInRoom}`);
+  ok(boundBefore === 0 && boundAt === 1 && rigs.rebranched.join() === 'theed', `its sounds and flames are bound to that branch's marks the moment its landing begins, once, and never again as it lifts off out of the room on it (${rigs.rebranched.join(', ') || 'never'})`);
+  ok(named > 0 && heldIn > 0 && heldIn < named && landing.length === 0, `the room is named for its lights through its landing, its wait and its leaving (${named} frames), the view held through the first two (${heldIn}), and never before`);
+  ok(rooms.join() === '5' && passenger.offAt.length === 1, 'and the passenger is put down in that room once it has landed');
+  ok(ride.ended === 'gone' && rigs.tidy(), 'and the trip runs to its end all the same');
+}
+
+{
+  // Boarded where the hull stands in a room (the hangar a transport leaves Theed from): the passenger is seated
+  // with that room -- carried a dozen metres from the collector to the seat, which a walk would take for a
+  // teleport and leave the room for -- and is put down in it again stepping off while it waits, or when the
+  // trip is stopped before it lifts off; landed on a pad in the open, they are put down in no room at all.
+  const inRoom: PadRef = { ...padAt(0, 100, 20, -30, 0.3, 'theed'), cell: 5 };
+  const seen: string[] = [];
+  for (const how of ['step off', 'stop', 'land'] as const) {
+    const hull = new FakeHull({ theed: fly.clips, calm: fly.clips });
+    const rigs = new FakeRigs();
+    const { host, clock, passenger } = makeHost(hull, rigs, watching(destination));
+    const seats: number[] = [];
+    const offs: number[] = [];
+    const seat = host.seat;
+    host.seat = (h, r) => {
+      seats.push(r ?? -1);
+      return seat(h, r);
+    };
+    const unseat = host.unseat;
+    host.unseat = (h, at, r) => {
+      offs.push(r ?? -1);
+      unseat(h, at, r);
+    };
+    const ride = new ShuttleRide(planHop(inRoom, destination), host, true);
+    clock.t = 2;
+    await ride.begin();
+    const boarding = ride.leg?.kind === 'board';
+    if (how === 'step off') ride.pressE();
+    else if (how === 'stop') ride.abort('test');
+    else fly60(ride, clock, hull);
+    seen.push(`${how}: seated with ${seats.join()} and put down with ${offs.join()}`);
+    ok(
+      boarding && seats.join() === '5' && offs.join() === (how === 'land' ? '0' : '5') && passenger.seatedIn === null && passenger.offAt.length === 1 && !ride.running,
+      `boarded in a room it is seated with that room, and ${how === 'land' ? 'landed on a pad in the open is put down in none' : how === 'step off' ? 'stepping off while it waits is put down in it again' : 'stopped before it lifts off is put down in it again'} (${seen.at(-1)})`,
+    );
+  }
+}
+
+{
+  // The passenger's view coming down into a room (`holdRoomHeading`): from the frame the hull is followed into
+  // the room it keeps the heading the hull's nose had then, level, however the hull turns on the spot after;
+  // a frame that does not hold lets it go, and the next trip takes its own.
+  const held = heldHeading();
+  const tripA = {};
+  const tripB = {};
+  const turn = (deg: number, pitch = 0): THREE.Quaternion => new THREE.Quaternion().setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(pitch), THREE.MathUtils.degToRad(deg), 0, 'YXZ'));
+  const outside = holdRoomHeading(held, tripA, false, turn(30));
+  const heldOutside = held.ride;
+  const first = holdRoomHeading(held, tripA, true, turn(40, 12));
+  const took = held.heading;
+  const later = holdRoomHeading(held, tripA, true, turn(215));
+  const kept = held.heading;
+  const level = new THREE.Vector3(0, 0, 1).applyQuaternion(held.turn);
+  ok(!outside && heldOutside === null, 'the view does not hold a heading while the hull is not yet in the room');
+  ok(first && later && Math.abs(THREE.MathUtils.radToDeg(took) - 40) < 1e-6 && kept === took, `once it is, it holds the heading the nose had coming in (${THREE.MathUtils.radToDeg(took).toFixed(1)} degrees) while the hull turns half round on the spot`);
+  ok(Math.abs(level.y) < 1e-9 && Math.abs(Math.atan2(level.x, level.z) - took) < 1e-9, '... level, whatever the nose was pitched at');
+  ok(!holdRoomHeading(held, tripA, false, turn(215)) && held.ride === null && holdRoomHeading(held, tripB, true, turn(90)) && Math.abs(THREE.MathUtils.radToDeg(held.heading) - 90) < 1e-6, 'and a frame that does not hold lets it go, so the next landing takes its own');
+  const again = holdRoomHeading(held, tripA, true, turn(10));
+  ok(again && Math.abs(THREE.MathUtils.radToDeg(held.heading) - 10) < 1e-6, '... as does another trip taking over the view');
+}
+
 // ---------------------------------------------------------------- begun part way through its lift-off
 
 {
@@ -1215,7 +1331,13 @@ const ticketTo = (pad: PadRef, id = 't1'): Ticket => ({ id, from: 'test', pack: 
   // free look both test what stands between the view and the hull's middle, and the test is only what
   // stands still, so the hull itself, solid on its pad, never stands in the way of its own passenger.
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  ok(/this\.cam\.chase\(input, dt, mid, rh\.group\.quaternion, rh\.heading, reach, null, this\.rideBlock, f\.rise\)/.test(main) && /this\.cam\.update\(input, mid, this\.rideBlock,/.test(main), "the passenger's chase and free look are both given the view's block, at the hull's middle, with the framing's rise");
+  // The chase takes the hull's own turn and heading, or, coming down into a room, the heading it held at the door (step 9).
+  ok(
+    /const held = holdRoomHeading\(this\.rideHeld, ride, RIDE_TUNE\.roomHeadingHold && ride\.roomLanding && !!this\.world\.vehicleRoomOf\(rh\), rh\.group\.quaternion\);\s*const turn: THREE\.Quaternion = held \? this\.rideHeld\.turn : rh\.group\.quaternion;\s*const heading = held \? this\.rideHeld\.heading : rh\.heading;/.test(main) &&
+      /this\.cam\.chase\(input, dt, mid, turn, heading, reach, null, this\.rideBlock, f\.rise\)/.test(main) &&
+      /this\.cam\.update\(input, mid, this\.rideBlock,/.test(main),
+    "the passenger's chase and free look are both given the view's block, at the hull's middle, with the framing's rise, and the chase the heading `holdRoomHeading` holds coming down into a room",
+  );
   ok(/private readonly rideBlock[^=]*= \(from, to\) => \{\n\s*const d = this\.physics\.blockDistance\(from\.x, from\.y, from\.z, to\.x, to\.y, to\.z, this\.world\.inside\);/.test(main), 'and the block is the first thing that stands still along the line (`blockDistance`), never a body that moves, the hull among them');
   const physics = readFileSync(new URL('../../../src/core/physics.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const block = /blockDistance\([^)]*\): number \{[\s\S]*?\n  \}/.exec(physics)?.[0] ?? '';
@@ -1754,6 +1876,30 @@ async function toTheCut(env: ReturnType<typeof makeHost>, ride: ShuttleRide, hul
   ok(
     !!nh && ride.hull === nh && ride.leg?.kind === 'land' && readyAt.length === 1 && !readyAt[0].hull && readyAt[0].made === 0 && rigs.readied.length === 2 && rigs.readied[1].join() === 'theed,calm' && rigs.made.at(-1)?.mood === 'calm',
     `and the hull that came out was made ready for both before the trip took it up, then given a set bound to the calm branch it lands with (${rigs.readied.at(-1)?.join(', ') ?? 'none'}; set on ${rigs.made.at(-1)?.mood ?? 'none'})`,
+  );
+  ride.abort('test');
+}
+
+{
+  // The same crossing from the calm branch to a far pad in a room of the rig's own other branch (a transport
+  // flown to Theed from another world): the hull that comes out is made ready for the room's branch it lands
+  // with, and given a set bound to it that follows the rooms.
+  const twoBranches = { theed: fly.clips, calm: fly.clips };
+  const hull = new FakeHull(twoBranches);
+  const rigs = new FakeRigs();
+  const farRoom: PadRef = { ...far, mood: 'theed', cell: 5 };
+  const env = makeHost(hull, rigs, watching(farRoom));
+  const x = crossings(env, rigs, twoBranches);
+  const fromCalm = padAt(0, 100, 20, -30, 0.3, 'calm');
+  const ride = new ShuttleRide(planRoute(ticketThere('w-room'), fromCalm, farRoom, 'test', SPACE_LATER)!, env.host, true);
+  await toTheCut(env, ride, hull, x);
+  ok(rigs.readied.length === 1 && rigs.readied[0].join() === 'calm,theed', `boarded on the calm branch for a far room's pad, both branches were made ready before it was shown (${rigs.readied.map((m) => m.join(', ')).join(' / ') || 'nothing'})`);
+  await x.go();
+  const nh = x.made[0].hull!;
+  const set = rigs.made.at(-1);
+  ok(
+    !!nh && ride.hull === nh && ride.leg?.kind === 'land' && rigs.readied.length === 2 && rigs.readied[1].join() === 'calm,theed' && set?.mood === 'theed' && set.inside,
+    `and the hull that came out was made ready for the room's branch too, then given a set bound to it that follows the rooms (${rigs.readied.at(-1)?.join(', ') ?? 'none'}; set on ${set?.mood ?? 'none'}${set?.inside ? ', inside' : ''})`,
   );
   ride.abort('test');
 }

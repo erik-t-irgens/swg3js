@@ -17,7 +17,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
 import { FLYING, flyingRig, loadGlb, madeUpPieces, madeUpRig, packRigs, ROOT_REST, type Skeleton } from './rigFixtures.ts';
-import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf, landingMood } from '../../../src/vehicles/rigHull.ts';
+import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf, landingMood, landingMoodFor } from '../../../src/vehicles/rigHull.ts';
 import {
   RIG_PATH_TUNE,
   alignShare,
@@ -397,6 +397,7 @@ function isCinematic(path: ReturnType<typeof rigPathOf>, i: number): boolean {
   const turned = turnOnPad(pad, v.clone());
   ok(turned.distanceTo(v.clone().transformDirection(padGroup.matrixWorld).multiplyScalar(v.length())) < 1e-9, 'and a velocity in the rig, turned onto its pad, points where the pad group turns it and keeps its length');
   ok(landingMood({ '': clips }, '') === '' && landingMood({ calm: clips, theed: clips }, 'theed') === 'calm' && landingMood({ calm: clips }, 'calm') === 'calm', 'a hull lands with the calm branch where its rig has one, and with its own where it has not');
+  ok(landingMoodFor({ calm: clips, theed: clips }, 'calm', 'theed') === 'theed' && landingMoodFor({ calm: clips, theed: clips }, 'theed', null) === 'calm' && landingMoodFor({ calm: clips }, 'calm', 'theed') === 'calm', '... unless the pad it lands on asks for a branch its rig has (a pad in a room: Theed\'s hangar lands on its own)');
   hull.dispose();
 }
 
@@ -481,9 +482,12 @@ function isCinematic(path: ReturnType<typeof rigPathOf>, i: number): boolean {
       const cut120 = takeoffCut(lift, RIG_HULL_TUNE.boostSpeed, soft);
       const join120 = landingJoin(land, RIG_HULL_TUNE.maxSpeed, soft);
       ok(cut120?.t === cut?.t && join120?.t === join?.t, `${label}: the cut and the join are the same with a physical stretch capped at 120 m/s² as at ${RIG_PATH_TUNE.cinematicAccel}`);
-      // What the hull built on this branch flies: a transport out of Theed lands as the calm one does.
+      // What the hull built on this branch flies: a transport out of Theed lands as the calm one does on an
+      // open pad, and with this branch's own clip where the pad asks for it (Theed's hangar asks for its own).
       const paths = hull.paths(mood);
       ok(!!paths && paths.landMood === landingMood(rig.moods, mood) && paths.join?.t === landingJoin(rigPathOf(assembled.fullClips.get(rig.moods[paths.landMood].land)!, assembled.chain), RIG_HULL_TUNE.maxSpeed)?.t, `${label}: a hull built on it lands with the ${paths?.landMood || 'only'} branch's clip`);
+      const own = hull.paths(mood, mood);
+      ok(!!own && own.landMood === mood && own.join?.t === landingJoin(rigPathOf(assembled.fullClips.get(clips.land)!, assembled.chain), RIG_HULL_TUNE.maxSpeed)?.t, `${label}: and with its own clip where the pad asks for this branch`);
       hull.dispose();
       const row = (m: RigMoment | null) => (m ? `${f2(m.t)} s, ${f2(m.speed)} m/s, ${f2(m.height)} m up, ${f2(m.out)} m out, climb ${f2(m.climb)}°, nose ${f2(m.noseOff)}° off` : 'none');
       table.push(`${label.padEnd(16)} cut ${row(cut)}`);

@@ -13,6 +13,9 @@
 // the owner already knows and the split is something the top three earn. If that ever stops being
 // true, this is the line that says so.
 //
+// **And the level bands** a person from the catalogue climbs the ladder by (`tierOfLevel`): every edge
+// of every band, Core3's own levels for the bodies met first, and that no level is ever tier 0.
+//
 // **The knob writes the rows in place.** A body holds its own tier's object from the moment it is
 // made, so a knob that replaced a row would reach nothing already standing; the same identity is
 // checked before and after, and a bad value is checked not to empty a field.
@@ -36,6 +39,7 @@ import {
   GROUND_SKILL,
   GROUND_TIERS,
   GROUND_TUNE,
+  TIER_LEVELS,
   aimScatter,
   coverDue,
   fireReset,
@@ -43,6 +47,7 @@ import {
   skillOfGroundTier,
   strafeShare,
   thinkEvery,
+  tierOfLevel,
   tuneGroundSkill,
   willFire,
   type AimScatter,
@@ -109,6 +114,28 @@ ok(skillOfGroundTier(3) === GROUND_SKILL[3], 'a tier hands back its own row, not
 ok(skillOfGroundTier(0) === GROUND_SKILL[1] && skillOfGroundTier(99) === GROUND_SKILL[GROUND_TIERS], 'a tier outside the ladder is clamped rather than refused');
 ok(skillOfGroundTier(2.4) === GROUND_SKILL[2] && skillOfGroundTier(2.6) === GROUND_SKILL[3], 'and a fractional tier rounds');
 ok(skillOfGroundTier(Number.NaN) === GROUND_SKILL[1], 'a tier that is not a number is the bottom of the ladder and never undefined');
+
+// --- 2b: the level bands ------------------------------------------------------------------------------
+//
+// A person from the catalogue climbs the ladder by its own level (the design's bands, invented): under
+// 10 is tier 1, under 30 tier 2, under 60 tier 3, under 90 tier 4, and 90 up tier 5. Tier 0 is never a
+// level's. The examples are Core3's own levels for bodies the owner will meet first.
+
+{
+  const bands: [number, number][] = [[0, 1], [9.99, 1], [10, 2], [29, 2], [30, 3], [59, 3], [60, 4], [89, 4], [90, 5], [263, 5]];
+  ok(bands.every(([level, tier]) => tierOfLevel(level) === tier), `every edge of every band lands on its tier (${bands.map(([l, t]) => `${l}:${t}`).join(' ')})`);
+  ok(tierOfLevel(8) === 1 && tierOfLevel(25) === 2 && tierOfLevel(38) === 3 && tierOfLevel(116) === 5, 'a Tusken child (8) is tier 1, a stormtrooper (25) tier 2, a Tusken warrior (38) tier 3 and a carnage champion (116) tier 5');
+  ok(tierOfLevel(null) === 1 && tierOfLevel(undefined) === 1 && tierOfLevel(Number.NaN) === 1 && tierOfLevel(-5) === 1, 'a body with no level, or a nonsense one, fights as the least of them');
+  let climbs = true;
+  for (let l = 0; l < 400; l += 0.5) if (tierOfLevel(l + 0.5) < tierOfLevel(l)) climbs = false;
+  ok(climbs, 'and the ladder only ever climbs with the level');
+  ok(Array.from({ length: 400 }, (_, l) => tierOfLevel(l)).every((t) => t >= 1 && t <= GROUND_TIERS), 'never off the top of the ladder, and never tier 0');
+  const was = [...TIER_LEVELS];
+  TIER_LEVELS[0] = 5;
+  ok(tierOfLevel(6) === 2, 'the bands are read in place, so the console moves them for the next body stood');
+  TIER_LEVELS.splice(0, TIER_LEVELS.length, ...was);
+  ok(tierOfLevel(6) === 1, 'and back');
+}
 
 // --- 3: where today's fighter sits ----------------------------------------------------------------
 //

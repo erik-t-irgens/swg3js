@@ -134,9 +134,10 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
 
 {
   // Theed's shape: the starport is the royal hangar, and its transport parks on the deck, its cell 5, a
-  // room. A hull a trip lands with comes down on the calm branch, made for an open pad, so a trip there
-  // is set down at the port; and a shuttle out in the open a little further off is still not taken for
-  // the port's own, since it is past the reach a thing belongs to a port by.
+  // room. Asked with no hull rig (room pads switched off, the old way) a trip there is set down at the
+  // port; and a shuttle out in the open a little further off is still not taken for the port's own, since
+  // it is past the reach a thing belongs to a port by. What a transport's trip lands on is
+  // `roomLanding.test.ts`'s.
   const ports: Port[] = [{ name: 'Theed Starport', x: 0, z: 0, kind: 'starport' }];
   const inside = thing({ cell: 5, bx: 0, bz: 0, x: 0, z: 0 });
   const rigs = { transport: rig };
@@ -252,6 +253,10 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   const packs = join(process.cwd(), 'assets-private');
   const worlds = existsSync(packs) ? readdirSync(packs).filter((w) => !w.startsWith('space_') && existsSync(join(packs, w, 'travel.json')) && existsSync(join(packs, w, 'pois.json'))) : [];
   const none: string[] = [];
+  // The same asked by a trip flown with a transport and with the plain shuttle (step 9): Theed's hangar is a
+  // room, landed at only by its own rig, so a transport has one port more to land at and a shuttle none more.
+  const noneTransport: string[] = [];
+  const noneShuttle: string[] = [];
   let answered = 0;
   let calm = 0;
   for (const world of worlds) {
@@ -261,7 +266,10 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
     const rigs = travel.rigs ?? {};
     const all = travelThingsOf(travel.rows, pois.center);
     for (const p of portsOf(pois.pois ?? [], pois.center)) {
-      const pad = padOfPort(all, portsOf(pois.pois ?? [], pois.center), p.name, world, rigs);
+      const ports = portsOf(pois.pois ?? [], pois.center);
+      if (!padOfPort(all, ports, p.name, world, rigs, undefined, 'transport')) noneTransport.push(`${world}: ${p.name}`);
+      if (!padOfPort(all, ports, p.name, world, rigs, undefined, 'shuttle')) noneShuttle.push(`${world}: ${p.name}`);
+      const pad = padOfPort(all, ports, p.name, world, rigs);
       if (!pad) {
         none.push(`${world}: ${p.name}`);
         continue;
@@ -275,6 +283,7 @@ const rig: TravelRig = { file: 'travel/rig.glb', parts: [], moods: { calm: { lan
   else {
     ok(none.length === 7 && none.includes('naboo: Theed Starport'), `seven ports have no rigged shuttle in the open to land on, Theed Starport among them (${none.join('; ')})`);
     ok(answered > 40, `and every other one of ${answered + none.length} has its pad (${answered}, ${calm} of them flown to by a transport's calm landing)`);
+    ok(noneTransport.length === 6 && !noneTransport.includes('naboo: Theed Starport') && noneShuttle.length === 7 && noneShuttle.includes('naboo: Theed Starport'), `for a trip flown with a transport six have none, Theed Starport's hangar being its pad (${noneTransport.join('; ')}); for one flown with the plain shuttle still seven`);
   }
 }
 

@@ -116,6 +116,9 @@ import { FIGHTER_BODY, POSTURE_TUNE, STANCE_TUNE, aimMode, aimPointFor, applyBod
 import { BLADE_RADIUS, BladePath, type Striker } from '../combat/sweep';
 // Its meshes culled one by one against a sphere about the figure, set once (commit 3c).
 import { cullsOneByOne, fighterCull, fitCullSpheres, setBodyCulled, type BodyPose } from './bodyCull.ts';
+// Jedi Academy's roll when it is aimed at, and a jump by what it is (`evade.ts`): the same tables a
+// person from the catalogue reads, and its own rig's own clips.
+import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeTune, type JumpTune, type LedgeAsk, type RollDir } from './evade.ts';
 
 /** What a fighter carries, and so how it fights. */
 type Arm = 'saber' | 'melee' | 'gun';
@@ -256,6 +259,14 @@ export type FighterKnob = Partial<FighterTune> & {
    * body that has gone down is really harder to hit, which nobody can answer from a hidden tab.
    */
   posture?: Posture | 'auto' | null;
+  /**
+   * The roll's numbers -- the share a second a tier evades while aimed at, the cooldown, Jedi Academy's
+   * speed and length, what counts as being aimed at -- which the people from the catalogue read too:
+   * `__debug.fighters({ roll: { share: [0, 0, 1, 1, 1, 1] } })`.
+   */
+  roll?: Partial<EvadeTune>;
+  /** And the jump's: the heights a level reaches, the tiers that earn one and the ledge a jump is worth. */
+  jump?: Partial<JumpTune>;
 };
 
 /** The wearables a Wookiee wears, and nobody else: the Kashyyykian pieces, and the ones marked _wke. */
@@ -313,6 +324,9 @@ const stanceAsk: StanceInput = { gun: false, combat: false, hasTarget: false, ga
 const aimAsk: AimWhen = { aiming: false, sinceShot: 0, stunned: false };
 /** How low it stands, asked the same way: filled and handed straight to `postureFor`. */
 const postureAsk: PostureInput = { grounded: true, gun: false, combat: false, shooting: false, gap: Infinity, hpRatio: 1, pace: 'stand', held: false, canProne: false, was: 'stand', covered: false };
+/** A ledge worth a jump, asked the same way, and the ground direction of a roll or a hop, written into. */
+const ledgeAsk: LedgeAsk = { rise: 0, flat: 0, level: 0, grounded: true, chasing: false, free: true, outdoors: true, since: 0 };
+const rollAt = { x: 0, z: 0 };
 const moveAsk = { x: 0, y: 0, z: 0 };
 const moveGot = { x: 0, y: 0, z: 0 };
 
@@ -630,6 +644,22 @@ export class Npc implements Living, ErrandBody {
   /** Whether the collision capsule is the low one this instant, so a change is written once and not every frame. */
   private lowBody = false;
   /**
+   * Its evade and jump clocks (`evade.ts`): when it last rolled or hopped, last jumped, and was last
+   * struck from afar, and how often it has done each. The roll is Jedi Academy's, off its own rig.
+   */
+  readonly evade = new EvadeClock();
+  /** A roll under way: seconds of it left, and the ground it covers a second, and until when its clip still has the body. */
+  private rollLeft = 0;
+  private rollVX = 0;
+  private rollVZ = 0;
+  private tumbleUntil = 0;
+  /** A jump of its own under way: which way, whether a Force jump, and the ground it covers a second meanwhile. */
+  private jumping = false;
+  private jumpDir: RollDir = 'F';
+  private jumpForce = false;
+  private jumpVX = 0;
+  private jumpVZ = 0;
+  /**
    * Whether this rig holds any of the game's own prone loops, resolved once when it is dressed
    * (`preferPostures`). The rule will not lay a body down that cannot be drawn lying down: the
    * prone states' own last resort is the *standing* idle, so without this a badly hurt fighter
@@ -862,6 +892,7 @@ export class Npc implements Living, ErrandBody {
   /** Hold it at a point in the air this frame (the Force grip). */
   holdAt(point: THREE.Vector3, dt: number): void {
     if (this.dead) return;
+    this.endTumble();
     (this.heldAt ??= new THREE.Vector3()).copy(point);
     // A frame or two of grace, as the creatures use: the power sets this every frame it is held.
     this.heldUntil = this.now + Math.max(0.05, dt * 3);
@@ -951,7 +982,7 @@ export class Npc implements Living, ErrandBody {
   private cullTall = 0;
 
   /** What `applyCull` reads, filled rather than made each time it is asked. */
-  private readonly cullPose: BodyPose = { ragdoll: false, dead: false, down: false, idle: null };
+  private readonly cullPose: BodyPose = { ragdoll: false, dead: false, down: false, low: false, kneel: false, idle: null };
 
   /**
    * Whether its meshes are culled one by one now (`cullsOneByOne`): the switch, and only while it is on
@@ -964,8 +995,19 @@ export class Npc implements Living, ErrandBody {
     p.ragdoll = this.ragdoll !== null;
     p.dead = this.dead;
     p.down = this.posture === 'prone';
+    // Rolling or in the air on a jump of its own lays it past the standing figure's sphere too -- and
+    // for as long as the clip that ends one has the body (`tumbleUntil`: a roll's clip runs past the
+    // roll's 0.55 s, and a landing plays after the feet are down) -- and a knee is the rule's own
+    // switch (`LOW_CULL.kneelWhole`).
+    const tumble = this.tumbling || this.now < this.tumbleUntil;
+    this.cullTumble = tumble;
+    p.low = tumble;
+    p.kneel = this.posture === 'kneel';
     setBodyCulled(this.cullMeshes, cullsOneByOne(p));
   }
+
+  /** Whether the cull was last asked while a roll, a jump or its closing clip had the body: asked again once that clip has run. */
+  private cullTumble = false;
 
   /** Its spheres set again (the console moved the scale); nothing before it is dressed, or once it has fallen. */
   refitCull(): void {
@@ -1154,10 +1196,18 @@ export class Npc implements Living, ErrandBody {
       console.warn('fighters: this rig has none of the prone loops, so a body put flat by hand is drawn standing; the rule never asks for prone on such a rig.');
     }
     const wasProne = this.posture === 'prone';
+    const wasKneeling = this.posture === 'kneel';
     this.posture = p;
     // Flat on the ground a figure reaches past its standing sphere: drawn whole until it is up (`applyCull`).
     if ((p === 'prone') !== wasProne) this.applyCull();
-    const low = p !== 'stand';
+    // And on one knee, which the low half of the cull's rule takes too (`BodyPose.low`).
+    else if ((p === 'kneel') !== wasKneeling) this.applyCull();
+    this.reshape();
+  }
+
+  /** The capsule low for a low posture or a roll, and written once when that changes. */
+  private reshape(): void {
+    const low = this.posture !== 'stand' || this.rollLeft > 0;
     if (low === this.lowBody) return;
     this.lowBody = low;
     this.resize();
@@ -1170,7 +1220,9 @@ export class Npc implements Living, ErrandBody {
    */
   resize(): void {
     if (this.dead) return;
-    const half = capsuleHalfFor(this.posture);
+    // A roll carries a body on the low shell whatever posture it rolled out of, as the player's does.
+    const shape: Posture = this.rollLeft > 0 && this.posture === 'stand' ? 'crouch' : this.posture;
+    const half = capsuleHalfFor(shape);
     this.collider.setHalfHeight(half);
     // The drop is worked against **this body's own lift**, not against the live `halfHeight`. The
     // lift is read once when the body is made and the tuning is live, so a fighter already standing
@@ -1181,6 +1233,7 @@ export class Npc implements Living, ErrandBody {
     this.collider.setTranslationWrtParent({ x: 0, y: capsuleDropFor(half, FIGHTER_BODY, this.bodyLift), z: 0 });
     this.collider.setTranslation({ x: this.pos.x, y: this.pos.y + FIGHTER_BODY.radius + half, z: this.pos.z });
     this.halfHeight = aimPointFor(this.posture);
+    if (shape !== this.posture) this.halfHeight = aimPointFor(shape);
   }
 
   /** Hold it in one posture by hand, or hand it back to the rule with null. The settle does not apply. */
@@ -1189,6 +1242,175 @@ export class Npc implements Living, ErrandBody {
     if (p) {
       this.postureHeld = 0;
       this.setPosture(p);
+    }
+  }
+
+  /**
+   * How high it jumps (`jumpLevelFor`): nothing below the tier that earns it, a plain hop, or a Force
+   * jump's first or second level for a lightsaber. Worked out when asked, since both the tier and what
+   * is in its hand can change under it.
+   */
+  get jumpLevel(): number {
+    return jumpLevelFor(this.tier, 'person', this.arm === 'saber');
+  }
+
+  /** Rolling, or in the air on a jump of its own: its steering and its blows wait until it is done. */
+  private get tumbling(): boolean {
+    return this.rollLeft > 0 || this.jumping;
+  }
+
+  /**
+   * Whether to throw itself aside, or jump up to somebody on a ledge, asked once a thought: the same
+   * rule a person from the catalogue asks (`evade.ts`), with its own rig's own rolls and jumps. Aimed at
+   * is the player's gun pointed within reach of it while it has something to fight, or a blow from afar
+   * a moment ago.
+   */
+  private stepEvade(aim: AimLine | null, now: number, d: Decision): void {
+    const rig = this.rig;
+    if (!this.skill || this.dead || !rig) return;
+    const t = this.target;
+    const free = !this.tumbling && now >= this.tumbleUntil && this.stunned <= 0 && this.swingLeft < 0 && !this.heldAt && this.posture !== 'prone' && !(this.errand && !this.errand.done);
+    const gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) : Infinity;
+    const level = this.cell ? 0 : this.jumpLevel;
+    if (t && !t.dead && level > 0 && d.state === 'chase') {
+      const a = ledgeAsk;
+      a.rise = t.pos.y - this.pos.y;
+      a.flat = gap;
+      a.level = level;
+      a.grounded = this.grounded;
+      a.chasing = true;
+      a.free = free;
+      a.outdoors = !this.cell;
+      a.since = now - this.evade.jumpAt;
+      const height = ledgeJump(a);
+      if (height > 0 && gap > 1e-3) {
+        // Over the lip as it tops out, and down onto the ledge just past it.
+        this.startJump(height, (t.pos.x - this.pos.x) / gap, (t.pos.z - this.pos.z) / gap, jumpAcross(gap, height, FIGHTER_BODY.gravity, 'top'), 'F');
+        this.evade.jumped(now, true);
+        return;
+      }
+    }
+    // The player's aim counts only against a fighter already fighting something: one merely looked at
+    // down a raised gun has nothing to throw itself away from. A blow from afar counts whatever it was doing.
+    const aimed = (!!t && !t.dead && aimedAt(aim, this.pos.x, this.pos.y + this.halfHeight, this.pos.z)) || this.evade.shotLately(now);
+    const kind = this.evade.due(now, this.tier, aimed, this.grounded, free, rig.has(ROLL_CLIPS.L), level, Math.random(), Math.random());
+    if (!kind) return;
+    const side = Math.random() < 0.5 ? 1 : -1;
+    if (kind === 'roll') {
+      this.startRoll(rollDirection(side, gap));
+      return;
+    }
+    // A hop (only with `hopShare` raised, D9 being the roll only): aside, or at what it fights for a
+    // blade still far off, which has to close to do anything -- down on level ground at its mark.
+    const height = jumpHeight(level);
+    if (this.arm === 'saber' && t && gap > EVADE_TUNE.leapFrom) this.startJump(height, (t.pos.x - this.pos.x) / gap, (t.pos.z - this.pos.z) / gap, jumpAcross(gap - EVADE_TUNE.leapFrom * 0.5, height, FIGHTER_BODY.gravity, 'land'), 'F');
+    else {
+      const dir: RollDir = side > 0 ? 'L' : 'R';
+      rollVector(dir, this.facing, rollAt);
+      this.startJump(height, rollAt.x, rollAt.z, EVADE_TUNE.rollSpeed, dir);
+    }
+    this.evade.jumped(now, false);
+  }
+
+  /**
+   * Jedi Academy's roll, as the player's: along `dir` off the way its gun faces, at the roll's own speed
+   * for its own length of time, on the low shell (`reshape`), with its own rig's clip.
+   */
+  private startRoll(dir: RollDir): void {
+    const rig = this.rig;
+    const clip = ROLL_CLIPS[dir];
+    if (!rig?.has(clip)) return;
+    rollVector(dir, this.facing, rollAt);
+    this.rollVX = rollAt.x * EVADE_TUNE.rollSpeed;
+    this.rollVZ = rollAt.z * EVADE_TUNE.rollSpeed;
+    this.rollLeft = EVADE_TUNE.rollTime;
+    rig.play(clip, { fadeIn: 0.05 });
+    this.tumbleUntil = this.now + Math.max(EVADE_TUNE.rollTime, rig.clipDuration(clip) ?? 0);
+    this.startTumble();
+  }
+
+  /**
+   * A jump of its own to `height`, carried `across` metres a second along (`dx`, `dz`): the body's own
+   * fall is given the speed upward that reaches it (`jumpSpeed`, at the fighters' own gravity), and its
+   * rig plays Jedi Academy's jump for the direction -- a Force jump's past the plain one's height --
+   * with the in-air loop under it until it lands (`land`).
+   */
+  private startJump(height: number, dx: number, dz: number, across: number, dir: RollDir): void {
+    const rig = this.rig;
+    const up = jumpSpeed(height, FIGHTER_BODY.gravity);
+    if (!rig || !(up > 0)) return;
+    this.jumpForce = height > (JUMP_TUNE.heights[1] ?? 0) + 1e-3;
+    this.jumpDir = dir;
+    this.jumpVX = dx * across;
+    this.jumpVZ = dz * across;
+    this.fallVy = up;
+    this.grounded = false;
+    this.jumping = true;
+    rig.prefer('air', jumpClipName('INAIR', dir, this.jumpForce, rig));
+    const clip = jumpClipName('JUMP', dir, this.jumpForce, rig);
+    if (clip) rig.play(clip, { fadeIn: 0.05 });
+    this.startTumble();
+  }
+
+  /** What starting a roll or a jump takes off it: a swing under way and any low posture. */
+  private startTumble(): void {
+    this.swingLeft = -1;
+    this.swingTarget = null;
+    this.forced = null;
+    if (this.posture !== 'stand') {
+      this.posture = 'stand';
+      this.postureHeld = 0;
+    }
+    this.reshape();
+    this.applyCull();
+  }
+
+  /**
+   * A roll or a jump let go of, whatever became of it: its shell back to its posture's. Called **while
+   * it is still rolling or in the air** -- the guard is what keeps a Force hold, which calls it every
+   * frame, from asking the cull every frame -- which is why `stepTumble` ends a roll before it writes
+   * the roll's last moment off rather than after.
+   */
+  private endTumble(): void {
+    if (!this.tumbling) return;
+    this.rollLeft = 0;
+    this.jumping = false;
+    this.rig?.prefer('air', null);
+    this.reshape();
+    this.applyCull();
+  }
+
+  /** It came down from a jump of its own: Jedi Academy's landing for it, and on its feet again. */
+  private land(): void {
+    const rig = this.rig;
+    const clip = rig ? jumpClipName('LAND', this.jumpDir, this.jumpForce, rig) : null;
+    if (clip && rig) {
+      rig.play(clip, { fadeIn: 0.06 });
+      this.tumbleUntil = Math.max(this.tumbleUntil, this.now + Math.min(0.6, rig.clipDuration(clip) ?? 0));
+    }
+    this.endTumble();
+  }
+
+  /**
+   * One frame of a roll or a jump, which is all a fighter asks the ground for while one is under way: a
+   * roll its own speed along the roll for the roll's length, a jump its speed across while it is up.
+   */
+  private stepTumble(sdt: number): void {
+    this.wish.set(0, 0, 0);
+    this.moving = false;
+    if (this.rollLeft > 0) {
+      this.wish.x = this.rollVX * sdt;
+      this.wish.z = this.rollVZ * sdt;
+      this.moving = true;
+      // Ended before the time left is written off, never after: `endTumble` asks `tumbling`, which a
+      // roll with nothing left no longer is, and a roll written down to nothing first would leave the
+      // fighter standing on the crouch shell, aimed at its crouch middle and drawn whole for good.
+      const left = this.rollLeft - sdt;
+      if (left <= 0) this.endTumble();
+      else this.rollLeft = left;
+    } else if (this.jumping) {
+      this.wish.x = this.jumpVX * sdt;
+      this.wish.z = this.jumpVZ * sdt;
     }
   }
 
@@ -1273,6 +1495,8 @@ export class Npc implements Living, ErrandBody {
     // blow that could never have been aimed here.
     if (source && source.key !== this.key && source.side === this.side && !hostileSides(source, this)) return;
     if (source && source.key !== this.key && source.aggression !== 'passive') this.remember(source);
+    // Struck by something standing well off is being shot at: a tiered fighter may throw itself aside.
+    if (source && source.key !== this.key) this.evade.struck(this.now, Math.hypot(source.pos.x - this.pos.x, source.pos.z - this.pos.z));
     this.hp -= amount;
     this.stunned = Math.max(this.stunned, 0.2);
     if (from && push > 0) {
@@ -1287,8 +1511,10 @@ export class Npc implements Living, ErrandBody {
     this.push.addScaledVector(dir, power * 0.6);
     this.stunned = Math.max(this.stunned, 0.5);
     // A real blow takes it off its feet: it rises and falls where it lands, rather than sliding
-    // along the ground. A bolt's or a blade's little shove (under six) leaves it standing.
+    // along the ground. A bolt's or a blade's little shove (under six) leaves it standing. It ends a
+    // roll or a jump of its own: it goes where it was thrown, not where it was going.
     if (power >= 6) {
+      this.endTumble();
       this.fallVy = Math.max(Number.isNaN(this.fallVy) ? 0 : this.fallVy, Math.max(power * 0.35, 2));
       this.grounded = false;
     }
@@ -1316,8 +1542,10 @@ export class Npc implements Living, ErrandBody {
   private die(): void {
     // Upright first, while the collider is still there to be written: the death clip and the
     // ragdoll after it are a standing body's, and a corpse left with a low aim point would be shot
-    // at half a metre over ground it is lying on.
+    // at half a metre over ground it is lying on. A roll or a jump part way through stops here too.
     this.forced = null;
+    this.rollLeft = 0;
+    this.jumping = false;
     this.setPosture('stand');
     this.dead = true;
     this.deadTimer = 9;
@@ -1444,7 +1672,7 @@ export class Npc implements Living, ErrandBody {
    * anything it holds a grudge against or is already fighting, and everything else within the
    * farthest the brain's own numbers can reach.
    */
-  private think(foes: readonly Living[], now: number): void {
+  private think(foes: readonly Living[], now: number, aim: AimLine | null): void {
     if (this.wanderAt < 0) this.wanderAt = now + 1 + Math.random() * 4;
     // Grudges past the brain's memory, and the dead, are dropped.
     for (const [k, g] of this.memory) if (now - g.at > BRAIN_TUNE.memory || g.who.dead) this.memory.delete(k);
@@ -1529,6 +1757,8 @@ export class Npc implements Living, ErrandBody {
       seeksCover: !!this.skill && this.arm === 'gun' && !!this.gun && !this.cell && !(this.errand && !this.errand.done),
       // And whether it really is behind something, which only this side can answer.
       inCover: this.coverKind !== null,
+      // How far up its jump reaches, which keeps a target on a ledge it can get up onto.
+      jumpReach: this.cell ? 0 : jumpHeight(this.jumpLevel),
     };
     const d = decide(self, list);
     // A wander indoors is pulled back inside the indoor leash before it is kept: see
@@ -1590,6 +1820,8 @@ export class Npc implements Living, ErrandBody {
     this.state = d.state;
     this.decision = d;
     this.stepSpacing(list);
+    // And whether to throw itself aside, or jump up to somebody on a ledge, once a thought.
+    this.stepEvade(aim, now, d);
   }
 
   /**
@@ -1671,6 +1903,12 @@ export class Npc implements Living, ErrandBody {
   private act(sdt: number, bolts: Bolts, effects: Effects | null, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
     const d = this.decision;
     if (this.target?.dead) this.target = null;
+    // A roll or a jump of its own under way is the whole of this frame's ground: it goes where it was
+    // thrown, and whatever it was walking at or striking at waits until it is on its feet again.
+    if (this.tumbling) {
+      this.stepTumble(sdt);
+      return;
+    }
     const t = this.target;
     let moveTo = d?.moveTo ?? null;
     let face = d?.face ?? null;
@@ -1850,6 +2088,8 @@ export class Npc implements Living, ErrandBody {
       }
     }
     this.checkStuck(sdt, this.moving ? speed : 0);
+    // Nothing is struck or shot while the clip that ends a roll or a jump still has the body.
+    if (this.now < this.tumbleUntil) return;
     // Stunned it neither moves nor strikes, which is what being stunned has always meant here. A
     // body in the cover state shoots on exactly the same terms as one in the attack state, because
     // it *is* one: `d.attack` is what says a shot would land, and the word beside it only says
@@ -2459,6 +2699,10 @@ export class Npc implements Living, ErrandBody {
       // The aim's correction in degrees, and the share of it the spine could not take.
       aim: { yaw: Number(((this.aimFix.yaw * 180) / Math.PI).toFixed(1)), pitch: Number(((this.aimFix.pitch * 180) / Math.PI).toFixed(1)), body: Number(((this.aimTurn * 180) / Math.PI).toFixed(1)) },
       poses: this.gunPose ? { kind: this.gunPose.kind, aim: this.gunPose.aim, ready: this.gunPose.ready } : null,
+      // How often it has thrown itself aside, and how: Jedi Academy's roll, a hop, and a jump up to a
+      // ledge; how high it jumps; and whether it is rolling or in the air this instant.
+      roll: { rolls: this.evade.rolls, hops: this.evade.hops, rolling: this.rollLeft > 0 },
+      jump: { level: this.jumpLevel, height: Number(jumpHeight(this.jumpLevel).toFixed(2)), jumps: this.evade.jumps, inAir: this.jumping },
     };
   }
 
@@ -2467,7 +2711,7 @@ export class Npc implements Living, ErrandBody {
    * hold. `hittableAt` is what a swinging blade names the colliders it touches with; with none
    * nothing can be swept at all and the swing falls back on the blow the timer used to land.
    */
-  update(dt: number, terrain: Terrain, foes: readonly Living[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null, now: number, hittableAt: ((handle: number) => Hittable | undefined) | null = null): void {
+  update(dt: number, terrain: Terrain, foes: readonly Living[], bolts: Bolts, effects: Effects | null, camera: THREE.Camera | null, now: number, hittableAt: ((handle: number) => Hittable | undefined) | null = null, aim: AimLine | null = null): void {
     if (!this.stepped) {
       this.stepped = true;
       // Whatever was struck before this fighter had a clock is dated from here (see `stepped`).
@@ -2521,7 +2765,7 @@ export class Npc implements Living, ErrandBody {
       // squad stood up on one frame does not go on thinking on one frame for ever. Tier 0 keeps the
       // flat 0.4 s every fighter used to share, which is roughly where tier 4 sits.
       this.thinkAt = now + (this.skill ? thinkEvery(this.skill, Math.random()) : FIGHTER_TUNE.think * (1 + (Math.random() * 2 - 1) * FIGHTER_TUNE.thinkJitter));
-      this.think(foes, now);
+      this.think(foes, now, aim);
     }
     // How fast what it is shooting at is going, before anything reads it: `act` may pull the
     // trigger on this very frame and the lead is measured off these two numbers.
@@ -2557,6 +2801,15 @@ export class Npc implements Living, ErrandBody {
     stanceAsk.offNose = offNose;
     this.stance = stanceFor(stanceAsk);
     this.move(sdt, terrain);
+    // Down from a jump of its own: landed the moment it stands on something again coming down, and let
+    // go of all the same if it has not come down in a few seconds (held on a ledge's lip).
+    if (this.jumping) {
+      const up = now - this.evade.jumpAt;
+      if (up > 0.15 && this.grounded && Number.isNaN(this.fallVy)) this.land();
+      else if (up > 4) this.endTumble();
+    }
+    // The clip that ends a roll or a jump has run out: culled against the standing sphere again.
+    if (this.cullTumble && !this.tumbling && now >= this.tumbleUntil) this.applyCull();
     // The **body's** own lift, not the aim point: the two were one number until the posture moved
     // the aim point, and writing the body from it would have dropped a kneeling fighter's whole
     // capsule forty centimetres into the floor.
@@ -2724,6 +2977,11 @@ export class Npc implements Living, ErrandBody {
    * and the style's stance standing -- again the player's, who moves that way with a blade lit.
    */
   private poseRig(rig: CharacterRig, own: number): void {
+    // In the air on a jump of its own, once its take-off clip has run: the in-air loop it was given.
+    if (this.jumping) {
+      rig.setState('air');
+      return;
+    }
     const moving = this.moving;
     const walking = this.pace === 'walk';
     // The very speed `act` moved it at, so the clip is scaled to the ground really covered and the
@@ -2812,7 +3070,8 @@ export class Npc implements Living, ErrandBody {
     const rig = this.rig;
     if (!rig) return;
     const holder = this.holder;
-    aimAsk.aiming = !!t && !t.dead && !!holder && this.stance !== 'relaxed';
+    // Not through a roll or a jump, whose clips pose the whole body: the correction eases away meanwhile.
+    aimAsk.aiming = !!t && !t.dead && !!holder && this.stance !== 'relaxed' && !this.tumbling;
     aimAsk.sinceShot = this.sinceShot;
     aimAsk.stunned = this.stunned > 0;
     const mode = aimMode(aimAsk);
@@ -3239,7 +3498,7 @@ export class NpcManager {
    * long walk; with none given such a walk records that it had nobody to measure against, which it
    * reads as the worst case rather than as a pass.
    */
-  update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number, playerPos?: THREE.Vector3): void {
+  update(dt: number, targets: readonly Living[], bolts: Bolts, camera: THREE.Camera | null, now: number, playerPos?: THREE.Vector3, aim: AimLine | null = null): void {
     if (this.disposed) return;
     this.expose();
     noteBladeLookup(!!this.deps.hittableAt);
@@ -3271,7 +3530,7 @@ export class NpcManager {
       // floor that has gone is half a metre nobody asked for.
       if (solid && !npc.dead) npc.cellSolid = solid(npc.cell);
       npc.cellOf = this.deps.cellOf ?? null;
-      npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now, this.deps.hittableAt ?? null);
+      npc.update(dt, this.terrain, targets, bolts, this.deps.effects, camera, now, this.deps.hittableAt ?? null, aim);
       // The walk, after the body has taken its step: what it records is what really happened this
       // frame, never what was asked for. A walk that ends here takes the count down with it.
       const e = npc.errand;
@@ -3322,10 +3581,12 @@ export class NpcManager {
    */
   private report(opts?: FighterKnob): Record<string, unknown> {
     if (opts) {
-      const { stance, body, postures, posture, tier, skill, cover, step, ...own } = opts;
+      const { stance, body, postures, posture, tier, skill, cover, step, roll, jump, ...own } = opts;
       Object.assign(FIGHTER_TUNE, own);
       if (stance) tuneStance(stance);
       if (postures) tunePosture(postures);
+      if (roll) tuneEvade(roll);
+      if (jump) tuneJump(jump);
       if (skill) tuneGroundSkill(skill);
       if (cover) tuneCover(cover);
       if (step) tuneGroundStep(step);
@@ -3363,6 +3624,9 @@ export class NpcManager {
       ground: { ...GROUND_TUNE },
       step: { ...GROUND_STEP },
       cover: coverSearch.status(),
+      // The roll's and the jump's tables, which the people from the catalogue read as well.
+      roll: { ...EVADE_TUNE, share: [...EVADE_TUNE.share] },
+      jump: { ...JUMP_TUNE, heights: [...JUMP_TUNE.heights] },
       out: this.npcs.length,
       fighters: this.npcs.map((n) => n.status()),
     };

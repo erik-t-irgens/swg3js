@@ -29,6 +29,7 @@
 // with their `.ts`, no enum, no namespace, no constructor parameter properties.
 import type { Building } from '../layoutStream.ts';
 import type { Decision } from '../mobiles/brain.ts';
+import { NAV_OTHER, NAV_RANKS } from '../nav/outdoorGrid.ts';
 import { restDecision } from '../patrols.ts';
 import { roll } from '../spawnSeed.ts';
 import { slotHash, type ShuttleRound } from '../travelTerminal.ts';
@@ -110,7 +111,122 @@ export const ROUTINE_TUNE = {
    * walk through (Mos Eisley's, pad to front door, measured at about two and a half minutes).
    */
   walkMax: 420,
+  /**
+   * How far out along a door's own line the first open ground of the walk grid is looked for, metres
+   * (`firstOpenOut`): the first two to four and a half metres outside every Tatooine starport's doors are
+   * blocked cells of the grid (the building's own footprint, or its steps), so a point a step and a bit
+   * outside stood a traveller where the grid could say nothing of where it could walk, and a cantina's
+   * doorstep sent an arrival at a cell the grid plans no way to. On, a traveller is stood on that ground,
+   * an arrival steps out onto it before it makes for town and is sent to the same ground outside a
+   * cantina's door. 0 is the old way: stood a step and `outside` metres out, any goal counted as
+   * reachable, the doorstep the goal, and an arrival with nowhere better sent to the nearest cantina
+   * whatever its region.
+   */
+  clearOut: 8,
+  /** Whether a stalled walk is sent once to the nearest spot it can reach before it is let go (ours). */
+  replanOnce: true,
+  /** Whether a stalled walk is let go only while nobody can see it (ours): nobody vanishes in plain view. */
+  letGoOffScreen: true,
+  /** Seconds a stalled walk seen on screen waits to be let go at most, so one stuck in view for good still goes (ours). */
+  letGoWait: 60,
 };
+
+/** A way out of a building, as the travellers use one: the point a step outside it, and the unit way out through it. */
+export interface DoorLine {
+  outX: number;
+  outZ: number;
+  dirX: number;
+  dirZ: number;
+}
+
+/** Where `firstOpenOut` found the first open ground: the point, how far out from the door's outside point, and its region. */
+export interface OpenOut {
+  x: number;
+  z: number;
+  d: number;
+  region: number;
+}
+
+/** A region of the walk grid that says which others can be walked to from it: one of the ranked ones, 1 to `NAV_RANKS`. */
+export function rankedRegion(r: number): boolean {
+  return r >= 1 && r <= NAV_RANKS;
+}
+
+/** A region of the walk grid that is open ground: a ranked one, or one of the smaller ones lumped together (`NAV_OTHER`); not blocked, not a building's footprint. */
+export function openRegion(r: number): boolean {
+  return r >= 1 && r <= NAV_OTHER;
+}
+
+/**
+ * The first open ground of the walk grid out along a door's own line: from its outside point, every
+ * `step` metres out to `max`, the first point whose region is open (`openRegion`), written into `out`
+ * with that region. The cells just outside every Tatooine starport's doors are the building's footprint
+ * (region 15) or its steps (0) for two to four and a half metres, about which the grid can say nothing;
+ * past them, the street's ground is a ranked region (its street door's, region 1) and a starport's walled
+ * pads a small one (14), which whoever asks about reach must judge (`sameRankedRegion`). False, with `out`
+ * untouched, where there is no grid (`region` answers -1) or none is found within `max`; the caller then
+ * stands its point as it always did. Pure; allocates nothing.
+ */
+export function firstOpenOut(door: DoorLine, region: (x: number, z: number) => number, out: OpenOut, max = ROUTINE_TUNE.clearOut, step = 0.5): boolean {
+  if (!(max > 0) || !(step > 0)) return false;
+  for (let d = 0; d <= max + 1e-9; d += step) {
+    const x = door.outX + door.dirX * d;
+    const z = door.outZ + door.dirZ * d;
+    const r = region(x, z);
+    if (r < 0) return false;
+    if (!openRegion(r)) continue;
+    out.x = x;
+    out.z = z;
+    out.d = d;
+    out.region = r;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The nearest ranked ground about a point, in rings a metre apart out to `max` (eight points on the first,
+ * more on each after), and with `want` over 0 only ground of that region: the one spot a walker in that
+ * region can be sure of reaching nearest where it was going. Written into `out`; false where there is no
+ * grid or nothing is found. Pure; allocates nothing.
+ */
+export function nearestRanked(x: number, z: number, region: (x: number, z: number) => number, want: number, max: number, out: OpenOut): boolean {
+  const here = region(x, z);
+  if (here < 0) return false;
+  if (rankedRegion(here) && (want <= 0 || here === want)) {
+    out.x = x;
+    out.z = z;
+    out.d = 0;
+    out.region = here;
+    return true;
+  }
+  for (let r = 1; r <= max; r++) {
+    const n = 8 * r;
+    for (let k = 0; k < n; k++) {
+      const a = (k / n) * Math.PI * 2;
+      const px = x + Math.sin(a) * r;
+      const pz = z + Math.cos(a) * r;
+      const g = region(px, pz);
+      if (!rankedRegion(g) || (want > 0 && g !== want)) continue;
+      out.x = px;
+      out.z = pz;
+      out.d = r;
+      out.region = g;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether one of ours standing in region `from` may be sent to a goal in region `to`: both ranked and the
+ * same, which is the one answer the grid can be sure of. The general question (`OutdoorNav.reachable`)
+ * answers yes whenever either end is unranked, since a body that refuses an errand it could have walked
+ * is worse than one that tries; ours can pick another errand, so ours ask the strict one.
+ */
+export function sameRankedRegion(from: number, to: number): boolean {
+  return rankedRegion(from) && from === to;
+}
 
 export type RoutineTune = typeof ROUTINE_TUNE;
 

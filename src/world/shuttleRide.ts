@@ -104,6 +104,18 @@ export const RIDE_TUNE = {
   parkedRise: 0.12,
   /** Metres over its pad under which a hull lifting off or coming down is framed as parked: the height of a starport's walls and a little more. */
   viewLow: 25,
+  /**
+   * The switch for landing in a room (step 9, ours): a transport's trip to Theed Starport lands in the
+   * royal hangar on the hangar's own branch, through its door, and its passenger steps off on the deck.
+   * False is the old way, set down at the port. Taken by the next trip planned.
+   */
+  roomPads: true,
+  /**
+   * While a hull comes down into a room and stands there, the passenger's view keeps the heading the hull
+   * had as it came through the door, rather than swinging round with it as it turns on the spot to face
+   * back out (Theed's transport turns half round in the hangar): swung, the view went through the walls.
+   */
+  roomHeadingHold: true,
   /** Seconds the view takes to go from the parked framing to the flight's or back, eased at both ends: never a jump. */
   viewEase: 2,
   /**
@@ -220,6 +232,47 @@ function settleFraming(f: RideFraming, tune = RIDE_TUNE): RideFraming {
   return f;
 }
 
+/**
+ * The heading the passenger's view holds while a hull comes down into a room and stands there
+ * (`RIDE_TUNE.roomHeadingHold`): the trip it was taken for (null while none is held), the heading and
+ * the level turn about the vertical that goes with it. Kept by the game between frames.
+ */
+export interface HeldHeading {
+  ride: object | null;
+  heading: number;
+  readonly turn: THREE.Quaternion;
+}
+
+export function heldHeading(): HeldHeading {
+  return { ride: null, heading: 0, turn: new THREE.Quaternion() };
+}
+
+const HOLD_UP = new THREE.Vector3(0, 1, 0);
+const holdNose = new THREE.Vector3();
+
+/**
+ * One frame of the passenger's held heading: `holding` is whether the view is to hold one now -- the
+ * switch on, the trip coming down onto a pad in a room or standing there (`ShuttleRide.roomLanding`), and
+ * the hull already followed into that room -- and `hullTurn` the hull's own turn. The first frame it holds
+ * for a trip, the heading the hull's nose has then (the one it came through the door with) is taken and
+ * kept, level, for as long as it holds for that trip, however the hull turns on the spot; a frame that does
+ * not hold lets it go, so the next landing takes its own. Answers whether the view is to take `held.turn`
+ * and `held.heading` rather than the hull's own. Allocates nothing.
+ */
+export function holdRoomHeading(held: HeldHeading, ride: object, holding: boolean, hullTurn: THREE.Quaternion): boolean {
+  if (!holding) {
+    held.ride = null;
+    return false;
+  }
+  if (held.ride !== ride) {
+    held.ride = ride;
+    const nose = holdNose.set(0, 0, 1).applyQuaternion(hullTurn);
+    held.heading = Math.atan2(nose.x, nose.z);
+    held.turn.setFromAxisAngle(HOLD_UP, held.heading);
+  }
+  return true;
+}
+
 /** A hull a trip flies, as much of a `Vehicle` as it uses. */
 export interface RideHull {
   readonly pos: THREE.Vector3;
@@ -280,10 +333,18 @@ export interface RideHost {
    * about to swap its hull in on (an empty one about to leave the pad a passenger boards at).
    */
   clearPad(pad: PadRef): void;
-  /** Seat the passenger in a hull, in this step; false when they cannot be (on something else, gone, dead). */
-  seat(h: RideHull): boolean;
-  /** Put the passenger down off a hull, on their feet at `at`. */
-  unseat(h: RideHull, at: THREE.Vector3): void;
+  /**
+   * Seat the passenger in a hull, in this step; false when they cannot be (on something else, gone, dead).
+   * `room` is the room of the pad's building the hull stands in (Theed's hangar), 0 out in the open: the
+   * passenger is carried a dozen metres to their seat, which would otherwise lose the room they are in.
+   */
+  seat(h: RideHull, room?: number): boolean;
+  /**
+   * Put the passenger down off a hull, on their feet at `at`: in room `room` of the building the pad stands
+   * in where it stands in one (Theed's hangar), which a step of a dozen metres off the seat would otherwise
+   * lose, and out in the open with it 0 or left out.
+   */
+  unseat(h: RideHull, at: THREE.Vector3, room?: number): void;
   /** The ground's height where the world already holds it, or null: never made on the spot. */
   groundCached(x: number, z: number): number | null;
   /**
@@ -569,6 +630,38 @@ export class ShuttleRide {
     return this.running ? (this.route.legs[this.index] ?? null) : null;
   }
 
+  /** The branch the pad it lands on asks it to land with (a pad in a room's own), or null for the hull's own rule. */
+  private landWith(): string | null {
+    return this.route.landMood ?? null;
+  }
+
+  /**
+   * Whether either end of the trip is a pad in a room (Theed's hangar): its sounds then follow the rooms
+   * the hull flies through (`RigFx.inside`), since it lifts off out of one or lands in one.
+   */
+  private inRooms(): boolean {
+    return this.route.from.cell > 0 || (this.route.to.pad?.cell ?? 0) > 0;
+  }
+
+  /**
+   * The pad in a room it is landing on, parked on or lifting off again from empty, or null: while its
+   * landing, its wait and its leaving are flown there, what looks in on that room from outside is lit by
+   * the room's own lights (`World.hintRoomLight`), and the passenger's view holds its heading once the hull
+   * is through the door (`RIDE_TUNE.roomHeadingHold`). Null for a pad in the open, and once it has ended.
+   */
+  roomPad(): PadRef | null {
+    const leg = this.leg;
+    if (!leg || !(leg.kind === 'land' || leg.kind === 'off' || leg.kind === 'leave')) return null;
+    const pad = leg.pad ?? this.route.to.pad;
+    return pad && pad.cell > 0 ? pad : null;
+  }
+
+  /** Whether it is coming down onto a pad in a room, or stands landed there: what the passenger's held heading is for. */
+  get roomLanding(): boolean {
+    const k = this.leg?.kind;
+    return (k === 'land' || k === 'off') && this.roomPad() !== null;
+  }
+
   /**
    * Build the hull and swap it in for the shuttle on the first pad, in one synchronous step once it is
    * ready: the pad's own shuttle held out of the picture at once, the hull held where that shuttle's
@@ -596,7 +689,8 @@ export class ShuttleRide {
       return 'aborted';
     }
     const rig = hull?.rig ?? null;
-    const paths = rig ? rig.paths(this.route.mood) : null;
+    const paths = rig ? rig.paths(this.route.mood, this.landWith()) : null;
+    // Empty again, it lifts off on the branch it landed with: out of Theed's hangar, through its door.
     const again = rig && paths ? rig.paths(paths.landMood) : null;
     if (!hull || !rig || !paths || !paths.cut || !paths.join || !again?.cut) {
       if (hull && !hull.disposed) this.host.disposeHull(hull);
@@ -630,7 +724,7 @@ export class ShuttleRide {
     }
     // The passenger first: somebody who is no longer there to board (on something else, dead, gone)
     // misses it, and nothing of the swap has happened yet to be undone.
-    if (this.passenger && !this.host.seat(hull)) {
+    if (this.passenger && !this.host.seat(hull, from.cell)) {
       this.host.disposeHull(hull);
       this.finish('missed', 'the passenger was not there to board it');
       this.host.say(`you were not there to board the shuttle to ${to}${this.ticketBack()}`);
@@ -661,7 +755,10 @@ export class ShuttleRide {
       this.flyClip(paths.lift, this.clip, paths.cut.t, from, paths.liftMood);
     }
     this.host.showHull(hull);
-    this.fx = rigs.lend(from.key, rig.joints) ?? (hull.def?.rig ? rigs.fxFor(hull.def.rig.rig, this.route.mood, rig.joints, from.cell > 0) : null);
+    this.fx = rigs.lend(from.key, rig.joints) ?? (hull.def?.rig ? rigs.fxFor(hull.def.rig.rig, this.route.mood, rig.joints, this.inRooms()) : null);
+    // A set lent from a shuttle standing in the open follows the rooms too when the trip lands in one, so
+    // the hangar's landing is heard in the hangar.
+    if (this.fx && this.inRooms()) this.fx.inside = true;
     this.fxMood = this.route.mood;
     if (this.fx) rigs.drive(this.fx, this.posing);
     const dest = this.route.to.pad;
@@ -766,8 +863,9 @@ export class ShuttleRide {
     const leg = this.leg;
     if (leg?.kind === 'board') {
       const hull = this.hull;
-      this.findAlight(leg.pad ?? this.route.from);
-      this.host.unseat(hull, this.alightAt);
+      const pad = leg.pad ?? this.route.from;
+      this.findAlight(pad);
+      this.host.unseat(hull, this.alightAt, pad.cell);
       this.seated = false;
       this.refunded = true;
       this.host.giveBack(this.route.ticket);
@@ -898,6 +996,8 @@ export class ShuttleRide {
       landSeconds: p ? n2(p.land.seconds) : null,
       landedFrom: this.started.some((s, i) => this.route.legs[i].kind === 'land' && Number.isFinite(s)) ? n2(this.landFrom) : null,
       landsWith: p?.landMood ?? null,
+      // The room its landing pad stands in (Theed's hangar's deck is 5), or 0 for a pad in the open.
+      landsInRoom: this.route.to.pad?.cell ?? 0,
       alight: this.alightFrom ? { at: this.alightAt.toArray().map(n2), from: this.alightFrom } : null,
       unseen: n2(this.unseen),
       pilot: this.route.legs.some((l) => l.kind === 'fly') ? this.pilot.report() : null,
@@ -1099,7 +1199,7 @@ export class ShuttleRide {
     const rig = h.rig;
     const block = h.def?.rig?.rig ?? null;
     if (token !== this.token || !this.running || !rig || !block) return Promise.resolve();
-    const land = rig.paths(this.route.mood)?.landMood ?? this.route.mood;
+    const land = rig.paths(this.route.mood, this.landWith())?.landMood ?? this.route.mood;
     return this.host.rigs.ready(block, land === this.route.mood ? [this.route.mood] : [this.route.mood, land], rig.joints);
   }
 
@@ -1132,7 +1232,7 @@ export class ShuttleRide {
     const landing = leg?.kind === 'skip';
     const pad = leg?.pad ?? to.pad;
     const rig = h && !h.disposed ? h.rig : null;
-    const paths = rig ? rig.paths(this.route.mood) : null;
+    const paths = rig ? rig.paths(this.route.mood, this.landWith()) : null;
     if (!h || h.disposed || !rig || !paths || (landing && (!paths.join || !pad))) {
       // Whatever did come out, with no clips to fly, is taken away with the passenger off it.
       if (h && !h.disposed) {
@@ -1172,7 +1272,7 @@ export class ShuttleRide {
     const block = h.def?.rig?.rig ?? null;
     if (!landing) {
       // Out in space, or high over the far world: flown on from here, with the branch it took off on.
-      this.fx = block ? rigs.fxFor(block, this.route.mood, rig.joints, leg?.kind === 'down' && !!pad && pad.cell > 0) : null;
+      this.fx = block ? rigs.fxFor(block, this.route.mood, rig.joints, this.inRooms()) : null;
       this.fxMood = this.route.mood;
       if (this.fx) rigs.drive(this.fx, this.posing);
       // Over the far world, never under its ground: the glide was worked out from the pad and its join
@@ -1193,7 +1293,7 @@ export class ShuttleRide {
       this.next();
       return;
     }
-    this.fx = block ? rigs.fxFor(block, paths.landMood, rig.joints, pad!.cell > 0) : null;
+    this.fx = block ? rigs.fxFor(block, paths.landMood, rig.joints, this.inRooms()) : null;
     this.fxMood = paths.landMood;
     if (this.fx) rigs.drive(this.fx, this.posing);
     this.holdDestNow(pad!.key);
@@ -1224,7 +1324,7 @@ export class ShuttleRide {
       from.autopilot = this.autopilot;
       from.setGhost(true);
       const block = from.def?.rig?.rig ?? null;
-      this.fx = block && from.rig ? this.host.rigs.fxFor(block, this.route.mood, from.rig.joints, false) : null;
+      this.fx = block && from.rig ? this.host.rigs.fxFor(block, this.route.mood, from.rig.joints, this.inRooms()) : null;
       this.fxMood = this.route.mood;
       if (this.fx) this.host.rigs.drive(this.fx, this.posing);
       return;
@@ -1694,7 +1794,8 @@ export class ShuttleRide {
   private letOff(): void {
     const hull = this.hull;
     if (!this.seated || !hull) return;
-    this.host.unseat(hull, this.alightAt);
+    const leg = this.leg;
+    this.host.unseat(hull, this.alightAt, (leg?.pad ?? this.route.to.pad)?.cell ?? 0);
     this.seated = false;
     this.legClock = 0;
     this.host.say(`you arrive at ${this.route.to.port || 'the far pad'}`);
@@ -1984,9 +2085,15 @@ export class ShuttleRide {
     const seatedIn = this.hull ?? left;
     let setDown = false;
     if (this.seated && seatedIn) {
-      if (leg?.kind === 'board') this.findAlight(leg.pad ?? this.route.from);
-      else if (leg?.kind !== 'off' || !this.alightFrom) this.alightAt.copy(seatedIn.pos);
-      this.host.unseat(seatedIn, this.alightAt);
+      // Stood at the foot of its ramp where it stands on a pad, in that pad's room where it has one.
+      let room = 0;
+      if (leg?.kind === 'board') {
+        const pad = leg.pad ?? this.route.from;
+        this.findAlight(pad);
+        room = pad.cell;
+      } else if (leg?.kind !== 'off' || !this.alightFrom) this.alightAt.copy(seatedIn.pos);
+      else room = (leg.pad ?? this.route.to.pad)?.cell ?? 0;
+      this.host.unseat(seatedIn, this.alightAt, room);
       setDown = !moved && !crossing && !!leg && leg.kind !== 'board' && leg.kind !== 'off';
     }
     this.seated = false;

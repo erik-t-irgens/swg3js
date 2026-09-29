@@ -61,7 +61,14 @@ import { describeRoles, idleClipFor, ownGunIsPistol, rolesFor } from './packClip
 // The fighters' own carry and aim, borrowed whole rather than written a second time: pure, on the
 // player's numbers, node-tested, and the bones it wants (`spine1..3`, the hand's weapon joint) are
 // exactly the ones a mobile's clone carries. One knob moves a fighter's carry and a mobile's.
-import { STANCE_TUNE, aimMode, bodyShare, easeAngle, spineShare, stanceFor, stepAimFix, type AimFix, type AimWhen, type Stance, type StanceInput } from '../fighterStance.ts';
+import { POSTURE_TUNE, STANCE_TUNE, aimMode, bodyShare, capsuleTopFor, easeAngle, paceInPosture, postureFor, spineShare, stanceFor, stepAimFix, wrapAngle, type AimFix, type AimWhen, type Posture, type PostureInput, type Stance, type StanceInput } from '../fighterStance.ts';
+// And the rest of fighting as a fighter does, for a person: its tier from its level, its ring, its
+// slide and its cover (`tactics.ts`), and Jedi Academy's roll and a jump by what it is (`evade.ts`).
+import { GroundTactics, lowClipsFor, lowLoop, lowTransition, type LowClips } from './tactics.ts';
+import { EVADE_TUNE, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpSpeed, ledgeJump, rollDirection, rollVector, type AimLine, type LedgeAsk, type RollDir } from '../evade.ts';
+import { tierOfLevel, willFire } from '../groundSkill.ts';
+import { GROUND_STEP } from '../groundStep.ts';
+import type { CoverDeps } from '../cover.ts';
 // The spine is collected on the one walk the clone already takes, by the module's own `SPINE_BONE`
 // rule, which is why that rule is exported and no second walk is: one home for which bones fold.
 import { SPINE_BONE, foldSpine, type FoldRecord } from './spineFold.ts';
@@ -93,6 +100,26 @@ const IDLE_CAMERA = new THREE.PerspectiveCamera();
 const aimWant = new THREE.Vector3();
 const aimHave = new THREE.Vector3();
 const aimGrip = new THREE.Vector3();
+/**
+ * What a person's posture, a ledge and a roll are asked through, written in place by each body in
+ * turn and read at once, as the fighters keep theirs: a literal a body a frame is an allocation a
+ * body a frame.
+ */
+const postureAsk: PostureInput = { grounded: true, gun: false, combat: false, shooting: false, gap: Infinity, hpRatio: 1, pace: 'stand', held: false, canProne: false, was: 'stand', covered: false };
+const ledgeAsk: LedgeAsk = { rise: 0, flat: 0, level: 0, grounded: true, chasing: false, free: true, outdoors: true, since: 0 };
+const rollAt = { x: 0, z: 0 };
+/** The velocity a roll or a jump writes onto the body, kept. */
+const rollVel = { x: 0, y: 0, z: 0 };
+/**
+ * The linear damping every mobile's body is built with, which settles a walker's velocity between the
+ * frames that write it. Off for the length of a jump of its own (`startJump`), put back on landing.
+ */
+const BODY_DAMPING = 0.6;
+/**
+ * A low shell's height against a standing one's: the fighters' own (`capsuleTopFor`), 1.0 m of the
+ * player's 1.6 m, read live so the one knob that moves a fighter's low shell moves a person's.
+ */
+const lowShare = (): number => capsuleTopFor('crouch') / Math.max(1e-3, capsuleTopFor('stand'));
 
 /** The body a mobile wears: a plain model's prototype, or a person's dressed look; cloned per mobile. */
 export interface MobileBody {
@@ -242,6 +269,12 @@ export interface MobileDeps {
    */
   groundIfCached?(x: number, z: number): number | null;
   groundSolid?(x: number, z: number): boolean;
+  /**
+   * The physics the cover search casts through (`cover.ts`), the manager's one adapter over the
+   * streamer's blockers and the rays that stand still. With none, a person finds no cover and walks
+   * into the open exactly as it always did.
+   */
+  cover?: CoverDeps | null;
 }
 
 export interface MobileContext {
@@ -258,6 +291,11 @@ export interface MobileContext {
    * every body steers exactly as it did before it could be told.
    */
   cellOf?(t: Living): CellState | null | undefined;
+  /**
+   * Where the player's gun is pointed, when it is up (`World.playerAim`): what makes a person say it
+   * is being aimed at and throw itself aside. Null or off, only a blow from afar says so.
+   */
+  aim?: AimLine | null;
 }
 
 interface Grudge {
@@ -287,8 +325,20 @@ export class Mobile implements Living, NpcSubject {
   readonly colliders: RAPIER.Collider[] = [];
   readonly plan: BodyPlan;
   readonly scale: number;
-  readonly halfHeight: number;
+  /**
+   * The point the rest of the game shoots at, over its feet -- and not readonly, because a person's
+   * moves with its posture, in the same call as its collision capsule and never apart (`reshape`),
+   * exactly as a fighter's does: the capsule is the hitbox. Everything else stands at its plan's.
+   */
+  halfHeight: number;
+  /** The standing aim point, which `halfHeight` goes back to when it gets up. */
+  private readonly standHalfHeight: number;
   readonly hologram: boolean;
+  /**
+   * A person on the humanoid skeleton -- a catalogue NPC or a dressed one, never a creature, a droid
+   * or a hologram -- which is what may fight as a fighter does (`tactics`), and jump.
+   */
+  readonly humanoid: boolean;
   hp: number;
   /**
    * Its whole health and its blow at the difficulty in force (`src/world/difficulty.ts`): its own
@@ -542,6 +592,10 @@ export class Mobile implements Living, NpcSubject {
   private stuckCommanded = 0;
   /** What the step-up keeps between frames (`stepUp.ts`): the pace it was set at, when it may ask again, and its lifts. */
   private readonly stepWalk: StepWalker = stepWalker();
+  /** How many times the step-up has lifted this body onto a step, for the console's trace of the people of ours. */
+  get stepLifts(): number {
+    return this.stepWalk.lifts;
+  }
   /** The body the step-up climbs with, written in place before each ask (`stepShapeNow`). */
   private readonly stepShape: StepShape = { along: 0, rim: 0, step: 0, feet: 0 };
   /** The lifts the picture has already been eased over, and how far behind the body it is still drawn, in the body's own frame (up, forward). */
@@ -574,6 +628,57 @@ export class Mobile implements Living, NpcSubject {
   private toldOnce = false;
   /** Something this browser owes the wire about it while it keeps it: it was struck, it was thrown. */
   private mark: NpcMark | null = null;
+  /**
+   * How a person fights beyond what the brain decides -- its tier, its ring and its slide, its cover,
+   * its evade and its jump (`tactics.ts`) -- made when it is hung and null for everything that is not
+   * a person. Its tier is its own level's (`tierOfLevel`) unless the console says otherwise, and tier
+   * 0 is none of it: the mobile this game had before.
+   */
+  tactics: GroundTactics | null = null;
+  /**
+   * How low it stands: upright, crouched, kneeling or flat, which is the fighters' own axis and their
+   * own rule (`postureFor`), with what each means read out of the client's own state table. Only a
+   * person whose pack carries the low postures (`lowClips`) ever leaves `stand`.
+   */
+  posture: Posture = 'stand';
+  /** Seconds before it may take another posture, the settle a fighter keeps. */
+  private postureHeld = 0;
+  /** A posture put on by hand (`__debug.mobileTune({ posture })`), or null for the rule's. */
+  private forcedPosture: Posture | null = null;
+  /** The low postures its pack can draw, resolved when it is hung; null for a pack without them. */
+  private lowClips: LowClips | null = null;
+  /** The crouch walk as a gait list, kept, so the gait is chosen from it with nothing made. */
+  private readonly crouchGaits: Gait[] = [];
+  /** Whether its capsule is the low one this instant, so a change is written once. */
+  private lowShape = false;
+  /** A roll under way: seconds of it left, and the ground it covers a second while it lasts. */
+  private rollLeft = 0;
+  private rollVX = 0;
+  private rollVZ = 0;
+  /** Until when the roll's or a landing's clip still has the body, so nothing else is started over it. */
+  private tumbleUntil = 0;
+  /** A jump of its own under way: when it left the ground, which way, whether a Force jump, whether for a ledge. */
+  private hopping = false;
+  private hopAt = 0;
+  private hopDir: RollDir = 'F';
+  private hopForce = false;
+  /** Its in-air loop for this jump, resolved as it left the ground so that no frame looks a name up. */
+  private hopAir: string | null = null;
+  /** Whether the last thought found its shot at what it is after clear: a ring is held only with one. */
+  private lineSeen = false;
+  /**
+   * Whether this frame's travel is its own and not the brain's -- a cover spot, or a place on the ring
+   * -- so the feet go there while the gun stays on what it fights; and whether the gun gave way to the
+   * feet this frame, because the two were further apart than the legs can show on anything but a slide.
+   */
+  private splitMove = false;
+  private gunOnFeet = false;
+  /** How far its gun still had to turn to where it wanted it this frame, radians: what its trigger's cone reads. */
+  private aimErr = 0;
+  /** A shot of its own landing on something alive, counted for the console: one arrow for the body's life. */
+  private readonly shotLanded = (_at: THREE.Vector3, hit: Hittable | null): void => {
+    if (hit && this.tactics && typeof (hit as { key?: unknown }).key === 'number') this.tactics.counts.hits++;
+  };
 
   constructor(spawn: MobileSpawn, private readonly deps: MobileDeps) {
     const e = spawn.entry;
@@ -593,7 +698,9 @@ export class Mobile implements Living, NpcSubject {
       scale: this.scale,
     });
     this.halfHeight = this.plan.halfHeight;
+    this.standHalfHeight = this.halfHeight;
     this.hologram = (e.flags ?? []).includes('hologram');
+    this.humanoid = (e.kind === 'npc' || e.kind === 'dressed') && spawn.hierarchy === 'all_b' && !this.hologram && this.plan.kind === 'upright';
     this.flyer = this.plan.hover > 0;
     this.label = e.name;
     this.side = sideOf(e);
@@ -620,7 +727,7 @@ export class Mobile implements Living, NpcSubject {
         .setTranslation(spawn.x, spawn.y + feet + 0.05, spawn.z)
         .setRotation({ x: tmpQ.x, y: tmpQ.y, z: tmpQ.z, w: tmpQ.w })
         .lockRotations()
-        .setLinearDamping(0.6)
+        .setLinearDamping(BODY_DAMPING)
         .setAngularDamping(2.5),
     );
     for (const c of this.plan.colliders) {
@@ -694,6 +801,375 @@ export class Mobile implements Living, NpcSubject {
     if (this.targetKey !== null || this.memory.size > 0) return true;
     const s = this.state;
     return s === 'alert' || s === 'chase' || s === 'attack' || s === 'cover' || s === 'flee' || s === 'return' || s === 'knockdown';
+  }
+
+  // ---- fighting as a fighter does ------------------------------------------------------------------
+  //
+  // A person from the catalogue: its tier from its level, its postures, its ring and its slide, its
+  // cover, Jedi Academy's roll and a jump by what it is. Everything here is the fighters' own rules on
+  // the fighters' own tables (`fighterStance.ts`, `groundSkill.ts`, `groundStep.ts`, `cover.ts`,
+  // `evade.ts`); what is this file's is only the body it is done with, a dynamic one shared with every
+  // creature. A creature, a droid and a hologram have no `tactics` and never reach any of it.
+
+  /**
+   * Its tier: `override` when the console sets one for everybody, else its own level's
+   * (`tierOfLevel`). Tier 0 is none of this at all -- no postures, no cover, no slide, no roll and no
+   * jump -- which is the mobile the game had before, so it can be looked at beside the new one.
+   */
+  applyFightTier(override: number | null = null): void {
+    const t = this.tactics;
+    if (!t) return;
+    t.setTier(override ?? tierOfLevel(this.level), 'person', !!this.blade);
+    if (!t.skill && this.posture !== 'stand' && !this.forcedPosture) this.setPosture('stand');
+  }
+
+  /** Hold it in one posture by hand, or hand it back to the rule with null. The settle does not apply. */
+  forcePosture(p: Posture | null): void {
+    if (!this.lowClips) return;
+    this.forcedPosture = p;
+    if (p) {
+      this.postureHeld = 0;
+      this.setPosture(p);
+    }
+  }
+
+  /** Rolling, or in the air on a jump of its own: its steering and its blows wait until it is done. */
+  private get tumbling(): boolean {
+    return this.rollLeft > 0 || this.hopping;
+  }
+
+  /**
+   * Go into a posture, and write its capsule and its aim point for it. Counted when it goes low, for
+   * the console's measure of how often a fight puts people on a knee or on the ground.
+   */
+  private setPosture(p: Posture): void {
+    const was = this.posture;
+    this.posture = p;
+    const c = this.tactics?.counts;
+    if (c && p !== was) {
+      if (p === 'kneel') c.kneels++;
+      else if (p === 'prone') c.prones++;
+      else if (p === 'crouch') c.crouches++;
+    }
+    // Asked whether or not the posture changed: a roll that has just been let go of leaves the shell
+    // low under a body that never left `stand`.
+    this.reshape();
+    // Flat it lies outside the standing body's sphere (`BodyPose.low`), and a knee is the rule's own
+    // switch (`LOW_CULL.kneelWhole`): asked again whenever either changes, the fighter's own test, so
+    // going straight from a knee to flat (or back) is asked too -- the two answer differently whenever
+    // the knee is culled.
+    if ((p === 'prone') !== (was === 'prone') || (p === 'kneel') !== (was === 'kneel')) this.applyCull();
+  }
+
+  /**
+   * The capsule and the aim point for the posture it is in, or for a roll: **moved in one call and
+   * never apart**, since a bolt is a ray against the physics and the struck collider is the hitbox.
+   * The fighters' own shapes (`capsuleTopFor`): the low shell is the standing one's share of 1.0 m to
+   * 1.6 m, its feet where they were, and the aim point is its middle. One capsule reshaped, as the
+   * player's and a fighter's are, rather than a second switched on and off, so no new handle has to be
+   * taught to the manager's lookup or to the bolts.
+   */
+  private reshape(): void {
+    const low = this.posture !== 'stand' || this.rollLeft > 0;
+    if (low === this.lowShape) return;
+    const c = this.colliders[0];
+    const p = this.plan.colliders[0];
+    if (!c || !p || p.shape !== 'capsule' || !c.isValid()) return;
+    this.lowShape = low;
+    const standTotal = 2 * (p.half + p.radius);
+    const half = low ? Math.max(0.01, (standTotal * lowShare()) / 2 - p.radius) : p.half;
+    // Its feet stay where the standing shell's were: the capsule's own bottom over the body's origin.
+    const bottom = p.at[1] - (p.half + p.radius);
+    const y = bottom + p.radius + half;
+    c.setHalfHeight(half);
+    c.setTranslationWrtParent({ x: p.at[0], y, z: p.at[2] });
+    // And in the world as well, which is what every bolt already in the air reads this frame.
+    c.setTranslation({ x: this.pos.x + p.at[0], y: this.pos.y + this.plan.feet + y, z: this.pos.z + p.at[2] });
+    this.halfHeight = low ? p.radius + half : this.standHalfHeight;
+  }
+
+  /**
+   * How low it stands this frame: `postureFor`, the fighters' own rule, fed from the brain's own
+   * answer and what this body already knows, and written back onto the decision. A pack that cannot
+   * draw the low postures never leaves `stand`, and neither does a body with no tier. The game's own
+   * one-shot between two postures plays over the change where the pack has it.
+   */
+  private stepPosture(dt: number, pace: 'stand' | 'walk' | 'run', target: Living | null, d: Decision | null): void {
+    this.postureHeld = Math.max(0, this.postureHeld - dt);
+    const tac = this.tactics;
+    const c = this.lowClips;
+    if (!c || !tac?.skill) {
+      if (this.posture !== 'stand' && !this.forcedPosture) this.setPosture('stand');
+      return;
+    }
+    const ask = postureAsk;
+    ask.grounded = this.grounded;
+    ask.gun = !!this.gun && this.rangedRange > 0;
+    ask.combat = this.now < this.readyUntil;
+    // `cover` is the attack state under another name: a body behind a crate that can see you is shooting.
+    ask.shooting = !!d && (d.state === 'attack' || d.state === 'cover') && d.attack === 'ranged' && !!target && !target.dead;
+    // Standing in cover it cannot shoot out of: the one place it goes low with no shot to take.
+    ask.covered = tac.coverKind === 'hard' && tac.inSpot(this.pos.x, this.pos.z);
+    ask.gap = target ? Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z) : Infinity;
+    ask.hpRatio = this.maxHp > 0 ? this.hp / this.maxHp : 1;
+    ask.pace = pace;
+    // A walker on a round or a routine is under orders, as a fighter under a long walk is.
+    ask.held = !!this.routine || this.essential;
+    ask.canProne = c.canProne;
+    ask.was = this.posture;
+    const want = this.forcedPosture ?? postureFor(ask);
+    if (d) d.posture = want;
+    if (want === this.posture || this.postureHeld > 0) return;
+    this.postureHeld = POSTURE_TUNE.settle;
+    const was = this.posture;
+    this.setPosture(want);
+    const animator = this.animator;
+    const pack = this.animPack;
+    if (!animator || !pack) return;
+    const clip = lowTransition(pack.json, was, want, pace !== 'stand', (n) => animator.has(n));
+    if (clip) animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.08, fadeOut: 0.15 });
+  }
+
+  /**
+   * Whether it gets behind things at all, which is what it tells the brain (`BrainSelf.seeksCover`):
+   * a capability and not a kind, as a fighter's is -- a tier of its own, a gun in its hand that shoots,
+   * out of doors where the streamer builds what a body would hide behind, and its own fight to fight.
+   */
+  private seeksCover(): boolean {
+    return !!this.tactics?.skill && !!this.gun && this.rangedRange > 0 && !this.inside && !this.routine && !this.essential;
+  }
+
+  /**
+   * Somewhere to stand out of the line of fire, for a tiered person with a gun out of doors: the
+   * fighters' own rule through `GroundTactics.stepCover`, with the brain's `d.cover` as whether to look.
+   * Every other body lets go of any spot it had, as a fighter does.
+   */
+  private stepCover(target: Living | null, d: Decision | null): boolean {
+    const tac = this.tactics;
+    const deps = this.deps.cover;
+    if (!tac?.skill || !deps || !target || target.dead || !d || !this.gun || !(this.rangedRange > 0) || this.inside || this.routine) {
+      if (tac?.coverKind) tac.dropCover(this.now, false);
+      return false;
+    }
+    return tac.stepCover(this.now, deps, this.pos.x, this.pos.y, this.pos.z, target.key, target.pos.x, target.pos.y + target.halfHeight, target.pos.z, d.cover === true, this.inside);
+  }
+
+  /**
+   * Which way the feet go while a move of its own is under way, radians. A **slide** keeps them within
+   * its tier's lean of the gun (`slideLean`), so it becomes a diagonal and the gun stays on what it
+   * fights; anything else past what the legs can show (`GROUND_STEP.legMax`) turns the body and takes
+   * the gun with it (`gunOnFeet`), and so does every move of a tier that has not earned the split --
+   * the fighters' own division of it, since there is no strafe clip in either game.
+   */
+  private legsWant(face: { x: number; z: number }, look: { x: number; z: number } | null): number {
+    const travel = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
+    this.gunOnFeet = false;
+    const tac = this.tactics;
+    if (!this.splitMove || !look || !tac) return travel;
+    if (!tac.split) {
+      this.gunOnFeet = true;
+      return travel;
+    }
+    const aim = Math.atan2(look.x - this.pos.x, look.z - this.pos.z);
+    const off = wrapAngle(travel - aim);
+    const lean = tac.leanOnly ? tac.slideLean : GROUND_STEP.legMax;
+    if (Math.abs(off) <= lean) return travel;
+    if (tac.leanOnly && Math.abs(off) <= Math.PI / 2 + 0.01) return aim + Math.sign(off) * lean;
+    this.gunOnFeet = true;
+    return travel;
+  }
+
+  /**
+   * Whether to throw itself aside, or jump up to somebody on a ledge, asked once a thought. Aimed at
+   * is the player's gun pointed within reach of it **while it is in a fight** (`fighting`), or a blow
+   * from afar a moment ago (`EvadeClock`); how often is its tier's share a second, compounded over the
+   * thought (`evade.ts`). A person at its post, in a queue or walking its round that the player merely
+   * looks at down a raised gun has nothing to throw itself away from: only a blow makes it one.
+   */
+  private stepEvade(ctx: MobileContext): void {
+    const tac = this.tactics;
+    if (!tac?.skill || this.essential || this.routine || this.driven || this.dead || !this.animator) return;
+    const now = this.now;
+    const free = !this.tumbling && now >= this.tumbleUntil && this.stunned <= 0 && !this.downPhase && this.heldUntil <= now && this.swingAt === 0 && now >= this.swingUntil && this.posture !== 'prone' && !this.swimming && !this.flyer && !this.seatAt && !!this.tier?.move;
+    const target = this.targetRef;
+    const gap = target ? Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z) : Infinity;
+    const level = this.inside ? 0 : tac.jumpLevel;
+    // A ledge first: whatever it is chasing stands above it within its jump, and near.
+    if (target && !target.dead && level > 0 && this.decision?.state === 'chase') {
+      const a = ledgeAsk;
+      a.rise = target.pos.y - this.pos.y;
+      a.flat = gap;
+      a.level = level;
+      a.grounded = this.grounded;
+      a.chasing = true;
+      a.free = free;
+      a.outdoors = !this.inside;
+      a.since = now - tac.evade.jumpAt;
+      const height = ledgeJump(a);
+      if (height > 0 && gap > 1e-3) {
+        // Over the lip as it tops out, and down onto the ledge just past it.
+        const across = jumpAcross(gap, height, this.gravityNow(), 'top');
+        if (this.startJump(height, (target.pos.x - this.pos.x) / gap, (target.pos.z - this.pos.z) / gap, across, 'F')) tac.evade.jumped(now, true);
+        return;
+      }
+    }
+    const aimed = (this.fighting() && aimedAt(ctx.aim, this.pos.x, this.pos.y + this.halfHeight, this.pos.z)) || tac.evade.shotLately(now);
+    const kind = tac.evade.due(now, tac.tier, aimed, this.grounded, free, this.animator.has('BOTH_ROLL_L'), level, Math.random(), Math.random());
+    if (!kind) return;
+    const side = Math.random() < 0.5 ? 1 : -1;
+    if (kind === 'roll') {
+      this.startRoll(rollDirection(side, gap));
+      return;
+    }
+    // A hop (only with `hopShare` raised, D9 being the roll only): aside, or at what it fights for a
+    // blade still far off, which has to close to do anything -- down on level ground at its mark.
+    const height = jumpHeight(level);
+    if (this.blade && target && gap > EVADE_TUNE.leapFrom) {
+      const across = jumpAcross(gap - EVADE_TUNE.leapFrom * 0.5, height, this.gravityNow(), 'land');
+      this.startJump(height, (target.pos.x - this.pos.x) / gap, (target.pos.z - this.pos.z) / gap, across, 'F');
+    } else {
+      const dir: RollDir = side > 0 ? 'L' : 'R';
+      rollVector(dir, this.facing, rollAt);
+      this.startJump(height, rollAt.x, rollAt.z, EVADE_TUNE.rollSpeed, dir);
+    }
+    tac.evade.jumped(now, false);
+  }
+
+  /** What gravity pulls this body down at, metres a second squared: the world's, by its own scale. */
+  private gravityNow(): number {
+    const g = this.deps.physics.world.gravity;
+    return Math.abs(g.y) * (this.body.isValid() ? this.body.gravityScale() : 1);
+  }
+
+  /**
+   * Jedi Academy's roll: along `dir` off the way its gun faces, at the roll's own speed for its own
+   * length of time (`EVADE_TUNE`, the player's own figures), on the low shell so the shot it dodged goes
+   * over, with the lent clip played over its loop. Refused for a body that cannot be drawn rolling.
+   */
+  private startRoll(dir: RollDir): boolean {
+    const animator = this.animator;
+    const clip = ROLL_CLIPS[dir];
+    if (!animator?.has(clip) || !this.body.isValid()) return false;
+    rollVector(dir, this.facing, rollAt);
+    this.rollVX = rollAt.x * EVADE_TUNE.rollSpeed;
+    this.rollVZ = rollAt.z * EVADE_TUNE.rollSpeed;
+    this.rollLeft = EVADE_TUNE.rollTime;
+    const length = animator.once(clip, { priority: SHOT_PRIORITY.attack, fadeIn: 0.05, fadeOut: 0.15 }) ?? 0;
+    this.tumbleUntil = this.now + Math.max(EVADE_TUNE.rollTime, length);
+    this.startTumble();
+    return true;
+  }
+
+  /**
+   * A jump of its own to `height`, carried `across` metres a second along (`dx`, `dz`): the dynamic
+   * body is thrown and falls under the world's own gravity, with Jedi Academy's jump for the direction
+   * (a Force jump's past the plain one's height) played as it leaves the ground, its in-air loop under
+   * it and its landing when it comes down (`stepTumble`).
+   */
+  private startJump(height: number, dx: number, dz: number, across: number, dir: RollDir): boolean {
+    const animator = this.animator;
+    if (!animator || !this.body.isValid() || !(height > 0)) return false;
+    const up = jumpSpeed(height, this.gravityNow());
+    if (!(up > 0)) return false;
+    this.hopForce = height > (JUMP_TUNE.heights[1] ?? 0) + 1e-3;
+    this.hopDir = dir;
+    // Undamped for the flight. The body's own linear damping (`BODY_DAMPING`) is there to settle a
+    // walker, and left on it takes the launch down with it: a jump thrown at `sqrt(2 g h)` then tops out
+    // at 71 to 85 per cent of the height it was thrown for, and a ledge in the top of a level's reach
+    // is tried every `JUMP_TUNE.every` seconds and never reached. Put back as it lands (`endTumble`).
+    this.body.setLinearDamping(0);
+    rollVel.x = dx * across;
+    rollVel.y = up;
+    rollVel.z = dz * across;
+    this.body.setLinvel(rollVel, true);
+    this.grounded = false;
+    this.hopping = true;
+    this.hopAt = this.now;
+    // Off the ground: every other browser is told, as a knock that lifts one is.
+    this.mark = 'leap';
+    this.hopAir = jumpClipName('INAIR', dir, this.hopForce, animator);
+    const clip = jumpClipName('JUMP', dir, this.hopForce, animator);
+    if (clip) animator.once(clip, { priority: SHOT_PRIORITY.attack, fadeIn: 0.05, fadeOut: 0.12 });
+    this.startTumble();
+    return true;
+  }
+
+  /** What starting a roll or a jump takes off it: its blows under way, its walk, and any low posture. */
+  private startTumble(): void {
+    this.swingAt = 0;
+    this.swingUntil = 0;
+    this.shotsLeft = 0;
+    this.speed = 0;
+    this.ramp = 0;
+    this.forcedPosture = null;
+    if (this.posture !== 'stand') {
+      this.posture = 'stand';
+      this.postureHeld = 0;
+    }
+    this.reshape();
+    this.applyCull();
+  }
+
+  /**
+   * A roll or a jump let go of, whatever became of it: its shell back to its posture's, its damping
+   * back, and the cull asked again. Called **while it is still rolling or in the air** -- the guard is
+   * what keeps a Force hold, a knock or a death from asking the cull every frame -- which is why
+   * `stepTumble` ends a roll before it writes the roll's last second off rather than after.
+   */
+  private endTumble(): void {
+    if (!this.tumbling) return;
+    this.rollLeft = 0;
+    if (this.hopping) {
+      this.hopping = false;
+      if (this.body.isValid()) this.body.setLinearDamping(BODY_DAMPING);
+    }
+    this.reshape();
+    this.applyCull();
+  }
+
+  /**
+   * Everything of a roll or a jump let go of at once, the clip that ends one included: for a body that
+   * will not step `act` to find that clip run out (one handed to another browser to drive) or that is
+   * starting a fresh life. The clock goes first, so the cull `endTumble` asks is the standing one.
+   */
+  private dropTumble(): void {
+    this.tumbleUntil = 0;
+    this.endTumble();
+    if (this.cullTumble) this.applyCull();
+  }
+
+  /**
+   * One frame of a roll or a jump, which is all a body does while one is under way: a roll holds its
+   * ground speed along the roll for the roll's length, and a jump goes where it was thrown until it
+   * stands on something again coming down, when it lands. A jump that has not come down in a few
+   * seconds -- stuck on a ledge's lip, held up in a room with no floor built -- is let go all the same.
+   */
+  private stepTumble(dt: number): void {
+    if (this.rollLeft > 0) {
+      const v = this.body.linvel();
+      rollVel.x = this.rollVX;
+      rollVel.y = v.y;
+      rollVel.z = this.rollVZ;
+      this.body.setLinvel(rollVel, true);
+      // Ended before the time left is written off, never after: `endTumble` asks `tumbling`, which a
+      // roll with nothing left no longer is, and a roll written down to nothing first would leave the
+      // body standing on the low shell, aimed at half a metre low and drawn whole, until it next knelt.
+      const left = this.rollLeft - dt;
+      if (left <= 0) this.endTumble();
+      else this.rollLeft = left;
+    } else if (this.hopping) {
+      const up = this.now - this.hopAt;
+      if (up > 0.2 && this.grounded && this.body.linvel().y <= 0.5) {
+        const animator = this.animator;
+        const clip = animator ? jumpClipName('LAND', this.hopDir, this.hopForce, animator) : null;
+        if (clip && animator) {
+          const length = animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.05, fadeOut: 0.15 }) ?? 0;
+          this.tumbleUntil = Math.max(this.tumbleUntil, this.now + Math.min(0.6, length));
+        }
+        this.endTumble();
+      } else if (up > 4) this.endTumble();
+    }
+    if (!this.downPhase) this.animator?.loop(this.idleNow(), 1);
   }
 
   /**
@@ -791,6 +1267,19 @@ export class Mobile implements Living, NpcSubject {
         if (!this.muzzle && (o as THREE.Bone).isBone && re.test(o.name)) this.muzzle = o;
       });
       if (this.muzzle) break;
+    }
+    // A person fights as a fighter does (`tactics.ts`): its low postures where its pack can draw them,
+    // the crouch walk as a gait of its own, and its tier from its own level. The manager lays the
+    // console's tier over it once the weapon is in its hand (`applyFightTier`), since a lightsaber
+    // changes how high it jumps.
+    if (this.humanoid && pack && this.animator) {
+      const played = this.animator;
+      const kind = this.carry === 'pistol' || this.carry === 'rifle' ? this.carry : null;
+      this.lowClips = lowClipsFor(pack.json, kind, (c) => played.has(c));
+      this.crouchGaits.length = 0;
+      if (this.lowClips?.crouchWalk) this.crouchGaits.push({ clip: this.lowClips.crouchWalk, speed: this.lowClips.crouchSpeed });
+      this.tactics ??= new GroundTactics(this.key % 2 === 0 ? 1 : -1);
+      this.applyFightTier();
     }
     this.state = 'idle';
     this.animator?.loop(this.idleNow(), 1, 0);
@@ -942,9 +1431,9 @@ export class Mobile implements Living, NpcSubject {
     return radiusToward(this.plan, this.heading, from.x - this.pos.x, from.z - this.pos.z);
   }
 
-  /** Whether it is in a one-shot, dying, or attacking: the tiers never freeze it. */
+  /** Whether it is in a one-shot, dying, or attacking (from cover too, the same state): the tiers never freeze it. */
   get busy(): boolean {
-    return this.dead || !!this.animator?.busy || this.swingAt > 0 || this.shotsLeft > 0 || this.state === 'attack';
+    return this.dead || !!this.animator?.busy || this.swingAt > 0 || this.shotsLeft > 0 || this.state === 'attack' || this.state === 'cover';
   }
 
   // ---- one of the world's creatures ----------------------------------------------------------------
@@ -1146,6 +1635,11 @@ export class Mobile implements Living, NpcSubject {
       // And the aim, which nothing steps for a driven body: left folded, the chest would keep the
       // turn it had at the moment it changed hands for as long as it was somebody else's.
       this.dropAim();
+      // And whatever of a fighter's it was doing: the posture, the ring and the evade are all this
+      // browser's thinking, and a driven body is walked where its keeper says, standing.
+      this.dropTumble();
+      this.setPosture('stand');
+      this.tactics?.reset();
       // Out of the solver. A dynamic body nobody is steering would fall, drift and be shoved about
       // between the keeper's words; kinematic, it goes exactly where it is told and still stops a
       // bolt, holds a blade and blocks a walker.
@@ -1260,6 +1754,8 @@ export class Mobile implements Living, NpcSubject {
     if (source && source.key !== this.key) {
       this.remember(source, amount);
       this.deps.alert(this, source);
+      // Struck by something standing well off is being shot at: a tiered person may throw itself aside.
+      this.tactics?.evade.struck(this.now, Math.hypot(source.pos.x - this.pos.x, source.pos.z - this.pos.z));
     }
     this.hp -= amount;
     // Something everyone else has to see once: what they are told is that it was struck, and their
@@ -1303,6 +1799,8 @@ export class Mobile implements Living, NpcSubject {
       this.body.setLinvel({ x: v.x + dir.x * k, y: Math.max(v.y, lift), z: v.z + dir.z * k }, true);
     }
     this.stunned = Math.max(this.stunned, Math.min(0.8, 0.1 * k));
+    // A real shove ends a roll or a jump of its own: it goes where it was thrown, not where it was going.
+    if (k >= 6) this.endTumble();
     if (lift > 1) {
       this.grounded = false;
       // Off the ground: the ease on every other browser would walk it along the floor, so this is
@@ -1352,6 +1850,7 @@ export class Mobile implements Living, NpcSubject {
     // move: the power fires and the creature goes on walking wherever its keeper says. One sat on a
     // seat is held there (`sit`) and stays sat, as it does under a shove (`knock`).
     if (this.dead || this.disposed || this.driven || this.seatAt || !this.plan.canHold) return;
+    this.endTumble();
     this.heldUntil = this.now + Math.max(0.05, dt * 3);
     this.stunned = Math.max(this.stunned, 0.3);
     this.grounded = false;
@@ -1399,6 +1898,12 @@ export class Mobile implements Living, NpcSubject {
     this.shotsLeft = 0;
     this.downPhase = null;
     this.targetRef = null;
+    // Upright first, while its capsule is still the one being written: a corpse left on the low shell
+    // would be shot at half a metre over the ground it lies on, and a roll part way through stops here.
+    this.endTumble();
+    this.forcedPosture = null;
+    this.setPosture('stand');
+    this.tactics?.dropCover(this.now, false);
     // Before the death clip, so the fall is posed from the clip's own chest and the ragdoll built
     // from it is not carrying an aim.
     this.dropAim();
@@ -1464,19 +1969,30 @@ export class Mobile implements Living, NpcSubject {
   private readonly cullMeshes: THREE.Mesh[] = [];
 
   /** What `applyCull` reads, filled rather than made each time it is asked. */
-  private readonly cullPose: BodyPose = { ragdoll: false, dead: false, down: false, idle: null };
+  private readonly cullPose: BodyPose = { ragdoll: false, dead: false, down: false, low: false, kneel: false, idle: null };
+  /**
+   * Whether the cull was last asked while a roll, a jump or the clip that ends one still had the body,
+   * which is what makes `act` ask again the frame that clip has run out (`tumbleUntil`).
+   */
+  private cullTumble = false;
 
   /**
    * Whether its meshes are culled one by one now (`cullsOneByOne`): the switch, and only while it is on
    * its feet. Dead (in its held death clip or a ragdoll), knocked down, or standing in an idle that lays it
    * at full length, it reaches past the standing body's sphere and is drawn whole whenever its group is.
    * Asked again whenever one of those changes: hung, dying, knocked down and up, sat and risen, stood again.
+   * A roll's clip runs past the roll's own 0.55 s and a landing plays after the feet are down, so the
+   * body counts as tumbling until `tumbleUntil` and not only while it is rolling or in the air.
    */
   applyCull(): void {
     const p = this.cullPose;
     p.ragdoll = this.ragdoll !== null;
     p.dead = this.dead;
     p.down = this.downPhase !== null;
+    const tumble = this.tumbling || this.now < this.tumbleUntil;
+    this.cullTumble = tumble;
+    p.low = this.posture === 'prone' || tumble;
+    p.kneel = this.posture === 'kneel';
     p.idle = this.roles?.idle ?? null;
     setBodyCulled(this.cullMeshes, cullsOneByOne(p));
   }
@@ -1551,7 +2067,11 @@ export class Mobile implements Living, NpcSubject {
       color = g.color;
       // The weapon in its hand is known here by the rack's id alone (the hands are given a copy of
       // the model, not the record), which is all its sounds need: every id is its template's name.
-      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this, sound: (held ? combatSounds.gunById(this.weapon) : null) ?? combatSounds.gunOf(pistol ? OWN_GUN.pistol : OWN_GUN.rifle), scar: scarFamilyOf(profile.type, this.weapon) });
+      // A person counts its shots and what they land on, for the console's measure of a fight; the
+      // one arrow is the body's own, made with it.
+      const tac = this.tactics;
+      if (tac) tac.counts.shots++;
+      this.deps.bolts.fire(from, dir, { owner: 'enemy', damage: this.blow, speed: g.speed, color, size: g.size, push: g.push, exclude: this.body, source: this, sound: (held ? combatSounds.gunById(this.weapon) : null) ?? combatSounds.gunOf(pistol ? OWN_GUN.pistol : OWN_GUN.rifle), scar: scarFamilyOf(profile.type, this.weapon), onHit: tac ? this.shotLanded : undefined });
     }
     // The flash is a pooled light shared by everything; only a near shot may borrow one.
     if (this.tier?.name === 'near' && cameraDist < LOD_TUNE.near) this.deps.effects()?.flash(from, color, 5, 6, 0.06);
@@ -1569,11 +2089,20 @@ export class Mobile implements Living, NpcSubject {
     if (!r) return [];
     if (this.swimming && r.gaitsSwim.length) return r.gaitsSwim;
     if (this.flyer && r.gaitsHover.length) return r.gaitsHover;
+    // Crouched, the game's own crouch walk: the crouch is how a body moves low.
+    if (this.posture === 'crouch' && this.crouchGaits.length) return this.crouchGaits;
     if (this.fighting() && r.gaitsCombat.length) return r.gaitsCombat;
     return r.gaits;
   }
 
   private idleNow(): string | null {
+    // In the air on a jump of its own: Jedi Academy's in-air loop for that jump, found as it left the
+    // ground. Low: the posture's own loop for the carry it stands in (`lowLoop`).
+    if (this.hopping && this.hopAir) return this.hopAir;
+    if (this.posture !== 'stand' && this.lowClips) {
+      const low = lowLoop(this.lowClips, this.posture, this.stance);
+      if (low) return low;
+    }
     return idleClipFor(this.roles, { swimming: this.swimming, flying: this.flyer, shooting: this.decision?.attack === 'ranged', fighting: this.fighting(), stance: this.stance, carried: this.carried });
   }
 
@@ -1653,7 +2182,8 @@ export class Mobile implements Living, NpcSubject {
     const holder = this.holder;
     const target = this.targetRef;
     const ask = this.aimAsk;
-    ask.aiming = !!this.gun && !!holder && !!target && !target.dead && this.stance !== 'relaxed';
+    // Not through a roll or a jump, whose clips pose the whole body: the correction eases away meanwhile.
+    ask.aiming = !!this.gun && !!holder && !!target && !target.dead && this.stance !== 'relaxed' && !this.tumbling;
     ask.sinceShot = this.sinceShot;
     ask.stunned = this.stunned > 0;
     const mode = aimMode(ask);
@@ -1700,9 +2230,9 @@ export class Mobile implements Living, NpcSubject {
   private fighting(): boolean {
     // `cover` is in the list because it is the attack state under another name: a body behind a
     // crate is still in a fight, and one told the word off the wire must carry the combat stance,
-    // the combat gaits and a lit blade exactly as one told `attack` does. Nothing in this game
-    // sends it yet -- only a fighter takes cover and a fighter is on no wire -- and listing it here
-    // is what makes that stay true when one is.
+    // the combat gaits and a lit blade exactly as one told `attack` does. A tiered person from the
+    // catalogue takes cover now (`seeksCover`) and its keeper sends the word, so a driven copy of one
+    // is told it; listing it here is what keeps that copy in its fight.
     const at = this.state === 'chase' || this.state === 'attack' || this.state === 'cover' || this.state === 'alert';
     // Driven, there is no target here to have: what it is doing is the keeper's word for it, and
     // that word is what chooses the combat stance, the combat gaits and a lit blade.
@@ -1936,6 +2466,9 @@ export class Mobile implements Living, NpcSubject {
     // the living to find it in.
     if (this.wantTarget) this.takeWantedTarget(ctx.targets);
     let current: Living | null = null;
+    /** Whom it was after before this thought, and whether its shot at them was clear: a ring holds only with one. */
+    const was = this.targetKey;
+    let line = false;
     const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
     const reach = (this.entry.stats?.reach ?? 1.5) * this.scale;
     for (const t of ctx.targets) {
@@ -1963,6 +2496,7 @@ export class Mobile implements Living, NpcSubject {
       b.dead = t.dead;
       b.attackedMeAt = grudge ? grudge.at : -Infinity;
       b.hasLine = isCurrent && this.rangedRange > 0 && !t.dead ? this.lineTo(t) : false;
+      if (isCurrent) line = b.hasLine;
       // Whether a wall stands between: asked only of what a blow could nearly reach, which is the one
       // rule that reads it, so a ray is cast for a handful of bodies at most and none at all for most.
       // Left undefined past that, which says "not asked" rather than "no wall".
@@ -1997,6 +2531,12 @@ export class Mobile implements Living, NpcSubject {
       blockedSince: this.blockedSince,
       forgetKey: this.forgetKey,
       forgetUntil: this.forgetUntil,
+      // What a person tells the shared brain, and nothing else does: whether it gets behind things at
+      // all (a tier, a gun in its hand, out of doors, its own fight), whether it is behind one now,
+      // and how far up its jump reaches. Every creature leaves all three out and is what it was.
+      seeksCover: this.seeksCover(),
+      inCover: !!this.tactics?.coverKind,
+      jumpReach: this.tactics && !this.inside ? jumpHeight(this.tactics.jumpLevel) : 0,
     };
     const d = decide(self, list);
     // A standing person keeps to the spot the data put it on (`keepPost`): the brain's wander is drawn
@@ -2041,6 +2581,11 @@ export class Mobile implements Living, NpcSubject {
     if (d.state === 'return' && this.state !== 'return') this.goal = null;
     this.state = d.state;
     this.decision = d;
+    // Whether its shot at what it is after is clear, kept only while that is still who it is after:
+    // the ring holds a chase off only with a line, since a chase with none is a wall in the way.
+    this.lineSeen = d.targetKey !== null && d.targetKey === was ? line : false;
+    // And whether to throw itself aside, or jump up to somebody on a ledge, once a thought.
+    this.stepEvade(ctx);
     // Water it cannot swim in, just ahead: a wander turns elsewhere, a chase stops at the edge.
     this.waterAhead = false;
     if (!this.canSwim && !this.flyer && !this.inside && d.pace !== 'stand') {
@@ -2229,15 +2774,24 @@ export class Mobile implements Living, NpcSubject {
     const d = this.decision;
     const t = this.targetRef;
     if (t && (t.dead || (t as { removed?: boolean }).removed)) this.targetRef = null;
+    // A roll or a jump of its own under way is the whole of this frame: it goes where it was thrown,
+    // and whatever it was walking at or striking at waits until it is on its feet again.
+    if (this.tumbling) {
+      this.stepTumble(dt);
+      return;
+    }
+    // The clip that ends a roll or a jump has run out: its meshes may be culled against the standing
+    // sphere again. One boolean a frame, and a cull asked once.
+    if (this.cullTumble && this.now >= this.tumbleUntil) this.applyCull();
     // The target moves between thoughts: the chase and the aim follow it every frame.
     let moveTo = d?.moveTo ?? null;
     let face = d?.face ?? null;
     let pace = d?.pace ?? 'stand';
     const target = this.targetRef;
-    // `cover` is `attack` or `chase` under another name and is listed with them for that reason,
-    // though no creature can reach it: the word is gated on `BrainSelf.seeksCover` and nothing but
-    // a tiered fighter sets that. It is here so a mobile that is ever given one does not silently
-    // stop tracking whatever it is fighting.
+    // `cover` is `attack` or `chase` under another name and is listed with them for that reason. No
+    // creature can reach it: the word is gated on `BrainSelf.seeksCover`, which only a tiered person
+    // with a gun out of doors sets (`seeksCover`), and such a person must not stop tracking whatever
+    // it is fighting the moment it gets behind something.
     if (target && d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert')) {
       face = this.faceAt;
       face.x = target.pos.x;
@@ -2249,6 +2803,37 @@ export class Mobile implements Living, NpcSubject {
         const gap = Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z) - target.radiusToward(this.pos) - this.radiusToward(target.pos);
         if (this.melee && !this.apart && gap <= (this.entry.stats?.reach ?? 1.5) * this.scale * 0.8) pace = 'stand';
       }
+    }
+    // A person's own feet, for a tier that has any (`tactics.ts`): a cover spot outranks the ring, and
+    // the ring outranks the brain's own point, exactly as a fighter's do. Either is a move of its own
+    // (`splitMove`), which the feet walk while the gun stays on what it is fighting.
+    this.splitMove = false;
+    this.gunOnFeet = false;
+    const tac = this.tactics;
+    if (tac?.skill && tier.move && !this.driven) {
+      const frozen = this.stunned > 0 || this.swingAt > 0 || this.now < this.swingUntil;
+      if (frozen) pace = 'stand';
+      if (this.stepCover(target, d)) {
+        moveTo = tac.walkTo;
+        // Run for it, and stand once there: a body walking to cover under fire is not behind anything yet.
+        pace = frozen || tac.inSpot(this.pos.x, this.pos.z) ? 'stand' : pace === 'stand' ? 'run' : pace;
+        this.splitMove = true;
+      } else if (!frozen && target && !target.dead && d && this.gun && this.rangedRange > 0 && !this.routine) {
+        const gap = Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z);
+        const shooting = d.attack === 'ranged' && (d.state === 'attack' || d.state === 'cover');
+        const lineChase = (d.state === 'chase' || d.state === 'cover') && this.lineSeen;
+        if (tac.stepStandoff(this.now, this.pos.x, this.pos.z, target.pos.x, target.pos.z, gap, this.key, shooting, lineChase, this.rangedRange, this.speeds.walk * 1.5)) {
+          moveTo = tac.walkTo;
+          pace = pace === 'stand' ? 'walk' : pace;
+          this.splitMove = true;
+        }
+      }
+    }
+    // How low it stands, asked after the feet have been decided (a body sliding or running for a crate
+    // is on its feet) and capping the pace: a kneel has no walk and a prone body goes nowhere.
+    if (tac) {
+      this.stepPosture(dt, pace, target, d);
+      pace = paceInPosture(pace, this.posture);
     }
     // Where the **gun** points, which from here on is a different question from where the feet go:
     // the thing it is fighting, whatever its legs are doing. It is read by the carry alone, and by
@@ -2263,6 +2848,9 @@ export class Mobile implements Living, NpcSubject {
     // The side-step below is the same trap from the other side, and is applied to the heading only.
     // `fighterMove.test.ts` pins the order as text, because nothing else can.
     const look = face;
+    // A move of its own: the feet make for its point while the gun stays on `look`. Standing in its
+    // spot it turns to what it fights, as a body with nowhere to go always has.
+    if (this.splitMove && moveTo && pace !== 'stand') face = moveTo;
     // The way there. Indoors, the building's own floors say which corner to walk at next on the way
     // to where the brain is sending it; outdoors, the world's baked grid does, for a body it is given
     // to (`walksGrid`); and between the two, when what it is after is on the other side of a wall,
@@ -2274,7 +2862,8 @@ export class Mobile implements Living, NpcSubject {
     // on open ground, and for anything that flies, `corner` is null and every line below is the line
     // it always was.
     if (moveTo && pace !== 'stand' && !this.flyer && !this.driven) {
-      const fighting = !!target && !!d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
+      // A move of its own is to a point of its own on open ground, not to the thing it is fighting.
+      const fighting = !this.splitMove && !!target && !!d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
       const goalY = fighting && target ? target.pos.y : this.pos.y;
       const place = fighting && target ? this.placeOf(ctx, target) : this.placeOfGoal(d);
       const corner = doorwayNav.corner(this.navAgent, this.legs, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, place, this.plan.across, this.now, this.walksGrid());
@@ -2288,6 +2877,9 @@ export class Mobile implements Living, NpcSubject {
       if (this.grounded && !this.body.isSleeping()) this.body.sleep();
     }
     let wanted = pace === 'run' ? this.speeds.run : pace === 'walk' ? this.speeds.walk : 0;
+    // Crouched, no faster than its crouch walk shows at its size, so the feet stay planted.
+    const low = this.lowClips;
+    if (this.posture === 'crouch' && low && low.crouchSpeed > 0) wanted = Math.min(wanted, low.crouchSpeed * this.scale);
     if (moveTo && pace !== 'stand' && Math.hypot(moveTo.x - this.pos.x, moveTo.z - this.pos.z) < 0.5) wanted = 0;
     // Point the feet at the move point, or at the target while attacking -- and the weapon at
     // whatever it is really fighting. The side-step goes on the **feet alone** now: it is a twist
@@ -2297,17 +2889,23 @@ export class Mobile implements Living, NpcSubject {
       const rate = THREE.MathUtils.degToRad(wanted > this.speeds.walk + 1e-3 ? move.turnRun : move.turnWalk) || Math.PI;
       const turn = rate * dt;
       if (face) {
-        let want = Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
+        let want = this.splitMove ? this.legsWant(face, look) : Math.atan2(face.x - this.pos.x, face.z - this.pos.z);
         if (this.now < this.sidestepUntil && pace !== 'stand') want += this.sidestep;
         this.heading += clamp(Math.atan2(Math.sin(want - this.heading), Math.cos(want - this.heading)), -turn, turn);
       }
       // The same rate, so the two never come apart faster than a body can turn; with nothing to
-      // fight the weapon simply follows the feet, which is where it has always pointed.
-      const aimAt = look ?? face;
+      // fight the weapon simply follows the feet, which is where it has always pointed -- and so does
+      // one whose own move has taken its feet further off its gun than its legs can show.
+      const aimAt = this.gunOnFeet ? face : (look ?? face);
       if (aimAt) {
         const want = Math.atan2(aimAt.x - this.pos.x, aimAt.z - this.pos.z);
-        this.facing += clamp(Math.atan2(Math.sin(want - this.facing), Math.cos(want - this.facing)), -turn, turn);
-      } else this.facing = this.heading;
+        // Measured before the turn, as a fighter's is: the error its trigger's cone is tested against.
+        this.aimErr = Math.atan2(Math.sin(want - this.facing), Math.cos(want - this.facing));
+        this.facing += clamp(this.aimErr, -turn, turn);
+      } else {
+        this.facing = this.heading;
+        this.aimErr = 0;
+      }
     }
     // Speed: the template's acceleration toward the pace, then the gait that matches what it ends up doing.
     const accel = (wanted > this.speeds.walk + 1e-3 ? move.accel?.[0] : move.accel?.[1]) ?? 4;
@@ -2446,7 +3044,15 @@ export class Mobile implements Living, NpcSubject {
     const target = this.targetRef;
     const roles = this.roles;
     const animator = this.animator;
-    if (!roles || !animator || this.downPhase || this.stunned > 0.3) return;
+    // Nothing is struck or shot from a roll, a jump, or the clip that ends one.
+    if (!roles || !animator || this.downPhase || this.stunned > 0.3 || this.tumbling || this.now < this.tumbleUntil) return;
+    // **A crouched body does nothing at all**, which is the client's own data: of the state hierarchy's
+    // twelve crouch states not one carries a fire or an attack. The crouch is how a body moves low; the
+    // kneel is how it fights low. A burst under way is let go with it.
+    if (this.posture === 'crouch') {
+      this.shotsLeft = 0;
+      return;
+    }
     const cameraDist = ctx.camera ? ctx.camera.position.distanceTo(this.pos) : Infinity;
     const cooldown = this.entry.stats?.attackCooldown ?? 1.6;
     // A blow under way lands part way into its swing, if the target is still in reach.
@@ -2482,7 +3088,17 @@ export class Mobile implements Living, NpcSubject {
       this.shotsLeft--;
       this.nextShotAt = this.now + 0.18;
     }
-    if (!target || !d || d.state !== 'attack') return;
+    // `cover` is the attack state under another name, exactly as a fighter's is (`Npc.act`): the brain
+    // says it in place of `attack` for a tiered person behind something, and `d.attack` beside it is
+    // still what says whether a shot would land. Leaving it out is a person that takes a spot and never
+    // fires from it again, since a spot it can shoot out of is held for as long as it holds.
+    if (!target || !d || (d.state !== 'attack' && d.state !== 'cover')) return;
+    // A tiered person pulls the trigger only once its gun has come round to within its tier's cone of
+    // where it wants it -- the fighters' own discipline and the fighters' own measure of it, the gun's
+    // turn still to make (`aimErr`) -- and swings only on its feet.
+    const skill = this.tactics?.skill;
+    if (skill && d.attack === 'ranged' && !willFire(skill, this.aimErr)) return;
+    if (this.posture !== 'stand' && d.attack === 'melee') return;
     if (d.attack === 'melee' && this.attackCd <= 0 && this.swingAt === 0 && animator.shotLevel < SHOT_PRIORITY.attack) {
       const list = this.flyer && roles.hoverAttacks.length ? roles.hoverAttacks : roles.attacks;
       if (!list.length) return;
@@ -2502,8 +3118,10 @@ export class Mobile implements Living, NpcSubject {
         // shot the weapon has where the table carries them (six a weapon), so a gunner standing
         // over somebody does not fire the identical clip a dozen times; a pack with one falls back
         // to `ranged`, which is that one.
-        const shots = roles.rangedShots;
-        const shot = shots && shots.length > 1 ? shots[Math.floor(Math.random() * shots.length)] : roles.ranged;
+        // On a knee or flat, the posture's own shots: the game's six kneeling fires a weapon, and the prone one.
+        const lowShots = this.posture === 'kneel' ? this.lowClips?.fires.kneel : this.posture === 'prone' ? this.lowClips?.fires.prone : null;
+        const shots = lowShots && lowShots.length ? lowShots : roles.rangedShots;
+        const shot = shots && shots.length > 1 ? shots[Math.floor(Math.random() * shots.length)] : shots?.length ? shots[0] : roles.ranged;
         const length = animator.once(animator.has(shot) ? shot : roles.ranged, { priority: SHOT_PRIORITY.attack, fadeIn: 0.08, fadeOut: 0.2 });
         this.shotsLeft = 1;
         this.nextShotAt = this.now + Math.min(0.5, 0.4 * (length ?? 0.5));
@@ -2625,6 +3243,11 @@ export class Mobile implements Living, NpcSubject {
     this.folded.clear();
     this.dropAim();
     this.sinceShot = Infinity;
+    // On its feet, with nothing it was doing carried over: no roll, no jump (its damping back with it),
+    // no spot, the standing shell.
+    this.dropTumble();
+    this.setPosture('stand');
+    this.tactics?.reset();
     this.downPhase = null;
     this.memory.clear();
     this.targetKey = null;
@@ -2737,6 +3360,21 @@ export class Mobile implements Living, NpcSubject {
       aim: !this.gun ? null : !this.canAim ? 'no aimed pose in this pack: reconvert mobiles' : `${THREE.MathUtils.radToDeg(spineShare(this.aimFix.yaw)).toFixed(1)}° spine, ${THREE.MathUtils.radToDeg(this.aimTurn).toFixed(1)}° body, ${THREE.MathUtils.radToDeg(this.aimFix.pitch).toFixed(1)}° pitch`,
       spines: this.spines?.length ?? 0,
       roles: r ? describeRoles(r) : null,
+      // How a person fights: its tier (0 is none of it), its jump level, where its cover is, what it
+      // has done, how low it stands and how far its feet are off its gun. `low` null is a pack that
+      // cannot draw the low postures, whose body therefore never leaves its feet.
+      fight: this.tactics
+        ? {
+            ...this.tactics.status(this.now, this.pos.x, this.pos.z),
+            posture: this.posture,
+            forced: this.forcedPosture,
+            lean: Number(THREE.MathUtils.radToDeg(wrapAngle(this.heading - this.facing)).toFixed(1)),
+            shell: { aimAt: Number(this.halfHeight.toFixed(2)), low: this.lowShape },
+            low: this.lowClips ? { canProne: this.lowClips.canProne, kneelShots: this.lowClips.fires.kneel.length, proneShots: this.lowClips.fires.prone.length } : null,
+            rolling: this.rollLeft > 0,
+            inAir: this.hopping,
+          }
+        : null,
     };
   }
 

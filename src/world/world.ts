@@ -3,6 +3,7 @@ import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { NpcManager, type NpcDeps } from './npcs';
+import type { AimLine } from './evade.ts';
 import { MobileManager } from './mobiles/manager';
 import type { Mobile } from './mobiles/mobile';
 import { MobileAssets } from './mobiles/assets';
@@ -640,6 +641,12 @@ export class World {
   readonly weather: Weather;
   /** Set by main before update: the player is aboard a ship's rooms. */
   aboard = false;
+  /**
+   * Set by main before update: where the player's gun is pointed while it is up, and whether it is.
+   * It is what a fighter and a person from the catalogue read to know they are being aimed at, and
+   * throw themselves aside (`src/world/evade.ts`). One record, written in place and never made again.
+   */
+  readonly playerAim: AimLine = { on: false, x: 0, y: 0, z: 0, dx: 0, dy: 0, dz: 1 };
   /** Set by main before update: the ship the player rides (its box keeps rain out of the canopy), or null. */
   weatherHull: Vehicle | null = null;
   /** Set by main before update: whatever the player rides (never a roof for the rain), or null. */
@@ -1383,6 +1390,9 @@ export class World {
       weapons: () => this.npcDeps.weapons ?? null,
       // How the portal renderer's last frame saw a body's rooms: one nobody could see is off screen (commit 2c).
       roomSeen: (root) => this.roomSeen(root),
+      // What stands near a person that it could get behind, the fighters' own wire (see below): a person
+      // from the catalogue takes cover as a fighter does now, through the one shared search.
+      blockers: (x, z, reach, out, cap) => this.layoutStream?.blockersNear(x, z, reach, out, cap) ?? 0,
     });
     // The fighters stand on a building's floor as the mobiles do: their room followed through the
     // portals (the floor under them is then found by a ray, the terrain outside).
@@ -1816,6 +1826,9 @@ export class World {
     this.localWater.length = 0;
     this.dropLava();
     this.cellState = null;
+    this.lightHint.state = null;
+    this.lightHint.cell = 0;
+    if (this.portals) this.portals.hintedLights.building = null;
     this.groundHiddenFor = null;
     this.prevPlayerPos.x = Number.NaN;
     this.hiddenGround.length = 0;
@@ -3445,6 +3458,8 @@ export class World {
   attachCamera(camera: THREE.PerspectiveCamera, shadows: boolean, portals: PortalRenderer): void {
     this.portals = portals;
     this.camera = camera;
+    // The rooms' lights lit for a hint are dimmed for every other building's rooms (`hintRoomLight`).
+    portals.hintedLights.dim = this.dimRoomLights;
     // The world pass drawn from inside a building may leave out what these hold when it misses the
     // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
     if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
@@ -5098,6 +5113,88 @@ export class World {
     return { stops, current: stopAt(stops, tmpV.y), title: `${b.model.def.id} · ${name.replace(/_/g, ' ')}` };
   }
 
+  /**
+   * Put the player in room `cell` of the streamed building near `at` that has that room with the point in
+   * its box (`buildingWithRoom`), as a lift's stop does: for a body moved further than a walk is followed
+   * (`followThrough` takes a step over five metres for a teleport and drops the room), which a shuttle's
+   * passenger is twice in Theed's hangar -- carried a dozen metres to their seat, and stood at the foot of
+   * the ramp. `carried` is a body about to be moved again before the next frame (onto a seat whose hull is
+   * parked in the same step): the walk then begins wherever the body stands on that frame, rather than at
+   * `at`. False, and nothing changed, where no building near has that room there.
+   */
+  enterRoom(at: THREE.Vector3, cell: number, carried = false): boolean {
+    if (!this.layoutStream || !(cell > 0)) return false;
+    const state = this.layoutStream.buildingWithRoom(at, cell);
+    if (!state) return false;
+    this.cellState = state;
+    if (carried) this.prevPlayerPos.x = Number.NaN;
+    else this.prevPlayerPos.copy(at);
+    return true;
+  }
+
+  /**
+   * A room lit for whoever looks in on it while the player is in no room at all: a shuttle coming down into
+   * Theed's hangar, parked there and lifting off again with the player out in the street, or seated in it
+   * behind a view still outside the door. The building placed nearest the point with that room, found once
+   * a hint changes (a building streamed out and back is looked for again); null or a cell of 0 lets go.
+   * The player's own room wins whenever they are in one. Allocates only when the hint changes.
+   */
+  hintRoomLight(at: { x: number; y: number; z: number } | null, cell = 0): void {
+    const h = this.lightHint;
+    if (!at || !(cell > 0) || !this.layoutStream) {
+      h.cell = 0;
+      h.state = null;
+      return;
+    }
+    const same = h.cell === cell && h.x === at.x && h.y === at.y && h.z === at.z;
+    if (same && h.state && this.layoutStream.buildings.has(h.state.building)) return;
+    h.x = at.x;
+    h.y = at.y;
+    h.z = at.z;
+    h.cell = cell;
+    // Asked again at most twice a second while nothing is found (the building not streamed in yet).
+    if (same && !h.state && this.simTime - h.askedAt < 0.5) return;
+    h.askedAt = this.simTime;
+    h.state = this.layoutStream.buildingWithRoom(tmpV.set(at.x, at.y + 1, at.z), cell);
+  }
+
+  /** The room lit for a shuttle landing in it while the player is in none (`hintRoomLight`), and where it was asked for. */
+  private readonly lightHint: { x: number; y: number; z: number; cell: number; askedAt: number; state: CellState | null } = { x: 0, y: 0, z: 0, cell: 0, askedAt: -Infinity, state: null };
+
+  /** The rooms' pool's intensities while `dimRoomLights` holds them at nought: the lamps, then the parallel light and the ambient. */
+  private readonly roomLightsKept = new Float32Array(INTERIOR_LIGHT_CAP + 2);
+
+  /**
+   * The rooms' one pool of lights dimmed to nought (`on`) for one pass, and put back as it was (`!on`): what
+   * the portal renderer draws another building's rooms with while the pool is lit for a hint
+   * (`PortalRenderer.hintedLights`). Intensities only, which are in no program's key. Allocates nothing.
+   */
+  private readonly dimRoomLights = (on: boolean): void => {
+    const kept = this.roomLightsKept;
+    const lamps = this.interiorPoints;
+    const n = Math.min(lamps.length, INTERIOR_LIGHT_CAP);
+    if (on) {
+      for (let i = 0; i < n; i++) {
+        kept[i] = lamps[i].intensity;
+        lamps[i].intensity = 0;
+      }
+      kept[INTERIOR_LIGHT_CAP] = this.interiorParallel.intensity;
+      kept[INTERIOR_LIGHT_CAP + 1] = this.interiorAmbient.intensity;
+      this.interiorParallel.intensity = 0;
+      this.interiorAmbient.intensity = 0;
+      return;
+    }
+    for (let i = 0; i < n; i++) lamps[i].intensity = kept[i];
+    this.interiorParallel.intensity = kept[INTERIOR_LIGHT_CAP];
+    this.interiorAmbient.intensity = kept[INTERIOR_LIGHT_CAP + 1];
+  };
+
+  /** The room the rooms' lights are lit for now, for the console: the player's own, the hint's, or none. */
+  get litRoom(): { model: string; cell: number; hinted: boolean } | null {
+    const l = this.interiorLightsFor;
+    return l ? { model: l.building.model.def.id, cell: l.cell, hinted: !(this.cellState && this.cellState.cell > 0) } : null;
+  }
+
   /** Ride the lift the player stands in to one of its stops: the spot through that doorway, in the world, and the room beyond becomes the cell. */
   rideLift(stop: LiftStop): THREE.Vector3 | null {
     const b = this.cellState?.building;
@@ -5412,6 +5509,7 @@ export class World {
         // Open ground on the walk grid, and not a building's own footprint; with no grid, anywhere.
         walkable: (x, z) => (outdoorNav.ready ? outdoorNav.walkable(x, z) && !outdoorNav.indoors(x, z) : null),
         reachable: (x, z, gx, gz) => outdoorNav.reachable(x, z, gx, gz),
+        region: (x, z) => outdoorNav.region(x, z),
         cellReady: (x, y, z) => this.groundAt(x, y + 2, z, true) !== null,
         // Only what stands still: a body walking over the spot is not a table on it (`stillOnly`).
         floorsAt: (x, z, top, bottom) => this.physics.floorsAt(x, z, top, bottom, true),
@@ -5763,10 +5861,15 @@ export class World {
    * those of the cells its portals open onto are live, up to a cap; the rest wait.
    */
   private updateInteriorLights(): void {
-    const state = this.cellState;
-    const want = state && state.cell > 0 ? { building: state.building, cell: state.cell } : null;
+    // The player's own room, or with none the room a shuttle is landing in (`hintRoomLight`).
+    const hint = this.lightHint.state;
+    const state = this.cellState && this.cellState.cell > 0 ? this.cellState : hint && hint.cell > 0 && this.layoutStream?.buildings.has(hint.building) ? hint : null;
+    // Lit for a hint, the pool is the hinted building's alone: every other building's rooms seen through a
+    // door are drawn with it dimmed (`PortalRenderer.hintedLights`), as they were drawn with no hint.
+    if (this.portals) this.portals.hintedLights.building = state !== null && state === hint ? state.building : null;
     const have = this.interiorLightsFor;
-    if ((want?.building ?? null) === (have?.building ?? null) && (want?.cell ?? -1) === (have?.cell ?? -1)) return;
+    if ((state?.building ?? null) === (have?.building ?? null) && (state?.cell ?? -1) === (have?.cell ?? -1)) return;
+    const want = state && state.cell > 0 ? { building: state.building, cell: state.cell } : null;
     this.interiorLightsFor = want;
     for (const l of this.interiorPoints) l.intensity = 0;
     this.fxLampCells.fill(-1);
@@ -6080,7 +6183,7 @@ export class World {
     // A step has passed since the last frame was drawn: how that frame saw each body's rooms is read
     // below, and only while it is the one frame just drawn (`ActorRoutes.levelOf`).
     this.portals?.actors.tick();
-    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell });
+    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell, aim: this.playerAim });
     perf.end(SEC.mobiles);
     perf.begin(SEC.people);
     // The world's own lairs and herds, stood and put away as the player moves. On this clock and
@@ -6096,7 +6199,7 @@ export class World {
     // how far the body was from the player to know whether anything along the route was solid. It is
     // handed in rather than picked out of `targets`, because the player leaves that list while
     // noclipping, aboard or dead and the walk's account must not go blind on any of those.
-    this.npcs.update(dt, targets, this.bolts, camera, this.simTime, playerPos);
+    this.npcs.update(dt, targets, this.bolts, camera, this.simTime, playerPos, this.playerAim);
     perf.end(SEC.npcs);
     perf.begin(SEC.ships);
     // The ships that fight: the contacts in step with the vehicles (the player's ship marked), the NPC ships'

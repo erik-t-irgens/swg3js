@@ -12,7 +12,7 @@
 // casting (at 2 Hz, by size, screen and the cascades' light boxes), and `frustumCulled` (the switch,
 // off while the body lies off its feet: dead, a ragdoll, knocked down, or in an idle lying at full length).
 import * as THREE from 'three';
-import type { Physics } from '../../core/physics';
+import { Group, groups, RAPIER, type Physics } from '../../core/physics';
 import type { Terrain } from '../terrain';
 import type { Bolts } from '../../combat/bolts';
 import type { Effects } from '../../combat/effects';
@@ -42,6 +42,15 @@ import type { FighterGlow } from '../npcs';
 import { keepNearestGlow } from '../../combat/bladeLights';
 import { PendingSpawns, armsRng, decideStand, rollsFor, scaleFrom, type SpawnRecord } from '../spawnSeed.ts';
 import { npcNow, sharesOnWire } from '../../net/npcNet.ts';
+// A person fighting as a fighter does: the cover search's physics, the rolls and jumps it is lent,
+// and the tables its tier, its posture, its roll and its jump are read from (`tactics.ts`, `evade.ts`).
+import type { CoverDeps } from '../cover.ts';
+import { outdoorNav } from '../nav/outdoorNav.ts';
+import { EVADE_CLIPS, EVADE_TUNE, JUMP_TUNE, tuneEvade, tuneJump, type EvadeTune, type JumpTune } from '../evade.ts';
+import { GROUND_TIERS, TIER_LEVELS } from '../groundSkill.ts';
+import { POSTURE_TUNE, tunePosture, type Posture, type PostureTune } from '../fighterStance.ts';
+import type { NearBlocker } from '../layoutStream';
+import type { GroundTactics } from './tactics.ts';
 
 export interface SpawnOpts {
   origin?: 'spawned' | 'ambient';
@@ -179,6 +188,49 @@ export interface MobileManagerDeps {
   roomSeen?(root: THREE.Object3D): number;
   /** The weapons rack, once it has loaded (a person's gun or lightsaber comes off it); null until then, or without one. */
   weapons?(): WeaponCatalogue | null;
+  /**
+   * What stands near a point that a body could hide behind (`LayoutStreamer.blockersNear`), the one
+   * thing the cover search is handed: every ray it casts it casts itself. The fighters' own wire,
+   * given to the people as well; with none, a person finds no cover and walks into the open.
+   */
+  blockers?(x: number, z: number, reach: number, out: NearBlocker[], cap: number): number;
+}
+
+/** A person's fight counts added into a row of the report (`fightReport`). */
+function addFight(row: Record<string, number>, tac: GroundTactics): void {
+  const c = tac.counts;
+  row.shots += c.shots;
+  row.hits += c.hits;
+  row.kneels += c.kneels;
+  row.prones += c.prones;
+  row.crouches += c.crouches;
+  row.covers += c.covers;
+  row.slides += c.slides;
+  row.rolls += tac.evade.rolls;
+  row.hops += tac.evade.hops;
+  row.jumps += tac.evade.jumps;
+}
+
+/** Outside: everything, which is what the cover search's floor probe is filtered by, as a fighter's is. */
+const OUTSIDE_FILTER = groups(Group.all, Group.all);
+/** What a spot's floor may be: only what stands still, never a body that walks off. */
+const staticOnly = (c: RAPIER.Collider): boolean => {
+  const body = c.parent();
+  return !body || body.isFixed();
+};
+
+/**
+ * What the console moves about a person's fighting (`__debug.mobileTune`): the tier every person is
+ * put on, or null for its own level's; the levels the ladder is climbed at; the postures' numbers and a
+ * posture put on by hand; and the roll's and the jump's tables.
+ */
+export interface FightKnob {
+  tier?: number | null;
+  levels?: number[];
+  postures?: Partial<PostureTune>;
+  posture?: Posture | 'auto' | null;
+  roll?: Partial<EvadeTune>;
+  jump?: Partial<JumpTune>;
 }
 
 /** What a person is armed with and played with, worked out while the model loads. */
@@ -431,6 +483,7 @@ export class MobileManager {
       wantRagdoll: (self) => this.queueRagdoll(self),
       groundIfCached: this.deps.groundIfCached ? this.groundCached : undefined,
       groundSolid: this.deps.groundSolid ? this.groundSolid : undefined,
+      cover: this.deps.blockers ? this.coverDeps : null,
     });
     this.live.push(m);
     for (const c of m.colliders) this.byCollider.set(c.handle, m);
@@ -623,7 +676,7 @@ export class MobileManager {
     held.loading = false;
     const gotModel = model.status === 'fulfilled' ? model.value : null;
     const gotPack = pack.status === 'fulfilled' ? pack.value : null;
-    const plan = arms.status === 'fulfilled' ? arms.value : null;
+    const plan = this.withEvade(entry, packInfo, arms.status === 'fulfilled' ? arms.value : null, hologram || !!opts.essential);
     if (arms.status === 'rejected') console.warn(`mobiles: ${entry.id} goes unarmed:`, arms.reason);
     const failure = model.status === 'rejected' ? model.reason : pack.status === 'rejected' ? pack.reason : null;
     if (failure || !gotModel) {
@@ -648,6 +701,9 @@ export class MobileManager {
       return;
     }
     if (plan?.equipment && !m.equip(plan.equipment)) console.warn(`mobiles: ${entry.id} has no hand to hold ${plan.equipment.id}`);
+    // Its tier, now that what is in its hand is known (a lightsaber jumps higher): its own level's, or
+    // the one the console has put every person on.
+    m.applyFightTier(this.fightTier);
     held.model = gotModel;
     held.pack = gotPack;
     // It is ready now: it joins the list of the living (a mobile still loading is left out of it).
@@ -659,6 +715,22 @@ export class MobileManager {
     // Something new came in: the cache may be over its budget with things nobody holds.
     const after = assets.stats().models.length + assets.stats().packs.length;
     if (after > before) assets.trim();
+  }
+
+  /**
+   * A person's plan with Jedi Academy's rolls and jumps laid over it (`evadeClips`), which is what lets it
+   * throw itself aside and jump as a fighter does: lent from a species rig already parsed, costing no
+   * bytes, on the humanoid skeleton every person from the catalogue shares. Nothing for a creature, a
+   * droid, a hologram or a body that is part of the furniture (`none`), which never fights at all, and
+   * nothing before any rig is in, which leaves it a body that neither rolls nor jumps.
+   */
+  private withEvade(entry: MobileEntry, packInfo: PackSummary | null, plan: ArmsPlan | null, none: boolean): ArmsPlan | null {
+    if (none || packInfo?.hierarchy !== 'all_b' || (entry.kind !== 'npc' && entry.kind !== 'dressed')) return plan;
+    const lent = this.evadeClips(entry);
+    if (!lent) return plan;
+    const extras = plan?.extras ?? null;
+    const clips = extras?.clips?.size ? new Map([...extras.clips, ...lent]) : lent;
+    return { equipment: plan?.equipment ?? null, extras: { ...(extras ?? {}), clips } };
   }
 
   /** Weapon models already prepared (or being), by file: the rack's copies share their materials, so one preparation serves them all. */
@@ -855,6 +927,16 @@ export class MobileManager {
       this.worldIds.delete(m);
     }
     for (const c of m.colliders) if (this.byCollider.get(c.handle) === m) this.byCollider.delete(c.handle);
+    // What it did in its fights goes into the planet's tally before it goes (`fightReport`).
+    const tac = m.tactics;
+    if (tac) {
+      let spent = this.spentFights.get(tac.tier);
+      if (!spent) {
+        spent = { bodies: 0, low: 0, covered: 0, shots: 0, hits: 0, kneels: 0, prones: 0, crouches: 0, covers: 0, slides: 0, rolls: 0, hops: 0, jumps: 0 };
+        this.spentFights.set(tac.tier, spent);
+      }
+      addFight(spent, tac);
+    }
     this.group.remove(m.group);
     const q = this.ragdollQueue.indexOf(m);
     if (q >= 0) this.ragdollQueue.splice(q, 1);
@@ -1073,6 +1155,46 @@ export class MobileManager {
   private readonly groundSolid = (x: number, z: number): boolean => this.deps.groundSolid?.(x, z) ?? true;
 
   /**
+   * The physics a person's cover search casts through, made once and handed to every body, as the
+   * fighters' manager hands its one to every fighter: the streamer's blockers, the first thing in the way
+   * that stands still, the floor under a spot among what stands still, and the baked grid's regions.
+   * Every answer is a primitive, so a search allocates nothing.
+   */
+  private readonly coverDeps: CoverDeps = {
+    blockers: (x, z, reach, out, cap) => this.deps.blockers?.(x, z, reach, out as NearBlocker[], cap) ?? 0,
+    hit: (ax, ay, az, bx, by, bz) => this.deps.physics.blockDistance(ax, ay, az, bx, by, bz),
+    floor: (x, z, fromY, maxDrop) => this.deps.physics.topSurface(x, z, fromY, maxDrop, OUTSIDE_FILTER, staticOnly) ?? Number.NaN,
+    sameGround: (ax, az, bx, bz) => outdoorNav.reachable(ax, az, bx, bz),
+  };
+
+  /**
+   * The tier the console puts every person on (`__debug.mobileTune({ tier })`), or null for each one's
+   * own level's. 0 is none of the fighting a fighter does, which is the mobile the game had before.
+   */
+  fightTier: number | null = null;
+
+  /**
+   * Jedi Academy's rolls and jumps out of a species rig that is already parsed, by the rig's own clip
+   * list: made once per rig and shared by every person lent them, as the saber swings are lent.
+   */
+  private readonly evadeLent = new WeakMap<readonly THREE.AnimationClip[], ReadonlyMap<string, THREE.AnimationClip>>();
+
+  /** The rolls and jumps a person is lent, or null before any species rig has been parsed. */
+  private evadeClips(entry: MobileEntry): ReadonlyMap<string, THREE.AnimationClip> | null {
+    const rig = Character.parsedRigClips(entry.species ?? undefined);
+    if (!rig) return null;
+    let lent = this.evadeLent.get(rig);
+    if (!lent) {
+      const wanted = new Set(EVADE_CLIPS);
+      const m = new Map<string, THREE.AnimationClip>();
+      for (const c of rig) if (wanted.has(c.name)) m.set(c.name, c);
+      lent = m;
+      this.evadeLent.set(rig, lent);
+    }
+    return lent.size ? lent : null;
+  }
+
+  /**
    * The per-mesh cull switched (`SKELETON_TUNE.cullSphere`, commit 3c): every body out takes it at once,
    * each but one lying off its feet (`cullsOneByOne`), which reaches past its sphere.
    */
@@ -1199,8 +1321,9 @@ export class MobileManager {
    * planet's settings. Returns them all, with what the step-up's probes have found since the session
    * began and every walking body's stuck count summed.
    */
-  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number }): Record<string, unknown> {
+  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number } & FightKnob): Record<string, unknown> {
     if (t) {
+      this.tuneFight(t);
       if (t.step) tuneStep(t.step);
       if (t.brain) Object.assign(BRAIN_TUNE, t.brain);
       if (t.lod) {
@@ -1226,8 +1349,64 @@ export class MobileManager {
       cache: { ...MOBILE_CACHE },
       cap: this.cap,
       animRange: this.animRange,
+      fight: this.fightReport(),
     };
   }
+
+  /**
+   * The console's knob on how a person fights: every person put on a tier, or handed back to its own
+   * level's with `tier: null`; the levels the ladder is climbed at, written in place; the postures'
+   * numbers (the fighters' own table, so it moves theirs too) and a posture put on by hand, `'auto'`
+   * handing them back to the rule; and the roll's and the jump's tables, which the fighters share.
+   */
+  private tuneFight(t: FightKnob): void {
+    if (t.postures) tunePosture(t.postures);
+    if (t.roll) tuneEvade(t.roll);
+    if (t.jump) tuneJump(t.jump);
+    if (Array.isArray(t.levels)) for (let i = 0; i < TIER_LEVELS.length && i < t.levels.length; i++) if (Number.isFinite(t.levels[i])) TIER_LEVELS[i] = t.levels[i];
+    let retier = Array.isArray(t.levels) || !!t.jump;
+    if (t.tier !== undefined) {
+      this.fightTier = t.tier === null || !Number.isFinite(t.tier) ? null : Math.max(0, Math.min(GROUND_TIERS, Math.round(t.tier)));
+      retier = true;
+    }
+    for (const m of this.live) {
+      if (retier) m.applyFightTier(this.fightTier);
+      if (t.posture !== undefined) m.forcePosture(t.posture === 'auto' || t.posture === null ? null : t.posture);
+    }
+  }
+
+  /**
+   * How the people out are fighting, summed by tier: how many there are, and what they have done since
+   * each was stood -- shots and hits, the times they went down on a knee, flat and into a crouch, the
+   * spots they took, the slides, rolls, hops and ledge jumps -- with the tables in force. The measure
+   * of a fight is the difference between two of these read either side of it.
+   */
+  fightReport(): Record<string, unknown> {
+    const byTier: Record<number, Record<string, number>> = {};
+    const rowOf = (tier: number): Record<string, number> => (byTier[tier] ??= { bodies: 0, low: 0, covered: 0, shots: 0, hits: 0, kneels: 0, prones: 0, crouches: 0, covers: 0, slides: 0, rolls: 0, hops: 0, jumps: 0 });
+    let people = 0;
+    for (const m of this.live) {
+      const tac = m.tactics;
+      if (!tac) continue;
+      const row = rowOf(tac.tier);
+      if (!m.dead) {
+        people++;
+        row.bodies++;
+        if (m.posture !== 'stand') row.low++;
+        if (tac.coverKind) row.covered++;
+      }
+      addFight(row, tac);
+    }
+    // And what the people already taken away did, so a fight's measure does not lose its dead.
+    for (const [tier, spent] of this.spentFights) {
+      const row = rowOf(tier);
+      for (const k of Object.keys(spent)) row[k] += spent[k];
+    }
+    return { tier: this.fightTier, levels: [...TIER_LEVELS], people, byTier, postures: { ...POSTURE_TUNE }, roll: { ...EVADE_TUNE, share: [...EVADE_TUNE.share] }, jump: { ...JUMP_TUNE, heights: [...JUMP_TUNE.heights] } };
+  }
+
+  /** The fights of the people taken away, by tier, for `fightReport`: kept for the planet's life. */
+  private readonly spentFights = new Map<number, Record<string, number>>();
 
   /** Every mobile and every queued load goes (the world is unloading). The assets are released, not disposed: the cache outlives the planet. */
   dispose(): void {

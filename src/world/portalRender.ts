@@ -157,6 +157,31 @@ export class PortalRenderer {
   /** What each pass of the last frame drew, for the console hook. */
   readonly passLog: { label: string; calls: number; triangles: number }[] = [];
 
+  /**
+   * The rooms' one pool of lights (`World.updateInteriorLights`), when a hint rather than the player's own
+   * room has lit it (a shuttle landing in Theed's hangar with the player out in the street,
+   * `World.hintRoomLight`): the building it was lit for, and the world's own way to dim the pool to nought
+   * for one pass and put it back. Every nearby building's rooms are drawn through their doors with that one
+   * pool, which with the player in no room stands at nought; lit for the hangar, it would light every other
+   * building's rooms seen through a door as well -- its ambient and its parallel light have no range -- so
+   * every other building's interior pass is drawn with it dimmed, as it was drawn before there was a hint.
+   * Intensity is not in a program's key, so nothing compiles. `building` null: no hint, nothing dimmed.
+   * Written by the world; a record of its own, so a frame allocates nothing.
+   */
+  readonly hintedLights: { building: Building | null; dim: (on: boolean) => void } = { building: null, dim: () => {} };
+
+  /** One building's interior pass, with the hinted pool dimmed for any building it was not lit for (`hintedLights`). */
+  private renderRooms(scene: THREE.Scene, camera: THREE.Camera, b: Building): void {
+    const h = this.hintedLights;
+    const dim = h.building !== null && h.building !== b;
+    if (dim) h.dim(true);
+    try {
+      this.renderLayer(scene, camera, INTERIOR_LAYER);
+    } finally {
+      if (dim) h.dim(false);
+    }
+  }
+
   /** Objects hidden because they failed to draw, with why, for the console and the stats. */
   readonly broken: { name: string; type: string; why: string }[] = [];
 
@@ -614,7 +639,7 @@ export class PortalRenderer {
         // Inside: the whole building fills the screen; the world only through its exits.
         routes?.route(ROUTE_PASS.building, view, null);
         this.roomMeshes += this.showInterior(view, true, seenRooms ? this.vis.seenOf(view) : null);
-        this.renderLayer(scene, camera, INTERIOR_LAYER);
+        this.renderRooms(scene, camera, view);
         if (this.matrixOnce) scene.matrixWorldAutoUpdate = false;
         this.showInterior(view, false);
         if (skipWorld) return;
@@ -653,7 +678,7 @@ export class PortalRenderer {
         // What stands in this building's rooms, and nothing else.
         routes?.route(ROUTE_PASS.building, b, null);
         this.roomMeshes += this.showInterior(b, true, seenRooms ? this.vis.seenOf(b) : null);
-        this.renderLayer(scene, camera, INTERIOR_LAYER);
+        this.renderRooms(scene, camera, b);
         this.showInterior(b, false);
         this.setRef(1);
         this.drawPortals(this.exitList, doors, camera, 1, false, true);
