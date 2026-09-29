@@ -6,6 +6,7 @@
 // that record what was asked of it, because the tab this was built in can hear nothing and every
 // judgement has to be a number.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { CombatSounds, COMBAT_TUNE, GENERIC_GUN, SILENT_GUN, gunSoundFrom, hitColumn, rowFor, shipGunFrom, templateKey, type ColliderSurfaces, type CombatTables } from '../../../src/audio/combatSounds.ts';
 import { EmitterGrid, type LoopHost } from '../../../src/audio/emitters.ts';
 import type { SoundSpace } from '../../../src/audio/distance.ts';
@@ -309,6 +310,31 @@ const TABLES: CombatTables = {
   c.saberSwing('strong', 0, 0, 0, 'BOTH_A3_T__B_');
   c.saberContact('body', 0, 0, 0);
   ok(seen.join(' ') === 'strong:BOTH_A3_T__B_ body', "and with them installed the style, the clip and the contact go straight through: the guns never decide what a blade sounds like");
+  // A body swinging the player's own move machine hands in how long its move really lasts (so a clip
+  // Jedi Academy marked whooshes on its marks) and itself (so its next move takes back its own whooshes
+  // and nobody else's): both must reach the sabers as they were given.
+  const swung: { seconds?: number; owner?: object | null }[] = [];
+  const cancelled: object[] = [];
+  const d = new CombatSounds();
+  d.attach(new FakeMixer(), '/');
+  let threw = false;
+  try {
+    d.saberCancel({});
+  } catch {
+    threw = true;
+  }
+  ok(!threw, 'a cancel with no sabers installed is nothing, not a crash');
+  d.useSaber({ swing: (_style, _x, _y, _z, _clip, seconds, owner) => swung.push({ seconds, owner }), contact: () => undefined, cancel: (owner) => cancelled.push(owner) });
+  const fighter = {};
+  d.saberSwing('medium', 1, 2, 3, 'BOTH_A2_SPECIAL', 2.4, fighter);
+  ok(swung.length === 1 && swung[0].seconds === 2.4 && swung[0].owner === fighter, "a fighter's swing reaches the sabers with its move's real length and the fighter itself as its owner");
+  d.saberCancel(fighter);
+  ok(cancelled.length === 1 && cancelled[0] === fighter, "and its move cut short asks the sabers to take back that very fighter's whooshes");
+  // The game's own hook, which is the one that turns this into the sabers' calls: it must hand both on.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const hook = main.slice(main.indexOf('combatSounds.useSaber({'), main.indexOf('contact: (kind, x, y, z) => {', main.indexOf('combatSounds.useSaber({')));
+  ok(/swing: \(style, x, y, z, clip, seconds, owner\) => \{/.test(hook) && /sabers\.swing\(style, saberAt, clip \?\? undefined, seconds, owner \?\? null\)/.test(hook), "the game's hook hands the move's length and its swinger on to the sabers");
+  ok(/cancel: \(owner\) => sabers\.cancel\(owner\)/.test(hook), "and a swinger's cancel on as that swinger's, never the player's");
 }
 
 // ---- nothing is heard without a mixer, and nothing throws ----

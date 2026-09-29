@@ -565,6 +565,15 @@ export class CharacterRig {
     return this.override !== null;
   }
 
+  /**
+   * The one-off clip playing over the states, by its action's own name, or null: a whole-body one is
+   * the clip's name as it was played, a half carries its `upper:` prefix. Nothing is made to answer, so
+   * a body may ask on every frame whether the clip it put up is still the one playing.
+   */
+  get overrideName(): string | null {
+    return this.override ? this.override.getClip().name : null;
+  }
+
   /** Whether the one-off clip playing is one of Jedi Academy's (a swing, a flip), not a game transition. */
   get overridingJka(): boolean {
     return this.override !== null && this.override.getClip().name.replace(/^upper:/, '').startsWith('BOTH_');

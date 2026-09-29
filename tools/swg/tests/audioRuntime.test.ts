@@ -1460,6 +1460,39 @@ const blade = {} as object;
   host.now += 1;
   s.cancel();
   ok(!host.stopped.includes(early.key) && host.stopped.includes(late.key), 'a move cut short takes only the whooshes that had not sounded yet, and lets the one already sounding finish');
+  // Two movers at once: the player's kata and a fighter's, laid out over the same seconds. Each move
+  // cut short takes back its own mover's whooshes and nobody else's -- with one list for everybody, a
+  // fighter's next swing silenced the rest of the player's kata.
+  const fighter = {} as object;
+  host.played.length = 0;
+  host.stopped.length = 0;
+  s.swing('medium', { x: 0, y: 0, z: 0 }, 'BOTH_A2_SPECIAL', 4);
+  s.swing('medium', { x: 20, y: 0, z: 0 }, 'BOTH_A2_SPECIAL', 4, fighter);
+  const mine = host.played.slice(0, 2);
+  const theirs = host.played.slice(2, 4);
+  s.cancel(fighter);
+  ok(theirs.every((p) => host.stopped.includes(p.key)) && mine.every((p) => !host.stopped.includes(p.key)), "a fighter's move cut short takes back its own whooshes and leaves the player's alone");
+  s.cancel();
+  ok(mine.every((p) => host.stopped.includes(p.key)), "and the player's own cut short takes back the player's");
+  // The owners must follow their whooshes as the list closes up behind the ones that have sounded.
+  // The fighter's move is laid out first this time, and its first whoosh has sounded by the time the
+  // player's is laid out, so the sweep that runs then shifts everything after it down a place.
+  host.played.length = 0;
+  host.stopped.length = 0;
+  const other = {} as object;
+  s.swing('medium', { x: 20, y: 0, z: 0 }, 'BOTH_A2_SPECIAL', 4, other);
+  const [otherFirst, otherLast] = host.played;
+  host.now += 1;
+  host.stopped.push(otherFirst.key);
+  s.swing('medium', { x: 0, y: 0, z: 0 }, 'BOTH_A2_SPECIAL', 4);
+  const player = host.played.slice(2, 4);
+  host.stopped.length = 0;
+  s.cancel(other);
+  ok(host.stopped.length === 1 && host.stopped[0] === otherLast.key, "after the list has closed up, a fighter's cancel still takes back only its own whoosh still to come");
+  // And after that cancel has closed the list up again, the player's takes back exactly the player's.
+  host.stopped.length = 0;
+  s.cancel();
+  ok(host.stopped.length === 2 && player.every((p) => host.stopped.includes(p.key)), "and the player's cancel after it takes back exactly the player's two, still filed under the player");
 }
 
 // ---- the blade going into the water ----

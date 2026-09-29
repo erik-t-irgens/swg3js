@@ -567,6 +567,27 @@ export class Bolts {
       // from any of them. Read both ways round, a copy striking a person looked and sounded like a
       // bolt going into the dirt.
       const struck = w.hittableAt(hit.collider.handle);
+      // A lit blade in somebody else's hands turns it away as the player's does (`Hittable.blockBolt`,
+      // which is `src/world/npcSaber.ts` on the pure blocking maths the player's own block runs on):
+      // it flies on from the block as the blocker's own shot, so it may now strike the player it came
+      // from. Never a picture of somebody else's bolt, whose fate is the browser's that fired it.
+      if (struck && !b.inert && struck.blockBolt?.(b, hitPoint, bounce)) {
+        b.owner = 'enemy';
+        b.exclude = (struck as { body?: RAPIER.RigidBody }).body ?? b.exclude;
+        b.source = typeof (struck as Partial<Living>).key === 'number' ? (struck as Living) : null;
+        b.reflected++;
+        b.age = 0;
+        b.dir.copy(bounce);
+        // A bolt that falls or turns flies by its velocity, which is turned with it; and it homes on
+        // nothing any more, or a rocket turned away would come round onto its first mark again.
+        if (b.vel) b.vel.copy(bounce).multiplyScalar(b.speed);
+        b.homing = null;
+        b.pos.copy(hitPoint).addScaledVector(b.dir, 0.05);
+        this.settle(b);
+        w.effects.burst(hitPoint, 0xbfe6ff, 0.6, 0.15);
+        w.effects.flash(hitPoint, 0x9fd4ff, 14, 7, 0.12);
+        continue;
+      }
       const target = b.inert ? undefined : struck;
       if (!b.inert) b.onHit?.(hitPoint, target ?? null);
       // A ship with a fight takes the bolt whole: its shields, armour and parts, and the game's hit effect for the layer struck.

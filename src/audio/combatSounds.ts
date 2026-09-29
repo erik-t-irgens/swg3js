@@ -246,10 +246,13 @@ const MELEE_KIND: Record<string, string> = {
  */
 export interface SaberHooks {
   /** A swing started: the style it swings in, where the swinger stands, and the clip it plays,
-   * whose own marks may speak for it. */
-  swing(style: string, x: number, y: number, z: number, clip: string | null): void;
+   * whose own marks may speak for it -- laid out over `seconds`, the move's real length, when the
+   * swinger knows it, and cancelled later as `owner`'s (the swinger itself). */
+  swing(style: string, x: number, y: number, z: number, clip: string | null, seconds?: number, owner?: object | null): void;
   /** A blade met something: another blade, a body, or the world. */
   contact(kind: 'block' | 'body' | 'wall', x: number, y: number, z: number): void;
+  /** The whooshes `owner`'s own moves laid out and have not sounded yet, dropped: its move was cut short. */
+  cancel?(owner: object): void;
 }
 
 /** One line of the report: an event and everything that decided what it sounded like. */
@@ -738,13 +741,23 @@ export class CombatSounds {
     this.saber = hooks;
   }
 
-  /** A fighter swung a lit blade: handed to the sabers, which know what a blade sounds like. */
-  saberSwing(style: string, x: number, y: number, z: number, clip: string | null): void {
+  /**
+   * A fighter swung a lit blade: handed to the sabers, which know what a blade sounds like. A body
+   * swinging the player's own move machine says how long the move lasts (so a clip Jedi Academy
+   * marked whooshes on its marks) and whose move it is (so its next move cuts off its own and
+   * nobody else's).
+   */
+  saberSwing(style: string, x: number, y: number, z: number, clip: string | null, seconds?: number, owner?: object | null): void {
     if (!this.saber) {
       this.counts.saberNoHook++;
       return;
     }
-    this.saber.swing(style, x, y, z, clip);
+    this.saber.swing(style, x, y, z, clip, seconds, owner);
+  }
+
+  /** A body's move was cut short or its blade put away: its own whooshes still to come are dropped. */
+  saberCancel(owner: object): void {
+    this.saber?.cancel?.(owner);
   }
 
   /** A fighter's blade met something. */
