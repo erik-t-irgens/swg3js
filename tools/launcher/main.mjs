@@ -649,7 +649,13 @@ function openBrowserHere(url) {
 // the checkout is the release, and the children run on this Node.
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const arg = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
-  const dataDir = resolve(arg('data') ?? join(process.env.LOCALAPPDATA ?? join(HERE, '..', '..'), 'swg3js-dev'));
+  // Matches the binary's own choice in bootstrap.cjs, so a dev run and an installed one do not keep
+  // two separate data folders on the same machine.
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? join(HERE, '..', '..');
+  const devBase = process.platform === 'darwin' ? join(home, 'Library', 'Application Support')
+    : process.platform === 'win32' ? (process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'))
+    : (process.env.XDG_DATA_HOME ?? join(home, '.local', 'share'));
+  const dataDir = resolve(arg('data') ?? join(devBase, 'swg3js-dev'));
   mkdirSync(dataDir, { recursive: true });
   start({
     dataDir,

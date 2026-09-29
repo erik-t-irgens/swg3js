@@ -63,70 +63,12 @@ jobs:
           path: launcher-build/swg3js.exe
           if-no-files-found: error
 
-  # The Mac launcher, one slice per architecture. A Node binary is built for one of them and a Mac is
-  # either, so both are built and joined below; macos-13 is the last Intel runner GitHub offers and
-  # macos-14 the first Apple silicon one, so the pair is named rather than left to `macos-latest`.
-  launcher-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            arch: arm64
-          - runner: macos-13
-            arch: x64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      # Fails loudly if the runner ever stops being the architecture it is named for, rather than
-      # quietly publishing two slices of the same kind that lipo would then refuse to join.
-      - name: The runner is ${{ matrix.arch }}
-        run: |
-          got=$(node -p process.arch)
-          if [ "$got" != "${{ matrix.arch }}" ]; then echo "expected ${{ matrix.arch }}, this runner is $got"; exit 1; fi
-      - run: npm run launcher:build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-${{ matrix.arch }}
-          path: launcher-build/swg3js
-          if-no-files-found: error
-
-  # The two slices joined into one universal binary, signed ad-hoc and packed with a double-clickable
-  # starter. Done on a Mac because lipo and codesign are only there.
-  launcher-macos-universal:
-    needs: launcher-macos
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-arm64
-          path: slices/arm64
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos-x64
-          path: slices/x64
-      - name: Join, sign and pack
-        run: |
-          chmod +x slices/arm64/swg3js slices/x64/swg3js
-          node tools/launcher/macos-bundle.mjs --arm64=slices/arm64/swg3js --x64=slices/x64/swg3js --out=launcher-build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: launcher-build/swg3js-macos.tar.gz
-          if-no-files-found: error
-
   # One rolling release, tagged `latest`, always main's newest. The new archive is uploaded beside the
   # old (it is named for its commit), then the exe, then the record that names the archive, and only
   # then are the older archives removed and the tag moved, so a launcher reading the release at any
   # moment finds the archive its record names.
   release:
-    needs: [build, launcher, launcher-macos-universal]
+    needs: [build, launcher]
     # Only main is ever the release, whichever branch a manual run was started on.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -144,10 +86,6 @@ jobs:
         with:
           name: exe
           path: exe
-      - uses: actions/download-artifact@v4
-        with:
-          name: macos
-          path: macos
       - name: Publish to the latest release
         run: |
           set -euo pipefail
@@ -155,12 +93,11 @@ jobs:
           test -f "release/$archive"
           if ! gh release view latest >/dev/null 2>&1; then
             gh release create latest --target "$GITHUB_SHA" --title "swg3js (main)" \
-              --notes "The newest build of main. On Windows download swg3js.exe and run it; on a Mac download swg3js-macos.tar.gz, unpack it and run swg3js (its README.txt says what macOS will ask you). Either keeps itself up to date, converts your own Star Wars Galaxies install on your machine and plays the game in your browser. No game files are in this release."
+              --notes "The newest build of main. Download swg3js.exe and run it: it keeps itself up to date, converts your own Star Wars Galaxies install on your machine and plays the game in your browser. No game files are in this release."
           fi
           old=$(gh release view latest --json assets --jq '.assets[].name' | grep -E '^swg3js-.*\.tar\.gz$' | grep -vxF "$archive" || true)
           gh release upload latest "release/$archive" --clobber
           gh release upload latest exe/swg3js.exe --clobber
-          gh release upload latest macos/swg3js-macos.tar.gz --clobber
           gh release upload latest release/release.json --clobber
           for a in $old; do gh release delete-asset latest "$a" --yes; done
           gh api --method PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true

@@ -347,7 +347,7 @@ async function update(dataDir, log = () => {}) {
   }
   answer.latest = latest.info.commit;
   if (latest.info.format > PACK_FORMAT) {
-    answer.note = `The newest release needs a newer launcher. Download swg3js.exe again from ${latest.page}.`;
+    answer.note = `The newest release needs a newer launcher. Download ${programName()} again from ${latest.page}.`;
     return answer;
   }
   if (before && before.commit === latest.info.commit) {
@@ -439,6 +439,11 @@ function importer(dataDir) {
   return createRequire(file)(file);
 }
 
+/** What to call this program when telling someone to run it again: it is not an .exe on a Mac. */
+function programName() {
+  return process.platform === 'win32' ? 'swg3js.exe' : 'swg3js';
+}
+
 /** How the launcher proper starts one of the release's scripts as a child: this exe, told which file. */
 function childCommand(file, args) {
   return { command: process.execPath, args: [RUN_FLAG, file, ...args] };
@@ -448,8 +453,12 @@ function childCommand(file, args) {
 // The data folder, the log and one launcher at a time.
 
 function defaultDataDir() {
-  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  return path.join(base, 'swg3js');
+  // Each platform keeps a program's data in its own place. Windows first, since that is where most
+  // players are; a Mac given the Windows shape would grow an AppData folder in its home directory,
+  // which nothing there expects and no backup knows to keep.
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'swg3js');
+  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'swg3js');
+  return path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'swg3js');
 }
 
 function makeLog(dataDir) {
@@ -578,7 +587,7 @@ async function main() {
   const version = installedVersion(dataDir);
   const entry = path.join(dataDir, 'app', ...LAUNCHER_ENTRY.split('/'));
   if (!version || !fs.existsSync(entry)) {
-    log(answer.checked && /Could not reach/.test(answer.note) ? 'Nothing is installed, so there is nothing to start. Connect to the internet and run swg3js.exe again.' : 'Nothing is installed, so there is nothing to start. Run swg3js.exe again once a release is published, or start it with --from-archive=<a release archive>.');
+    log(answer.checked && /Could not reach/.test(answer.note) ? `Nothing is installed, so there is nothing to start. Connect to the internet and run ${programName()} again.` : `Nothing is installed, so there is nothing to start. Run ${programName()} again once a release is published, or start it with --from-archive=<a release archive>.`);
     await holdWindow();
     process.exitCode = 1;
     return;

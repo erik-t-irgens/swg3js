@@ -13,6 +13,7 @@
     "relay": "node server/relay.mjs",
     "launcher": "node tools/launcher/main.mjs",
     "launcher:build": "node tools/launcher/build-exe.mjs",
+    "launcher:macos": "node tools/launcher/macos-bundle.mjs",
     "launcher:pack": "node tools/launcher/pack.mjs",
     "test:launcher": "node tools/launcher/tests/launcher.test.mjs",
     "test:terrain": "node tools/swg/tests/groundShader.test.ts && node tools/swg/tests/terrain.test.ts && node tools/swg/tests/terrainAudit.test.ts && node tools/swg/tests/floraClear.test.ts",

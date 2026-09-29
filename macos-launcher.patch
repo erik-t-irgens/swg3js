@@ -1,0 +1,390 @@
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+index 785e3ce..cbd6a45 100644
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -63,12 +63,70 @@ jobs:
+           path: launcher-build/swg3js.exe
+           if-no-files-found: error
+ 
++  # The Mac launcher, one slice per architecture. A Node binary is built for one of them and a Mac is
++  # either, so both are built and joined below; macos-13 is the last Intel runner GitHub offers and
++  # macos-14 the first Apple silicon one, so the pair is named rather than left to `macos-latest`.
++  launcher-macos:
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - runner: macos-14
++            arch: arm64
++          - runner: macos-13
++            arch: x64
++    runs-on: ${{ matrix.runner }}
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with:
++          node-version: 22
++          cache: npm
++      - run: npm ci
++      # Fails loudly if the runner ever stops being the architecture it is named for, rather than
++      # quietly publishing two slices of the same kind that lipo would then refuse to join.
++      - name: The runner is ${{ matrix.arch }}
++        run: |
++          got=$(node -p process.arch)
++          if [ "$got" != "${{ matrix.arch }}" ]; then echo "expected ${{ matrix.arch }}, this runner is $got"; exit 1; fi
++      - run: npm run launcher:build
++      - uses: actions/upload-artifact@v4
++        with:
++          name: macos-${{ matrix.arch }}
++          path: launcher-build/swg3js
++          if-no-files-found: error
++
++  # The two slices joined into one universal binary, signed ad-hoc and packed with a double-clickable
++  # starter. Done on a Mac because lipo and codesign are only there.
++  launcher-macos-universal:
++    needs: launcher-macos
++    runs-on: macos-14
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/download-artifact@v4
++        with:
++          name: macos-arm64
++          path: slices/arm64
++      - uses: actions/download-artifact@v4
++        with:
++          name: macos-x64
++          path: slices/x64
++      - name: Join, sign and pack
++        run: |
++          chmod +x slices/arm64/swg3js slices/x64/swg3js
++          node tools/launcher/macos-bundle.mjs --arm64=slices/arm64/swg3js --x64=slices/x64/swg3js --out=launcher-build
++      - uses: actions/upload-artifact@v4
++        with:
++          name: macos
++          path: launcher-build/swg3js-macos.tar.gz
++          if-no-files-found: error
++
+   # One rolling release, tagged `latest`, always main's newest. The new archive is uploaded beside the
+   # old (it is named for its commit), then the exe, then the record that names the archive, and only
+   # then are the older archives removed and the tag moved, so a launcher reading the release at any
+   # moment finds the archive its record names.
+   release:
+-    needs: [build, launcher]
++    needs: [build, launcher, launcher-macos-universal]
+     # Only main is ever the release, whichever branch a manual run was started on.
+     if: github.ref == 'refs/heads/main'
+     runs-on: ubuntu-latest
+@@ -86,6 +144,10 @@ jobs:
+         with:
+           name: exe
+           path: exe
++      - uses: actions/download-artifact@v4
++        with:
++          name: macos
++          path: macos
+       - name: Publish to the latest release
+         run: |
+           set -euo pipefail
+@@ -93,11 +155,12 @@ jobs:
+           test -f "release/$archive"
+           if ! gh release view latest >/dev/null 2>&1; then
+             gh release create latest --target "$GITHUB_SHA" --title "swg3js (main)" \
+-              --notes "The newest build of main. Download swg3js.exe and run it: it keeps itself up to date, converts your own Star Wars Galaxies install on your machine and plays the game in your browser. No game files are in this release."
++              --notes "The newest build of main. On Windows download swg3js.exe and run it; on a Mac download swg3js-macos.tar.gz, unpack it and run swg3js (its README.txt says what macOS will ask you). Either keeps itself up to date, converts your own Star Wars Galaxies install on your machine and plays the game in your browser. No game files are in this release."
+           fi
+           old=$(gh release view latest --json assets --jq '.assets[].name' | grep -E '^swg3js-.*\.tar\.gz$' | grep -vxF "$archive" || true)
+           gh release upload latest "release/$archive" --clobber
+           gh release upload latest exe/swg3js.exe --clobber
++          gh release upload latest macos/swg3js-macos.tar.gz --clobber
+           gh release upload latest release/release.json --clobber
+           for a in $old; do gh release delete-asset latest "$a" --yes; done
+           gh api --method PATCH "repos/$GH_REPO/git/refs/tags/latest" -f sha="$GITHUB_SHA" -F force=true
+diff --git a/package.json b/package.json
+index eb243a8..d42961f 100644
+--- a/package.json
++++ b/package.json
+@@ -13,6 +13,7 @@
+     "relay": "node server/relay.mjs",
+     "launcher": "node tools/launcher/main.mjs",
+     "launcher:build": "node tools/launcher/build-exe.mjs",
++    "launcher:macos": "node tools/launcher/macos-bundle.mjs",
+     "launcher:pack": "node tools/launcher/pack.mjs",
+     "test:launcher": "node tools/launcher/tests/launcher.test.mjs",
+     "test:terrain": "node tools/swg/tests/groundShader.test.ts && node tools/swg/tests/terrain.test.ts && node tools/swg/tests/terrainAudit.test.ts && node tools/swg/tests/floraClear.test.ts",
+diff --git a/tools/launcher/bootstrap.cjs b/tools/launcher/bootstrap.cjs
+index fc1b09f..a4bf3a8 100644
+--- a/tools/launcher/bootstrap.cjs
++++ b/tools/launcher/bootstrap.cjs
+@@ -347,7 +347,7 @@ async function update(dataDir, log = () => {}) {
+   }
+   answer.latest = latest.info.commit;
+   if (latest.info.format > PACK_FORMAT) {
+-    answer.note = `The newest release needs a newer launcher. Download swg3js.exe again from ${latest.page}.`;
++    answer.note = `The newest release needs a newer launcher. Download ${programName()} again from ${latest.page}.`;
+     return answer;
+   }
+   if (before && before.commit === latest.info.commit) {
+@@ -439,6 +439,11 @@ function importer(dataDir) {
+   return createRequire(file)(file);
+ }
+ 
++/** What to call this program when telling someone to run it again: it is not an .exe on a Mac. */
++function programName() {
++  return process.platform === 'win32' ? 'swg3js.exe' : 'swg3js';
++}
++
+ /** How the launcher proper starts one of the release's scripts as a child: this exe, told which file. */
+ function childCommand(file, args) {
+   return { command: process.execPath, args: [RUN_FLAG, file, ...args] };
+@@ -448,8 +453,12 @@ function childCommand(file, args) {
+ // The data folder, the log and one launcher at a time.
+ 
+ function defaultDataDir() {
+-  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+-  return path.join(base, 'swg3js');
++  // Each platform keeps a program's data in its own place. Windows first, since that is where most
++  // players are; a Mac given the Windows shape would grow an AppData folder in its home directory,
++  // which nothing there expects and no backup knows to keep.
++  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'swg3js');
++  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'swg3js');
++  return path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'swg3js');
+ }
+ 
+ function makeLog(dataDir) {
+@@ -578,7 +587,7 @@ async function main() {
+   const version = installedVersion(dataDir);
+   const entry = path.join(dataDir, 'app', ...LAUNCHER_ENTRY.split('/'));
+   if (!version || !fs.existsSync(entry)) {
+-    log(answer.checked && /Could not reach/.test(answer.note) ? 'Nothing is installed, so there is nothing to start. Connect to the internet and run swg3js.exe again.' : 'Nothing is installed, so there is nothing to start. Run swg3js.exe again once a release is published, or start it with --from-archive=<a release archive>.');
++    log(answer.checked && /Could not reach/.test(answer.note) ? `Nothing is installed, so there is nothing to start. Connect to the internet and run ${programName()} again.` : `Nothing is installed, so there is nothing to start. Run ${programName()} again once a release is published, or start it with --from-archive=<a release archive>.`);
+     await holdWindow();
+     process.exitCode = 1;
+     return;
+diff --git a/tools/launcher/build-exe.mjs b/tools/launcher/build-exe.mjs
+index aeface6..2007fb5 100644
+--- a/tools/launcher/build-exe.mjs
++++ b/tools/launcher/build-exe.mjs
+@@ -1,43 +1,84 @@
+-// Builds swg3js.exe: Node's own single-executable application, with the bootstrap
+-// (tools/launcher/bootstrap.cjs) as its script. The exe is a copy of the Node that runs this build with
+-// the bootstrap injected, so the player needs nothing installed; the Node version inside is the one
+-// running here (CI pins it).
++// Builds the launcher binary: Node's own single-executable application, with the bootstrap
++// (tools/launcher/bootstrap.cjs) as its script. The binary is a copy of the Node that runs this build
++// with the bootstrap injected, so the player needs nothing installed; the Node version inside is the
++// one running here (CI pins it).
+ //
+-//   npm run launcher:build          ->  launcher-build/swg3js.exe
++//   npm run launcher:build          ->  launcher-build/swg3js.exe      (Windows)
++//                                   ->  launcher-build/swg3js          (macOS, Linux)
+ //
+-// Windows only: the exe is a Windows program. It is not signed, so SmartScreen warns the first time it
+-// is run (the README says how to get past that).
+-
++// It builds for the machine it runs on: a Mach-O binary has to be made on a Mac, a PE on Windows. CI
++// runs it once per platform. Neither is signed by a developer certificate, so both are warned about
++// the first time they run; tools/launcher/README.md says how to get past that on each.
+ import { spawnSync } from 'node:child_process';
+-import { copyFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
++import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+ import { createRequire } from 'node:module';
+ import { dirname, join, resolve } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ 
+ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+ const OUT = join(ROOT, 'launcher-build');
+-const EXE = join(OUT, 'swg3js.exe');
++/** Windows wants the extension; a Unix program is named plainly and marked executable instead. */
++export const binaryName = (platform = process.platform) => (platform === 'win32' ? 'swg3js.exe' : 'swg3js');
++const BIN = join(OUT, binaryName());
+ const BLOB = join(OUT, 'sea-prep.blob');
+ const CONFIG = join(OUT, 'sea-config.json');
+ /** The fuse Node's single-executable support looks for (from Node's own documentation). */
+ const FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
++/** The Mach-O segment Node's single-executable support reads its blob from on a Mac. */
++const MACHO_SEGMENT = 'NODE_SEA';
++
++/**
++ * A Mach-O binary carries a code signature that covers its contents, and injecting the blob breaks it.
++ * macOS refuses to run a binary whose signature does not match, with no message worth reading, so the
++ * old signature is taken off before the injection and an ad-hoc one put on after. Ad-hoc means signed
++ * by nobody: enough for the binary to run at all, not enough for Gatekeeper to let it run unremarked.
++ */
++function codesign(args, what) {
++  const r = spawnSync('codesign', args, { stdio: 'inherit' });
++  if (r.error) throw new Error(`codesign is not on PATH, so ${what} cannot be done (Xcode command line tools)`);
++  if (r.status !== 0) throw new Error(`codesign failed to ${what}`);
++}
+ 
+ async function main() {
+-  if (process.platform !== 'win32') throw new Error('swg3js.exe is built on Windows (the CI builds it on a Windows runner).');
++  if (!['win32', 'darwin', 'linux'].includes(process.platform)) {
++    throw new Error(`the launcher binary is built on Windows, macOS or Linux, not ${process.platform}`);
++  }
+   mkdirSync(OUT, { recursive: true });
+   // The bootstrap must parse before it is sealed in.
+   const check = spawnSync(process.execPath, ['--check', join(ROOT, 'tools', 'launcher', 'bootstrap.cjs')], { stdio: 'inherit' });
+   if (check.status !== 0) throw new Error('the bootstrap does not parse');
+-  writeFileSync(CONFIG, `${JSON.stringify({ main: join(ROOT, 'tools', 'launcher', 'bootstrap.cjs'), output: BLOB, disableExperimentalSEAWarning: true, useSnapshot: false, useCodeCache: false }, null, 2)}\n`);
++
++  writeFileSync(CONFIG, `${JSON.stringify({
++    main: join(ROOT, 'tools', 'launcher', 'bootstrap.cjs'),
++    output: BLOB,
++    disableExperimentalSEAWarning: true,
++    useSnapshot: false,
++    useCodeCache: false,
++  }, null, 2)}\n`);
+   const prep = spawnSync(process.execPath, ['--experimental-sea-config', CONFIG], { stdio: 'inherit' });
+   if (prep.status !== 0) throw new Error('Node did not write the preparation blob');
+-  copyFileSync(process.execPath, EXE);
++
++  rmSync(BIN, { force: true });
++  copyFileSync(process.execPath, BIN);
++  if (process.platform === 'darwin') codesign(['--remove-signature', BIN], 'take the old signature off');
++
+   const { inject } = createRequire(import.meta.url)('postject');
+-  await inject(EXE, 'NODE_SEA_BLOB', readFileSync(BLOB), { sentinelFuse: FUSE, overwrite: true });
+-  console.log(`built ${EXE} (${(statSync(EXE).size / 1048576).toFixed(1)} MB, Node ${process.version})`);
++  await inject(BIN, 'NODE_SEA_BLOB', readFileSync(BLOB), {
++    sentinelFuse: FUSE,
++    overwrite: true,
++    ...(process.platform === 'darwin' ? { machoSegmentName: MACHO_SEGMENT } : {}),
++  });
++
++  if (process.platform === 'darwin') codesign(['--sign', '-', BIN], 'sign the binary ad-hoc');
++  if (process.platform !== 'win32') chmodSync(BIN, 0o755);
++
++  const arch = process.platform === 'win32' ? '' : ` ${process.arch}`;
++  console.log(`built ${BIN} (${(statSync(BIN).size / 1048576).toFixed(1)} MB, Node ${process.version}${arch})`);
+ }
+ 
+-main().catch((err) => {
+-  console.error(err.message);
+-  process.exit(1);
+-});
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  main().catch((err) => {
++    console.error(err.message);
++    process.exit(1);
++  });
++}
+diff --git a/tools/launcher/macos-bundle.mjs b/tools/launcher/macos-bundle.mjs
+new file mode 100644
+index 0000000..3f66d6d
+--- /dev/null
++++ b/tools/launcher/macos-bundle.mjs
+@@ -0,0 +1,95 @@
++// Joins the two Mac builds into one download.
++//
++//   node tools/launcher/macos-bundle.mjs --arm64=<binary> --x64=<binary> --out=launcher-build
++//     ->  launcher-build/swg3js-macos.tar.gz
++//
++// A Mac is either Apple silicon or Intel and a Node binary is built for one of them, so CI builds
++// both and this puts them in a single universal binary with lipo. That leaves one file to download
++// and no architecture for anyone to choose wrongly.
++//
++// Given only one of the two it makes a single-architecture binary instead and says so, which is what
++// a local run on one machine gets.
++import { spawnSync } from 'node:child_process';
++import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { basename, join, resolve } from 'node:path';
++
++const arg = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
++
++function run(cmd, args, what) {
++  const r = spawnSync(cmd, args, { stdio: 'inherit' });
++  if (r.error) throw new Error(`${cmd} is not on PATH, so ${what} cannot be done`);
++  if (r.status !== 0) throw new Error(`${cmd} failed to ${what}`);
++}
++
++/** Double-clicking a plain Unix binary in Finder does nothing; a .command opens it in Terminal. */
++const STARTER = `#!/bin/sh
++# Double-click this to start swg3js. It opens the launcher in your browser; leave this window open
++# while you play, and close it to stop the launcher.
++cd "$(dirname "$0")" || exit 1
++exec ./swg3js "$@"
++`;
++
++const README = `swg3js on macOS
++===============
++
++The quickest way, which macOS does not question, is to unpack from Terminal:
++
++    tar -xzf swg3js-macos.tar.gz
++    ./swg3js
++
++Unpacking in Finder instead is fine, but macOS marks anything downloaded through a browser and will
++refuse to run it the first time. Either strip that mark:
++
++    xattr -dr com.apple.quarantine swg3js "Start swg3js.command"
++
++or right-click "Start swg3js.command", choose Open, and confirm once. After that it starts normally.
++
++The binary is signed ad-hoc, which is to say by nobody: enough to run, not enough for macOS to let it
++run without being asked. It is the same program as swg3js.exe on Windows and keeps itself up to date
++from the same release.
++`;
++
++function main() {
++  const out = resolve(arg('out') ?? 'launcher-build');
++  const slices = [['arm64', arg('arm64')], ['x64', arg('x64')]].filter(([, p]) => p).map(([a, p]) => [a, resolve(p)]);
++  if (!slices.length) throw new Error('give at least one of --arm64=<binary> or --x64=<binary>');
++  for (const [a, p] of slices) if (!existsSync(p)) throw new Error(`the ${a} binary is not at ${p}`);
++
++  mkdirSync(out, { recursive: true });
++  const stage = mkdtempSync(join(tmpdir(), 'swg3js-macos-'));
++  const binary = join(stage, 'swg3js');
++
++  if (slices.length === 2) {
++    run('lipo', ['-create', '-output', binary, slices[0][1], slices[1][1]], 'join the two architectures');
++  } else {
++    copyFileSync(slices[0][1], binary);
++    console.warn(`only the ${slices[0][0]} build was given, so this download runs on that alone`);
++  }
++  // lipo writes a fresh binary, so whatever signatures the slices carried are gone. Without one
++  // macOS refuses to run it at all, and an ad-hoc signature is the most that can be given here.
++  run('codesign', ['--sign', '-', '--force', binary], 'sign the joined binary ad-hoc');
++  run('codesign', ['--verify', '--strict', binary], 'verify the signature it just wrote');
++  chmodSync(binary, 0o755);
++
++  const starter = join(stage, 'Start swg3js.command');
++  writeFileSync(starter, STARTER);
++  chmodSync(starter, 0o755);
++  writeFileSync(join(stage, 'README.txt'), README);
++
++  const archive = join(out, 'swg3js-macos.tar.gz');
++  rmSync(archive, { force: true });
++  // tar keeps the executable bit, which a zip made on one platform and opened on another may not.
++  run('tar', ['-czf', archive, '-C', stage, 'swg3js', 'Start swg3js.command', 'README.txt'], 'make the archive');
++  rmSync(stage, { recursive: true, force: true });
++
++  const kinds = spawnSync('lipo', ['-archs', binary], { encoding: 'utf8' }).stdout?.trim();
++  console.log(`built ${basename(archive)} (${(statSync(archive).size / 1048576).toFixed(1)} MB${kinds ? `, ${kinds}` : ''})`);
++}
++
++try {
++  main();
++} catch (err) {
++  console.error(err.message);
++  process.exit(1);
++}
+diff --git a/tools/launcher/main.mjs b/tools/launcher/main.mjs
+index 9f7e43c..4f01fa0 100644
+--- a/tools/launcher/main.mjs
++++ b/tools/launcher/main.mjs
+@@ -649,7 +649,13 @@ function openBrowserHere(url) {
+ // the checkout is the release, and the children run on this Node.
+ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+   const arg = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+-  const dataDir = resolve(arg('data') ?? join(process.env.LOCALAPPDATA ?? join(HERE, '..', '..'), 'swg3js-dev'));
++  // Matches the binary's own choice in bootstrap.cjs, so a dev run and an installed one do not keep
++  // two separate data folders on the same machine.
++  const home = process.env.HOME ?? process.env.USERPROFILE ?? join(HERE, '..', '..');
++  const devBase = process.platform === 'darwin' ? join(home, 'Library', 'Application Support')
++    : process.platform === 'win32' ? (process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'))
++    : (process.env.XDG_DATA_HOME ?? join(home, '.local', 'share'));
++  const dataDir = resolve(arg('data') ?? join(devBase, 'swg3js-dev'));
+   mkdirSync(dataDir, { recursive: true });
+   start({
+     dataDir,
