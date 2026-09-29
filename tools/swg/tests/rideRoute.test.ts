@@ -750,7 +750,8 @@ const spaceTicket = (from: string, to: string): Ticket => ({ id: `${from}>${to}`
   // What is read out of other files and must stay true: the crossing down comes out inside the range a
   // starport's buildings load out to; the climb ends under the height where a ship's own flight eases a
   // slack nose back down; space's cruise is under what a body can be moved at.
-  const layout = readFileSync(new URL('../../../src/world/layoutStream.ts', import.meta.url), 'utf8');
+  // The placed objects' size tiers, which the streamer reads from `placedTiers.ts`.
+  const layout = readFileSync(new URL('../../../src/world/placedTiers.ts', import.meta.url), 'utf8');
   const vehicle = readFileSync(new URL('../../../src/vehicles/vehicle.ts', import.meta.url), 'utf8');
   const near = Number(/\{ minRadius: 12, range: (\d+) \}/.exec(layout)?.[1]);
   const ceiling = Number(/fly: \{ climb: big \? 6 : 10, ceiling: (\d+), floor/.exec(vehicle)?.[1]);

@@ -30,6 +30,8 @@ import type { HeatSources, LavaHeatTable } from './heatSources';
 import { REFLECTIONS, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FLORA_WARM, FloraPlanter } from './flora.ts';
+import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
+import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
 import { AssetPack, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
@@ -94,7 +96,8 @@ import { SHIP_ROOM } from '../vehicles/landing';
 import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
 import { Gallery } from './gallery';
-import { surfaces } from './surfaces';
+import { isBasinWater, surfaces } from './surfaces';
+import { PLACED_TUNE } from './placedTiers.ts';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import { PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
 import { clashes } from '../combat/clash.ts';
@@ -129,6 +132,8 @@ const standPlace: StandingBodyPlace = { drawnAt: 0, scale: 1, tan: 0, depthScale
 /** Detailed ground chunks each way, by default; the settings move it (World.viewRadius). */
 const VIEW_RADIUS = 6;
 const STREAM_BUDGET = 3;
+/** Placed models loaded at once behind a loading screen for their programs' sake (`World.warmPlaced`). Ours. */
+const PLACED_WARM_LOADS = 4;
 /** Coarse distant terrain: tile size, vertex resolution and radius in tiles. */
 const FAR_TILE = 512;
 const FAR_RES = 32;
@@ -293,6 +298,13 @@ interface Chunk {
   colliders: Collider[];
   heights: Float32Array;
   physics: RAPIER.Collider[] | null;
+  /** The planet's own flora of this chunk, trees and plants apart (step 5); null for the procedural props. */
+  trees: THREE.Group | null;
+  plants: THREE.Group | null;
+  /** The chunk's middle in the world, on its ground: what the plant sweep measures from the eye. */
+  mx: number;
+  my: number;
+  mz: number;
 }
 
 
@@ -777,6 +789,9 @@ export class World {
     // foot (`doorway.ts`). Read at the call: the terrain is this world's and changes with each travel.
     doorwayNav.ground = (x, z) => this.terrain.heightAt(x, z);
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
+    // What is added to the scene or the ground's root from here on is queued for the material scan (step 6).
+    this.sceneAdds.watch(scene);
+    this.sceneAdds.watch(this.chunkRoot);
     markActor(this.splashes.points);
     markActor(this.dust.points);
     for (let i = 0; i < INTERIOR_LIGHT_CAP; i++) {
@@ -1308,8 +1323,14 @@ export class World {
     this.props = new PropFactory(planet);
     this.creatures = new CreatureManager(planet, this.terrain, this.physics);
     this.scene.add(this.creatures.group);
+    // Each body is added under the manager's own group, which stands in the scene for the world's life, so
+    // the material scan's queue listens there as well (step 6, `sceneAdds.ts`); the converted model arrives
+    // after the first bodies are stood and is hung deeper, so the group is queued again when it does.
+    this.sceneAdds.watch(this.creatures.group);
+    this.creatures.onModel = (root) => this.noteAdded(root);
     this.turrets = new TurretManager(this.physics, this.terrain);
     this.scene.add(this.turrets.group);
+    this.sceneAdds.watch(this.turrets.group);
     this.npcs = new NpcManager(this.scene, this.physics, this.terrain, import.meta.env.BASE_URL);
     this.npcs.attach(this.npcDeps);
     // The catalogue's mobiles. The asset cache outlives the planet; the catalogue is a getter,
@@ -1394,6 +1415,9 @@ export class World {
     this.mobiles.cap = this.mobileDetail.cap;
     this.mobiles.animRange = this.mobileDetail.animRange;
     this.scene.add(this.mobiles.group);
+    // A body is prepared before it is hung, but a lit blade (`Mobile.equip`) is hung here beside it with
+    // materials of its own and nothing else to adopt them.
+    this.sceneAdds.watch(this.mobiles.group);
     this.mobilesAt = -1;
     // A fresh planet, a fresh clock and a fresh list of the living.
     this.simTime = 0;
@@ -1576,6 +1600,10 @@ export class World {
       // A fountain's or a pool's water is drawn by the water system (the owner's call): reflecting,
       // rippling and ringed by rain like a lake, and never swelling.
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
+      // The models the old rule would have loaded round the arrival start loading now, behind the screen, so
+      // the sweep there builds their programs (step 6): the loading screen's `settle` asks again for where
+      // the player really stands.
+      this.warmPlaced(spawn);
       // A space zone's hyperspace effects are made ready now (their textured batches hidden in the scene, their
       // textures uploaded), so settle() compiles them behind the loading screen and no jump builds a program on a
       // live frame. Not `solid`: the jump places them without it (placeZoneEffect). `spaceData` was set by
@@ -1719,6 +1747,8 @@ export class World {
     // that owns them is disposed below, or each world visited would leave its whole flora list behind.
     if (this.flora) this.forgetMaterials(this.flora.materials());
     this.floraWarm = [];
+    // Nothing queued for the material scan outlives the world it was added to.
+    this.sceneAdds.clear();
     for (const o of this.structures) this.scene.remove(o);
     this.structures.length = 0;
     this.layoutStream?.dispose();
@@ -1739,6 +1769,9 @@ export class World {
     // materials forgotten by the portal set and the cascades, then freed.
     dropLooseProps(this);
     this.flora = null;
+    this.floraTemplate = null;
+    // The next world measures from its own arrival: until then nothing is hidden by an eye from this one.
+    this.plantSweep.reset();
     this.groundTextures?.dispose();
     this.groundTextures = null;
     this.dropSky();
@@ -1777,6 +1810,12 @@ export class World {
     this.hiddenGround.length = 0;
     for (const c of this.structureColliders) this.physics.removeCollider(c);
     this.structureColliders = [];
+    // The pack's materials joined the portal renderer's set and the cascades' map as its tiers (and, behind a
+    // loading screen, its warmed stand-ins, step 6) were adopted, and both hold them strongly: taken out
+    // before the pack disposes them, or every world visited leaves its placed objects' materials in the set
+    // walked a dozen times a frame.
+    if (this.pack) this.forgetMaterials(this.pack.loadedMaterials());
+    this.placedWarm = null;
     this.pack?.dispose();
     // The houses' pack goes with the world it was used in, although it is not the world's own. Its
     // materials joined this world's shadow cascades and the portal renderer's set when they were
@@ -1790,6 +1829,8 @@ export class World {
     this.pack = null;
     this.packStatus = 'no pack';
     if (this.creatures) {
+      this.sceneAdds.unwatch(this.creatures.group);
+      this.creatures.onModel = null;
       this.scene.remove(this.creatures.group);
       this.creatures.dispose();
     }
@@ -1797,6 +1838,7 @@ export class World {
     // The spawned and ambient mobiles go with the planet (their ragdolls with them); their models
     // stay in the cache, released, and anything held by nothing is trimmed to the budget.
     if (this.mobiles) {
+      this.sceneAdds.unwatch(this.mobiles.group);
       this.scene.remove(this.mobiles.group);
       this.mobiles.dispose();
     }
@@ -1807,6 +1849,7 @@ export class World {
     this.livingAt.creatures = -1;
     this.livingAt.npcs = -1;
     if (this.turrets) {
+      this.sceneAdds.unwatch(this.turrets.group);
       this.scene.remove(this.turrets.group);
       this.turrets.dispose();
     }
@@ -2727,6 +2770,11 @@ export class World {
     });
     const families = swg.template.generator.floraGroup.families.size;
     this.flora = new FloraPlanter(swg, byAppearance);
+    this.floraTemplate = swg.template;
+    // The reach is known only now: the arrival's own sweep (`warmUp`) measured from where the player arrives
+    // but had no file to take a distance from, so it hid nothing. Taken again from that eye, so a chunk
+    // planted from here on is shown or hidden by the planet's own reach from the moment it is made (step 5).
+    this.refreshFloraReach();
     // Every plant this planet can grow, one stand-in a primitive, adopted now and compiled by the loading
     // screen's sweep (`compileEverything`) so no species builds its program in play (commit 4c). Never in the scene.
     this.floraWarm = FLORA_WARM.on ? this.flora.standIns() : [];
@@ -2736,6 +2784,183 @@ export class World {
 
   /** One instanced stand-in per flora primitive, compiled behind the loading screen and never drawn (commit 4c). */
   private floraWarm: THREE.InstancedMesh[] = [];
+
+  /**
+   * The placed models whose programs the next loading-screen sweep builds from stand-ins (step 6,
+   * `PLACED_TUNE.warm`), each with whether any of its copies stands in a building's rooms; null when there is
+   * nothing to warm.
+   */
+  private placedWarm: Map<string, boolean> | null = null;
+  /** What the last placed warm did, for the console: models asked for, loaded by the sweep, stand-ins compiled, programs they built, and why none were asked for. */
+  private readonly placedWarmStats = { asked: 0, ready: 0, missing: 0, standIns: 0, programs: 0, loadMs: 0, why: '' };
+
+  /**
+   * Behind a loading screen, start loading every model the old rule would have loaded around `at` -- every
+   * tier of every region within the first tier's range at the settings' reach -- so the sweep that compiles
+   * the scene builds their programs from stand-ins, as the flora's are built. The model rule loads a small
+   * thing later than the old rule did (320 m rather than 1.7 km), and without this its programs were built in
+   * play as it came into range: a starport's crates and lamps under a shuttle passenger coming down onto it
+   * from a crossing that came out 1.5 km off. A few load at a time, and none is started once no screen is up;
+   * the screen waits for them no longer than `PLACED_TUNE.warmWaitMs` (`placedWarmSettled`), and what has not
+   * arrived by the sweep is compiled as its tier loads, as it was. Nothing is warmed in a world filed by the old
+   * rule (every one of those is in its first tier already), in space, or with the switch off.
+   */
+  warmPlaced(at: THREE.Vector3): void {
+    const ls = this.layoutStream;
+    const st = this.placedWarmStats;
+    st.asked = 0;
+    st.ready = 0;
+    st.missing = 0;
+    st.standIns = 0;
+    st.programs = 0;
+    st.loadMs = 0;
+    st.why = !ls ? 'no placed objects yet' : !PLACED_TUNE.warm ? 'switched off' : ls.filing !== 'model' ? 'filed by the old rule: everything round here is in its first tier' : this.planet?.space ? 'in space' : '';
+    if (!ls || st.why) {
+      this.placedWarmLoads = Promise.resolve();
+      return;
+    }
+    const ids = ls.modelsWithin(at.x, at.z, this.streamNearRange());
+    this.placedWarm = ids;
+    st.asked = ids.size;
+    const queue: string[] = [];
+    for (const id of ids.keys()) if (!ls.loadedModel(id)) queue.push(id);
+    const token = this.loadToken;
+    const t0 = performance.now();
+    let next = 0;
+    let running = 0;
+    const worker = async (): Promise<void> => {
+      running++;
+      try {
+        while (next < queue.length && token === this.loadToken && this.layoutStream === ls && this.behindScreen) {
+          const id = queue[next++];
+          try {
+            await ls.loadModel(id);
+          } catch {
+            // A model that will not load is noted by the streamer when its tier asks for it.
+          }
+        }
+      } finally {
+        running--;
+        if (!running) st.loadMs = Math.round(performance.now() - t0);
+      }
+    };
+    this.placedWarmLoads = Promise.all(Array.from({ length: PLACED_WARM_LOADS }, () => worker())).then(() => undefined);
+  }
+
+  /** The placed warm's loads under way, answered when the last has settled (or none were asked for). */
+  private placedWarmLoads: Promise<void> = Promise.resolve();
+
+  /**
+   * Wait, at most `ms` (`PLACED_TUNE.warmWaitMs`), for the placed warm's models to load, so the loading screen's
+   * sweep builds their programs rather than play: the loading screen asks this just before it compiles
+   * (`App.settle`). Measured on arrivals 1.5 km from Theed's starport with a flight onto it: with no wait the
+   * screen lifted with 142 of 318 models in and the approach built two programs in play (a trophy and a tent
+   * pipe) that the old rule had built behind the screen; with a 6 s wait all 318 were in on one run of two and
+   * nothing was built in play, but the screen stood 5 to 7 s longer. So it ships at nought: best effort, never
+   * holding the screen up; the knob is `__debug.placed({ warmWaitMs })`.
+   */
+  placedWarmSettled(ms: number): Promise<void> {
+    return Promise.race([this.placedWarmLoads, new Promise<void>((r) => setTimeout(r, Math.max(0, ms)))]);
+  }
+
+  /**
+   * The stand-ins the loading-screen sweep compiles for the placed warm: an instanced mesh of one per piece of
+   * every warmed model that has loaded, on the actor layer for a model that stands indoors anywhere near (so
+   * both passes are built), never in the scene. An outdoor piece whose material is adopted already is left
+   * out -- a tier holds it and its world pass is built -- but never an indoor one, whose rooms' pass an outdoor
+   * copy of the same model never built (measured at the Mos Eisley street: banners, consoles and screens
+   * whose room-light programs were built in play just after the screen lifted). A portal building's rooms
+   * (built and compiled with their building) and a basin's water (the water system's) are left out.
+   */
+  private placedStandIns(): THREE.InstancedMesh[] {
+    const ids = this.placedWarm;
+    const ls = this.layoutStream;
+    this.placedWarm = null;
+    if (!ids || !ls) return [];
+    const st = this.placedWarmStats;
+    const out: THREE.InstancedMesh[] = [];
+    for (const [id, indoor] of ids) {
+      const m = ls.loadedModel(id);
+      if (!m) {
+        st.missing++;
+        continue;
+      }
+      st.ready++;
+      for (const prim of m.primitives) {
+        if (prim.cell > 0 && m.portals.length > 0) continue;
+        if (isBasinWater(prim.material)) continue;
+        if (!indoor && this.compiledMaterials.has(prim.material)) continue;
+        const s = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+        s.name = `warm:${id}`;
+        if (indoor) s.layers.enable(ACTOR_LAYER);
+        out.push(s);
+      }
+    }
+    st.standIns = out.length;
+    return out;
+  }
+
+  /** For the console (`__debug.placed()`): what the last placed warm did. */
+  get placedWarmReport(): { on: boolean; asked: number; ready: number; missing: number; standIns: number; programs: number; loadMs: number; why: string } {
+    return { on: PLACED_TUNE.warm, ...this.placedWarmStats };
+  }
+
+  /** The terrain template the planet's flora is planted from, whose own plant distance the reach is a multiple of (step 5). */
+  private floraTemplate: SwgTerrain['template'] | null = null;
+  /** The plant sweep (step 5, `floraReach.ts`): where it last measured from, with what reach, its clock and what it left. */
+  private readonly plantSweep = new PlantSweep();
+  /** The sweep's one visit per chunk, made once with the world so a sweep makes no closure. */
+  private readonly plantVisit = (c: Chunk): void => this.plantSweep.visit(c, FLORA_TUNE);
+
+  /**
+   * Whether the plant reach hides anything here: switched on, a planet with flora of its own, and not a
+   * captured place on the creation or selection screen, whose view was chosen as it stood.
+   */
+  private get plantsReached(): boolean {
+    return FLORA_TUNE.on && !!this.floraTemplate && !this.sceneOnly;
+  }
+
+  /** How far from the eye plants are shown on this planet now, in metres (Infinity with the reach off, no flora of its own, or a captured place). */
+  get plantReach(): number {
+    return this.plantsReached ? plantReachOf(this.floraTemplate, FLORA_TUNE) : Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * The plant sweep (step 5): a few times a second (`FLORA_TUNE.sweepHz`), every chunk's plants shown or
+   * hidden by how far its middle is from the eye. `force` runs it now, whatever the clock says.
+   */
+  private sweepFlora(eye: THREE.Vector3, dt: number, force = false): void {
+    const sweep = this.plantSweep;
+    if (!sweep.due(dt, FLORA_TUNE, force)) return;
+    sweep.begin(eye.x, eye.y, eye.z, this.plantReach, this.plantsReached);
+    this.chunks.forEach(this.plantVisit);
+  }
+
+  /**
+   * The plant reach moved (the frame report's `floraReach`, `__debug.flora({ reach })`): every chunk redone
+   * now from where the last sweep measured. Before any sweep has measured there is no eye, and every plant is
+   * shown as it stands until the first one.
+   */
+  refreshFloraReach(): void {
+    const s = this.plantSweep;
+    if (!s.measured) return;
+    this._floraEye.set(s.eyeX, s.eyeY, s.eyeZ);
+    this.sweepFlora(this._floraEye, 0, true);
+  }
+  private readonly _floraEye = new THREE.Vector3();
+
+  /** The plant reach switched on or off: the frame report's `floraReach`. */
+  setFloraReach(on: boolean): void {
+    FLORA_TUNE.on = on;
+    this.refreshFloraReach();
+  }
+
+  /** For the console (`__debug.flora()`): the reach in force, the client's own distance it comes from, and what the last sweep left. */
+  floraReachReport(): { on: boolean; active: boolean; reach: number; clientDistance: number; tune: typeof FLORA_TUNE; chunks: number; plantGroups: { shown: number; hidden: number }; plantInstances: { shown: number; hidden: number }; sweeps: number; eye: number[] | null } {
+    const sw = this.plantSweep;
+    const s = sw.stats;
+    return { on: FLORA_TUNE.on, active: sw.active, reach: this.plantReach, clientDistance: clientPlantDistance(this.floraTemplate), tune: { ...FLORA_TUNE }, chunks: this.chunks.size, plantGroups: { shown: s.shown, hidden: s.hidden }, plantInstances: { shown: s.shownInstances, hidden: s.hiddenInstances }, sweeps: s.sweeps, eye: sw.measured ? [Math.round(sw.eyeX), Math.round(sw.eyeY), Math.round(sw.eyeZ)] : null };
+  }
 
   /** How many plant stand-ins the last arrival compiled, for the console. */
   get floraStandIns(): number {
@@ -3409,6 +3634,90 @@ export class World {
   }
 
   /**
+   * What was added to the scene, the ground's root and the world's standing containers since the scan last
+   * ran (step 6, `sceneAdds.ts`), and the scan that walks it with the whole scene as a slower backstop.
+   */
+  private readonly sceneAdds = new SceneAdds();
+  private readonly scan = new MaterialScan(this.sceneAdds);
+  /** What the scan asks of this world: made once, read by the scan a few times a second. */
+  private readonly scanHost: ScanHost = (() => {
+    const world = this;
+    return {
+      get scene(): THREE.Object3D {
+        return world.scene;
+      },
+      adopt: (root: THREE.Object3D) => world.adoptMaterials(root),
+      compile: (fresh: THREE.Object3D[]) => world.compileObjects(fresh),
+      get behindScreen(): boolean {
+        return world.behindScreen;
+      },
+    };
+  })();
+
+  /**
+   * The material scan, a few times a second (`MaterialScan.run`): the roots added since it last ran, with the
+   * whole scene walked every `SCAN_TUNE.backstopMs` behind them for whatever was added somewhere nobody
+   * watches -- and anything that walk finds new is counted as missed. With `SCAN_TUNE.queued` off it walks
+   * the whole scene every time, as it always did.
+   */
+  private scanMaterials(now: number): void {
+    this.scan.run(now, this.scanHost);
+    const last = this.scan.last;
+    if (last.roots) perf.count(CNT.scanRoots, last.roots);
+    if (last.whole) perf.count(CNT.scanWhole, 1);
+    if (last.missed) perf.count(CNT.scanMissed, last.missed);
+  }
+
+  /**
+   * Adopt everything under a root now and queue its new programs, for a path that hangs things under a
+   * container nothing watches and shows them at once (the placement ghost's see-through copies): the next
+   * quarter-second scan would not hear of them, and the backstop only every two seconds.
+   */
+  adoptNow(root: THREE.Object3D): void {
+    const fresh = this.adoptMaterials(root);
+    if (fresh.length) this.compileObjects(fresh);
+  }
+
+  /** Queue a root for the next scan: something hung under a container nothing watches (the creatures' own model, arriving late). */
+  noteAdded(root: THREE.Object3D): void {
+    this.sceneAdds.push(root);
+  }
+
+  /**
+   * Have the scan's queue hear of whatever is added under a container of the game's own that stands in the
+   * scene for the session (the placement ghost's group, whose footprint grid is hung under it after the model).
+   */
+  watchAdds(container: THREE.Object3D): void {
+    this.sceneAdds.watch(container);
+  }
+
+  /** How the placed objects are filed and loaded (step 6, `placedTiers.ts`), for the console; null with no layout. */
+  placedTierReport(): ReturnType<LayoutStreamer['tierReport']> | null {
+    return this.layoutStream?.tierReport() ?? null;
+  }
+
+  /**
+   * File this world's placed objects again by another rule (`LayoutStreamer.refile`): every tier dropped and
+   * the next update loading by the new one. The room the player stood in went with its building, so the
+   * player is taken to be outdoors until the caller puts them back (`enterCellAt`); the game calls this only
+   * behind a loading screen. Answers whether anything changed.
+   */
+  refilePlaced(rule: 'model' | 'snapshot'): boolean {
+    const ls = this.layoutStream;
+    if (!ls || !ls.refile(rule)) return false;
+    this.cellState = null;
+    this.prevPlayerPos.x = Number.NaN;
+    return true;
+  }
+
+  /** The material scan's switch (the frame report's `scanNew`), and what it has done, for the console. */
+  scanReport(on?: boolean): { queued: boolean; everyMs: number; backstopMs: number; scans: number; wholeScans: number; rootsWalked: number; missed: number; missedInPlay: number; lastMissed: string[]; adds: SceneAdds['stats']; pending: number; watching: number } {
+    if (typeof on === 'boolean') SCAN_TUNE.queued = on;
+    const s = this.scan.stats;
+    return { queued: SCAN_TUNE.queued, everyMs: SCAN_TUNE.everyMs, backstopMs: SCAN_TUNE.backstopMs, scans: s.scans, wholeScans: s.whole, rootsWalked: s.roots, missed: s.missed, missedInPlay: s.missedInPlay, lastMissed: s.lastMissed.slice(), adds: { ...this.sceneAdds.stats }, pending: this.sceneAdds.pending, watching: this.sceneAdds.watching };
+  }
+
+  /**
    * Everything a material must join before it is drawn: the portal stencil scheme, the normal-map
    * convention and the shadow cascades. Called over the whole scene by the quarter-second scan
    * and over one root by `prepareActor`, so an actor made at run time is ready at once rather
@@ -3799,6 +4108,14 @@ export class World {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return;
+    // Adopted first, whoever calls: the cascades' defines, the wet wrap and the detail wrap are in the
+    // program key, so a program built before them is one no frame draws, and `CSM.setupMaterial` marks
+    // nothing for rebuilding -- a material drawn before its adoption keeps its unshadowed program for good.
+    // `prepareActor`, `prepareVehicle` and `prepareExtras` adopt before they get here (a second adoption is a
+    // set lookup per material); a fighter dressed at run time (`npcDeps.compile`) hangs its rig under a group
+    // already in the scene and comes straight here, and used to rely on the quarter-second scan's whole-scene
+    // walk to adopt it in time, which the queued scan (step 6, `sceneAdds.ts`) no longer makes.
+    for (const o of objects) this.adoptMaterials(o);
     const meshes: THREE.Object3D[] = [];
     for (const o of objects) {
       o.traverse((m) => {
@@ -3999,15 +4316,32 @@ export class World {
       this.adoptMaterials(o);
       objects.push(o);
     }
+    // Every placed model the old rule would have loaded around the arrival, whose tier the model rule loads
+    // later (step 6, `warmPlaced`): a stand-in each, compiled here and let go of after. Only a sweep behind a
+    // screen takes them; the Effects switch's in play leaves them for the next one.
+    const placed = this.behindScreen ? this.placedStandIns() : [];
+    for (const o of placed) {
+      this.adoptMaterials(o);
+      objects.push(o);
+    }
     const before = r.info.programs?.length ?? 0;
     const BATCH = 8;
+    const placedFrom = objects.length - placed.length;
+    let placedPrograms = 0;
     for (let i = 0; i < objects.length; i += BATCH) {
       // `compileFor` builds each batch's programs and finishes their links before it returns, so
       // every program this sweep makes is ready to draw with by the time it ends, and no chained
       // poll is left running behind the loading screen.
+      const was = r.info.programs?.length ?? 0;
       this.compileFor(r, camera, objects.slice(i, i + BATCH), target);
+      if (i + BATCH > placedFrom) placedPrograms += (r.info.programs?.length ?? 0) - was;
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
       await this.nextFrame();
+    }
+    if (placed.length) {
+      this.placedWarmStats.programs = placedPrograms;
+      // Their programs are held by the pack's own materials, which outlive them: only the stand-ins go.
+      for (const s of placed) s.dispose();
     }
     // The weather's falling effects draw in their own scene, with no lights and no fog: compiled
     // against that scene (never this one, whose lights and fog are in the program key), for the
@@ -4041,9 +4375,11 @@ export class World {
       csm.update();
       refreshCascadeBoxes(csm.lights, this.cascadeBoxes);
     }
-    if (now - this.csmScanAt > 250) {
+    if (now - this.csmScanAt > SCAN_TUNE.everyMs) {
       this.csmScanAt = now;
-      this.setupShadowMaterials();
+      perf.begin(SEC.scan);
+      this.scanMaterials(now);
+      perf.end(SEC.scan);
     }
     this.drainCompiles();
   }
@@ -4058,6 +4394,9 @@ export class World {
     // in, so it usually only hands the weather its channel sink and the first frames of `update` do
     // the rest, still behind the loading screen.
     this.readySound();
+    // The plants measured from where the player arrives, so the chunks made below never show a plant the
+    // reach would hide (step 5).
+    this.sweepFlora(center, 0, true);
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
     // Nothing stands on its own any more. The planet's own wildlife used to be stood here -- through
@@ -5417,8 +5756,15 @@ export class World {
   update(dt: number, playerPos: THREE.Vector3, camPos: THREE.Vector3, fastTime: boolean, onAttack: (damage: number, from?: THREE.Vector3) => void, target: TurretTarget | null = null): void {
     // The frame report's sections (`__debug.perf()`): each is a clock pair on a fixed id, nothing when timing is off.
     perf.begin(SEC.stream);
+    // The plants shown only as near the eye as the client drew them, a few times a second (step 5); first,
+    // so a chunk made below is measured from where the eye is now.
+    this.sweepFlora(camPos, dt);
     this.stream(playerPos, STREAM_BUDGET);
     perf.end(SEC.stream);
+    const plants = this.plantSweep.stats;
+    perf.gauge(CNT.floraShown, plants.shown);
+    perf.gauge(CNT.floraHidden, plants.hidden);
+    perf.gauge(CNT.floraInstances, plants.shownInstances);
     perf.begin(SEC.streamFar);
     this.streamFar(playerPos, 1);
     perf.end(SEC.streamFar);
@@ -6481,7 +6827,17 @@ export class World {
     group.add(mesh);
     const exclude = this.layoutStream ? [...this.exclusions, ...this.layoutStream.exclusionsFor(cx, cz)] : this.exclusions;
     // The planet's own flora replaces the procedural props once its models are loaded.
-    const { group: propGroup, colliders } = this.flora ? this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude) : this.props.buildForChunk(cx, cz, this.terrain, exclude);
+    let trees: THREE.Group | null = null;
+    let plants: THREE.Group | null = null;
+    let propGroup: THREE.Group;
+    let colliders: Collider[];
+    if (this.flora) {
+      const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude);
+      propGroup = built.group;
+      colliders = built.colliders;
+      trees = built.trees;
+      plants = built.plants;
+    } else ({ group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude));
     propGroup.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
     });
@@ -6498,7 +6854,13 @@ export class World {
       if (fresh.length) this.compileObjects(fresh);
     }
     this.chunkRoot.add(group);
-    this.chunks.set(key, { key, cx, cz, group, colliders, heights, physics: null });
+    const mx = (cx + 0.5) * CHUNK_SIZE;
+    const mz = (cz + 0.5) * CHUNK_SIZE;
+    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, mx, my: this.terrain.heightAt(mx, mz), mz };
+    this.chunks.set(key, chunk);
+    // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
+    // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).
+    this.plantSweep.show(chunk, FLORA_TUNE);
     const b = this.groundHiddenFor;
     if (b) {
       const r = b.radius + 2;

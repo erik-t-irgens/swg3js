@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { PlanetDef } from '../data/planets';
-import { FBM, hash2 } from './noise';
+import { FBM, hash2 } from './noise.ts';
 import type { FarGrid, SwgTerrain } from './swgTerrain';
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 
@@ -52,7 +52,11 @@ export class Terrain {
   private readonly anchorCells = new Map<string, Anchor[]>();
   private anchorCount = 0;
 
-  constructor(readonly planet: PlanetDef) {
+  // Written out rather than a parameter property, which node's type stripping cannot run (the flora's node test reaches this file).
+  readonly planet: PlanetDef;
+
+  constructor(planet: PlanetDef) {
+    this.planet = planet;
     this.fbm = new FBM(planet.seed);
     this.detail = new FBM(planet.seed * 31 + 7);
     this.low = new THREE.Color(planet.palette.low);

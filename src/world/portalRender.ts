@@ -30,6 +30,7 @@ import { cullOn, ExitNarrowing, exitFrustum, isQuarantined, markQuarantined, MAX
 import { ActorRoutes, ROUTE_PASS } from './portalCull.ts';
 import { furnitureOn, maskSeen } from './furnitureHost.ts';
 import { beginSkeletonFrame, endSkeletonFrame, installSkeletonOnce } from '../core/skeletonOnce.ts';
+import { setPortalRef, setSharedRef as shareEveryRef, shareRef, unshareRef } from './stencilRef.ts';
 
 export { crossing } from './portalVis.ts';
 
@@ -317,12 +318,17 @@ export class PortalRenderer {
     return [this.portalStandIn, this.resetQuad];
   }
 
-  /** Every material must take part in the stencil test (the second argument is kept for callers). */
+  /**
+   * Every material must take part in the stencil test (the second argument is kept for callers). Its
+   * reference follows the renderer's one shared value from here on (step 6, `stencilRef.ts`), or with that
+   * switched off holds a copy the renderer writes. Nothing about the material's own shape changes, so it
+   * stays in V8's fast mode: the accessor is on `Material.prototype`, never on the material.
+   */
   registerMaterial(m: THREE.Material, _interior = false): void {
     if (this.materials.has(m)) return;
     m.stencilWrite = true;
     m.stencilFunc = THREE.EqualStencilFunc;
-    m.stencilRef = 1;
+    shareRef(m);
     m.stencilFuncMask = 0xff;
     m.stencilFail = THREE.KeepStencilOp;
     m.stencilZFail = THREE.KeepStencilOp;
@@ -330,12 +336,19 @@ export class PortalRenderer {
     this.materials.add(m);
   }
 
+  /** A material leaves the set, with a plain reference of its own again (the value in force). */
   forget(m: THREE.Material): void {
-    this.materials.delete(m);
+    if (this.materials.delete(m)) unshareRef(m);
   }
 
+  /** Move every registered material's reference: one assignment while it is shared, a walk of the set the old way. */
   private setRef(ref: number): void {
-    for (const m of this.materials) m.stencilRef = ref;
+    setPortalRef(ref, this.materials);
+  }
+
+  /** The shared reference switched on or off (the frame report's `sharedStencilRef`): every registered material moved over now. */
+  setSharedRef(on: boolean): void {
+    shareEveryRef(on, this.materials);
   }
 
   private meshesFor(b: Building): THREE.Mesh[] {

@@ -395,6 +395,16 @@ export class AssetPack {
     return out;
   }
 
+  /**
+   * Every material of every model this pack has finished loading: what a world must take out of the portal
+   * renderer's set and the cascades' map before the pack disposes them, since both hold what they are given.
+   */
+  loadedMaterials(): THREE.Material[] {
+    const out: THREE.Material[] = [];
+    for (const m of this.ready.values()) for (const prim of m.primitives) out.push(prim.material);
+    return out;
+  }
+
   dispose(): void {
     for (const p of this.cache.values()) {
       void p.then((m) => {

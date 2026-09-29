@@ -351,6 +351,16 @@ export function interiorBuildRange(b: VisBuilding, tune: PortalCullTune = PORTAL
 }
 
 /**
+ * The farthest `interiorBuildRange` can be for any building under the doors' rule now: the widest range a door
+ * may be given, plus the lead. What the placed-object streamer floors a tier holding furniture at (step 6), so a
+ * room drawn through a door is never drawn without what stands in it.
+ */
+export function interiorBuildRangeMax(tune: PortalCullTune = PORTAL_CULL): number {
+  if (!cullOn('doorRange', tune)) return PORTAL_RANGE + INTERIOR_LEAD;
+  return Math.max(PORTAL_RANGE, tune.rangeBase, tune.rangeMax) + INTERIOR_LEAD;
+}
+
+/**
  * Whether a point is within a squared reach of a triangle: Ericson's closest point on a triangle, all in
  * scalars. The corners are read out of `wv` at offsets `ia`, `ib` and `ic`, and the point and the squared
  * reach out of `q` (x, y, z, r2), and it answers a boolean: no number crosses the call, so nothing is boxed.

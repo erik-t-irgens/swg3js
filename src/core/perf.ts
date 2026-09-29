@@ -54,6 +54,8 @@ const SECTION_DEFS = [
   { key: 'camera', parent: '' },
   { key: 'audio', parent: '' },
   { key: 'hud', parent: '' },
+  // The material scan a few times a second (step 6): the roots added since, or the whole scene.
+  { key: 'scan', parent: '' },
   { key: 'draw', parent: '' },
   { key: 'roomAir', parent: 'draw' },
   { key: 'portals', parent: 'draw' },
@@ -123,6 +125,15 @@ const COUNTER_DEFS = [
   { key: 'routeUndrawn', group: 'cull', label: 'bodies in no pass', kind: 'mean', scale: 1 },
   { key: 'furnitureShown', group: 'cull', label: 'furniture groups shown', kind: 'mean', scale: 1 },
   { key: 'seenOff', group: 'cull', label: 'bodies off by room', kind: 'mean', scale: 1 },
+  // Step 5: the chunks' plant groups the reach sweep left shown and hidden, and the plants shown.
+  { key: 'floraShown', group: 'flora', label: 'plant groups shown', kind: 'last', scale: 1 },
+  { key: 'floraHidden', group: 'flora', label: 'plant groups hidden', kind: 'last', scale: 1 },
+  { key: 'floraInstances', group: 'flora', label: 'plants shown', kind: 'last', scale: 1 },
+  // Step 6: the material scan -- roots it walked from the queue of what was added, and the whole-scene
+  // backstop's finds, which the queue should have left it none of.
+  { key: 'scanRoots', group: 'scan', label: 'roots walked', kind: 'sum', scale: 1 },
+  { key: 'scanWhole', group: 'scan', label: 'whole-scene scans', kind: 'sum', scale: 1 },
+  { key: 'scanMissed', group: 'scan', label: 'found by the backstop', kind: 'sum', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },

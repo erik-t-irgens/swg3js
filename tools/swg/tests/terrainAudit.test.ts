@@ -251,7 +251,8 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   // the same way: if it goes red again, whoever moves the rule re-reads the table in that commit.
   check(
     'the rule being measured is still the model reach the game now uses',
-    /floraClearRadius\(o\.radius, this\.pack\.find\(o\.model\)\?\.bounds \?\? null\)/.test(stream),
+    // The model's entry is looked up by id once per object now (`defs`, the frame-time wave's step 6), not by `pack.find`.
+    /const def = defs\.get\(o\.model\);[\s\S]{0,1500}floraClearRadius\(o\.radius, def\?\.bounds \?\? null\)/.test(stream),
     'layoutStream.ts no longer excludes by the model reach: re-read the measurement with whatever replaced it',
   );
 }
