@@ -1,0 +1,72 @@
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+index cbd6a45..03d871d 100644
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -64,18 +64,25 @@ jobs:
+           if-no-files-found: error
+ 
+   # The Mac launcher, one slice per architecture. A Node binary is built for one of them and a Mac is
+-  # either, so both are built and joined below; macos-13 is the last Intel runner GitHub offers and
+-  # macos-14 the first Apple silicon one, so the pair is named rather than left to `macos-latest`.
++  # either, so both are built and joined below. The runners are named rather than left to
++  # `macos-latest`, which moves between macOS versions and would silently change what is built.
++  #
++  # Apple has dropped x86_64 and GitHub retires the last Intel runner in autumn 2027, so the Intel
++  # slice is allowed to fail: the job below packs whatever slices arrive, and an Apple silicon only
++  # download is a far better outcome than a release that cannot be published at all. When Intel does
++  # go, either drop that leg or inject into Node's own darwin-x64 tarball from an arm64 runner --
++  # postject only rewrites Mach-O sections, so it does not care which architecture it is editing.
+   launcher-macos:
+     strategy:
+       fail-fast: false
+       matrix:
+         include:
+-          - runner: macos-14
++          - runner: macos-15
+             arch: arm64
+-          - runner: macos-13
++          - runner: macos-15-intel
+             arch: x64
+     runs-on: ${{ matrix.runner }}
++    continue-on-error: ${{ matrix.arch == 'x64' }}
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4
+@@ -100,21 +107,33 @@ jobs:
+   # starter. Done on a Mac because lipo and codesign are only there.
+   launcher-macos-universal:
+     needs: launcher-macos
+-    runs-on: macos-14
++    runs-on: macos-15
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/download-artifact@v4
+         with:
+           name: macos-arm64
+           path: slices/arm64
+-      - uses: actions/download-artifact@v4
++      # Best effort: if the Intel leg was skipped or failed there is nothing to download, and the
++      # pack below falls back to an Apple silicon only binary rather than failing the release.
++      - id: intel
++        continue-on-error: true
++        uses: actions/download-artifact@v4
+         with:
+           name: macos-x64
+           path: slices/x64
+       - name: Join, sign and pack
+         run: |
+-          chmod +x slices/arm64/swg3js slices/x64/swg3js
+-          node tools/launcher/macos-bundle.mjs --arm64=slices/arm64/swg3js --x64=slices/x64/swg3js --out=launcher-build
++          set -euo pipefail
++          chmod +x slices/arm64/swg3js
++          args="--arm64=slices/arm64/swg3js"
++          if [ -f slices/x64/swg3js ]; then
++            chmod +x slices/x64/swg3js
++            args="$args --x64=slices/x64/swg3js"
++          else
++            echo "::warning::no Intel slice, so the Mac download is Apple silicon only"
++          fi
++          node tools/launcher/macos-bundle.mjs $args --out=launcher-build
+       - uses: actions/upload-artifact@v4
+         with:
+           name: macos
