@@ -542,6 +542,10 @@ export class Mobile implements Living, NpcSubject {
   private stuckCommanded = 0;
   /** What the step-up keeps between frames (`stepUp.ts`): the pace it was set at, when it may ask again, and its lifts. */
   private readonly stepWalk: StepWalker = stepWalker();
+  /** How many times the step-up has lifted this body onto a step, for the console's trace of the people of ours. */
+  get stepLifts(): number {
+    return this.stepWalk.lifts;
+  }
   /** The body the step-up climbs with, written in place before each ask (`stepShapeNow`). */
   private readonly stepShape: StepShape = { along: 0, rim: 0, step: 0, feet: 0 };
   /** The lifts the picture has already been eased over, and how far behind the body it is still drawn, in the body's own frame (up, forward). */

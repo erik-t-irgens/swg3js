@@ -238,8 +238,11 @@ export class RigFx {
   private readonly deps: ShuttleRigDeps;
   /** The rig whose marks it plays, for binding them again from another of its branches (`rebranch`). */
   private readonly rig: TravelRig;
-  /** Whether it stands in a room (Theed's hangar), which is whether its sounds ask for one. */
-  readonly inside: boolean;
+  /**
+   * Whether its sounds ask which room they are in: a shuttle standing in a room (Theed's hangar), and a
+   * flown hull whose trip lifts off out of one or lands in one, which is set after it is lent.
+   */
+  inside: boolean;
   /** Every particle file its marks light, to be prepared before it is shown (a branch bound later adds its own). */
   readonly files: string[];
   /** Every sound its client data can play, asked of the bank as it stands and again as each clip begins. */

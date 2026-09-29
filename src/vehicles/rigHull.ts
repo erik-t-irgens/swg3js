@@ -39,15 +39,19 @@ export const RIG_HULL_TUNE = {
 };
 
 /**
- * The branch a hull flown from a rig lands with. Every pad a shuttle can be flown to plays the calm
- * branch where a rig has one (Theed's hangar is never a pad to land at: its transport stands in a room,
- * which `padOfPort` passes over, and a trip to Theed Starport sets its passenger down there), so a
- * transport out of Theed lands as every other transport does; a rig with no calm branch, the shuttle's
- * one unnamed branch, lands with its own. The rule is the trip's own (`landMood`), so the hull and the
- * route it is flown on cannot disagree.
+ * The branch a hull flown from a rig lands with where the pad it lands on does not decide it: the calm
+ * branch where a rig has one, so a transport out of Theed lands on an open pad as every other transport
+ * does; a rig with no calm branch, the shuttle's one unnamed branch, lands with its own. The rule is the
+ * trip's own (`landMood`), so the hull and the route it is flown on cannot disagree. A pad in a room
+ * (Theed's hangar) decides it instead, and the trip hands that branch to `RigHull.paths`.
  */
 export function landingMood(moods: Record<string, RigClips> | null | undefined, mood: string): string {
   return landMood(moods ? { moods } : null, { mood });
+}
+
+/** The branch a hull lands with: `land` where one is asked for and its rig has it, else its own rule (`landingMood`). */
+export function landingMoodFor(moods: Record<string, RigClips> | null | undefined, mood: string, land: string | null | undefined): string {
+  return land !== null && land !== undefined && moods && Object.prototype.hasOwnProperty.call(moods, land) ? land : landingMood(moods, mood);
 }
 
 /** A hull's clips flown as paths for one branch: the take-off and where it lets go, the landing and where it takes back, and the branch it lands with. */
@@ -250,7 +254,8 @@ export class RigHull {
   private readonly chain: ChainLink[];
   private readonly fullClips: Map<string, THREE.AnimationClip>;
   private readonly limbClips: Map<string, THREE.AnimationClip>;
-  private readonly pathsByMood = new Map<string, RigPaths | null>();
+  /** Each pair of branches flown as paths once asked for: by the branch it lifts off with, then by the one asked to land with ('' for its own rule). */
+  private readonly pathsByMood = new Map<string, Map<string, RigPaths | null>>();
   /** The ramp's foot in the model's own frame, where the framing has not yet been taken into account. */
   private readonly rampInModel: THREE.Vector3 | null;
 
@@ -316,26 +321,33 @@ export class RigHull {
   }
 
   /**
-   * One branch's take-off and landing flown as paths, with where the take-off lets go of the hull (its
-   * cut, no faster than the hull's boost) and where the landing takes it back (its join, no faster than
-   * its cruise), from the whole clips; the landing is the branch it lands with (`landingMood`). Made
-   * the first time a branch is asked for and kept, with the paths themselves kept per clip for the
-   * session (`rigPathOf`), so a hull built again after a crossing works nothing out twice; a retune of
-   * `RIG_PATH_TUNE` or `RIG_HULL_TUNE` is taken by the next hull built. Null for a branch with no
-   * take-off or landing clip.
+   * One branch's take-off and another's landing flown as paths, with where the take-off lets go of the
+   * hull (its cut, no faster than the hull's boost) and where the landing takes it back (its join, no
+   * faster than its cruise), from the whole clips. `mood` is the branch it lifts off with; `land` the one
+   * the pad it lands on asks for (a pad in a room, the trip's `landMood`), and left out or null, or one its
+   * rig has not got, the hull's own rule (`landingMood`: calm, or its only branch). Made the first time a
+   * pair is asked for and kept, with the paths themselves kept per clip for the session (`rigPathOf`), so a
+   * hull built again after a crossing works nothing out twice; a retune of `RIG_PATH_TUNE` or
+   * `RIG_HULL_TUNE` is taken by the next hull built. Null for a pair with no take-off or landing clip.
    */
-  paths(mood: string): RigPaths | null {
-    if (this.pathsByMood.has(mood)) return this.pathsByMood.get(mood) ?? null;
-    const landMood = landingMood(this.moods, mood);
+  paths(mood: string, land: string | null = null): RigPaths | null {
+    let byLand = this.pathsByMood.get(mood);
+    if (!byLand) {
+      byLand = new Map();
+      this.pathsByMood.set(mood, byLand);
+    }
+    const key = land === null ? '*' : `=${land}`;
+    if (byLand.has(key)) return byLand.get(key) ?? null;
+    const landMood = landingMoodFor(this.moods, mood, land);
     const liftClip = this.fullClips.get(this.clipsOf(mood).lift);
     const landClip = this.fullClips.get(this.clipsOf(landMood).land);
     let out: RigPaths | null = null;
     if (liftClip && landClip) {
       const lift = rigPathOf(liftClip, this.chain);
-      const land = rigPathOf(landClip, this.chain);
-      out = { lift, cut: takeoffCut(lift, RIG_HULL_TUNE.boostSpeed), land, join: landingJoin(land, RIG_HULL_TUNE.maxSpeed), liftMood: mood, landMood };
+      const landPath = rigPathOf(landClip, this.chain);
+      out = { lift, cut: takeoffCut(lift, RIG_HULL_TUNE.boostSpeed), land: landPath, join: landingJoin(landPath, RIG_HULL_TUNE.maxSpeed), liftMood: mood, landMood };
     }
-    this.pathsByMood.set(mood, out);
+    byLand.set(key, out);
     return out;
   }
 

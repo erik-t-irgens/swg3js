@@ -30,6 +30,7 @@ import {
   decodeGrid,
   isOpen,
   legInset,
+  lineThick,
   nibbleAt,
   planRoute,
   regionAt,
@@ -69,6 +70,23 @@ export interface OutdoorAgentTune {
   stuck: number;
   /** Ground covered within `stuck` seconds that counts as headway, metres. */
   stuckMoved: number;
+  /**
+   * 1 drops a corner the body has come within `reach` of only where the leg after it can be walked from
+   * where the body stands (`lineThick` on the grid), or once the body is within `sightNear` of the corner
+   * itself; 0 is the rule every body outdoors walks by, `reach` alone. Ours, from step 10's trace: a path
+   * that turns tightly round a pile of junk in Mos Eisley's street (two corners four metres apart, the
+   * obstacle between) had its turning corner dropped three metres short, and every arrival walked straight
+   * at the corner after it, into the junk, and stood there until it was let go -- all of them at the same
+   * spot to the centimetre. **It ships off** (the switch `navSightAdvance`): it changes how every creature,
+   * person and fighter outdoors walks, it has been measured on nothing but that one street, and there it did
+   * not get one arrival more through -- the bodies stopped about 1.3 m short of the corner it kept, past
+   * `sightNear`, so the corner was never dropped and the stuck watch planned the same corner again. The
+   * grid's own walk (`starportDoors.test.ts`) shows only that the legs it hands stay on open cells, not that
+   * a body with a size gets past what stands there.
+   */
+  sight: number;
+  /** Metres from a corner within which it is dropped whatever the leg after it looks like: the body is on it. */
+  sightNear: number;
 }
 
 export const OUTDOOR_AGENT: OutdoorAgentTune = {
@@ -78,6 +96,8 @@ export const OUTDOOR_AGENT: OutdoorAgentTune = {
   retry: 5,
   stuck: 3,
   stuckMoved: 2,
+  sight: 0,
+  sightNear: 1,
 };
 
 /**
@@ -343,12 +363,35 @@ export class OutdoorNav {
         this.plan(agent, g, w, x, z, goalX, goalZ, now, legInset(g.header, radius));
       }
     }
-    if (!agent.advance(x, z, this.agentTune)) return null;
+    if (!(this.agent.sight > 0 ? this.advanceSeen(agent, g, x, z) : agent.advance(x, z, this.agentTune))) return null;
     const c = agent.corner();
     if (!c) return null;
     this.out.x = c.x;
     this.out.z = c.z;
     return this.out;
+  }
+
+  /**
+   * `NavAgent.advance` with a look at the leg ahead: a corner within `reach` is dropped only where the
+   * body could walk the leg after it from where it stands, or once it is within `sightNear` of the corner
+   * itself, or it is the last. A turn tightly round an obstacle -- two corners a few metres apart with the
+   * obstacle in the bend -- otherwise lost its turning corner while the body was still on the near side,
+   * and the body walked straight at the next corner into the obstacle. Allocates nothing.
+   */
+  private advanceSeen(agent: NavAgent, g: OutdoorGrid, x: number, z: number): boolean {
+    const reach = this.agent.reach * this.agent.reach;
+    const near = this.agent.sightNear * this.agent.sightNear;
+    const c = agent.corners;
+    while (agent.at < agent.count) {
+      const dx = c[agent.at * 2] - x;
+      const dz = c[agent.at * 2 + 1] - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > reach) break;
+      const next = agent.at + 1;
+      if (next < agent.count && d2 > near && !lineThick(g, x, z, c[next * 2], c[next * 2 + 1], 0)) break;
+      agent.at++;
+    }
+    return agent.at < agent.count;
   }
 
   /**
