@@ -24,7 +24,7 @@
 // of the modules under test. Nothing comes from the game's archives.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { EVADE_CLIPS, EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, evadeChance, evadeKind, evadeShare, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeAsk, type LedgeAsk } from '../../../src/world/evade.ts';
+import { EVADE_CLIPS, EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, evadeChance, evadeKind, evadeShare, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollCommit, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeAsk, type LedgeAsk } from '../../../src/world/evade.ts';
 import { JKA, UNIT } from '../../../src/player/jkaMove.ts';
 import { GroundTactics, lowClipsFor, lowLoop, lowTransition } from '../../../src/world/mobiles/tactics.ts';
 import { GROUND_STEP } from '../../../src/world/groundStep.ts';
@@ -397,11 +397,11 @@ ok(EVADE_CLIPS.includes('BOTH_ROLL_L') && EVADE_CLIPS.includes('BOTH_FORCEJUMP1'
   const mobileFight = body(mobile, /private fight\(ctx: MobileContext, d: Decision \| null\): void \{/);
   // The brain says `cover` for a tiered person behind something, in place of `attack`.
   ok(/if \(!target \|\| !d \|\| \(d\.state !== 'attack' && d\.state !== 'cover'\)\) return;/.test(mobileFight) && !/d\.state !== 'attack'\) return;/.test(mobileFight), "a person shoots from `cover` as from `attack`: the brain's word for a tiered gunner behind something");
-  ok(/this\.state === 'attack' \|\| this\.state === 'cover';/.test(body(mobile, /get busy\(\): boolean \{/)), '... and is never frozen off screen there, as it is not while it attacks');
+  ok(/this\.state === 'attack' \|\| this\.state === 'cover'(;| \|\|)/.test(body(mobile, /get busy\(\): boolean \{/)), '... and is never frozen off screen there, as it is not while it attacks');
   ok(/if \(skill && d\.attack === 'ranged' && !willFire\(skill, this\.aimErr\)\) return;/.test(mobileFight), "a tiered person's trigger waits for its gun inside its tier's cone, the fighters' own measure");
   const mobileAct = body(mobile, /private act\(dt: number, ctx: MobileContext, tier: LodTier\): void \{/);
   ok(/this\.aimErr = Math\.atan2\(Math\.sin\(want - this\.facing\), Math\.cos\(want - this\.facing\)\);\s*this\.facing \+= clamp\(this\.aimErr, -turn, turn\);/.test(mobileAct), '... measured before the gun turns, which is the turn still to make');
-  ok(/t\.setTier\(override \?\? tierOfLevel\(this\.level\), 'person', !!this\.blade\);/.test(body(mobile, /applyFightTier\(override: number \| null = null\): void \{/)), "a person's tier is its own level's unless the console says otherwise");
+  ok(/t\.setTier\(this\.ownTier \?\? override \?\? tierOfLevel\(this\.level\), 'person', !!this\.blade\);/.test(body(mobile, /applyFightTier\(override: number \| null = null\): void \{/)), "a person's tier is its own level's unless the console says otherwise, for everybody or for that one body");
   // The brain keeps a target on a ledge only for a body that says how far it jumps.
   ok(/jumpReach: this\.tactics && !this\.inside \? jumpHeight\(this\.tactics\.jumpLevel\) : 0,/.test(body(mobile, /private think\(ctx: MobileContext\): void \{/)), 'a person tells the brain how far up it jumps');
   ok(/jumpReach: this\.cell \? 0 : jumpHeight\(this\.jumpLevel\),/.test(npcs), '... and so does a fighter');
@@ -426,6 +426,40 @@ ok(EVADE_CLIPS.includes('BOTH_ROLL_L') && EVADE_CLIPS.includes('BOTH_FORCEJUMP1'
   // A leap to level ground is timed to land on its mark; a ledge to top out over it.
   ok(/jumpAcross\(gap, height, this\.gravityNow\(\), 'top'\)/.test(mobile) && /jumpAcross\(gap - EVADE_TUNE\.leapFrom \* 0\.5, height, this\.gravityNow\(\), 'land'\)/.test(mobile), "a person's ledge jump tops out over the lip and its leap lands on its mark");
   ok(/jumpAcross\(gap, height, FIGHTER_BODY\.gravity, 'top'\)/.test(npcs) && /jumpAcross\(gap - EVADE_TUNE\.leapFrom \* 0\.5, height, FIGHTER_BODY\.gravity, 'land'\)/.test(npcs), "... and so do a fighter's");
+  // How long a roll holds the body is one rule for both (`rollCommit`), so the knob moves them together.
+  for (const [who, text] of [
+    ['a person', mobile],
+    ['a fighter', npcs],
+  ] as const) {
+    ok(/this\.tumbleUntil = this\.now \+ rollCommit\(/.test(body(text, /private startRoll\(dir: RollDir\): (boolean|void) \{/)), `${who} is held through a roll by the one rule the recovery knob moves`);
+  }
+}
+
+// --- the roll's recovery: the knob and what it replaces ----------------------------------------------
+//
+// A roll holds the body until its clip has run out, which is what every body did before the knob and
+// is what a negative `recover` still means; a number of nought or more holds it for the roll itself and
+// that much after it, whatever the clip's length. Moved live through `tuneEvade`, which both consoles
+// call, and put back afterwards so nothing later in this file sees it moved.
+{
+  const was = EVADE_TUNE.recover;
+  ok(was < 0, `the knob ships at today's behaviour: a negative recovery, which is the roll clip's own length (${was})`);
+  const roll = EVADE_TUNE.rollTime;
+  ok(near(rollCommit(1.4), 1.4) && near(rollCommit(0.3), roll) && near(rollCommit(0), roll), `so a roll is held for its clip, or for the roll itself where the clip is shorter or missing (${roll} s)`);
+  ok(near(rollCommit(Number.NaN), roll), 'and a clip length that is not a number is taken as no clip at all');
+  tuneEvade({ recover: 0.2 });
+  ok(near(EVADE_TUNE.recover, 0.2), 'the knob moves live through the one call both consoles make');
+  ok(near(rollCommit(1.4), roll + 0.2) && near(rollCommit(0), roll + 0.2), `set, a roll holds the body for the roll and the recovery after it, whatever the clip's length (${(roll + 0.2).toFixed(2)} s)`);
+  tuneEvade({ recover: 0 });
+  ok(near(rollCommit(1.4), roll), 'nought is up the moment the roll itself ends');
+  tuneEvade({ recover: -7 });
+  ok(EVADE_TUNE.recover === -1 && near(rollCommit(1.4), 1.4), 'and any negative number is the clip again, floored at -1 rather than taken as a length');
+  tuneEvade({ recover: Number.NaN });
+  ok(EVADE_TUNE.recover === -1, 'a value that is not a number is left alone');
+  // A table of its own is read as given, so a caller that keeps one can judge it without moving the live one.
+  ok(near(rollCommit(2, { ...EVADE_TUNE, share: [...EVADE_TUNE.share], recover: 0.5 }), roll + 0.5), 'a table handed in is read in place of the live one');
+  tuneEvade({ recover: was });
+  ok(EVADE_TUNE.recover === was, 'and the live knob is put back as it shipped');
 }
 
 console.log(`\n${checks} checks passed`);

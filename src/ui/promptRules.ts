@@ -166,6 +166,12 @@ export interface PromptState {
    */
   travel: '' | 'terminal' | 'collector' | 'ship';
   /**
+   * Somebody in front of you who may be spoken to (`src/world/talk.ts`): a person, neither hostile nor
+   * fighting, in reach and in the view. The cap says only that you would talk; who it is goes on the
+   * long line, which has room for a name.
+   */
+  talk: boolean;
+  /**
    * Standing at one of the gates a world's zones are walked between: 'travel' where the pack names
    * a destination and 'nowhere' where it does not. It carries no place name, deliberately — a cap
    * wears a word from the table below and never the name of what you are looking at, so where the
@@ -200,6 +206,7 @@ export function newPromptState(): PromptState {
     elevator: '',
     doorless: false,
     travel: '',
+    talk: false,
     gate: '',
     boots: false,
     bootsReach: false,
@@ -223,6 +230,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.elevator = '';
   s.doorless = false;
   s.travel = '';
+  s.talk = false;
   s.gate = '';
   s.boots = false;
   s.bootsReach = false;
@@ -271,6 +279,9 @@ export const PROMPT_WORDS = Object.freeze({
   ticketTerminal: 'the ticket terminal',
   collector: 'the ticket collector',
   shipTerminal: 'the ship terminal',
+  // Somebody you are looking at who may be spoken to. The cap says what you would do, never whom: a
+  // name is the thing you are looking at, and it is written on the long line instead.
+  talk: 'talk',
   // A gate between two of a world's zones. The cap says what happens, never where it goes: the
   // destination is a place name, which is the thing you are looking at, and it is said on the
   // message line as you come to the gate and written in full on the long line.
@@ -429,6 +440,12 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   // orders them: a lift shaft, an elevator and a doorway are all underfoot and all outrank a terminal
   // you have walked up to.
   else if (s.travel) n = push(out, n, 'mount', s.travel === 'collector' ? W.collector : s.travel === 'ship' ? W.shipTerminal : W.ticketTerminal);
+  // Somebody to talk to comes after all of those -- a terminal is a thing you walked up to use, and a
+  // traveller standing at it is not what E is for there -- and before a vehicle in reach and a gate:
+  // a person must be in front of the view to be offered at all, while a vehicle is in reach whichever
+  // way you look, so the one you are looking at is the one you meant. The vehicle's cap, pushed below,
+  // is then dropped for sharing the binding, and the gate stands aside for it as for a vehicle.
+  else if (s.talk) n = push(out, n, 'mount', W.talk);
 
   if (s.boots) {
     // The boots hold a surface out in space: a ship beside you is climbed into, otherwise they come off.

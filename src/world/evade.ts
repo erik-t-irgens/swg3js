@@ -48,6 +48,15 @@ export interface EvadeTune {
   /** Jedi Academy's roll: `JKA.rollSpeed` in metres a second, and `JKA.rollTime`. */
   rollSpeed: number;
   rollTime: number;
+  /**
+   * How long a body stays committed to a roll once the roll's own `rollTime` is spent, seconds: what it
+   * may do nothing else through before it shoots, swings or rolls again. **Negative is the roll clip's
+   * own length**, which is what every body did before this knob and still does: the clip runs well
+   * past the roll's 0.55 s, and nothing was started over it until it had run out. A number of nought or
+   * more replaces that with `rollTime` plus this, so the get-up can be made quicker or slower than the
+   * animation without touching it (`rollCommit`).
+   */
+  recover: number;
   /** Nearer than this to what it is fighting, it rolls back rather than aside, metres. */
   backInside: number;
   /**
@@ -77,6 +86,7 @@ export const EVADE_TUNE: EvadeTune = {
   cooldown: 4,
   rollSpeed: 220 * UNIT,
   rollTime: 0.55,
+  recover: -1,
   backInside: 4,
   hopShare: 0,
   leapFrom: 6,
@@ -123,8 +133,11 @@ export const JUMP_TUNE: JumpTune = {
   across: 7,
 };
 
-/** Nothing may go negative; a share past one is a certainty and no more. */
-const EVADE_FLOOR: Partial<Record<keyof EvadeTune, number>> = { cooldown: 0, rollSpeed: 0, rollTime: 0, backInside: 0, hopShare: 0, leapFrom: 0, aimRadius: 0, aimReach: 0, shotFrom: 0, shotFor: 0 };
+/**
+ * Nothing may go negative; a share past one is a certainty and no more. `recover` is the one that may,
+ * since a negative number there is a word and not a length: the roll clip's own, today's.
+ */
+const EVADE_FLOOR: Partial<Record<keyof EvadeTune, number>> = { cooldown: 0, rollSpeed: 0, rollTime: 0, recover: -1, backInside: 0, hopShare: 0, leapFrom: 0, aimRadius: 0, aimReach: 0, shotFrom: 0, shotFor: 0 };
 const JUMP_FLOOR: Partial<Record<keyof JumpTune, number>> = { hopFrom: 0, saberFrom: 0, saberHigh: 0, ledgeMin: 0, ledgeReach: 0, ledgeOver: 0, every: 0, across: 0 };
 
 /** Write the finite numbers of `from` over a table's own list, in place and no further than it runs. */
@@ -223,6 +236,19 @@ export function evadeKind(o: EvadeAsk, r1: number, r2: number, tune: EvadeTune =
   if (!(r1 < p)) return null;
   if (o.jumpLevel > 0 && r2 < tune.hopShare) return 'hop';
   return o.canRoll ? 'roll' : null;
+}
+
+/**
+ * How long a roll holds the body, seconds from its start: nothing else is started over it until this
+ * has run out (`tumbleUntil` on a fighter and on a person alike). With `recover` negative it is the
+ * longer of the roll itself and its clip, `clipLength` (0 for a clip the rig has not got), which is
+ * what it always was; with `recover` at nought or more it is the roll itself and that much after it,
+ * whatever the clip's length.
+ */
+export function rollCommit(clipLength: number, tune: EvadeTune = EVADE_TUNE): number {
+  const roll = Math.max(0, tune.rollTime);
+  if (tune.recover >= 0) return roll + tune.recover;
+  return Math.max(roll, Number.isFinite(clipLength) ? clipLength : 0);
 }
 
 /**

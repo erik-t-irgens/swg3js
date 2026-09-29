@@ -130,7 +130,7 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(sites >= 9, `every blow on the player goes through it (${sites} sites, the helper included)`);
   // The two that carry a real direction, which is what makes the arc worth having at all.
   ok(main.includes('this.hurtFrom(from ?? this.hurtSource)'), 'a blow from something alive carries where it stood');
-  ok(main.includes('onPlayerHit: (dmg, from)'), "a bolt carries where it was when it reached you");
+  ok(main.includes('onPlayerHit: (dmg, from, source)'), "a bolt carries where it was when it reached you, and whose it was");
   // And the hook the other way: what you hurt.
   ok(main.includes('this.world.watchPlayerHits('), 'the blows you land are heard through the world');
 }

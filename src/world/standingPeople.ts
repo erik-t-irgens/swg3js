@@ -411,6 +411,14 @@ export interface PeopleDeps {
    * with no streaming has no cells to wait for.
    */
   cellReady?(x: number, y: number, z: number): boolean | null;
+  /**
+   * Whether somebody else has the body for now: a person following the player, or one just asked to
+   * stop and not yet handed back (`FollowerSet.holds`). Such a body is never put down by this pass -- not
+   * for its distance, not to make room for somebody nearer, not for model memory, not for a change of the
+   * side holding the towns -- though its row is still the row it stands for, so a follower killed comes
+   * back at its post on the row's own clock as anybody else would. With none wired nothing is held.
+   */
+  keeps?(m: Mobile): boolean;
 }
 
 /**
@@ -719,8 +727,9 @@ export class StandingPeople {
       if (here) {
         // Past `drop` everyone goes. Nearer than that a body is only ever put down to make room for
         // somebody nearer still, and never one in a fight (`farthestFree`): somebody you are
-        // fighting does not vanish.
-        if (away > PEOPLE_TUNE.drop) {
+        // fighting does not vanish. Nor, at any distance, one somebody else has for now (`keeps`): a
+        // follower walks with the player and is as far from its own row as they are.
+        if (away > PEOPLE_TUNE.drop && !(here.body && deps.keeps?.(here.body))) {
           if (here.body) {
             deps.remove(here.body);
             this.last.dropped++;
@@ -791,7 +800,7 @@ export class StandingPeople {
       const cap = essential ? PEOPLE_TUNE.mostEssential : PEOPLE_TUNE.most;
       let makeRoom = -1;
       if ((essential ? liveKept : liveFought) >= cap) {
-        makeRoom = this.farthestFree(this.away[i] + PEOPLE_TUNE.swapMargin, essential);
+        makeRoom = this.farthestFree(this.away[i] + PEOPLE_TUNE.swapMargin, essential, deps);
         if (makeRoom < 0) {
           if (essential) fullKept = true;
           else fullFought = true;
@@ -891,7 +900,7 @@ export class StandingPeople {
     c.length = 0;
     for (const [k, s] of this.up) {
       const b = s.body;
-      if (k === first || !b || b.dead || b.removed || b.engaged || this.away[k] <= beyond) continue;
+      if (k === first || !b || b.dead || b.removed || b.engaged || this.away[k] <= beyond || deps.keeps?.(b)) continue;
       c.push(k);
     }
     c.sort(this.farther);
@@ -931,15 +940,16 @@ export class StandingPeople {
   /**
    * The row of the farthest person standing past `beyond` who may be put down to make room for one of
    * the same kind (`essential`, since the two kinds have caps of their own): alive, and in no fight and
-   * holding no grudge (`Mobile.engaged`). -1 for nobody. Walks the eighty standing and allocates
-   * nothing but the loop's own entries, once per person a full pass stands.
+   * holding no grudge (`Mobile.engaged`), and nobody somebody else has for now (`PeopleDeps.keeps`). -1
+   * for nobody. Walks the eighty standing and allocates nothing but the loop's own entries, once per
+   * person a full pass stands.
    */
-  private farthestFree(beyond: number, essential: boolean): number {
+  private farthestFree(beyond: number, essential: boolean, deps?: PeopleDeps): number {
     let best = -1;
     let bestAway = beyond;
     for (const [k, s] of this.up) {
       const b = s.body;
-      if (!b || b.dead || b.removed || b.engaged || s.essential !== essential) continue;
+      if (!b || b.dead || b.removed || b.engaged || s.essential !== essential || deps?.keeps?.(b)) continue;
       const away = this.away[k];
       if (away > bestAway) {
         bestAway = away;
@@ -1067,7 +1077,9 @@ export class StandingPeople {
       GCW_SIDES[world] = side;
       if (deps) {
         for (const [i, s] of this.up) {
-          if (!s.row.gcw || !s.body) continue;
+          // A guard following the player goes on following on the side it took; its row stands the other
+          // side's the next time it is stood, once the body it has now is killed or put down for distance.
+          if (!s.row.gcw || !s.body || deps.keeps?.(s.body)) continue;
           deps.remove(s.body);
           this.up.delete(i);
         }

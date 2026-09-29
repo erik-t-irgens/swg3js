@@ -515,6 +515,7 @@ export class MobileManager {
     }
     this.held.set(m, held);
     m.essential = !!opts.essential;
+    m.fixture = !!opts.fixture;
     if (opts.listed) this.listed.add(m);
     if (opts.worldId) {
       this.byWorldId.set(opts.worldId, m);
@@ -851,16 +852,17 @@ export class MobileManager {
 
   /**
    * Stand `n` of an entry `distance` ahead of a point, on a ring when several, each facing back
-   * at the point. Awaiting `loaded` on each says when they are up.
+   * at the point. Awaiting `loaded` on each says when they are up. `extra` is what else each is stood
+   * with (the console's own level for them, `SpawnOpts.overrides`); where they stand is this call's.
    */
-  spawnAhead(entry: MobileEntry, from: THREE.Vector3, forward: THREE.Vector3, n = 1, distance = 10, inside = false): SpawnResult {
+  spawnAhead(entry: MobileEntry, from: THREE.Vector3, forward: THREE.Vector3, n = 1, distance = 10, inside = false, extra: SpawnOpts = {}): SpawnResult {
     const mobiles: Mobile[] = [];
     let note = '';
     const spots = this.spotsAhead(entry, from, forward, n, distance, inside);
     if (spots.length < n) note = inside ? 'there is no floor under that spot' : 'no ground there';
     for (const spot of spots) {
       const heading = Math.atan2(from.x - spot.x, from.z - spot.z);
-      const got = this.spawn(entry, { x: spot.x, y: spot.y, z: spot.z, heading }, { inside });
+      const got = this.spawn(entry, { x: spot.x, y: spot.y, z: spot.z, heading }, { ...extra, inside });
       if (typeof got === 'string') {
         note = got;
         break;
@@ -1210,6 +1212,21 @@ export class MobileManager {
       this.saberLent.set(rig, lent);
     }
     return lent.size ? lent : null;
+  }
+
+  /**
+   * A person who may have to fight from now on is handed the rolls and jumps it was never lent (one
+   * stood as part of the furniture, asked to follow the player: `withEvade` leaves them off such a body)
+   * and put on its tier again. Answers whether anything was lent: nothing for a creature, a droid, a
+   * hologram, a body whose pack is not the humanoid one, or before any species rig is in.
+   */
+  lendFightClips(m: Mobile): boolean {
+    const cat = this.deps.catalogue();
+    const info = cat ? cat.packOf(m.entry) : null;
+    const lent = m.humanoid && info?.hierarchy === 'all_b' ? this.evadeClips(m.entry) : null;
+    if (lent) m.lendClips(lent);
+    m.applyFightTier(this.fightTier);
+    return !!lent;
   }
 
   /** The rolls and jumps a person is lent, or null before any species rig has been parsed. */

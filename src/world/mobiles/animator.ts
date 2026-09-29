@@ -57,11 +57,15 @@ export class MobileAnimator {
     this.endShot();
   };
 
-  constructor(
-    private readonly root: THREE.Object3D,
-    private readonly clips: ReadonlyMap<string, THREE.AnimationClip>,
-    private readonly additive: ReadonlySet<string>,
-  ) {
+  /** The clips it plays by name: the pack's and whatever it was lent, then or later (`lend`). */
+  private clips: ReadonlyMap<string, THREE.AnimationClip>;
+  private readonly root: THREE.Object3D;
+  private readonly additive: ReadonlySet<string>;
+
+  constructor(root: THREE.Object3D, clips: ReadonlyMap<string, THREE.AnimationClip>, additive: ReadonlySet<string>) {
+    this.root = root;
+    this.clips = clips;
+    this.additive = additive;
     this.mixer = new THREE.AnimationMixer(root);
     // One listener for the life of the animator, removed in dispose.
     this.mixer.addEventListener('finished', this.onFinished as unknown as (e: THREE.Event) => void);
@@ -69,6 +73,18 @@ export class MobileAnimator {
 
   has(clip: string | null | undefined): boolean {
     return !!clip && this.clips.has(clip);
+  }
+
+  /**
+   * More clips, lent after it was made: a person stood as part of the furniture was never lent the rolls
+   * a fight needs, and is handed them when it is asked to follow somebody. A name it already has keeps
+   * its own clip. The map is made again once, here, and never in a frame.
+   */
+  lend(extra: ReadonlyMap<string, THREE.AnimationClip>): void {
+    let fresh = false;
+    for (const name of extra.keys()) if (!this.clips.has(name)) fresh = true;
+    if (!fresh) return;
+    this.clips = new Map([...extra, ...this.clips]);
   }
 
   /** The clip's action, made once. Additive clips blend additively. */

@@ -10,7 +10,7 @@ const torchDir = new THREE.Vector3();
 import { BountyHunterKit } from './combat/bountyHunter';
 import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
-import type { ClassId, Kit, KitContext } from './combat/kit';
+import type { ClassId, Kit, KitContext, Living } from './combat/kit';
 import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
 import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
@@ -125,6 +125,11 @@ import { homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
+// Speaking to somebody, and the people who follow you (`src/world/talk.ts`, `src/world/followers.ts`).
+import { TalkUi } from './ui/talkUi.ts';
+import { GREET_CLIPS, TALK_LINES, TALK_TUNE, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkShot, tuneTalk, whyNotTalk, type TalkOption } from './world/talk.ts';
+import { FOLLOW_TUNE, tuneFollow } from './world/followers.ts';
+import { levelSamples, statsAtLevel, type LevelSample } from './world/levelStats.ts';
 import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
 import { RIG_HULL_TUNE, rigDef } from './vehicles/rigHull.ts';
@@ -505,12 +510,22 @@ const bootPoint = new THREE.Vector3();
 const bootUp = new THREE.Vector3();
 let bootBody: import('@dimforge/rapier3d-compat').RigidBody | null = null;
 const boltFrom = new THREE.Vector3();
+/** The view's forward across the ground, for who the use key would speak to; written in place. */
+const talkLook = new THREE.Vector3();
 /** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
 const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
 /** A kept ship fit copied, so a change is made on the copy and handed to saveFit whole. */
 function copyShipFit(f: ShipFit): ShipFit {
   return { components: { ...f.components }, paint: { ...f.paint }, ...(f.droid ? { droid: f.droid } : {}) };
+}
+
+/**
+ * Whether something that struck is somebody following the player (`src/world/followers.ts`): a person
+ * from the catalogue carrying a follow order. Such a blow on the player is no blow at all.
+ */
+function isFollower(t: Living | null | undefined): boolean {
+  return !!t && !!(t as { follow?: unknown }).follow;
 }
 
 /** A console hook's knobs set on a table of ours: only a key the table has, only a value of the kind it holds, and never a number below nought. */
@@ -711,6 +726,25 @@ class App {
   private readonly bandBar: BandBar;
   /** Which song the instrument in hand is set to, and whether the bar has ever been shown. */
   private bandSong = 1;
+  /** The conversation window (`src/ui/talkUi.ts`). */
+  private readonly talkUi: TalkUi;
+  /**
+   * The conversation under way, or null: whom, what may be answered, whether they follow, and until when
+   * a reply stands before the view goes back (NaN while the answers are up). One at a time.
+   */
+  private talkNow: { body: Mobile; options: TalkOption[]; following: boolean; replyUntil: number; since: number } | null = null;
+  /** The point the one spoken to turns to: the player's place, kept and written each frame. */
+  private readonly talkAt = { x: 0, z: 0 };
+  /**
+   * The camera over the shoulder: how far it has come (0 the orbit, 1 the shot), where the shot stands and
+   * what it looks at, the last body it was taken for (kept for the ease back after the talk has ended), and
+   * the few objects it is worked out with, made once.
+   */
+  private readonly talkCam = { blend: 0, body: null as Mobile | null, shot: newTalkShot(), from: new THREE.Vector3(), to: new THREE.Vector3(), look: new THREE.Vector3(), q: new THREE.Quaternion(), m: new THREE.Matrix4() };
+  /** Who the use key would speak to, gathered with the rest of the bar's state, and their name for the long line. */
+  private promptTalk = '';
+  /** The catalogue's emulator rows by level, read the first time the console asks for a body at a level of its own. */
+  private levelRows: LevelSample[] | null = null;
   private readonly shuttleMenu: ShuttleMenu;
   private readonly terminalUi: TerminalUi;
   /** The shuttle fares, fetched once with the galaxy file; null until it lands, and on a pack that has none. */
@@ -1280,7 +1314,10 @@ class App {
     // of the session, so this is a single wrapper and not a per-frame anything.
     const target = this.world.playerTarget;
     const innerDamage = target.damage.bind(target);
-    target.damage = (amount: number, from?: THREE.Vector3): void => {
+    target.damage = (amount: number, from?: THREE.Vector3, _push?: number, source?: Living | null): void => {
+      // A follower's stray blow on the one it follows is no blow at all: it never turns on you, and a
+      // swing or a spit that finds you on its way to something else lands on nothing.
+      if (isFollower(source)) return;
       this.hurtSource = from ?? null;
       // Put back whatever happens: a direction left standing would be worn by the next blow that
       // has none of its own, and a fall would flash with an arc on the side of whatever last shot.
@@ -1289,10 +1326,16 @@ class App {
       } finally {
         this.hurtSource = null;
       }
+      // Whatever struck you is what the people following you fight (`FollowerSet.assist`).
+      if (source && source !== target) this.world.followers.assist(source);
     };
     // Every blow the player lands, whatever struck and whichever file called it: the world wraps each
     // living thing's own `damage` once as it joins the list, so this is one hook rather than a dozen.
-    this.world.watchPlayerHits((hit, amount, killed) => this.landedHit(hit, amount, killed));
+    // What you strike is what the people following you fight, too.
+    this.world.watchPlayerHits((hit, amount, killed) => {
+      this.landedHit(hit, amount, killed);
+      if (!killed) this.world.followers.assist(hit);
+    });
     // What the world says once, in words: standing in a flow, and stepping out of one. It goes to the
     // message line like every other one-shot notice and never to the prompt, which is rewritten every
     // frame from outside every guard. One line when a burn starts and one when it stops, never a
@@ -1721,6 +1764,10 @@ class App {
     this.placingBar.onLift = (n) => this.liftPlacing(n);
     this.placingBar.onPlace = () => void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
     this.placingBar.onCancel = () => (this.propPlacing ? this.stopPlacingProp() : this.stopPlacing());
+    // A conversation: E at a person who is neither hostile nor fighting, answered with the number keys
+    // or the mouse while the world goes on round it.
+    this.talkUi = new TalkUi(this.ui);
+    this.talkUi.onPick = (n) => this.answerTalk(n);
     // The band: an instrument in hand plays its own track of a song, and everybody in earshot is
     // heard on theirs. There is no world music in this game and none is wanted.
     this.bandBar = new BandBar(this.ui);
@@ -5494,8 +5541,14 @@ class App {
         this.world.creatures.spawnAt(p.x + tmp.x * metres, p.z + tmp.z * metres);
         return list();
       },
-      /** Stand `n` of a catalogue entry `metres` ahead (an exact id or name, else the best find); waits for their models, so the answer says whether they are up. */
-      mobile: async (idOrFind: string, metres = 10, n = 1) => {
+      /**
+       * Stand `n` of a catalogue entry `metres` ahead (an exact id or name, else the best find); waits for
+       * their models, so the answer says whether they are up. `{ level }` stands them at a level of your
+       * choosing, with the health and blow the catalogue's own emulator rows nearest that level give
+       * through the catalogue's own curve (`src/world/levelStats.ts`), and `{ tier }` puts them alone on a
+       * fighting tier; neither touches the tier the console sets for everybody.
+       */
+      mobile: async (idOrFind: string, metres = 10, n = 1, opts?: { level?: number; tier?: number }) => {
         const mobiles = this.world.mobiles;
         const cat = this.world.mobileCatalogue;
         if (!mobiles) return 'no world loaded';
@@ -5505,14 +5558,27 @@ class App {
         const hits = exact ? [exact] : cat.search(idOrFind, { limit: 9 });
         const e = hits[0];
         if (!e) return `nothing in the catalogue matches "${idOrFind}"`;
+        // A level of its own, and the numbers a body of that level has in the catalogue's own rows.
+        const level = typeof opts?.level === 'number' && Number.isFinite(opts.level) && opts.level > 0 ? Math.round(opts.level) : null;
+        let atLevel: ReturnType<typeof statsAtLevel> = null;
+        if (level !== null) {
+          this.levelRows ??= levelSamples(cat.file.entries);
+          atLevel = statsAtLevel(level, this.levelRows, e.kind === 'npc' || e.kind === 'dressed');
+        }
+        const overrides = level !== null ? { level, ...(atLevel ? { hp: atLevel.hp, damage: atLevel.damage } : {}) } : undefined;
+        const tier = typeof opts?.tier === 'number' && Number.isFinite(opts.tier) ? Math.max(0, Math.round(opts.tier)) : null;
         this.cam.forward(tmp);
-        const r = mobiles.spawnAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), metres, this.world.inside);
+        const r = mobiles.spawnAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), metres, this.world.inside, overrides ? { overrides } : {});
+        // Its own tier before its model is up, so the one the manager puts it on as it is hung is this one.
+        if (tier !== null) for (const m of r.mobiles) m.ownTier = tier;
         await Promise.all(r.mobiles.map((m) => mobiles.loaded(m)));
         return {
           entry: { id: e.id, name: e.name, kind: e.kind, group: e.group, pack: e.pack, appearance: e.appearance },
           spawned: r.spawned,
           note: r.note,
           matches: exact ? undefined : hits.slice(1).map((h) => h.id),
+          level: level === null ? undefined : atLevel ? { level, hp: atLevel.hp, damage: atLevel.damage, from: `${atLevel.rows} of the catalogue's own rows, levels ${atLevel.near[0]} to ${atLevel.near[1]}` } : { level, note: 'the catalogue carries no emulator rows to read a level from: the body keeps its own numbers' },
+          tier: tier ?? undefined,
           mobiles: r.mobiles.map((m) => ({ ...m.describe(this.player.pos), error: mobiles.loadError(m) })),
         };
       },
@@ -5529,6 +5595,100 @@ class App {
             const why = mobiles?.whyNot(e, cat) ?? null;
             return { id: e.id, name: e.name, kind: e.kind, group: e.group, ready: cat.ready(e).ok, standable: !why, why };
           }),
+        };
+      },
+      /**
+       * Speaking to somebody (`src/world/talk.ts`). With nothing, the conversation under way (who, what
+       * the window shows, the answers, how far the camera has come over the shoulder), who the use key
+       * would speak to now, and everybody within `near` metres with whether they may be spoken to and why
+       * not. `{ start: true }` is E's own path (in reach and in the view); `{ to: key }` or
+       * `{ to: 'nearest' }` opens one with a body wherever it stands, the rules but reach and view kept;
+       * `{ pick: 1 }` is a number key; `{ leave: true }` is Escape; `{ tune }` moves `TALK_TUNE`.
+       */
+      talk: (opts?: { start?: boolean; to?: number | 'nearest'; pick?: number; leave?: boolean; near?: number; tune?: Partial<typeof TALK_TUNE> }) => {
+        if (opts?.tune) tuneTalk(opts.tune);
+        const live = (this.world.mobiles?.live ?? []).filter((m) => !m.removed);
+        const at = this.player.worldPos;
+        const byDistance = (a: Mobile, b: Mobile): number => a.pos.distanceTo(at) - b.pos.distanceTo(at);
+        let said: string | null = null;
+        if (opts?.leave) {
+          said = this.talkNow ? 'left' : 'no conversation to leave';
+          this.endTalk();
+        }
+        if (opts?.start) {
+          const m = this.talkTarget();
+          said = m ? (this.startTalk(m) ?? `talking to ${m.label}`) : 'nobody in reach and in the view to talk to';
+        }
+        if (opts?.to !== undefined) {
+          const me = this.world.playerTarget;
+          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
+          said = m ? (this.startTalk(m) ?? `talking to ${m.label}`) : opts.to === 'nearest' ? 'nobody on this world may be spoken to' : `no body with key ${opts.to}`;
+        }
+        if (typeof opts?.pick === 'number') {
+          const t = this.talkNow;
+          const o = t ? pickOption(t.options, opts.pick) : null;
+          said = !t ? 'no conversation to answer' : !o ? `answer ${opts.pick} is not on offer` : `answered: ${o.label}`;
+          this.answerTalk(opts.pick);
+        }
+        const me = this.world.playerTarget;
+        this.cam.forward(talkLook);
+        const near = typeof opts?.near === 'number' && Number.isFinite(opts.near) ? opts.near : TALK_TUNE.reach * 4;
+        const t = this.talkNow;
+        const tc = this.talkCam;
+        const r2 = (n: number): number => Math.round(n * 100) / 100;
+        return {
+          said,
+          talking: t ? { with: t.body.label, key: t.body.key, following: t.following, options: t.options.map((o, i) => `${i + 1}. ${o.label}${o.enabled ? '' : ` (${o.why})`}`), replying: Number.isFinite(t.replyUntil) } : null,
+          window: this.talkUi.debug(),
+          hudHidden: this.ui.classList.contains('talking'),
+          camera: { blend: r2(tc.blend), at: tc.body ? [r2(tc.to.x), r2(tc.to.y), r2(tc.to.z)] : null, look: tc.body ? [r2(tc.look.x), r2(tc.look.y), r2(tc.look.z)] : null },
+          wouldTalkTo: this.talkTarget()?.label ?? null,
+          near: live
+            .filter((m) => m.pos.distanceTo(at) <= near)
+            .sort(byDistance)
+            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z)), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
+          tune: { ...TALK_TUNE },
+        };
+      },
+      /**
+       * The people following you (`src/world/followers.ts`): each with who stood it, how far off it is, its
+       * place behind you and how far it is from it, what it is doing and whom it fights, and what it was
+       * before it followed; those asked to stop and not yet handed back; and the tallies and `FOLLOW_TUNE`.
+       * `{ recruit: key }` (or `'nearest'`) asks one to follow with no conversation, `{ dismiss: key }` or
+       * `{ dismiss: true }` asks one or all to stop, and `{ tune }` moves the numbers live.
+       */
+      followers: (opts?: { recruit?: number | 'nearest'; dismiss?: number | boolean; tune?: Partial<typeof FOLLOW_TUNE> }) => {
+        const set = this.world.followers;
+        if (opts?.tune) tuneFollow(opts.tune);
+        const at = this.player.worldPos;
+        let said: string | null = null;
+        if (opts?.recruit !== undefined) {
+          const me = this.world.playerTarget;
+          const live = (this.world.mobiles?.live ?? []).filter((m) => !m.removed && !set.following(m));
+          const m = opts.recruit === 'nearest' ? live.filter((x) => !whyNotTalk(x, me)).sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0] : live.find((x) => x.key === opts.recruit);
+          said = m ? (this.world.recruit(m) ?? `${m.label} follows you`) : 'nobody to ask';
+        }
+        if (opts?.dismiss === true) said = `${set.dismissAll()} asked to stop following you`;
+        else if (typeof opts?.dismiss === 'number') {
+          const m = set.bodies().find((b) => b.key === opts.dismiss);
+          said = m && set.dismiss(m) ? `${m.label} stays here` : `no follower with key ${opts.dismiss}`;
+        }
+        const report = set.report(at);
+        const bodies = set.bodies();
+        return {
+          said,
+          count: set.count,
+          most: FOLLOW_TUNE.most,
+          walking: { heading: Number(set.heading.toFixed(2)), speed: Number(set.speed.toFixed(2)) },
+          following: report.following.map((row) => {
+            const m = bodies.find((b) => b.key === row.key);
+            const d = m ? m.describe(at) : null;
+            const fight = (d?.fight ?? null) as { tier?: number; posture?: string; counts?: { shots?: number; hits?: number; rolls?: number } } | null;
+            return { ...row, state: d?.state, target: d?.target, hp: d?.hp, maxHp: d?.maxHp, level: d?.level, weapon: d?.weapon, inside: d?.inside, room: d?.room, door: d?.door, fight: fight ? { tier: fight.tier, posture: fight.posture, shots: fight.counts?.shots, hits: fight.counts?.hits, rolls: fight.counts?.rolls } : null };
+          }),
+          released: report.released,
+          tally: { ...set.tally },
+          tune: { ...FOLLOW_TUNE },
         };
       },
       /** An entry's pack and its roles by name, the gait speeds, the template's, and the walk and run the game will use: the feet check without spawning. */
@@ -6857,7 +7017,8 @@ class App {
     }
     // The windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
     // hands it back, so a panel closing under any of them leaves the pointer where it is.
-    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open || this.debugMenu.open;
+    // A conversation holds the mouse the same way: it is no panel, since the world goes on round it.
+    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open || this.debugMenu.open || this.talkNow !== null;
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
@@ -7263,6 +7424,11 @@ class App {
         this.stopPlacingProp();
         return;
       }
+      // A conversation is left, and that is all the press does.
+      if (this.talkNow && !this.menu.open) {
+        this.endTalk();
+        return;
+      }
       // The Escape that dropped the lock (and so opened the menu) must not close it again in the same breath.
       if (this.menu.open) {
         if (performance.now() - this.menuOpenedAt > 300) this.resume();
@@ -7284,7 +7450,8 @@ class App {
       this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.anyPanelOpen());
     });
     this.canvas.addEventListener('click', () => {
-      if (this.started && !this.input.locked && !this.map.open && !this.anyPanelOpen() && !this.traveling) this.input.requestLock();
+      // Not in a conversation, whose answers are clicked with the free mouse: a click beside them is no ask for the view.
+      if (this.started && !this.input.locked && !this.map.open && !this.anyPanelOpen() && !this.traveling && !this.talkNow) this.input.requestLock();
     });
 
     window.addEventListener('resize', () => {
@@ -7668,6 +7835,8 @@ class App {
 
   /** Back to the select screen: the place is written, the world unloaded, nothing streams until a character is chosen. */
   private switchToSelect(): void {
+    // A conversation ends with the world; the followers are let go of with it (`World.unload`).
+    this.endTalk(false);
     // A jump lets go of everything it holds (the hull, the white, its effects) before the ship is left.
     this.hyperspace.abort('leaving');
     // So does a run: it holds the hull and the streamer, and both would be left behind.
@@ -7739,6 +7908,7 @@ class App {
     this.promptDoorless = '';
     this.promptTravel = '';
     this.promptGate = '';
+    this.promptTalk = '';
     this.zoneGates.clear();
     this.showBodyBlock(true);
     this.hud.setPrompt('');
@@ -7952,6 +8122,8 @@ class App {
   private hurtFrom(from: THREE.Vector3 | null | undefined): void {
     // Every blow taken, with a direction or without: the zone gates stand aside for a few seconds.
     this.zoneGates.fought(this.world.simTime);
+    // And a conversation is cut short: nobody stands chatting while they are hit.
+    if (this.talkNow) this.endTalk();
     this.hud.hurt();
     if (!from) return;
     const at = this.player.worldPos;
@@ -8044,6 +8216,12 @@ class App {
       const use = this.travelHere();
       s.travel = use ? (use.kind === 'terminal' ? 'terminal' : 'collector') : this.shipTerminalNear() ? 'ship' : '';
       this.promptTravel = s.travel === 'collector' && use ? this.collectorLine(use) : s.travel === 'ship' ? 'the ship terminal: your own ship' : s.travel ? 'the ticket terminal: buy a ticket' : '';
+      // Somebody in front of you who may be spoken to. Gathered whatever else is beside you, like the
+      // port's things, so the bar's own chain decides which of the things that want the key shows; the
+      // name is kept for the long line, which has room for it.
+      const talk = this.talkTarget();
+      s.talk = !!talk;
+      this.promptTalk = talk ? talk.label : '';
     }
     const flown = p.mounted ?? p.piloting;
     if (flown) {
@@ -8115,7 +8293,7 @@ class App {
     const act = gateAction({
       live: s.live,
       onFoot: !p.mounted && !p.piloting && !p.aboard && !p.noclip,
-      free: !s.lift && !s.elevator && !s.doorless && !s.near && !s.boots && !s.eva,
+      free: !s.lift && !s.elevator && !s.doorless && !s.talk && !s.near && !s.boots && !s.eva,
       since: this.zoneGates.since(this.world.simTime),
       d: near ? near.d : null,
       to: !!near?.gate.to,
@@ -9306,6 +9484,8 @@ class App {
    */
   private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<Vehicle | null> {
     if (this.traveling) return null;
+    // A conversation does not cross: whoever it was with stays with the world, as a follower does.
+    this.endTalk(false);
     this.hyperspace.abort('travel');
     this.ultraCruise.abort();
     // A shuttle trip stops before the world goes under it: its passenger put down and its hull away.
@@ -10029,6 +10209,8 @@ class App {
     // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
     const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
     this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);
+    // A conversation takes the view over the shoulder, eased from the orbit just placed and back to it.
+    if (this.talkNow || this.talkCam.blend > 0) this.talkCamera(blocked, dt);
     // The frame on which the wheel has just brought the orbit in is drawn as the cockpit, not from the orbit's tilt.
     if (seated && eyes && this.cam.firstPerson) {
       this.cam.cockpit(input, dt, eyes, seated.group.quaternion, seated.heading, false);
@@ -10657,10 +10839,14 @@ class App {
       block: (bolt, hit, out) => player.deflect(bolt.dir, hit, this.cam, out),
       // The bolt hands over where it was when it reached you, which is the direction it came from
       // closely enough for an arc: a bolt travels 600 m/s and the point is a frame old at most.
-      onPlayerHit: (dmg, from) => {
+      onPlayerHit: (dmg, from, source) => {
         if (player.mounted || player.noclip) return;
+        // A follower's stray shot stops on you and takes nothing: it never turns on you.
+        if (isFollower(source)) return;
         player.takeDamage(dmg);
         this.hurtFrom(from);
+        // Whatever shot you is what the people following you fight.
+        if (source) this.world.followers.assist(source);
       },
     });
   }
@@ -11540,6 +11726,8 @@ class App {
    * away rather than a fade. A death without a rig (the placeholder figure) fades as before.
    */
   private die(): void {
+    // A conversation ends where the body falls; the death card sees to the mouse below.
+    this.endTalk(false);
     this.hyperspace.abort('died');
     this.ultraCruise.abort();
     // Nothing reaches a passenger, but a death that comes by some other way puts them down where they are;
@@ -14904,7 +15092,7 @@ class App {
     const act = gateAction({
       live: !this.traveling && !this.dying,
       onFoot: true,
-      free: !this.nearestVehicle() && !peerRooms()?.nearest(p.pos, BOARD_TUNE.reach),
+      free: !this.nearestVehicle() && !peerRooms()?.nearest(p.pos, BOARD_TUNE.reach) && !this.talkTarget(),
       since: this.zoneGates.since(this.world.simTime),
       d: near.d,
       to: !!near.gate.to,
@@ -14922,6 +15110,193 @@ class App {
     this.messages.system(`through the gate to ${near.gate.label ?? dest.zone.name}`);
     void this.travel(dest.planet, dest.zone.id);
     return true;
+  }
+
+  // ---- speaking to somebody ------------------------------------------------------------------------
+  //
+  // E at a person who is neither hostile nor fighting opens a conversation (`src/world/talk.ts`): the
+  // display stands aside, the camera comes over the player's shoulder onto the one spoken to, who turns
+  // to answer, and the answers are chosen with the number keys or the mouse while the world goes on round
+  // it. Two answers for now, the owner's: follow me (stop following me, to a follower), and stop talking.
+
+  /**
+   * Who the use key would speak to now: the nearest person in reach and in front of the view who may be
+   * spoken to at all (`reachOf`, `whyNotTalk`), with nothing solid between the two, or null. On foot in the
+   * world only -- never riding, at a bridge's controls, in a ship's rooms, adrift or flying free -- and
+   * never while a conversation is already up. A walk of the catalogue's bodies out and one ray for the
+   * one it picks, a few times a second; nothing is made.
+   */
+  private talkTarget(): Mobile | null {
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying || this.talkNow) return null;
+    const mobiles = this.world.mobiles;
+    if (!mobiles || this.world.planet?.space) return null;
+    const at = p.worldPos;
+    this.cam.forward(talkLook);
+    const me = this.world.playerTarget;
+    let best: Mobile | null = null;
+    let bestD = Infinity;
+    for (const m of mobiles.live) {
+      const d = reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z);
+      if (!(d < bestD) || whyNotTalk(m, me)) continue;
+      best = m;
+      bestD = d;
+    }
+    if (!best) return null;
+    // Not through a wall: eye to eye, against what stands still.
+    const eye = at.y + p.eyeHeight;
+    const face = best.pos.y + best.plan.height * TALK_TUNE.face;
+    return this.physics.blockDistance(at.x, eye, at.z, best.pos.x, face, best.pos.z, this.world.inside) === Infinity ? best : null;
+  }
+
+  /** E beside somebody who may be spoken to: the conversation. False when there is nobody, and E goes on to what else it means. */
+  private handleTalk(): boolean {
+    const m = this.talkTarget();
+    if (!m) return false;
+    return this.startTalk(m) === null;
+  }
+
+  /**
+   * Speak to somebody, or say why not. They turn to face the player and greet them, the display stands
+   * aside for the window, and the mouse is freed for the answers; the player stands and listens.
+   */
+  private startTalk(m: Mobile): string | null {
+    if (this.talkNow) this.endTalk(false);
+    const why = whyNotTalk(m, this.world.playerTarget);
+    if (why) return why;
+    const following = this.world.followers.following(m);
+    const options = talkOptions(following, this.world.followers.full);
+    const at = this.player.worldPos;
+    this.talkAt.x = at.x;
+    this.talkAt.z = at.z;
+    m.listen(this.talkAt);
+    // Not from a chair: a greeting is a whole-body clip, and played over a seated idle it stands the body up.
+    if (TALK_TUNE.greet && !m.seated) m.greet(GREET_CLIPS);
+    this.talkNow = { body: m, options, following, replyUntil: Number.NaN, since: this.world.simTime };
+    this.talkCam.body = m;
+    this.closePanels();
+    this.map.hide();
+    this.talkUi.show(m.label, greetingOf(m.side, following, m.key), options);
+    this.freeMouse(true);
+    this.audio.ui.play('panelOpen');
+    return null;
+  }
+
+  /**
+   * An answer, by its number from 1: stop talking, which ends it now, or follow me and stop following me,
+   * each with a reply that stands a moment before the view goes back. A refused answer does nothing.
+   */
+  private answerTalk(n: number): void {
+    const t = this.talkNow;
+    if (!t || Number.isFinite(t.replyUntil)) return;
+    const o = pickOption(t.options, n);
+    if (!o) return;
+    this.audio.ui.play('select');
+    if (o.id === 'leave') {
+      this.endTalk();
+      return;
+    }
+    const m = t.body;
+    if (o.id === 'follow') {
+      const why = this.world.recruit(m);
+      if (why) {
+        this.messages.system(`${m.label}: ${why}`);
+        this.endTalk();
+        return;
+      }
+      this.messages.system(`${m.label} follows you`);
+      this.talkUi.reply(lineOf(TALK_LINES.follow, m.key));
+    } else {
+      this.world.followers.dismiss(m);
+      this.messages.system(`${m.label} stays here`);
+      this.talkUi.reply(lineOf(TALK_LINES.stay, m.key));
+    }
+    t.replyUntil = this.world.simTime + TALK_TUNE.replyFor;
+  }
+
+  /**
+   * One frame of a conversation: the answers' keys, and every other key the player pressed taken so that
+   * they stand and listen; the one spoken to kept turned to them and the player turned to it; and the end,
+   * once a reply has stood its time, or whatever else ends it -- they are gone or fighting, the two have
+   * drawn apart, the player is on something, down or away, or a panel or the map has the screen.
+   */
+  private stepTalk(dt: number): void {
+    const input = this.input;
+    for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.answerTalk(n);
+    input.dropPresses();
+    const t = this.talkNow;
+    if (!t) return;
+    const m = t.body;
+    const p = this.player;
+    const at = p.worldPos;
+    this.talkAt.x = at.x;
+    this.talkAt.z = at.z;
+    const done = Number.isFinite(t.replyUntil) && this.world.simTime >= t.replyUntil;
+    const gone = m.removed || m.dead || m.engaged;
+    const away = p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.dying || this.traveling || !this.inWorld;
+    const screen = this.anyPanelOpen() || this.map.open;
+    const apart = Math.hypot(m.pos.x - at.x, m.pos.z - at.z) > TALK_TUNE.keep;
+    if (done || gone || away || screen || apart) {
+      this.endTalk(!away && !screen);
+      return;
+    }
+    // Turned to the one spoken to, so the camera looks over a shoulder and not into a face.
+    const want = Math.atan2(m.pos.x - at.x, m.pos.z - at.z);
+    const diff = Math.atan2(Math.sin(want - p.heading), Math.cos(want - p.heading));
+    p.heading += diff * Math.min(1, dt * 6);
+  }
+
+  /**
+   * The conversation over: the one spoken to thinks again, the window goes and the display comes back,
+   * and the view eases back to the orbit. `handBack` gives the mouse back to the game unless something
+   * else holds it; a death, a travel and the select screen say false and see to the mouse themselves, and
+   * the view goes back at once, since what it looked at is going with the world.
+   */
+  private endTalk(handBack = true): void {
+    const t = this.talkNow;
+    if (!t) return;
+    this.talkNow = null;
+    t.body.listen(null);
+    this.talkUi.hide();
+    if (!handBack) {
+      this.talkCam.blend = 0;
+      this.talkCam.body = null;
+      return;
+    }
+    this.handBackMouse();
+  }
+
+  /**
+   * The view over the shoulder, eased in and out over the orbit the camera has just taken this frame: from
+   * the player's eye behind them, to their right and a touch above, looking at the face of the one spoken
+   * to (`talkShot`), pulled in before anything solid behind the player by the camera's own block test.
+   * After the conversation it eases back from where the shot last stood. Allocates nothing.
+   */
+  private talkCamera(blocked: import('./core/camera').CameraBlocker | null, dt: number): void {
+    const tc = this.talkCam;
+    tc.blend = stepBlend(tc.blend, this.talkNow ? 1 : 0, dt);
+    if (tc.blend <= 0) {
+      tc.body = null;
+      return;
+    }
+    const m = tc.body;
+    const cam = this.cam.camera;
+    if (m && !m.removed) {
+      const p = this.player.worldPos;
+      const shot = talkShot(p.x, p.y + this.player.eyeHeight, p.z, m.pos.x, m.pos.y + m.plan.height * TALK_TUNE.face, m.pos.z, tc.shot);
+      tc.from.set(p.x, p.y + this.player.eyeHeight, p.z);
+      tc.to.set(shot.cx, shot.cy, shot.cz);
+      if (blocked && shot.reach > 1e-3) {
+        const allowed = pullIn(shot.reach, blocked(tc.from, tc.to));
+        if (allowed < shot.reach) tc.to.sub(tc.from).multiplyScalar(allowed / shot.reach).add(tc.from);
+      }
+      tc.look.set(shot.lx, shot.ly, shot.lz);
+      tc.m.lookAt(tc.to, tc.look, cam.up);
+      tc.q.setFromRotationMatrix(tc.m);
+    }
+    const s = easeShare(tc.blend);
+    cam.position.lerp(tc.to, s);
+    cam.quaternion.slerp(tc.q, s);
   }
 
   /** The lift shaft the player stands in, in a building or aboard a ship, with its stops. */
@@ -15650,6 +16025,9 @@ class App {
       // The lift menu takes the number keys while it is up, before the kit's slots see them.
       if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
           if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey('Digit' + n)) this.shuttleMenu.pickKey(n);
+      // A conversation takes the number keys for its answers and every other key the player has: the world
+      // goes on round it, and the player stands and listens (`stepTalk`).
+      if (this.talkNow) this.stepTalk(dt);
 
       if (active) {
         // A passenger in a shuttle has the same few keys a jump leaves: the trip is theirs to step off
@@ -15703,7 +16081,9 @@ class App {
             // Seated in a shuttle, E is the passenger's own: stepping off, and nothing else.
             if (riding) this.ride?.pressE();
             else if (!this.hyperspace.locksControls) {
-              if (!this.handleElevator() && !this.handleTravel() && !this.handleZoneGate()) this.handleMount();
+              // The order the bar's own rules offer them in (`promptRules.ts`, whose test pins this line):
+              // what is underfoot, a port's own things, somebody you are looking at, a gate, and a vehicle.
+              if (!this.handleElevator() && !this.handleTravel() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -15869,7 +16249,8 @@ class App {
       // Out of the eyes the body stays in the picture and the head, hair and headwear draw into the shadows only (headHide.ts).
       if (player.rig) {
         player.group.visible = true;
-        player.rig.setHeadHidden(this.fpHeadForce ?? this.cam.firstPerson);
+        // A conversation seen over the shoulder shows the head, whatever the wheel had the view at.
+        player.rig.setHeadHidden(this.fpHeadForce ?? (this.cam.firstPerson && this.talkCam.blend < 0.5));
         // The head follows where the view looks (`src/player/lookAt.ts`). It is asked for here, after
         // the physics and the camera and after the figure's own pose, so the direction is this frame's
         // and the turn is measured from where `twistTorso` has just left the chest rather than from
@@ -15951,6 +16332,7 @@ class App {
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
         else if (S8.travel) prompt = `<b>E</b> ${this.promptTravel}`;
+        else if (S8.talk) prompt = `<b>E</b> talk to ${this.promptTalk}`;
         else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
         // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.
         else if (isSurfaceRoom(player.aboard)) prompt = `<b>gravity boots</b> on ${S8.bootsReach ? 'a surface · <b>E</b> climbs into the ship' : 'a surface · <b>E</b> takes them off'} · <b>jump</b> lets go${player.aboard.atEdge ? ' · <b>the surface underfoot runs out near here</b>' : ''} · <b>${shipKey}</b> ship menu`;

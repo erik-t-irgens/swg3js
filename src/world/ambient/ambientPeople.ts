@@ -441,7 +441,7 @@ export class AmbientPeople {
   };
   private readonly yieldAdd = (r: OursRecord): number => this.yieldDeps?.frees?.(r.body) ?? 0;
   /** What has happened since the world loaded, for the console. */
-  readonly tally = { stood: 0, boarded: 0, missed: 0, arrived: 0, outwalked: 0, letGo: 0, left: 0, shed: 0, replanned: 0, heldInView: 0, refused: '' };
+  readonly tally = { stood: 0, boarded: 0, missed: 0, arrived: 0, outwalked: 0, letGo: 0, left: 0, shed: 0, replanned: 0, heldInView: 0, recruited: 0, refused: '' };
   /** Whether the console's trace is kept (`__debug.ours({ trace: true })`), and the accounts of those whose day is over, the latest last. */
   private tracing = false;
   private readonly traced: OursTrace[] = [];
@@ -540,6 +540,7 @@ export class AmbientPeople {
     this.tally.shed = 0;
     this.tally.replanned = 0;
     this.tally.heldInView = 0;
+    this.tally.recruited = 0;
     this.tally.refused = '';
     this.traced.length = 0;
   }
@@ -1024,6 +1025,12 @@ export class AmbientPeople {
       this.lose(r, now, deps, false);
       return;
     }
+    // Being spoken to: its day waits for the conversation, stalls and all, rather than walking it off
+    // mid-sentence. Its walk's headway is started again, so the stand is not counted as a stall after.
+    if (m.listening) {
+      restartHeadway(r.track, now);
+      return;
+    }
     if (r.trace) this.tracePass(r, now);
     const away = Math.hypot(m.pos.x - at.x, m.pos.z - at.z);
     // Out of range, a traveller is put away and stood again where its day has got to when the player
@@ -1316,6 +1323,34 @@ export class AmbientPeople {
     deps.remove(m);
     this.drop(r);
     f.bodies[i] = null;
+    return true;
+  }
+
+  /**
+   * One of ours asked to follow the player: off the books here without being taken away, since the
+   * follower set has it now and takes it away itself once it is let go (`src/world/followers.ts`). A
+   * filler's place waits for somebody new, as it does when one leaves; a traveller is done with for its
+   * round, so it is not stood again as well. Up off its seat and walked by no routine of ours any more.
+   * False for a body that is not one of ours.
+   */
+  release(m: Mobile, now: number): boolean {
+    let r: OursRecord | null = null;
+    for (const rec of this.records.values()) {
+      if (rec.body !== m) continue;
+      r = rec;
+      break;
+    }
+    if (!r) return false;
+    if (r.trace) r.trace.ended = 'asked to follow';
+    this.drop(r);
+    if (r.fill) {
+      const spot = r.fill.spots[r.slot];
+      if (m.seated && spot) m.rise(spot.frontX, spot.frontZ);
+      r.fill.bodies[r.slot] = null;
+      leaveSlot(r.fill.slots[r.slot], now, r.fill.seed, r.slot);
+    } else if (r.plan) this.done.set(r.num, r.plan.round);
+    m.routine = null;
+    this.tally.recruited++;
     return true;
   }
 

@@ -49,6 +49,7 @@ import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
+import { FollowerSet, type FollowerOwner } from './followers.ts';
 import { sharedClock } from './sharedClock.ts';
 import { worldNav } from './nav/nav.ts';
 import { MOBILE_CACHE } from './mobiles/assets.ts';
@@ -515,6 +516,12 @@ export class World {
   /** The player as something that can be hurt and fought: its place and state are set each frame. */
   readonly playerTarget = new PlayerTarget();
   /**
+   * The people following the player (`src/world/followers.ts`): stepped before the bodies think, so each
+   * reads its place behind the player as it is this step, and let go of with the world (`unload`), which
+   * is how a follower is left behind by a travel and at the select screen.
+   */
+  readonly followers = new FollowerSet<Mobile>();
+  /**
    * Which room a living thing is in, as this world follows it: the player's own followed room, a
    * catalogue body's (`navCell`), a fighter's (`cell`); null for open ground, undefined for anything
    * nobody follows (another player, a turret). One arrow for the session, handed to the mobiles on
@@ -802,6 +809,17 @@ export class World {
     // The ground a doorway's sill is measured against, so a door up in the air is never a way in on
     // foot (`doorway.ts`). Read at the call: the terrain is this world's and changes with each travel.
     doorwayNav.ground = (x, z) => this.terrain.heightAt(x, z);
+    // What the followers ask of the world: one of ours or a lair's handed back is taken away here, the
+    // player walks through whoever follows them, and a follower's fall is said on the message line.
+    this.followers.deps = {
+      remove: (m) => this.mobiles?.remove(m),
+      // By handle, which a collider keeps after its body has gone, so a follower taken away is always
+      // unmarked and a handle handed out again to a wall is never walked through.
+      walkThrough: (m, on) => {
+        for (const c of m.colliders) this.physics.markWalkThrough(c, on);
+      },
+      say: (text) => this.onNote?.(text),
+    };
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     // What is added to the scene or the ground's root from here on is queued for the material scan (step 6).
     this.sceneAdds.watch(scene);
@@ -1724,6 +1742,8 @@ export class World {
     // The outdoor walkability grid: about forty megabytes of typed arrays for a 16 km world, and
     // nothing else holds them.
     outdoorNav.unload();
+    // Whoever was following the player stays behind with the world they were following them in.
+    this.followers.clear();
     wildLife.unload();
     standingPeople.unload();
     ambientPeople.unload();
@@ -5467,9 +5487,43 @@ export class World {
         // A person in a room needs that room's floor to exist first. The streamer builds a
         // building's cells by distance, so asking for the ground there answers null until it has.
         cellReady: (x, y, z) => this.groundAt(x, y + 2, z, true) !== null,
+        // A person following the player, or just asked to stop, is the follower set's for now.
+        keeps: (m) => this.followers.holds(m),
       };
     }
     return this.peopleDepsKept;
+  }
+
+  /**
+   * Ask a person to follow the player, or say why not. Whoever stood it decides who takes it away when it
+   * is done with: a person standing where the data put it stays that row's, and its row is not put down
+   * while it follows (`PeopleDeps.keeps`); one of ours or a lair's is given up to the follower set, which
+   * takes it away itself once it is let go; one stood by hand is left to the manager as it always was.
+   * Then it is made ready to walk -- up off a seat, in its own idle -- and lent what a fight needs if it
+   * was stood without it, and it takes the player's side (`FollowerSet.add`).
+   */
+  recruit(m: Mobile): string | null {
+    const mobiles = this.mobiles;
+    if (!mobiles || m.removed || m.dead) return 'gone';
+    if (this.followers.following(m)) return 'already following you';
+    if (this.followers.full) return 'you have as much company as you can take';
+    const id = mobiles.worldIdOf(m);
+    let owner: FollowerOwner;
+    if (!id) owner = 'own';
+    else if (id.startsWith('stood:')) owner = 'stood';
+    else if (id.startsWith('ours:')) {
+      if (!ambientPeople.release(m, this.simTime)) return 'not one of ours any more';
+      owner = 'adopted';
+    } else if (id.startsWith('wild:')) {
+      if (!wildLife.release(m)) return 'not one of its camp any more';
+      owner = 'adopted';
+    } else return 'kept by the world, not by you';
+    m.readyToFollow();
+    const why = this.followers.add(m, owner, this.playerTarget, this.simTime);
+    if (why) return why;
+    // After it has left the furniture: `lendFightClips` puts it on its tier again, now that it may fight.
+    mobiles.lendFightClips(m);
+    return null;
   }
 
   /** What the people of ours are allowed to ask of this world. Kept, like the wild world's. */
@@ -6180,6 +6234,10 @@ export class World {
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     perf.end(SEC.creatures);
     perf.begin(SEC.mobiles);
+    // The followers' places behind the player, before the bodies think, so each thinks about where the
+    // player is this step (`src/world/followers.ts`). A few sums while nobody follows: the way the player
+    // is walking is kept all the same, so somebody asked to follow knows it from the first step.
+    this.followers.step(dt, this.playerTarget);
     // A step has passed since the last frame was drawn: how that frame saw each body's rooms is read
     // below, and only while it is the one frame just drawn (`ActorRoutes.levelOf`).
     this.portals?.actors.tick();

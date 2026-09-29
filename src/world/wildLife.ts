@@ -655,6 +655,24 @@ export class WildLife {
     return true;
   }
 
+  /**
+   * One of a site's people asked to follow the player: off its site's books without being taken away, the
+   * follower set having it now (`src/world/followers.ts`). Counted as the site losing it to the player, as
+   * a kill is, so a camp whose last person walks off with you waits its own clock before its people stand
+   * again rather than standing a fresh crowd in front of you at once. False for a body no site stood.
+   */
+  release(m: Mobile): boolean {
+    for (const rec of this.standing.values()) {
+      const i = rec.bodies.indexOf(m);
+      if (i < 0) continue;
+      rec.bodies.splice(i, 1);
+      rec.killed++;
+      this.count();
+      return true;
+    }
+    return false;
+  }
+
   /** Put a site away: every body it stood, the thing in its middle, and the record. */
   private put(key: string, deps: WildDeps): void {
     const rec = this.standing.get(key);
