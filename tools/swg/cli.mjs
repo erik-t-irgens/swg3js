@@ -156,7 +156,8 @@
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { resolveParts } from './appearance.mjs';
+import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs';
+import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
 import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
@@ -746,7 +747,55 @@ function loadAppearanceMesh(vfs, appearancePath) {
   return { mesh: merged, meshPath: meshParts === 1 ? parts.find((p) => p.mesh).mesh : appearancePath, partCount: meshParts, cells: cellList.length > 1 ? cellList : null, portalGeometry, effects };
 }
 
-/** `opts.paint`: paint shaders are baked at their defaults (textureFor), for the ships command. */
+/** What a pack's models came to with their levels: how many carry any, and primitives and triangles finest against lowest. */
+function lodSummaryLine(label, defs) {
+  let withLods = 0;
+  let p0 = 0;
+  let pLow = 0;
+  let t0 = 0;
+  let tLow = 0;
+  let empty = 0;
+  for (const d of defs) {
+    if (!d.lods?.length) continue;
+    withLods++;
+    const low = d.lods[d.lods.length - 1];
+    p0 += d.lods[0].prims;
+    t0 += d.lods[0].tris;
+    pLow += low.prims;
+    tLow += low.tris;
+    if (!low.prims) empty++;
+  }
+  return `levels (${label}): ${withLods} of ${defs.length} models carry lower levels; over those, primitives ${p0} -> ${pLow} and triangles ${t0} -> ${tLow} at the lowest${empty ? `, ${empty} of which draw nothing there (the artists' no_render)` : ''}`;
+}
+
+/**
+ * A model's lower detail levels (step 7, `lodMeshesFor` in lodlevels.mjs), read with this converter's own
+ * mesh reader: each level's resolved parts parsed and put in the part's frame.
+ */
+const LOD_DEPS = {
+  exteriorAppearance,
+  detailLevels,
+  resolveParts,
+  meshGroups: (part) => {
+    const m = parseMesh(parseIff(activeVfs.read(part.mesh)));
+    if (part.transform) transformMesh(m, part.transform);
+    return m.groups;
+  },
+};
+/** The archives `LOD_DEPS.meshGroups` reads from, set by `lodMeshesFor`'s one caller. */
+let activeVfs = null;
+function lodMeshesFor(vfs, source, finestGroups) {
+  activeVfs = vfs;
+  return lodMeshesForDeps(vfs, source, finestGroups, LOD_DEPS);
+}
+
+/**
+ * `opts.paint`: paint shaders are baked at their defaults (textureFor), for the ships command.
+ * `opts.lods`: carry the model's lower detail levels (step 7) -- `true` from this appearance, or the
+ * appearance to take them from (the snapshot converts a one-mesh model from its `.msh`, whose chain is
+ * the template's appearance). Only the packs the streamer instances ask for them: the placed objects,
+ * the flora and the gallery.
+ */
 function convertOne(vfs, appearancePath, outFile, opts = {}) {
   const { mesh, meshPath, partCount, cells, portalGeometry, effects } = loadAppearanceMesh(vfs, appearancePath);
   const textures = new Map();
@@ -759,7 +808,26 @@ function convertOne(vfs, appearancePath, outFile, opts = {}) {
   const baseName = basename(meshPath).replace(/\.[^.]+$/, '');
   // One GLB node per portal cell ("cell:<index>:<name>"), or a single node for plain appearances.
   const meshes = cells ? cells.map((c) => ({ name: `cell:${c.index}:${c.name}`, groups: c.groups, hardpoints: c.hardpoints, bounds: c.bounds })) : [{ name: baseName, ...mesh }];
-  const glb = buildGlb(meshes, { flipX, textures });
+  // What the model's own shaders came to, before any lower level's are added beside them.
+  const textured = textures.size;
+  let lodInfo = null;
+  if (opts.lods) {
+    try {
+      lodInfo = lodMeshesFor(vfs, opts.lods === true ? appearancePath : opts.lods, cells ? (cells.find((c) => c.index === 0)?.groups ?? []) : mesh.groups);
+    } catch (err) {
+      console.error(`  ${appearancePath}: its lower detail levels were left out (${err.message})`);
+      lodInfo = null;
+    }
+    for (const lm of lodInfo?.meshes ?? []) {
+      for (const g of lm.groups) {
+        if (textures.has(g.shader)) continue;
+        const t = textureFor(vfs, g.shader, opts);
+        if (t) textures.set(g.shader, t);
+        if (t && surfaceUse) surfaceUse.add(t);
+      }
+    }
+  }
+  const glb = buildGlb(meshes, { flipX, textures, lods: lodInfo?.meshes ?? [] });
   mkdirSync(dirname(outFile), { recursive: true });
   writeFileSync(outFile, glb);
   const tris = mesh.groups.reduce((n, g) => n + g.primitives.reduce((m, p) => m + p.indices.length / 3, 0), 0);
@@ -780,7 +848,7 @@ function convertOne(vfs, appearancePath, outFile, opts = {}) {
   // The cells' walkable floors, into the pack's floors.json rather than the manifest: the manifests
   // are written indented, and a floor is thousands of plain numbers.
   if (cells) noteFloors(vfs, dirname(outFile), basename(outFile).replace(/\.glb$/i, ''), cells, flipX);
-  return { meshPath, mesh, flipX, tris, shaders, textured: textures.size, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects };
+  return { meshPath, mesh, flipX, tris, shaders, textured, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects, lods: lodInfo?.lods ?? null };
 }
 
 // The floors a portal building's cells walk on, gathered per pack and written beside the manifest
@@ -1480,10 +1548,11 @@ function convertFlora(vfs, template, outDir, manifest) {
       }
       const id = familyOf(appearance);
       try {
-        const conv = convertOne(vfs, appearance, join(outDir, 'flora', `${id}.glb`));
+        // With the client's own lower levels (step 7): the lowest is the plant's own sprite card on 58 of them.
+        const conv = convertOne(vfs, appearance, join(outDir, 'flora', `${id}.glb`), { lods: true });
         const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
         const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
-        defs.set(key, { id, file: `flora/${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance, family: family.id, familyName: family.name });
+        defs.set(key, { id, file: `flora/${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance, family: family.id, familyName: family.name, ...(conv.lods ? { lods: conv.lods } : {}) });
       } catch (err) {
         missing++;
         console.warn(`flora ${appearance}: ${err.message}`);
@@ -2660,6 +2729,9 @@ function packStatus(dir) {
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
     if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
+    // The client's own lower detail levels and each indoor object's room (step 7): a pack without them draws
+    // every placed thing and plant at its finest at every distance, and finds a room's furniture by its boxes.
+    else if (objects && (manifest.lodFormat ?? 0) < LOD_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, (manifest.lodFormat ?? 0) < 1 ? `${planet}'s placed models and flora were converted before the client's own detail levels (every one drawn at its finest at any distance)` : `${planet}'s placed models and flora carry detail levels the game can never draw or that stand somewhere else than the model, and a few surfaces a detail map with no coordinates for it`);
     // Travel and the fittings both hang off the same blocks of the emulator's scripts (the Core3 reference),
     // and both must run after the world they join to. A world the scripts really say nothing about
     // writes no file at all, so "none" and "not run yet" cannot be told apart here and the ask is
@@ -2951,6 +3023,7 @@ function packStatus(dir) {
   // are asked for only once it exists. So it is asked for like any other pack now (the owner's call).
   if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
   else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
+  else if ((gallery.lodFormat ?? 0) < LOD_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, (gallery.lodFormat ?? 0) < 1 ? "the gallery's models were converted before the client's own detail levels" : "the gallery's models carry detail levels the game can never draw or that stand somewhere else than the model");
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
   // gallery's models, so it is asked for after the gallery and never before one exists. What each
@@ -3347,6 +3420,29 @@ async function snapshotPlanet(vfs, planet, outDir) {
     }
     const inRegion = entries.filter((e) => e.world && Math.hypot(e.world.pos[0] - cx, e.world.pos[2] - cz) <= radius);
     console.error(`${inRegion.length} within ${radius} m of ${cx},${cz}`);
+    // Which building and which room each indoor object stands in (step 7, for 2b's room mask): its
+    // nearest container that is a cell object is the room (`cellIndex`), and that cell's own container
+    // is the building. Written as the index of the building's own row in `objects` (`in`) and the room
+    // (`cell`); a building this run did not place (a failed model) leaves `in` out and the game finds
+    // the host from the rooms' boxes, as it did before.
+    const entryById = new Map(entries.map((e) => [e.node.id, e]));
+    const objectRow = new Map();
+    const indoorRows = [];
+    const roomOf = (e) => {
+      let id = e.parentId;
+      for (let guard = 0; id && guard < 16; guard++) {
+        const p = entryById.get(id);
+        if (!p) return null;
+        if (/shared_cell\.iff$/i.test(snap.templates[p.node.templateIndex] ?? '')) return { cell: p.node.cellIndex, building: p.parentId };
+        id = p.parentId;
+      }
+      return null;
+    };
+    const pushObject = (e, obj) => {
+      objectRow.set(e.node.id, objects.length);
+      if (obj.contained) indoorRows.push([objects.length, e]);
+      objects.push(obj);
+    };
     const cache = new Map();
     const skipped = {};
     const examples = {};
@@ -3390,7 +3486,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
           skip(`skeletal convert failed: ${model?.failed ?? 'unknown'}`, template);
           continue;
         }
-        objects.push({ template, model: sid, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 });
+        pushObject(e, { template, model: sid, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: n.radius, contained: e.parentId !== 0 });
         continue;
       }
       if (r.particle) {
@@ -3402,7 +3498,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
           continue;
         }
         if (!models.has(p.id)) models.set(p.id, { ...p, source: r.source ?? r.appearance });
-        objects.push({ template, model: p.id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: Math.max(n.radius, p.bounds.max[0]), contained: e.parentId !== 0 });
+        pushObject(e, { template, model: p.id, x: e.world.pos[0], y: e.world.pos[1], z: e.world.pos[2], q: e.world.q, radius: Math.max(n.radius, p.bounds.max[0]), contained: e.parentId !== 0 });
         continue;
       }
       const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
@@ -3410,12 +3506,14 @@ async function snapshotPlanet(vfs, planet, outDir) {
       if (!models.has(id)) {
         if (models.size >= max) break;
         try {
-          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+          // With the client's own lower detail levels (step 7), taken from the appearance chain even where
+          // the model itself is converted from its one finest mesh.
+          const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { lods: r.appearance });
           const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
           const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
           const effects = attachedEffects(vfs, conv.effects, outDir);
-          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}) });
-          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}${effects.length ? `, ${effects.length} attached particle effect(s)` : ''}`);
+          models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.lods ? { lods: conv.lods } : {}) });
+          console.error(`  ${id}: ${conv.tris} tris, ${conv.textured}/${conv.shaders.length} textured${conv.partCount > 1 ? `, ${conv.partCount} parts` : ''}${effects.length ? `, ${effects.length} attached particle effect(s)` : ''}${conv.lods ? `, levels ${conv.lods.map((l) => `${l.level}@${l.near}m ${l.tris}t/${l.prims}p`).join(' ')}` : ''}`);
         } catch (err) {
           models.set(id, { failed: err.message });
         }
@@ -3430,8 +3528,23 @@ async function snapshotPlanet(vfs, planet, outDir) {
         const layer = copyTerrainLayer(vfs, template, outDir, layerCache);
         if (layer) obj.layer = layer;
       }
-      objects.push(obj);
+      pushObject(e, obj);
     }
+    // The rooms, once every building's row exists.
+    let roomsWritten = 0;
+    let hostsWritten = 0;
+    for (const [row, e] of indoorRows) {
+      const r = roomOf(e);
+      if (!r || !(r.cell > 0)) continue;
+      objects[row].cell = r.cell;
+      roomsWritten++;
+      const b = objectRow.get(r.building);
+      if (b !== undefined && !objects[b].contained) {
+        objects[row].in = b;
+        hostsWritten++;
+      }
+    }
+    console.log(`rooms: ${indoorRows.length} objects inside buildings, ${roomsWritten} with their room from the cell that holds them, ${hostsWritten} with the building's own row`);
     const terrainFile = await copyTerrain(vfs, planet, outDir);
     const layout = { planet, center: { x: cx, z: cz }, radius: Number.isFinite(radius) ? radius : null, terrain: terrainFile, objects, skipped };
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
@@ -3439,7 +3552,11 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     manifest.materialFormat = MATERIAL_FORMAT;
+    // The placed models and the flora carry their lower detail levels from this run on (step 7).
+    manifest.lodFormat = LOD_FORMAT;
     const flora = lastTemplate ? convertFlora(vfs, lastTemplate, outDir, manifest) : { models: 0, missing: 0, families: 0 };
+    console.log(lodSummaryLine('layout', manifest.categories.layout));
+    console.log(lodSummaryLine('flora', manifest.categories.flora ?? []));
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     writePois(vfs, planet, snap, entries, cx, cz, outDir);
@@ -5566,11 +5683,12 @@ switch (cmd) {
           const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
           id = familyOf(single ? r.parts[0].mesh : r.appearance);
           if (!models.has(id)) {
-            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`));
+            // With the client's own lower detail levels (step 7): the gallery is a world the streamer places too.
+            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { lods: r.appearance ?? true });
             const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
             const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
             const effects = attachedEffects(vfs, conv.effects, outDir);
-            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.lods ? { lods: conv.lods } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
             if (!conv.tris) console.log(`  ${template}: converted with no triangles`);
           }
         }
@@ -5644,15 +5762,21 @@ switch (cmd) {
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: 'gallery', center: { x: 0, z: 0 }, radius: null, objects: g.objects }));
     // A run of some sections keeps the others' models as they were, so it keeps their material format too.
     let galleryFormat = MATERIAL_FORMAT;
+    // And its detail levels' stamp, the same way (step 7).
+    let galleryLods = LOD_FORMAT;
     if (options.only) {
       try {
-        galleryFormat = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).materialFormat ?? 1;
+        const was = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
+        galleryFormat = was.materialFormat ?? 1;
+        galleryLods = was.lodFormat ?? 0;
       } catch {
         galleryFormat = 1;
+        galleryLods = 0;
       }
     }
     const galleryModels = [...models.values()].filter((m) => m && !m.failed);
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, categories: { layout: galleryModels } }, null, 2));
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, categories: { layout: galleryModels } }, null, 2));
+    console.log(lodSummaryLine('gallery', galleryModels));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
     writeFloors(outDir, galleryModels.map((m) => m.id));
     console.log(`-> ${outDir}: ${g.objects.length} exhibits, ${models.size} models; play it with ?planet=gallery`);

@@ -132,6 +132,35 @@ export function detailLevels(vfs, rawPath, depth = 0, seen = new Set()) {
 }
 
 /**
+ * The appearance whose detail levels a model's exterior switches between: the file itself, followed
+ * through `.apt` redirections, and for a portal building its exterior cell's own appearance (a
+ * building's level chains are per cell, and only the shell outside is ever seen from afar). Null for
+ * a building with no exterior, or a chain that cannot be read.
+ */
+export function exteriorAppearance(vfs, rawPath, depth = 0) {
+  const path = appearancePath(rawPath);
+  const lower = path.toLowerCase();
+  if (depth > 8 || !vfs.has(path)) return null;
+  if (lower.endsWith('.apt')) {
+    try {
+      const name = find(parseIff(vfs.read(path)), 'NAME');
+      return name ? exteriorAppearance(vfs, readCString(name.data).value, depth + 1) : null;
+    } catch {
+      return null;
+    }
+  }
+  if (lower.endsWith('.pob')) {
+    try {
+      const { cells } = parsePob(parseIff(vfs.read(path)));
+      return cells[0]?.appearance ? appearancePath(cells[0].appearance) : null;
+    } catch {
+      return null;
+    }
+  }
+  return path;
+}
+
+/**
  * Resolve an appearance to mesh parts: [{ mesh, transform | null }], where
  * transform is a row-major 3x4 in the appearance's local space.
  *

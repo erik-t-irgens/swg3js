@@ -8,7 +8,8 @@
 import * as THREE from 'three';
 import { RandomGenerator } from '../swg/terrain/fractal.ts';
 import { FastRandomGenerator, hashFloat, hashTuple, type FloraChild } from '../swg/terrain/flora.ts';
-import type { LoadedModel } from './assetPack';
+import type { LoadedModel, Primitive } from './assetPack.ts';
+import type { FloraChunkData } from './floraBatch.ts';
 import type { Collider, Exclusion } from './props';
 
 /** Flora smaller than this (metres of model radius) never casts a shadow. */
@@ -73,7 +74,9 @@ export class FloraPlanter {
     for (const model of this.models.values()) {
       if (seen.has(model)) continue;
       seen.add(model);
-      for (const prim of model.primitives) {
+      // Every level's pieces (step 7): a lower level's atlas or sprite card is drawn by the region batches
+      // from the moment a plant is far enough, and must not build its program on that frame.
+      for (const prim of allPrimitives(model)) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
         mesh.setMatrixAt(0, tmpM.identity());
         mesh.name = 'flora stand-in';
@@ -91,7 +94,7 @@ export class FloraPlanter {
    */
   materials(out: Set<THREE.Material> = new Set()): Set<THREE.Material> {
     for (const model of this.models.values()) {
-      for (const prim of model.primitives) {
+      for (const prim of allPrimitives(model)) {
         const m = prim.material as THREE.Material | THREE.Material[];
         if (Array.isArray(m)) for (const x of m) out.add(x);
         else out.add(m);
@@ -209,7 +212,7 @@ export class FloraPlanter {
    * as the client drew them (step 5, `floraReach.ts`) and leave the trees alone. A model planted both ways
    * in one chunk is two meshes, one under each.
    */
-  buildForChunk(cx: number, cz: number, heightAt: (x: number, z: number) => number, exclusions: Exclusion[]): { group: THREE.Group; trees: THREE.Group; plants: THREE.Group; colliders: Collider[] } {
+  buildForChunk(cx: number, cz: number, heightAt: (x: number, z: number) => number, exclusions: Exclusion[]): { group: THREE.Group; trees: THREE.Group; plants: THREE.Group; colliders: Collider[]; data: FloraChunkData } {
     const placements: Placement[] = [];
     this.collidable(cx, cz, placements);
     this.nonCollidable(cx, cz, placements);
@@ -221,29 +224,31 @@ export class FloraPlanter {
     group.add(trees, plants);
     const colliders: Collider[] = [];
     const kept = placements.filter((p) => exclusions.every((e) => Math.hypot(e.x - p.x, e.z - p.z) > e.r));
+    // Every planting's place and matrix, once: the chunk's own meshes and the region batches (step 7,
+    // `floraBatch.ts`) are both written from it.
+    const data = plantingData(kept, heightAt);
+    const index = new Map<Placement, number>();
+    kept.forEach((p, i) => index.set(p, i));
     const byTree = new Map<LoadedModel, Placement[]>();
     const byPlant = new Map<LoadedModel, Placement[]>();
     for (const p of kept) {
       const into = p.collidable ? byTree : byPlant;
       (into.get(p.model) ?? into.set(p.model, []).get(p.model)!).push(p);
     }
-    this.plantMeshes(byTree, trees, heightAt, colliders);
-    this.plantMeshes(byPlant, plants, heightAt, colliders);
+    this.plantMeshes(byTree, trees, data, index, colliders);
+    this.plantMeshes(byPlant, plants, data, index, colliders);
     this.planted += kept.length;
-    return { group, trees, plants, colliders };
+    return { group, trees, plants, colliders, data };
   }
 
   /** One instanced mesh per model and primitive of these placements, into `into`, and the collidable ones' colliders. */
-  private plantMeshes(byModel: Map<LoadedModel, Placement[]>, into: THREE.Group, heightAt: (x: number, z: number) => number, colliders: Collider[]): void {
+  private plantMeshes(byModel: Map<LoadedModel, Placement[]>, into: THREE.Group, data: FloraChunkData, index: Map<Placement, number>, colliders: Collider[]): void {
     for (const [model, list] of byModel) {
       for (const prim of model.primitives) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, list.length);
         list.forEach((p, i) => {
-          const y = heightAt(p.x, p.z);
-          // Mirrored world: a yaw about Y turns the other way.
-          tmpQ.setFromAxisAngle(UP, -p.yaw);
-          tmpM.compose(tmpP.set(p.x, y, p.z), tmpQ, tmpS.setScalar(p.scale));
-          mesh.setMatrixAt(i, tmpM);
+          const k = index.get(p)!;
+          (mesh.instanceMatrix.array as Float32Array).set(data.mats.subarray(k * 16, k * 16 + 16), i * 16);
         });
         mesh.instanceMatrix.needsUpdate = true;
         // Grass and shrubs cast nothing: their shadow is a smudge under themselves, and a
@@ -255,7 +260,7 @@ export class FloraPlanter {
       }
       for (const p of list) {
         if (!p.collidable) continue;
-        const y = heightAt(p.x, p.z);
+        const y = data.y[index.get(p)!];
         const r = model.radius * p.scale;
         const h = model.height * p.scale;
         // Trees block at the trunk, not the canopy; squat things (rocks) block at their width.
@@ -264,4 +269,33 @@ export class FloraPlanter {
       }
     }
   }
+}
+
+/** A model's pieces at every level it carries (step 7): its own, then each lower level's. */
+function allPrimitives(model: LoadedModel): Primitive[] {
+  if (!model.levels || model.levels.length < 2) return model.primitives;
+  const out = model.primitives.slice();
+  for (let k = 1; k < model.levels.length; k++) out.push(...model.levels[k].primitives);
+  return out;
+}
+
+/** Every planting's place (on the ground), scale and world matrix, as the chunk's meshes and the region batches both draw it. */
+function plantingData(kept: readonly Placement[], heightAt: (x: number, z: number) => number): FloraChunkData {
+  const n = kept.length;
+  const data: FloraChunkData = { n, models: new Array<LoadedModel>(n), mats: new Float32Array(n * 16), x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), scale: new Float32Array(n), collidable: new Uint8Array(n) };
+  for (let i = 0; i < n; i++) {
+    const p = kept[i];
+    const y = heightAt(p.x, p.z);
+    // Mirrored world: a yaw about Y turns the other way.
+    tmpQ.setFromAxisAngle(UP, -p.yaw);
+    tmpM.compose(tmpP.set(p.x, y, p.z), tmpQ, tmpS.setScalar(p.scale));
+    tmpM.toArray(data.mats, i * 16);
+    data.models[i] = p.model;
+    data.x[i] = p.x;
+    data.y[i] = y;
+    data.z[i] = p.z;
+    data.scale[i] = p.scale;
+    data.collidable[i] = p.collidable ? 1 : 0;
+  }
+  return data;
 }

@@ -21,6 +21,8 @@ import { boxDistance, gameX, gameZ, hostRadiusOf, hostReach, modelTier, PLACED_T
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
 import { buildingWithRoomIn } from './roomOf.ts';
+import { LevelGroup } from './levelGroup.ts';
+import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 
 /** The side of a streaming region, metres: one number with the tier arithmetic's (`placedTiers.ts`). */
 export { REGION };
@@ -128,6 +130,9 @@ export interface PlacedObject {
   roomsHi?: number;
   /** `HOST_FLAG` bits. */
   hostFlags?: number;
+  /** The snapshot's own word on where it stands (step 7): its building's index in the layout's objects, and its room. */
+  hostIndex?: number;
+  cell?: number;
 }
 
 /**
@@ -223,6 +228,8 @@ interface LoadedTier {
   waters: WaterSurfaceHandle[];
   /** Its furniture groups and the building each is filed under (null: one of a switch's pairs), so an unload takes each out of its list. */
   furniture: { g: FurnitureGroup; host: PlacedObject | null }[];
+  /** Its models' outdoor copies drawn at the client's own detail levels (step 7), whose meshes are among `meshes`. */
+  levels: LevelGroup[];
 }
 
 /**
@@ -378,7 +385,7 @@ export class LayoutStreamer {
   /** Whether the groups are drawn per building now (`syncFurniture`), as the switch stands when the world is read. */
   private furnitureRouted = furnitureOn();
   /** What hosting found when the layout was read, for the console. */
-  furnitureStats = { contained: 0, hosted: 0, noBox: 0, twoHosts: 0, doorway: 0, hosts: 0 };
+  furnitureStats = { contained: 0, hosted: 0, noBox: 0, twoHosts: 0, doorway: 0, hosts: 0, exact: 0 };
   private readonly hostAnswer: HostAnswer = { host: -1, lo: 0, hi: 0, flags: 0 };
   private loads = 0;
   private readonly failed = new Set<string>();
@@ -545,6 +552,12 @@ export class LayoutStreamer {
       const sizeTier = modelTier(o.radius, def?.bounds, !!def?.particle);
       const snapTier = snapshotTier(o.radius);
       const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier };
+      // The building and the room the snapshot itself names (step 7): an index into this same list, which the
+      // loop fills in the layout's own order.
+      if (o.contained && typeof o.in === 'number' && typeof o.cell === 'number') {
+        p.hostIndex = o.in;
+        p.cell = o.cell;
+      }
       this.objects.push(p);
       const region = this.regionFor(gx, gz);
       region.objects[p.tier].push(p);
@@ -649,6 +662,12 @@ export class LayoutStreamer {
 
   /** A tier's mesh shown once its programs exist: a furniture group as the switch says, anything else plainly. */
   private reveal(mesh: THREE.Object3D): void {
+    // A level's mesh is shown only while its level holds a copy (step 7).
+    const lg = this.levelOfMesh.get(mesh);
+    if (lg) {
+      lg.setReady();
+      return;
+    }
     const g = this.furnitureOfMesh.get(mesh);
     if (!g) {
       mesh.visible = true;
@@ -1321,6 +1340,7 @@ export class LayoutStreamer {
     const effects: EffectHandle[] = [];
     const waters: WaterSurfaceHandle[] = [];
     const furniture: LoadedTier['furniture'] = [];
+    const levels: LevelGroup[] = [];
     const localFx = new THREE.Matrix4();
     if (this.effects) {
       for (const o of objects) {
@@ -1355,12 +1375,20 @@ export class LayoutStreamer {
         this.buildings.add(b);
         return b;
       });
+      // Step 7: a model whose pack carries the client's lower detail levels has its copies out in the open
+      // drawn by a level group, every exterior piece at every level; its copies in a building's rooms keep
+      // the finest, drawn with their rooms. A model holding a basin's water is left as it was: the water
+      // system takes that piece copy by copy, which a level's shared store cannot follow.
+      const levelled = this.levelled(model) ? list.filter((p) => !p.contained) : null;
+      if (levelled && levelled.length) levels.push(this.levelGroup(model, levelled, meshes));
       for (const prim of model.primitives) {
         // Interiors of portal buildings are drawn per building and per cell by the portal renderer,
         // so each placed building gets its own meshes; a building without portal data draws normally.
         // Those meshes are made only once the player is near (see buildInterior).
         const perBuilding = prim.cell > 0 && model.portals.length > 0;
         let all = perBuilding ? list.filter((_, i) => !built[i]) : list;
+        // The exterior's outdoor copies are the level group's.
+        if (levelled && levelled.length && prim.cell <= 0) all = all.filter((p) => p.contained);
         if (!all.length) continue;
         // A fountain's or a pool's water standing out in the open is the water system's: a body per
         // copy, prepared with the tier's own meshes. One in a room stays the model's, since the room
@@ -1410,7 +1438,133 @@ export class LayoutStreamer {
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects, effects, waters, furniture };
+    return { meshes, buildings, objects, effects, waters, furniture, levels };
+  }
+
+  /** Whether a model's outdoor copies are drawn at its levels: it carries more than one, and no piece of it is a basin's water the water system takes. */
+  private levelled(model: LoadedModel): boolean {
+    if (!model.levels || model.levels.length < 2) return false;
+    if (this.waterSurface) for (const prim of model.primitives) if (prim.cell <= 0 && isBasinWater(prim.material)) return false;
+    return true;
+  }
+
+  /**
+   * A level group for a model's outdoor copies (`levelGroup.ts`): a mesh per piece of every level, each made as
+   * the streamer makes any tier mesh (its shadow by the model's size and the material, its order after the
+   * water for a translucent surface, hidden until its programs exist), put in the tier's `meshes` so it is
+   * prepared, revealed and unloaded with the rest, and offered to the exit narrowing with its own sphere,
+   * which the group keeps to what it draws. Swept at once from the last eye, so a tier loading far off does
+   * not draw its finest level for a frame.
+   */
+  private levelGroup(model: LoadedModel, copies: PlacedObject[], meshes: THREE.Object3D[]): LevelGroup {
+    // Measured from what the levels draw: a portal building's levels are its shell cell's, and the whole
+    // model's box takes in every room, which under a cave or a bunker runs a hundred metres and more below
+    // the door -- measured from that middle, a cave mouth was at its lowest level with the player at it.
+    const shell = model.def.cells?.find((c) => c.index === 0)?.bounds;
+    const b = shell && shell.min.length >= 3 && shell.max.length >= 3 ? shell : model.def.bounds;
+    const centre = new THREE.Vector3((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2);
+    const radius = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2;
+    const made: THREE.InstancedMesh[] = [];
+    const g = new LevelGroup(
+      copies,
+      model.levels!,
+      centre,
+      radius,
+      (prim, n) => {
+        const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, n);
+        mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
+        if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
+        mesh.receiveShadow = true;
+        mesh.name = `level:${model.def.id}`;
+        if (this.prepare) mesh.visible = false;
+        this.scene.add(mesh);
+        meshes.push(mesh);
+        made.push(mesh);
+        return mesh;
+      },
+      !this.prepare,
+    );
+    g.broken = isQuarantined;
+    for (const mesh of made) {
+      this.levelOfMesh.set(mesh, g);
+      if (mesh.boundingSphere) markNarrowRoot(mesh, mesh.boundingSphere);
+    }
+    this.levelGroups.push(g);
+    if (this.levelMeasured) g.sweep(this.levelEyeX, this.levelEyeY, this.levelEyeZ, this.levelScale, this.levelCascadeFar);
+    return g;
+  }
+
+  /** Every level group standing now (step 7), in a kept list the sweep walks by index (a set's iterator is an object a walk). */
+  private readonly levelGroups: LevelGroup[] = [];
+  /** The level group a tier mesh belongs to, so its reveal knows it. */
+  private readonly levelOfMesh = new WeakMap<THREE.Object3D, LevelGroup>();
+  /** Where the level sweep last measured from, with what scale, and its clock. */
+  private levelEyeX = 0;
+  private levelEyeY = 0;
+  private levelEyeZ = 0;
+  private levelScale = 1;
+  private levelCascadeFar = Number.POSITIVE_INFINITY;
+  private levelMeasured = false;
+  private levelAge = 0;
+  private levelForce = false;
+  /** What the level sweeps did, for the console and the frame report. */
+  readonly levelStats = { sweeps: 0, repacks: 0, ms: 0 };
+
+  /**
+   * Put every outdoor copy of every levelled model at the level the eye picks (step 7): when the eye has moved
+   * `sweepMetres` or `sweepSeconds` has gone by, or at once after the switch or a tune moved. `scale` multiplies
+   * the client's switch distances (the tune's bias over the ride's, step 8); `cascadeFar` is where the second
+   * shadow cascade ends. Nothing allocated.
+   */
+  sweepLevels(eye: THREE.Vector3, dt: number, scale: number, cascadeFar: number): void {
+    if (this.disposed) return;
+    this.levelAge += dt;
+    const dx = eye.x - this.levelEyeX;
+    const dy = eye.y - this.levelEyeY;
+    const dz = eye.z - this.levelEyeZ;
+    const moved = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (this.levelMeasured && !this.levelForce && scale === this.levelScale && cascadeFar === this.levelCascadeFar && !sweepDue(this.levelAge, moved, LOD_LEVEL_TUNE)) return;
+    const t0 = performance.now();
+    this.levelEyeX = eye.x;
+    this.levelEyeY = eye.y;
+    this.levelEyeZ = eye.z;
+    this.levelScale = scale;
+    this.levelCascadeFar = cascadeFar;
+    this.levelMeasured = true;
+    this.levelForce = false;
+    this.levelAge = 0;
+    let repacks = 0;
+    const groups = this.levelGroups;
+    for (let i = 0; i < groups.length; i++) if (groups[i].sweep(eye.x, eye.y, eye.z, scale, cascadeFar)) repacks++;
+    const st = this.levelStats;
+    st.sweeps++;
+    st.repacks += repacks;
+    st.ms = performance.now() - t0;
+  }
+
+  /** The levels switch or a tune moved: the next sweep runs whatever the clock says. */
+  refreshLevels(): void {
+    this.levelForce = true;
+  }
+
+  /**
+   * For the console (`__debug.lod()`): the level groups standing, their meshes, and the copies at each level
+   * position (0 the finest; the last entry drawn at nothing), with what the sweeps have done.
+   */
+  levelReport(): { groups: number; meshes: number; drawing: number; copies: number; byLevel: number[]; nothing: number; sweeps: number; repacks: number; lastSweepMs: number } {
+    const counts = [0, 0, 0, 0];
+    let meshCount = 0;
+    let drawing = 0;
+    let copies = 0;
+    for (const g of this.levelGroups) {
+      g.countInto(counts);
+      copies += g.n;
+      for (const m of g.meshes) {
+        meshCount++;
+        if (m.visible) drawing++;
+      }
+    }
+    return { groups: this.levelGroups.length, meshes: meshCount, drawing, copies, byLevel: counts.slice(0, 3), nothing: counts[3], sweeps: this.levelStats.sweeps, repacks: this.levelStats.repacks, lastSweepMs: Number(this.levelStats.ms.toFixed(3)) };
   }
 
   /**
@@ -1717,6 +1871,13 @@ export class LayoutStreamer {
     for (const mesh of t.meshes) {
       this.scene.remove(mesh);
       if ((mesh as THREE.InstancedMesh).isInstancedMesh) (mesh as THREE.InstancedMesh).dispose();
+    }
+    // Its level groups out of the kept list (an unload, not a frame's work).
+    if (t.levels.length) {
+      const gone = new Set(t.levels);
+      let k = 0;
+      for (const g of this.levelGroups) if (!gone.has(g)) this.levelGroups[k++] = g;
+      this.levelGroups.length = k;
     }
     this.dropFurniture(t.furniture);
     for (const b of t.buildings) this.buildings.delete(b);
@@ -2275,5 +2436,6 @@ export class LayoutStreamer {
     this.buildings.clear();
     this.furnitureByHost.clear();
     this.furnitureSwaps.clear();
+    this.levelGroups.length = 0;
   }
 }

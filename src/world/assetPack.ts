@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { isReflective, registerReflective } from './envmap';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from './surfaces';
+import { drawnLevels } from './lodLevels.ts';
 
 export interface CellLight {
   type: number;
@@ -83,6 +84,35 @@ export interface PackModelDef {
   particle?: boolean;
   /** Particle effects attached to this model (a lamp's flame), transforms in the converter's unflipped model space. */
   effects?: PackEffect[];
+  /**
+   * The client's own detail levels the pack carries (step 7), finest first: the client's level number, where
+   * it takes over and where the next carried level does (metres from the eye), and what it draws. The finest
+   * is the model's own nodes; the others are the `lod:<n>` nodes of the GLB's `lods` scene. Absent on a model
+   * with one level and on every model of a pack converted before levels were carried.
+   */
+  lods?: PackLevel[];
+}
+
+/** One carried detail level, as the manifest lists it. */
+export interface PackLevel {
+  level: number;
+  near: number;
+  far: number;
+  tris: number;
+  prims: number;
+}
+
+/**
+ * One of a model's detail levels once loaded: where it takes over, where the next does, and what it draws
+ * of the exterior (a portal building's rooms are drawn by their building at every distance). A level the
+ * artists left empty has no primitives: nothing is drawn there.
+ */
+export interface ModelLevel {
+  near: number;
+  far: number;
+  /** The client's level number. */
+  level: number;
+  primitives: Primitive[];
 }
 
 export interface PackManifest {
@@ -102,6 +132,13 @@ export interface LayoutObject {
   radius: number;
   /** Inside a building's cell; positioned relative to it by the converter. */
   contained?: boolean;
+  /**
+   * For a contained object, the room it stands in (the cell object holding it) and its building's own index in
+   * `objects`, as the snapshot says (step 7). Absent in a pack converted before, and `in` wherever the building
+   * itself was not placed.
+   */
+  cell?: number;
+  in?: number;
   /** Pack-relative terrain modification layer (.lay) flattening the ground under a building. */
   layer?: string;
 }
@@ -135,6 +172,12 @@ export interface LoadedModel {
   bounds: THREE.Box3;
   /** Portal polygons (model space) with the cells on either side, for tracking which cell someone is in. */
   portals: Portal[];
+  /**
+   * The detail levels its exterior switches between (step 7), finest first: `levels[0]` is `primitives` less
+   * any room's, the others the GLB's `lods` scene. Null for a model with one level, or out of an older pack.
+   * Never part of `scene`, so whatever draws the model whole draws it exactly as before.
+   */
+  levels: ModelLevel[] | null;
 }
 
 export interface Portal {
@@ -148,6 +191,79 @@ export interface Portal {
   links: { from: number; to: number }[];
   passable: boolean;
 }
+
+/** The client's level number a node's glTF name carries (`lod:<n>`, read through `userData.name`, since GLTFLoader strips the colon), walking up to its scene; -1 for none. */
+function lodLevelOf(o: THREE.Object3D): number {
+  for (let x: THREE.Object3D | null = o; x; x = x.parent) {
+    const m = /^lod:(\d+)$/.exec(String(x.userData?.name ?? ''));
+    if (m) return Number(m[1]);
+  }
+  return -1;
+}
+
+/**
+ * A model's detail levels out of its manifest entry and the GLB's `lods` scene (step 7): the finest is the
+ * exterior of what the model's own nodes draw, each lower level the meshes of its `lod:<n>` node, set up as
+ * the model's own are. Null -- the model drawn at its finest everywhere, as before -- for a model with one
+ * level, and for any mismatch between the entry and the file (a level the entry says draws something with no
+ * node for it), since a half-read chain would draw a hole where a building stands.
+ */
+function modelLevels(def: PackModelDef, scenes: THREE.Group[], primitives: Primitive[]): ModelLevel[] | null {
+  const lods = def.lods;
+  if (!lods || lods.length < 2) return null;
+  // Only the levels the pick can ever draw: a chain whose switches do not rise (a pack converted before the
+  // converter dropped such levels: one gallery hull had every switch at 0 and drew its heaviest "lowest" level at
+  // every distance) keeps the coarser of two that clash, and one that comes to its finest alone is drawn so.
+  const kept = drawnLevels(lods.map((l) => l.near));
+  if (kept.length < 2) return null;
+  const wanted = new Set<number>();
+  for (let j = 1; j < kept.length; j++) wanted.add(lods[kept[j]].level);
+  const scene = scenes.find((s) => /^lods(_\d+)?$/.test(s.name));
+  const byLevel = new Map<number, { mesh: THREE.Mesh; material: THREE.Material }[]>();
+  scene?.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return;
+    const level = lodLevelOf(o);
+    if (!wanted.has(level)) return;
+    let list = byLevel.get(level);
+    if (!list) byLevel.set(level, (list = []));
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) list.push({ mesh: o, material: m });
+  });
+  for (let j = 1; j < kept.length; j++) {
+    const row = lods[kept[j]];
+    if (row.prims > 0 && !byLevel.get(row.level)?.length) return null;
+  }
+  // Set up as the model's own meshes are, and only once the chain is known to be whole: a level never drawn
+  // registers nothing that the pack's dispose would not reach.
+  const prims = new Map<number, Primitive[]>();
+  for (const [level, list] of byLevel) {
+    const out: Primitive[] = [];
+    for (const { mesh, material } of list) {
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      if (isReflective(material)) registerReflective(material);
+      if (Object.keys(mesh.geometry.morphAttributes).length) {
+        mesh.geometry.morphAttributes = {};
+        mesh.geometry.morphTargetsRelative = false;
+      }
+      out.push({ geometry: mesh.geometry, material, cell: -1 });
+    }
+    prims.set(level, out);
+  }
+  const out: ModelLevel[] = [];
+  for (let j = 0; j < kept.length; j++) {
+    const row = lods[kept[j]];
+    const next = kept[j + 1];
+    const far = next !== undefined ? lods[next].near : row.far;
+    out.push({ near: j === 0 ? 0 : row.near, far, level: row.level, primitives: j === 0 ? primitives.filter((p) => p.cell <= 0) : (prims.get(row.level) ?? []) });
+  }
+  return out;
+}
+
+/** A loaded model's levels past the finest, whose meshes are its own (the finest's are `primitives`). */
+export function lowerLevels(m: LoadedModel): readonly ModelLevel[] {
+  return m.levels && m.levels.length > 1 ? m.levels.slice(1) : NO_LEVELS;
+}
+const NO_LEVELS: readonly ModelLevel[] = [];
 
 /** Converted SWG content for one planet, loaded from the private assets folder. */
 export class AssetPack {
@@ -312,6 +428,7 @@ export class AssetPack {
             }
           }
         });
+        const levels = modelLevels(def, gltf.scenes ?? [], primitives);
         const { min, max } = def.bounds;
         const interiorBoxes = (def.cells ?? [])
           .filter((c) => c.index > 0)
@@ -345,6 +462,7 @@ export class AssetPack {
           interiorBoxes,
           bounds: new THREE.Box3(new THREE.Vector3(min[0], min[1], min[2]), new THREE.Vector3(max[0], max[1], max[2])),
           portals,
+          levels,
         };
       });
       this.cache.set(id, p);
@@ -401,7 +519,11 @@ export class AssetPack {
    */
   loadedMaterials(): THREE.Material[] {
     const out: THREE.Material[] = [];
-    for (const m of this.ready.values()) for (const prim of m.primitives) out.push(prim.material);
+    for (const m of this.ready.values()) {
+      for (const prim of m.primitives) out.push(prim.material);
+      // A lower level's own materials (an atlas, a sprite card): joined to the same sets when its meshes were prepared.
+      for (const lv of lowerLevels(m)) for (const prim of lv.primitives) out.push(prim.material);
+    }
     return out;
   }
 
@@ -411,6 +533,12 @@ export class AssetPack {
         for (const prim of m.primitives) {
           prim.geometry.dispose();
           prim.material.dispose();
+        }
+        for (const lv of lowerLevels(m)) {
+          for (const prim of lv.primitives) {
+            prim.geometry.dispose();
+            prim.material.dispose();
+          }
         }
       }).catch(() => undefined);
     }

@@ -25,9 +25,14 @@ export interface FurnitureTune {
   boxPad: number;
   /** How near an exit's polygon an object's sphere may come before it counts as standing in the doorway, metres. Ours. */
   doorwayPad: number;
+  /**
+   * Take the building the snapshot names (step 7: a pack whose layout carries each indoor object's `in` and
+   * `cell`) over the rooms' boxes, and add the room it names to the rooms the boxes find. Read when a world is read.
+   */
+  exactRooms: boolean;
 }
 
-export const FURNITURE_TUNE: FurnitureTune = { perBuilding: true, boxPad: 0.5, doorwayPad: 0.3 };
+export const FURNITURE_TUNE: FurnitureTune = { perBuilding: true, boxPad: 0.5, doorwayPad: 0.3, exactRooms: true };
 
 /**
  * Whether furniture is drawn per building now: the switch, under the portal cull's own (`mode: 'all'`
@@ -169,6 +174,13 @@ export interface HostObject {
   z: number;
   q: { x: number; y: number; z: number; w: number };
   contained: boolean;
+  /**
+   * The building that holds it and its room, as the snapshot itself says (step 7: the cell object that
+   * contains it, and that cell's building, written by the converter): the index of the building in the same
+   * list, and the room. Absent in a pack converted before, which finds both from the rooms' boxes.
+   */
+  hostIndex?: number;
+  cell?: number;
 }
 
 /** The parts of a model's manifest entry hosting reads. */
@@ -358,6 +370,40 @@ export class FurnitureIndex {
     if (!best) return out;
     out.host = best.index;
     if (holders > 1) out.flags |= HOST_FLAG.twoHosts;
+    this.roomsIn(best, o, def, -1, out);
+    return out;
+  }
+
+  /** Whether a building is indexed under `index`. */
+  has(index: number): boolean {
+    return this.byIndex.has(index);
+  }
+
+  /**
+   * The same answer when the snapshot says which building and which room (step 7): the host is that building,
+   * the room mask is that room and every room of it the boxes find (`roomsIn`), and whether it stands in one of
+   * the building's exits is measured as `assign` measures it. A room past 63 takes the `anyRoom` flag, as a
+   * box-found one does.
+   */
+  assignTo(index: number, cell: number, o: HostObject, def: HostDef | undefined, out: HostAnswer): HostAnswer {
+    out.host = -1;
+    out.lo = 0;
+    out.hi = 0;
+    out.flags = 0;
+    const e = this.byIndex.get(index);
+    if (!e) return out;
+    out.host = index;
+    this.roomsIn(e.b, o, def, cell, out);
+    return out;
+  }
+
+  /**
+   * The rooms of `best` an object can be seen in, and whether it stands in an exit, into `out`: every room whose
+   * grown box its sphere reaches or holds its origin, and with `exact` a room number (the snapshot's), that room
+   * as well.
+   */
+  private roomsIn(best: HostBuilding, o: HostObject, def: HostDef | undefined, exact: number, out: HostAnswer): void {
+    const pad = this.tune.boxPad;
     // The object's sphere, in the host's frame: its own model's box turned and placed, then brought in.
     const e = best.inv;
     let cx = o.x;
@@ -387,6 +433,18 @@ export class FurnitureIndex {
     const oy = e[1] * o.x + e[5] * o.y + e[9] * o.z + e[13];
     const oz = e[2] * o.x + e[6] * o.y + e[10] * o.z + e[14];
     const x = best.boxes;
+    const addRoom = (cell: number): void => {
+      if (cell < 32) out.lo = (out.lo | (1 << cell)) >>> 0;
+      else if (cell < 64) out.hi = (out.hi | (1 << (cell - 32))) >>> 0;
+      else out.flags |= HOST_FLAG.anyRoom;
+    };
+    // The snapshot's own room, where it names one; and with it, always, every room the boxes find, since what
+    // the snapshot names is the one room a thing is filed in and not every room it can be seen in: a long table
+    // reaches through a doorway into the room beyond, and a few dozen things are filed in a neighbouring cell
+    // (the house whose jars are filed in its lift shaft while they stand in the hall), and either drawn only with
+    // the room it is filed in would vanish from the room it stands in. So the host is exact and the mask is the
+    // box rule's guarantee plus that room.
+    if (exact > 0) addRoom(exact);
     for (let r = 0; r < best.rooms.length; r++) {
       const k = r * 6;
       const holdsOrigin = !(ox < x[k] - pad || oy < x[k + 1] - pad || oz < x[k + 2] - pad || ox > x[k + 3] + pad || oy > x[k + 4] + pad || oz > x[k + 5] + pad);
@@ -395,10 +453,7 @@ export class FurnitureIndex {
       const dy = Math.max(x[k + 1] - pad - sy, 0, sy - x[k + 4] - pad);
       const dz = Math.max(x[k + 2] - pad - sz, 0, sz - x[k + 5] - pad);
       if (!holdsOrigin && dx * dx + dy * dy + dz * dz > radius * radius) continue;
-      const cell = best.rooms[r];
-      if (cell < 32) out.lo = (out.lo | (1 << cell)) >>> 0;
-      else if (cell < 64) out.hi = (out.hi | (1 << (cell - 32))) >>> 0;
-      else out.flags |= HOST_FLAG.anyRoom;
+      addRoom(best.rooms[r]);
     }
     // Standing in a doorway: its sphere, grown by the pad, reaches one of the exits' triangles.
     const reach = radius + this.tune.doorwayPad;
@@ -409,7 +464,6 @@ export class FurnitureIndex {
         break;
       }
     }
-    return out;
   }
 }
 
@@ -526,7 +580,8 @@ export interface FurnitureHosts {
   flags: Uint8Array;
   /** The index the buildings went into, kept for anything placed later. */
   index: FurnitureIndex;
-  stats: { contained: number; hosted: number; noBox: number; twoHosts: number; doorway: number; hosts: number };
+  /** `exact`: hosted by the snapshot's own building and room (step 7) rather than by the rooms' boxes. */
+  stats: { contained: number; hosted: number; noBox: number; twoHosts: number; doorway: number; hosts: number; exact: number };
 }
 
 /**
@@ -545,7 +600,7 @@ export function furnitureHosts(objects: readonly HostObject[], defOf: (id: strin
   const rooms = new Uint32Array(n * 2);
   const flags = new Uint8Array(n);
   const answer: HostAnswer = { host: -1, lo: 0, hi: 0, flags: 0 };
-  const stats = { contained: 0, hosted: 0, noBox: 0, twoHosts: 0, doorway: 0, hosts: 0 };
+  const stats = { contained: 0, hosted: 0, noBox: 0, twoHosts: 0, doorway: 0, hosts: 0, exact: 0 };
   const used = new Set<number>();
   for (let i = 0; i < n; i++) {
     const o = objects[i];
@@ -553,7 +608,12 @@ export function furnitureHosts(objects: readonly HostObject[], defOf: (id: strin
     const def = defOf(o.model);
     if (def?.particle) continue;
     stats.contained++;
-    index.assign(o, def, answer);
+    // The snapshot's own word where the pack carries it (step 7), the rooms' boxes where it does not.
+    const h = o.hostIndex;
+    if (tune.exactRooms && typeof h === 'number' && h >= 0 && h < n && typeof o.cell === 'number' && o.cell > 0 && index.has(h)) {
+      index.assignTo(h, o.cell, o, def, answer);
+      stats.exact++;
+    } else index.assign(o, def, answer);
     if (answer.host < 0) {
       stats.noBox++;
       continue;

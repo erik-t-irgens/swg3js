@@ -31,9 +31,11 @@ import { REFLECTIONS, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FLORA_WARM, FloraPlanter } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
+import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
+import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
-import { AssetPack, type LoadedModel } from './assetPack';
+import { AssetPack, lowerLevels, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
@@ -301,6 +303,11 @@ interface Chunk {
   /** The planet's own flora of this chunk, trees and plants apart (step 5); null for the procedural props. */
   trees: THREE.Group | null;
   plants: THREE.Group | null;
+  /**
+   * The group holding both, hidden while the flora's region batches draw its plantings instead (step 7,
+   * `floraBatch.ts`); null for the procedural props.
+   */
+  flora: THREE.Group | null;
   /** The chunk's middle in the world, on its ground: what the plant sweep measures from the eye. */
   mx: number;
   my: number;
@@ -1768,6 +1775,10 @@ export class World {
     // world (which outlives a planet and would otherwise keep two dozen of them for ever), their
     // materials forgotten by the portal set and the cascades, then freed.
     dropLooseProps(this);
+    // The flora's region batches (step 7): their meshes out of the ground's root and their instance stores
+    // freed. Their materials are the plants' own, forgotten above with the rest.
+    this.floraField?.dispose();
+    this.floraField = null;
     this.flora = null;
     this.floraTemplate = null;
     // The next world measures from its own arrival: until then nothing is hidden by an eye from this one.
@@ -2706,6 +2717,7 @@ export class World {
   }
 
   private disposeChunk(c: Chunk): void {
+    this.floraField?.remove(c.key);
     this.chunkRoot.remove(c.group);
     c.group.traverse((o) => {
       if (o instanceof THREE.Mesh && !(o instanceof THREE.InstancedMesh)) o.geometry.dispose();
@@ -2771,6 +2783,25 @@ export class World {
     const families = swg.template.generator.floraGroup.families.size;
     this.flora = new FloraPlanter(swg, byAppearance);
     this.floraTemplate = swg.template;
+    // The plantings drawn per region at the client's own levels (step 7): every batch mesh adopted before it is
+    // drawn (its materials are the plants' own, adopted with the stand-ins below) and offered to the exit
+    // narrowing with its sphere, which the batch keeps to what it draws.
+    //
+    // Never in a captured place (`sceneOnly`, the creator's and the select screen's backdrops): the plant reach
+    // keeps every plant there (step 5), and so do the levels, each chunk drawing its own at its finest, the
+    // picture as it was captured. The batches are also only ever written by `update`'s sweep, which a scene
+    // shows its first frame before, so there the plants came in a couple of regions a frame after it opened.
+    this.floraField?.dispose();
+    this.floraField = null;
+    if (!this.sceneOnly) {
+      this.floraField = new FloraField(this.chunkRoot, (mesh) => {
+        const fresh = this.adoptMaterials(mesh);
+        if (fresh.length) this.compileObjects(fresh);
+        if (mesh.boundingSphere) markNarrowRoot(mesh, mesh.boundingSphere);
+      });
+      this.floraField.shown = FLORA_BATCH.on;
+      this.floraField.cascadeFar = this.cascadeFar(1);
+    }
     // The reach is known only now: the arrival's own sweep (`warmUp`) measured from where the player arrives
     // but had no file to take a distance from, so it hid nothing. Taken again from that eye, so a chunk
     // planted from here on is shown or hidden by the planet's own reach from the moment it is made (step 5).
@@ -2895,6 +2926,16 @@ export class World {
         if (indoor) s.layers.enable(ACTOR_LAYER);
         out.push(s);
       }
+      // Its lower detail levels (step 7), which only its outdoor copies are drawn at: a far street's atlases
+      // and cards must not build their programs on the frame a copy first falls to them.
+      for (const lv of lowerLevels(m)) {
+        for (const prim of lv.primitives) {
+          if (this.compiledMaterials.has(prim.material)) continue;
+          const s = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
+          s.name = `warm:${id}:level`;
+          out.push(s);
+        }
+      }
     }
     st.standIns = out.length;
     return out;
@@ -2920,9 +2961,125 @@ export class World {
     return FLORA_TUNE.on && !!this.floraTemplate && !this.sceneOnly;
   }
 
-  /** How far from the eye plants are shown on this planet now, in metres (Infinity with the reach off, no flora of its own, or a captured place). */
+  /**
+   * How far from the eye plants are shown on this planet now, in metres (Infinity with the reach off, no flora of
+   * its own, or a captured place). Divided by the ride bias while the eye moves fast (step 8).
+   */
   get plantReach(): number {
-    return this.plantsReached ? plantReachOf(this.floraTemplate, FLORA_TUNE) : Number.POSITIVE_INFINITY;
+    return this.plantsReached ? plantReachOf(this.floraTemplate, FLORA_TUNE) / this.rideBias : Number.POSITIVE_INFINITY;
+  }
+
+  /** The flora's region batches at the client's own levels (step 7, `floraBatch.ts`); null with no flora of the planet's own. */
+  private floraField: FloraField | null = null;
+  /** The eye's speed, smoothed, and where it stood last frame (step 8). */
+  private eyeSpeedNow = 0;
+  private readonly lastEye = new THREE.Vector3();
+  private eyeMeasured = false;
+  /** The ride bias in force (step 8, `rideLodBias`): the client's switch distances and the plant reach are divided by it. */
+  rideBias = 1;
+  /** The flora level sweep's own clock and eye, as the placed objects' is the streamer's. */
+  private floraLevelAge = 0;
+  private readonly floraLevelEye = new THREE.Vector3();
+  private floraLevelMeasured = false;
+  private floraLevelForce = false;
+  private floraLevelScale = 1;
+
+  /**
+   * Where shadow cascade `i` ends, metres from the eye (Infinity with no cascades or shadows off): a coarse
+   * detail level whose copies are all past the second cascade's end casts nothing (`levelCasts`).
+   */
+  cascadeFar(i: number): number {
+    const csm = this.csm;
+    if (!csm || !this.renderer?.shadowMap.enabled) return Number.POSITIVE_INFINITY;
+    const b = csm.breaks[i];
+    if (b === undefined) return Number.POSITIVE_INFINITY;
+    const near = this.camera?.near ?? 0.1;
+    return near + (this.shadowDistance - near) * b;
+  }
+
+  /**
+   * The detail levels, a frame (steps 7 and 8): the eye's speed and the ride bias it makes, every placed model's
+   * outdoor copies put at their levels (the streamer's own clock), the flora's plantings likewise, and the
+   * flora's out-of-date regions rebuilt -- a few a frame, every one behind a loading screen or with `force`.
+   * Nothing allocated.
+   */
+  private sweepDetail(eye: THREE.Vector3, dt: number, force = false): void {
+    if (this.eyeMeasured) this.eyeSpeedNow = eyeSpeed(this.eyeSpeedNow, eye.distanceTo(this.lastEye), dt);
+    this.lastEye.copy(eye);
+    this.eyeMeasured = true;
+    // Stepped: every change of the bias re-sweeps every level group and planting whatever their clocks say, and
+    // the smoothed speed moves a little on nearly every frame of a ride.
+    this.rideBias = steppedBias(rideLodBias(this.eyeSpeedNow, RIDE_LOD_TUNE), this.rideBias, RIDE_LOD_TUNE.step);
+    const scale = LOD_LEVEL_TUNE.bias / this.rideBias;
+    const far2 = this.cascadeFar(1);
+    if (force) this.layoutStream?.refreshLevels();
+    this.layoutStream?.sweepLevels(eye, dt, scale, far2);
+    const ff = this.floraField;
+    if (!ff) return;
+    ff.cascadeFar = far2;
+    this.floraLevelAge += dt;
+    const moved = this.floraLevelMeasured ? eye.distanceTo(this.floraLevelEye) : Number.POSITIVE_INFINITY;
+    if (force || this.floraLevelForce || scale !== this.floraLevelScale || !this.floraLevelMeasured || sweepDue(this.floraLevelAge, moved, LOD_LEVEL_TUNE)) {
+      this.floraLevelEye.copy(eye);
+      this.floraLevelMeasured = true;
+      this.floraLevelForce = false;
+      this.floraLevelScale = scale;
+      this.floraLevelAge = 0;
+      ff.sweep(eye.x, eye.y, eye.z, scale);
+    }
+    ff.rebuild(force || this.behindScreen ? Number.POSITIVE_INFINITY : LOD_LEVEL_TUNE.regionsPerFrame);
+  }
+
+  /** What the frame report counts of the levels this frame: repacks and rebuilds since the last frame, the regions waiting, the ride bias. */
+  private gaugeDetail(): void {
+    const ls = this.layoutStream;
+    const repacks = ls ? ls.levelStats.repacks : 0;
+    perf.count(CNT.lodRepacks, Math.max(0, repacks - this.lodRepacksSeen));
+    this.lodRepacksSeen = repacks;
+    const ff = this.floraField;
+    const rebuilt = ff ? ff.stats.rebuilds : 0;
+    perf.count(CNT.floraRebuilt, Math.max(0, rebuilt - this.floraRebuiltSeen));
+    this.floraRebuiltSeen = rebuilt;
+    perf.gauge(CNT.floraPending, ff ? ff.pending : 0);
+    perf.count(CNT.rideBias, this.rideBias);
+  }
+  private lodRepacksSeen = 0;
+  private floraRebuiltSeen = 0;
+
+  /** A level switch or tune moved: the next sweep of both the placed objects and the flora runs whatever their clocks say. */
+  refreshDetail(): void {
+    this.layoutStream?.refreshLevels();
+    this.floraLevelForce = true;
+  }
+
+  /** The levels switched on or off (the frame report's `lodLevels`): every copy put at its level, or at its finest, at once. */
+  setLodLevels(on: boolean): void {
+    LOD_LEVEL_TUNE.on = on;
+    this.refreshDetail();
+    this.sweepDetail(this.lastEye, 0, true);
+  }
+
+  /**
+   * The flora drawn by the region batches or by each chunk's own meshes (the frame report's `floraRegions`): a
+   * flip of which is shown, both kept up to date so the flip costs nothing but the flags.
+   */
+  setFloraRegions(on: boolean): void {
+    FLORA_BATCH.on = on;
+    const ff = this.floraField;
+    if (!ff) return;
+    ff.setShown(on);
+    for (const c of this.chunks.values()) if (c.flora) c.flora.visible = !on;
+  }
+
+  /** For the console (`__debug.lod()`): the tune, the ride bias, the placed objects' level groups and the flora's batches. */
+  lodReport(): { tune: typeof LOD_LEVEL_TUNE; ride: { tune: typeof RIDE_LOD_TUNE; eyeSpeed: number; bias: number }; placed: ReturnType<LayoutStreamer['levelReport']> | null; flora: (ReturnType<FloraField['measure']> & { shown: boolean }) | null } {
+    const ff = this.floraField;
+    return {
+      tune: { ...LOD_LEVEL_TUNE },
+      ride: { tune: { ...RIDE_LOD_TUNE }, eyeSpeed: Number(this.eyeSpeedNow.toFixed(1)), bias: Number(this.rideBias.toFixed(2)) },
+      placed: this.layoutStream ? this.layoutStream.levelReport() : null,
+      flora: ff ? { ...ff.measure(), byLevel: ff.stats.byLevel.slice(), shown: ff.shown } : null,
+    };
   }
 
   /**
@@ -4399,6 +4556,11 @@ export class World {
     this.sweepFlora(center, 0, true);
     this.stream(center, Infinity);
     this.streamFar(center, Infinity);
+    // Every plant made above put at its level from where the player arrives and every region batch written
+    // now, behind the screen, rather than a few a frame after it lifts (step 7).
+    this.eyeMeasured = false;
+    this.eyeSpeedNow = 0;
+    this.sweepDetail(center, 0, true);
     // Nothing stands on its own any more. The planet's own wildlife used to be stood here -- through
     // the catalogue (its own model, clips and brain) when it had landed and had the species, else the
     // old creatures -- and it is now behind one switch, off unless this browser's storage says
@@ -5590,6 +5752,9 @@ export class World {
     this.hiddenGround.length = 0;
     this.groundHiddenFor = want;
     if (want) this.hideGroundUnder(want);
+    // The flora's region batches read each chunk's ground as they sweep (step 7): swept again at once, so no
+    // plant stands in a basement for the quarter second until the next.
+    this.floraLevelForce = true;
   }
 
   /**
@@ -5779,6 +5944,11 @@ export class World {
       this.packStatus = `${this.packBase}; ${this.layoutStream.status}${this.particles ? `; ${this.particles.status}` : ''}`;
       perf.end(SEC.layout);
     }
+    // The client's own detail levels for the placed objects and the flora, from the eye (steps 7 and 8).
+    perf.begin(SEC.levels);
+    this.sweepDetail(camPos, dt);
+    perf.end(SEC.levels);
+    this.gaugeDetail();
     perf.begin(SEC.particles);
     if (this.particles && this.camera) this.particles.update(dt, this.camera, this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null);
     if (this.camera) {
@@ -6831,12 +7001,14 @@ export class World {
     let plants: THREE.Group | null = null;
     let propGroup: THREE.Group;
     let colliders: Collider[];
+    let floraData: FloraChunkData | null = null;
     if (this.flora) {
       const built = this.flora.buildForChunk(cx, cz, (x, z) => this.terrain.heightAt(x, z), exclude);
       propGroup = built.group;
       colliders = built.colliders;
       trees = built.trees;
       plants = built.plants;
+      floraData = built.data;
     } else ({ group: propGroup, colliders } = this.props.buildForChunk(cx, cz, this.terrain, exclude));
     propGroup.traverse((o) => {
       if (o instanceof THREE.InstancedMesh) o.computeBoundingSphere();
@@ -6856,11 +7028,16 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, flora: this.flora ? propGroup : null, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).
     this.plantSweep.show(chunk, FLORA_TUNE);
+    // Its plantings into the region batches (step 7), which draw them in place of its own meshes while on.
+    if (floraData && this.floraField) {
+      this.floraField.add(key, cx, cz, floraData, chunk);
+      if (this.floraField.shown) propGroup.visible = false;
+    }
     const b = this.groundHiddenFor;
     if (b) {
       const r = b.radius + 2;

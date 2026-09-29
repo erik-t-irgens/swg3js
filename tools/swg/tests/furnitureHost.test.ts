@@ -106,6 +106,15 @@ const DEFS = new Map<string, HostDef>([twoRooms, chair, bench, deep, noPortals, 
   ok(h.host[9] === 0 && maskHas(h.rooms[18], h.rooms[19], 1) && maskHas(h.rooms[18], h.rooms[19], 2) && !(h.flags[9] & HOST_FLAG.doorway), 'a long table whose origin and middle are a metre inside the front room can be seen in the back room its far end reaches into, so it never pops at the doorway');
   ok(h.host[10] === 0 && maskHas(h.rooms[20], h.rooms[21], 1) && maskHas(h.rooms[20], h.rooms[21], 2), 'a shelf whose box stands off its origin is measured where its box is turned to: placed in the front room, it reaches the back room');
   ok(h.stats.contained === 9 && h.stats.hosted === 8 && h.stats.noBox === 1 && h.stats.doorway === 1 && h.stats.twoHosts === 0, `the counts: ${JSON.stringify(h.stats)}`);
+  // The snapshot's own word (step 7): the building it names, and the room it files a thing in added to the
+  // rooms the boxes find, never put in their place.
+  const named: HostObject[] = objects.map((o, i) => (i === 1 ? { ...o, hostIndex: 0, cell: 2 } : i === 9 ? { ...o, hostIndex: 0, cell: 1 } : i === 5 ? { ...o, hostIndex: 0, cell: 1 } : o));
+  const hn = furnitureHosts(named, (id) => DEFS.get(id));
+  ok(hn.host[1] === 0 && maskHas(hn.rooms[2], hn.rooms[3], 2) && maskHas(hn.rooms[2], hn.rooms[3], 1), 'a chair the snapshot files in the back room while it stands in the front one is seen from both: its own room is added, the room it stands in is kept');
+  ok(hn.host[9] === 0 && maskHas(hn.rooms[18], hn.rooms[19], 1) && maskHas(hn.rooms[18], hn.rooms[19], 2), 'a long table filed in the front room is still seen from the back room its far end reaches into');
+  ok(hn.host[5] === 0 && maskHas(hn.rooms[10], hn.rooms[11], 1) && hn.stats.exact === 3 && hn.stats.noBox === 0, "and a thing in no room's box is hosted by the building and the room the snapshot names");
+  const off = furnitureHosts(named, (id) => DEFS.get(id), { ...FURNITURE_TUNE, exactRooms: false });
+  ok(off.host[5] === -1 && off.stats.exact === 0 && !maskHas(off.rooms[2], off.rooms[3], 2), 'with the switch off the snapshot\'s word is not read at all');
   // Two buildings over one point: the smaller room wins, and it is flagged.
   const idx = new FurnitureIndex(FURNITURE_TUNE);
   idx.add(0, building, twoRooms);
@@ -239,10 +248,13 @@ interface LayoutObj {
   q: number[];
   radius: number;
   contained?: boolean;
+  /** The snapshot's own building row and room (step 7), in a pack converted with them. */
+  cell?: number;
+  in?: number;
 }
 
 /** A world read as the streamer reads it: mirrored in x and centred, each object's radius kept for its tier. */
-function world(planet: string): { objects: (HostObject & { radius: number })[]; defs: Map<string, HostDef>; center: { x: number; z: number } } | null {
+function world(planet: string): { objects: (HostObject & { radius: number })[]; defs: Map<string, HostDef>; center: { x: number; z: number }; exact: (HostObject & { radius: number })[] } | null {
   const lu = new URL(`${planet}/layout.json`, root);
   const mu = new URL(`${planet}/manifest.json`, root);
   if (!existsSync(lu) || !existsSync(mu)) return null;
@@ -252,7 +264,9 @@ function world(planet: string): { objects: (HostObject & { radius: number })[]; 
   for (const list of Object.values(manifest.categories)) for (const d of list) defs.set(d.id, d);
   const c = layout.center;
   const objects = layout.objects.map((o) => ({ model: o.model, x: -(o.x - c.x), y: o.y, z: o.z - c.z, q: { x: o.q[1], y: -o.q[2], z: -o.q[3], w: o.q[0] }, contained: !!o.contained, radius: o.radius }));
-  return { objects, defs, center: c };
+  // The same objects with the snapshot's own building and room where the pack carries them, as the streamer reads them.
+  const exact = layout.objects.map((o, i) => (o.contained && typeof o.in === 'number' && typeof o.cell === 'number' ? { ...objects[i], hostIndex: o.in, cell: o.cell } : objects[i]));
+  return { objects, defs, center: c, exact };
 }
 
 /**
@@ -289,7 +303,9 @@ for (const planet of ['tatooine', 'naboo']) {
   if (whole) ok(Math.abs(h.stats.noBox - whole.noBox) <= whole.noBoxSlack && Math.abs(h.stats.doorway - whole.doorway) <= 1 && h.stats.hosted + h.stats.noBox === h.stats.contained, `${planet}: hosting's own answer is ${h.stats.noBox} in no room box and ${h.stats.doorway} in a doorway to the world, against ${whole.noBox} and ${whole.doorway} measured`);
   // Every hosted object's rooms hold the room box that holds its origin (grown by the pad), the one that holds
   // its middle, and every one (grown by the pad) that holds a corner of its own box turned and placed: a piece
-  // reaching across a doorway can be seen from either side of it.
+  // reaching across a doorway can be seen from either side of it. Run over the rooms' boxes' hosting here, and
+  // over the snapshot's own below, where it must hold just the same.
+  const reach = (hh: typeof h) => {
   let missOrigin = 0;
   let missMiddle = 0;
   let missCorner = 0;
@@ -300,7 +316,7 @@ for (const planet of ['tatooine', 'naboo']) {
   const corner = new THREE.Vector3();
   const oq = new THREE.Quaternion();
   for (let i = 0; i < w.objects.length; i++) {
-    const hi = h.host[i];
+    const hi = hh.host[i];
     if (hi < 0) continue;
     const o = w.objects[i];
     const bo = w.objects[hi];
@@ -329,7 +345,7 @@ for (const planet of ['tatooine', 'naboo']) {
       // A hair inside the grown box, so a corner exactly on the sphere's edge is not decided by rounding.
       const inGrown = (v: THREE.Vector3) => [0, 1, 2].every((a) => v.getComponent(a) >= lo[a] - pad + 1e-6 && v.getComponent(a) <= up[a] + pad - 1e-6);
       const holdsCorner = boxCorners.some(inGrown);
-      const has = maskHas(h.rooms[i * 2], h.rooms[i * 2 + 1], c.index);
+      const has = maskHas(hh.rooms[i * 2], hh.rooms[i * 2 + 1], c.index);
       if (holdsOrigin && !has) missOrigin++;
       if (holdsMiddle && !has) missMiddle++;
       if (holdsCorner) {
@@ -339,8 +355,42 @@ for (const planet of ['tatooine', 'naboo']) {
     }
     checked++;
   }
-  ok(missOrigin === 0 && missMiddle === 0 && checked === h.stats.hosted, `${planet}: every one of ${checked} hosted things can be seen in the room whose box holds its origin and the room whose box holds its middle`);
-  ok(missCorner === 0 && corners > checked, `${planet}: and in every room whose box holds a corner of its own turned box (${corners} such rooms), so nothing pops at a doorway it reaches across`);
+  return { missOrigin, missMiddle, missCorner, corners, checked };
+  };
+  const byBox = reach(h);
+  ok(byBox.missOrigin === 0 && byBox.missMiddle === 0 && byBox.checked === h.stats.hosted, `${planet}: every one of ${byBox.checked} hosted things can be seen in the room whose box holds its origin and the room whose box holds its middle`);
+  ok(byBox.missCorner === 0 && byBox.corners > byBox.checked, `${planet}: and in every room whose box holds a corner of its own turned box (${byBox.corners} such rooms), so nothing pops at a doorway it reaches across`);
+  // Step 7: the snapshot's own building and room, where the pack carries them.
+  const named = w.exact.filter((o) => typeof o.hostIndex === 'number').length;
+  if (!named) console.log(`skip  ${planet}: the pack names no object's building and room (converted before step 7)`);
+  else {
+    const ex = furnitureHosts(w.exact, (id) => w.defs.get(id));
+    let wrongRoom = 0;
+    let agree = 0;
+    let both = 0;
+    let wider = 0;
+    for (let i = 0; i < w.exact.length; i++) {
+      const o = w.exact[i];
+      if (typeof o.hostIndex !== 'number' || ex.host[i] < 0) continue;
+      const cell = o.cell as number;
+      const lo = ex.rooms[i * 2];
+      const hi = ex.rooms[i * 2 + 1];
+      // Its own room is always among the rooms it is seen in (a room past 63 is "any room").
+      if (cell < 64 && !maskHas(lo, hi, cell)) wrongRoom++;
+      if (cell < 64 && (cell < 32 ? lo !== (1 << cell) >>> 0 || hi !== 0 : hi !== (1 << (cell - 32)) >>> 0 || lo !== 0)) wider++;
+      if (h.host[i] >= 0) {
+        both++;
+        if (h.host[i] === ex.host[i]) agree++;
+      }
+    }
+    console.log(`     ${planet} by the snapshot's own rooms: ${JSON.stringify(ex.stats)}; the rooms' boxes found the same building for ${agree} of ${both}; ${wider} are seen from more rooms than the one they are filed in`);
+    ok(ex.stats.exact > 0 && ex.stats.twoHosts === 0 && wrongRoom === 0, `${planet}: ${ex.stats.exact} things are hosted by the building the snapshot names and are always seen from the room it files them in`);
+    // The 2b guarantee holds on the snapshot's hosting too: the room it names is added to the boxes' rooms, never put in their place.
+    const byName = reach(ex);
+    ok(byName.missOrigin === 0 && byName.missMiddle === 0 && byName.missCorner === 0 && byName.checked === ex.stats.hosted && wider > 0, `${planet}: and hosted so, every one of ${byName.checked} is still seen from every room whose box holds its origin, its middle or a corner of its turned box (${byName.corners} such rooms), so a thing reaching through a doorway or filed in the room next door never pops`);
+    ok(ex.stats.noBox <= h.stats.noBox && ex.stats.hosted >= h.stats.hosted, `${planet}: and none that the rooms' boxes hosted is lost (${ex.stats.noBox} in no room, against ${h.stats.noBox} by the boxes)`);
+    ok(both > 0 && agree / both > 0.99, `${planet}: where both answer, the boxes chose the snapshot's own building ${(100 * agree / both).toFixed(2)}% of the time`);
+  }
   for (const town of TOWNS) {
     if (town.planet !== planet) continue;
     const px = -(town.x - w.center.x);
