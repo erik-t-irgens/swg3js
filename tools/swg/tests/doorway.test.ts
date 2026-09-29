@@ -538,7 +538,7 @@ const toLocal = (b: Building, p: { x: number; z: number }): THREE.Vector3 => new
   const manager = src('world/mobiles/manager.ts');
   // What a mobile hands the join: its room, where the goal is -- the thing it is fighting, or the goal
   // of any other walk -- and whether it walks the grid. Each argument is named, not skipped over.
-  ok(mobile.includes('const place = fighting && target ? this.placeOf(ctx, target) : this.placeOfGoal(d);'), 'a mobile works out where its goal is: the room of the thing it is fighting, or the goal of its walk');
+  ok(mobile.includes('const place = fighting && target ? this.placeOf(ctx, target) : leader ? this.placeOf(ctx, leader) : this.placeOfGoal(d);'), 'a mobile works out where its goal is: the room of the thing it is fighting, of the player it follows, or the goal of its walk');
   ok(mobile.includes('doorwayNav.corner(this.navAgent, this.legs, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, place, this.plan.across, this.now, this.walksGrid())'), '... and asks the join for its corner, indoors and out, with its room, that place and whether it walks the grid');
   ok(/private placeOf\(ctx: MobileContext, t: Living\): GoalPlace \| null \{\s*return placeOfCell\(ctx\.cellOf \? ctx\.cellOf\(t\) : undefined, this\.goalPlace\);/.test(mobile), '... the place of what it fights being the room the world follows that in (`placeOfCell`)');
   ok(/const onRound = !!p && \(d\.goal === p\.goal \|\| d\.state === 'return'\);\s*return placeOfWalk\(this\.goalPlace, d\.state, onRound, p \? p\.anchor\.room : undefined, this\.homeCell, this\.navCell\);/.test(mobile), '... and the place of any other walk its round’s point or its home (`placeOfWalk`)');

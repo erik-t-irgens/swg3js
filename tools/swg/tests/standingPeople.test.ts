@@ -211,6 +211,63 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(bodies.length === 2, "and stood again once it is, on the row's own respawn rather than a number of ours");
 }
 
+// ------------------------------------------------------------------ a body somebody else has for now
+{
+  // A person following the player (src/world/followers.ts) walks with them, as far from its own row as
+  // they are: the pass must put it down for nothing -- not its distance, not to make room for somebody
+  // nearer, not for model memory, not for a change of the side holding the towns -- while its row stays
+  // its row, so a follower killed comes back at its post on the row's own clock.
+  const held = new Set<Body>();
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'guard', z: 0 }), row({ who: 'far', z: 60 })]);
+  const { deps, bodies } = game({ keeps: (m) => held.has(m as unknown as Body) });
+  const at = new THREE.Vector3(0, 0, 0);
+  p.step(1, 1, at, deps);
+  const guard = bodies.find((b) => b.z === 0)!;
+  ok(!!guard && !guard.removed, 'one stood');
+  held.add(guard);
+  // The player walks it far off: past `drop` from its row, which would put anybody else down.
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 10, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 200), deps);
+  ok(!guard.removed && p.last.up >= 1, 'a body the followers hold is not put down however far the player takes it from its row');
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 12, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 400), deps);
+  ok(bodies.filter((b) => b.z === 0).length === 1, 'nor is its row stood a second time while it follows');
+  // Handed back, it is its row's again, and far off it goes.
+  held.delete(guard);
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 14, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 400), deps);
+  ok(guard.removed, 'handed back, it is put down for its distance like anybody else');
+
+  // Killed while it follows: its row comes back on its own clock, as a post's always did.
+  const q = new StandingPeople();
+  q.adopt([row({ who: 'guard', respawn: 30 })]);
+  const g2 = game({ keeps: (m) => held.has(m as unknown as Body) });
+  q.step(1, 1, at, g2.deps);
+  const f = g2.bodies[0];
+  held.add(f);
+  q.step(PEOPLE_TUNE.everySeconds + 0.1, 5, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 50), g2.deps);
+  f.dead = true;
+  held.delete(f);
+  q.step(PEOPLE_TUNE.everySeconds + 0.1, 8, at, g2.deps);
+  q.step(PEOPLE_TUNE.everySeconds + 0.1, 40, at, g2.deps);
+  q.step(PEOPLE_TUNE.everySeconds + 0.1, 42, at, g2.deps);
+  ok(g2.bodies.length === 2 && !g2.bodies[1].removed, "a follower killed is stood again at its post on the row's own clock");
+
+  // The cap full and somebody nearer waiting: the farthest standing makes room, but never one held.
+  const was = PEOPLE_TUNE.most;
+  PEOPLE_TUNE.most = 1;
+  const r = new StandingPeople();
+  r.adopt([row({ who: 'kept', z: 80 }), row({ who: 'near', z: 1 })]);
+  const g3 = game({ keeps: (m) => held.has(m as unknown as Body) });
+  r.step(1, 1, new THREE.Vector3(0, 0, 80), g3.deps);
+  const kept = g3.bodies.find((b) => b.z === 80)!;
+  held.add(kept);
+  r.step(PEOPLE_TUNE.everySeconds + 0.1, 5, at, g3.deps);
+  ok(!kept.removed && g3.bodies.filter((b) => b.z === 1).length === 0, 'with the cap full, a held body is never put down to make room for somebody nearer');
+  held.delete(kept);
+  r.step(PEOPLE_TUNE.everySeconds + 0.1, 8, at, g3.deps);
+  ok(kept.removed && g3.bodies.some((b) => b.z === 1 && !b.removed), 'handed back, it makes room as anybody would');
+  PEOPLE_TUNE.most = was;
+}
+
 // ------------------------------------------------------------------ a respawn of nought is never
 {
   // The server ran a body's timer only when it was above nought: a bunker's boss, a trainer, an event's
@@ -727,13 +784,13 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
 
   // The post and the indoor wander, which the brain's own tests reach only through a copy of `think`.
   // A town's walker keeps to its round instead, and its home moves onto the round before the clamp.
-  ok(/const d = decide\(self, list\);\s*(?:\/\/[^\n]*\n\s*)*if \(this\.patrol\) \{\s*keepPatrol\(d, self, this\.patrol(?:, [^;]*)?\);\s*this\.homeX = this\.patrol\.anchor\.x;\s*this\.homeZ = this\.patrol\.anchor\.z;\s*\} else if \(this\.post\) keepPost\(d, self, this\.post, self\.wanderAt\);\s*if \(this\.inside\) clampWander\(d, this\.homeX, this\.homeZ, BRAIN_TUNE\.leashInside \* BRAIN_TUNE\.wanderInsideShare\);/.test(mobile), "a body's own thinking keeps a person to their post (a walker to its round) and every wander indoors inside the leash");
+  ok(/const d = decide\(self, list\);\s*(?:\/\/[^\n]*\n\s*)*if \(follow\) keepFollow\(d, self, follow\);\s*else if \(this\.patrol\) \{\s*keepPatrol\(d, self, this\.patrol(?:, [^;]*)?\);\s*this\.homeX = this\.patrol\.anchor\.x;\s*this\.homeZ = this\.patrol\.anchor\.z;\s*\} else if \(this\.post\) keepPost\(d, self, this\.post, self\.wanderAt\);\s*if \(this\.inside\) clampWander\(d, this\.homeX, this\.homeZ, BRAIN_TUNE\.leashInside \* BRAIN_TUNE\.wanderInsideShare\);/.test(mobile), "a body's own thinking keeps a person to their post (a walker to its round, a follower to its place behind the player) and every wander indoors inside the leash");
 
   // The hand-over's reading side, and what the hand-spawn cap and the NPC tab's clear may take.
   ok(/const named = npcNow\(\)\?\.readTarget\(want\) \?\? null;\s*if \(!named\) return;/.test(mobile) && /'key' in named \? t\.key === named\.key : \(t as \{ npcId\?: string \}\)\.npcId === named\.npc/.test(mobile), "a creature handed over reads who it was fighting through the wire's own rule, never as this browser's player");
   ok(/if \(m\.origin === 'spawned' && !this\.worldIds\.has\(m\)\) n\+\+;/.test(manager), "the hand-spawn cap counts only what was stood by hand, never the world's own bodies");
   ok(/if \(m\.origin !== 'spawned' \|\| this\.worldIds\.has\(m\)\) continue;/.test(manager), "and the NPC tab's clear never takes one of the world's");
-  ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged \|\| s\.essential !== essential\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer, nor anybody of the other cap');
+  ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged \|\| s\.essential !== essential \|\| deps\?\.keeps\?\.\(b\)\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer, nor anybody of the other cap, nor anybody following the player');
 
   // What the town says about each row reaches the body the world stands, and the budget can make room.
   ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\), wildLife\.peopleExtras\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows, and the towns' lists and weapon groups beside them");

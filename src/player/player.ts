@@ -578,11 +578,12 @@ export class Player {
   }
 
   /**
-   * What the character controller walks straight through: a corpse (a ragdoll is no wall) and
-   * another player's body (it comes off the wire and teleports, so it must never climb, shove or
-   * trap you). One kept predicate rather than a closure made on every step.
+   * What the character controller walks straight through: a corpse (a ragdoll is no wall), another
+   * player's body (it comes off the wire and teleports, so it must never climb, shove or trap you), and
+   * somebody following you (`Physics.markWalkThrough`), who is never in your way. One kept predicate
+   * rather than a closure made on every step.
    */
-  private readonly walkPast = (c: RAPIER.Collider): boolean => !this.physics.isRagdoll(c.handle) && !this.physics.isPeer(c.handle);
+  private readonly walkPast = (c: RAPIER.Collider): boolean => !this.physics.isRagdoll(c.handle) && !this.physics.isPeer(c.handle) && !this.physics.isWalkThrough(c.handle);
 
   /** A kinematic capsule with its character controller, in a physics world: the player's in the world, or in a ship's room. */
   private static makeBody(world: RAPIER.World): { body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } {

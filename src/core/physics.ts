@@ -363,6 +363,23 @@ export class Physics {
   }
 
   /**
+   * The bodies the player walks through as though they were not there: the people following them
+   * (src/world/followers.ts), who stay out of the player's way by never being in it. Only the player's
+   * own character controller asks; a follower still stops a bolt, a blade and everybody else.
+   */
+  private readonly walkThrough = new Set<number>();
+
+  markWalkThrough(c: RAPIER.Collider, on: boolean): void {
+    if (on) this.walkThrough.add(c.handle);
+    else this.walkThrough.delete(c.handle);
+  }
+
+  /** Whether the player walks through a collider (one of a follower's). */
+  isWalkThrough(handle: number): boolean {
+    return this.walkThrough.has(handle);
+  }
+
+  /**
    * What the one ray that filters nothing at all passes over: another player's body, and a corpse.
    * Neither is a surface to stand on -- a peer standing under a speeder would be its road, and so
    * would a dead body lying under one -- and the two other rays that ask for a floor among things

@@ -60,6 +60,8 @@ import { NavAgent } from '../nav/navAgent.ts';
 import { DOOR_TUNE, DoorLegs, doorwayNav, placeOfCell, placeOfWalk, wallBetween, type GoalPlace } from '../nav/doorway.ts';
 import { MOBILE_GRID_ACROSS, outdoorNav } from '../nav/outdoorNav.ts';
 import { PATROL_TUNE, keepPatrol, thinkWalking, type Patrol } from '../patrols.ts';
+// A person following the player (`src/world/followers.ts`): its place behind them, kept on every thought.
+import { keepFollow, type FollowOrder } from '../followers.ts';
 import { walkDecision, type RoutineWalk } from '../ambient/routines.ts';
 import type { CellState } from '../layoutStream';
 import { MobileAnimator, SHOT_PRIORITY } from './animator';
@@ -71,7 +73,7 @@ import { POSTURE_TUNE, STANCE_TUNE, aimMode, bodyShare, capsuleTopFor, easeAngle
 // And the rest of fighting as a fighter does, for a person: its tier from its level, its ring, its
 // slide and its cover (`tactics.ts`), and Jedi Academy's roll and a jump by what it is (`evade.ts`).
 import { GroundTactics, lowClipsFor, lowLoop, lowTransition, type LowClips } from './tactics.ts';
-import { EVADE_TUNE, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpSpeed, ledgeJump, rollDirection, rollVector, type AimLine, type LedgeAsk, type RollDir } from '../evade.ts';
+import { EVADE_TUNE, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpSpeed, ledgeJump, rollCommit, rollDirection, rollVector, type AimLine, type LedgeAsk, type RollDir } from '../evade.ts';
 import { tierOfLevel, willFire } from '../groundSkill.ts';
 import { GROUND_STEP } from '../groundStep.ts';
 import type { CoverDeps } from '../cover.ts';
@@ -323,7 +325,12 @@ export class Mobile implements Living, NpcSubject {
   readonly entry: MobileEntry;
   readonly origin: 'spawned' | 'ambient';
   readonly label: string;
-  readonly side: Side;
+  /**
+   * Whose side it is on. Not readonly, for one reason: a person asked to follow the player takes the
+   * player's side for as long as it follows, and its own back when it is asked to stop
+   * (`src/world/followers.ts`). Everything that reads a side reads it again each time.
+   */
+  side: Side;
   aggression: Aggression;
   /** Hangs at the body's middle, turned by the heading. */
   readonly group = new THREE.Group();
@@ -442,10 +449,35 @@ export class Mobile implements Living, NpcSubject {
    */
   essential = false;
   /**
+   * A fixture the world cannot work without, stood as one (`SpawnOpts.fixture`): the ticket collector.
+   * Nobody talks such a body away from its post (`src/world/talk.ts`).
+   */
+  fixture = false;
+  /**
    * The spot the data put it on, for a standing person, and how it keeps to it (`keepPost` in
    * `brain.ts`); null for everything else, whose wander is the brain's own.
    */
   post: Post | null = null;
+  /**
+   * Following the player (`src/world/followers.ts`): whom, and its place behind them, rewritten by the
+   * follower set every step. While it is set its home is that place, so the brain's own leash measures
+   * from the player, and the idle half of every decision is a walk to it (`keepFollow`). Null for every
+   * body nobody has asked to follow.
+   */
+  follow: FollowOrder | null = null;
+  /**
+   * Being spoken to: the point it turns to, and holds still for, while the conversation lasts. Nothing
+   * it would otherwise think of is thought of meanwhile -- no wander, no post, no walk of a round or a
+   * routine -- and it is let go of the moment the conversation ends. Null the rest of the time.
+   */
+  listening: { x: number; z: number } | null = null;
+  /** The decision a body in a conversation acts on: stand, and face the one speaking. Made once. */
+  private readonly hearing: Decision = { state: 'idle', targetKey: null, moveTo: null, pace: 'stand', posture: 'stand', cover: false, face: null, attack: null, emote: null, wanderAt: 0, goal: null, until: 0, blockedSince: null, forgetKey: null, forgetUntil: 0, clearMemory: false };
+  /**
+   * Its own fighting tier, set by hand for this one body (`__debug.mobile(..., { tier })`), which wins
+   * over the one the console sets for everybody and over its own level's; null for neither.
+   */
+  ownTier: number | null = null;
   /**
    * Whether the room it stands in has no collision under it this instant. A building's colliders
    * come and go with the player's distance while the room a body is in goes on answering from model
@@ -888,14 +920,15 @@ export class Mobile implements Living, NpcSubject {
   // creature. A creature, a droid and a hologram have no `tactics` and never reach any of it.
 
   /**
-   * Its tier: `override` when the console sets one for everybody, else its own level's
-   * (`tierOfLevel`). Tier 0 is none of this at all -- no postures, no cover, no slide, no roll and no
-   * jump -- which is the mobile the game had before, so it can be looked at beside the new one.
+   * Its tier: its own when one was set for this body alone (`ownTier`), else `override` when the console
+   * sets one for everybody, else its own level's (`tierOfLevel`). Tier 0 is none of this at all -- no
+   * postures, no cover, no slide, no roll and no jump -- which is the mobile the game had before, so it
+   * can be looked at beside the new one.
    */
   applyFightTier(override: number | null = null): void {
     const t = this.tactics;
     if (!t) return;
-    t.setTier(override ?? tierOfLevel(this.level), 'person', !!this.blade);
+    t.setTier(this.ownTier ?? override ?? tierOfLevel(this.level), 'person', !!this.blade);
     if (!t.skill && this.posture !== 'stand' && !this.forcedPosture) this.setPosture('stand');
     // Its blade is judged at the same rung (`npcSaber.ts`), and hears a change of it on its next step.
     if (this.blades) this.blades.tier = t.tier;
@@ -1144,7 +1177,8 @@ export class Mobile implements Living, NpcSubject {
     this.rollVZ = rollAt.z * EVADE_TUNE.rollSpeed;
     this.rollLeft = EVADE_TUNE.rollTime;
     const length = animator.once(clip, { priority: SHOT_PRIORITY.attack, fadeIn: 0.05, fadeOut: 0.15 }) ?? 0;
-    this.tumbleUntil = this.now + Math.max(EVADE_TUNE.rollTime, length);
+    // Held until the clip has run out, or for the roll and the knob's recovery after it (`rollCommit`).
+    this.tumbleUntil = this.now + rollCommit(length);
     this.startTumble();
     return true;
   }
@@ -1801,9 +1835,98 @@ export class Mobile implements Living, NpcSubject {
     return radiusToward(this.plan, this.heading, from.x - this.pos.x, from.z - this.pos.z);
   }
 
-  /** Whether it is in a one-shot, dying, or attacking (from cover too, the same state): the tiers never freeze it. */
+  /**
+   * Whether it is in a one-shot, dying, or attacking (from cover too, the same state): the tiers never
+   * freeze it. Nor one following the player or being spoken to, which is behind the camera or at its
+   * edge as often as not and would otherwise think once a second and slide on unmoving feet.
+   */
   get busy(): boolean {
-    return this.dead || !!this.animator?.busy || this.swingAt > 0 || this.shotsLeft > 0 || this.bladeBusy || this.state === 'attack' || this.state === 'cover';
+    return this.dead || !!this.animator?.busy || this.swingAt > 0 || this.shotsLeft > 0 || this.bladeBusy || this.state === 'attack' || this.state === 'cover' || this.follow !== null || this.listening !== null;
+  }
+
+  /** Whether it has anything to fight with at all: a blow of its own, or a shot. */
+  get canFight(): boolean {
+    return this.melee || this.rangedRange > 0;
+  }
+
+  // ---- being spoken to, and following ------------------------------------------------------------
+  //
+  // A person the player talks to (`src/world/talk.ts`) and one asked to follow them
+  // (`src/world/followers.ts`). What is here is only what needs the body itself: the rest is the talk's
+  // and the follower set's, which are pure.
+
+  /**
+   * Speak to it, or stop (null): while spoken to it stands where it is and turns to face `at`, which the
+   * caller keeps and moves; let go, it thinks again at once, and a body that thinks nothing (part of the
+   * furniture) is left facing where it faced rather than acting on a stale decision.
+   */
+  listen(at: { x: number; z: number } | null): void {
+    if (this.disposed) return;
+    const was = this.listening;
+    this.listening = at;
+    if (at || !was) return;
+    this.decision = null;
+    this.goal = null;
+    this.thinkAt = 0;
+  }
+
+  /**
+   * The greeting it turns to answer with: the first of `clips` its animator holds, played once over its
+   * idle as an emote is. False where it holds none, or something weightier is playing.
+   */
+  greet(clips: readonly string[]): boolean {
+    const a = this.animator;
+    if (!a || this.dead || this.downPhase) return false;
+    for (const c of clips) {
+      if (!a.has(c)) continue;
+      return a.once(c, { priority: SHOT_PRIORITY.emote, fadeIn: 0.15, fadeOut: 0.25 }) !== null;
+    }
+    return false;
+  }
+
+  /**
+   * Made ready to walk off with the player: up off a seat onto the spot in front of it, back in its own
+   * idle rather than a lent one (a sitting mood played on the move is a body walking along sat on the
+   * air), and no longer walked by a routine of ours.
+   */
+  readyToFollow(): void {
+    if (this.disposed || this.dead) return;
+    if (this.seatAt) {
+      const s = this.seatAt;
+      this.rise(s.x + Math.sin(s.heading) * 0.7, s.z + Math.cos(s.heading) * 0.7);
+    }
+    this.routine = null;
+    this.seatedIdleOnly = false;
+    if (this.roles && this.plainIdle && this.roles.idle !== this.plainIdle) {
+      this.roles.idle = this.plainIdle;
+      this.laidIdle = this.plainIdle;
+      if (!this.downPhase) this.animator?.loop(this.idleNow(), 1, 0.3);
+      // A lent idle may have laid it at full length; its own does not.
+      this.applyCull();
+    }
+    this.thinkAt = 0;
+  }
+
+  /**
+   * Let go of its steering once it is no longer following: its last decision was a walk to a place behind
+   * the player, and a body that thinks nothing would otherwise walk on to where that place was. Its room
+   * is its home's room from here, since its home has just been moved to where it stands.
+   */
+  unfollow(): void {
+    if (this.disposed) return;
+    this.decision = null;
+    this.goal = null;
+    this.thinkAt = 0;
+    this.homeCell = this.navCell;
+    if (!this.dead && this.state !== 'loading' && !this.downPhase) this.state = 'idle';
+  }
+
+  /**
+   * Clips lent to it after it was hung (`MobileAnimator.lend`): the rolls and jumps a person stood as part
+   * of the furniture was never lent, handed over when it is asked to follow and may now have to fight.
+   */
+  lendClips(extra: ReadonlyMap<string, THREE.AnimationClip>): void {
+    this.animator?.lend(extra);
   }
 
   // ---- one of the world's creatures ----------------------------------------------------------------
@@ -2089,6 +2212,10 @@ export class Mobile implements Living, NpcSubject {
 
   private remember(source: Living, amount: number): void {
     if (this.aggression === 'passive' || source.key === this.key) return;
+    // A follower never holds a grudge against its own side: the player it follows, another player, or
+    // anybody else following them. A neighbour of its old group told that the player struck one of them
+    // (`MobileManager.assist`) would otherwise have it turn on the one it walks behind.
+    if (this.follow && source.side === this.side) return;
     const g = this.memory.get(source.key);
     if (g) {
       g.at = this.now;
@@ -2710,14 +2837,19 @@ export class Mobile implements Living, NpcSubject {
     // its branches is the point -- there is no state it can be left in and nothing to come out of.
     // The one thing such a body does do is walk a town's round, which asks nothing of the brain -- or,
     // for one of ours, the walk its routine gives it, which asks nothing of the brain either.
-    if (this.routine && this.now >= this.thinkAt && !this.downPhase) {
-      this.thinkRoutine();
-      this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
-    }
-    if (!this.routine && this.now >= this.thinkAt && !this.downPhase && (!this.essential || this.patrol)) {
-      if (this.essential) this.thinkWalker();
-      else this.think(ctx);
-      this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
+    // Spoken to, it thinks of nothing else: it stands and turns to whoever is speaking, whatever it was
+    // doing, and picks its day up again when the conversation ends (`listen`).
+    if (this.listening) this.hearOut();
+    else {
+      if (this.routine && this.now >= this.thinkAt && !this.downPhase) {
+        this.thinkRoutine();
+        this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
+      }
+      if (!this.routine && this.now >= this.thinkAt && !this.downPhase && (!this.essential || this.patrol)) {
+        if (this.essential) this.thinkWalker();
+        else this.think(ctx);
+        this.thinkAt = this.now + tier.think * (0.85 + Math.random() * 0.3);
+      }
     }
     // 10. The carry it stands in (before acting: `act` chooses the loop from it), 11. act,
     // 12. hold its height, 13. animate, 14. aim.
@@ -2851,6 +2983,14 @@ export class Mobile implements Living, NpcSubject {
     const was = this.targetKey;
     let line = false;
     const reachOut = Math.max(BRAIN_TUNE.aggroBig, BRAIN_TUNE.leash) + 30;
+    // Following the player: home is its place behind them, and its room theirs, so the leash, the walk
+    // back after a chase and which leash is kept (a room's or the ground's) all measure from the player.
+    const follow = this.follow;
+    if (follow) {
+      this.homeX = follow.slotX;
+      this.homeZ = follow.slotZ;
+      this.homeCell = ctx.cellOf ? (ctx.cellOf(follow.leader) ?? null) : null;
+    }
     // A blade swung through the move machine strikes from where arm and blade really reach
     // (`NPC_SABER_TUNE.closeTo`), as a fighter's does; everything else from its own template's reach.
     const own = (this.entry.stats?.reach ?? 1.5) * this.scale;
@@ -2931,7 +3071,11 @@ export class Mobile implements Living, NpcSubject {
     // round it is making for, written **before** the indoor clamp reads it: so the leash, the walk home
     // after a fight and the clamp all measure from the round, and a walker who was fought comes back to
     // the very point it was on its way to.
-    if (this.patrol) {
+    //
+    // A follower keeps to its place behind the player instead (`keepFollow`), which leaves a fight, a
+    // flight and the run back past the leash to the brain.
+    if (follow) keepFollow(d, self, follow);
+    else if (this.patrol) {
       keepPatrol(d, self, this.patrol, Math.random, PATROL_TUNE, !this.tier?.move);
       this.homeX = this.patrol.anchor.x;
       this.homeZ = this.patrol.anchor.z;
@@ -2998,6 +3142,21 @@ export class Mobile implements Living, NpcSubject {
         if (names.length) this.animator.once(e[names[Math.floor(Math.random() * names.length)]], { priority: SHOT_PRIORITY.emote });
       }
     }
+  }
+
+  /**
+   * A body being spoken to: the one decision it keeps for this, standing and facing the speaker, and no
+   * fight, target or walk of its own while it lasts. Nothing is made.
+   */
+  private hearOut(): void {
+    const at = this.listening;
+    const d = this.hearing;
+    d.face = at;
+    this.decision = d;
+    this.goal = null;
+    this.state = 'idle';
+    this.targetKey = null;
+    this.targetRef = null;
   }
 
   /**
@@ -3250,8 +3409,11 @@ export class Mobile implements Living, NpcSubject {
     if (moveTo && pace !== 'stand' && !this.flyer && !this.driven) {
       // A move of its own is to a point of its own on open ground, not to the thing it is fighting.
       const fighting = !this.splitMove && !!target && !!d && (d.state === 'chase' || d.state === 'attack' || d.state === 'cover' || d.state === 'alert');
-      const goalY = fighting && target ? target.pos.y : this.pos.y;
-      const place = fighting && target ? this.placeOf(ctx, target) : this.placeOfGoal(d);
+      // A follower's walk is to its place behind the player, which is in whatever room the player is in:
+      // the doorway join walks it through the door they went through, and up to the floor they are on.
+      const leader = !fighting && this.follow ? this.follow.leader : null;
+      const goalY = fighting && target ? target.pos.y : leader ? leader.pos.y : this.pos.y;
+      const place = fighting && target ? this.placeOf(ctx, target) : leader ? this.placeOf(ctx, leader) : this.placeOfGoal(d);
       const corner = doorwayNav.corner(this.navAgent, this.legs, this.navCell, this.pos.x, this.pos.y, this.pos.z, moveTo.x, goalY, moveTo.z, place, this.plan.across, this.now, this.walksGrid());
       if (corner) face = corner;
     }
@@ -3731,6 +3893,12 @@ export class Mobile implements Living, NpcSubject {
       airless: this.airless,
       // The spot a standing person keeps to, and how far it is off it.
       post: this.post ? `${this.post.kind} ${Math.hypot(this.pos.x - this.homeX, this.pos.z - this.homeZ).toFixed(1)} m off` : null,
+      // Following the player, and how far it is from its place behind them; being spoken to; its own tier.
+      follow: this.follow ? `place ${this.follow.index + 1}, ${Math.hypot(this.pos.x - this.follow.slotX, this.pos.z - this.follow.slotZ).toFixed(1)} m off${this.follow.run ? ', running' : ''}` : null,
+      listening: this.listening !== null,
+      fixture: this.fixture,
+      essential: this.essential,
+      ownTier: this.ownTier,
       // A town walker's round: the point it is at and the one it walks to, legs and rounds walked.
       patrol: this.patrol ? `${this.patrol.walking ? `walking ${this.patrol.at} -> ${this.patrol.to}` : `waiting at ${this.patrol.at}`} of ${this.patrol.points.length}, ${this.patrol.legs} legs (${this.patrol.skipped} given up), ${this.patrol.rounds} rounds` : null,
       // Its walk through a doorway, and whether the ground's grid is handed to it at all.

@@ -236,6 +236,15 @@ export class Input {
     return this.pressed.delete(code);
   }
 
+  /**
+   * Take every press of this frame, so nothing later in it sees any: a conversation holds the player's
+   * keys while the world goes on (`captured` already stops a held key reading as held). The mouse's
+   * movement and the wheel are the camera's and are left alone.
+   */
+  dropPresses(): void {
+    this.pressed.clear();
+  }
+
   /** Rebind an action to one or more codes (KeyboardEvent.code, or Mouse0, Mouse1, Mouse2). An empty list restores the default. */
   bind(action: Action, codes: string[]): void {
     if (!(action in DEFAULT_BINDINGS)) throw new Error(`no such action: ${action}; actions are ${Object.keys(DEFAULT_BINDINGS).join(', ')}`);

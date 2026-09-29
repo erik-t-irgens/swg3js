@@ -123,7 +123,7 @@ import { BLADE_RADIUS, BladePath, type Striker } from '../combat/sweep';
 import { cullsOneByOne, fighterCull, fitCullSpheres, setBodyCulled, type BodyPose } from './bodyCull.ts';
 // Jedi Academy's roll when it is aimed at, and a jump by what it is (`evade.ts`): the same tables a
 // person from the catalogue reads, and its own rig's own clips.
-import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeTune, type JumpTune, type LedgeAsk, type RollDir } from './evade.ts';
+import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollCommit, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeTune, type JumpTune, type LedgeAsk, type RollDir } from './evade.ts';
 
 /** What a fighter carries, and so how it fights. */
 export type Arm = 'saber' | 'melee' | 'gun';
@@ -1438,7 +1438,8 @@ export class Npc implements Living, ErrandBody {
     this.rollVZ = rollAt.z * EVADE_TUNE.rollSpeed;
     this.rollLeft = EVADE_TUNE.rollTime;
     rig.play(clip, { fadeIn: 0.05 });
-    this.tumbleUntil = this.now + Math.max(EVADE_TUNE.rollTime, rig.clipDuration(clip) ?? 0);
+    // Held until the clip has run out, or for the roll and the knob's recovery after it (`rollCommit`).
+    this.tumbleUntil = this.now + rollCommit(rig.clipDuration(clip) ?? 0);
     this.startTumble();
   }
 

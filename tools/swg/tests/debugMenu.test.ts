@@ -474,7 +474,7 @@ const report = () => menu.report() as { picked: string | null; args: string; bus
   ok(handBack.test(block('this.debugMenu = new DebugMenu(')), 'the debug menu gives the mouse back through handBackMouse, never straight to the pointer lock');
   ok(handBack.test(block('const groupUi = new GroupUi(')), "and so does the group's panel, so shutting it under the debug menu or the trade window leaves them the mouse");
   ok(/elseHasMouse: \(\) => this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)/.test(block('const tradeUi = new TradeUi(')), 'the trade window counts the windows that hold the mouse without being panels before handing it back');
-  ok(/this\.mouseHeldElsewhere = \(\) => groupUi\.open \|\| tradeUi\.open \|\| this\.debugMenu\.open;/.test(main), 'and the debug menu is one of them');
+  ok(/this\.mouseHeldElsewhere = \(\) => groupUi\.open \|\| tradeUi\.open \|\| this\.debugMenu\.open \|\| this\.talkNow !== null;/.test(main), 'and the debug menu is one of them, and so is a conversation');
   const hb = /private handBackMouse\(\): void \{\n\s*if \(this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)\) return;\n\s*this\.freeMouse\(false\);/;
   ok(hb.test(main), 'handBackMouse leaves the mouse where it is while a panel, the map or one of those windows is up');
 }

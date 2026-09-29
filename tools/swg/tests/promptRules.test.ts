@@ -190,6 +190,53 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // Somebody you are looking at who may be spoken to (`src/world/talk.ts`). The cap says what you
+  // would do and never whom: a name is the thing you are looking at, and it goes on the long line.
+  const n = fill(at({ talk: true }));
+  ok(n === 1 && words(n)[0] === PROMPT_WORDS.talk && keys(n)[0] === 'mount', `somebody to talk to: talk, on the use key (${show(n).join(', ')})`);
+  // What is underfoot and a port's own things all outrank a person: a lift, an elevator and a doorway
+  // are where you stand, and a terminal is a thing you walked up to use, beside which a traveller
+  // standing at it is not what the key is for.
+  for (const [what, fields, want] of [
+    ['a lift shaft', { lift: true }, PROMPT_WORDS.lift],
+    ['an elevator', { elevator: 'up' as const }, PROMPT_WORDS.up],
+    ['a building with no way in', { doorless: true }, PROMPT_WORDS.inside],
+    ['a ticket terminal', { travel: 'terminal' as const }, PROMPT_WORDS.ticketTerminal],
+    ['the ticket collector', { travel: 'collector' as const }, PROMPT_WORDS.collector],
+  ] as [string, Record<string, unknown>, string][]) {
+    const both = fill(at({ talk: true, ...fields }));
+    ok(both === 1 && words(both)[0] === want, `somebody to talk to beside ${what}: ${what} keeps the key (${show(both).join(', ')})`);
+  }
+  // A person outranks a vehicle in reach and a gate: a person is offered only while the view is on
+  // them, a vehicle whichever way you look, so the one you are looking at is the one you meant.
+  for (const [what, fields] of [
+    ['a speeder', { near: 'mount' as const }],
+    ['a ship with a room', { near: 'board' as const }],
+    ['a gate', { gate: 'travel' as const }],
+  ] as [string, Record<string, unknown>][]) {
+    const both = fill(at({ talk: true, ...fields }));
+    ok(both === 1 && words(both)[0] === PROMPT_WORDS.talk, `somebody to talk to beside ${what}: talk has the key, and ${what} is not shown under it too (${show(both).join(', ')})`);
+  }
+  const menu = fill(at({ talk: true, shipMenu: 'here' }));
+  ok(words(menu).join() === `${PROMPT_WORDS.talk},${PROMPT_WORDS.shipMenu}`, `somebody to talk to with the ship menu on offer: both, on their own keys (${show(menu).join(', ')})`);
+  ok(PROMPT_WORDS.talk.length <= PROMPT.maxLabel, `"${PROMPT_WORDS.talk}" fits the bar`);
+}
+
+{
+  // The game's own dispatch has to agree with the bar, or the key would do one thing and the cap say
+  // another. It is one line in the frame loop, read out of the source: what is underfoot (the lift, an
+  // elevator, a doorway), then a port's own things, then somebody to talk to, then a gate, then a
+  // vehicle or a hull, which is `handleMount`'s. A reordering there fails here.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  const line = /if \(!this\.handleElevator\(\) && !this\.handleTravel\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
+  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a port, a person, a gate, a vehicle');
+  ok([...main.matchAll(/this\.handleTalk\(\)/g)].length === 1, 'and talking is reached from that one place');
+  // The gate stands aside for a person as it does for a vehicle, in the gather and in the key alike.
+  ok(/free: !s\.lift && !s\.elevator && !s\.doorless && !s\.talk && !s\.near/.test(main), "the gather's gate stands aside for somebody to talk to");
+  ok(/!peerRooms\(\)\?\.nearest\(p\.pos, BOARD_TUNE\.reach\) && !this\.talkTarget\(\)/.test(main), "and so does the key's own gate");
+}
+
+{
   // At one of the gates a world's zones are walked between. The cap says what happens and never
   // where it goes: a place name on a cap would be a label built outside the table below, which the
   // whole-bar check further down would catch, and where it leads is said on the message line.
@@ -364,6 +411,7 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
     at({ lift: true }),
     at({ elevator: 'up' }),
     at({ doorless: true }),
+    at({ talk: true }),
     at({ gate: 'travel' }),
     at({ gate: 'nowhere' }),
     at({ boots: true, bootsReach: true }),

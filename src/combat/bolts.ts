@@ -217,7 +217,8 @@ export interface BoltWorld {
   playerHittable?: Hittable | null;
   /** A bolt reached the player: return the way it leaves when blocked, or null to let it hurt. */
   block(bolt: Bolt, hit: THREE.Vector3, out: THREE.Vector3): boolean;
-  onPlayerHit(damage: number, from: THREE.Vector3): void;
+  /** A bolt reached the player and was not turned away: how hard, from where, and whose it was (null for nobody's). */
+  onPlayerHit(damage: number, from: THREE.Vector3, source?: Living | null): void;
 }
 
 const tmp = new THREE.Vector3();
@@ -551,7 +552,7 @@ export class Bolts {
           // A picture of somebody else's bolt stops here and is heard and seen doing it, and takes
           // nothing: the browser that fired it is the one that says whether it hit, and what it
           // takes comes back from there.
-          if (!b.inert) w.onPlayerHit(b.damage, b.pos);
+          if (!b.inert) w.onPlayerHit(b.damage, b.pos, b.source);
           combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
           w.effects.burst(hitPoint, 0xff8060, 0.5, 0.15);
         }
