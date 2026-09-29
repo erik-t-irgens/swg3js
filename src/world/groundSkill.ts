@@ -161,6 +161,27 @@ const TUNE_FLOOR: Record<keyof GroundTune, number> = { strafeFrom: 0, strafeTo: 
 const DEG = Math.PI / 180;
 const TAU = Math.PI * 2;
 
+/**
+ * The levels a person from the catalogue climbs the ladder at: under the first is tier 1, from the
+ * last up is tier 5. **Invented**, like everything in this file, and read in place so the knob
+ * reaches the next body stood: in Core3's own numbers a level-8 Tusken child is tier 1, a level-25
+ * stormtrooper tier 2, a level-38 Tusken warrior tier 3 and a level-116 carnage champion tier 5. Tier
+ * 0 is never a level's: it stays the fighters' own A/B, the flat body this game had before the ladder.
+ */
+export const TIER_LEVELS: number[] = [10, 30, 60, 90];
+
+/**
+ * The tier a body of this level fights at. A body with no level at all -- nothing in the data says
+ * how good it is -- fights as the least of them, which is also the body the game always had, since
+ * the bottom two tiers neither strafe nor evade.
+ */
+export function tierOfLevel(level: number | null | undefined, bands: readonly number[] = TIER_LEVELS): number {
+  if (typeof level !== 'number' || !Number.isFinite(level)) return 1;
+  let tier = 1;
+  for (const b of bands) if (level >= b) tier++;
+  return Math.min(GROUND_TIERS, tier);
+}
+
 /** A tier's skill, clamped to 1..`GROUND_TIERS` and rounded, as `skillOfTier` does for a pilot. */
 export function skillOfGroundTier(tier: number): GroundSkill {
   const t = Number.isFinite(tier) ? Math.min(GROUND_TIERS, Math.max(1, Math.round(tier))) : 1;

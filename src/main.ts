@@ -17,6 +17,7 @@ import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuildin
 import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
 import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
 import { SKELETON_FRAME, SKELETON_TUNE } from './core/skeletonOnce.ts';
+import { LOW_CULL } from './world/bodyCull.ts';
 import { LOD_TUNE } from './world/mobiles/lod.ts';
 import { FAR_TILE_TUNE } from './world/farTile.ts';
 import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
@@ -423,6 +424,8 @@ const liftAt = new THREE.Vector3();
 /** The fighters' glows the pool is asked for when the effects do not light the blades: the nearest two, within 25 m of the camera. */
 const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
+/** The way the camera looks, written each frame into the world's record of the player's aim. */
+const aimLook = new THREE.Vector3();
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
 /**
@@ -1119,6 +1122,29 @@ class App {
       note: "creatures', people's and fighters' meshes culled one by one in every pass and shadow cascade against a sphere set once",
     });
     registerPerfSwitch('shadowReach', { get: () => LOD_TUNE.shadowClamp, set: (v) => (LOD_TUNE.shadowClamp = !!v), values: [false, true], note: "a creature whose sphere reaches none of the shadow cascades' light boxes throws no shadow (and may freeze)" });
+    // A body fighting on one knee: culled mesh by mesh against its standing sphere, or drawn whole.
+    registerPerfSwitch('kneelWhole', {
+      get: () => LOW_CULL.kneelWhole,
+      set: (v) => {
+        LOW_CULL.kneelWhole = !!v;
+        this.world.mobiles?.applyCullSphere();
+        this.world.npcs?.applyCullSphere();
+      },
+      values: [false, true],
+      note: 'false culls a kneeling person or fighter mesh by mesh against its standing sphere, which holds a kneel; true draws it whole while it kneels',
+    });
+    // How the world's people fight, flipped in place over one fight: 0 is the mobile before any of it,
+    // null each person's own level's tier. Behaviour takes seconds to show, so an A/B of it wants long
+    // blocks (`perf({ ab: { key: 'fightTier', a: 0, b: 5 }, block: 300, frames: 3600 })`), each
+    // thrown block the fight settling into the new rung.
+    registerPerfSwitch('fightTier', {
+      get: () => this.world.mobiles?.fightTier ?? null,
+      set: (v) => {
+        this.world.mobiles?.tune({ tier: typeof v === 'number' && Number.isFinite(v) ? v : null });
+      },
+      values: [0, null],
+      note: "0 fights as the mobile before tiers (no postures, cover, slide, roll or jump); null each person's own level's tier; a number that rung for everybody",
+    });
     // The four of step 3 at once, so the whole step is put beside the old way in one drift-cancelling run
     // (`perf({ ab: { key: 'step3' } })`) rather than read off windows taken one after another. It reads true
     // with all four on, false with all four off and 'mixed' otherwise, and a mixed state is kept aside the
@@ -15777,6 +15803,20 @@ class App {
       this.world.aboard = !!player.aboard;
       this.world.weatherHull = player.mounted?.spec.ship ? player.mounted : null;
       this.world.weatherRidden = player.mounted;
+      // Where the player's gun is pointed while it is up: what a fighter or a person reads to know it is
+      // aimed at, and throw itself aside (`src/world/evade.ts`). The crosshair is the camera's own line.
+      const aim = this.world.playerAim;
+      aim.on = simulate && player.classId === 'bounty_hunter' && !player.fists && player.gunReady && !player.mounted && !player.aboard && !player.noclip;
+      if (aim.on) {
+        const eye = this.cam.camera;
+        eye.getWorldDirection(aimLook);
+        aim.x = eye.position.x;
+        aim.y = eye.position.y;
+        aim.z = eye.position.z;
+        aim.dx = aimLook.x;
+        aim.dy = aimLook.y;
+        aim.dz = aimLook.z;
+      }
       this.hud.setWeatherNote(this.world.weather.heldNote());
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
       this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);

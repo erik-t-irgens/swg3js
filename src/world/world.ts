@@ -3,6 +3,7 @@ import { packIdOf, type PlanetDef } from '../data/planets';
 import type { Physics, RAPIER } from '../core/physics';
 import { CreatureManager } from './creatures';
 import { NpcManager, type NpcDeps } from './npcs';
+import type { AimLine } from './evade.ts';
 import { MobileManager } from './mobiles/manager';
 import type { Mobile } from './mobiles/mobile';
 import { MobileAssets } from './mobiles/assets';
@@ -640,6 +641,12 @@ export class World {
   readonly weather: Weather;
   /** Set by main before update: the player is aboard a ship's rooms. */
   aboard = false;
+  /**
+   * Set by main before update: where the player's gun is pointed while it is up, and whether it is.
+   * It is what a fighter and a person from the catalogue read to know they are being aimed at, and
+   * throw themselves aside (`src/world/evade.ts`). One record, written in place and never made again.
+   */
+  readonly playerAim: AimLine = { on: false, x: 0, y: 0, z: 0, dx: 0, dy: 0, dz: 1 };
   /** Set by main before update: the ship the player rides (its box keeps rain out of the canopy), or null. */
   weatherHull: Vehicle | null = null;
   /** Set by main before update: whatever the player rides (never a roof for the rain), or null. */
@@ -1383,6 +1390,9 @@ export class World {
       weapons: () => this.npcDeps.weapons ?? null,
       // How the portal renderer's last frame saw a body's rooms: one nobody could see is off screen (commit 2c).
       roomSeen: (root) => this.roomSeen(root),
+      // What stands near a person that it could get behind, the fighters' own wire (see below): a person
+      // from the catalogue takes cover as a fighter does now, through the one shared search.
+      blockers: (x, z, reach, out, cap) => this.layoutStream?.blockersNear(x, z, reach, out, cap) ?? 0,
     });
     // The fighters stand on a building's floor as the mobiles do: their room followed through the
     // portals (the floor under them is then found by a ray, the terrain outside).
@@ -6173,7 +6183,7 @@ export class World {
     // A step has passed since the last frame was drawn: how that frame saw each body's rooms is read
     // below, and only while it is the one frame just drawn (`ActorRoutes.levelOf`).
     this.portals?.actors.tick();
-    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell });
+    this.mobiles?.update(dt, { now: this.simTime, dt, camera, playerPos, targets, cellOf: this.livingCell, aim: this.playerAim });
     perf.end(SEC.mobiles);
     perf.begin(SEC.people);
     // The world's own lairs and herds, stood and put away as the player moves. On this clock and
@@ -6189,7 +6199,7 @@ export class World {
     // how far the body was from the player to know whether anything along the route was solid. It is
     // handed in rather than picked out of `targets`, because the player leaves that list while
     // noclipping, aboard or dead and the walk's account must not go blind on any of those.
-    this.npcs.update(dt, targets, this.bolts, camera, this.simTime, playerPos);
+    this.npcs.update(dt, targets, this.bolts, camera, this.simTime, playerPos, this.playerAim);
     perf.end(SEC.npcs);
     perf.begin(SEC.ships);
     // The ships that fight: the contacts in step with the vehicles (the player's ship marked), the NPC ships'

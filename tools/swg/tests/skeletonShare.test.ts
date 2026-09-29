@@ -338,6 +338,8 @@ function skinnedUnder(root: THREE.Object3D): THREE.SkinnedMesh[] {
   ok(!cullsOneByOne(pose({ ragdoll: true }), true), 'a ragdoll is not');
   ok(!cullsOneByOne(pose({ dead: true }), true), 'nor a body dead in its held death clip, which is every death on a world a server holds, and every one waiting for its ragdoll');
   ok(!cullsOneByOne(pose({ down: true }), true), 'nor one knocked down, or a fighter prone');
+  ok(!cullsOneByOne(pose({ low: true }), true), 'nor one prone, rolling or in the air on a jump of its own, which a fighter and a person fight in');
+  ok(!cullsOneByOne(pose({ kneel: true }), true, true) && cullsOneByOne(pose({ kneel: true }), true, false), 'and one on a knee as its own switch says: drawn whole, or culled against the standing sphere that holds it');
   ok(!cullsOneByOne(pose({ idle: 'idle:npc_dead_02' }), true) && !cullsOneByOne(pose({ idle: 'idle:wookiee_lying_restrained' }), true), 'nor one standing in an idle that lays it at full length');
   ok(['idle:npc_sitting_chair', 'idle:npc_sitting_ground', 'idle:npc_meditate', 'idle:worried', 'idle'].every((idle) => cullsOneByOne(pose({ idle }), true)), 'while sitting, meditating and every mood on its feet keep the cull');
   ok(!LYING_IDLE.test('idle:npc_sitting_table') && LYING_IDLE.test('idle:npc_dead_01'), 'the lying idles are told from the sitting ones by name');
@@ -443,6 +445,22 @@ function skinnedUnder(root: THREE.Object3D): THREE.SkinnedMesh[] {
   ok(/p\.dead = this\.dead;/.test(applied) && /p\.down = this\.downPhase !== null;/.test(applied) && /p\.idle = this\.roles\?\.idle \?\? null;/.test(applied) && /cullsOneByOne\(p\)/.test(applied), 'a creature reads its death, its knockdown and its idle');
   ok(told(npcs, /private die\(\): void \{/) && told(npcs, /private startRagdoll\(\): void \{/) && /if \(\(p === 'prone'\) !== wasProne\) this\.applyCull\(\);/.test(npcs), 'a fighter dying, falling and going prone or getting up asks it too');
   ok(/p\.down = this\.posture === 'prone';/.test(npcs), 'and reads its posture');
+  ok(/const tumble = this\.tumbling \|\| this\.now < this\.tumbleUntil;\s*this\.cullTumble = tumble;\s*p\.low = this\.posture === 'prone' \|\| tumble;/.test(applied) && /p\.kneel = this\.posture === 'kneel';/.test(applied), 'a person reads its prone, its rolls and jumps and the clips that end them, which lay it out past the standing sphere, and its knee');
+  const npcApplied = body(npcs, /  applyCull\(\): void \{/);
+  ok(/const tumble = this\.tumbling \|\| this\.now < this\.tumbleUntil;\s*this\.cullTumble = tumble;\s*p\.low = tumble;/.test(npcApplied) && /p\.kneel = this\.posture === 'kneel';/.test(npcApplied), 'and a fighter its rolls, its jumps, the clips that end them and its knee');
+  ok(told(mobile, /private startTumble\(\): void \{/) && told(mobile, /private endTumble\(\): void \{/) && told(npcs, /private startTumble\(\): void \{/) && told(npcs, /private endTumble\(\): void \{/), 'both asking the cull again as a roll or a jump starts and ends');
+  // And once the clip that ends one has run out, or the body stays drawn whole after a roll for as long as it stands.
+  const act = body(mobile, /private act\(dt: number, ctx: MobileContext, tier: LodTier\): void \{/);
+  ok(/if \(this\.cullTumble && this\.now >= this\.tumbleUntil\) this\.applyCull\(\);/.test(act) && act.indexOf('this.cullTumble') > act.indexOf('this.stepTumble(dt)'), "a person asks again, once a frame off its roll, the moment the roll's or the landing's clip has run");
+  const npcUpdate = body(npcs, /  update\(dt: number, terrain: Terrain,[^{]*\{/);
+  ok(/if \(this\.cullTumble && !this\.tumbling && now >= this\.tumbleUntil\) this\.applyCull\(\);/.test(npcUpdate), 'and so does a fighter');
+  ok(told(mobile, /private dropTumble\(\): void \{/) && /this\.tumbleUntil = 0;\s*this\.endTumble\(\);/.test(body(mobile, /private dropTumble\(\): void \{/)), "a person handed to another browser or stood again drops the clip's clock before it asks, so the cull it is left with is the standing one");
+  // Going low or getting up asks too, and a knee and flat are asked apart, since with `LOW_CULL.kneelWhole`
+  // off the two answer differently and a body going straight from one to the other must be asked.
+  const setMobile = body(mobile, /private setPosture\(p: Posture\): void \{/);
+  ok(/if \(\(p === 'prone'\) !== \(was === 'prone'\) \|\| \(p === 'kneel'\) !== \(was === 'kneel'\)\) this\.applyCull\(\);/.test(setMobile), 'a person going onto a knee, flat, between the two or up again asks the cull');
+  const setNpc = body(npcs, /private setPosture\(p: Posture\): void \{/);
+  ok(/if \(\(p === 'prone'\) !== wasProne\) this\.applyCull\(\);\s*(\/\/[^\n]*\n\s*)*else if \(\(p === 'kneel'\) !== wasKneeling\) this\.applyCull\(\);/.test(setNpc), 'and so does a fighter');
   // The shadow rule: the manager asks the world's boxes with the same slack as the screen, and the world refreshes them after the cascades move.
   ok(/sphere\.radius = radius \+ tune\.shadowSlack;\s*inCascades = reachesCascades\(boxes, sphere\);/.test(manager) && /i\.inCascades = inCascades;/.test(manager), "the manager asks whether a body's sphere, with the shadow slack, reaches a cascade's box");
   ok(/csm\.update\(\);\s*refreshCascadeBoxes\(csm\.lights, this\.cascadeBoxes\);/.test(worldSrc) && /shadowBoxes: \(\) => \(this\.csm \? this\.cascadeBoxes : null\),/.test(worldSrc), 'and the world hands it the boxes, refreshed right after the cascades move');
