@@ -22,6 +22,8 @@ import { FAR_TILE_TUNE } from './world/farTile.ts';
 import { FAR_PROBE, FAR_PROBE_STATS } from './world/mobiles/groundProbe.ts';
 import { FLORA_WARM } from './world/flora.ts';
 import { applyReachOption, FLORA_TUNE, type ReachOption } from './world/floraReach.ts';
+import { FLORA_BATCH } from './world/floraBatch.ts';
+import { LOD_LEVEL_DEFAULTS, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, type LodLevelTune, type RideLodTune } from './world/lodLevels.ts';
 import { PLACED_TUNE } from './world/placedTiers.ts';
 import { legacyCount as legacyStencilCount, PORTAL_REF } from './world/stencilRef.ts';
 import { SCAN_TUNE } from './world/sceneAdds.ts';
@@ -1148,6 +1150,12 @@ class App {
     registerPerfSwitch('placedTiers', { get: () => PLACED_TUNE.tierRule, set: (v) => (PLACED_TUNE.tierRule = v === 'snapshot' ? 'snapshot' : 'model'), values: ['snapshot', 'model'], note: "'model' files a placed object by its own model's size (1.7 km, 750 m or 320 m); 'snapshot' by the snapshot's radius, the old streamer exactly, which put almost everything at 1.7 km. A world is filed when it is read, so this takes effect at the next arrival or at once under a loading screen with `placed({ rule, reload: true })`: an in-session `ab` on it compares nothing, and the two are compared on fresh loads (`perf()` after each)" });
     registerPerfSwitch('sharedStencilRef', { get: () => PORTAL_REF.shared, set: (v) => this.portals.setSharedRef(!!v), values: [false, true], note: "every portal material reads one shared stencil reference through an accessor on three's Material prototype, where the renderer used to write it into each of them several times a frame; both sides keep every material in V8's fast mode, and `localStorage['swg.stencilAccessor'] = '0'` leaves the accessor out altogether from the next load" });
     registerPerfSwitch('scanNew', { get: () => SCAN_TUNE.queued, set: (v) => (SCAN_TUNE.queued = !!v), values: [false, true], note: "the quarter-second material scan walks only what was added since, with the whole scene every two seconds behind it" });
+    // Step 7, the client's own detail levels (from a pack converted with them), and the flora drawn per region.
+    registerPerfSwitch('lodLevels', { get: () => LOD_LEVEL_TUNE.on, set: (v) => this.world.setLodLevels(!!v), values: [false, true], note: "a placed thing out in the open and a plant drawn at the client's own detail level for its distance from the eye (the finest, the middle and the lowest the pack carries); off, every copy at its finest" });
+    registerPerfSwitch('exactRooms', { get: () => FURNITURE_TUNE.exactRooms, set: (v) => (FURNITURE_TUNE.exactRooms = !!v), values: [false, true], note: "a room's furniture hosted by the building the snapshot names (a pack converted with them) rather than the one the rooms' boxes find, and seen from the room it names as well as every room the boxes find. Read when a world is read, so it takes effect at the next arrival: an in-session `ab` on it compares nothing" });
+    registerPerfSwitch('floraRegions', { get: () => FLORA_BATCH.on, set: (v) => this.world.setFloraRegions(!!v), values: [false, true], note: "the plants and trees drawn one batch per 256 m region, model and level, rather than one mesh per 64 m chunk, model and piece (the levels ride on these)" });
+    // Step 8, detail coming in nearer while the eye moves fast.
+    registerPerfSwitch('rideLodBias', { get: () => RIDE_LOD_TUNE.on, set: (v) => { RIDE_LOD_TUNE.on = !!v; this.world.refreshDetail(); }, values: [false, true], note: "the detail levels' switch distances and the plant reach divided by 1 + (speed - 20) / 30 (at most 5) while the eye moves faster than 20 m/s: a shuttle ride, a fast ship. Ships off: on a flown trip it saved nothing (RIDE_LOD_DEFAULTS says what was measured)" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
@@ -2548,7 +2556,19 @@ class App {
        * trip's plan instead: each leg, where and toward what, when it began and how long it took, and about
        * how long the whole flight should take (`flownSeconds`, loading screens left out).
        */
-      ride: async (opts: { to?: string; empty?: string; trip?: string; skip?: boolean; legs?: boolean; abort?: boolean; pilot?: Partial<typeof RIDE_PILOT>; tune?: Partial<typeof RIDE_TUNE> } = {}) => {
+      ride: async (opts: { to?: string; empty?: string; trip?: string; skip?: boolean; legs?: boolean; abort?: boolean; pilot?: Partial<typeof RIDE_PILOT>; tune?: Partial<typeof RIDE_TUNE>; lodBias?: boolean | Partial<RideLodTune> } = {}) => {
+        // Step 8: the ride bias. `true` reports it, `false` switches it off, an object moves `RIDE_LOD_TUNE`.
+        if (opts.lodBias !== undefined) {
+          if (opts.lodBias === false) RIDE_LOD_TUNE.on = false;
+          else if (typeof opts.lodBias === 'object') {
+            for (const [k, v] of Object.entries(opts.lodBias)) {
+              if (!(k in RIDE_LOD_TUNE)) continue;
+              const was = (RIDE_LOD_TUNE as unknown as Record<string, unknown>)[k];
+              if (typeof was === typeof v && (typeof v !== 'number' || Number.isFinite(v))) (RIDE_LOD_TUNE as unknown as Record<string, unknown>)[k] = v;
+            }
+          }
+          if (!opts.to && !opts.empty && !opts.trip && !opts.legs && !opts.abort) return this.world.lodReport().ride;
+        }
         setTune(RIDE_TUNE, opts.tune);
         setTune(RIDE_PILOT, opts.pilot);
         if (opts.pilot?.joinTol) setTune(RIDE_PILOT.joinTol, opts.pilot.joinTol);
@@ -2914,6 +2934,31 @@ class App {
        * placed warm for the next loading screen; `{ stencil, scan }` flip as the frame report's
        * `sharedStencilRef` and `scanNew` do; `{ backstopMs }` moves the backstop's clock.
        */
+      /**
+       * The client's own detail levels (step 7) and the ride bias (step 8): the tune, the eye's speed and the
+       * bias it makes now, the placed objects' level groups (how many copies stand at each carried level, 0 the
+       * finest, and how many past their chain's last far with `hideBeyond`), and the flora's region batches (the
+       * plantings at each level, those the reach hides, the batches drawing, the regions still to rebuild).
+       *
+       * `{ on }` switches the levels (every copy at its finest when off; the frame report's `lodLevels`),
+       * `{ flora }` whether the flora is drawn per region or per chunk (`floraRegions`), `{ tune }` moves any of
+       * `LOD_LEVEL_TUNE` (a `bias` over 1 keeps each level out farther; `hideBeyond` draws nothing past a chain's
+       * last far), `{ reset: true }` puts the tune back as shipped.
+       */
+      lod: (o?: { on?: boolean; flora?: boolean; tune?: Partial<LodLevelTune>; reset?: boolean }) => {
+        if (o?.reset) Object.assign(LOD_LEVEL_TUNE, LOD_LEVEL_DEFAULTS);
+        if (o?.tune) {
+          for (const [k, v] of Object.entries(o.tune)) {
+            if (!(k in LOD_LEVEL_TUNE)) continue;
+            const was = (LOD_LEVEL_TUNE as unknown as Record<string, unknown>)[k];
+            if (typeof was === typeof v && (typeof v !== 'number' || Number.isFinite(v))) (LOD_LEVEL_TUNE as unknown as Record<string, unknown>)[k] = v;
+          }
+        }
+        if (typeof o?.on === 'boolean') this.world.setLodLevels(o.on);
+        else if (o?.tune || o?.reset) this.world.refreshDetail();
+        if (typeof o?.flora === 'boolean') this.world.setFloraRegions(o.flora);
+        return this.world.lodReport();
+      },
       placed: (o?: { rule?: 'model' | 'snapshot'; reload?: boolean; warm?: boolean; warmWaitMs?: number; stencil?: boolean; scan?: boolean; backstopMs?: number }) => {
         if (o?.rule === 'model' || o?.rule === 'snapshot') PLACED_TUNE.tierRule = o.rule;
         if (typeof o?.warm === 'boolean') PLACED_TUNE.warm = o.warm;

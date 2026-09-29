@@ -41,6 +41,8 @@ const SECTION_DEFS = [
   { key: 'farRefresh', parent: 'stream' },
   { key: 'streamFar', parent: 'world' },
   { key: 'layout', parent: 'world' },
+  // The detail levels' sweeps and the flora's region rebuilds (steps 7 and 8).
+  { key: 'levels', parent: 'world' },
   { key: 'particles', parent: 'world' },
   { key: 'sky', parent: 'world' },
   { key: 'living', parent: 'world' },
@@ -134,6 +136,12 @@ const COUNTER_DEFS = [
   { key: 'scanRoots', group: 'scan', label: 'roots walked', kind: 'sum', scale: 1 },
   { key: 'scanWhole', group: 'scan', label: 'whole-scene scans', kind: 'sum', scale: 1 },
   { key: 'scanMissed', group: 'scan', label: 'found by the backstop', kind: 'sum', scale: 1 },
+  // Steps 7 and 8: the placed objects' level groups repacked, the flora's regions rebuilt and still waiting,
+  // and the ride bias the eye's speed made.
+  { key: 'lodRepacks', group: 'levels', label: 'groups repacked', kind: 'sum', scale: 1 },
+  { key: 'floraRebuilt', group: 'levels', label: 'flora regions rebuilt', kind: 'sum', scale: 1 },
+  { key: 'floraPending', group: 'levels', label: 'flora regions waiting', kind: 'last', scale: 1 },
+  { key: 'rideBias', group: 'levels', label: 'ride bias', kind: 'mean', scale: 1 },
   { key: 'strays', group: '', label: 'strays', kind: 'mean', scale: 1 },
   { key: 'caster0', group: '', label: 'caster0', kind: 'mean', scale: 1 },
   { key: 'caster1', group: '', label: 'caster1', kind: 'mean', scale: 1 },

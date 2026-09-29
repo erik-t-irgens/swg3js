@@ -55,7 +55,14 @@ export function everyKeyEquals(values, size, ref, eps) {
   return true;
 }
 
-export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [], keepZones = false, compactTracks = false } = {}) {
+/**
+ * `lods`: a model's lower detail levels, meshes named `lod:<n>` like any other, whose nodes go into a
+ * second scene named `lods` (step 7) rather than the default one. Every loader that reads `gltf.scene`
+ * -- the garage, a scene backdrop, the gallery page -- sees exactly the model it always did; only the
+ * placed-object pack looks for the second scene. Materials and images are shared by index with the
+ * finest level's, as any two meshes of one file share them.
+ */
+export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = null, animations = [], keepZones = false, compactTracks = false, lods = [] } = {}) {
   const buffers = [];
   const bufferViews = [];
   const accessors = [];
@@ -75,8 +82,20 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
   // worse than no detail at all -- so those keep none. It catches the skinned meshes, whose reader
   // has only ever kept one coordinate set, and the 218 retail vertex arrays whose second set is not
   // a pair of coordinates.
+  //
+  // Decided over the model's own meshes alone, exactly as before any lower level was carried, so a level
+  // can never give the finest a detail map it has no second set for (a shader a lower level uses and the
+  // model does not is decided over the levels the same way). A primitive with no second set under a
+  // shader that is detailed takes a copy of the material with no detail map (`materialFor`'s `plain`),
+  // since every primitive under a detail material must have one.
   const detailed = new Set();
   for (const mesh of meshes) for (const g of mesh.groups) for (const p of g.primitives) if (p.uvs2) detailed.add(g.shader);
+  const ownShaders = new Set();
+  for (const mesh of meshes) for (const g of mesh.groups) ownShaders.add(g.shader);
+  for (const mesh of lods) for (const g of mesh.groups) for (const p of g.primitives) if (p.uvs2 && !ownShaders.has(g.shader)) detailed.add(g.shader);
+  // The lower levels' root nodes, for the `lods` scene.
+  const lodRoots = [];
+  const lodSet = new Set(lods);
 
   const pushView = (bytes, target) => {
     const padded = align4(bytes.length);
@@ -136,8 +155,11 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
   const imageFor = (tex) => textureOf(tex);
   const round4 = (v) => Math.round(v * 1e4) / 1e4;
 
-  const materialFor = (shader) => {
-    if (!materialIndex.has(shader)) {
+  // `plain`: the shader's material with no detail map (a lower level's primitive with no second set under a
+  // detailed shader). The same name, so every rule the game keys on a shader's name still finds it.
+  const materialFor = (shader, plain = false) => {
+    const key = plain && detailed.has(shader) ? `${shader}\u0000plain` : shader;
+    if (!materialIndex.has(key)) {
       const mat = { name: shader, pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 }, doubleSided: false };
       const tex = textures.get(shader);
       if (tex?.invisible) {
@@ -200,7 +222,7 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         // The detail map, which the game multiplies the base colour by at the second coordinate
         // set. It rides in `swg` rather than in a glTF slot of its own because glTF has no such
         // slot: three's aoMap is the only channel-1 texture it knows and that is not this.
-        if (tex.detail && detailed.has(shader)) swg.detail = textureOf(tex.detail);
+        if (tex.detail && detailed.has(shader) && key === shader) swg.detail = textureOf(tex.detail);
         if (tex.scroll) swg.scroll = { map: tex.scroll.map.map(round4), alpha: tex.scroll.alpha ? tex.scroll.alpha.map(round4) : null };
         if (tex.alphaImage) swg.alphaMap = textureOf(tex.alphaImage, !!tex.scroll?.alpha);
         if (tex.alphaTest) swg.alphaTest = round4(tex.alphaTest);
@@ -210,12 +232,12 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         mat.pbrMetallicRoughness.baseColorFactor = [0.8, 0.8, 0.8, 1];
       }
       materials.push(mat);
-      materialIndex.set(shader, materials.length - 1);
+      materialIndex.set(key, materials.length - 1);
     }
-    return materialIndex.get(shader);
+    return materialIndex.get(key);
   };
 
-  for (const mesh of meshes) {
+  for (const mesh of [...meshes, ...lods]) {
     const primitives = [];
     // glTF requires every primitive of a mesh to carry the same morph targets in the same order,
     // and the mesh's single weights array drives all of them. A target usually moves only some of
@@ -247,7 +269,13 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         if (p.uvs) attributes.TEXCOORD_0 = pushAccessor(p.uvs, 'VEC2', 5126, 34962);
         // The detail map's own coordinate set, written only where the shader really has a detail
         // map: it is eight bytes a vertex, and a set nothing samples is a set nobody should pay for.
-        if (p.uvs2 && textures.get(g.shader)?.detail) attributes.TEXCOORD_1 = pushAccessor(p.uvs2, 'VEC2', 5126, 34962);
+        // (On the model's own meshes a primitive with a second set makes its shader detailed, so this
+        // is the rule it always was; a lower level's set under a shader the model left plain is dropped.)
+        // A primitive with no second set under a detailed shader takes the plain copy, on a lower level
+        // and on the model's own meshes alike: a few dozen of the worlds' own models mix the two under
+        // one shader, and those primitives sampled one texel of the detail map over their whole surface.
+        const plain = !p.uvs2;
+        if (p.uvs2 && textures.get(g.shader)?.detail && detailed.has(g.shader)) attributes.TEXCOORD_1 = pushAccessor(p.uvs2, 'VEC2', 5126, 34962);
         if (p.colors) attributes.COLOR_0 = pushAccessor(p.colors, 'VEC4', 5121, 34962, { normalized: true });
         if (p.joints) attributes.JOINTS_0 = pushAccessor(p.joints, 'VEC4', 5123, 34962);
         if (p.weights) attributes.WEIGHTS_0 = pushAccessor(p.weights, 'VEC4', 5126, 34962);
@@ -255,7 +283,7 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         const prim = {
           attributes,
           indices: pushAccessor(idx, 'SCALAR', idx instanceof Uint16Array ? 5123 : 5125, 34963),
-          material: materialFor(g.shader),
+          material: materialFor(g.shader, plain),
           mode: 4,
         };
         // Morph targets: the character creator's shape sliders. A target's POSITION accessor
@@ -294,7 +322,7 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
     if (mesh.bounds) node.extras = { bounds: mesh.bounds };
     nodes.push(node);
     const meshNode = nodes.length - 1;
-    rootNodes.push(meshNode);
+    (lodSet.has(mesh) ? lodRoots : rootNodes).push(meshNode);
     for (const hp of mesh.hardpoints ?? []) {
       const [x, y, z] = hp.position;
       const node = { name: `hp:${hp.name}`, translation: [flipX ? -x : x, y, z] };
@@ -371,7 +399,7 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
   const json = {
     asset: { version: '2.0', generator: 'swg3js converter' },
     scene: 0,
-    scenes: [{ nodes: rootNodes }],
+    scenes: lodRoots.length ? [{ nodes: rootNodes }, { name: 'lods', nodes: lodRoots }] : [{ nodes: rootNodes }],
     nodes,
     meshes: gltfMeshes,
     materials,
