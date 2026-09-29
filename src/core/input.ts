@@ -53,7 +53,9 @@ export type Action =
   | 'placeUp'
   | 'placeDown'
   // A prop of yours standing near: pick it back up.
-  | 'takeProp';
+  | 'takeProp'
+  // The debug menu: every `__debug` helper, run from a window.
+  | 'debugMenu';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -117,6 +119,10 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // Picking one of your own props back up. It is a key of its own rather than the use key, which is
   // already the doorway, the lift, the shuttle and the mount and would have to lose to all four.
   takeProp: ['KeyJ'],
+  // The debug menu, on the key a console has always had in a game (Jedi Academy's own is there): the
+  // one left of 1, which nothing else in this game uses. It types a character into a box, so inside
+  // the menu's own boxes it is Escape that shuts it.
+  debugMenu: ['Backquote'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 

@@ -69,6 +69,8 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   terminal: { w: 640, h: 420 },
   group: { w: 220, h: 150 },
   trade: { w: 520, h: 320 },
+  // The debug menu: its list of helpers beside an arguments box and an answer that can still be read.
+  debug: { w: 560, h: 360 },
 });
 
 /** The minimum of a window this table does not name. */

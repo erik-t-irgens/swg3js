@@ -14,7 +14,7 @@ import { glyphFor, handGlyph, iconCount, installIcons } from './hudIcons.ts';
 const HELP_LINES: readonly { text: string; actions: readonly string[]; move?: boolean }[] = [
   { text: 'move · mouse look · wheel zoom · %s jump · %s walk', actions: ['jump', 'walk'], move: true },
   { text: '%s mount and dismount · %s switch class · %s fast-forward time', actions: ['mount', 'switchClass', 'fastForward'] },
-  { text: '%s galaxy map · %s inventory · %s spawner · %s help · %s noclip · Esc frees the mouse', actions: ['map', 'inventory', 'spawner', 'help', 'noclip'] },
+  { text: '%s galaxy map · %s inventory · %s spawner · %s help · %s noclip · %s debug menu · Esc frees the mouse', actions: ['map', 'inventory', 'spawner', 'help', 'noclip', 'debugMenu'] },
   { text: 'Esc → Controls rebinds every one of these, and the display follows at once', actions: [] },
 ];
 

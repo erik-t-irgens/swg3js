@@ -692,7 +692,7 @@ b { color: var(--accent); font-weight: 600; }
 .menu-nav button:hover { color: var(--text); border-color: var(--panel-border); }
 .menu-nav button.on { color: var(--accent); background: color-mix(in srgb, var(--pool) 20%, transparent); border-color: var(--panel-border); }
 .menu-nav .menu-spacer { flex: 1; }
-.menu-nav .resume-nav b { float: right; font-size: 10px; color: var(--muted); }
+.menu-nav .resume-nav b, .menu-nav .debug-nav b { float: right; font-size: 10px; color: var(--muted); }
 .menu-body { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 18px 26px 26px; }
 .menu-body h2 { margin: 0 0 14px; font-size: 20px; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; }
 .menu-body h3 { margin: 18px 0 6px; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--panel-border); padding-bottom: 4px; }

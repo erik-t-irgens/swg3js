@@ -219,10 +219,12 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
   const files = (readdirSync(src, { recursive: true }) as string[]).map((f) => f.replace(/\\/g, '/')).filter((f) => f.endsWith('.ts'));
   let sheets = 0;
   const failures: string[] = [];
+  const sheetFiles = new Set<string>();
   for (const file of files) {
     const text = readFileSync(new URL(file, src), 'utf8');
     for (const m of text.matchAll(/const\s+([A-Z_]*CSS)\s*=\s*`([\s\S]*?)`;/g)) {
       sheets++;
+      sheetFiles.add(file);
       const name = `${file} ${m[1]}`;
       const hidden: string[] = [];
       // Each `${IDENT}` stands for what its constant is.
@@ -253,6 +255,9 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
     }
   }
   ok(sheets >= 5, `the injected stylesheets are found (${sheets})`);
+  // The debug menu's sheet is the largest written since this check was, and the one most likely to
+  // grow a colour for a syntax highlight: it is named here so a rename that hid it from the scan fails.
+  ok(sheetFiles.has('ui/debugMenu.ts'), "the debug menu's stylesheet is among them");
   ok(failures.length === 0, `and every one is held to the stylesheet's own rule${failures.length ? `: ${failures.join(' || ')}` : ''}`);
   const group = readFileSync(new URL('ui/groupUi.ts', src), 'utf8');
   ok(!/rgba?\(|#[0-9a-fA-F]{6}\b/.test(/const CSS = `([\s\S]*?)`;/.exec(group)?.[1] ?? 'rgba('), "the group's panel, whose hand-typed colours started this check, has none left");

@@ -226,6 +226,7 @@ import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
 import { TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
 import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
+import { DebugMenu } from './ui/debugMenu.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
 // The moods: one word that is two things at once, the body's branch and the chat's mark.
 import { MOOD_TUNE, cleanMoodName, findMood, isMoodOff, moodListLine, moodNote, moodReport, tuneMoods } from './player/moods.ts';
@@ -630,6 +631,13 @@ class App {
   private readonly select: CharacterSelect;
   private readonly creatorBar: CreatorBar;
   private readonly menu: Menu;
+  /**
+   * The debug menu: every `__debug` helper run from a window. It holds the mouse without joining
+   * `anyPanelOpen`, as the group's panel does, so the world goes on simulating while it is up.
+   */
+  private readonly debugMenu: DebugMenu;
+  /** The timer that gives the game its keys back after Escape has shut the debug menu; 0 when none is out. */
+  private keyHold = 0;
   private readonly shipMenu: ShipMenu;
   /**
    * Docking at a station: the lane asked for from the ship menu, flown by its own autopilot. Made in
@@ -6602,7 +6610,9 @@ class App {
         return n;
       },
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
-      freeMouse: (free) => this.freeMouse(free),
+      // Given back through the game's own check, so the panel shutting under the trade window or the
+      // debug menu leaves the mouse with them rather than locking it (and shutting them with it).
+      freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
     });
     // The group's panel moves by its title and sizes by its corner, as every other window does.
     draggable(groupUi.root, '.group-panel', 'h3', 'group');
@@ -6770,14 +6780,37 @@ class App {
       // Whether anything else is holding the mouse. The trade window is deliberately allowed over
       // the backpack (that is where its own Trade button is), so the panel asks before it hands the
       // mouse back -- and, the other way round, it knows that nobody will hand it back for it when
-      // what refused the window was a travel, a death or a jump rather than another panel.
-      elseHasMouse: () => this.anyPanelOpen() || this.map.open,
+      // what refused the window was a travel, a death or a jump rather than another panel. The
+      // windows that hold the mouse without being panels count too (the group's, whose roster has a
+      // Trade button of its own, and the debug menu), or a trade ending under one locks the pointer
+      // and that window stands down with it.
+      elseHasMouse: () => this.anyPanelOpen() || this.map.open || this.mouseHeldElsewhere(),
     });
     // The trade window moves by its head (its find field still takes a click) and sizes by its corner.
     draggable(tradeUi.root, '.trade-panel', '.trade-head', 'trade');
-    // The two windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
-    // hands it back, so a panel closing under either of them leaves the pointer where it is.
-    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open;
+    // The debug menu: every `__debug` helper from a window. It frees the mouse and does not join
+    // `anyPanelOpen`, so play goes on simulating under it and `__debug.perf()` measures with it up;
+    // it is built here, before the game's own Escape listener is put on, so its Escape is asked first.
+    // It may stand over a tab panel or the map, which are what it is often opened to look at, so the
+    // mouse goes back through `handBackMouse` and stays with whatever is still up under it.
+    this.debugMenu = new DebugMenu(this.ui, {
+      keys: () => this.input.bindings.debugMenu,
+      canOpen: () => this.started && this.inWorld && !this.traveling,
+      freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
+      holdKeys: (ms) => this.holdGameKeys(ms),
+    });
+    draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
+    if (debugRoot) {
+      // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
+      // tab with no keyboard, a run being waited on before the report comes back.
+      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean }) => {
+        await this.debugMenu.drive(o ?? {});
+        return this.debugMenu.report();
+      };
+    }
+    // The windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
+    // hands it back, so a panel closing under any of them leaves the pointer where it is.
+    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open || this.debugMenu.open;
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
@@ -7158,6 +7191,13 @@ class App {
     };
     this.menu.onResume = () => this.resume();
     this.menu.onSwitchCharacter = () => this.switchToSelect();
+    // Debug, in the Escape menu: that menu goes and the debug menu comes up with the mouse still free,
+    // so the lock is never taken and given back in between.
+    this.menu.onDebugMenu = () => {
+      this.menuClosedAt = performance.now();
+      this.menu.hide();
+      this.debugMenu.show();
+    };
     // The menu's own clicks, from the game's interface table.
     this.menu.onUiSound = (action) => void this.audio.ui.play(action);
     this.menu.onSetting = (key) => this.applySetting(key);
@@ -7609,6 +7649,8 @@ class App {
     // Nobody's music carries to the next character.
     band.clear();
     this.map.hide();
+    // The debug menu goes too, leaving the mouse to the select screen.
+    this.debugMenu.standDown();
     // A death still on the screen goes with the world (`endDeath`), and before the ship is left: a corpse
     // aboard lies in the room's own physics, which goes with the hull.
     this.endDeath();
@@ -13953,6 +13995,20 @@ class App {
   }
 
   /**
+   * Keep the game's keys standing aside a moment after Escape has shut a window from a typed line, so
+   * the press that shut it is not also taken as the player's own Escape, the chat line's rule. The keys
+   * come back when the moment is up unless something else on the screen has them by then.
+   */
+  private holdGameKeys(ms: number): void {
+    this.input.captured = true;
+    window.clearTimeout(this.keyHold);
+    this.keyHold = window.setTimeout(() => {
+      this.keyHold = 0;
+      if (!this.anyPanelOpen() && !this.map.open && !this.mouseHeldElsewhere()) this.input.captured = false;
+    }, ms);
+  }
+
+  /**
    * Give the mouse back, unless something else on the screen still wants it.
    *
    * What a panel knows is that it has closed; whether the pointer goes back to the game is the
@@ -13966,7 +14022,7 @@ class App {
     this.freeMouse(false);
   }
 
-  /** Whether one of the two windows that hold the mouse without joining `anyPanelOpen` has it. */
+  /** Whether one of the windows that hold the mouse without joining `anyPanelOpen` (the group's, the trade window, the debug menu) has it. */
   private mouseHeldElsewhere: () => boolean = () => false;
 
   /** B: the spawner, the garage or the NPCs tab; the key toggles the last tab used, a tab click swaps. */
@@ -15521,6 +15577,9 @@ class App {
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
+        // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
+        // it itself, and from one of its boxes it types a character and Escape is the way out.
+        if (input.pressedAction('debugMenu')) this.debugMenu.toggle();
         // A building in hand takes the click and its own four keys before anything else does: a
         // click puts it down, two keys turn it and two raise and lower it. They are keys of their
         // own rather than the strafe keys, so a player can still walk the building to where they

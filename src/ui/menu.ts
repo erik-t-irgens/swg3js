@@ -3,7 +3,8 @@
 import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
-import { INTERFACE, notifyBindingsChanged, type Knob } from './hudPage.ts';
+import { INTERFACE, notifyBindingsChanged, onBindingsChanged, type Knob } from './hudPage.ts';
+import { keyLabel } from './hud.ts';
 import { GAMEPLAY } from './gameplayPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
@@ -104,6 +105,7 @@ const ACTION_LABELS: Record<Action, string> = {
   placeUp: 'Raise it (placing)',
   placeDown: 'Lower it (placing)',
   takeProp: 'Pick up a prop of yours',
+  debugMenu: 'Debug menu',
 };
 
 /**
@@ -251,6 +253,8 @@ export class Menu {
   private capturing: { action: Action; slot: number; button: HTMLButtonElement } | null = null;
   onResume: () => void = () => {};
   onSwitchCharacter: () => void = () => {};
+  /** The debug menu asked for from here: the game shuts this menu and opens that one, without the pointer. */
+  onDebugMenu: () => void = () => {};
   /** A setting moved: the game applies it. */
   onSetting: (key: keyof Settings, value: number | boolean | string) => void = () => {};
   /** A panel's own click, played by the game's interface sounds. */
@@ -278,11 +282,25 @@ export class Menu {
           <button data-page="emotes">Emotes</button>
           <button data-page="multiplayer">Multiplayer</button>
           <div class="menu-spacer"></div>
+          <button class="debug-nav">Debug <b></b></button>
           <button class="resume-nav">Resume <b>Esc</b></button>
         </nav>
         <div class="menu-body"></div>
       </div>`;
     parent.appendChild(this.root);
+    this.root.querySelector('.debug-nav')!.addEventListener('click', () => {
+      this.onUiSound('confirm');
+      this.onDebugMenu();
+    });
+    // The debug menu's key on its button, spelled as the display spells a cap, and spelled again
+    // whenever a key is rebound (from the Controls page or the console).
+    const debugCap = this.root.querySelector<HTMLElement>('.debug-nav b')!;
+    const drawDebugCap = () => {
+      const cap = keyLabel(this.input.bindings.debugMenu[0] ?? '');
+      if (debugCap.textContent !== cap) debugCap.textContent = cap;
+    };
+    drawDebugCap();
+    onBindingsChanged(drawDebugCap);
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.menu-nav button[data-page]')) {
       b.addEventListener('click', () => {
         this.onUiSound('select');
@@ -338,8 +356,13 @@ export class Menu {
           <button class="big" data-page="sound">Sound</button>
           <button class="big" data-page="emotes">Emotes</button>
           <button class="big" data-page="multiplayer">Multiplayer</button>
+          <button class="big debug-open">Debug menu</button>
         </div>
         <p class="menu-hint">The world keeps turning behind this; the character stands still. Settings are kept in this browser.</p>`;
+      body.querySelector('.debug-open')!.addEventListener('click', () => {
+        this.onUiSound('confirm');
+        this.onDebugMenu();
+      });
       body.querySelector('.resume')!.addEventListener('click', () => {
         this.onUiSound('confirm');
         this.onResume();
