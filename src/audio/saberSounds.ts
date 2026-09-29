@@ -359,6 +359,12 @@ export class SaberSounds {
    */
   private readonly scheduled: number[] = [];
   private readonly scheduledAt: number[] = [];
+  /**
+   * Whose move laid each of them out: null for the player's own, else the body that swung (a fighter,
+   * a person from the catalogue). A move cut short takes back only its own mover's whooshes, so a
+   * fighter's next swing never silences the rest of the player's kata, nor the player's another's.
+   */
+  private readonly scheduledBy: (object | null)[] = [];
 
   /** Whether anything can sound at all. */
   get ready(): boolean {
@@ -851,8 +857,9 @@ export class SaberSounds {
    * `at` is where it is heard; with none, the player's own blade. `seconds` is how long the move
    * really lasts, speed and all, which only the mover knows: without it a marked clip is treated as
    * an unmarked one and whooshes once, since a mark at a fraction of nothing has no time to be at.
+   * `owner` is whose move it is, for `cancel`: null (the default) is the player's.
    */
-  swing(style: string, at: SaberPoint | null, clip?: string, seconds?: number): void {
+  swing(style: string, at: SaberPoint | null, clip?: string, seconds?: number, owner: object | null = null): void {
     const host = this.host;
     if (!host) return;
     this.expose();
@@ -875,7 +882,7 @@ export class SaberSounds {
     const marks = clip && length > 0 ? this.marksOf(clip) : null;
     if (marks) {
       this.counts.marked++;
-      this.schedule(marks, length, x, y, z, space);
+      this.schedule(marks, length, x, y, z, space, owner);
       return;
     }
     const now = this.now;
@@ -903,7 +910,7 @@ export class SaberSounds {
    * to the mixer with the time it is to start at, which Web Audio honours to the sample, so a kata
    * keeps its rhythm whatever the frame rate does.
    */
-  private schedule(marks: readonly { f: number; sound?: string; range?: [number, number] }[], seconds: number, x?: number, y?: number, z?: number, space?: SoundSpace): void {
+  private schedule(marks: readonly { f: number; sound?: string; range?: [number, number] }[], seconds: number, x?: number, y?: number, z?: number, space?: SoundSpace, owner: object | null = null): void {
     const host = this.host!;
     const now = this.now;
     let made = 0;
@@ -920,6 +927,7 @@ export class SaberSounds {
       if (key) {
         this.scheduled.push(key);
         this.scheduledAt.push(startAt);
+        this.scheduledBy.push(owner);
         made++;
         this.counts.marks++;
       } else this.counts.refused++;
@@ -934,26 +942,32 @@ export class SaberSounds {
    * Whatever a move laid out and has not sounded yet, dropped: the saber was put away, thrown or
    * lost, or another move began over the top of it. A whoosh that has already started is left to
    * finish -- cutting it would be a click in the middle of the one sound the swing did make.
+   *
+   * Only `owner`'s own: null (the default) is the player's, and a body that swings hands in itself.
+   * Anybody else's whooshes are kept exactly as they were, laid out or sounding.
    */
-  cancel(): void {
+  cancel(owner: object | null = null): void {
     const host = this.host;
     if (!host) return;
     const now = this.now;
     let n = 0;
     for (let i = 0; i < this.scheduled.length; i++) {
       const key = this.scheduled[i];
-      if (this.scheduledAt[i] > now) {
+      const mine = this.scheduledBy[i] === owner;
+      if (mine && this.scheduledAt[i] > now) {
         if (host.isPlaying(key)) host.stop(key, 0);
         continue;
       }
-      // Still to finish: keep it, so the sweep can let it go when it does.
+      // Still to finish, or somebody else's: keep it, so the sweep can let it go when it does.
       if (!host.isPlaying(key)) continue;
       this.scheduled[n] = key;
       this.scheduledAt[n] = this.scheduledAt[i];
+      this.scheduledBy[n] = this.scheduledBy[i];
       n++;
     }
     this.scheduled.length = n;
     this.scheduledAt.length = n;
+    this.scheduledBy.length = n;
   }
 
   private sweepScheduled(): void {
@@ -963,10 +977,12 @@ export class SaberSounds {
       if (!host.isPlaying(this.scheduled[i])) continue;
       this.scheduled[n] = this.scheduled[i];
       this.scheduledAt[n] = this.scheduledAt[i];
+      this.scheduledBy[n] = this.scheduledBy[i];
       n++;
     }
     this.scheduled.length = n;
     this.scheduledAt.length = n;
+    this.scheduledBy.length = n;
   }
 
   /**
@@ -1115,6 +1131,7 @@ export class SaberSounds {
     if (host) for (const key of this.scheduled) if (host.isPlaying(key)) host.stop(key, 0);
     this.scheduled.length = 0;
     this.scheduledAt.length = 0;
+    this.scheduledBy.length = 0;
   }
 
   // ---- where the player is ----

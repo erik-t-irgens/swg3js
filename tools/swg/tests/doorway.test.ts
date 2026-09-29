@@ -555,7 +555,9 @@ const toLocal = (b: Building, p: { x: number; z: number }): THREE.Vector3 => new
   ok(npcs.includes('npc.cellOf = this.deps.cellOf ?? null;'), '... which the manager hands every fighter it steps');
   ok(/private apartFrom\(t: Living\): boolean \{\s*return wallBetween\(\s*this\.physics,\s*this\.cell,\s*this\.cellOf \? this\.cellOf\(t\) : undefined,\s*!!this\.cell,/.test(npcs), 'a fighter asks `wallBetween` too');
   ok(npcs.includes('b.apart = melee && !t.dead && Math.hypot(dx, dz) - b.radius <= FIGHTER_TUNE.reach + DOOR_TUNE.wallLook ? this.apartFrom(t) : undefined;') && npcs.includes('this.apart = asked ?? this.apartFrom(next);'), '... for the brain and for the frames between thoughts');
-  ok(/if \(this\.arm !== 'gun' && !this\.apart && gap - t\.radiusToward\(this\.pos\) - this\.radiusToward\(\) <= FIGHTER_TUNE\.reach\) pace = 'stand';/.test(npcs), '... so a blade with a wall between it and its foe goes round to the door rather than stopping at the plaster');
+  // The reach it stops at is the old swings' own, or where arm and blade really reach for a blade swung
+  // through the move machine (`npcSaber.ts`): either way the wall between is asked first.
+  ok(/if \(this\.arm !== 'gun' && !this\.apart && gap - t\.radiusToward\(this\.pos\) - this\.radiusToward\(\) <= \(this\.bladesOn \? NPC_SABER_TUNE\.closeTo : FIGHTER_TUNE\.reach\)\) pace = 'stand';/.test(npcs), '... so a blade with a wall between it and its foe goes round to the door rather than stopping at the plaster');
   ok(npcs.includes('homeInside: this.homeInside,') && npcs.includes('npc.homeInside = npc.cell !== null;'), 'a fighter keeps the leash of where it was stood, not of the room a chase has taken it into');
   ok(/const e = new Errand\([^;]*;\s*e\.begin\(w\);[\s\S]{0,300}?npc\.homeInside = false;/.test(npcs), '... and a long walk, which moves its home onto the ground, gives it the ground’s');
   // Where it walks and whether it has arrived are two points (section 5c walks why).

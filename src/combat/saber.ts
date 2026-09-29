@@ -187,6 +187,9 @@ export function chainAngle(from: string, to: string): number {
 
 const irand = (lo: number, hi: number) => lo + Math.floor(Math.random() * (hi - lo + 1));
 
+/** The six diagonal and level attacks the chain tolerance counts (not the overhead). */
+const SIX = ['A_TL2BR', 'A_L2R', 'A_BL2TR', 'A_BR2TL', 'A_R2L', 'A_TR2BL'];
+
 /** PM_SaberKataDone: whether the chain has run long enough that the next swing has to wait for a return. */
 export function kataDone(style: SaberStyle, chainCount: number, cur: string, next: string): boolean {
   // The staff and the dual sabers chain without end.
@@ -202,7 +205,7 @@ export function kataDone(style: SaberStyle, chainCount: number, cur: string, nex
     }
     return false;
   }
-  if (['A_TL2BR', 'A_L2R', 'A_BL2TR', 'A_BR2TL', 'A_R2L', 'A_TR2BL'].includes(next)) {
+  if (SIX.includes(next)) {
     const tolerance = style === 'fast' ? 5 : 3;
     if (chainCount >= tolerance && irand(1, chainCount) > tolerance) return true;
   }
@@ -267,6 +270,34 @@ export interface Selection {
 const ROLL_STAB_ON = false;
 /** The Force the special moves cost (SABER_ALT_ATTACK_POWER and its _FB and _LR variants). */
 export const ALT_ATTACK_POWER = { kata: 50, sideways: 10, forwardBack: 25 };
+
+/**
+ * Where a move's whooshes go. The move machine knows when a move that cuts begins, which clip it
+ * plays and how long it really lasts, and nothing about where the blade is or whose it is -- so the
+ * sound is handed in rather than reached for. The player's is `PLAYER_VOICE`; a fighter or a person
+ * from the catalogue swinging the same machine hands in one of its own, heard at its own blade, and
+ * `cancel` then takes back only what that body's own moves laid out. With one voice for everybody a
+ * fighter's next swing cut off the player's kata half way through its whooshes.
+ */
+export interface SaberVoice {
+  /** A move that cuts or kicks has begun: the style, its clip, and how long it will really last. */
+  swing(style: SaberStyle, clip: string, seconds: number): void;
+  /** Whatever this voice's own moves laid out ahead of now and has not sounded yet, dropped. */
+  cancel(): void;
+}
+
+/** The player's own: heard at the player's blade, and cancelling only the player's own whooshes. */
+export const PLAYER_VOICE: SaberVoice = {
+  swing: (style, clip, seconds) => sabers.swing(style, null, clip, seconds),
+  cancel: () => sabers.cancel(),
+};
+
+/** A move's scripted push for now, written into by `SaberCombat.scriptInto`: forward and right as -1..1, and a hop's vertical speed (NaN for none). */
+export interface MoveScriptNow {
+  fmove: number;
+  smove: number;
+  hop: number;
+}
 
 /**
  * PM_SaberAttackForMovement: which swing the direction keys ask for, including the special
@@ -380,6 +411,21 @@ export function animForStyle(move: SaberMove, style: SaberStyle): string {
   return anim;
 }
 
+/**
+ * `animForStyle`, worked out once per move and style and then looked up: a body swinging a chain
+ * changes move a few times a second, and each change would otherwise build its clip's name again.
+ */
+const ANIM_CACHE: Record<SaberStyle, Map<string, string>> = { fast: new Map(), medium: new Map(), strong: new Map(), dual: new Map(), staff: new Map() };
+export function animOf(move: SaberMove, style: SaberStyle): string {
+  const cache = ANIM_CACHE[style];
+  let anim = cache.get(move.name);
+  if (anim === undefined) {
+    anim = animForStyle(move, style);
+    cache.set(move.name, anim);
+  }
+  return anim;
+}
+
 /** BG_SaberStartTransAnim: the arcs play quicker in the fast style and slower in the strong one. */
 export function animSpeed(move: SaberMove, style: SaberStyle): number {
   if (move.kind !== 'transition') return 1;
@@ -428,7 +474,15 @@ export class SaberCombat {
   chainCount = 0;
   /** Counts up on every attack move, so a hit test can tell one swing from the next. */
   attackId = 0;
+  /** Where its whooshes are heard, and whose they are cancelled as: the player's unless a body hands in its own. */
+  voice: SaberVoice = PLAYER_VOICE;
   private buffered = false;
+  /**
+   * What `update` hands back when the move changes, kept and written into rather than made: a body
+   * swinging a chain changes move several times a second, and every caller reads it on the spot and
+   * keeps nothing of it.
+   */
+  private readonly played: SaberPlay = { move: MOVES.get('NONE')!, anim: '', speed: 1, blend: 0, loop: false, impulse: null, forceCost: 0 };
 
   get current(): SaberMove {
     return MOVES.get(this.move) ?? MOVES.get('NONE')!;
@@ -469,6 +523,42 @@ export class SaberCombat {
     return { fmove: fw ? (fw.amount ?? 1) : 0, smove: s.right && t >= s.right[0] && t <= s.right[1] ? s.right[2] : 0, hop: hop ? hop.vy * UNIT : null };
   }
 
+  /**
+   * The same, written into `out` with nothing made: what a body that asks on every frame reads (the
+   * one above builds an object and two closures a call). Answers whether the move has a script at
+   * all; a hop not under way is NaN.
+   */
+  scriptInto(out: MoveScriptNow): boolean {
+    out.fmove = 0;
+    out.smove = 0;
+    out.hop = Number.NaN;
+    const s = this.current.script;
+    if (!s || this.duration <= 0) return false;
+    const t = this.elapsed;
+    const fw = s.forward;
+    if (fw) {
+      for (let i = 0; i < fw.length; i++) {
+        const w = fw[i];
+        if (t >= w.from && t <= w.to) {
+          out.fmove = w.amount ?? 1;
+          break;
+        }
+      }
+    }
+    if (s.right && t >= s.right[0] && t <= s.right[1]) out.smove = s.right[2];
+    const hops = s.hops;
+    if (hops) {
+      for (let i = 0; i < hops.length; i++) {
+        const h = hops[i];
+        if (t >= h.from && t <= h.to) {
+          out.hop = h.vy * UNIT;
+          break;
+        }
+      }
+    }
+    return true;
+  }
+
   cycleStyle(allowed: SaberStyle[] = STYLES): SaberStyle {
     const list = allowed.length ? allowed : STYLES;
     const i = list.indexOf(this.style);
@@ -483,8 +573,8 @@ export class SaberCombat {
     this.chainCount = 0;
     this.buffered = false;
     // A kata whose whooshes were laid out ahead of it must not go on whooshing after the blade has
-    // been put away, thrown or lost.
-    sabers.cancel();
+    // been put away, thrown or lost -- this body's own, and nobody else's.
+    this.voice.cancel();
   }
 
   /**
@@ -581,7 +671,7 @@ export class SaberCombat {
     if (move.kind === 'ready' || move.name === 'A_FLIP_STAB' || move.name === 'A_FLIP_SLASH') this.chainCount = 0;
     else if (move.kind === 'attack') this.chainCount = Math.min(16, this.chainCount + 1);
     if (move.kind === 'attack' || move.kind === 'special') this.attackId++;
-    const anim = animForStyle(move, this.style);
+    const anim = animOf(move, this.style);
     const speed = animSpeed(move, this.style);
     const loop = move.kind === 'ready';
     const natural = clipDuration(anim);
@@ -596,10 +686,19 @@ export class SaberCombat {
     if (move.kind === 'attack' || move.kind === 'special') {
       // A move begun over the top of another takes the one before it with it: a kata chained into,
       // knocked out of or killed part way through would otherwise go on whooshing on the audio
-      // clock over whatever came next.
-      sabers.cancel();
-      sabers.swing(this.style, null, anim, this.duration);
+      // clock over whatever came next. Through this body's own voice, so it is this body's moves
+      // that are taken and never another's.
+      this.voice.cancel();
+      this.voice.swing(this.style, anim, this.duration);
     }
-    return { move, anim, speed, blend: move.blend / 1000, loop, impulse, forceCost };
+    const p = this.played;
+    p.move = move;
+    p.anim = anim;
+    p.speed = speed;
+    p.blend = move.blend / 1000;
+    p.loop = loop;
+    p.impulse = impulse;
+    p.forceCost = forceCost;
+    return p;
   }
 }

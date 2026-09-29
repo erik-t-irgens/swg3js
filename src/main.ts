@@ -1028,12 +1028,14 @@ class App {
     // A fighter's blade is the sabers' to speak for: the guns hold the hook and the fighters ask
     // through it, so nothing in the world has to know what a lit blade sounds like.
     combatSounds.useSaber({
-      swing: (style, x, y, z, clip) => {
+      swing: (style, x, y, z, clip, seconds, owner) => {
         saberAt.x = x;
         saberAt.y = y;
         saberAt.z = z;
-        sabers.swing(style, saberAt, clip ?? undefined);
+        sabers.swing(style, saberAt, clip ?? undefined, seconds, owner ?? null);
       },
+      // A body's own move cut short takes back its own whooshes and nobody else's (`SaberVoice`).
+      cancel: (owner) => sabers.cancel(owner),
       contact: (kind, x, y, z) => {
         saberAt.x = x;
         saberAt.y = y;
@@ -5774,11 +5776,13 @@ class App {
         return `${v.spec.id} wrecked`;
       },
       /** Stand `n` fighters ahead (random species, look and weapon; they fight you and each other), or with 0 list the ones out. */
-      fighter: (n = 1, species?: string) => {
+      // `arm` asks for what it carries -- 'saber', 'melee' or 'gun' -- instead of the rack's draw.
+      fighter: (n = 1, species?: string, arm?: 'saber' | 'melee' | 'gun') => {
+        const want = arm === 'saber' || arm === 'melee' || arm === 'gun' ? arm : undefined;
         for (let i = 0; i < n; i++) {
           this.cam.forward(tmp);
           const d = 8 + Math.random() * 6;
-          this.world.npcs.spawnAt(this.player.pos.x + tmp.x * d + (Math.random() - 0.5) * 6, this.player.pos.z + tmp.z * d + (Math.random() - 0.5) * 6, species);
+          this.world.npcs.spawnAt(this.player.pos.x + tmp.x * d + (Math.random() - 0.5) * 6, this.player.pos.z + tmp.z * d + (Math.random() - 0.5) * 6, species, want ? { arm: want } : {});
         }
         return this.world.npcs.npcs.map((f) => ({ name: f.name, arm: f.arm, weapon: f.weapon?.id ?? null, outfit: f.outfit, hp: Number(f.hp.toFixed(0)), dead: f.dead, dist: Number(f.pos.distanceTo(this.player.pos).toFixed(1)), rig: !!f.rig }));
       },

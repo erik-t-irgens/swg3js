@@ -51,6 +51,8 @@ import { GROUND_TIERS, TIER_LEVELS } from '../groundSkill.ts';
 import { POSTURE_TUNE, tunePosture, type Posture, type PostureTune } from '../fighterStance.ts';
 import type { NearBlocker } from '../layoutStream';
 import type { GroundTactics } from './tactics.ts';
+// A lightsaber's moves (`npcSaber.ts`): every clip the move machine can ask for, to lend, and the style by seed.
+import { NPC_SABER_CLIPS, styleOf } from '../npcSaber.ts';
 
 export interface SpawnOpts {
   origin?: 'spawned' | 'ambient';
@@ -785,11 +787,14 @@ export class MobileManager {
       // game's own table; only a lightsaber is lent anything.
       // The blade's own ready stance and gaits come from the row where the pack has one; the swings
       // stay Jedi Academy's, lent from a rig that is already parsed, because they are the ones this
-      // game's blade combat was built around and they cost no bytes.
-      const rig = Character.parsedRigClips(entry.species ?? undefined);
-      const swings = new Map<string, THREE.AnimationClip>();
-      for (const c of rig ?? []) if (SABER_SWINGS.includes(c.name)) swings.set(c.name, c);
-      if (swings.size) extras = { clips: swings, roles: { ...over, attacks: [...swings.keys()] }, carry, carried };
+      // game's blade combat was built around and they cost no bytes. The ten one-hand swings are its
+      // attacks below the second tier; from there up it swings the player's own move machine
+      // (`npcSaber.ts`), whose every clip in every style it may swing is lent beside them.
+      const lent = this.saberClips(entry);
+      if (lent) {
+        const attacks = SABER_SWINGS.filter((name) => lent.has(name));
+        extras = { clips: lent, roles: { ...over, attacks }, carry, carried };
+      }
     }
     // A gun its own list drew fires, whatever its numbers said of its group's name (`ArmsDecision.ranged`).
     if (decided.ranged) extras = { ...extras, ranged: decided.ranged };
@@ -813,6 +818,7 @@ export class MobileManager {
     }
     const b = def.bounds;
     const saber = decided.hold === 'saber';
+    const color = saber ? (/sith|dark|inquisitor/.test(entry.id) ? DARK_BLADE : LIGHT_BLADES[Math.floor(rand() * LIGHT_BLADES.length)]) : 0xffffff;
     return {
       extras,
       equipment: {
@@ -823,7 +829,11 @@ export class MobileManager {
         length: def.length || 0.6,
         hiltTop: b ? Math.abs(b.max[1] - b.min[1]) / 2 : 0.13,
         blade: saber && def.blade ? { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close } : null,
-        color: saber ? (/sith|dark|inquisitor/.test(entry.id) ? DARK_BLADE : LIGHT_BLADES[Math.floor(rand() * LIGHT_BLADES.length)]) : 0xffffff,
+        color,
+        // The style it swings, drawn from the same seed after the colour (so a seed's colour is what it
+        // always was), among those its hilt can swing: the style by seed every browser draws alike.
+        saberStyle: saber ? styleOf(rand(), def.class) : undefined,
+        weaponClass: def.class,
       },
     };
   }
@@ -1178,6 +1188,29 @@ export class MobileManager {
    * list: made once per rig and shared by every person lent them, as the saber swings are lent.
    */
   private readonly evadeLent = new WeakMap<readonly THREE.AnimationClip[], ReadonlyMap<string, THREE.AnimationClip>>();
+
+  /**
+   * The lightsaber clips a person holding one is lent, out of a species rig already parsed: the ten
+   * one-hand swings it has always swung, and every clip the move machine can ask for in every style a
+   * body may swing (`NPC_SABER_CLIPS`), so a style put on from the console has its clips too. Made once
+   * per rig and shared, as the rolls are; null before any rig is in, which leaves it holding the blade
+   * unarmed of moves exactly as before.
+   */
+  private readonly saberLent = new WeakMap<readonly THREE.AnimationClip[], ReadonlyMap<string, THREE.AnimationClip>>();
+
+  private saberClips(entry: MobileEntry): ReadonlyMap<string, THREE.AnimationClip> | null {
+    const rig = Character.parsedRigClips(entry.species ?? undefined);
+    if (!rig) return null;
+    let lent = this.saberLent.get(rig);
+    if (!lent) {
+      const wanted = new Set([...SABER_SWINGS, ...NPC_SABER_CLIPS]);
+      const m = new Map<string, THREE.AnimationClip>();
+      for (const c of rig) if (wanted.has(c.name)) m.set(c.name, c);
+      lent = m;
+      this.saberLent.set(rig, lent);
+    }
+    return lent.size ? lent : null;
+  }
 
   /** The rolls and jumps a person is lent, or null before any species rig has been parsed. */
   private evadeClips(entry: MobileEntry): ReadonlyMap<string, THREE.AnimationClip> | null {

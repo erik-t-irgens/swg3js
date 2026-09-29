@@ -68,11 +68,16 @@ import { applyLook } from '../player/look';
 import { FIGHTS, gunKindOf, isSaber, type WeaponCatalogue, type WeaponDef } from '../player/weapons';
 import { SaberBlade } from '../combat/saberBlade';
 import { CLASH } from '../combat/clash.ts';
+import { KICK_DAMAGE, type Dir, type Impulse, type MoveScriptNow, type SaberStyle, type SaberVoice } from '../combat/saber.ts';
+import { parryClip } from '../combat/deflect.ts';
+// A lightsaber swung through the player's own move machine from the second tier up, and a bolt turned
+// away by chance by tier (wave W9): the NPC's half of it is this file's neighbour, written fresh.
+import { BLOCK_EYE, JKA_UNIT, LUNGE_PUSH, NPC_SABER_TUNE, NpcSaber, alongFacing, blockFrame, liesToward, npcSaberReport, styleOf, type BladeAsk, type BlockAsk, type NpcSaberTune } from './npcSaber.ts';
 import { keepNearestGlow } from '../combat/bladeLights';
 import { Ragdoll } from '../combat/ragdoll';
 import { GUNS, gunTypeFor, type GunProfile } from '../combat/guns';
 import { scarFamilyOf } from '../combat/scars.ts';
-import type { Bolts } from '../combat/bolts';
+import type { Bolt, Bolts } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
 import { applyDifficultyTo, rescaleBody, scaledByDifficulty } from './difficulty.ts';
@@ -121,7 +126,7 @@ import { cullsOneByOne, fighterCull, fitCullSpheres, setBodyCulled, type BodyPos
 import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeTune, type JumpTune, type LedgeAsk, type RollDir } from './evade.ts';
 
 /** What a fighter carries, and so how it fights. */
-type Arm = 'saber' | 'melee' | 'gun';
+export type Arm = 'saber' | 'melee' | 'gun';
 
 /** Jedi Academy's one-hand swings (the same list a lightsaber-armed person from the catalogue swings). */
 const SWINGS = SABER_SWINGS;
@@ -268,6 +273,13 @@ export type FighterKnob = Partial<FighterTune> & {
   /** And the jump's: the heights a level reaches, the tiers that earn one and the ledge a jump is worth. */
   jump?: Partial<JumpTune>;
 };
+
+/**
+ * What `__debug.blades({ ... })` takes: the swing's own numbers (`BLADE_SWING`) as before, and the move
+ * machine's (`npcSaber.ts`) -- every NPC blade put on one tier or one style (null hands each its own
+ * back), the machine's numbers, and its totals cleared.
+ */
+export type BladesKnob = Partial<BladeSwingTune> & { tier?: number | null; style?: SaberStyle | null; moves?: Partial<NpcSaberTune> | null; reset?: boolean };
 
 /** The wearables a Wookiee wears, and nobody else: the Kashyyykian pieces, and the ones marked _wke. */
 const WOOKIEE_ONLY = /kashyyyk|(^|_)wke(_|$)/i;
@@ -483,6 +495,74 @@ export class Npc implements Living, ErrandBody {
   private holder: THREE.Group | null = null;
   private hiltTop = 0.13;
   private blade: SaberBlade | null = null;
+  /**
+   * Its lightsaber swung through the player's own move machine (`npcSaber.ts`) from the second tier up;
+   * null for anything but a lightsaber. Below that tier it holds the blade and throws the random
+   * one-hand swings every fighter always has, and this presses nothing.
+   */
+  private blades: NpcSaber | null = null;
+  /** The move clip it last put on its rig, so letting a move go takes that clip off and never another. */
+  private bladeAnim: string | null = null;
+  /** The swing its ledger was last opened for, and whether a move that cuts was under way last frame. */
+  private bladeSwing = 0;
+  private bladeWas = false;
+  /** The kick that has already landed, so a kick lands once. */
+  private kickedFor = 0;
+  /** Whether the cull was last asked while a special had the body (it is drawn whole through one). */
+  private cullSpecial = false;
+  /**
+   * A saber move's own push, metres a second along the ground: a leap's while it is in the air, the
+   * lunge's for `LUNGE_PUSH` seconds eased out. Until when it lasts, when it began, and whether airborne.
+   */
+  private leapVX = 0;
+  private leapVZ = 0;
+  private leapUntil = 0;
+  private leapAt = 0;
+  private leapAir = false;
+  /** The living things it was last handed, for its blade's question about a foe behind it; read, never kept past a step. */
+  private foesSeen: readonly Living[] = [];
+  /** What its blade is asked each frame and what a bolt meeting it is judged from: one each for its life. */
+  private readonly bladeAsk: BladeAsk = { now: 0, dt: 0, lit: false, hasTarget: false, attackState: false, chasing: false, gap: Infinity, reach: 0, offNose: 0, grounded: true, vy: 0, above: 0, tumbling: false, stunned: false };
+  private readonly blockAsk: BlockAsk = { lit: false, tumbling: false, dir: new THREE.Vector3(), hit: new THREE.Vector3(), eye: new THREE.Vector3(), forward: new THREE.Vector3(), right: new THREE.Vector3(), look: new THREE.Vector3() };
+  /** A move's scripted push this frame, written into. */
+  private readonly moveScript: MoveScriptNow = { fmove: 0, smove: 0, hop: Number.NaN };
+  /** A push along the ground worked out from its facing (`alongFacing`), written into. */
+  private readonly pushAt = { x: 0, z: 0 };
+  /**
+   * The share of a whole blow the swing under way lands (`NpcSaber.shareOf`): 1 for the old clock's
+   * swings, which land one a cooldown by their own clock, and a share measured against that same
+   * cooldown for a swing of the move machine's, which throws several where the clock threw one.
+   */
+  private swingShare = 1;
+  /** Arrows made once for its life, never one a frame: how long a clip lasts, whether the rig has one, a blade meeting another, a foe behind. */
+  private readonly clipLength = (anim: string): number | null => this.rig?.clipDuration(anim) ?? null;
+  private readonly hasClip = (clip: string): boolean => !!this.rig?.has(clip);
+  private readonly bladeClashed = (loser: boolean, bind: boolean): void => {
+    if (loser && !bind) this.blades?.combat.clashed();
+  };
+  private readonly foeToward = (dir: Dir, radius: number): boolean => {
+    for (const t of this.foesSeen) {
+      if (t.dead || t.key === this.key) continue;
+      if (t.key !== this.targetKey && !this.memory.has(t.key) && !hostileSides(this, t)) continue;
+      if (liesToward(dir, radius, this.facing, this.pos.x, this.pos.y, this.pos.z, t.pos.x, t.pos.y, t.pos.z)) return true;
+    }
+    return false;
+  };
+  /**
+   * Where its moves' whooshes are heard -- along its own blade, as it was last drawn -- and whose they
+   * are: its own, so its next move takes back only its own whooshes still to come and never the
+   * player's or another fighter's. Made once.
+   */
+  private readonly voice: SaberVoice = {
+    swing: (style, clip, seconds) => {
+      const drawn = this.bladeTip.lengthSq() > 1e-6;
+      const bx = drawn ? (this.bladeBase.x + this.bladeTip.x) * 0.5 : this.pos.x;
+      const by = drawn ? (this.bladeBase.y + this.bladeTip.y) * 0.5 : this.pos.y + 1.2;
+      const bz = drawn ? (this.bladeBase.z + this.bladeTip.z) * 0.5 : this.pos.z;
+      combatSounds.saberSwing(style, bx, by, bz, clip, seconds, this);
+    },
+    cancel: () => combatSounds.saberCancel(this),
+  };
 
   /** Its lit blade's own group, which hangs beside the body rather than under it; null with no blade. */
   get bladeRoot(): THREE.Object3D | null {
@@ -868,7 +948,15 @@ export class Npc implements Living, ErrandBody {
   setTier(tier: number): void {
     this.tier = Number.isFinite(tier) ? Math.max(0, Math.round(tier)) : DEFAULT_TIER;
     this.skill = this.tier <= 0 ? null : skillOfGroundTier(this.tier);
+    // Its blade is judged at the same rung (`npcSaber.ts`), and hears a change of it on its next step.
+    if (this.blades) this.blades.tier = this.tier;
   }
+
+  /**
+   * What `NpcManager.spawnAt` asked it to carry, for the console's `fighter(n, species, arm)`; null draws
+   * one off the rack as every fighter always has (a lightsaber half the time).
+   */
+  wantArm: Arm | null = null;
 
   /** Where the world's simulated clock stood at this fighter's last step: the hold's grace keys off it. */
   private now = 0;
@@ -1001,7 +1089,11 @@ export class Npc implements Living, ErrandBody {
     // switch (`LOW_CULL.kneelWhole`).
     const tumble = this.tumbling || this.now < this.tumbleUntil;
     this.cullTumble = tumble;
-    p.low = tumble;
+    // A saber special -- a leap, a cartwheel, a butterfly, a kata -- carries the body by a clip the
+    // standing sphere was never measured against, as a roll does: drawn whole for as long as it plays.
+    const special = !!this.blades && this.blades.special;
+    this.cullSpecial = special;
+    p.low = tumble || special;
     p.kneel = this.posture === 'kneel';
     setBodyCulled(this.cullMeshes, cullsOneByOne(p));
   }
@@ -1019,7 +1111,8 @@ export class Npc implements Living, ErrandBody {
     const rig = this.rig;
     const cat = deps.weapons;
     if (!rig || !cat) return;
-    const r = Math.random();
+    // Asked for by the console, or drawn: a lightsaber half the time, else a sword or a gun.
+    const r = this.wantArm === 'saber' ? 0 : this.wantArm === 'melee' ? 0.6 : this.wantArm === 'gun' ? 0.9 : Math.random();
     const pool = cat.weapons.filter((w) => (r < 0.5 ? w.class === 'lightsaber' : r < 0.7 ? w.class === 'sword1h' || w.class === 'sword2h' || w.class === 'polearm' : FIGHTS[w.class] === 'gun') && !/_static$|_npe$|_noob$/.test(w.id));
     const def = pool[Math.floor(Math.random() * pool.length)];
     if (!def) return;
@@ -1054,6 +1147,15 @@ export class Npc implements Living, ErrandBody {
       if (def.blade) this.blade.spec = { length: def.blade.length, width: def.blade.width, open: def.blade.open, close: def.blade.close };
       this.group.parent?.add(this.blade.group);
       if (this.blade.group.parent) markActor(this.blade.group);
+      // Its moves: the player's own machine, pressed from its tier (`npcSaber.ts`), in a style drawn
+      // among those its hilt can swing, heard through its own voice. A blade of its that gives way in a
+      // clash cuts its swing short into the return, as the player's does.
+      const blades = new NpcSaber(this.voice, this.foeToward);
+      blades.weaponClass = def.class;
+      blades.own = styleOf(Math.random(), def.class);
+      blades.tier = this.tier;
+      this.blades = blades;
+      this.blade.onClash = this.bladeClashed;
     } else if (this.arm === 'gun') {
       this.gun = GUNS[gunTypeFor(def, def.class)];
       this.findGunPoses(rig, def);
@@ -1259,6 +1361,16 @@ export class Npc implements Living, ErrandBody {
     return this.rollLeft > 0 || this.jumping;
   }
 
+  /** A saber move other than the ready stance is under way: it stands for it, and nothing else starts over it. */
+  private get bladeBusy(): boolean {
+    return !!this.blades && this.blades.busy;
+  }
+
+  /** Whether its blade swings through the move machine this instant (a lightsaber, tier 2 up), rather than the old random swings. */
+  private get bladesOn(): boolean {
+    return !!this.blades && this.blades.active && this.arm === 'saber';
+  }
+
   /**
    * Whether to throw itself aside, or jump up to somebody on a ledge, asked once a thought: the same
    * rule a person from the catalogue asks (`evade.ts`), with its own rig's own rolls and jumps. Aimed at
@@ -1269,7 +1381,8 @@ export class Npc implements Living, ErrandBody {
     const rig = this.rig;
     if (!this.skill || this.dead || !rig) return;
     const t = this.target;
-    const free = !this.tumbling && now >= this.tumbleUntil && this.stunned <= 0 && this.swingLeft < 0 && !this.heldAt && this.posture !== 'prone' && !(this.errand && !this.errand.done);
+    // Not in the middle of a saber move either, whose clip has the whole body, nor up on a leap of one.
+    const free = !this.tumbling && now >= this.tumbleUntil && this.stunned <= 0 && this.swingLeft < 0 && !this.bladeBusy && now >= this.leapUntil && !this.heldAt && this.posture !== 'prone' && !(this.errand && !this.errand.done);
     const gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) : Infinity;
     const level = this.cell ? 0 : this.jumpLevel;
     if (t && !t.dead && level > 0 && d.state === 'chase') {
@@ -1356,6 +1469,8 @@ export class Npc implements Living, ErrandBody {
   private startTumble(): void {
     this.swingLeft = -1;
     this.swingTarget = null;
+    // A saber move under way is let go of: the roll's or the jump's clip has already taken the rig.
+    this.dropBlades();
     this.forced = null;
     if (this.posture !== 'stand') {
       this.posture = 'stand';
@@ -1571,6 +1686,9 @@ export class Npc implements Living, ErrandBody {
         this.ragdollIn = Math.min(3, (rig.clipDuration(clip) ?? 1) - 0.05);
       }
     }
+    // A saber move let go of, and its whooshes still to come with it -- after the death clip has taken the
+    // rig, so the fall blends out of the swing itself; with no death clip, the swing's own is taken off.
+    this.dropBlades();
     // The death clip lays it out past its standing sphere before the ragdoll takes it: drawn whole from here.
     this.applyCull();
     // The handle goes out of the lookup at the moment the collider goes, not ten seconds later
@@ -1733,7 +1851,9 @@ export class Npc implements Living, ErrandBody {
       homeInside: this.homeInside,
       // A person is never a big body: the far sight is a bantha's and a rancor's.
       big: false,
-      reach: FIGHTER_TUNE.reach,
+      // A blade swung through the move machine strikes from where arm and blade really reach
+      // (`NPC_SABER_TUNE.closeTo`); everything else from the reach every fighter has always struck from.
+      reach: this.bladesOn ? NPC_SABER_TUNE.closeTo : FIGHTER_TUNE.reach,
       ranged,
       melee,
       halfHeight: this.halfHeight,
@@ -1933,11 +2053,12 @@ export class Npc implements Living, ErrandBody {
         // which still closes whenever the shot is blocked, for exactly the reason in this comment.
         // Not with a wall between (`apart`): the brain has already said chase, and the way is round
         // to the door, which the doorway join below walks it.
-        if (this.arm !== 'gun' && !this.apart && gap - t.radiusToward(this.pos) - this.radiusToward() <= FIGHTER_TUNE.reach) pace = 'stand';
+        if (this.arm !== 'gun' && !this.apart && gap - t.radiusToward(this.pos) - this.radiusToward() <= (this.bladesOn ? NPC_SABER_TUNE.closeTo : FIGHTER_TUNE.reach)) pace = 'stand';
       }
     }
-    // Stunned, or with a blade already on its way through a swing, it stands where it is.
-    const frozen = this.stunned > 0 || this.swingLeft >= 0;
+    // Stunned, or with a blade already on its way through a swing -- or through any saber move of the
+    // machine's, whose clip has the whole body -- it stands where it is.
+    const frozen = this.stunned > 0 || this.swingLeft >= 0 || this.bladeBusy;
     if (frozen) pace = 'stand';
     // Where the **feet** are going, which from here on is a different question from where the gun
     // is pointed. A cover spot outranks the ring, the ring outranks the brain's own point, and a
@@ -2122,7 +2243,9 @@ export class Npc implements Living, ErrandBody {
     // posture put on by hand.
     if (this.posture !== 'stand' && d.attack === 'melee') return;
     if (d.attack === 'ranged' && this.arm === 'gun' && this.gun) this.shoot(t, bolts, effects);
-    else if (d.attack === 'melee' && this.arm !== 'gun') this.swing(t, hittableAt);
+    // A lightsaber from the second tier up is swung by its move machine (`stepBlades`), frame by frame,
+    // and never by this clock.
+    else if (d.attack === 'melee' && this.arm !== 'gun' && !this.bladesOn) this.swing(t, hittableAt);
   }
 
   /**
@@ -2514,15 +2637,13 @@ export class Npc implements Living, ErrandBody {
     if (clip && rig) rig.playUpper(clip, 0.04);
   }
 
-  /** A swing: the window during which the blade cuts whatever it passes through. */
-  private swing(t: Living, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
-    const rig = this.rig;
-    this.attackCd = FIGHTER_TUNE.swingEvery + Math.random() * FIGHTER_TUNE.swingSpread;
-    // The swing opens a window rather than setting the moment a blow lands: for as long as it
-    // runs the blade cuts what it passes through, once each, and it can now miss altogether.
-    // The path is not reset here: the blade was drawn on the frame before and wrote its ends
-    // down, so the first cut of the swing steps from where the blade really stood.
-    this.swingLeft = BLADE_SWING.window;
+  /**
+   * A swing has opened, by the old clock or by the move machine: a fresh ledger (one bite per body per
+   * swing), a fresh contact sound, and whom it was aimed at. The path is not reset: the blade was drawn
+   * on the frame before and wrote its ends down, so the first cut of the swing steps from where the
+   * blade really stood.
+   */
+  private openSwing(t: Living | null, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
     this.hitThisSwing.clear();
     this.swingSwept = false;
     this.swingSounded = false;
@@ -2534,6 +2655,18 @@ export class Npc implements Living, ErrandBody {
       warnedBlind = true;
       console.warn('fighters: nothing was wired to say what a collider belongs to (npcDeps.hittableAt), so a swung blade can find nobody; the blow it replaced stands in. __debug.blades() counts it.');
     }
+  }
+
+  /** A swing: the window during which the blade cuts whatever it passes through. */
+  private swing(t: Living, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
+    const rig = this.rig;
+    this.attackCd = FIGHTER_TUNE.swingEvery + Math.random() * FIGHTER_TUNE.swingSpread;
+    // The swing opens a window rather than setting the moment a blow lands: for as long as it
+    // runs the blade cuts what it passes through, once each, and it can now miss altogether.
+    this.swingLeft = BLADE_SWING.window;
+    this.openSwing(t, hittableAt);
+    // One swing a cooldown by the clock above: each a whole blow, as it always was.
+    this.swingShare = 1;
     const swing = SWINGS[Math.floor(Math.random() * SWINGS.length)];
     if (rig?.has(swing)) rig.play(swing, { fadeIn: 0.06 });
     // A blade's own whoosh is the sabers' to make (the clip it plays may mark its own); a
@@ -2549,6 +2682,208 @@ export class Npc implements Living, ErrandBody {
       const bz = drawn ? (this.bladeBase.z + this.bladeTip.z) * 0.5 : this.pos.z;
       combatSounds.saberSwing(swingStyle(swing), bx, by, bz, swing);
     } else combatSounds.melee(this.weapon, false, this.pos.x, this.pos.y + 1.2, this.pos.z);
+  }
+
+  /**
+   * One frame of its lightsaber through the move machine (`npcSaber.ts`), from the second tier up. What
+   * the brain decided is turned into the keys the player would press, the machine answers with the move
+   * to play, and the rig plays it whole-body and held so each move runs straight on into the next --
+   * never split off the legs, since the body stands for every one of them. The blade cuts while a move
+   * that cuts is under way, which is the machine's own `attacking` and not the old clock's window; a
+   * leap or a lunge carries the body by its own push; a kick lands once. Below the second tier, or with
+   * the blade put away, the machine is let go of and this does nothing at all.
+   *
+   * Called on every frame it lives, rolling or not, after the ground `act` asked for and before the body
+   * is moved, so a leap begun this frame goes up this frame.
+   */
+  private stepBlades(sdt: number, effects: Effects | null, hittableAt: ((handle: number) => Hittable | undefined) | null): void {
+    const b = this.blades;
+    const rig = this.rig;
+    if (!b || !rig || this.arm !== 'saber') return;
+    const t = this.target && !this.target.dead ? this.target : null;
+    const d = this.decision;
+    const a = this.bladeAsk;
+    const gap = t ? Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - t.radiusToward(this.pos) - this.radiusToward() : Infinity;
+    a.now = this.now;
+    a.dt = sdt;
+    // Out while it is fighting and for the few seconds of the combat carry after, which is when it is lit.
+    a.lit = !!this.blade && this.sinceFought < STANCE_TUNE.ready && !this.heldAt;
+    a.hasTarget = !!t;
+    a.attackState = !!t && !!d && d.state === 'attack' && d.attack === 'melee' && !this.apart && this.posture === 'stand';
+    // A leap is out of doors only: a room's ceiling and furniture are nothing to throw a body across.
+    a.chasing = !!t && !!d && d.state === 'chase' && !this.apart && !this.cell;
+    a.gap = gap;
+    // A chain goes on while its foe stays within `keepTo`, a little past where it stopped to strike.
+    a.reach = NPC_SABER_TUNE.keepTo;
+    a.offNose = t ? wrapAngle(Math.atan2(t.pos.x - this.pos.x, t.pos.z - this.pos.z) - this.facing) : 0;
+    a.grounded = this.grounded;
+    a.vy = Number.isNaN(this.fallVy) ? 0 : this.fallVy;
+    a.above = this.grounded ? 0 : 2;
+    a.tumbling = this.tumbling || this.now < this.tumbleUntil;
+    a.stunned = this.stunned > 0;
+    const play = b.step(a, this.clipLength);
+    const c = b.combat;
+    if (play) {
+      if (play.move.kind === 'ready') this.takeBladeClip();
+      else if (rig.has(play.anim)) {
+        rig.play(play.anim, { loop: play.loop, fadeIn: play.blend, timeScale: play.speed, hold: true });
+        this.bladeAnim = play.anim;
+      }
+      if (play.impulse) this.leap(play.impulse);
+    } else if (c.move === 'NONE' && this.bladeAnim) this.takeBladeClip();
+    // Drawn whole while a special carries it, asked again whenever that changes.
+    if (b.special !== this.cullSpecial) this.applyCull();
+    // The swing's window: open for as long as a move that cuts plays, one ledger per swing.
+    const cuts = b.active && c.attacking;
+    const id = c.attackId;
+    if (this.bladeWas && (!cuts || id !== this.bladeSwing)) {
+      // The swing it was in has ended: one nothing could sweep lands the old timer's blow instead.
+      if (!this.swingSwept) this.timerBlow(effects);
+      this.swingTarget = null;
+    }
+    if (cuts && (!this.bladeWas || id !== this.bladeSwing)) {
+      this.bladeSwing = id;
+      this.openSwing(t, hittableAt);
+      // How much of a whole blow this swing lands: measured from the last that landed against the
+      // cooldown the old clock swung by, so a chain hits no harder over a fight than that clock did.
+      this.swingShare = b.shareOf(this.now, Npc.bladeCooldown());
+    }
+    this.bladeWas = cuts;
+    // A kick lands with the foot, once, while its foot is out.
+    const kick = c.kicking;
+    if (kick && t && this.kickedFor !== id) this.kick(t, kick, id);
+    this.bladeMotion(sdt, gap);
+  }
+
+  /** The seconds between two of a fighter's blows by the old clock, on average: what a chain's swings share a blow out by. */
+  private static bladeCooldown(): number {
+    return FIGHTER_TUNE.swingEvery + FIGHTER_TUNE.swingSpread * 0.5;
+  }
+
+  /** The move clip it put up, taken off the rig -- only while it is still the clip playing, so a roll, a parry or a death that took the rig since is left alone. */
+  private takeBladeClip(): void {
+    const rig = this.rig;
+    if (rig && this.bladeAnim && rig.overrideName === this.bladeAnim) rig.stopOverride();
+    this.bladeAnim = null;
+  }
+
+  /**
+   * A saber move's own push (`Impulse`, in Jedi Academy's units a second along its facing and to its
+   * right): up at once when it has an upward speed, carried along the ground meanwhile until it comes
+   * down; with none, a push along the ground eased out over `LUNGE_PUSH`.
+   */
+  private leap(im: Impulse): void {
+    const v = alongFacing(this.facing, im.forward * JKA_UNIT, im.right * JKA_UNIT, this.pushAt);
+    this.leapVX = v.x;
+    this.leapVZ = v.z;
+    this.leapAt = this.now;
+    if (im.up !== null) {
+      this.fallVy = im.up * JKA_UNIT;
+      this.grounded = false;
+      this.leapAir = true;
+      this.leapUntil = this.now + 3;
+    } else {
+      this.leapAir = false;
+      this.leapUntil = this.now + LUNGE_PUSH;
+    }
+  }
+
+  /**
+   * What a saber move carries the body by this frame, on top of the ground `act` asked for: a leap's
+   * push while it is up, a lunge's eased out, and a move's own script (the staff's butterflies, the
+   * steps of a kata) at the run -- each stopping once it is within striking distance of what it
+   * fights, so a leap never lands it past its foe. A script's hop lifts it off the ground.
+   */
+  private bladeMotion(sdt: number, gap: number): void {
+    const carry = gap > NPC_SABER_TUNE.closeTo;
+    if (this.now < this.leapUntil) {
+      let k = 1;
+      if (this.leapAir) {
+        // Down again: the push ends with the flight.
+        if (this.now - this.leapAt > 0.15 && this.grounded) {
+          this.leapUntil = 0;
+          this.leapAir = false;
+          k = 0;
+        }
+      } else k = Math.max(0, (this.leapUntil - this.now) / LUNGE_PUSH);
+      if (carry && k > 0) {
+        this.wish.x += this.leapVX * k * sdt;
+        this.wish.z += this.leapVZ * k * sdt;
+      }
+    } else if (this.leapAir) this.leapAir = false; // a flight not seen down in its time is let go all the same
+    const b = this.blades;
+    if (!b || !b.combat.scriptInto(this.moveScript)) return;
+    const s = this.moveScript;
+    if ((s.fmove !== 0 || s.smove !== 0) && carry) {
+      const run = FIGHTER_TUNE.run * sdt;
+      const v = alongFacing(this.facing, s.fmove, s.smove, this.pushAt);
+      this.wish.x += v.x * run;
+      this.wish.z += v.z * run;
+    }
+    if (!Number.isNaN(s.hop) && this.grounded) {
+      this.fallVy = s.hop;
+      this.grounded = false;
+    }
+  }
+
+  /**
+   * A staff's kick landing with the foot: once a kick, on what it is fighting if that stands the kick's
+   * way within reach. It is a blow like a swing and shares the same clock (`NpcSaber.shareOf`), so a
+   * kick does not come on top of what the body's own rate of blows allows.
+   */
+  private kick(t: Living, dir: Dir, id: number): void {
+    this.kickedFor = id;
+    if (!liesToward(dir, FIGHTER_TUNE.reach, this.facing, this.pos.x, this.pos.y, this.pos.z, t.pos.x, t.pos.y, t.pos.z)) return;
+    const share = this.blades ? this.blades.shareOf(this.now, Npc.bladeCooldown()) : 1;
+    this.blades?.landed(this.now);
+    t.damage(scaledByDifficulty(KICK_DAMAGE.min + Math.random() * (KICK_DAMAGE.max - KICK_DAMAGE.min)) * share, this.pos, KICK_DAMAGE.push, this);
+    combatSounds.melee(null, true, t.pos.x, t.pos.y + t.halfHeight, t.pos.z);
+  }
+
+  /**
+   * Its saber move let go of wherever it was (a roll, a jump, a death): its whooshes still to come with
+   * it, its push and its window -- and its clip, while that is still the one on the rig, or a held move
+   * with nothing to replace it would keep the body posed in its last frame.
+   */
+  private dropBlades(): void {
+    if (!this.blades) return;
+    this.blades.holster();
+    this.takeBladeClip();
+    this.bladeWas = false;
+    this.leapUntil = 0;
+    this.leapAir = false;
+  }
+
+  /**
+   * A bolt reached its body: whether its lit blade turns it away (`NpcSaber.block`: the player's own
+   * blocking maths and a chance by tier), writing where it now goes to `out`. The parry plays when
+   * nothing better has the rig, as the player's does, and the blade rings where the bolt struck.
+   */
+  blockBolt(bolt: Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean {
+    const b = this.blades;
+    const blade = this.blade;
+    const rig = this.rig;
+    if (!b || !blade || !rig || this.dead || this.heldAt || this.arm !== 'saber') return false;
+    const a = this.blockAsk;
+    // Out and lit: a blade still igniting or going out turns nothing.
+    a.lit = blade.ignition >= 0.9 && this.sinceFought < STANCE_TUNE.ready;
+    a.tumbling = this.tumbling || this.now < this.tumbleUntil;
+    a.dir.copy(bolt.dir);
+    a.hit.copy(point);
+    blockFrame(a, this.pos.x, this.pos.y, this.pos.z, this.facing, BLOCK_EYE);
+    const t = this.target;
+    if (t && !t.dead) a.look.set(t.pos.x - a.eye.x, t.pos.y + t.halfHeight - a.eye.y, t.pos.z - a.eye.z);
+    else a.look.copy(a.forward);
+    if (a.look.lengthSq() < 1e-8) a.look.copy(a.forward);
+    a.look.normalize();
+    const zone = b.block(a, out);
+    if (!zone) return false;
+    if (!b.busy && this.swingLeft < 0 && !rig.overriding) {
+      const clip = parryClip(b.style, zone, this.hasClip);
+      if (clip) rig.play(clip, { fadeIn: 0.05 });
+    }
+    combatSounds.saberContact('block', point.x, point.y, point.z);
+    return true;
   }
 
   /**
@@ -2703,6 +3038,9 @@ export class Npc implements Living, ErrandBody {
       // ledge; how high it jumps; and whether it is rolling or in the air this instant.
       roll: { rolls: this.evade.rolls, hops: this.evade.hops, rolling: this.rollLeft > 0 },
       jump: { level: this.jumpLevel, height: Number(jumpHeight(this.jumpLevel).toFixed(2)), jumps: this.evade.jumps, inAir: this.jumping },
+      // Its lightsaber's moves (`npcSaber.ts`): its tier and style, the move it is in, its Force and
+      // what it has swung, leapt and turned away; null for anything but a lightsaber.
+      blade: this.blades ? this.blades.status(this.now) : null,
     };
   }
 
@@ -2745,6 +3083,8 @@ export class Npc implements Living, ErrandBody {
       return;
     }
     this.lookup = hittableAt ?? NOTHING_AT;
+    // Read by its blade's question about a foe behind it, this step only.
+    this.foesSeen = foes;
     const sdt = dt * own;
     this.stunned = Math.max(0, this.stunned - sdt);
     this.attackCd = Math.max(0, this.attackCd - sdt);
@@ -2800,6 +3140,8 @@ export class Npc implements Living, ErrandBody {
     stanceAsk.range = FIGHTER_TUNE.gunRange;
     stanceAsk.offNose = offNose;
     this.stance = stanceFor(stanceAsk);
+    // Its lightsaber's move machine, once the carry is known and before the body is moved (`stepBlades`).
+    this.stepBlades(sdt, effects, hittableAt);
     this.move(sdt, terrain);
     // Down from a jump of its own: landed the moment it stands on something again coming down, and let
     // go of all the same if it has not come down in a few seconds (held on a ledge's lip).
@@ -2832,19 +3174,21 @@ export class Npc implements Living, ErrandBody {
     // hilt's top; a sword's or a club's steel is the model's own longest extent out of the grip.
     // The sweep is here, after the body has been posed and the holder's matrix is this frame's, so
     // the blade never cuts from where it was standing a frame ago.
-    const swinging = this.swingLeft >= 0;
+    // The old clock's window, or a move of the machine's that cuts (`stepBlades`).
+    const swinging = this.swingLeft >= 0 || this.bladeWas;
     if (this.holder && this.arm !== 'gun') {
       this.holder.updateWorldMatrix(true, false);
       if (this.blade) {
         this.holder.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
         this.holder.localToWorld(this.bladeTip.set(0, this.hiltTop + this.blade.spec.length, 0));
         // Whose blade this is when it meets another, and what it weighs (src/combat/clash.ts): the
-        // fighter's own living key, its swing window, and the medium style, which is what its
-        // one-hand swings are. Without this the blade owns nobody, and a blade that owns nobody
-        // never clashes with another that owns nobody either -- which is every other fighter.
+        // fighter's own living key, its swing window, and its style -- the machine's own from the
+        // second tier up, else the medium, which is what the old one-hand swings are. Without this the
+        // blade owns nobody, and a blade that owns nobody never clashes with another that owns nobody
+        // either -- which is every other fighter.
         this.blade.owner = this.key;
         this.blade.attacking = swinging;
-        this.blade.clashWeight = CLASH.weights.medium;
+        this.blade.clashWeight = this.bladesOn && this.blades ? CLASH.weights[this.blades.style] : CLASH.weights.medium;
         // Lit while it is fighting, and for the few seconds of the combat carry after: it used to
         // snap off on the very frame its target died, which is the one place the stance changes
         // what is *seen* of a blade rather than only of a body.
@@ -3113,7 +3457,8 @@ export class Npc implements Living, ErrandBody {
     tmp.copy(t.pos).sub(this.pos);
     if (tmp.length() >= BLADE_SWING.timerReach) return;
     const saber = this.arm === 'saber';
-    t.damage(scaledByDifficulty(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee), this.pos, BLADE_SWING.fighterPush, this);
+    t.damage(scaledByDifficulty(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee) * this.swingShare, this.pos, BLADE_SWING.fighterPush, this);
+    this.blades?.landed(this.now);
     tmp2.copy(t.pos).y += t.halfHeight;
     if (saber) combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
     else combatSounds.melee(this.weapon, true, tmp2.x, tmp2.y, tmp2.z);
@@ -3134,7 +3479,8 @@ export class Npc implements Living, ErrandBody {
     const saber = this.arm === 'saber';
     strike.effects = effects;
     strike.now = now;
-    strike.damage = scaledByDifficulty(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee);
+    // A whole blow for the old clock's swings; a share of one for a swing of the move machine's (`swingShare`).
+    strike.damage = scaledByDifficulty(saber ? BLADE_SWING.fighterSaber : BLADE_SWING.fighterMelee) * this.swingShare;
     strike.color = saber ? this.color.getHex() : BLADE_SWING.meleeSpark;
     this.swingSwept = true;
     // The player's readout is one shared record and this blade is swept at a different simulated
@@ -3148,7 +3494,10 @@ export class Npc implements Living, ErrandBody {
     } finally {
       returnSwingFigures(now);
     }
-    if (hits <= 0 || this.swingSounded) return;
+    if (hits <= 0) return;
+    // Landed: the next swing's share is measured from here.
+    this.blades?.landed(now);
+    if (this.swingSounded) return;
     this.swingSounded = true;
     tmp2.copy(this.bladeBase).lerp(this.bladeTip, 0.5);
     if (saber) combatSounds.saberContact('body', tmp2.x, tmp2.y, tmp2.z);
@@ -3351,11 +3700,13 @@ export class NpcManager {
    * Stand one at a point on the ground, of a random species; it dresses and arms itself as its rig
    * loads. `at.y` and `at.inside` put it on a building's floor, in the room the point is in.
    */
-  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean; tier?: number } = {}): Npc {
+  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean; tier?: number; arm?: Arm } = {}): Npc {
     const species = this.deps.species.length ? this.deps.species : SPECIES_FALLBACK;
     const id = (wanted && species.find((s) => s.includes(wanted))) ?? species[Math.floor(Math.random() * species.length)];
     const npc = new Npc(id, this.physics, x, at.y ?? this.terrain.heightAt(x, z), z);
     npc.setTier(at.tier ?? this.tier);
+    // What it carries, when the console asked: a lightsaber, a sword or a gun off the rack.
+    if (at.arm) npc.wantArm = at.arm;
     // The one adapter, shared: the searcher's per-step budget is only worth anything if every body
     // in the world is asking the same one.
     npc.cover = this.coverDeps;
@@ -3562,13 +3913,22 @@ export class NpcManager {
    * everybody else's blades have a tuning object at all (`clash.ts` and `nebulae.ts` hang theirs
    * the same way). It is what says whether the wiring is in: `lookup` reads `none` while nothing
    * has been given to name a collider with, which is the one way this wave can quietly do nothing.
+   *
+   * Its `moves` are the move machine's (`npcSaber.ts`): what every NPC blade has swung, chained,
+   * leapt and turned away since they were last cleared, a minute of the world's clock at a time.
+   * `__debug.blades({ tier: 5, style: 'strong' })` puts every NPC blade on one rung and one style
+   * (null for each its own), `{ moves: { … } }` moves the machine's numbers and `{ reset: true }`
+   * clears the totals.
    */
   private expose(): void {
     if (typeof window === 'undefined') return;
     const dbg = (window as unknown as { __debug?: Record<string, unknown> }).__debug;
     if (!dbg || dbg === this.exposedOn) return;
     this.exposedOn = dbg;
-    dbg.blades = (opts?: Partial<BladeSwingTune>) => bladeSwingReport(opts);
+    dbg.blades = (opts?: BladesKnob) => {
+      const { tier, style, moves, reset, ...swing } = opts ?? {};
+      return { ...bladeSwingReport(Object.keys(swing).length ? swing : null), moves: npcSaberReport(this.lastNow, { tier, style, tune: moves ?? null, reset: !!reset }) };
+    };
     dbg.fighters = (opts?: FighterKnob) => this.report(opts);
   }
 

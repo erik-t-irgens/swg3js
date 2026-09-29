@@ -42,6 +42,13 @@ export interface Hittable {
    * 'taken' when it placed none and the bolt's own hit effect should play; false to be hurt the plain way.
    */
   takeBolt?(bolt: import('./bolts').Bolt, point: THREE.Vector3, normal: THREE.Vector3): false | 'taken' | 'shown';
+  /**
+   * A bolt reached it at `point`: turn it away with a lit blade, writing the way it now leaves to
+   * `out`, or answer false to be struck the plain way. Only a body holding a lightsaber has one (a
+   * fighter, a person from the catalogue: `src/world/npcSaber.ts`); the player's own block is the
+   * bolts' `BoltWorld.block`, which it has always been.
+   */
+  blockBolt?(bolt: import('./bolts').Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean;
   /** Burn or corrode it for a while (a creature), stagger it, or slow it; the turrets and vehicles do without. */
   afflict?(dps: number, seconds: number): void;
   stun?(seconds: number): void;
