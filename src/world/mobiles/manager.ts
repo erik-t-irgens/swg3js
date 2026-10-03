@@ -53,6 +53,8 @@ import type { NearBlocker } from '../layoutStream';
 import type { GroundTactics } from './tactics.ts';
 // A lightsaber's moves (`npcSaber.ts`): every clip the move machine can ask for, to lend, and the style by seed.
 import { NPC_SABER_CLIPS, styleOf } from '../npcSaber.ts';
+// Where the people standing in a building are put when it comes down.
+import { doorstepSpot } from '../myBuildings.ts';
 
 export interface SpawnOpts {
   origin?: 'spawned' | 'ambient';
@@ -119,6 +121,13 @@ export interface SpawnOpts {
    */
   weapons?: readonly string[];
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
+  /**
+   * A weapon the console chose for it, by the rack's template (`__debug.mobile(.., { weapon })`): held
+   * over its own list, its name and its temper (`OwnArms.forcedTemplate`). This browser's own spawns
+   * only -- a body the world holds is armed from its record's seed in every browser alike, and a choice
+   * made here would put a different weapon in its hand on this screen alone.
+   */
+  weaponTemplate?: string;
 }
 
 export interface MobileManagerDeps {
@@ -670,7 +679,9 @@ export class MobileManager {
     // Taken before the first await: a load in flight counts against the budget at its estimate from
     // this moment, so the next spawn in the same tick sees it (`referencedBytes`).
     const guess = assets.estimate(entry, cat);
-    const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged };
+    // The console's choice is never laid on a body the world holds: that one is armed from its record alike everywhere.
+    const forced = opts.weaponTemplate && !opts.worldId ? opts.weaponTemplate : undefined;
+    const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged, forcedTemplate: forced };
     const [model, pack, arms] = await Promise.allSettled([
       assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),
       packInfo ? assets.acquirePack(packInfo.id, packInfo.file, packInfo.json, guess.pack) : Promise.resolve(null),
@@ -1299,6 +1310,34 @@ export class MobileManager {
    */
   cellFromOf(m: Mobile): THREE.Vector3 | null {
     return this.held.get(m)?.cellFrom ?? null;
+  }
+
+  /**
+   * A building put down in play is coming down: every body this browser keeps that is followed in one
+   * of its rooms is stood on the ground round its doorstep (`doorstepSpot`, a step apart) and put
+   * back outdoors before the rooms go, or it would be held in the air where a floor had been, walking
+   * corners of a building that is not there. Answers how many were moved; `first` is the doorstep spot
+   * the first of them takes, so the fighters stood out beside them can take the next ones.
+   */
+  standOutOf(building: object, door: { x: number; z: number }, first = 1): number {
+    let n = 0;
+    for (const m of this.live) {
+      const held = this.held.get(m);
+      if (!held || held.cell?.building !== building) continue;
+      const spot = doorstepSpot(first + n, door);
+      // A body another browser keeps is not moved (its keeper takes the same building down and stands
+      // it out there), but its rooms here go all the same, or this browser would go on following it
+      // through the portals of a building that is gone, held indoors and airless until something moved it.
+      const moved = m.standOut(spot.x, this.deps.terrain.heightAt(spot.x, spot.z), spot.z);
+      held.cell = null;
+      held.cellFrom.copy(m.pos);
+      m.room = 0;
+      m.navCell = null;
+      m.setInside(false);
+      m.setAirless(false);
+      if (moved) n++;
+    }
+    return n;
   }
 
   /** For `__debug.mobileCull`: every mobile's world sphere, whether it is on and near the screen, drawn, casting, and its tier. */

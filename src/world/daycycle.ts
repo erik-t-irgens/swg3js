@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { dayTune, registerDay, setDayNote, sharedClock } from './sharedClock.ts';
+import { GAME_DAY_SECONDS, dayTune, registerDay, setDayNote, sharedClock } from './sharedClock.ts';
 import { rand3 } from './weatherSchedule.ts';
 
 /** The client's day: the clock runs 06:00 to 06:00, and the first 70% of it is daylight. */
@@ -35,7 +35,8 @@ export function phaseFor(azimuth: number, maxElevation: number): number {
 /** Time of day in [0, 1): 0 is midnight, 0.5 is noon. */
 export class DayCycle {
   time = 0.36;
-  dayLengthSeconds = 720;
+  /** The whole day, in seconds: the game's twelve minutes, a server's own, or `__debug.day({ length })` with none. */
+  dayLengthSeconds = GAME_DAY_SECONDS;
   /** This planet's place in the shared day, in days. */
   phase = 0;
   /**
@@ -46,6 +47,14 @@ export class DayCycle {
   held = false;
   /** The fast-forward key is down: the day is not the shared one while it is. */
   fast = false;
+  /**
+   * The day stands still: the creator's hour slider has it (`PlaceBar`), so the hour a face is being
+   * chosen at is the hour that was picked and the sky does not walk off it. Nothing moves the time
+   * but a hand while it is set, and it follows no shared clock either. Only the creator sets it, and
+   * leaving the creator (`App.hideScene`) clears it: a pause carried into a played world would stop
+   * that world's day and take it off the clock everybody else shares.
+   */
+  paused = false;
   /** What the last update left, so a write from anywhere else is noticed as a write. */
   private lastTime = 0.36;
   /** The wall clock at the last update, which is how a gap in the frames is told from a slow one. */
@@ -106,8 +115,9 @@ export class DayCycle {
     const away = (wallNow - this.lastWallAt) / 1000 - Math.max(0, dt);
     const stopped = this.lastWallAt === 0 || away > dayTune.gapSeconds;
     this.lastWallAt = wallNow;
-    const shared = this.held || fast ? null : sharedClock.timeOfDay(this.dayLengthSeconds, this.phase);
-    const step = (dt / this.dayLengthSeconds) * (fast ? 90 : 1);
+    const shared = this.held || fast || this.paused ? null : sharedClock.timeOfDay(this.dayLengthSeconds, this.phase);
+    // Paused, the step is nought: the time is whatever was last written, and stays it.
+    const step = this.paused ? 0 : (dt / this.dayLengthSeconds) * (fast ? 90 : 1);
     if (shared === null) this.time = (this.time + step) % 1;
     else if (!(dt > 0) || stopped) {
       // No time passed, or none of it was drawn: the world is being set up behind a loading screen,

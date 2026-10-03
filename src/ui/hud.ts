@@ -1126,7 +1126,7 @@ export function keyLabel(code: string): string {
 // the display's own tick and a table built inside the call would be built again every time.
 const MOUSE_CAPS: Record<string, string> = { Mouse0: 'LMB', Mouse1: 'MMB', Mouse2: 'RMB', Mouse3: 'M4', Mouse4: 'M5' };
 const ARROW_CAPS: Record<string, string> = { Up: '↑', Down: '↓', Left: '←', Right: '→' };
-const NAMED_CAPS: Record<string, string> = { Space: 'Space', Equal: '=', Minus: '-', Comma: ',', Period: '.', Slash: '/', Backquote: '`', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Backslash: '\\', Tab: 'Tab', Enter: 'Enter', CapsLock: 'Caps', Escape: 'Esc' };
+const NAMED_CAPS: Record<string, string> = { Space: 'Space', Equal: '=', Minus: '-', Comma: ',', Period: '.', Slash: '/', Backquote: '`', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Backslash: '\\', Tab: 'Tab', Enter: 'Enter', CapsLock: 'Caps', Escape: 'Esc', Delete: 'Del' };
 
 /** An id as words, for an item whose own name the game's tables never had. */
 function wordsOf(id: string): string {

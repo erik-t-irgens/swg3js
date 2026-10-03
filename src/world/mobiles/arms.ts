@@ -291,6 +291,62 @@ export interface OwnArms {
   aggression?: MobileAggression;
   /** Its ranged attack: left out is its body's, null is none at all. */
   ranged?: RangedStat | null;
+  /**
+   * A weapon chosen for it from the console (`__debug.mobile(.., { weapon })`), by the rack's own
+   * template: held whatever its own list, its name or its temper would have given it. Only a body with
+   * a hand to hold it takes it (the humanoid skeleton), and only a thing that is fought with.
+   */
+  forcedTemplate?: string;
+}
+
+/**
+ * A weapon off the rack by what somebody typed: its id exactly, its template (whole, then by its file's
+ * name with or without `shared_`), the game's own name exactly, then an id and then a name holding the
+ * text. Of several that hold it, the plainest: one the game used for a quest, a decoration, an event or
+ * never at all (`donotuse`) last, as the rack's own random draw leaves them out, and then the shortest
+ * id, which is the plain model rather than one of its variants (`dl44` is the DL-44, not the DL-44 XT).
+ * Null when nothing matches.
+ */
+export function findRackWeapon<W extends { id: string; template: string; name?: string | null }>(rack: readonly W[], text: string): W | null {
+  const q = text.trim().toLowerCase().replace(/\\/g, '/');
+  if (!q) return null;
+  const fileOf = (t: string) => t.toLowerCase().replace(/\\/g, '/').replace(/^.*\//, '').replace(/^shared_/, '').replace(/\.iff$/, '');
+  const own = fileOf(q);
+  const odd = (w: W) => (NOT_RANDOM.test(w.id) || /donotuse/.test(w.id) ? 1 : 0);
+  /** The plainest of those `holds` accepts, or null. */
+  const plainest = (holds: (w: W) => boolean): W | null => {
+    let best: W | null = null;
+    for (const w of rack) {
+      if (!holds(w)) continue;
+      if (!best) best = w;
+      else {
+        const d = odd(w) - odd(best) || w.id.length - best.id.length || (w.id < best.id ? -1 : w.id > best.id ? 1 : 0);
+        if (d < 0) best = w;
+      }
+    }
+    return best;
+  };
+  return (
+    rack.find((w) => w.id.toLowerCase() === q) ??
+    rack.find((w) => w.template.toLowerCase() === q) ??
+    plainest((w) => fileOf(w.template) === own) ??
+    // A name is often shared (fifteen of the rack's weapons are called plain "Lightsaber", the game's
+    // two never-used ranged copies first among them), so even an exact one takes the plainest.
+    plainest((w) => (w.name ?? '').toLowerCase() === q) ??
+    plainest((w) => w.id.toLowerCase().includes(q)) ??
+    plainest((w) => (w.name ?? '').toLowerCase().includes(q))
+  );
+}
+
+/**
+ * Why a body cannot be stood holding a chosen weapon, in words, or '' when it can: a creature or a droid
+ * not on the humanoid skeleton has no hand to hold anything (the weapon would have no bone to hang on),
+ * and a grenade, an instrument or a dancer's prop is not a thing a body fights with.
+ */
+export function forcedArmsRefusal(entryName: string, hierarchy: string | null | undefined, weapon: { id: string; class: WeaponClass }): string {
+  if (hierarchy !== 'all_b') return `a ${entryName} has no hand to hold anything: only a body on the humanoid skeleton carries a weapon`;
+  if (!armsKindOf(weapon.class)) return `${weapon.id} (${weapon.class}) is not something a body fights with`;
+  return '';
 }
 
 /** How a weapon is handed to the body: one shot from, a lightsaber, or one swung and never shot from. */
@@ -337,6 +393,19 @@ export function decideArms<W extends { template: string; class: WeaponClass }>(
   rand: () => number = Math.random,
 ): ArmsDecision<W> | null {
   if (hierarchy !== 'all_b') return null;
+  // One the console chose: held whatever its own list, its name or its temper say, and drawing nothing
+  // from `rand`, so the colour and the style a seed draws afterwards are the ones it always drew.
+  if (own?.forcedTemplate) {
+    const def = rack?.find((w) => w.template === own.forcedTemplate) ?? null;
+    const choice = def ? armsKindOf(def.class) : null;
+    if (!def || !choice) return null;
+    const out: ArmsDecision<W> = { choice, weapon: def, hold: holdOf(choice) };
+    if (choice.kind === 'gun') {
+      const shoots = own.ranged !== undefined ? own.ranged : (entry.stats?.ranged ?? null);
+      if (!(shoots && shoots.range > 0)) out.ranged = { range: OWN_GUN_RANGE, additive: !!roles.rangedAdditive };
+    }
+    return out;
+  }
   const mine = own?.weapons?.length && rack ? ownWeapon(own.weapons, own.groups ?? null, rack, rand) : null;
   if (mine) {
     if (mine.unarmed || !mine.def || !mayHoldWeapon(entry, hierarchy, own?.aggression ?? entry.stats?.aggression)) return null;

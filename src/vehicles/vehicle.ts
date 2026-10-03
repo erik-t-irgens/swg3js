@@ -4,11 +4,12 @@
 // animal mounts) turn in place and stay on their feet, flyers (landspeeders as flying cars, gunships
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
-import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics';
-import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings';
-import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly';
-import { partnerLoss } from '../space/shipDamage';
-import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane, type LandingLiquid } from './landing';
+import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
+import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings.ts';
+import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly.ts';
+import { partnerLoss } from '../space/shipDamage.ts';
+import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane, type LandingLiquid } from './landing.ts';
+import { cellIndexOf } from './cells.ts';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -33,7 +34,6 @@ const standsStill = (c: RAPIER.Collider): boolean => {
   const b = c.parent();
   return !b || b.isFixed();
 };
-import { cellIndexOf } from './interior';
 
 export type VehicleKind = 'podracer' | 'speederbike' | 'ground' | 'flyer' | 'ship';
 
@@ -278,6 +278,49 @@ const BODY_SPEED_CAP = 399;
 const SHIP_HIT_FREE = 0.4;
 /** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
 const SLOPE_FOLLOW = 0.85;
+/** How hard a hull is turned back toward the way it wants to stand (a turning acceleration per unit of lean). */
+const RIGHTING = 40;
+
+/**
+ * How a machine on its springs keeps its feet, and how its speed comes down when its top speed drops
+ * under it. The owner's rule is that a speeder may go over in the air and never on the ground.
+ *
+ * The springs used to push at the four corners of the underside. The middle of the mass sits at the
+ * middle of the box, so once a hull leaned past the angle whose tangent is the corner's reach over
+ * half the height (32 degrees on a speeder bike, 21 on a STAP, 46 to 66 on a pod), all four corners
+ * stood on the same side of the mass and every spring rolled it further over: measured with this very
+ * class over a heightfield, a bike flipped eleven times in forty seconds on rolling hills, all four
+ * springs touching the ground the whole way over. Pushed at the corner raised along the hull's own up
+ * to the height of the mass, a spring can only ever level the hull against the ground under it, so
+ * that is where they push now; in the air nothing changes, as no spring reaches the ground there.
+ *
+ * Beside that, a guard for the rule itself, on the ground only and only while the hull is still the
+ * right way up: the righting is steered by the angle rather than its sine (the sine peaks at a right
+ * angle and fades past it), and any turning that would carry the hull past `tipLimit` from the way it
+ * wants to stand is taken away. A hull that comes down on its back after a jump is left on its back,
+ * and its rider is thrown after a moment, as before.
+ *
+ * The cap: a top speed that falls under the hull (a boost let go, an engine burnt out) was snapped in
+ * one step, and the next step's hit test read the speed it took off as a crash: a pod let off its
+ * boost lost 40 m/s at once, the hull took the whole of it and blew up under its rider. Now the cap
+ * comes down at the hull's own brake from the speed it has, as a ship's cruise does, and what it
+ * takes off is the update's own doing, which the hit test no longer counts.
+ *
+ * `springsAt: 'corner'`, `tipLimit: 0`, `rightByAngle: false` and `easeCap: false` together are the
+ * old rules, to put side by side (`__debug.hover`). The 50 degrees are ours.
+ */
+export const HOVER_TUNE = {
+  /** Where each spring pushes: 'mass', its corner raised to the height of the hull's middle; 'corner', the underside, as it was. */
+  springsAt: 'mass' as 'mass' | 'corner',
+  /** On the ground, the furthest a hull may lean from the way it wants to stand (degrees); 0 turns the guard off. */
+  tipLimit: 50,
+  /** On the ground, the righting grows with the lean itself rather than its sine. */
+  rightByAngle: true,
+  /** A top speed that falls under the hull comes down at its brake; false snaps it in one step, as it was. */
+  easeCap: true,
+};
+/** Where a spring pushes this step: scratch, so nothing is made per corner. */
+const springAt = new THREE.Vector3();
 /** Every vehicle's colliders by handle, so a hull that hit something can tell another ship from a station. Filled by the constructor, emptied by dispose. */
 const HULLS = new Map<number, Vehicle>();
 
@@ -310,6 +353,14 @@ export class Vehicle {
   upsideDown = false;
   flipped = false;
   private overFor = 0;
+  /** How far the hull leaned from the way it wants to stand on the last step on its springs (rad), for the console. */
+  lean = 0;
+  /**
+   * The top speed the hull was held to on the last step on its springs (m/s): the spec's, or on its way
+   * down to it at the brake after the spec's fell under the hull (HOVER_TUNE.easeCap). Infinity before
+   * the first step, so a hull that arrives moving is never snapped.
+   */
+  speedCap = Infinity;
 
   /** Turn a machine on its back the right way up where it lies (E on it), as a Halo warthog is flipped. */
   rightSelf(): void {
@@ -717,7 +768,11 @@ export class Vehicle {
   /** Materials made for this vehicle alone (its glow sprite's, each trail's, each clear pane's): World.disposeVehicle forgets and disposes them. */
   readonly ownedMaterials: THREE.Material[] = [];
 
-  constructor(readonly spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
+  /** How it handles, sized to its model. Written out rather than a parameter property, so node's type stripping can load the class for its test. */
+  readonly spec: VehicleSpec;
+
+  constructor(spec: VehicleSpec, model: THREE.Object3D, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number) {
+    this.spec = spec;
     this.hull = model;
     this.group.add(model);
     // Whether it weathers is not marked here: the spawn kind can differ from the model's (the
@@ -1786,7 +1841,12 @@ export class Vehicle {
         // No more than a few g per corner: a corner well under the floor (a spawn under the
         // water, a slope streamed in late) rises out rather than being launched skyward.
         const f = THREE.MathUtils.clamp(k * (ride - dist) - c * vPointY, 0, m * g * 1.5);
-        body.addForceAtPoint({ x: 0, y: f, z: 0 }, { x: p.x, y: p.y, z: p.z }, true);
+        // Pushed at the corner raised along the hull's up to the height of its mass (HOVER_TUNE): a
+        // spring there only ever levels the hull against the ground, where one on the underside rolls
+        // a hull leaning past its tipping angle further over. The corner itself still measures.
+        springAt.copy(p);
+        if (HOVER_TUNE.springsAt === 'mass') springAt.addScaledVector(up, drop);
+        body.addForceAtPoint({ x: 0, y: f, z: 0 }, { x: springAt.x, y: springAt.y, z: springAt.z }, true);
       }
       // The ground is a hard floor: a corner that has got under it is lifted out at once, and
       // the speed it went in at is a hit, so a hull cannot sink into a slope as into water.
@@ -1888,7 +1948,28 @@ export class Vehicle {
     if (s.bank > 0 && steer !== 0) wantUp.applyAxisAngle(fwd, steer * s.bank * share * (podYaw ? 1.6 : 1));
     // Torques are asked for as turning accelerations (rad/s²) and scaled by the inertia below, so
     // a barge and a bike right themselves alike; the rates stay well under the step's stability limit.
-    alpha.crossVectors(up, wantUp).multiplyScalar(40);
+    alpha.crossVectors(up, wantUp);
+    const lean = up.angleTo(wantUp);
+    this.lean = lean;
+    // On the ground and still the right way up, the owner's rule holds: no tipping over (HOVER_TUNE).
+    // A hull on its back came down that way from the air, and is left to the old rule and its rider thrown.
+    if (grounded && !this.upsideDown && HOVER_TUNE.tipLimit > 0) {
+      const sin = alpha.length();
+      if (sin > 1e-6) {
+        // `axis` turns the hull's up toward the way it wants to stand; along it, a negative rate turns it away.
+        axis.copy(alpha).divideScalar(sin);
+        // The righting by the angle itself, so it never fades as the lean grows past a right angle.
+        if (HOVER_TUNE.rightByAngle) alpha.copy(axis).multiplyScalar(lean);
+        // Turning that would carry it past the limit within this step is taken away, and only that.
+        const toward = av.dot(axis);
+        const away = Math.max(0, THREE.MathUtils.degToRad(HOVER_TUNE.tipLimit) - lean) / Math.max(dt, 1e-3);
+        if (-toward > away) {
+          av.addScaledVector(axis, -toward - away);
+          body.setAngvel({ x: av.x, y: av.y, z: av.z }, true);
+        }
+      }
+    }
+    alpha.multiplyScalar(RIGHTING);
     alpha.x -= av.x * 8;
     alpha.z -= av.z * 8;
     alpha.y = -av.y * 3;
@@ -1966,17 +2047,27 @@ export class Vehicle {
     tmp.copy(lat).multiplyScalar(-m * gripRate).addScaledVector(fwd, lat.length() * m * gripRate * 0.85 * Math.sign(speedFwd || 1));
     body.addForce({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
 
-    // Drag when coasting.
-    if (!drive || drive.throttle === 0) {
+    const hSpeed = Math.hypot(lv.x, lv.z);
+    const maxSpeed = (this.boosting ? s.boostSpeed : s.maxSpeed) * (this.overheated > 0 ? 0.6 : 1);
+    // Drag when coasting. Over the top speed it is the cap's to bring the hull down, and the two are
+    // not added: at a pod's boosted speed the coast's drag alone takes about 6 m/s off in a twentieth
+    // of a second, which is the hit test's whole allowance.
+    if ((!drive || drive.throttle === 0) && !(HOVER_TUNE.easeCap && hSpeed > maxSpeed)) {
       tmp.copy(fwd).multiplyScalar(-speedFwd * m * (grounded ? 0.9 : 0.15));
       body.addForce({ x: tmp.x, y: tmp.y, z: tmp.z }, true);
     }
 
-    const hSpeed = Math.hypot(lv.x, lv.z);
-    const maxSpeed = (this.boosting ? s.boostSpeed : s.maxSpeed) * (this.overheated > 0 ? 0.6 : 1);
-    if (hSpeed > maxSpeed) {
-      const sc = maxSpeed / hSpeed;
+    // A top speed that fell under the hull (a boost let go, the engine burnt out) comes down at the
+    // brake from the speed the hull has, never above it, so anything that slows it faster is not added
+    // to; snapped in one step, the hit test read it as a crash (HOVER_TUNE).
+    const cap = HOVER_TUNE.easeCap ? Math.max(maxSpeed, Math.min(this.speedCap - s.brake * dt, hSpeed)) : maxSpeed;
+    this.speedCap = cap;
+    if (hSpeed > cap) {
+      const sc = cap / hSpeed;
       body.setLinvel({ x: lv.x * sc, y: lv.y, z: lv.z * sc }, true);
+      // The speed the cap takes off is the update's own doing, not something the hull ran into, so the
+      // next step's hit test measures from what is left. With easeCap off this is the old snap, crash and all.
+      if (HOVER_TUNE.easeCap) this.prevVel.set(lv.x * sc, lv.y, lv.z * sc);
     }
 
     this.group.position.copy(this.pos);

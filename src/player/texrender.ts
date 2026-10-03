@@ -579,8 +579,10 @@ export function recipeNormalFiles(r: Recipe, values: Values): [string | null, st
 }
 
 /** Every variable a recipe reads, with whether it is the mesh's own. */
-export function recipeVariableDefs(r: Recipe): { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number }[] {
-  const out: { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number }[] = [];
+export function recipeVariableDefs(r: Recipe): { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; tag?: string }[] {
+  // `tag` is the texture slot a palette variable tints (MAIN, HUEB), which is all a garment's general
+  // palette says about which part of it a colour is: the appearance page names a row by it.
+  const out: { name: string; private: boolean; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; tag?: string }[] = [];
   const seen = new Set<string>();
   const push = (d: (typeof out)[number]) => {
     const key = variableKey(d.name, d.private, r.mesh);
@@ -590,12 +592,12 @@ export function recipeVariableDefs(r: Recipe): { name: string; private: boolean;
   };
   const fromShader = (s: ShaderDef | null) => {
     for (const c of s?.choices ?? []) push({ name: c.variable, private: c.private, default: c.default, kind: 'index', count: c.files.length });
-    for (const p of s?.palettes ?? []) push({ name: p.variable, private: p.private, default: p.default, kind: 'palette', palette: p.palette });
+    for (const p of s?.palettes ?? []) push({ name: p.variable, private: p.private, default: p.default, kind: 'palette', palette: p.palette, ...(p.tag ? { tag: p.tag } : {}) });
   };
   fromShader(r.shader);
   for (const slot of r.slots) {
     for (const s of slot.blueprint.shaders) fromShader(s);
-    for (const v of slot.blueprint.variables) push({ name: v.name, private: v.private, default: v.default, kind: v.kind === 'palette' ? 'palette' : 'index', ...(v.palette ? { palette: v.palette } : {}), ...(v.max !== undefined ? { count: v.max } : {}) });
+    for (const v of slot.blueprint.variables) push({ name: v.name, private: v.private, default: v.default, kind: v.kind === 'palette' ? 'palette' : 'index', ...(v.palette ? { palette: v.palette } : {}), ...(v.max !== undefined ? { count: v.max } : {}), ...(v.palette && slot.tag ? { tag: slot.tag } : {}) });
   }
   return out;
 }

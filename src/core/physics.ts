@@ -1,4 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-compat';
+import type { ColliderPart } from '../world/floraCollision.ts';
 
 /**
  * Collision group bits. Everything is in `all` by default; terrain and building shells get
@@ -638,6 +639,39 @@ export class Physics {
     return hit ? hit.timeOfImpact : Infinity;
   }
 
+  /** The torch's own ray, kept, and the handle of the one more body it looks through (-1: none). */
+  private readonly aimRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 });
+  private aimSkip = -1;
+  private readonly aimPass = (c: RAPIER.Collider): boolean => {
+    if (this.aimSkip < 0) return true;
+    const b = c.parent();
+    return !b || b.handle !== this.aimSkip;
+  };
+
+  /**
+   * How far along a ray from a point in a unit direction the first thing a light would land on is,
+   * within `len`, or `Infinity` when the ray is clear: anything solid, standing still or moving (a
+   * creature in front of the hand torch is lit as a wall is), but never a sensor, never `exclude`'s
+   * colliders and never those of the body whose handle is `skip` (what the player rides). It is the
+   * hand torch's one ray a frame along the view (`src/player/torch.ts`). Indoors the ground and the
+   * buildings' shells are left out, as `cameraBlock` leaves them. Makes no objects of its own.
+   */
+  aimDistance(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, len: number, inside: boolean, exclude: RAPIER.RigidBody | null, skip = -1): number {
+    if (!(len > 1e-4)) return Infinity;
+    const r = this.aimRay;
+    r.origin.x = ox;
+    r.origin.y = oy;
+    r.origin.z = oz;
+    r.dir.x = dx;
+    r.dir.y = dy;
+    r.dir.z = dz;
+    this.aimSkip = skip;
+    const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : undefined;
+    const hit = this.world.castRay(r, len, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, filter, undefined, exclude ?? undefined, this.aimPass);
+    this.aimSkip = -1;
+    return hit ? hit.timeOfImpact : Infinity;
+  }
+
   /** The step-up's own ray, kept: a body held back at a step casts up to six of these an ask. */
   private readonly standingRay = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
 
@@ -673,6 +707,41 @@ export class Physics {
     if (![x, y, z, radius, halfHeight].every(Number.isFinite) || radius <= 0.01 || halfHeight <= 0.01) return null;
     const desc = RAPIER.ColliderDesc.cylinder(halfHeight, radius).setTranslation(x, y, z).setFriction(0.6);
     return this.world.createCollider(desc);
+  }
+
+  /**
+   * One of a planting's own collision shapes (src/world/floraCollision.ts), fixed where it stands: an
+   * upright cylinder, a ball, a box turned about Y, or a small mesh, which goes through `cleanTrimesh`
+   * and `TRIMESH_FLAGS` as every trimesh does. Null for one the engine would abort on (a size of
+   * nothing, a number that is not one, a mesh with no triangle left).
+   */
+  createStaticPart(p: ColliderPart): RAPIER.Collider | null {
+    if (![p.x, p.y, p.z].every(Number.isFinite)) return null;
+    let desc: RAPIER.ColliderDesc;
+    switch (p.kind) {
+      case 'cyl':
+        return this.createStaticCylinder(p.x, p.y, p.z, p.r, p.hy);
+      case 'ball':
+        if (!Number.isFinite(p.r) || p.r <= 0.01) return null;
+        desc = RAPIER.ColliderDesc.ball(p.r).setTranslation(p.x, p.y, p.z);
+        break;
+      case 'box':
+        if (![p.hx, p.hy, p.hz, p.qy, p.qw].every(Number.isFinite) || Math.min(p.hx, p.hy, p.hz) <= 0.005) return null;
+        desc = RAPIER.ColliderDesc.cuboid(Math.max(0.01, p.hx), Math.max(0.01, p.hy), Math.max(0.01, p.hz))
+          .setTranslation(p.x, p.y, p.z)
+          .setRotation({ x: 0, y: p.qy, z: 0, w: p.qw });
+        break;
+      case 'mesh': {
+        if (!p.verts || !p.idx || !p.verts.every(Number.isFinite)) return null;
+        const clean = cleanTrimesh(p.verts, p.idx);
+        if (!clean) return null;
+        desc = RAPIER.ColliderDesc.trimesh(clean.vertices, clean.indices, TRIMESH_FLAGS);
+        break;
+      }
+      default:
+        return null;
+    }
+    return this.world.createCollider(desc.setFriction(0.6));
   }
 
   removeCollider(c: RAPIER.Collider): void {

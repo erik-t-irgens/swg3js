@@ -817,6 +817,18 @@ export class LayoutStreamer {
   }
 
   /**
+   * The building standing under a key something was put down in play under, or null (not placed,
+   * or placed into a tier that has not loaded, or a thing with no rooms). A building made from a
+   * placement carries that placement as its `object`, whichever path built it.
+   */
+  buildingOf(template: string): Building | null {
+    const placed = this.placedByKey.get(template);
+    if (!placed) return null;
+    for (const b of this.buildings) if (b.object === placed) return b;
+    return null;
+  }
+
+  /**
    * A building put down in play is being taken up: everything filed under it is let go of. Only things
    * put down in play can stand in such a building (the layout's own furniture was hosted when the world
    * was read, before any house was), so those are the ones walked. Each loses its host, so a mesh made for

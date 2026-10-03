@@ -513,7 +513,11 @@ function fakeBuilding(cells: CellDef[], portals: PortalDef[], offsetX = 0): { bu
   ok(hook !== null && /!this\.flyer/.test(hook[0]), 'and nothing that flies is pathed across a floor');
   ok(/this\.navAgent\.clear\(\)/.test(mobile), 'a creature that respawns drops the corners it was walking');
   ok(/m\.navCell = held\.cell;/.test(manager) && /m\.navCell = null;/.test(manager), "the manager writes the room the path is keyed on beside the room it already wrote, and clears it on open ground");
-  ok((manager.match(/m\.navCell/g) ?? []).length === 3, 'in the three places it writes the room and nowhere else');
+  // Four: where a body is stood, where it is followed, where it comes back somewhere else, and where a
+  // building put down in play comes down round it (`standOutOf`, the fix round's take-down), which
+  // puts it on open ground exactly as a respawn does.
+  ok((manager.match(/m\.navCell/g) ?? []).length === 4, 'in the four places it writes the room and nowhere else');
+  ok(/standOutOf\(building: object[\s\S]{0,900}m\.room = 0;\s*m\.navCell = null;/.test(manager), 'and the fourth puts a body out of a building that is coming down on open ground, in no room');
 }
 
 // --- 16: a room's floor over a body that stands on none ----------------------------------------------------

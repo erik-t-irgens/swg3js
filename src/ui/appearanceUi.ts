@@ -1,8 +1,9 @@
 // The appearance editor: species and gender, the shape sliders and the colours a character
 // takes, on the inventory's own tab beside the clothing, with the doll turning beside them.
-import type { Character, SpeciesEntry } from '../player/character';
-import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
-import { CharacterPreview } from './characterPreview';
+import type { Character, SpeciesEntry } from '../player/character.ts';
+import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
+import { CharacterPreview } from './characterPreview.ts';
+import { distinctLabels, plainLabel } from './variableLabel.ts';
 
 export class AppearanceUi {
   readonly root: HTMLElement;
@@ -155,11 +156,14 @@ export class AppearanceUi {
     const worn = c.wornMeshes();
     const live = (c.customizer?.variables() ?? []).filter((v) => (!v.private || worn.has(v.mesh)) && !c.customizer!.isLinked(v.key));
     const manifestVars = c.manifest.variables ?? [];
-    const rows: { key: string; name: string; private: boolean; mesh: string; kind: 'palette' | 'index'; colors?: number[][]; count?: number; default: number; live: boolean }[] = [];
+    // The palette and the slot it tints go with each row, because they are what names it: the live
+    // row's are the customizer's own, read off that mesh's recipe, and the manifest's merged list is
+    // the fallback (it can name the wrong palette for a private variable another mesh shares a name with).
+    const rows: { key: string; name: string; private: boolean; mesh: string; kind: 'palette' | 'index'; colors?: number[][]; count?: number; default: number; live: boolean; palette?: string; tag?: string }[] = [];
     const short = (n: string) => n.replace(/^.*\//, '');
     for (const v of live) {
       const m = manifestVars.find((mv) => short(mv.name) === short(v.name) && mv.private === v.private);
-      rows.push({ key: v.key, name: v.name, private: v.private, mesh: v.mesh, kind: v.kind, colors: v.colors ?? m?.colors, count: v.count ?? m?.count, default: v.default, live: true });
+      rows.push({ key: v.key, name: v.name, private: v.private, mesh: v.mesh, kind: v.kind, colors: v.colors ?? m?.colors, count: v.count ?? m?.count, default: v.default, live: true, palette: v.palette ?? m?.palette, tag: v.tag });
     }
     // What the manifest lists that no recipe reads live (a pack converted before live customization
     // lists everything so) still shows, dimmed, with the bake command behind it.
@@ -168,15 +172,18 @@ export class AppearanceUi {
         if (v.private && live.length && !worn.has(mesh)) continue;
         if (rows.some((r) => r.private === v.private && short(r.name) === short(v.name) && (!v.private || r.mesh === mesh))) continue;
         if (v.private && live.length && c.customizer?.isLinked(`${mesh}|${v.name}`)) continue;
-        rows.push({ key: v.private ? `${mesh}|${v.name}` : v.name, name: v.name, private: v.private, mesh, kind: v.kind, colors: v.colors, count: v.count, default: v.default, live: false });
+        rows.push({ key: v.private ? `${mesh}|${v.name}` : v.name, name: v.name, private: v.private, mesh, kind: v.kind, colors: v.colors, count: v.count, default: v.default, live: false, palette: v.palette });
       }
     }
     if (!rows.length) return '';
-    const row = (v: (typeof rows)[number]): string => {
+    // A palette colour is named for what it colours (`variableLabel.ts`): the head's `index_color_2`
+    // reads its eyes' palette and is "Eye Color", where it used to be "Color 2". A choice among
+    // textures keeps the name it always had.
+    const row = (v: (typeof rows)[number], named: string): string => {
       const short = v.name.replace(/^.*\//, '');
       const current = values[v.key] ?? values[v.name] ?? values[short] ?? v.default;
       const dead = v.live ? '' : ' dead';
-      const label = prettyMorph(short);
+      const label = v.kind === 'palette' ? named : prettyMorph(short);
       if (v.kind === 'palette' && v.colors?.length) {
         const swatches = v.colors.map((rgb, i) => `<button class="swatch${i === current ? ' on' : ''}" data-var="${v.key}" data-value="${i}" style="background:rgb(${rgb[0]},${rgb[1]},${rgb[2]})" title="${short} = ${i}"></button>`).join('');
         return `<div class="wardrobe-slot colour${dead}"><span class="slot-label">${label}</span><div class="palette"><div class="swatches">${swatches}</div><input type="range" class="scrub" min="0" max="${v.colors.length - 1}" step="1" value="${current}" data-var="${v.key}" /></div><span class="slot-count">${current + 1}/${v.colors.length}</span></div>`;
@@ -187,19 +194,25 @@ export class AppearanceUi {
       }
       return '';
     };
+    // One section's rows, each palette colour named and a second of the same name numbered.
+    const drawn = (list: (typeof rows)[number][]): string[] => {
+      const colours = list.filter((v) => v.kind === 'palette' && v.colors?.length);
+      const names = distinctLabels(colours);
+      return list.map((v) => row(v, names[colours.indexOf(v)] ?? '')).filter(Boolean);
+    };
     const sections: string[] = [];
     // The owner's own: skin, hair, eyes and the like. A blend variable that a shape slider already
     // drives (blend_fat and the fat morph are one thing in the game) is left to that slider.
     const shared = rows.filter((v) => !v.private && !morphs.has(v.name.replace(/^.*\//, '')));
-    const sharedRows = shared.map(row).filter(Boolean);
+    const sharedRows = drawn(shared);
     if (sharedRows.length) sections.push(`<h3 class="wardrobe-section">Skin, hair and eyes <span>${rows.some((v) => v.live) ? "rendered live from the game's own palettes and blueprints" : "this pack has no live recipes: run the converter's species command again"}</span></h3>${sharedRows.join('')}`);
     // Each worn piece's own colours, in a section of its own.
-    const byMesh = new Map<string, string[]>();
-    for (const v of rows.filter((v) => v.private)) {
-      const html = row(v);
-      if (html) (byMesh.get(v.mesh) ?? byMesh.set(v.mesh, []).get(v.mesh)!).push(html);
+    const byMesh = new Map<string, (typeof rows)[number][]>();
+    for (const v of rows.filter((v) => v.private)) (byMesh.get(v.mesh) ?? byMesh.set(v.mesh, []).get(v.mesh)!).push(v);
+    for (const [mesh, list] of byMesh) {
+      const html = drawn(list);
+      if (html.length) sections.push(`<h3 class="wardrobe-section">${prettyMesh(mesh)} <span>its own colours</span></h3>${html.join('')}`);
     }
-    for (const [mesh, list] of byMesh) sections.push(`<h3 class="wardrobe-section">${prettyMesh(mesh)} <span>its own colours</span></h3>${list.join('')}`);
     if (!sections.length) return '';
     return `${sections.join('')}<div class="bake-hint"></div>`;
   }
@@ -328,9 +341,8 @@ function prettyMesh(mesh: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Body';
 }
 
-/** "blend_jaw" reads as "Jaw", "index_color_skin" as "Color skin". */
+/** "blend_jaw" reads as "Jaw", "index_texture_1" as "Texture 1": a shape or a choice's name, tidied. */
 function prettyMorph(name: string): string {
-  const s = name.replace(/^(blend|index|private)_/, '').replace(/_/g, ' ');
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  return plainLabel(name);
 }
 

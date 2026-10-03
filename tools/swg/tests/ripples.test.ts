@@ -23,8 +23,10 @@ import {
   RIPPLE_STABILITY, rippleDecayPerStep, rippleGroupSpeed, rippleHalfLife, ripplePeriod,
   ripplePhaseSpeed, rippleSwing, ringPeriodSeconds, shallowWaterDepth, waveSpeedOf, waveTerm,
 } from '../../../src/world/rippleMath.ts';
+import { readFileSync } from 'node:fs';
+import * as THREE from 'three';
 import {
-  configureWaterSim, WATER_SIM_DETAIL, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED,
+  addSimBody, configureWaterSim, splatHeight, WATER_SIM_DETAIL, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED,
   waterSimDebug, type WaterSimSettings,
 } from '../../../src/world/waterSim.ts';
 
@@ -494,6 +496,65 @@ function measuredCarry(term: number, damp: number, waveM: number): number {
   WATER_SIM_SPEED.value = tuned;
   configureWaterSim(base);
   ok((waterSimDebug() as Record<string, number>).speedMs === 1.423, 'and the tuned speed comes back untouched');
+}
+
+// --- ripples on a big lake: where the detail fades, and what each body is measured against ------
+//
+// Two faults left wading on a big lake with no ring. The shader faded the ripples by a distance worked
+// out per vertex and spread across each triangle, and a lake is its bare outline (Naboo's Lake Paonga
+// band is two triangles with a 16.9 km edge), so under your feet that distance came out kilometres
+// long and the detail was nothing. And every body in the field was measured against one water height,
+// the one under the camera, which over another table or no table at all rang nothing.
+
+{
+  // The shader is read as text: water.ts does not load under node, and what matters is which distance it reads.
+  const water = readFileSync(new URL('../../../src/world/water.ts', import.meta.url), 'utf8');
+  ok(water.includes('float detail = 1.0 - smoothstep(120.0, 700.0, length(vWetPos - cameraPosition));'),
+    "the ripples' fade reads this pixel's own distance from the camera, from the world position every water pixel carries");
+  ok(!water.includes('vWaterDist'), 'and no distance spread across a triangle is left anywhere in the water shader');
+  ok(water.includes('`swg-water-7-${variant}'), 'the program key moved on, so the old programs are not reused for the new source');
+  ok(/installWaterHook\(mask, lit\.userData\.uniforms, 'mask'/.test(water) && /installWaterHook\(mat, uniforms, 'lit'/.test(water),
+    'the lit water and its mask twin take the same hook, so both fade the same way');
+  // What that buys on the lake the owner most likely stood on: one of the two triangles 16.9 km along
+  // their long edge, with the eye 30 m over the water. The pixel right under the eye read, spread from
+  // the three corners by its own weights, as kilometres off; its own distance is the 30 m it is.
+  const smooth = (e0: number, e1: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  const fade = (d: number) => 1 - smooth(120, 700, d);
+  const [A, B, C] = [[-8192, -8192], [8192, -8192], [-8192, -4096]];
+  const eye = { x: -2000, y: 30, z: -7000 };
+  const area = (p: number[], q: number[], r: number[]) => (q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1]);
+  const under = [eye.x, eye.z];
+  const whole = area(A, B, C);
+  const w = [area(under, B, C) / whole, area(A, under, C) / whole, area(A, B, under) / whole];
+  ok(w.every((v) => v > 0) && Math.abs(w[0] + w[1] + w[2] - 1) < 1e-9, 'the pixel under the eye lies inside the triangle');
+  const spread = [A, B, C].reduce((s, c, i) => s + w[i] * Math.hypot(c[0] - eye.x, eye.y, c[1] - eye.z), 0);
+  ok(fade(spread) === 0 && fade(eye.y) === 1,
+    `the water under your feet read as ${spread.toFixed(0)} m off, spread over the triangle, which faded every ripple there to nothing; read where it is, ${eye.y} m, it takes the whole of the detail`);
+}
+
+{
+  // Each body carries its own water height; nothing is shared between two of them.
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const a = addSimBody(geo, 1);
+  const b = addSimBody(geo, 0.8);
+  a.waterY = 12.5;
+  b.waterY = -3;
+  const ua = (a.object.material as THREE.ShaderMaterial).uniforms.uWaterY;
+  const ub = (b.object.material as THREE.ShaderMaterial).uniforms.uWaterY;
+  ok(a.waterY === 12.5 && b.waterY === -3 && ua.value === 12.5 && ub.value === -3, 'two bodies in the field each keep the height of their own water');
+  ok(ua !== ub, 'their splats read two uniforms, not one plane shared by all');
+  a.dispose();
+  b.dispose();
+  geo.dispose();
+  ok(splatHeight(14, 40) === 14, 'the overhead camera hangs over the water under the camera where there is any');
+  ok(splatHeight(Number.NEGATIVE_INFINITY, 40) === 40, "where there is none (half of Naboo and Tatooine) over the camera's own height");
+  ok(splatHeight(Number.NaN, Number.NaN) === 0 && Number.isFinite(splatHeight(Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY)), 'and never at a height that is not a number, which turned its matrices to NaN');
+  const world = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8');
+  ok(world.includes('body.waterY = surface + lift;'), "the world gives each body the surface its depth was read from, the swell included for what floats");
+  ok(/stepWaterSim\(this\.renderer, cx, cz, [^;]*, dt, this\.camera\.position\.y\)/.test(world), "and hands the field the camera's own height to fall back on");
 }
 
 console.log(`\n${passed} checks passed`);

@@ -22,7 +22,7 @@
 import * as THREE from 'three';
 import { COL, colourOf } from '../core/palette.ts';
 import type { GalaxyMap, Poi } from './galaxyMap';
-import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type GroupMark, type LayerId, type MapMark, type MapPack, type ShipMark } from './spaceMapLayers.ts';
+import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark } from './spaceMapLayers.ts';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
 export interface MapSource {
@@ -59,8 +59,12 @@ export interface MapSource {
 
 interface MapImage {
   image: HTMLImageElement;
-  width: number;
+  /** The ground the picture covers, in the map's own frame (`mapFrame`). */
+  frame: MapFrame;
 }
+
+/** The frame drawn while no picture is converted: the planet-wide 16384 m about the origin, as a grid. */
+const NO_PICTURE: MapFrame = mapFrame(null);
 
 type Tab = 'here' | 'galaxy';
 
@@ -629,7 +633,7 @@ export class MapUi {
       this.testFill = (out: GroupList) => {
         const p = this.source.player();
         // Before the first frame has fitted the map there is no scale yet: the same fallbacks `fit` uses.
-        const scale = this.scale || (this.image?.width ?? 16384) / Math.min(this.canvas2d.clientWidth || 900, this.canvas2d.clientHeight || 560);
+        const scale = this.scale || (this.image?.frame ?? NO_PICTURE).width / Math.min(this.canvas2d.clientWidth || 900, this.canvas2d.clientHeight || 560);
         const r = this.canvas3d.hidden ? scale * GROUP_MAP_TUNE.testRing : this.view.orbit.distance * GROUP_MAP_TUNE.testShare;
         for (let i = 0; i < this.testGroup; i++) {
           const a = (i / this.testGroup) * Math.PI * 2;
@@ -816,14 +820,14 @@ export class MapUi {
       p = fetch(`${base}map.json`)
         .then(async (res) => {
           if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          const meta = (await res.json()) as { image: string; width: number };
+          const meta = (await res.json()) as { image: string; width?: number; centre?: { x: number; z: number } };
           const image = new Image();
           await new Promise<void>((resolve, reject) => {
             image.onload = () => resolve();
             image.onerror = () => reject(new Error(`${meta.image} did not load`));
             image.src = `${base}${meta.image}`;
           });
-          return { image, width: meta.width || 16384 };
+          return { image, frame: mapFrame(meta) };
         })
         .catch(() => null);
       this.images.set(packId, p);
@@ -840,8 +844,7 @@ export class MapUi {
   private fit(): void {
     const w = this.canvas2d.clientWidth || 900;
     const h = this.canvas2d.clientHeight || 560;
-    const extent = this.image?.width ?? 16384;
-    this.scale = extent / Math.min(w, h);
+    this.scale = (this.image?.frame ?? NO_PICTURE).width / Math.min(w, h);
     const p = this.source.player();
     const m = this.toMap(p.x, p.z);
     this.look.x = m.x;
@@ -947,8 +950,11 @@ export class MapUi {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#060a12';
     ctx.fillRect(0, 0, w, h);
-    const extent = this.image?.width ?? 16384;
-    const tl = this.toScreen(-extent / 2, extent / 2);
+    // The picture's ground, about the point under its middle (`mapFrame`): the launch worlds' pictures
+    // cover the whole terrain about the origin, the expansion zones' a composite rectangle of their own.
+    const frame = this.image?.frame ?? NO_PICTURE;
+    const extent = frame.width;
+    const tl = this.toScreen(frame.x - extent / 2, frame.z + extent / 2);
     const px = extent / this.scale;
     if (this.image) {
       ctx.imageSmoothingEnabled = true;

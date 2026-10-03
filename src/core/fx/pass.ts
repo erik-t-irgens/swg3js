@@ -114,15 +114,20 @@ export abstract class ShaderFxPass implements FxPass {
   protected readonly material: THREE.ShaderMaterial;
   private readonly quad: THREE.Mesh;
   private label?: string;
+  /** The uniform the picture coming in is bound to; null for a pass that takes its input from somewhere else. */
+  private readonly inputName: string | null;
 
   /**
    * `inputName` is the uniform the picture coming in is bound to; null for a pass that takes its
-   * input from somewhere else (the sanitize pass reads the scene target itself).
+   * input from somewhere else (the sanitize pass reads the scene target itself). Written out rather
+   * than a parameter property, so a node test can load a pass's own shader (node's type stripping
+   * refuses those).
    */
   protected constructor(
     shader: { uniforms: Record<string, THREE.IUniform>; vertexShader: string; fragmentShader: string; defines?: Record<string, unknown> },
-    private readonly inputName: string | null = 'tDiffuse',
+    inputName: string | null = 'tDiffuse',
   ) {
+    this.inputName = inputName;
     this.material = new THREE.ShaderMaterial({
       uniforms: THREE.UniformsUtils.clone(shader.uniforms),
       vertexShader: shader.vertexShader,
@@ -180,8 +185,11 @@ interface InnerPass {
 export abstract class ThreePassAdapter implements FxPass {
   abstract readonly id: FxPassId;
   private label?: string;
+  protected readonly inner: InnerPass;
 
-  protected constructor(protected readonly inner: InnerPass) {}
+  protected constructor(inner: InnerPass) {
+    this.inner = inner;
+  }
 
   get timerLabel(): string {
     return (this.label ??= `pass:${this.id}`);

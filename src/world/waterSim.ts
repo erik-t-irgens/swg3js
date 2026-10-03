@@ -138,6 +138,13 @@ export interface SimBody {
   velDown: number;
   /** Off for a body that has left the water, so it costs nothing. */
   active: boolean;
+  /**
+   * The height of the water this body stands in, metres: its own, set by whoever moves it. The field
+   * is one plane but the water is not -- a lake on a shelf above the camera's, a basin over the
+   * planet's table, a column with no table at all -- and measured against one height for everybody a
+   * wader's legs stood clear of a plane metres below them, or in one far above, and rang nothing.
+   */
+  waterY: number;
   dispose(): void;
 }
 
@@ -244,7 +251,6 @@ interface Rig {
 let rig: Rig | null = null;
 let failed = false;
 const bodies: SimBody[] = [];
-const waterY = { value: 0 };
 const pokes: THREE.Vector4[] = Array.from({ length: MAX_POKES }, () => new THREE.Vector4(0, 0, 1, 0));
 let pokeNext = 0;
 let accumulator = 0;
@@ -355,7 +361,8 @@ export function addSimBody(geometry: THREE.BufferGeometry, draft = 1): SimBody {
     vertexShader: SPLAT_VERT,
     fragmentShader: SPLAT_FRAG,
     uniforms: {
-      uWaterY: waterY,
+      // Each body's own water height, never one shared by all (`SimBody.waterY`).
+      uWaterY: { value: 0 },
       uDraft: { value: draft },
       uVelDown: { value: 0 },
     },
@@ -379,6 +386,8 @@ export function addSimBody(geometry: THREE.BufferGeometry, draft = 1): SimBody {
     set draft(v: number) { mat.uniforms.uDraft.value = v; },
     get velDown() { return mat.uniforms.uVelDown.value as number; },
     set velDown(v: number) { mat.uniforms.uVelDown.value = v; },
+    get waterY() { return mat.uniforms.uWaterY.value as number; },
+    set waterY(v: number) { mat.uniforms.uWaterY.value = v; },
     active: true,
     dispose() {
       const i = bodies.indexOf(body);
@@ -408,8 +417,22 @@ export function waterSimReady(): boolean {
 }
 
 /**
+ * The height the overhead camera that draws the bodies into the field is hung over: the water under
+ * the camera where there is any, else `fallbackY` (the camera's own height), else 0. It only places
+ * that camera -- every body is measured against its own water (`SimBody.waterY`) -- but it must be a
+ * number: a column with no water table under it answers -Infinity, and a camera hung there turns its
+ * matrices to NaN and the splat into nothing, which is half of Naboo and Tatooine.
+ */
+export function splatHeight(surfaceY: number, fallbackY: number): number {
+  if (Number.isFinite(surfaceY)) return surfaceY;
+  return Number.isFinite(fallbackY) ? fallbackY : 0;
+}
+
+/**
  * Step the field. Call once a frame, after the bodies have been moved and before the scene is
  * drawn. The window centres on the camera, snapped to whole texels so sliding it costs nothing.
+ * `surfaceY` is the water under the camera (it may be -Infinity: none) and `cameraY` the camera's
+ * own height; between them they only hang the overhead camera (`splatHeight`).
  */
 export function stepWaterSim(
   renderer: THREE.WebGLRenderer,
@@ -417,6 +440,7 @@ export function stepWaterSim(
   cameraZ: number,
   surfaceY: number,
   dt: number,
+  cameraY = 0,
 ): void {
   if (failed) return;
 
@@ -466,15 +490,17 @@ export function stepWaterSim(
   originX = nx;
   originZ = nz;
 
-  waterY.value = surfaceY;
   WATER_SIM_WINDOW.value.set(originX, originZ, WINDOW, TEXEL);
 
+  // Its depth range runs 200 m under this height and 600 over it, which takes in every body a window
+  // a few hundred metres wide can hold, whatever water each stands in.
+  const planeY = splatHeight(surfaceY, cameraY);
   const cx = originX + HALF;
   const cz = originZ + HALF;
   rig.splatCam.left = -HALF; rig.splatCam.right = HALF;
   rig.splatCam.top = HALF; rig.splatCam.bottom = -HALF;
-  rig.splatCam.position.set(cx, surfaceY + 200, cz);
-  rig.splatCam.lookAt(cx, surfaceY, cz);
+  rig.splatCam.position.set(cx, planeY + 200, cz);
+  rig.splatCam.lookAt(cx, planeY, cz);
   rig.splatCam.updateProjectionMatrix();
 
   for (const b of bodies) b.object.visible = b.active;

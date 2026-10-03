@@ -13,6 +13,7 @@ import { markActor } from '../world/portalRender.ts';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
 import { fitFor, packPartOf, type ItemFit } from '../core/inventory.ts';
 import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
+import { partsToLoad } from './partsShown.ts';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -324,7 +325,8 @@ export class Character {
     character.dir = dir;
     if (opts.share) character.sources = { meshes: new WeakMap(), textures: new WeakMap() };
     const dress = new Set(wear ?? manifest.defaultWear ?? []);
-    const wanted = manifest.parts.filter((def) => def.occlusionLayer === 0 || dress.has(def.name));
+    // Every mesh of the appearance itself, whatever its layer (partsShown.ts).
+    const wanted = partsToLoad(manifest.parts, dress);
     if (!wanted.length) throw new Error(`${id}: the parts pack has nothing to show`);
     for (const def of wanted) await character.addPart(def.name, [def], true);
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);

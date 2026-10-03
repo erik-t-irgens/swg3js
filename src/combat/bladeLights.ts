@@ -99,16 +99,16 @@ export function keepNearestGlow(out: FighterGlow[], n: number, pos: THREE.Vector
 export interface LitSources {
   world: { litIrradianceNear(p: THREE.Vector3, reach: number): number };
   effects: { litIrradianceNear(p: THREE.Vector3, reach: number): number };
-  /** The hand torch while it is on, else null. */
+  /** The hand torch while it is on, else null; a child of the scene, so its position is where it is. */
   torch: THREE.SpotLight | null;
-  eye: THREE.Vector3;
 }
 
 /**
  * The brightest a white surface near the listed blades can be from every light but the blades: the
  * most, over the blades, of the world's, the pooled lights' and the torch's irradiance luminance near
  * each blade's middle, over PI. 1 when the list is empty. The glow pass takes a pixel much brighter
- * than this for additive glow.
+ * than this for additive glow. The torch is measured from where it is carried, which in third person
+ * is the head and not the camera (`src/player/torch.ts`).
  */
 export function litCeiling(list: FxBladeList, src: LitSources): number {
   if (list.count === 0) return 1;
@@ -119,7 +119,7 @@ export function litCeiling(list: FxBladeList, src: LitSources): number {
     mid.copy(bl.a).lerp(bl.b, 0.5);
     let here = src.world.litIrradianceNear(mid, reach) + src.effects.litIrradianceNear(mid, reach);
     const t = src.torch;
-    if (t && t.intensity > 0) here += (luminance(t.color.r, t.color.g, t.color.b) * t.intensity) / Math.pow(Math.max(1, src.eye.distanceTo(mid) - reach), t.decay);
+    if (t && t.intensity > 0) here += (luminance(t.color.r, t.color.g, t.color.b) * t.intensity) / Math.pow(Math.max(1, t.position.distanceTo(mid) - reach), t.decay);
     if (here > e) e = here;
   }
   return e / Math.PI;

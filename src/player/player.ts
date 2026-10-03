@@ -1522,9 +1522,22 @@ export class Player {
     return true;
   }
 
-  takeDamage(amount: number): void {
+  /**
+   * God mode (`__debug.god`, `src/player/godMode.ts`): nothing takes health off. Asked first in
+   * `takeDamage`, which every way the player is hurt ends in, so this one flag is the whole of it for
+   * the body. Never saved: a reload is always mortal.
+   */
+  god = false;
+
+  /**
+   * Health off for a blow; false when it was refused (god mode), so the caller shows no red flash and
+   * no arc for a blow that did nothing. `force` is the console's own `kill('player')`, which still kills.
+   */
+  takeDamage(amount: number, force = false): boolean {
+    if (this.god && !force) return false;
     this.hp = Math.max(0, this.hp - amount * this.damageTaken);
     this.regenDelay = 5;
+    return true;
   }
 
   heal(amount: number): void {

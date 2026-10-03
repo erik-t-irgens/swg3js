@@ -54,6 +54,8 @@ export type Action =
   | 'placeDown'
   // A prop of yours standing near: pick it back up.
   | 'takeProp'
+  // A prop in hand that was picked back up: throw it away rather than put it back.
+  | 'putAway'
   // The debug menu: every `__debug` helper, run from a window.
   | 'debugMenu';
 
@@ -119,6 +121,9 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // Picking one of your own props back up. It is a key of its own rather than the use key, which is
   // already the doorway, the lift, the shuttle and the mount and would have to lose to all four.
   takeProp: ['KeyJ'],
+  // Throwing a prop in hand away. The pick-up key does the same while one is in hand; Delete is the
+  // key anybody reaches for to get rid of something, and nothing else in the game uses it.
+  putAway: ['Delete'],
   // The debug menu, on the key a console has always had in a game (Jedi Academy's own is there): the
   // one left of 1, which nothing else in this game uses. It types a character into a box, so inside
   // the menu's own boxes it is Escape that shuts it.

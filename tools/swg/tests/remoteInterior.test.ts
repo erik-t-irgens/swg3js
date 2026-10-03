@@ -403,7 +403,8 @@ function harness(opts: { roomsNull?: boolean; ownModel?: boolean } = {}) {
   ok(/group\.position\.copy\(from\.position\)/.test(roomsFn), "14: and the copy carries the model's own place, so it stands where the picture's own cells stand");
   ok(/ownCellIndex\(o\) <= 0/.test(roomsFn), "14: cell 0, which is the hull's own shell and is already drawn, is not copied with the rooms");
   ok(/group\.visible = false;\s*\n\s*return group;/.test(roomsFn), '14: and the copy comes back turned off, so nothing of it is drawn through the hull while it is being hung, measured and prepared');
-  ok(/export function ownCellIndex/.test(src('../../../src/vehicles/interior.ts')), "14: with one spelling of the converter's cell naming, read from the rooms themselves");
+  // The spelling lives in cells.ts so the hull can load without the rooms; the rooms hand it on.
+  ok(/export function ownCellIndex/.test(src('../../../src/vehicles/cells.ts')) && /export \{[^}]*\bownCellIndex\b[^}]*\}/.test(src('../../../src/vehicles/interior.ts')), "14: with one spelling of the converter's cell naming, read from the rooms themselves");
 
   const interior = src('../../../src/vehicles/interior.ts');
   ok(/export interface InteriorHost/.test(interior), '14: the rooms name what they ask of a hull');

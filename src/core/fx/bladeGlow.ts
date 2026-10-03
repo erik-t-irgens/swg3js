@@ -10,12 +10,24 @@
 //
 // The arithmetic, the tuning and the march's numbers live in `bladeGlowMath.ts`, which a node test
 // mirrors; the shader's constants are written from there.
+//
+// The normal is rebuilt from the depth, which is each triangle's flat face, where every other light
+// shades with the smoothed vertex normals and the normal maps; lit by it alone a body, a column or a
+// hull shows every facet. Four things soften that, all uniforms: the wrap goes most of the way to 1,
+// a share of the light ignores the facing altogether, the normal is smoothed over a 5 by 5 kernel
+// that leaves out any tap across a silhouette, and some of the pixel's own brightness is kept in the
+// albedo so a texture's detail shows through.
 import * as THREE from 'three';
 import type { FxFrameContext } from './context';
-import { ShaderFxPass } from './pass';
-import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE, FX_VIEW_POS } from './glsl';
-import { UNSET_BLADES, type FxBladeList } from './bladeList';
-import { BLADE_GLOW_GUARD, BLADE_GLOW_MARCH, BLADE_GLOW_MAX, BLADE_GLOW_TUNE, emptyRect, lightRect, unionRect, type UvRect } from './bladeGlowMath.ts';
+import { ShaderFxPass } from './pass.ts';
+import { FX_FULLSCREEN_VERTEX, FX_LINEARIZE, FX_VIEW_POS } from './glsl.ts';
+import { UNSET_BLADES, type FxBladeList } from './bladeList.ts';
+import { BLADE_GLOW_GUARD, BLADE_GLOW_MARCH, BLADE_GLOW_MAX, BLADE_GLOW_TUNE, KEEP_ALBEDO_FLOOR, SMOOTH_RING_INNER, SMOOTH_RING_OUTER, emptyRect, lightRect, unionRect, type UvRect } from './bladeGlowMath.ts';
+
+/** A ring of the smoothing kernel as a GLSL constant array of ivec2. */
+function glslRing(name: string, ring: readonly (readonly [number, number])[]): string {
+  return `const ivec2 ${name}[${ring.length}] = ivec2[${ring.length}](${ring.map(([x, y]) => `ivec2(${x}, ${y})`).join(', ')});`;
+}
 
 /** A number as a GLSL float literal: an integer gets its `.0`. */
 function glslFloat(v: number): string {
@@ -67,6 +79,11 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
       uAlbedo: { value: BLADE_GLOW_TUNE.albedo },
       uHueMix: { value: BLADE_GLOW_TUNE.hue },
       uWrap: { value: BLADE_GLOW_TUNE.wrap },
+      uFlat: { value: BLADE_GLOW_TUNE.flat },
+      uSmooth: { value: BLADE_GLOW_TUNE.smooth },
+      uSmoothPx: { value: BLADE_GLOW_TUNE.smoothPx },
+      uSmoothTol: { value: BLADE_GLOW_TUNE.smoothTol },
+      uKeep: { value: BLADE_GLOW_TUNE.keep },
       uWallScale: { value: BLADE_GLOW_TUNE.walls },
       /** Floors' up in view space. */
       uUp: { value: new THREE.Vector3(0, 1, 0) },
@@ -102,6 +119,11 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
       uniform float uAlbedo;
       uniform float uHueMix;
       uniform float uWrap;
+      uniform float uFlat;
+      uniform float uSmooth;
+      uniform float uSmoothPx;
+      uniform float uSmoothTol;
+      uniform float uKeep;
       uniform float uWallScale;
       uniform vec3 uUp;
       uniform float uFogDensity;
@@ -133,10 +155,50 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
       const float GUARD_LUM_FROM = ${f(G.lumFrom)};
       const float GUARD_LUM_TO = ${f(G.lumTo)};
       const float BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+      const float KEEP_ALBEDO_FLOOR = ${f(KEEP_ALBEDO_FLOOR)};
+      ${glslRing('RING_IN', SMOOTH_RING_INNER)}
+      ${glslRing('RING_OUT', SMOOTH_RING_OUTER)}
 
       vec3 viewAt(ivec2 p, ivec2 size) {
         p = clamp(p, ivec2(0), size - 1);
         return fxViewPos((vec2(p) + 0.5) / vec2(size), fxViewZ(texelFetch(tDepth, p, 0).r, uNear, uFar), uTanHalfFov);
+      }
+
+      // One tap of a ring in Newell's sum (ringNewell in bladeGlowMath.ts): S is its offset from the
+      // pixel's own point, skipped when it leaves the pixel's plane by more than uSmoothTol of its length.
+      void ringTap(vec3 S, vec3 n0, inout vec3 sum, inout vec3 first, inout vec3 prev, inout int count) {
+        float len = length(S);
+        if (len < 1e-9 || abs(dot(S, n0)) > uSmoothTol * len) return;
+        if (count == 0) first = S;
+        else sum += cross(prev, S);
+        prev = S;
+        count++;
+      }
+
+      // The two rings' area-weighted normal mixed into n0 by uSmooth, n0 where no ring could count
+      // (smoothedNormal in bladeGlowMath.ts; the caller turns it to face the eye).
+      vec3 smoothNormal(vec3 P, vec3 n0, ivec2 px, ivec2 size) {
+        int stride = max(1, int(uSmoothPx + 0.5));
+        vec3 sum = vec3(0.0);
+        vec3 ring = vec3(0.0);
+        vec3 first = vec3(0.0);
+        vec3 prev = vec3(0.0);
+        int count = 0;
+        for (int k = 0; k < ${SMOOTH_RING_INNER.length}; k++) ringTap(viewAt(px + RING_IN[k] * stride, size) - P, n0, ring, first, prev, count);
+        if (count >= 3) sum += ring + cross(prev, first);
+        ring = vec3(0.0);
+        first = vec3(0.0);
+        prev = vec3(0.0);
+        count = 0;
+        for (int k = 0; k < ${SMOOTH_RING_OUTER.length}; k++) ringTap(viewAt(px + RING_OUT[k] * stride, size) - P, n0, ring, first, prev, count);
+        if (count >= 3) sum += ring + cross(prev, first);
+        float len = length(sum);
+        if (len < 1e-12) return n0;
+        vec3 m = sum / len;
+        if (dot(m, n0) < 0.0) m = -m;
+        vec3 n = mix(n0, m, clamp(uSmooth, 0.0, 1.0));
+        float nl = length(n);
+        return nl > 1e-12 ? n / nl : n0;
       }
 
       // Inverse square with a soft core, a smooth fourth-power knee at uKnee, zero at uRange.
@@ -214,6 +276,8 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
         float nl = length(n);
         if (nl < 1e-12) return vec3(0.0);
         n /= nl;
+        // Smoothed over the rings round the pixel, never across a silhouette: the facets' edges go soft.
+        if (uSmooth > 0.0) n = smoothNormal(P, n, px, size);
         if (dot(n, -P) < 0.0) n = -n;                                        // facing the eye
         nOut = n;
         float wall = mix(uWallScale, 1.0, smoothstep(0.3, 0.7, abs(dot(n, uUp))));
@@ -235,7 +299,9 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
           float dd = dot(q, q);
           if (dd >= r2) continue;
           float d = sqrt(dd);
-          vec3 contrib = uColor[i] * (irradiance(dd, d) * clamp((dot(n, q / max(d, 1e-4)) + uWrap) / (1.0 + uWrap), 0.0, 1.0));
+          // The wrapped Lambert term with uFlat of it facing-blind (facing in bladeGlowMath.ts).
+          float face = mix(clamp((dot(n, q / max(d, 1e-4)) + uWrap) / (1.0 + uWrap), 0.0, 1.0), 1.0, clamp(uFlat, 0.0, 1.0));
+          vec3 contrib = uColor[i] * (irradiance(dd, d) * face);
           vec3 far = contrib * smoothstep(MARCH_NEAR, MARCH_NEAR_FULL, d);   // nearer than half a metre nothing fits between
           float s = max(far.r, max(far.g, far.b));
           if (uOwn[i] > 0.5) {
@@ -265,6 +331,10 @@ export function bladeGlowShader(): { uniforms: Record<string, THREE.IUniform>; v
         float guard = (1.0 - smoothstep(GUARD_RATIO_FROM, GUARD_RATIO_TO, lum / max(uLitCeiling, 1e-3))) * (1.0 - smoothstep(GUARD_LUM_FROM, GUARD_LUM_TO, lum));
         vec3 hue = srcRgb / max(maxc, 1e-4);
         vec3 albedo = uAlbedo * mix(uGlowDim, 1.0, guard) * mix(vec3(1.0), hue, uHueMix * guard * smoothstep(0.002, 0.02, maxc));
+        // Some of the surface's own brightness as everything else lights it, so its detail shows (keptAlbedo).
+        // Named apart from own above (the player's blades' light): GLSL refuses two of one name in a scope.
+        float kept = clamp(lum / max(uLitCeiling, 1e-3), 0.0, 1.0) / max(uAlbedo, KEEP_ALBEDO_FLOOR);
+        albedo *= mix(1.0, kept, clamp(uKeep, 0.0, 1.0) * guard);
         float fz = uFogDensity * z;                                          // three's FogExp2 on view depth
         return light * albedo * (wall * exp(-fz * fz) / PI);
       }
@@ -392,6 +462,11 @@ export class BladeGlowPass extends ShaderFxPass {
     u.uHueMix.value = T.hue;
     u.uGlowDim.value = T.glowDim;
     u.uWrap.value = T.wrap;
+    u.uFlat.value = T.flat;
+    u.uSmooth.value = T.smooth;
+    u.uSmoothPx.value = T.smoothPx;
+    u.uSmoothTol.value = T.smoothTol;
+    u.uKeep.value = T.keep;
     u.uWallScale.value = T.walls;
     u.uOcclusion.value = ctx.settings.bladeGlowShadows && this.occlusion ? 1 : 0;
     u.uMarchMin.value = T.marchMin;

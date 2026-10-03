@@ -20,7 +20,7 @@
 //    player a chair: two rows claiming one thing is a row overwritten.
 
 import { NO_TURN, PROP_TUNE, applyTurn, liftBy, propPoints, propSpot, propVerdict, pushBy, turnBy, type PropBox, type PropTurn } from '../../../src/world/propPlace.ts';
-import { PLACED_TUNE, PlacedProps, mintThing, placedTally, propsKey, readRow, type PlacedProp } from '../../../src/world/propsPlaced.ts';
+import { PLACED_TUNE, PlacedProps, letGoOf, mintThing, placedTally, propsKey, readRow, type PlacedProp } from '../../../src/world/propsPlaced.ts';
 
 let checks = 0;
 let bad = 0;
@@ -260,6 +260,167 @@ async function store(): Promise<void> {
 }
 
 await store();
+
+// ---- Picked up, then put back, put away, or carried off on a travel -----------------------------------
+//
+// The fix round's item: a prop picked up (J) could only ever be put down again or put back where it
+// stood (Escape), so there was no way to get rid of one; and a prop held through a travel was put back
+// by a stand that waited on a model load and landed in a world that had gone, after the pick-up had
+// already taken its row out of the store -- the thing was lost. `restore` is the put-back: the same
+// thing, written down before anything is awaited.
+
+async function pickedUp(): Promise<void> {
+  let saved: PlacedProp[] = [];
+  const save = (_w: string, rows: readonly PlacedProp[]) => void (saved = rows.map((r) => ({ ...r })));
+  const store = { get: () => JSON.stringify(saved) };
+  const cleared: string[] = [];
+  const stood: string[] = [];
+  const deps = {
+    stand: async (r: PlacedProp) => {
+      stood.push(r.thing);
+      return true;
+    },
+    clear: (t: string) => void cleared.push(t),
+  };
+  const p = new PlacedProps();
+  await p.enter('tatooine', { get: () => null }, deps);
+  const chair = await p.put('chair', { x: 1, y: 0, z: 2 }, [0, 0, 0, 1], false, deps, save, 5, () => 0.25);
+  ok('a chair is down and written', !!chair && saved.length === 1);
+
+  // Picked up, then Escape: the very same thing back where it stood, under its own id.
+  const row = p.take(chair!.thing, deps, save)!;
+  ok('picking it up takes it out of the store', saved.length === 0 && p.all.length === 0);
+  const back = await p.restore(row, deps, save);
+  ok('put back, it stands again', back && p.standing === 1);
+  ok('as the same thing, not a new one minted', p.all.length === 1 && p.all[0].thing === chair!.thing && saved[0]?.thing === chair!.thing);
+  ok('where it stood', p.all[0].x === 1 && p.all[0].z === 2);
+  const again = await p.restore(row, deps, save);
+  ok('putting back a row that is already back writes nothing twice', again && p.all.length === 1 && saved.length === 1);
+
+  // Picked up, then put away: nothing is written back, so it is gone from the world and from the store.
+  p.take(chair!.thing, deps, save);
+  ok('put away, it is in neither the world nor the store', p.all.length === 0 && saved.length === 0 && cleared.includes(chair!.thing));
+
+  // Picked up and held through a travel. The stand never answers (the world goes before the model
+  // loads): the row must be in the store in the same breath as the call, not after the stand.
+  const lamp = await p.put('lamp', { x: 4, y: 0, z: 4 }, [0, 0, 0, 1], true, deps, save, 9, () => 0.5);
+  const held = p.take(lamp!.thing, deps, save)!;
+  ok('the lamp is out of the store while it is in hand', saved.length === 0);
+  let answered = false;
+  const never = { stand: () => new Promise<boolean>(() => undefined), clear: () => undefined };
+  void p.restore(held, never, save).then(() => (answered = true));
+  ok('put back with a stand that never lands, it is written down at once', saved.length === 1 && saved[0].thing === lamp!.thing);
+  ok('and kept that it went down indoors', saved[0].inside === true);
+  ok('while the stand is still out', !answered);
+
+  // The travel's own call: written and not stood, since the world is going.
+  const p2 = new PlacedProps();
+  saved = [];
+  await p2.enter('naboo', { get: () => null }, deps);
+  const crate = await p2.put('crate', { x: 0, y: 0, z: 0 }, [0, 0, 0, 1], false, deps, save, 11, () => 0.75);
+  const inHand = p2.take(crate!.thing, deps, save)!;
+  stood.length = 0;
+  const up = await p2.restore(inHand, deps, save, false);
+  ok('kept on a travel: written, not stood', !up && stood.length === 0 && saved.length === 1);
+  p2.leave();
+  const p3 = new PlacedProps();
+  await p3.enter('naboo', store, deps);
+  ok('and the next visit stands it with everything else, as the same thing', p3.standing === 1 && p3.all[0].thing === crate!.thing);
+
+  // The world changes while the stand is out: the row is kept, and only a stand in the world it was
+  // put back into counts as standing.
+  const p4 = new PlacedProps();
+  saved = [];
+  await p4.enter('corellia', { get: () => null }, deps);
+  const stool = await p4.put('stool', { x: 0, y: 0, z: 0 }, [0, 0, 0, 1], false, deps, save, 13, () => 0.1);
+  const stoolRow = p4.take(stool!.thing, deps, save)!;
+  let land: (v: boolean) => void = () => undefined;
+  const slow = { stand: () => new Promise<boolean>((r) => (land = r)), clear: () => undefined };
+  const pending = p4.restore(stoolRow, slow, save);
+  ok('written down before the slow stand', saved.length === 1);
+  p4.leave();
+  await p4.enter('dantooine', { get: () => null }, deps);
+  land(true);
+  ok('a stand that lands in a world since left does not count as standing', (await pending) === false && p4.standing === 0);
+
+  // A stand refused: kept, with a reason, rather than lost.
+  const p5 = new PlacedProps();
+  saved = [];
+  await p5.enter('lok', { get: () => null }, deps);
+  const rug = await p5.put('rug', { x: 0, y: 0, z: 0 }, [0, 0, 0, 1], false, deps, save, 17, () => 0.2);
+  const rugRow = p5.take(rug!.thing, deps, save)!;
+  const refused = await p5.restore(rugRow, { stand: async () => false, clear: () => undefined }, save);
+  ok('a put-back the world will not stand is kept in the store', !refused && saved.length === 1 && p5.all.length === 1);
+  ok('and says why', p5.note.length > 0, p5.note);
+
+  // No world at all: nothing to put it back into, and nothing written anywhere wrong.
+  const p6 = new PlacedProps();
+  saved = [];
+  ok('with no world there is nothing to put it back in', (await p6.restore(rugRow, deps, save)) === false && saved.length === 0);
+
+  // What giving one up does, the game's own choice (`stopPlacingProp` asks `letGoOf`): Put away throws a
+  // picked-up prop away and writes nothing back, which is the whole of what makes it a removal.
+  ok('put away, a picked-up prop is gone, and nothing is written back', letGoOf('away', true) === 'gone' && letGoOf('away', false) === 'gone');
+  ok('Escape puts a picked-up one back where it stood, and a travel writes it back without standing it', letGoOf('back', true) === 'stand' && letGoOf('keep', true) === 'write');
+  ok('one taken fresh from the tab has nowhere to go back to', letGoOf('back', false) === 'nothing' && letGoOf('keep', false) === 'nothing');
+}
+
+await pickedUp();
+
+// ---- Moved, refused, and a travel in the wait -----------------------------------------------------
+//
+// A prop picked up and put down somewhere else is let go of before the new spot's stand is awaited.
+// If a travel came in that wait, the store is another world's (or none) when the answer lands: the
+// new row must not be filed into it, and the picked-up row must go back into its own world's keeping
+// rather than the new one's, or be lost when there is no world at all.
+
+async function movedAcrossATravel(): Promise<void> {
+  const kept = new Map<string, PlacedProp[]>();
+  const save = (w: string, rows: readonly PlacedProp[]) => void kept.set(w, rows.map((r) => ({ ...r })));
+  const store = { get: (key: string) => {
+    for (const [w, rows] of kept) if (propsKey(w) === key) return JSON.stringify(rows);
+    return null;
+  } };
+  const cleared: string[] = [];
+  const deps = { stand: async () => true, clear: (t: string) => void cleared.push(t) };
+  const p = new PlacedProps();
+  await p.enter('tatooine', store, deps);
+  const chair = await p.put('chair', { x: 1, y: 0, z: 1 }, [0, 0, 0, 1], false, deps, save, 21, () => 0.3);
+  const row = p.take(chair!.thing, deps, save)!;
+  ok('picked up, the chair is out of its world\'s keeping', (kept.get('tatooine') ?? []).length === 0);
+
+  // Put down somewhere new; the stand waits, and a travel to Naboo comes in the wait.
+  let land: (v: boolean) => void = () => undefined;
+  const slow = { stand: () => new Promise<boolean>((r) => (land = r)), clear: (t: string) => void cleared.push(t) };
+  const worldAt = p.inWorld;
+  const putting = p.put('chair', { x: 9, y: 0, z: 9 }, [0, 0, 0, 1], false, slow, save, 22, () => 0.6);
+  p.leave();
+  await p.enter('naboo', store, deps);
+  land(true);
+  const put = await putting;
+  ok('a put whose world changed in the wait answers nothing', put === null && p.note.includes('world changed'), p.note);
+  ok('and files nothing into the world the store is in now', p.all.length === 0 && (kept.get('naboo') ?? []).length === 0);
+  ok('and takes down whatever it stood, should it have stood anywhere', cleared.length > 0);
+  ok('the store knows the world has changed under the drop', p.inWorld !== worldAt);
+  ok('so the chair is written back into its own world\'s keeping', p.keepIn(worldAt, row, store, save) && (kept.get('tatooine') ?? []).some((r) => r.thing === row.thing));
+  ok('as the same thing, where it stood, and not into this world\'s', (kept.get('tatooine') ?? [])[0]?.x === 1 && p.all.length === 0 && (kept.get('naboo') ?? []).length === 0);
+  ok('written once however often it is asked', p.keepIn(worldAt, row, store, save) && (kept.get('tatooine') ?? []).length === 1);
+  const back = new PlacedProps();
+  const stood: string[] = [];
+  await back.enter('tatooine', store, { stand: async (r) => (stood.push(r.thing), true), clear: () => undefined });
+  ok('and the next visit stands it with everything else', stood.includes(row.thing));
+  ok('a row with no world to go to is refused, not written under no name', !p.keepIn('', row, store, save) && !kept.has(''));
+
+  // The wiring: the game keeps the world across the wait and only stands the put-back in that world.
+  const { readFileSync } = await import('node:fs');
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  ok('the drop keeps the world it began in across the stand', /const worldAt = placedProps\.inWorld;\s*const row = await placedProps\.put\(/.test(main));
+  ok('and puts back in that world only while the store is still in it, else into its own keeping', /else if \(placedProps\.inWorld === worldAt\) void placedProps\.restore\(from,[\s\S]{0,200}else if \(placedProps\.keepIn\(worldAt, from, this\.placedStore\(\), save\)\)/.test(main));
+  const gone = /const fate = letGoOf\(how, !!from\);\s*if \(fate === 'gone'\) \{([\s\S]*?)\n\s*\}/.exec(main)?.[1] ?? '';
+  ok('giving one up asks letGoOf, and a prop put away returns before anything is put back', /\breturn;\s*$/.test(gone) && !/restore|keepIn/.test(gone));
+}
+
+await movedAcrossATravel();
 
 console.log(`props placement: ${checks} checks, ${bad} failed`);
 if (bad) process.exit(1);

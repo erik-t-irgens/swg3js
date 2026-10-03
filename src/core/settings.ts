@@ -92,6 +92,11 @@ export interface Settings extends FxSettings {
   soundSabers: string;
   /** A nebula's lightning takes shields and armour off a ship it strikes; off, a strike only flashes. */
   nebulaLightningDamage: boolean;
+  /**
+   * How solid the nebulae are, 0 to 1: their sheets and the haze inside one together, and how much
+   * they dim the lens flare and the god rays with them. 1 is as they are drawn; 0 is none at all.
+   */
+  nebulaOpacity: number;
   // The screen's own display. Every number here is ours -- the game's own interface is not read for
   // any of it -- and every one of them is invented; they are kept together so they can be judged
   // together, and `__debug.hud({ ... })` moves the first two live without opening the menu.
@@ -170,6 +175,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundInBackground: false,
   soundSabers: 'jka',
   nebulaLightningDamage: true,
+  nebulaOpacity: 1,
   hudScale: 1,
   hudDpr: 1,
   hudShipCondition: true,

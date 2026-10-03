@@ -3247,6 +3247,32 @@ export class Mobile implements Living, NpcSubject {
     this.applyCull();
   }
 
+  /**
+   * Stood somewhere else at once, on its feet, out of any seat and with nothing carried over: the
+   * building it was standing in is being taken out of the world. Its path and its home's room go with
+   * the building, as a respawn's do, and its home is the doorstep it is stood on (a follower's is its
+   * place behind the leader again on its next thought): kept, they leashed it to a room that is not
+   * there and walked it home into one. A body another browser keeps loses its rooms all the same and is
+   * not moved, since its place is that browser's to say (it takes the same building down and stands it
+   * out there). Answers whether it was moved.
+   */
+  standOut(x: number, y: number, z: number): boolean {
+    if (this.disposed) return false;
+    this.navCell = null;
+    this.navAgent.clear();
+    this.homeCell = null;
+    if (this.driven) return false;
+    if (this.seatAt) this.rise(x, z);
+    this.placeAt(x, y + 0.05, z, this.heading);
+    if (this.body.isValid()) this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    resetStepWalker(this.stepWalk);
+    this.homeX = x;
+    this.homeZ = z;
+    this.goal = null;
+    this.thinkAt = 0;
+    return true;
+  }
+
   /** Whether it is sitting on a seat just now. */
   get seated(): boolean {
     return this.seatAt !== null;

@@ -666,14 +666,16 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
     external?.call(mat, shader, renderer);
     Object.assign(shader.uniforms, uniforms);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\nvarying vec3 vWetPos;\nvarying vec3 vWetUp;`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying vec3 vWetPos;\nvarying vec3 vWetUp;`)
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         {
           vec4 wp = modelMatrix * vec4(transformed, 1.0);
+          // Only the swell's fade reads this, per vertex, on the sea's fine mesh. The ripples' fade is
+          // worked out per pixel below: a lake is its outline with no vertex inside it, and a distance
+          // spread across a triangle sixteen kilometres long is kilometres out under your feet.
           float dist = distance(wp.xyz, cameraPosition);
-          vWaterDist = dist;
           vWaterLevel = wp.y;
           // The weather's varyings, declared by its fragment chunk: written so both stages agree.
           vWetPos = wp.xyz;
@@ -688,7 +690,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
         }`,
       );
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\nvarying float vWaterDist;\n${SURFACE_PARS_GLSL}\n${MASK_PARS_GLSL}\n${WEATHER_PARS_GLSL}\n${RAIN_RINGS_GLSL}`)
+      .replace('#include <common>', `#include <common>\n${WAVES_GLSL}\nvarying vec2 vWaterXZ;\n${SURFACE_PARS_GLSL}\n${MASK_PARS_GLSL}\n${WEATHER_PARS_GLSL}\n${RAIN_RINGS_GLSL}`)
       .replace(
         // Only the specular environment term: the irradiance and the multiscatter stay, so the
         // water looks the same while the reflections pass adds this term back itself. The mask
@@ -719,7 +721,11 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
           float depth = waterDepthKnown(vWaterXZ, depthKnown);
           float calm = smoothstep(0.15, 3.0, depth);
           gerstner(vWaterXZ, calm, disp, wn, crest);
-          float detail = 1.0 - smoothstep(120.0, 700.0, vWaterDist);
+          // From this pixel's own place (the weather's world position, which a triangle carries
+          // exactly however large it is), never from a distance spread across the triangle: on a lake
+          // drawn as its bare outline that came out kilometres long under your feet, and the wind
+          // ripples, the field's rings and the rain all faded to nothing on 85% of the lakes' area.
+          float detail = 1.0 - smoothstep(120.0, 700.0, length(vWetPos - cameraPosition));
           // The shore's own gradient, taken before the detail so the ripples can run along the
           // bank: the band's width below reads the same distance back.
           // The band runs right up to the water's edge: by distance where the slope is known, and
@@ -782,7 +788,7 @@ function installWaterHook(mat: WaterMaterial, uniforms: WaterUniforms, variant: 
       external = fn;
     },
   });
-  mat.customProgramCacheKey = () => `swg-water-6-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
+  mat.customProgramCacheKey = () => `swg-water-7-${variant}-rain-${waves ? 'waves' : 'flat'}-${external ? 'hooked' : 'plain'}`;
 }
 
 /**

@@ -10,6 +10,11 @@
 // that does the same thing and a player never has to find the mouse. The buttons still work for
 // anybody whose pointer is free, which is why they are here at all.
 //
+// A prop picked back up out of the world has a third way out beside putting it down and Escape:
+// **Put away**, which throws it away for good (the Props tab is a catalogue, so there is nothing to
+// hand back), where Escape puts it back exactly where it stood. The button is there only while what
+// is in hand came out of the world, and carries the cap of the pick-up key, which does the same.
+//
 // It builds its own element and says what was pressed. It knows nothing about deeds, worlds or
 // ghosts, so a test can drive it with no game at all. Every colour on it is one of the eighteen.
 
@@ -27,6 +32,7 @@ const PLACING_BAR_CSS = `
 #placing-bar button .cap { color: var(--ink); opacity: 0.75; }
 #placing-bar button.go { color: var(--good); border-color: color-mix(in srgb, var(--good) 60%, transparent); }
 #placing-bar button.go[disabled] { color: var(--muted); border-color: var(--rule); }
+#placing-bar button.away { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 60%, transparent); }
 #placing-bar button[disabled] { opacity: 0.45; cursor: default; }
 `;
 
@@ -53,11 +59,16 @@ export class PlacingBar {
   onLift: (presses: number) => void = () => {};
   onPlace: () => void = () => {};
   onCancel: () => void = () => {};
+  /** A prop picked back up, thrown away rather than put back. */
+  onPutAway: () => void = () => {};
 
   private readonly what: HTMLElement;
   private readonly why: HTMLElement;
   private readonly lift: HTMLElement;
   private readonly go: HTMLButtonElement;
+  private readonly away: HTMLButtonElement;
+  private readonly awayCap: HTMLElement;
+  private readonly cancel: HTMLButtonElement;
   private readonly caps: Record<keyof PlacingKeys, HTMLElement>;
   /** What was last written, so a frame that changes nothing writes nothing. */
   private last = '';
@@ -79,6 +90,7 @@ export class PlacingBar {
         <span class="what"></span>
         <button class="turn-right" title="turn it right"><span class="cap cap-right"></span> &#9654;</button>
         <button class="go">Place</button>
+        <button class="away" title="throw it away rather than put it back" hidden>Put away <span class="cap cap-away"></span></button>
         <button class="cancel">Cancel (Esc)</button>
       </div>`;
     parent.appendChild(this.root);
@@ -86,6 +98,9 @@ export class PlacingBar {
     this.why = this.root.querySelector('.why')!;
     this.lift = this.root.querySelector('.lift')!;
     this.go = this.root.querySelector('.go')!;
+    this.away = this.root.querySelector('.away')!;
+    this.awayCap = this.root.querySelector('.cap-away')!;
+    this.cancel = this.root.querySelector('.cancel')!;
     this.caps = {
       left: this.root.querySelector('.cap-left')!,
       right: this.root.querySelector('.cap-right')!,
@@ -97,7 +112,8 @@ export class PlacingBar {
     this.root.querySelector('.lift-up')!.addEventListener('click', () => this.onLift(1));
     this.root.querySelector('.lift-down')!.addEventListener('click', () => this.onLift(-1));
     this.go.addEventListener('click', () => this.onPlace());
-    this.root.querySelector('.cancel')!.addEventListener('click', () => this.onCancel());
+    this.away.addEventListener('click', () => this.onPutAway());
+    this.cancel.addEventListener('click', () => this.onCancel());
   }
 
   get open(): boolean {
@@ -107,12 +123,16 @@ export class PlacingBar {
   /**
    * What the bar says now. Written only when it has changed, because a placement moves every frame
    * the mouse does and the bar is on the page rather than on the overlay canvas.
+   *
+   * `away` is the cap of the key that puts a picked-up prop away, or null when what is in hand did
+   * not come out of the world: then there is nothing to put away and no button for it, and Escape is
+   * a plain cancel rather than "put it back".
    */
-  show(name: string, ok: boolean, why: string | null, keys?: PlacingKeys, lift = 0): void {
+  show(name: string, ok: boolean, why: string | null, keys?: PlacingKeys, lift = 0, away: string | null = null): void {
     this.root.hidden = false;
     const k = keys ?? { left: '', right: '', up: '', down: '' };
     const height = lift === 0 ? 'on the ground' : `${lift > 0 ? '+' : ''}${lift.toFixed(2)} m`;
-    const key = `${name}\0${ok}\0${why ?? ''}\0${k.left}${k.right}${k.up}${k.down}\0${height}`;
+    const key = `${name}\0${ok}\0${why ?? ''}\0${k.left}${k.right}${k.up}${k.down}\0${height}\0${away ?? '\u0001'}`;
     if (key === this.last) return;
     this.last = key;
     this.writes++;
@@ -122,6 +142,9 @@ export class PlacingBar {
     this.lift.textContent = height;
     for (const which of ['left', 'right', 'up', 'down'] as (keyof PlacingKeys)[]) this.caps[which].textContent = k[which];
     this.go.disabled = !ok;
+    this.away.hidden = away === null;
+    this.awayCap.textContent = away ?? '';
+    this.cancel.textContent = away === null ? 'Cancel (Esc)' : 'Put back (Esc)';
   }
 
   hide(): void {

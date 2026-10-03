@@ -87,6 +87,7 @@ import { markActor } from './portalRender';
 import { slotOf } from '../ui/wardrobeUi';
 import type { CellState, NearBlocker } from './layoutStream';
 import { NavAgent } from './nav/navAgent.ts';
+import { doorstepSpot } from './myBuildings.ts';
 import { DOOR_TUNE, DoorLegs, doorwayNav, placeOfCell, wallBetween, type GoalPlace } from './nav/doorway.ts';
 // Whether a place cannot be walked to at all, which only the baked grid can say. A world with no
 // grid answers "yes" to everything, so a cover spot behind a wall on ground this body's ground is
@@ -1650,6 +1651,32 @@ export class Npc implements Living, ErrandBody {
 
   slow(seconds: number): void {
     this.slowed = Math.max(this.slowed, seconds);
+  }
+
+  /**
+   * Stood on the ground at once, on its feet, in no room and on no path: the building it was standing
+   * in is being taken out of the world (`NpcManager.standOutOf`). Left in a room the streamer no longer
+   * has, it would be held airless at the height of a floor that had gone (`move`) until it happened to
+   * walk out of the old building's box. A home that was in there moves to where it is stood, or the
+   * room's leash would walk it straight back to a room that is not there.
+   */
+  standOut(x: number, y: number, z: number): void {
+    this.heldAt = null;
+    this.pos.set(x, y, z);
+    this.fallVy = Number.NaN;
+    this.grounded = true;
+    this.cell = null;
+    this.cellSolid = true;
+    this.cellFrom.copy(this.pos);
+    this.navAgent.clear();
+    this.legs.reset();
+    if (this.homeInside) {
+      this.homeX = x;
+      this.homeZ = z;
+      this.homeInside = false;
+    }
+    if (this.body.isValid()) this.body.setTranslation({ x, y: y + this.bodyLift, z }, true);
+    this.group.position.copy(this.pos);
   }
 
   /** The manager's collider map, so the entry goes at the moment the collider does (see `die`). */
@@ -3804,6 +3831,22 @@ export class NpcManager {
       npc.errand.finish('stopped', this.lastNow);
       this.lastErrand = npc.errand;
       this.errands--;
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * A building put down in play is coming down: every living fighter followed in one of its rooms is
+   * stood on the ground round its doorstep, from spot `first` on (`doorstepSpot`, a step apart, the
+   * same ring the people and creatures are stood in), before the rooms go. Answers how many.
+   */
+  standOutOf(building: object, door: { x: number; z: number }, first = 1): number {
+    let n = 0;
+    for (const npc of this.npcs) {
+      if (npc.dead || npc.cell?.building !== building) continue;
+      const spot = doorstepSpot(first + n, door);
+      npc.standOut(spot.x, this.terrain.heightAt(spot.x, spot.z), spot.z);
       n++;
     }
     return n;

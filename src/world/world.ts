@@ -33,6 +33,7 @@ import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './
 import { FLORA_WARM, FloraPlanter } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
+import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
@@ -310,6 +311,8 @@ interface Chunk {
    * `floraBatch.ts`); null for the procedural props.
    */
   flora: THREE.Group | null;
+  /** Its plantings (step 7), kept so the trees' colliders can be worked out again when the console moves the rule; null for the procedural props. */
+  floraData: FloraChunkData | null;
   /** The chunk's middle in the world, on its ground: what the plant sweep measures from the eye. */
   mx: number;
   my: number;
@@ -2293,6 +2296,7 @@ export class World {
       contact.combat?.take(amount, from, null);
     },
     damageEnabled: (): boolean => liveSettings().nebulaLightningDamage,
+    opacity: (): number => liveSettings().nebulaOpacity,
     now: (): number => Date.now(),
   };
 
@@ -2549,6 +2553,16 @@ export class World {
     return this.basinBodies.size;
   }
 
+  /**
+   * The sky has been moved by hand (the creator's hour slider, settling after a drag): the reflections
+   * are taken again on the next frame rather than when their four-second clock next comes round, so a
+   * scrubbed hour does not wear the last hour's sky in every shiny surface. One capture, the very one
+   * the clock would have made; nothing compiles (`envMapCubeUVHeight` is the same 128 every time).
+   */
+  recaptureSky(): void {
+    this.envTimer = 99;
+  }
+
   /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */
   reflectionsChanged(): void {
     this.envWant = null;
@@ -2613,6 +2627,9 @@ export class World {
       }
       body.active = true;
       body.draft = draft;
+      // Measured against its own water, the very surface its depth was just read from, and not the
+      // one plane under the camera: a lake on a shelf, a basin, a column with no table at all.
+      body.waterY = surface + lift;
       body.object.position.copy(p);
       if (q) body.object.quaternion.copy(q);
       // Only a real arrival punches a crater; a wader bobbing does not.
@@ -2770,6 +2787,14 @@ export class World {
     const cols: RAPIER.Collider[] = [];
     cols.push(this.physics.createHeightfield(c.cx * CHUNK_SIZE, c.cz * CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, c.heights));
     for (const p of c.colliders) {
+      // A planting with the client's own shapes stands on them, exactly where they are (`floraCollision.ts`).
+      if (p.parts) {
+        for (const part of p.parts) {
+          const col = this.physics.createStaticPart(part);
+          if (col) cols.push(col);
+        }
+        continue;
+      }
       const ground = this.terrain.heightAt(p.x, p.z) - 0.5;
       const halfH = (p.top - ground) / 2;
       const col = this.physics.createStaticCylinder(p.x, ground + halfH, p.z, p.r, halfH);
@@ -3713,6 +3738,42 @@ export class World {
   /** Take a building placed in play back out of the world, by what it was filed under. */
   unplaceBuilding(key: string): boolean {
     return this.layoutStream?.unplace(key) ?? false;
+  }
+
+  /**
+   * A building placed in play is about to come down: everybody this browser keeps standing in its
+   * rooms is stood outdoors round its doorstep first, which is the building's own origin on the
+   * ground (`housePlace.ts` stands a house at the ground under it). The player's room is let go of
+   * here and the doorstep handed back, for the caller to stand them on; the people, the creatures and
+   * the fighters are stood out by their managers. Null when the player was not inside it, or it has no
+   * rooms here.
+   *
+   * It must come before `unplaceBuilding`: the room the player is followed in, the ground hidden under
+   * a basement and every follower's path are all keyed on the building itself, and a building taken
+   * out of the world from under them leaves each of those naming one that is not there.
+   */
+  clearRoomsOf(key: string): THREE.Vector3 | null {
+    const b = this.layoutStream?.buildingOf(key);
+    if (!b) return null;
+    const door = { x: b.x, z: b.z };
+    // The people and creatures first, then the fighters on the spots after theirs: a fighter left in a
+    // room the streamer no longer has is held airless where the floor was (`Npc.move`).
+    const stood = this.mobiles ? this.mobiles.standOutOf(b, door) : 0;
+    this.npcs?.standOutOf(b, door, stood + 1);
+    // A ship stood in one of its rooms is outdoors from now on: its colliders take the terrain again
+    // and it is followed afresh from where it stands.
+    for (const v of this.vehicles) {
+      const held = this.vehicleRooms.get(v);
+      if (held?.cell?.building !== b) continue;
+      held.cell = null;
+      v.setInRoom(false);
+    }
+    if (this.cellState?.building !== b) return null;
+    this.cellState = null;
+    // Taken for a fresh start rather than a walk: the next frame follows the player from where they
+    // are put, outdoors, and the ground hidden under the basement comes back with it.
+    this.prevPlayerPos.x = Number.NaN;
+    return new THREE.Vector3(b.x, this.terrain.heightAt(b.x, b.z), b.z);
   }
 
   /**
@@ -5337,6 +5398,55 @@ export class World {
     return this.flora ? { planted: this.flora.planted, models: this.flora.modelCount, missing: [...this.flora.missing] } : null;
   }
 
+  /**
+   * The trees' and rocks' colliders of every chunk standing, worked out again under the rule as it is
+   * now (`FLORA_COLLISION`), and stood up again where a chunk has its physics: what the console calls
+   * after moving the rule, never a frame.
+   */
+  refreshFloraColliders(): void {
+    for (const c of this.chunks.values()) {
+      if (!c.floraData) continue;
+      c.colliders = floraColliders(c.floraData, []);
+      if (c.physics) {
+        this.removeChunkPhysics(c);
+        this.addChunkPhysics(c);
+      }
+    }
+  }
+
+  /**
+   * What the chunks standing are solid at, for `__debug.flora().collision`: of their collidable
+   * plantings, how many stand on the client's own shapes, how many on the guessed cylinder, and how
+   * many on nothing (walked through, as the client did); the shapes by kind; and how many models the
+   * pack has the client's word on.
+   */
+  floraCollisionReport(): { plantings: number; client: number; guessed: number; walkedThrough: number; shapes: Record<string, number>; withPhysics: number; models: { withShapes: number; walkedThrough: number; noWord: number } } {
+    const out = { plantings: 0, client: 0, guessed: 0, walkedThrough: 0, shapes: {} as Record<string, number>, withPhysics: 0, models: { withShapes: 0, walkedThrough: 0, noWord: 0 } };
+    for (const c of this.chunks.values()) {
+      if (!c.floraData) continue;
+      let collidable = 0;
+      for (let i = 0; i < c.floraData.n; i++) if (c.floraData.collidable[i]) collidable++;
+      out.plantings += collidable;
+      let standing = 0;
+      for (const col of c.colliders) {
+        standing++;
+        if (col.parts) {
+          out.client++;
+          for (const p of col.parts) out.shapes[p.kind] = (out.shapes[p.kind] ?? 0) + 1;
+        } else out.guessed++;
+      }
+      out.walkedThrough += collidable - standing;
+      if (c.physics) out.withPhysics++;
+    }
+    for (const def of this.pack?.category('flora') ?? []) {
+      if (!def.appearance) continue;
+      if (!def.collision) out.models.noWord++;
+      else if (def.collision.shapes.length) out.models.withShapes++;
+      else out.models.walkedThrough++;
+    }
+    return out;
+  }
+
   /** The snapshot's centre in SWG coordinates (the game's origin), when a converted pack is loaded. */
   /**
    * What the cover search can even be offered on this world, for `__debug.cover()`: how many placed
@@ -6140,12 +6250,13 @@ export class World {
     // The field is stepped after its bodies have moved and before anything is drawn, so the water
     // shader reads the surface those bodies just made.
     if (this.renderer && this.camera && this.waterMaterials.length) {
-      // The field is one plane. Beside a fountain it is the basin's, or the legs that go into the basin
-      // cut the planet's table metres below them and nothing rings.
+      // Every body is measured against its own water (`touch` above), so this height only hangs the
+      // overhead camera that draws them: the basin's beside a fountain, the table under the camera
+      // elsewhere, and where there is no table at all (most of Naboo and Tatooine) the camera's own.
       const cx = this.camera.position.x;
       const cz = this.camera.position.z;
       const basin = this.basinFootprints.length ? basinLevelNear(this.basinFootprints, playerPos.x, playerPos.z) : Number.NaN;
-      stepWaterSim(this.renderer, cx, cz, Number.isNaN(basin) ? this.terrain.waterHeightAt(cx, cz) : basin, dt);
+      stepWaterSim(this.renderer, cx, cz, Number.isNaN(basin) ? this.terrain.waterHeightAt(cx, cz) : basin, dt, this.camera.position.y);
     }
     this.emitDust(dt);
     if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
@@ -7062,6 +7173,11 @@ export class World {
     for (const t of this.farTiles.values()) this.cutWhole(t);
   }
 
+  /** For the console (`__debug.reach()`): how many detailed ground chunks stand now, and how far they reach from the middle of the one underfoot. */
+  groundReport(): { chunks: number; metres: number } {
+    return { chunks: this.chunks.size, metres: Math.round((this.viewRadius + 0.5) * CHUNK_SIZE) };
+  }
+
   /** For the console (`__debug.farTiles()`): how many tiles, how the last cut left them, and whether the index attribute is each tile's own. */
   farTileReport(): { local: boolean; tiles: number; cut: number; ownIndex: number; quadsKept: number; quadsTotal: number } {
     let cut = 0;
@@ -7191,7 +7307,7 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, flora: this.flora ? propGroup : null, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).

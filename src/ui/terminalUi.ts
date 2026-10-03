@@ -14,6 +14,7 @@
 // pressed. Every colour on it is one of the eighteen.
 
 import { escapeHtml } from './catalogue';
+import { mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
 
 /** One port a terminal can sell a ticket to. */
 export interface TerminalPort {
@@ -60,8 +61,8 @@ export interface TerminalModel {
   stage: 'here' | 'worlds' | 'there' | 'ship';
   /** The world whose ports are shown: this one on `here`, the picked one on `there`. */
   mapUrl: string | null;
-  /** How wide a ground that picture covers, metres. */
-  mapWidth: number;
+  /** The ground that picture covers (`mapFrame`): how wide, about which point. */
+  mapFrame: MapFrame;
   ports: TerminalPort[];
   worlds: TerminalWorld[];
   /** The world picked on the galaxy side, for the heading. */
@@ -251,26 +252,26 @@ export class TerminalUi {
     } else if (m.stage === 'ship') {
       // The same map, with only the pads a ship can land on dotted: a shuttleport is a shelter
       // with a bench and your own ship has no business at one.
-      const e = m.mapWidth;
+      const f = m.mapFrame;
       map.innerHTML =
         `<img src="${escapeHtml(m.mapUrl)}" alt="">` +
         m.ports
           .filter((p) => p.kind === 'starport')
           .map((p) => {
-            const left = (p.x + e / 2) / e;
-            const top = (e / 2 - p.z) / e;
+            const left = mapShareX(f, p.x);
+            const top = mapShareY(f, p.z);
             if (!(left >= 0 && left <= 1 && top >= 0 && top <= 1)) return '';
             return `<button type="button" class="dot star" style="left:${(left * 100).toFixed(2)}%;top:${(top * 100).toFixed(2)}%" data-trip="${escapeHtml(p.name)}" title="${escapeHtml(p.name)}"></button>`;
           })
           .join('');
     } else {
-      const e = m.mapWidth;
+      const f = m.mapFrame;
       map.innerHTML =
         `<img src="${escapeHtml(m.mapUrl)}" alt="">` +
         m.ports
           .map((p) => {
-            const left = (p.x + e / 2) / e;
-            const top = (e / 2 - p.z) / e;
+            const left = mapShareX(f, p.x);
+            const top = mapShareY(f, p.z);
             if (!(left >= 0 && left <= 1 && top >= 0 && top <= 1)) return '';
             return `<button type="button" class="dot ${p.kind === 'starport' ? 'star' : ''}${p.name === this.pickedPort ? ' on' : ''}" style="left:${(left * 100).toFixed(2)}%;top:${(top * 100).toFixed(2)}%" data-port="${escapeHtml(p.name)}" title="${escapeHtml(`${p.name} — ${p.fare}`)}"></button>`;
           })

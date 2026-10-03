@@ -52,6 +52,9 @@ export const CLOCK_LIMITS = {
   maxDayMs: 24 * 60 * 60 * 1000,
 };
 
+/** The game's own day, in seconds: twelve minutes, the one number of the day that is not ours. */
+export const GAME_DAY_SECONDS = 720;
+
 export type ClockState = 'off' | 'shared' | 'adrift';
 
 /** What the clock needs of the day to report it and to let the console let go of it. */
@@ -357,6 +360,33 @@ export interface ClockKnob {
   weatherEaseMsPerSecond?: number;
   weatherEaseMaxMs?: number;
   release?: boolean;
+  /**
+   * How long the whole day is, in seconds, or null for the game's own twelve minutes. With no server
+   * only: a server's day is one of the two things it exists to hold, and a browser running a day of
+   * its own length beside it would have its sun somewhere else from everybody's.
+   */
+  length?: number | null;
+}
+
+/**
+ * The whole day's length set from the console, with no server; the sentence to say back. Refused in
+ * words while the shared clock is in use (a server answering, or one that has gone and left its offset
+ * in force), since the length is the server's there. Offline the day is walked by `dt / length`, so a
+ * new length bends the sun's pace from the next frame and the hour it stands at never jumps; and a
+ * server met later keeps this length as this build's own and gives it back when it goes, exactly as it
+ * keeps the twelve minutes now.
+ */
+export function setOwnDayLength(seconds: number | null): string {
+  if (!theDay) return 'there is no day to set yet';
+  if (sharedClock.shared) {
+    return `the day is the server's while one is in use: ${Math.round(theDay.dayLengthSeconds)} s, the same for everyone on it; a server's day is set where it is started (npm run relay -- --day=<seconds>)`;
+  }
+  const want = seconds === null ? GAME_DAY_SECONDS : seconds;
+  const lo = CLOCK_LIMITS.minDayMs / 1000;
+  const hi = CLOCK_LIMITS.maxDayMs / 1000;
+  if (typeof want !== 'number' || !Number.isFinite(want) || want < lo || want > hi) return `a day is between ${lo} and ${hi} seconds long; it stays ${Math.round(theDay.dayLengthSeconds)} s`;
+  theDay.dayLengthSeconds = want;
+  return want === GAME_DAY_SECONDS ? `a day is the game's own ${GAME_DAY_SECONDS} s again` : `a day is now ${want} s long (the game's own is ${GAME_DAY_SECONDS} s)`;
 }
 
 export interface DayTune {
@@ -387,7 +417,9 @@ export interface DayTune {
 export const dayTune: DayTune = { easeMax: 4, snapAt: 0.01, catchUp: 30, minRate: 0.25, gapSeconds: 1, phaseSpread: 1 };
 
 export function clockKnob(opts?: ClockKnob): Record<string, unknown> {
+  let said = '';
   if (opts) {
+    if (opts.length !== undefined) said = setOwnDayLength(opts.length);
     if (opts.ease !== undefined && Number.isFinite(opts.ease)) dayTune.easeMax = Math.max(1, opts.ease);
     if (opts.snapAt !== undefined && Number.isFinite(opts.snapAt)) dayTune.snapAt = Math.max(0, opts.snapAt);
     if (opts.catchUp !== undefined && Number.isFinite(opts.catchUp)) dayTune.catchUp = Math.max(1, opts.catchUp);
@@ -418,10 +450,12 @@ export function clockKnob(opts?: ClockKnob): Record<string, unknown> {
           shared: shared === null ? null : Number(shared.toFixed(4)),
           phase: Number(theDay.phase.toFixed(4)),
           lengthSeconds: theDay.dayLengthSeconds,
+          gameLengthSeconds: GAME_DAY_SECONDS,
           held: theDay.held,
           fast: theDay.fast,
         }
       : null,
+    ...(said ? { said } : {}),
     note: note.day,
     tune: { ...dayTune, ...CLOCK_TUNE },
     limits: { ...CLOCK_LIMITS },

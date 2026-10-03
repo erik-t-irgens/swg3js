@@ -104,7 +104,8 @@ const ACTION_LABELS: Record<Action, string> = {
   placeRight: 'Turn it right (placing; shift and ctrl tip and roll)',
   placeUp: 'Raise it (placing)',
   placeDown: 'Lower it (placing)',
-  takeProp: 'Pick up a prop of yours',
+  takeProp: 'Pick up a prop of yours (in hand: put it away; at your door: take the building down)',
+  putAway: 'Put away a prop in hand',
   debugMenu: 'Debug menu',
 };
 
@@ -198,6 +199,7 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     title: 'Space',
     knobs: [
       { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula takes shields and armour off the ship it hits, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
+      { key: 'nebulaOpacity', label: 'Nebula opacity', kind: 'range', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, hint: 'How solid the nebulae are: their glowing and misty sheets seen from outside and the haze around you inside one, together, and how much a nebula you are in dims the sun\'s flare and rays. 100% is as they are drawn; 0% hides them. Their lightning still strikes.' },
     ],
   },
   {
