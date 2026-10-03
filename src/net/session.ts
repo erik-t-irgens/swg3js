@@ -17,8 +17,13 @@
 
 import { fromBase32, hmacSha256, sha256, toBase32, toHex, utf8 } from './hash.ts';
 
-/** The version of the language this browser speaks. An old relay ignores it; a new server reads it. */
-export const WIRE_VERSION = 2;
+/**
+ * The version of the language this browser speaks. An old relay ignores it; a new server reads it.
+ * 3 is the seen creatures, a creature's blow on another player, the keeper turning a bolt away, how low
+ * a body stands on the wire and the admin's day (`server/relay.mjs` says the same); none of those is
+ * ever sent to a server that says less (`speaks`).
+ */
+export const WIRE_VERSION = 3;
 
 /**
  * The label mixed into the key to make the verifier the server keeps. It is the server's
@@ -772,6 +777,15 @@ export class Session {
    */
   get isAdmin(): boolean {
     return this.stat.authority === 'server' && this.stat.admin;
+  }
+
+  /**
+   * Whether the server holding the world speaks at least `version` of the language: what everything
+   * that a newer server understands and an older one would drop in silence asks before it says it. False
+   * with no server, against the relay that came before and on a line that has dropped.
+   */
+  speaks(version: number): boolean {
+    return this.stat.authority === 'server' && this.stat.serverVersion >= version;
   }
 
   /** A tie waiting on the player, or null. */

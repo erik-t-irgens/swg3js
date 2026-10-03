@@ -534,6 +534,12 @@ export class Bolts {
             this.remove(i, hitPoint);
             continue;
           }
+          // A shot of this browser's own on the wire (a creature kept here fired it at the player): every
+          // picture of it ends at the blade, as a landed shot's does, and what flies on is the player's own
+          // shot, which crosses as theirs do -- one bolt in, one bolt out, as for the creatures' blades
+          // below. Said before it is turned, while the bolt is still the one the pictures copy.
+          const wired = !!b.wire;
+          if (wired) this.onGone?.(b, hitPoint);
           // Turned away by the saber: it now belongs to the player and flies on from the block.
           b.owner = 'player';
           b.exclude = w.player.body;
@@ -544,6 +550,7 @@ export class Bolts {
           b.dir.copy(bounce);
           b.pos.copy(hitPoint).addScaledVector(b.dir, 0.05);
           this.settle(b);
+          if (wired) this.onFire?.(b);
           w.effects.burst(hitPoint, 0xbfe6ff, 0.6, 0.15);
           w.effects.flash(hitPoint, 0x9fd4ff, 14, 7, 0.12);
           continue;
@@ -573,6 +580,11 @@ export class Bolts {
       // it flies on from the block as the blocker's own shot, so it may now strike the player it came
       // from. Never a picture of somebody else's bolt, whose fate is the browser's that fired it.
       if (struck && !b.inert && struck.blockBolt?.(b, hitPoint, bounce)) {
+        // A shot on the wire turned away here: every picture of it ends at the blade, as a shot that
+        // landed does, and what flies on is a shot of the blocker's own -- which crosses if the
+        // blocker's do (a creature this browser keeps), so the other screens see it fly back rather
+        // than stop. Said before it is turned, while the bolt is still the one the pictures copy.
+        if (b.wire) this.onGone?.(b, hitPoint);
         b.owner = 'enemy';
         b.exclude = (struck as { body?: RAPIER.RigidBody }).body ?? b.exclude;
         b.source = typeof (struck as Partial<Living>).key === 'number' ? (struck as Living) : null;
@@ -585,6 +597,7 @@ export class Bolts {
         b.homing = null;
         b.pos.copy(hitPoint).addScaledVector(b.dir, 0.05);
         this.settle(b);
+        this.onFire?.(b);
         w.effects.burst(hitPoint, 0xbfe6ff, 0.6, 0.15);
         w.effects.flash(hitPoint, 0x9fd4ff, 14, 7, 0.12);
         continue;

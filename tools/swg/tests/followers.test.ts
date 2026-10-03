@@ -420,6 +420,23 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
     }
     return text.slice(start, i + 1);
   };
+  // A follower is this browser's alone: a body another browser keeps is refused, and one this browser keeps
+  // leaves the wire before it follows -- asked whether it may before anything is taken off any books, and
+  // done after, so a refusal never leaves a body nobody's.
+  const recruit = body(world, /recruit\(m: Mobile\): string \| null \{/);
+  const driven = recruit.indexOf('if (m.isDriven) return TALK_WORDS.keptElsewhere;');
+  const may = recruit.indexOf('if (!mobiles.mayUnshare(m))');
+  const books = recruit.indexOf('recruitOwner(');
+  const leave = recruit.indexOf('if (!mobiles.unshare(m)) return TALK_WORDS.keptElsewhere;');
+  const add = recruit.indexOf('this.followers.add(');
+  ok(driven > 0 && driven < books, 'a body another player\'s game keeps is refused in words before anything is done');
+  ok(may > driven && may < books, 'whether the wire will let it go is asked before its lair or its row lets go of it');
+  ok(leave > books && leave < add, 'and it leaves the wire before it follows, never after');
+  ok(/const options = talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven\);/.test(main), "the conversation offers no 'Follow me' to a body another browser keeps, and says why");
+  const unshare = body(read('world/mobiles/manager.ts'), /unshare\(m: Mobile\): boolean \{/);
+  ok(/if \(!this\.mayUnshare\(m\)\) return false;/.test(unshare) && /net\.leave\(id\)/.test(unshare) && /m\.unshare\(\);/.test(unshare), "the manager's own unshare refuses what may not leave, says it walked off and lets go of its name");
+  const mayUnshare = body(read('world/mobiles/manager.ts'), /mayUnshare\(m: Mobile\): boolean \{/);
+  ok(/if \(m\.isDriven\) return false;/.test(mayUnshare) && /return net\.mayLeave\(id\);/.test(mayUnshare), 'and asks the wire itself whether it may');
   // A follower never holds a grudge against its own side, and a blow from its own side never lands.
   ok(/if \(this\.follow && source\.side === this\.side\) return;/.test(mobile), 'a follower holds no grudge against the player or anybody else on their side');
   ok(/source\.side === this\.side && !hostileSides\(source, this\)\) return;/.test(mobile), "and a blow from its own side is refused where it lands, the player's included");

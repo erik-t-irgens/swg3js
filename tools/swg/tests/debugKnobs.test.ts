@@ -257,7 +257,10 @@ function body(text: string, signature: string): string {
 
   // Wiring: the console's choice rides the spawn's options and is never laid on a body the world holds.
   const manager = src('world/mobiles/manager.ts');
-  ok(/weaponTemplate\?: string;/.test(manager) && /const forced = opts\.weaponTemplate && !opts\.worldId \? opts\.weaponTemplate : undefined;/.test(manager) && /forcedTemplate: forced/.test(manager), "15: the manager hands the choice to the arms, for this browser's own spawns only");
+  // A body the world holds takes it only from its own record, which carries it to every browser alike
+  // (`listed`, a record of the server's own); a seeded body never does.
+  ok(/weaponTemplate\?: string;/.test(manager) && /const forced = opts\.weaponTemplate && \(!opts\.worldId \|\| opts\.listed\) \? opts\.weaponTemplate : undefined;/.test(manager) && /forcedTemplate: forced/.test(manager), "15: the manager hands the choice to the arms, for this browser's own spawns and for a record that carries it");
+  ok(/const weapon = typeof rec\.weapon === 'string' && rec\.weapon \? \{ weaponTemplate: rec\.weapon \} : \{\};/.test(manager), "15: and a record's weapon is read off the record itself");
   const helper = body(main, 'mobile: async (idOrFind: string, metres = 10, n = 1, opts?: { level?: number; tier?: number; weapon?: string })');
   ok(helper.includes('findRackWeapon(rack.weapons, String(opts.weapon))') && helper.includes('forcedArmsRefusal(e.name, cat.packOf(e)?.hierarchy, weapon)') && helper.includes('weaponTemplate: weapon.template'), '15: __debug.mobile finds the weapon, refuses in words, and passes it through the spawn options');
   ok(helper.indexOf('forcedArmsRefusal(') < helper.indexOf('mobiles.spawnAhead('), '15: and refuses before anything is stood');

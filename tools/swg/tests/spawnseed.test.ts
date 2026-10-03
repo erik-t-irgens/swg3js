@@ -285,7 +285,13 @@ const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
   // from a record, and the list's handler asks that mark rather than the name alone.
   const manager = src('../../../src/world/mobiles/manager.ts');
   const main = src('../../../src/main.ts');
-  ok(/worldId: a\.id, listed: true, share: true \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
+  ok(/worldId: a\.id, listed: true, share: true, \.\.\.weapon \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
+  // The weapon the admin put in its hand rides the record the whole way: asked for with it, read off the
+  // row, and stood holding it on every browser, the admin's own included, rather than each arming it off
+  // its own list.
+  ok(/const weapon = typeof rec\.weapon === 'string' && rec\.weapon \? \{ weaponTemplate: rec\.weapon \} : \{\};/.test(manager), '9: a record that names a weapon stands its body holding that weapon');
+  ok(/owned\.askSpawn\(rec\.species, \[rec\.x, rec\.y \?\? 0, rec\.z\], rec\.heading, rec\.seed, rec\.id, !!rec\.inside, rec\.weapon \?\? ''\)/.test(main), '9: and the admin\'s ask carries the weapon to the server, which puts it in the record');
+  ok(/\.\.\.\(r\.weapon \? \{ weapon: r\.weapon \} : \{\}\)/.test(main), '9: and a row from the server is turned into a record with its weapon');
   ok(/if \(sweptByList\(id, mobiles\.fromList\(m\), wanted\)\) mobiles\.removeById\(id\);/.test(main) && !/if \(id && !wanted\.has\(id\)\) mobiles\.removeById\(id\);/.test(main), '9: and the list’s handler asks that mark, not the name alone');
 }
 

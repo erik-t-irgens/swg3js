@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { GCW_SIDES, StandingPeople, PEOPLE_TUNE, overridesOf, personFor, postFor, seedOfRow, standPlaceOf, standsStill, weaponsOf, type PeopleCreature, type PeopleDeps, type PersonSpawn, type PlanContext, type StandingRow } from '../../../src/world/standingPeople.ts';
+import { GCW_SIDES, STAYS_DOWN_SECONDS, StandingPeople, PEOPLE_TUNE, overridesOf, personFor, postFor, seedOfRow, standPlaceOf, standsStill, weaponsOf, type PeopleCreature, type PeopleDeps, type PersonSpawn, type PlanContext, type StandingRow } from '../../../src/world/standingPeople.ts';
 import { moodIdleName, moodOfRow, pickMoodClip, withMood, type RigVariants } from '../../../src/world/mobiles/moodIdle.ts';
 import { buildingWithRoomIn, offRoomBox, ROOM_SLACK, type RoomBuilding } from '../../../src/world/roomOf.ts';
 import { intoWorld } from '../../../src/world/wildLife.ts';
@@ -357,6 +357,53 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   p.step(PEOPLE_TUNE.everySeconds + 0.1, 802, at, deps);
   p.step(PEOPLE_TUNE.everySeconds + 0.1, 804, at, deps);
   ok(bodies.filter((b) => b.z === 0).length === 1, 'nor by walking away and coming back, which would be a respawn by another name');
+}
+
+// ------------------------------------------------------------------ shared with a server
+{
+  // Every browser stands the same people from the same rows; shared with a server, one every other
+  // browser has seen die is down here too until the server's wait is out (`downFor`), and somebody who
+  // may be fought comes back as the same person every life, since the lives are each browser's own count.
+  const creatures = { somebody: { id: 'body', bodies: ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8'], game: { aggression: 'defensive', attackable: true } } };
+  const rows = [row({ respawn: 30 }), row({ z: 3, respawn: 0 })];
+  let down = 50;
+  let seeding = true;
+  const p = new StandingPeople();
+  p.adopt(rows, creatures as never);
+  const { deps, bodies } = game({ downFor: (id) => (id.endsWith(':0') ? down : 0), seeding: () => seeding });
+  const at = new THREE.Vector3(0, 0, 0);
+  p.step(0, 0, at, deps, true);
+  ok(bodies.length === 1 && bodies[0].z === 3, 'somebody every other browser has seen die is not stood here while the server holds them down');
+  ok(bodies[0].how?.respawn === STAYS_DOWN_SECONDS, `and a row that never comes back asks the server to hold its death for the longest it holds any (${bodies[0].how?.respawn} s), not a second`);
+  down = 0;
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 2, at, deps);
+  const first = bodies.find((b) => b.z === 0)!;
+  ok(!!first && first.how?.respawn === 30, 'once it is out they stand, asking their own row\'s wait');
+  const lives: string[] = [first.id!];
+  let t = 2;
+  for (let life = 0; life < 4; life++) {
+    bodies.filter((b) => b.z === 0 && !b.dead).forEach((b) => (b.dead = true));
+    for (let k = 0; k < 4; k++) {
+      t += 20;
+      p.step(PEOPLE_TUNE.everySeconds + 0.1, t, at, deps);
+    }
+    const now = bodies.filter((b) => b.z === 0 && !b.dead && !b.removed).pop();
+    if (now) lives.push(now.id!);
+  }
+  ok(lives.length === 5 && lives.every((id) => id === lives[0]), `shared, the same person comes back every life, so no two browsers draw two people under one name (${lives.join(', ')})`);
+  // The control: alone, the same row draws its bodies afresh each life.
+  seeding = false;
+  const alone: string[] = [];
+  for (let life = 0; life < 4; life++) {
+    bodies.filter((b) => b.z === 0 && !b.dead).forEach((b) => (b.dead = true));
+    for (let k = 0; k < 4; k++) {
+      t += 20;
+      p.step(PEOPLE_TUNE.everySeconds + 0.1, t, at, deps);
+    }
+    const now = bodies.filter((b) => b.z === 0 && !b.dead && !b.removed).pop();
+    if (now) alone.push(now.id!);
+  }
+  ok(new Set(alone).size > 1, `while alone each life draws again, as it always did (${alone.join(', ')})`);
 }
 
 // ------------------------------------------------------------------ what the town says about the one standing there
@@ -864,7 +911,10 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
 
   // What the town says about each row reaches the body the world stands, and the budget can make room.
   ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\), wildLife\.peopleExtras\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows, and the towns' lists and weapon groups beside them");
-  ok(/spawn: \(entry, at, how\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{\s*origin: 'spawned',\s*seed: how\.seed,\s*inside: how\.inside,\s*worldId: `stood:\$\{how\.index\}`,\s*essential: how\.essential,\s*overrides: how\.overrides,\s*mood: how\.mood,\s*weapons: how\.weapons,\s*weaponGroups: how\.weaponGroups,\s*room: how\.room,\s*\}\)/.test(worldSrc), "and stands each with its own creature's numbers, mood, weapons and room over its body's");
+  // The name is the person's own (`stood:<world>:<index>`, unique across worlds so the server can hold it
+  // once), and the row's respawn goes with it, which is how long its post stays empty once it dies.
+  ok(/spawn: \(entry, at, how\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{\s*origin: 'spawned',\s*seed: how\.seed,\s*inside: how\.inside,\s*worldId: how\.id,\s*essential: how\.essential,\s*overrides: how\.overrides,\s*mood: how\.mood,\s*weapons: how\.weapons,\s*weaponGroups: how\.weaponGroups,\s*room: how\.room,\s*respawn: how\.respawn,\s*\}\)/.test(worldSrc), "and stands each with its own creature's numbers, mood, weapons and room over its body's");
+  ok(/stoodId\(i: number\): string \{\s*return `stood:\$\{this\.extras\.world \|\| 'here'\}:\$\{i\}`;/.test(src('world/standingPeople.ts')), 'under a name of its own that says which world it stands on');
   ok(/holds: \(id\) => \{\s*const e = this\.mobileCatalogue\?\.byId\(id\);\s*return !!e && !!this\.mobiles\?\.holdsBody\(e\);\s*\},/.test(worldSrc), 'and tells them which bodies are already built, so an unattackable crowd can lean on them');
   ok(/short: \(entry\) => this\.mobiles\?\.budgetShort\(entry\) \?\? 0,\s*freeStart: \(\) => this\.mobiles\?\.freeStart\(\),\s*frees: \(m\) => this\.mobiles\?\.frees\(m\) \?\? 0,/.test(worldSrc), 'and tells them what the model memory budget is short of and what putting a set of people down gives back, counted of the set');
   ok(/spawn\(entry, at, \{ origin: 'spawned', inside, worldId, essential, fixture: true \}\)/.test(worldSrc) && /const cost = budget \? this\.deps\.assets\.wouldCost\(entry, cat\) : 0;/.test(manager) && /this\.whyNot\(entry, cat, opts\.worldId \? 'world' : origin, !opts\.fixture\)/.test(manager), 'and a ticket collector is a fixture the memory budget never keeps off its pad');

@@ -112,6 +112,11 @@ export interface SpawnRecord {
   seed: number;
   /** Whether it was stood inside a building's rooms rather than on the ground. */
   inside?: boolean;
+  /**
+   * A weapon off the rack the admin put in its hand from the console, by the rack's template: carried in
+   * the record so every browser arms it alike. None, and each arms it from its own list and its seed.
+   */
+  weapon?: string;
 }
 
 /**

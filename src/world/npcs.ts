@@ -125,6 +125,11 @@ import { cullsOneByOne, fighterCull, fitCullSpheres, setBodyCulled, type BodyPos
 // Jedi Academy's roll when it is aimed at, and a jump by what it is (`evade.ts`): the same tables a
 // person from the catalogue reads, and its own rig's own clips.
 import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jumpClipName, jumpHeight, jumpLevelFor, jumpSpeed, ledgeJump, rollCommit, rollDirection, rollVector, tuneEvade, tuneJump, type AimLine, type EvadeTune, type JumpTune, type LedgeAsk, type RollDir } from './evade.ts';
+// A fighter an admin stands with a server is one of the world's creatures (`NpcSubject`): one browser
+// thinks for it and every other drives its copy from the keeper's rows, as for a person from the catalogue.
+import { Strikers } from '../combat/strikers.ts';
+import { NPC_TUNE, mayFight, npcNow, type NpcBolt, type NpcEnd, type NpcLow, type NpcMark, type NpcRow, type NpcSubject } from '../net/npcNet.ts';
+import { rngFor, type SpawnRecord } from './spawnSeed.ts';
 
 /** What a fighter carries, and so how it fights. */
 export type Arm = 'saber' | 'melee' | 'gun';
@@ -143,6 +148,26 @@ function swingStyle(clip: string): 'fast' | 'medium' | 'strong' {
 }
 const SPECIES_FALLBACK = ['human_male', 'human_female', 'twilek_male', 'twilek_female', 'zabrak_male', 'zabrak_female', 'rodian_male', 'bothan_male', 'trandoshan_male', 'moncal_female', 'sullustan_male', 'wookiee_male'];
 const HP = 160;
+
+/**
+ * The word a fighter's spawn record carries where a catalogue body's carries its catalogue id: what an
+ * admin's NPC tab stands with a server, so every browser stands a fighter rather than looking for a
+ * catalogue entry by that name. Its tier follows a colon (`fighter:3`); with none it is stood at the
+ * tier the console sets for every fighter. Ours, as everything about a fighter's record is.
+ */
+export const FIGHTER_SPECIES = 'fighter';
+
+/** Whether a record's species is a fighter's, and the tier it was stood at (null for the console's). */
+export function fighterRecord(species: unknown): { tier: number | null } | null {
+  if (typeof species !== 'string') return null;
+  if (species === FIGHTER_SPECIES) return { tier: null };
+  if (!species.startsWith(`${FIGHTER_SPECIES}:`)) return null;
+  const t = Number(species.slice(FIGHTER_SPECIES.length + 1));
+  return { tier: Number.isInteger(t) && t >= 0 && t <= 9 ? t : null };
+}
+
+/** The stream of a record's seed a fighter's look is drawn from (`rngFor`): its own, so no other roll moves it. */
+const FIGHTER_SEED_STREAM = 17;
 
 /**
  * Everything a fighter's body does that is not the brain's to decide, and every number of it is
@@ -292,17 +317,21 @@ const NOT_STREET = /_quest$|_npe$|_noob$|prison|slave/i;
  * feet always, a hat, gloves or a back piece now and then, each a random piece of the slot for
  * the species' gender. A Wookiee wears only the pieces made for Wookiees, and no one else wears those.
  */
-export function pickOutfit(items: { id: string; kind: string; gender: string; parts?: unknown[] }[], species: string): string[] {
+export function pickOutfit(items: { id: string; kind: string; gender: string; parts?: unknown[] }[], species: string, rand: () => number = Math.random): string[] {
   const wookiee = /^wookiee/i.test(species);
   const gender = /female/.test(species) ? 'f' : 'm';
   // A worn-unseen entry (no meshes: the Ithorians' :hide items) dresses nothing, so it is never picked.
   const pool = items.filter((i) => i.kind !== 'hair' && i.gender === gender && (i.parts?.length ?? 1) > 0 && WOOKIEE_ONLY.test(i.id) === wookiee && !NOT_STREET.test(i.id));
   const bySlot = new Map<string, string[]>();
   for (const i of pool) (bySlot.get(slotOf(i.id)) ?? bySlot.set(slotOf(i.id), []).get(slotOf(i.id))!).push(i.id);
+  // Both draws are always taken, so a seeded fighter (one the server shares) draws the same run of
+  // numbers in every browser whatever each slot turns out to hold.
   const pick = (slot: string, chance: number) => {
     const list = bySlot.get(slot);
-    if (!list?.length || Math.random() > chance) return null;
-    return list[Math.floor(Math.random() * list.length)];
+    const wear = rand();
+    const which = rand();
+    if (!list?.length || wear > chance) return null;
+    return list[Math.floor(which * list.length)];
   };
   return [pick('chest', 1), pick('legs', 1), pick('feet', 1), pick('head', 0.3), pick('hands', 0.3), pick('back', 0.2), pick('waist', 0.4)].filter((s): s is string => !!s);
 }
@@ -427,7 +456,12 @@ let warnedProne = false;
 // `ErrandBody` is here rather than only in `errand.ts` so the compiler is what says a fighter can be
 // given a long walk: its home is writable, it has a key and a label, and it can say what it is doing
 // without allocating. Nothing else in the game answers to it.
-export class Npc implements Living, ErrandBody {
+//
+// `NpcSubject` is the wire's (`src/net/npcNet.ts`): a fighter an admin stands while a server holds the
+// world is one of the world's creatures, stood from the same record in every browser -- its species, its
+// look, its weapon and its blade's colour drawn from the record's seed, so every browser dresses the same
+// body -- and kept by one browser, every other driving its copy from the keeper's rows.
+export class Npc implements Living, ErrandBody, NpcSubject {
   readonly group = new THREE.Group();
   readonly pos = new THREE.Vector3();
   readonly body: RAPIER.RigidBody;
@@ -895,9 +929,22 @@ export class Npc implements Living, ErrandBody {
    */
   errand: Errand | null = null;
 
-  constructor(readonly species: string, private readonly physics: Physics, x: number, y: number, z: number) {
+  /**
+   * Where its look comes from: `Math.random` for a fighter of this browser's own, and the record's seed
+   * for one a server shares, so every browser draws the same heading, colour, height, colours, clothes,
+   * weapon and blade style for it. Only the look is drawn from it; how it fights is its keeper's.
+   */
+  private readonly lookRand: () => number;
+
+  constructor(readonly species: string, private readonly physics: Physics, x: number, y: number, z: number, rand: (() => number) | null = null) {
     this.name = `${species.replace(/_/g, ' ')} fighter`;
     this.legs.who = this.name;
+    this.lookRand = rand ?? Math.random;
+    if (rand) {
+      this.heading = rand() * Math.PI * 2;
+      this.facing = this.heading;
+      this.color.setHSL(rand(), 0.9, 0.55);
+    }
     this.homeX = x;
     this.homeZ = z;
     this.pos.set(x, y, z);
@@ -1023,17 +1070,21 @@ export class Npc implements Living, ErrandBody {
     // clothes off the species' wardrobe.
     const c = rig.character;
     if (c) {
+      const rand = this.lookRand;
       const values: Record<string, number> = {};
-      for (const [name] of Object.entries(c.variableValues())) if (c.canCustomize(name)) values[name] = Math.floor(Math.random() * 12);
+      for (const [name] of Object.entries(c.variableValues())) if (c.canCustomize(name)) values[name] = Math.floor(rand() * 12);
+      // Drawn before the clothes are fetched, so a seeded fighter draws its height from the same place
+      // in its run in every browser whatever the wardrobe turns out to hold.
+      const height = 0.25 + rand() * 0.5;
       let outfit: string[] = [];
       try {
-        outfit = pickOutfit((await c.catalogue(baseUrl)).items, this.species);
+        outfit = pickOutfit((await c.catalogue(baseUrl)).items, this.species, rand);
       } catch {
         outfit = [];
       }
       this.outfit = outfit;
       try {
-        await applyLook(c, { morphs: {}, values, height: 0.25 + Math.random() * 0.5, outfit }, baseUrl);
+        await applyLook(c, { morphs: {}, values, height, outfit }, baseUrl);
       } catch {
         // A look that will not go on is no loss.
       }
@@ -1112,10 +1163,14 @@ export class Npc implements Living, ErrandBody {
     const rig = this.rig;
     const cat = deps.weapons;
     if (!rig || !cat) return;
-    // Asked for by the console, or drawn: a lightsaber half the time, else a sword or a gun.
-    const r = this.wantArm === 'saber' ? 0 : this.wantArm === 'melee' ? 0.6 : this.wantArm === 'gun' ? 0.9 : Math.random();
+    // Asked for by the console, or drawn: a lightsaber half the time, else a sword or a gun. Both draws
+    // are always taken, so a seeded fighter's run of numbers is the same whatever it was asked to carry.
+    const rand = this.lookRand;
+    const drawn = rand();
+    const pick = rand();
+    const r = this.wantArm === 'saber' ? 0 : this.wantArm === 'melee' ? 0.6 : this.wantArm === 'gun' ? 0.9 : drawn;
     const pool = cat.weapons.filter((w) => (r < 0.5 ? w.class === 'lightsaber' : r < 0.7 ? w.class === 'sword1h' || w.class === 'sword2h' || w.class === 'polearm' : FIGHTS[w.class] === 'gun') && !/_static$|_npe$|_noob$/.test(w.id));
-    const def = pool[Math.floor(Math.random() * pool.length)];
+    const def = pool[Math.floor(pick * pool.length)];
     if (!def) return;
     const hand = rig.boneFor('rightHand');
     if (!hand) return;
@@ -1153,7 +1208,7 @@ export class Npc implements Living, ErrandBody {
       // clash cuts its swing short into the return, as the player's does.
       const blades = new NpcSaber(this.voice, this.foeToward);
       blades.weaponClass = def.class;
-      blades.own = styleOf(Math.random(), def.class);
+      blades.own = styleOf(this.lookRand(), def.class);
       blades.tier = this.tier;
       this.blades = blades;
       this.blade.onClash = this.bladeClashed;
@@ -1442,6 +1497,9 @@ export class Npc implements Living, ErrandBody {
     // Held until the clip has run out, or for the roll and the knob's recovery after it (`rollCommit`).
     this.tumbleUntil = this.now + rollCommit(rig.clipDuration(clip) ?? 0);
     this.startTumble();
+    // Every other browser is told, so its copy rolls rather than sliding.
+    this.mark = 'roll';
+    this.markDir = dir;
   }
 
   /**
@@ -1465,6 +1523,10 @@ export class Npc implements Living, ErrandBody {
     const clip = jumpClipName('JUMP', dir, this.jumpForce, rig);
     if (clip) rig.play(clip, { fadeIn: 0.05 });
     this.startTumble();
+    // Every other browser is told which jump, so its copy plays the same clips over the keeper's arc.
+    this.mark = 'jump';
+    this.markDir = dir;
+    this.markForce = this.jumpForce;
   }
 
   /** What starting a roll or a jump takes off it: a swing under way and any low posture. */
@@ -1611,6 +1673,14 @@ export class Npc implements Living, ErrandBody {
     // to each other by `hostileSides`, so this lets a brawl between them stand and only stops the
     // blow that could never have been aimed here.
     if (source && source.key !== this.key && source.side === this.side && !hostileSides(source, this)) return;
+    // Another browser thinks for it: the blow is asked of that browser, with the bolt that struck it
+    // when one did, and nothing is taken off here (`Mobile.damage` says why at length).
+    const bolt = this.heldBoltAt === this.now ? this.heldBolt : null;
+    this.heldBoltAt = -Infinity;
+    if (this.driven && this.shared && npcNow()?.askHit(this.shared, amount, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, '', source?.key === PLAYER_KEY, bolt)) return;
+    // Who struck, for its death's word, kept apart from the brain's grudges: those are cleared the moment
+    // it dies, which is before the death is said.
+    if (source && source.key !== this.key) this.strikers.note(source.key, this.now);
     if (source && source.key !== this.key && source.aggression !== 'passive') this.remember(source);
     // Struck by something standing well off is being shot at: a tiered fighter may throw itself aside.
     if (source && source.key !== this.key) this.evade.struck(this.now, Math.hypot(source.pos.x - this.pos.x, source.pos.z - this.pos.z));
@@ -1714,6 +1784,9 @@ export class Npc implements Living, ErrandBody {
         this.ragdollIn = Math.min(3, (rig.clipDuration(clip) ?? 1) - 0.05);
       }
     }
+    // One of the world's, with a server holding it: the death is a clip and never a ragdoll, which would
+    // come to rest in a different heap on every screen (the rule a person from the catalogue keeps too).
+    if (this.shared && npcNow()?.active) this.ragdollIn = -1000;
     // A saber move let go of, and its whooshes still to come with it -- after the death clip has taken the
     // rig, so the fall blends out of the swing itself; with no death clip, the swing's own is taken off.
     this.dropBlades();
@@ -1833,6 +1906,9 @@ export class Npc implements Living, ErrandBody {
     const melee = this.arm !== 'gun';
     for (const t of foes) {
       if (t.key === this.key) continue;
+      // Another player only for a fighter whose blow can reach their browser: one this browser keeps on
+      // the wire. A console fighter's, or one stood off the wire, would chase a picture for ever.
+      if (!mayFight(t, this.shared)) continue;
       const dx = t.pos.x - this.pos.x;
       const dz = t.pos.z - this.pos.z;
       const grudge = this.memory.get(t.key);
@@ -2888,15 +2964,36 @@ export class Npc implements Living, ErrandBody {
    * nothing better has the rig, as the player's does, and the blade rings where the bolt struck.
    */
   blockBolt(bolt: Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean {
+    if (this.driven) {
+      // Held for the blow the same bolt strikes in the same breath, so the keeper's blade is asked.
+      if (this.blades && this.blade && !this.dead) {
+        const h = this.heldBolt;
+        h.dx = bolt.dir.x;
+        h.dy = bolt.dir.y;
+        h.dz = bolt.dir.z;
+        h.speed = bolt.speed;
+        h.color = bolt.color ?? 0xff4a2a;
+        h.size = bolt.size ?? 1;
+        this.heldBoltAt = this.now;
+      }
+      return false;
+    }
+    if (!this.blockFrom(bolt.dir, point, out)) return false;
+    this.mark = 'block';
+    return true;
+  }
+
+  /** Whether its lit blade turns away a bolt going along `dir` that reached it at `point`, writing where it goes to `out`. */
+  private blockFrom(dir: THREE.Vector3, point: THREE.Vector3, out: THREE.Vector3): boolean {
     const b = this.blades;
     const blade = this.blade;
     const rig = this.rig;
-    if (!b || !blade || !rig || this.dead || this.heldAt || this.arm !== 'saber') return false;
+    if (!b || !blade || !rig || this.dead || this.driven || this.heldAt || this.arm !== 'saber') return false;
     const a = this.blockAsk;
     // Out and lit: a blade still igniting or going out turns nothing.
     a.lit = blade.ignition >= 0.9 && this.sinceFought < STANCE_TUNE.ready;
     a.tumbling = this.tumbling || this.now < this.tumbleUntil;
-    a.dir.copy(bolt.dir);
+    a.dir.copy(dir);
     a.hit.copy(point);
     blockFrame(a, this.pos.x, this.pos.y, this.pos.z, this.facing, BLOCK_EYE);
     const t = this.target;
@@ -3013,6 +3110,10 @@ export class Npc implements Living, ErrandBody {
       name: this.name,
       arm: this.arm,
       state: this.state,
+      // One of the world's, and whether another browser thinks for it (then what its keeper says of it).
+      shared: this.shared || null,
+      driven: this.driven,
+      told: this.driven ? { speed: Number(this.toldSpeed.toFixed(2)), cover: this.toldCover } : null,
       target: this.targetKey === PLAYER_KEY ? 'you' : (this.target?.label ?? this.targetKey),
       hp: Number(this.hp.toFixed(0)),
       nerve: this.nerve,
@@ -3084,6 +3185,12 @@ export class Npc implements Living, ErrandBody {
       for (const g of this.memory.values()) g.at = now;
     }
     this.now = now;
+    this.boltsNow = bolts;
+    // Another browser thinks for it: walked to what its keeper says, and nothing of its own runs.
+    if (this.driven && !this.dead) {
+      this.stepDriven(dt, camera);
+      return;
+    }
     // Slowed, everything of its own runs at a crawl; a burn eats in real time.
     this.slowed = Math.max(0, this.slowed - dt);
     const own = this.slowed > 0 ? 0.12 : 1;
@@ -3550,7 +3657,278 @@ export class Npc implements Living, ErrandBody {
     return this.blade ? this.blade.glowCore(out, n) : n;
   }
 
+  // ---- one of the world's creatures ----------------------------------------------------------------
+  //
+  // Everything from here to `stepDriven` is the `NpcSubject` the wire talks to (`src/net/npcNet.ts`),
+  // the same contract a person from the catalogue keeps, on the same rules: one browser thinks for it,
+  // every other holds the same body with its mind switched off and walked to what the keeper says, a
+  // blow struck at a copy is asked of the keeper, and its death is the keeper's word. A fighter is
+  // already kinematic and is written where it goes, so a driven one is simply written where it is told.
+
+  /** The name every browser knows it by, when an admin stood it with a server; '' while it is this browser's alone. */
+  private shared = '';
+  /** Another browser thinks for it. */
+  private driven = false;
+  private readonly toldAt = new THREE.Vector3();
+  private toldHeading = 0;
+  private toldSpeed = 0;
+  private toldState: MobileState = 'idle';
+  private toldOnce = false;
+  private toldCover = false;
+  /** Something this browser owes the wire about it while it keeps it, and which way a roll or a jump went. */
+  private mark: NpcMark | null = null;
+  private markDir: RollDir = 'F';
+  private markForce = false;
+  /** A driven copy's jump, played from its keeper's mark: until when it is held in the air. */
+  private hopDownAt = 0;
+  /** A bolt that reached a driven copy, held for the blow it strikes in the same breath (see `Mobile.blockBolt`). */
+  private readonly heldBolt: NpcBolt = { dx: 0, dy: 0, dz: 1, speed: 0, color: 0xff4a2a, size: 1 };
+  private heldBoltAt = -Infinity;
+
+  /** Make it one of the world's, by the name every browser knows it by. */
+  shareAs(id: string): void {
+    this.shared = id;
+  }
+
+  get npcId(): string {
+    return this.shared;
+  }
+
+  get npcDead(): boolean {
+    return this.dead;
+  }
+
+  /** Another browser thinks for it. */
+  get isDriven(): boolean {
+    return this.driven;
+  }
+
+  /** Where it is, what it is doing and how much of it is left, for its keeper's batch; nothing before it has a rig. */
+  npcFill(row: NpcRow): boolean {
+    if (!this.rig) return false;
+    row.p[0] = this.pos.x;
+    row.p[1] = this.pos.y;
+    row.p[2] = this.pos.z;
+    row.h = this.heading;
+    row.s = this.state;
+    row.v = this.moving ? this.paceSpeed(this.pace === 'walk' ? 'walk' : 'run') : 0;
+    row.hp = this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    if (this.mark) {
+      row.f = this.mark;
+      if (this.mark === 'roll' || this.mark === 'jump') row.fd = this.markDir;
+      if (this.mark === 'jump' && this.markForce) row.ff = 1;
+      this.mark = null;
+    }
+    if (this.posture !== 'stand') row.po = this.posture as NpcLow;
+    if (this.coverKind && Math.hypot(this.coverX - this.pos.x, this.coverZ - this.pos.z) <= FIGHTER_TUNE.arrive) row.cv = 1;
+    // Its mind does not cross: a fighter handed over picks its own fight on its first thought, which is
+    // what a fighter has always done when it lost its target.
+    row.b = undefined;
+    return true;
+  }
+
+  /** What its keeper says: walked toward, never jumped to, but for the first word, where there is nothing to walk from. */
+  npcDrive(row: NpcRow, snap: boolean): void {
+    if (this.dead) return;
+    this.toldAt.set(row.p[0], row.p[1], row.p[2]);
+    this.toldHeading = row.h;
+    this.toldSpeed = row.v;
+    this.toldState = row.s as MobileState;
+    this.toldCover = row.cv === 1;
+    this.hp = Math.max(0, Math.min(this.maxHp, row.hp * this.maxHp));
+    if (snap || !this.toldOnce) {
+      this.toldOnce = true;
+      this.pos.copy(this.toldAt);
+      this.heading = row.h;
+      this.facing = row.h;
+    }
+    // How low it stands, as its keeper has it: the shell, the aim point and the transition between.
+    const low = row.po ?? 'stand';
+    if (low !== this.posture && !this.tumbling) {
+      const was = this.posture;
+      this.setPosture(low);
+      const rig = this.rig;
+      const clip = rig?.firstOf(...postureTransitionNames(was, low, this.arm === 'gun' ? (this.gunPose?.kind ?? null) : null, false, this.toldSpeed > 0.3));
+      if (clip && rig) rig.play(clip, { fadeIn: 0.08 });
+    }
+    if (row.f) this.sawMark(row.f, row.fd ?? 'F', row.ff === 1);
+  }
+
+  /** Something its keeper did that has to be seen once: a roll, a jump, a parry, a knock off its feet. */
+  private sawMark(mark: NpcMark, dir: RollDir, force: boolean): void {
+    const rig = this.rig;
+    if (mark === 'roll') {
+      const clip = ROLL_CLIPS[dir];
+      if (!rig?.has(clip)) return;
+      if (this.posture !== 'stand') this.setPosture('stand');
+      this.rollLeft = EVADE_TUNE.rollTime;
+      rig.play(clip, { fadeIn: 0.05 });
+      this.tumbleUntil = this.now + rollCommit(rig.clipDuration(clip) ?? 0);
+      this.reshape();
+      this.applyCull();
+      return;
+    }
+    if (mark === 'jump') {
+      if (!rig) return;
+      if (this.posture !== 'stand') this.setPosture('stand');
+      this.jumpForce = force;
+      this.jumpDir = dir;
+      this.jumping = true;
+      this.grounded = false;
+      rig.prefer('air', jumpClipName('INAIR', dir, force, rig));
+      const clip = jumpClipName('JUMP', dir, force, rig);
+      if (clip) rig.play(clip, { fadeIn: 0.05 });
+      const up = jumpSpeed(jumpHeight(force ? 2 : 1), FIGHTER_BODY.gravity);
+      this.hopDownAt = this.now + (up > 0 ? (2 * up) / FIGHTER_BODY.gravity : 0.8);
+      this.applyCull();
+      return;
+    }
+    if (mark === 'block') {
+      const b = this.blades;
+      if (rig && b && !b.busy && !rig.overriding) {
+        const clip = parryClip(b.style, 'top', this.hasClip);
+        if (clip) rig.play(clip, { fadeIn: 0.05 });
+      }
+      combatSounds.saberContact('block', this.pos.x, this.pos.y + 1.2, this.pos.z);
+      return;
+    }
+    if (mark === 'leap') this.grounded = false;
+  }
+
+  /**
+   * Thinking for it here, or driven from elsewhere: called only when the answer changes. Taking one over
+   * starts its mind from where it stands; giving one up lets go of whatever of its own it was doing, since
+   * from now on its keeper's browser swings its blade and pulls its trigger.
+   */
+  npcSetDriven(driven: boolean): void {
+    if (this.driven === driven) return;
+    this.driven = driven;
+    if (driven) {
+      this.toldAt.copy(this.pos);
+      this.toldHeading = this.heading;
+      this.toldSpeed = 0;
+      this.toldState = this.state;
+      this.toldOnce = false;
+      this.target = null;
+      this.targetKey = null;
+      this.decision = null;
+      this.goal = null;
+      this.swingLeft = -1;
+      this.swingTarget = null;
+      this.dropBlades();
+      this.heldAt = null;
+      this.stunned = 0;
+      this.slowed = 0;
+      this.dotLeft = 0;
+      this.aimFix.yaw = 0;
+      this.aimFix.pitch = 0;
+      this.aimTurn = 0;
+      this.rollLeft = 0;
+      this.jumping = false;
+      this.forced = null;
+      this.setPosture('stand');
+      return;
+    }
+    // Its own again, from where it stands: it thinks at once.
+    this.thinkAt = 0;
+    this.wanderAt = -1;
+    this.state = this.dead ? this.state : 'idle';
+  }
+
+  /**
+   * A blow somebody else struck, at the keeper: its own blade asked first about a bolt, as the person
+   * from the catalogue's is, and anything not turned away taken off here, the only place it comes off.
+   */
+  npcHurt(amount: number, x: number, y: number, z: number, source: Living | null, _what = '', bolt: NpcBolt | null = null): void {
+    if (this.dead || this.driven) return;
+    tmp.set(x, y, z);
+    if (bolt && this.blades && this.blade && this.arm === 'saber') {
+      tmp2.set(bolt.dx, bolt.dy, bolt.dz);
+      if (this.blockFrom(tmp2, tmp, tmp3)) {
+        this.mark = 'block';
+        npcNow()?.noteBlocked();
+        spot.copy(tmp).addScaledVector(tmp3, 0.05);
+        this.boltsNow?.fire(spot, tmp3, { owner: 'enemy', damage: amount, metresPerSecond: bolt.speed > 0 ? bolt.speed : undefined, color: bolt.color, size: bolt.size, exclude: this.body, source: this });
+        return;
+      }
+    }
+    this.damage(amount, tmp, 0, source);
+  }
+
+  /** The bolts it was last handed (its own `update`), for a bolt flown back off its blade at the keeper's. */
+  private boltsNow: Bolts | null = null;
+
+  /** Its keeper says it is gone: dead, or taken out of the world. */
+  npcEnd(why: NpcEnd): void {
+    if (why === 'dead') {
+      if (!this.dead) this.die();
+      return;
+    }
+    if (!this.dead) this.die();
+    this.deadTimer = 0;
+  }
+
+  /** Who struck it within `seconds`, by living key, for its death's word. */
+  npcStruckBy(seconds: number, out: number[]): void {
+    // Its own record of blows, never the brain's memory, which `die` clears before the death is said.
+    this.strikers.within(this.now, seconds, out);
+  }
+
+  /** Who has struck it lately, kept through its death: what that death names (`Strikers`). */
+  private readonly strikers = new Strikers();
+
+  /**
+   * One frame of a copy another browser thinks for: walked toward what its keeper said at the tenth of a
+   * second every other glide uses, written into its kinematic body, posed from the pace and the state
+   * its keeper told, with its blade lit while it is in a fight. Nothing of its own is decided.
+   */
+  private stepDriven(dt: number, camera: THREE.Camera | null): void {
+    const k = this.toldOnce ? 1 - Math.exp(-dt / Math.max(1e-3, NPC_TUNE.glideSeconds)) : 1;
+    this.pos.lerp(this.toldAt, k);
+    this.heading += wrapAngle(this.toldHeading - this.heading) * k;
+    this.facing = this.heading;
+    this.toldOnce = true;
+    this.state = this.toldState;
+    const fighting = this.state === 'chase' || this.state === 'attack' || this.state === 'cover' || this.state === 'alert';
+    this.sinceFought = fighting ? 0 : this.sinceFought + dt;
+    this.moving = this.toldSpeed > 0.3;
+    this.pace = this.toldSpeed > (FIGHTER_TUNE.walk + FIGHTER_TUNE.run) / 2 ? 'run' : 'walk';
+    this.stance = !fighting && this.sinceFought >= STANCE_TUNE.ready ? 'relaxed' : this.arm === 'gun' && this.state === 'attack' ? 'aim' : 'ready';
+    // A roll or a jump its keeper threw, played out on the clips' own clock.
+    if (this.rollLeft > 0) {
+      const left = this.rollLeft - dt;
+      if (left <= 0) this.endTumble();
+      else this.rollLeft = left;
+    } else if (this.jumping && this.now >= this.hopDownAt) {
+      this.land();
+      this.grounded = true;
+    }
+    if (this.cullTumble && !this.tumbling && this.now >= this.tumbleUntil) this.applyCull();
+    this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y + this.bodyLift, z: this.pos.z });
+    this.group.position.copy(this.pos);
+    this.group.quaternion.setFromAxisAngle(UP, this.heading);
+    const rig = this.rig;
+    if (rig) {
+      if (!rig.overriding) this.poseRig(rig, 1);
+      rig.update(dt);
+      this.group.updateMatrixWorld(true);
+    }
+    if (this.holder && this.blade) {
+      this.holder.updateWorldMatrix(true, false);
+      this.holder.localToWorld(this.bladeBase.set(0, this.hiltTop, 0));
+      this.holder.localToWorld(this.bladeTip.set(0, this.hiltTop + this.blade.spec.length, 0));
+      this.blade.owner = this.key;
+      this.blade.attacking = false;
+      this.blade.update(dt, this.bladeBase, this.bladeTip, this.sinceFought < STANCE_TUNE.ready, camera ?? IDLE_CAMERA, this.moving ? 0.3 : 0);
+    }
+  }
+
   dispose(scene: THREE.Scene): void {
+    // Off the wire with it: this browser's body went, not the creature.
+    if (this.shared) {
+      const net = npcNow();
+      if (net?.find(this.shared) === this) net.remove(this.shared);
+    }
     this.ragdoll?.dispose();
     this.ragdoll = null;
     // Anything still holding this one reads it as dead from here on.
@@ -3728,10 +4106,18 @@ export class NpcManager {
    * Stand one at a point on the ground, of a random species; it dresses and arms itself as its rig
    * loads. `at.y` and `at.inside` put it on a building's floor, in the room the point is in.
    */
-  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean; tier?: number; arm?: Arm } = {}): Npc {
+  spawnAt(x: number, z: number, wanted?: string, at: { y?: number; inside?: boolean; tier?: number; arm?: Arm; seed?: number; heading?: number } = {}): Npc {
     const species = this.deps.species.length ? this.deps.species : SPECIES_FALLBACK;
-    const id = (wanted && species.find((s) => s.includes(wanted))) ?? species[Math.floor(Math.random() * species.length)];
-    const npc = new Npc(id, this.physics, x, at.y ?? this.terrain.heightAt(x, z), z);
+    // A fighter stood from one of the server's records draws everything it looks like from the record's
+    // seed, so every browser dresses the same body; one of this browser's own draws as it always did.
+    const rand = at.seed !== undefined ? rngFor(at.seed, FIGHTER_SEED_STREAM) : null;
+    const pickSpecies = rand ? rand() : Math.random();
+    const id = (wanted && species.find((s) => s.includes(wanted))) ?? species[Math.floor(pickSpecies * species.length)];
+    const npc = new Npc(id, this.physics, x, at.y ?? this.terrain.heightAt(x, z), z, rand);
+    if (at.heading !== undefined && Number.isFinite(at.heading)) {
+      npc.heading = at.heading;
+      npc.facing = at.heading;
+    }
     npc.setTier(at.tier ?? this.tier);
     // What it carries, when the console asked: a lightsaber, a sword or a gun off the rack.
     if (at.arm) npc.wantArm = at.arm;
@@ -3751,6 +4137,60 @@ export class NpcManager {
     this.version++;
     void npc.dress(this.baseUrl, this.deps).catch((err) => console.warn(`fighter ${id}: no rig`, err));
     return npc;
+  }
+
+  /** The fighters stood from the server's records, by the name every browser knows them by, and back. */
+  private readonly byWorldId = new Map<string, Npc>();
+
+  /**
+   * Stand one from one of the server's own records (`FIGHTER_SPECIES`, with its tier after a colon):
+   * where the admin stood it and facing as they faced it, its look drawn from the record's seed so every
+   * browser dresses the same body, and put on the wire so one browser thinks for it. A record already
+   * standing answers the one standing; one for another world, or that is not a fighter's, is refused.
+   */
+  standRecord(rec: SpawnRecord, world: string): Npc | string {
+    const what = fighterRecord(rec?.species);
+    if (!what) return 'that record is not a fighter';
+    if (rec.world !== world) return `that fighter belongs to ${rec.world}, and this is ${world}`;
+    const had = this.byWorldId.get(rec.id);
+    if (had && !had.dead) return had;
+    const npc = this.spawnAt(rec.x, rec.z, undefined, { y: rec.y, inside: rec.inside, tier: what.tier ?? undefined, seed: rec.seed, heading: rec.heading });
+    npc.shareAs(rec.id);
+    this.byWorldId.set(rec.id, npc);
+    npcNow()?.add(npc);
+    return npc;
+  }
+
+  /** A fighter's name in the world let go of with its body, so a later record under it is a new one. */
+  private forgetName(npc: Npc): void {
+    const id = npc.npcId;
+    if (id && this.byWorldId.get(id) === npc) this.byWorldId.delete(id);
+  }
+
+  /** The fighter the world calls `id`, or null. */
+  fighterById(id: string): Npc | null {
+    const n = this.byWorldId.get(id);
+    return n && !n.dead ? n : null;
+  }
+
+  /** Every name the world's fighters here go by: what the world's list may take down when it no longer names one. */
+  get worldIds(): IterableIterator<string> {
+    return this.byWorldId.keys();
+  }
+
+  /** Take down the fighter the world calls `id`; false when there is none here. */
+  removeById(id: string): boolean {
+    const npc = this.byWorldId.get(id);
+    if (!npc) return false;
+    this.byWorldId.delete(id);
+    const i = this.npcs.indexOf(npc);
+    if (i >= 0) {
+      this.closeErrand(npc);
+      npc.dispose(this.scene);
+      this.npcs.splice(i, 1);
+      this.version++;
+    }
+    return true;
   }
 
   /**
@@ -3852,6 +4292,22 @@ export class NpcManager {
     return n;
   }
 
+  /** Take away every fighter `pick` names (one of this browser's own, say), the rest left standing. Answers how many. */
+  removeWhere(pick: (npc: Npc) => boolean): number {
+    let n = 0;
+    for (let i = this.npcs.length - 1; i >= 0; i--) {
+      const npc = this.npcs[i];
+      if (!pick(npc)) continue;
+      this.closeErrand(npc);
+      this.forgetName(npc);
+      npc.dispose(this.scene);
+      this.npcs.splice(i, 1);
+      n++;
+    }
+    if (n) this.version++;
+    return n;
+  }
+
   removeAll(): number {
     const n = this.npcs.length;
     for (const npc of this.npcs) {
@@ -3860,6 +4316,7 @@ export class NpcManager {
     }
     this.npcs.length = 0;
     this.byCollider.clear();
+    this.byWorldId.clear();
     this.version++;
     return n;
   }
@@ -3938,6 +4395,7 @@ export class NpcManager {
       }
       if (npc.dead && npc.deadTimer <= 0) {
         this.closeErrand(npc);
+        this.forgetName(npc);
         // The collider handle went out of the lookup in `die`, at the moment the collider itself
         // went. Deleting it again here would unregister whichever live body rapier has since
         // given that recycled handle to, and that body would stop taking damage.

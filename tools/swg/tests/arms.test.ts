@@ -161,8 +161,10 @@ const at = (u: number) => () => u;
   const src = (p: string): string => readFileSync(new URL(`../../../src/${p}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const manager = src('world/mobiles/manager.ts');
   const mobile = src('world/mobiles/mobile.ts');
-  // With the console's own choice beside them (`__debug.mobile(.., { weapon })`), for this browser's own spawns only.
-  ok(/const own: OwnArms = \{ weapons: opts\.weapons, groups: opts\.weaponGroups, aggression: opts\.overrides\?\.aggression, ranged: opts\.overrides\?\.ranged, forcedTemplate: forced \};/.test(manager) && /const forced = opts\.weaponTemplate && !opts\.worldId \? opts\.weaponTemplate : undefined;/.test(manager), "a body's own creature's weapons, temper and gun reach the decision");
+  // With the console's own choice beside them (`__debug.mobile(.., { weapon })`): on this browser's own
+  // spawns, and on a body stood from one of the server's records that carries it, which every browser
+  // stands alike. Never on a seeded body, which every browser arms from its own seed.
+  ok(/const own: OwnArms = \{ weapons: opts\.weapons, groups: opts\.weaponGroups, aggression: opts\.overrides\?\.aggression, ranged: opts\.overrides\?\.ranged, forcedTemplate: forced \};/.test(manager) && /const forced = opts\.weaponTemplate && \(!opts\.worldId \|\| opts\.listed\) \? opts\.weaponTemplate : undefined;/.test(manager), "a body's own creature's weapons, temper and gun reach the decision");
   ok(/const decided = decideArms\(entry, packInfo\.hierarchy, roles, json\.roleSources, own, rack\?\.weapons \?\? null, rand\);\s*if \(!decided\) return null;/.test(manager), 'which the manager takes whole, drawn from its seed');
   ok(/const def = decided\.weapon \?\? \(rack \? chooseWeapon\(choice, rack\.weapons, rand\) : null\);/.test(manager), 'the weapon its list drew is the one it holds');
   ok(/kind: decided\.hold,\s*gun: decided\.hold === 'gun' \? \(GUNS\[gunTypeFor\(def, def\.class\)\] \?\? null\) : null,/.test(manager), 'handed over as it is held, and only a gun with a bolt');

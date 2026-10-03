@@ -3,10 +3,13 @@
 // when somebody else has been a quarter nearer for three seconds together, two players the same
 // distance away never move it, a keeper that falls silent or goes to sleep loses everything it kept,
 // and a creature that dies in the middle of being handed over is handed to nobody. Everything a
-// browser can send goes through its checker first. Synthetic players only; no sockets and no clock
-// but the one handed in, so every rule can be stepped by hand.
+// browser can send goes through its checker first. The seen ones -- the lairs, nests and people every
+// browser seeds for itself -- are held once whoever says it, only under their three kinds of name, kept
+// only by a browser with a body for them, dead until their own respawn and then forgotten, and forgotten
+// too once nobody keeps or sees them. Synthetic players only; no sockets and no clock but the one
+// handed in, so every rule can be stepped by hand.
 import assert from 'node:assert/strict';
-import { OWN_TUNING, Ownership, cleanId, cleanKeep, cleanSpawn, maySpawn } from '../../../server/ownership.mjs';
+import { OWN_TUNING, Ownership, SEEN_PREFIXES, cleanId, cleanKeep, cleanSpawn, cleanTemplate, mayBlow, maySee, maySpawn, seenId } from '../../../server/ownership.mjs';
 import { adminFor, firstRegistered, isAdmin } from '../../../server/identity.mjs';
 
 let checks = 0;
@@ -47,6 +50,10 @@ function server(tuning: Record<string, number> = {}) {
     },
     /** Work them out without moving the clock. */
     tick: () => post(own.tick() as Result),
+    /** Move the clock on and work nothing out: a word arriving between two of the relay's passes. */
+    skip(ms: number) {
+      t += ms;
+    },
     /** Somebody is standing here. */
     at(session: number, x: number, y = 0, z = 0, world = 'tatooine ') {
       own.here(session, world, [x, y, z]);
@@ -336,6 +343,276 @@ function stand(s: ReturnType<typeof server>, world = 'tatooine ') {
   ok(s.own.listFor('tatooine ')[0].hp === 1, '15: a share is a share, whatever a browser on another build sends');
   s.own.health(1, id, Number.NaN);
   ok(s.own.listFor('tatooine ')[0].hp === 1, '15: and something that is not a number changes nothing');
+}
+
+// --- 16: what a browser may say about the ones it seeds for itself ---------------------------------------
+{
+  const seen = cleanSpawn({ t: 'spawn', do: 'seen', id: 'wild:tatooine:3:1', at: [1, 2, 3], r: 300 });
+  ok(seen?.do === 'seen' && seen.id === 'wild:tatooine:3:1' && seen.at[1] === 2 && seen.r === 300, '16: saying one has been seen names it, where it stands and how long it stays down');
+  ok(cleanSpawn({ t: 'spawn', do: 'seen', id: 'k4', at: [0, 0, 0] }) === undefined, '16: a name an admin\'s creature goes by is not one a browser may say it has seen');
+  ok(cleanSpawn({ t: 'spawn', do: 'seen', id: 'travel:tatooine:1', at: [0, 0, 0] }) === undefined && cleanSpawn({ t: 'spawn', do: 'seen', id: 'ours:x', at: [0, 0, 0] }) === undefined, '16: nor is a ticket collector\'s or one of ours, which nobody may strike');
+  ok(cleanSpawn({ t: 'spawn', do: 'seen', id: 'wild:', at: [0, 0, 0] }) === undefined, '16: and a bare prefix names nothing');
+  ok(cleanSpawn({ t: 'spawn', do: 'seen', id: 'stood:naboo:2' }) === undefined, '16: one with nowhere to stand is dropped');
+  ok(cleanSpawn({ t: 'spawn', do: 'seen', id: 'camp:naboo:2', at: [0, 0, 0], r: 1e12 })?.r === OWN_TUNING.respawnMax / 1000, '16: a respawn past an hour is an hour');
+  ok(cleanSpawn({ t: 'spawn', do: 'seen', id: 'camp:naboo:2', at: [0, 0, 0], r: 'x' })?.r === 0, '16: and one that is not a number is none');
+  ok(cleanSpawn({ t: 'spawn', do: 'unseen', id: 'wild:a' })?.do === 'unseen' && cleanSpawn({ t: 'spawn', do: 'taken', id: 'wild:a' })?.do === 'taken', '16: putting one down and walking off with one each name it');
+  const dead = cleanSpawn({ t: 'spawn', do: 'dead', id: 'k3', by: [4, 4, 7, -1, 1.5, 'x', 0, 9, 10, 11, 12, 13, 14, 15, 16] });
+  ok(JSON.stringify(dead?.by) === '[4,7,9,10,11,12,13,14]', `16: who struck it is a few relay ids, each once, and nothing else (${JSON.stringify(dead?.by)})`);
+  ok(cleanSpawn({ t: 'spawn', do: 'dead', id: 'k3', by: 'everyone' })?.by === undefined, '16: and a list that is not one names nobody');
+  ok(cleanSpawn({ t: 'spawn', do: 'add', species: 'a_creature', at: [0, 0, 0], weapon: 'object/weapon/ranged/rifle/rifle_e11.iff' })?.weapon === 'object/weapon/ranged/rifle/rifle_e11.iff', '16: an admin may put a weapon in a creature\'s hand as it is stood');
+  ok(cleanSpawn({ t: 'spawn', do: 'add', species: 'a_creature', at: [0, 0, 0], weapon: '../../etc/passwd' })?.weapon === undefined && cleanSpawn({ t: 'spawn', do: 'add', species: 'a_creature', at: [0, 0, 0], weapon: 'a b' })?.weapon === undefined, '16: and a path that climbs out, or is not a path, is no weapon');
+  ok(cleanTemplate(7) === '' && cleanTemplate('x'.repeat(200)) === '', '16: a weapon is a short string or nothing');
+  ok(seenId('wild:a') && seenId('stood:a') && seenId('camp:a') && !seenId('travel:a') && !seenId('k1') && !seenId(7), '16: exactly three kinds of name are the seen ones');
+  ok(SEEN_PREFIXES.length === 3, '16: and they are the lairs\', the people\'s and the nests\'');
+  const window = { at: 0, lines: 0 };
+  let through = 0;
+  for (let i = 0; i < 40; i++) if (maySee(window, 5000)) through++;
+  ok(through === OWN_TUNING['seen.perSecond'], `16: one browser may say it has seen ${OWN_TUNING['seen.perSecond']} in a second, apart from the spawn allowance`);
+}
+
+// --- 17: seen once, whoever says it, and never in the list a browser is handed ------------------------------
+{
+  const s = server();
+  s.at(1, 10);
+  s.at(2, 20);
+  const first = s.do(s.own.sight(1, 'tatooine ', 'wild:t:1:0', [0, 0, 0], 60000) as Result & { created?: boolean });
+  ok(first.ok && (first as { created?: boolean }).created === true, '17: the first browser to say it has stood one makes the record');
+  ok(s.own.keeperOf('wild:t:1:0') === 1 && s.added(1)[0] === 'wild:t:1:0', '17: and, the only one with a body for it, keeps it at once');
+  const second = s.do(s.own.sight(2, 'tatooine ', 'wild:t:1:0', [0, 0, 0], 60000) as Result & { created?: boolean });
+  ok(second.ok && (second as { created?: boolean }).created !== true, '17: a second browser saying the same only joins it');
+  ok(s.own.counts().seen === 1, '17: so there is one creature and not two');
+  ok(s.added(2).length === 0, '17: and the second is not handed it while the first, nearer, has it');
+  ok(s.own.listFor('tatooine ').length === 0, '17: a seen one is never in the list a browser arriving stands from: every browser stands its own');
+  s.do(s.own.clearWorld('tatooine ') as Result);
+  ok(s.own.alive('wild:t:1:0'), '17: and an admin clearing the world takes down what the admin stood, not the world\'s own lairs');
+}
+
+// --- 18: only the seeded kinds, and never a name an admin's creature has -----------------------------------
+{
+  const s = server();
+  s.at(1, 0);
+  ok(s.do(s.own.sight(1, 'tatooine ', 'travel:t:1', [0, 0, 0], 0) as Result).ok === false, '18: a ticket collector is never on the list');
+  ok(s.do(s.own.sight(1, 'tatooine ', 'k1', [0, 0, 0], 0) as Result).ok === false, '18: nor is an admin\'s kind of name');
+  ok(s.own.counts().seen === 0, '18: so neither made a record');
+  const made = s.do(s.own.spawn({ world: 'tatooine ', species: 'a_creature', at: [0, 0, 0], id: 'stood:t:4' }) as Result);
+  ok(made.row.id !== 'stood:t:4', '18: an admin asking for a seeded name is given another, so one name is never two creatures');
+  s.do(s.own.sight(1, 'tatooine ', 'stood:t:5', [0, 0, 0], 0) as Result);
+  s.clear();
+  const elsewhere = s.do(s.own.sight(1, 'naboo ', 'stood:t:5', [0, 0, 0], 0) as Result);
+  ok(elsewhere.ok === false && s.to(1).some((m) => m.t === 'spawn' && m.do === 'local' && m.id === 'stood:t:5'), '18: the same name said from another world is told to keep its body to itself');
+}
+
+// --- 19: only a browser with a body for it keeps it, however near anybody else is ---------------------------
+{
+  const s = server();
+  s.at(1, 500);
+  s.at(2, 1);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:2:0', [0, 0, 0], 0) as Result);
+  s.tick();
+  ok(s.own.keeperOf('wild:t:2:0') === 1, '19: a browser five hundred metres off that has a body for it keeps it, past the 180 m an admin\'s needs');
+  s.wait(10000);
+  ok(s.own.keeperOf('wild:t:2:0') === 1 && s.added(2).length === 0, '19: and a browser right beside it that never stood one is never handed it');
+  s.do(s.own.sight(2, 'tatooine ', 'wild:t:2:0', [0, 0, 0], 0) as Result);
+  s.wait(OWN_TUNING.steady + 600);
+  ok(s.own.keeperOf('wild:t:2:0') === 2, '19: once it says it has one, it takes it over by the same quarter-nearer rule as anything else');
+}
+
+// --- 20: putting one down hands it on at once -----------------------------------------------------------------
+{
+  const s = server();
+  s.at(1, 5);
+  s.at(2, 50);
+  s.do(s.own.sight(1, 'tatooine ', 'stood:t:9', [0, 0, 0], 0) as Result);
+  s.do(s.own.sight(2, 'tatooine ', 'stood:t:9', [0, 0, 0], 0) as Result);
+  ok(s.own.keeperOf('stood:t:9') === 1, '20: the nearer of two browsers with a body keeps it');
+  s.clear();
+  s.do(s.own.unsee(1, 'stood:t:9') as Result);
+  ok(s.own.keeperOf('stood:t:9') === 2 && s.dropped(1).includes('stood:t:9') && s.added(2).includes('stood:t:9'), '20: the keeper putting its body down hands it to the other at once, with no three seconds');
+  s.clear();
+  s.at(1, 1);
+  s.wait(10000);
+  ok(s.own.keeperOf('stood:t:9') === 2, '20: and walking back beside it is not having a body for it again until it says so');
+  s.do(s.own.gone(2) as Result);
+  ok(s.own.keeperOf('stood:t:9') === 0, '20: the last body going takes the keeper with it');
+}
+
+// --- 20b: a browser that went to another world and came back has a body for none of what it left -----------------
+{
+  // Asked of the very case the rule is for: no line closing, no word put down -- it went to another world
+  // (where it put every body of this one down with the world) and came back, and has said nothing since.
+  const s = server();
+  s.at(1, 5);
+  s.at(2, 50);
+  s.do(s.own.sight(1, 'tatooine ', 'stood:t:19', [0, 0, 0], 0) as Result);
+  s.do(s.own.sight(2, 'tatooine ', 'stood:t:19', [0, 0, 0], 0) as Result);
+  ok(s.own.keeperOf('stood:t:19') === 1, '20b: the nearer of two browsers with a body keeps it');
+  s.at(2, 50, 0, 0, 'naboo ');
+  s.tick();
+  s.at(2, 50);
+  s.tick();
+  s.clear();
+  s.do(s.own.unsee(1, 'stood:t:19') as Result);
+  s.wait(OWN_TUNING.steady + 600);
+  ok(s.own.keeperOf('stood:t:19') === 0 && !s.added(2).includes('stood:t:19'), '20b: so when the other puts its body down nobody keeps it, rather than a browser that has no body for it any more');
+}
+
+// --- 21: dead stays dead for its own respawn, and is then forgotten -------------------------------------------
+{
+  const s = server();
+  s.at(1, 5);
+  s.at(2, 6);
+  s.do(s.own.sight(1, 'tatooine ', 'camp:t:3', [0, 0, 0], 30000) as Result);
+  const end = s.do(s.own.died('camp:t:3') as Result) as Result & { back?: number };
+  ok(end.ok && end.back === 30, `21: a seen one that dies is held down for the respawn it was seen with, and says so (${end.back} s)`);
+  ok(s.own.alive('camp:t:3') === false && s.own.keeperOf('camp:t:3') === 0, '21: nobody keeps it while it is down');
+  s.clear();
+  s.do(s.own.sight(2, 'tatooine ', 'camp:t:3', [0, 0, 0], 30000) as Result);
+  const told = s.to(2).find((m) => m.t === 'spawn' && m.do === 'gone');
+  ok(told?.id === 'camp:t:3' && told.why === 'dead' && told.back >= 1 && told.back <= 30, '21: a browser saying it has stood it meanwhile is told it is dead, and for how much longer, so its copy goes down rather than up whole');
+  ok(s.own.counts().seen === 0 && s.own.counts().seenDead === 1, '21: and the record stays one dead creature');
+  s.wait(29000);
+  ok(s.own.creatures.has('camp:t:3'), '21: a moment before its respawn is out it is still held');
+  s.wait(1500);
+  ok(!s.own.creatures.has('camp:t:3'), '21: and when it is out it is forgotten, telling nobody: everybody was told how long it would be');
+  const again = s.do(s.own.sight(2, 'tatooine ', 'camp:t:3', [0, 0, 0], 30000) as Result) as Result & { created?: boolean };
+  ok(again.created === true && s.own.alive('camp:t:3'), '21: so the next browser to stand it stands it whole, a fresh life');
+}
+
+// --- 22: one nobody keeps and nobody sees is forgotten ----------------------------------------------------------
+{
+  const s = server();
+  s.at(1, 5);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:5:1', [0, 0, 0], 0) as Result);
+  for (let i = 0; i < 8; i++) {
+    s.at(1, 5);
+    s.wait(20000);
+  }
+  ok(s.own.alive('wild:t:5:1') && s.own.keeperOf('wild:t:5:1') === 1, '22: one that is being kept is never forgotten, however long');
+  s.do(s.own.unsee(1, 'wild:t:5:1') as Result);
+  s.wait(OWN_TUNING.forget - 1000);
+  ok(s.own.creatures.has('wild:t:5:1'), '22: put down by everybody, it is held a while, so a browser walking back stands it as it was left');
+  s.wait(2000);
+  ok(!s.own.creatures.has('wild:t:5:1'), `22: and after ${OWN_TUNING.forget / 1000} s with nobody keeping or seeing it, it is forgotten`);
+}
+
+// --- 23: walked off with a player --------------------------------------------------------------------------------
+{
+  const s = server();
+  s.at(1, 5);
+  s.do(s.own.sight(1, 'tatooine ', 'stood:t:11', [0, 0, 0], 60000) as Result);
+  const end = s.own.taken('stood:t:11') as Result & { back?: number };
+  ok(end.ok && end.back === 60 && s.own.alive('stood:t:11') === false, '23: a seen person who becomes a follower leaves their post empty for their own respawn');
+  s.clear();
+  s.do(s.own.sight(1, 'tatooine ', 'stood:t:11', [0, 0, 0], 60000) as Result);
+  ok(s.to(1).some((m) => m.do === 'gone' && m.why === 'taken'), '23: and a browser standing their post again meanwhile is told they were taken, not killed');
+  const admin = stand(s);
+  ok(s.own.taken(admin).ok === true && s.own.listFor('tatooine ').length === 0, '23: an admin\'s one that walks off is simply gone from the list');
+}
+
+// --- 24: a world with no room left ---------------------------------------------------------------------------------
+{
+  const s = server({ seenPerWorld: 2 });
+  s.at(1, 5);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:a:1', [0, 0, 0], 0) as Result);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:a:2', [0, 0, 0], 0) as Result);
+  s.clear();
+  const full = s.do(s.own.sight(1, 'tatooine ', 'wild:a:3', [0, 0, 0], 0) as Result);
+  ok(full.ok === false && s.to(1).some((m) => m.do === 'local' && m.id === 'wild:a:3'), '24: past the world\'s share the browser is told to keep that body to itself, as every body was before');
+  ok(s.do(s.own.sight(1, 'naboo ', 'wild:b:1', [0, 0, 0], 0) as Result).ok === true, '24: and the share is a world\'s, not the server\'s');
+}
+
+// --- 25: a weapon an admin put in a creature's hand goes with its row -------------------------------------------------
+{
+  const s = server();
+  const made = s.do(s.own.spawn({ world: 'tatooine ', species: 'a_creature', at: [0, 0, 0], weapon: 'object/weapon/melee/sword/sword_01.iff' }) as Result);
+  ok(made.row.weapon === 'object/weapon/melee/sword/sword_01.iff' && s.own.listFor('tatooine ')[0].weapon === made.row.weapon, '25: a creature stood with a weapon carries it in its row, so every browser arms it alike');
+  const plain = s.do(s.own.spawn({ world: 'tatooine ', species: 'a_creature', at: [0, 0, 0] }) as Result);
+  ok(plain.row.weapon === undefined, '25: and one stood with none says nothing about it');
+}
+
+// --- 26: a grant handed back is let go of on both sides --------------------------------------------------------
+{
+  const s = server();
+  const id = stand(s);
+  s.at(1, 10);
+  s.tick();
+  ok(s.own.keeperOf(id) === 1, '26: the one browser near it keeps it');
+  s.clear();
+  s.do(s.own.refuse(1, id) as Result);
+  ok(s.own.keeperOf(id) === 0 && s.dropped(1).includes(id), '26: one that says it cannot keep it is told to let go, so it is not left holding a grant the server has taken back');
+  for (let t = 0; t < 60000; t += 20000) {
+    s.at(1, 10);
+    s.wait(20000);
+  }
+  ok(s.added(1).length === 0, '26: and is not offered it again for a while');
+  for (let t = 0; t < OWN_TUNING.refusal; t += 20000) {
+    s.at(1, 10);
+    s.wait(20000);
+  }
+  ok(s.own.keeperOf(id) === 1, '26: after which it is, as before');
+}
+
+// --- 27: a respawn that runs out between two passes -------------------------------------------------------------
+{
+  // Browsers stand their copy again the moment the wait they were told is out, which is the very moment a
+  // word lands between two of the relay's passes. Answered from the old record, the fresh body was killed
+  // on arrival and made to wait its whole respawn again.
+  const s = server();
+  s.at(1, 5);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:7:0', [0, 0, 0], 30000) as Result);
+  s.tick();
+  s.do(s.own.died('wild:t:7:0') as Result);
+  s.tick();
+  s.clear();
+  s.skip(10000);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:7:0', [0, 0, 0], 30000) as Result);
+  const still = s.to(1).find((m) => m.do === 'gone');
+  ok(still?.why === 'dead' && still.fresh === 1 && still.back >= 19 && still.back <= 20, `27: inside its wait a browser saying it has stood one is told, alone, that it is still down and that this is about the body it has just stood (${JSON.stringify(still)})`);
+  s.clear();
+  s.skip(20000);
+  const again = s.do(s.own.sight(1, 'tatooine ', 'wild:t:7:0', [0, 0, 0], 30000) as Result) as Result & { created?: boolean };
+  ok(again.created === true && s.own.alive('wild:t:7:0') && !s.to(1).some((m) => m.do === 'gone'), '27: and the instant its wait is out, before any pass has forgotten it, the same word stands a fresh life rather than killing the new body');
+  s.tick();
+  ok(s.own.keeperOf('wild:t:7:0') === 1, '27: which is kept like any other');
+}
+
+// --- 28: a browser that handed one back and then stands a body for it is offered it again -------------------------
+{
+  const s = server();
+  s.at(1, 5);
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:8:0', [0, 0, 0], 0) as Result);
+  s.tick();
+  s.do(s.own.refuse(1, 'wild:t:8:0') as Result);
+  ok(s.own.keeperOf('wild:t:8:0') === 0, '28: one this browser said it could not keep goes back');
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:8:0', [0, 0, 0], 0) as Result);
+  s.tick();
+  ok(s.own.keeperOf('wild:t:8:0') === 1, '28: and saying it has a body for it again is no longer a refusal: it is offered it at once, not two minutes later with the creature frozen meanwhile');
+}
+
+// --- 29: a creature's blow on another player is held to what the server can see -----------------------------------
+{
+  const s = server();
+  const id = stand(s);
+  s.at(1, 10);
+  s.at(2, 60);
+  s.tick();
+  ok(s.own.keeperOf(id) === 1, '29: the nearer browser keeps an admin\'s creature');
+  ok(s.own.mayStrike(1, id, 2) === true, '29: its keeper may say it bit a player standing within reach of it');
+  ok(s.own.mayStrike(2, id, 1) === false, '29: a browser that does not keep it may not');
+  ok(s.own.mayStrike(1, id, 1) === false, '29: and nothing bites the browser that is saying so');
+  ok(s.own.mayStrike(1, id, 2, [OWN_TUNING.strike + 80, 0, 0]) === false, `29: nor a player farther than ${OWN_TUNING.strike} m from where it was last said to stand`);
+  s.at(3, 5, 0, 0, 'naboo ');
+  ok(s.own.mayStrike(1, id, 3) === false && s.own.mayStrike(1, id, 9) === false, '29: nor a player on another world, nor one the server has never heard of');
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:9:0', [0, 0, 0], 0) as Result);
+  s.tick();
+  ok(s.own.keeperOf('wild:t:9:0') === 1 && s.own.mayStrike(1, 'wild:t:9:0', 2) === false, '29: a seen one bites only a player whose own browser has stood that very creature, so none can be made up beside anybody');
+  s.do(s.own.sight(2, 'tatooine ', 'wild:t:9:0', [0, 0, 0], 0) as Result);
+  ok(s.own.mayStrike(1, 'wild:t:9:0', 2) === true, '29: and does, once it has');
+  const w = { at: 0, lines: 0 };
+  let passed = 0;
+  for (let k = 0; k < 40; k++) if (mayBlow(w, 5000, OWN_TUNING)) passed++;
+  ok(passed === OWN_TUNING['blow.perSecond'], `29: one browser passes on at most ${OWN_TUNING['blow.perSecond']} of them a second`);
+  ok(mayBlow(w, 6000, OWN_TUNING), '29: and more the next');
 }
 
 console.log(`\n${checks} checks passed`);

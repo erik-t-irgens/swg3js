@@ -32,9 +32,16 @@
 // keeper, or when this browser is handed a world's worth of places on arriving.
 //
 // The wire is the server's (`server/npcWire.mjs`, and the cases in `server/relay.mjs`). This side
-// sends `npcState`, `npcGone`, `npcHit` and `npcDrop`; it is sent `npcState`, `npcGone` and
-// `npcHurt` -- the words in `NPC_WORDS`, which the socket has to hand over for any of this to
-// happen at all.
+// sends `npcState`, `npcGone`, `npcHit`, `npcDrop` and `npcBlow`; it is sent `npcState`, `npcGone`,
+// `npcHurt` and `npcBlow` -- the words in `NPC_WORDS`, which the socket has to hand over for any of
+// this to happen at all.
+//
+// And a third rule, which is the seen creatures': **a body this browser stands for itself from the
+// same data as everybody is shared by saying so** (`addSeen`), and never by being told to stand it.
+// The lairs, the nests and the people at their posts stand in every browser from the same seed; what
+// crosses is that this browser has one, and from then on it is kept by one browser like any other.
+// What is never shared is one nobody may strike (it needs no keeper) and one that is this browser's
+// alone whatever it is (`neverShared`: a follower, and later a story's own people).
 //
 // `npcDrop` is the one word that is about this browser rather than about a creature: it is how a
 // browser hands back a grant it cannot honour. A creature granted to a browser whose catalogue does
@@ -50,19 +57,64 @@
 
 import { PLAYER_KEY, type Living } from '../combat/kit.ts';
 import type { Authority } from './session.ts';
+import { seenId } from './owned.ts';
+import { COMBAT_TUNE } from './combatNet.ts';
+
+export { seenId };
 
 /**
- * Whether a body stood under a world name goes on the wire at all.
+ * Whether a body stood under a world name goes on the wire as one of the server's own records.
  *
  * Only a body stood from one of the server's own records does (`standRecord` asks for it). Everything
  * else with a world name -- a lair's creature (`wild:`), a person standing about (`stood:`), a ticket
  * collector (`travel:`) -- is seeded here, stands the same in every browser from the same data, and is
- * a name the server has never heard. Handed to this module one was marked driven the moment a server
- * answered, because nobody had been granted it, and so every one of them stood frozen and could not
- * be hurt for as long as the line was up. So sharing is asked for, never assumed.
+ * a name the server has never heard. Handed to this module as one of the server's, one was marked
+ * driven the moment a server answered, because nobody had been granted it, and so every one of them
+ * stood frozen and could not be hurt for as long as the line was up. So that sharing is asked for,
+ * never assumed; the seeded kind is shared another way, by saying it has been seen (`sharesSeen`).
  */
 export function sharesOnWire(worldId: string | undefined, share: boolean | undefined): boolean {
   return !!worldId && share === true;
+}
+
+/**
+ * The seam for a body that is this browser's alone whatever it is and whoever is near: today a
+ * follower, which walks with this browser's player and fights at their side; later the named people of
+ * a story and a player's companions, which the `companion` flag is the place for. Such a body is never
+ * put on the wire, and one already on it leaves (`NpcNet.leave`) the moment it becomes one.
+ */
+export interface NeverShared {
+  readonly follow?: unknown;
+  readonly companion?: boolean;
+}
+
+export function neverShared(b: NeverShared | null | undefined): boolean {
+  return !!b && (b.follow != null || b.companion === true);
+}
+
+/**
+ * Whether a body may pick a fight with that living thing: anything at all, except another player's figure
+ * (`isPeer`), which only a body this browser keeps on the wire may go after (`NpcNet.keepsHere`). Such a
+ * body's blow on a peer is the keeper's word and crosses to their browser (`npcBlow`); anybody else's --
+ * a body this browser alone holds, one stood off the wire, one told to keep to itself at a full world, a
+ * follower -- goes nowhere, and a body that hunted a peer with it would chase a picture it can never
+ * finish. Asked once per target per thought, never in a frame.
+ */
+export function mayFight(t: object, npcId: string, net: NpcNet | null = theCreatures): boolean {
+  if (!(t as { readonly isPeer?: boolean }).isPeer) return true;
+  return !!npcId && !!net && net.keepsHere(npcId);
+}
+
+/**
+ * Whether a body this browser seeded for itself is shared by saying it has been seen.
+ *
+ * A lair's creature, a nest and a person at a post (`seenId`), and only while a server that speaks of
+ * them is answering (`seeding`). Never one nobody may strike (`essential`): such a body is the same in
+ * every browser whoever thinks for it -- it stands, it plays its mood, it never fights -- so it needs no
+ * keeper and costs the wire nothing. That is the design's "unattackable ones stay local for ever".
+ */
+export function sharesSeen(worldId: string | undefined, essential: boolean, seeding: boolean): boolean {
+  return seeding && !!worldId && seenId(worldId) && !essential;
 }
 
 /**
@@ -119,7 +171,7 @@ export function copyBrain(from: NpcBrain, into: NpcBrain | null): NpcBrain {
  * it, so this list and the one in its switch have to agree: a word missing there is a word this side
  * never hears, and every creature stands still with nothing to say why.
  */
-export const NPC_WORDS = ['npcState', 'npcGone', 'npcHurt'] as const;
+export const NPC_WORDS = ['npcState', 'npcGone', 'npcHurt', 'npcBlow'] as const;
 
 /**
  * Every number this side invents, in one place and live: `__npcs({ batchHz: 10 })` sets one and the
@@ -180,6 +232,25 @@ export const NPC_TUNE = {
    * pass, and four notes a second is a screen of them.
    */
   noteEvery: 10,
+  /**
+   * Invented: how long a seen body this browser holds may stand driven with nobody saying a word about
+   * it before this browser says again that it has it. The first word can be lost -- over the server's
+   * allowance, or said to a server that had just forgotten the record -- and a body nobody keeps is a
+   * body frozen on every screen; saying it again costs one word and puts it right.
+   */
+  reseeSeconds: 10,
+  /**
+   * Invented: how long after asking about a body somebody else keeps and this browser has not stood
+   * (a lair's creature its keeper sent out after this browser stood its own) it may ask again.
+   */
+  strangerEvery: 2,
+  /**
+   * Invented: how many of the shots the creatures this browser keeps fire may cross in a second, apart
+   * from the player's own, so a big fight never crowds the player's shots off the wire nor takes the
+   * line past what the server lets one browser send. Over it the rest of that second is not sent,
+   * which loses pictures of bolts and never a blow: a blow is its own word.
+   */
+  npcShotsPerSecond: 8,
 };
 
 /** Set any of those, clamped to what makes sense; the answer is the table as it now stands. */
@@ -192,20 +263,46 @@ export function tuneNpcs(o: Partial<typeof NPC_TUNE>): typeof NPC_TUNE {
   if (typeof o.parkSeconds === 'number') NPC_TUNE.parkSeconds = Math.max(1, Math.min(600, o.parkSeconds));
   if (typeof o.cannotKeepSeconds === 'number') NPC_TUNE.cannotKeepSeconds = Math.max(1, Math.min(120, o.cannotKeepSeconds));
   if (typeof o.noteEvery === 'number') NPC_TUNE.noteEvery = Math.max(0, Math.min(600, o.noteEvery));
+  if (typeof o.reseeSeconds === 'number') NPC_TUNE.reseeSeconds = Math.max(1, Math.min(600, o.reseeSeconds));
+  if (typeof o.strangerEvery === 'number') NPC_TUNE.strangerEvery = Math.max(0.1, Math.min(600, o.strangerEvery));
+  if (typeof o.npcShotsPerSecond === 'number') NPC_TUNE.npcShotsPerSecond = Math.max(0, Math.min(40, Math.round(o.npcShotsPerSecond)));
   return NPC_TUNE;
 }
 
 /**
- * Something that must be seen once rather than eased into: it was struck, and it left the ground.
+ * Something that must be seen once rather than eased into: it was struck, it left the ground, it threw
+ * itself aside in a roll, it jumped of its own accord, and its blade turned a bolt away. The place a roll
+ * or a jump carries a body to is in the rows like any other place; the mark is which clip to play over
+ * it, since a body eased along by four rows a second is otherwise a body sliding.
  *
  * A death is not one of them, and deliberately: it has a word of its own that the server carries to
  * everybody (the spawn list's `dead`, which reaches this module as `noteGone`), and a row is never
  * sent for a creature that is already dead. A mark nothing can produce is a rule nothing can reach.
  */
-export type NpcMark = 'hit' | 'leap';
+export type NpcMark = 'hit' | 'leap' | 'roll' | 'jump' | 'block';
+
+/** Which way a roll or a jump went off the way the body faced: Jedi Academy's four. */
+export type NpcDir = 'F' | 'B' | 'L' | 'R';
+
+/** How low a body stands when it is not upright: the fighters' own three low postures. */
+export type NpcLow = 'crouch' | 'kneel' | 'prone';
 
 /** Why a creature is gone: it died, or it was taken away. */
 export type NpcEnd = 'dead' | 'gone';
+
+/**
+ * A bolt's own flight, on a blow that was one: which way it was going, how fast, its colour and its
+ * size. It is what the keeper's creature asks its blade about (`npcHurt`), and what a bolt flown back
+ * off that blade is made to look like.
+ */
+export interface NpcBolt {
+  dx: number;
+  dy: number;
+  dz: number;
+  speed: number;
+  color: number;
+  size: number;
+}
 
 /**
  * One creature as it crosses. It is written out as plain numbers rather than taken from the mobiles
@@ -226,6 +323,13 @@ export interface NpcRow {
   hp: number;
   /** Anything that has to be seen once. */
   f?: NpcMark;
+  /** A roll's or a jump's direction, and whether the jump was the Force's: what picks the clip. */
+  fd?: NpcDir;
+  ff?: 1;
+  /** How low it stands, left out while it is upright. */
+  po?: NpcLow;
+  /** In cover: behind something, ducking and rising from it. Left out while it is not. */
+  cv?: 1;
   /** What it is thinking, so a change of keeper does not start it over. */
   b?: NpcBrain;
 }
@@ -278,10 +382,20 @@ export interface NpcSubject {
   npcDrive(row: NpcRow, snap: boolean): void;
   /** Thinking for it here, or driven from elsewhere. Called only when the answer changes. */
   npcSetDriven(driven: boolean): void;
-  /** A blow somebody else struck. Only ever called on the keeper's own copy: it is the only place a number comes off. */
-  npcHurt(amount: number, x: number, y: number, z: number, source: Living | null, what: string): void;
+  /**
+   * A blow somebody else struck. Only ever called on the keeper's own copy: it is the only place a
+   * number comes off. `bolt` is the bolt's own flight when the blow was one, which the keeper's own
+   * blade is asked about before anything is taken off.
+   */
+  npcHurt(amount: number, x: number, y: number, z: number, source: Living | null, what: string, bolt?: NpcBolt | null): void;
   /** The keeper says it is gone. */
   npcEnd(why: NpcEnd): void;
+  /**
+   * Who struck it within `seconds` of now, by the living key each is known by here, written into `out`
+   * (cleared first): what its death names so a later server can witness the kill. Optional: a body that
+   * keeps no memory of blows names nobody.
+   */
+  npcStruckBy?(seconds: number, out: number[]): void;
 }
 
 /** What the module is doing, filled in place so the console can read it between frames. */
@@ -309,6 +423,21 @@ export interface NpcStats {
   silent: number;
   /** Grants this browser could not honour and handed back: it has no body for them and cannot build one. */
   handedBack: number;
+  /** Of the bodies held, how many are seen ones (stood here from the same data as everywhere), and how many of those are kept here. */
+  seen: number;
+  seenKept: number;
+  /** How many of the bodies held an admin stood, and how many of those are kept here. */
+  stood: number;
+  stoodKept: number;
+  /** `seen` words said again for a body nobody had spoken about for a while. */
+  reseen: number;
+  /** Bodies somebody else keeps that this browser had not stood, asked to be stood (a lair's own sent out). */
+  strangers: number;
+  /** Blows this browser's creatures struck other players, and blows this player took from creatures kept elsewhere. */
+  blowsSent: number;
+  blowsTaken: number;
+  /** Bolts turned away by a blade of a creature this browser keeps, on a blow somebody else asked for. */
+  blocked: number;
 }
 
 /** A finite number, or the fallback: everything that arrives is read through one of these. */
@@ -337,7 +466,9 @@ function idOf(x: unknown): string {
   return typeof x === 'string' && x && x.length <= 64 && ID.test(x) ? x : '';
 }
 
-const MARKS: readonly string[] = ['hit', 'leap'];
+const MARKS: readonly string[] = ['hit', 'leap', 'roll', 'jump', 'block'];
+const DIRS: readonly string[] = ['F', 'B', 'L', 'R'];
+const LOWS: readonly string[] = ['crouch', 'kneel', 'prone'];
 
 /**
  * A row read off the wire into a kept object; false when it was not one. The place is read number
@@ -368,7 +499,26 @@ function readRow(raw: unknown, into: NpcRow, brain: NpcBrain, keeper: number): b
   into.v = Math.max(0, num(o.v));
   into.hp = Math.min(1, Math.max(0, num(o.hp, 1)));
   into.f = MARKS.includes(String(o.f)) ? (o.f as NpcMark) : undefined;
+  into.fd = (into.f === 'roll' || into.f === 'jump') && DIRS.includes(String(o.fd)) ? (o.fd as NpcDir) : undefined;
+  into.ff = into.f === 'jump' && o.ff === 1 ? 1 : undefined;
+  into.po = LOWS.includes(String(o.po)) ? (o.po as NpcLow) : undefined;
+  into.cv = o.cv === 1 ? 1 : undefined;
   into.b = readBrain(o.b, brain, keeper) ? brain : undefined;
+  return true;
+}
+
+/** A bolt's flight off the wire into a kept object, or false when the blow carried none (a blade, a bite). */
+function readBolt(o: Record<string, unknown>, into: NpcBolt): boolean {
+  const d = point(o.d);
+  if (!d) return false;
+  const len = Math.hypot(d[0], d[1], d[2]);
+  if (!(len > 1e-6)) return false;
+  into.dx = d[0] / len;
+  into.dy = d[1] / len;
+  into.dz = d[2] / len;
+  into.speed = Math.max(0, num(o.s));
+  into.color = Math.floor(Math.min(0xffffff, Math.max(0, num(o.c, 0xff4a2a))));
+  into.size = Math.min(10, Math.max(0.1, num(o.z, 1)));
   return true;
 }
 
@@ -464,7 +614,9 @@ export class NpcNet {
    */
   attacker: (id: number) => Living | null = () => null;
   /**
-   * Say that one this browser was keeping has died. It is the keeper's word and nobody else's.
+   * Say that one this browser was keeping has died. It is the keeper's word and nobody else's, and it
+   * names who struck it in its last moments (`by`, the relay ids of the browsers whose players did,
+   * within the players' own eight seconds), which is what a later server can witness a kill by.
    *
    * It is a hook rather than a message of its own because the world's spawn list already carries a
    * death (`src/net/owned.ts`, which holds what stands in a world and whether it is alive), and two
@@ -472,7 +624,7 @@ export class NpcNet {
    * not to have. It answers true when something took the word; with nothing wired the module says
    * `npcGone` itself, which is what makes it whole on its own and testable without the spawn list.
    */
-  died: (id: string) => boolean = () => false;
+  died: (id: string, by: readonly number[]) => boolean = () => false;
   /**
    * Whether the world's own list says that one is dead. Asked beside this module's own memory, so a
    * death heard by the spawn list and a death heard here are one answer. With nothing wired only
@@ -491,6 +643,30 @@ export class NpcNet {
   peerOfKey: (key: number) => number = () => 0;
   /** The living key a peer's figure holds here, from their relay id; 0 when they have none. */
   keyOfPeer: (id: number) => number = () => 0;
+  /**
+   * Whether this browser shares what it stands for itself (`Owned.seeding`: a server answering that
+   * speaks of the seen ones). With nothing wired, nothing seeded is ever shared.
+   */
+  seeding: () => boolean = () => false;
+  /** Say a seen body has been stood here, where it is and how long it stays down once it dies (`Owned.saySeen`). */
+  seen: (id: string, at: { x: number; y: number; z: number }, respawn: number) => void = () => {};
+  /** Say a seen body has been put down here (`Owned.sayUnseen`). */
+  unseen: (id: string) => void = () => {};
+  /** Say one this browser keeps has walked off with its player (`Owned.sayTaken`). */
+  taken: (id: string) => void = () => {};
+  /**
+   * Somebody else keeps a body under this name and this browser has none: a lair's creature its keeper
+   * sent out after this browser stood its own, say. The wiring stands it where it can (the lairs know
+   * their own names), and the rows parked for it put it where it really is. Asked at most once every
+   * `strangerEvery` seconds about one name.
+   */
+  onStranger: (id: string) => void = () => {};
+  /**
+   * A creature somebody else keeps struck this player, there, for that much, and the body here that is
+   * that creature (null when this browser has none). It is the one place this browser takes a creature's
+   * blow off its own player that it did not see land itself: the keeper saw it, the keeper is right.
+   */
+  onBlow: (amount: number, x: number, y: number, z: number, from: NpcSubject | null, what: string) => void = () => {};
   /** The clock the rates are measured on, in seconds; a test hands in its own. */
   private readonly now: () => number;
 
@@ -519,8 +695,27 @@ export class NpcNet {
   private notedAt = -Infinity;
   /** Every id this browser has been told died. A death happens once and stays. */
   private readonly deaths = new Set<string>();
+  /**
+   * The seen ones that died, and until when in this file's own seconds: a seen name stands again in
+   * every browser once its row's respawn is out, so its death is held exactly that long and no longer.
+   * Until the server says how long, one decided here is held for a minute.
+   */
+  private readonly downUntil = new Map<string, number>();
   /** Which ones have been said to be gone from here, so one death is one message. */
   private readonly saidGone = new Set<string>();
+  /** The seen bodies held here, by id: when each was last said, and how long it stays down once it dies. */
+  private readonly seenAt = new Map<string, { at: number; r: number }>();
+  /** When each name nobody here has a body for was last asked about (`onStranger`). */
+  private readonly strangerAt = new Map<string, number>();
+  /** The second the creatures' own shots are counted in, and how many have crossed in it. */
+  private npcShotWindow = 0;
+  private npcShotCount = 0;
+  /** One row a position is read into for a word that is not a batch (a `seen` said again), and a bolt off the wire. */
+  private readonly asked: NpcRow = blankRow();
+  private readonly heardBolt: NpcBolt = { dx: 0, dy: 0, dz: 1, speed: 0, color: 0xff4a2a, size: 1 };
+  /** Who struck a dying creature, by key and then by relay id, refilled per death. */
+  private readonly struckKeys: number[] = [];
+  private readonly struckIds: number[] = [];
   /** The rows sent, filled in place; the list is kept and truncated, and the socket writes it before we are given the frame back. */
   private readonly pool: NpcRow[] = [];
   private readonly out: NpcRow[] = [];
@@ -533,7 +728,7 @@ export class NpcNet {
   /** The same for other players, by relay id: a peer being fought is named four times a second. */
   private readonly peerWords = new Map<number, string>();
   private clock = 0;
-  private readonly stat: NpcStats = { active: false, held: 0, kept: 0, driven: 0, sent: 0, rowsSent: 0, heard: 0, rowsHeard: 0, waiting: 0, refused: 0, asked: 0, applied: 0, deaths: 0, silent: 0, handedBack: 0 };
+  private readonly stat: NpcStats = { active: false, held: 0, kept: 0, driven: 0, sent: 0, rowsSent: 0, heard: 0, rowsHeard: 0, waiting: 0, refused: 0, asked: 0, applied: 0, deaths: 0, silent: 0, handedBack: 0, seen: 0, seenKept: 0, stood: 0, stoodKept: 0, reseen: 0, strangers: 0, blowsSent: 0, blowsTaken: 0, blocked: 0 };
 
   constructor(now: () => number = () => Date.now() / 1000) {
     this.now = now;
@@ -553,11 +748,29 @@ export class NpcNet {
     return this.keeps(id);
   }
 
-  /** Whether that creature is known to have died. Nothing may bring it back. */
+  /**
+   * Whether that creature is known to have died. Nothing may bring it back -- an admin's for good, and a
+   * seen one until its own respawn is out, after which the same name stands again in every browser.
+   */
   isDead(id: string): boolean {
     if (this.deaths.has(id)) return true;
+    const until = this.downUntil.get(id);
+    if (until !== undefined) {
+      if (until > this.now()) return true;
+      this.downUntil.delete(id);
+    }
     try {
       return this.buried(id);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether this browser shares what it stands for itself just now; a hook that throws is no. */
+  get seedingNow(): boolean {
+    if (!this.active) return false;
+    try {
+      return this.seeding();
     } catch {
       return false;
     }
@@ -572,20 +785,8 @@ export class NpcNet {
    * when it changes hands, when a late batch arrives from the keeper that had it, or when a browser
    * that has just arrived is handed a list of where everything stands.
    */
-  noteGone(id: string, why: NpcEnd): void {
-    if (!id) return;
-    if (why === 'dead') {
-      this.deaths.add(id);
-      this.stat.deaths = this.deaths.size;
-    }
-    // Said once, whoever said it, and for both kinds of going: this browser must not announce
-    // something it was itself told about, and a body ended by the word below would otherwise be
-    // found dead by the next batch and announced as though this browser had killed it.
-    this.saidGone.add(id);
-    this.waiting.delete(id);
-    this.parkedAt.delete(id);
-    this.granting.delete(id);
-    this.stat.waiting = this.waiting.size;
+  noteGone(id: string, why: NpcEnd, back = 0): void {
+    if (!this.noteDown(id, why, back)) return;
     // The word ends the body whether this browser was being driven about it or thinking for it.
     //
     // It used to end only a driven one, on the reasoning that a stale word must not kill a creature
@@ -599,6 +800,31 @@ export class NpcNet {
     if (s) s.npcEnd(why);
   }
 
+  /**
+   * Everything `noteGone` remembers about a creature going, without ending the body here: what the
+   * wiring uses for a body this browser has only just stood of one already down everywhere else (the
+   * server's `fresh` answer), which is taken away quietly rather than made to play a death nobody here
+   * saw. False for no id.
+   */
+  noteDown(id: string, why: NpcEnd, back = 0): boolean {
+    if (!id) return false;
+    if (why === 'dead') {
+      // A seen one is down for its own respawn, which the server says; an admin's for good.
+      if (seenId(id)) this.downUntil.set(id, this.now() + Math.max(1, back));
+      else this.deaths.add(id);
+      this.stat.deaths = this.deaths.size + this.downUntil.size;
+    }
+    // Said once, whoever said it, and for both kinds of going: this browser must not announce
+    // something it was itself told about, and a body ended by the word below would otherwise be
+    // found dead by the next batch and announced as though this browser had killed it.
+    this.saidGone.add(id);
+    this.waiting.delete(id);
+    this.parkedAt.delete(id);
+    this.granting.delete(id);
+    this.stat.waiting = this.waiting.size;
+    return true;
+  }
+
   // ---- the creatures this browser holds ------------------------------------------------------------
 
   /**
@@ -610,11 +836,15 @@ export class NpcNet {
     const id = s.npcId;
     if (!id) return;
     // A body stood again under an id this browser already holds (it was cleared and rebuilt) takes
-    // that id over outright: two entries in the list would be one creature spoken about twice.
-    this.remove(id);
+    // that id over outright: two entries in the list would be one creature spoken about twice. Quietly:
+    // it is the same body's name changing hands here, and nothing about it is news to the server.
+    this.remove(id, true);
     this.subjects.set(id, s);
     this.order.push(s);
     this.stat.held = this.order.length;
+    // A seen name stood again once its respawn is out is a fresh life: its death, when it comes, is a
+    // new one and is said, which the record of the last one would otherwise swallow.
+    if (seenId(id) && !this.isDead(id)) this.saidGone.delete(id);
     const driven = this.active && !this.keeps(id);
     if (driven) {
       this.drivenNow.add(id);
@@ -630,16 +860,119 @@ export class NpcNet {
     if (this.isDead(id)) s.npcEnd('dead');
   }
 
-  /** It has been taken out of the world here. Nothing is said: it is this browser's body that went, not the creature. */
-  remove(id: string): void {
+  /**
+   * A body this browser stood for itself from the same data as everybody -- a lair's creature, a nest,
+   * a person at a post -- put on the wire by saying it has been seen. It is held driven until the server
+   * grants it here, which for a body nobody else has is a moment; `at` is where it stands, which is what
+   * the server measures who is nearest from, and `respawn` how long it stays down once it dies, in
+   * seconds, its own row's.
+   */
+  addSeen(s: NpcSubject, at: { x: number; y: number; z: number }, respawn: number): void {
+    const id = s.npcId;
+    if (!id || !seenId(id) || !this.seedingNow) return;
+    this.add(s);
+    this.seenAt.set(id, { at: this.now(), r: respawn });
+    try {
+      this.seen(id, at, respawn);
+    } catch {
+      // A hook that cannot take a word costs this body its share of the wire and nothing more: the
+      // re-saying below tries again for a body nobody speaks about.
+    }
+  }
+
+  /**
+   * It has been taken out of the world here. Nothing is said about the creature: it is this browser's
+   * body that went, not the creature. What is said, for a seen one still alive, is that this browser no
+   * longer has a body for it, so the server hands it to somebody who has rather than to this browser.
+   * `quiet` is a body handing its own name straight on to another (`add`).
+   */
+  remove(id: string, quiet = false): void {
     const s = this.subjects.get(id);
     if (!s) return;
+    // A death decided here and not yet said (the body went before the next batch reached it) is said
+    // now, while the body can still name who struck it: it is the one word nobody else can say for it.
+    if (!quiet && s.npcDead && this.active) this.sayDeath(s, this.now());
     this.subjects.delete(id);
     const i = this.order.indexOf(s);
     if (i >= 0) this.order.splice(i, 1);
     this.drivenNow.delete(id);
     this.toldAt.delete(id);
+    const said = this.seenAt.delete(id);
     this.stat.held = this.order.length;
+    // **Asked of what is known, never of the body.** A body put down sets itself dead as it goes
+    // (`Mobile.dispose`), so reading `npcDead` here once cost every lair creature and every person put
+    // down this word: the server went on offering the creature to a browser with no body for it, every
+    // other screen saw it freeze, and the grant came back as a refusal that kept this browser out of it
+    // for two minutes. What says a seen one is not to be let go of is that its death has been said
+    // (`saidGone`, also every word that ended it from elsewhere) or that it is down.
+    if (quiet || !said || this.saidGone.has(id) || this.isDead(id)) return;
+    try {
+      this.unseen(id);
+    } catch {
+      // Nothing to be done: the server's own silence rule and the next keeper's grant put it right.
+    }
+  }
+
+  /**
+   * A death decided here, said once: held down a minute (a seen one) or for good (an admin's) until the
+   * server's own word says otherwise, and handed to the world's list with whoever struck it, or said by
+   * this module itself when nothing is wired to take it. Nothing for a death the world has already heard.
+   */
+  private sayDeath(s: NpcSubject, now: number): void {
+    const id = s.npcId;
+    if (this.saidGone.has(id)) return;
+    this.saidGone.add(id);
+    // A death the world has already heard is not said back: it reached this browser as the list's own
+    // word or as `npcGone`, and answering it would be the second path for one death that this wave
+    // exists not to have. What is left is a death decided here.
+    if (this.isDead(id)) return;
+    // A seen one is held down a minute until the server's own word says for how long its row's respawn
+    // really is; an admin's for good.
+    if (seenId(id)) this.downUntil.set(id, now + 60);
+    else this.deaths.add(id);
+    this.stat.deaths = this.deaths.size + this.downUntil.size;
+    // The world's own spawn list carries a death where there is one; with nothing wired to take it,
+    // this module says it itself so that the wire is whole on its own.
+    if (!this.sayDied(id, this.strikersOf(s))) this.send({ t: 'npcGone', i: id, why: 'dead' });
+  }
+
+  /**
+   * One this browser keeps leaves the wire for good while it stands: it has become a body that is this
+   * browser's alone (`neverShared`: a follower). The server is told, as the keeper, that it is gone from
+   * its post, so every other browser takes its copy down and a seen one's post stays empty for its row's
+   * respawn; and it is held here as nothing anybody else knows about from now on. False for one that is
+   * not on the wire, or that this browser does not keep -- which may not leave, since it is not its to
+   * take.
+   */
+  leave(id: string): boolean {
+    const s = this.subjects.get(id);
+    if (!s || !this.mayLeave(id)) return false;
+    this.subjects.delete(id);
+    const i = this.order.indexOf(s);
+    if (i >= 0) this.order.splice(i, 1);
+    this.toldAt.delete(id);
+    this.seenAt.delete(id);
+    this.granting.delete(id);
+    this.saidGone.add(id);
+    this.stat.held = this.order.length;
+    try {
+      this.taken(id);
+    } catch {
+      // The word did not go: the others keep their copy until the server forgets it, which is a body
+      // at its post that this browser no longer draws there. Nothing here can put that right.
+    }
+    return true;
+  }
+
+  /**
+   * Whether one held here may leave the wire (`leave`), asked before anything is done about it so a
+   * caller can refuse before it has changed anything of its own. It must be held here, kept here, and the
+   * server must speak of a creature walking off (`taken`, wire 3): an older one would drop the word and
+   * leave every other screen holding a frozen copy at its post that nobody keeps, so against one the
+   * body stays on the wire and is not this browser's to walk off with.
+   */
+  mayLeave(id: string): boolean {
+    return this.subjects.has(id) && this.active && this.seedingNow && !this.drivenNow.has(id) && this.keeps(id);
   }
 
   /** The creature this browser holds under that id, or null. */
@@ -723,6 +1056,32 @@ export class NpcNet {
     this.reconcile();
     this.gather();
     this.watchGrants();
+    this.reseen();
+  }
+
+  /**
+   * A seen body this browser holds that nobody keeps and nobody speaks about: say again that it has
+   * it. The first word can be lost -- over the server's allowance, or said to a server that had just
+   * forgotten the name -- and a body nobody keeps stands frozen on every screen. One word every
+   * `reseeSeconds` per such body, and none at all for a body somebody is speaking about.
+   */
+  private reseen(): void {
+    if (!this.seenAt.size || !this.seedingNow) return;
+    const now = this.now();
+    for (const [id, rec] of this.seenAt) {
+      if (now - rec.at < NPC_TUNE.reseeSeconds || !this.drivenNow.has(id)) continue;
+      const told = this.toldAt.get(id);
+      if (told !== undefined && now - told < NPC_TUNE.reseeSeconds) continue;
+      const s = this.subjects.get(id);
+      if (!s || s.npcDead || !s.npcFill(this.asked)) continue;
+      rec.at = now;
+      this.stat.reseen++;
+      try {
+        this.seen(id, { x: this.asked.p[0], y: this.asked.p[1], z: this.asked.p[2] }, rec.r);
+      } catch {
+        // Tried again on the next round.
+      }
+    }
   }
 
   /**
@@ -764,6 +1123,21 @@ export class NpcNet {
       if (now - rec.said <= NPC_TUNE.cannotKeepSeconds) continue;
       rec.told = true;
       this.stat.handedBack++;
+      // A seen body of this browser's own that is still being built (a dressed person's look takes a
+      // while): put down rather than refused. Refused, the server would offer it here again only after two
+      // minutes, and with nobody else near it would stand frozen all that while; put down, it goes at once
+      // to anybody else with a body, and this browser says it has one again once the body can speak
+      // (`reseen`, which waits for exactly that).
+      const seen = this.seenAt.get(id);
+      if (seen && this.subjects.has(id)) {
+        seen.at = now;
+        try {
+          this.unseen(id);
+        } catch {
+          // The server's own silence rule puts it right.
+        }
+        continue;
+      }
       this.send({ t: 'npcDrop', i: id });
       this.note(this.subjects.has(id) ? 'a creature here is still being built: it has gone back to the world' : 'a creature this browser cannot build has gone back to the world');
     }
@@ -836,21 +1210,9 @@ export class NpcNet {
       // announced whatever the grant now says, and the server's own grace (`mayKill`) is what makes
       // the word count. It is still said exactly once, which `saidGone` is for.
       if (s.npcDead) {
-        // Its death is the one thing everybody must hear, and it is said once. The body itself is
-        // still drawn here while its own clip plays out; nothing more is said about it.
-        if (!this.saidGone.has(id)) {
-          this.saidGone.add(id);
-          // A death the world has already heard is not said back: it reached this browser as the
-          // list's own word or as `npcGone`, and answering it would be the second path for one death
-          // that this wave exists not to have. What is left is a death decided here.
-          if (!this.isDead(id)) {
-            this.deaths.add(id);
-            this.stat.deaths = this.deaths.size;
-            // The world's own spawn list carries a death where there is one; with nothing wired to
-            // take it, this module says it itself so that the wire is whole on its own.
-            if (!this.sayDied(id)) this.send({ t: 'npcGone', i: id, why: 'dead' });
-          }
-        }
+        // Its death is the one thing everybody must hear, and it is said once (`sayDeath`). The body
+        // itself is still drawn here while its own clip plays out; nothing more is said about it.
+        this.sayDeath(s, now);
         continue;
       }
       if (this.drivenNow.has(id)) continue;
@@ -860,7 +1222,13 @@ export class NpcNet {
         this.pool.push(row);
       }
       row.i = id;
+      // Everything a pooled row may have carried for the last body it held, cleared: a body that is
+      // upright, out of cover and did nothing worth a mark says none of it.
       row.f = undefined;
+      row.fd = undefined;
+      row.ff = undefined;
+      row.po = undefined;
+      row.cv = undefined;
       if (!s.npcFill(row)) continue;
       row.p[0] = r2(row.p[0]);
       row.p[1] = r2(row.p[1]);
@@ -903,14 +1271,83 @@ export class NpcNet {
    * through the pack's alert, everything with it -- on somebody who did nothing at all. Unset, the
    * blow lands with nobody to blame, which is the true answer rather than a convenient one.
    */
-  askHit(id: string, amount: number, x: number, y: number, z: number, what = '', byPlayer = false): boolean {
+  askHit(id: string, amount: number, x: number, y: number, z: number, what = '', byPlayer = false, bolt: NpcBolt | null = null): boolean {
     if (!this.active || !id || !(amount > 0)) return false;
     // Nobody is asked to kill something twice: the blow is refused here, and refusing it is still
     // "the keeper decides", because the keeper is where that death was decided.
     if (this.isDead(id)) return true;
     this.stat.asked++;
-    this.send({ t: 'npcHit', i: id, a: r2(amount), at: [r2(x), r2(y), r2(z)], ...(what ? { w: what.slice(0, 16) } : {}), ...(byPlayer ? { b: 1 } : {}) });
+    const msg: Record<string, unknown> = { t: 'npcHit', i: id, a: r2(amount), at: [r2(x), r2(y), r2(z)] };
+    if (what) msg.w = what.slice(0, 16);
+    if (byPlayer) msg.b = 1;
+    // A bolt's own flight, so the keeper's creature may turn it away with its blade rather than take it:
+    // only to a server that speaks of it, since one that does not passes the blow on without it and the
+    // bytes would buy nothing.
+    if (bolt && this.seedingNow) {
+      msg.d = [r3(bolt.dx), r3(bolt.dy), r3(bolt.dz)];
+      msg.s = r2(bolt.speed);
+      msg.c = Math.floor(bolt.color);
+      msg.z = r2(bolt.size);
+    }
+    this.send(msg);
     return true;
+  }
+
+  /**
+   * A creature this browser keeps struck another player, there, for that much: said to that player's
+   * browser, which is the only place it comes off -- the players' own rule, with this browser where the
+   * shooter stands. True when it went; false with no server that speaks of it, or for a creature this
+   * browser does not keep, which is not this browser's to strike with.
+   */
+  sayBlow(to: number, id: string, amount: number, x: number, y: number, z: number, what = ''): boolean {
+    if (!this.seedingNow || !(to > 0) || !id || !(amount > 0)) return false;
+    if (this.drivenNow.has(id) || !this.subjects.has(id)) return false;
+    this.stat.blowsSent++;
+    this.send({ t: 'npcBlow', to, i: id, a: r2(amount), at: [r2(x), r2(y), r2(z)], ...(what ? { w: what.slice(0, 16) } : {}) });
+    return true;
+  }
+
+  /**
+   * Whether one of the creatures this browser keeps may put another of its shots on the wire this
+   * second, under its own allowance (`npcShotsPerSecond`), apart from the player's own. Asked by the
+   * shots when a creature fires; nothing here sends the shot itself.
+   */
+  npcShotDue(): boolean {
+    if (!this.seedingNow) return false;
+    const second = Math.floor(this.now());
+    if (second !== this.npcShotWindow) {
+      this.npcShotWindow = second;
+      this.npcShotCount = 0;
+    }
+    if (this.npcShotCount >= NPC_TUNE.npcShotsPerSecond) return false;
+    this.npcShotCount++;
+    return true;
+  }
+
+  /** Whether that body is on the wire and kept here: one whose shots, blows and death are this browser's to say. */
+  keepsHere(id: string): boolean {
+    return !!id && this.active && this.subjects.has(id) && !this.drivenNow.has(id) && this.keeps(id);
+  }
+
+  /**
+   * The relay ids of the players who struck a dying creature within the players' own eight seconds
+   * (`COMBAT_TUNE.blameSeconds`): this browser's own for its own player, a peer's for theirs. Nobody else
+   * -- another creature, a fighter, a turret -- is anybody a server could credit with a kill.
+   */
+  private strikersOf(s: NpcSubject): number[] {
+    const ids = this.struckIds;
+    ids.length = 0;
+    if (!s.npcStruckBy) return ids;
+    try {
+      s.npcStruckBy(COMBAT_TUNE.blameSeconds, this.struckKeys);
+    } catch {
+      return ids;
+    }
+    for (const key of this.struckKeys) {
+      const id = key === PLAYER_KEY ? this.ask(this.selfId) : this.ask(() => this.peerOfKey(key));
+      if (id > 0 && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
   }
 
   // ---- what the server says ---------------------------------------------------------------------------
@@ -948,12 +1385,36 @@ export class NpcNet {
         // creature simply does not know who did it.
         const from = msg.b ? who(msg.id) : 0;
         this.stat.applied++;
-        s.npcHurt(a, at[0], at[1], at[2], from ? this.safeAttacker(from) : null, typeof msg.w === 'string' ? msg.w.slice(0, 16) : '');
+        // The bolt's own flight, when the blow was one: the creature's blade is asked about it before
+        // anything is taken off, which is the keeper answering the block for everybody.
+        const bolt = readBolt(msg, this.heardBolt) ? this.heardBolt : null;
+        s.npcHurt(a, at[0], at[1], at[2], from ? this.safeAttacker(from) : null, typeof msg.w === 'string' ? msg.w.slice(0, 16) : '', bolt);
+        return true;
+      }
+      case 'npcBlow': {
+        // A creature kept at another browser struck this player. The keeper saw it land, so it landed:
+        // this browser takes it off its own player, as it would a shot another player says landed. The
+        // body here that is that creature names where it came from and who to turn on, when there is one.
+        const a = num(msg.a);
+        if (!(a > 0)) return true;
+        const at = point(msg.at) ?? [0, 0, 0];
+        const id = idOf(msg.i);
+        this.stat.blowsTaken++;
+        try {
+          this.onBlow(a, at[0], at[1], at[2], id ? (this.subjects.get(id) ?? null) : null, typeof msg.w === 'string' ? msg.w.slice(0, 16) : '');
+        } catch {
+          // A game that cannot take the blow just now (between worlds, at the select screen) drops it.
+        }
         return true;
       }
       default:
         return false;
     }
+  }
+
+  /** A body this browser keeps turned a bolt away with its blade on a blow somebody else asked for: counted for the console. */
+  noteBlocked(): void {
+    this.stat.blocked++;
   }
 
   /** Who struck, asked of the game. A hook that throws costs this one blow its blame and nothing else. */
@@ -966,9 +1427,9 @@ export class NpcNet {
   }
 
   /** The world's list told about a death, if anything is listening; false when this module must say it. */
-  private sayDied(id: string): boolean {
+  private sayDied(id: string, by: readonly number[]): boolean {
     try {
-      return this.died(id);
+      return this.died(id, by);
     } catch {
       return false;
     }
@@ -994,6 +1455,7 @@ export class NpcNet {
       const s = this.subjects.get(id);
       if (!s) {
         this.park(id);
+        this.stranger(id, now);
         continue;
       }
       // A creature this browser thinks for is not moved by anything anybody else says. This is the
@@ -1039,12 +1501,37 @@ export class NpcNet {
     row.s = from.s;
     row.v = from.v;
     row.hp = from.hp;
+    // How low it stands and whether it is in cover are what it is doing, and a body stood from this row
+    // stands that way.
+    row.po = from.po;
+    row.cv = from.cv;
     // A mark is a thing that happened once, and a body that does not exist yet cannot have seen it.
     row.f = undefined;
+    row.fd = undefined;
+    row.ff = undefined;
     // Its mind is kept in a copy of its own, made once for this row: the one it was read into is
     // refilled by the very next row of the batch.
     row.b = from.b ? copyBrain(from.b, row.b ?? null) : undefined;
     this.stat.waiting = this.waiting.size;
+  }
+
+  /**
+   * A name somebody else keeps and this browser holds no body for: asked about once every
+   * `strangerEvery` seconds, so the wiring can stand it where it knows the name (a lair's creature its
+   * keeper sent out after this browser stood its own). Only the seen kind: an admin's is stood from the
+   * list, and one this browser could not build is the grant's business, not this.
+   */
+  private stranger(id: string, now: number): void {
+    if (!seenId(id) || !this.seedingNow) return;
+    const was = this.strangerAt.get(id);
+    if (was !== undefined && now - was < NPC_TUNE.strangerEvery) return;
+    this.strangerAt.set(id, now);
+    this.stat.strangers++;
+    try {
+      this.onStranger(id);
+    } catch {
+      // A wiring that cannot stand it leaves the row parked, which ages out on its own.
+    }
   }
 
   /** Rows nothing has spoken about for `parkSeconds`: they belong to a world that has been left. */
@@ -1070,6 +1557,7 @@ export class NpcNet {
     this.parkedAt.clear();
     this.toldAt.clear();
     this.granting.clear();
+    this.strangerAt.clear();
     this.pass = 0;
     this.stat.waiting = 0;
   }
@@ -1089,7 +1577,10 @@ export class NpcNet {
     this.parkedAt.clear();
     this.granting.clear();
     this.deaths.clear();
+    this.downUntil.clear();
     this.saidGone.clear();
+    this.seenAt.clear();
+    this.strangerAt.clear();
     this.pass = 0;
     this.notedAt = -Infinity;
     this.cursor = 0;
@@ -1109,7 +1600,7 @@ export class NpcNet {
     this.stat.driven = this.drivenNow.size;
     this.stat.kept = this.order.length - this.drivenNow.size;
     this.stat.waiting = this.waiting.size;
-    this.stat.deaths = this.deaths.size;
+    this.stat.deaths = this.deaths.size + this.downUntil.size;
     const now = this.now();
     let silent = 0;
     for (const id of this.drivenNow) {
@@ -1117,6 +1608,18 @@ export class NpcNet {
       if (at === undefined || now - at > NPC_TUNE.silentSeconds) silent++;
     }
     this.stat.silent = silent;
+    // What an admin stood against what every browser stands for itself, each with how many are kept here.
+    let seen = 0;
+    let seenKept = 0;
+    for (const s of this.order) {
+      if (!seenId(s.npcId)) continue;
+      seen++;
+      if (!this.drivenNow.has(s.npcId)) seenKept++;
+    }
+    this.stat.seen = seen;
+    this.stat.seenKept = seenKept;
+    this.stat.stood = this.order.length - seen;
+    this.stat.stoodKept = this.stat.kept - seenKept;
     return this.stat;
   }
 
@@ -1125,7 +1628,7 @@ export class NpcNet {
     const kept: string[] = [];
     const driven: string[] = [];
     for (const s of this.order) (this.drivenNow.has(s.npcId) ? driven : kept).push(s.npcId);
-    return { ...this.debug(), keptIds: kept, drivenIds: driven, tune: { ...NPC_TUNE } };
+    return { ...this.debug(), seeding: this.seedingNow, keptIds: kept, drivenIds: driven, tune: { ...NPC_TUNE } };
   }
 }
 

@@ -23,8 +23,11 @@
 // **Everything here is ours**, and live through `__debug.followers({ tune })`.
 //
 // **A follower is this browser's alone and stays on its world.** It is left behind by any change of
-// world and at the select screen (`clear`, from the world's own unload), and a body the server shares is
-// never one (`talk.ts` refuses it). Asked to stop following it stays where it was left -- its home moved
+// world and at the select screen (`clear`, from the world's own unload). A body another player's game is
+// thinking for is never one (`World.recruit` refuses it in words), and one this browser keeps leaves the
+// wire for good as it is asked (`MobileManager.unshare`): every other browser takes its copy down and its
+// post stays empty for its row's respawn, and it is never handed to another keeper while it lives.
+// Asked to stop following it stays where it was left -- its home moved
 // to that spot -- and is handed back to whatever stood it once the player is `letGo` away: until then the
 // standing people's own caps and memory rules may not take it (`holds`), and one of ours or a lair's,
 // which were given up to the set when they were asked, is taken away by the set itself.

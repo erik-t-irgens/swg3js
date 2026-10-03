@@ -41,7 +41,7 @@ import type { CellState } from '../layoutStream';
 import type { FighterGlow } from '../npcs';
 import { keepNearestGlow } from '../../combat/bladeLights';
 import { PendingSpawns, armsRng, decideStand, rollsFor, scaleFrom, type SpawnRecord } from '../spawnSeed.ts';
-import { npcNow, sharesOnWire } from '../../net/npcNet.ts';
+import { neverShared, npcNow, sharesOnWire, sharesSeen } from '../../net/npcNet.ts';
 // A person fighting as a fighter does: the cover search's physics, the rolls and jumps it is lent,
 // and the tables its tier, its posture, its roll and its jump are read from (`tactics.ts`, `evade.ts`).
 import type { CoverDeps } from '../cover.ts';
@@ -76,14 +76,20 @@ export interface SpawnOpts {
    */
   worldId?: string;
   /**
-   * Whether it goes on the wire to be kept by whichever browser the server grants it to
-   * (`sharesOnWire`). Only a body stood from one of the server's own records asks for that
-   * (`standRecord`). Everything else under a world name -- a lair's creature, a person standing
-   * about, a ticket collector -- is seeded from the same data in every browser and is a name the
-   * server has never heard, so it stays this browser's own: shared, it was driven by nobody and stood
-   * frozen and unhurtable for as long as a server was answering.
+   * Whether it goes on the wire as one of the server's own records, to be kept by whichever browser the
+   * server grants it to (`sharesOnWire`). Only a body stood from one of the server's own records asks
+   * for that (`standRecord`). A lair's creature and a person at a post -- seeded from the same data in
+   * every browser -- go on the wire another way, by saying they have been seen (`sharesSeen`), and only
+   * while a server that speaks of them is answering and only when they may be struck at all; a ticket
+   * collector and one of ours never do.
    */
   share?: boolean;
+  /**
+   * How long a seen body stays down once it dies before any browser stands it again, in seconds: its
+   * own row's respawn (a lair's broken wait, a person's own seconds). What the server holds its death
+   * for, so a browser walking up meanwhile does not stand a whole copy of something everybody saw die.
+   */
+  respawn?: number;
   /**
    * Part of the furniture: it stands where it is stood, takes no damage and never dies.
    *
@@ -123,9 +129,10 @@ export interface SpawnOpts {
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
   /**
    * A weapon the console chose for it, by the rack's template (`__debug.mobile(.., { weapon })`): held
-   * over its own list, its name and its temper (`OwnArms.forcedTemplate`). This browser's own spawns
-   * only -- a body the world holds is armed from its record's seed in every browser alike, and a choice
-   * made here would put a different weapon in its hand on this screen alone.
+   * over its own list, its name and its temper (`OwnArms.forcedTemplate`). This browser's own spawns,
+   * and a body stood from one of the server's records that carries one (`SpawnRow.weapon`, the admin's
+   * choice, which every browser stands alike); never a seeded body, which every browser arms from its
+   * own seed and a choice made here would put a different weapon in its hand on this screen alone.
    */
   weaponTemplate?: string;
 }
@@ -531,12 +538,11 @@ export class MobileManager {
       this.worldIds.set(m, opts.worldId);
       // One the server stood: the wire is told, so whichever browser the server grants it to thinks
       // for it and every other one holds the same body with its brain switched off. With no server
-      // this costs a map insert and nothing else, and every creature stays this browser's own. One
-      // this browser seeded for itself is never told to the wire at all (`share`).
+      // this costs a map insert and nothing else, and every creature stays this browser's own.
       if (sharesOnWire(opts.worldId, opts.share)) {
         m.shareAs(opts.worldId);
         npcNow()?.add(m);
-      }
+      } else this.shareSeen(m, opts.worldId, !!opts.essential, opts.respawn ?? 0);
     }
     held.loaded = this.load(m, held, entry, cat, opts);
     return m;
@@ -569,6 +575,85 @@ export class MobileManager {
   private readonly worldIds = new WeakMap<Mobile, string>();
   /** The ones stood from the world's list's own records: the only ones that list may take down again. */
   private readonly listed = new WeakSet<Mobile>();
+  /** How long each seeded body stays down once it dies (its row's respawn, seconds), kept for a server met after it was stood. */
+  private readonly respawnOf = new WeakMap<Mobile, number>();
+
+  /**
+   * A body this browser seeded for itself put on the wire by saying it has been seen (`sharesSeen`):
+   * one of the seeded kind, that may be struck, that is nobody's alone (`neverShared`), and only while a
+   * server that speaks of the seen ones is answering. Every other is left exactly as it was: this
+   * browser's own, as every such body was before.
+   */
+  private shareSeen(m: Mobile, worldId: string, essential: boolean, respawn: number): void {
+    this.respawnOf.set(m, respawn);
+    const net = npcNow();
+    if (!net || !sharesSeen(worldId, essential, net.seedingNow) || neverShared(m)) return;
+    m.shareAs(worldId);
+    net.addSeen(m, m.pos, respawn);
+  }
+
+  /**
+   * Every seeded body already standing put on the wire, now that a server that speaks of them is
+   * answering: it came after they were stood (a line opened mid-session, or come back after a drop,
+   * which clears the wire and leaves the bodies). A body already on it is left; one that may not be
+   * shared is left too. Answers how many went on.
+   */
+  shareSeeded(): number {
+    const net = npcNow();
+    if (!net || !net.seedingNow) return 0;
+    let n = 0;
+    for (const m of this.live) {
+      if (m.removed || m.dead) continue;
+      const id = this.worldIds.get(m);
+      if (!id || this.listed.has(m) || neverShared(m) || m.essential) continue;
+      if (m.npcId && net.find(m.npcId) === m) continue;
+      if (!sharesSeen(id, false, true)) continue;
+      m.shareAs(id);
+      net.addSeen(m, m.pos, this.respawnOf.get(m) ?? 0);
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * A body taken off the wire for good while it stands, because it has become this browser's alone (a
+   * follower, `neverShared`). It must be one this browser keeps or one that was never on the wire: one
+   * somebody else keeps is not this browser's to take, and the answer says so (false). Its name is let go
+   * of here as well, so a body the world stands under the same name later is a new one, and so the world's
+   * list never takes it down for not naming it.
+   */
+  unshare(m: Mobile): boolean {
+    if (!this.mayUnshare(m)) return false;
+    const id = m.npcId;
+    if (id) {
+      const net = npcNow();
+      // On the wire and kept here: the keeper says it has walked off, and every other browser takes its
+      // copy down. Off the wire already (no server), there is nothing to say.
+      if (net?.find(id) === m && !net.leave(id) && net.active) return false;
+      m.unshare();
+    }
+    const name = this.worldIds.get(m);
+    if (name && this.byWorldId.get(name) === m) this.byWorldId.delete(name);
+    this.listed.delete(m);
+    return true;
+  }
+
+  /**
+   * Whether `unshare` would take that body off the wire, asked before anything is done to it: a caller
+   * that first takes the body off its own books (a lair's, a row's) must not do so for a body the wire
+   * will then refuse to let go of, or the body is nobody's at all. Not one somebody else keeps; not one on
+   * the wire that may not leave it (`NpcNet.mayLeave`: not kept here this instant, or a server that would
+   * not hear it walk off). One off the wire, or with no server answering, always may.
+   */
+  mayUnshare(m: Mobile): boolean {
+    if (m.isDriven) return false;
+    const id = m.npcId;
+    if (!id) return true;
+    const net = npcNow();
+    if (!net || net.find(id) !== m || !net.active) return true;
+    return net.mayLeave(id);
+  }
+
   /** The records that arrived before the catalogue did; stood the moment it lands. */
   private readonly pending = new PendingSpawns();
 
@@ -612,7 +697,9 @@ export class MobileManager {
     const a = choice.args;
     this.pending.drop(a.id);
     const entry = cat!.byId(a.species)!;
-    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true, share: true });
+    // The weapon the admin put in its hand rides in the record, so every browser arms it alike.
+    const weapon = typeof rec.weapon === 'string' && rec.weapon ? { weaponTemplate: rec.weapon } : {};
+    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true, share: true, ...weapon });
   }
 
   /**
@@ -679,8 +766,10 @@ export class MobileManager {
     // Taken before the first await: a load in flight counts against the budget at its estimate from
     // this moment, so the next spawn in the same tick sees it (`referencedBytes`).
     const guess = assets.estimate(entry, cat);
-    // The console's choice is never laid on a body the world holds: that one is armed from its record alike everywhere.
-    const forced = opts.weaponTemplate && !opts.worldId ? opts.weaponTemplate : undefined;
+    // The console's choice is laid on this browser's own spawn, and on a body stood from a record that
+    // carries it (every browser stands that record alike); never on a seeded body, which every browser
+    // arms from its own seed, nor on a record's body that carries none.
+    const forced = opts.weaponTemplate && (!opts.worldId || opts.listed) ? opts.weaponTemplate : undefined;
     const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged, forcedTemplate: forced };
     const [model, pack, arms] = await Promise.allSettled([
       assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),

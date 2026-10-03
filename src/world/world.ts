@@ -51,6 +51,7 @@ import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
 import { FollowerSet, recruitOwner } from './followers.ts';
+import { TALK_WORDS } from './talk.ts';
 import { sharedClock } from './sharedClock.ts';
 import { worldNav } from './nav/nav.ts';
 import { MOBILE_CACHE } from './mobiles/assets.ts';
@@ -78,6 +79,9 @@ import { prepareForceEffects } from '../combat/forcePowers.ts';
 import { liveSettings } from '../core/settings.ts';
 import { CNT, perf, SEC } from '../core/perf.ts';
 import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
+// The world's creatures as a server shares them: whether a seen body is down, and the wire it goes on.
+import { owned } from '../net/owned.ts';
+import { npcNow } from '../net/npcNet.ts';
 import { remoteInteriors, type RemoteInteriors } from '../net/remoteInterior.ts';
 import { watchPeers } from '../net/remotePlayers.ts';
 import { ShipContacts } from '../space/contacts';
@@ -5492,8 +5496,10 @@ export class World {
         // creatures belong at their lair, so they are `spawned`, which the manager only ever takes
         // away when it is dead or has fallen out of the world. The `worldId` is what keeps the hand
         // -spawn cap and the NPC tab's clear off them. No `share`: every browser seeds the same lair
-        // from the same data, and a name the server has never heard is never put on the wire. Its own
-        // creature's numbers and weapons go with it (`WildSpawn`), as a standing person's do.
+        // from the same data, so it is never one of the server's records; with a server that speaks of
+        // them it goes on the wire by saying it has been seen, with its site's wait as how long it
+        // stays down (`respawn`). Its own creature's numbers and weapons go with it (`WildSpawn`), as a
+        // standing person's do.
         spawn: (entry, at, how) =>
           this.mobiles?.spawn(entry, at, {
             origin: 'spawned',
@@ -5502,7 +5508,12 @@ export class World {
             overrides: how.overrides,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
+            respawn: how.respawn,
           }) ?? 'no world',
+        // A body or a nest every other browser has seen go down is not stood here before its wait is out.
+        downFor: (id) => owned.downFor(id),
+        // A nest is one of the world's seen creatures too, under its site's own name.
+        shareNest: (nest, at, respawn) => npcNow()?.addSeen(nest, at, respawn),
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
         // A nest's own height is this world's to answer, unlike a creature's: the manager works one
@@ -5567,8 +5578,8 @@ export class World {
         catalogue: () => this.mobileCatalogue,
         // Stood as `spawned` with a world name, for the same reasons the wildlife is: the manager
         // leaves a spawned one where it was put, the name keeps the hand-spawn cap and the NPC tab's
-        // clear off it, and with no `share` it is never put on the wire for a server that has never
-        // heard of it to leave frozen.
+        // clear off it, and with no `share` it is never put on the wire as a server's own record. One
+        // that may be fought goes on it by saying it has been seen, with a server that speaks of that.
         // The row's own creature's numbers, mood, weapons and room (`PersonSpawn`), over the body's: a
         // body is shared by every creature drawn as it and carries one of their numbers.
         spawn: (entry, at, how) =>
@@ -5576,14 +5587,17 @@ export class World {
             origin: 'spawned',
             seed: how.seed,
             inside: how.inside,
-            worldId: `stood:${how.index}`,
+            worldId: how.id,
             essential: how.essential,
             overrides: how.overrides,
             mood: how.mood,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
             room: how.room,
+            respawn: how.respawn,
           }) ?? 'no world',
+        downFor: (id) => owned.downFor(id),
+        seeding: () => owned.seeding,
         remove: (m) => this.mobiles?.remove(m),
         holds: (id) => {
           const e = this.mobileCatalogue?.byId(id);
@@ -5617,6 +5631,13 @@ export class World {
     if (!mobiles || m.removed || m.dead) return 'gone';
     if (this.followers.following(m)) return 'already following you';
     if (this.followers.full) return 'you have as much company as you can take';
+    // A body another player's game is thinking for is not this browser's to walk off with: a follower is
+    // this browser's alone, and this one belongs to whoever keeps it.
+    if (m.isDriven) return TALK_WORDS.keptElsewhere;
+    // And asked before anything is taken off anybody's books: whether the wire will let it go. A body that
+    // may not leave it (a grant lost this instant, or a server too old to hear a creature walk off) refused
+    // after its lair or its row had let go of it would be nobody's at all.
+    if (!mobiles.mayUnshare(m)) return npcNow()?.active && !npcNow()?.seedingNow ? TALK_WORDS.serverKeeps : TALK_WORDS.keptElsewhere;
     // Somebody asked to stop and not yet handed back is the set's already, and keeps the owner it had: one
     // of ours or a lair's was taken off its books the first time, and asking them again would refuse it.
     const whose = recruitOwner(mobiles.worldIdOf(m), this.followers.releasedOwner(m), {
@@ -5624,6 +5645,13 @@ export class World {
       wild: () => wildLife.release(m),
     });
     if ('refused' in whose) return whose.refused;
+    // **Off the wire before it follows, and for good** (`neverShared`): a follower is this browser's alone
+    // and is never handed to another keeper. It was one this browser keeps (or one never on the wire), so
+    // the keeper's word that it has walked off takes every other browser's copy down and holds its post
+    // empty for its row's respawn, as after a death; holding it here instead -- kept on the wire, pinned
+    // to this browser for as long as it follows -- would leave every other browser's own lair or row still
+    // counting it as theirs, standing it at its post again and putting it away when they walked off.
+    if (!mobiles.unshare(m)) return TALK_WORDS.keptElsewhere;
     m.readyToFollow();
     const why = this.followers.add(m, whose.owner, this.playerTarget, this.simTime);
     if (why) return why;
@@ -6336,7 +6364,11 @@ export class World {
   stepLiving(dt: number, playerPos: THREE.Vector3, camera: THREE.Camera | null): void {
     this.simTime += dt;
     surfaces.update(this.simTime, this.renderer);
-    const targets = this.targets(true);
+    // What the world's creatures and the fighters pick a fight out of: the one list of the living, and
+    // every other player a blow of theirs could reach (`RemoteBodies.prey`) whatever the players' own
+    // damage switch says, since such a blow is the keeper's word and not a player's. Which body may go
+    // after a peer at all is each body's own question (`mayFight`): only one this browser keeps on the wire.
+    const targets = this.npcTargets(this.targets(true));
     perf.begin(SEC.creatures);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     perf.end(SEC.creatures);
@@ -6591,6 +6623,26 @@ export class World {
     for (const p of peers.living) this.livingList.push(p);
     if (this.hitWatch && gained) this.watchHits();
     return this.livingList;
+  }
+
+  /** The list the creatures fight over, refilled in place: `living`, then each peer on the creatures' own list who is not on it already. */
+  private readonly npcList: Living[] = [];
+
+  /**
+   * The living (`targets`) and every other player the world's creatures may fight (`RemoteBodies.prey`),
+   * in one kept array refilled every step, which is how often the living list itself is asked fresh. With
+   * no server, or one that carries no creature's blow, it is exactly the living list.
+   */
+  npcTargets(living: readonly Living[]): readonly Living[] {
+    const prey = this.peers().prey;
+    const out = this.npcList;
+    out.length = 0;
+    // Emptied before the plain list is handed back, too: kept full, it would hold the last bodies and
+    // peers it was filled with -- through an unload and at the select screen -- until prey came back.
+    if (!prey.length) return living;
+    for (let i = 0; i < living.length; i++) out.push(living[i]);
+    for (let i = 0; i < prey.length; i++) if (!(prey[i] as { listed?: boolean }).listed) out.push(prey[i]);
+    return out;
   }
 
   /**

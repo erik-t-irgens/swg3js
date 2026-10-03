@@ -56,7 +56,7 @@ import { BLADE_GLOW_VIEWS, type BladeGlowPass } from './core/fx/bladeGlow';
 import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
 import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
-import { DEFAULT_TIER } from './world/npcs.ts';
+import { DEFAULT_TIER, FIGHTER_SPECIES, fighterRecord } from './world/npcs.ts';
 import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
 import { framePlace, orbitFor, packPlanet, FRAME_ASPECT, ORBIT_EYE_HEIGHT } from './world/scenePlaces.ts';
 import { buildPlace, disposePlace, sceneManifest, type BuiltPlace } from './world/sceneWorld.ts';
@@ -5789,6 +5789,30 @@ class App {
           const why = forcedArmsRefusal(e.name, cat.packOf(e)?.hierarchy, weapon);
           if (why) return why;
         }
+        // With a server holding the world, a body stood holding a weapon of the console's choosing is the
+        // world's: the admin asks for it and the weapon rides in its record, so every browser arms it
+        // alike. Anybody else is refused, as for every creature the world holds. A level and a tier are
+        // this browser's own and do not ride in the record, so such a body stands at its own.
+        if (weapon && owned.active) {
+          if (!this.net.session.isAdmin) return 'only this world’s admin can stand creatures in it';
+          this.cam.forward(tmp);
+          tmp.y = 0;
+          tmp.normalize();
+          const inside = this.world.inside;
+          const spots = mobiles.spotsAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), inside ? Math.min(4, metres) : metres, inside);
+          if (!spots.length) return inside ? 'there is no floor under that spot' : 'no ground there';
+          let asked = 0;
+          let note = '';
+          for (const s of spots) {
+            const heading = Math.atan2(this.player.pos.x - s.x, this.player.pos.z - s.z);
+            const rec = recordFor(this.worldKey(), this.net.session.player, this.worldSpawnCount++, e.id, { x: s.x, y: s.y, z: s.z, heading, inside });
+            rec.weapon = weapon.template;
+            note = this.askWorldSpawn(rec);
+            if (note) break;
+            asked++;
+          }
+          return { entry: { id: e.id, name: e.name, kind: e.kind }, asked, note: note || `asked the server for ${asked}, each holding ${weapon.name ?? weapon.id}`, weapon: { asked: opts?.weapon, id: weapon.id, template: weapon.template }, level: level === null ? undefined : 'not carried: a body the world holds stands at its own level', tier: tier === null ? undefined : 'not carried: a body the world holds fights at its own tier' };
+        }
         this.cam.forward(tmp);
         const extra = { ...(overrides ? { overrides } : {}), ...(weapon ? { weaponTemplate: weapon.template } : {}) };
         const r = mobiles.spawnAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), metres, this.world.inside, extra);
@@ -6654,6 +6678,19 @@ class App {
     owned.authority = () => this.net.session.authority;
     owned.admin = () => this.net.session.isAdmin;
     owned.onNote = (text) => this.messages.system(text);
+    // Whether the server speaks of the bodies every browser stands for itself (the lairs, the nests, the
+    // people at their posts): with one that does, those that may be fought are shared by saying they
+    // have been seen; with an older one, or none, every such body stays this browser's own.
+    owned.seeds = () => this.net.session.speaks(3);
+    // The whole day's length from the console (`__debug.day({ length })`) while a server holds the clock:
+    // the world's admin asks the server, which anchors the day where it stands and tells everybody, so
+    // nobody's sun moves; anybody else is refused in the clock's own words. Nothing changes here until
+    // the server's answer arrives, which is the same moment it reaches everybody else.
+    sharedClock.adminDay = (seconds) => {
+      if (!this.net.session.isAdmin || !this.net.session.speaks(3)) return null;
+      this.net.sendWord({ t: 'day', ms: Math.round(seconds * 1000) });
+      return `asked the server for a ${Math.round(seconds)} s day, for everybody on it; the sun goes on from where it stands`;
+    };
     // Whether this tab is being drawn at all. The module never reads the document itself; it asks,
     // and says what it is on the first word it hears on a line, which is what covers a page opened
     // in a background tab -- `visibilitychange` fires on a change and there has not been one.
@@ -6704,17 +6741,48 @@ class App {
     // nothing here holds at all -- a grant for a species this browser's catalogue does not know, or
     // one whose model never landed -- which is handed back rather than left frozen on every screen
     // in the world. The array is refilled rather than rebuilt, so the asking allocates nothing.
-    const grantedIds: string[] = [];
-    creatures.granted = () => {
-      grantedIds.length = 0;
-      for (const r of owned.list) if (owned.mine(r.id)) grantedIds.push(r.id);
-      return grantedIds;
-    };
+    // The seen ones are in it too, though no list names them: the grants are the server's whole answer.
+    creatures.granted = () => owned.keptIds;
     // A death has one word, and it is the spawn list's: this browser's own creature dying goes out
-    // as the list's `dead` rather than as a second word of this module's.
-    creatures.died = (id) => {
-      owned.sayDead(id);
+    // as the list's `dead` rather than as a second word of this module's, with whoever struck it last.
+    creatures.died = (id, by) => {
+      owned.sayDead(id, by);
       return owned.active;
+    };
+    // The bodies every browser stands for itself: shared by saying so, and let go of the same way.
+    creatures.seeding = () => owned.seeding;
+    creatures.seen = (id, at, respawn) => owned.saySeen(id, at, respawn);
+    creatures.unseen = (id) => owned.sayUnseen(id);
+    creatures.taken = (id) => owned.sayTaken(id);
+    // A lair's creature its keeper sent out after this browser stood its own: stood here as that body of
+    // its site, where the site stands here, and the rows parked for it put it where it really is.
+    creatures.onStranger = (id) => {
+      wildLife.standKnown(id);
+    };
+    // The world could hold no more of the seen ones: the body under that name is this browser's own after
+    // all, off the wire and thinking for itself, as every such body was before there were any.
+    owned.onLocal = (id) => {
+      const s = creatures.find(id);
+      if (!s) return;
+      creatures.remove(id, true);
+      s.npcSetDriven(false);
+      (s as { shareAs?(name: string): void }).shareAs?.('');
+    };
+    // A creature kept at another browser struck this player there: the keeper saw it land, so it landed.
+    // It comes off through the player's own record, which is what every blow on the player goes through
+    // -- the red flash, the arc on the side it came from, the followers turning on it, god mode -- and
+    // with the body here that is that creature as who struck, when this browser has one.
+    const npcBlowAt = new THREE.Vector3();
+    creatures.onBlow = (amount, x, y, z, from, what) => {
+      if (!this.started || !this.inWorld || this.dying || this.player.noclip) return;
+      const at = npcBlowAt.set(x, y, z);
+      const ship = what === 'ship' ? (this.pilotedShip() ?? this.player.mounted ?? null) : null;
+      if (ship && !ship.disposed) {
+        ship.damage(amount, at, 0, null);
+        return;
+      }
+      const source = from && typeof (from as unknown as Partial<Living>).key === 'number' ? (from as unknown as Living) : null;
+      this.world.playerTarget.damage(amount, at, 0, source);
     };
     creatures.buried = (id) => owned.dead(id);
     // Who struck, so a creature turns on the right person: the blow carries a relay id, the peers'
@@ -6764,12 +6832,18 @@ class App {
     // What the world's list says stands here is what is stood here. The list's own shape is not the
     // manager's, so it is turned into a record on the way in; everything else about standing one --
     // the catalogue entry, the ground under it, everything it rolls -- is the record's own.
-    const recordOf = (r: SpawnRow): SpawnRecord => ({ id: r.id, world: r.world, species: r.species, x: r.at[0], y: r.at[1], z: r.at[2], heading: r.h, seed: r.seed, inside: r.inside });
+    const recordOf = (r: SpawnRow): SpawnRecord => ({ id: r.id, world: r.world, species: r.species, x: r.at[0], y: r.at[1], z: r.at[2], heading: r.h, seed: r.seed, inside: r.inside, ...(r.weapon ? { weapon: r.weapon } : {}) });
     // Stand one of the world's, and put on it what has been done to it. The share is the one thing
     // about a creature that is not in the record: a creature that has been fought is not the creature
     // that was stood, and a browser walking up to a half-killed animal must not stand it up whole. A
-    // row with no share at all is one nobody has said anything about, which is a whole one.
+    // row with no share at all is one nobody has said anything about, which is a whole one. A fighter's
+    // record is the fighters' to stand, from the same record and the same seed in every browser.
     const standRow = (r: SpawnRow, here: string): void => {
+      if (fighterRecord(r.species)) {
+        const n = this.world.npcs.standRecord(recordOf(r), here);
+        if (typeof n !== 'string' && r.hp !== undefined && r.hp < 1) n.hp = Math.max(0, Math.min(n.maxHp, r.hp * n.maxHp));
+        return;
+      }
       const mobiles = this.world.mobiles;
       if (!mobiles) return;
       const m = mobiles.standRecord(recordOf(r), here);
@@ -6796,13 +6870,34 @@ class App {
         const id = mobiles.worldIdOf(m);
         if (sweptByList(id, mobiles.fromList(m), wanted)) mobiles.removeById(id);
       }
+      // And the fighters stood from it, every one of which is a record of the list's.
+      for (const id of [...this.world.npcs.worldIds]) if (!wanted.has(id)) this.world.npcs.removeById(id);
     };
     owned.onAdd = (row) => standRow(row, this.worldKey());
-    owned.onGone = (id, why) => {
-      // A death is played out where the body stands and the manager takes it down in its own time;
-      // one taken down by an admin goes at once.
-      creatures.noteGone(id, why === 'dead' ? 'dead' : 'gone');
-      if (why !== 'dead') this.world.mobiles?.removeById(id);
+    owned.onGone = (id, why, back, fresh) => {
+      // A body this browser has only just stood, of one that was already down everywhere else (the
+      // server's answer to its `seen`, to it alone): nothing died here, so nothing plays a death or counts
+      // as a kill at its post. It is held down for the server's wait and taken away quietly -- but for a
+      // nest, which stands broken, as it stands on every other screen.
+      if (fresh) {
+        if (id.startsWith('camp:')) {
+          creatures.noteGone(id, 'dead', back);
+          return;
+        }
+        creatures.noteDown(id, why === 'dead' || why === 'taken' ? 'dead' : 'gone', back);
+        this.world.mobiles?.removeById(id);
+        this.world.npcs.removeById(id);
+        return;
+      }
+      // A death is played out where the body stands and the manager takes it down in its own time; a
+      // seen one is down for `back` seconds and stands again after. One taken down by an admin goes at
+      // once, and so does one that walked off with another player as a follower, which to this browser
+      // is a body that has left its post.
+      creatures.noteGone(id, why === 'dead' ? 'dead' : 'gone', back);
+      if (why !== 'dead') {
+        this.world.mobiles?.removeById(id);
+        this.world.npcs.removeById(id);
+      }
     };
 
     // ---- The group and the words players type at each other. ----
@@ -7513,11 +7608,28 @@ class App {
         const key = blow.source?.key ?? 0;
         if (!key) return;
         const ship = this.pilotedShip();
-        if (key !== this.world.playerTarget.key && !(ship && key === (this.world.ships.of(ship)?.key ?? 0))) return;
-        combat.sendHit(blow.id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
+        if (key === this.world.playerTarget.key || (ship && key === (this.world.ships.of(ship)?.key ?? 0))) {
+          combat.sendHit(blow.id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
+          return;
+        }
+        // One of the world's creatures this browser keeps struck another player: said to that player's
+        // browser, the only place it comes off, and not behind the players' damage switch -- the keeper's
+        // word, as a shot's hit is the shooter's. A creature this browser alone holds (one stood from the
+        // console, a follower) is nobody the other browser could see, and its blow goes nowhere.
+        const id = (blow.source as { npcId?: string } | null)?.npcId ?? '';
+        if (id && creatures.keepsHere(id)) creatures.sayBlow(blow.id, id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
       },
       (id) => combat.mayHurt(id),
     );
+    // Every other player is somebody the world's creatures may fight while a server carries their blows,
+    // whatever the players' own damage switch says (`RemoteBodies.prey`).
+    peerBodies().preyCan = () => creatures.seedingNow;
+    // A creature this browser keeps fires shots that cross as the player's do, on their own allowance:
+    // every other screen sees it fire, and a bolt its blade turned away is seen flying back.
+    combat.isNpcShot = (bolt) => {
+      const id = (bolt.source as { npcId?: string } | null | undefined)?.npcId ?? '';
+      return !!id && creatures.keepsHere(id) && creatures.npcShotDue();
+    };
     // Somebody arrived. Nothing they are told about the people already here carries health -- not
     // the greeting, not the states -- so everyone says theirs again at the next look and the newcomer
     // reads them as they are rather than as whole. It is one small message per player per arrival.
@@ -7546,6 +7658,19 @@ class App {
     // the frame's: a tab that is not being drawn stops its frames and keeps its timers, so a player
     // who walked away is still seen to be where and how they are.
     window.setInterval(() => combat.step(0.1), 100);
+    // The seen words waiting their turn go on the same clock, and the moment a server that speaks of the
+    // seen ones takes this browser (a line opened mid-session, or back after a drop, which clears the
+    // wire and leaves the bodies), every body already standing that may be shared goes on it.
+    let seedingWas = false;
+    window.setInterval(() => {
+      owned.tick();
+      const seeding = owned.seeding;
+      if (seeding && !seedingWas) {
+        this.world.mobiles?.shareSeeded();
+        wildLife.shareNests();
+      }
+      seedingWas = seeding;
+    }, 100);
     // The group's words are read first and the fight takes what is left, so neither unplugs the other.
     const combatWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
@@ -14993,7 +15118,7 @@ class App {
    * the player, or '' when the asking went out.
    */
   private askWorldSpawn(rec: SpawnRecord): string {
-    return owned.askSpawn(rec.species, [rec.x, rec.y ?? 0, rec.z], rec.heading, rec.seed, rec.id, !!rec.inside);
+    return owned.askSpawn(rec.species, [rec.x, rec.y ?? 0, rec.z], rec.heading, rec.seed, rec.id, !!rec.inside, rec.weapon ?? '');
   }
 
   /** Ask the server to take one down by the name the world knows it by; '' when the word went out. */
@@ -15164,10 +15289,26 @@ class App {
             x = p.x + (Math.random() - 0.5) * 4;
             z = p.z + (Math.random() - 0.5) * 4;
           }
+          // With a server holding the world a fighter is the world's: the admin asks for one, and every
+          // browser stands it from the same record and dresses it from the same seed, one of them
+          // thinking for it. Anybody else is refused, as for every creature the world holds.
+          if (owned.active) {
+            const heading = Math.atan2(this.player.pos.x - x, this.player.pos.z - z);
+            const rec = recordFor(this.worldKey(), this.net.session.player, this.worldSpawnCount++, tier === undefined ? FIGHTER_SPECIES : `${FIGHTER_SPECIES}:${tier}`, { x, y: spot?.y, z, heading, inside: !!spot });
+            const why = this.askWorldSpawn(rec);
+            return why || `asked for a fighter at ${FIGHTER_TIERS.label(tier ?? this.world.npcs.tier)}`;
+          }
           const n = this.world.npcs.spawnAt(x, z, undefined, { ...(spot ? { y: spot.y, inside: true } : {}), ...(tier === undefined ? {} : { tier }) });
           return `a ${n.name} ahead at ${FIGHTER_TIERS.label(n.tier)} (${this.world.npcs.npcs.length} out)`;
         },
-        clear: () => this.world.npcs.removeAll(),
+        // With a server the world's fighters are asked to go (an admin's alone, as for every creature the
+        // world holds); one this browser stood for itself before there was a server goes at once.
+        clear: () => {
+          if (!owned.active) return this.world.npcs.removeAll();
+          let n = this.world.npcs.removeWhere((f) => !f.npcId);
+          for (const id of [...this.world.npcs.worldIds]) if (!this.askWorldDespawn(id)) n++;
+          return n;
+        },
       },
     ];
   }
@@ -15721,7 +15862,8 @@ class App {
     const why = whyNotTalk(m, this.world.playerTarget);
     if (why) return why;
     const following = this.world.followers.following(m);
-    const options = talkOptions(following, this.world.followers.full);
+    // Anybody may be spoken to whichever browser keeps them; only one this browser keeps may follow.
+    const options = talkOptions(following, this.world.followers.full, [], m.isDriven);
     const at = this.player.worldPos;
     this.talkAt.x = at.x;
     this.talkAt.z = at.z;

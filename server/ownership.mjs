@@ -1,10 +1,17 @@
 // Who thinks for a creature, and how it is handed over.
 //
-// The world's automatic wildlife is switched off: nothing appears on its own, ever. What stands in a
-// world is what an admin stood there by hand, and what an admin stands is the world's -- everyone
+// Two kinds of creature are held here. What an admin stands by hand is the world's -- everyone
 // connected is told about it, one browser thinks for it, and it is handed between browsers as people
-// walk about. This file holds both halves of that: the list of what has been stood, and the rule that
-// says whose browser is keeping each of them this half-second.
+// walk about. And what every browser stands for itself from the same data -- a lair's creatures, a
+// nest, a person the converter put at a post -- is **seen**: each browser seeds its own copy under a
+// name that is the same in all of them (`wild:`, `stood:`, `camp:`), says so here, and from then on one
+// browser thinks for it exactly as for an admin's. Nobody is ever told to stand a seen one: a browser
+// that has not stood it has no reason to, and every browser that has is the only list it needs. What
+// the server keeps of one is who is thinking for it, who has a body for it at all (only those are
+// offered it), and when it died: a seen creature that died stays dead for its own row's respawn and is
+// then forgotten, so the next browser to stand it stands it whole; one nobody keeps or sees is
+// forgotten after a while for the same reason. This file holds both halves of all that: the lists,
+// and the rule that says whose browser is keeping each of them this half-second.
 //
 // The rule, in words. A creature is kept by the nearest player within 180 m of it, and by nobody at
 // all when there is no such player: it simply stands where it was until somebody comes back, because
@@ -79,10 +86,83 @@ export const OWN_TUNING = {
    * messages a second. Ours, invented with the word itself.
    */
   refusal: 120000,
+  /**
+   * How many seen creatures one world may hold at once, the dead among them (the design's number):
+   * every lair, nest and person anybody is standing near. Past it a browser is told to keep the next
+   * one to itself, which is what every browser did before there were any seen ones at all.
+   */
+  seenPerWorld: 600,
+  /**
+   * How long a seen creature nobody keeps and nobody has said they see is held before it is forgotten,
+   * in ms (the design's 120 s). Forgotten, the next browser to stand it stands it whole.
+   */
+  forget: 120000,
+  /** How many `seen` words one browser may send in a second (the design's 20). */
+  'seen.perSecond': 20,
+  /**
+   * The longest a seen creature may be held dead before it may stand again, in ms. A bound on nonsense
+   * rather than a rule, as the damage caps are: the data's own respawns run from seconds to a quarter of
+   * an hour, and a browser on another build must not be able to keep a camp empty for a week.
+   */
+  respawnMax: 3600000,
+  /**
+   * How far from a creature's last known place the player it is said to have struck may be standing, in
+   * metres. A bound on a blow claimed from across the world rather than a rule about reach: wide enough
+   * for the longest shot anything in the game fires and the quarter-second the places lag by. Ours.
+   */
+  strike: 200,
+  /**
+   * How many creature blows on other players one browser may pass on in a second (`npcBlow`). A keeper's
+   * whole pack biting one player is a few a second; this is the bound on a browser that is not playing
+   * fair. Ours.
+   */
+  'blow.perSecond': 20,
 };
 
 /** What a browser may ask about the list. `clear` takes down everything in the world it is on. */
-const DOES = ['add', 'remove', 'dead', 'clear'];
+const DOES = ['add', 'remove', 'dead', 'clear', 'seen', 'unseen', 'taken'];
+
+/**
+ * The names a seen creature may go by: the three kinds every browser seeds for itself from the same
+ * data, and nothing else. A lair's creature (`wild:`), a person standing about (`stood:`) and a nest
+ * (`camp:`). A ticket collector (`travel:`) and one of ours (`ours:`) are never on the list: nobody may
+ * strike them, so they are the same in every browser whoever thinks for them, and need nobody to.
+ */
+export const SEEN_PREFIXES = ['wild:', 'stood:', 'camp:'];
+
+/** Whether a name is one a seen creature may go by. */
+export function seenId(id) {
+  return typeof id === 'string' && SEEN_PREFIXES.some((p) => id.startsWith(p) && id.length > p.length);
+}
+
+/**
+ * Who struck a creature in the last moments before it died, as its keeper names them: the relay ids of
+ * the browsers whose players did. At most eight, each a whole number above nought, each once. Nothing
+ * here keeps them; they are passed on with the death so that a later server can witness a kill.
+ */
+function cleanBy(x) {
+  if (!Array.isArray(x)) return [];
+  const out = [];
+  for (const v of x) {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n <= 0 || n > 1e9 || out.includes(n)) continue;
+    out.push(n);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+/**
+ * A weapon template a spawn may be stood holding, or '' (the console's `{ weapon }` on a body an admin
+ * stands). A path of the client's own, in the characters such paths are made of, short, and never one
+ * that climbs out of where it is looked up: it is looked up on every browser's rack.
+ */
+const TEMPLATE = /^[A-Za-z0-9_./-]{1,120}$/;
+
+export function cleanTemplate(x) {
+  if (typeof x !== 'string' || !TEMPLATE.test(x) || x.split('/').includes('..')) return '';
+  return x;
+}
 /**
  * An id the browser proposes for a creature it is asking to have stood. It is worked out from the
  * world, the spawner and a counter, so two browsers never mint the same one; it is taken here only
@@ -124,10 +204,23 @@ export function cleanSpawn(x, tuning = OWN_TUNING) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
   if (typeof x.do !== 'string' || !DOES.includes(x.do)) return undefined;
   if (x.do === 'clear') return { do: 'clear' };
-  if (x.do === 'remove' || x.do === 'dead') {
+  if (x.do === 'seen') {
+    // A browser saying it has stood one of the seeded kind: its name, where it stands (which is what
+    // decides who is nearest), and how long it stays dead once it dies, in seconds.
+    const id = cleanId(x.id);
+    const at = point(x.at, tuning.limit);
+    if (!id || !seenId(id) || !at) return undefined;
+    return { do: 'seen', id, at, r: num(x.r, 0, tuning.respawnMax / 1000, 0) };
+  }
+  if (x.do === 'remove' || x.do === 'dead' || x.do === 'unseen' || x.do === 'taken') {
     const id = cleanId(x.id);
     if (!id) return undefined;
-    return { do: x.do, id };
+    const out = { do: x.do, id };
+    if (x.do === 'dead') {
+      const by = cleanBy(x.by);
+      if (by.length) out.by = by;
+    }
+    return out;
   }
   const species = cleanWord(x.species, '', WIRE.word);
   const at = point(x.at, tuning.limit);
@@ -141,7 +234,34 @@ export function cleanSpawn(x, tuning = OWN_TUNING) {
   if (Number.isFinite(seed) && seed >= 0) out.seed = Math.floor(seed) >>> 0;
   const id = cleanId(x.id);
   if (id) out.id = id;
+  // The weapon the admin put in its hand from the console. It rides in the record, so every browser
+  // that stands it arms it alike rather than each taking its own guess off its name.
+  const weapon = cleanTemplate(x.weapon);
+  if (weapon) out.weapon = weapon;
   return out;
+}
+
+/**
+ * Whether this browser may send another `seen` this second: the same shape as `maySpawn`, with its
+ * own allowance, since a browser walking into a town says it of a few dozen people together.
+ */
+export function maySee(window, now, tuning = OWN_TUNING) {
+  if (now - window.at >= 1000) {
+    window.at = now;
+    window.lines = 0;
+  }
+  window.lines++;
+  return window.lines <= tuning['seen.perSecond'];
+}
+
+/** Whether this browser may pass on another creature's blow on a player this second: the same shape again, with its own allowance. */
+export function mayBlow(window, now, tuning = OWN_TUNING) {
+  if (now - window.at >= 1000) {
+    window.at = now;
+    window.lines = 0;
+  }
+  window.lines++;
+  return window.lines <= tuning['blow.perSecond'];
 }
 
 /**
@@ -184,7 +304,13 @@ function rowOf(c) {
   // every browser, the admin's own included.
   if (c.inside) row.inside = true;
   if (c.hp >= 0) row.hp = c.hp;
+  if (c.weapon) row.weapon = c.weapon;
   return row;
+}
+
+/** Whole seconds until a dead seen creature may stand again, never less than one while it is still held. */
+function secondsLeft(c, now) {
+  return Math.max(1, Math.ceil((c.until - now) / 1000));
 }
 
 export class Ownership {
@@ -197,8 +323,15 @@ export class Ownership {
     this.tuning = tuning;
     /** @type {Map<string, object>} id to the creature: where it is, who stood it, and who keeps it */
     this.creatures = new Map();
-    /** @type {Map<string, Set<string>>} world key to the ids standing in it */
+    /** @type {Map<string, Set<string>>} world key to the ids an admin stood in it, the living ones */
     this.byWorld = new Map();
+    /**
+     * World key to the ids of the seen creatures held for it, living and dead. Apart from `byWorld`
+     * because nothing a browser is handed on arriving, nothing an admin's clear takes down and nothing
+     * the admin's own cap counts is a seen one: they are every browser's own, and only kept here.
+     * @type {Map<string, Set<string>>}
+     */
+    this.seenByWorld = new Map();
     /** @type {Map<number, object>} connection to where that browser is and when it last said so */
     this.people = new Map();
     this.nextId = 1;
@@ -233,6 +366,9 @@ export class Ownership {
     // the place it last sent belongs to the world it came from, and taken for this one it would make
     // it the nearest thing to whatever happens to stand at those metres here.
     if (key !== person.world) {
+      // And it has a body for none of the seen creatures of the world it left: it put them all down
+      // with that world, and must never be offered one of them on the strength of having stood it once.
+      this.unseeAll(session, person.world);
       person.world = key;
       person.placed = false;
     }
@@ -261,8 +397,139 @@ export class Ownership {
    */
   gone(session) {
     this.people.delete(session);
-    for (const c of this.creatures.values()) if (c.keeper === session) this.release(c);
+    for (const c of this.creatures.values()) {
+      if (c.keeper === session) this.release(c);
+      c.seers?.delete(session);
+    }
     return { ok: true, tell: this.assign() };
+  }
+
+  // -- the seen ones --------------------------------------------------------------------------------
+
+  /**
+   * A browser has stood one of the seeded kind and says so: from now on it is one of the bodies that
+   * creature may be kept by. The first browser to say it adds the record; every one after only joins
+   * it. One that died is still dead until its respawn runs out, and a browser saying it has stood it
+   * meanwhile is told so, alone, so its copy goes down rather than standing up whole. A name an admin's
+   * creature already goes by, or one this world has no room left for, is told to keep its body to
+   * itself.
+   *
+   * `respawn` is in ms and is the browser's own reading of how long that row stays down, which every
+   * browser reads from the same data; the first one to say it is kept.
+   */
+  sight(session, world = '', id = '', at = [0, 0, 0], respawn = 0) {
+    if (!seenId(id)) return { ok: false, why: 'not a name a seen creature goes by', tell: [] };
+    const now = this.now();
+    let c = this.creatures.get(id);
+    // A seen one whose respawn has run out is forgotten here rather than at the next pass. Browsers stand
+    // their copy again the moment the wait they were told is out, which is the very moment between two
+    // passes that this word arrives in; answered from the old record, the fresh body was killed on
+    // arrival, counted as a kill at its post and made to wait its whole respawn again.
+    if (c?.seeded && c.dead && now >= c.until && c.world === world) {
+      if (c.keeper) this.pending.push({ session: c.keeper, id: c.id });
+      this.release(c);
+      this.forgetSeen(c);
+      c = undefined;
+    }
+    if (c) {
+      // An admin's creature under a seeded name, or the same name on another world, is nothing a
+      // browser may join: it keeps its own body to itself, as it did before any of this.
+      if (!c.seeded || c.world !== world) return { ok: false, why: 'that name is taken', tell: [{ to: session, msg: { t: 'spawn', do: 'local', id } }] };
+      // Still down: this browser alone is told so, and told that it is about a body it has just stood
+      // (`fresh`), which it takes down quietly rather than playing a death nobody here saw.
+      if (c.dead) return { ok: true, tell: [{ to: session, msg: { t: 'spawn', do: 'gone', id, why: c.taken ? 'taken' : 'dead', back: secondsLeft(c, now), fresh: 1 } }] };
+      c.seers.add(session);
+      c.seenAt = now;
+      // A browser saying it has a body for one is no longer one that cannot keep it, whatever it said
+      // before: the word it handed the grant back with was about a body it did not have then.
+      c.refused?.delete(session);
+      return { ok: true, tell: this.assign() };
+    }
+    const held = this.seenByWorld.get(world);
+    if (this.creatures.size >= this.tuning.total) this.pruneDead();
+    const full = (held && held.size >= this.tuning.seenPerWorld) || this.creatures.size >= this.tuning.total;
+    if (full) return { ok: false, why: `a world holds ${this.tuning.seenPerWorld} of these`, tell: [{ to: session, msg: { t: 'spawn', do: 'local', id } }] };
+    const made = {
+      id,
+      world,
+      species: '',
+      at: [Number(at[0]) || 0, Number(at[1]) || 0, Number(at[2]) || 0],
+      h: 0,
+      seed: 0,
+      inside: false,
+      by: '',
+      born: now,
+      dead: 0,
+      keeper: 0,
+      since: 0,
+      rival: 0,
+      rivalAt: 0,
+      lastKeeper: 0,
+      lastKeeperAt: 0,
+      hp: -1,
+      seeded: true,
+      // Who has a body for it: only these are ever offered it, so a browser is never handed one it
+      // would have to give straight back.
+      seers: new Set([session]),
+      seenAt: now,
+      // Since when nobody has kept it, which with `seenAt` is what forgets one left alone.
+      unkeptAt: now,
+      respawn: Math.min(this.tuning.respawnMax, Math.max(0, Number(respawn) || 0)),
+      until: 0,
+      taken: false,
+    };
+    this.creatures.set(id, made);
+    this.seenWorld(world).add(id);
+    return { ok: true, created: true, tell: this.assign() };
+  }
+
+  /**
+   * A browser has put its body for a seen creature down (it walked away, or the body went for room).
+   * It is offered it no more, and if it was the one keeping it the creature goes at once to whoever
+   * else has one -- with no wait, since giving one up because you walked off is not refusing it.
+   */
+  unsee(session, id) {
+    const c = this.creatures.get(id);
+    if (!c?.seeded) return { ok: false, why: 'there is nothing there', tell: [] };
+    c.seers.delete(session);
+    const tell = [];
+    if (c.keeper === session) {
+      tell.push({ to: session, msg: { t: 'keep', add: [], drop: [id] } });
+      this.release(c);
+    }
+    for (const t of this.assign()) tell.push(t);
+    return { ok: true, tell };
+  }
+
+  /** Every seen creature of one world let go of by one browser, which has left that world. */
+  unseeAll(session, world) {
+    const ids = this.seenByWorld.get(world);
+    if (!ids) return;
+    for (const id of ids) {
+      const c = this.creatures.get(id);
+      if (!c) continue;
+      c.seers.delete(session);
+    }
+  }
+
+  /** The set of seen ids held for a world, made if it is not there yet. */
+  seenWorld(key) {
+    let set = this.seenByWorld.get(key);
+    if (!set) {
+      set = new Set();
+      this.seenByWorld.set(key, set);
+    }
+    return set;
+  }
+
+  /** Out of the tables altogether: a seen creature whose respawn has run out, or that nobody has kept or seen for a while. */
+  forgetSeen(c) {
+    this.creatures.delete(c.id);
+    const held = this.seenByWorld.get(c.world);
+    if (held) {
+      held.delete(c.id);
+      if (!held.size) this.seenByWorld.delete(c.world);
+    }
   }
 
   // -- the list -------------------------------------------------------------------------------------
@@ -271,14 +538,16 @@ export class Ownership {
    * Stand a creature. The id the browser proposed is taken when it is free, so the browser that asked
    * can recognise its own; otherwise one is minted here. Nothing is stood twice under one id.
    */
-  spawn({ world = '', species = '', at = [0, 0, 0], h = 0, seed = 0, by = '', id = '', inside = false } = {}) {
+  spawn({ world = '', species = '', at = [0, 0, 0], h = 0, seed = 0, by = '', id = '', inside = false, weapon = '' } = {}) {
     if (!species) return { ok: false, why: 'nothing to stand', tell: [] };
     if (this.creatures.size >= this.tuning.total) this.pruneDead();
     if (this.creatures.size >= this.tuning.total) return { ok: false, why: 'this server is holding as many creatures as it can', tell: [] };
     const inWorld = this.byWorld.get(world);
     if (inWorld && inWorld.size >= this.tuning.world) return { ok: false, why: `a world holds ${this.tuning.world} of these`, tell: [] };
     let key = cleanId(id);
-    if (!key || this.creatures.has(key)) key = this.mint();
+    // A name of the seeded kind is never an admin's: every browser stands its own body under it, and
+    // one stood by hand under the same name would be two creatures every screen thinks are one.
+    if (!key || this.creatures.has(key) || seenId(key)) key = this.mint();
     const c = {
       id: key,
       world,
@@ -302,6 +571,8 @@ export class Ownership {
       lastKeeperAt: 0,
       // How much of it is left, as a share of a whole one. -1 until a keeper has said.
       hp: -1,
+      // What the admin put in its hand, or nothing: every browser arms it from its own list then.
+      weapon: cleanTemplate(weapon),
     };
     this.creatures.set(key, c);
     this.world(world).add(key);
@@ -312,6 +583,14 @@ export class Ownership {
   remove(id) {
     const c = this.creatures.get(id);
     if (!c) return { ok: false, why: 'there is nothing there', tell: [] };
+    if (c.seeded) {
+      // A seen one is simply forgotten: whoever was keeping it is told to let go, and the next
+      // browser to say it has stood it starts it again.
+      if (c.keeper) this.pending.push({ session: c.keeper, id: c.id });
+      this.release(c);
+      this.forgetSeen(c);
+      return { ok: true, row: rowOf(c), world: c.world, tell: this.assign() };
+    }
     this.forget(c);
     return { ok: true, row: rowOf(c), world: c.world, tell: this.assign() };
   }
@@ -319,20 +598,44 @@ export class Ownership {
   /**
    * One died. The row is kept rather than forgotten, and kept dead: a death happens once and stays,
    * so a creature that changes hands after it cannot be stood again by the browser that takes it.
+   *
+   * A seen one stays dead for its own respawn and is then forgotten, which is how the next browser to
+   * stand it stands it whole; `back` is how many seconds that is, which every browser is told with the
+   * death so that none stands its own copy again before then.
    */
   died(id) {
     const c = this.creatures.get(id);
     if (!c || c.dead) return { ok: false, why: 'there is nothing there to die', tell: [] };
-    c.dead = this.now();
+    const now = this.now();
+    c.dead = now;
     // The grant is not taken back here but in the pass below, so that whoever was keeping it is told
     // to let go in the same breath -- which is what makes a death in the middle of a hand-over safe:
     // the challenge goes with it and the browser that was about to take it over never does.
+    if (c.seeded) {
+      c.until = now + c.respawn;
+      return { ok: true, row: rowOf(c), world: c.world, back: secondsLeft(c, now), tell: this.assign() };
+    }
     const inWorld = this.byWorld.get(c.world);
     if (inWorld) {
       inWorld.delete(c.id);
       if (!inWorld.size) this.byWorld.delete(c.world);
     }
     return { ok: true, row: rowOf(c), world: c.world, tell: this.assign() };
+  }
+
+  /**
+   * One walked off with a player (a follower, which is that browser's alone from now on). An admin's is
+   * simply gone from the list. A seen one is held as though it had died -- its row stays down for its
+   * own respawn -- because to every other browser it is a creature that left its post, and standing a
+   * fresh one there at once would put two of one person in the world.
+   */
+  taken(id) {
+    const c = this.creatures.get(id);
+    if (!c || c.dead) return { ok: false, why: 'there is nothing there', tell: [] };
+    if (!c.seeded) return { ...this.remove(id), back: 0 };
+    const end = this.died(id);
+    c.taken = true;
+    return end;
   }
 
   /** Take down everything standing in one world. */
@@ -391,6 +694,25 @@ export class Ownership {
     if (!c || c.dead) return false;
     if (c.keeper === session) return true;
     return c.lastKeeper === session && this.now() - c.lastKeeperAt < this.tuning.grace;
+  }
+
+  /**
+   * Whether that browser's word that one of its creatures struck another player can be believed enough
+   * to pass on (`npcBlow`). It is not behind the players' damage switch, so it is held to everything the
+   * server can see instead: the word is the keeper's (or the keeper's a moment ago, as a death is); the
+   * player struck is on the creature's world and has said where they stand; they are within `strike`
+   * metres of the creature's last known place (`at`, the keeper's own last row, else where it was stood);
+   * and for a seen one their own browser has a body for it -- has stood that very creature from its own
+   * data -- so a browser cannot make one up beside somebody and bite them with it.
+   */
+  mayStrike(session, id, victim, at = null) {
+    if (!this.mayKill(session, id)) return false;
+    const c = this.creatures.get(id);
+    const v = this.people.get(victim);
+    if (!c || !v || victim === session || v.world !== c.world || !v.placed) return false;
+    if (c.seeded && !c.seers.has(victim)) return false;
+    const p = Array.isArray(at) && at.length === 3 ? at : c.at;
+    return Math.hypot(v.x - p[0], v.y - p[1], v.z - p[2]) <= this.tuning.strike;
   }
 
   /**
@@ -453,6 +775,8 @@ export class Ownership {
     if (c.keeper) {
       c.lastKeeper = c.keeper;
       c.lastKeeperAt = this.now();
+      // A seen one's clock of being left alone starts now, not when it was first seen.
+      if (c.seeded) c.unkeptAt = c.lastKeeperAt;
     }
     c.keeper = 0;
     c.since = 0;
@@ -487,8 +811,18 @@ export class Ownership {
     if (!c) return { ok: false, why: 'there is nothing there', tell: [] };
     if (!c.refused) c.refused = new Map();
     c.refused.set(session, this.now());
-    if (c.keeper === session) this.release(c);
-    return { ok: true, tell: this.assign() };
+    // A browser that cannot keep a seen one has no body for it, whatever it said before.
+    c.seers?.delete(session);
+    // It is told to let go, as anybody losing a grant is: released silently, it went on holding the grant
+    // it had handed back, thought for the creature itself once its body landed, and said rows nobody was
+    // ever passed -- alive on its own screen and frozen on every other.
+    const tell = [];
+    if (c.keeper === session) {
+      tell.push({ to: session, msg: { t: 'keep', add: [], drop: [id] } });
+      this.release(c);
+    }
+    for (const t of this.assign()) tell.push(t);
+    return { ok: true, tell };
   }
 
   /** Room for another: the oldest deaths go first, and only ever the dead. */
@@ -496,7 +830,10 @@ export class Ownership {
     const dead = [];
     for (const c of this.creatures.values()) if (c.dead) dead.push(c);
     dead.sort((a, b) => a.dead - b.dead);
-    for (let i = 0; i < dead.length && this.creatures.size >= this.tuning.total; i++) this.creatures.delete(dead[i].id);
+    for (let i = 0; i < dead.length && this.creatures.size >= this.tuning.total; i++) {
+      if (dead[i].seeded) this.forgetSeen(dead[i]);
+      else this.creatures.delete(dead[i].id);
+    }
   }
 
   /** Whether a browser can keep anything at all just now: here, placed, awake, and not silent. */
@@ -534,29 +871,47 @@ export class Ownership {
           note(c.keeper, 'drop', c.id);
           this.release(c);
         }
+        // A seen one's respawn has run out: forgotten, and the next browser to say it has stood it
+        // stands it whole. Nobody is told: every browser was told how long it would be, with the death.
+        if (c.seeded && now >= c.until) this.forgetSeen(c);
+        continue;
+      }
+      // A seen one nobody has kept and nobody has said they see for a while: everybody who stood it has
+      // walked away and put it down, and holding it would only stand it frozen for the next who comes.
+      if (c.seeded && !c.keeper && now - Math.max(c.unkeptAt, c.seenAt) >= this.tuning.forget) {
+        this.forgetSeen(c);
         continue;
       }
       let best = 0;
       let bestAway = Infinity;
       let keeperAway = Infinity;
+      let keeperHere = false;
+      // A seen one may be kept only by a browser with a body for it, and by any such browser however far
+      // it is standing: every browser that has one stood it because it was near, and put it down when it
+      // walked off (`unsee`), so the range that an admin's creature needs is already in who has one.
+      const range = c.seeded ? Infinity : this.tuning.range;
       for (const person of this.people.values()) {
         if (person.world !== c.world || !this.keen(person, now)) continue;
+        if (c.seeded && !c.seers.has(person.session)) continue;
         // One this browser has already said it cannot keep is not offered to it again for a while;
         // somebody else takes it, and if nobody can it simply stands where it is, which is what it
         // was doing anyway and is at least the same on every screen.
         const refusedAt = c.refused ? c.refused.get(person.session) : undefined;
         if (refusedAt !== undefined && now - refusedAt < this.tuning.refusal) continue;
         const away = Math.hypot(person.x - c.at[0], person.y - c.at[1], person.z - c.at[2]);
-        if (away > this.tuning.range) continue;
-        if (person.session === c.keeper) keeperAway = away;
+        if (away > range) continue;
+        if (person.session === c.keeper) {
+          keeperAway = away;
+          keeperHere = true;
+        }
         if (away < bestAway) {
           bestAway = away;
           best = person.session;
         }
       }
-      // The keeper has gone, fallen silent, gone to sleep or walked out of range: it is taken off at
-      // once and whoever is nearest, if anybody is, has it from now.
-      if (c.keeper && !(keeperAway <= this.tuning.range)) {
+      // The keeper has gone, fallen silent, gone to sleep, walked out of range or put its body down:
+      // it is taken off at once and whoever is nearest, if anybody is, has it from now.
+      if (c.keeper && !keeperHere) {
         note(c.keeper, 'drop', c.id);
         this.release(c);
       }
@@ -615,16 +970,29 @@ export class Ownership {
   /** What to print on the status page: how many are standing, how many are kept, and by how many. */
   describe() {
     if (!this.creatures.size) return 'nothing stood';
-    let alive = 0;
+    const n = this.counts();
+    return `${n.stood} stood by an admin and ${n.seen} seen (${n.seenDead} of those dead until their respawn) in ${n.worlds} world(s), ${n.kept} kept by ${n.keepers}, ${this.handovers} handed over`;
+  }
+
+  /** The same in numbers: what an admin stood and what browsers have seen for themselves, apart. */
+  counts() {
+    let stood = 0;
+    let seen = 0;
+    let seenDead = 0;
     let kept = 0;
     const keepers = new Set();
     for (const c of this.creatures.values()) {
-      if (c.dead) continue;
-      alive++;
+      if (c.dead) {
+        if (c.seeded) seenDead++;
+        continue;
+      }
+      if (c.seeded) seen++;
+      else stood++;
       if (!c.keeper) continue;
       kept++;
       keepers.add(c.keeper);
     }
-    return `${alive} standing in ${this.byWorld.size} world(s), ${kept} kept by ${keepers.size}, ${this.handovers} handed over`;
+    const worlds = new Set([...this.byWorld.keys(), ...this.seenByWorld.keys()]).size;
+    return { stood, seen, seenDead, kept, keepers: keepers.size, worlds };
   }
 }

@@ -407,6 +407,44 @@ const bodies = new RemoteBodies().bind(physics);
   live.dispose();
 }
 
+// --- 12b: the world's creatures' own list ------------------------------------------------------------------
+// A creature this browser keeps strikes a peer through its keeper's word (`npcBlow`), which is not behind
+// the players' damage switch: while a server carries such words every peer with a body is on the
+// creatures' own list, whatever the switch says. Which body may then go after them is each body's own
+// question (`mayFight`, npcWire.test.ts).
+{
+  const w = await Physics.create();
+  const live = new RemoteBodies().bind(w);
+  const them = peer(6, 30, 0, 0);
+  live.peerAdded(them);
+  live.peerMoved(them);
+  ok(live.prey.length === 0, '12b: with nothing saying the creatures may, nobody is on their list');
+  let can = true;
+  live.preyCan = () => can;
+  const was = live.version;
+  live.peerMoved(them);
+  ok(live.prey.length === 1 && live.living.length === 0 && live.version > was, '12b: with a server carrying the creatures\' blows a peer is on their list though nothing of the player\'s could hurt them, and the world is told to build it again');
+  ok((live.prey[0] as { isPeer?: boolean }).isPeer === true, '12b: and says it is another player, which is what each body asks before going after them');
+  can = false;
+  live.peerMoved(them);
+  ok(live.prey.length === 0, '12b: with no such server they are off it again');
+  live.preyCan = () => {
+    throw new Error('the wiring broke');
+  };
+  live.peerMoved(them);
+  ok(live.prey.length === 0, '12b: and a hook that throws is read as no');
+  live.preyCan = () => true;
+  peerBodyKnob({ fight: 0 });
+  live.peerMoved(them);
+  ok(live.prey.length === 0 && live.byCollider.size === 1, '12b: the knob takes them off this list as well, bodies left standing');
+  peerBodyKnob({ fight: 1 });
+  live.peerMoved(them);
+  ok(live.prey.length === 1, '12b: and puts them back');
+  live.peerRemoved(6);
+  ok(live.prey.length === 0, '12b: and a peer who goes leaves it');
+  live.dispose();
+}
+
 // --- 13: the interface the other packages take -----------------------------------------------------------
 {
   const w = await Physics.create();

@@ -44,8 +44,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import RAPIER from '@dimforge/rapier3d-compat';
-import type { Hittable, Living } from '../combat/kit.ts';
+import { PLAYER_KEY, type Hittable, type Living } from '../combat/kit.ts';
 import type { PlacedPiece } from './mobiles/lairs.ts';
+import { npcNow, type NpcEnd, type NpcRow, type NpcSubject } from '../net/npcNet.ts';
 import { rescaleBody, scaledByDifficulty } from './difficulty.ts';
 import { castsShadow, drawsAfterWater, surfaces } from './surfaces.ts';
 
@@ -394,8 +395,14 @@ async function hangEffects(list: readonly NestEffect[] | undefined, at: (e: Nest
  * `Hittable` is all of it: a place, a height, whether it is dead, and a way to be hurt. It is not in
  * `World.targets()` -- nothing should pick a fight with a mound of earth, and the aim ray and the
  * bolts reach it through the collider map instead, exactly as a crate is reached.
+ *
+ * With a server it is also one of the world's seen creatures (`NpcSubject`, as a `camp:` name): every
+ * browser stands its own from the same site, one browser keeps it, and a blow struck at a copy kept
+ * elsewhere is asked of the keeper, whose health is everybody's. So a nest broken on one screen is
+ * broken on every screen, and only its keeper sends its own out when it is struck; the creatures it
+ * sends reach every other browser as names it has not stood, which the lair stands for them.
  */
-export class WildNest implements Hittable {
+export class WildNest implements Hittable, NpcSubject {
   readonly pos = new THREE.Vector3();
   halfHeight = 1;
   dead = false;
@@ -418,12 +425,73 @@ export class WildNest implements Hittable {
   private disposed = false;
   /** Between the start of a build and the end of its preparing: a dispose then leaves its materials and holds for the build to give back. */
   private busy = false;
+  /** The name every browser knows it by on the wire (`camp:` and its site), or '' while it is this browser's alone. */
+  private shared = '';
+  /** Another browser keeps it: a blow is asked of that browser and nothing is taken off here. */
+  private driven = false;
 
   constructor(label: string, hp: number) {
     this.label = label;
     this.baseHp = hp;
     this.maxHp = scaledByDifficulty(hp);
     this.hp = this.maxHp;
+  }
+
+  // ---- one of the world's seen creatures ------------------------------------------------------------
+
+  /** Make it one of the world's, by the name every browser stands it under. */
+  shareAs(id: string): void {
+    this.shared = id;
+  }
+
+  get npcId(): string {
+    return this.shared;
+  }
+
+  get npcDead(): boolean {
+    return this.dead;
+  }
+
+  /** Where it is and how much of it is left, for its keeper's batch; nothing until it stands. */
+  npcFill(row: NpcRow): boolean {
+    if (this.disposed || !this.group) return false;
+    row.p[0] = this.pos.x;
+    row.p[1] = this.pos.y;
+    row.p[2] = this.pos.z;
+    row.h = 0;
+    row.s = this.dead ? 'dead' : 'idle';
+    row.v = 0;
+    row.hp = this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    row.b = undefined;
+    return true;
+  }
+
+  /**
+   * What its keeper says: how much of it is left. Nothing else of a nest moves. Its death is not read off
+   * a share of nothing here but comes with its own word (`npcEnd`), as every creature's does.
+   */
+  npcDrive(row: NpcRow, _snap: boolean): void {
+    if (this.dead || this.disposed) return;
+    this.hp = Math.max(1e-3, Math.min(this.maxHp, row.hp * this.maxHp));
+  }
+
+  npcSetDriven(driven: boolean): void {
+    this.driven = driven;
+    // A nest handed back to this browser starts sending its own out only when it is next struck here.
+    if (!driven) this.wantsHelp = false;
+  }
+
+  /** A blow somebody else struck, at the keeper: taken off here, which is the only place it comes off. */
+  npcHurt(amount: number): void {
+    if (this.driven || this.dead || this.disposed) return;
+    this.damage(amount);
+  }
+
+  /** Its keeper says it is gone: broken, or taken away with its site. */
+  npcEnd(why: NpcEnd): void {
+    if (why !== 'dead' || this.dead) return;
+    this.hp = 0;
+    this.dead = true;
   }
 
   /** The difficulty knob moved: its whole set again, keeping the share of it it had. */
@@ -547,8 +615,11 @@ export class WildNest implements Hittable {
    * off it and bring more of its own out, which is the second half of what makes walking up to one
    * a decision rather than a chore.
    */
-  damage(amount: number, _from?: THREE.Vector3, _push?: number, _source?: Living | null): void {
+  damage(amount: number, _from?: THREE.Vector3, _push?: number, source?: Living | null): void {
     if (this.dead || !(amount > 0)) return;
+    // Kept at another browser: the blow is asked of that browser, whose health is everybody's, and
+    // nothing is taken off here -- nor does this copy send any of its own out, which is the keeper's.
+    if (this.driven && this.shared && npcNow()?.askHit(this.shared, amount, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, '', source?.key === PLAYER_KEY)) return;
     this.hp -= amount;
     this.wantsHelp = true;
     if (this.hp <= 0) {
@@ -566,6 +637,12 @@ export class WildNest implements Hittable {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // Off the wire with it: this browser no longer has a body for it, which the wire says for a live
+    // one so the server hands it to somebody who has.
+    if (this.shared) {
+      const net = npcNow();
+      if (net?.find(this.shared) === this) net.remove(this.shared);
+    }
     const deps = this.deps;
     for (const h of this.fxHandles) deps?.effects?.remove(h);
     this.fxHandles.length = 0;

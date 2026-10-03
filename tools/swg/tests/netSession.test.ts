@@ -14,7 +14,7 @@
 // started. `src/net/net.ts` imports nothing but its own types, the session and the shared clock, so it
 // runs here as it is.
 import assert from 'node:assert/strict';
-import { tuneSession } from '../../../src/net/session.ts';
+import { WIRE_VERSION, tuneSession } from '../../../src/net/session.ts';
 import { sharedClock } from '../../../src/world/sharedClock.ts';
 
 let checks = 0;
@@ -100,7 +100,7 @@ function open(url = 'ws://test:8787', word = '') {
   const { net, sock } = open();
   const hello = sock.word('hello');
   ok(!!hello, 'the hello goes at once when no join word is set, as it always did');
-  ok(hello!.v === 2, 'and says which language this browser speaks');
+  ok(hello!.v === WIRE_VERSION && WIRE_VERSION === 3, 'and says which language this browser speaks: the third, which speaks of the seen creatures and the day');
   ok(hello!.name === 'Han' && hello!.planet === 'tatooine', 'while carrying everything it always carried');
   ok(net.session.mode === 'waiting', 'though nothing is known about the server yet');
   await sleep(60);
@@ -140,6 +140,9 @@ function open(url = 'ws://test:8787', word = '') {
   ok(notices.some((n) => /joined/.test(n)), 'and the player is told');
   sock.say({ t: 'welcome', id: 3, v: 2, now: Date.now(), ff: 1, peers: [] });
   ok(net.session.friendlyFire, 'the welcome brings the friendly-fire switch');
+  // A server of the second wire knows nothing of the seen creatures or the admin's day: nothing that
+  // would be dropped there in silence is ever said to it.
+  ok(net.session.speaks(2) && !net.session.speaks(3), 'a server on the second wire is spoken to in the second wire');
   await sleep(60);
   ok(net.session.mode === 'server', 'and the wait for a first word does not undo a server that spoke');
   // A line that drops keeps the clock; one put down on purpose lets it go.
@@ -147,6 +150,18 @@ function open(url = 'ws://test:8787', word = '') {
   ok(sharedClock.where === 'adrift', 'a line that drops leaves the day carrying on at its own rate');
   net.disconnect();
   ok(!sharedClock.shared, 'and putting it down on purpose gives the day back to this browser');
+}
+
+{
+  // A server of the third wire: the seen creatures and the day may be spoken of.
+  const { net, sock } = open();
+  sock.say({ t: 'hail', v: 3, now: Date.now(), epoch: 1, dayMs: 1800000, dayAt: Date.now() - 1000, dayFrom: 0.25, nonce: NONCE, word: 0, ff: 0 });
+  const claim = sock.word('claim')!;
+  sock.say({ t: 'claimed', you: { player: String(claim.player), character: 'char-1', name: 'Han' }, keep: 'browser' });
+  ok(net.session.speaks(3) && net.session.speaks(2), 'a server on the third wire speaks of the seen creatures and the day');
+  ok(sharedClock.report().dayAt > 0 && Math.abs(sharedClock.report().dayFrom - 0.25) < 1e-6, 'and the anchor its day turned at is read from the greeting');
+  net.disconnect();
+  ok(!net.session.speaks(3) && sharedClock.report().dayAt === 0, 'and with the line put down nothing is spoken of, and no anchor is left behind');
 }
 
 {

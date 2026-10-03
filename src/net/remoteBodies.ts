@@ -56,6 +56,12 @@
 // subtract it -- `onBlow` wired, and `mayHurt` (the server's damage switch, or a duel) saying yes.
 // Otherwise the local wildlife would abandon the player and mob the picture of their friend for ever.
 //
+// The world's creatures have a list of their own beside it (`prey`), and it is the same rule with the
+// creatures' own reach: a blow one of them strikes at a peer goes to that peer's browser as the keeper's
+// word (`npcBlow`), which is not behind the players' damage switch, so whenever a server that carries it
+// is answering (`preyCan`) every peer with a body is on it -- and the creatures fight them as they fight
+// the player, while the player's own powers and reticle still read the list the switch decides.
+//
 // Nothing is allocated per frame: the bodies are made when a peer arrives and taken down when they
 // go, the poses are written through kept scratch objects, and the one blow record is refilled.
 import * as THREE from 'three';
@@ -140,6 +146,13 @@ class PeerBody implements Living {
   collider: RAPIER.Collider | null = null;
   /** On the one list of the living right now: see the note at the head of this file. */
   listed = false;
+  /** On the world's creatures' own list right now (`RemoteBodies.prey`). */
+  hunted = false;
+  /**
+   * Another player's figure, which is what the creatures' own choice of a fight asks (`mayFight` in
+   * npcNet.ts): only a body whose blow can reach this player's browser may go after them.
+   */
+  readonly isPeer = true;
   /** Their relay id. */
   readonly id: number;
   private readonly owner: RemoteBodies;
@@ -218,10 +231,27 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
    * that is alive, exactly as the game's own vehicles are.
    */
   private readonly livingList: Living[] = [];
+  /**
+   * The figures the world's creatures may pick a fight with: every peer with a body while a blow one of
+   * them strikes could reach that peer's browser (`preyCan`), whatever the players' own switch says,
+   * since that blow is the keeper's and not a player's. See the head of this file.
+   */
+  private readonly preyList: Living[] = [];
 
   get living(): readonly Living[] {
     return this.livingList;
   }
+
+  get prey(): readonly Living[] {
+    return this.preyList;
+  }
+
+  /**
+   * Whether a blow one of the world's creatures strikes at a peer could reach that peer's browser just
+   * now: a server answering that carries the creatures' blows (`npcBlow`). Null is no, which keeps every
+   * peer off the creatures' list, as it always was. Asked once per peer per frame; a hook that throws is no.
+   */
+  preyCan: (() => boolean) | null = null;
 
   /** Bumped whenever a body comes or goes, or joins or leaves the list, so the world builds again. */
   version = 0;
@@ -284,8 +314,31 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     // without a message of its own: a duel begins, a duel ends, a world's damage switch arrives in
     // the welcome. It is one call and a comparison, and the list is touched only when it changes.
     this.list(held.figure, this.fightable(p.id));
+    this.hunt(held.figure, this.huntable());
     if (p.ship && p.shipBox) this.moveShip(w, held, p.ship, p.shipBox);
     else this.dropShip(held);
+  }
+
+  /** Whether the world's creatures may fight the peers at all just now. */
+  private huntable(): boolean {
+    if (!(PEER_BODY_TUNE.fight > 0) || !this.preyCan) return false;
+    try {
+      return this.preyCan();
+    } catch {
+      return false;
+    }
+  }
+
+  /** On or off the creatures' own list, bumping the version only when it really changed. */
+  private hunt(f: PeerBody, want: boolean): void {
+    if (f.hunted === want) return;
+    f.hunted = want;
+    if (want) this.preyList.push(f);
+    else {
+      const i = this.preyList.indexOf(f);
+      if (i >= 0) this.preyList.splice(i, 1);
+    }
+    this.version++;
   }
 
   /** Whether a blow struck here against that peer could reach the browser that would subtract it. */
@@ -393,8 +446,9 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
   private dropFigure(held: Held): void {
     const f = held.figure;
     const w = this.physics;
-    // Off the list whatever else happens: a peer with no body is nothing to pick a fight with.
+    // Off the lists whatever else happens: a peer with no body is nothing to pick a fight with.
     this.list(f, false);
+    this.hunt(f, false);
     if (!f.body || !w) return;
     // The handle leaves the lookup at the moment the collider does, never later: the engine hands a
     // recycled handle to the next body made, and an entry left behind would answer for that one.
@@ -474,6 +528,7 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     this.physics = null;
     this.onBlow = null;
     this.mayHurt = null;
+    this.preyCan = null;
     this.version++;
   }
 
@@ -482,12 +537,12 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
    * way to see whether a peer has a body is to ask.
    */
   status(): Record<string, unknown> {
-    const rows: { id: number; name: string; key: number; body: boolean; ship: boolean; fights: boolean; hp: number; down: boolean; at: number[] }[] = [];
+    const rows: { id: number; name: string; key: number; body: boolean; ship: boolean; fights: boolean; hunted: boolean; hp: number; down: boolean; at: number[] }[] = [];
     for (const [id, held] of this.peers) {
       const f = held.figure;
-      rows.push({ id, name: f.label, key: f.key, body: !!f.body, ship: !!held.ship, fights: f.listed, hp: Math.round(f.hp), down: f.dead, at: f.pos.toArray().map((n) => Number(n.toFixed(2))) });
+      rows.push({ id, name: f.label, key: f.key, body: !!f.body, ship: !!held.ship, fights: f.listed, hunted: f.hunted, hp: Math.round(f.hp), down: f.dead, at: f.pos.toArray().map((n) => Number(n.toFixed(2))) });
     }
-    return { bound: !!this.physics, peers: rows.length, bodies: this.byCollider.size, living: this.livingList.length, version: this.version, hurts: !!this.onBlow, switched: !this.mayHurt ? 'nothing asked' : 'asked', rows, tune: { ...PEER_BODY_TUNE } };
+    return { bound: !!this.physics, peers: rows.length, bodies: this.byCollider.size, living: this.livingList.length, prey: this.preyList.length, version: this.version, hurts: !!this.onBlow, switched: !this.mayHurt ? 'nothing asked' : 'asked', rows, tune: { ...PEER_BODY_TUNE } };
   }
 }
 

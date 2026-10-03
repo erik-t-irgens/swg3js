@@ -91,6 +91,18 @@ export class SharedClock {
   private warned = false;
   /** This build's own day length, kept while a server's is in force. */
   private ownDaySeconds: number | null = null;
+  /**
+   * Where the server anchored its day when its length last changed while it ran: the server's clock
+   * reading in ms, and how far into the day it stood then. 0 and 0 is no anchor, which is the wall
+   * clock over the day's length exactly as every server kept it before a day's length could change.
+   */
+  private dayAt = 0;
+  private dayFrom = 0;
+  /**
+   * What `setOwnDayLength` asks while the shared clock is in use: the wiring answers for the world's
+   * admin by asking the server and saying so, or null for anybody else, who is refused in words.
+   */
+  adminDay: ((seconds: number) => string | null) | null = null;
 
   /** True while a server's clock is driving this one (including after the socket has gone). */
   get shared(): boolean {
@@ -117,6 +129,8 @@ export class SharedClock {
     this.pendingAt = 0;
     if (this.ownDaySeconds !== null && theDay) theDay.dayLengthSeconds = this.ownDaySeconds;
     this.ownDaySeconds = null;
+    this.dayAt = 0;
+    this.dayFrom = 0;
     // The clock everybody shares has gone back to this machine's own in one step; the weather walks
     // that off rather than stepping its schedule with it. The day needs nothing: with no shared
     // time to follow it simply carries on from where it is.
@@ -132,7 +146,7 @@ export class SharedClock {
    * server that says how long its day is is believed, so a world running a longer day than this
    * build's own still comes out right; what the day was before is put back if the server goes.
    */
-  hail(serverNowMs: number, dayMs?: number): void {
+  hail(serverNowMs: number, dayMs?: number, dayAt?: number, dayFrom?: number): void {
     if (!this.sane(serverNowMs)) return;
     const opening = this.state === 'off';
     this.state = 'shared';
@@ -140,6 +154,7 @@ export class SharedClock {
     this.samples.push(serverNowMs - this.wall());
     this.setAim(this.samples[0], true);
     this.setDayLength(dayMs);
+    this.setAnchor(dayAt, dayFrom);
     // A time set from the console before there was a server was held against this machine's clock;
     // the greeting that opens sharing is where the shared day starts, so the day is handed back
     // rather than quietly refusing to follow it for the rest of the session with nothing on the
@@ -153,6 +168,35 @@ export class SharedClock {
     if (dayMs === undefined || !Number.isFinite(dayMs) || dayMs < CLOCK_LIMITS.minDayMs || dayMs > CLOCK_LIMITS.maxDayMs || !theDay) return;
     if (this.ownDaySeconds === null) this.ownDaySeconds = theDay.dayLengthSeconds;
     theDay.dayLengthSeconds = dayMs / 1000;
+  }
+
+  /**
+   * Where the server anchored its day (`server/clock.mjs`'s `setDay`): the server's clock reading the
+   * anchor was made at and how far into the day the world stood then. A server that has never changed
+   * its day's length sends none, and none is no anchor. A reading that could not be a clock is ignored.
+   */
+  setAnchor(dayAt?: number, dayFrom?: number): void {
+    const at = Number(dayAt);
+    const from = Number(dayFrom);
+    if (!Number.isFinite(at) || at <= 0 || !this.sane(at) || !Number.isFinite(from)) {
+      this.dayAt = 0;
+      this.dayFrom = 0;
+      return;
+    }
+    this.dayAt = at;
+    this.dayFrom = from - Math.floor(from);
+  }
+
+  /**
+   * The server's `day` word: the day's new length and where it was anchored as it changed. The day is
+   * the same day at the anchor whichever length it is read at, so the sun does not move; what changes is
+   * only how fast it goes from here. The clock itself is not touched, so the weather's own reading of it
+   * -- which keys on seconds and not on days -- carries on exactly where it was, with nothing to walk off.
+   */
+  dayWord(dayMs: number, dayAt?: number, dayFrom?: number): void {
+    if (this.state === 'off') return;
+    this.setDayLength(dayMs);
+    this.setAnchor(dayAt, dayFrom);
   }
 
   /** A clock that could be a clock: finite, and somewhere this game could be played. */
@@ -277,11 +321,12 @@ export class SharedClock {
   timeOfDay(dayLengthSeconds: number, phase: number): number | null {
     if (this.state === 'off') return null;
     const len = dayLengthSeconds > 0 ? dayLengthSeconds : 1;
-    const t = this.nowSeconds() / len + phase;
+    // With no anchor this is `now / len + phase` to the last bit, which is what it always was.
+    const t = this.dayAt ? this.dayFrom + (this.now() - this.dayAt) / (len * 1000) + phase : this.nowSeconds() / len + phase;
     return t - Math.floor(t);
   }
 
-  report(): { where: ClockState; offsetMs: number; aimMs: number; rttMs: number; samples: number; waiting: boolean; weatherLagMs: number; refused: number } {
+  report(): { where: ClockState; offsetMs: number; aimMs: number; rttMs: number; samples: number; waiting: boolean; weatherLagMs: number; refused: number; dayAt: number; dayFrom: number } {
     return {
       where: this.state,
       offsetMs: Math.round(this.offsetMs()),
@@ -291,6 +336,8 @@ export class SharedClock {
       waiting: this.pendingAt !== 0,
       weatherLagMs: Math.round(this.lagNow()),
       refused: this.refusedCount,
+      dayAt: this.dayAt,
+      dayFrom: Number(this.dayFrom.toFixed(6)),
     };
   }
 
@@ -362,29 +409,35 @@ export interface ClockKnob {
   release?: boolean;
   /**
    * How long the whole day is, in seconds, or null for the game's own twelve minutes. With no server
-   * only: a server's day is one of the two things it exists to hold, and a browser running a day of
-   * its own length beside it would have its sun somewhere else from everybody's.
+   * the day is this browser's to set; with one it is the server's, and only the world's admin may set
+   * it, for everybody at once -- a browser running a day of its own length beside it would have its sun
+   * somewhere else from everybody's.
    */
   length?: number | null;
 }
 
 /**
- * The whole day's length set from the console, with no server; the sentence to say back. Refused in
- * words while the shared clock is in use (a server answering, or one that has gone and left its offset
- * in force), since the length is the server's there. Offline the day is walked by `dt / length`, so a
- * new length bends the sun's pace from the next frame and the hour it stands at never jumps; and a
- * server met later keeps this length as this build's own and gives it back when it goes, exactly as it
- * keeps the twelve minutes now.
+ * The whole day's length set from the console; the sentence to say back. With no server it is set
+ * here: the day is walked by `dt / length`, so a new length bends the sun's pace from the next frame and
+ * the hour it stands at never jumps; and a server met later keeps this length as this build's own and
+ * gives it back when it goes, exactly as it keeps the twelve minutes now. While the shared clock is in
+ * use (a server answering, or one that has gone and left its offset in force) the length is the
+ * server's: the world's admin asks the server for it (`adminDay`), which anchors the day where it stands
+ * and tells everybody, and anybody else is refused in words.
  */
 export function setOwnDayLength(seconds: number | null): string {
   if (!theDay) return 'there is no day to set yet';
-  if (sharedClock.shared) {
-    return `the day is the server's while one is in use: ${Math.round(theDay.dayLengthSeconds)} s, the same for everyone on it; a server's day is set where it is started (npm run relay -- --day=<seconds>)`;
-  }
   const want = seconds === null ? GAME_DAY_SECONDS : seconds;
   const lo = CLOCK_LIMITS.minDayMs / 1000;
   const hi = CLOCK_LIMITS.maxDayMs / 1000;
-  if (typeof want !== 'number' || !Number.isFinite(want) || want < lo || want > hi) return `a day is between ${lo} and ${hi} seconds long; it stays ${Math.round(theDay.dayLengthSeconds)} s`;
+  const fits = typeof want === 'number' && Number.isFinite(want) && want >= lo && want <= hi;
+  if (sharedClock.shared) {
+    if (!fits) return `a day is between ${lo} and ${hi} seconds long; it stays ${Math.round(theDay.dayLengthSeconds)} s`;
+    const asked = sharedClock.adminDay?.(want) ?? null;
+    if (asked !== null) return asked;
+    return `the day is the server's while one is in use: ${Math.round(theDay.dayLengthSeconds)} s, the same for everyone on it; only the world's admin may change it (or the server's own start: npm run relay -- --day=<seconds>)`;
+  }
+  if (!fits) return `a day is between ${lo} and ${hi} seconds long; it stays ${Math.round(theDay.dayLengthSeconds)} s`;
   theDay.dayLengthSeconds = want;
   return want === GAME_DAY_SECONDS ? `a day is the game's own ${GAME_DAY_SECONDS} s again` : `a day is now ${want} s long (the game's own is ${GAME_DAY_SECONDS} s)`;
 }

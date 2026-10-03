@@ -118,6 +118,11 @@ interface ServerWord {
   now?: number;
   epoch?: number;
   dayMs?: number;
+  /** Where the server anchored its day when an admin last changed its length (see `server/clock.mjs`). */
+  dayAt?: number;
+  dayFrom?: number;
+  /** A refusal (`day`'s, for one): what the word is about. */
+  do?: string;
   nonce?: string;
   word?: number;
   ff?: number;
@@ -393,7 +398,7 @@ export class Net {
         this.hailTimer = 0;
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
-        sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined);
+        sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
         this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
@@ -413,6 +418,13 @@ export class Net {
         break;
       case 'pong':
         sharedClock.pong(Number(server.c), Number(server.s));
+        break;
+      case 'day':
+        // The world's admin changed how long a day is. The new length comes with the anchor the server
+        // made as it changed it, so the day goes on from the hour it was at; a refusal is a word for the
+        // one who asked. Nothing else of the clock moves, so the weather does not either.
+        if (server.do === 'refused') this.onNotice(typeof server.why === 'string' ? server.why.slice(0, 160) : 'the server would not change the day');
+        else if (Number(server.dayMs) > 0) sharedClock.dayWord(Number(server.dayMs), Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
         break;
       case 'claimed':
         // The server has us: this is what makes it a server session, not the welcome, because a server
@@ -551,6 +563,8 @@ export class Net {
       case 'npcState':
       case 'npcGone':
       case 'npcHurt':
+      // ...and a blow one of them struck this player at the browser that keeps it.
+      case 'npcBlow':
       // The places two players can both want: the server's answer to a claim on a station's dock
       // lane or on the spot on a hull that one ship rides another on. Handed over whole, as the
       // group's words are; what it means belongs to src/space/docking.ts.
