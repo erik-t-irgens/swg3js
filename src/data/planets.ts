@@ -23,6 +23,13 @@ export interface PlanetDef {
    * this being truthy.
    */
   space?: string;
+  /**
+   * A zone of the copies the server stood one of per group (`dungeon1`: the Corellian corvette and the
+   * heroic instances). Never on the travel or galaxy lists and never a world a character starts on; it
+   * is reached only through a dungeon's own way in (`src/world/instances.ts`), and nobody stands in it
+   * but in the copy the player is in.
+   */
+  instances?: boolean;
   /** Downward acceleration in m/s². Real planets vary; SWG feel is snappier than Earth. */
   gravity: number;
   sky: { top: number; horizon: number; sunColor: number; suns: number; sunElevation: number; sunAzimuth: number };
@@ -253,9 +260,12 @@ export const PLANETS: PlanetDef[] = [
       { id: 'hunting', name: 'Etyyy, the Hunting Grounds', pack: 'kashyyyk_hunting' },
       { id: 'dead_forest', name: 'Dead Forest', pack: 'kashyyyk_dead_forest' },
       { id: 'rryatt_trail', name: 'Rryatt Trail', pack: 'kashyyyk_rryatt_trail' },
-      { id: 'north_dungeons', name: 'Myyydril Caverns', pack: 'kashyyyk_north_dungeons' },
+      // Named for what each holds, in the game's own words: the north zone is twelve Trandoshan slave
+      // camps (the client's "Blackscale Processing Camp"), and the pob zone the Myyydril caverns' copies
+      // beside the Avatar Platform's; they were the other way round, a cave's name on a zone of camps.
+      { id: 'north_dungeons', name: 'Blackscale Processing Camp', pack: 'kashyyyk_north_dungeons' },
       { id: 'south_dungeons', name: 'Kkowir Forest', pack: 'kashyyyk_south_dungeons' },
-      { id: 'pob_dungeons', name: 'Avatar Platform', pack: 'kashyyyk_pob_dungeons' },
+      { id: 'pob_dungeons', name: 'Myyydril Caverns and the Avatar Platform', pack: 'kashyyyk_pob_dungeons' },
     ],
   },
 ];
@@ -282,6 +292,30 @@ PLANETS.push({
   palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
   props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
   creatures: { name: 'Bantha', count: 0, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
+});
+
+/**
+ * The instances zone (`dungeon1`, converted as a world by `snapshot`): sixteen copies of each of the
+ * corvette's three runs and ten of each heroic, hung over ground the client never drew. A group is sent
+ * to one copy by a dungeon's own way in and leaves where it came in; it is no place to travel to. The
+ * sky numbers are a space system's, so the shared day's planet list gains no new sun to keep apart.
+ */
+PLANETS.push({
+  id: 'dungeon1',
+  name: 'Instances',
+  tagline: 'The copies the game stood for each group',
+  description: 'The Corellian corvette, the Star Destroyer, the Tomb of Exar Kun, Axkva Min\'s prison, IG-88\'s arena and the meatlump hideout, each one copy per group, reached only through their own ways in.',
+  seed: 5201,
+  gravity: 20,
+  instances: true,
+  sky: { top: 0x000000, horizon: 0x000000, sunColor: 0xffffff, suns: 1, sunElevation: 0.9, sunAzimuth: 1.2 },
+  fog: { color: 0x000000, density: 0 },
+  swgFogScale: 0,
+  light: { sunIntensity: 2.2, ambientSky: 0x9fb0c8, ambientGround: 0x303848, ambientIntensity: 0.8 },
+  terrain: { base: 0, amplitude: 0, frequency: 0.004, octaves: 1, ridged: 0, flatten: 1, detail: 0 },
+  palette: { low: 0x14202e, mid: 0x3f4a5a, high: 0x9fa6b0, slope: 0x14202e, shore: 0x3f4a5a },
+  props: { treeDensity: 0, rockDensity: 0, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x000000, treeScale: 1 },
+  creatures: { name: 'Nothing', count: 0, color: 0x000000, size: 1, speed: 0, hp: 1, aggressive: false, damage: 0 },
 });
 
 /**

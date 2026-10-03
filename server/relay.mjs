@@ -48,6 +48,9 @@
 //                                                          group, members on other worlds included: it is what
 //                                                          lets somebody who takes the leader's trip up arrive
 //                                                          beside them rather than at their own world's spawn
+//   { t: 'unlock', kind, at: [x, z], cell }                  a room of the group's copy of a dungeon opened at its
+//                                                          keypad (copyWire.mjs): to the group and only the group,
+//                                                          held nowhere, so every member's doors open with it
 //   { t: 'shot', n, p, d, s, l, c, z, g?, a?, b?, fx?, rc?, hx?, pk?, in? }
 //                                                          a bolt that left this player's gun (combatWire.mjs): its
 //                                                          own number, where it left and which way, how fast, how
@@ -152,6 +155,7 @@
 //   { t: 'group', do: 'refused', why }   (to whoever asked, and to nobody else)
 //   { t: 'chat', id, from, scope, text }
 //   { t: 'cross', id, from, phase, planet, zone, how, at? }   (to the sender's group, and to nobody else)
+//   { t: 'unlock', id, from, kind, at, cell }   (to the sender's group, and to nobody else)
 //   { t: 'shot', id, ... }   { t: 'end', id, n, at }   { t: 'blocked', id, of, n, at }
 //   { t: 'health', id, hp, d? }   { t: 'died', id, by? }
 //   { t: 'hurt', id, a, at, w? }   (to the one hurt and to nobody else, and only where they may be hurt)
@@ -210,6 +214,7 @@ import { Sessions, adminFor, checkClaim, firstRegistered, isAdmin, makeNonce, su
 import { OWN_TUNING, Ownership, cleanKeep, cleanSpawn, mayBlow, maySee, maySpawn } from './ownership.mjs';
 import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './groups.mjs';
 import { cleanCross, mayCross } from './crossWire.mjs';
+import { cleanUnlock, mayOpen } from './copyWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
 import { NpcPlaces, cleanNpcBatch, cleanNpcBlow, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
 import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
@@ -924,6 +929,22 @@ function onMessage(c, text, trimmed = false) {
     const to = groups.chatTo(c.member);
     if (!to) return;
     const line = { t: 'cross', id: c.id, from: c.hello.name, ...cross };
+    for (const key of to) {
+      const session = groups.sessionOf(key);
+      if (session && session !== c.id) send(clients.get(session), line);
+    }
+  } else if (msg.t === 'unlock') {
+    // A room of the group's copy of a dungeon opened at its keypad. Every member works the copy out for
+    // themselves and keeps its locks in their own browser, so the word goes to the group and only the
+    // group, and the server holds nothing of it: whoever is in that copy opens the same room.
+    if (!c.hello || !c.member || !holdsMember(c)) return;
+    const unlock = cleanUnlock(msg);
+    if (!unlock) return;
+    c.unlocking ??= { at: 0, lines: 0 };
+    if (!mayOpen(c.unlocking, Date.now())) return;
+    const to = groups.chatTo(c.member);
+    if (!to) return;
+    const line = { t: 'unlock', id: c.id, from: c.hello.name, ...unlock };
     for (const key of to) {
       const session = groups.sessionOf(key);
       if (session && session !== c.id) send(clients.get(session), line);

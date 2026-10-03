@@ -531,7 +531,7 @@ for (const [name, tris] of [['counter-clockwise', CCW], ['clockwise', CW]] as co
     return !(x >= 1 && x <= 2 && y >= 0 && y <= 2.2);
   };
 
-  function rig(opts: { shaded?: (from: THREE.Vector3) => boolean; settings?: Record<string, unknown> } = {}) {
+  function rig(opts: { shaded?: (from: THREE.Vector3) => boolean; settings?: Record<string, unknown>; doors?: (portal: number) => number } = {}) {
     const scene = new THREE.Scene();
     // The world's pooled room lamps: their world matrices move only when the scene is drawn.
     const pool = [0, 1, 2].map(() => new THREE.PointLight(0xffffff, 0, 1, 2));
@@ -556,6 +556,8 @@ for (const [name, tris] of [['counter-clockwise', CCW], ['clockwise', CW]] as co
         },
       },
       day: {},
+      // As World.doors: how open the door standing in a doorway is (1 where none stands).
+      doors: opts.doors ? { openShare: (_b: unknown, portal: number) => opts.doors!(portal) } : undefined,
       // As World.fillFxLights: the sun from its light, the lit cell's lamps from their world matrices.
       fillFxLights(o: Parameters<typeof resetFxLights>[0]) {
         resetFxLights(o);
@@ -744,6 +746,38 @@ for (const [name, tris] of [['counter-clockwise', CCW], ['clockwise', CW]] as co
   }
   ok(doorSlotBefore !== undefined && freed > 0 && freed <= 150, `a door the sun stops reaching fades out and gives up its slot (${((freed + 1) * dt).toFixed(2)} s)`);
   ok(dim.air.frame !== null && !dim.air.frame.shaftsLit && dim.air.frame.shaftLight.every((l) => l.w === 0), 'and nothing is lit after');
+
+  // -- A door in the doorway (doors.ts): the sun comes in as far as it stands open --
+  {
+    let doorOpen = 1;
+    const dr = rig({ shaded: (from) => from.x < 0, doors: (portal) => (portal === 0 ? doorOpen : 1) });
+    dr.lightCell(1, FOYER_LAMPS);
+    dr.place(3.5, 1.6, 1, 2, 1.6, 4);
+    for (let k = 0; k < 60; k++) dr.frame();
+    const slotOpen = dr.air.describe().shafts.find((s) => s.portal === 0)?.slot ?? -1;
+    const lightOpen = slotOpen >= 0 ? dr.air.frame!.shaftLight[slotOpen].w : 0;
+    doorOpen = 0.5;
+    dr.frame();
+    const lightHalf = dr.air.frame!.shaftLight[slotOpen].w;
+    doorOpen = 0;
+    dr.frame();
+    const lightShut = dr.air.frame!.shaftLight[slotOpen].w;
+    ok(slotOpen >= 0 && lightOpen > 0 && Math.abs(lightHalf - lightOpen * 0.5) < 1e-6 && lightShut === 0, `the beam through a doorway follows its door: full open, half at half, none shut the frame it shuts (${lightOpen.toFixed(3)}, ${lightHalf.toFixed(3)}, ${lightShut})`);
+    let freedShut = -1;
+    for (let k = 0; k < 240 && freedShut < 0; k++) {
+      dr.frame();
+      if (!dr.air.describe().shafts.some((s) => s.portal === 0)) freedShut = k;
+    }
+    ok(freedShut > 0 && !dr.air.frame!.shaftsLit, `and a shut door gives up its doorway's slot (${((freedShut + 1) * dt).toFixed(2)} s)`);
+    doorOpen = 1;
+    let back = -1;
+    for (let k = 0; k < 120 && back < 0; k++) {
+      dr.frame();
+      const s = dr.air.describe().shafts.find((x) => x.portal === 0);
+      if (s && dr.air.frame!.shaftLight[s.slot].w > 0) back = k;
+    }
+    ok(back >= 0 && back <= 20, `opened again, the beam comes back within a selection (${((back + 1) * dt).toFixed(2)} s)`);
+  }
 
   // -- Leaving --
   r.input.view = null;

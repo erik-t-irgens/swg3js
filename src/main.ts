@@ -149,7 +149,8 @@ import { RIG_PATH_TUNE, onPad, vehicleFromJoint } from './world/rigPath.ts';
 import { discDirection, farPadsOf, padOfPort, padRefOf, planHop, planRoute, portOfThing, shuttleClockName, skipOffer, tripSeconds, zonePlace, type FarPads, type PadRef, type RideRoute, type SpacePlan } from './world/rideRoute.ts';
 import { RIDE_PILOT } from './world/shuttleCourse.ts';
 import { RIDE_TUNE, ShuttleRide, downReachOf, heldHeading, holdRoomHeading, rideFraming, stepFraming, type RideHost } from './world/shuttleRide.ts';
-import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type FittingRow } from './world/fittings.ts';
+import { FITTINGS_PACK_VERSION, fittingTally, fittingsOf, type Fitting, type FittingRow } from './world/fittings.ts';
+import { INSTANCES, INSTANCE_TUNE, aboardOf, besideTaker, copiesOf, copyIndex, corvetteFor, entrancesOf, fallbackBack, instanceOf, instanceOfTemplate, instanceUse, packOfInstance, readWayBack, roomWords, tuneInstances, type InstanceDef, type InstanceUse, type WayBack } from './world/instances.ts';
 import { ParticleEffects, type EffectHandle } from './world/particles.ts';
 // How wet the world is, and which of our own injections a material is wearing: two numbers the
 // console's shine report needs, since how shiny a surface looks is partly the weather's.
@@ -281,6 +282,7 @@ import { SWOOSH_TUNE } from './world/swooshTrail.ts';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
 import { doorwayNav, type DoorTune } from './world/nav/doorway.ts';
+import { DOORS_TUNE, type DoorsTune } from './world/doorMath.ts';
 import { PATROL_TUNE, type PatrolTune } from './world/patrols.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
 // has to turn a place name or a pair of coordinates into a point, because the world's own named
@@ -492,6 +494,27 @@ interface ShipCrossing {
    * batches, so the screen builds their programs rather than the first frames after it lifts.
    */
   ready?: (v: Vehicle) => Promise<unknown>;
+  /**
+   * The dock the hull is stood at once the world arrived at is in, already docked (`Docking.park`): the
+   * ship a crew left at a hull they went aboard, which they come back to as they left it.
+   */
+  dock?: { key: string; lane: string };
+}
+/** What else a travel does (`App.travel`): which dungeon copy it stands the player in, or where on foot it puts them. */
+interface TravelOpts {
+  /** A dungeon copy: stood in its arrival room once the world arrived at is in (`src/world/instances.ts`). */
+  into?: { def: InstanceDef; copyOf: string; back: WayBack };
+  /** On foot, the spot to come out at in the world arrived at, the way to face, and whether it is in a room. */
+  at?: THREE.Vector3;
+  heading?: number;
+  indoors?: boolean;
+  /** What the loading screen says is being travelled to. */
+  label?: string;
+  /**
+   * Into a world of copies with no way in of its own (following the group into a dungeon): where the player
+   * set out from, with the ship they flew, kept as the way back out of the copy they come out in.
+   */
+  back?: WayBack;
 }
 /**
  * Whether a shuttle trip between worlds can be flown through space. It can: the terminal's box is free
@@ -502,6 +525,13 @@ const SPACE_LEG_BUILT = true;
 /** Milliseconds a loading screen waits at most for a world's shuttles to be stood and made ready behind it (ours). */
 const TRAVEL_STAND_WAIT = 10000;
 const tmp2 = new THREE.Vector3();
+/**
+ * Whether a way back out of a dungeon copy leads into a world of copies (`PlanetDef.instances`), which is
+ * nowhere to be put back: out there between the copies is the empty sky, and a player put there has no way on.
+ */
+function wayBackNowhere(back: WayBack): boolean {
+  return !!PLANETS.find((p) => p.id === back.planet)?.instances;
+}
 /** Where a thrown blade is in the world, for the state that carries it; written once a message. */
 const thrownAt = new THREE.Vector3();
 /** Where the view looks, for the head that follows it; written once a frame and never made. */
@@ -760,6 +790,20 @@ class App {
   private readonly talkCam = { blend: 0, body: null as Mobile | null, shot: newTalkShot(), from: new THREE.Vector3(), to: new THREE.Vector3(), look: new THREE.Vector3(), q: new THREE.Quaternion(), m: new THREE.Matrix4() };
   /** Who the use key would speak to, gathered with the rest of the bar's state, and their name for the long line. */
   private promptTalk = '';
+  /** What a conversation does once its last reply has stood (a corvette's taker sends the player on their way). */
+  private talkThen: (() => void) | null = null;
+  /**
+   * The dungeon copy the player is in (`src/world/instances.ts`): which dungeon, the thing the layout placed
+   * for the copy, where the player was stood on arriving and in which room, and where the copy stands
+   * (which of the world's fittings are its). Null anywhere else.
+   */
+  private instanceHere: { def: InstanceDef; object: PlacedObject | null; x: number; z: number; template: string; arrival: THREE.Vector3; cell: number } | null = null;
+  /** Where the player came into a dungeon copy from, to be put back there; kept per character in this browser (`wayBackKey`). */
+  private wayBack: WayBack | null = null;
+  /** The thing the use key works at a dungeon (`gatherInstance`): a keypad, an escape pod's console, a way in. */
+  private instanceThing: Fitting | PlacedObject | null = null;
+  /** The group's id, or '' with no group: which copy of a dungeon a group is sent to. Wired with the groups. */
+  private groupIdNow: () => string = () => '';
   /** The catalogue's emulator rows by level, read the first time the console asks for a body at a level of its own. */
   private levelRows: LevelSample[] | null = null;
   private readonly shuttleMenu: ShuttleMenu;
@@ -1445,6 +1489,7 @@ class App {
         hyperspace: () => this.hyperspaceButton(),
         dock: () => this.dockButton(),
         board: () => this.boardButton(),
+        aboard: () => void this.goAboard(),
         cruise: () => this.cruiseControl?.toggle(),
       },
       () => keyName(this.input.bindings.ship[0] ?? ''),
@@ -3745,6 +3790,43 @@ class App {
       },
       /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
       interiors: (force = false) => this.world.interiorStats(force),
+      /**
+       * The doors in the buildings' doorways (`src/world/doors.ts`): how many stand, are open and are
+       * moving, what became of the door models, how many sounds they have played, and the door nearest
+       * the player with its style, times, slide, trigger, sounds and how open it is. `{ tune }` moves
+       * `DOORS_TUNE` live, `{ hold: 'open' | 'shut' | 'auto' }` holds the nearest door, and
+       * `{ list: true }` (or a number of metres) lists every door within 30 m.
+       */
+      doors: (opts: { tune?: Partial<DoorsTune>; hold?: 'open' | 'shut' | 'auto'; list?: boolean | number } = {}) => {
+        if (opts.tune) {
+          const t = DOORS_TUNE as unknown as Record<string, unknown>;
+          for (const [k, v] of Object.entries(opts.tune)) if (k in t && typeof v === typeof t[k]) t[k] = v;
+        }
+        const at = this.player.worldPos;
+        const doors = this.world.doors;
+        const near = doors.nearest(at.x, at.y, at.z);
+        if (opts.hold && near) doors.hold(near.door, opts.hold === 'open' ? 1 : opts.hold === 'shut' ? -1 : 0);
+        const list = opts.list ? doors.around(at.x, at.y, at.z, typeof opts.list === 'number' ? opts.list : 30) : null;
+        return { ...doors.status(), tune: { ...DOORS_TUNE }, nearest: near ? doors.describe(near.door, at) : null, ...(list ? { list } : {}) };
+      },
+      /**
+       * The dungeons' copies (`src/world/instances.ts`): the copy the player is in, where they came in and
+       * where they go back to, its locked rooms and its fittings that do anything, what E would do here, and
+       * every dungeon with how many copies of it this world has. `{ go: '<kind>' }` goes into one (the copy
+       * the group's id picks, back to where the player stands now), `{ leave: true }` goes back out,
+       * `{ unlock: true }` opens every locked room of the copy, and `{ tune }` moves `INSTANCE_TUNE`.
+       */
+      instances: (opts: { go?: string; leave?: boolean; unlock?: boolean; tune?: Partial<typeof INSTANCE_TUNE> } = {}) => this.debugInstances(opts),
+      /**
+       * The Corellian corvette: `{ go: 'rebel' | 'imperial' | 'neutral' }` goes aboard that faction's copy as
+       * its ticket taker sends a player (back to where the player stands now); with nothing, what
+       * `instances` says.
+       */
+      corvette: (opts: { go?: 'rebel' | 'imperial' | 'neutral' } = {}) => {
+        if (!opts.go) return this.debugInstances({});
+        const def = corvetteFor(opts.go);
+        return def ? this.debugInstances({ go: def.kind }) : Promise.resolve({ error: "go: 'rebel', 'imperial' or 'neutral'" });
+      },
       /** Draw calls of the whole frame, summed over the portal renderer's passes. */
       drawCalls: () => ({ calls: stats.calls, passes: this.portals.passes, triangles: stats.triangles }),
       // The player's position in the original game's coordinates (for terrain-check --at and /way).
@@ -5307,10 +5389,11 @@ class App {
        * and `dock({ allow: false })` turns away another player asking for room on this hull.
        * `__debug.advance` steps it, so a whole approach can be watched from a hidden tab.
        */
-      dock: (opts: { go?: boolean; face?: 'auto' | 'hardpoint' | 'lane'; clamp?: Partial<typeof CLAMP_TUNE>; allow?: boolean } & Partial<typeof DOCK_TUNE> = {}) => {
+      dock: (opts: { go?: boolean; park?: boolean; face?: 'auto' | 'hardpoint' | 'lane'; clamp?: Partial<typeof CLAMP_TUNE>; allow?: boolean } & Partial<typeof DOCK_TUNE> = {}) => {
         const p = this.player;
         const v = p.mounted ?? p.piloting ?? null;
         const out = this.docking.tune(opts);
+        if (opts.park) return { parked: v ? (this.docking.parkNearest(v) ?? 'nothing in this zone has a dock') : 'no ship is being flown', ...this.docking.report() };
         if (opts.go === true) return { asked: v ? this.docking.dock(v) : 'no ship is being flown', ...this.docking.report() };
         if (opts.go === false) return { said: this.docking.act(v), ...this.docking.report() };
         return out;
@@ -7078,6 +7161,8 @@ class App {
     together.others = () => (groups.roster ? groups.roster.members.reduce((n, m) => n + (m.me ? 0 : 1), 0) : 0);
     together.myMid = () => groups.roster?.you ?? '';
     together.leaderId = () => groups.roster?.members.find((m) => m.leader)?.id ?? 0;
+    // Which copy of a dungeon a group is sent to is its id's, so every member works out the same one.
+    this.groupIdNow = () => groups.roster?.id ?? '';
     // Only somebody still on the roster is somebody to arrive beside: a member who left, or a group
     // that has gone, would otherwise go on being followed until their place aged out.
     together.inGroup = (id) => !!groups.roster?.members.some((m) => m.id === id);
@@ -7144,6 +7229,8 @@ class App {
     this.net.onWord = (msg) => {
       crossWordWas(msg);
       together.handle(msg);
+      // And a room of the group's dungeon copy opened at another member's keypad.
+      this.heardUnlock(msg);
     };
     // A line that dropped or was taken over leaves no trip and no places behind: what the group held
     // is the server's, and a place somebody reported before the line went is not worth standing at.
@@ -8777,6 +8864,8 @@ class App {
           this.promptDoorless = doorless ? doorless.label : '';
         }
       }
+      // A dungeon copy's keypad, escape pod or way out, or out in a world a dungeon's way in (`instances.ts`).
+      s.instance = this.gatherInstance();
       // The travel terminal, and the ticket collector outside it. A terminal is a **thing** you use
       // and not a place you stand in: E is a general use key, and a forty-metre circle round a
       // starport is not something you use. It is gathered whatever else is beside you and the bar's
@@ -8865,7 +8954,7 @@ class App {
     const act = gateAction({
       live: s.live,
       onFoot: !p.mounted && !p.piloting && !p.aboard && !p.noclip,
-      free: !s.lift && !s.elevator && !s.doorless && !s.talk && !s.near && !s.boots && !s.eva,
+      free: !s.lift && !s.elevator && !s.doorless && !s.talk && !s.near && !s.boots && !s.eva && !s.instance,
       since: this.zoneGates.since(this.world.simTime),
       d: near ? near.d : null,
       to: !!near?.gate.to,
@@ -9711,6 +9800,8 @@ class App {
     // where arriving compiles the whole scene, the held models included.
     await this.equipment.restoreHeld();
     this.loadingScreen.setProgress(0.04);
+    // A character kept in a dungeon copy is in a room, which can lie below the ground: not lifted onto it.
+    this.arriveIndoors = !!planet.instances;
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     if (c.heading !== undefined) {
       this.player.heading = c.heading;
@@ -9725,6 +9816,10 @@ class App {
     // with the ground's height (`ShuttleRide.keepPlace`), and at Theed Starport that ground is under the
     // royal hangar's deck: back at a port's own place, it is stood in as an arrival there is.
     if (c.pos && !planet.space && (await this.atPortPlace())) this.standInPort();
+    // A character kept inside a dungeon copy comes back in it, its way out the one this browser kept.
+    this.wayBack = this.keptWayBack();
+    if (planet.instances) await this.enterCopy(null, null, true);
+    this.arriveIndoors = false;
     c.played = Date.now();
     upsertCharacter(c);
     this.savePlace(true);
@@ -9734,6 +9829,7 @@ class App {
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+    this.leaveIfStranded();
     // The debug menu's pins ticked to run at start, once a page, now the first world is up and every
     // helper they name has a world to work on. Each is said on the message line as it runs.
     if (!this.ranAtStart) {
@@ -9996,6 +10092,9 @@ class App {
     this.endConsoleShuttles('the world changed');
     // The houses this browser put down itself are not written down anywhere: they went with the world.
     this.localHomes.clear();
+    // In no dungeon copy until a travel into one stands the player there.
+    this.instanceHere = null;
+    this.copyFittings = [];
     // A played world's day always runs. Only the creator stops it, and `hideScene` starts it again;
     // this is the backstop for a place stood from the console and never left.
     this.world.day.paused = false;
@@ -10039,7 +10138,9 @@ class App {
       // to show rather than a blank the first time it is opened.
       purse.ask();
       const p = this.player;
-      if (p.mounted || p.aboard || p.noclip) return;
+      // Nor lifted to the ground when the arrival is a room's (a dungeon copy, a way back out to a ladder
+      // in a hideout under the street): a room can lie below the ground, and the travel stands them in it.
+      if (p.mounted || p.aboard || p.noclip || this.arriveIndoors || this.world.inside) return;
       // Still standing where we arrived: move to open ground now that the real city is in.
       // A character back where it stood stays put.
       if (clearSpawn && !at && p.pos.distanceTo(arrivalSpawn) < 4) {
@@ -10062,6 +10163,8 @@ class App {
 
   /** This world's shuttles being stood, from its arrival: done once they all stand (or the world's pack failed). */
   private travelStanding: Promise<void> = Promise.resolve();
+  /** The arrival under way is a room's, which the arrival's own lift to the ground must leave alone. */
+  private arriveIndoors = false;
 
   /**
    * Go to another world. With `ship`, arrive flying it: the ship carried up into space, or down
@@ -10071,7 +10174,7 @@ class App {
    * A jump in flight ends first (a jump to another system does not come here: `carryAcross`). The ship arrived in is
    * returned, or null.
    */
-  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing): Promise<Vehicle | null> {
+  private async travel(planet: PlanetDef, zoneId?: string, ship?: ShipCrossing, opts?: TravelOpts): Promise<Vehicle | null> {
     if (this.traveling) return null;
     // A conversation does not cross: whoever it was with stays with the world, as a follower does.
     this.endTalk(false);
@@ -10101,7 +10204,7 @@ class App {
     // nothing and sends nothing. A shuttle's passenger is on a trip of their own, which is nobody's to
     // take up.
     if (!passenger) this.together.leaving(planet.id, zoneId ?? '', planet.space ? 'space' : 'ground');
-    this.loadingScreen.show(planet, zone ? `${planet.name}: ${zone.name}` : planet.name, passenger ? 'on the shuttle' : 'travelling');
+    this.loadingScreen.show(planet, opts?.label ?? (zone ? `${planet.name}: ${zone.name}` : planet.name), passenger ? 'on the shuttle' : 'travelling');
     await new Promise((r) => setTimeout(r, 400));
     // Taking the group's trip up: come out beside whoever led it rather than at this world's own
     // spawn. It waits here, under the loading screen and before anyone steps out of a ship, for the
@@ -10131,16 +10234,33 @@ class App {
       if (isSurfaceRoom(room)) room.dispose();
     }
     if (p.mounted) p.dismount(p.pos.clone());
-    // A jump's arrival, the group's, or the zone's (above) is where the world streams from, not the zone's spawn.
-    this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
+    // Where this player stands now, for a way back out of a dungeon copy that this travel reaches without
+    // one of its own (following the group into it): put back where they set out from.
+    const leftFrom: WayBack = { kind: '', planet: this.world.planet.id, ...(this.zone ? { zone: this.zone } : {}), at: [p.worldPos.x, p.worldPos.y, p.worldPos.z], heading: p.heading, ...(this.world.inside ? { indoors: true } : {}) };
+    // A room's arrival is left where the travel stands it, and not lifted to the ground (`arrive`).
+    this.arriveIndoors = !!(opts?.into || opts?.indoors || planet.instances);
+    // A jump's arrival, the group's, a spot of the caller's, or the zone's (above) is where the world streams from, not the zone's spawn.
+    this.arrive(planet, zoneId, crossing?.arrival?.pos ?? besideAt ?? opts?.at ?? (spaceArrival ? new THREE.Vector3(spaceArrival[0], spaceArrival[1], spaceArrival[2]) : undefined));
+    // Into a dungeon copy: the copy the group's id picks, and the world streamed round it from here on.
+    // Following the group there instead, the player is beside the leader already, in the copy they went to.
+    const copy = opts?.into ? await this.copyFor(opts.into) : null;
+    if (copy && !besideAt) {
+      const at = new THREE.Vector3(copy.x, copy.y + 1, copy.z);
+      p.reset(at);
+      this.world.jumpTo(at);
+      this.physics.stepOnce();
+    }
     // A ship that cannot be spawned on the far side is a crossing with no ship, not a loading screen
     // left up for good: the player is in the new world on foot, and the caller is told null.
     let arrived: Vehicle | null = null;
     try {
+      // Into space on foot to a spot of the caller's (a way back out of a copy kept with no ship), the ship
+      // every arrival in space is seated in comes out at that spot, and not at the zone's own arrival with the
+      // player then stood out of it in the empty sky.
       arrived = crossing
         ? await this.arriveInShip(crossing.def, crossing.speed, crossing.height, crossing.crew, crossing.arrival ?? null, crossing.condition ?? null, passenger)
         : planet.space
-          ? await this.arriveInSpace(besideAt ?? undefined)
+          ? await this.arriveInSpace(besideAt ?? opts?.at ?? undefined)
           : null;
     } catch (err) {
       console.warn(`travel: nothing could be spawned to arrive in on ${planet.name}`, err);
@@ -10157,6 +10277,25 @@ class App {
       }
     }
     await this.settle();
+    // Into a dungeon copy, stood in its arrival room now that its building is in, with its crew stood
+    // and compiled behind this same screen; following the group into one, or come back to a copy some
+    // other way, only the room is found. A spot of the caller's on foot (a way back out of a copy) is
+    // stood on again now that the world is in, in its room where it is one.
+    if (opts?.into) await this.enterCopy(opts.into, copy, !!besideAt);
+    else if (planet.instances) await this.enterCopy(null, null, true, opts?.back ?? leftFrom);
+    else if (opts?.at && !besideAt && !arrived) {
+      this.physics.stepOnce();
+      p.reset(opts.at.clone());
+      if (opts.heading !== undefined) {
+        p.heading = opts.heading;
+        this.cam.yaw = opts.heading + Math.PI;
+      }
+      if (opts.indoors) this.world.enterCellAt(opts.at);
+      this.physics.stepOnce();
+    }
+    // The ship a crew left docked at the hull they went aboard: docked again, as it was.
+    if (arrived && crossing?.dock && !this.docking.park(arrived, crossing.dock.key, crossing.dock.lane)) this.messages.system('the dock your ship was left at is not here, so it is flying free');
+    this.arriveIndoors = false;
     // Where this crossing came out, for anyone in the group taking the same trip after it. It is
     // said under the same name the trip was offered under, not the zone `arrive` settled on: a
     // planet with zones and none named resolves to its first, and a member following the world the
@@ -10167,6 +10306,7 @@ class App {
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+    this.leaveIfStranded();
     return arrived;
   }
 
@@ -10300,8 +10440,18 @@ class App {
     // one hull is the reason, and it does not care who asked for the crossing. A crossing on foot
     // out of a docked ship is a different thing and is still allowed, as the ship menu's own way
     // off always has been.
-    if ((move.withShip || move.do === 'jump') && this.refuseWhileDocked()) return;
     const zoneId = move.zone || undefined;
+    // A world of copies is gone into on foot, however the leader went and whatever this member is in: a
+    // dungeon's copy is rooms, which no ship flies into and which nobody comes out of in the empty sky. The
+    // ship this member flies or walks -- docked, flying, or with them in its rooms -- is kept with where they
+    // set out from (`wayBackFromHere`), and stood again there, docked where it was docked, when they come
+    // back out of the copy, as the ship of a crew going aboard from a dock is. So a docked ship is no refusal.
+    if (planet.instances) {
+      this.closePanels();
+      await this.travel(planet, zoneId, undefined, { back: this.wayBackFromHere() });
+      return;
+    }
+    if ((move.withShip || move.do === 'jump') && this.refuseWhileDocked()) return;
     if (move.do === 'jump') {
       if (!move.at) return;
       // The System Map's catalogue is what a jump reads another system's arrival out of, and it is
@@ -10597,6 +10747,8 @@ class App {
     // way would otherwise stop half way over for nothing.
     if (!fromRide && !this.traveling) this.ride?.abort('teleport', true);
     if (this.traveling) return;
+    // Out of any dungeon copy the player was in: a teleport is no way back out of one, and leaves it behind.
+    this.instanceHere = null;
     if (planet.id !== this.world.planet.id || (planet.zones?.length && zoneId && zoneId !== this.zone)) {
       await this.travel(planet, zoneId);
       // The pack (and with it the snapshot's centre) loads after arrival; wait for it.
@@ -12229,6 +12381,11 @@ class App {
     if (props) out.add(props, false, 'vehicle');
     // The shuttles, the same shape again: each root stands on its pad and the joints under it move.
     if (this.shuttleRigs) for (const r of this.shuttleRigs.roots(this.moverRoots)) out.add(r, false, 'vehicle');
+    // The doors' leaves that moved this step, each its own root. They stand on the world's layer or the
+    // rooms' rather than the actors', and the portal renderer hides an inner one wherever its rooms are
+    // not drawn, so the draw check takes them on any layer (`anyLayer`).
+    const leaves = w.doors.moved;
+    for (let i = 0; i < leaves.length; i++) out.add(leaves[i], false, 'vehicle', null, null, true);
     this.remotes.collectMovers(out);
   };
 
@@ -13331,7 +13488,16 @@ class App {
   /** The world's fittings as the pack carries them, what was stood, and which pack both are for. */
   private fittingRows: FittingRow[] = [];
   private fittingRowsFor = '';
-  private fittingsStood: { pack: string; keys: string[] } = { pack: '', keys: [] };
+  /** Whether `fittingRows` is the whole answer for `fittingRowsFor`: its file read, or known to be none. */
+  private fittingRowsIn = false;
+  /**
+   * What `standFittings` stood, for which world, and which run stood it. The record is the run's token, as the
+   * seats' is (`standSeats`): a run that a later one replaced stops at its next await and takes down whatever
+   * it stood after being replaced, and every key carries its run's number.
+   */
+  private fittingsStood: { pack: string; keys: string[]; run: number } = { pack: '', keys: [], run: 0 };
+  /** Counts the runs of `standFittings`, so each files what it stands under keys no other run uses. */
+  private fittingsRuns = 0;
 
   /**
    * A world's fittings, out of its own pack.
@@ -13348,6 +13514,7 @@ class App {
     }
     this.fittingRowsFor = pack;
     this.fittingRows = [];
+    this.fittingRowsIn = false;
     try {
       const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/fittings.json`);
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return;
@@ -13355,9 +13522,13 @@ class App {
       if (!Array.isArray(data.rows) || data.version !== FITTINGS_PACK_VERSION) return;
       if (this.fittingRowsFor !== pack) return;
       this.fittingRows = data.rows;
+      this.fittingRowsIn = true;
       void this.standFittings(pack);
     } catch {
       /* a world with no fittings pack simply has none */
+    } finally {
+      // Whatever came of it, it is the whole answer for this world: a world with no file has no fittings.
+      if (this.fittingRowsFor === pack) this.fittingRowsIn = true;
     }
   }
 
@@ -13374,22 +13545,43 @@ class App {
    */
   private async standFittings(pack: string): Promise<void> {
     this.clearFittingsStood(this.fittingsStood.pack === pack);
-    this.fittingsStood.pack = pack;
+    const run = { pack, keys: [] as string[], run: ++this.fittingsRuns };
+    this.fittingsStood = run;
+    const world = this.world.generation;
+    // Two runs for one world overlap whenever a dungeon copy is entered while the world's own rows are still
+    // landing: the record is the token, and the world's generation stands beside it.
+    const current = () => this.fittingsStood === run && this.world.generation === world && this.fittingRowsFor === pack;
     const c = this.world.layoutCenter;
     if (!c || this.fittingRowsFor !== pack) return;
-    for (const [i, f] of fittingsOf(this.fittingRows, c).entries()) {
-      if (this.fittingRowsFor !== pack) return;
-      const key = `fitting:${pack}:${i}`;
+    // A world of copies stands the fittings of the copy the player is in and of no other (two thousand of
+    // the corvette's over its forty-eight copies), and none at all before the player is in one; whatever
+    // of them opens a locked room locks it (`lockCopy`).
+    const only = this.world.planet.instances ? this.instanceHere : null;
+    if (this.world.planet.instances && !only) return;
+    const all = fittingsOf(this.fittingRows, c);
+    if (only) this.lockCopy(all);
+    for (const [i, f] of all.entries()) {
+      if (!current()) return;
+      if (only && (Math.abs(f.bx - only.x) > 1 || Math.abs(f.bz - only.z) > 1)) continue;
+      const key = `fitting:${pack}:${run.run}:${i}`;
       // Solid whatever its size: a terminal or a panel is under the sweep's own floor for small
       // props and is exactly the thing the owner asked to be able to walk into rather than through.
-      if (await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true, template: f.template })) this.fittingsStood.keys.push(key);
+      const stood = await this.world.placeProp(f.model, { key, at: { x: f.x, y: f.y, z: f.z }, yaw: f.yaw, inside: f.cell > 0, solid: true, template: f.template });
+      if (!stood) continue;
+      if (!current()) {
+        // Replaced while this one was being stood: it is under a key no other run uses, so this finds it and
+        // nothing else (and finds nothing at all in a world loaded since).
+        this.world.unplaceBuilding(key);
+        return;
+      }
+      run.keys.push(key);
     }
   }
 
   /** Everything `standFittings` stood, taken down where the world it was stood in is still here. */
   private clearFittingsStood(takeDown: boolean): void {
     if (takeDown) for (const key of this.fittingsStood.keys) this.world.unplaceBuilding(key);
-    this.fittingsStood = { pack: '', keys: [] };
+    this.fittingsStood = { pack: '', keys: [], run: 0 };
   }
 
   /**
@@ -14096,6 +14288,9 @@ class App {
     this.traveling = true;
     this.input.captured = false;
     this.map.hide();
+    // Out of any building with a way back of its own (a world with a facility has no dungeon copies, but its
+    // doorless buildings keep one): coming round elsewhere leaves it behind.
+    this.instanceHere = null;
     this.loadingScreen.show(this.world.planet, f.name, 'coming round');
     const p = this.player;
     try {
@@ -14175,6 +14370,15 @@ class App {
     this.deathChoices = [];
     this.player.endRagdoll();
     this.player.reset(this.spawn);
+    // Come round in a dungeon copy's arrival room, where `enterCopy` put the spawn: stood in that room again
+    // here, because a reset is a move further than a walk, which the streamer takes for a teleport out of
+    // every room (`followThrough`). Left out of it, the copy's crew go (`World.inCopy`), its way out goes, and
+    // in a world of copies there is nothing outside the rooms to stand on.
+    const here = this.instanceHere;
+    if (here && this.spawn.distanceToSquared(here.arrival) < 1) {
+      this.world.enterCellAt(this.spawn, here.cell);
+      this.physics.stepOnce();
+    }
     this.dying = false;
     this.freeMouse(false);
     const rescue = this.rideRescue;
@@ -15031,6 +15235,7 @@ class App {
       },
       dock: this.docking.menuRow(ship, role, inSpace),
       board: boardRow(this.boardState()) ?? undefined,
+      aboard: this.aboardRow(ship, role) ?? undefined,
       cruise: this.cruiseControl?.available(),
       speed: Math.round(Math.abs(ship.speed) * 3.6),
     };
@@ -15926,11 +16131,32 @@ class App {
       return true;
     }
     if (this.world.doorlessNear(p.pos)) {
+      // Where they stood, to be put back there: the way out of a building with no way in on foot is where
+      // they were let in, as it is of a dungeon's copy (`leaveInstance`).
+      const from: WayBack = { kind: 'doorless', planet: this.world.planet.id, ...(this.zone ? { zone: this.zone } : {}), at: [p.pos.x, p.pos.y, p.pos.z], heading: p.heading };
       const went = this.world.enterDoorless(p.pos);
       if (went) {
         p.pos.copy(went.at);
         p.vel.set(0, 0, 0);
         this.physics.stepOnce();
+        const here = this.world.buildingHere;
+        if (here) {
+          const def: InstanceDef = instanceOfTemplate(here.template) ?? { kind: 'doorless', name: here.template.replace(/^.*\/shared_|\.iff$/g, '').replace(/_/g, ' '), planet: this.world.planet.id, templates: [here.template], room: '', exits: [] };
+          if (this.world.planet.instances) {
+            // Back into a copy from the empty sky between them (a walker who left its rooms some other way): the
+            // way back is still the one the copy was come into by, and never a spot out there, which is nowhere
+            // to be put back; the way out is the copy's own arrival again; and its fittings and locks are the
+            // copy's again.
+            const arrival = this.world.roomSpotOf(here.x, here.z, here.template, def.room);
+            this.instanceHere = { def, object: here.object, x: here.x, z: here.z, template: here.template, arrival: arrival ? arrival.at.clone() : p.pos.clone(), cell: arrival ? arrival.cell : here.cell };
+            const kept = this.wayBack ?? this.keptWayBack();
+            if (kept) this.setWayBack({ ...kept, kind: def.kind });
+            void this.standFittings(packIdOf(this.world.planet, this.zone));
+          } else {
+            this.instanceHere = { def, object: here.object, x: here.x, z: here.z, template: here.template, arrival: p.pos.clone(), cell: here.cell };
+            this.setWayBack({ ...from, kind: def.kind });
+          }
+        }
       }
       return true;
     }
@@ -15978,6 +16204,512 @@ class App {
     this.messages.system(`through the gate to ${near.gate.label ?? dest.zone.name}`);
     void this.travel(dest.planet, dest.zone.id);
     return true;
+  }
+
+  // ---- the dungeons' copies ------------------------------------------------------------------------
+  //
+  // A dungeon the server stood a copy of for each group (`src/world/instances.ts`): the corvette through its
+  // ticket taker, the Star Destroyer and the Avatar Platform from a ship docked at them, and the rest at the
+  // thing the world places at each one's way in. Every way in keeps where the player came from (`WayBack`),
+  // and the way out is where they came in, a dungeon's own exits, and the corvette's escape pods.
+
+  /** Where the way back is kept for a character in this browser: a convenience, which falls back on the dungeon's own way in. */
+  private wayBackKey(): string {
+    return `swg3js.wayBack.${this.current?.id ?? 'nobody'}`;
+  }
+
+  private setWayBack(back: WayBack | null): void {
+    // A way back into a world of copies is no way back: out there between the copies is the empty sky. The one
+    // already kept stands rather than be lost to it.
+    if (back && wayBackNowhere(back)) return;
+    this.wayBack = back;
+    try {
+      if (back) localStorage.setItem(this.wayBackKey(), JSON.stringify(back));
+      else localStorage.removeItem(this.wayBackKey());
+    } catch {
+      // A browser that keeps nothing still leaves by the dungeon's own way in.
+    }
+  }
+
+  private keptWayBack(): WayBack | null {
+    try {
+      const kept = readWayBack(JSON.parse(localStorage.getItem(this.wayBackKey()) ?? 'null'));
+      // One kept into a world of copies (by a build before this was refused) reads as none, its dungeon's own way in instead.
+      return kept && !wayBackNowhere(kept) ? kept : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Which dungeon the kept way back was out of, even when the record itself leads nowhere: what its own way in is found by. */
+  private keptKind(): string {
+    try {
+      return readWayBack(JSON.parse(localStorage.getItem(this.wayBackKey()) ?? 'null'))?.kind ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * The copy of a dungeon a group goes to, among what the world places: by the group's id or the
+   * character's, over its copies in a fixed order (`copyOf`). Waits for the world's layout, bounded.
+   */
+  private async copyFor(into: { def: InstanceDef; copyOf: string }): Promise<PlacedObject | null> {
+    // The layout's own list, which the streamer is built over a little after the pack's centre is known.
+    for (let i = 0; i < 150 && !(this.world.layoutCenter && this.world.placedObjects.length); i++) await new Promise((r) => setTimeout(r, 100));
+    const copies = copiesOf(this.world.placedObjects, into.def);
+    const i = copyIndex(into.copyOf, into.def.kind, copies.length);
+    return i >= 0 ? copies[i] : null;
+  }
+
+  /**
+   * Stand the player in a dungeon copy, behind the loading screen that is already up: in the copy's arrival
+   * room (`into`), or with `beside` in whatever room they already stand in (following the group, or back in a
+   * copy some other way). Then the copy's own fittings for it alone, its locked rooms locked, its crew stood
+   * in one forced pass (nobody stands in a world of copies until the player is in one: `World.inCopy`), and
+   * the whole of it compiled behind the same screen. `leftFrom` is where a player who came in without a way
+   * back of their own set out from. Never throws: a travel under it has its loading screen up.
+   */
+  private async enterCopy(into: TravelOpts['into'] | null, copy: PlacedObject | null, beside: boolean, leftFrom?: WayBack): Promise<void> {
+    const p = this.player;
+    try {
+      // The way back is kept before the copy is looked for, so that one which cannot be stood in still sends
+      // the player back where they set out from (`leaveIfStranded`), with their ship, rather than by some
+      // dungeon's own way in or a way back kept from an earlier visit.
+      const given: WayBack | null = into?.back ?? (leftFrom && leftFrom.planet !== this.world.planet.id ? leftFrom : null);
+      if (given) this.setWayBack(given);
+      this.physics.stepOnce();
+      const spot = copy && into && !beside ? this.world.standInRoomOf(copy.x, copy.z, copy.template, into.def.room) : null;
+      if (spot) {
+        p.reset(spot.at);
+        p.vel.set(0, 0, 0);
+        this.physics.stepOnce();
+      } else this.world.enterCellAt(p.pos);
+      const here = this.world.buildingHere;
+      const def = into?.def ?? (here ? instanceOfTemplate(here.template) : null);
+      if (!here || !def || !def.templates.includes(here.template)) {
+        this.instanceHere = null;
+        if (into) this.messages.system(`${into.def.name} has no copy here to stand in, so you are where the world put you`);
+        return;
+      }
+      // The copy's own arrival, which is its way out and where a death in it comes round: where the player was
+      // just stood, or, back in it some other way (a session started in it, following the group in), the room
+      // the copy is come into found again, and not wherever they happen to stand.
+      const arrival = spot ? { at: p.pos.clone(), cell: here.cell } : this.world.roomSpotOf(here.x, here.z, here.template, def.room);
+      this.instanceHere = { def, object: here.object, x: here.x, z: here.z, template: here.template, arrival: arrival ? arrival.at.clone() : p.pos.clone(), cell: arrival ? arrival.cell : here.cell };
+      const back = given ? { ...given, kind: def.kind } : (this.wayBack ?? this.keptWayBack());
+      this.setWayBack(back);
+      // A room they come back to standing in is not locked round them: whatever it was they opened it once
+      // (a character saved in a room it had opened), and its locks are made again with the world.
+      if (beside && here.object && here.cell > 0) this.world.instanceLocks.open(here.object, here.cell);
+      // A death in here comes round where the copy was come into, not out in the empty sky between copies.
+      this.spawn.copy(this.instanceHere.arrival);
+      // A world of copies stands only the fittings of the copy the player is in, so they are stood now; any
+      // other world stood all of its own on arriving and keeps them. The copy's locks are made from its
+      // fittings, which must be in hand first: locked from none, a copy would stay open for the whole visit
+      // (`lockCopy`). Bounded, as the copy's own wait is.
+      if (this.world.planet.instances) {
+        const pack = packIdOf(this.world.planet, this.zone);
+        for (let i = 0; i < 100 && !(this.fittingRowsFor === pack && this.fittingRowsIn); i++) await new Promise((r) => setTimeout(r, 100));
+        await this.standFittings(pack);
+      }
+      if (this.world.standPeopleNow(p.worldPos) > 0) {
+        for (let i = 0; i < 80 && !this.world.bodiesUp; i++) await new Promise((r) => setTimeout(r, 100));
+      }
+      await this.settle();
+      this.messages.system(`${def.name} · the way out is where you came in`);
+    } catch (err) {
+      console.warn('instances: the copy could not be stood in', err);
+    }
+  }
+
+  /**
+   * Into a dungeon's copy: travelled to when it is in another world, and moved to under a loading screen
+   * when it is in this one (Mustafar's own dungeons). `back` is where the player is put when they leave.
+   */
+  private async goIntoCopy(def: InstanceDef, back: WayBack): Promise<void> {
+    if (this.traveling) return;
+    const into = { def, copyOf: this.groupIdNow() || this.current?.id || 'nobody', back };
+    if (packOfInstance(def) === packIdOf(this.world.planet, this.zone)) {
+      await this.moveIntoCopy(into);
+      return;
+    }
+    // A world nobody has converted is no trip: the loading screen would wait on a copy that never comes and
+    // put the player straight back. Said in words, with the command, before anything moves.
+    if (!(await this.packConverted(packOfInstance(def)))) {
+      this.messages.system(`${def.name} is not converted here (${packOfInstance(def)}): npm run swg -- status assets-private says what to run`);
+      return;
+    }
+    if (this.traveling) return;
+    this.messages.system(`to ${def.name}`);
+    await this.travel(planetById(def.planet), def.zone, undefined, { into, label: def.name });
+  }
+
+  /** The packs found converted, asked once each; one not found is asked again, so a conversion mid-session counts. */
+  private readonly packsFound = new Set<string>();
+
+  /** Whether a world's pack is converted at all: its manifest is there. A server's index page for a missing file is no manifest. */
+  private async packConverted(pack: string): Promise<boolean> {
+    if (this.packsFound.has(pack)) return true;
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}assets-private/${pack}/manifest.json`, { method: 'HEAD' });
+      // A server that will not answer the question that way is not taken for a missing world.
+      if (res.status === 405 || res.status === 501) return true;
+      const found = res.ok && (res.headers.get('content-type') ?? '').includes('json');
+      if (found) this.packsFound.add(pack);
+      return found;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Into a copy in this same world, under a loading screen, as the map's teleport moves a player. */
+  private async moveIntoCopy(into: NonNullable<TravelOpts['into']>): Promise<void> {
+    const copy = await this.copyFor(into);
+    if (!copy) {
+      this.messages.system(`${into.def.name} has no copy in this world`);
+      return;
+    }
+    if (this.traveling) return;
+    this.traveling = true;
+    this.closePanels();
+    this.map.hide();
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, into.def.name, `on ${this.world.planet.name}`);
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      const p = this.player;
+      if (p.mounted) p.dismount(p.pos.clone());
+      const at = new THREE.Vector3(copy.x, copy.y + 1, copy.z);
+      p.reset(at);
+      this.world.jumpTo(at);
+      this.physics.stepOnce();
+      await this.settle();
+      await this.enterCopy(into, copy, false);
+      this.savePlace(true);
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+      this.input.requestLock();
+    }
+  }
+
+  /**
+   * In the world of copies and in none of them (a character saved between copies, a copy that could not be
+   * found): there is nothing out there but the empty sky the copies hang in and no way out on foot, so the
+   * player is sent back the way they came, or by the dungeon's own way in.
+   */
+  private leaveIfStranded(): void {
+    if (!this.world.planet.instances || this.instanceHere || this.traveling) return;
+    void this.leaveInstance('there is no copy here to stand in, so back the way you came');
+  }
+
+  /** A spot in this same world, stood on under a loading screen: the way back out of a copy of this world's own. */
+  private async moveWithin(at: THREE.Vector3, heading: number, indoors: boolean, label: string): Promise<void> {
+    if (this.traveling) return;
+    this.traveling = true;
+    this.closePanels();
+    this.map.hide();
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, label, `on ${this.world.planet.name}`);
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      const p = this.player;
+      p.reset(at);
+      this.world.jumpTo(at);
+      this.physics.stepOnce();
+      await this.settle();
+      this.physics.stepOnce();
+      p.reset(at.clone());
+      p.heading = heading;
+      this.cam.yaw = heading + Math.PI;
+      if (indoors) this.world.enterCellAt(at);
+      this.physics.stepOnce();
+      this.spawn.copy(p.pos);
+      // In a world of copies, what was stood for the copy left behind comes down with it (its fittings stand
+      // nowhere now), behind this screen. Any other world stands all its fittings for good and keeps them:
+      // taken down and stood again here, every terminal and sign of the town round a doorless building's way
+      // in would blink out and back over the frames after the screen lifted.
+      if (this.world.planet.instances) await this.standFittings(packIdOf(this.world.planet, this.zone));
+      this.savePlace(true);
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+      this.input.requestLock();
+    }
+  }
+
+  /** A corvette's ticket taker sends the player to its faction's copy: back by the taker, a few steps in front of them. */
+  private async goCorvette(x: number, z: number, heading: number, def: InstanceDef): Promise<void> {
+    const spot = besideTaker(x, z, heading);
+    const y = this.world.terrain.heightAt(spot.x, spot.z) + 0.3;
+    await this.goIntoCopy(def, { kind: def.kind, planet: this.world.planet.id, ...(this.zone ? { zone: this.zone } : {}), at: [spot.x, y, spot.z], heading: spot.heading });
+  }
+
+  /**
+   * The ship menu's row that goes aboard what the ship rests docked at, into its dungeon (`ABOARD`): the
+   * crew go in on foot behind a loading screen, and the ship is kept to stand docked again where it was
+   * when they come back. Null where the ship is docked at nothing that has one.
+   */
+  private aboardRow(ship: Vehicle, role: 'pilot' | 'passenger'): { label: string; why: string | null; note: string | null } | null {
+    const docked = this.docking.dockedAt(ship);
+    const a = aboardOf(this.world.planet.id, docked);
+    const def = a ? instanceOf(a.kind) : null;
+    if (!docked || !def) return null;
+    return { label: `Go aboard ${def.name}`, why: role === 'pilot' ? null : "the pilot's call", note: 'your ship stays docked here until you come back' };
+  }
+
+  private async goAboard(): Promise<void> {
+    const ship = this.pilotedShip();
+    const docked = this.docking.dockedAt(ship);
+    const a = aboardOf(this.world.planet.id, docked);
+    const def = a ? instanceOf(a.kind) : null;
+    if (!ship || !ship.def || !docked || !def || this.traveling) return;
+    const back: WayBack = { ...this.wayBackFromHere(), kind: def.kind };
+    if (!back.ship) return;
+    this.shipMenu.hide();
+    this.freeMouse(false);
+    await this.goIntoCopy(def, back);
+  }
+
+  /**
+   * The ship this player is leaving behind by going into a world of copies on foot: the one they fly, from its
+   * seat or its bridge, or their own hull whose rooms they walk. Never a shuttle they ride in, a hull another
+   * player flies, or the surface the gravity boots hold them to.
+   */
+  private shipLeftBehind(): Vehicle | null {
+    if (this.ride?.riding) return null;
+    const flown = this.pilotedShip();
+    if (flown) return flown;
+    const room = this.player.aboard;
+    if (!room || isSurfaceRoom(room) || (peerRooms()?.idOf(room) ?? 0) !== 0) return null;
+    const v = room.vehicle as Vehicle | null | undefined;
+    return v && v.spec.ship && v.def && !v.autopilot ? v : null;
+  }
+
+  /**
+   * Where this player stands now, as a way back out of a dungeon copy (`WayBack`), with the ship they are
+   * leaving behind: where it is and how it is turned, its fight as it stands, and the dock it rests at. A
+   * repair that dock is still doing is finished as they go (`Docking.finishRepair`), since the ship is stood
+   * again on their return already docked and the dock repairs nothing then.
+   */
+  private wayBackFromHere(): WayBack {
+    const p = this.player;
+    const at = p.worldPos;
+    const back: WayBack = { kind: '', planet: this.world.planet.id, ...(this.zone ? { zone: this.zone } : {}), at: [at.x, at.y, at.z], heading: p.heading, ...(this.world.inside ? { indoors: true } : {}) };
+    const ship = this.shipLeftBehind();
+    if (ship?.def && !ship.destroyed) {
+      this.docking.finishRepair(ship);
+      const docked = this.docking.dockedAt(ship);
+      const q = ship.quaternion(new THREE.Quaternion());
+      back.ship = { def: ship.def.id, condition: this.conditionRecord(ship), ...(docked ? { dock: { key: docked.key, lane: docked.lane } } : {}), pos: [ship.pos.x, ship.pos.y, ship.pos.z], quat: [q.x, q.y, q.z, q.w] };
+    }
+    return back;
+  }
+
+  /**
+   * Out of the copy the player is in, back where they came from (`WayBack`): to the ship they left docked,
+   * to the spot in this world or another, and with nothing kept, to the dungeon's own way in at that
+   * world's arrival.
+   */
+  private async leaveInstance(why: string): Promise<void> {
+    if (this.traveling) return;
+    const here = this.instanceHere;
+    const back = this.wayBack ?? this.keptWayBack();
+    const kind = here?.def.kind || back?.kind || this.keptKind();
+    this.messages.system(why);
+    this.instanceHere = null;
+    this.setWayBack(null);
+    const planet = back ? PLANETS.find((x) => x.id === back.planet) : undefined;
+    if (back?.ship && planet) {
+      this.world.garage ??= await Garage.load(import.meta.env.BASE_URL);
+      const def = this.world.garage.find(back.ship.def);
+      if (def) {
+        const [qx, qy, qz, qw] = back.ship.quat;
+        await this.travel(planet, back.zone, { def, speed: 0, height: 0, crew: null, condition: back.ship.condition as import('./space/shipCombat').CarriedCondition | null, arrival: { pos: new THREE.Vector3(back.ship.pos[0], back.ship.pos[1], back.ship.pos[2]), quaternion: new THREE.Quaternion(qx, qy, qz, qw) }, dock: back.ship.dock }, { label: planet.name });
+        return;
+      }
+    }
+    if (back && planet && !back.ship) {
+      const at = new THREE.Vector3(back.at[0], back.at[1], back.at[2]);
+      if (planet.id === this.world.planet.id && back.zone === this.zone) await this.moveWithin(at, back.heading, !!back.indoors, planet.name);
+      else await this.travel(planet, back.zone, undefined, { at, heading: back.heading, indoors: !!back.indoors, label: planet.name });
+      return;
+    }
+    const fb = fallbackBack(kind);
+    await this.travel(planetById(fb.planet), fb.zone);
+  }
+
+  /** The way-in things of this world, by template, made once a world (`entrancesOf`). */
+  private entranceSet: { pack: string; templates: Set<string> } = { pack: '', templates: new Set() };
+  /** Each dungeon's own exits, by template, made once a dungeon. */
+  private readonly exitSets = new Map<string, Set<string>>();
+
+  /**
+   * What the use key does at a dungeon where the player stands (`instanceUse`), and the thing it does it at:
+   * a keypad or panel that opens a locked room of this copy, one of its escape pods, its way out, or out in
+   * a world a dungeon's way in. On foot only, and a few times a second with the rest of the bar's state.
+   */
+  private gatherInstance(): InstanceUse {
+    this.instanceThing = null;
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying) return '';
+    const at = p.worldPos;
+    const here = this.instanceHere;
+    let keypad: Fitting | null = null;
+    let pod: Fitting | null = null;
+    let wayOut = false;
+    let wayIn: PlacedObject | null = null;
+    const state = this.world.cellState;
+    const inCopy = !!here && !!state && (state.building.object ?? null) === here.object;
+    if (here && state && inCopy) {
+      let best = INSTANCE_TUNE.useReach;
+      for (const f of this.copyFittings) {
+        if (!f.use) continue;
+        const d = Math.hypot(f.x - at.x, (f.y - at.y) * 0.5, f.z - at.z);
+        if (d > best) continue;
+        if (f.use === 'pod') {
+          pod = f;
+          keypad = null;
+          best = d;
+        } else if (f.opensCell && this.world.instanceLocks.isLocked(here.object ?? undefined, f.opensCell)) {
+          keypad = f;
+          pod = null;
+          best = d;
+        }
+      }
+      wayOut = state.cell === here.cell && at.distanceTo(here.arrival) <= INSTANCE_TUNE.exitReach;
+      if (!wayOut && here.def.exits.length) {
+        let exits = this.exitSets.get(here.def.kind);
+        if (!exits) this.exitSets.set(here.def.kind, (exits = new Set(here.def.exits)));
+        wayOut = !!this.world.placedNear(exits, at, INSTANCE_TUNE.thingReach);
+      }
+    } else {
+      const pack = packIdOf(this.world.planet, this.zone);
+      if (this.entranceSet.pack !== pack) this.entranceSet = { pack, templates: new Set(entrancesOf(pack).map((e) => e.template)) };
+      if (this.entranceSet.templates.size) wayIn = this.world.placedNear(this.entranceSet.templates, at, INSTANCE_TUNE.thingReach);
+    }
+    const use = instanceUse({ live: true, keypad: !!keypad, pod: !!pod, wayOut, wayIn: !!wayIn });
+    this.instanceThing = use === 'keypad' ? keypad : use === 'pod' ? pod : use === 'in' ? wayIn : null;
+    return use;
+  }
+
+  /** The fittings of the copy the player is in that do anything when used: a corvette's keypads, panels and pods. */
+  private copyFittings: Fitting[] = [];
+
+  /**
+   * A copy's locked rooms locked (`InstanceLocks`): every room one of its keypads or panels opens. Asked
+   * with the copy's fittings as they are stood, so a copy whose fittings land after the player is in it is
+   * locked when they do -- and never before: a copy is locked once, so locks made from the empty list a world
+   * holds while its fittings are still on their way would leave every room of it open for the whole visit.
+   * A copy already known keeps what was unlocked in it.
+   */
+  private lockCopy(all: readonly Fitting[]): void {
+    const here = this.instanceHere;
+    if (!here) return;
+    this.copyFittings = all.filter((f) => f.use && Math.abs(f.bx - here.x) <= 1 && Math.abs(f.bz - here.z) <= 1);
+    if (!here.object || !this.fittingRowsIn) return;
+    this.world.instanceLocks.lock(here.object, this.copyFittings.filter((f) => f.opensCell).map((f) => f.opensCell!));
+  }
+
+  /**
+   * Another member of the group opened a room of a copy at its keypad (`unlock`, server/copyWire.mjs): opened
+   * here too where it is the copy this player is in, so the door they walked through opens on this screen as
+   * well. A word about a copy this player is not in is nothing to them; a member coming in after it was said
+   * finds the room locked, since nothing holds it.
+   */
+  private heardUnlock(msg: Record<string, unknown>): void {
+    if (msg.t !== 'unlock') return;
+    const here = this.instanceHere;
+    const at = msg.at;
+    const cell = Number(msg.cell);
+    if (!here?.object || msg.kind !== here.def.kind || !Array.isArray(at) || at.length !== 2 || !Number.isInteger(cell) || cell < 1) return;
+    if (Math.abs(Number(at[0]) - here.x) > 1 || Math.abs(Number(at[1]) - here.z) > 1) return;
+    if (!this.world.instanceLocks.open(here.object, cell)) return;
+    const f = this.copyFittings.find((x) => x.opensCell === cell);
+    const who = typeof msg.from === 'string' && msg.from ? msg.from : 'someone in your group';
+    this.messages.system(`${who} unlocked the ${roomWords(f?.opens)}`);
+  }
+
+  /**
+   * E at a dungeon: a keypad or a panel opens its room, an escape pod or the way out leaves the copy, and a
+   * dungeon's way in out in a world goes into it. False when there is none of those here.
+   */
+  private handleInstance(): boolean {
+    const use = this.gatherInstance();
+    if (use === 'keypad') {
+      const f = this.instanceThing as Fitting;
+      const here = this.instanceHere;
+      if (here && f.opensCell && this.world.instanceLocks.unlock(here.object ?? undefined, f.opensCell)) {
+        this.audio.ui.play('select');
+        this.messages.system(`${f.name ?? 'the panel'}: the ${roomWords(f.opens)} unlocked`);
+        // And for the rest of the group in this copy, whose doors would otherwise stay shut on their screens
+        // while this player walked through them (`heardUnlock`). Nothing goes with no group or no server.
+        if (this.groupIdNow()) this.net.sendWord({ t: 'unlock', kind: here.def.kind, at: [here.x, here.z], cell: f.opensCell });
+      }
+      return true;
+    }
+    if (use === 'pod') {
+      void this.leaveInstance('into an escape pod and away');
+      return true;
+    }
+    if (use === 'out') {
+      void this.leaveInstance(`out of ${this.instanceHere?.def.name ?? 'here'}`);
+      return true;
+    }
+    if (use === 'in') {
+      const thing = this.instanceThing as PlacedObject | null;
+      const e = thing ? entrancesOf(packIdOf(this.world.planet, this.zone)).find((x) => x.template === thing.template) : null;
+      const def = e ? instanceOf(e.kind) : null;
+      if (!def) return false;
+      void this.goIntoCopy(def, { ...this.wayBackFromHere(), kind: def.kind });
+      return true;
+    }
+    return false;
+  }
+
+  /** `__debug.instances` (and `__debug.corvette`): see the README's Debugging section. */
+  private async debugInstances(opts: { go?: string; leave?: boolean; unlock?: boolean; tune?: Partial<typeof INSTANCE_TUNE> }): Promise<unknown> {
+    if (opts.tune) tuneInstances(opts.tune);
+    const here = this.instanceHere;
+    if (opts.unlock && here) for (const c of this.world.instanceLocks.lockedIn(here.object ?? undefined)) this.world.instanceLocks.unlock(here.object ?? undefined, c);
+    if (opts.leave) {
+      if (!here && !this.wayBack) return { error: 'not in a dungeon copy, and no way back is kept' };
+      await this.leaveInstance('out, from the console');
+      return { left: true, planet: this.world.planet.id, at: this.player.worldPos.toArray().map((n) => Math.round(n)) };
+    }
+    if (opts.go) {
+      const def = instanceOf(opts.go);
+      if (!def) return { error: `no dungeon called ${opts.go}; these are: ${INSTANCES.map((d) => d.kind).join(', ')}` };
+      // Back to where the player stands now, with the ship they fly or are docked in, as any way in keeps it.
+      await this.goIntoCopy(def, { ...this.wayBackFromHere(), kind: def.kind });
+    }
+    const now = this.instanceHere;
+    const at = this.player.worldPos;
+    const pack = packIdOf(this.world.planet, this.zone);
+    return {
+      here: now
+        ? {
+            kind: now.def.kind,
+            name: now.def.name,
+            copy: [Math.round(now.x), Math.round(now.z)],
+            room: now.cell,
+            arrival: now.arrival.toArray().map((n) => Math.round(n * 10) / 10),
+            locked: this.world.instanceLocks.lockedIn(now.object ?? undefined),
+            fittings: this.copyFittings.map((f) => ({ use: f.use, name: f.name ?? null, opens: f.opens ?? null, at: [f.x, f.y, f.z].map((n) => Math.round(n * 10) / 10), away: Math.round(Math.hypot(f.x - at.x, f.y - at.y, f.z - at.z)) })),
+          }
+        : null,
+      use: this.gatherInstance(),
+      wayBack: this.wayBack,
+      copies: INSTANCES.filter((d) => packOfInstance(d) === pack).map((d) => ({ kind: d.kind, copies: copiesOf(this.world.placedObjects, d).length })),
+      entrances: entrancesOf(pack).map((e) => {
+        const placed = this.world.placedObjects.filter((o) => o.template === e.template);
+        let near: PlacedObject | null = null;
+        for (const o of placed) if (!near || Math.hypot(o.x - at.x, o.z - at.z) < Math.hypot(near.x - at.x, near.z - at.z)) near = o;
+        return { kind: e.kind, ours: e.ours, placed: placed.length, nearest: near ? { at: [near.x, near.y, near.z].map((n) => Math.round(n * 10) / 10), away: Math.round(Math.hypot(near.x - at.x, near.y - at.y, near.z - at.z)) } : null };
+      }),
+      tune: { ...INSTANCE_TUNE },
+    };
   }
 
   // ---- speaking to somebody ------------------------------------------------------------------------
@@ -16066,8 +16798,10 @@ class App {
     const why = whyNotTalk(m, this.world.playerTarget);
     if (why) return why;
     const following = this.world.followers.following(m);
+    // A corvette's ticket taker offers the trip to its faction's copy of the ship first (`instances.ts`).
+    const taker = !!corvetteFor(standingPeople.rowOf(m)?.takes);
     // Anybody may be spoken to whichever browser keeps them; only one this browser keeps may follow.
-    const options = talkOptions(following, this.world.followers.full, [], m.isDriven);
+    const options = talkOptions(following, this.world.followers.full, [], m.isDriven, taker);
     const at = this.player.worldPos;
     this.talkAt.x = at.x;
     this.talkAt.z = at.z;
@@ -16099,6 +16833,19 @@ class App {
       return;
     }
     const m = t.body;
+    if (o.id === 'corvette') {
+      // The trip to the ship, once the taker's reply has stood its time (`stepTalk`).
+      const row = standingPeople.rowOf(m);
+      const def = corvetteFor(row?.takes);
+      if (!row || !def) {
+        this.endTalk();
+        return;
+      }
+      this.talkUi.reply(lineOf(TALK_LINES.corvette, m.key));
+      this.talkThen = () => void this.goCorvette(row.x, row.z, row.heading, def);
+      t.replyUntil = this.world.simTime + TALK_TUNE.replyFor;
+      return;
+    }
     if (o.id === 'follow') {
       const why = this.world.recruit(m);
       if (why) {
@@ -16139,7 +16886,10 @@ class App {
     const screen = this.anyPanelOpen() || this.map.open;
     const apart = Math.hypot(m.pos.x - at.x, m.pos.z - at.z) > TALK_TUNE.keep;
     if (done || gone || away || screen || apart) {
+      // What the last answer asked for happens once its reply has stood, and only then.
+      const then = done ? this.talkThen : null;
       this.endTalk(!away && !screen);
+      then?.();
       return;
     }
     // Turned to the one spoken to, so the camera looks over a shoulder and not into a face. The view is
@@ -16163,6 +16913,7 @@ class App {
    */
   private endTalk(handBack = true): void {
     const t = this.talkNow;
+    this.talkThen = null;
     if (!t) return;
     this.talkNow = null;
     t.body.listen(null);
@@ -16997,7 +17748,7 @@ class App {
             else if (!this.hyperspace.locksControls) {
               // The order the bar's own rules offer them in (`promptRules.ts`, whose test pins this line):
               // what is underfoot, a port's own things, somebody you are looking at, a gate, and a vehicle.
-              if (!this.handleElevator() && !this.handleTravel() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
+              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -17240,6 +17991,7 @@ class App {
         else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
+        else if (S8.instance) prompt = S8.instance === 'keypad' ? '<b>E</b> use the keypad' : S8.instance === 'pod' ? '<b>E</b> the escape pod: off this ship' : S8.instance === 'out' ? `<b>E</b> back the way you came in` : '<b>E</b> go in';
         else if (S8.travel) prompt = `<b>E</b> ${this.promptTravel}`;
         else if (S8.talk) prompt = `<b>E</b> talk to ${this.promptTalk}`;
         else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;

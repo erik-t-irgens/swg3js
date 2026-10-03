@@ -71,6 +71,8 @@ export interface DockWorld {
 interface DockTarget {
   key: string;
   label: string;
+  /** The pack's own name for it (a station's, a piece of scenery's), or its model's id where it has none. */
+  name: string;
   object: PlacedObject;
   lanes: LanePlan[];
   /** The hull's own frame in the world, which the lanes and the dock pose are read through. */
@@ -266,6 +268,7 @@ export class Docking {
       this.candidates.push({
         key: `${o.model}@${Math.round(o.x)},${Math.round(o.y)},${Math.round(o.z)}`,
         label: this.labelFor(o),
+        name: this.nameFor(o),
         object: o,
         lanes: plans,
         frame,
@@ -281,6 +284,97 @@ export class Docking {
     for (const s of pack?.stations ?? []) if (s.model === o.model && Math.abs(-s.x - o.x) < 2 && Math.abs(s.z - o.z) < 2) return s.title || s.name;
     for (const s of pack?.scenery ?? []) if (s.model === o.model && Math.abs(-s.x - o.x) < 2 && Math.abs(s.z - o.z) < 2) return s.name;
     return o.model.replace(/_/g, ' ');
+  }
+
+  /** The pack's own name for a hull with lanes (a station's `name`, which is the server's), else its model's id. */
+  private nameFor(o: PlacedObject): string {
+    const pack = this.world.spaceData;
+    for (const s of pack?.stations ?? []) if (s.model === o.model && Math.abs(-s.x - o.x) < 2 && Math.abs(s.z - o.z) < 2) return s.name;
+    for (const s of pack?.scenery ?? []) if (s.model === o.model && Math.abs(-s.x - o.x) < 2 && Math.abs(s.z - o.z) < 2) return s.name;
+    return o.model;
+  }
+
+  /**
+   * What a ship is docked at, or null when it is not resting at a dock: the dock's key (where the hull
+   * stands, which every load of the zone gives again), the pack's own name for the hull, its model and
+   * the lane. What "Go aboard" reads (`instances.ts`' `ABOARD`), and what `park` takes back.
+   */
+  dockedAt(ship: Vehicle | null): { key: string; name: string; label: string; model: string; lane: string } | null {
+    if (!ship || ship !== this.ship || !this.target || !this.plan || (this.phase !== 'repair' && this.phase !== 'docked')) return null;
+    return { key: this.target.key, name: this.target.name, label: this.target.label, model: this.target.object.model, lane: this.plan.lane };
+  }
+
+  /**
+   * The free repair a ship docked for, done now rather than at the end of its seconds: its crew are leaving
+   * it at the dock across a loading screen (aboard what it is docked at, or after their group), the step that
+   * counts the repair down never runs again for this hull, and the dock it is stood at when they come back
+   * repairs nothing (`park`). Answers whether there was a repair to finish.
+   */
+  finishRepair(ship: Vehicle | null): boolean {
+    if (!ship || ship !== this.ship || this.phase !== 'repair' || !this.target) return false;
+    ship.combat?.repair();
+    this.repairLeft = 0;
+    this.phase = 'docked';
+    this.note = `docked at ${this.target.label} · hull and components put right`;
+    return true;
+  }
+
+  /**
+   * Stand a ship at a dock outright, already docked and put right, as it was left: a ship whose crew went
+   * aboard the hull it was docked at and have come back to it across a loading screen. The lane is claimed,
+   * the hull ghosted and held at the dock's own pose in the hull's frame, and the menu offers Launch; the
+   * answer is a line for the console, and null when there is no such dock in this zone (yet). Nothing is
+   * flown and nothing is repaired: a repair under way when the crew left was finished as they went
+   * (`finishRepair`), and the condition carried across is the repaired one.
+   */
+  park(ship: Vehicle, key: string, lane: string): string | null {
+    if (!this.inSpace || ship.disposed) return null;
+    const target = this.list().find((c) => c.key === key) ?? null;
+    const plan = target?.lanes.find((l) => l.lane === lane) ?? null;
+    if (!target || !plan) return null;
+    if (this.phase !== 'idle') this.breakOff('another dock was taken back');
+    const by = this.owner(ship);
+    const claim = LaneClaims.key(target.key, plan.lane);
+    if (!this.claims.claim(claim, by, 'dock')) return null;
+    this.claimed = claim;
+    this.claimedBy = by;
+    this.ship = ship;
+    this.target = target;
+    this.plan = plan;
+    this.point.copy(ship.pos).applyMatrix4(target.frameInverse);
+    approachRun(plan, this.point, this.run);
+    dockPose(plan, this.run, this.dockPos, this.dockTurn);
+    this.index = this.run.points.length;
+    this.phase = 'docked';
+    this.ghostedByUs = true;
+    ship.setGhost(true);
+    this.holdAt(ship, target, this.dockPos, this.dockTurn);
+    this.note = `docked at ${target.label}`;
+    return this.note;
+  }
+
+  /**
+   * The console's own way to a dock: the ship stood docked outright at the nearest hull with lanes in the
+   * zone, however far off, at the first of its lanes, with no lane flown (`park`). What a check of what
+   * hangs off a dock needs (the Star Destroyer's "Go aboard") without flying the approach first.
+   */
+  parkNearest(ship: Vehicle): string | null {
+    let best: DockTarget | null = null;
+    let bestD = Infinity;
+    for (const c of this.list()) {
+      const d = Math.hypot(c.object.x - ship.pos.x, c.object.y - ship.pos.y, c.object.z - ship.pos.z) - c.object.radius;
+      if (d < bestD && c.lanes.length) {
+        bestD = d;
+        best = c;
+      }
+    }
+    if (!best) return null;
+    // Stood first at the lane's own way in, so the dock's pose is read from the way the lane is flown.
+    const lane = best.lanes[0];
+    approachRun(lane, this.point.set(0, 0, 0), this.probe);
+    const entry = this.probe.points[0];
+    if (entry) ship.teleport(this.scratch.set(entry.x, entry.y, entry.z).applyMatrix4(best.frame), ship.quaternion(this.shipTurn), 0);
+    return this.park(ship, best.key, lane.lane);
   }
 
   /** The hull with lanes nearest this point, within `ask` metres; null with none in reach. */

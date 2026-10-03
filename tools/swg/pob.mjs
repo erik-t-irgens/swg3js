@@ -5,7 +5,8 @@
 //              + FORM CELS { FORM CELL > FORM 000N > DATA ... + FORM PRTL { 000N chunk } per portal [+ LGHT] }
 //   Cell DATA: int32 portals, bool8 canSeeParent, [0004+: cstring name], cstring appearance, [0002+: bool8 hasFloor, cstring floor]
 //   Cell portal chunk 000N: [0005: bool8 disabled], [0002+: bool8 passable], int32 geometry, bool8 clockwise, int32 targetCell,
-//                           [0003+: cstring doorStyle], [0004+: bool8 hasDoorHardpoint, 12 floats]
+//                           [0003+: cstring doorStyle], [0004+: bool8 hasDoorHardpoint, 12 floats, written whether or not the flag is set]
+//                           Every one of the 7,422 portal sides in the 281 retail files reads to its last byte this way.
 import { childrenOf, find, isForm, readCString } from './iff.mjs';
 
 export function parsePob(root) {
@@ -74,7 +75,23 @@ export function parsePob(root) {
       q += 4;
       const clockwise = d[q++] !== 0;
       const target = d.readInt32LE(q);
-      links.push({ geometry, target, clockwise, passable, disabled });
+      q += 4;
+      // The door that stands in this portal (the doors command reads these): its style's name in the
+      // client's door style table, and where the door hangs, a 3x4 row-major transform in the
+      // building's own frame. The two sides of a portal name the same style on all but one in the archives.
+      let doorStyle = '';
+      let doorHardpoint = null;
+      if (pv >= 3 && q < d.length) {
+        const r = readCString(d, q);
+        doorStyle = r.value;
+        q = r.next;
+      }
+      // The twelve floats follow the flag whether or not it is set; only a set flag says they mean anything.
+      if (pv >= 4 && q < d.length && d[q++] !== 0 && q + 48 <= d.length) {
+        doorHardpoint = [];
+        for (let k = 0; k < 12; k++) doorHardpoint.push(d.readFloatLE(q + k * 4));
+      }
+      links.push({ geometry, target, clockwise, passable, disabled, doorStyle, doorHardpoint });
     }
     // LGHT: int32 count, then per light int8 type (0 ambient, 1 parallel, 2 point), ARGB diffuse and
     // specular floats, a 3x4 row-major transform, and constant, linear and quadratic attenuation.

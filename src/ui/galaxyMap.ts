@@ -165,6 +165,8 @@ export class GalaxyMap {
 
   private buildCards(): void {
     for (const p of PLANETS) {
+      // The instances zone is reached only through a dungeon's own way in, never travelled to.
+      if (p.instances) continue;
       const card = document.createElement('div');
       card.className = 'planet-card';
       card.dataset.id = p.id;

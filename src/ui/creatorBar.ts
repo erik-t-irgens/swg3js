@@ -17,7 +17,7 @@ export class CreatorBar {
     this.root = document.createElement('div');
     this.root.id = 'creator-bar';
     this.root.className = 'hidden';
-    const worlds = PLANETS.filter((p) => p.id !== 'gallery' && !p.space);
+    const worlds = PLANETS.filter((p) => p.id !== 'gallery' && !p.space && !p.instances);
     this.root.innerHTML = `
       <button class="back">← Characters</button>
       <label>Name<input class="name" type="text" maxlength="24" placeholder="Character name" autocomplete="off" spellcheck="false" /></label>

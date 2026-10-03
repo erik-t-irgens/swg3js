@@ -68,8 +68,11 @@ export const GALAXY_SYSTEMS: GalaxySystemDef[] = [
   { id: 'sandbox', name: 'Sandbox', grid: null, at: { col: -2, row: 16 }, confidence: 'invented', note: 'Made up: a quiet corner of our own.', zone: 'space_sandbox', worlds: [{ planet: 'space_sandbox' }] },
 ];
 
-/** PLANETS entries that belong to no system on purpose: the development gallery is not a place in the galaxy. */
-export const GALAXY_LEFT_OUT: readonly string[] = ['gallery'];
+/**
+ * PLANETS entries that belong to no system on purpose: the development gallery is not a place in the
+ * galaxy, and the instances zone is a box of copies reached only through each dungeon's own way in.
+ */
+export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1'];
 
 /**
  * Invented: how the galaxy is laid out, in the map's own units (one unit is one metre to three, and

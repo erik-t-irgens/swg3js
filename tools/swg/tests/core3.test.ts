@@ -369,6 +369,15 @@ type Row = { key: string; who: string | null; x: number; y: number; z: number; h
       'corvetteImperialSpawns = {}',
       'corvetteNeutralSpawns = { { "crew_b", 1, 2, 3, 0, "helm4", "Captain" } }',
     ].join('\n'));
+    put('screenplays/dungeon/corellian_corvette/ticket_takers/pilot_a.lua', [
+      'pilot_a = { planetName = "naboo", npcTemplate = "pilot_a", x = 1, z = 2, y = 3, direction = -141, cellID = 0, position = SIT }',
+      'ticketTakerA = CorvetteTicketTakerLogic:new {',
+      '  npc = pilot_a,',
+      '  faction = FACTIONIMPERIAL,',
+      '}',
+    ].join('\n'));
+    put('screenplays/dungeon/corellian_corvette/ticket_takers/pilot_b.lua', 'pilot_b = { planetName = "tatooine", npcTemplate = "pilot_b", x = 1, z = 2, y = 3 }\nticketTakerB = CorvetteTicketTakerLogic:new {\n  npc = pilot_b,\n  faction = 0,\n}\n');
+    put('screenplays/dungeon/corellian_corvette/ticket_takers/pilot_c.lua', 'pilot_c = { planetName = "corellia", npcTemplate = "pilot_c", x = 1, z = 2, y = 3 }\nticketTakerC = CorvetteTicketTakerLogic:new {\n  npc = pilot_c,\n  faction = FACTIONREBEL,\n}\n');
     put('managers/planet/tatooine_regions.lua', [
       'tatooine_regions = {',
       '  {"ring", 100, 100, {RING, 50, 80}, SPAWNAREA + NOWORLDSPAWNAREA, {"g"}, 32},',
@@ -384,6 +393,8 @@ type Row = { key: string; who: string | null; x: number; y: number; z: number; h
     ok(cv.statics.length === 3 && cv.statics[0].room === 'lobby3' && Math.abs(cv.statics[0].heading - Math.PI) < 1e-3, 'and its fittings, turned in degrees');
     const [plainFitting, rebelDesk, imperialDesk] = cv.statics as { faction?: string; data?: string }[];
     ok(plainFitting.faction === undefined && rebelDesk.faction === 'rebel' && imperialDesk.faction === 'imperial' && rebelDesk.data === 'one', 'a fitting that stands in only one faction\'s copy says which, so two on one spot are never both stood');
+    const takers = cv.takers as { who: string; planet: string; faction: string }[];
+    ok(takers.length === 3 && takers[0].who === 'pilot_a' && takers[0].planet === 'naboo' && takers[0].faction === 'imperial' && takers[1].faction === 'neutral' && takers[2].who === 'pilot_c' && takers[2].planet === 'corellia' && takers[2].faction === 'rebel', 'and who takes a ticket for it, where and for which faction\'s copy: the Empire\'s, the Alliance\'s, and nobody\'s where the file says nought');
     const reg = readRegions(dir).get('tatooine') as { spawn: { name: string; world?: boolean }[]; noSpawn: { name: string; world?: boolean }[] };
     ok(reg.spawn.find((a) => a.name === 'everywhere')?.world === true && !reg.spawn.find((a) => a.name === 'ring')?.world, 'the world-wide spawn area says it is one');
     ok(reg.noSpawn.find((a) => a.name === 'ring')?.world === true && !reg.noSpawn.find((a) => a.name === 'keepout')?.world, 'and a place that keeps out only the world-wide spawner is told apart from one that keeps out everything');
@@ -540,6 +551,8 @@ if (!core3 || !existsSync(join(core3, 'managers', 'planet'))) {
   ok(dress.size >= 20 && weapons.size >= 100, `${dress.size} dress groups and ${weapons.size} weapon groups`);
   const crews = [...corvette.rebel, ...corvette.imperial, ...corvette.neutral];
   ok(crews.length === 268 && new Set(crews.map((r) => r.room)).size >= 40, `the corvette's three crews are ${crews.length} people over ${new Set(crews.map((r) => r.room)).size} rooms named`);
+  const takers = (corvette.takers ?? []) as { who: string; faction: string }[];
+  ok(takers.length === 3 && new Set(takers.map((t) => t.faction)).size === 3, `three ticket takers, one for each faction's copy (${takers.map((t) => `${t.who} ${t.faction}`).join(', ')})`);
 
   // The frame, asked of the ground: the converted packs carry what `spawns` measured, which is a
   // witness built from the client's own terrain rules and not from these scripts.

@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from './surfaces';
 import { drawnLevels } from './lodLevels.ts';
 import { mergeFloraCollision, type FloraCollision } from './floraCollision.ts';
+import { DOORS_PACK_VERSION, type DoorsFile } from './doorMath.ts';
 
 export interface CellLight {
   type: number;
@@ -290,6 +291,13 @@ export class AssetPack {
    */
   objectEffects: Record<string, PackEffect[]> | null = null;
 
+  /**
+   * The doors standing in its buildings' doorways, from the pack's `doors.json` (the converter's `doors`
+   * pass): per model, each door's portal, style, the cells on its two sides and where it hangs, and the
+   * styles they use. Null for a pack converted before the pass, whose doorways stand open as they always did.
+   */
+  doors: DoorsFile | null = null;
+
   private effectsLoad: Promise<void> | null = null;
 
   /**
@@ -383,6 +391,17 @@ export class AssetPack {
         } catch {
           /* no collision shapes in this pack: the trees are guessed, as they always were */
         }
+      }
+      // The doors in the buildings' doorways, beside the manifest as the floors are. Only a pack with
+      // portal buildings has the file; one converted before the pass has none and its doorways stand open.
+      try {
+        const dr = await fetch(`${baseUrl}doors.json`);
+        if (dr.ok && (dr.headers.get('content-type') ?? '').includes('json')) {
+          const doors = (await dr.json()) as DoorsFile;
+          if (doors.version === DOORS_PACK_VERSION && doors.models && doors.styles) pack.doors = doors;
+        }
+      } catch {
+        /* no doors in this pack */
       }
       await pack.loadObjectEffects();
       return pack;

@@ -266,6 +266,17 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
   mayHurt: ((id: number) => boolean) | null = null;
 
   private readonly peers = new Map<number, Held>();
+  /**
+   * The figures that have a body just now, in a kept list: what a door asks to know whether another
+   * player is walking up to it (`World.stepDoors`), walked by index so a frame makes no iterator.
+   */
+  private readonly standingList: PeerBody[] = [];
+
+  /** The figures with a body just now: each one's feet in the world (`pos`) and whether it is down. */
+  get standing(): readonly { readonly pos: THREE.Vector3; readonly dead: boolean }[] {
+    return this.standingList;
+  }
+
   /** Refilled, never made: a blow can come several times a frame from one burst. */
   private readonly theBlow: PeerBlow = { id: 0, what: 'body', amount: 0, from: null, source: null };
   /** Scratch for writing a pose into the engine; the engine copies out of them at the call. */
@@ -397,6 +408,7 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
       f.collider.setCollisionGroups(PEER_GROUPS);
       w.markPeer(f.collider);
       this.byCollider.set(f.collider.handle, f);
+      this.standingList.push(f);
       this.version++;
       // A scene query sees nothing the world has not stepped over yet: this body is found from the
       // next step, not this frame. Nothing here depends on it being found sooner.
@@ -449,6 +461,8 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     // Off the lists whatever else happens: a peer with no body is nothing to pick a fight with.
     this.list(f, false);
     this.hunt(f, false);
+    const at = this.standingList.indexOf(f);
+    if (at >= 0) this.standingList.splice(at, 1);
     if (!f.body || !w) return;
     // The handle leaves the lookup at the moment the collider does, never later: the engine hands a
     // recycled handle to the next body made, and an entry left behind would answer for that one.

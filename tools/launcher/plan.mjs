@@ -50,6 +50,7 @@ const WORDS = {
   fittings: 'What stands inside buildings',
   spawns: 'Where the creatures and people stand',
   objeffects: 'Fires, fountains, torches and lamps',
+  doors: 'Doors in the buildings',
   scenes: 'The character screens’ places',
   clouds: 'Clouds',
   loading: 'Loading pictures',

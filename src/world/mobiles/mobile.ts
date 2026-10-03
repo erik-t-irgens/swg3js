@@ -2871,7 +2871,11 @@ export class Mobile implements Living, NpcSubject {
     return out.add(this.pos).setY(this.pos.y + this.halfHeight * 1.3);
   }
 
-  /** Whether a shot from here would reach a target's middle: a ray against what stands still. */
+  /**
+   * Whether a shot from here would reach a target's middle: a ray against what stands still and a shut
+   * door (`Physics.stillOrWall`). A door's leaf stops the bolt, so a target behind one is no line: the
+   * brain closes in rather than standing to shoot the door, and the door opens as the body comes up.
+   */
   private lineTo(t: Living): boolean {
     this.muzzlePoint(tmp);
     tmp2.set(t.pos.x, t.pos.y + t.halfHeight, t.pos.z).sub(tmp);
@@ -2879,10 +2883,7 @@ export class Mobile implements Living, NpcSubject {
     if (len < 0.5) return true;
     tmp2.divideScalar(len);
     const ray = new RAPIER.Ray({ x: tmp.x, y: tmp.y, z: tmp.z }, { x: tmp2.x, y: tmp2.y, z: tmp2.z });
-    const hit = this.deps.physics.world.castRay(ray, len - 0.3, true, undefined, this.inside ? INSIDE : OUTSIDE, undefined, this.body, (c) => {
-      const b = c.parent();
-      return !b || b.isFixed();
-    });
+    const hit = this.deps.physics.world.castRay(ray, len - 0.3, true, undefined, this.inside ? INSIDE : OUTSIDE, undefined, this.body, this.deps.physics.stillOrWall);
     return !hit;
   }
 

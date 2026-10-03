@@ -456,6 +456,30 @@ export class PortalRenderer {
       list[i].visible = show;
       if (show) shown++;
     }
+    // Its doors (`doors.ts`). One on an exit stands in the world and is drawn in the world's pass; it joins
+    // this building's rooms' pass as well, and no other building's, by the rooms' layer it takes for the
+    // length of that pass (a layer is in no program's key, and it was compiled for both passes). One
+    // between two rooms is shown with the rooms when either of the two is seen.
+    const d = b.doors;
+    if (d && d.ready) {
+      const outer = d.outer;
+      for (let i = 0; i < outer.length; i++) {
+        if (on) outer[i].layers.enable(INTERIOR_LAYER);
+        else outer[i].layers.disable(INTERIOR_LAYER);
+      }
+      const inner = d.inner;
+      const two = d.innerCells;
+      for (let i = 0; i < inner.length; i++) {
+        let show = on;
+        if (show && seen) {
+          const a = two[i * 2];
+          const c = two[i * 2 + 1];
+          show = (a > 0 && a < seen.length && seen[a] === 1) || (c > 0 && c < seen.length && seen[c] === 1) || a >= seen.length || c >= seen.length;
+        }
+        if (show && isQuarantined(inner[i])) show = false;
+        inner[i].visible = show;
+      }
+    }
     // Its furniture, drawn per building (commit 2b): a group is shown with the rooms when one of the rooms
     // its copies can be in is seen, and only once its programs exist. A group not routed is the streamer's.
     const f = b.furniture;

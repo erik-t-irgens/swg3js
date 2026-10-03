@@ -819,10 +819,29 @@ function registeredLists(dir, register) {
  * objects every copy stands (terminals, keypads, crates). Kept for the corvette's own wave; the rows
  * are `{ who, x, y, z, heading, room, name? }` with the height second as everywhere, and the fittings
  * `{ template, x, y, z, heading, room, name?, fn?, data?, faction? }`.
+ *
+ * And the three who take a ticket for it (`takers`, `{ who, planet, faction }`): which copy a player is
+ * sent to was the taker's faction, Imperial at the Emperor's Retreat, the Alliance's at its base and
+ * nobody's at Jabba's palace, and that is a fact of each taker's own file (`ticket_takers/*.lua`) and
+ * of nothing the client holds. Each file is two assignments the Lua reader steps over as calls, so the
+ * three names are read off the text as the words they are; the takers themselves stand as ordinary
+ * rows of `readStatics`.
  */
 export function readCorvette(scripts) {
-  const file = join(scripts, 'screenplays', 'dungeon', 'corellian_corvette', 'corvetteSpawnMaps.lua');
-  const out = { rebel: [], imperial: [], neutral: [], statics: [] };
+  const dir = join(scripts, 'screenplays', 'dungeon', 'corellian_corvette');
+  const file = join(dir, 'corvetteSpawnMaps.lua');
+  const out = { rebel: [], imperial: [], neutral: [], statics: [], takers: [] };
+  const takers = join(dir, 'ticket_takers');
+  if (existsSync(takers)) {
+    for (const f of readdirSync(takers).filter((n) => n.endsWith('.lua')).sort()) {
+      const text = readFileSync(join(takers, f), 'utf8');
+      const who = /npcTemplate\s*=\s*"([^"]+)"/.exec(text)?.[1];
+      const planet = /planetName\s*=\s*"([^"]+)"/.exec(text)?.[1];
+      const word = /\bfaction\s*=\s*(FACTION\w+|\d+)/.exec(text)?.[1];
+      if (!who || !planet || word === undefined) continue;
+      out.takers.push({ who, planet, faction: word === 'FACTIONIMPERIAL' ? 'imperial' : word === 'FACTIONREBEL' ? 'rebel' : 'neutral' });
+    }
+  }
   if (!existsSync(file)) return out;
   const { values } = readLua(readFileSync(file, 'utf8'));
   const crew = (list) =>

@@ -487,7 +487,7 @@ const row = (name: string, at: [number, number, number], radius: number, extra: 
     const read = (rel: string) => readFileSync(new URL(`../../../src/${rel}`, import.meta.url), 'utf8');
     ok(/opacity: \(\): number => liveSettings\(\)\.nebulaOpacity,/.test(read('world/world.ts')), "the world hands the nebulae the Graphics page's own setting, read live");
     ok(/\{ key: 'nebulaOpacity', label: 'Nebula opacity', kind: 'range', min: 0, max: 1,/.test(read('ui/menu.ts')), 'and the Graphics page has the slider, 0 to 100%');
-    ok(/nebulaOpacity: 1,/.test(read('core/settings.ts')), 'which starts at 100%, the nebulae as they are drawn');
+    ok(/nebulaOpacity: 0\.1,/.test(read('core/settings.ts')), "which starts at 10%, the owner's choice");
   }
 
   // The bolts: two at once and no more, and a strike that ends on the ship hurts it.

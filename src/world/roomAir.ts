@@ -648,7 +648,7 @@ export class RoomAir {
       if (!sun) {
         for (let i = 0; i < MAX_SHAFTS; i++) this.slots[i].target = 0;
       } else if (this.selectTimer >= 0.25 || sun.dir.dot(this.selectSun) < COS_025) {
-        this.select(sun, f);
+        this.select(sun, f, building);
       }
     }
 
@@ -688,7 +688,9 @@ export class RoomAir {
       f.shaftSize[i].set(a.width, a.height, slot.reach, soft);
       f.shaftBoxMin[i].set(a.shaftBox.min[0], a.shaftBox.min[1], a.shaftBox.min[2]);
       f.shaftBoxMax[i].set(a.shaftBox.max[0], a.shaftBox.max[1], a.shaftBox.max[2]);
-      const k = this.dayFade * st.lit * st.facing * slot.weight * this.fade;
+      // A door standing in the doorway lets in as much of the sun as it stands open: none shut, and the
+      // beam follows the leaf as it slides (`Doors.openShare`).
+      const k = this.dayFade * st.lit * st.facing * slot.weight * this.fade * this.doorOpen(building, st.a.portal);
       f.shaftLight[i].set(this.sunRadiance.r * k, this.sunRadiance.g * k, this.sunRadiance.b * k, k);
       this.rectOf(i, u2r, soft / a.width, soft / a.height, input);
       count = i + 1;
@@ -698,8 +700,16 @@ export class RoomAir {
     f.shaftsLit = lit;
   }
 
+  /**
+   * How open the door standing in one of a building's doorways is, 0 shut to 1 open, and 1 where none
+   * stands (`Doors.openShare`). A world with no doors (a test's stand-in) has every doorway open.
+   */
+  private doorOpen(building: Building, portal: number): number {
+    return this.world.doors?.openShare(building, portal) ?? 1;
+  }
+
   /** Pick the doorways worth a beam, keeping each one's slot while it stays picked. */
-  private select(sun: SunInfo, f: RoomAirFrame): void {
+  private select(sun: SunInfo, f: RoomAirFrame, building: Building): void {
     this.selectTimer = 0;
     this.selectSun.copy(sun.dir);
     const T = this.tuning;
@@ -719,7 +729,8 @@ export class RoomAir {
         this.testLit(st, sun.dir, f.roomToWorld);
         st.lit = st.litTarget;
       }
-      st.score = st.lit * st.facing * st.a.area / (1 + d2 / 100);
+      // A shut door takes no slot from a doorway that stands open; one opening is picked again within a selection.
+      st.score = (st.lit * st.facing * st.a.area * this.doorOpen(building, st.a.portal)) / (1 + d2 / 100);
     }
     for (let i = 0; i < MAX_SHAFTS; i++) this.slots[i].target = 0;
     for (let n = 0; n < MAX_SHAFTS; n++) {
@@ -1001,7 +1012,8 @@ export class RoomAir {
     if (!building) return false;
     target.applyMatrix4(f.roomToWorld);
     this.v2.setFromMatrixPosition(input.camera.matrixWorld);
-    return !this.world.physics.segmentBlocked(this.v2, target, true);
+    // A shut door hides a lamp behind it as a wall does.
+    return !this.world.physics.segmentBlocked(this.v2, target, true, true);
   }
 
   // ---- The motes ----

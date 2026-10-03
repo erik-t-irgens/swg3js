@@ -45,6 +45,9 @@ import { LayoutStreamer, nearTierRange, type Building, type CellState, type Plac
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
+import { Doors, type DoorView } from './doors.ts';
+import { InstanceLocks } from './instances.ts';
+import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -112,6 +115,8 @@ import { clashes } from '../combat/clash.ts';
 
 const tmpQ = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
+/** The box a world of copies tests a standing person against (`World.inCopy`), kept so the test allocates nothing. */
+const copyBox = new THREE.Box3();
 /** The ground's normal under a foot, for the print laid there; a step allocates nothing. */
 const footNormal = new THREE.Vector3();
 /**
@@ -623,6 +628,19 @@ export class World {
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
   private layoutStream: LayoutStreamer | null = null;
+  /**
+   * The doors in the buildings' doorways (`doors.ts`): stood with each building's rooms by the streamer,
+   * opened by whatever walks up to them, stepped once a step. One for the session, emptied with each world.
+   */
+  readonly doors: Doors;
+  /**
+   * The rooms a dungeon copy keeps locked until its keypad or panel is used (`instances.ts`), by the
+   * thing the layout placed for the copy. A locked room's doors refuse everybody (the doors' `mayOpen`,
+   * wired with them) and the lift stops at none. Emptied with each world.
+   */
+  readonly instanceLocks = new InstanceLocks<PlacedObject | undefined>();
+  /** The space a door's sound is heard in, refilled for each one (`doorSound`). */
+  private readonly doorSpace: SoundSpace = { building: -1, cell: -1 };
   /** Particle effects from the pack (campfires, smoke, sparks), placed by the streamer. */
   private particles: ParticleEffects | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
@@ -826,6 +844,15 @@ export class World {
       },
       say: (text) => this.onNote?.(text),
     };
+    // The doors in the buildings' doorways: stood by the streamer with each building's rooms, their
+    // programs built on the paced queue before they are shown, and their sounds heard from the room the
+    // ear is in or from the street.
+    this.doors = new Doors(scene, physics, import.meta.env.BASE_URL);
+    this.doors.prepare = (objects) => this.prepareDoors(objects);
+    this.doors.onSound = (id, door) => this.doorSound(id, door);
+    this.doors.prepareSounds = (ids) => this.audio?.prepare(ids);
+    // The locks' seam, answered by the dungeon copies' locked rooms: yes to everybody anywhere else.
+    this.doors.mayOpen = (door) => !this.instanceLocks.refuses(door.building.object, door.cells);
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     // What is added to the scene or the ground's root from here on is queued for the material scan (step 6).
     this.sceneAdds.watch(scene);
@@ -1641,6 +1668,8 @@ export class World {
       // A fountain's or a pool's water is drawn by the water system (the owner's call): reflecting,
       // rippling and ringed by rain like a lake, and never swelling.
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
+      // The doors in its buildings' doorways, stood with each building's rooms (`doors.ts`).
+      this.layoutStream.doorHost = this.doors;
       // The models the old rule would have loaded round the arrival start loading now, behind the screen, so
       // the sweep there builds their programs (step 6): the loading screen's `settle` asks again for where
       // the player really stands.
@@ -1781,6 +1810,10 @@ export class World {
       t.geometry.dispose();
     }
     this.farTiles.clear();
+    // Drawn again by default: only a world whose ground is the client's empty punch-out hides it.
+    this.chunkRoot.visible = true;
+    // A dungeon copy's locks go with the world its copies were in.
+    this.instanceLocks.clear();
     this.lastTx = Number.NaN;
     this.lastTz = Number.NaN;
     // The plants' stand-ins share the pack's geometry and materials: let go, never disposed of those. But
@@ -1796,6 +1829,10 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
+    // The doors came down with their buildings' rooms just above; the door models go with the world they
+    // were prepared in, their materials out of the portal set and the cascades first.
+    this.forgetMaterials(this.doors.materials());
+    this.doors.unload();
     // A hold belongs to the world it was taken out on: nothing may carry one into the next one.
     this.streamHold = false;
     this.particles?.dispose();
@@ -2821,7 +2858,9 @@ export class World {
       this.csmMaterials.add(mat);
       for (const c of this.chunks.values()) c.group.traverse((o) => { if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === this.terrainMat) (o as THREE.Mesh).material = mat; });
       for (const t of this.farTiles.values()) if (t.material === this.terrainMat) t.material = mat;
-      console.info(`terrain: ${textures.families.length} ground textures (${textures.texture.image.width} px)`);
+      // Ground the client never drew (`emptyGround`: the instances zone's) is kept and not drawn.
+      this.chunkRoot.visible = !textures.empty;
+      console.info(`terrain: ${textures.families.length} ground textures (${textures.texture.image.width} px)${textures.empty ? ', the client\'s empty punch-out: the ground is not drawn' : ''}`);
     } catch (err) {
       console.warn('terrain: ground textures failed to load', err);
     }
@@ -5206,7 +5245,9 @@ export class World {
   liftHere(pos: THREE.Vector3): { stops: LiftStop[]; current: number; title: string } | null {
     const b = this.cellState?.building;
     if (!b || !this.cellState || !isLiftCell(b.model.def, this.cellState.cell)) return null;
-    const stops = liftStops(b.model.def, this.cellState.cell);
+    // A room a dungeon copy keeps locked (`InstanceLocks`) is no stop: the lift would be a way round its door.
+    const locks = this.instanceLocks;
+    const stops = liftStops(b.model.def, this.cellState.cell).filter((s) => !locks.isLocked(b.object, s.cell));
     if (stops.length < 2) return null;
     tmpV.copy(pos).applyMatrix4(b.inverse);
     const name = b.model.def.cells?.find((c) => c.index === this.cellState!.cell)?.name ?? 'lift';
@@ -5585,6 +5626,25 @@ export class World {
     return this.peopleDeps();
   }
 
+  /**
+   * Everybody who stands round a point stood now, in one forced pass, as the arrival's own warm-up stands
+   * them: behind a loading screen, so their models load and their programs are built before it lifts.
+   * What a dungeon copy's arrival asks once the player is in it, since nobody stands in a world of copies
+   * before then. Answers how many were stood.
+   */
+  standPeopleNow(at: THREE.Vector3): number {
+    standingPeople.step(0, this.simTime, at, this.peopleDeps(), true);
+    return standingPeople.last.stood;
+  }
+
+  /** Whether every body standing in the world has its model up (or has gone): what a loading screen waits on after `standPeopleNow`. */
+  get bodiesUp(): boolean {
+    const live = this.mobiles?.live;
+    if (!live) return true;
+    for (const m of live) if (!m.ready && !m.removed && !m.dead) return false;
+    return true;
+  }
+
   /** What the standing people are allowed to ask of this world. Kept, like the wild world's. */
   private peopleDepsKept: PeopleDeps | null = null;
   private peopleDeps(): PeopleDeps {
@@ -5628,9 +5688,58 @@ export class World {
         cellReady: (x, y, z) => this.groundAt(x, y + 2, z, true) !== null,
         // A person following the player, or just asked to stop, is the follower set's for now.
         keeps: (m) => this.followers.holds(m),
+        // A world of copies stands nobody but in the copy the player is in.
+        scope: (x, y, z) => this.inCopy(x, y, z),
       };
     }
     return this.peopleDepsKept;
+  }
+
+  /**
+   * Whether a point is inside the building the player is in, in a world of copies (`PlanetDef.instances`):
+   * inside that building's own box, a couple of metres grown. Everywhere else every point is. What the
+   * standing people ask (`PeopleDeps.scope`), so sixteen corvettes a hundred and fifty metres apart stand
+   * one crew. Allocates nothing.
+   */
+  private inCopy(x: number, y: number, z: number): boolean {
+    if (!this.planet?.instances) return true;
+    const b = this.cellState?.building;
+    if (!b) return false;
+    tmpV.set(x, y, z).applyMatrix4(b.inverse);
+    return copyBox.copy(b.model.bounds).expandByScalar(2).containsPoint(tmpV);
+  }
+
+  /**
+   * Put the player in a named room of the building placed at a point, as a clone facility's room is
+   * (`cloneRoomAt`): a dungeon copy's arrival room, or its way in when it has no room of that name (`''`
+   * asks for the way in outright). Null while that building's region has not streamed in. The world must
+   * have stepped since it did, since the spot is found by a ray.
+   */
+  standInRoomOf(x: number, z: number, template: string, room: string): { at: THREE.Vector3; cell: number; object: PlacedObject | null } | null {
+    const spot = this.roomSpotOf(x, z, template, room);
+    if (!spot) return null;
+    this.cellState = { building: spot.building, cell: spot.cell };
+    this.prevPlayerPos.copy(spot.at);
+    return { at: spot.at, cell: spot.cell, object: spot.building.object ?? null };
+  }
+
+  /**
+   * Where `standInRoomOf` would stand the player, with nothing moved: a dungeon copy's own arrival, which is
+   * its way out, found again for a player who came back into the copy some other way (a session started in
+   * it, following the group in). Null as `standInRoomOf` is.
+   */
+  roomSpotOf(x: number, z: number, template: string, room: string): { at: THREE.Vector3; cell: number; building: Building } | null {
+    if (!this.layoutStream) return null;
+    const b = this.layoutStream.buildingPlacedAt(x, z, template);
+    if (!b) return null;
+    const entry = room ? this.layoutStream.namedEntryOf(b, room) : this.layoutStream.entryOf(b);
+    return entry ? { at: entry.at, cell: entry.cell, building: b } : null;
+  }
+
+  /** The building the player is in and the thing the layout placed for it, for the dungeon copies' rules; null outside. */
+  get buildingHere(): { template: string; object: PlacedObject | null; cell: number; x: number; z: number } | null {
+    const s = this.cellState;
+    return s ? { template: s.building.template, object: s.building.object ?? null, cell: s.cell, x: s.building.x, z: s.building.z } : null;
   }
 
   /**
@@ -6438,9 +6547,53 @@ export class World {
     // goes. Noclipping and stepping aboard leave the burn alone deliberately -- it goes on being
     // spent, every blow of it refused by the game's own rule about what may hurt the player, and the
     // burning manager draws nothing on a body that may not be attacked, so nothing is left standing.
+    // The doors, once everything that walks has moved: each opens for whoever is near it now, and its
+    // leaves and their bodies are put where it has got to before the physics steps and the frame is drawn.
+    perf.begin(SEC.doors);
+    this.stepDoors(dt, playerPos);
+    perf.end(SEC.doors);
     // What the ground itself does to whoever stands on it. Last, after everything alive has moved
     // and after the hulls, so a body is burnt where this step left it and not where it was.
     this.stepHazards(dt, playerPos);
+  }
+
+  /**
+   * Who is near a door this step, and the doors' own step (`doors.ts`): the player wherever they stand
+   * (in a hull's rooms the figure is in no building of this world, and nothing there has a door), every
+   * person and creature of the catalogue with its model up, every fighter and every other player's body,
+   * alive. Not `targets()`, which leaves the player out while a panel is open: a door must not shut on
+   * somebody who has stopped to read a menu in its doorway. Nothing allocated.
+   */
+  private stepDoors(dt: number, playerPos: THREE.Vector3): void {
+    const doors = this.doors;
+    if (!doors.count) return;
+    // Who they are is `gatherOpeners`' rule, which the node test pins (doorMath.ts).
+    gatherOpeners(doors, this.aboard ? null : playerPos, this.mobiles?.live, this.npcs.npcs, this.peers().standing);
+    doors.step(dt);
+  }
+
+  /** The door models' programs, built on the paced queue as a streamed tier's are; adopted at once with no pacing. */
+  private prepareDoors(objects: THREE.Object3D[]): Promise<void> {
+    if (SHADER_PACING) return this.prepareStreamed(objects);
+    for (const o of objects) this.adoptMaterials(o);
+    return Promise.resolve();
+  }
+
+  /**
+   * A door's sound: in the ear's own room when the ear is in that door's building (no wall between),
+   * out in the open for a door to the world heard from the street, and inside its building otherwise,
+   * which the mixer muffles for an ear outside it.
+   */
+  private doorSound(id: string, door: DoorView): void {
+    const building = this.spaceId(door.building);
+    let space: SoundSpace | undefined;
+    if (building >= 0 && this.listenerSpace.building === building) space = this.listenerSpace;
+    else if (!door.exit) {
+      this.doorSpace.building = building;
+      this.doorSpace.cell = door.cells[0] ?? -1;
+      space = this.doorSpace;
+    }
+    this.playSound(id, door.x, door.y, door.z, space);
   }
 
   /**

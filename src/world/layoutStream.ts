@@ -23,6 +23,17 @@ import { namedCellIndex } from './cloning.ts';
 import { buildingWithRoomIn } from './roomOf.ts';
 import { LevelGroup } from './levelGroup.ts';
 import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
+import type { BuildingDoors, DoorsFile } from './doorMath.ts';
+
+/**
+ * What stands the doors in a building's doorways when its rooms are built and takes them down with
+ * the rooms (`Doors` in `doors.ts`, which the world hands over). The streamer knows nothing of how a
+ * door looks, moves or sounds: it says when, and which pack's table a building's doors are in.
+ */
+export interface DoorHost {
+  build(b: Building, table: DoorsFile): void;
+  drop(b: Building): void;
+}
 
 /** The side of a streaming region, metres: one number with the tier arithmetic's (`placedTiers.ts`). */
 export { REGION };
@@ -209,6 +220,12 @@ export interface Building {
    * either order. Optional only for a hand-built stand-in in a test.
    */
   furniture?: FurnitureGroup[];
+  /**
+   * The doors standing in its doorways (`doors.ts`), made with its rooms and gone with them: what the
+   * portal renderer shows of them with its rooms. Absent with no rooms built, and for a building whose
+   * pack has no doors (converted before the `doors` pass, or a model with none).
+   */
+  doors?: BuildingDoors;
   /**
    * The placed object this building was made from, which is the key its **collision** is held
    * under: a building's colliders come and go with the player's distance while the building
@@ -429,6 +446,19 @@ export class LayoutStreamer {
    * the blended surface the model carries, which is what happened before.
    */
   waterSurface: ((geometry: THREE.BufferGeometry, matrix: THREE.Matrix4, name: string) => WaterSurfaceHandle | null) | null = null;
+
+  /**
+   * Stands the doors in a building's doorways with its rooms and takes them down with them (`doors.ts`).
+   * Null stands none, which is what a pack with no doors table gets anyway.
+   */
+  doorHost: DoorHost | null = null;
+
+  /** The doors table a building's model is in: the pack its entry came from, this world's own or one standing behind it. */
+  private doorTableOf(def: PackModelDef): DoorsFile | null {
+    if (this.pack.find(def.id) === def) return this.pack.doors;
+    for (const g of this.guests) if (g.find(def.id) === def) return g.doors;
+    return this.pack.doors;
+  }
 
   /** Hand a basin's water to the world for each of these copies, and say which the world would not take. */
   private basinWater(prim: { geometry: THREE.BufferGeometry }, copies: readonly PlacedObject[], name: string, into: WaterSurfaceHandle[]): PlacedObject[] {
@@ -1787,6 +1817,12 @@ export class LayoutStreamer {
       made.push(mesh);
     }
     b.interiorCell = Int16Array.from(cells);
+    // The doors in its doorways, with its rooms: made and prepared out of sight and shown when their
+    // programs exist, and taken down with the rooms (`dropInterior`).
+    if (this.doorHost) {
+      const table = this.doorTableOf(b.model.def);
+      if (table) this.doorHost.build(b, table);
+    }
     if (!made.length) return;
     // Into the scene now, hidden, as they always have been: the portal renderer writes `visible`
     // itself for the cells it draws.
@@ -1812,6 +1848,7 @@ export class LayoutStreamer {
   /** Drop a building's interior meshes. Shared geometry and materials are left alone. */
   private dropInterior(b: Building): void {
     if (!b.interiorBuilt) return;
+    this.doorHost?.drop(b);
     for (const mesh of b.interior) this.scene.remove(mesh);
     b.interior.length = 0;
     b.interiorCell = undefined;
