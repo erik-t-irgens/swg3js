@@ -10,11 +10,25 @@ import RAPIER from '@dimforge/rapier3d-compat';
  * interaction group misses them (the character controller, a ship's set-down probe, the weather's
  * roof grid, the camera's block ray) while a query that passes none is not group-tested at all and
  * finds them (a bolt's ray, a blade's sweep, an aiming ray). See src/net/remoteBodies.ts.
+ *
+ * `player` is the player's own capsule, and is used in the **solver** groups only, never the collision
+ * groups, so no query and no contact test changes for it: the capsule's solver membership is that bit
+ * alone (`PLAYER_SOLVER`), which every collider's default solver filter still takes, and somebody following
+ * the player leaves it out of its own solver filter (`WALK_THROUGH_SOLVER`): the narrow phase still finds
+ * the two touching, and a bolt and a blade still stop on the follower, but no force passes between them, so
+ * the player's kinematic capsule walking through one never shoves it, nor pins one parked against a wall.
  */
-export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, peer: 0x0008, all: 0xffff } as const;
+export const Group = { terrain: 0x0001, exterior: 0x0002, interior: 0x0004, peer: 0x0008, player: 0x0010, all: 0xffff } as const;
 
 /** Rapier interaction groups: membership in the high half, filter in the low half. */
 export const groups = (membership: number, filter: number): number => ((membership << 16) | filter) >>> 0;
+
+/** The player's capsule's solver groups: a member of `player` alone, taking every other's contacts. */
+export const PLAYER_SOLVER = groups(Group.player, Group.all);
+/** A body the player walks through: a member of everything, taking every contact but the player capsule's. */
+export const WALK_THROUGH_SOLVER = groups(Group.all, Group.all & ~Group.player);
+/** Rapier's own default, which every collider not touched by the two above keeps. */
+export const DEFAULT_SOLVER = groups(Group.all, Group.all);
 
 /**
  * A mesh's triangles made safe for a trimesh collider: indices past the vertices, triangles with
@@ -364,14 +378,19 @@ export class Physics {
 
   /**
    * The bodies the player walks through as though they were not there: the people following them
-   * (src/world/followers.ts), who stay out of the player's way by never being in it. Only the player's
-   * own character controller asks; a follower still stops a bolt, a blade and everybody else.
+   * (src/world/followers.ts), who stay out of the player's way by never being in it. Two lines, as a
+   * peer's body has: the player's own character controller asks this set and walks past what is in it, and
+   * the collider leaves the player's capsule out of its solver groups (`WALK_THROUGH_SOLVER`), or the
+   * capsule driven through it would shove it aside at walking pace. A follower still stops a bolt, a blade
+   * and everybody else, and still meets everything else in the solver.
    */
   private readonly walkThrough = new Set<number>();
 
   markWalkThrough(c: RAPIER.Collider, on: boolean): void {
     if (on) this.walkThrough.add(c.handle);
     else this.walkThrough.delete(c.handle);
+    // A collider whose body has already gone keeps its handle but nothing else, and must not be written to.
+    if (c.isValid()) c.setSolverGroups(on ? WALK_THROUGH_SOLVER : DEFAULT_SOLVER);
   }
 
   /** Whether the player walks through a collider (one of a follower's). */

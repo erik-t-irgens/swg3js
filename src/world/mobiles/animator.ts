@@ -7,7 +7,7 @@
 // loop. An action is only stopped once its weight has reached zero, so nothing is ever disabled
 // behind this code's back, and a gait started again keeps its phase.
 import * as THREE from 'three';
-import { blendWeight, clampFades, oneShotWeight } from './gait';
+import { blendWeight, clampFades, oneShotWeight } from './gait.ts';
 import type { ActiveClip } from '../../audio/clipEvents.ts';
 
 /** One-shot priorities: a lower one is refused while a higher one plays. */

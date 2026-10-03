@@ -12,9 +12,12 @@
 // Synthetic throughout: every body, place and number below is written here or read out of the module.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { FOLLOW_TUNE, FollowerSet, keepFollow, slotOf, tuneFollow, type FollowOrder, type FollowerBody } from '../../../src/world/followers.ts';
+import * as THREE from 'three';
+import { FOLLOW_TUNE, FollowerSet, isFollowerSource, keepFollow, recruitOwner, slotOf, tuneFollow, type FollowOrder, type FollowerBody } from '../../../src/world/followers.ts';
 import type { Decision, Post } from '../../../src/world/mobiles/brain.ts';
 import type { Aggression, Living, Side } from '../../../src/combat/kit.ts';
+import { DEFAULT_SOLVER, Group, PLAYER_SOLVER, Physics, RAPIER, WALK_THROUGH_SOLVER, groups } from '../../../src/core/physics.ts';
+import { MobileAnimator } from '../../../src/world/mobiles/animator.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string): void => {
@@ -172,10 +175,23 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   const far = order({ slotX: 40, slotZ: 40, stuckSeen: 0 });
   keepFollow(decision(), { x: 20, z: 20, stuck: 5 }, far);
   ok(!far.parked, 'stuck far from the leader is the brain’s own stuck, and nothing is given up for it');
-  // A body that joins with a stuck count of its own is not taken as stuck the first time it is asked.
-  const fresh = order({ slotX: -1.3, slotZ: -2.2, stuckSeen: Number.POSITIVE_INFINITY });
-  keepFollow(decision(), { x: 0.2, z: 1.5, stuck: 46 }, fresh);
-  ok(!fresh.parked && fresh.stuckSeen === 46, 'a count carried in from before it followed is only noted');
+}
+
+{
+  // A body that joins with a stuck count of its own is not taken as stuck the first time it is asked: the
+  // order the set itself writes as it takes the body on (`FollowerSet.add`) has seen no count yet, so the
+  // first it is told is only noted, and only a count that rises after that parks it.
+  const { set } = aSet();
+  const you = leader();
+  const b = person({ pos: { x: 0.2, y: 0, z: 1.5 } });
+  ok(set.add(b, 'own', you, 0) === null && !!b.follow, 'taken on by the set itself');
+  const o = b.follow!;
+  const first = decision();
+  keepFollow(first, { x: 0.2, z: 1.5, stuck: 46 }, o);
+  ok(!o.parked && o.stuckSeen === 46 && first.state === 'wander', 'a count carried in from before it followed is only noted, and it makes for its place');
+  const next = decision();
+  keepFollow(next, { x: 0.2, z: 1.5, stuck: 47 }, o);
+  ok(o.parked && next.state === 'idle', 'while one that rises after it followed has it give up a place it cannot reach');
 }
 
 // --- 3: taken on, asked to stop, handed back -----------------------------------------------------------
@@ -233,6 +249,71 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   ok(!set.holds(ours) && !set.holds(row), `past ${FOLLOW_TUNE.letGo} m both are handed back`);
   ok(removed.length === 1 && removed[0] === ours, 'and only the one given up to the set is taken away by it');
   ok(set.tally.handedBack === 2, 'counted');
+}
+
+{
+  // Asked to stop and then asked to follow again before it is handed back: it is the set's already, so it
+  // follows again as whoever's it was, and leaves the set's list of those waiting to be handed back -- or the
+  // player walking off past `letGo` would hand it back while it follows, and take one of ours away outright.
+  const { set, removed } = aSet();
+  const you = leader(0, 0);
+  const ours = person({ pos: { x: 2, y: 0, z: 0 } });
+  set.add(ours, 'adopted', you, 0);
+  set.dismiss(ours);
+  ok(set.releasedOwner(ours) === 'adopted' && !set.following(ours), 'asked to stop, the set remembers whose it was');
+  ok(set.add(ours, set.releasedOwner(ours)!, you, 1) === null && set.following(ours) && set.releasedOwner(ours) === null, 'asked again, it follows again and is waiting to be handed back no longer');
+  (you.pos as { x: number }).x = FOLLOW_TUNE.letGo + 10;
+  set.step(0.1, you);
+  set.step(0.1, you);
+  ok(set.following(ours) && removed.length === 0 && set.tally.handedBack === 0, `and the player walking ${FOLLOW_TUNE.letGo} m off takes it along rather than handing it back`);
+  ok(set.releasedOwner(person()) === null, 'nobody the set never had is waiting');
+}
+
+{
+  // Who a body asked to follow belongs to (`recruitOwner`, which `World.recruit` asks): what the world calls
+  // it decides, and a body the set already holds keeps its owner without its old books being asked again.
+  let asked = 0;
+  const books = (has: boolean) => ({
+    ours: () => {
+      asked++;
+      return has;
+    },
+    wild: () => {
+      asked++;
+      return has;
+    },
+  });
+  const owner = (r: ReturnType<typeof recruitOwner>): string => ('owner' in r ? r.owner : `refused: ${r.refused}`);
+  ok(owner(recruitOwner('', null, books(true))) === 'own' && owner(recruitOwner('stood:12', null, books(true))) === 'stood' && asked === 0, 'one stood by hand is its own, a standing row stays the row, and no books are asked for either');
+  ok(owner(recruitOwner('ours:7', null, books(true))) === 'adopted' && asked === 1, 'one of ours is given up by our books');
+  ok(owner(recruitOwner('wild:a:1', null, books(true))) === 'adopted' && asked === 2, "and one of a lair's by its site");
+  ok(owner(recruitOwner('ours:7', null, books(false))) === 'refused: not one of ours any more' && owner(recruitOwner('wild:a:1', null, books(false))).startsWith('refused'), 'books that no longer have it refuse it, in words');
+  ok(owner(recruitOwner('npc:3', null, books(true))).startsWith('refused'), "and a body the world keeps (a shared one) is the world's");
+  // The case the review found: one of ours recruited, dismissed, and asked again. Its books gave it up the
+  // first time and would refuse it now; the set's own memory of it is what answers.
+  const { set } = aSet();
+  const b = person();
+  const first = recruitOwner('ours:9', set.releasedOwner(b), books(true));
+  ok('owner' in first && set.add(b, first.owner, leader(), 0) === null, 'one of ours asked to follow follows');
+  set.dismiss(b);
+  const before = asked;
+  const again = recruitOwner('ours:9', set.releasedOwner(b), books(false));
+  ok('owner' in again && again.owner === 'adopted' && asked === before, 'dismissed and asked again, it is the set\'s still: its old books are not asked, and it is not refused');
+  ok(set.add(b, again.owner, leader(), 1) === null && set.following(b), 'so it follows again');
+}
+
+{
+  // A blow or a shot whose striker carries a follow order is no blow on the player (`App`'s damage wrapper
+  // and its bolts' `onPlayerHit` both ask this one predicate).
+  ok(isFollowerSource({ follow: order() }), 'somebody following the player is a follower');
+  ok(!isFollowerSource({ follow: null }) && !isFollowerSource({ key: 3 }) && !isFollowerSource(leader()), 'a body that follows nobody, a creature and the player are not');
+  ok(!isFollowerSource(null) && !isFollowerSource(undefined), 'and nobody at all is not');
+  const { set } = aSet();
+  const b = person();
+  set.add(b, 'own', leader(), 0);
+  ok(isFollowerSource(b), 'a body the set has taken on is one');
+  set.dismiss(b);
+  ok(!isFollowerSource(b), 'and asked to stop it is not, so its blows land as anybody else\'s');
 }
 
 {
@@ -323,22 +404,158 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   const world = read('world/world.ts');
   const people = read('world/standingPeople.ts');
   const player = read('player/player.ts');
+  const bolts = read('combat/bolts.ts');
+  const creatures = read('world/creatures.ts');
+  // The text of a function from its signature to its own closing brace, so a line is pinned where it has
+  // to be and not merely somewhere in a file of sixteen thousand lines.
+  const body = (text: string, signature: RegExp): string => {
+    const m = signature.exec(text);
+    assert.ok(m, `no ${signature} in the source`);
+    let i = text.indexOf('{', m.index + m[0].length - 1);
+    const start = i;
+    let depth = 0;
+    for (; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}' && --depth === 0) break;
+    }
+    return text.slice(start, i + 1);
+  };
   // A follower never holds a grudge against its own side, and a blow from its own side never lands.
   ok(/if \(this\.follow && source\.side === this\.side\) return;/.test(mobile), 'a follower holds no grudge against the player or anybody else on their side');
   ok(/source\.side === this\.side && !hostileSides\(source, this\)\) return;/.test(mobile), "and a blow from its own side is refused where it lands, the player's included");
-  ok((main.match(/if \(isFollower\(source\)\) return;/g) ?? []).length === 2, "a follower's stray blow and its stray shot both land on nothing when they find the player");
-  ok(/this\.world\.followers\.assist\(source\)/.test(main) && /this\.world\.followers\.assist\(hit\)/.test(main), 'whatever strikes the player and whatever the player strikes are handed to the followers');
+  // The two ways a blow reaches the player, each asking the one predicate (tested above) before anything is
+  // taken off, and each handing whoever struck to the followers after.
+  const wrapper = body(main, /target\.damage = \(amount: number, from\?: THREE\.Vector3, _push\?: number, source\?: Living \| null\): void => \{/);
+  const shot = body(main, /onPlayerHit: \(dmg, from, source\) => \{/);
+  for (const [what, text, hurts] of [
+    ['a blow', wrapper, 'innerDamage(amount, from)'],
+    ['a shot', shot, 'player.takeDamage(dmg)'],
+  ] as const) {
+    const guard = text.indexOf('if (isFollowerSource(source)) return;');
+    ok(guard > 0 && guard < text.indexOf(hurts), `a follower's stray ${what.slice(2)} that finds the player lands on nothing, asked before anything is taken off`);
+    ok(text.indexOf('this.world.followers.assist(source)') > text.indexOf(hurts), `and whatever lands ${what} on the player is handed to the followers`);
+  }
+  ok((main.match(/this\.world\.followers\.assist\(source\)/g) ?? []).length === 2 && /this\.world\.followers\.assist\(hit\)/.test(body(main, /this\.world\.watchPlayerHits\(\(hit, amount, killed\) => \{/)), 'those two, and whatever the player strikes, are the only ways a foe reaches them');
+  // What those two are handed: a bolt says whose it was, a person's shots and spit are its own, and a
+  // creature's unprovoked bite -- the one blow that reaches no `damage` of its own -- is carried down to the
+  // player's record with its biter, through the record's own `damage` so the wrapper above hears it.
+  ok(/if \(!b\.inert\) w\.onPlayerHit\(b\.damage, b\.pos, b\.source\);/.test(bolts), 'a bolt that reaches the player says whose it was');
+  ok((body(mobile, /private fire\(t: Living, cameraDist: number\): void \{/).match(/this\.deps\.bolts\.fire\([^;]*source: this,/g) ?? []).length === 2, "and a person's shots and spit are its own (`source: this`)");
+  ok(/else onAttack\(scaledByDifficulty\(this\.def\.damage\), this\.pos, this\);/.test(creatures), "a creature's unprovoked bite carries the creature");
+  ok(/this\.playerTarget\.damage\(damage, from, 0, source \?\? null\);/.test(body(world, /private readonly hurtPlayer = \(damage: number, from\?: THREE\.Vector3, source\?: Living\): void => \{/)) && !/this\.playerTarget\.hurt\(/.test(world), "and reaches the player's record through its own `damage`, never straight to `hurt`");
   // Its home is its place, so the brain's own leash measures from the player, and its idle half is kept.
-  ok(/this\.homeX = follow\.slotX;/.test(mobile) && /if \(follow\) keepFollow\(d, self, follow\);/.test(mobile), 'a follower thinks from its place behind the player and keeps to it');
+  ok(/this\.homeX = follow\.slotX;\s*this\.homeZ = follow\.slotZ;/.test(mobile) && /if \(follow\) keepFollow\(d, self, follow\);/.test(mobile), 'a follower thinks from its place behind the player, both ways across the ground, and keeps to it');
   ok(/leader \? this\.placeOf\(ctx, leader\)/.test(mobile), 'and walks through the doors the player went through, to the room the player is in');
   ok(/this\.follow !== null \|\| this\.listening !== null;/.test(mobile), 'a follower is never frozen by its distance from the camera');
   // The world steps it before the bodies think, clears it with itself, and the standing people keep off it.
   const stepAt = world.indexOf('this.followers.step(dt, this.playerTarget);');
   ok(stepAt > 0 && stepAt < world.indexOf('this.mobiles?.update(dt, { now: this.simTime'), 'the world places the followers before the bodies think');
-  ok(/this\.followers\.clear\(\);/.test(world), 'and lets them go with itself, which is a travel and the select screen');
+  ok(/this\.followers\.clear\(\);/.test(body(world, /private unload\(\): void \{/)), "and lets them go in its own unload, which is a travel and the select screen");
   ok(/keeps: \(m\) => this\.followers\.holds\(m\),/.test(world), 'the standing people are told which bodies the followers hold');
   ok(/away > PEOPLE_TUNE\.drop && !\(here\.body && deps\.keeps\?\.\(here\.body\)\)/.test(people) && /deps\?\.keeps\?\.\(b\)/.test(people) && /deps\.keeps\?\.\(b\)\) continue;/.test(people), 'and put none of them down for distance, for the cap or for memory');
-  ok(/!this\.physics\.isWalkThrough\(c\.handle\)/.test(player), 'the player walks through whoever follows them');
+  ok(/!this\.physics\.isWalkThrough\(c\.handle\)/.test(player) && /\.setSolverGroups\(PLAYER_SOLVER\)/.test(player), 'the player walks through whoever follows them, and is in the solver as the player alone');
+  ok(/for \(const c of m\.colliders\) this\.physics\.markWalkThrough\(c, on\);/.test(world), "and every one of a follower's colliders is marked (and unmarked) for it");
+}
+
+// --- walking through a follower, in a real physics world -------------------------------------------
+//
+// Measured rather than read: the player's own capsule (its numbers read out of player.ts) on a kinematic
+// body with the player's solver groups and the player's own predicate, walked by a character controller
+// along +x into a follower -- a dynamic capsule on a mobile's own kind of body -- with a wall behind it as
+// the control, so "it walked past the follower" is not "it never moved". Two lines are checked apart: the
+// controller's predicate (unmarked, the follower stops the walk) and the solver groups (marked for the
+// controller alone, the capsule driven through it shoves it aside).
+{
+  const playerSrc = readFileSync(new URL('../../../src/player/player.ts', import.meta.url), 'utf8');
+  const half = Number(/const STAND_HALF_HEIGHT = ([\d.]+);/.exec(playerSrc)?.[1]);
+  const radius = Number(/const CAPSULE_RADIUS = ([\d.]+);/.exec(playerSrc)?.[1]);
+  ok(half > 0 && radius > 0, `the player's capsule is read out of player.ts (${half} and ${radius})`);
+  ok(PLAYER_SOLVER === groups(Group.player, Group.all) && (WALK_THROUGH_SOLVER & 0xffff & Group.player) === 0 && DEFAULT_SOLVER === 0xffffffff, "the solver bits: the player's capsule is a member of `player` alone, a follower's filter leaves it out, and the rest keep the engine's default");
+  ok(((DEFAULT_SOLVER & 0xffff) & (PLAYER_SOLVER >>> 16)) !== 0, "so every other body still meets the player's capsule in the solver exactly as before");
+  const physics = await Physics.create();
+  const world = physics.world;
+  world.createCollider(RAPIER.ColliderDesc.cuboid(60, 0.5, 60).setTranslation(0, -0.5, 0));
+  world.createCollider(RAPIER.ColliderDesc.cuboid(0.5, 3, 5).setTranslation(16, 1, 0));
+  physics.step(1 / 60);
+  const walkPast = (c: RAPIER.Collider): boolean => !physics.isRagdoll(c.handle) && !physics.isPeer(c.handle) && !physics.isWalkThrough(c.handle);
+  /** A follower standing at x = 10: a dynamic body, rotations locked, a capsule, as `Mobile` makes one. */
+  const follower = (): { body: RAPIER.RigidBody; col: RAPIER.Collider } => {
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(10, 0.9, 0).lockRotations().setLinearDamping(4));
+    const col = world.createCollider(RAPIER.ColliderDesc.capsule(0.5, 0.35).setMass(70).setFriction(0.8).setCollisionGroups(groups(Group.all, Group.all)), body);
+    for (let i = 0; i < 30; i++) physics.step(1 / 60);
+    return { body, col };
+  };
+  /** The player walked from x = 7 toward the wall at 16; answers where the walk ended. */
+  const walk = (): number => {
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(7, 0, 0));
+    const col = world.createCollider(RAPIER.ColliderDesc.capsule(half, radius).setTranslation(0, radius + half, 0).setSolverGroups(PLAYER_SOLVER), body);
+    const ctrl = world.createCharacterController(0.04);
+    let x = 7;
+    let y = 0;
+    for (let i = 0; i < 120; i++) {
+      ctrl.computeColliderMovement(col, { x: 0.1, y: -0.05, z: 0 }, undefined, groups(Group.all, Group.all), walkPast);
+      const mv = ctrl.computedMovement();
+      x += mv.x;
+      y += mv.y;
+      body.setNextKinematicTranslation({ x, y, z: 0 });
+      physics.step(1 / 60);
+    }
+    world.removeRigidBody(body);
+    world.removeCharacterController(ctrl);
+    return x;
+  };
+  const moved = (f: { body: RAPIER.RigidBody }): number => Math.hypot(f.body.translation().x - 10, f.body.translation().z);
+
+  const a = follower();
+  const stopped = walk();
+  ok(stopped < 10, `unmarked, a person in the way stops the walk (x = ${stopped.toFixed(2)})`);
+  world.removeRigidBody(a.body);
+
+  const b = follower();
+  physics.markWalkThrough(b.col, true);
+  ok(physics.isWalkThrough(b.col.handle) && b.col.solverGroups() === WALK_THROUGH_SOLVER, "marked: the controller walks past it and it leaves the player's capsule out of the solver");
+  const through = walk();
+  ok(through > 14, `marked, the player walks straight through and on to the wall behind (x = ${through.toFixed(2)})`);
+  ok(moved(b) < 0.05, `without shoving it (it moved ${moved(b).toFixed(3)} m)`);
+  world.removeRigidBody(b.body);
+
+  // The solver line is a real one: the controller's predicate alone lets the walk through, and the capsule
+  // driven through a body still in the player's solver groups carries it off.
+  const c = follower();
+  physics.markWalkThrough(c.col, true);
+  c.col.setSolverGroups(DEFAULT_SOLVER);
+  const pushedThrough = walk();
+  ok(pushedThrough > 14 && moved(c) > 0.2, `with the predicate alone it is shoved aside as the player walks through (${moved(c).toFixed(2)} m), which is what the solver groups stop`);
+  physics.markWalkThrough(c.col, false);
+  ok(!physics.isWalkThrough(c.col.handle) && c.col.solverGroups() === DEFAULT_SOLVER, 'unmarked, it is a body like any other again');
+  world.removeRigidBody(c.body);
+  // A collider whose body has gone keeps its handle but nothing else: unmarking it is only forgetting it.
+  const d = follower();
+  physics.markWalkThrough(d.col, true);
+  world.removeRigidBody(d.body);
+  let threw = false;
+  try {
+    physics.markWalkThrough(d.col, false);
+  } catch {
+    threw = true;
+  }
+  ok(!threw && !physics.isWalkThrough(d.col.handle), "a follower taken away is unmarked without touching the engine's freed collider");
+}
+
+// --- a person lent clips after it was hung (`MobileAnimator.lend`) --------------------------------------
+{
+  const clip = (name: string): THREE.AnimationClip => new THREE.AnimationClip(name, 1, []);
+  const ownIdle = clip('idle');
+  const anim = new MobileAnimator(new THREE.Object3D(), new Map([['idle', ownIdle]]), new Set());
+  ok(anim.has('idle') && !anim.has('BOTH_ROLL_F'), 'stood as part of the furniture, a person has its idle and no roll');
+  const lentIdle = clip('idle');
+  anim.lend(new Map([['BOTH_ROLL_F', clip('BOTH_ROLL_F')], ['idle', lentIdle]]));
+  ok(anim.has('BOTH_ROLL_F'), 'asked to follow, it is lent the rolls a fight needs');
+  ok((anim as unknown as { clips: Map<string, THREE.AnimationClip> }).clips.get('idle') === ownIdle, 'and a clip it already had keeps its own, not the one lent');
+  const before = (anim as unknown as { clips: Map<string, THREE.AnimationClip> }).clips;
+  anim.lend(new Map([['idle', lentIdle]]));
+  ok((anim as unknown as { clips: Map<string, THREE.AnimationClip> }).clips === before, 'and a loan of nothing new makes nothing');
+  anim.dispose();
 }
 
 console.log(`\n${checks} checks passed`);

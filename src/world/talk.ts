@@ -116,14 +116,33 @@ export function whyNotTalk(b: TalkBody, player: Fighter): string | null {
  * player's feet (`dx`, `dz`, and `dy` above them), with `fx`, `fz` the view's own forward across the
  * ground, a unit vector. NaN when it is out of reach -- too far, too far above or below, or off to the
  * side of the view past `cone` and not within `near` -- and otherwise the distance, so the nearest wins.
+ *
+ * `squarely` takes the `near` exemption away, so only a body inside the cone is in reach however close
+ * it stands: what somebody following the player is asked, since a follower stands at the player's elbow
+ * as a matter of course and would otherwise have the key every time the player stopped beside it.
  */
-export function reachOf(dx: number, dy: number, dz: number, fx: number, fz: number, tune = TALK_TUNE): number {
+export function reachOf(dx: number, dy: number, dz: number, fx: number, fz: number, tune = TALK_TUNE, squarely = false): number {
   if (!(Math.abs(dy) <= tune.rise)) return Number.NaN;
   const d = Math.hypot(dx, dz);
   if (!(d <= tune.reach)) return Number.NaN;
-  if (d <= tune.near || d < 1e-6) return d;
+  if (d < 1e-6) return squarely ? Number.NaN : d;
+  if (d <= tune.near && !squarely) return d;
   const cos = (dx * fx + dz * fz) / d;
   return cos >= tune.cone ? d : Number.NaN;
+}
+
+/**
+ * Which body the use key speaks to, of the nearest not following the player (`other`) and the nearest
+ * following them (`follower`, already asked `squarely`): anybody else before a follower, whatever their
+ * distances, and a follower only while nothing else in reach wants the key (`elseWants`: a vehicle, a
+ * hull to board, a gate). A follower is company that stands beside everything the player walks up to,
+ * and E at the speeder or the gate it happens to be standing by must still mean the speeder or the gate.
+ * `elseWants` is asked only when it could matter.
+ */
+export function talkPick<T>(other: T | null, follower: T | null, elseWants: () => boolean): T | null {
+  if (other) return other;
+  if (!follower) return null;
+  return elseWants() ? null : follower;
 }
 
 /** One answer in the window: what it is, its words, whether it may be chosen now and why not. */

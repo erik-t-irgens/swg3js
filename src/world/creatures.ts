@@ -393,7 +393,12 @@ export class Creature implements Living {
     this.body.applyTorqueImpulse({ x: m * 1.5, y: 0, z: m * (Math.random() - 0.5) }, true);
   }
 
-  update(dt: number, terrain: Terrain, playerPos: THREE.Vector3, onAttack: (damage: number, from?: THREE.Vector3) => void): void {
+  /**
+   * `onAttack` is a bite on the player it hunts unprovoked, with where it stood and what bit: the one
+   * blow on the player that does not go through `damage`, so it carries its striker the whole way down
+   * (`World.hurtPlayer`) or whatever reads who struck (the followers) would never hear of the commonest.
+   */
+  update(dt: number, terrain: Terrain, playerPos: THREE.Vector3, onAttack: (damage: number, from?: THREE.Vector3, source?: Living) => void): void {
     if (this.ragdoll) {
       // The physics has the body: the skin follows it, and the creature's place is where the trunk lies.
       this.ragdoll.update(dt);
@@ -478,7 +483,7 @@ export class Creature implements Living {
         if (this.attackCd <= 0) {
           // It bites whatever it is after: the one that hurt it, or the player it hunts.
           if (foe) foe.damage(scaledByDifficulty(this.def.damage), this.pos, 0, this);
-          else onAttack(scaledByDifficulty(this.def.damage), this.pos);
+          else onAttack(scaledByDifficulty(this.def.damage), this.pos, this);
           this.attackCd = 1.6;
           if (this.model) this.playOnce('cbt_stand_combat_attack_light', false);
         }
@@ -645,7 +650,7 @@ export class CreatureManager {
     return new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z);
   }
 
-  update(dt: number, playerPos: THREE.Vector3, onAttack: (damage: number, from?: THREE.Vector3) => void): void {
+  update(dt: number, playerPos: THREE.Vector3, onAttack: (damage: number, from?: THREE.Vector3, source?: Living) => void): void {
     for (let i = this.creatures.length - 1; i >= 0; i--) {
       const c = this.creatures[i];
       const spent = (c.dead && c.deadTimer <= 0) || c.pos.y < this.terrain.floor - 20;

@@ -49,7 +49,7 @@ import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
-import { FollowerSet, type FollowerOwner } from './followers.ts';
+import { FollowerSet, recruitOwner } from './followers.ts';
 import { sharedClock } from './sharedClock.ts';
 import { worldNav } from './nav/nav.ts';
 import { MOBILE_CACHE } from './mobiles/assets.ts';
@@ -467,7 +467,7 @@ class PlayerTarget implements Living {
    * already passes, and it is handed straight to the callback, which is what turns the red flash into
    * an arc on the side the blow came from.
    */
-  damage(amount: number, from?: THREE.Vector3): void {
+  damage(amount: number, from?: THREE.Vector3, _push?: number, _source?: Living | null): void {
     this.hurt(amount, from);
   }
   /**
@@ -5507,19 +5507,15 @@ export class World {
     if (!mobiles || m.removed || m.dead) return 'gone';
     if (this.followers.following(m)) return 'already following you';
     if (this.followers.full) return 'you have as much company as you can take';
-    const id = mobiles.worldIdOf(m);
-    let owner: FollowerOwner;
-    if (!id) owner = 'own';
-    else if (id.startsWith('stood:')) owner = 'stood';
-    else if (id.startsWith('ours:')) {
-      if (!ambientPeople.release(m, this.simTime)) return 'not one of ours any more';
-      owner = 'adopted';
-    } else if (id.startsWith('wild:')) {
-      if (!wildLife.release(m)) return 'not one of its camp any more';
-      owner = 'adopted';
-    } else return 'kept by the world, not by you';
+    // Somebody asked to stop and not yet handed back is the set's already, and keeps the owner it had: one
+    // of ours or a lair's was taken off its books the first time, and asking them again would refuse it.
+    const whose = recruitOwner(mobiles.worldIdOf(m), this.followers.releasedOwner(m), {
+      ours: () => ambientPeople.release(m, this.simTime),
+      wild: () => wildLife.release(m),
+    });
+    if ('refused' in whose) return whose.refused;
     m.readyToFollow();
-    const why = this.followers.add(m, owner, this.playerTarget, this.simTime);
+    const why = this.followers.add(m, whose.owner, this.playerTarget, this.simTime);
     if (why) return why;
     // After it has left the furniture: `lendFightClips` puts it on its tier again, now that it may fight.
     mobiles.lendFightClips(m);
@@ -6439,9 +6435,15 @@ export class World {
     return MobileCatalogue.loaded(import.meta.env.BASE_URL);
   }
 
-  /** One kept callback rather than a fresh closure a frame; what it does is set by the loop. */
-  private readonly hurtPlayer = (damage: number, from?: THREE.Vector3): void => {
-    this.playerTarget.hurt(damage, from);
+  /**
+   * One kept callback rather than a fresh closure a frame; what it does is set by the loop. It goes
+   * through the record's own `damage`, with whatever bit, and not straight to `hurt`: an unprovoked bite is
+   * the one blow on the player that reaches no `damage` of its own, and anything wrapped round the record
+   * (the game's: where a blow came from, and who the followers should turn on) must hear it as it hears
+   * every other.
+   */
+  private readonly hurtPlayer = (damage: number, from?: THREE.Vector3, source?: Living): void => {
+    this.playerTarget.damage(damage, from, 0, source ?? null);
   };
 
   /**

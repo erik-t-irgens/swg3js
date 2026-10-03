@@ -215,57 +215,126 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
 {
   // A person following the player (src/world/followers.ts) walks with them, as far from its own row as
   // they are: the pass must put it down for nothing -- not its distance, not to make room for somebody
-  // nearer, not for model memory, not for a change of the side holding the towns -- while its row stays
-  // its row, so a follower killed comes back at its post on the row's own clock.
+  // nearer, not for model memory, not for a change of the side holding the towns -- and count it under
+  // neither cap, while its row stays its row, so a follower killed comes back at its post on the row's own
+  // clock. Each case below is built to come out otherwise with the hook taken away from the line it pins.
   const held = new Set<Body>();
+  const keeps = (m: unknown): boolean => held.has(m as Body);
+  const next = PEOPLE_TUNE.everySeconds + 0.1;
+  const at = new THREE.Vector3(0, 0, 0);
+  const far = (metres: number) => new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + metres);
+
+  // Its distance.
   const p = new StandingPeople();
   p.adopt([row({ who: 'guard', z: 0 }), row({ who: 'far', z: 60 })]);
-  const { deps, bodies } = game({ keeps: (m) => held.has(m as unknown as Body) });
-  const at = new THREE.Vector3(0, 0, 0);
+  const { deps, bodies } = game({ keeps });
   p.step(1, 1, at, deps);
   const guard = bodies.find((b) => b.z === 0)!;
   ok(!!guard && !guard.removed, 'one stood');
   held.add(guard);
   // The player walks it far off: past `drop` from its row, which would put anybody else down.
-  p.step(PEOPLE_TUNE.everySeconds + 0.1, 10, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 200), deps);
+  p.step(next, 10, far(200), deps);
   ok(!guard.removed && p.last.up >= 1, 'a body the followers hold is not put down however far the player takes it from its row');
-  p.step(PEOPLE_TUNE.everySeconds + 0.1, 12, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 400), deps);
-  ok(bodies.filter((b) => b.z === 0).length === 1, 'nor is its row stood a second time while it follows');
-  // Handed back, it is its row's again, and far off it goes.
+  // Back at its row while it still follows: the row's body is the one following, and nobody is stood there
+  // a second time (put down for its distance, the row would have been stood afresh here).
+  p.step(next, 12, at, deps);
+  ok(bodies.filter((b) => b.z === 0).length === 1 && !guard.removed, 'back at its row while it follows, nobody is stood there a second time');
+  // Handed back far off, it is its row's again, and goes on that very pass.
+  p.step(next, 14, far(400), deps);
   held.delete(guard);
-  p.step(PEOPLE_TUNE.everySeconds + 0.1, 14, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 400), deps);
-  ok(guard.removed, 'handed back, it is put down for its distance like anybody else');
+  p.step(next, 16, far(400), deps);
+  ok(guard.removed && p.last.dropped === 1, 'handed back, it is put down for its distance on the next pass, like anybody else');
 
-  // Killed while it follows: its row comes back on its own clock, as a post's always did.
+  // Killed while it follows: its row waits its own clock, as a post's always did, and then comes back.
   const q = new StandingPeople();
   q.adopt([row({ who: 'guard', respawn: 30 })]);
-  const g2 = game({ keeps: (m) => held.has(m as unknown as Body) });
+  const g2 = game({ keeps });
   q.step(1, 1, at, g2.deps);
   const f = g2.bodies[0];
   held.add(f);
-  q.step(PEOPLE_TUNE.everySeconds + 0.1, 5, new THREE.Vector3(0, 0, PEOPLE_TUNE.drop + 50), g2.deps);
+  q.step(next, 5, far(50), g2.deps);
   f.dead = true;
   held.delete(f);
-  q.step(PEOPLE_TUNE.everySeconds + 0.1, 8, at, g2.deps);
-  q.step(PEOPLE_TUNE.everySeconds + 0.1, 40, at, g2.deps);
-  q.step(PEOPLE_TUNE.everySeconds + 0.1, 42, at, g2.deps);
-  ok(g2.bodies.length === 2 && !g2.bodies[1].removed, "a follower killed is stood again at its post on the row's own clock");
+  q.step(next, 8, at, g2.deps);
+  ok(g2.bodies.length === 1, 'a follower killed far from its post is not stood again there at once');
+  q.step(next, 40, at, g2.deps);
+  ok(g2.bodies.length === 2 && !g2.bodies[1].removed, "it is stood again at its post on the row's own clock");
 
-  // The cap full and somebody nearer waiting: the farthest standing makes room, but never one held.
   const was = PEOPLE_TUNE.most;
-  PEOPLE_TUNE.most = 1;
-  const r = new StandingPeople();
-  r.adopt([row({ who: 'kept', z: 80 }), row({ who: 'near', z: 1 })]);
-  const g3 = game({ keeps: (m) => held.has(m as unknown as Body) });
-  r.step(1, 1, new THREE.Vector3(0, 0, 80), g3.deps);
-  const kept = g3.bodies.find((b) => b.z === 80)!;
-  held.add(kept);
-  r.step(PEOPLE_TUNE.everySeconds + 0.1, 5, at, g3.deps);
-  ok(!kept.removed && g3.bodies.filter((b) => b.z === 1).length === 0, 'with the cap full, a held body is never put down to make room for somebody nearer');
-  held.delete(kept);
-  r.step(PEOPLE_TUNE.everySeconds + 0.1, 8, at, g3.deps);
-  ok(kept.removed && g3.bodies.some((b) => b.z === 1 && !b.removed), 'handed back, it makes room as anybody would');
-  PEOPLE_TUNE.most = was;
+  try {
+    // The cap: a held body takes no place under it, so with room for one and that one following the
+    // player, somebody nearer is still stood -- and the follower is not put down for them either.
+    PEOPLE_TUNE.most = 1;
+    const r = new StandingPeople();
+    r.adopt([row({ who: 'kept', z: 80 }), row({ who: 'near', z: 1 })]);
+    const g3 = game({ keeps });
+    r.step(1, 1, new THREE.Vector3(0, 0, 80), g3.deps);
+    const kept = g3.bodies.find((b) => b.z === 80)!;
+    ok(!!kept && g3.bodies.length === 1, 'with room for one, one is stood');
+    held.add(kept);
+    r.step(next, 5, at, g3.deps);
+    ok(!kept.removed && g3.bodies.some((b) => b.z === 1 && !b.removed), 'a held body takes no place under the cap: somebody nearer is stood beside it, and it is not put down for them');
+    held.delete(kept);
+
+    // A swap: the cap full of others, the farthest of them makes room for somebody nearer, and never a held
+    // body standing farther off still.
+    PEOPLE_TUNE.most = 2;
+    const s = new StandingPeople();
+    s.adopt([row({ who: 'kept', z: 80 }), row({ who: 'mid', z: 40 }), row({ who: 'near', z: 1 })]);
+    const g4 = game({ keeps });
+    s.step(1, 1, new THREE.Vector3(0, 0, 80), g4.deps);
+    const keptB = g4.bodies.find((b) => b.z === 80)!;
+    const mid = g4.bodies.find((b) => b.z === 40)!;
+    ok(!!keptB && !!mid && g4.bodies.length === 2, 'with room for two, the two nearest are stood');
+    held.add(keptB);
+    PEOPLE_TUNE.most = 1;
+    s.step(next, 5, at, g4.deps);
+    ok(!keptB.removed && mid.removed && g4.bodies.some((b) => b.z === 1 && !b.removed) && s.last.swapped === 1, 'the cap full, the farthest who is not held is put down for somebody nearer, never the held body farther still');
+    held.delete(keptB);
+  } finally {
+    PEOPLE_TUNE.most = was;
+  }
+
+  // Model memory: short for somebody nearer, the farthest who are not held give it back, never a held body.
+  {
+    const m = memory({ held: 5, far: 5, near: 5 });
+    m.deps.keeps = keeps;
+    const t = new StandingPeople();
+    t.adopt([row({ who: 'held', id: 'held', z: 110 }), row({ who: 'far', id: 'far', z: 104 }), row({ who: 'near', id: 'near', z: 0 })]);
+    t.step(0, 0, new THREE.Vector3(0, 0, 200), m.deps, true);
+    ok(m.standingIds() === 'far,held', `two far people stand (${m.standingIds()})`);
+    m.fill();
+    const heldBody = m.body('held')!;
+    held.add(heldBody);
+    t.step(0, 1, at, m.deps, true);
+    ok(m.standingIds() === 'held,near' && !heldBody.removed, `short of memory for the near one, the far one who is not held gives it back, and the held one farther still is not put down (${m.standingIds()})`);
+    held.delete(heldBody);
+  }
+
+  // The side holding the towns: its guards standing now are put down for the other side's, but not one
+  // that is following the player, which goes on following on the side it took.
+  {
+    const creatures: Record<string, PeopleCreature> = {
+      officer: { id: 'o0', game: { attackable: true, aggression: 'defensive' } },
+      rebel: { id: 'r0', game: { attackable: true, aggression: 'defensive' } },
+    };
+    const gcw = [{ who: 'officer', id: 'o1' }, { who: 'rebel', id: 'r1' }];
+    const t = new StandingPeople();
+    t.adopt([row({ key: 'feed00a1', who: 'officer', id: 'o1', x: -2, gcw }), row({ key: 'feed00a2', who: 'officer', id: 'o1', x: 2, gcw })], creatures, { world: 'heldside' });
+    const g5 = game({ keeps });
+    try {
+      t.step(0, 0, at, g5.deps, true);
+      const a = g5.bodies.find((b) => b.x === -2)!;
+      const b = g5.bodies.find((b) => b.x === 2)!;
+      ok(!!a && !!b && t.side === 'imperial', 'two Imperial guards stand');
+      held.add(a);
+      t.setSide('rebel', g5.deps);
+      ok(!a.removed && b.removed, 'the towns changing hands put down the guard standing, never the one following the player');
+      held.delete(a);
+    } finally {
+      delete GCW_SIDES.heldside;
+    }
+  }
 }
 
 // ------------------------------------------------------------------ a respawn of nought is never
@@ -376,7 +445,8 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   const plain = g.deps.spawn;
   g.deps.spawn = (entry, at, how) => (short(entry as MobileEntry) > 0 ? 'the budget is full' : plain(entry, at, how));
   const standingIds = () => bodies.filter((b) => !b.removed && !b.dead).map((b) => b.id!).sort().join();
-  return { deps: g.deps, upId, standingIds, fill: () => (budget = used()) };
+  const body = (id: string) => bodies.find((b) => b.id === id && !b.removed && !b.dead) ?? null;
+  return { deps: g.deps, upId, standingIds, body, fill: () => (budget = used()) };
 }
 {
   // Two far people of one species share its body between them (5): neither gives it back alone, and

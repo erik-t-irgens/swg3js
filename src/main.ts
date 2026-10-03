@@ -127,8 +127,8 @@ import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, s
 import { BandBar } from './ui/bandBar.ts';
 // Speaking to somebody, and the people who follow you (`src/world/talk.ts`, `src/world/followers.ts`).
 import { TalkUi } from './ui/talkUi.ts';
-import { GREET_CLIPS, TALK_LINES, TALK_TUNE, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkShot, tuneTalk, whyNotTalk, type TalkOption } from './world/talk.ts';
-import { FOLLOW_TUNE, tuneFollow } from './world/followers.ts';
+import { GREET_CLIPS, TALK_LINES, TALK_TUNE, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkPick, talkShot, tuneTalk, whyNotTalk, type TalkOption } from './world/talk.ts';
+import { FOLLOW_TUNE, isFollowerSource, tuneFollow } from './world/followers.ts';
 import { levelSamples, statsAtLevel, type LevelSample } from './world/levelStats.ts';
 import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
@@ -521,12 +521,10 @@ function copyShipFit(f: ShipFit): ShipFit {
 }
 
 /**
- * Whether something that struck is somebody following the player (`src/world/followers.ts`): a person
- * from the catalogue carrying a follow order. Such a blow on the player is no blow at all.
+ * The number keys' codes, made once: a conversation reads them on every frame it is up, and a code
+ * written out as a template string there is nine strings made a frame.
  */
-function isFollower(t: Living | null | undefined): boolean {
-  return !!t && !!(t as { follow?: unknown }).follow;
-}
+const DIGIT_CODES: readonly string[] = Object.freeze(['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9']);
 
 /** A console hook's knobs set on a table of ours: only a key the table has, only a value of the kind it holds, and never a number below nought. */
 function setTune(tune: object, from: object | undefined): void {
@@ -1317,7 +1315,7 @@ class App {
     target.damage = (amount: number, from?: THREE.Vector3, _push?: number, source?: Living | null): void => {
       // A follower's stray blow on the one it follows is no blow at all: it never turns on you, and a
       // swing or a spit that finds you on its way to something else lands on nothing.
-      if (isFollower(source)) return;
+      if (isFollowerSource(source)) return;
       this.hurtSource = from ?? null;
       // Put back whatever happens: a direction left standing would be worn by the next blow that
       // has none of its own, and a fall would flash with an arc on the side of whatever last shot.
@@ -5602,7 +5600,8 @@ class App {
        * the window shows, the answers, how far the camera has come over the shoulder), who the use key
        * would speak to now, and everybody within `near` metres with whether they may be spoken to and why
        * not. `{ start: true }` is E's own path (in reach and in the view); `{ to: key }` or
-       * `{ to: 'nearest' }` opens one with a body wherever it stands, the rules but reach and view kept;
+       * `{ to: 'nearest' }` opens one with a body anywhere within `keep` metres (past that a conversation
+       * ends on its next frame, so it is refused), the rules but reach and view kept;
        * `{ pick: 1 }` is a number key; `{ leave: true }` is Escape; `{ tune }` moves `TALK_TUNE`.
        */
       talk: (opts?: { start?: boolean; to?: number | 'nearest'; pick?: number; leave?: boolean; near?: number; tune?: Partial<typeof TALK_TUNE> }) => {
@@ -5620,9 +5619,14 @@ class App {
           said = m ? (this.startTalk(m) ?? `talking to ${m.label}`) : 'nobody in reach and in the view to talk to';
         }
         if (opts?.to !== undefined) {
+          // Wherever it stands within `keep`: the conversation's own rule ends one past that on the next
+          // frame, so a body farther off is refused here rather than opened and shut again unseen.
           const me = this.world.playerTarget;
-          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
-          said = m ? (this.startTalk(m) ?? `talking to ${m.label}`) : opts.to === 'nearest' ? 'nobody on this world may be spoken to' : `no body with key ${opts.to}`;
+          const within = (x: Mobile): boolean => Math.hypot(x.pos.x - at.x, x.pos.z - at.z) <= TALK_TUNE.keep;
+          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me) && within(x)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
+          if (!m) said = opts.to === 'nearest' ? `nobody within ${TALK_TUNE.keep} m may be spoken to` : `no body with key ${opts.to}`;
+          else if (!within(m)) said = `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)`;
+          else said = this.startTalk(m) ?? `talking to ${m.label}`;
         }
         if (typeof opts?.pick === 'number') {
           const t = this.talkNow;
@@ -5646,7 +5650,7 @@ class App {
           near: live
             .filter((m) => m.pos.distanceTo(at) <= near)
             .sort(byDistance)
-            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z)), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
+            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, this.world.followers.following(m))), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
           tune: { ...TALK_TUNE },
         };
       },
@@ -6763,7 +6767,9 @@ class App {
       project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
       anchor: peerAnchor,
       meAt: (out) => groups.meAt(out),
-      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
+      // Not in a conversation either, which is no panel: the line would open hidden behind it, unfocused,
+      // and be left open after it with nothing that could close it.
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen() && !this.talkNow,
       // Typing takes the keyboard from the game without taking the mouse: the field has the keys (the
       // game's own input stands aside for a field), and the view is not thrown out of its lock for a
       // line of chat. `captured` is also what keeps the Escape that closes the line from opening the menu.
@@ -6816,7 +6822,8 @@ class App {
         }
         return n;
       },
-      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
+      // Nor over a conversation, which hides it (and which it would shut by taking Escape first).
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen() && !this.talkNow,
       // Given back through the game's own check, so the panel shutting under the trade window or the
       // debug menu leaves the mouse with them rather than locking it (and shutting them with it).
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
@@ -6982,7 +6989,8 @@ class App {
         }
         return n;
       },
-      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open,
+      // A trade asked for during a conversation waits for it to end and then comes up (its own step).
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.talkNow,
       freeMouse: (free) => this.freeMouse(free),
       // Whether anything else is holding the mouse. The trade window is deliberately allowed over
       // the backpack (that is where its own Trade button is), so the panel asks before it hands the
@@ -7002,7 +7010,8 @@ class App {
     // mouse goes back through `handBackMouse` and stays with whatever is still up under it.
     this.debugMenu = new DebugMenu(this.ui, {
       keys: () => this.input.bindings.debugMenu,
-      canOpen: () => this.started && this.inWorld && !this.traveling,
+      // Not over a conversation, which hides every other window of the display and has the keys.
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.talkNow,
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
       holdKeys: (ms) => this.holdGameKeys(ms),
     });
@@ -10842,7 +10851,7 @@ class App {
       onPlayerHit: (dmg, from, source) => {
         if (player.mounted || player.noclip) return;
         // A follower's stray shot stops on you and takes nothing: it never turns on you.
-        if (isFollower(source)) return;
+        if (isFollowerSource(source)) return;
         player.takeDamage(dmg);
         this.hurtFrom(from);
         // Whatever shot you is what the people following you fight.
@@ -15123,8 +15132,12 @@ class App {
    * Who the use key would speak to now: the nearest person in reach and in front of the view who may be
    * spoken to at all (`reachOf`, `whyNotTalk`), with nothing solid between the two, or null. On foot in the
    * world only -- never riding, at a bridge's controls, in a ship's rooms, adrift or flying free -- and
-   * never while a conversation is already up. A walk of the catalogue's bodies out and one ray for the
-   * one it picks, a few times a second; nothing is made.
+   * never while a conversation is already up. A walk of the catalogue's bodies out and a ray for each of
+   * the two it picks, a few times a second; nothing is made.
+   *
+   * Somebody following the player is asked apart (`talkPick`): only while the view is squarely on them,
+   * after anybody else, and only while nothing else in reach wants the key, since a follower stands at the
+   * player's elbow beside every speeder, hull and gate they walk up to.
    */
   private talkTarget(): Mobile | null {
     const p = this.player;
@@ -15134,20 +15147,49 @@ class App {
     const at = p.worldPos;
     this.cam.forward(talkLook);
     const me = this.world.playerTarget;
-    let best: Mobile | null = null;
-    let bestD = Infinity;
+    const followers = this.world.followers;
+    let other: Mobile | null = null;
+    let otherD = Infinity;
+    let follower: Mobile | null = null;
+    let followerD = Infinity;
     for (const m of mobiles.live) {
-      const d = reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z);
-      if (!(d < bestD) || whyNotTalk(m, me)) continue;
-      best = m;
-      bestD = d;
+      const follows = followers.following(m);
+      const d = reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, follows);
+      if (!(d < (follows ? followerD : otherD)) || whyNotTalk(m, me)) continue;
+      if (follows) {
+        follower = m;
+        followerD = d;
+      } else {
+        other = m;
+        otherD = d;
+      }
     }
-    if (!best) return null;
     // Not through a wall: eye to eye, against what stands still.
-    const eye = at.y + p.eyeHeight;
-    const face = best.pos.y + best.plan.height * TALK_TUNE.face;
-    return this.physics.blockDistance(at.x, eye, at.z, best.pos.x, face, best.pos.z, this.world.inside) === Infinity ? best : null;
+    if (other && !this.talkSeen(other)) other = null;
+    if (follower && !this.talkSeen(follower)) follower = null;
+    return talkPick(other, follower, this.talkElseWants);
   }
+
+  /** Whether nothing solid stands between the player's eye and somebody's face. */
+  private talkSeen(m: Mobile): boolean {
+    const p = this.player;
+    const at = p.worldPos;
+    const face = m.pos.y + m.plan.height * TALK_TUNE.face;
+    return this.physics.blockDistance(at.x, at.y + p.eyeHeight, at.z, m.pos.x, face, m.pos.z, this.world.inside) === Infinity;
+  }
+
+  /**
+   * Whether anything else in reach wants the use key that a follower would otherwise take: a vehicle or a
+   * hull to board (`handleMount`'s), or a zone gate (`handleZoneGate`'s, asked by its reach alone, since
+   * that gate's own rule stands aside for whoever may be spoken to). Kept, so asking makes nothing.
+   */
+  private readonly talkElseWants = (): boolean => {
+    const p = this.player;
+    if (this.nearestVehicle() || peerRooms()?.nearest(p.pos, BOARD_TUNE.reach)) return true;
+    const at = p.worldPos;
+    const gate = this.zoneGates.nearest(at.x, at.y, at.z);
+    return !!gate && gate.d <= GATE_TUNE.reach;
+  };
 
   /** E beside somebody who may be spoken to: the conversation. False when there is nobody, and E goes on to what else it means. */
   private handleTalk(): boolean {
@@ -15222,7 +15264,7 @@ class App {
    */
   private stepTalk(dt: number): void {
     const input = this.input;
-    for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.answerTalk(n);
+    for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.answerTalk(n);
     input.dropPresses();
     const t = this.talkNow;
     if (!t) return;
@@ -15240,10 +15282,17 @@ class App {
       this.endTalk(!away && !screen);
       return;
     }
-    // Turned to the one spoken to, so the camera looks over a shoulder and not into a face.
+    // Turned to the one spoken to, so the camera looks over a shoulder and not into a face. The view is
+    // turned with the body, toward them: the player's own update turns the body to the view for a gun at
+    // the ready, seen from the eyes, and in Jedi Academy's stance past 45 degrees, so a body turned alone
+    // would be turned back the same frame, and the view's way is the one every branch of it agrees with.
+    // The camera looks back along its own yaw (`forward` is -sin, -cos), so looking along `want` is a yaw
+    // of `want + PI`.
     const want = Math.atan2(m.pos.x - at.x, m.pos.z - at.z);
-    const diff = Math.atan2(Math.sin(want - p.heading), Math.cos(want - p.heading));
-    p.heading += diff * Math.min(1, dt * 6);
+    const k = Math.min(1, dt * 6);
+    p.heading += Math.atan2(Math.sin(want - p.heading), Math.cos(want - p.heading)) * k;
+    const look = want + Math.PI;
+    this.cam.yaw += Math.atan2(Math.sin(look - this.cam.yaw), Math.cos(look - this.cam.yaw)) * k;
   }
 
   /**
@@ -16023,8 +16072,8 @@ class App {
       // The jump's countdown (held still while the Escape menu is open) and its phases; during a crossing's travel it waits.
       if (!this.traveling) this.hyperspace.update(dt, rawDt, this.menu.open);
       // The lift menu takes the number keys while it is up, before the kit's slots see them.
-      if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
-          if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey('Digit' + n)) this.shuttleMenu.pickKey(n);
+      if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.liftMenu.pickKey(n);
+      if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.shuttleMenu.pickKey(n);
       // A conversation takes the number keys for its answers and every other key the player has: the world
       // goes on round it, and the player stands and listens (`stepTalk`).
       if (this.talkNow) this.stepTalk(dt);

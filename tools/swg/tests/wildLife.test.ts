@@ -159,6 +159,46 @@ function nearWorld(areas: WildPack['areas'] = [nearArea], man: WildManifest = ma
   ok(bodies.every((b) => b.removed), 'and every body it stood is really taken down, not merely forgotten');
 }
 
+// ------------------------------------------------------------------ one of a site's people asked to follow the player
+{
+  // Given up to the people following the player (`WildLife.release`, src/world/followers.ts): off its
+  // site's books without being taken away, and counted as the site's loss to the player, so a site whose
+  // last body walks off with you waits its own clock rather than standing a fresh crowd in front of you --
+  // the very thing a body the game merely took away does not do, which is the control below.
+  const at = new THREE.Vector3(0, 0, 0);
+  const settle = (w: WildLife, deps: WildDeps, from: number): number => {
+    let t = from;
+    for (let i = 0; i < 12; i++) {
+      t += WILD_TUNE.everySeconds + 0.1;
+      w.step(WILD_TUNE.everySeconds + 0.1, t, at, deps);
+    }
+    return t;
+  };
+  const w = nearWorld();
+  const { deps, bodies } = game();
+  let t = settle(w, deps, 0);
+  const up = bodies.filter((b) => !b.removed && !b.dead);
+  ok(up.length > 1, `${up.length} bodies stand`);
+  const before = w.last.bodies;
+  ok(w.release(up[0] as never) && !up[0].removed && w.last.bodies === before - 1, 'one asked to follow is off its site\'s books, and still in the world');
+  ok(!w.release(up[0] as never), 'asked again, it is no site\'s to give');
+  for (const b of up.slice(1)) w.release(b as never);
+  const made = bodies.length;
+  t = settle(w, deps, t);
+  ok(w.last.bodies === 0 && bodies.length === made, `every one of them asked to follow, their sites wait their own clocks and nobody new is stood (${bodies.length - made} stood)`);
+  // The control: the same world's bodies merely taken away by the game are stood again at once.
+  const w2 = nearWorld();
+  const g2 = game();
+  const t2 = settle(w2, g2.deps, 0);
+  for (const b of g2.bodies) {
+    b.removed = true;
+    b.dead = true;
+  }
+  const made2 = g2.bodies.length;
+  settle(w2, g2.deps, t2);
+  ok(g2.bodies.length > made2, `while the same bodies merely taken away are stood again at once (${g2.bodies.length - made2} stood)`);
+}
+
 // ------------------------------------------------------------------ its own numbers and weapons
 {
   const man: WildManifest = {

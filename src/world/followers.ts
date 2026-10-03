@@ -195,6 +195,32 @@ export interface FollowerBody {
  */
 export type FollowerOwner = 'stood' | 'adopted' | 'own';
 
+/**
+ * Who a body asked to follow belongs to, from what the world calls it, or why it may not follow, in words.
+ * `back` is the owner the set already has for it when it was asked to stop and not yet handed back
+ * (`FollowerSet.releasedOwner`): such a body is the set's already, so it keeps that owner and nothing is
+ * given up for it a second time -- one of ours or a lair's was taken off its books the first time, and
+ * asking those books again could only say it is not theirs any more. Otherwise a body the world named
+ * `stood:` stays its row's, one named `ours:` or `wild:` is given up by its books (`release`, which
+ * answers whether they had it), one with no name was stood by hand, and anything else is the world's.
+ */
+export function recruitOwner(id: string, back: FollowerOwner | null, release: { ours(): boolean; wild(): boolean }): { owner: FollowerOwner } | { refused: string } {
+  if (back) return { owner: back };
+  if (!id) return { owner: 'own' };
+  if (id.startsWith('stood:')) return { owner: 'stood' };
+  if (id.startsWith('ours:')) return release.ours() ? { owner: 'adopted' } : { refused: 'not one of ours any more' };
+  if (id.startsWith('wild:')) return release.wild() ? { owner: 'adopted' } : { refused: 'not one of its camp any more' };
+  return { refused: 'kept by the world, not by you' };
+}
+
+/**
+ * Whether something that struck is somebody following the player: a living thing carrying a follow order.
+ * Such a blow or shot on the player is no blow at all (`App`'s damage wrapper and its bolts' `onPlayerHit`).
+ */
+export function isFollowerSource(t: unknown): boolean {
+  return !!t && !!(t as { follow?: unknown }).follow;
+}
+
 /** What the set needs of the game: taking a body away, letting the player walk through one, and saying things. */
 export interface FollowerDeps<B extends FollowerBody> {
   remove(b: B): void;
@@ -255,6 +281,15 @@ export class FollowerSet<B extends FollowerBody = FollowerBody> {
     if (this.following(b)) return true;
     for (const r of this.released) if (r.body === b) return true;
     return false;
+  }
+
+  /**
+   * Who stood a body asked to stop and not yet handed back, or null for one that is not waiting here:
+   * what a second ask to follow keeps (`recruitOwner`), since such a body is the set's already.
+   */
+  releasedOwner(b: B): FollowerOwner | null {
+    for (const r of this.released) if (r.body === b) return r.owner;
+    return null;
   }
 
   /**

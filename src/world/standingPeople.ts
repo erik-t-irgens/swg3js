@@ -415,8 +415,9 @@ export interface PeopleDeps {
    * Whether somebody else has the body for now: a person following the player, or one just asked to
    * stop and not yet handed back (`FollowerSet.holds`). Such a body is never put down by this pass -- not
    * for its distance, not to make room for somebody nearer, not for model memory, not for a change of the
-   * side holding the towns -- though its row is still the row it stands for, so a follower killed comes
-   * back at its post on the row's own clock as anybody else would. With none wired nothing is held.
+   * side holding the towns -- and takes no place under either cap, though its row is still the row it
+   * stands for, so a follower killed comes back at its post on the row's own clock as anybody else would.
+   * With none wired nothing is held.
    */
   keeps?(m: Mobile): boolean;
 }
@@ -747,10 +748,12 @@ export class StandingPeople {
     near.sort(this.nearer);
 
     // Two caps, counted apart (`most` and `mostEssential`): those who may be fought, and the furniture.
+    // Nobody somebody else has for now (`keeps`) is counted against either: a follower walks with the
+    // player wherever they go and is no part of the crowd round them, so it takes nobody's place.
     let liveFought = 0;
     let liveKept = 0;
     for (const s of this.up.values()) {
-      if (!s.body) continue;
+      if (!s.body || deps.keeps?.(s.body)) continue;
       if (s.essential) liveKept++;
       else liveFought++;
     }
@@ -825,7 +828,7 @@ export class StandingPeople {
         liveFought = 0;
         liveKept = 0;
         for (const s of this.up.values()) {
-          if (!s.body) continue;
+          if (!s.body || deps.keeps?.(s.body)) continue;
           if (s.essential) liveKept++;
           else liveFought++;
         }
@@ -878,7 +881,7 @@ export class StandingPeople {
       else liveFought++;
       this.last.stood++;
     }
-    this.count();
+    this.count(deps);
   }
 
   /**
@@ -959,7 +962,12 @@ export class StandingPeople {
     return best;
   }
 
-  private count(): void {
+  /**
+   * The pass's own counts. `essential` is the furniture's cap as the pass counted it, which is what the
+   * people of ours stand in the rest of (`essentialUp`), so a body somebody else has for now takes no
+   * place there either.
+   */
+  private count(deps?: PeopleDeps): void {
     let up = 0;
     let down = 0;
     let inside = 0;
@@ -968,7 +976,7 @@ export class StandingPeople {
       if (s.body) up++;
       else down++;
       if (s.body && s.stand.inside) inside++;
-      if (s.body && s.essential) essential++;
+      if (s.body && s.essential && !deps?.keeps?.(s.body)) essential++;
     }
     this.last.up = up;
     this.last.down = down;
