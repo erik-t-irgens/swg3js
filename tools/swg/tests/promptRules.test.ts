@@ -225,11 +225,12 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 {
   // The game's own dispatch has to agree with the bar, or the key would do one thing and the cap say
   // another. It is one line in the frame loop, read out of the source: what is underfoot (the lift, an
-  // elevator, a doorway), then a port's own things, then somebody to talk to, then a gate, then a
-  // vehicle or a hull, which is `handleMount`'s. A reordering there fails here.
+  // elevator, a doorway), then a dungeon copy's things (`instances.ts`), then a port's own things, then
+  // somebody to talk to, then a gate, then a vehicle or a hull, which is `handleMount`'s. A reordering
+  // there fails here.
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
-  const line = /if \(!this\.handleElevator\(\) && !this\.handleTravel\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
-  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a port, a person, a gate, a vehicle');
+  const line = /if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
+  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a dungeon copy, a port, a person, a gate, a vehicle');
   ok([...main.matchAll(/this\.handleTalk\(\)/g)].length === 1, 'and talking is reached from that one place');
   // The gate stands aside for a person as it does for a vehicle, in the gather and in the key alike.
   ok(/free: !s\.lift && !s\.elevator && !s\.doorless && !s\.talk && !s\.near/.test(main), "the gather's gate stands aside for somebody to talk to");
@@ -259,7 +260,7 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   ok(/else if \(S8\.talk\) prompt = `<b>E<\/b> talk to \$\{this\.promptTalk\}`;/.test(main), 'and the long line says whom');
   for (const [what, sig] of [
     ['a blow on you', /private hurtFrom\(from: THREE\.Vector3 \| null \| undefined\): void \{/],
-    ['a travel', /private async travel\(planet: PlanetDef, zoneId\?: string, ship\?: ShipCrossing\): Promise<Vehicle \| null> \{/],
+    ['a travel', /private async travel\(planet: PlanetDef, zoneId\?: string, ship\?: ShipCrossing, opts\?: TravelOpts\): Promise<Vehicle \| null> \{/],
     ['a death', /private die\(\): void \{/],
     ['the select screen', /private switchToSelect\(\): void \{/],
   ] as [string, RegExp][]) {

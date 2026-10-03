@@ -18,6 +18,9 @@ npm run swg -- planets "C:/SWG" --retail-only                                   
 npm run swg -- snapshot "C:/SWG" all assets-private --radius=all --retail-only                                      # every planet the game knows, one pack each
 # The expansions' planets convert the same way: mustafar, and Kashyyyk's zones kashyyyk_main, kashyyyk_hunting, kashyyyk_dead_forest,
 # kashyyyk_rryatt_trail, kashyyyk_north_dungeons, kashyyyk_south_dungeons, kashyyyk_pob_dungeons (one pack per zone; `all` includes them).
+# So does dungeon1, the instances zone: the corvette's 48 copies and the heroics' buildouts, ten of each. A building that names
+# a portal layout is drawn as that layout (the heroic Star Destroyer's appearance alone is a hull with no room in it); `spawns`
+# then joins the corvette's crews to every copy and stands a crew of ours on the Star Destroyer, and `fittings` its keypads and pods.
 npm run swg -- terrain "C:/SWG" tatooine assets-private/tatooine                                                  # just the terrain template and ground textures
 npm run swg -- terrain "C:/SWG" all assets-private                                                                # the same into every planet pack already there
 npm run swg -- sky "C:/SWG" all assets-private                                                                    # just the sky of every pack (snapshot and terrain do it too)

@@ -99,6 +99,19 @@ export function resolveTemplateMesh(vfs, templatePath, cache = new Map()) {
   else if (/^object\/soundobject\//.test(templatePath)) result = { skip: 'sound object' };
   try {
     if (result) throw null;
+    // A building that names a portal layout is that layout: its rooms are the building, and the client
+    // drew whatever appearance it also names as the shell seen from outside. Read first along the whole
+    // chain, because the two are not always at the same level. Measured over every template the worlds
+    // place, two of 3,500 name both: the heroic Star Destroyer's, which read by its appearance alone was
+    // a hull with not one room in it, and one of Tatooine's player houses. A ship's template is not a
+    // building and keeps its hull (a station names its rooms too, and is flown past as a hull).
+    if (/^object\/building\//.test(templatePath)) {
+      const layout = resolveTemplateString(vfs, templatePath, ['portalLayoutFilename']);
+      if (layout && /\.pob$/i.test(layout) && vfs.has(layout.replace(/\\/g, '/'))) {
+        result = resolveAppearanceToMesh(vfs, layout);
+        throw null;
+      }
+    }
     let appearance = null;
     let path = templatePath;
     let lastParams = [];

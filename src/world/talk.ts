@@ -153,7 +153,8 @@ export function talkPick<T>(other: T | null, follower: T | null, elseWants: () =
 
 /** One answer in the window: what it is, its words, whether it may be chosen now and why not. */
 export interface TalkOption {
-  id: 'follow' | 'stay' | 'leave';
+  /** `corvette`: a ticket taker's own answer, which sends the player to its faction's copy of the corvette. */
+  id: 'follow' | 'stay' | 'leave' | 'corvette';
   label: string;
   enabled: boolean;
   why: string;
@@ -169,15 +170,19 @@ export const TALK_WORDS = Object.freeze({
   keptElsewhere: 'another player’s game is looking after them, so they will not follow you',
   /** Said of a body on the wire of a server too old to hear one walk off with a player: it stays at its post. */
   serverKeeps: 'this server cannot let them walk off with you, so they will not follow you',
+  /** A corvette's ticket taker: take me to the ship. Ours, as every word here is. */
+  corvette: 'Take me to the corvette.',
 });
 
 /**
  * The answers on offer: to a follower, stop following; to anybody else, follow, which is refused in
- * words once as many follow as may, and of a body another player's game keeps (`keptElsewhere`); and
- * always the way out. Written into `out` when one is given.
+ * words once as many follow as may, and of a body another player's game keeps (`keptElsewhere`); to a
+ * corvette's ticket taker (`taker`), first of all, the trip to the ship; and always the way out. Written
+ * into `out` when one is given.
  */
-export function talkOptions(following: boolean, full: boolean, out: TalkOption[] = [], keptElsewhere = false): TalkOption[] {
+export function talkOptions(following: boolean, full: boolean, out: TalkOption[] = [], keptElsewhere = false, taker = false): TalkOption[] {
   out.length = 0;
+  if (taker && !following) out.push({ id: 'corvette', label: TALK_WORDS.corvette, enabled: true, why: '' });
   if (following) out.push({ id: 'stay', label: TALK_WORDS.stay, enabled: true, why: '' });
   else {
     const why = keptElsewhere ? TALK_WORDS.keptElsewhere : full ? TALK_WORDS.full : '';
@@ -213,6 +218,7 @@ export const TALK_LINES = {
   follower: ['Where to next?', 'I am right behind you.', 'Say the word.', 'Still with you.'],
   follow: ['Lead the way.', 'All right. I am with you.', 'After you.'],
   stay: ['I will wait here, then.', 'Suit yourself.', 'Good luck out there.'],
+  corvette: ['Transport is standing by. Do not keep it waiting.', 'Your authorisation checks out. Off you go.', 'Get aboard and get it done.'],
 };
 
 /** Sides that speak as guards. */

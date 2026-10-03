@@ -758,6 +758,16 @@ export class Bolts {
         new THREE.MeshBasicMaterial({ color: c.clone().lerp(new THREE.Color(0xffffff), 0.7).multiplyScalar(1.6), toneMapped: false }),
         new THREE.MeshBasicMaterial({ color: c.clone().multiplyScalar(1.3), transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
       ];
+      // Unlit and dry: kept out of the shadow cascades and never wrapped by the rain. Both are in a program's
+      // key, and a colour first fired after the loading screen is drawn on its first frame before the scan
+      // adopts it: adopted afterwards, every new colour's first shot was a program its warm-up never built,
+      // and a room's crew firing a colour of their own built two on a live frame (measured on the corvette:
+      // its core and its glow, under the room's lights). Kept out, a bolt of any colour is the one program
+      // the warm-up's two colours build behind the screen, in the world's pass and a room's alike.
+      for (const mat of m) {
+        mat.userData.unlit = true;
+        mat.userData.dry = true;
+      }
       this.materials.set(color, m);
     }
     return m;

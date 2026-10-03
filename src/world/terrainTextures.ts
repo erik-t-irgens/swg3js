@@ -32,6 +32,22 @@ export interface ShaderFamilyDef {
    * The two are read into one texture at load all the same.
    */
   specular?: string | null;
+  /** The client's shader and its main texture, as the converter read them: what `emptyGround` asks. */
+  shader?: string;
+  texture?: string;
+}
+
+/**
+ * Whether a terrain's ground is one the client never drew: every shader family it paints with is a
+ * punch-out of the client's empty texture (`null_a_punchout` over `texture/null.dds`). The instances
+ * zone is the one that does it -- its copies hang in a sky over flat ground at nought that nothing was
+ * meant to see, and drawn, that ground ran straight through the corvettes' main deck. The ground is then
+ * kept (it is still a floor to the physics and a height to everything that asks for one) and not drawn.
+ * A pack converted before the converter wrote the shader's name says nothing and draws as it always did.
+ */
+export function emptyGround(families: readonly Pick<ShaderFamilyDef, 'shader' | 'texture'>[]): boolean {
+  if (!families.length) return false;
+  return families.every((f) => typeof f.texture === 'string' && /(^|\/)null\.dds$/i.test(f.texture) && typeof f.shader === 'string' && /punchout/i.test(f.shader));
 }
 
 /**
@@ -165,6 +181,8 @@ export class TerrainTextures {
   private readonly layerOf: Float32Array;
   private readonly sizeOf: Float32Array;
   readonly families: ShaderFamilyDef[];
+  /** The ground is the client's empty punch-out and is not drawn (`emptyGround`). */
+  empty = false;
   private material: THREE.MeshStandardMaterial | null = null;
 
   private readonly layerIndex: Map<number, number>;
@@ -212,6 +230,7 @@ export class TerrainTextures {
     } catch {
       return null;
     }
+    const empty = emptyGround(families);
     families = families.filter((f) => f.file);
     if (!families.length) return null;
     const images = await Promise.all(families.map((f) => loadImage(pack.url(f.file))));
@@ -290,7 +309,9 @@ export class TerrainTextures {
       normals.anisotropy = anisotropy;
       normals.needsUpdate = true;
     }
-    return new TerrainTextures(texture, kept, layers, planet, normals);
+    const out = new TerrainTextures(texture, kept, layers, planet, normals);
+    out.empty = empty;
+    return out;
   }
 
   /**

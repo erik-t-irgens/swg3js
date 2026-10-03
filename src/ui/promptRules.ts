@@ -156,6 +156,12 @@ export interface PromptState {
   elevator: '' | 'up' | 'down';
   doorless: boolean;
   /**
+   * What the key does at a dungeon's copy (`src/world/instances.ts`): a keypad or panel that opens a
+   * locked room, an escape pod, the way out where the copy was come into, or out in a world a dungeon's
+   * way in. Underfoot like the three above, and after them, since a lift is the room you stand in.
+   */
+  instance: '' | 'keypad' | 'pod' | 'in' | 'out';
+  /**
    * Which of a port's three things is within reach: the terminal a ticket is bought at, the
    * collector it is handed to outside, or the terminal the player's own ship answers to.
    *
@@ -205,6 +211,7 @@ export function newPromptState(): PromptState {
     lift: false,
     elevator: '',
     doorless: false,
+    instance: '',
     travel: '',
     talk: false,
     gate: '',
@@ -229,6 +236,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.lift = false;
   s.elevator = '';
   s.doorless = false;
+  s.instance = '';
   s.travel = '';
   s.talk = false;
   s.gate = '';
@@ -272,6 +280,12 @@ export const PROMPT_WORDS = Object.freeze({
   up: 'up a level',
   down: 'down a level',
   inside: 'go inside',
+  // A dungeon's copy: a keypad by a locked door, an escape pod, the way out where it was come into, and
+  // out in a world the thing that is its way in.
+  keypad: 'use the keypad',
+  pod: 'escape pod',
+  wayOut: 'the way out',
+  wayIn: 'go in',
   // A port's three things, each named for itself. The cap says what you are standing at, not where it
   // goes: where is a list of places and fares, which is what the panel is for. They were one word,
   // "the shuttle", which was the wrong noun for all three -- a terminal is not a shuttle, and the
@@ -436,6 +450,9 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   if (s.lift) n = push(out, n, 'mount', W.lift);
   else if (s.elevator) n = push(out, n, 'mount', s.elevator === 'down' ? W.down : W.up);
   else if (s.doorless) n = push(out, n, 'mount', W.inside);
+  // A dungeon's copy, after the three underfoot and before a port's things, as the game's own dispatch
+  // takes them (`handleElevator`, then `handleInstance`).
+  else if (s.instance) n = push(out, n, 'mount', s.instance === 'keypad' ? W.keypad : s.instance === 'pod' ? W.pod : s.instance === 'out' ? W.wayOut : W.wayIn);
   // A port's own things are the last of the four to have the key, exactly as the game's own dispatch
   // orders them: a lift shaft, an elevator and a doorway are all underfoot and all outrank a terminal
   // you have walked up to.

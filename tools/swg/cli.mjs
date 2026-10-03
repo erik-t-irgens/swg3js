@@ -119,7 +119,8 @@
 //                                                                  creature's own level, health and damage, read out of the Core3 reference
 //                                                                  in the checkout. It opens no game archive, so it takes no <swg-dir>,
 //                                                                  and it must run after the worlds and after mobiles. Writes <pack>/spawns.json
-//                                                                  per world and <out-dir>/spawns/manifest.json for the fleet
+//                                                                  per world and <out-dir>/spawns/manifest.json for the fleet; with --swg, the
+//                                                                  instances zone's too (the corvette's crews in every copy, our Star Destroyer crew)
 //   node tools/swg/cli.mjs sandbox <swg-dir> <out-dir> [--seed=N]   a made-up system to fly in, 250 km across, as <out-dir>/space_sandbox:
 //                                                                  a sun and a sky borrowed from a converted zone, four to six planets with real
 //                                                                  places you can fly to, asteroid fields and three jump points; nothing in it
@@ -228,6 +229,7 @@ import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
+import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { mapFrameOf } from './mapframe.mjs';
@@ -2534,8 +2536,13 @@ function moodValues(variants, clips) {
   return n;
 }
 
-/** Planet ids the game can load a pack for (see src/data/planets.ts). */
-const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons'];
+/**
+ * Planet ids the game can load a pack for (see src/data/planets.ts). `dungeon1` is the instances zone,
+ * a box of the copies the server stood one of per group (the Corellian corvette, the heroic Star
+ * Destroyer and the other heroics): converted as an ordinary zone, as the tree world's pob zone is, and
+ * never on the travel or galaxy lists.
+ */
+const GAME_PLANETS = ['tatooine', 'naboo', 'corellia', 'dantooine', 'lok', 'endor', 'dathomir', 'yavin4', 'talus', 'rori', 'mustafar', 'kashyyyk_main', 'kashyyyk_hunting', 'kashyyyk_dead_forest', 'kashyyyk_rryatt_trail', 'kashyyyk_north_dungeons', 'kashyyyk_south_dungeons', 'kashyyyk_pob_dungeons', 'dungeon1'];
 
 /**
  * Report what the packs under <dir> hold (planets, creatures, player) and which command
@@ -3259,6 +3266,19 @@ function packStatus(dir) {
       if (stale.stale) {
         need(`spawns ${dir} --swg=<swg-dir> --retail-only`, `the standing people on ${stale.older.length ? stale.older.join(', ') : 'every world'} are from an older converter (format ${SPAWNS_FORMAT} reads the towns' people, guards and patrols, stands the people the data stacks on one spot apart, faces people indoors through their building's turn, and gives every creature its own numbers and every camp its pieces)`);
       } else console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
+    }
+    // The instances: the corvette's crew in every copy of the ship, the crew of ours on the Star
+    // Destroyer, and the ticket takers' word for which copy they send a player to (`instances.mjs`).
+    if (spawnWorlds.length && spawnManifest) {
+      let takers = [];
+      try {
+        takers = core3SourceFor({}).readCorvette().takers ?? [];
+      } catch {
+        takers = [];
+      }
+      const zone = existsSync(join(dir, 'dungeon1', 'manifest.json'));
+      const why = instanceSpawnsWhy(zone, readQuiet(join(dir, 'dungeon1', 'spawns.json')), takers, (w) => (existsSync(join(dir, w, 'spawns.json')) ? (readQuiet(join(dir, w, 'spawns.json'))?.statics ?? []) : null));
+      if (why) need(`spawns ${dir} --swg=<swg-dir> --retail-only`, why);
     }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
@@ -7006,6 +7026,11 @@ switch (cmd) {
     const templates = new Set();
     for (const kids of byTemplate.values()) for (const k of kids) templates.add(k.template);
     for (const planet of GAME_PLANETS) for (const p of c3.readServerProps(planet)) templates.add(p.template);
+    // The third: the corvette's own fittings, which stand in every copy of the ship in the instances zone
+    // (`instances.mjs`): its lift terminals, keypads, escape pod consoles, computers and crates.
+    const corvette = c3.readCorvette();
+    for (const s of corvette.statics ?? []) templates.add(s.template);
+    const I = await import('./instances.mjs');
     const paramCache = new Map();
     const { models, missing } = F.fittingModels(templates, (shared) => (vfs.has(shared) ? resolveTemplateString(vfs, shared, ['appearanceFilename'], paramCache) : null));
     for (const kids of byTemplate.values()) for (const k of kids) k.model = models.get(k.template)?.id ?? null;
@@ -7052,6 +7077,22 @@ switch (cmd) {
             continue;
           }
           all.push({ template: p.template, model, building: c.building, at: null, cell: c.cellIndex, x: p.x, y: p.y, z: p.z, yaw: p.yaw, bx: c.bx, by: c.by, bz: c.bz, byaw: c.byaw });
+        }
+      }
+      // The instances zone: the corvette's fittings in every copy of its faction's ship, through the
+      // ship's own rooms by name. Read off the snapshot, which is where the sixteen copies of each are.
+      if (planet === 'dungeon1' && vfs.has('snapshot/dungeon1.ws')) {
+        const manifestFile = join(out, dir.name, 'manifest.json');
+        const man = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : null;
+        const modelId = (layout.objects ?? []).find((o) => I.corvetteFactionOf(o.template))?.model;
+        const def = man?.categories?.layout?.find((d) => d.id === modelId);
+        if (def) {
+          const snap = parseSnapshot(parseIff(vfs.read('snapshot/dungeon1.ws')));
+          const copies = I.copiesIn(flattenWithWorldTransforms(snap), snap.templates, (t) => !!I.corvetteFactionOf(t));
+          const got = I.corvetteFittingRows(corvette, copies, I.cellIndexByName(def.cells), (t) => models.get(t)?.id ?? null);
+          all.push(...got.rows);
+          lost += got.lost;
+          console.log(`  ${dir.name}: the corvette's ${corvette.statics?.length ?? 0} fittings over ${copies.length} copies come to ${got.rows.length}${got.lost ? `, ${got.lost} with no room or no model` : ''}`);
         }
       }
       // A fitting this game cannot draw is left out of the pack rather than written as a place with
@@ -7680,6 +7721,10 @@ switch (cmd) {
     let worlds = 0;
     const noWorld = [];
     const lostBy = { body: 0, room: 0 };
+    // The corvette's own half of the scripts: its crews and fittings by room name, and the three who take
+    // a ticket for it (`readCorvette`). A taker's row says which faction's copy it sends a player to.
+    const corvette = src.readCorvette();
+    const I = await import('./instances.mjs');
     for (const [world, r] of regions) {
       const out = join(pos[1], world);
       if (!existsSync(out)) {
@@ -7700,6 +7745,8 @@ switch (cmd) {
           continue;
         }
         if (got.row.routeLost) routesLost++;
+        const takes = I.takerFaction(corvette.takers, world, got.row.who);
+        if (takes) got.row.takes = takes;
         rows.push(got.row);
       }
       lostBy.body += lost.body;
@@ -7740,6 +7787,77 @@ switch (cmd) {
         ),
       );
       areas += r.spawn.length;
+      people += rows.length;
+      worlds++;
+    }
+    // The instances (`dungeon1`): no spawn area and no town, only the copies the server stood one of per
+    // group. The corvette's crews are joined to every copy of their faction's ship through its own cells,
+    // and the heroic Star Destroyer's rooms take a crew of ours by room kind (`instances.mjs` says why
+    // both); the other heroics stay empty, since nothing holds anybody for them. It needs the archives,
+    // for the copies' cells, and the zone's own pack, for the rooms' names and floors.
+    const instanceDir = join(pos[1], 'dungeon1');
+    if (existsSync(join(instanceDir, 'manifest.json')) && spawnVfs?.has('snapshot/dungeon1.ws')) {
+      const snap = parseSnapshot(parseIff(spawnVfs.read('snapshot/dungeon1.ws')));
+      mergeBuildouts(snap, loadBuildouts(spawnVfs, 'dungeon1'));
+      const entries = flattenWithWorldTransforms(snap);
+      const rooms = sp.roomsOf(snap);
+      const man = JSON.parse(readFileSync(join(instanceDir, 'manifest.json'), 'utf8'));
+      const lay = JSON.parse(readFileSync(join(instanceDir, 'layout.json'), 'utf8'));
+      const floorsFile = join(instanceDir, 'floors.json');
+      const floors = existsSync(floorsFile) ? JSON.parse(readFileSync(floorsFile, 'utf8')) : null;
+      const defOf = (want) => {
+        const id = lay.objects.find((o) => want(o.template))?.model;
+        return id ? man.categories.layout.find((d) => d.id === id) : null;
+      };
+      const corvetteDef = defOf((t) => !!I.corvetteFactionOf(t));
+      const sdDef = defOf(I.isStarDestroyerDungeon);
+      const rows = [];
+      const lost = { body: 0, room: 0 };
+      const take = (raw, ours) => {
+        const got = sp.packRow(raw, { joined, rooms, pools: new Map() });
+        if (got.lost) {
+          lost[got.lost]++;
+          return;
+        }
+        if (ours) got.row.ours = true;
+        rows.push(got.row);
+      };
+      let crewLost = 0;
+      if (corvetteDef) {
+        const copies = I.copiesIn(entries, snap.templates, (t) => !!I.corvetteFactionOf(t));
+        const crew = I.corvetteCrewRows(corvette, copies, I.cellIndexByName(corvetteDef.cells));
+        crewLost = crew.lost;
+        for (const raw of crew.rows) take(raw, false);
+      }
+      let ours = 0;
+      if (sdDef && corvetteDef && floors?.models) {
+        const copies = I.copiesIn(entries, snap.templates, I.isStarDestroyerDungeon);
+        // Measured against the Alliance's run, whose corvette the Empire held: its crew is the Imperial one.
+        const kindRooms = I.corvetteKindRooms(corvette.rebel, corvetteDef.cells, floors.models[corvetteDef.id]);
+        const crew = I.ourCrewRows(copies, sdDef.cells, floors.models[sdDef.id], corvette.rebel, kindRooms);
+        const before = rows.length;
+        for (const raw of crew) take(raw, true);
+        ours = rows.length - before;
+      }
+      writeFileSync(
+        join(instanceDir, 'spawns.json'),
+        JSON.stringify(
+          {
+            format: sp.SPAWNS_FORMAT,
+            instances: I.INSTANCES_FORMAT,
+            planet: 'dungeon1',
+            source: { statics: 'core3', ours: 'invented' },
+            counts: { areas: 0, noSpawn: 0, statics: rows.length, corvette: rows.length - ours, ours, noBody: lost.body, noRoom: lost.room + crewLost },
+            areas: [],
+            noSpawn: [],
+            statics: rows,
+            pools: {},
+          },
+          null,
+          1,
+        ),
+      );
+      console.log(`spawns: dungeon1 — ${rows.length - ours} of the corvette's people over its copies, ${ours} of our crew on the Star Destroyer's${lost.body ? `, ${lost.body} with no body` : ''}${lost.room + crewLost ? `, ${lost.room + crewLost} in no room` : ''}${corvetteDef ? '' : '; NO CORVETTE MODEL in the pack'}${sdDef ? '' : '; NO STAR DESTROYER MODEL in the pack'}${floors ? '' : '; no floors.json, so no crew of ours'}`);
       people += rows.length;
       worlds++;
     }

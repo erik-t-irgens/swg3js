@@ -37,6 +37,16 @@ export interface FittingRow {
   by: number;
   bz: number;
   byaw: number;
+  /**
+   * What pressing the use key at it does, where it does anything: a corvette's keypad or room panel
+   * opens a locked room (`opensCell`, by index, and `opens` by name), and its escape pod's console is the
+   * way off the ship (`instances.ts`). Absent on everything that is only to look at.
+   */
+  use?: 'keypad' | 'panel' | 'pod';
+  opens?: string;
+  opensCell?: number;
+  /** What the server called it, where it named it ("Keypad", "Escape Pod Controls"). */
+  name?: string;
 }
 
 /** One of them in the world's own frame. */
@@ -50,6 +60,13 @@ export interface Fitting {
   yaw: number;
   cell: number;
   building: string;
+  /** Where the building it belongs to stands, in the world's own frame: which copy of a dungeon it is in. */
+  bx: number;
+  bz: number;
+  use?: FittingRow['use'];
+  opensCell?: number;
+  opens?: string;
+  name?: string;
 }
 
 /**
@@ -65,7 +82,12 @@ export function fittingsOf(rows: readonly FittingRow[], centre: { x: number; z: 
   for (const r of rows) {
     if (!r.model) continue;
     const p = childInWorld(r, centre);
-    out.push({ model: r.model, building: r.building, x: p.x, y: p.y, z: p.z, yaw: p.yaw, cell: p.cell, ...(r.template ? { template: r.template } : {}) });
+    const f: Fitting = { model: r.model, building: r.building, x: p.x, y: p.y, z: p.z, yaw: p.yaw, cell: p.cell, bx: p.bx, bz: p.bz, ...(r.template ? { template: r.template } : {}) };
+    if (r.use === 'keypad' || r.use === 'panel' || r.use === 'pod') f.use = r.use;
+    if (typeof r.opensCell === 'number' && r.opensCell > 0) f.opensCell = r.opensCell;
+    if (typeof r.opens === 'string') f.opens = r.opens;
+    if (typeof r.name === 'string') f.name = r.name;
+    out.push(f);
   }
   return out;
 }

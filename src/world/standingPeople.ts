@@ -99,6 +99,10 @@ export interface StandingRow {
    * with the row); indoors a point carries its room. It stands at the first, and walks them later.
    */
   route?: { x: number; y: number; z: number; room?: number; linger?: boolean }[];
+  /** A ticket taker for the Corellian corvette: the faction's copy it sends a player to (`instances.ts`). */
+  takes?: string;
+  /** Stood by us rather than by the data: the Star Destroyer's crew, whom no data stands anywhere. */
+  ours?: boolean;
 }
 
 /**
@@ -435,6 +439,14 @@ export interface PeopleDeps {
    */
   downFor?(id: string): number;
   /**
+   * Whether a row's body may stand where it stands at all (the world's frame). A world of copies (the
+   * instances: sixteen corvettes a hundred and fifty metres apart) stands nobody but in the copy the
+   * player is in, or the crew of the ship alongside would take the cap's places from the crew of this
+   * one; a body already standing outside it is put down as one past `drop` is. None stands everybody,
+   * which is every other world. Asked only of a row already within `build`, and of the bodies standing.
+   */
+  scope?(x: number, y: number, z: number): boolean;
+  /**
    * Whether this browser shares the people it may be fought over with a server just now (`Owned.seeding`).
    * While it does, a person killed comes back as the same person rather than as its row's next life: the
    * lives are each browser's own count, and two browsers that had seen different numbers of deaths would
@@ -751,7 +763,8 @@ export class StandingPeople {
         // somebody nearer still, and never one in a fight (`farthestFree`): somebody you are
         // fighting does not vanish. Nor, at any distance, one somebody else has for now (`keeps`): a
         // follower walks with the player and is as far from its own row as they are.
-        if (away > PEOPLE_TUNE.drop && !(here.body && deps.keeps?.(here.body))) {
+        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z));
+        if (outside && !(here.body && deps.keeps?.(here.body))) {
           if (here.body) {
             deps.remove(here.body);
             this.last.dropped++;
@@ -764,7 +777,7 @@ export class StandingPeople {
         }
         continue;
       }
-      if (away <= PEOPLE_TUNE.build) near.push(i);
+      if (away <= PEOPLE_TUNE.build && (!deps.scope || deps.scope(st.x, st.y, st.z))) near.push(i);
     }
     near.sort(this.nearer);
 
@@ -1095,6 +1108,16 @@ export class StandingPeople {
   /** Whether the rows have been carried into the world's frame yet, which everything the people of ours ask needs. */
   get inWorld(): boolean {
     return this.framed;
+  }
+
+  /**
+   * The row a body standing now was stood from, in the world's frame, or null for a body this did not
+   * stand: what a conversation asks of somebody it opens with (a corvette's ticket taker says which copy
+   * it sends a player to). Walks the eighty standing; asked once a conversation.
+   */
+  rowOf(m: Mobile): StandingRow | null {
+    for (const s of this.up.values()) if (s.body === m) return s.row;
+    return null;
   }
 
   /**

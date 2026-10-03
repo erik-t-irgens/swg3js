@@ -337,6 +337,37 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   }
 }
 
+// ------------------------------------------------------------------ a world of copies stands only the copy the player is in
+{
+  // `PeopleDeps.scope` (`World.inCopy`): the instances zone parks sixteen corvettes side by side, a few
+  // hundred metres apart, and only the copy the player is in has its crew stood. Each half is pinned: nobody
+  // the scope leaves out is stood however near, a body standing when the scope moves off it is put down as
+  // one past `drop` would be, and one the followers hold never is.
+  // Along z, which the world's frame keeps as the rows have it (it mirrors x), and the scope is asked in the world's frame.
+  let inCopy = (z: number): boolean => z < 50;
+  const held = new Set<Body>();
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'here', z: 0 }), row({ who: 'there', z: 60 }), row({ who: 'follower', z: 2 })]);
+  const { deps, bodies } = game({ scope: (_x, _y, z) => inCopy(z), keeps: (m) => held.has(m as unknown as Body) });
+  const at = new THREE.Vector3(0, 0, 30);
+  ok(Math.abs(60 - at.z) < PEOPLE_TUNE.build, 'the next copy\'s row is near enough to be stood by distance alone');
+  p.step(1, 1, at, deps, true);
+  ok(bodies.some((b) => b.z === 0) && bodies.some((b) => b.z === 2) && !bodies.some((b) => b.z === 60), 'nobody is stood outside the copy the player is in, however near');
+  const follower = bodies.find((b) => b.z === 2)!;
+  held.add(follower);
+  inCopy = (z) => z > 50;
+  p.step(PEOPLE_TUNE.everySeconds + 0.1, 5, at, deps, true);
+  ok(bodies.find((b) => b.z === 0)!.removed, 'the copy left behind has its crew put down');
+  ok(!follower.removed, 'except whoever follows the player, which the followers hold');
+  ok(bodies.some((b) => b.z === 60 && !b.removed), 'and the copy now in scope has its own stood');
+  // With no scope at all (every other world) nobody is left out.
+  const q = new StandingPeople();
+  q.adopt([row({ who: 'a', z: 0 }), row({ who: 'b', z: 60 })]);
+  const g2 = game();
+  q.step(1, 1, at, g2.deps, true);
+  ok(g2.bodies.length === 2, 'and a world with no scope stands everybody near, as it always did');
+}
+
 // ------------------------------------------------------------------ a respawn of nought is never
 {
   // The server ran a body's timer only when it was above nought: a bunker's boss, a trainer, an event's

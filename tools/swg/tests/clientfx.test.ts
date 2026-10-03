@@ -121,6 +121,18 @@ const seventeen = (over: Record<number, number>) => f32(...Array.from({ length: 
     const fountain = one('object/static/structure/corellia/shared_corl_fountain_circle_s01.iff');
     ok(fountain.length === 1 && /pt_fountain_corl_circle_s01\.prt$/.test(fountain[0].particle), "and a fountain sprays, which is the other half of what the owner saw missing");
     ok(one('object/static/naboo/shared_waterfall_mist_lg.iff').every((e) => !(e.transform[3] === 0 && e.transform[7] === 0 && e.transform[11] === 0 && /hardpoint2/.test(e.particle))) && r.missing.some((m: string) => /hardpoint2/.test(m)), 'a hardpoint the appearance has not got is left out and counted, never hung at the origin');
+
+    // A building that names a portal layout is drawn as the layout, even when it names an appearance too
+    // (`resolveTemplateMesh`): the heroic Star Destroyer's dungeon is its 59 rooms, never the hull alone. A
+    // ship's template is no building and keeps its hull, the one that names the same rooms included.
+    const { resolveTemplateMesh, resolveTemplateString } = await import('../objtemplate.mjs');
+    const sd = resolveTemplateMesh(vfs, 'object/building/general/shared_space_dungeon_star_destroyer.iff') as { appearance?: string; parts?: unknown[] };
+    ok(/\.pob$/.test(sd.appearance ?? '') && (sd.parts?.length ?? 0) >= 59, `the heroic Star Destroyer's dungeon is drawn as its portal layout, ${sd.parts?.length ?? 0} pieces (${sd.appearance})`);
+    const station = 'object/ship/shared_spacestation_stardestroyer.iff';
+    const hull = resolveTemplateMesh(vfs, station) as { appearance?: string };
+    ok(/\.pob$/.test(resolveTemplateString(vfs, station, ['portalLayoutFilename']) ?? '') && /\.apt$/.test(hull.appearance ?? ''), `while the ship template that names the same rooms keeps its hull (${hull.appearance})`);
+    const plain = resolveTemplateMesh(vfs, 'object/ship/shared_star_destroyer.iff') as { appearance?: string };
+    ok(/\.apt$/.test(plain.appearance ?? ''), 'as the plain Star Destroyer keeps its own');
   }
 }
 

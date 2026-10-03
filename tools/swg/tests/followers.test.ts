@@ -432,7 +432,8 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   ok(driven > 0 && driven < books, 'a body another player\'s game keeps is refused in words before anything is done');
   ok(may > driven && may < books, 'whether the wire will let it go is asked before its lair or its row lets go of it');
   ok(leave > books && leave < add, 'and it leaves the wire before it follows, never after');
-  ok(/const options = talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven\);/.test(main), "the conversation offers no 'Follow me' to a body another browser keeps, and says why");
+  // A corvette's ticket taker's own answer is one more argument (`taker`), which leaves these as they were.
+  ok(/const options = talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven(, taker)?\);/.test(main), "the conversation offers no 'Follow me' to a body another browser keeps, and says why");
   const unshare = body(read('world/mobiles/manager.ts'), /unshare\(m: Mobile\): boolean \{/);
   ok(/if \(!this\.mayUnshare\(m\)\) return false;/.test(unshare) && /net\.leave\(id\)/.test(unshare) && /m\.unshare\(\);/.test(unshare), "the manager's own unshare refuses what may not leave, says it walked off and lets go of its name");
   const mayUnshare = body(read('world/mobiles/manager.ts'), /mayUnshare\(m: Mobile\): boolean \{/);
@@ -469,7 +470,8 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   ok(stepAt > 0 && stepAt < world.indexOf('this.mobiles?.update(dt, { now: this.simTime'), 'the world places the followers before the bodies think');
   ok(/this\.followers\.clear\(\);/.test(body(world, /private unload\(\): void \{/)), "and lets them go in its own unload, which is a travel and the select screen");
   ok(/keeps: \(m\) => this\.followers\.holds\(m\),/.test(world), 'the standing people are told which bodies the followers hold');
-  ok(/away > PEOPLE_TUNE\.drop && !\(here\.body && deps\.keeps\?\.\(here\.body\)\)/.test(people) && /deps\?\.keeps\?\.\(b\)/.test(people) && /deps\.keeps\?\.\(b\)\) continue;/.test(people), 'and put none of them down for distance, for the cap or for memory');
+  // Put down for distance, or for standing outside the copy of a dungeon the player is in (`scope`): either way never one a follower holds.
+  ok(/const outside = away > PEOPLE_TUNE\.drop[^;]*;\s*if \(outside && !\(here\.body && deps\.keeps\?\.\(here\.body\)\)\)/.test(people) && /deps\?\.keeps\?\.\(b\)/.test(people) && /deps\.keeps\?\.\(b\)\) continue;/.test(people), 'and put none of them down for distance, for the cap or for memory');
   ok(/!this\.physics\.isWalkThrough\(c\.handle\)/.test(player) && /\.setSolverGroups\(PLAYER_SOLVER\)/.test(player), 'the player walks through whoever follows them, and is in the solver as the player alone');
   ok(/for \(const c of m\.colliders\) this\.physics\.markWalkThrough\(c, on\);/.test(world), "and every one of a follower's colliders is marked (and unmarked) for it");
 }

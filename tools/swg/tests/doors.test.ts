@@ -600,6 +600,10 @@ ok(DOORS_PACK_VERSION === CONVERTER_VERSION, `the game reads the shape of doors.
     let tables = 0;
     let total = 0;
     let fallback = 0;
+    /** The one building whose doors stand on sides that name no hardpoint, and the doors of any other that do. */
+    const STAR_DESTROYER_ROOMS = 'thm_spc_star_destroyer_s01';
+    const sdFallback = new Map<string, number>();
+    const otherFallback: string[] = [];
     let unknown = 0;
     let measured = 0;
     let inPlane = 0;
@@ -621,7 +625,11 @@ ok(DOORS_PACK_VERSION === CONVERTER_VERSION, `the game reads the shape of doors.
       for (const [model, rows] of Object.entries(t.models) as [string, { portal: number; style: string; m: number[]; fallback?: boolean }[]][]) {
         for (const row of rows) {
           total++;
-          if (row.fallback) fallback++;
+          if (row.fallback) {
+            fallback++;
+            if (model === STAR_DESTROYER_ROOMS) sdFallback.set(d.name, (sdFallback.get(d.name) ?? 0) + 1);
+            else otherFallback.push(`${d.name}/${model}`);
+          }
           const s = t.styles[row.style];
           if (!s || ![s.door, s.door2, s.frame].filter(Boolean).every((id: string) => models.has(id))) unknown++;
           // In the plane of its own portal (from the manifest, mirrored as the door is), sliding across it.
@@ -651,9 +659,13 @@ ok(DOORS_PACK_VERSION === CONVERTER_VERSION, `the game reads the shape of doors.
     ok(measured > 0 && inPlane / measured > 0.97, `${inPlane} of ${measured} doors with a hardpoint hang within half a metre of their own portal's plane (worst ${worstPlane.toFixed(2)} m): the mirror and the reading agree with the buildings`);
     ok(measured > 0 && across === measured, `all ${across} of ${measured} slide across their portal, not through it (the slide, the style's move through the row's turn, at worst ${(Math.asin(Math.min(1, worstAcross)) * 180 / Math.PI).toFixed(1)} degrees off the portal's plane)`);
     note(`${acrossX} of ${measured} have their own X across the portal; the rest rise, sink or slide along another axis of their own`);
-    // Almost every door hangs on its own hardpoint: a reading that lost the hardpoints of a version (69%
-    // of the retail doors stand on 0004 sides) would hang most of them at their portals instead.
-    ok(total > 0 && fallback / total < 0.03, `${fallback} of ${total} doors (${((100 * fallback) / total).toFixed(1)}%) hang at their portal for want of a hardpoint, as measured (33 of 2,034)`);
+    // Every door hangs on its own hardpoint but the heroic Star Destroyer's: a reading that lost the
+    // hardpoints of a version (69% of the retail doors stand on 0004 sides) would hang most of them at their
+    // portals instead. The Star Destroyer's sides name none, 33 of them, and since the instances zone was
+    // converted that building stands in two packs, the gallery's and the zone's: 66 of 2,162, every one of
+    // them those same 33 sides. So no other building may lose one, and that one no more than its 33 a pack.
+    ok(total > 0 && otherFallback.length === 0, `no door but the Star Destroyer's hangs at its portal for want of a hardpoint (${otherFallback.length ? otherFallback.slice(0, 4).join(', ') : 'none'})`);
+    ok([...sdFallback.values()].every((n) => n <= 33), `and the Star Destroyer's no more than its own 33 sides in any pack (${[...sdFallback].map(([p, n]) => `${n} in ${p}`).join(', ') || 'none here'}; ${fallback} of ${total} in all, ${((100 * fallback) / Math.max(1, total)).toFixed(1)}%)`);
     // As measured when the doors were first written: 17 packs, 2,034 doors. A reading that dropped the
     // styles of a version would leave most of them out.
     if (tables >= 17) ok(total >= 0.95 * 2034, `with the ${tables} packs measured, ${total} doors stand: no version's styles have been lost (2,034 measured)`);
