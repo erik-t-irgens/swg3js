@@ -175,7 +175,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundInBackground: false,
   soundSabers: 'jka',
   nebulaLightningDamage: true,
-  nebulaOpacity: 1,
+  nebulaOpacity: 0.1,
   hudScale: 1,
   hudDpr: 1,
   hudShipCondition: true,
