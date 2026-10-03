@@ -69,7 +69,7 @@ export class MobileCatalogue {
     return p;
   }
 
-  /** The one already loaded, or null: for code that must not wait (a spawn, the ambient wildlife on arrival). */
+  /** The one already loaded, or null: for code that must not wait (a spawn, a record that arrives before it). */
   static loaded(baseUrl: string): MobileCatalogue | null {
     return landed.get(baseUrl) ?? null;
   }

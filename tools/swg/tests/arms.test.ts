@@ -169,7 +169,7 @@ const at = (u: number) => () => u;
   ok(/const def = decided\.weapon \?\? \(rack \? chooseWeapon\(choice, rack\.weapons, rand\) : null\);/.test(manager), 'the weapon its list drew is the one it holds');
   ok(/kind: decided\.hold,\s*gun: decided\.hold === 'gun' \? \(GUNS\[gunTypeFor\(def, def\.class\)\] \?\? null\) : null,/.test(manager), 'handed over as it is held, and only a gun with a bolt');
   ok(/if \(decided\.ranged\) extras = \{ \.\.\.extras, ranged: decided\.ranged \};/.test(manager), 'and a gun its list drew brings its range with it');
-  ok(/const ranged = this\.rangedStat && this\.rangedStat\.range > 0 \? this\.rangedStat : \(extras\?\.ranged \?\? null\);\s*this\.rangedRange = r\.ranged && !this\.hologram && ranged && ranged\.range > 0/.test(mobile), "which the body shoots with where its own numbers give it none");
+  ok(/const ranged = this\.rangedStat && this\.rangedStat\.range > 0 \? this\.rangedStat : given;\s*this\.rangedRange = r\.ranged && !this\.hologram && ranged && ranged\.range > 0/.test(mobile) && /this\.fitArms\(ownRanged, ownAdditive, extras\?\.ranged \?\? null\);/.test(mobile), "which the body shoots with where its own numbers give it none");
   ok(/\} else if \(choice\.kind === 'saber'\) \{/.test(manager), 'and only a lightsaber is lent Jedi Academy\'s swings: a blade or a staff swings its own carry row');
   ok(/\} else if \(e\.kind === 'melee'\) \{\s*(?:\/\/[^\n]*\n\s*)*this\.rangedRange = 0;/.test(mobile), 'a blade, a club or a staff in the hand is never shot from');
 }

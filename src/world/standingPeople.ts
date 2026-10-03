@@ -54,6 +54,7 @@ import { intoWorld, tuneTable } from './wildLife.ts';
 import { roll } from './spawnSeed.ts';
 import { SEATED_MOOD, moodOfRow } from './mobiles/moodIdle.ts';
 import { Patrol, walksRound } from './patrols.ts';
+import { seatOfMood, type SeatedRow } from './seatProps.ts';
 
 /**
  * One person, as the converter wrote them: x and z in the snapshot's frame, as every placed object
@@ -1094,6 +1095,31 @@ export class StandingPeople {
   /** Whether the rows have been carried into the world's frame yet, which everything the people of ours ask needs. */
   get inWorld(): boolean {
     return this.framed;
+  }
+
+  /**
+   * Every row somebody sits at, in the world's frame -- carried into it here, with the layout's centre,
+   * if no pass has done it yet -- each where its body is stood, the way it faces and what its mood sits
+   * on (`seatOfMood`): what the chairs and tables of ours are stood under (`seatProps.ts`). A guard's row
+   * stands in the mood of whichever side holds the world and is never one of them. Empty before the rows
+   * are in, and with no centre to carry them by.
+   */
+  seatedRows(centre: { x: number; z: number } | null): SeatedRow[] {
+    if (!this.rows.length) return [];
+    if (!this.framed) {
+      if (!centre) return [];
+      this.frame(centre);
+    }
+    const out: SeatedRow[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      if (r.gcw?.length) continue;
+      const sits = seatOfMood(moodOfRow(r));
+      if (!sits) continue;
+      const st = this.stands[i];
+      out.push({ key: r.key ?? `row${i}`, x: st.x, y: st.y, z: st.z, heading: r.heading, inside: st.inside, sits });
+    }
+    return out;
   }
 
   /**

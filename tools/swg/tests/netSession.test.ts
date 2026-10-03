@@ -100,7 +100,7 @@ function open(url = 'ws://test:8787', word = '') {
   const { net, sock } = open();
   const hello = sock.word('hello');
   ok(!!hello, 'the hello goes at once when no join word is set, as it always did');
-  ok(hello!.v === WIRE_VERSION && WIRE_VERSION === 3, 'and says which language this browser speaks: the third, which speaks of the seen creatures and the day');
+  ok(hello!.v === WIRE_VERSION && WIRE_VERSION === 4, 'and says which language this browser speaks: the fourth, which speaks of the seen creatures, the day and re-arming one already standing');
   ok(hello!.name === 'Han' && hello!.planet === 'tatooine', 'while carrying everything it always carried');
   ok(net.session.mode === 'waiting', 'though nothing is known about the server yet');
   await sleep(60);
@@ -162,6 +162,33 @@ function open(url = 'ws://test:8787', word = '') {
   ok(sharedClock.report().dayAt > 0 && Math.abs(sharedClock.report().dayFrom - 0.25) < 1e-6, 'and the anchor its day turned at is read from the greeting');
   net.disconnect();
   ok(!net.session.speaks(3) && sharedClock.report().dayAt === 0, 'and with the line put down nothing is spoken of, and no anchor is left behind');
+}
+
+{
+  // A relay of the third wire records a browser's version only when it is exactly its own, and passes a
+  // creature's bite on only to a browser it recorded. The hello that went the moment the line opened said
+  // this browser's own, so against such a relay every bite on this player was dropped while `speaks(3)`
+  // still said yes: once it has hailed, the hello is said again in its version, and every one after it too.
+  const { net, sock } = open();
+  ok(sock.word('hello')!.v === WIRE_VERSION, "the hello that goes at once says this browser's own version, since nothing is known yet");
+  sock.say({ t: 'hail', v: 3, now: Date.now(), nonce: NONCE, word: 0, ff: 0 });
+  const hellos = () => sock.words().filter((m) => m.t === 'hello');
+  ok(hellos().length === 2 && hellos()[1].v === 3 && hellos()[1].name === 'Han' && hellos()[1].planet === 'tatooine', `a relay of the third wire is said it again in the third, everything else as it was (${hellos().map((h) => h.v).join(', ')})`);
+  net.setHello({ ...HELLO, planet: 'naboo' });
+  ok(hellos().length === 3 && hellos()[2].v === 3, 'and every hello after it says the third too');
+  net.disconnect();
+}
+
+{
+  // A server of this browser's own wire, or a newer one, keeps the first hello: nothing is said twice.
+  const { net, sock } = open();
+  sock.say({ t: 'hail', v: WIRE_VERSION, now: Date.now(), nonce: NONCE, word: 0, ff: 0 });
+  ok(sock.words().filter((m) => m.t === 'hello').length === 1, 'a server of the same wire is said the hello once');
+  net.disconnect();
+  const newer = open();
+  newer.sock.say({ t: 'hail', v: WIRE_VERSION + 1, now: Date.now(), nonce: NONCE, word: 0, ff: 0 });
+  ok(newer.sock.words().filter((m) => m.t === 'hello').length === 1, 'and so is a newer one, which takes the lesser of the two itself');
+  newer.net.disconnect();
 }
 
 {

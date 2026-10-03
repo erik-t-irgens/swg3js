@@ -1805,7 +1805,7 @@ export class LayoutStreamer {
     for (const mesh of made) this.scene.add(mesh);
     if (!this.prepare) return;
     void this.prepare(made).catch((err) => {
-      console.warn('snapshot: a buildingâ€™s rooms could not be compiled ahead of being drawn', err);
+      console.warn('snapshot: a building’s rooms could not be compiled ahead of being drawn', err);
     });
   }
 
@@ -2019,7 +2019,7 @@ export class LayoutStreamer {
       // Squared, with the blocker's own disc folded into the bound rather than subtracted from a
       // root: `Math.hypot` is a call and a square root apiece, and this list is walked up to four
       // times a step over as many as fourteen hundred records. `dist - radius > reach` and
-      // `distÂ² > (reach + radius)Â²` are the same test for non-negative numbers.
+      // `dist² > (reach + radius)²` are the same test for non-negative numbers.
       const dx = b.x - x;
       const dz = b.z - z;
       const far = reach + b.radius;

@@ -27,9 +27,12 @@ import {
   pushHistory,
   readStore,
   searchScore,
+  setAtStart,
+  startCalls,
   textTable,
   toJsonText,
   togglePin,
+  TUNING_HELPERS,
   writeStore,
   type ConsoleLike,
   type ConsoleLine,
@@ -275,6 +278,26 @@ const entry = (b: ViewBranch, key: string) => b.entries().find((e) => e.key === 
   const p2 = togglePin(p1.list, { helper: 'hud', on: 'debug', args: '  ' });
   ok(!p2.pinned && p2.list.length === 0, 'and pinning it again unpins it');
   ok(callText({ helper: '__sharedDay', on: 'window', args: ' { release: true } ' }) === '__sharedDay({ release: true })', 'a kept call reads as the call it is');
+
+  // A pin's own tick to run it at start: off unless ticked, carried by a pin and nothing else, written
+  // and read back as the plain `true` it is, and lost with the pin.
+  const reach = { helper: 'reach', on: 'debug' as const, args: '{ objects: 3000 }' };
+  const god = { helper: 'god', on: 'debug' as const, args: 'true' };
+  let pins = togglePin(togglePin([], reach).list, god).list;
+  ok(startCalls(pins).length === 0, 'a knob pinned is not run at start until its tick is set: pinned is not persisted');
+  pins = setAtStart(pins, reach, true);
+  ok(startCalls(pins).map(callText).join(' ') === 'reach({ objects: 3000 })', 'ticked, it is one of the calls run at start');
+  pins = setAtStart(pins, god, true);
+  ok(startCalls(pins).map((p) => p.helper).join(' ') === 'reach god', 'and they run in the order they were pinned');
+  ok(setAtStart(pins, { helper: 'fog', on: 'debug', args: '' }, true).every((p, i) => p === pins[i]), 'a call that is not pinned is not ticked');
+  const kept = readStore(writeStore({ history: [{ ...reach, at: 1, atStart: true } as never], pinned: pins, last: { ...god, atStart: true } }));
+  ok(kept.pinned.filter((p) => p.atStart === true).length === 2, 'the ticks are kept with the pins and read back');
+  ok(kept.history.every((h) => !('atStart' in h)) && !!kept.last && !('atStart' in kept.last), 'and nothing but a pin carries one, written or read');
+  ok(readStore(JSON.stringify({ pinned: [{ helper: 'reach', args: '', atStart: 'yes' }] })).pinned[0].atStart === undefined, 'a tick that is not the plain true it was written as is no tick');
+  pins = setAtStart(pins, reach, false);
+  ok(startCalls(pins).map((p) => p.helper).join(' ') === 'god', 'untick it and it no longer runs');
+  const unpinned = togglePin(pins, god).list;
+  ok(startCalls(unpinned).length === 0 && startCalls(togglePin(unpinned, god).list).length === 0, 'and unpinning takes the tick with it: pinned again, it starts unticked');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -290,6 +313,11 @@ const entry = (b: ViewBranch, key: string) => b.entries().find((e) => e.key === 
   ok(groups.flatMap((g) => g.entries).length === helpers.length, 'and every helper is listed exactly once');
   const all = DEBUG_GROUPS.flatMap((g) => g.helpers);
   ok(new Set(all).size === all.length, `no helper is filed under two groups (${all.length})`);
+  // The knobs: a group of their own, first, holding every one the owner asked for in one place.
+  ok(DEBUG_GROUPS[0].title === 'Tuning' && DEBUG_GROUPS[0].helpers === TUNING_HELPERS, 'the knobs are the first group, Tuning');
+  for (const k of ['reach', 'lod', 'god', 'day', 'flora', 'bladeGlow', 'torch', 'hover', 'nebulae', 'difficulty', 'arm', 'seats']) ok(TUNING_HELPERS.includes(k), `and ${k} is one of them`);
+  const tuning = groupHelpers(TUNING_HELPERS.map((n) => e(n)).concat([e('perf')]));
+  ok(tuning[0].title === 'Tuning' && tuning[0].entries.length === TUNING_HELPERS.length && !tuning.slice(1).some((g) => g.entries.some((h) => TUNING_HELPERS.includes(h.name))), 'and the menu lists each of them there and nowhere else');
 
   ok(searchScore(e('perf'), 'perf') === 0 && searchScore(e('perfMarks'), 'perf') === 1 && searchScore(e('flowPerf'), 'perf') === 2, 'the search ranks the name itself, then a name starting with it, then one holding it');
   ok(searchScore(e('bench', 'draw thirty frames'), 'frames') === 4 && searchScore(e('bench', 'draw thirty frames'), 'sound') === -1, 'and finds a helper by what its row says, after all of those');

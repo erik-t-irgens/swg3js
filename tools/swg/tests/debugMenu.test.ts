@@ -14,6 +14,8 @@
 //   lined up.
 // - Shutting it gives the mouse back through the game's own check (`handBackMouse`), so a panel or the
 //   map it was opened over keeps the cursor instead of having the pointer locked under it.
+// - A pin ticked to run at start runs once the first world is up, in the order pinned, each waited on, a
+//   throw or a helper gone said and stepped over, and the whole said on the message line: never silently.
 //
 // Everything here is synthetic: made-up helpers on a made-up `__debug`, nothing read from the game.
 import assert from 'node:assert/strict';
@@ -314,6 +316,8 @@ const gameHeard: string[] = [];
 // The helpers the menu lists: one that answers at once, one that is waited on, one that prints a
 // table and one that answers with a report of several lines.
 let finishSlow: (v: unknown) => void = () => {};
+const startOrder: string[] = [];
+let finishSecond: () => void = () => {};
 win.__debug = {
   quick: () => 42,
   slow: () =>
@@ -326,6 +330,23 @@ win.__debug = {
     return 7;
   },
   report: () => 'perf: 120 frames of play\n  frame  p50 6.9  p95 8.1',
+  // The pins run at start: one that answers at once, one that answers later, one that throws, one that is
+  // gone by the time the start comes round, and one pinned but never ticked.
+  first: (n: number) => void startOrder.push(`first ${n}`),
+  second: () =>
+    new Promise((resolve) => {
+      startOrder.push('second began');
+      finishSecond = () => {
+        startOrder.push('second done');
+        resolve(2);
+      };
+    }),
+  boom: () => {
+    startOrder.push('boom');
+    throw new Error('kaboom');
+  },
+  vanish: () => void startOrder.push('vanish'),
+  never: () => void startOrder.push('never'),
 };
 
 const { DebugMenu } = await import('../../../src/ui/debugMenu.ts');
@@ -447,6 +468,51 @@ const report = () => menu.report() as { picked: string | null; args: string; bus
   const rule = /\.dbg-line\.l-fixed,\s*\.dbg-out pre\.dbg-fixed\s*\{([^}]*)\}/.exec(sheet)?.[1] ?? '';
   ok(/white-space:\s*pre;/.test(rule) && /word-break:\s*normal/.test(rule), `and the stylesheet draws both unwrapped, so a wide row scrolls sideways (${rule.trim()})`);
   ok(sheet.indexOf('.dbg-line.l-fixed') > sheet.indexOf('.dbg-line {'), 'after the wrapping rule it overrides');
+}
+
+// --- the pins run at start ---------------------------------------------------------------------------------
+//
+// A pin ticked ▷ runs again once the first world is up after a reload, and the safety of it is that it is
+// never silent: god mode or a server's day put back at start is said on the message line as it runs. So the
+// run is driven here through the menu itself -- in the order pinned, each waited on, a throw and a helper
+// gone said in words and stepped over, one pinned but not ticked left alone -- and the tick is clicked.
+{
+  await menu.drive({ pick: 'first', args: '1', pin: true, atStart: true });
+  await menu.drive({ pick: 'second', args: '', pin: true, atStart: true });
+  await menu.drive({ pick: 'boom', args: '', pin: true, atStart: true });
+  await menu.drive({ pick: 'vanish', args: '', pin: true, atStart: true });
+  await menu.drive({ pick: 'never', args: '', pin: true });
+  const rep = () => menu.report() as { atStart: string[]; ranAtStart: string[] | null; pinned: string[] };
+  ok(rep().atStart.join(' ') === 'first(1) second() boom() vanish()', `four pins are ticked to run at start, in the order pinned, and the fifth is only pinned (${rep().atStart.join(' ')})`);
+  const kept = [...store.values()].find((v) => v.includes('"pinned"')) ?? '';
+  ok((kept.match(/"atStart":true/g) ?? []).length === 4, 'and the ticks are kept with the pins, so a reload finds them');
+  delete (win.__debug as Record<string, unknown>).vanish;
+  const said: string[] = [];
+  const running = menu.runAtStart((line) => void said.push(line));
+  await new Promise((r) => setImmediate(r));
+  ok(startOrder.join(', ') === 'first 1, second began', `they run in the order pinned, and one that answers later is waited on before the next begins (${startOrder.join(', ')})`);
+  ok(said.length === 0, 'and nothing is said until the run is over');
+  finishSecond();
+  const ran = await running;
+  ok(startOrder.join(', ') === 'first 1, second began, second done, boom', `the rest follow once it answers, and the one only pinned never runs (${startOrder.join(', ')})`);
+  ok(ran.length === 4 && /threw: kaboom/.test(ran[2]) && /there is no vanish now/.test(ran[3]), `a throw and a helper that has gone are said in words and stepped over (${ran.join(' | ')})`);
+  ok(said.length === 1 && ['__debug.first(1)', '__debug.second()', 'kaboom', 'vanish'].every((w) => said[0].includes(w)), `and the whole run is said once on the message line, naming every call: nothing is put back silently (${said[0]})`);
+  ok(JSON.stringify(rep().ranAtStart) === JSON.stringify(ran), "the console's report says what the run came to");
+
+  // The tick beside a pin, clicked: on, kept, and off again.
+  const rowOf = (text: string) => panel.querySelector('.dbg-pins')!.querySelectorAll('.dbg-saved').find((r) => r.querySelector('.dbg-item')?.textContent === text);
+  const tick = () => rowOf('never()')!.querySelector('.dbg-start')!;
+  ok(!tick().classList.contains('on') && tick().textContent === '▷', 'a pin not ticked shows the open mark');
+  click(tick());
+  ok(tick().classList.contains('on') && tick().textContent === '▶' && rep().atStart.includes('never()'), 'clicked, it is ticked to run at start');
+  ok(/"helper":"never"[^}]*"atStart":true/.test([...store.values()].find((v) => v.includes('"pinned"')) ?? ''), 'and the tick is saved at once');
+  click(tick());
+  ok(!tick().classList.contains('on') && !rep().atStart.includes('never()'), 'clicked again, it is not');
+  ok(panel.contains(doc.activeElement), 'and the keyboard stays in the window through both');
+
+  // Where main.ts runs them: once a page, after the first world's loading screen has lifted, on the message line.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  ok(/await this\.loadingScreen\.hide\(\);[\s\S]{0,400}if \(!this\.ranAtStart\) \{\s*this\.ranAtStart = true;\s*void this\.debugMenu\.runAtStart\(\(line\) => this\.messages\.system\(line\)\);/.test(main), 'the game runs the ticked pins once a page, after the first loading screen lifts, and says them on the message line');
 }
 
 // --- shutting it -------------------------------------------------------------------------------------------

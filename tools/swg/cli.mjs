@@ -1821,7 +1821,7 @@ function customizationList(vfs, info) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** --var=a=1,b=2 â†’ Map of customization variable values (matched by full or short name). */
+/** --var=a=1,b=2 → Map of customization variable values (matched by full or short name). */
 function customizationValues(spec) {
   const values = new Map();
   for (const part of (spec ?? '').split(',')) {
@@ -4534,10 +4534,10 @@ switch (cmd) {
       // The reasons, most common first, so a bug that fails every item shows as one line rather than hiding behind the usual few.
       const reasons = new Map();
       for (const f of failed) {
-        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, 'â€¦');
+        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, '…');
         reasons.set(why, (reasons.get(why) ?? 0) + 1);
       }
-      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} Ã— ${why}`).join('; ')}`);
+      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} × ${why}`).join('; ')}`);
     }
     break;
   }
@@ -5123,7 +5123,7 @@ switch (cmd) {
         }
         // The hardpoint's own slot (weapon1 for weapon1_pos1) when the names carry one, else the
         // unnumbered ones; the lowest style (s01) of those; and every part of that style, since a
-        // gun comes as its parts (â€¦_0, â€¦_1) on the one hardpoint.
+        // gun comes as its parts (…_0, …_1) on the one hardpoint.
         const base = (t) => t.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
         const numbered = slot ? candidates.filter((t) => new RegExp(`${kind}${slot}(_|$)`, 'i').test(base(t))) : [];
         const pool = numbered.length ? numbered : candidates.filter((t) => !new RegExp(`${kind}\\d`, 'i').test(base(t)));

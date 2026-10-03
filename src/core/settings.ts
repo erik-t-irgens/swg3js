@@ -32,7 +32,7 @@ export interface Settings extends FxSettings {
   terrainRadius: number;
   /** Coarse far tiles each way. */
   farRadius: number;
-  /** How many creatures and NPCs the spawner may have out at once (the planet's own wildlife is not counted). */
+  /** How many creatures and NPCs the spawner may have out at once (nothing the world itself stands is counted). */
   mobileCap: number;
   /** Metres past which a creature or NPC holds its pose until it comes nearer. */
   mobileAnimRange: number;

@@ -8,8 +8,7 @@ import { MobileManager } from './mobiles/manager';
 import type { Mobile } from './mobiles/mobile';
 import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
-import { ambientOverrides } from './mobiles/spawning';
-import { scratchWanted, wildlifeWanted } from './spawnSeed.ts';
+import { scratchWanted } from './spawnSeed.ts';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
@@ -3877,6 +3876,42 @@ export class World {
     return this.layoutStream?.nearestPlaced(templates, at, reach) ?? null;
   }
 
+  /**
+   * Which world this is, as a number every unload moves on (`loadGeneration`): the same planet loaded again
+   * after a trip to the select screen is a different world here, which a pack's name cannot say. What a
+   * caller that stands things across several awaits checks after each one (`App.standSeats`), so a run
+   * begun for the last world never puts anything into the next.
+   */
+  get generation(): number {
+    return this.loadGeneration;
+  }
+
+  /** Whether this world's own pack carries a model, so a thing drawn with it needs no other pack behind the world. */
+  packHas(model: string): boolean {
+    return !!this.pack?.find(model);
+  }
+
+  /** The kept list `dataPlacedNear` reads a building's furniture into. */
+  private readonly furnitureScratch: PlacedObject[] = [];
+
+  /**
+   * Whether something the world's own data placed -- a snapshot object, whose template is the game's own
+   * path, never a thing put down in play under a name of its own -- stands within `reach` metres of a point
+   * and is what `test` takes its template for: inside a building only on the same floor (`level` metres
+   * either way), out in the open anywhere over the point. What the seats of ours ask before standing a
+   * chair or a table the data already has (`seatProps.ts`). Asked once a world, never in a frame.
+   */
+  dataPlacedNear(test: (template: string) => boolean, x: number, y: number, z: number, reach: number, level: number): boolean {
+    const stream = this.layoutStream;
+    if (!stream) return false;
+    const inside = this.furnitureScratch;
+    stream.containedNear(x, z, reach, inside);
+    for (const o of inside) if (o.template.startsWith('object/') && Math.abs(o.y - y) <= level && test(o.template)) return true;
+    inside.length = 0;
+    for (const o of stream.objectsNear(x, z, reach)) if (o.template.startsWith('object/') && Math.hypot(o.x - x, o.z - z) <= reach && test(o.template)) return true;
+    return false;
+  }
+
   /** Materials whose shaders have been asked for ahead of their first draw. */
   private readonly compiledMaterials = new WeakSet<THREE.Material>();
 
@@ -4661,14 +4696,11 @@ export class World {
     this.eyeMeasured = false;
     this.eyeSpeedNow = 0;
     this.sweepDetail(center, 0, true);
-    // Nothing stands on its own any more. The planet's own wildlife used to be stood here -- through
-    // the catalogue (its own model, clips and brain) when it had landed and had the species, else the
-    // old creatures -- and it is now behind one switch, off unless this browser's storage says
-    // otherwise (`localStorage['swg.wildlife'] = '1'`, WILDLIFE_KEY in src/world/spawnSeed.ts). What
-    // is alive in a world is what somebody stood there, and what an admin stands belongs to the
-    // world. The switch is read once, here, and short-circuits before the catalogue is even asked, so
-    // an arrival with it off does exactly as much work as it did before and no more.
-    if (wildlifeWanted() && !this.ambientFromCatalogue(center)) this.creatures.spawnAround(center);
+    // What is alive in a world is what its data puts there -- the lairs, camps and nests laid on its
+    // spawn areas (`wildLife.ts`), the people at their posts (`standingPeople.ts`), the people of ours
+    // in the buildings the data leaves empty (`ambient/`) -- and what an admin stands. The planet's one
+    // species stood in a ring round the arrival point, which is what a world was before any of that, is
+    // gone, switch and all; the NPC tab still stands one of it by hand (`CreatureManager.spawnAt`).
     // The people the server stood here, before the screen lifts rather than after: every one within
     // range is stood in one forced pass, so their models are loaded and their programs compiled by
     // the warm-up that follows instead of a few at a time on live frames as the player walks in.
@@ -4685,8 +4717,8 @@ export class World {
     // to ride before this game had a garage or a world with anything in it, and both are now
     // furniture in a game that has its own -- so they are behind one switch, off unless this
     // browser's storage says otherwise (`localStorage['swg.scratch'] = '1'`, SCRATCH_KEY in
-    // src/world/spawnSeed.ts), exactly as the wildlife is. Read once, here, so an arrival with it
-    // off does no work at all for either.
+    // src/world/spawnSeed.ts). Read once, here, so an arrival with it off does no work at all for
+    // either.
     if (!scratchWanted()) return;
     // Here rather than in `loadPack`, because here the ground round the arrival has already been
     // generated (the `stream` above) and the loading screen's own compile still follows, so their
@@ -4699,23 +4731,6 @@ export class World {
     const speeder = createPlaceholderSpeeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
     markActor(speeder.group);
     this.vehicles.push(speeder);
-  }
-
-  /**
-   * The planet's species stood as the catalogue's mobiles, `count` of them about the arrival point,
-   * with the planet's own health, blow and temper. Never waits: the catalogue is read only if it has
-   * already landed (this runs at arrival, in a frame), and the spot is the terrain's own height,
-   * which needs no stepped physics. False when anything is missing, leaving it to the old path.
-   */
-  private ambientFromCatalogue(center: THREE.Vector3): boolean {
-    const def = this.planet.creatures;
-    if (!def.count || this.planet.space || !this.mobiles) return false;
-    const cat = MobileCatalogue.loaded(import.meta.env.BASE_URL);
-    const entry = cat?.resolve(def.name);
-    if (!cat || !entry || !cat.ready(entry).ok) return false;
-    const n = this.mobiles.spawnAmbient(entry, def.count, center, ambientOverrides(def));
-    if (n) console.info(`creatures: ${def.name} stood from the catalogue (${entry.id}), ${n} about`);
-    return n > 0;
   }
 
   /** Each ship followed through a building's rooms: where it was last sampled, its room, and the wait until the next sample. */

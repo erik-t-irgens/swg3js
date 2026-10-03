@@ -23,8 +23,8 @@ import type { Vehicle } from './vehicle';
 
 /**
  * How high a plain jump reaches (m): the walk is Jedi Academy's, so it is that jump's own arithmetic,
- * `jumpVelocityÃ‚Â² / 2Ã‚Â·gravity` in engine units at `UNIT` metres a unit. Not invented Ã¢â‚¬â€ it is read from the
- * movement's own numbers Ã¢â‚¬â€ and it is the ceiling everything about letting go has to stay under, since a
+ * `jumpVelocity² / 2·gravity` in engine units at `UNIT` metres a unit. Not invented — it is read from the
+ * movement's own numbers — and it is the ceiling everything about letting go has to stay under, since a
  * Bounty Hunter (and a Jedi with no force left) has no higher jump than this.
  */
 export const JUMP_APEX = ((JKA.jumpVelocity * JKA.jumpVelocity) / (2 * JKA.gravity)) * UNIT;
@@ -49,7 +49,7 @@ export const JUMP_APEX = ((JKA.jumpVelocity * JKA.jumpVelocity) / (2 * JKA.gravi
  * - `lift`: how far over the surface the figure is set down when the boots take hold (m). (next take)
  * - `zoom`: how far in the camera is pulled when the boots take hold, as the third-person distance counts it. (next take)
  * - `note`: how long a refusal ("nothing within reach") stays in the prompt (s).
- * - `gravity`: the pull toward the surface (m/sÃ‚Â²), the walk's own so that a corpse falls to the face the
+ * - `gravity`: the pull toward the surface (m/s²), the walk's own so that a corpse falls to the face the
  *   walker stood on; the zone's own out here is none at all. 0 takes the zone's. (next take)
  */
 export const SURFACE_ROOM = {
@@ -168,7 +168,7 @@ const pivotA = new THREE.Matrix4();
 const pivotB = new THREE.Matrix4();
 
 /**
- * A transform turned about a point: `m` becomes `translate(pivot) Ã‚Â· q Ã‚Â· translate(Ã¢Ë†â€™pivot) Ã‚Â· m`. The room's
+ * A transform turned about a point: `m` becomes `translate(pivot) · q · translate(−pivot) · m`. The room's
  * surface is turned about the walker's own feet, which is why the walker never moves when it does.
  */
 export function turnAbout(q: THREE.Quaternion, pivot: THREE.Vector3, m: THREE.Matrix4): THREE.Matrix4 {
@@ -396,7 +396,7 @@ export class SurfaceRoom implements WalkableRoom {
     bodyFrame(this.source, mSource);
     mSourceInv.copy(mSource).invert();
     bodyFrame(p.source, mPiece);
-    // room = toRoom Ã‚Â· (sourceÃ¢ÂÂ»Ã‚Â¹ Ã‚Â· piece): the patch the room was cut from lands on the transform itself.
+    // room = toRoom · (source⁻¹ · piece): the patch the room was cut from lands on the transform itself.
     mRel.multiplyMatrices(mSourceInv, mPiece).premultiply(this.toRoom);
     mRel.decompose(vTmp2, qTmp, scaleTmp);
     p.body.setTranslation({ x: vTmp2.x, y: vTmp2.y, z: vTmp2.z }, false);

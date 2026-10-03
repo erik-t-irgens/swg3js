@@ -472,7 +472,7 @@ const stairs = (flip = false): World => world((w) => addMesh(w, flightMesh(6, RI
   ok(/s\.along = support \? support\.at\[2\] : 0;/.test(shape) && /s\.rim = support \? support\.radius/.test(shape) && /s\.step = stepHeightOf\(this\.entry\.size\?\.stepHeight, this\.scale\);/.test(shape) && /s\.feet = this\.plan\.feet;/.test(shape), '`Mobile.stepShapeNow` is its support, its template\'s own step height at its size, and its origin\'s height over its feet');
   const ground = mobileSrc.slice(mobileSrc.indexOf('  private checkGround('), mobileSrc.indexOf('  private think('));
   ok(ground.includes(`this.deps.physics.groundDistance(t.x, t.y, t.z, this.plan.feet + ${GROUND_REACH}, this.body, filter)`), `its ground ray reaches ${GROUND_REACH} m under its feet, as this test's walk casts it`);
-  ok((mobileSrc.match(/resetStepWalker\(this\.stepWalk\)/g) ?? []).length === 4, '... and the step-up is put back when it changes hands, when it is stood again, when it gets up off a seat and when it is stood out of a building coming down');
+  ok((mobileSrc.match(/resetStepWalker\(this\.stepWalk\)/g) ?? []).length === 3, '... and the step-up is put back when it changes hands, when it gets up off a seat and when it is stood out of a building coming down (nothing stands a body again in place any more)');
   ok(/if \(this\.liftLagY !== 0 \|\| this\.liftLagZ !== 0\) this\.easeLift\(dt\);/.test(mobileSrc.slice(mobileSrc.indexOf('  update('), mobileSrc.indexOf('  private stepDriven('))), '... and the picture is eased after a lift on every frame the body is its own');
 }
 

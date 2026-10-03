@@ -4,7 +4,7 @@
 import type { Look } from '../player/look';
 import type { ShipFit } from '../vehicles/shipFit';
 import { sharedClock } from '../world/sharedClock.ts';
-import { SESSION, Session, WIRE_VERSION, type CharacterSummary, type Settlement } from './session.ts';
+import { SESSION, Session, type CharacterSummary, type Settlement } from './session.ts';
 import { rideFields, type PeerAboard } from './aboardMath.ts';
 
 export interface Hello {
@@ -150,6 +150,12 @@ interface ServerWord {
  */
 const PING_TICK = 1000;
 
+/**
+ * The first wire whose relay reads the version a hello says, and so the first a hello said in a newer one
+ * than the server's has to be said again for (`Session.helloVersion`).
+ */
+const HELLO_VERSION_READ = 3;
+
 const STORAGE = 'swg.server';
 
 export class Net {
@@ -178,6 +184,8 @@ export class Net {
    * nothing in the game to say why.
    */
   private greetedEarly = false;
+  /** The version the last hello on this line said; nought before one has gone. */
+  private helloSaid = 0;
   status: Status = 'off';
   id = 0;
   readonly peers = new Map<number, Peer>();
@@ -246,14 +254,21 @@ export class Net {
     // Before the handshake has settled the hello has not gone yet, and the one the handshake sends will
     // be this one: a server started with a join word listens to nothing until it knows who is there, so
     // a hello sent ahead of the claim would simply be dropped and never sent again.
-    if (this.online && this.greeted) this.send({ t: 'hello', v: WIRE_VERSION, ...hello });
+    if (this.online && this.greeted) this.sayHello(hello);
   }
 
   /** The hello, once per line, after the handshake has settled one way or the other. */
   private greet(): void {
     if (this.greeted || this.socket?.readyState !== WebSocket.OPEN) return;
     this.greeted = true;
-    if (this.hello) this.send({ t: 'hello', v: WIRE_VERSION, ...this.hello });
+    if (this.hello) this.sayHello(this.hello);
+  }
+
+  /** A hello said, in the version the session says to say it in (`Session.helloVersion`), and that version kept. */
+  private sayHello(hello: Hello): void {
+    const v = this.session.helloVersion();
+    this.helloSaid = v;
+    this.send({ t: 'hello', v, ...hello });
   }
 
   disconnect(): void {
@@ -302,6 +317,7 @@ export class Net {
       this.retryDelay = 1000;
       this.greeted = false;
       this.greetedEarly = false;
+      this.helloSaid = 0;
       this.setStatus('online', this.url);
       this.session.opening();
       // With no join word the hello goes at once, exactly as it always did, and the claim follows the
@@ -407,6 +423,12 @@ export class Net {
         if (this.greetedEarly && server.word === 1) this.greeted = false;
         this.greetedEarly = false;
         this.greet();
+        // A hello that went at once, before the server had said which wire it speaks, said this browser's
+        // own. A relay of the third wire records a browser's version only when it is exactly its own and
+        // passes a creature's bite on only to one it recorded, so it is said again in the server's version;
+        // the second wire's relay read no version at all and is not sent a second hello it has no use for.
+        const v = this.session.helloVersion();
+        if (this.greeted && this.hello && this.helloSaid > v && v >= HELLO_VERSION_READ) this.sayHello(this.hello);
         // The round trips are only worth taking while the clock really is the server's: a greeting
         // whose clock could not be true leaves the day on this machine's own, and a timer asking
         // nothing every few seconds for the life of the page is worse than no timer at all.

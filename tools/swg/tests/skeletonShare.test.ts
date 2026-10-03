@@ -438,7 +438,7 @@ function skinnedUnder(root: THREE.Object3D): THREE.SkinnedMesh[] {
   ok(told(mobile, /private die\(\): void \{/) && told(mobile, /startRagdoll\(\): void \{/) && told(mobile, /private endRagdoll\(\): void \{/), 'a creature dying, falling to a ragdoll and let go of it asks the cull again');
   ok(told(mobile, /knock\(dir: THREE\.Vector3, power: number\): void \{/) && told(mobile, /private stoodUp\(\): void \{/), 'knocked down and up again');
   ok(told(mobile, /sit\(x: number, y: number, z: number, heading: number\): void \{/) && told(mobile, /rise\(x: number, z: number\): void \{/), 'sat and risen, whose idle may lay it down');
-  ok(told(mobile, /respawn\(x: number, y: number, z: number\): void \{/), 'and stood again, a clip-played death having had no ragdoll to end');
+  ok(/this\.refitCull\(\);/.test(body(mobile, /private unequip\(\): void \{/)) && !/respawn\(x: number, y: number, z: number\): void \{/.test(mobile), 'and re-armed, its cull fitted again to what it holds; nothing stands a body again in place, so a death is never undone under its cull');
   const attach = body(mobile, /attach\(model: MobileBody, pack: PackAsset \| null, extras\?: MobileExtras\): \{ ok: boolean; warning: string \| null \} \{/);
   ok(attach.lastIndexOf('this.applyCull();') > attach.indexOf('this.roles = rolesFor('), "and when it is hung, once its idle is known");
   const applied = body(mobile, /  applyCull\(\): void \{/);

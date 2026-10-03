@@ -66,17 +66,11 @@ export class Creature implements Living {
   readonly body: RAPIER.RigidBody;
   readonly collider: RAPIER.Collider;
   readonly halfHeight: number;
-  /**
-   * Its place in the one list of living things, for as long as it lives. A respawn is a new life,
-   * so it takes a new key: a brain that remembered this body as its target must not find the fresh
-   * wildlife two hundred metres away under the same key and keep chasing it.
-   */
-  key = nextLivingKey();
+  /** Its place in the one list of living things, for as long as it lives: one life, one key. */
+  readonly key = nextLivingKey();
   readonly label: string;
   readonly side: Side = 'wild';
   readonly aggression: Aggression;
-  /** Stood by hand (the NPC tab, `__debug.creature`): it is taken away when it dies rather than coming back as wildlife. */
-  spawned = false;
   /** Told the manager who struck, so the herd may turn together. */
   alert: ((self: Creature, source: Living) => void) | null = null;
   hp: number;
@@ -239,44 +233,6 @@ export class Creature implements Living {
     this.body.setEnabled(true);
   }
 
-  respawn(x: number, y: number, z: number): void {
-    this.dead = false;
-    // A fresh life is a fresh body as far as anything holding a key is concerned.
-    this.key = nextLivingKey();
-    this.endRagdoll();
-    if (this.model) {
-      this.oneShot?.stop();
-      this.oneShot = null;
-      this.current = null;
-      this.play('idle');
-    }
-    // Its whole at the difficulty in force, as it was stood with: the planet's own number would come
-    // back as twice its bar at a half.
-    this.hp = this.maxHp;
-    this.stunned = 0;
-    this.tumble = 0;
-    // Everything a body can carry goes with the old one: a creature killed while burning used to
-    // come back still burning, and one killed mid-swing came back with its attack still cooling.
-    this.dotDps = 0;
-    this.dotLeft = 0;
-    this.slowed = 0;
-    this.held = false;
-    this.attackCd = 0;
-    this.deadTimer = 0;
-    this.provoked = null;
-    this.provokedFor = 0;
-    this.moving = false;
-    this.speed = 0;
-    this.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
-    this.body.lockRotations(true, true);
-    this.body.setTranslation({ x, y: y + this.halfHeight + 0.05, z }, true);
-    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    this.body.setRotation({ x: 0, y: Math.sin(this.heading / 2), z: 0, w: Math.cos(this.heading / 2) }, true);
-    this.pos.set(x, y, z);
-    this.target.copy(this.pos);
-    this.retarget = 0;
-  }
 
   /** Seconds left in a Force slow: it moves and animates at a crawl. */
   slowed = 0;
@@ -569,9 +525,9 @@ export class CreatureManager {
   }
 
   /**
-   * Fetch and parse the converted model the first time one of these creatures is stood. When the
-   * catalogue stands the planet's wildlife (`World.ambientFromCatalogue`) nothing is added here,
-   * and a GLB for bodies that never stand is never downloaded.
+   * Fetch and parse the converted model the first time one of these creatures is stood. Nothing stands
+   * one but the NPC tab, and only where the catalogue has no such species, so a GLB for bodies that
+   * never stand is never downloaded.
    */
   private ensureModel(): void {
     if (this.modelAsked) return;
@@ -591,18 +547,12 @@ export class CreatureManager {
     applyDifficultyTo(this.creatures, scale);
   }
 
-  spawnAround(center: THREE.Vector3): void {
-    for (let i = 0; i < this.planet.creatures.count; i++) {
-      const p = this.pickSpot(center);
-      this.add(new Creature(this.planet.creatures, this.mat, this.physics, p.x, p.y, p.z));
-    }
-  }
-
-  /** Stand one of the planet's creatures at a point (the NPC tab's spawn); it is not recycled as wildlife. */
+  /**
+   * Stand one of the planet's creatures at a point: the NPC tab's spawn, and the only way one is ever
+   * stood since the planet's own ring of them round the arrival point went.
+   */
   spawnAt(x: number, z: number): Creature {
-    const c = this.add(new Creature(this.planet.creatures, this.mat, this.physics, x, this.terrain.heightAt(x, z), z));
-    c.spawned = true;
-    return c;
+    return this.add(new Creature(this.planet.creatures, this.mat, this.physics, x, this.terrain.heightAt(x, z), z));
   }
 
   private add(c: Creature): Creature {
@@ -638,38 +588,19 @@ export class CreatureManager {
     return n;
   }
 
-  private pickSpot(center: THREE.Vector3): THREE.Vector3 {
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 35 + Math.random() * 90;
-      const x = center.x + Math.sin(a) * r;
-      const z = center.z + Math.cos(a) * r;
-      const h = this.terrain.heightAt(x, z);
-      if (h > this.terrain.waterLevel + 0.5) return new THREE.Vector3(x, h, z);
-    }
-    return new THREE.Vector3(center.x, this.terrain.heightAt(center.x, center.z), center.z);
-  }
-
   update(dt: number, playerPos: THREE.Vector3, onAttack: (damage: number, from?: THREE.Vector3, source?: Living) => void): void {
     for (let i = this.creatures.length - 1; i >= 0; i--) {
       const c = this.creatures[i];
-      const spent = (c.dead && c.deadTimer <= 0) || c.pos.y < this.terrain.floor - 20;
-      // One stood by hand lies where it fell and is then taken away, which is what the panel's
-      // own note has always claimed. It is never recycled by distance: walking away from one you
-      // put there by hand must not quietly delete it.
-      if (c.spawned) {
-        if (spent) {
-          this.group.remove(c.group);
-          this.byCollider.delete(c.collider.handle);
-          c.dispose();
-          this.creatures.splice(i, 1);
-          this.version++;
-          continue;
-        }
-      } else if (spent || c.pos.distanceTo(playerPos) > 260) {
-        // The planet's own wildlife comes back somewhere else.
-        const p = this.pickSpot(playerPos);
-        c.respawn(p.x, p.y, p.z);
+      // Every one was stood by hand: it lies where it fell and is then taken away, which is what the
+      // panel's own note has always claimed. It is never recycled by distance: walking away from one
+      // you put there by hand must not quietly delete it.
+      if ((c.dead && c.deadTimer <= 0) || c.pos.y < this.terrain.floor - 20) {
+        this.group.remove(c.group);
+        this.byCollider.delete(c.collider.handle);
+        c.dispose();
+        this.creatures.splice(i, 1);
+        this.version++;
+        continue;
       }
       c.update(dt, this.terrain, playerPos, onAttack);
     }

@@ -125,7 +125,9 @@ import { wildLife, NEST_MODEL_TUNE, WILD_TUNE, tuneTable } from './world/wildLif
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
 import { ambientPeople, OURS_TUNE, type AmbientPort } from './world/ambient/ambientPeople.ts';
 import { ROUTINE_TUNE } from './world/ambient/routines.ts';
-import { FILLER_TUNE } from './world/ambient/fillers.ts';
+import { FILLER_TUNE, isSeat } from './world/ambient/fillers.ts';
+import { SEAT_TUNE, isTableTemplate, planSeats, seatTally, tuneSeats, type SeatPlan } from './world/seatProps.ts';
+import type { AssetPack } from './world/assetPack.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
@@ -194,11 +196,11 @@ import { Notice } from './ui/notice';
 import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
 import { COL, colourOf } from './core/palette';
 import { HudCanvas, OVERLAY_TUNE } from './ui/hudCanvas';
-import { layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
+import { HUD_SIZES, layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
 import { ActionBar } from './ui/prompt';
 import { PROMPT, newPromptState, resetPromptState, tunePrompt, type PromptState } from './ui/promptRules';
 import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from './ui/hudFeedback';
-import { Nameplates, PLATE_TUNE } from './ui/nameplate';
+import { Nameplates, PLATE_TUNE, pickPlate } from './ui/nameplate';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
 import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
@@ -2743,6 +2745,42 @@ class App {
           ...fittingTally(things),
           nearest: near.slice(0, 5).map((n) => ({ model: n.f.model, away: Math.round(n.d), cell: n.f.cell })),
           note: this.fittingRows.length ? '' : "no fittings.json for this world: npm run swg -- fittings '@SWG' assets-private --retail-only (with your emulator checkout), then reload",
+        };
+      },
+      /**
+       * The chairs and tables of ours under the people the data sits down (`src/world/seatProps.ts`): how
+       * many the plan holds by kind and model and how many of them stand, how many sitters already had a
+       * seat of the data's and how many tables it already had, how many tables are shared, and the nearest
+       * few. `{ tune: { ahead: 0.9, share: 2 } }` moves any of `SEAT_TUNE` and stands them all again, as
+       * `{ again: true }` does; `{ tune: { on: false } }` takes them all away. `{ go: true }` puts you
+       * beside the nearest, on its own floor when it is indoors.
+       */
+      seats: (opts: { tune?: Record<string, unknown>; again?: boolean; go?: boolean } = {}) => {
+        const moved = opts.tune ? tuneSeats(opts.tune) : [];
+        const here = packIdOf(this.world.planet, this.zone);
+        if (moved.length || opts.again) void this.standSeats(here);
+        const plan = this.seatsStood.pack === here ? this.seatsStood.plan : null;
+        const props = plan?.props ?? [];
+        const at = this.player.worldPos;
+        const near = props.map((p) => ({ p, d: Math.hypot(p.x - at.x, p.z - at.z) })).sort((a, b) => a.d - b.d);
+        if (opts.go && near.length) {
+          const p = near[0].p;
+          // A step in front of it, where its sitter's knees are, and on its own floor indoors.
+          const to = new THREE.Vector3(p.x + Math.sin(p.yaw) * 1.2, (p.inside ? p.y : this.world.terrain.heightAt(p.x, p.z)) + 0.3, p.z + Math.cos(p.yaw) * 1.2);
+          this.player.reset(to);
+          const cell = p.inside ? this.world.enterCellAt(to) : 0;
+          return { went: { kind: p.kind, model: p.model, at: [p.x, p.y, p.z].map((n) => Math.round(n * 10) / 10) }, cell };
+        }
+        return {
+          planned: props.length,
+          standing: this.seatsStood.keys.length,
+          ...seatTally(props),
+          had: plan?.had ?? null,
+          shared: plan?.shared ?? 0,
+          ...(moved.length || opts.again ? { moved, note: 'standing them all again: ask once more in a moment for the new count' } : {}),
+          nearest: near.slice(0, 6).map((n) => ({ kind: n.p.kind, model: n.p.model, away: Math.round(n.d), indoors: n.p.inside })),
+          why: this.seatsStood.note || undefined,
+          tune: { ...SEAT_TUNE },
         };
       },
       /**
@@ -5830,6 +5868,52 @@ class App {
           mobiles: r.mobiles.map((m) => ({ ...m.describe(this.player.pos), error: mobiles.loadError(m) })),
         };
       },
+      /**
+       * A weapon off the rack in the hand of a body already standing: `{ weapon }` is found as
+       * `weapons(find)` finds one (an id, a template or the game's name), and `{ target }` is what the
+       * crosshair rests on (`'crosshair'`, the default), a body's key, or the name the world knows it by.
+       * Whatever it held goes, the new one is prepared before it is in its hand, and the fighting roles of
+       * its carry row come with it. With a server holding the world, a body on the wire is everybody's: the
+       * admin's word rides its record and every browser re-arms its copy (anybody else is refused); a body
+       * that is this browser's alone, and every body with no server, is armed here and nowhere else.
+       */
+      arm: async (o?: { target?: 'crosshair' | number | string; weapon?: string }) => {
+        const mobiles = this.world.mobiles;
+        if (!mobiles) return 'no world loaded';
+        const rack = this.weapons;
+        if (!rack) return 'no weapons converted, so there is nothing to put in a hand (npm run swg -- weapons @SWG assets-private --retail-only)';
+        if (!o || typeof o.weapon !== 'string' || !o.weapon.trim()) return "say which weapon: arm({ weapon: 'dl44' }) arms what the crosshair rests on, arm({ target: key, weapon }) a body by its key (mobiles() lists them)";
+        const weapon = findRackWeapon(rack.weapons, o.weapon);
+        if (!weapon) return `nothing on the weapons rack matches "${o.weapon}" (weapons('${o.weapon}') searches it)`;
+        const want = o.target ?? 'crosshair';
+        let body: Living | null = null;
+        if (want === 'crosshair') body = this.crosshairBody();
+        else if (typeof want === 'number') body = this.world.targets().find((t) => t.key === want) ?? null;
+        else body = mobiles.mobileById(String(want));
+        if (!body) return want === 'crosshair' ? 'nothing under the crosshair: look at somebody, or name one by its key (mobiles() lists them)' : `nobody called ${String(want)} stands here`;
+        const m = mobiles.live.find((x) => x === body) ?? null;
+        if (!m) return `${body.label} is not one of the catalogue's people: a fighter is armed by its kind as it is stood (fighter(n, species, 'saber' | 'melee' | 'gun'))`;
+        const why = forcedArmsRefusal(m.entry.name, this.world.mobileCatalogue?.packOf(m.entry)?.hierarchy, weapon);
+        if (why) return why;
+        const shown = { id: weapon.id, class: weapon.class, name: weapon.name ?? null, template: weapon.template };
+        // On the wire it is everybody's: the admin asks, the server writes it into the record and tells every
+        // browser on the world, this one included, and that word is what re-arms every copy alike.
+        if (owned.active && m.npcId) {
+          if (!this.net.session.isAdmin) return `only this world’s admin can arm ${m.label}: it is everybody’s`;
+          const note = owned.askArm(m.npcId, weapon.template);
+          return note || { asked: m.npcId, weapon: shown, note: 'asked the server: every browser on this world puts it in that hand, this one included' };
+        }
+        const failed = await mobiles.rearm(m, weapon.template);
+        if (failed) return failed;
+        return {
+          armed: m.label,
+          key: m.key,
+          weapon: shown,
+          holding: m.weapon,
+          here: owned.active ? 'this body is this browser’s alone, so it is armed here and nowhere else' : undefined,
+          body: m.describe(this.player.pos),
+        };
+      },
       /** With no argument, every mobile out: state, health, distance, clip, target, tier, shadow. With a string, the catalogue search: the total and the first forty, with whether each can be stood and why not. */
       mobiles: (find?: string) => {
         const mobiles = this.world.mobiles;
@@ -6768,6 +6852,19 @@ class App {
       s.npcSetDriven(false);
       (s as { shareAs?(name: string): void }).shareAs?.('');
     };
+    // The admin put a weapon in the hand of one of the world's creatures already standing (`__debug.arm`):
+    // every browser on the world hears it, the admin's own included, and re-arms its own copy off the same
+    // template and the body's own seed, keeper and driven copies alike. One this browser has no body for
+    // is armed when it is stood: its row now names the weapon, and a seen one is told again as it is seen.
+    owned.arms = () => this.net.session.speaks(4);
+    owned.onArm = (id, weapon) => {
+      const mobiles = this.world.mobiles;
+      const m = mobiles?.mobileById(id);
+      if (!mobiles || !m) return;
+      void mobiles.rearm(m, weapon).then((why) => {
+        if (why) console.warn(`arm: ${id} keeps what it holds: ${why}`);
+      });
+    };
     // A creature kept at another browser struck this player there: the keeper saw it land, so it landed.
     // It comes off through the player's own record, which is what every blow on the player goes through
     // -- the red flash, the arc on the side it came from, the followers turning on it, god mode -- and
@@ -7378,9 +7475,11 @@ class App {
     draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
     if (debugRoot) {
       // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
-      // tab with no keyboard, a run being waited on before the report comes back.
-      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean }) => {
-        await this.debugMenu.drive(o ?? {});
+      // tab with no keyboard, a run being waited on before the report comes back. `{ pin, atStart }`
+      // pins the call in the box and ticks it to run at start, and `{ start: true }` runs the ticked
+      // pins now, as the first world after a reload does.
+      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean }) => {
+        await this.debugMenu.drive(o ?? {}, (line) => this.messages.system(line));
         return this.debugMenu.report();
       };
     }
@@ -9635,7 +9734,16 @@ class App {
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+    // The debug menu's pins ticked to run at start, once a page, now the first world is up and every
+    // helper they name has a world to work on. Each is said on the message line as it runs.
+    if (!this.ranAtStart) {
+      this.ranAtStart = true;
+      void this.debugMenu.runAtStart((line) => this.messages.system(line));
+    }
   }
+
+  /** Whether the debug menu's pins ticked to run at start have been run this page (`play`). */
+  private ranAtStart = false;
 
   /**
    * Hold the loading screen until the world around the player is in: the pack, the ground
@@ -9924,6 +10032,9 @@ class App {
       void this.loadFittings(packIdOf(planet, this.zone));
       // And whatever this player has put down here themselves, which is kept per world.
       void this.enterPlaced(packIdOf(planet, this.zone));
+      // And the chairs and tables of ours under the people the data sits down. After `enterPlaced`, which
+      // lets the last world's copy of the props pack go before anything of this world's is stood from it.
+      void this.standSeats(packIdOf(planet, this.zone));
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
@@ -13282,6 +13393,88 @@ class App {
   }
 
   /**
+   * The chairs and tables of ours stood under the data's sitting people (`seatProps.ts`): which world, what,
+   * and the plan they came from. One record per run of `standSeats`, and the record is the run's token: a run
+   * a later one replaced stops at its next await and takes down whatever it stood after being replaced.
+   */
+  private seatsStood: { pack: string; keys: string[]; plan: SeatPlan | null; note: string; run: number } = { pack: '', keys: [], plan: null, note: '', run: 0 };
+  /** Counts the runs of `standSeats`, so each files what it stands under keys no other run uses. */
+  private seatsRuns = 0;
+
+  /**
+   * Chairs and tables of ours under the people the data sits down (`seatProps.ts`): planned from the rows
+   * once the world's pack is in, then each stood through the streamer as the fittings are -- instanced,
+   * compiled behind its own hidden first draw (`LayoutStreamer.addToTier`'s `prepare`), lit, shadowed and
+   * loaded by distance with everything else. A model this world's own pack carries comes out of it; one it
+   * has not (the cantina furniture is Tatooine's) out of the props pack, which is fetched for the purpose
+   * only on a world that needs it. **Never solid**: a seated person is a dynamic body stood on the floor
+   * with the sitting idle playing, and a chair's collider under it pushed it off the seat, while a table
+   * round which three people sit would push all three back; the data never asked anybody to walk round
+   * them, since nothing of the game's had them. Deliberately not awaited: an arrival waits on no scenery.
+   *
+   * **A run is its own record and its own keys.** Two runs for one world overlap whenever the knob is turned
+   * twice inside the second or so a stand takes, or a pin run at start meets the arrival's own stand; checked
+   * against the pack's name alone, the older run went on standing its plan into the newer one's record under
+   * the same keys, and the streamer files a key once (`placedByKey`), so the first copy of every chair was
+   * left drawn where no removal could reach it. So the record is the token (checked by identity after every
+   * await, with the world's own generation beside it, which a trip to the select screen and back to the same
+   * planet moves on), every key carries its run's number, and a run replaced while a prop of its was being
+   * stood takes that prop straight down again.
+   */
+  private async standSeats(pack: string): Promise<void> {
+    this.clearSeatsStood(this.seatsStood.pack === pack);
+    const run = { pack, keys: [] as string[], plan: null as SeatPlan | null, note: '', run: ++this.seatsRuns };
+    this.seatsStood = run;
+    const world = this.world.generation;
+    const current = () => this.seatsStood === run && this.world.generation === world;
+    const centre = this.world.layoutCenter;
+    if (!centre) {
+      run.note = 'this world has no layout to stand them in';
+      return;
+    }
+    const rows = standingPeople.seatedRows(centre);
+    const plan = planSeats(rows, {
+      has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
+      ground: (x, z) => this.world.terrain.heightAt(x, z),
+    });
+    run.plan = plan;
+    if (!plan.props.length) return;
+    // The props pack behind the world only where this world's own pack lacks a model the plan asks for.
+    let guest: AssetPack | null = null;
+    if (plan.props.some((p) => !this.world.packHas(p.model))) {
+      try {
+        await this.props.load();
+      } catch {
+        /* no props pack: whatever this world's own pack carries is still stood */
+      }
+      if (!current() || packIdOf(this.world.planet, this.zone) !== pack) return;
+      guest = this.props.pack;
+      if (!guest) run.note = this.props.note || 'no props pack, so the seats this world lacks the models for are left out';
+    }
+    for (const p of plan.props) {
+      if (!current()) return;
+      const own = this.world.packHas(p.model);
+      if (!own && !guest) continue;
+      const key = `seat:${pack}:${run.run}:${p.key}`;
+      const stood = await this.world.placeProp(p.model, { key, at: { x: p.x, y: p.y, z: p.z }, yaw: p.yaw, pack: own ? null : guest, inside: p.inside, solid: false });
+      if (!stood) continue;
+      if (!current()) {
+        // Replaced while this one was being stood: it is under a key no other run uses, so this finds it
+        // and nothing else (and finds nothing at all in a world loaded since).
+        this.world.unplaceBuilding(key);
+        return;
+      }
+      run.keys.push(key);
+    }
+  }
+
+  /** Everything `standSeats` stood, taken down where the world it was stood in is still here. */
+  private clearSeatsStood(takeDown: boolean): void {
+    if (takeDown) for (const key of this.seatsStood.keys) this.world.unplaceBuilding(key);
+    this.seatsStood = { pack: '', keys: [], plan: null, note: '', run: 0 };
+  }
+
+  /**
    * Stand whatever this player has put down in the world they have just come to, and tell the store
    * **which world that is**.
    *
@@ -15167,6 +15360,17 @@ class App {
    * fighter), else the planet's own species. Read from the world's kept list of the living, which
    * is only rebuilt when something is added or taken away, so this walks a short array a frame.
    */
+  /**
+   * The living thing the crosshair rests on now: the nameplate's own pick (`pickPlate`), asked at once
+   * from the camera rather than read off the plate, which holds a body for a moment after a glance away
+   * and is not drawn at all with its setting off. For the console; never in a frame.
+   */
+  private crosshairBody(): Living | null {
+    const pm = this.cam.camera.matrixWorld.elements;
+    const found = pickPlate(this.world.targets(), pm[12], pm[13], pm[14], -pm[8], -pm[9], -pm[10], HUD_SIZES.nameplateRange, HUD_SIZES.nameplateCone, this.world.playerTarget.key);
+    return found ? (this.world.targets().find((t) => t.key === found.key) ?? null) : null;
+  }
+
   private nearbyLabel(at: THREE.Vector3): string {
     let best = 40 * 40;
     let label: string | null = null;

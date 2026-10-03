@@ -615,4 +615,42 @@ function stand(s: ReturnType<typeof server>, world = 'tatooine ') {
   ok(mayBlow(w, 6000, OWN_TUNING), '29: and more the next');
 }
 
+// --- 30: the admin arms one already standing, and the record carries it --------------------------------------------
+// The console's `arm` with a server: what is in a creature's hand is the world's, so the weapon rides the
+// record. One an admin stood is handed to every newcomer in the list with it; a seen one carries it for as
+// long as its record lives, and a browser that stands its own copy later is told to hold the same.
+{
+  const arm = cleanSpawn({ t: 'spawn', do: 'arm', id: 'k3', weapon: 'object/weapon/ranged/pistol/shared_pistol_dl44.iff' });
+  ok(arm?.do === 'arm' && arm.id === 'k3' && arm.weapon === 'object/weapon/ranged/pistol/shared_pistol_dl44.iff', '30: arming one names it and the weapon by its template');
+  ok(cleanSpawn({ t: 'spawn', do: 'arm', id: 'k3' }) === undefined, '30: with no weapon it is dropped, not read as taking one away');
+  ok(cleanSpawn({ t: 'spawn', do: 'arm', id: 'k3', weapon: '../../etc/passwd' }) === undefined && cleanSpawn({ t: 'spawn', do: 'arm', id: 'k3', weapon: 'a b' }) === undefined, '30: and a weapon that is not a template path, or climbs out of one, is dropped');
+  ok(cleanSpawn({ t: 'spawn', do: 'arm', id: '__proto__', weapon: 'object/x.iff' }) === undefined, '30: as is a name that means something to every object');
+
+  const s = server();
+  const id = stand(s);
+  const dl44 = 'object/weapon/ranged/pistol/shared_pistol_dl44.iff';
+  const got = s.own.arm(id, dl44, 'tatooine ');
+  ok(got.ok && got.weapon === dl44, '30: one an admin stood takes the weapon');
+  ok(s.own.listFor('tatooine ')[0].weapon === dl44, '30: and the list a newcomer is handed stands it holding that');
+  ok(!s.own.arm(id, dl44, 'naboo ').ok, '30: one is never armed from another world');
+  ok(!s.own.arm('k999', dl44, 'tatooine ').ok, '30: nor one that is not there');
+  ok(!s.own.arm(id, '../x', 'tatooine ').ok, '30: nor with a weapon that is not a template');
+  s.do(s.own.died(id) as Result);
+  ok(!s.own.arm(id, dl44, 'tatooine ').ok, '30: nor one that has died');
+
+  // A seen one: armed while one browser has it, and the next browser to stand its own copy is told.
+  s.at(1, 5);
+  s.at(2, 40);
+  s.do(s.own.sight(1, 'tatooine ', 'stood:tatooine:4', [0, 0, 0], 300) as Result);
+  ok(s.own.arm('stood:tatooine:4', dl44, 'tatooine ').ok, '30: a seen one takes the weapon too, admin or no list');
+  s.clear();
+  s.do(s.own.sight(2, 'tatooine ', 'stood:tatooine:4', [0, 0, 0], 300) as Result);
+  const told = s.to(2).find((m) => m.t === 'spawn' && m.do === 'arm');
+  ok(!!told && told.id === 'stood:tatooine:4' && told.weapon === dl44, '30: and a browser that says it has stood one is told to hold what everybody else sees');
+  s.do(s.own.sight(1, 'tatooine ', 'wild:t:1:0', [0, 0, 0], 300) as Result);
+  s.clear();
+  s.do(s.own.sight(2, 'tatooine ', 'wild:t:1:0', [0, 0, 0], 300) as Result);
+  ok(!s.to(2).some((m) => m.t === 'spawn' && m.do === 'arm'), '30: while one nobody armed says nothing of the kind, and is armed off its own seed');
+}
+
 console.log(`\n${checks} checks passed`);

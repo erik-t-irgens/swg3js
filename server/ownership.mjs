@@ -119,8 +119,11 @@ export const OWN_TUNING = {
   'blow.perSecond': 20,
 };
 
-/** What a browser may ask about the list. `clear` takes down everything in the world it is on. */
-const DOES = ['add', 'remove', 'dead', 'clear', 'seen', 'unseen', 'taken'];
+/**
+ * What a browser may ask about the list. `clear` takes down everything in the world it is on; `arm` puts
+ * a weapon of the admin's choosing in the hand of one already standing (the console's `arm`).
+ */
+const DOES = ['add', 'remove', 'dead', 'clear', 'seen', 'unseen', 'taken', 'arm'];
 
 /**
  * The names a seen creature may go by: the three kinds every browser seeds for itself from the same
@@ -211,6 +214,13 @@ export function cleanSpawn(x, tuning = OWN_TUNING) {
     const at = point(x.at, tuning.limit);
     if (!id || !seenId(id) || !at) return undefined;
     return { do: 'seen', id, at, r: num(x.r, 0, tuning.respawnMax / 1000, 0) };
+  }
+  if (x.do === 'arm') {
+    // One already standing given a weapon off the rack by the admin: which, and the rack's template.
+    const id = cleanId(x.id);
+    const weapon = cleanTemplate(x.weapon);
+    if (!id || !weapon) return undefined;
+    return { do: 'arm', id, weapon };
   }
   if (x.do === 'remove' || x.do === 'dead' || x.do === 'unseen' || x.do === 'taken') {
     const id = cleanId(x.id);
@@ -443,7 +453,11 @@ export class Ownership {
       // A browser saying it has a body for one is no longer one that cannot keep it, whatever it said
       // before: the word it handed the grant back with was about a body it did not have then.
       c.refused?.delete(session);
-      return { ok: true, tell: this.assign() };
+      const tell = this.assign();
+      // A weapon the admin put in its hand since it was first seen rides the record: the body this
+      // browser has just stood was armed off its own seed, and is told to hold what everybody else sees.
+      if (c.weapon) tell.unshift({ to: session, msg: { t: 'spawn', do: 'arm', id, weapon: c.weapon } });
+      return { ok: true, tell };
     }
     const held = this.seenByWorld.get(world);
     if (this.creatures.size >= this.tuning.total) this.pruneDead();
@@ -477,6 +491,8 @@ export class Ownership {
       respawn: Math.min(this.tuning.respawnMax, Math.max(0, Number(respawn) || 0)),
       until: 0,
       taken: false,
+      // A weapon the admin puts in its hand later (`arm`); nothing, and every browser arms it off its seed.
+      weapon: '',
     };
     this.creatures.set(id, made);
     this.seenWorld(world).add(id);
@@ -577,6 +593,22 @@ export class Ownership {
     this.creatures.set(key, c);
     this.world(world).add(key);
     return { ok: true, row: rowOf(c), tell: this.assign() };
+  }
+
+  /**
+   * A weapon of the admin's choosing put in the hand of one already standing in `world`, admin's or seen
+   * alike: the record carries it from now on, so every browser holding a body is told and every browser
+   * that stands one later -- from the list, or by saying it has seen it -- stands it holding the same. It
+   * lasts as long as the record does: a seen one forgotten after its respawn, or left alone, is armed off
+   * its own seed again when it is next stood. One dead, or on another world, is refused.
+   */
+  arm(id, weapon, world) {
+    const c = this.creatures.get(id);
+    const w = cleanTemplate(weapon);
+    if (!c || c.dead || c.world !== world) return { ok: false, why: 'there is nothing standing there to arm' };
+    if (!w) return { ok: false, why: 'that is not a weapon template' };
+    c.weapon = w;
+    return { ok: true, world: c.world, weapon: w };
   }
 
   /** Take one down: the admin's doing, and it is gone rather than dead. */

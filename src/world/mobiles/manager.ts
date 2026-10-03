@@ -1,6 +1,6 @@
 // Everything from the catalogue that is out on this planet: the spawns (a cap on how many, and on
-// the bytes their models hold), the ambient wildlife, the lookup from a collider to its body, and
-// the one loop that steps them all with the level of detail each has earned.
+// the bytes their models hold), what the world's data and its server stand, the lookup from a collider
+// to its body, and the one loop that steps them all with the level of detail each has earned.
 //
 // A mobile is culled as a whole, against one sphere of its own, by setting its group's
 // visibility: an invisible group is skipped by the renderer outright, so none of its meshes is
@@ -22,7 +22,7 @@ import { Character } from '../../player/character';
 import type { WeaponCatalogue } from '../../player/weapons';
 import { Mobile, type MobileContext, type MobileEquipment, type MobileExtras, type MobileSpawn } from './mobile';
 import { MOBILE_CACHE, MobileAssets, type ModelAsset, type PackAsset } from './assets';
-import { armedRoles, carryWeaponFor, chooseWeapon, decideArms, SABER_SWINGS, type OwnArms } from './arms';
+import { armedRoles, carryWeaponFor, chooseWeapon, decideArms, forcedArmsRefusal, SABER_SWINGS, type OwnArms } from './arms';
 import { withMood } from './moodIdle.ts';
 import { applyDifficultyTo } from '../difficulty.ts';
 import { isLook, lookKey } from './look';
@@ -57,7 +57,8 @@ import { NPC_SABER_CLIPS, styleOf } from '../npcSaber.ts';
 import { doorstepSpot } from '../myBuildings.ts';
 
 export interface SpawnOpts {
-  origin?: 'spawned' | 'ambient';
+  /** How it came to stand: always by somebody's hand or the world's data now that nothing roams in on its own. */
+  origin?: 'spawned';
   scale?: number;
   inside?: boolean;
   overrides?: MobileSpawn['overrides'];
@@ -275,8 +276,6 @@ const tmp = new THREE.Vector3();
 const ZERO = new THREE.Vector3();
 /** The tier's input, filled per mobile every frame rather than made anew. */
 const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange, room: -1, inCascades: undefined };
-/** Ambient wildlife this far from the player comes back somewhere nearer. */
-const AMBIENT_RANGE = 260;
 /** How often (seconds) a mobile's inside-or-out is asked again, and its shadow flag set. */
 const INSIDE_EVERY = 0.25;
 /** A body that has gone this far since its room was last followed is followed now, whatever the clock (the tracker takes a jump over 5 m as a teleport). */
@@ -341,12 +340,12 @@ export class MobileManager {
    * Why an entry cannot be stood now, in a sentence, or null when it can.
    *
    * The origin is what the cap is asked about. `spawned` is one this browser stood from the tab and
-   * is what the cap counts; `ambient` is the planet's own wildlife; `world` is one the world holds,
-   * which the cap must never refuse -- it is a local limit on what somebody may stand from the tab,
-   * and applied to the world's list every browser would end up holding a different arbitrary subset
-   * of the creatures everyone else can see, with nothing said anywhere.
+   * is what the cap counts; `world` is one the world holds, which the cap must never refuse -- it is a
+   * local limit on what somebody may stand from the tab, and applied to the world's list every browser
+   * would end up holding a different arbitrary subset of the creatures everyone else can see, with
+   * nothing said anywhere.
    */
-  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' | 'world' = 'spawned', budget = true): string | null {
+  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'world' = 'spawned', budget = true): string | null {
     const where = this.deps.refuse();
     if (where) return where;
     // The one model the game's own archives cannot give: said as what it is, not as a fault.
@@ -415,7 +414,7 @@ export class MobileManager {
     return n;
   }
 
-  /** How many stood by hand are out (what the cap counts; the planet's own wildlife is not, nor anything the world holds). */
+  /** How many stood by hand are out (what the cap counts; nothing the world holds is). */
   get spawnedOut(): number {
     return this.spawnedCount();
   }
@@ -502,6 +501,7 @@ export class MobileManager {
       groundIfCached: this.deps.groundIfCached ? this.groundCached : undefined,
       groundSolid: this.deps.groundSolid ? this.groundSolid : undefined,
       cover: this.deps.blockers ? this.coverDeps : null,
+      forgetMaterials: this.forgetBlade,
     });
     this.live.push(m);
     for (const c of m.colliders) this.byCollider.set(c.handle, m);
@@ -836,6 +836,53 @@ export class MobileManager {
     return { equipment: plan?.equipment ?? null, extras: { ...(extras ?? {}), clips } };
   }
 
+  /**
+   * Put a weapon off the rack in the hand of a body already standing, by the rack's template: the console's
+   * `arm`, and the server's word that the admin did so on another browser. It is `armsFor` again with the
+   * choice made (`OwnArms.forcedTemplate`), from the body's own seed where it has one so a lightsaber's
+   * colour and style come out alike on every browser, the weapon prepared before it is handed over, and the
+   * rolls and jumps a person fights with laid beside it as at its stand (`withEvade`). Answers null, or why
+   * not in words: no such weapon on this browser's rack, a body with no hand, one still loading or gone.
+   *
+   * **The last word asked wins, and a word for what it already holds does nothing.** The server says the
+   * weapon again to every browser that says `seen` for a body it has armed, which a driven body's browser
+   * does every few seconds while its keeper is quiet, and re-arming the same weapon would put the blade out,
+   * drop the aim and the burst and build it all again each time. And two arms asked close together finish
+   * in whichever order their weapons were made ready in (one on the rack already, the other fetched and
+   * prepared), so each is numbered as it is asked (`arming`) and one overtaken while it waited is dropped:
+   * the body ends holding what was asked last, which is what the server's record says too.
+   */
+  async rearm(m: Mobile, template: string): Promise<string | null> {
+    const turn = (this.arming.get(m) ?? 0) + 1;
+    this.arming.set(m, turn);
+    const overtaken = () => this.arming.get(m) !== turn;
+    const cat = this.deps.catalogue();
+    const held = this.held.get(m);
+    if (!cat || !held || m.removed) return 'that body is not standing here';
+    if (m.dead) return `${m.label} is dead`;
+    await held.loaded;
+    if (overtaken()) return `${m.label} was asked to hold something else meanwhile`;
+    if (!m.ready || m.removed || m.dead) return `${m.label} has no body to arm`;
+    const packInfo = cat.packOf(m.entry);
+    const def = this.deps.weapons?.()?.weapons.find((w) => w.template === template) ?? null;
+    if (!def) return `nothing on this browser's weapons rack is ${template}`;
+    if (m.weapon === def.id) return null;
+    const why = forcedArmsRefusal(m.entry.name, packInfo?.hierarchy, def);
+    if (why) return why;
+    const arms = await this.armsFor(m.entry, packInfo, held.seed, { forcedTemplate: template, ranged: m.ownRanged });
+    const plan = this.withEvade(m.entry, packInfo, arms, m.hologram || m.essential);
+    if (overtaken()) return `${m.label} was asked to hold something else meanwhile`;
+    if (m.removed || m.dead) return `${m.label} went while the weapon was made ready`;
+    if (!plan?.equipment) return `${def.id} could not be put in ${m.label}'s hand`;
+    if (!m.rearm(plan.equipment, plan.extras)) return `${m.label} has no hand to hold ${def.id}`;
+    // Its tier again, now that what is in its hand is known (a lightsaber jumps higher).
+    m.applyFightTier(this.fightTier);
+    return null;
+  }
+
+  /** How many times each body has been asked to re-arm, so an arm overtaken while it waited is dropped (`rearm`). */
+  private readonly arming = new WeakMap<Mobile, number>();
+
   /** Weapon models already prepared (or being), by file: the rack's copies share their materials, so one preparation serves them all. */
   private readonly preparedWeapons = new Map<string, Promise<void>>();
 
@@ -1002,31 +1049,6 @@ export class MobileManager {
     return out;
   }
 
-  /** The planet's own wildlife: `count` of an entry about a point, respawned rather than removed. Returns how many stood. */
-  spawnAmbient(entry: MobileEntry, count: number, centre: THREE.Vector3, overrides?: MobileSpawn['overrides']): number {
-    let n = 0;
-    for (let i = 0; i < count; i++) {
-      const p = this.pickSpot(centre);
-      const got = this.spawn(entry, { x: p.x, y: p.y, z: p.z }, { origin: 'ambient', overrides });
-      if (typeof got === 'string') break;
-      n++;
-    }
-    return n;
-  }
-
-  private pickSpot(centre: THREE.Vector3): THREE.Vector3 {
-    const terrain = this.deps.terrain;
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 35 + Math.random() * 90;
-      const x = centre.x + Math.sin(a) * r;
-      const z = centre.z + Math.cos(a) * r;
-      const h = terrain.heightAt(x, z);
-      if (h > terrain.waterHeightAt(x, z) + 0.5) return new THREE.Vector3(x, h, z);
-    }
-    return new THREE.Vector3(centre.x, terrain.heightAt(centre.x, centre.z), centre.z);
-  }
-
   /** Take one away now: its colliders' handles go at the moment the body does, and its assets are released. */
   remove(m: Mobile): void {
     const i = this.live.indexOf(m);
@@ -1065,8 +1087,8 @@ export class MobileManager {
   }
 
   /**
-   * Take away every spawned mobile the filter picks (all spawned ones without one); the wildlife
-   * stays, and so does everything the world holds. A body with a world name is never this call's:
+   * Take away every spawned mobile the filter picks (all spawned ones without one); everything the
+   * world holds stays, the lairs' creatures among it. A body with a world name is never this call's:
    * the NPC tab's clear took the town's people and a lair's creatures down with the ones stood by
    * hand, and they came straight back on the world's next pass. Returns how many.
    */
@@ -1150,24 +1172,12 @@ export class MobileManager {
       const m = this.live[i];
       const held = this.held.get(m);
       if (!held) continue;
-      // Spent: a spawned one is taken away, the wildlife comes back somewhere else.
+      // Spent: taken away. Whatever stood it -- a lair, a row, the console, the server's list -- stands
+      // it again on its own clock if it comes back at all; nothing here recycles a body by distance.
       // The fallen-out-of-the-world floor never applies inside a building: dungeon rooms go far below it.
-      const spent = (m.dead && m.deadTimer <= 0) || (!m.inside && m.pos.y < this.deps.terrain.floor - 20);
-      if (m.origin === 'spawned') {
-        if (spent) {
-          this.remove(m);
-          continue;
-        }
-      } else if (spent || m.pos.distanceTo(ctx.playerPos) > AMBIENT_RANGE) {
-        const p = this.pickSpot(ctx.playerPos);
-        m.respawn(p.x, p.y, p.z);
-        // Back on open ground, in no room.
-        held.cell = null;
-        held.cellFrom.copy(m.pos);
-        m.room = 0;
-        m.navCell = null;
-        m.setInside(false);
-        this.version++;
+      if ((m.dead && m.deadTimer <= 0) || (!m.inside && m.pos.y < this.deps.terrain.floor - 20)) {
+        this.remove(m);
+        continue;
       }
       // Its room, followed through the portals four times a second (staggered), and sooner when it has gone a couple of metres.
       if (!m.dead && (ctx.now - held.lastInside >= INSIDE_EVERY || held.cellFrom.distanceToSquared(m.pos) > FOLLOW_STEP * FOLLOW_STEP)) {
@@ -1262,8 +1272,16 @@ export class MobileManager {
   /** The shadow cascades' light boxes, read once at the top of `update` for every body's tier; null with shadows off or none wired. */
   private shadowBoxes: readonly THREE.Frustum[] | null = null;
 
+  /**
+   * How a body's own blade renderer lets its materials go before it is disposed, through the asset cache's
+   * own hook (`MobileAssets.forget`, which the world sets to `World.forgetMaterials`): one closure for every body.
+   */
+  private readonly forgetBlade = (materials: readonly THREE.Material[]): void => {
+    this.deps.assets.forget?.(materials);
+  };
+
   /** The world's far ground readers, handed to every body as the same two closures (commit 4b). */
-  private readonly groundCached = (x: number, z: number): number | null => this.deps.groundIfCached?.(x, z) ?? null;
+  private readonly groundCached =(x: number, z: number): number | null => this.deps.groundIfCached?.(x, z) ?? null;
   private readonly groundSolid = (x: number, z: number): boolean => this.deps.groundSolid?.(x, z) ?? true;
 
   /**

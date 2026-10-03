@@ -216,6 +216,16 @@ export class Owned {
   /** The server could hold no more seen ones on this world: the body under this name is this browser's own to keep. */
   onLocal: (id: string) => void = () => {};
   /**
+   * The admin put a weapon off the rack, by its template, in the hand of one already standing: every
+   * browser on its world is told, the admin's own included, and re-arms its copy the same way.
+   */
+  onArm: (id: string, weapon: string) => void = () => {};
+  /**
+   * Whether the server hears `arm` at all (`Session.speaks(4)`): one that does not would drop it in
+   * silence, and the admin would be left looking at a body that never changed hands.
+   */
+  arms: () => boolean = () => false;
+  /**
    * This browser has been given one to think for, or had one taken off it. `row` is what is known
    * about it, which may be nothing at all when the grant has outrun the news of the spawn.
    */
@@ -362,6 +372,32 @@ export class Owned {
     if (weapon) msg.weapon = weapon;
     this.send(msg);
     return '';
+  }
+
+  /**
+   * Put a weapon off the rack in the hand of one of the world's creatures already standing, by the rack's
+   * template. Nothing is armed by this: the server's word comes back to everybody on the world, this
+   * browser included, and that is what re-arms every copy alike. The answer is a word for the player, or
+   * '' when the asking went out.
+   */
+  askArm(id: string, weapon: string): string {
+    if (!this.active) return '';
+    if (!this.admin()) return 'only this world’s admin can arm the creatures in it';
+    if (!id || !weapon) return 'there is nothing to arm';
+    if (!this.askArms()) return 'this server is older than arming one already standing: restart it (npm run relay)';
+    if (!this.mayAsk()) return 'that is faster than the server will take them';
+    this.stat.asked++;
+    this.send({ t: 'spawn', do: 'arm', id, weapon });
+    return '';
+  }
+
+  /** Whether the server hears `arm`, asked of the game; a hook that throws is no. */
+  private askArms(): boolean {
+    try {
+      return this.arms();
+    } catch {
+      return false;
+    }
   }
 
   /** Take one down. The admin's, and the server is what refuses it. */
@@ -614,6 +650,18 @@ export class Owned {
         this.onLocal(id);
         break;
       }
+      case 'arm': {
+        // A weapon the admin put in one's hand: read as a template path and nothing more, and looked up
+        // on this browser's own rack by whoever re-arms the body. A row this browser holds remembers it,
+        // so the record a body would be stood from again names it too.
+        const id = readId(msg.id);
+        const weapon = readTemplate(msg.weapon);
+        if (!id || !weapon) break;
+        const row = this.rows.get(id);
+        if (row) row.weapon = weapon;
+        this.onArm(id, weapon);
+        break;
+      }
       case 'refused': {
         const why = readWords(msg.why);
         this.stat.refused = why;
@@ -801,8 +849,15 @@ function readRow(x: unknown): SpawnRow | null {
   if (o.inside) row.inside = true;
   // The weapon the admin put in its hand: a template path, read as one and nothing more. It is looked
   // up on this browser's own rack and a name the rack has not got arms it off its own list instead.
-  if (typeof o.weapon === 'string' && /^[A-Za-z0-9_./-]{1,120}$/.test(o.weapon) && !o.weapon.split('/').includes('..')) row.weapon = o.weapon;
+  const weapon = readTemplate(o.weapon);
+  if (weapon) row.weapon = weapon;
   return row;
+}
+
+/** A weapon's template path from the far end, or '': the server's own rule for one (`cleanTemplate`). */
+function readTemplate(x: unknown): string {
+  if (typeof x !== 'string' || !/^[A-Za-z0-9_./-]{1,120}$/.test(x) || x.split('/').includes('..')) return '';
+  return x;
 }
 
 /**

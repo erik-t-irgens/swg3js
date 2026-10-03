@@ -65,10 +65,11 @@
 //   { t: 'duel', do: ask|accept|decline|end, to? }           the game's own COMBAT_DUEL and COMBAT_PEACE, at its own
 //                                                          128 m: how two players agree to fight where the server's
 //                                                          switch for it is off
-//   { t: 'spawn', do: add|remove|clear|dead|taken|seen|unseen, species?, at?, h?, seed?, id?, inside?, weapon?, r?, by? }
+//   { t: 'spawn', do: add|remove|clear|dead|taken|seen|unseen|arm, species?, at?, h?, seed?, id?, inside?, weapon?, r?, by? }
 //                                                          the world's creatures (ownership.mjs). An admin stands one
 //                                                          by hand (`add`, with the weapon the console put in its hand
-//                                                          if any) and takes them down (`remove`, `clear`). Every
+//                                                          if any), puts a weapon in the hand of one already standing
+//                                                          (`arm`), and takes them down (`remove`, `clear`). Every
 //                                                          browser stands the lairs, the nests and the people at their
 //                                                          posts for itself from the same data, and says so (`seen`,
 //                                                          with where and how long it stays dead once it dies) and when
@@ -164,6 +165,8 @@
 //                                                           it again; `by`: who struck it last, as the keeper said)
 //   { t: 'spawn', do: 'refused', why }   (to whoever asked, and to nobody else)
 //   { t: 'spawn', do: 'local', id }   (to a browser that said it saw one this world cannot hold: keep it to yourself)
+//   { t: 'spawn', do: 'arm', id, weapon }   (the admin put that weapon in its hand: to everybody on its world, and
+//                                          to a browser that says it has seen one whose record carries a weapon)
 //   { t: 'keep', add: [id], drop: [id] }   (who thinks for which creature: the server's answer is the only one,
 //                                           and a browser never thinks for one it was not granted)
 //   { t: 'npcState', id?, r: [...] }   (a keeper's batch passed on to the rest of that world; with no `id` it is the
@@ -218,9 +221,11 @@ import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
  * What this server speaks. A browser that hears no hail is talking to the relay that came before. 3 is
  * the seen creatures, a creature's blow on another player, a blade turning a bolt away at its keeper,
  * how low a body stands on the wire, and the admin's day: a browser built for 3 does none of that
- * against a server that says 2, and a browser built before 3 never sends any of it.
+ * against a server that says 2, and a browser built before 3 never sends any of it. 4 is the admin's
+ * `arm`, a weapon put in the hand of one of the world's creatures already standing, which a server that
+ * says 3 would drop in silence.
  */
-const WIRE_VERSION = 3;
+const WIRE_VERSION = 4;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
@@ -780,7 +785,11 @@ function onMessage(c, text, trimmed = false) {
     if (!hello) return;
     const first = !c.hello;
     c.hello = hello;
-    if (msg.v === WIRE_VERSION) c.v = WIRE_VERSION;
+    // The language the browser speaks, as far as this server speaks it: what a word only some browsers
+    // understand is held to (`npcBlow` is the third language's), so a browser a version behind still hears
+    // everything it can.
+    const v = Number(msg.v);
+    if (Number.isInteger(v) && v > 0) c.v = Math.min(WIRE_VERSION, v);
     const key = roomKey(hello.planet, hello.zone);
     const move = rooms.set(c.id, key);
     // A group's roster says what world each member is on, so it is told here and nowhere else; this
@@ -1093,6 +1102,16 @@ function onMessage(c, text, trimmed = false) {
       sendToRoom(world, { t: 'spawn', do: 'add', row: made.row });
       deliverTo(made);
       console.log(`  ${c.id} ${who(c)} stood ${made.row.species} on ${roomLabel(world)} as ${made.row.id}`);
+    } else if (ask.do === 'arm') {
+      // A weapon put in the hand of one already standing: the record carries it, and everybody on its
+      // world is told, the admin who asked included, so every browser re-arms its own copy the same way.
+      const armed = ownership.arm(ask.id, ask.weapon, world);
+      if (!armed.ok) {
+        send(c, { t: 'spawn', do: 'refused', why: armed.why });
+        return;
+      }
+      sendToRoom(world, { t: 'spawn', do: 'arm', id: ask.id, weapon: armed.weapon });
+      console.log(`  ${c.id} ${who(c)} put ${armed.weapon} in the hand of ${ask.id} on ${roomLabel(world)}`);
     } else if (ask.do === 'remove') {
       const off = ownership.remove(ask.id);
       if (!off.ok) return;
@@ -1175,7 +1194,7 @@ function onMessage(c, text, trimmed = false) {
     const world = ownership.worldOf(blow.i);
     if (!world || world !== rooms.keyOf(c.id)) return;
     const to = clients.get(blow.to);
-    if (!to || to === c || !to.hello || to.v !== WIRE_VERSION || rooms.keyOf(to.id) !== world) return;
+    if (!to || to === c || !to.hello || !((to.v ?? 0) >= 3) || rooms.keyOf(to.id) !== world) return;
     if (!ownership.mayStrike(c.id, blow.i, to.id, npcPlaces.at(world, blow.i))) return;
     send(to, { t: 'npcBlow', id: c.id, i: blow.i, a: blow.a, at: blow.at, ...(blow.w ? { w: blow.w } : {}) });
   } else if (msg.t === 'day') {

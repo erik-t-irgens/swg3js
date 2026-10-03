@@ -19,6 +19,9 @@
 //   - the day: a new length offline that bends the sun's pace without moving the hour, refused while a
 //     server's clock is in use, and given back as this browser's own when the server goes.
 //
+// And the clean-up wave's: a weapon put in the hand of a body already standing (`__debug.arm`), the last
+// one asked winning and the same one again doing nothing, and the chairs and tables of ours stood once a run.
+//
 // Run: node tools/swg/tests/debugKnobs.test.ts
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
@@ -28,7 +31,7 @@ import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding
 import { PLACED_TIERS } from '../../../src/world/placedTiers.ts';
 import { GOD_REFUSED, GodHold, godRefusal, type GodHull } from '../../../src/player/godMode.ts';
 import { GOD_NOTE, HeldNotes, REACH_NOTE } from '../../../src/ui/heldNotes.ts';
-import { OWN_GUN_RANGE, decideArms, findRackWeapon, forcedArmsRefusal } from '../../../src/world/mobiles/arms.ts';
+import { OWN_GUN_RANGE, decideArms, findRackWeapon, forcedArmsRefusal, rolesFromCarry } from '../../../src/world/mobiles/arms.ts';
 import { DayCycle } from '../../../src/world/daycycle.ts';
 import { CLOCK_LIMITS, GAME_DAY_SECONDS, clockKnob, setOwnDayLength, sharedClock } from '../../../src/world/sharedClock.ts';
 import { joinsTheFight } from '../../../src/space/shipCombat.ts';
@@ -309,6 +312,85 @@ function body(text: string, signature: string): string {
   ok(clockKnob({ length: null }).said === `a day is the game's own ${GAME_DAY_SECONDS} s again` && day.dayLengthSeconds === 720, "16: and null puts the game's own back");
   const sharedSrc = src('world/sharedClock.ts');
   ok(/if \(sharedClock\.shared\) \{/.test(body(sharedSrc, 'export function setOwnDayLength(seconds: number | null): string')), '16: the refusal is the shared clock in use, which covers a server gone adrift as well as one answering');
+}
+
+// --- 17: a weapon for a body already standing (W11) --------------------------------------------------
+// `__debug.arm`: the body's own hand emptied and filled again, only its fighting roles moved, prepared
+// before it is held, and with a server the admin's word riding the record to every browser. The roles a
+// carry row can move are pinned against the arms' own `rolesFromCarry` over a row with every field set,
+// so a field added there later and forgotten here fails; the rest is wiring in files node cannot load.
+{
+  const mobile = src('world/mobiles/mobile.ts');
+  const listed = /const COMBAT_ROLES = \[([^\]]*)\] as const;/.exec(mobile);
+  ok(!!listed, '17: the body names the roles a weapon speaks for');
+  const combat = new Set((listed?.[1] ?? '').split(',').map((s) => s.trim().replace(/'/g, '')).filter(Boolean));
+  // Both of the row's branches: with shots, and with only the one-frame recoil, which writes a role of its
+  // own and is the branch a row with every field set never takes.
+  const row = { relaxed: 'r', ready: 'rd', aimed: 'a', walk: 'w', run: 'rn', gaits: [{ clip: 'w', speed: 1 }, { clip: 'rn', speed: 3 }], fires: ['f1', 'f2'], recoil: 'rc', swings: ['s1'], toCombat: 'tc', fromCombat: 'fc' };
+  const writes = [...new Set([...Object.keys(rolesFromCarry(row)), ...Object.keys(rolesFromCarry({ ...row, fires: [] }))])];
+  // And every role the arms' source writes at all, read off the text of both functions that build a carry's
+  // roles, so a field written on a branch no row here reaches is caught too.
+  const armsSrc = src('world/mobiles/arms.ts');
+  const written = new Set<string>();
+  for (const sig of ['export function rolesFromCarry(row: CarryRow): Partial<Roles>', 'export function armedRoles(clips:']) for (const w of body(armsSrc, sig).matchAll(/\bout\.(\w+) =/g)) written.add(w[1]);
+  const left = [...new Set([...writes, ...written])].filter((k) => !combat.has(k));
+  ok(left.length === 0 && written.size >= writes.length && combat.has('attacks') && combat.has('rangedAdditive'), `17: every role a carry row can write, on either branch and in the fallback, is one a re-arm resets (${written.size}: ${[...written].join(', ')}${left.length ? `; not reset: ${left.join(', ')}` : ''})`);
+  ok(!['idle', 'walk', 'run', 'gaits'].some((k) => combat.has(k)), '17: and how it idles, walks and runs is never one of them, so a mood idle survives a new weapon');
+  const rearm = body(mobile, 'rearm(e: MobileEquipment | null, extras: MobileExtras | null): boolean');
+  ok(rearm.indexOf('this.unequip();') >= 0 && rearm.indexOf('this.unequip();') < rearm.indexOf('this.equip(e)'), '17: the hand is emptied before the new weapon goes in');
+  ok(/if \(extras\?\.clips\?\.size\) animator\.lend\(extras\.clips\);/.test(rearm) && rearm.indexOf('animator.lend(') < rearm.indexOf('this.equip(e)'), "17: a lightsaber's swings are lent before it is held, so its move machine finds them");
+  ok(/const own = rolesFor\(pack\.json, this\.entry\.gender\);[\s\S]{0,400}for \(const k of COMBAT_ROLES\) into\[k\] = laid\[k\] !== undefined \? laid\[k\] : fresh\[k\];/.test(rearm), "17: the fighting roles are the pack's own again first, and the new carry's over them");
+  ok(/this\.fitArms\(own\.ranged, own\.rangedAdditive, extras\?\.ranged \?\? null\);/.test(rearm) && /this\.fitArms\(ownRanged, ownAdditive, extras\?\.ranged \?\? null\);/.test(mobile), '17: and what it fights with is worked out by the one rule the stand uses');
+  ok(/if \(fights && this\.emptyHanded\) \{\s*this\.aggression = this\.baseAggression;/.test(rearm) && /else if \(!fights\) this\.disarmTemper\(\);/.test(rearm), '17: a body made passive by empty hands gets its temper back with a weapon, and one left with nothing goes passive');
+  const unequip = body(mobile, 'private unequip(): void');
+  ok(/this\.disposeBlade\(\);/.test(unequip) && /this\.blades = null;/.test(unequip) && /holder\.parent\?\.remove\(holder\);/.test(unequip) && !/geometry\.dispose|material\.dispose/.test(unequip), "17: the old weapon goes: its blade renderer disposed, the rack's copy let go and never disposed");
+  // A re-arm can take a blade off one body any number of times, so its four materials must leave the portal
+  // renderer's set and the cascades' map before they are disposed, not wait for the world's unload.
+  const dropBlade = body(mobile, 'private disposeBlade(): void');
+  ok(/forget\(materials\)/.test(dropBlade) && dropBlade.indexOf('forget(materials)') < dropBlade.indexOf('blade.dispose()'), "17: and the blade's materials are let go of before it is disposed");
+  const takenAway = mobile.slice(mobile.indexOf('  dispose(): void {\n    if (this.disposed) return;'));
+  ok(/this\.disposeBlade\(\);/.test(body(takenAway, 'dispose(): void')) && !/this\.blade\.dispose\(\)/.test(mobile), '17: by the one path, a body taken away included');
+  const managerSrc = src('world/mobiles/manager.ts');
+  ok(/forgetMaterials: this\.forgetBlade,/.test(managerSrc) && /this\.deps\.assets\.forget\?\.\(materials\);/.test(body(managerSrc, 'private readonly forgetBlade = (materials: readonly THREE.Material[]): void =>')), "17: through the asset cache's own hook, which the world points at its forgetMaterials");
+  ok(/this\.muzzle = this\.ownMuzzle;/.test(unequip) && /this\.refitCull\(\);/.test(unequip), '17: and the muzzle is the skeleton\'s own again, the cull fitted to what it now holds');
+  const manager = src('world/mobiles/manager.ts');
+  const mrearm = body(manager, 'async rearm(m: Mobile, template: string): Promise<string | null>');
+  ok(/await held\.loaded;/.test(mrearm) && /forcedArmsRefusal\(m\.entry\.name, packInfo\?\.hierarchy, def\)/.test(mrearm), '17: the manager waits for the body to be up and refuses a body with no hand in words');
+  ok(/this\.armsFor\(m\.entry, packInfo, held\.seed, \{ forcedTemplate: template, ranged: m\.ownRanged \}\)/.test(mrearm) && mrearm.indexOf('this.armsFor(') < mrearm.indexOf('m.rearm('), "17: and puts the weapon in its hand through the stand's own arms, from its own seed, prepared before it is handed over");
+  ok(/m\.applyFightTier\(this\.fightTier\);/.test(mrearm), '17: then its tier again, since a lightsaber jumps higher');
+  // The server says the weapon again to every browser that says it has seen an armed body, which a driven
+  // body's browser does every few seconds: the same weapon again is nothing, and a second arm asked while the
+  // first is still being made ready wins whichever finishes first.
+  ok(/if \(m\.weapon === def\.id\) return null;/.test(mrearm) && mrearm.indexOf('if (m.weapon === def.id) return null;') < mrearm.indexOf('this.armsFor('), '17: a word for what it already holds changes nothing: no blade put out and lit again, no aim dropped');
+  const turned = mrearm.indexOf('this.arming.set(m, turn);');
+  const afterLoad = mrearm.indexOf('if (overtaken())', mrearm.indexOf('await held.loaded;'));
+  const afterArms = mrearm.indexOf('if (overtaken())', mrearm.indexOf('this.armsFor('));
+  ok(turned >= 0 && turned < mrearm.indexOf('await held.loaded;') && afterLoad > 0 && afterArms > 0 && afterArms < mrearm.indexOf('m.rearm('), '17: and each arm is numbered as it is asked and dropped after either wait once a later one has been asked, so the body ends holding the last');
+  const helper = body(main, "arm: async (o?: { target?: 'crosshair' | number | string; weapon?: string })");
+  ok(helper.includes('findRackWeapon(rack.weapons, o.weapon)') && helper.indexOf('forcedArmsRefusal(') < helper.indexOf('mobiles.rearm('), '17: __debug.arm finds the weapon as weapons(find) does and refuses before anything is touched');
+  ok(/if \(owned\.active && m\.npcId\) \{\s*if \(!this\.net\.session\.isAdmin\) return/.test(helper) && helper.indexOf('owned.askArm(m.npcId, weapon.template)') < helper.indexOf('mobiles.rearm('), "17: a body on the wire is everybody's: only the admin may, and it is asked of the server rather than armed here");
+  ok(/this\.crosshairBody\(\)/.test(helper) && /pickPlate\(this\.world\.targets\(\)/.test(main), "17: the crosshair's body is the nameplate's own pick");
+  ok(/owned\.onArm = \(id, weapon\) => \{[\s\S]{0,200}mobiles\.rearm\(m, weapon\)/.test(main) && /owned\.arms = \(\) => this\.net\.session\.speaks\(4\);/.test(main), "17: and the server's word re-arms this browser's copy, the admin's own included, on a server that hears it");
+  ok(DEBUG_GROUPS[0].title === 'Tuning' && DEBUG_GROUPS[0].helpers.includes('arm'), '17: it is one of the knobs in the debug menu');
+}
+
+// --- 18: the chairs and tables of ours, stood once a run (W11) ---------------------------------------
+// The plan is seatProps.test's; what is pinned here is the wiring in main.ts node cannot load. A seat is never
+// solid, or the sitter on it is pushed off; and two stands of one world overlap whenever the knob is turned twice
+// in the second a stand takes, so each run is its own record, checked by identity after every await, with keys
+// no other run uses, or the older run's copy of every chair is filed under a key the newer one overwrote.
+{
+  const stand = body(main, 'private async standSeats(pack: string): Promise<void>');
+  ok(/solid: false/.test(stand) && !/solid: true/.test(stand), '18: a seat of ours is never solid, so a body sat on it is not pushed off');
+  ok(/this\.seatsStood = run;/.test(stand) && /const current = \(\) => this\.seatsStood === run && this\.world\.generation === world;/.test(stand), '18: a run is its own record, and current only while it is the record and the world it began in is still here');
+  const loaded = stand.indexOf('await this.props.load();');
+  const loopCheck = stand.indexOf('if (!current()) return;', stand.indexOf('for (const p of plan.props)'));
+  ok(loaded > 0 && stand.indexOf('if (!current()') > loaded && loopCheck > 0 && loopCheck < stand.indexOf('placeProp('), '18: checked after the props pack is fetched and before every prop');
+  ok(/const key = `seat:\$\{pack\}:\$\{run\.run\}:\$\{p\.key\}`;/.test(stand), '18: every key carries its run, so no two runs file a prop under one key');
+  const stoodAt = stand.indexOf('const stood = await this.world.placeProp(');
+  const late = stand.indexOf('if (!current()) {', stoodAt);
+  ok(stoodAt > 0 && late > stoodAt && /this\.world\.unplaceBuilding\(key\);\s*return;/.test(stand.slice(late)) && stand.indexOf('run.keys.push(key);') > late, '18: and a prop that finished standing after its run was replaced is taken straight down again, never filed');
+  ok(/get generation\(\): number \{\s*return this\.loadGeneration;/.test(src('world/world.ts')), '18: the world says which world it is by the number every unload moves on');
 }
 
 console.log(`\n${checks} checks passed`);

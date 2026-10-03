@@ -2,7 +2,9 @@
 // posts that every browser seeds for itself, said to the server as seen and kept by one browser; a death
 // that carries who struck it and how long the post stays empty; a follower walking off; a creature's blow
 // on another player going to that player and nobody else; the admin's weapon riding in a stood
-// creature's row; and the admin changing the length of everybody's day without moving the sun.
+// creature's row, and put in the hand of one already standing (the admin's alone to ask, said to its world
+// and no other, and told again to a browser that sees an armed one afterwards); and the admin changing
+// the length of everybody's day without moving the sun.
 //
 // The pieces each have tests of their own (ownership.test.ts, npcWire.test.ts, clock.test.ts). What they
 // cannot see is the glue in `server/relay.mjs`: that each word reaches its handler, that a seen word is
@@ -89,7 +91,7 @@ if (typeof WebSocket === 'undefined') {
     const far = await connect('Leia', 'char-c', 'naboo');
     ok(admin.id > 0 && b.id > 0 && stranger.id > 0 && far.id > 0, 'four browsers, three of them saying who they are, are in');
     const hail = admin.last('hail') as Msg;
-    ok(hail.v === 3, `the relay speaks the third wire (${hail.v})`);
+    ok(hail.v === 4, `the relay speaks the fourth wire (${hail.v})`);
     ok(admin.all('welcome').length === 1 && b.all('welcome').length === 1, 'and a welcome is sent once and only once');
     admin.at(10);
     b.at(40);
@@ -214,6 +216,41 @@ if (typeof WebSocket === 'undefined') {
     b.send({ t: 'spawn', do: 'add', species: 'a_trooper', at: [3, 0, 3] });
     await settle();
     ok(!!b.last('spawn', (m) => m.do === 'refused'), 'and nobody but the admin may stand one');
+
+    // ---- the admin's weapon for one already standing --------------------------------------------------
+    // `__debug.arm` on a body the world holds: only the admin may, the word goes to everybody on its world and
+    // nobody off it, and a browser that says it has seen an armed one later is told the weapon as it does.
+    const armId = String((admin.last('spawn', (m) => m.do === 'add') as { row: Msg } | undefined)?.row.id ?? '');
+    const sword = 'object/weapon/melee/sword/shared_sword_01.iff';
+    const arms = (br: { got: Msg[] }, id: string) => br.got.filter((m) => m.t === 'spawn' && m.do === 'arm' && m.id === id);
+    const refusedWas = b.all('spawn').filter((m) => m.do === 'refused').length;
+    b.send({ t: 'spawn', do: 'arm', id: armId, weapon: sword });
+    await settle();
+    ok(!!armId && b.all('spawn').filter((m) => m.do === 'refused').length === refusedWas + 1, 'a player who is not the admin asking to arm one is refused in words');
+    ok([admin, b, stranger, far].every((br) => arms(br, armId).length === 0), 'and nobody is told anything about it');
+    admin.send({ t: 'spawn', do: 'arm', id: armId, weapon: sword });
+    await settle();
+    const armWord = arms(b, armId)[0];
+    ok(arms(admin, armId).length === 1 && armWord?.weapon === sword, `the admin's word reaches every browser on the world, the admin's own included (${JSON.stringify(armWord)})`);
+    ok(arms(far, armId).length === 0, 'and none on another world');
+    const adminRefusedWas = admin.all('spawn').filter((m) => m.do === 'refused').length;
+    admin.send({ t: 'spawn', do: 'arm', id: 'stood:tatooine:nobody', weapon: sword });
+    await settle();
+    ok(admin.all('spawn').filter((m) => m.do === 'refused').length === adminRefusedWas + 1 && arms(b, 'stood:tatooine:nobody').length === 0, 'arming something that is not standing is refused, even for the admin, and said to nobody else');
+    // One the browsers seed for themselves, armed, and then seen by a browser that arrives afterwards.
+    admin.send({ t: 'spawn', do: 'seen', id: 'stood:tatooine:9', at: [0, 0, 0], r: 60 });
+    await pass();
+    admin.send({ t: 'spawn', do: 'arm', id: 'stood:tatooine:9', weapon: sword });
+    await settle();
+    ok(arms(b, 'stood:tatooine:9').length === 1, 'a person at their post is armed for everybody on the world alike');
+    const seer = await connect('Wedge', 'char-e', 'tatooine');
+    seer.at(12);
+    await settle();
+    ok(arms(seer, 'stood:tatooine:9').length === 0, 'a browser arriving afterwards has heard nothing of it yet');
+    seer.send({ t: 'spawn', do: 'seen', id: 'stood:tatooine:9', at: [0, 0, 0], r: 60 });
+    await settle();
+    ok(arms(seer, 'stood:tatooine:9')[0]?.weapon === sword, 'and is told the weapon the moment it says it has stood that body, which was armed off its own seed');
+    seer.close();
 
     // ---- the length of everybody's day ---------------------------------------------------------------
     b.send({ t: 'day', ms: 60000 });

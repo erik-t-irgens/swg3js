@@ -20,10 +20,11 @@ import { fromBase32, hmacSha256, sha256, toBase32, toHex, utf8 } from './hash.ts
 /**
  * The version of the language this browser speaks. An old relay ignores it; a new server reads it.
  * 3 is the seen creatures, a creature's blow on another player, the keeper turning a bolt away, how low
- * a body stands on the wire and the admin's day (`server/relay.mjs` says the same); none of those is
- * ever sent to a server that says less (`speaks`).
+ * a body stands on the wire and the admin's day; 4 is the admin's `arm`, a weapon put in the hand of one
+ * of the world's creatures already standing (`server/relay.mjs` says the same). None of those is ever
+ * sent to a server that says less (`speaks`).
  */
-export const WIRE_VERSION = 3;
+export const WIRE_VERSION = 4;
 
 /**
  * The label mixed into the key to make the verifier the server keeps. It is the server's
@@ -786,6 +787,18 @@ export class Session {
    */
   speaks(version: number): boolean {
     return this.stat.authority === 'server' && this.stat.serverVersion >= version;
+  }
+
+  /**
+   * The version a hello says: this browser's own until the server has hailed, and after that the lesser of
+   * the two. A relay of the third wire records a browser's version only when it is exactly its own (every
+   * one since takes the lesser itself), and it passes a creature's blow on only to a browser it recorded:
+   * told 4 by this browser, it recorded nothing and dropped every bite on this player while `speaks(3)`
+   * still said yes. The words of a newer wire are never said to an older server whatever the hello says.
+   */
+  helloVersion(): number {
+    const server = this.stat.serverVersion;
+    return server > 0 ? Math.min(WIRE_VERSION, server) : WIRE_VERSION;
   }
 
   /** A tie waiting on the player, or null. */

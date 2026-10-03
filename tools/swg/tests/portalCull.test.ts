@@ -452,7 +452,7 @@ const want = (shown: (keyof typeof R)[]) => seen([...shown, 'lit'].filter((k) =>
   ok(manager.includes('this.deps.roomSeen(m.group)') && manager.includes('(cast && held.cast === false)'), "the manager reads each body's level by its own group, and puts a shadow on the step it is wanted rather than on the half-second");
   const mobile = read('world/mobiles/mobile.ts');
   const animate = mobile.slice(mobile.indexOf('  private animate(dt: number, tier: LodTier): void {'));
-  ok(/if \(this\.posed\) \{\s*if \(every <= 0\) return;/.test(animate) && animate.includes('this.posed = true;') && (mobile.match(/this\.posed = false;/g) ?? []).length >= 2, 'a body frozen from the start is posed once all the same, on being hung and on being stood again, so it is never revealed in its rest pose');
+  ok(/if \(this\.posed\) \{\s*if \(every <= 0\) return;/.test(animate) && animate.includes('this.posed = true;') && (mobile.match(/this\.posed = false;/g) ?? []).length >= 1, 'a body frozen from the start is posed once all the same on being hung, so it is never revealed in its rest pose (a body is never stood again in place: one that comes back is new, and hung)');
 }
 
 // ---- 11. Nothing allocated by a frame of it. ----

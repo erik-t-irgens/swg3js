@@ -1219,4 +1219,29 @@ const BEAT = 1 / NPC_TUNE.batchHz + 1e-6;
   ok(/if \(wired\) this\.onGone\?\.\(b, hitPoint\);[\s\S]{0,900}if \(wired\) this\.onFire\?\.\(b\);/.test(bolts), '36: and so does one of this browser\'s own creatures\' shots that the player\'s own blade turned away');
 }
 
+// --- 37: the admin arming one already standing, this side's half ----------------------------------------
+// The console's `arm` with a server asks and arms nothing itself: the server's word comes back to every
+// browser on the world, this one included, and that is what re-arms every copy alike.
+{
+  const o = new Owned(() => 5000);
+  const sent: Record<string, unknown>[] = [];
+  o.send = (m) => sent.push(JSON.parse(JSON.stringify(m)) as Record<string, unknown>);
+  ok(o.askArm('k1', 'object/weapon/x.iff') === '' && sent.length === 0, '37: with no server it asks nothing (a body is armed here, and only here)');
+  o.authority = () => 'server';
+  ok(/admin/.test(o.askArm('k1', 'object/weapon/x.iff')) && sent.length === 0, '37: with a server only the world’s admin may arm one of its creatures');
+  o.admin = () => true;
+  ok(/older/.test(o.askArm('k1', 'object/weapon/x.iff')) && sent.length === 0, '37: and only on a server that hears the word, or the admin would be left looking at a body that never changed hands');
+  o.arms = () => true;
+  ok(o.askArm('k1', 'object/weapon/x.iff') === '' && sent.length === 1 && sent[0].do === 'arm' && sent[0].id === 'k1' && sent[0].weapon === 'object/weapon/x.iff', '37: the admin’s ask names the body and the weapon’s template');
+  const heard: [string, string][] = [];
+  o.onArm = (id, weapon) => heard.push([id, weapon]);
+  o.handle({ t: 'spawn', do: 'add', row: { id: 'k1', world: 'tatooine\u0000', species: 'some_body', at: [0, 0, 0], h: 0, seed: 3 } });
+  o.handle({ t: 'spawn', do: 'arm', id: 'k1', weapon: 'object/weapon/x.iff' });
+  ok(heard.length === 1 && heard[0][0] === 'k1' && heard[0][1] === 'object/weapon/x.iff', '37: the server’s word is handed to whoever re-arms the body');
+  ok(o.row('k1')?.weapon === 'object/weapon/x.iff', '37: and the row remembers it, so the body is stood holding it again from that row');
+  o.handle({ t: 'spawn', do: 'arm', id: 'k1', weapon: '../../x' });
+  o.handle({ t: 'spawn', do: 'arm', id: '__proto__', weapon: 'object/weapon/x.iff' });
+  ok(heard.length === 1, '37: a word with a path that climbs out of where it is looked up, or a name that is not one, is dropped');
+}
+
 console.log(`\n${checks} checks passed`);
