@@ -10,6 +10,7 @@ import { RandomGenerator } from '../swg/terrain/fractal.ts';
 import { FastRandomGenerator, hashFloat, hashTuple, type FloraChild } from '../swg/terrain/flora.ts';
 import type { LoadedModel, Primitive } from './assetPack.ts';
 import type { FloraChunkData } from './floraBatch.ts';
+import { floraColliders } from './floraCollision.ts';
 import type { Collider, Exclusion } from './props';
 
 /** Flora smaller than this (metres of model radius) never casts a shadow. */
@@ -235,14 +236,17 @@ export class FloraPlanter {
       const into = p.collidable ? byTree : byPlant;
       (into.get(p.model) ?? into.set(p.model, []).get(p.model)!).push(p);
     }
-    this.plantMeshes(byTree, trees, data, index, colliders);
-    this.plantMeshes(byPlant, plants, data, index, colliders);
+    this.plantMeshes(byTree, trees, data, index);
+    this.plantMeshes(byPlant, plants, data, index);
+    // What the trees and rocks are solid at: the client's own shapes where the pack has them, the
+    // guessed cylinder where it has not (`floraCollision.ts`), from the same matrices the meshes stand on.
+    floraColliders(data, colliders);
     this.planted += kept.length;
     return { group, trees, plants, colliders, data };
   }
 
-  /** One instanced mesh per model and primitive of these placements, into `into`, and the collidable ones' colliders. */
-  private plantMeshes(byModel: Map<LoadedModel, Placement[]>, into: THREE.Group, data: FloraChunkData, index: Map<Placement, number>, colliders: Collider[]): void {
+  /** One instanced mesh per model and primitive of these placements, into `into`. */
+  private plantMeshes(byModel: Map<LoadedModel, Placement[]>, into: THREE.Group, data: FloraChunkData, index: Map<Placement, number>): void {
     for (const [model, list] of byModel) {
       for (const prim of model.primitives) {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, list.length);
@@ -257,15 +261,6 @@ export class FloraPlanter {
         mesh.receiveShadow = true;
         mesh.computeBoundingSphere();
         into.add(mesh);
-      }
-      for (const p of list) {
-        if (!p.collidable) continue;
-        const y = data.y[index.get(p)!];
-        const r = model.radius * p.scale;
-        const h = model.height * p.scale;
-        // Trees block at the trunk, not the canopy; squat things (rocks) block at their width.
-        const radius = h > 2.2 * r ? Math.min(Math.max(r * 0.3, 0.25), 1.2) : Math.max(r * 0.8, 0.3);
-        colliders.push({ x: p.x, z: p.z, r: radius, top: y + h });
       }
     }
   }

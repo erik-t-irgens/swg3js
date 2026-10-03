@@ -1,10 +1,13 @@
 // The browser's half of who thinks for a creature.
 //
-// The world's automatic wildlife is off: nothing stands in a world unless an admin stood it there by
-// hand, and what an admin stands is the world's -- everyone connected is told about it, and exactly
-// one browser thinks for it. Which browser that is, is the server's to say (server/ownership.mjs):
-// the nearest player within 180 m, changing hands only when somebody else has been a quarter nearer
-// for three seconds. This file is what that answer looks like on this side. It decides nothing.
+// Two kinds of creature are the world's. What an admin stands by hand -- everyone connected is told
+// about it, and exactly one browser thinks for it. And what every browser stands for itself from the
+// same data -- the lairs, the nests, the people at their posts -- which this browser says it has stood
+// (`saySeen`) and is then kept by exactly one browser in the same way, without anybody being told to
+// stand it. Which browser that is, is the server's to say (server/ownership.mjs): the nearest player
+// within 180 m for an admin's, the nearest with a body for it for a seen one, changing hands only when
+// somebody else has been a quarter nearer for three seconds. This file is what that answer looks like
+// on this side. It decides nothing.
 //
 // What the rest of the game asks is one question -- `owned.mine(id)` -- and the answer shapes
 // everything else: a creature this browser keeps runs its brain, its steering and its own physics,
@@ -47,14 +50,50 @@ export const OWN_TUNE = {
    * what enforces it; this side only has to be willing to speak.
    */
   deathGrace: 5,
+  /**
+   * How many `seen` words this browser sends in a second, the rest waiting their turn. Under the
+   * server's own twenty (`seen.perSecond` in server/ownership.mjs) on purpose: a word over the server's
+   * allowance is dropped there in silence, and a body whose word was dropped is a body nobody keeps.
+   * Ours: walking into a town says it of a few dozen people over a few seconds.
+   */
+  seenPerSecond: 16,
+  /**
+   * The span, in seconds, that no more than `seenPerSecond` of those words may go out in, measured back
+   * from each one sent rather than per calendar second. The server counts its own second from the first
+   * word of a burst, so two flushes either side of a calendar second's edge landed in one of its seconds
+   * and the words over twenty were dropped there in silence; a sliding span a quarter of a second longer
+   * than the server's second also covers the line delivering one word sooner than another. Ours.
+   */
+  seenSpan: 1.25,
+  /** How many `seen` words may wait their turn at once; past that the oldest is said again later by the body itself. Ours. */
+  seenWaiting: 256,
 };
+
+/** How many `seen` words the sliding span remembers sending: the most `seenPerSecond` may ever be (the server's own twenty). */
+const SEEN_SLOTS = 20;
 
 /** Set any of those, clamped to what makes sense; the answer is the table as it now stands. */
 export function tuneOwned(o: Partial<typeof OWN_TUNE>): typeof OWN_TUNE {
   if (typeof o.asksPerSecond === 'number') OWN_TUNE.asksPerSecond = Math.max(1, Math.min(60, Math.round(o.asksPerSecond)));
   if (typeof o.rows === 'number') OWN_TUNE.rows = Math.max(1, Math.min(2000, Math.round(o.rows)));
   if (typeof o.deathGrace === 'number') OWN_TUNE.deathGrace = Math.max(0, Math.min(60, o.deathGrace));
+  if (typeof o.seenPerSecond === 'number') OWN_TUNE.seenPerSecond = Math.max(1, Math.min(SEEN_SLOTS, Math.round(o.seenPerSecond)));
+  if (typeof o.seenSpan === 'number') OWN_TUNE.seenSpan = Math.max(1, Math.min(10, o.seenSpan));
+  if (typeof o.seenWaiting === 'number') OWN_TUNE.seenWaiting = Math.max(1, Math.min(4096, Math.round(o.seenWaiting)));
   return OWN_TUNE;
+}
+
+/**
+ * The names a body every browser stands for itself may be shared under: a lair's creature, a person at
+ * a post, a nest. The server's own list (`SEEN_PREFIXES` in server/ownership.mjs), kept here so this side
+ * never sends a word the server would only drop.
+ */
+export const SEEN_PREFIXES = ['wild:', 'stood:', 'camp:'] as const;
+
+/** Whether an id is one a seen creature goes by. */
+export function seenId(id: string): boolean {
+  for (const p of SEEN_PREFIXES) if (id.length > p.length && id.startsWith(p)) return true;
+  return false;
 }
 
 /**
@@ -84,10 +123,19 @@ export interface SpawnRow {
    * on every browser, the admin's own included.
    */
   inside?: boolean;
+  /**
+   * A weapon off the rack the admin put in its hand from the console (`__debug.mobile(.., { weapon })`),
+   * by the rack's template: in the record, so every browser arms it alike rather than each taking its
+   * own guess from its name.
+   */
+  weapon?: string;
 }
 
-/** Why a creature is no longer there: it was killed, or an admin took it down. */
-export type GoneWhy = 'dead' | 'removed';
+/**
+ * Why a creature is no longer there: it was killed, an admin took it down, or it walked off with
+ * another player as a follower -- which to everybody else is a creature that has left its post.
+ */
+export type GoneWhy = 'dead' | 'removed' | 'taken';
 
 /** What the module is doing, filled in place so the console can read it between frames. */
 export interface OwnedStats {
@@ -113,6 +161,19 @@ export interface OwnedStats {
   /** Spawn words sent, and the last thing the server refused, in its own words. */
   asked: number;
   refused: string;
+  /** Whether this browser shares what it stands for itself (a server answering that speaks of them). */
+  seeding: boolean;
+  /** `seen` words said, waiting their turn, and `unseen` words said, since the page began. */
+  seen: number;
+  seenWaiting: number;
+  unseen: number;
+  /** Bodies this browser was told to keep to itself because the world could hold no more seen ones. */
+  local: number;
+  /** Of what this browser keeps, how many an admin stood and how many are seen ones. */
+  keptStood: number;
+  keptSeen: number;
+  /** Seen ones this browser has been told are down for their respawn just now. */
+  seenDown: number;
 }
 
 /**
@@ -132,13 +193,38 @@ export class Owned {
    * behalf, because a tab that is not drawn runs no brains and must keep nothing.
    */
   visible: () => boolean = () => true;
+  /**
+   * Whether the server speaks of the seen creatures at all (`Session.speaks(3)`). With an older one --
+   * or none -- nothing this browser stands for itself is shared, and every such body stays its own,
+   * which is what every browser did before.
+   */
+  seeds: () => boolean = () => false;
 
   /** The whole list arrived (on joining a world, and again whenever it is cleared). */
   onList: (rows: readonly SpawnRow[]) => void = () => {};
   /** One creature was stood. Everyone on the world is told, the admin who asked included. */
   onAdd: (row: SpawnRow) => void = () => {};
-  /** One is no longer there. A death stays a death: it is never stood again under the same id. */
-  onGone: (id: string, why: GoneWhy) => void = () => {};
+  /**
+   * One is no longer there. A death stays a death: an admin's is never stood again under the same id,
+   * and a seen one not for `back` seconds, which is its own row's respawn as the server holds it.
+   *
+   * `fresh` is the server answering this browser alone about a body it has only just stood: the creature
+   * was already down when this browser said it had one. Nothing died here -- the body is to go quietly,
+   * never to play a death nobody saw or count as a kill at its post.
+   */
+  onGone: (id: string, why: GoneWhy, back: number, fresh: boolean) => void = () => {};
+  /** The server could hold no more seen ones on this world: the body under this name is this browser's own to keep. */
+  onLocal: (id: string) => void = () => {};
+  /**
+   * The admin put a weapon off the rack, by its template, in the hand of one already standing: every
+   * browser on its world is told, the admin's own included, and re-arms its copy the same way.
+   */
+  onArm: (id: string, weapon: string) => void = () => {};
+  /**
+   * Whether the server hears `arm` at all (`Session.speaks(4)`): one that does not would drop it in
+   * silence, and the admin would be left looking at a body that never changed hands.
+   */
+  arms: () => boolean = () => false;
   /**
    * This browser has been given one to think for, or had one taken off it. `row` is what is known
    * about it, which may be nothing at all when the grant has outrun the news of the spawn.
@@ -165,10 +251,24 @@ export class Owned {
   private awakeTold = -1;
   /** Ids of the dead, so that a row arriving late can never stand one of them up again. */
   private readonly buried = new Set<string>();
-  private readonly stat: OwnedStats = { active: false, admin: false, known: 0, kept: 0, ids: [], taken: 0, given: 0, lastId: '', lastGot: 0, lastAt: 0, sinceLast: -1, asked: 0, refused: '' };
+  /**
+   * The seen ones that are down, and until when in this file's own seconds: their own respawn as the
+   * server holds it. A seen one is not buried for good, because the same name stands again in every
+   * browser once its row's wait is out.
+   */
+  private readonly downUntil = new Map<string, number>();
+  private readonly stat: OwnedStats = { active: false, admin: false, known: 0, kept: 0, ids: [], taken: 0, given: 0, lastId: '', lastGot: 0, lastAt: 0, sinceLast: -1, asked: 0, refused: '', seeding: false, seen: 0, seenWaiting: 0, unseen: 0, local: 0, keptStood: 0, keptSeen: 0, seenDown: 0 };
   /** The second being counted for this browser's own rate, and how many words have gone out inside it. */
   private askWindow = 0;
   private askCount = 0;
+  /**
+   * `seen` words waiting their turn, oldest first, by id so a body said twice before its turn is one
+   * word. The second being counted for them, and how many have gone in it.
+   */
+  private readonly seenQueue = new Map<string, { at: [number, number, number]; r: number }>();
+  /** When each of the last `SEEN_SLOTS` `seen` words went out, a ring written in place, and where it goes next. */
+  private readonly seenSent: number[] = new Array<number>(SEEN_SLOTS).fill(-Infinity);
+  private seenHead = 0;
 
   /**
    * The clock the hand-overs are timed against, in seconds; a test hands in its own. It is assigned
@@ -213,9 +313,36 @@ export class Owned {
     return this.keeping.size;
   }
 
-  /** Whether one died here. A death happens once and stays, whoever ends up keeping the body. */
+  /**
+   * Whether one died here. A death happens once and stays, whoever ends up keeping the body -- for an
+   * admin's for good, and for a seen one until its own respawn is out.
+   */
   dead(id: string): boolean {
-    return this.buried.has(id);
+    return this.buried.has(id) || this.downFor(id) > 0;
+  }
+
+  /**
+   * How many seconds more a seen one stays down before anybody stands it again; 0 while it may stand.
+   * What the lairs and the people at their posts ask before standing a body, so none is stood up whole
+   * in one browser while every other has it dead.
+   */
+  downFor(id: string): number {
+    const until = this.downUntil.get(id);
+    if (until === undefined) return 0;
+    const left = until - this.now();
+    if (left > 0) return left;
+    this.downUntil.delete(id);
+    return 0;
+  }
+
+  /** Whether this browser shares what it stands for itself: a server answering that speaks of the seen ones. */
+  get seeding(): boolean {
+    return this.active && this.askSeeds();
+  }
+
+  /** Every id the server has granted this browser, seen ones included. Read, never written to. */
+  get keptIds(): ReadonlySet<string> {
+    return this.keeping;
   }
 
   // ---- the asking ----------------------------------------------------------------------------------
@@ -227,7 +354,7 @@ export class Owned {
    *
    * The answer is a word for the player, or '' when the asking went out.
    */
-  askSpawn(species: string, at: readonly [number, number, number], h = 0, seed = 0, id = '', inside = false): string {
+  askSpawn(species: string, at: readonly [number, number, number], h = 0, seed = 0, id = '', inside = false, weapon = ''): string {
     if (!this.active) return '';
     if (!this.admin()) return 'only this world’s admin can stand creatures in it';
     if (!species) return 'there is nothing to stand';
@@ -240,8 +367,37 @@ export class Owned {
     // the place, since rooms overhang their hull and a point inside one is often outdoors. Sent only
     // when it is true, so a browser standing things on the street sends exactly what it always did.
     if (inside) msg.inside = 1;
+    // A weapon of the console's choosing, carried in the record so every browser arms it alike. A
+    // server that speaks no such field drops it, and the body is armed off its own list there.
+    if (weapon) msg.weapon = weapon;
     this.send(msg);
     return '';
+  }
+
+  /**
+   * Put a weapon off the rack in the hand of one of the world's creatures already standing, by the rack's
+   * template. Nothing is armed by this: the server's word comes back to everybody on the world, this
+   * browser included, and that is what re-arms every copy alike. The answer is a word for the player, or
+   * '' when the asking went out.
+   */
+  askArm(id: string, weapon: string): string {
+    if (!this.active) return '';
+    if (!this.admin()) return 'only this world’s admin can arm the creatures in it';
+    if (!id || !weapon) return 'there is nothing to arm';
+    if (!this.askArms()) return 'this server is older than arming one already standing: restart it (npm run relay)';
+    if (!this.mayAsk()) return 'that is faster than the server will take them';
+    this.stat.asked++;
+    this.send({ t: 'spawn', do: 'arm', id, weapon });
+    return '';
+  }
+
+  /** Whether the server hears `arm`, asked of the game; a hook that throws is no. */
+  private askArms(): boolean {
+    try {
+      return this.arms();
+    } catch {
+      return false;
+    }
   }
 
   /** Take one down. The admin's, and the server is what refuses it. */
@@ -270,7 +426,7 @@ export class Owned {
    * server is what makes it true for everyone; the body is not taken down here, because a death is
    * heard back as the `gone` every browser hears, this one included.
    */
-  sayDead(id: string): void {
+  sayDead(id: string, by: readonly number[] = []): void {
     if (!this.active || !id) return;
     // The word goes out for a moment after the grant went away as well as while it is held. A brain
     // drops a creature to nothing and says so in the same breath, and the grants go out twice a
@@ -283,7 +439,116 @@ export class Owned {
       const lost = this.letGo.get(id);
       if (lost === undefined || this.now() - lost > OWN_TUNE.deathGrace) return;
     }
-    this.send({ t: 'spawn', do: 'dead', id });
+    // Who struck it in its last moments, by the relay ids of the browsers whose players did: what a
+    // later server could witness a kill by. Nothing here keeps it, and a server that knows nothing of it
+    // drops the field.
+    const msg: Record<string, unknown> = { t: 'spawn', do: 'dead', id };
+    if (by.length && this.askSeeds()) msg.by = by.slice(0, 8);
+    this.send(msg);
+  }
+
+  /**
+   * This browser has stood one of the seeded kind -- a lair's creature, a nest, a person at a post -- and
+   * says so, with where it stands and how long it stays down once it dies (its own row's respawn). The
+   * word waits its turn under the allowance, oldest first: the body it is about is meanwhile held as
+   * one nobody here keeps, which is a quarter of a second of standing still in the ordinary case.
+   */
+  saySeen(id: string, at: { x: number; y: number; z: number }, respawn: number): void {
+    if (!this.seeding || !id || !seenId(id)) return;
+    const r = Number.isFinite(respawn) && respawn > 0 ? Math.round(respawn) : 0;
+    const was = this.seenQueue.get(id);
+    if (was) {
+      was.at[0] = at.x;
+      was.at[1] = at.y;
+      was.at[2] = at.z;
+      was.r = r;
+    } else {
+      // Full: the oldest waiting is let go of rather than this one refused. Its body says it again on
+      // its own once it has gone a while unkept (`NpcNet`'s re-saying), so nothing is lost for good.
+      if (this.seenQueue.size >= OWN_TUNE.seenWaiting) {
+        const first = this.seenQueue.keys().next().value;
+        if (first !== undefined) this.seenQueue.delete(first);
+      }
+      this.seenQueue.set(id, { at: [at.x, at.y, at.z], r });
+    }
+    this.flushSeen();
+  }
+
+  /**
+   * This browser has put its body for a seen one down: walked away from it, or made room. The server
+   * offers it no more, and hands it at once to somebody who still has one. Nothing is said about one
+   * whose `seen` never went out: the server has never heard this browser has it.
+   */
+  sayUnseen(id: string): void {
+    if (!id || !seenId(id)) return;
+    if (this.seenQueue.delete(id)) {
+      this.stat.seenWaiting = this.seenQueue.size;
+      return;
+    }
+    if (!this.seeding) return;
+    this.stat.unseen++;
+    this.send({ t: 'spawn', do: 'unseen', id });
+  }
+
+  /**
+   * One this browser keeps has walked off with its player as a follower, which is this browser's alone
+   * from now on. To everybody else it is gone from its post, and a seen one's post stays empty for its
+   * own respawn, as after a death. It is the keeper's word, as a death is.
+   */
+  sayTaken(id: string): void {
+    // Only to a server that hears it: an older one drops the word, and every other screen would keep a
+    // frozen copy at the post that nobody keeps. `NpcNet.mayLeave` refuses the walk-off itself first.
+    if (!this.active || !id || !this.keeping.has(id) || !this.askSeeds()) return;
+    this.send({ t: 'spawn', do: 'taken', id });
+  }
+
+  /**
+   * The `seen` words whose turn it is: as many as the allowance lets go this second, oldest first. Run on
+   * every word said and on the wiring's own clock (`tick`), never in a frame.
+   */
+  private flushSeen(): void {
+    if (!this.seenQueue.size) return;
+    if (!this.seeding) {
+      // No server that hears them, any more: nothing waiting means anything to anybody.
+      this.seenQueue.clear();
+      this.stat.seenWaiting = 0;
+      return;
+    }
+    const now = this.now();
+    for (const [id, w] of this.seenQueue) {
+      if (!this.seenRoom(now)) break;
+      this.seenSent[this.seenHead] = now;
+      this.seenHead = (this.seenHead + 1) % SEEN_SLOTS;
+      this.seenQueue.delete(id);
+      this.stat.seen++;
+      this.send({ t: 'spawn', do: 'seen', id, at: [round2(w.at[0]), round2(w.at[1]), round2(w.at[2])], r: w.r });
+    }
+    this.stat.seenWaiting = this.seenQueue.size;
+  }
+
+  /**
+   * Whether another `seen` may go now: fewer than `seenPerSecond` have gone in the last `seenSpan` seconds.
+   * Any span that long holds no more than the allowance, so any second the server counts -- starting
+   * wherever its count starts, with the line a little quicker for one word than another -- holds no more.
+   */
+  private seenRoom(now: number): boolean {
+    let n = 0;
+    for (const t of this.seenSent) if (now - t < OWN_TUNE.seenSpan) n++;
+    return n < OWN_TUNE.seenPerSecond;
+  }
+
+  /** The wiring's clock, a few times a second: whatever `seen` words are waiting their turn go when it comes. */
+  tick(): void {
+    this.flushSeen();
+  }
+
+  /** Whether the server speaks of the seen ones, asked of the game; a hook that throws is no. */
+  private askSeeds(): boolean {
+    try {
+      return this.seeds();
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -348,7 +613,7 @@ export class Owned {
         const row = readRow(msg.row);
         // A creature that died here is never stood again: the row would be an old one arriving late,
         // and a death that came back would be the one thing about this nobody could put right.
-        if (row && !this.buried.has(row.id) && this.rows.size < OWN_TUNE.rows) {
+        if (row && !this.dead(row.id) && this.rows.size < OWN_TUNE.rows) {
           this.rows.set(row.id, row);
           this.stat.known = this.rows.size;
           this.onAdd(row);
@@ -358,15 +623,43 @@ export class Owned {
       case 'gone': {
         const id = readId(msg.id);
         if (!id) break;
-        const why: GoneWhy = msg.why === 'dead' ? 'dead' : 'removed';
-        if (why === 'dead') this.buried.add(id);
+        const why: GoneWhy = msg.why === 'dead' ? 'dead' : msg.why === 'taken' ? 'taken' : 'removed';
+        // A seen one is down for its own respawn and then stands again, in every browser; an admin's
+        // that died is buried for good. Taken off with another player is the same as a death to a seen
+        // one's post, and nothing at all to an admin's, which has simply gone from the list.
+        const seen = seenId(id);
+        const back = Math.max(0, Math.min(86400, Number(msg.back) || 0));
+        if (seen && (why === 'dead' || why === 'taken')) this.downUntil.set(id, this.now() + Math.max(1, back));
+        else if (why === 'dead') this.buried.add(id);
         const had = this.rows.delete(id);
         this.stat.known = this.rows.size;
         // Whatever this browser thought it was keeping, it is not any more: the server has taken the
         // grant back in the same breath, and a body nobody has told to stop is the one way a creature
         // could go on thinking after it was gone.
         if (this.keeping.delete(id)) this.note(id, false);
-        if (had) this.onGone(id, why);
+        if (had || seen) this.onGone(id, why, back, seen && msg.fresh === 1);
+        break;
+      }
+      case 'local': {
+        // The world could hold no more of the seen ones: the body under this name is this browser's
+        // own, as every such body was before there were any seen ones.
+        const id = readId(msg.id);
+        if (!id) break;
+        this.stat.local++;
+        this.seenQueue.delete(id);
+        this.onLocal(id);
+        break;
+      }
+      case 'arm': {
+        // A weapon the admin put in one's hand: read as a template path and nothing more, and looked up
+        // on this browser's own rack by whoever re-arms the body. A row this browser holds remembers it,
+        // so the record a body would be stood from again names it too.
+        const id = readId(msg.id);
+        const weapon = readTemplate(msg.weapon);
+        if (!id || !weapon) break;
+        const row = this.rows.get(id);
+        if (row) row.weapon = weapon;
+        this.onArm(id, weapon);
         break;
       }
       case 'refused': {
@@ -402,7 +695,7 @@ export class Owned {
       const id = readId(raw);
       // A grant for something that died is not taken: the server takes them back on a death, and one
       // crossing the other on the wire must not bring a body back to life.
-      if (!id || this.buried.has(id) || this.keeping.has(id)) continue;
+      if (!id || this.dead(id) || this.keeping.has(id)) continue;
       this.keeping.add(id);
       this.stat.taken++;
       this.note(id, true);
@@ -416,7 +709,7 @@ export class Owned {
     const seen = new Set<string>();
     for (const item of raw.slice(0, OWN_TUNE.rows)) {
       const row = readRow(item);
-      if (!row || this.buried.has(row.id)) continue;
+      if (!row || this.dead(row.id)) continue;
       seen.add(row.id);
       this.rows.set(row.id, row);
     }
@@ -424,7 +717,7 @@ export class Owned {
       if (seen.has(id)) continue;
       this.rows.delete(id);
       if (this.keeping.delete(id)) this.note(id, false);
-      this.onGone(id, 'removed');
+      this.onGone(id, 'removed', 0, false);
     }
     this.stat.known = this.rows.size;
     this.stat.kept = this.keeping.size;
@@ -461,6 +754,10 @@ export class Owned {
     this.keeping.clear();
     this.rows.clear();
     this.buried.clear();
+    this.downUntil.clear();
+    this.seenQueue.clear();
+    // A new line is a new count at the server's end as well.
+    this.seenSent.fill(-Infinity);
     this.letGo.clear();
     // Nothing has been said on the next line, whatever was said on this one: the server that answers
     // it holds a fresh record of this browser with nothing known about whether it is drawing frames.
@@ -469,6 +766,7 @@ export class Owned {
     this.stat.kept = 0;
     this.stat.ids.length = 0;
     this.stat.refused = '';
+    this.stat.seenWaiting = 0;
     this.onList([]);
   }
 
@@ -476,13 +774,29 @@ export class Owned {
   debug(): OwnedStats {
     this.stat.active = this.active;
     this.stat.admin = this.admin();
+    this.stat.seeding = this.seeding;
     this.stat.known = this.rows.size;
     this.stat.kept = this.keeping.size;
     this.stat.ids.length = 0;
-    for (const id of this.keeping) this.stat.ids.push(id);
+    let seen = 0;
+    for (const id of this.keeping) {
+      this.stat.ids.push(id);
+      if (seenId(id)) seen++;
+    }
+    this.stat.keptSeen = seen;
+    this.stat.keptStood = this.keeping.size - seen;
+    this.stat.seenWaiting = this.seenQueue.size;
+    let down = 0;
+    for (const id of [...this.downUntil.keys()]) if (this.downFor(id) > 0) down++;
+    this.stat.seenDown = down;
     this.stat.sinceLast = this.stat.lastId ? this.now() - this.stat.lastAt : -1;
     return this.stat;
   }
+}
+
+/** Two decimal places, as every place on the wire is cut. */
+function round2(n: number): number {
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
 }
 
 /** An id as the server mints them: short, plain, and never anything that means something to an object. */
@@ -516,7 +830,11 @@ function readRow(x: unknown): SpawnRow | null {
   const seed = Number(o.seed);
   const row: SpawnRow = {
     id,
-    world: readWords(o.world, 64),
+    // Kept exactly as it was sent: the server's world key holds a NUL between the planet and the zone
+    // (`roomKey` in server/rooms.mjs), and read through `readWords` -- which strips every control
+    // character -- `endor\0` came out `endor`, so every record an admin stood was refused on every browser
+    // as belonging to another world. It is only ever compared, never shown or parsed.
+    world: typeof o.world === 'string' ? o.world.slice(0, 64) : '',
     species,
     at: [at[0], at[1], at[2]],
     h: Number.isFinite(h) ? h : 0,
@@ -529,7 +847,17 @@ function readRow(x: unknown): SpawnRow | null {
   // Stood in a building's rooms. It decides the creature's cell and its collider filter on every
   // browser, and it cannot be worked out again from the place: rooms overhang their hull.
   if (o.inside) row.inside = true;
+  // The weapon the admin put in its hand: a template path, read as one and nothing more. It is looked
+  // up on this browser's own rack and a name the rack has not got arms it off its own list instead.
+  const weapon = readTemplate(o.weapon);
+  if (weapon) row.weapon = weapon;
   return row;
+}
+
+/** A weapon's template path from the far end, or '': the server's own rule for one (`cleanTemplate`). */
+function readTemplate(x: unknown): string {
+  if (typeof x !== 'string' || !/^[A-Za-z0-9_./-]{1,120}$/.test(x) || x.split('/').includes('..')) return '';
+  return x;
 }
 
 /**

@@ -7,7 +7,17 @@ import * as THREE from 'three';
 // colours on `:root`; this one carries what is drawn from them.
 import './ui/hud.css';
 const torchDir = new THREE.Vector3();
+/** The torch's head point, its pose and the inverse of a room's frame, kept so a frame with it on makes nothing. */
+const torchHead = new THREE.Vector3();
+const torchLocal = new THREE.Vector3();
+const torchLocalDir = new THREE.Vector3();
+const torchRoomInverse = new THREE.Matrix4();
 import { BountyHunterKit } from './combat/bountyHunter';
+import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
+import { GodHold, godRefusal } from './player/godMode.ts';
+import { HeldNotes } from './ui/heldNotes.ts';
+import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
+import { findRackWeapon, forcedArmsRefusal } from './world/mobiles/arms.ts';
 import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext, Living } from './combat/kit';
@@ -46,7 +56,7 @@ import { BLADE_GLOW_VIEWS, type BladeGlowPass } from './core/fx/bladeGlow';
 import { SSAO_TUNE_DEFAULTS, type SsaoPass } from './core/fx/ssao';
 import { SSAO_BASE_POWER } from './core/fx/ssaoMath.ts';
 import type { FighterGlow } from './world/npcs';
-import { DEFAULT_TIER } from './world/npcs.ts';
+import { DEFAULT_TIER, FIGHTER_SPECIES, fighterRecord } from './world/npcs.ts';
 import { captureScene, headingDegrees, sceneLine } from './world/sceneCapture.ts';
 import { framePlace, orbitFor, packPlanet, FRAME_ASPECT, ORBIT_EYE_HEIGHT } from './world/scenePlaces.ts';
 import { buildPlace, disposePlace, sceneManifest, type BuiltPlace } from './world/sceneWorld.ts';
@@ -83,7 +93,7 @@ import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
-import { groupMapFeed } from './ui/spaceMapLayers.ts';
+import { groupMapFeed, mapFrame, type MapFrame } from './ui/spaceMapLayers.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { GIVE_TUNE } from './ui/giveModel.ts';
@@ -101,7 +111,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
 // card's rows read exactly as the group roster's do.
 import { distanceWords, Hud, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
-import { specFor, type DriveInput } from './vehicles/vehicle';
+import { HOVER_TUNE, specFor, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
 import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
@@ -115,7 +125,9 @@ import { wildLife, NEST_MODEL_TUNE, WILD_TUNE, tuneTable } from './world/wildLif
 import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeople.ts';
 import { ambientPeople, OURS_TUNE, type AmbientPort } from './world/ambient/ambientPeople.ts';
 import { ROUTINE_TUNE } from './world/ambient/routines.ts';
-import { FILLER_TUNE } from './world/ambient/fillers.ts';
+import { FILLER_TUNE, isSeat } from './world/ambient/fillers.ts';
+import { SEAT_TUNE, isTableTemplate, planSeats, seatTally, tuneSeats, type SeatPlan } from './world/seatProps.ts';
+import type { AssetPack } from './world/assetPack.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
@@ -127,8 +139,8 @@ import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, s
 import { BandBar } from './ui/bandBar.ts';
 // Speaking to somebody, and the people who follow you (`src/world/talk.ts`, `src/world/followers.ts`).
 import { TalkUi } from './ui/talkUi.ts';
-import { GREET_CLIPS, TALK_LINES, TALK_TUNE, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkShot, tuneTalk, whyNotTalk, type TalkOption } from './world/talk.ts';
-import { FOLLOW_TUNE, tuneFollow } from './world/followers.ts';
+import { GREET_CLIPS, TALK_LINES, TALK_TUNE, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkPick, talkShot, tuneTalk, whyNotTalk, type TalkOption } from './world/talk.ts';
+import { FOLLOW_TUNE, isFollowerSource, tuneFollow } from './world/followers.ts';
 import { levelSamples, statsAtLevel, type LevelSample } from './world/levelStats.ts';
 import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
 import { SHUTTLE_RIG_TUNE, ShuttleRigs } from './world/shuttleRigs.ts';
@@ -165,7 +177,8 @@ import { HousingUi } from './ui/housingUi.ts';
 import { PropsUi } from './ui/propsUi.ts';
 import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
 import { PROP_TUNE, NO_TURN, liftBy as propLiftBy, propSpot, propVerdict, pushBy, turnBy, type PropTurn } from './world/propPlace.ts';
-import { placedProps, propsKey, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
+import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
+import { HOUSING_TUNE, LocalHomes, atDoorOf, houseName, isLocalHome, myBuildings, type MyBuilding } from './world/myBuildings.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -183,11 +196,11 @@ import { Notice } from './ui/notice';
 import { MESSAGES, MessageLine, plain, tuneMessages } from './ui/messages';
 import { COL, colourOf } from './core/palette';
 import { HudCanvas, OVERLAY_TUNE } from './ui/hudCanvas';
-import { layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
+import { HUD_SIZES, layout, makeLayout, tuneSizes, type HudLayout, type HudSizes } from './ui/hudMath';
 import { ActionBar } from './ui/prompt';
 import { PROMPT, newPromptState, resetPromptState, tunePrompt, type PromptState } from './ui/promptRules';
 import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from './ui/hudFeedback';
-import { Nameplates, PLATE_TUNE } from './ui/nameplate';
+import { Nameplates, PLATE_TUNE, pickPlate } from './ui/nameplate';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
 import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
@@ -198,6 +211,7 @@ import { AppearanceUi } from './ui/appearanceUi';
 import { CharacterSelect } from './ui/characterSelect';
 import { CreatorBar } from './ui/creatorBar';
 import { PlaceBar } from './ui/placeBar.ts';
+import { PLACE_CLOCK_TUNE } from './ui/placeClock.ts';
 import { Menu, keyName, onBindingsChanged, notifyBindingsChanged } from './ui/menu';
 import { ShipMenu, type ShipCruise, type ShipStatus } from './ui/shipMenu';
 import { BOARD_TUNE, Docking, boardRow, onPeerHullGone, peerHullGone, peerRooms, setPeerRooms, type BoardState, type CrossSide, type CrossTo, type PeerRooms, type SpotKind } from './space/docking';
@@ -299,6 +313,7 @@ import type { SeaFeedTune } from './world/seaFeed.ts';
 import type { PlayerBurnTune } from './combat/burnMath.ts';
 import type { BreathTune } from './player/breathMath.ts';
 import { FLORA_CLEAR } from './world/floraClear.ts';
+import { FLORA_COLLISION, FLORA_COLLISION_DEFAULTS } from './world/floraCollision.ts';
 import type { LavaSinkTune } from './player/lavaSinkMath.ts';
 import { configureWaterSim, pokeWaterSim, waterSimDebug, WATER_SIM_DRAFT, WATER_SIM_IMPACT, WATER_SIM_SPEED } from './world/waterSim';
 import { setWaterSurface, WATER_SURFACE_BAND, WATER_SURFACE_HIDE } from './world/water';
@@ -521,12 +536,10 @@ function copyShipFit(f: ShipFit): ShipFit {
 }
 
 /**
- * Whether something that struck is somebody following the player (`src/world/followers.ts`): a person
- * from the catalogue carrying a follow order. Such a blow on the player is no blow at all.
+ * The number keys' codes, made once: a conversation reads them on every frame it is up, and a code
+ * written out as a template string there is nine strings made a frame.
  */
-function isFollower(t: Living | null | undefined): boolean {
-  return !!t && !!(t as { follow?: unknown }).follow;
-}
+const DIGIT_CODES: readonly string[] = Object.freeze(['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9']);
 
 /** A console hook's knobs set on a table of ours: only a key the table has, only a value of the kind it holds, and never a number below nought. */
 function setTune(tune: object, from: object | undefined): void {
@@ -553,6 +566,10 @@ const BREAK_RELOAD_GAP = 120_000;
 class App {
   private torch!: THREE.SpotLight;
   private torchOn = false;
+  /** Where the torch was carried and aimed on the last frame it was on (`src/player/torch.ts`), and what the ray found. */
+  private readonly torchPose = newTorchPose();
+  private torchHit = Infinity;
+  private torchFirstPerson = false;
   private lastPrograms = 0;
   /**
    * Which shader programs the renderer holds, and which appeared on which frame. The renderer's own
@@ -814,7 +831,7 @@ class App {
   /** The frame's lights handed to the effects, refilled in drawFrame (declared before fxInput, whose initialiser reads it). */
   private readonly fxLights = createFxLights();
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
-  private readonly litSources: LitSources = { world: null!, effects: null!, torch: null, eye: new THREE.Vector3() };
+  private readonly litSources: LitSources = { world: null!, effects: null!, torch: null };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
   private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
@@ -891,10 +908,21 @@ class App {
    * catches anything that reaches the record by a path that does not.
    */
   private hurtSource: THREE.Vector3 | null = null;
+  /** What god mode holds of the hull flown or ridden (`__debug.god`, `src/player/godMode.ts`); the body's own flag is `Player.god`. */
+  private readonly godHold = new GodHold();
+  /** The display's quiet line: the weather's and the day's, then god mode and a held reach, joined only when one changes. */
+  private readonly heldNotes = new HeldNotes();
+  /** The draw distance the console holds past the Graphics page (`__debug.reach`); an axis not held follows its setting. */
+  private readonly reachHold = emptyHold();
   /** The nearest living thing's name, found at `HUD_WIRING.nearbyHz` rather than on the frame path. */
   private nearbyName = '';
-  /** The last building `__debug.house` put down, so the same helper can take it away again. */
-  private lastHouse: { x: number; z: number; key: string } | null = null;
+  /**
+   * The buildings this browser put down itself (no server, or `__debug.house(.., { local: true })`),
+   * each under a key of its own, for as long as the world they stand in: what the Housing tab lists
+   * beside the server's and takes down on the spot. It replaced a single slot that held only the last
+   * one, which left every earlier house standing with nothing that could name it.
+   */
+  private readonly localHomes = new LocalHomes();
   private nearbyClock = 0;
   /**
    * The two words the long prompt line needs that the bar's own state has no room for: how many
@@ -1108,17 +1136,18 @@ class App {
     Character.normalScale.set(S.normalStrength, S.normalStrength);
     this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
-    this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+    this.applyReach();
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
     // How hard the world's own bodies are, before any of them is stood: each reads it as it stands.
     setDifficulty(S.difficulty);
     // The weather's settings (the world made it; the HUD, made below, shows its note from the loop).
     this.world.weather.configure(S);
-    // A hand torch: a spot light carried at the camera, pointing where it looks. F toggles it.
+    // A hand torch: a spot light carried at the head (at the eye in first person), pointing at the
+    // crosshair's point, and no brighter on what it is aimed at than TORCH_TUNE allows. F toggles it.
     // Always in the scene and visible, turned up and down: a light that comes and goes changes the
     // light count, and that recompiles every shader in the world.
-    this.torch = new THREE.SpotLight(0xfff1d6, 0, 70, 0.42, 0.45, 1.6);
+    this.torch = new THREE.SpotLight(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);
     this.scene.add(this.torch, this.torch.target);
     this.portals = new PortalRenderer(this.renderer);
     // The frame report (`__debug.perf()`) times each pass on the GPU through this context when asked,
@@ -1317,7 +1346,7 @@ class App {
     target.damage = (amount: number, from?: THREE.Vector3, _push?: number, source?: Living | null): void => {
       // A follower's stray blow on the one it follows is no blow at all: it never turns on you, and a
       // swing or a spit that finds you on its way to something else lands on nothing.
-      if (isFollower(source)) return;
+      if (isFollowerSource(source)) return;
       this.hurtSource = from ?? null;
       // Put back whatever happens: a direction left standing would be worn by the next blow that
       // has none of its own, and a fall would flash with an arc on the side of whatever last shot.
@@ -1742,7 +1771,8 @@ class App {
         if (why) this.messages.system(why);
       });
     };
-    this.housingUi.onRemove = () => this.messages.system('take one down from the world itself, not from here');
+    // One of the character's own buildings, asked about and answered in the tab already.
+    this.housingUi.onRemove = (id) => this.messages.system(this.takeDownHome(id));
     // The props: every one in the game, listed and put down by the same hand a building is.
     this.props = new PropCatalogue(import.meta.env.BASE_URL);
     this.propsUi = new PropsUi(this.ui);
@@ -1764,6 +1794,14 @@ class App {
     this.placingBar.onLift = (n) => this.liftPlacing(n);
     this.placingBar.onPlace = () => void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
     this.placingBar.onCancel = () => (this.propPlacing ? this.stopPlacingProp() : this.stopPlacing());
+    // A prop picked back up: thrown away, where Cancel puts it back.
+    this.placingBar.onPutAway = () => this.stopPlacingProp('away');
+    // The creator's hour: play lets the day run at its own rate from wherever it stands, and a drag
+    // that has rested takes the reflections again at once rather than on their four-second clock.
+    this.placeBar.onPlay = (playing) => {
+      this.world.day.paused = !playing;
+    };
+    this.placeBar.onSettle = () => this.world.recaptureSky();
     // A conversation: E at a person who is neither hostile nor fighting, answered with the number keys
     // or the mouse while the world goes on round it.
     this.talkUi = new TalkUi(this.ui);
@@ -2170,8 +2208,9 @@ class App {
        * stands one a dozen metres ahead of where you face, on the ground as it finds it. The ground
        * is tested first and a spot too uneven or too steep is refused in words -- `{ force: true }`
        * stands it anyway, which is how to see what the test is saving you from. `{ go: true }` walks
-       * you to the door afterwards, `{ remove: true }` takes the last one back out, and
-       * `{ tune: { rise, sink, slope } }` moves the test itself, which is three invented numbers
+       * you to the door afterwards, `{ remove: true }` takes the nearest of yours back out (and
+       * `{ remove: '<id>' }` that one, as the Housing tab's own Take down does, with no question
+       * asked), and `{ tune: { rise, sink, slope } }` moves the test itself, which is three invented numbers
        * and wants an eye on them: measured over four real worlds they take between a tenth and a
        * half of the open ground, depending on the world and the size of the building.
        *
@@ -2181,24 +2220,16 @@ class App {
        * is gone the moment you leave the world. `{ local: true }` forces the second even with a
        * server, which is how to try a spot without asking anybody.
        */
-      house: async (model?: string, opts: { yaw?: number; force?: boolean; go?: boolean; remove?: boolean; local?: boolean; tune?: Partial<typeof HOUSE_TUNE> } = {}) => {
+      house: async (model?: string, opts: { yaw?: number; force?: boolean; go?: boolean; remove?: boolean | string; local?: boolean; tune?: Partial<typeof HOUSE_TUNE> } = {}) => {
         if (opts.tune) Object.assign(HOUSE_TUNE, opts.tune);
         const shared = !opts.local && this.net.session.authority === 'server';
         if (opts.remove) {
-          // Connected, the last one of yours nearest you, since the server is what says what is
-          // yours; alone, whatever this helper last put down.
-          if (shared) {
-            const p = this.player.worldPos;
-            const mine = homes.mine(this.net.session.character ?? '', { x: p.x, z: p.z });
-            if (!mine.length) return { error: 'you have nothing standing on this world' };
-            homes.askDown(mine[0].id);
-            return { asked: mine[0].id, note: 'it comes down when the server answers' };
-          }
-          const last = this.lastHouse;
-          if (!last) return { error: 'nothing has been put down this session' };
-          const gone = this.world.unplaceBuilding(last.key);
-          if (gone) this.lastHouse = null;
-          return { removed: gone, was: last };
+          // The one named, or the nearest of yours: the server's that are yours and the ones this
+          // browser put down itself, as the Housing tab lists them, and taken down the way it does.
+          const mine = this.myBuildingsHere();
+          const which = typeof opts.remove === 'string' ? mine.find((b) => b.id === opts.remove) : mine[0];
+          if (!which) return { error: typeof opts.remove === 'string' ? `none of yours here is ${opts.remove}` : 'you have nothing standing on this world', yours: mine.map((b) => b.id) };
+          return { taking: which.id, name: which.name, said: this.takeDownHome(which.id), left: mine.length - 1 };
         }
         const pack = await this.world.housesPack();
         if (!pack) return { error: 'the gallery pack is not converted: npm run swg -- gallery @SWG assets-private --retail-only' };
@@ -2226,8 +2257,11 @@ class App {
           if (opts.go) this.player.reset(new THREE.Vector3(tried.x, tried.y + 0.3, tried.z));
           return { ...tried, building: 'asked for; it goes up when the server answers', tune: { ...HOUSE_TUNE } };
         }
-        const out = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force });
-        if (out.ok) this.lastHouse = { x: out.x, z: out.z, key: out.key };
+        // A key of its own, so a second house of the same model is a second house and not the first
+        // one filed again over itself.
+        const key = this.localHomes.mint();
+        const out = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force, key });
+        if (out.ok) this.localHomes.add({ key, model, name: houseName(model, allDeeds()), x: out.x, y: out.y, z: out.z, yaw: out.yaw });
         if (out.ok && opts.go) this.player.reset(new THREE.Vector3(out.x, out.y + 0.3, out.z));
         // A building whose rooms the pack knows about but which came back without one was placed
         // into a size tier this region has not loaded: it is standing, and its rooms arrive with
@@ -2338,17 +2372,23 @@ class App {
        * catalogue if this session has not opened the panel); `{ turn: 3 }` presses the turn key
        * three times, `{ axis: 'x' }` picks which way, `{ lift: -4 }` lowers it four presses,
        * `{ reach: 5 }` holds it five metres out, `{ drop: true }` puts it down, `{ take: true }`
-       * picks the nearest one of yours back up, `{ cancel: true }` gives it up and
-       * `{ tune: { … } }` moves the numbers, every one of which is ours.
+       * picks the nearest one of yours back up, `{ cancel: true }` gives it up (one picked back up
+       * goes back where it stood), `{ away: true }` puts it away for good, as J again, Delete or the
+       * bar's Put away do, and `{ tune: { … } }` moves the numbers, every one of which is ours.
        *
        * `find` searches the catalogue by name or id, which is the only way to learn an id from a
        * driven tab: the panel's list cannot be read from here.
        */
-      prop: async (id?: string, opts: { turn?: number; axis?: 'x' | 'y' | 'z'; lift?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE> } = {}) => {
+      prop: async (id?: string, opts: { turn?: number; axis?: 'x' | 'y' | 'z'; lift?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; away?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE> } = {}) => {
         if (opts.tune) Object.assign(PROP_TUNE, opts.tune);
         if (opts.cancel) {
           this.stopPlacingProp();
-          return { placing: null };
+          return { placing: null, standing: placedProps.all.length };
+        }
+        if (opts.away) {
+          const was = this.propPlacing;
+          this.stopPlacingProp('away');
+          return { placing: null, putAway: was ? (was.def.name || was.def.id) : null, wasPickedUp: !!was?.from, standing: placedProps.all.length };
         }
         if (!this.props.loaded) await this.props.load();
         if (opts.find !== undefined) {
@@ -2400,6 +2440,8 @@ class App {
           ok: p.ok,
           why: p.why,
           keys: this.placeKeys(),
+          // Picked back up out of the world: Escape puts it back, J, Delete or `{ away: true }` throw it away.
+          pickedUp: !!p.from,
           standing: mine.length,
           tune: { ...PROP_TUNE },
         };
@@ -2706,6 +2748,42 @@ class App {
         };
       },
       /**
+       * The chairs and tables of ours under the people the data sits down (`src/world/seatProps.ts`): how
+       * many the plan holds by kind and model and how many of them stand, how many sitters already had a
+       * seat of the data's and how many tables it already had, how many tables are shared, and the nearest
+       * few. `{ tune: { ahead: 0.9, share: 2 } }` moves any of `SEAT_TUNE` and stands them all again, as
+       * `{ again: true }` does; `{ tune: { on: false } }` takes them all away. `{ go: true }` puts you
+       * beside the nearest, on its own floor when it is indoors.
+       */
+      seats: (opts: { tune?: Record<string, unknown>; again?: boolean; go?: boolean } = {}) => {
+        const moved = opts.tune ? tuneSeats(opts.tune) : [];
+        const here = packIdOf(this.world.planet, this.zone);
+        if (moved.length || opts.again) void this.standSeats(here);
+        const plan = this.seatsStood.pack === here ? this.seatsStood.plan : null;
+        const props = plan?.props ?? [];
+        const at = this.player.worldPos;
+        const near = props.map((p) => ({ p, d: Math.hypot(p.x - at.x, p.z - at.z) })).sort((a, b) => a.d - b.d);
+        if (opts.go && near.length) {
+          const p = near[0].p;
+          // A step in front of it, where its sitter's knees are, and on its own floor indoors.
+          const to = new THREE.Vector3(p.x + Math.sin(p.yaw) * 1.2, (p.inside ? p.y : this.world.terrain.heightAt(p.x, p.z)) + 0.3, p.z + Math.cos(p.yaw) * 1.2);
+          this.player.reset(to);
+          const cell = p.inside ? this.world.enterCellAt(to) : 0;
+          return { went: { kind: p.kind, model: p.model, at: [p.x, p.y, p.z].map((n) => Math.round(n * 10) / 10) }, cell };
+        }
+        return {
+          planned: props.length,
+          standing: this.seatsStood.keys.length,
+          ...seatTally(props),
+          had: plan?.had ?? null,
+          shared: plan?.shared ?? 0,
+          ...(moved.length || opts.again ? { moved, note: 'standing them all again: ask once more in a moment for the new count' } : {}),
+          nearest: near.slice(0, 6).map((n) => ({ kind: n.p.kind, model: n.p.model, away: Math.round(n.d), indoors: n.p.inside })),
+          why: this.seatsStood.note || undefined,
+          tune: { ...SEAT_TUNE },
+        };
+      },
+      /**
        * The band: the music players make, which is the only music in this game.
        *
        * `__debug.band()` reports what is in your hands, which songs it has a part in and what is
@@ -2748,11 +2826,29 @@ class App {
           instruments: pack ? Object.keys(pack.instruments).length : 0,
         };
       },
-      /** What is built on the world you are standing on, whose each one is, and what the server last said. */
-      homes: () => {
+      /**
+       * What is built on the world you are standing on, whose each one is, and what the server last
+       * said; `yours` is the Housing tab's own list (the server's that are yours and the ones this
+       * browser put down itself), `atDoor` the one whose doorstep you are standing at, and
+       * `{ tune: { armMs, doorReach, standApart } }` moves `HOUSING_TUNE`.
+       */
+      homes: (opts: { tune?: Partial<typeof HOUSING_TUNE> } = {}) => {
+        if (opts.tune) {
+          for (const [k, v] of Object.entries(opts.tune)) if (k in HOUSING_TUNE && typeof v === 'number' && Number.isFinite(v)) (HOUSING_TUNE as Record<string, number>)[k] = Math.max(0, v);
+        }
         const p = this.player.worldPos;
         const me = this.net.session.character ?? '';
-        return { ...homes.report(), shared: this.net.session.authority === 'server', mine: homes.mine(me, { x: p.x, z: p.z }).map((r) => r.id) };
+        const yours = this.myBuildingsHere();
+        return {
+          ...homes.report(),
+          shared: this.net.session.authority === 'server',
+          mine: homes.mine(me, { x: p.x, z: p.z }).map((r) => r.id),
+          local: this.localHomes.all.map((r) => ({ key: r.key, model: r.model, name: r.name, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)] })),
+          yours: yours.map((b) => ({ id: b.id, name: b.name, away: Math.round(b.away), shared: b.shared })),
+          atDoor: atDoorOf(yours, { x: p.x, z: p.z }, HOUSING_TUNE.doorReach)?.id ?? null,
+          asking: this.housingUi.askingAbout,
+          tune: { ...HOUSING_TUNE },
+        };
       },
       /** Teleport to a point in the original game's coordinates (the inverse of `swg()`); null when no layout is loaded. */
       teleportSwg: (x: number, z: number, yaw?: number) => {
@@ -3059,6 +3155,36 @@ class App {
         if (typeof o?.flora === 'boolean') this.world.setFloraRegions(o.flora);
         return this.world.lodReport();
       },
+      /**
+       * The draw distance past what the Graphics page allows, held (`src/world/reachHold.ts`):
+       * `reach({ objects: 4, terrain: 14, far: 16 })` loads placed objects at four times the game's tier
+       * ranges, ground detail 14 chunks each way and far ground 16 tiles each way, with no ceiling on any
+       * of them. What is asked for is held against the page: a slider moved later changes its setting
+       * and leaves a held axis where it was put (and says so). `{ objects: null }` hands one axis back,
+       * `{ release: true }` all three. The answer is the hold, the settings, the reach in force, what it
+       * costs in words past the page's own top, and the streaming as it stands -- the placed tiers, the
+       * ground chunks, the far tiles and the plants' own reach -- which fills over the next frames; ask
+       * again to watch it grow.
+       */
+      reach: (o?: { objects?: ReachAsk; terrain?: ReachAsk; far?: ReachAsk; release?: boolean }) => {
+        const refused = o ? askReach(this.reachHold, o) : [];
+        if (o) this.applyReach();
+        const S = this.settings;
+        const w = this.world;
+        return {
+          held: { ...this.reachHold },
+          settings: { objects: S.objectReach, terrain: S.terrainRadius, far: S.farRadius },
+          inForce: { objects: w.objectReach, terrain: w.viewRadius, far: w.farRadius },
+          ...(w.sceneOnly ? { waiting: 'a captured place keeps the small reach it was built at; the hold takes over when it closes' } : {}),
+          ...(refused.length ? { refused } : {}),
+          warnings: reachWarnings(reachInForce(this.reachHold, S)),
+          pageTop: { ...MENU_REACH_TOP },
+          floor: { ...REACH_FLOOR },
+          ground: { ...w.groundReport(), far: w.farTileReport() },
+          tiers: w.placedTierReport(),
+          plants: w.floraReachReport(),
+        };
+      },
       placed: (o?: { rule?: 'model' | 'snapshot'; reload?: boolean; warm?: boolean; warmWaitMs?: number; stencil?: boolean; scan?: boolean; backstopMs?: number }) => {
         if (o?.rule === 'model' || o?.rule === 'snapshot') PLACED_TUNE.tierRule = o.rule;
         if (typeof o?.warm === 'boolean') PLACED_TUNE.warm = o.warm;
@@ -3335,8 +3461,17 @@ class App {
        * `{ treeReach: 400 }`, `{ hysteresis: 16 }`, `{ sweepHz: 2 }`, `{ planar: true }` to measure along the
        * ground so a ring of plants stays under a flying eye). The captured places of the creation and
        * selection screens keep every plant whatever this says.
+       *
+       * `collision` is what the trees and rocks are solid at (`src/world/floraCollision.ts`): the result's
+       * block counts the standing chunks' collidable plantings on the client's own shapes, on the guessed
+       * cylinder and on nothing (walked through), the shapes by kind, and how many of the pack's models it
+       * has the client's word on. `collision: { rule: 'guess' }` puts the old guess back everywhere for
+       * comparison, `{ nullTrunk: true }` gives a tall tree the client walked through the guess's slim trunk
+       * after all, the guess's own numbers move too (`treeRatio`, `trunkShare`, `trunkMin`, `trunkMax`,
+       * `rockShare`, `rockMin`), and `collision: true` puts the shipped rule back; every one rebuilds the
+       * colliders of the chunks standing at once. `near`'s list says which shape each collider is.
        */
-      flora: (opts?: { near?: number; rule?: 'model' | 'snapshot'; pad?: number; cap?: number; reach?: ReachOption }) => {
+      flora: (opts?: { near?: number; rule?: 'model' | 'snapshot'; pad?: number; cap?: number; reach?: ReachOption; collision?: true | Partial<typeof FLORA_COLLISION> }) => {
         if (opts?.rule) FLORA_CLEAR.rule = opts.rule;
         if (typeof opts?.pad === 'number' && Number.isFinite(opts.pad)) FLORA_CLEAR.pad = Math.max(0, opts.pad);
         if (typeof opts?.cap === 'number' && Number.isFinite(opts.cap)) FLORA_CLEAR.cap = Math.max(1, opts.cap);
@@ -3344,15 +3479,28 @@ class App {
           applyReachOption(FLORA_TUNE, opts.reach);
           this.world.refreshFloraReach();
         }
+        // What the trees and rocks are solid at (`floraCollision.ts`): `true` puts the shipped rule back,
+        // an object moves its fields, and either way every standing chunk's colliders are made again.
+        if (opts?.collision !== undefined) {
+          const c = opts.collision === true ? { ...FLORA_COLLISION_DEFAULTS } : opts.collision;
+          if (c.rule === 'client' || c.rule === 'guess') FLORA_COLLISION.rule = c.rule;
+          if (typeof c.nullTrunk === 'boolean') FLORA_COLLISION.nullTrunk = c.nullTrunk;
+          for (const k of ['treeRatio', 'trunkShare', 'trunkMin', 'trunkMax', 'rockShare', 'rockMin'] as const) {
+            const v = c[k];
+            if (typeof v === 'number' && Number.isFinite(v)) FLORA_COLLISION[k] = Math.max(k === 'trunkMin' || k === 'rockMin' || k === 'trunkMax' ? 0.02 : 0, v);
+          }
+          FLORA_COLLISION.trunkMax = Math.max(FLORA_COLLISION.trunkMax, FLORA_COLLISION.trunkMin);
+          this.world.refreshFloraColliders();
+        }
         const status = this.world.floraStatus;
-        const out: Record<string, unknown> = { ...(status ?? {}), clear: { ...FLORA_CLEAR }, reach: this.world.floraReachReport() };
+        const out: Record<string, unknown> = { ...(status ?? {}), clear: { ...FLORA_CLEAR }, reach: this.world.floraReachReport(), collision: { tune: { ...FLORA_COLLISION }, ...this.world.floraCollisionReport() } };
         if (opts?.near !== undefined) {
           const p = this.player.pos;
           const r = Math.max(1, Math.min(200, opts.near));
           const ground = this.world.terrain.heightAt(p.x, p.z);
           out.colliders = this.world
             .collidersNear(p.x, p.z, r)
-            .map((c) => ({ d: Number(Math.hypot(c.x - p.x, c.z - p.z).toFixed(2)), radius: Number(c.r.toFixed(2)), stands: Number((c.top - ground).toFixed(2)), x: Number(c.x.toFixed(1)), z: Number(c.z.toFixed(1)) }))
+            .map((c) => ({ d: Number(Math.hypot(c.x - p.x, c.z - p.z).toFixed(2)), radius: Number(c.r.toFixed(2)), stands: Number((c.top - ground).toFixed(2)), x: Number(c.x.toFixed(1)), z: Number(c.z.toFixed(1)), shape: c.parts ? c.parts.map((s) => s.kind).join('+') : 'guess' }))
             .filter((c) => c.d <= r)
             .sort((a, b) => a.d - b.d);
         }
@@ -3539,7 +3687,8 @@ class App {
         // `filter` is a substring of a mobile's entry id or name, a creature's name, or a fighter's species.
         const f = filter?.toLowerCase();
         const picks = (...names: string[]) => !f || names.some((n) => n.toLowerCase().includes(f));
-        if (what === 'player') this.player.takeDamage(1e9);
+        // Forced: the console's own kill goes through god mode, which is what it is for.
+        if (what === 'player') this.player.takeDamage(1e9, true);
         if (what === 'creatures' || what === 'all') for (const c of this.world.creatures.creatures) if (picks(c.label)) c.damage(1e9);
         if (what === 'fighters' || what === 'all') for (const n of this.world.npcs.npcs) if (picks(n.species, n.name)) n.damage(1e9);
         if (what === 'mobiles' || what === 'all') for (const m of [...(this.world.mobiles?.live ?? [])]) if (picks(m.entry.id, m.entry.name)) m.damage(1e9);
@@ -4463,7 +4612,7 @@ class App {
           if (typeof o.draw === 'boolean') w.drawPass = o.draw;
           emitters = o.emitters === true;
         }
-        this.hud.setWeatherNote(w.heldNote());
+        this.hud.setWeatherNote(this.heldNote());
         return w.describe({ emitters });
       },
       /** The lens flare this frame: every source slot the sky has, whether it is on, its visibility ([smoothed, depth open, cloud transmittance]) and `turn`, the degrees right and up to face it whatever steers the view. */
@@ -4542,6 +4691,25 @@ class App {
       heal: () => {
         this.player.heal(this.player.maxHp);
         return this.player.hp;
+      },
+      /**
+       * God mode: `god(true)` and nothing takes your health, nor the hull of what you fly or ride, while
+       * creatures and people go on fighting you; `god(false)` puts it down; no argument reports. With no
+       * server it is always allowed; with one, only the world's admin may (health comes off only in the
+       * browser of whoever is hit, so nobody else could tell), and it is put down by itself the moment a
+       * server that does not make this browser its admin takes the world. Never saved: a reload is mortal.
+       */
+      god: (on?: boolean) => {
+        const said = typeof on === 'boolean' ? this.setGod(on) : '';
+        const held = this.godHold.holding as Vehicle | null;
+        return {
+          on: this.player.god,
+          ...(said ? { said } : {}),
+          hp: Math.round(this.player.hp),
+          hull: held ? { id: held.def?.id ?? held.spec.id, ship: !!held.spec.ship, invulnerable: held.invulnerable, fightGod: held.combat?.god ?? null } : null,
+          server: this.net.session.authority === 'server',
+          admin: this.net.session.isAdmin,
+        };
       },
       /** Play any clip the player's rig has, looping (or once), to see it on the player: `__debug.anim('BOTH_A2_SPECIAL')`; no name stops it. */
       anim: (name?: string, loop = true) => {
@@ -4989,6 +5157,41 @@ class App {
         if (!v) return 'no vehicle';
         Object.assign(v.spec, patch);
         return v.spec;
+      },
+      /**
+       * How a machine on its springs keeps its feet, and how its speed comes down when its top speed falls
+       * under it (HOVER_TUNE in vehicles/vehicle.ts): `hover()` reports the rules and the ridden (else the
+       * nearest) vehicle's lean from the way it wants to stand, the corners on the ground and the cap it is
+       * held to; `hover({ springsAt: 'corner', tipLimit: 0, rightByAngle: false, easeCap: false })` puts the
+       * old rules back to compare, and any one of them moves on its own (`tipLimit` in degrees, 0 off).
+       */
+      hover: (patch: Partial<typeof HOVER_TUNE> = {}) => {
+        if (patch.springsAt === 'mass' || patch.springsAt === 'corner') HOVER_TUNE.springsAt = patch.springsAt;
+        if (typeof patch.tipLimit === 'number' && Number.isFinite(patch.tipLimit)) HOVER_TUNE.tipLimit = THREE.MathUtils.clamp(patch.tipLimit, 0, 180);
+        if (typeof patch.rightByAngle === 'boolean') HOVER_TUNE.rightByAngle = patch.rightByAngle;
+        if (typeof patch.easeCap === 'boolean') HOVER_TUNE.easeCap = patch.easeCap;
+        const v = this.player.mounted ?? [...this.world.vehicles].filter((o) => !o.spec.ship).sort((a, b) => a.pos.distanceTo(this.player.pos) - b.pos.distanceTo(this.player.pos))[0];
+        const r2 = (n: number) => Number(n.toFixed(2));
+        return {
+          tune: { ...HOVER_TUNE },
+          vehicle: v
+            ? {
+                id: v.spec.id,
+                kind: v.spec.kind,
+                ridden: v === this.player.mounted,
+                // Degrees from the way it wants to stand (the ground's slope and its bank), on its last step on the springs.
+                lean: Math.round(THREE.MathUtils.radToDeg(v.lean)),
+                corners: v.groundedPoints,
+                upsideDown: v.upsideDown,
+                speed: r2(v.speed),
+                cap: Number.isFinite(v.speedCap) ? r2(v.speedCap) : null,
+                top: v.spec.maxSpeed,
+                boostTop: v.spec.boostSpeed,
+                boosting: v.boosting,
+                hp: Math.round(v.hp),
+              }
+            : 'no vehicle on its springs: spawn one (spawn(\'speeder\'))',
+        };
       },
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
       /** Set the ship whose room the player is in (or the nearest ship) adrift: forward speed and a spin (rad/s) with no gravity or righting, so the room's physics can be tried; `shipDrift(0)` brings it to rest. */
@@ -5439,8 +5642,10 @@ class App {
        * The lightsaber glow. No argument: the blades lit now, whether the pass drew, the light ceiling and the flash pool.
        * `show`: 'light' the added light over a dim picture, 'normals' the normals it lit with, 'rect' the box it worked in
        * tinted, null the picture. Any number of BLADE_GLOW_TUNE (`power`, `core`, `knee`, `range`, `albedo`, `hue`,
-       * `glowDim`, `wrap`, `walls`, `far`, `fadeFrom`, `whiteness`, `marchMin`) retunes live, and `tune` in the result is
-       * what to bake. `flashes: true` gives the blades their pooled lights back to compare. `occlusion: false` turns the
+       * `glowDim`, `wrap`, `flat`, `smooth`, `smoothPx`, `smoothTol`, `keep`, `walls`, `far`, `fadeFrom`, `whiteness`,
+       * `marchMin`) retunes live, and `tune` in the result is what to bake; the five after `wrap` are the retune against
+       * the facets the depth normal shows (`{ wrap: 0.3, flat: 0, smooth: 0, keep: 0 }` is the light as it was).
+       * `flashes: true` gives the blades their pooled lights back to compare. `occlusion: false` turns the
        * wall march off, `jitter: true` offsets its taps. `at: [x, y, z]` adds up, from the CPU copy of the shader without
        * the march, the light a neutral surface there facing each blade gets.
        */
@@ -5456,7 +5661,7 @@ class App {
           if (opts.jitter !== undefined) live('jitter', (p) => (p.jitter = !!opts.jitter));
           if (opts.flashes !== undefined) this.bladeGlowFlashes = !!opts.flashes;
           // Floors that keep the curve finite: a zero core or knee divides by zero at the blade.
-          const floor: Partial<Record<keyof BladeGlowTune, number>> = { core: 1e-4, knee: 1e-3, range: 0.01, power: 0, albedo: 0, far: 0.01 };
+          const floor: Partial<Record<keyof BladeGlowTune, number>> = { core: 1e-4, knee: 1e-3, range: 0.01, power: 0, albedo: 0, far: 0.01, wrap: 0, flat: 0, smooth: 0, smoothPx: 1, smoothTol: 0, keep: 0 };
           for (const key of Object.keys(BLADE_GLOW_TUNE) as (keyof BladeGlowTune)[]) {
             const v = opts[key];
             if (typeof v === 'number' && Number.isFinite(v)) BLADE_GLOW_TUNE[key] = Math.max(floor[key] ?? -Infinity, v);
@@ -5510,6 +5715,47 @@ class App {
         };
       },
       /**
+       * The hand torch (F): whether it is on, whether it is at the eye (first person) or carried at the
+       * head, where it was and what it pointed at on the last frame it was on, how far along the view
+       * the ray found something, how far off what it is aimed at is, its intensity, and the irradiance
+       * that puts there (the sun gives about 2.4). Any `TORCH_TUNE` number moves live (`maxIrradiance`,
+       * `ahead`, `side`, `rise`, `minAhead`, `intensity`, `distance`, `angle`, `penumbra`, `decay`), and
+       * `tune` in the answer is what to bake; `on: true` or `false` switches it as F does.
+       */
+      torch: (opts?: { on?: boolean } & Partial<TorchTune>) => {
+        if (opts) {
+          if (opts.on !== undefined) this.torchOn = !!opts.on;
+          // Floors that keep the light a light: a cone of no angle or a reach of nothing draws nothing useful.
+          const floor: Partial<Record<keyof TorchTune, number>> = { intensity: 0, distance: 0.1, angle: 0.01, penumbra: 0, decay: 0, maxIrradiance: 0, minAhead: 0 };
+          for (const key of Object.keys(TORCH_TUNE) as (keyof TorchTune)[]) {
+            const v = opts[key];
+            if (typeof v === 'number' && Number.isFinite(v)) TORCH_TUNE[key] = Math.max(floor[key] ?? -Infinity, v);
+          }
+          TORCH_TUNE.angle = Math.min(TORCH_TUNE.angle, Math.PI / 2);
+          TORCH_TUNE.penumbra = Math.min(TORCH_TUNE.penumbra, 1);
+          this.stepTorch();
+        }
+        const p = this.torchPose;
+        const r2 = (v: number) => Number(v.toFixed(2));
+        const at = (v: { x: number; y: number; z: number }) => [r2(v.x), r2(v.y), r2(v.z)];
+        const aimed = Number.isFinite(p.aimed) ? r2(p.aimed) : null;
+        const intensity = this.torch.intensity;
+        return {
+          on: this.torchOn,
+          carried: this.torchFirstPerson ? 'at the eye (first person)' : 'at the head (third person)',
+          source: at(p.source),
+          target: at(p.target),
+          hit: Number.isFinite(this.torchHit) ? r2(this.torchHit) : null,
+          aimed,
+          intensity: r2(intensity),
+          capped: this.torchOn && intensity < TORCH_TUNE.intensity - 1e-6,
+          irradianceThere: aimed === null ? null : r2(intensity / Math.max(Math.pow(p.aimed, TORCH_TUNE.decay), 0.01)),
+          // The world's main light at full strength, to read the line above against.
+          sunIrradiance: 2.4,
+          tune: { ...TORCH_TUNE },
+        };
+      },
+      /**
        * The Force powers. With a list it puts them in the number slots, as it always did:
        * `powers(['grip', 'pull', null, 'repulse'])` (ids from forcePowers.ts). With no argument it
        * lists the slots, every power, and **what each one draws** -- the game's own effect as it
@@ -5546,9 +5792,13 @@ class App {
        * their models, so the answer says whether they are up. `{ level }` stands them at a level of your
        * choosing, with the health and blow the catalogue's own emulator rows nearest that level give
        * through the catalogue's own curve (`src/world/levelStats.ts`), and `{ tier }` puts them alone on a
-       * fighting tier; neither touches the tier the console sets for everybody.
+       * fighting tier; neither touches the tier the console sets for everybody. `{ weapon: 'dl44' }`
+       * stands them holding that weapon off the rack (an id, a template or the game's name, found as
+       * `weapons(find)` finds one), whatever their own list, name or temper would have given them,
+       * prepared before it is in their hands; a creature or a droid with no hand, and a grenade, an
+       * instrument or a prop, are refused in words. Those already standing keep what they hold.
        */
-      mobile: async (idOrFind: string, metres = 10, n = 1, opts?: { level?: number; tier?: number }) => {
+      mobile: async (idOrFind: string, metres = 10, n = 1, opts?: { level?: number; tier?: number; weapon?: string }) => {
         const mobiles = this.world.mobiles;
         const cat = this.world.mobileCatalogue;
         if (!mobiles) return 'no world loaded';
@@ -5567,8 +5817,43 @@ class App {
         }
         const overrides = level !== null ? { level, ...(atLevel ? { hp: atLevel.hp, damage: atLevel.damage } : {}) } : undefined;
         const tier = typeof opts?.tier === 'number' && Number.isFinite(opts.tier) ? Math.max(0, Math.round(opts.tier)) : null;
+        // A weapon of the console's choosing, found on the rack and judged before anything is stood.
+        let weapon: WeaponDef | null = null;
+        if (opts?.weapon !== undefined) {
+          const rack = this.weapons;
+          if (!rack) return 'no weapons converted, so there is nothing to put in a hand (npm run swg -- weapons @SWG assets-private --retail-only)';
+          weapon = findRackWeapon(rack.weapons, String(opts.weapon));
+          if (!weapon) return `nothing on the weapons rack matches "${opts.weapon}" (weapons('${opts.weapon}') searches it)`;
+          const why = forcedArmsRefusal(e.name, cat.packOf(e)?.hierarchy, weapon);
+          if (why) return why;
+        }
+        // With a server holding the world, a body stood holding a weapon of the console's choosing is the
+        // world's: the admin asks for it and the weapon rides in its record, so every browser arms it
+        // alike. Anybody else is refused, as for every creature the world holds. A level and a tier are
+        // this browser's own and do not ride in the record, so such a body stands at its own.
+        if (weapon && owned.active) {
+          if (!this.net.session.isAdmin) return 'only this world’s admin can stand creatures in it';
+          this.cam.forward(tmp);
+          tmp.y = 0;
+          tmp.normalize();
+          const inside = this.world.inside;
+          const spots = mobiles.spotsAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), inside ? Math.min(4, metres) : metres, inside);
+          if (!spots.length) return inside ? 'there is no floor under that spot' : 'no ground there';
+          let asked = 0;
+          let note = '';
+          for (const s of spots) {
+            const heading = Math.atan2(this.player.pos.x - s.x, this.player.pos.z - s.z);
+            const rec = recordFor(this.worldKey(), this.net.session.player, this.worldSpawnCount++, e.id, { x: s.x, y: s.y, z: s.z, heading, inside });
+            rec.weapon = weapon.template;
+            note = this.askWorldSpawn(rec);
+            if (note) break;
+            asked++;
+          }
+          return { entry: { id: e.id, name: e.name, kind: e.kind }, asked, note: note || `asked the server for ${asked}, each holding ${weapon.name ?? weapon.id}`, weapon: { asked: opts?.weapon, id: weapon.id, template: weapon.template }, level: level === null ? undefined : 'not carried: a body the world holds stands at its own level', tier: tier === null ? undefined : 'not carried: a body the world holds fights at its own tier' };
+        }
         this.cam.forward(tmp);
-        const r = mobiles.spawnAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), metres, this.world.inside, overrides ? { overrides } : {});
+        const extra = { ...(overrides ? { overrides } : {}), ...(weapon ? { weaponTemplate: weapon.template } : {}) };
+        const r = mobiles.spawnAhead(e, this.player.pos, tmp, Math.max(1, Math.floor(n)), metres, this.world.inside, extra);
         // Its own tier before its model is up, so the one the manager puts it on as it is hung is this one.
         if (tier !== null) for (const m of r.mobiles) m.ownTier = tier;
         await Promise.all(r.mobiles.map((m) => mobiles.loaded(m)));
@@ -5579,7 +5864,54 @@ class App {
           matches: exact ? undefined : hits.slice(1).map((h) => h.id),
           level: level === null ? undefined : atLevel ? { level, hp: atLevel.hp, damage: atLevel.damage, from: `${atLevel.rows} of the catalogue's own rows, levels ${atLevel.near[0]} to ${atLevel.near[1]}` } : { level, note: 'the catalogue carries no emulator rows to read a level from: the body keeps its own numbers' },
           tier: tier ?? undefined,
+          weapon: weapon ? { asked: opts?.weapon, id: weapon.id, class: weapon.class, name: weapon.name ?? null, holding: r.mobiles.filter((m) => m.weapon === weapon!.id).length } : undefined,
           mobiles: r.mobiles.map((m) => ({ ...m.describe(this.player.pos), error: mobiles.loadError(m) })),
+        };
+      },
+      /**
+       * A weapon off the rack in the hand of a body already standing: `{ weapon }` is found as
+       * `weapons(find)` finds one (an id, a template or the game's name), and `{ target }` is what the
+       * crosshair rests on (`'crosshair'`, the default), a body's key, or the name the world knows it by.
+       * Whatever it held goes, the new one is prepared before it is in its hand, and the fighting roles of
+       * its carry row come with it. With a server holding the world, a body on the wire is everybody's: the
+       * admin's word rides its record and every browser re-arms its copy (anybody else is refused); a body
+       * that is this browser's alone, and every body with no server, is armed here and nowhere else.
+       */
+      arm: async (o?: { target?: 'crosshair' | number | string; weapon?: string }) => {
+        const mobiles = this.world.mobiles;
+        if (!mobiles) return 'no world loaded';
+        const rack = this.weapons;
+        if (!rack) return 'no weapons converted, so there is nothing to put in a hand (npm run swg -- weapons @SWG assets-private --retail-only)';
+        if (!o || typeof o.weapon !== 'string' || !o.weapon.trim()) return "say which weapon: arm({ weapon: 'dl44' }) arms what the crosshair rests on, arm({ target: key, weapon }) a body by its key (mobiles() lists them)";
+        const weapon = findRackWeapon(rack.weapons, o.weapon);
+        if (!weapon) return `nothing on the weapons rack matches "${o.weapon}" (weapons('${o.weapon}') searches it)`;
+        const want = o.target ?? 'crosshair';
+        let body: Living | null = null;
+        if (want === 'crosshair') body = this.crosshairBody();
+        else if (typeof want === 'number') body = this.world.targets().find((t) => t.key === want) ?? null;
+        else body = mobiles.mobileById(String(want));
+        if (!body) return want === 'crosshair' ? 'nothing under the crosshair: look at somebody, or name one by its key (mobiles() lists them)' : `nobody called ${String(want)} stands here`;
+        const m = mobiles.live.find((x) => x === body) ?? null;
+        if (!m) return `${body.label} is not one of the catalogue's people: a fighter is armed by its kind as it is stood (fighter(n, species, 'saber' | 'melee' | 'gun'))`;
+        const why = forcedArmsRefusal(m.entry.name, this.world.mobileCatalogue?.packOf(m.entry)?.hierarchy, weapon);
+        if (why) return why;
+        const shown = { id: weapon.id, class: weapon.class, name: weapon.name ?? null, template: weapon.template };
+        // On the wire it is everybody's: the admin asks, the server writes it into the record and tells every
+        // browser on the world, this one included, and that word is what re-arms every copy alike.
+        if (owned.active && m.npcId) {
+          if (!this.net.session.isAdmin) return `only this world’s admin can arm ${m.label}: it is everybody’s`;
+          const note = owned.askArm(m.npcId, weapon.template);
+          return note || { asked: m.npcId, weapon: shown, note: 'asked the server: every browser on this world puts it in that hand, this one included' };
+        }
+        const failed = await mobiles.rearm(m, weapon.template);
+        if (failed) return failed;
+        return {
+          armed: m.label,
+          key: m.key,
+          weapon: shown,
+          holding: m.weapon,
+          here: owned.active ? 'this body is this browser’s alone, so it is armed here and nowhere else' : undefined,
+          body: m.describe(this.player.pos),
         };
       },
       /** With no argument, every mobile out: state, health, distance, clip, target, tier, shadow. With a string, the catalogue search: the total and the first forty, with whether each can be stood and why not. */
@@ -5602,7 +5934,8 @@ class App {
        * the window shows, the answers, how far the camera has come over the shoulder), who the use key
        * would speak to now, and everybody within `near` metres with whether they may be spoken to and why
        * not. `{ start: true }` is E's own path (in reach and in the view); `{ to: key }` or
-       * `{ to: 'nearest' }` opens one with a body wherever it stands, the rules but reach and view kept;
+       * `{ to: 'nearest' }` opens one with a body anywhere within `keep` metres (past that a conversation
+       * ends on its next frame, so it is refused), the rules but reach and view kept;
        * `{ pick: 1 }` is a number key; `{ leave: true }` is Escape; `{ tune }` moves `TALK_TUNE`.
        */
       talk: (opts?: { start?: boolean; to?: number | 'nearest'; pick?: number; leave?: boolean; near?: number; tune?: Partial<typeof TALK_TUNE> }) => {
@@ -5620,9 +5953,14 @@ class App {
           said = m ? (this.startTalk(m) ?? `talking to ${m.label}`) : 'nobody in reach and in the view to talk to';
         }
         if (opts?.to !== undefined) {
+          // Wherever it stands within `keep`: the conversation's own rule ends one past that on the next
+          // frame, so a body farther off is refused here rather than opened and shut again unseen.
           const me = this.world.playerTarget;
-          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
-          said = m ? (this.startTalk(m) ?? `talking to ${m.label}`) : opts.to === 'nearest' ? 'nobody on this world may be spoken to' : `no body with key ${opts.to}`;
+          const within = (x: Mobile): boolean => Math.hypot(x.pos.x - at.x, x.pos.z - at.z) <= TALK_TUNE.keep;
+          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me) && within(x)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
+          if (!m) said = opts.to === 'nearest' ? `nobody within ${TALK_TUNE.keep} m may be spoken to` : `no body with key ${opts.to}`;
+          else if (!within(m)) said = `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)`;
+          else said = this.startTalk(m) ?? `talking to ${m.label}`;
         }
         if (typeof opts?.pick === 'number') {
           const t = this.talkNow;
@@ -5646,7 +5984,7 @@ class App {
           near: live
             .filter((m) => m.pos.distanceTo(at) <= near)
             .sort(byDistance)
-            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z)), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
+            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, this.world.followers.following(m))), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
           tune: { ...TALK_TUNE },
         };
       },
@@ -6134,6 +6472,35 @@ class App {
         const pose = viewPose(s.orbit, s.view, ORBIT_EYE_HEIGHT);
         return { ...s.view, metres: Number(pose.distance.toFixed(2)), farthest: Number(s.orbit.distance.toFixed(2)), looksAt: Number(pose.look.y.toFixed(2)) };
       },
+      /**
+       * The creator's hour while a place is up: `placeClock({ hour: 21.5 })` stops the day at half past
+       * nine at night as a drag on the slider does, `{ play: true }` lets it run and `{ play: false }`
+       * stops it, and `{ tune: { stepMinutes, settleMs } }` moves `PLACE_CLOCK_TUNE`. It reports the
+       * clock, whether the day is stopped, and `programs`, the renderer's live program count, which must
+       * not rise across a first scrub into the night.
+       */
+      placeClock: (opts: { hour?: number; play?: boolean; tune?: Partial<typeof PLACE_CLOCK_TUNE> } = {}) => {
+        if (opts.tune) {
+          for (const [k, v] of Object.entries(opts.tune)) if (k in PLACE_CLOCK_TUNE && typeof v === 'number' && Number.isFinite(v)) (PLACE_CLOCK_TUNE as Record<string, number>)[k] = Math.max(k === 'stepMinutes' ? 1 : 0, v);
+        }
+        if (!this.scene3d) return { error: 'nobody is standing in a place', tune: { ...PLACE_CLOCK_TUNE } };
+        if (typeof opts.hour === 'number' && Number.isFinite(opts.hour)) {
+          this.placeBar.takeHour(opts.hour);
+          this.world.recaptureSky();
+        }
+        if (typeof opts.play === 'boolean') {
+          this.placeBar.setPlaying(opts.play);
+          this.world.day.paused = !opts.play;
+        }
+        return {
+          ...this.placeBar.describe(),
+          paused: this.world.day.paused,
+          held: this.world.day.held,
+          time: Number(this.world.day.time.toFixed(4)),
+          programs: this.renderer.info.programs?.length ?? 0,
+          tune: { ...PLACE_CLOCK_TUNE },
+        };
+      },
       goToShot: async (key?: string) => {
         const spots = sceneSpots();
         if (!key || !spots.some((s) => s.key === key)) {
@@ -6312,7 +6679,13 @@ class App {
     // house put down with no server at all goes through.
     homes.attach({
       place: (model, o) => this.world.placeBuilding(model, o),
-      unplace: (key) => this.world.unplaceBuilding(key),
+      // Whoever this browser has standing in its rooms is stood on its doorstep before it goes: the
+      // server's word takes a house down in every browser on the world at once, so each one stands
+      // its own player and its own followers out, and nobody's room is freed under them.
+      unplace: (key) => {
+        this.standOutOf(key);
+        return this.world.unplaceBuilding(key);
+      },
       say: (text) => this.messages.system(text),
       send: (msg) => this.net.sendWord(msg),
     });
@@ -6339,7 +6712,11 @@ class App {
     const homeWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
       homeWordWas(msg);
-      if (msg?.t === 'homes' || msg?.t === 'homeUp' || msg?.t === 'homeDown' || msg?.t === 'homeNo') homes.word(msg);
+      if (msg?.t === 'homes' || msg?.t === 'homeUp' || msg?.t === 'homeDown' || msg?.t === 'homeNo') {
+        homes.word(msg);
+        // The tab's list of your buildings follows what the server says while it is open.
+        if (this.housingUi.open && msg.t !== 'homeNo') this.showHousing();
+      }
       if (msg?.t === 'purse') purse.word(msg);
     };
     this.remotes.carrierPose = (to, pos, quat) => {
@@ -6385,6 +6762,19 @@ class App {
     owned.authority = () => this.net.session.authority;
     owned.admin = () => this.net.session.isAdmin;
     owned.onNote = (text) => this.messages.system(text);
+    // Whether the server speaks of the bodies every browser stands for itself (the lairs, the nests, the
+    // people at their posts): with one that does, those that may be fought are shared by saying they
+    // have been seen; with an older one, or none, every such body stays this browser's own.
+    owned.seeds = () => this.net.session.speaks(3);
+    // The whole day's length from the console (`__debug.day({ length })`) while a server holds the clock:
+    // the world's admin asks the server, which anchors the day where it stands and tells everybody, so
+    // nobody's sun moves; anybody else is refused in the clock's own words. Nothing changes here until
+    // the server's answer arrives, which is the same moment it reaches everybody else.
+    sharedClock.adminDay = (seconds) => {
+      if (!this.net.session.isAdmin || !this.net.session.speaks(3)) return null;
+      this.net.sendWord({ t: 'day', ms: Math.round(seconds * 1000) });
+      return `asked the server for a ${Math.round(seconds)} s day, for everybody on it; the sun goes on from where it stands`;
+    };
     // Whether this tab is being drawn at all. The module never reads the document itself; it asks,
     // and says what it is on the first word it hears on a line, which is what covers a page opened
     // in a background tab -- `visibilitychange` fires on a change and there has not been one.
@@ -6435,17 +6825,61 @@ class App {
     // nothing here holds at all -- a grant for a species this browser's catalogue does not know, or
     // one whose model never landed -- which is handed back rather than left frozen on every screen
     // in the world. The array is refilled rather than rebuilt, so the asking allocates nothing.
-    const grantedIds: string[] = [];
-    creatures.granted = () => {
-      grantedIds.length = 0;
-      for (const r of owned.list) if (owned.mine(r.id)) grantedIds.push(r.id);
-      return grantedIds;
-    };
+    // The seen ones are in it too, though no list names them: the grants are the server's whole answer.
+    creatures.granted = () => owned.keptIds;
     // A death has one word, and it is the spawn list's: this browser's own creature dying goes out
-    // as the list's `dead` rather than as a second word of this module's.
-    creatures.died = (id) => {
-      owned.sayDead(id);
+    // as the list's `dead` rather than as a second word of this module's, with whoever struck it last.
+    creatures.died = (id, by) => {
+      owned.sayDead(id, by);
       return owned.active;
+    };
+    // The bodies every browser stands for itself: shared by saying so, and let go of the same way.
+    creatures.seeding = () => owned.seeding;
+    creatures.seen = (id, at, respawn) => owned.saySeen(id, at, respawn);
+    creatures.unseen = (id) => owned.sayUnseen(id);
+    creatures.taken = (id) => owned.sayTaken(id);
+    // A lair's creature its keeper sent out after this browser stood its own: stood here as that body of
+    // its site, where the site stands here, and the rows parked for it put it where it really is.
+    creatures.onStranger = (id) => {
+      wildLife.standKnown(id);
+    };
+    // The world could hold no more of the seen ones: the body under that name is this browser's own after
+    // all, off the wire and thinking for itself, as every such body was before there were any.
+    owned.onLocal = (id) => {
+      const s = creatures.find(id);
+      if (!s) return;
+      creatures.remove(id, true);
+      s.npcSetDriven(false);
+      (s as { shareAs?(name: string): void }).shareAs?.('');
+    };
+    // The admin put a weapon in the hand of one of the world's creatures already standing (`__debug.arm`):
+    // every browser on the world hears it, the admin's own included, and re-arms its own copy off the same
+    // template and the body's own seed, keeper and driven copies alike. One this browser has no body for
+    // is armed when it is stood: its row now names the weapon, and a seen one is told again as it is seen.
+    owned.arms = () => this.net.session.speaks(4);
+    owned.onArm = (id, weapon) => {
+      const mobiles = this.world.mobiles;
+      const m = mobiles?.mobileById(id);
+      if (!mobiles || !m) return;
+      void mobiles.rearm(m, weapon).then((why) => {
+        if (why) console.warn(`arm: ${id} keeps what it holds: ${why}`);
+      });
+    };
+    // A creature kept at another browser struck this player there: the keeper saw it land, so it landed.
+    // It comes off through the player's own record, which is what every blow on the player goes through
+    // -- the red flash, the arc on the side it came from, the followers turning on it, god mode -- and
+    // with the body here that is that creature as who struck, when this browser has one.
+    const npcBlowAt = new THREE.Vector3();
+    creatures.onBlow = (amount, x, y, z, from, what) => {
+      if (!this.started || !this.inWorld || this.dying || this.player.noclip) return;
+      const at = npcBlowAt.set(x, y, z);
+      const ship = what === 'ship' ? (this.pilotedShip() ?? this.player.mounted ?? null) : null;
+      if (ship && !ship.disposed) {
+        ship.damage(amount, at, 0, null);
+        return;
+      }
+      const source = from && typeof (from as unknown as Partial<Living>).key === 'number' ? (from as unknown as Living) : null;
+      this.world.playerTarget.damage(amount, at, 0, source);
     };
     creatures.buried = (id) => owned.dead(id);
     // Who struck, so a creature turns on the right person: the blow carries a relay id, the peers'
@@ -6495,12 +6929,18 @@ class App {
     // What the world's list says stands here is what is stood here. The list's own shape is not the
     // manager's, so it is turned into a record on the way in; everything else about standing one --
     // the catalogue entry, the ground under it, everything it rolls -- is the record's own.
-    const recordOf = (r: SpawnRow): SpawnRecord => ({ id: r.id, world: r.world, species: r.species, x: r.at[0], y: r.at[1], z: r.at[2], heading: r.h, seed: r.seed, inside: r.inside });
+    const recordOf = (r: SpawnRow): SpawnRecord => ({ id: r.id, world: r.world, species: r.species, x: r.at[0], y: r.at[1], z: r.at[2], heading: r.h, seed: r.seed, inside: r.inside, ...(r.weapon ? { weapon: r.weapon } : {}) });
     // Stand one of the world's, and put on it what has been done to it. The share is the one thing
     // about a creature that is not in the record: a creature that has been fought is not the creature
     // that was stood, and a browser walking up to a half-killed animal must not stand it up whole. A
-    // row with no share at all is one nobody has said anything about, which is a whole one.
+    // row with no share at all is one nobody has said anything about, which is a whole one. A fighter's
+    // record is the fighters' to stand, from the same record and the same seed in every browser.
     const standRow = (r: SpawnRow, here: string): void => {
+      if (fighterRecord(r.species)) {
+        const n = this.world.npcs.standRecord(recordOf(r), here);
+        if (typeof n !== 'string' && r.hp !== undefined && r.hp < 1) n.hp = Math.max(0, Math.min(n.maxHp, r.hp * n.maxHp));
+        return;
+      }
       const mobiles = this.world.mobiles;
       if (!mobiles) return;
       const m = mobiles.standRecord(recordOf(r), here);
@@ -6527,13 +6967,34 @@ class App {
         const id = mobiles.worldIdOf(m);
         if (sweptByList(id, mobiles.fromList(m), wanted)) mobiles.removeById(id);
       }
+      // And the fighters stood from it, every one of which is a record of the list's.
+      for (const id of [...this.world.npcs.worldIds]) if (!wanted.has(id)) this.world.npcs.removeById(id);
     };
     owned.onAdd = (row) => standRow(row, this.worldKey());
-    owned.onGone = (id, why) => {
-      // A death is played out where the body stands and the manager takes it down in its own time;
-      // one taken down by an admin goes at once.
-      creatures.noteGone(id, why === 'dead' ? 'dead' : 'gone');
-      if (why !== 'dead') this.world.mobiles?.removeById(id);
+    owned.onGone = (id, why, back, fresh) => {
+      // A body this browser has only just stood, of one that was already down everywhere else (the
+      // server's answer to its `seen`, to it alone): nothing died here, so nothing plays a death or counts
+      // as a kill at its post. It is held down for the server's wait and taken away quietly -- but for a
+      // nest, which stands broken, as it stands on every other screen.
+      if (fresh) {
+        if (id.startsWith('camp:')) {
+          creatures.noteGone(id, 'dead', back);
+          return;
+        }
+        creatures.noteDown(id, why === 'dead' || why === 'taken' ? 'dead' : 'gone', back);
+        this.world.mobiles?.removeById(id);
+        this.world.npcs.removeById(id);
+        return;
+      }
+      // A death is played out where the body stands and the manager takes it down in its own time; a
+      // seen one is down for `back` seconds and stands again after. One taken down by an admin goes at
+      // once, and so does one that walked off with another player as a follower, which to this browser
+      // is a body that has left its post.
+      creatures.noteGone(id, why === 'dead' ? 'dead' : 'gone', back);
+      if (why !== 'dead') {
+        this.world.mobiles?.removeById(id);
+        this.world.npcs.removeById(id);
+      }
     };
 
     // ---- The group and the words players type at each other. ----
@@ -6763,7 +7224,9 @@ class App {
       project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
       anchor: peerAnchor,
       meAt: (out) => groups.meAt(out),
-      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
+      // Not in a conversation either, which is no panel: the line would open hidden behind it, unfocused,
+      // and be left open after it with nothing that could close it.
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen() && !this.talkNow,
       // Typing takes the keyboard from the game without taking the mouse: the field has the keys (the
       // game's own input stands aside for a field), and the view is not thrown out of its lock for a
       // line of chat. `captured` is also what keeps the Escape that closes the line from opening the menu.
@@ -6816,7 +7279,8 @@ class App {
         }
         return n;
       },
-      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen(),
+      // Nor over a conversation, which hides it (and which it would shut by taking Escape first).
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen() && !this.talkNow,
       // Given back through the game's own check, so the panel shutting under the trade window or the
       // debug menu leaves the mouse with them rather than locking it (and shutting them with it).
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
@@ -6982,7 +7446,8 @@ class App {
         }
         return n;
       },
-      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open,
+      // A trade asked for during a conversation waits for it to end and then comes up (its own step).
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.talkNow,
       freeMouse: (free) => this.freeMouse(free),
       // Whether anything else is holding the mouse. The trade window is deliberately allowed over
       // the backpack (that is where its own Trade button is), so the panel asks before it hands the
@@ -7002,16 +7467,19 @@ class App {
     // mouse goes back through `handBackMouse` and stays with whatever is still up under it.
     this.debugMenu = new DebugMenu(this.ui, {
       keys: () => this.input.bindings.debugMenu,
-      canOpen: () => this.started && this.inWorld && !this.traveling,
+      // Not over a conversation, which hides every other window of the display and has the keys.
+      canOpen: () => this.started && this.inWorld && !this.traveling && !this.talkNow,
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
       holdKeys: (ms) => this.holdGameKeys(ms),
     });
     draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
     if (debugRoot) {
       // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
-      // tab with no keyboard, a run being waited on before the report comes back.
-      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean }) => {
-        await this.debugMenu.drive(o ?? {});
+      // tab with no keyboard, a run being waited on before the report comes back. `{ pin, atStart }`
+      // pins the call in the box and ticks it to run at start, and `{ start: true }` runs the ticked
+      // pins now, as the first world after a reload does.
+      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean }) => {
+        await this.debugMenu.drive(o ?? {}, (line) => this.messages.system(line));
         return this.debugMenu.report();
       };
     }
@@ -7205,8 +7673,7 @@ class App {
         ship.damage(amount, shotAt.set(x, y, z), 0, null);
         return;
       }
-      p.takeDamage(amount);
-      this.hurtFrom(shotAt.set(x, y, z));
+      if (p.takeDamage(amount)) this.hurtFrom(shotAt.set(x, y, z));
       void from;
     };
     // A peer's health, as their own browser said it: nothing on this side ever subtracts anything,
@@ -7240,11 +7707,28 @@ class App {
         const key = blow.source?.key ?? 0;
         if (!key) return;
         const ship = this.pilotedShip();
-        if (key !== this.world.playerTarget.key && !(ship && key === (this.world.ships.of(ship)?.key ?? 0))) return;
-        combat.sendHit(blow.id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
+        if (key === this.world.playerTarget.key || (ship && key === (this.world.ships.of(ship)?.key ?? 0))) {
+          combat.sendHit(blow.id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
+          return;
+        }
+        // One of the world's creatures this browser keeps struck another player: said to that player's
+        // browser, the only place it comes off, and not behind the players' damage switch -- the keeper's
+        // word, as a shot's hit is the shooter's. A creature this browser alone holds (one stood from the
+        // console, a follower) is nobody the other browser could see, and its blow goes nowhere.
+        const id = (blow.source as { npcId?: string } | null)?.npcId ?? '';
+        if (id && creatures.keepsHere(id)) creatures.sayBlow(blow.id, id, blow.amount, blow.from?.x ?? 0, blow.from?.y ?? 0, blow.from?.z ?? 0, blow.what);
       },
       (id) => combat.mayHurt(id),
     );
+    // Every other player is somebody the world's creatures may fight while a server carries their blows,
+    // whatever the players' own damage switch says (`RemoteBodies.prey`).
+    peerBodies().preyCan = () => creatures.seedingNow;
+    // A creature this browser keeps fires shots that cross as the player's do, on their own allowance:
+    // every other screen sees it fire, and a bolt its blade turned away is seen flying back.
+    combat.isNpcShot = (bolt) => {
+      const id = (bolt.source as { npcId?: string } | null | undefined)?.npcId ?? '';
+      return !!id && creatures.keepsHere(id) && creatures.npcShotDue();
+    };
     // Somebody arrived. Nothing they are told about the people already here carries health -- not
     // the greeting, not the states -- so everyone says theirs again at the next look and the newcomer
     // reads them as they are rather than as whole. It is one small message per player per arrival.
@@ -7273,6 +7757,19 @@ class App {
     // the frame's: a tab that is not being drawn stops its frames and keeps its timers, so a player
     // who walked away is still seen to be where and how they are.
     window.setInterval(() => combat.step(0.1), 100);
+    // The seen words waiting their turn go on the same clock, and the moment a server that speaks of the
+    // seen ones takes this browser (a line opened mid-session, or back after a drop, which clears the
+    // wire and leaves the bodies), every body already standing that may be shared goes on it.
+    let seedingWas = false;
+    window.setInterval(() => {
+      owned.tick();
+      const seeding = owned.seeding;
+      if (seeding && !seedingWas) {
+        this.world.mobiles?.shareSeeded();
+        wildLife.shareNests();
+      }
+      seedingWas = seeding;
+    }, 100);
     // The group's words are read first and the fight takes what is left, so neither unplugs the other.
     const combatWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
@@ -7632,10 +8129,11 @@ class App {
   private readonly placeBar = new PlaceBar(
     (key) => void this.switchPlace(key),
     (hour) => {
-      // Only the clock moves. The sky reads it every frame and blends its own rows to it, so an
-      // hour costs nothing at all -- which is the whole reason a place is one camera and a list of
-      // hours rather than a scene per hour.
-      this.world.day.time = hour / 24;
+      // Only the clock moves, and it stops where it is put. The sky reads it every frame and blends
+      // its own rows to it, so an hour costs nothing at all -- which is the whole reason a place is
+      // one camera and a list of hours rather than a scene per hour.
+      this.world.day.paused = true;
+      this.world.day.time = (hour / 24) % 1;
     },
   );
   /** The words under the world saying what turns the figure and what moves the view. */
@@ -7762,10 +8260,14 @@ class App {
     const whole = await this.world.readyAround(stand, SCENE_REACH.waitMs);
     if (!whole) console.info(`place: ${key} was still building after ${(SCENE_REACH.waitMs / 1000) | 0}s; showing it as it stands`);
     this.scene3d = { key, built, stand, facing: (built.place.stand.heading * Math.PI) / 180, orbit: orbitFor(built.place), view: restView() };
-    // The hour the place was captured at. Held, so the day does not walk off it while somebody is
-    // choosing a face; given back when the scene goes.
+    // The hour the place was captured at, with the day stopped on it (`DayCycle.paused`), so it does
+    // not walk off it while somebody is choosing a face: the hand write alone only took the day off
+    // the shared clock, and with no server it went on running at a game hour every thirty seconds.
+    // The bar's play button lets it run; the day is given back when the scene goes.
     const hour = built.place.hours[Math.floor((built.place.hours.length - 1) / 2)]?.hour;
+    this.world.day.paused = true;
     if (hour !== undefined) this.world.day.time = hour / 24;
+    this.placeBar.setPlaying(false);
     return true;
   }
 
@@ -7775,9 +8277,13 @@ class App {
     this.scene3d = null;
     if (s) disposePlace(s.built, (mats) => this.world.forgetMaterials(mats));
     this.world.sceneOnly = false;
-    // The player's own settings back, or the next world played would be built at a scene's reach.
-    const S = this.settings;
-    this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+    // The player's own settings back (and whatever the console holds over them), or the next world
+    // played would be built at a scene's reach.
+    this.applyReach();
+    // The creator's stopped day goes with it, before the day is handed back: a pause carried into a
+    // played world would stop that world's sun and take it off the clock everybody shares.
+    this.world.day.paused = false;
+    this.placeBar.setPlaying(false);
     clockKnob({ release: true });
     if (s) this.world.leave();
   }
@@ -7825,6 +8331,8 @@ class App {
 
     // The world's own engine, at the place's own feet. Nothing is hurt and nothing is targeted.
     this.world.update(dt, stand, cam.position, false, () => {}, null);
+    // A running day: the hour slider's thumb and clock follow it, written only when it has moved a step.
+    if (!this.world.day.paused) this.placeBar.follow(this.world.day.time * 24);
     this.effects.update(dt);
     this.world.updateWeatherView(dt);
     this.world.updateShadows(performance.now());
@@ -7856,6 +8364,10 @@ class App {
     // whatever still holds a pad, since no hold of this character's may reach the next one's world.
     this.ride?.abort('leaving for the select screen', true);
     this.shuttleRigs?.clearHolds();
+    // Whatever was in hand goes before the world does, as on a travel: a prop picked back up is
+    // written back into this world's store first, so the next visit finds it standing.
+    this.stopPlacing();
+    this.stopPlacingProp('keep');
     this.menu.hide();
     this.closePanels();
     // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
@@ -7874,11 +8386,17 @@ class App {
     // Off the ship before its room's physics world goes with the world.
     if (this.player.aboard) this.leaveShip(true);
     this.player.noclip = false;
+    // God mode is this character's, for this sitting: the player object outlives the select screen, and
+    // left on the next character chosen would start out unhurtable with nothing ever putting it down
+    // (with no server, nothing refuses it). The hull it held is given back before the world takes it.
+    this.player.god = false;
+    this.godHold.letGo();
     this.inWorld = false;
     // Whatever was built on the world being left is forgotten outright, not merely taken down: the
     // next character may be a different player entirely, and the server tells a browser what is
-    // built where when it says hello.
+    // built where when it says hello. The ones this browser put down itself go with the world.
     homes.clear();
+    this.localHomes.clear();
     // The world is going and the group with it: the strip comes down here, because the frame that
     // would notice stops being run the moment there is no world, and a roster left standing behind
     // the select screen is last night's group with last night's distances on it.
@@ -7955,9 +8473,14 @@ class App {
         break;
       case 'objectReach':
       case 'terrainRadius':
-      case 'farRadius':
-        this.world.setReach(S.objectReach, S.terrainRadius, S.farRadius);
+      case 'farRadius': {
+        // An axis the console holds (`__debug.reach`) stays where it was put, and says so rather than
+        // leaving the slider looking as though it did nothing.
+        this.applyReach();
+        const held = heldAxisNote(this.reachHold, key);
+        if (held) this.messages.note(held);
         break;
+      }
       case 'mobileCap':
       case 'mobileAnimRange':
         this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
@@ -7983,7 +8506,7 @@ class App {
       case 'lifeDay':
         // Uniforms and rates only: nothing here compiles a shader.
         this.world.weather.configure(S);
-        this.hud.setWeatherNote(this.world.weather.heldNote());
+        this.hud.setWeatherNote(this.heldNote());
         break;
       case 'soundMaster':
       case 'soundAmbience':
@@ -8134,6 +8657,55 @@ class App {
     const r = HUD_WIRING.hurtRange;
     if (dx * dx + dy * dy + dz * dz > r * r) return;
     this.feedback.hurt(dx, dy, dz);
+  }
+
+  /**
+   * The draw distance in force: the Graphics page's three settings, with whatever the console holds
+   * over them (`__debug.reach`, `src/world/reachHold.ts`). A captured place (the creator's, the select
+   * screen's) keeps the small reach it was built at until it closes, and its closing comes back here.
+   */
+  private applyReach(): void {
+    if (this.world.sceneOnly) return;
+    const r = reachInForce(this.reachHold, this.settings);
+    this.world.setReach(r.objects, r.terrain, r.far);
+  }
+
+  /** The display's quiet line: the weather's and the day's, god mode's and a held reach's, joined only when one changes. */
+  private heldNote(): string {
+    return this.heldNotes.join(this.world.weather.heldNote(), this.player.god, holding(this.reachHold));
+  }
+
+  /**
+   * God mode on or off (`__debug.god`, `src/player/godMode.ts`): the sentence to say back. Always
+   * with no server; with one, the world's admin's alone, and refused in words to anybody else.
+   */
+  private setGod(on: boolean): string {
+    if (on) {
+      const why = godRefusal(this.net.session.authority, this.net.session.isAdmin);
+      if (why) return why;
+    }
+    this.player.god = on;
+    // The hull goes back at once; the next step takes up whatever is flown or ridden by then.
+    if (!on) this.godHold.letGo();
+    return on ? 'god mode on: nothing takes your health, nor the hull of what you fly or ride' : 'god mode off';
+  }
+
+  /**
+   * God mode's step, before any hull is stepped: the hull flown or ridden held unhurtable (and the one
+   * left behind given back), and the mode put down the moment a server that does not make this browser
+   * its admin takes the world -- which is how a mode turned on with nobody answering never outlives the
+   * server coming back.
+   */
+  private stepGod(flown: Vehicle | null): void {
+    const p = this.player;
+    if (p.god) {
+      const why = godRefusal(this.net.session.authority, this.net.session.isAdmin);
+      if (why) {
+        p.god = false;
+        this.messages.note(`god mode off: ${why}`);
+      }
+    }
+    this.godHold.hold(p.god ? flown : null);
   }
 
   /**
@@ -9162,7 +9734,16 @@ class App {
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
+    // The debug menu's pins ticked to run at start, once a page, now the first world is up and every
+    // helper they name has a world to work on. Each is said on the message line as it runs.
+    if (!this.ranAtStart) {
+      this.ranAtStart = true;
+      void this.debugMenu.runAtStart((line) => this.messages.system(line));
+    }
   }
+
+  /** Whether the debug menu's pins ticked to run at start have been run this page (`play`). */
+  private ranAtStart = false;
 
   /**
    * Hold the loading screen until the world around the player is in: the pack, the ground
@@ -9413,6 +9994,11 @@ class App {
     // And the console's own shuttle trips and parked hull, whose hulls went with the world: their pads
     // are let go of now, once nothing of that world stands, so no hold is left waiting on it.
     this.endConsoleShuttles('the world changed');
+    // The houses this browser put down itself are not written down anywhere: they went with the world.
+    this.localHomes.clear();
+    // A played world's day always runs. Only the creator stops it, and `hideScene` starts it again;
+    // this is the backstop for a place stood from the console and never left.
+    this.world.day.paused = false;
     this.placeNames = [];
     this.placeNamesFor = placesFor;
     void this.poisOf(placesFor)
@@ -9446,6 +10032,9 @@ class App {
       void this.loadFittings(packIdOf(planet, this.zone));
       // And whatever this player has put down here themselves, which is kept per world.
       void this.enterPlaced(packIdOf(planet, this.zone));
+      // And the chairs and tables of ours under the people the data sits down. After `enterPlaced`, which
+      // lets the last world's copy of the props pack go before anything of this world's is stood from it.
+      void this.standSeats(packIdOf(planet, this.zone));
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
@@ -9496,9 +10085,12 @@ class App {
     this.map.hide();
     this.closePanels();
     // Whatever was in hand is given up before the world under it goes: a ghost holds borrowed
-    // meshes out of a pack this world owns, and a prop's pack is let go on the far side.
+    // meshes out of a pack this world owns, and a prop's pack is let go on the far side. A prop
+    // picked back up is written back into this world's store in this same breath and stood again
+    // the next time the world is entered: put back the ordinary way, its stand would wait on a model
+    // load and land in a world that had already gone, and the thing would be lost.
     this.stopPlacing();
-    this.stopPlacingProp();
+    this.stopPlacingProp('keep');
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
     console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}${ship.crew ? ` from its rooms${ship.crew.piloting ? ' at the controls' : ''}` : ''}` : ''}`);
@@ -10256,6 +10848,58 @@ class App {
 
   private readonly eyePoint = new THREE.Vector3();
 
+  /**
+   * The hand torch, after the frame's last camera move: carried at the head in third person and at the
+   * eye in first person (and in a cockpit), aimed at the crosshair's point, its intensity capped by how
+   * far that point is (`src/player/torch.ts`). One ray a frame along the view, and only while it is on:
+   * aboard, in the room's own physics and the room's frame; anywhere else in the world's, looking
+   * through the player's body and whatever the player rides. The light never leaves the scene and every
+   * number written here is a uniform, so nothing compiles; nothing is allocated either.
+   */
+  private stepTorch(): void {
+    const torch = this.torch;
+    const T = TORCH_TUNE;
+    if (!this.torchOn) {
+      torch.intensity = 0;
+      return;
+    }
+    torch.distance = T.distance;
+    torch.angle = T.angle;
+    torch.penumbra = T.penumbra;
+    torch.decay = T.decay;
+    const player = this.player;
+    const camera = this.cam.camera;
+    camera.getWorldDirection(torchDir);
+    const eye = camera.position;
+    const reach = Math.max(0.1, T.distance);
+    // The ray along the view. Aboard (and not flying the hull from its bridge, where the view is the
+    // chase outside it), the rooms are a world of their own in the hull's frame.
+    const room = player.aboard;
+    const flying = player.piloting?.airborne ?? false;
+    let hit: number;
+    if (room && !flying) {
+      torchRoomInverse.copy(roomFrame(room)).invert();
+      torchLocal.copy(eye).applyMatrix4(torchRoomInverse);
+      torchLocalDir.copy(torchDir).transformDirection(torchRoomInverse);
+      hit = room.physics.aimDistance(torchLocal.x, torchLocal.y, torchLocal.z, torchLocalDir.x, torchLocalDir.y, torchLocalDir.z, reach, false, player.body);
+    } else {
+      const ridden = player.mounted ?? player.piloting;
+      hit = this.physics.aimDistance(eye.x, eye.y, eye.z, torchDir.x, torchDir.y, torchDir.z, reach, this.world.inside, room ? null : player.body, ridden ? ridden.body.handle : -1);
+    }
+    const firstPerson = this.cam.firstPerson;
+    let head: THREE.Vector3 | null = null;
+    if (!firstPerson) {
+      const eyes = this.eyes();
+      head = eyes ? torchHead.copy(eyes) : torchHead.copy(player.worldPos).addScaledVector(camera.up, player.eyeHeight);
+    }
+    const pose = placeTorch(eye, torchDir, camera.up, head, hit, T, this.torchPose);
+    torch.position.set(pose.source.x, pose.source.y, pose.source.z);
+    torch.target.position.set(pose.target.x, pose.target.y, pose.target.z);
+    torch.intensity = torchIntensity(pose.aimed, T);
+    this.torchHit = hit;
+    this.torchFirstPerson = firstPerson;
+  }
+
   /** Where the player's eyes are this frame: a little above and ahead of the head's joint, as the animation places it; null without a head. */
   private eyes(): THREE.Vector3 | null {
     const rig = this.player.rig;
@@ -10337,6 +10981,8 @@ class App {
     // is the player's -- reaches it. What it is to the world's own hazards is still what they ride.
     const riding = !!this.ride?.riding;
     const pilot = riding ? null : (player.mounted ?? player.piloting);
+    // God mode's hold on what is flown or ridden, before a hull of them steps (`__debug.god`).
+    this.stepGod(pilot);
     const playerHull = pilot ?? player.aboard?.vehicle ?? null;
     this.world.playerShip = playerHull?.spec.ship ? playerHull : null;
     // What the world's own hazards reach beside the player: whatever they ride or drive, and how big
@@ -10467,29 +11113,29 @@ class App {
       // anybody riding a hull nothing may hurt (a shuttle), which the hull's own guards say again.
       if (v === rider && v.flipped && !v.invulnerable) {
         this.dismountBeside(v);
-        player.takeDamage(10);
         // Thrown by the ground, not by anybody: no direction, so the red flash and no arc.
-        this.hurtFrom(null);
+        if (player.takeDamage(10)) this.hurtFrom(null);
         this.messages.hitYou('thrown off: the speeder is on its back');
       }
       if (v.justHit > 0) {
         this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
         if (v === rider && !v.invulnerable) {
-          player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)));
           // A jolt through the hull under you: the hull keeps no record of what it ran into, so
           // there is no direction to point at and the flash is the whole of it.
-          this.hurtFrom(null);
+          if (player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)))) this.hurtFrom(null);
         }
       }
       if (v.struck > 0) {
         // Bolts in the hull: a jolt to whoever is at the controls, a little of it as hurt. A ship with a fight
         // takes them in its shields and armour: the pilot is jolted and keeps their health until it is destroyed.
         if ((v === rider || v === player.piloting) && !v.invulnerable) {
-          if (!v.combat) player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
           // Bolts in the hull: the hull counts them but does not keep where they came from, so this
-          // one flashes without an arc. The ship's own bars flash in the layer's colour instead.
-          this.hurtFrom(null);
+          // one flashes without an arc. The ship's own bars flash in the layer's colour instead. A
+          // ship in god mode (its fight's `god`) took nothing, and a body in it takes nothing either:
+          // neither flashes.
+          const jolted = v.combat ? !v.combat.god : player.takeDamage(Math.round(Math.min(12, v.struck * 0.2)));
+          if (jolted) this.hurtFrom(null);
         }
         v.struck = 0;
       }
@@ -10511,9 +11157,8 @@ class App {
           const lv = v.body.linvel();
           tmp.copy(v.pos).y += 0.6;
           player.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
-          player.takeDamage(25);
           // Blown up under you: it is all round, so it has no side.
-          this.hurtFrom(null);
+          if (player.takeDamage(25)) this.hurtFrom(null);
         } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
@@ -10532,9 +11177,8 @@ class App {
     }
     if (player.piloting?.crashed && !player.piloting.invulnerable) {
       const m = player.piloting;
-      player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)));
       // Flown into the ground: no side to it.
-      this.hurtFrom(null);
+      if (player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)))) this.hurtFrom(null);
       m.crashed = 0;
     }
     if (player.mounted) {
@@ -10543,11 +11187,11 @@ class App {
       if (m.crashed && !m.invulnerable) {
         // Flown into the ground: hurt by the speed, and the crash shown where it happened.
         const dmg = Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95));
-        player.takeDamage(dmg);
-        this.hurtFrom(null);
+        const took = player.takeDamage(dmg);
+        if (took) this.hurtFrom(null);
         this.effects.burst(m.pos, 0xffb070, 3 + m.radius, 0.35);
         this.effects.flash(m.pos, 0xff8a50, 20, 25, 0.3);
-        this.messages.hitYou(`crashed at ${Math.round(m.crashed * 3.6)} km/h: ${dmg} damage`);
+        this.messages.hitYou(`crashed at ${Math.round(m.crashed * 3.6)} km/h: ${took ? `${dmg} damage` : 'nothing taken (god mode)'}`);
         m.crashed = 0;
       }
     }
@@ -10842,9 +11486,8 @@ class App {
       onPlayerHit: (dmg, from, source) => {
         if (player.mounted || player.noclip) return;
         // A follower's stray shot stops on you and takes nothing: it never turns on you.
-        if (isFollower(source)) return;
-        player.takeDamage(dmg);
-        this.hurtFrom(from);
+        if (isFollowerSource(source)) return;
+        if (player.takeDamage(dmg)) this.hurtFrom(from);
         // Whatever shot you is what the people following you fight.
         if (source) this.world.followers.assist(source);
       },
@@ -11541,7 +12184,6 @@ class App {
       collectBlades(blades, this.player.saberBlades, this.world.npcs?.npcs ?? EMPTY_BODIES, cam.position, remoteBlades.holders(this.world.mobiles?.live));
       const lit = this.litSources;
       lit.torch = this.torchOn ? this.torch : null;
-      lit.eye.copy(cam.position);
       blades.litCeiling = litCeiling(blades, lit);
       // Whatever the player is standing in, the hull's rooms or a surface in space: "up" is that room's.
       const standingIn = this.player.aboard;
@@ -12751,6 +13393,88 @@ class App {
   }
 
   /**
+   * The chairs and tables of ours stood under the data's sitting people (`seatProps.ts`): which world, what,
+   * and the plan they came from. One record per run of `standSeats`, and the record is the run's token: a run
+   * a later one replaced stops at its next await and takes down whatever it stood after being replaced.
+   */
+  private seatsStood: { pack: string; keys: string[]; plan: SeatPlan | null; note: string; run: number } = { pack: '', keys: [], plan: null, note: '', run: 0 };
+  /** Counts the runs of `standSeats`, so each files what it stands under keys no other run uses. */
+  private seatsRuns = 0;
+
+  /**
+   * Chairs and tables of ours under the people the data sits down (`seatProps.ts`): planned from the rows
+   * once the world's pack is in, then each stood through the streamer as the fittings are -- instanced,
+   * compiled behind its own hidden first draw (`LayoutStreamer.addToTier`'s `prepare`), lit, shadowed and
+   * loaded by distance with everything else. A model this world's own pack carries comes out of it; one it
+   * has not (the cantina furniture is Tatooine's) out of the props pack, which is fetched for the purpose
+   * only on a world that needs it. **Never solid**: a seated person is a dynamic body stood on the floor
+   * with the sitting idle playing, and a chair's collider under it pushed it off the seat, while a table
+   * round which three people sit would push all three back; the data never asked anybody to walk round
+   * them, since nothing of the game's had them. Deliberately not awaited: an arrival waits on no scenery.
+   *
+   * **A run is its own record and its own keys.** Two runs for one world overlap whenever the knob is turned
+   * twice inside the second or so a stand takes, or a pin run at start meets the arrival's own stand; checked
+   * against the pack's name alone, the older run went on standing its plan into the newer one's record under
+   * the same keys, and the streamer files a key once (`placedByKey`), so the first copy of every chair was
+   * left drawn where no removal could reach it. So the record is the token (checked by identity after every
+   * await, with the world's own generation beside it, which a trip to the select screen and back to the same
+   * planet moves on), every key carries its run's number, and a run replaced while a prop of its was being
+   * stood takes that prop straight down again.
+   */
+  private async standSeats(pack: string): Promise<void> {
+    this.clearSeatsStood(this.seatsStood.pack === pack);
+    const run = { pack, keys: [] as string[], plan: null as SeatPlan | null, note: '', run: ++this.seatsRuns };
+    this.seatsStood = run;
+    const world = this.world.generation;
+    const current = () => this.seatsStood === run && this.world.generation === world;
+    const centre = this.world.layoutCenter;
+    if (!centre) {
+      run.note = 'this world has no layout to stand them in';
+      return;
+    }
+    const rows = standingPeople.seatedRows(centre);
+    const plan = planSeats(rows, {
+      has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
+      ground: (x, z) => this.world.terrain.heightAt(x, z),
+    });
+    run.plan = plan;
+    if (!plan.props.length) return;
+    // The props pack behind the world only where this world's own pack lacks a model the plan asks for.
+    let guest: AssetPack | null = null;
+    if (plan.props.some((p) => !this.world.packHas(p.model))) {
+      try {
+        await this.props.load();
+      } catch {
+        /* no props pack: whatever this world's own pack carries is still stood */
+      }
+      if (!current() || packIdOf(this.world.planet, this.zone) !== pack) return;
+      guest = this.props.pack;
+      if (!guest) run.note = this.props.note || 'no props pack, so the seats this world lacks the models for are left out';
+    }
+    for (const p of plan.props) {
+      if (!current()) return;
+      const own = this.world.packHas(p.model);
+      if (!own && !guest) continue;
+      const key = `seat:${pack}:${run.run}:${p.key}`;
+      const stood = await this.world.placeProp(p.model, { key, at: { x: p.x, y: p.y, z: p.z }, yaw: p.yaw, pack: own ? null : guest, inside: p.inside, solid: false });
+      if (!stood) continue;
+      if (!current()) {
+        // Replaced while this one was being stood: it is under a key no other run uses, so this finds it
+        // and nothing else (and finds nothing at all in a world loaded since).
+        this.world.unplaceBuilding(key);
+        return;
+      }
+      run.keys.push(key);
+    }
+  }
+
+  /** Everything `standSeats` stood, taken down where the world it was stood in is still here. */
+  private clearSeatsStood(takeDown: boolean): void {
+    if (takeDown) for (const key of this.seatsStood.keys) this.world.unplaceBuilding(key);
+    this.seatsStood = { pack: '', keys: [], plan: null, note: '', run: 0 };
+  }
+
+  /**
    * Stand whatever this player has put down in the world they have just come to, and tell the store
    * **which world that is**.
    *
@@ -12958,7 +13682,7 @@ class App {
         title: from ? from.name : 'this terminal',
         stage: this.terminalStage,
         mapUrl: meta?.url ?? null,
-        mapWidth: meta?.width ?? 16384,
+        mapFrame: meta?.frame ?? mapFrame(null),
         ports,
         worlds,
         picked: this.terminalWorld,
@@ -13103,18 +13827,18 @@ class App {
     };
   }
 
-  /** A world's own map picture and the ground it covers, fetched once per world for the session. */
-  private readonly terminalMaps = new Map<string, Promise<{ url: string; width: number } | null>>();
+  /** A world's own map picture and the ground it covers (`mapFrame`), fetched once per world for the session. */
+  private readonly terminalMaps = new Map<string, Promise<{ url: string; frame: MapFrame } | null>>();
 
-  private terminalMap(pack: string): Promise<{ url: string; width: number } | null> {
+  private terminalMap(pack: string): Promise<{ url: string; frame: MapFrame } | null> {
     let p = this.terminalMaps.get(pack);
     if (!p) {
       const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
       p = fetch(`${base}map.json`)
         .then(async (res) => {
           if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          const meta = (await res.json()) as { image?: string; width?: number };
-          return meta.image ? { url: `${base}${meta.image}`, width: Number(meta.width) || 16384 } : null;
+          const meta = (await res.json()) as { image?: string; width?: number; centre?: { x: number; z: number } };
+          return meta.image ? { url: `${base}${meta.image}`, frame: mapFrame(meta) } : null;
         })
         .catch(() => null);
       this.terminalMaps.set(pack, p);
@@ -13647,24 +14371,43 @@ class App {
   }
 
   /**
-   * Give up a prop in hand.
+   * Give up a prop in hand, one of three ways.
    *
-   * One that was **picked back up** goes back where it stood: taking one up removes it from the world
-   * and from the store at once, so giving up without putting it back would throw a player's own thing
-   * away on a press of Escape. One taken fresh from the Props tab has nothing to go back to.
+   * `back` (Escape, the bar's Cancel): one that was **picked back up** goes back where it stood, the
+   * very same thing under its own id. Taking one up removes it from the world and from the store at
+   * once, so giving up without putting it back would throw a player's own thing away on a press of
+   * Escape. One taken fresh from the Props tab has nothing to go back to.
+   *
+   * `away` (the pick-up key again, Delete, the bar's Put away): thrown away for good, which is the
+   * removal there was never a way to make. Nothing is handed back: the Props tab is a catalogue and
+   * the row already left the store when it was picked up.
+   *
+   * `keep` (a travel, the select screen): written back into the store at once and not stood, since
+   * the world is going; the next visit stands it with everything else. Put back the ordinary way its
+   * stand waits on a model load and lands in a world that has gone, after the row was taken out of
+   * the store, and the thing is lost.
    */
-  private stopPlacingProp(): void {
+  private stopPlacingProp(how: LetGo = 'back'): void {
     const p = this.propPlacing;
     if (!p) return;
     const mine = this.ghost.release();
     if (mine.length) this.world.forgetMaterials(mine);
     this.propPlacing = null;
     this.placingBar.hide();
-    if (!p.from) return;
-    const back = p.from;
-    void placedProps
-      .put(back.id, { x: back.x, y: back.y, z: back.z }, back.q, !!back.inside, this.placedDeps(), (world, rows) => this.savePlaced(world, rows))
-      .then((row) => this.messages.system(row ? `${p.def.name || p.def.id} put back where it was` : (placedProps.note ?? 'it could not be put back')));
+    const name = p.def.name || p.def.id;
+    const from = p.from;
+    const fate = letGoOf(how, !!from);
+    if (fate === 'gone') {
+      this.messages.system(from ? `${name} put away` : `${name} given up`);
+      return;
+    }
+    if (fate === 'nothing' || !from) return;
+    const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
+    if (fate === 'write') {
+      void placedProps.restore(from, this.placedDeps(), save, false);
+      return;
+    }
+    void placedProps.restore(from, this.placedDeps(), save).then((stood) => this.messages.system(stood ? `${name} put back where it was` : placedProps.note || `${name} is kept, and stands again the next time you come here`));
   }
 
   /**
@@ -13690,7 +14433,9 @@ class App {
     p.ok = v.ok;
     p.why = v.why;
     this.ghost.placeProp(at, p.turn, v.ok);
-    this.placingBar.show(p.def.name || p.def.id, v.ok, v.why, this.placeKeys(), p.lift);
+    // A prop picked back up out of the world can be put away for good; the cap is the pick-up key's.
+    const away = p.from ? keyLabel(this.input.bindings.takeProp[0] ?? this.input.bindings.putAway[0] ?? '') : null;
+    this.placingBar.show(p.def.name || p.def.id, v.ok, v.why, this.placeKeys(), p.lift, away);
   }
 
   /** The wheel while placing: push the ghost out or pull it in. */
@@ -13740,11 +14485,70 @@ class App {
       this.messages.system(`${deed.name}: asking the server for the ground`);
       return;
     }
-    const out = await this.world.placeBuilding(model, { at: { x: state.x, z: state.z }, yaw: state.yaw, y: state.y });
+    // A key of its own, so the Housing tab can name this one and take it down again.
+    const key = this.localHomes.mint();
+    const out = await this.world.placeBuilding(model, { at: { x: state.x, z: state.z }, yaw: state.yaw, y: state.y, key });
     if (out.ok) {
-      this.lastHouse = { x: out.x, z: out.z, key: out.key };
+      this.localHomes.add({ key, model, name: deed.name, x: out.x, y: out.y, z: out.z, yaw: out.yaw });
       this.messages.system(`${deed.name} stands`);
+      if (this.housingUi.open) this.showHousing();
     } else this.messages.system(out.why ?? 'it would not go there');
+  }
+
+  /**
+   * The character's own buildings on this world, nearest first: the server's rows that are theirs and
+   * the ones this browser put down itself, as the Housing tab lists them.
+   */
+  private myBuildingsHere(): MyBuilding[] {
+    const p = this.player.worldPos;
+    const at = { x: p.x, z: p.z };
+    const deeds = allDeeds();
+    const server = this.net.session.authority === 'server' ? homes.mine(this.net.session.character ?? '', at) : [];
+    return myBuildings(server, this.localHomes.all, at, (model) => houseName(model, deeds));
+  }
+
+  /**
+   * Take one of the character's own buildings down, by what the Housing tab named it. One this
+   * browser put down itself comes down here and now, with whoever stands in it stood on its doorstep
+   * first; one the server keeps is asked for, and comes down when the server answers -- in every
+   * browser on the world at once, each standing its own people out (`homes.attach`'s `unplace`).
+   * Answers what to say.
+   */
+  private takeDownHome(id: string): string {
+    if (isLocalHome(id)) {
+      const row = this.localHomes.find(id);
+      if (!row) return 'that building is not standing any more';
+      this.standOutOf(row.key);
+      this.world.unplaceBuilding(row.key);
+      this.localHomes.remove(row.key);
+      if (this.housingUi.open) this.showHousing();
+      return `${row.name} is down`;
+    }
+    const row = homes.rows.get(id);
+    if (!row) return 'that building is not standing any more';
+    if (this.net.session.authority !== 'server') return 'the server that keeps it is not answering, so it cannot be taken down just now';
+    homes.askDown(id);
+    return `${houseName(row.model, allDeeds())}: asking the server to take it down`;
+  }
+
+  /**
+   * A building put down in play is coming down: the player, if they are standing in its rooms, is
+   * stood on its doorstep first, and the people and creatures this browser keeps in it with them
+   * (`World.clearRoomsOf`). The doorstep is the building's own origin on the ground, which is where a
+   * house is stood. Someone riding or aboard a ship is left to what carries them.
+   */
+  private standOutOf(key: string): void {
+    const door = this.world.clearRoomsOf(key);
+    if (!door) return;
+    const p = this.player;
+    p.inside = false;
+    if (p.mounted || p.piloting || p.aboard || this.dying || p.hp <= 0) return;
+    // `reset` is the one way a body is stood somewhere, and it stands it up whole; a building coming
+    // down round somebody is no reason to heal them, so their health is kept as it was.
+    const hp = p.hp;
+    p.reset(door.setY(door.y + 0.3));
+    p.hp = hp;
+    this.messages.system('the building you were in came down; you are standing on its doorstep');
   }
 
   /**
@@ -13767,9 +14571,26 @@ class App {
     const name = p.def.name || p.def.id;
     const id = p.def.id;
     const inside = !!this.player.inside;
+    // A prop picked back up is going down here, not back where it stood: let go of without putting it
+    // back, or moving one left the old one standing as well and every move made a second of it.
+    const from = p.from;
+    p.from = null;
     this.stopPlacingProp();
-    const row = await placedProps.put(id, at, q, inside, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
-    this.messages.system(row ? `${name} is down` : (placedProps.note ?? 'it would not go there'));
+    const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
+    // The world it is being put down in, kept across the stand's wait: a travel in that wait leaves the
+    // store in another world, or none.
+    const worldAt = placedProps.inWorld;
+    const row = await placedProps.put(id, at, q, inside, this.placedDeps(), save);
+    if (row) {
+      this.messages.system(`${name} is down`);
+      return;
+    }
+    // Refused where it was put: one that came out of the world goes back where it stood rather than being
+    // lost -- in its own world's keeping, and stood only if that is still the world the store is in.
+    const why = placedProps.note || 'it would not go there';
+    if (!from) this.messages.system(why);
+    else if (placedProps.inWorld === worldAt) void placedProps.restore(from, this.placedDeps(), save).then(() => this.messages.system(`${why}; ${name} is back where it stood`));
+    else if (placedProps.keepIn(worldAt, from, this.placedStore(), save)) this.messages.system(`${why}; ${name} is kept where it stood, and stands there the next time you come back`);
   }
 
   /** How a placed prop is stood and taken down: the streamer's own placement, keyed on the thing. */
@@ -13813,8 +14634,9 @@ class App {
    *
    * This is the whole of the "edit mode" the owner asked for, and it is one key rather than a mode:
    * a thing picked up is off the world and out of the store at once and is back in your hands as a
-   * ghost, so moving it is putting it down again and throwing it away is Escape. There is no state
-   * to be in and nothing to turn off, which is the one thing a mode would have brought with it.
+   * ghost, so moving it is putting it down again, Escape puts it back where it stood, and the same
+   * key again (or Delete) throws it away. There is no state to be in and nothing to turn off, which
+   * is the one thing a mode would have brought with it.
    *
    * It does **not** go into the backpack. The backpack is the item ledger, keyed on catalogue ids
    * with a count, and a prop is a thing with an identity of its own; dropping one in there would be
@@ -13825,6 +14647,16 @@ class App {
     const me = this.player.worldPos;
     const row = placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far);
     if (!row) {
+      // Nothing of yours to pick up, but a building of yours whose doorstep this is: the same key
+      // opens the Housing tab with its take-down already asked, which is still two answers away
+      // from anything happening.
+      const home = atDoorOf(this.myBuildingsHere(), { x: me.x, z: me.z }, HOUSING_TUNE.doorReach);
+      if (home) {
+        this.toggleInventory('housing');
+        this.housingUi.ask(home.id);
+        this.messages.system(`take ${home.name} down from the Housing tab, or close it to keep it standing`);
+        return;
+      }
       this.messages.system('nothing of yours is standing near enough to pick up');
       return;
     }
@@ -14056,26 +14888,35 @@ class App {
     if (!band.flourish(n)) this.messages.system('this song has no such flourish for that instrument');
   }
 
-  /** What the Housing tab shows: every deed whose building this game can really put down. */
+  /**
+   * What the Housing tab shows: the character's own buildings on this world, which it can take down,
+   * and every deed whose building this game can really put down.
+   */
   private showHousing(): void {
     const here = this.world.planet.id;
     const rows = allDeeds();
+    const mine = this.myBuildingsHere();
     const cells = rows
       .filter((d) => d.model)
-      .map((d) => ({
-        id: d.id,
-        name: d.name,
-        line: deedLine(d),
-        desc: d.desc,
-        why: !d.foot ? 'the archives have no footprint for it' : (wrongWorld(d, here) ?? ''),
-        standing: 0,
-      }));
+      .map((d) => {
+        const standing = mine.filter((b) => b.model === d.model).length;
+        return {
+          id: d.id,
+          name: d.name,
+          line: deedLine(d),
+          desc: d.desc,
+          why: !d.foot ? 'the archives have no footprint for it' : (wrongWorld(d, here) ?? ''),
+          standing,
+        };
+      });
     this.housingUi.show({
       cells,
       note: rows.length
         ? 'none of the buildings in the pack has a model this game carries: run `npm run swg -- gallery` first'
         : 'no deeds: run `npm run swg -- deeds @SWG assets-private --retail-only` with your emulator checkout, and reload',
-      built: { now: homes.report().standing, most: 0 },
+      built: { now: mine.length, most: 0 },
+      mine: mine.map((b) => ({ id: b.id, name: b.name, line: b.line })),
+      mineNote: this.net.session.authority === 'server' ? 'none of yours on this world' : 'none put down this session (with no server a building lasts as long as the world it stands in)',
     });
   }
 
@@ -14470,7 +15311,7 @@ class App {
    * the player, or '' when the asking went out.
    */
   private askWorldSpawn(rec: SpawnRecord): string {
-    return owned.askSpawn(rec.species, [rec.x, rec.y ?? 0, rec.z], rec.heading, rec.seed, rec.id, !!rec.inside);
+    return owned.askSpawn(rec.species, [rec.x, rec.y ?? 0, rec.z], rec.heading, rec.seed, rec.id, !!rec.inside, rec.weapon ?? '');
   }
 
   /** Ask the server to take one down by the name the world knows it by; '' when the word went out. */
@@ -14519,6 +15360,17 @@ class App {
    * fighter), else the planet's own species. Read from the world's kept list of the living, which
    * is only rebuilt when something is added or taken away, so this walks a short array a frame.
    */
+  /**
+   * The living thing the crosshair rests on now: the nameplate's own pick (`pickPlate`), asked at once
+   * from the camera rather than read off the plate, which holds a body for a moment after a glance away
+   * and is not drawn at all with its setting off. For the console; never in a frame.
+   */
+  private crosshairBody(): Living | null {
+    const pm = this.cam.camera.matrixWorld.elements;
+    const found = pickPlate(this.world.targets(), pm[12], pm[13], pm[14], -pm[8], -pm[9], -pm[10], HUD_SIZES.nameplateRange, HUD_SIZES.nameplateCone, this.world.playerTarget.key);
+    return found ? (this.world.targets().find((t) => t.key === found.key) ?? null) : null;
+  }
+
   private nearbyLabel(at: THREE.Vector3): string {
     let best = 40 * 40;
     let label: string | null = null;
@@ -14641,10 +15493,26 @@ class App {
             x = p.x + (Math.random() - 0.5) * 4;
             z = p.z + (Math.random() - 0.5) * 4;
           }
+          // With a server holding the world a fighter is the world's: the admin asks for one, and every
+          // browser stands it from the same record and dresses it from the same seed, one of them
+          // thinking for it. Anybody else is refused, as for every creature the world holds.
+          if (owned.active) {
+            const heading = Math.atan2(this.player.pos.x - x, this.player.pos.z - z);
+            const rec = recordFor(this.worldKey(), this.net.session.player, this.worldSpawnCount++, tier === undefined ? FIGHTER_SPECIES : `${FIGHTER_SPECIES}:${tier}`, { x, y: spot?.y, z, heading, inside: !!spot });
+            const why = this.askWorldSpawn(rec);
+            return why || `asked for a fighter at ${FIGHTER_TIERS.label(tier ?? this.world.npcs.tier)}`;
+          }
           const n = this.world.npcs.spawnAt(x, z, undefined, { ...(spot ? { y: spot.y, inside: true } : {}), ...(tier === undefined ? {} : { tier }) });
           return `a ${n.name} ahead at ${FIGHTER_TIERS.label(n.tier)} (${this.world.npcs.npcs.length} out)`;
         },
-        clear: () => this.world.npcs.removeAll(),
+        // With a server the world's fighters are asked to go (an admin's alone, as for every creature the
+        // world holds); one this browser stood for itself before there was a server goes at once.
+        clear: () => {
+          if (!owned.active) return this.world.npcs.removeAll();
+          let n = this.world.npcs.removeWhere((f) => !f.npcId);
+          for (const id of [...this.world.npcs.worldIds]) if (!this.askWorldDespawn(id)) n++;
+          return n;
+        },
       },
     ];
   }
@@ -15123,8 +15991,12 @@ class App {
    * Who the use key would speak to now: the nearest person in reach and in front of the view who may be
    * spoken to at all (`reachOf`, `whyNotTalk`), with nothing solid between the two, or null. On foot in the
    * world only -- never riding, at a bridge's controls, in a ship's rooms, adrift or flying free -- and
-   * never while a conversation is already up. A walk of the catalogue's bodies out and one ray for the
-   * one it picks, a few times a second; nothing is made.
+   * never while a conversation is already up. A walk of the catalogue's bodies out and a ray for each of
+   * the two it picks, a few times a second; nothing is made.
+   *
+   * Somebody following the player is asked apart (`talkPick`): only while the view is squarely on them,
+   * after anybody else, and only while nothing else in reach wants the key, since a follower stands at the
+   * player's elbow beside every speeder, hull and gate they walk up to.
    */
   private talkTarget(): Mobile | null {
     const p = this.player;
@@ -15134,20 +16006,49 @@ class App {
     const at = p.worldPos;
     this.cam.forward(talkLook);
     const me = this.world.playerTarget;
-    let best: Mobile | null = null;
-    let bestD = Infinity;
+    const followers = this.world.followers;
+    let other: Mobile | null = null;
+    let otherD = Infinity;
+    let follower: Mobile | null = null;
+    let followerD = Infinity;
     for (const m of mobiles.live) {
-      const d = reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z);
-      if (!(d < bestD) || whyNotTalk(m, me)) continue;
-      best = m;
-      bestD = d;
+      const follows = followers.following(m);
+      const d = reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, follows);
+      if (!(d < (follows ? followerD : otherD)) || whyNotTalk(m, me)) continue;
+      if (follows) {
+        follower = m;
+        followerD = d;
+      } else {
+        other = m;
+        otherD = d;
+      }
     }
-    if (!best) return null;
     // Not through a wall: eye to eye, against what stands still.
-    const eye = at.y + p.eyeHeight;
-    const face = best.pos.y + best.plan.height * TALK_TUNE.face;
-    return this.physics.blockDistance(at.x, eye, at.z, best.pos.x, face, best.pos.z, this.world.inside) === Infinity ? best : null;
+    if (other && !this.talkSeen(other)) other = null;
+    if (follower && !this.talkSeen(follower)) follower = null;
+    return talkPick(other, follower, this.talkElseWants);
   }
+
+  /** Whether nothing solid stands between the player's eye and somebody's face. */
+  private talkSeen(m: Mobile): boolean {
+    const p = this.player;
+    const at = p.worldPos;
+    const face = m.pos.y + m.plan.height * TALK_TUNE.face;
+    return this.physics.blockDistance(at.x, at.y + p.eyeHeight, at.z, m.pos.x, face, m.pos.z, this.world.inside) === Infinity;
+  }
+
+  /**
+   * Whether anything else in reach wants the use key that a follower would otherwise take: a vehicle or a
+   * hull to board (`handleMount`'s), or a zone gate (`handleZoneGate`'s, asked by its reach alone, since
+   * that gate's own rule stands aside for whoever may be spoken to). Kept, so asking makes nothing.
+   */
+  private readonly talkElseWants = (): boolean => {
+    const p = this.player;
+    if (this.nearestVehicle() || peerRooms()?.nearest(p.pos, BOARD_TUNE.reach)) return true;
+    const at = p.worldPos;
+    const gate = this.zoneGates.nearest(at.x, at.y, at.z);
+    return !!gate && gate.d <= GATE_TUNE.reach;
+  };
 
   /** E beside somebody who may be spoken to: the conversation. False when there is nobody, and E goes on to what else it means. */
   private handleTalk(): boolean {
@@ -15165,7 +16066,8 @@ class App {
     const why = whyNotTalk(m, this.world.playerTarget);
     if (why) return why;
     const following = this.world.followers.following(m);
-    const options = talkOptions(following, this.world.followers.full);
+    // Anybody may be spoken to whichever browser keeps them; only one this browser keeps may follow.
+    const options = talkOptions(following, this.world.followers.full, [], m.isDriven);
     const at = this.player.worldPos;
     this.talkAt.x = at.x;
     this.talkAt.z = at.z;
@@ -15222,7 +16124,7 @@ class App {
    */
   private stepTalk(dt: number): void {
     const input = this.input;
-    for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.answerTalk(n);
+    for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.answerTalk(n);
     input.dropPresses();
     const t = this.talkNow;
     if (!t) return;
@@ -15240,10 +16142,17 @@ class App {
       this.endTalk(!away && !screen);
       return;
     }
-    // Turned to the one spoken to, so the camera looks over a shoulder and not into a face.
+    // Turned to the one spoken to, so the camera looks over a shoulder and not into a face. The view is
+    // turned with the body, toward them: the player's own update turns the body to the view for a gun at
+    // the ready, seen from the eyes, and in Jedi Academy's stance past 45 degrees, so a body turned alone
+    // would be turned back the same frame, and the view's way is the one every branch of it agrees with.
+    // The camera looks back along its own yaw (`forward` is -sin, -cos), so looking along `want` is a yaw
+    // of `want + PI`.
     const want = Math.atan2(m.pos.x - at.x, m.pos.z - at.z);
-    const diff = Math.atan2(Math.sin(want - p.heading), Math.cos(want - p.heading));
-    p.heading += diff * Math.min(1, dt * 6);
+    const k = Math.min(1, dt * 6);
+    p.heading += Math.atan2(Math.sin(want - p.heading), Math.cos(want - p.heading)) * k;
+    const look = want + Math.PI;
+    this.cam.yaw += Math.atan2(Math.sin(look - this.cam.yaw), Math.cos(look - this.cam.yaw)) * k;
   }
 
   /**
@@ -15813,9 +16722,8 @@ class App {
     // A flame held in the room lived in the hull's frame, which may be gone: its heat and its effect stop.
     (this.kits.bounty_hunter as BountyHunterKit | undefined)?.coolDown();
     p.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
-    p.takeDamage(20);
     // Thrown out of a hull that has gone: nothing to point at.
-    this.hurtFrom(null);
+    if (p.takeDamage(20)) this.hurtFrom(null);
     this.cam.setFrame(null);
   }
 
@@ -16023,8 +16931,8 @@ class App {
       // The jump's countdown (held still while the Escape menu is open) and its phases; during a crossing's travel it waits.
       if (!this.traveling) this.hyperspace.update(dt, rawDt, this.menu.open);
       // The lift menu takes the number keys while it is up, before the kit's slots see them.
-      if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(`Digit${n}`)) this.liftMenu.pickKey(n);
-          if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey('Digit' + n)) this.shuttleMenu.pickKey(n);
+      if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.liftMenu.pickKey(n);
+      if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.shuttleMenu.pickKey(n);
       // A conversation takes the number keys for its answers and every other key the player has: the world
       // goes on round it, and the player stands and listens (`stepTalk`).
       if (this.talkNow) this.stepTalk(dt);
@@ -16061,6 +16969,9 @@ class App {
         // A prop in hand takes the same four keys and the same click, and the two shift keys pick
         // which axis a turn is about: plain about up, shift about the axis across the view (tip it
         // away), control about the one along it (roll it). The owner asked for three dimensions.
+        // The pick-up key is read once: with a prop in hand it puts that prop away, and the same press
+        // must not then pick the next one up in the lines below.
+        const takeKey = input.pressedAction('takeProp');
         if (this.propPlacing) {
           if (input.pressedAction('attack')) void this.dropPlacingProp();
           const axis = input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 'x' : input.isDown('ControlLeft') || input.isDown('ControlRight') ? 'z' : 'y';
@@ -16068,10 +16979,13 @@ class App {
           if (input.pressedAction('placeRight')) this.turnPlacing(1, axis);
           if (input.pressedAction('placeUp')) this.liftPlacing(1);
           if (input.pressedAction('placeDown')) this.liftPlacing(-1);
+          // The pick-up key again, or Delete: thrown away for good rather than put back, which Escape does.
+          if (takeKey || input.pressedAction('putAway')) this.stopPlacingProp('away');
         }
         // Pick the nearest thing you have put down back up, so a weapon in a case can be taken out
-        // and used again. Never while something is already in hand, which would swap one for another.
-        if (input.pressedAction('takeProp') && !this.placing && !this.propPlacing && !this.anyPanelOpen() && !riding) this.takeNearestProp();
+        // and used again (or, with nothing of yours near, take down a building of yours at its door).
+        // Never while something is already in hand, which would swap one for another.
+        else if (takeKey && !this.placing && !this.anyPanelOpen() && !riding) this.takeNearestProp();
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
@@ -16180,8 +17094,8 @@ class App {
       // passes it, and it is what turns the red flash into an arc on the side the blow came from.
       const hurt = (dmg: number, from?: THREE.Vector3) => {
         if (!simulate || player.mounted || player.noclip || player.aboard) return;
-        player.takeDamage(dmg);
-        this.hurtFrom(from ?? this.hurtSource);
+        // A blow god mode refused shows nothing: no red flash and no arc for a blow that did nothing.
+        if (player.takeDamage(dmg)) this.hurtFrom(from ?? this.hurtSource);
       };
       // The weather's view of the player: aboard rooms nothing falls; a ridden ship's box keeps rain out of its canopy.
       this.world.aboard = !!player.aboard;
@@ -16201,7 +17115,7 @@ class App {
         aim.dy = aimLook.y;
         aim.dz = aimLook.z;
       }
-      this.hud.setWeatherNote(this.world.weather.heldNote());
+      this.hud.setWeatherNote(this.heldNote());
       // A passenger in a shuttle is nobody's target: nothing could reach them, and a creature would chase a picture.
       this.world.setPlayerTarget(player.worldPos, simulate && !player.noclip && !player.aboard && !this.dying && player.hp > 0 && !this.ride?.riding, hurt);
       perf.begin(SEC.world);
@@ -16240,12 +17154,7 @@ class App {
       perf.begin(SEC.audio);
       this.stepAudio(dt);
       perf.end(SEC.audio);
-      this.torch.intensity = this.torchOn ? 260 : 0;
-      if (this.torchOn) {
-        this.torch.position.copy(this.cam.camera.position);
-        this.cam.camera.getWorldDirection(torchDir);
-        this.torch.target.position.copy(this.cam.camera.position).addScaledVector(torchDir, 12);
-      }
+      this.stepTorch();
       // Out of the eyes the body stays in the picture and the head, hair and headwear draw into the shadows only (headHide.ts).
       if (player.rig) {
         player.group.visible = true;

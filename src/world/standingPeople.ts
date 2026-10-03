@@ -54,6 +54,7 @@ import { intoWorld, tuneTable } from './wildLife.ts';
 import { roll } from './spawnSeed.ts';
 import { SEATED_MOOD, moodOfRow } from './mobiles/moodIdle.ts';
 import { Patrol, walksRound } from './patrols.ts';
+import { seatOfMood, type SeatedRow } from './seatProps.ts';
 
 /**
  * One person, as the converter wrote them: x and z in the snapshot's frame, as every placed object
@@ -168,6 +169,14 @@ export interface PersonSpawn {
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
   /** The room of its building it stands in, where the data says: it seeds the body's cell. */
   room?: number;
+  /**
+   * Its name in the world (`stood:<world>:<n>`), the same in every browser: what it is shared under, and
+   * what a server holds its death by. The world is in it because every world's rows are numbered from
+   * nought, and a death held under `stood:17` on one world must never be another world's person.
+   */
+  id: string;
+  /** How long it stays down once it dies, in seconds: its row's own respawn, which a server holds its death for. */
+  respawn: number;
 }
 
 /** Who stands at a row this time: the person, the body, the mood, and whether it is part of the furniture. */
@@ -415,10 +424,23 @@ export interface PeopleDeps {
    * Whether somebody else has the body for now: a person following the player, or one just asked to
    * stop and not yet handed back (`FollowerSet.holds`). Such a body is never put down by this pass -- not
    * for its distance, not to make room for somebody nearer, not for model memory, not for a change of the
-   * side holding the towns -- though its row is still the row it stands for, so a follower killed comes
-   * back at its post on the row's own clock as anybody else would. With none wired nothing is held.
+   * side holding the towns -- and takes no place under either cap, though its row is still the row it
+   * stands for, so a follower killed comes back at its post on the row's own clock as anybody else would.
+   * With none wired nothing is held.
    */
   keeps?(m: Mobile): boolean;
+  /**
+   * How many seconds more a person every other browser saw die (or saw walk off with a player) stays
+   * down before anybody stands it again (`Owned.downFor`); none, and nobody is ever down.
+   */
+  downFor?(id: string): number;
+  /**
+   * Whether this browser shares the people it may be fought over with a server just now (`Owned.seeding`).
+   * While it does, a person killed comes back as the same person rather than as its row's next life: the
+   * lives are each browser's own count, and two browsers that had seen different numbers of deaths would
+   * draw two different people under one name. None, and every life draws again, as it always has.
+   */
+  seeding?(): boolean;
 }
 
 /**
@@ -747,10 +769,12 @@ export class StandingPeople {
     near.sort(this.nearer);
 
     // Two caps, counted apart (`most` and `mostEssential`): those who may be fought, and the furniture.
+    // Nobody somebody else has for now (`keeps`) is counted against either: a follower walks with the
+    // player wherever they go and is no part of the crowd round them, so it takes nobody's place.
     let liveFought = 0;
     let liveKept = 0;
     for (const s of this.up.values()) {
-      if (!s.body) continue;
+      if (!s.body || deps.keeps?.(s.body)) continue;
       if (s.essential) liveKept++;
       else liveFought++;
     }
@@ -783,12 +807,28 @@ export class StandingPeople {
         this.last.waiting++;
         continue;
       }
-      const who = personFor(r, this.lives[i], plan);
-      const entry = cat.byId(who.id);
+      let who = personFor(r, this.lives[i], plan);
+      let entry = cat.byId(who.id);
       if (!entry) continue;
       // Part of the furniture when the town made it so whatever body it drew, or when its own creature
       // may not be struck; its body's catalogue entry answers only for a row whose creature says nothing.
-      const essential = who.essential ?? standsStill(entry);
+      let essential = who.essential ?? standsStill(entry);
+      // Shared with a server, somebody who may be fought comes back as the same person every life: the
+      // lives are this browser's own count, and a different count elsewhere would draw a different
+      // person under one name. The furniture is never shared and draws again as it always did.
+      if (!essential && this.lives[i] > 0 && deps.seeding?.()) {
+        const first = personFor(r, 0, plan);
+        const firstEntry = cat.byId(first.id);
+        if (firstEntry) {
+          who = first;
+          entry = firstEntry;
+          essential = who.essential ?? standsStill(entry);
+        }
+      }
+      // Somebody every other browser saw die, or saw walk off with a player, stays down here too until
+      // the server's own wait for that row is out.
+      const id = this.stoodId(i);
+      if (deps.downFor && deps.downFor(id) > 0) continue;
       if (essential ? fullKept : fullFought) continue;
       // **The cap full, the farthest standing of the same kind makes room**, if it is enough farther
       // off than this row and in no fight. Found before this one is stood and put down only once it
@@ -825,7 +865,7 @@ export class StandingPeople {
         liveFought = 0;
         liveKept = 0;
         for (const s of this.up.values()) {
-          if (!s.body) continue;
+          if (!s.body || deps.keeps?.(s.body)) continue;
           if (s.essential) liveKept++;
           else liveFought++;
         }
@@ -850,6 +890,11 @@ export class StandingPeople {
         weapons: weaponsOf(who.creature),
         weaponGroups: this.extras.weaponGroups ?? null,
         room,
+        id,
+        // A row the server wrote with no respawn stays down for good here (`staysDown`), so the server is
+        // asked to hold it for the longest it holds anything: held a second, every other browser walking
+        // up after that stood whole somebody this one has dead for ever.
+        respawn: r.respawn > 0 ? Math.max(1, r.respawn) : STAYS_DOWN_SECONDS,
       });
       if (typeof m === 'string') {
         this.last.refused = m;
@@ -878,7 +923,7 @@ export class StandingPeople {
       else liveFought++;
       this.last.stood++;
     }
-    this.count();
+    this.count(deps);
   }
 
   /**
@@ -959,7 +1004,12 @@ export class StandingPeople {
     return best;
   }
 
-  private count(): void {
+  /**
+   * The pass's own counts. `essential` is the furniture's cap as the pass counted it, which is what the
+   * people of ours stand in the rest of (`essentialUp`), so a body somebody else has for now takes no
+   * place there either.
+   */
+  private count(deps?: PeopleDeps): void {
     let up = 0;
     let down = 0;
     let inside = 0;
@@ -968,7 +1018,7 @@ export class StandingPeople {
       if (s.body) up++;
       else down++;
       if (s.body && s.stand.inside) inside++;
-      if (s.body && s.essential) essential++;
+      if (s.body && s.essential && !deps?.keeps?.(s.body)) essential++;
     }
     this.last.up = up;
     this.last.down = down;
@@ -1048,6 +1098,31 @@ export class StandingPeople {
   }
 
   /**
+   * Every row somebody sits at, in the world's frame -- carried into it here, with the layout's centre,
+   * if no pass has done it yet -- each where its body is stood, the way it faces and what its mood sits
+   * on (`seatOfMood`): what the chairs and tables of ours are stood under (`seatProps.ts`). A guard's row
+   * stands in the mood of whichever side holds the world and is never one of them. Empty before the rows
+   * are in, and with no centre to carry them by.
+   */
+  seatedRows(centre: { x: number; z: number } | null): SeatedRow[] {
+    if (!this.rows.length) return [];
+    if (!this.framed) {
+      if (!centre) return [];
+      this.frame(centre);
+    }
+    const out: SeatedRow[] = [];
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      if (r.gcw?.length) continue;
+      const sits = seatOfMood(moodOfRow(r));
+      if (!sits) continue;
+      const st = this.stands[i];
+      out.push({ key: r.key ?? `row${i}`, x: st.x, y: st.y, z: st.z, heading: r.heading, inside: st.inside, sits });
+    }
+    return out;
+  }
+
+  /**
    * Whether the dead come back. Turned on again, every one already waiting comes back once its own
    * clock is out, which for somebody killed long ago is on the next pass.
    */
@@ -1092,6 +1167,11 @@ export class StandingPeople {
   /** The world these rows are for, as the pack named it: the key its side is kept under. */
   get world(): string {
     return this.extras.world ?? '';
+  }
+
+  /** Row `i`'s name in the world: `stood:`, the world and its place in the pack's list. */
+  stoodId(i: number): string {
+    return `stood:${this.extras.world || 'here'}:${i}`;
   }
 
   /** The side holding this world's towns, whose guards stand. */
@@ -1248,6 +1328,13 @@ export function patrolFor(r: Pick<StandingRow, 'route' | 'peaceful'>, st: Pick<S
  * switched off, and always for a row the server wrote with a respawn of nought, which it never brought
  * back. One the game merely took away (fallen out of the world) is never kept down.
  */
+/**
+ * How long a server is asked to hold the death of somebody whose row never comes back, in seconds: the
+ * longest it holds any death (`respawnMax` in server/ownership.mjs, an hour). Past it the server forgets
+ * them and a browser that never saw the death may stand them again; this browser keeps them down for good.
+ */
+export const STAYS_DOWN_SECONDS = 3600;
+
 function staysDown(s: Stood): boolean {
   return s.killed && (!PEOPLE_TUNE.respawns || !(s.row.respawn > 0));
 }

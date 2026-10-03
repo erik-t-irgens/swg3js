@@ -178,9 +178,9 @@ export class Customizer {
    * its default, its kind, and the palette or the number of choices; what the sliders and
    * swatches show.
    */
-  variables(): { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }[] {
+  variables(): { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; tag?: string; count?: number; colors?: number[][] }[] {
     if (this.variableCache) return this.variableCache;
-    const out = new Map<string, { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; count?: number; colors?: number[][] }>();
+    const out = new Map<string, { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index'; palette?: string; tag?: string; count?: number; colors?: number[][] }>();
     for (const r of this.recipes) {
       if (!this.active(r)) continue;
       for (const d of recipeVariableDefs(r)) {
@@ -190,7 +190,7 @@ export class Customizer {
           if (d.count && (!prev.count || d.count > prev.count)) prev.count = d.count;
           continue;
         }
-        out.set(key, { key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind, ...(d.palette ? { palette: d.palette, colors: this.palettes[d.palette] } : {}), ...(d.count ? { count: d.count } : {}) });
+        out.set(key, { key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind, ...(d.palette ? { palette: d.palette, colors: this.palettes[d.palette] } : {}), ...(d.tag ? { tag: d.tag } : {}), ...(d.count ? { count: d.count } : {}) });
       }
     }
     this.variableCache = [...out.values()];

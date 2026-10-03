@@ -1,11 +1,12 @@
-// What a creature stood by hand is, once nothing stands on its own any more.
+// What a creature stood by hand is.
 //
-// The planet's automatic wildlife is switched off (`WILDLIFE_KEY` below, and `World.warmUp`, which is
-// the only place that asks). Nothing appears in a world unless somebody stood it there, and what an
-// admin stands belongs to the world rather than to them: every browser connected sees the same
-// creature, one of them thinks for it, and it is handed between them. That only works if the thing
-// being handed over has a name and a look every browser agrees on without being told, which is what
-// this file is for.
+// Two things stand in a world: what its data puts there -- the lairs, the camps, the nests and the
+// people at their posts, which every browser stands for itself from the same rows -- and what an
+// admin stands from the console. The second belongs to the world rather than to the admin: every
+// browser connected sees the same creature, one of them thinks for it, and it is handed between them.
+// That only works if the thing being handed over has a name and a look every browser agrees on
+// without being told, which is what this file is for. (The planet's one species stood in a ring round
+// the arrival point, which is what a world was before either, is gone, and its switch with it.)
 //
 // A spawn is therefore a record rather than a call: an id, the world it stands in, the catalogue key
 // of what it is, where it stands, which way it faces, and one seed. Everything a stood creature would
@@ -17,20 +18,12 @@
 // about it.
 //
 // Nothing here touches the document, three.js, the socket or the catalogue: a node test runs it
-// exactly as it is. The one thing that is not pure is `wildlifeWanted`, which reads one switch out of
+// exactly as it is. The one thing that is not pure is `scratchWanted`, which reads one switch out of
 // this browser's storage through the same guard the session uses, since a private window, cleared
 // site data and a node test all give a storage that is not there. Nothing here runs in a frame -- a
 // spawn is an event, and the switch is read once when a planet arrives.
 
 import { sha256, toHex, utf8 } from '../net/hash.ts';
-
-/**
- * The switch that puts the planet's own wildlife back. It is off unless this browser's storage holds
- * `'1'` under it, which is the owner's decision: nothing appears in a world on its own any more, and
- * what is out there was stood by somebody. It is kept as a switch rather than deleted so that the old
- * path can be measured against the new one (`localStorage['swg.wildlife'] = '1'`, then travel).
- */
-export const WILDLIFE_KEY = 'swg.wildlife';
 
 /**
  * The switch that puts the developer's own two dozen crates and balls back round the arrival point,
@@ -62,28 +55,16 @@ export function browserSwitches(): SwitchStore {
 }
 
 /**
- * Whether a planet stands its own wildlife when it loads. Off unless the switch says otherwise: the
- * answer is false for a browser with no storage at all, which is the same answer as a browser that
- * never set it.
- */
-export function wildlifeWanted(store: SwitchStore = browserSwitches()): boolean {
-  try {
-    return store.get(WILDLIFE_KEY) === '1';
-  } catch {
-    // A store that throws is a store with nothing in it. This is read on the way into a world, and
-    // the way into a world is not somewhere a storage that has been switched off may throw.
-    return false;
-  }
-}
-
-/**
  * Whether the developer's own loose crates and the placeholder bike are stood on arrival. Off unless
- * the switch says otherwise, the same way round and for the same reason as the wildlife's.
+ * the switch says otherwise: the answer is false for a browser with no storage at all, which is the
+ * same answer as a browser that never set it.
  */
 export function scratchWanted(store: SwitchStore = browserSwitches()): boolean {
   try {
     return store.get(SCRATCH_KEY) === '1';
   } catch {
+    // A store that throws is a store with nothing in it. This is read on the way into a world, and
+    // the way into a world is not somewhere a storage that has been switched off may throw.
     return false;
   }
 }
@@ -112,6 +93,11 @@ export interface SpawnRecord {
   seed: number;
   /** Whether it was stood inside a building's rooms rather than on the ground. */
   inside?: boolean;
+  /**
+   * A weapon off the rack the admin put in its hand from the console, by the rack's template: carried in
+   * the record so every browser arms it alike. None, and each arms it from its own list and its seed.
+   */
+  weapon?: string;
 }
 
 /**

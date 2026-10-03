@@ -1,6 +1,6 @@
 // Everything from the catalogue that is out on this planet: the spawns (a cap on how many, and on
-// the bytes their models hold), the ambient wildlife, the lookup from a collider to its body, and
-// the one loop that steps them all with the level of detail each has earned.
+// the bytes their models hold), what the world's data and its server stand, the lookup from a collider
+// to its body, and the one loop that steps them all with the level of detail each has earned.
 //
 // A mobile is culled as a whole, against one sphere of its own, by setting its group's
 // visibility: an invisible group is skipped by the renderer outright, so none of its meshes is
@@ -22,7 +22,7 @@ import { Character } from '../../player/character';
 import type { WeaponCatalogue } from '../../player/weapons';
 import { Mobile, type MobileContext, type MobileEquipment, type MobileExtras, type MobileSpawn } from './mobile';
 import { MOBILE_CACHE, MobileAssets, type ModelAsset, type PackAsset } from './assets';
-import { armedRoles, carryWeaponFor, chooseWeapon, decideArms, SABER_SWINGS, type OwnArms } from './arms';
+import { armedRoles, carryWeaponFor, chooseWeapon, decideArms, forcedArmsRefusal, SABER_SWINGS, type OwnArms } from './arms';
 import { withMood } from './moodIdle.ts';
 import { applyDifficultyTo } from '../difficulty.ts';
 import { isLook, lookKey } from './look';
@@ -41,7 +41,7 @@ import type { CellState } from '../layoutStream';
 import type { FighterGlow } from '../npcs';
 import { keepNearestGlow } from '../../combat/bladeLights';
 import { PendingSpawns, armsRng, decideStand, rollsFor, scaleFrom, type SpawnRecord } from '../spawnSeed.ts';
-import { npcNow, sharesOnWire } from '../../net/npcNet.ts';
+import { neverShared, npcNow, sharesOnWire, sharesSeen } from '../../net/npcNet.ts';
 // A person fighting as a fighter does: the cover search's physics, the rolls and jumps it is lent,
 // and the tables its tier, its posture, its roll and its jump are read from (`tactics.ts`, `evade.ts`).
 import type { CoverDeps } from '../cover.ts';
@@ -53,9 +53,12 @@ import type { NearBlocker } from '../layoutStream';
 import type { GroundTactics } from './tactics.ts';
 // A lightsaber's moves (`npcSaber.ts`): every clip the move machine can ask for, to lend, and the style by seed.
 import { NPC_SABER_CLIPS, styleOf } from '../npcSaber.ts';
+// Where the people standing in a building are put when it comes down.
+import { doorstepSpot } from '../myBuildings.ts';
 
 export interface SpawnOpts {
-  origin?: 'spawned' | 'ambient';
+  /** How it came to stand: always by somebody's hand or the world's data now that nothing roams in on its own. */
+  origin?: 'spawned';
   scale?: number;
   inside?: boolean;
   overrides?: MobileSpawn['overrides'];
@@ -74,14 +77,20 @@ export interface SpawnOpts {
    */
   worldId?: string;
   /**
-   * Whether it goes on the wire to be kept by whichever browser the server grants it to
-   * (`sharesOnWire`). Only a body stood from one of the server's own records asks for that
-   * (`standRecord`). Everything else under a world name -- a lair's creature, a person standing
-   * about, a ticket collector -- is seeded from the same data in every browser and is a name the
-   * server has never heard, so it stays this browser's own: shared, it was driven by nobody and stood
-   * frozen and unhurtable for as long as a server was answering.
+   * Whether it goes on the wire as one of the server's own records, to be kept by whichever browser the
+   * server grants it to (`sharesOnWire`). Only a body stood from one of the server's own records asks
+   * for that (`standRecord`). A lair's creature and a person at a post -- seeded from the same data in
+   * every browser -- go on the wire another way, by saying they have been seen (`sharesSeen`), and only
+   * while a server that speaks of them is answering and only when they may be struck at all; a ticket
+   * collector and one of ours never do.
    */
   share?: boolean;
+  /**
+   * How long a seen body stays down once it dies before any browser stands it again, in seconds: its
+   * own row's respawn (a lair's broken wait, a person's own seconds). What the server holds its death
+   * for, so a browser walking up meanwhile does not stand a whole copy of something everybody saw die.
+   */
+  respawn?: number;
   /**
    * Part of the furniture: it stands where it is stood, takes no damage and never dies.
    *
@@ -119,6 +128,14 @@ export interface SpawnOpts {
    */
   weapons?: readonly string[];
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
+  /**
+   * A weapon the console chose for it, by the rack's template (`__debug.mobile(.., { weapon })`): held
+   * over its own list, its name and its temper (`OwnArms.forcedTemplate`). This browser's own spawns,
+   * and a body stood from one of the server's records that carries one (`SpawnRow.weapon`, the admin's
+   * choice, which every browser stands alike); never a seeded body, which every browser arms from its
+   * own seed and a choice made here would put a different weapon in its hand on this screen alone.
+   */
+  weaponTemplate?: string;
 }
 
 export interface MobileManagerDeps {
@@ -259,8 +276,6 @@ const tmp = new THREE.Vector3();
 const ZERO = new THREE.Vector3();
 /** The tier's input, filled per mobile every frame rather than made anew. */
 const lodInput: LodInput = { dist: 0, onScreen: true, nearScreen: true, busy: false, sizeClass: 'small', shadows: false, playerDist: 0, animRange: LOD_TUNE.animRange, room: -1, inCascades: undefined };
-/** Ambient wildlife this far from the player comes back somewhere nearer. */
-const AMBIENT_RANGE = 260;
 /** How often (seconds) a mobile's inside-or-out is asked again, and its shadow flag set. */
 const INSIDE_EVERY = 0.25;
 /** A body that has gone this far since its room was last followed is followed now, whatever the clock (the tracker takes a jump over 5 m as a teleport). */
@@ -325,12 +340,12 @@ export class MobileManager {
    * Why an entry cannot be stood now, in a sentence, or null when it can.
    *
    * The origin is what the cap is asked about. `spawned` is one this browser stood from the tab and
-   * is what the cap counts; `ambient` is the planet's own wildlife; `world` is one the world holds,
-   * which the cap must never refuse -- it is a local limit on what somebody may stand from the tab,
-   * and applied to the world's list every browser would end up holding a different arbitrary subset
-   * of the creatures everyone else can see, with nothing said anywhere.
+   * is what the cap counts; `world` is one the world holds, which the cap must never refuse -- it is a
+   * local limit on what somebody may stand from the tab, and applied to the world's list every browser
+   * would end up holding a different arbitrary subset of the creatures everyone else can see, with
+   * nothing said anywhere.
    */
-  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'ambient' | 'world' = 'spawned', budget = true): string | null {
+  whyNot(entry: MobileEntry, cat: MobileCatalogue, origin: 'spawned' | 'world' = 'spawned', budget = true): string | null {
     const where = this.deps.refuse();
     if (where) return where;
     // The one model the game's own archives cannot give: said as what it is, not as a fault.
@@ -399,7 +414,7 @@ export class MobileManager {
     return n;
   }
 
-  /** How many stood by hand are out (what the cap counts; the planet's own wildlife is not, nor anything the world holds). */
+  /** How many stood by hand are out (what the cap counts; nothing the world holds is). */
   get spawnedOut(): number {
     return this.spawnedCount();
   }
@@ -486,6 +501,7 @@ export class MobileManager {
       groundIfCached: this.deps.groundIfCached ? this.groundCached : undefined,
       groundSolid: this.deps.groundSolid ? this.groundSolid : undefined,
       cover: this.deps.blockers ? this.coverDeps : null,
+      forgetMaterials: this.forgetBlade,
     });
     this.live.push(m);
     for (const c of m.colliders) this.byCollider.set(c.handle, m);
@@ -522,12 +538,11 @@ export class MobileManager {
       this.worldIds.set(m, opts.worldId);
       // One the server stood: the wire is told, so whichever browser the server grants it to thinks
       // for it and every other one holds the same body with its brain switched off. With no server
-      // this costs a map insert and nothing else, and every creature stays this browser's own. One
-      // this browser seeded for itself is never told to the wire at all (`share`).
+      // this costs a map insert and nothing else, and every creature stays this browser's own.
       if (sharesOnWire(opts.worldId, opts.share)) {
         m.shareAs(opts.worldId);
         npcNow()?.add(m);
-      }
+      } else this.shareSeen(m, opts.worldId, !!opts.essential, opts.respawn ?? 0);
     }
     held.loaded = this.load(m, held, entry, cat, opts);
     return m;
@@ -560,6 +575,85 @@ export class MobileManager {
   private readonly worldIds = new WeakMap<Mobile, string>();
   /** The ones stood from the world's list's own records: the only ones that list may take down again. */
   private readonly listed = new WeakSet<Mobile>();
+  /** How long each seeded body stays down once it dies (its row's respawn, seconds), kept for a server met after it was stood. */
+  private readonly respawnOf = new WeakMap<Mobile, number>();
+
+  /**
+   * A body this browser seeded for itself put on the wire by saying it has been seen (`sharesSeen`):
+   * one of the seeded kind, that may be struck, that is nobody's alone (`neverShared`), and only while a
+   * server that speaks of the seen ones is answering. Every other is left exactly as it was: this
+   * browser's own, as every such body was before.
+   */
+  private shareSeen(m: Mobile, worldId: string, essential: boolean, respawn: number): void {
+    this.respawnOf.set(m, respawn);
+    const net = npcNow();
+    if (!net || !sharesSeen(worldId, essential, net.seedingNow) || neverShared(m)) return;
+    m.shareAs(worldId);
+    net.addSeen(m, m.pos, respawn);
+  }
+
+  /**
+   * Every seeded body already standing put on the wire, now that a server that speaks of them is
+   * answering: it came after they were stood (a line opened mid-session, or come back after a drop,
+   * which clears the wire and leaves the bodies). A body already on it is left; one that may not be
+   * shared is left too. Answers how many went on.
+   */
+  shareSeeded(): number {
+    const net = npcNow();
+    if (!net || !net.seedingNow) return 0;
+    let n = 0;
+    for (const m of this.live) {
+      if (m.removed || m.dead) continue;
+      const id = this.worldIds.get(m);
+      if (!id || this.listed.has(m) || neverShared(m) || m.essential) continue;
+      if (m.npcId && net.find(m.npcId) === m) continue;
+      if (!sharesSeen(id, false, true)) continue;
+      m.shareAs(id);
+      net.addSeen(m, m.pos, this.respawnOf.get(m) ?? 0);
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * A body taken off the wire for good while it stands, because it has become this browser's alone (a
+   * follower, `neverShared`). It must be one this browser keeps or one that was never on the wire: one
+   * somebody else keeps is not this browser's to take, and the answer says so (false). Its name is let go
+   * of here as well, so a body the world stands under the same name later is a new one, and so the world's
+   * list never takes it down for not naming it.
+   */
+  unshare(m: Mobile): boolean {
+    if (!this.mayUnshare(m)) return false;
+    const id = m.npcId;
+    if (id) {
+      const net = npcNow();
+      // On the wire and kept here: the keeper says it has walked off, and every other browser takes its
+      // copy down. Off the wire already (no server), there is nothing to say.
+      if (net?.find(id) === m && !net.leave(id) && net.active) return false;
+      m.unshare();
+    }
+    const name = this.worldIds.get(m);
+    if (name && this.byWorldId.get(name) === m) this.byWorldId.delete(name);
+    this.listed.delete(m);
+    return true;
+  }
+
+  /**
+   * Whether `unshare` would take that body off the wire, asked before anything is done to it: a caller
+   * that first takes the body off its own books (a lair's, a row's) must not do so for a body the wire
+   * will then refuse to let go of, or the body is nobody's at all. Not one somebody else keeps; not one on
+   * the wire that may not leave it (`NpcNet.mayLeave`: not kept here this instant, or a server that would
+   * not hear it walk off). One off the wire, or with no server answering, always may.
+   */
+  mayUnshare(m: Mobile): boolean {
+    if (m.isDriven) return false;
+    const id = m.npcId;
+    if (!id) return true;
+    const net = npcNow();
+    if (!net || net.find(id) !== m || !net.active) return true;
+    return net.mayLeave(id);
+  }
+
   /** The records that arrived before the catalogue did; stood the moment it lands. */
   private readonly pending = new PendingSpawns();
 
@@ -603,7 +697,9 @@ export class MobileManager {
     const a = choice.args;
     this.pending.drop(a.id);
     const entry = cat!.byId(a.species)!;
-    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true, share: true });
+    // The weapon the admin put in its hand rides in the record, so every browser arms it alike.
+    const weapon = typeof rec.weapon === 'string' && rec.weapon ? { weaponTemplate: rec.weapon } : {};
+    return this.spawn(entry, { x: a.x, y: a.y, z: a.z, heading: a.heading }, { origin: 'spawned', inside: a.inside, seed: a.seed, worldId: a.id, listed: true, share: true, ...weapon });
   }
 
   /**
@@ -670,7 +766,11 @@ export class MobileManager {
     // Taken before the first await: a load in flight counts against the budget at its estimate from
     // this moment, so the next spawn in the same tick sees it (`referencedBytes`).
     const guess = assets.estimate(entry, cat);
-    const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged };
+    // The console's choice is laid on this browser's own spawn, and on a body stood from a record that
+    // carries it (every browser stands that record alike); never on a seeded body, which every browser
+    // arms from its own seed, nor on a record's body that carries none.
+    const forced = opts.weaponTemplate && (!opts.worldId || opts.listed) ? opts.weaponTemplate : undefined;
+    const own: OwnArms = { weapons: opts.weapons, groups: opts.weaponGroups, aggression: opts.overrides?.aggression, ranged: opts.overrides?.ranged, forcedTemplate: forced };
     const [model, pack, arms] = await Promise.allSettled([
       assets.acquireModel(file, { hologram, bounds, estimate: guess.model, look: look ? { entry, cat } : undefined }),
       packInfo ? assets.acquirePack(packInfo.id, packInfo.file, packInfo.json, guess.pack) : Promise.resolve(null),
@@ -735,6 +835,53 @@ export class MobileManager {
     const clips = extras?.clips?.size ? new Map([...extras.clips, ...lent]) : lent;
     return { equipment: plan?.equipment ?? null, extras: { ...(extras ?? {}), clips } };
   }
+
+  /**
+   * Put a weapon off the rack in the hand of a body already standing, by the rack's template: the console's
+   * `arm`, and the server's word that the admin did so on another browser. It is `armsFor` again with the
+   * choice made (`OwnArms.forcedTemplate`), from the body's own seed where it has one so a lightsaber's
+   * colour and style come out alike on every browser, the weapon prepared before it is handed over, and the
+   * rolls and jumps a person fights with laid beside it as at its stand (`withEvade`). Answers null, or why
+   * not in words: no such weapon on this browser's rack, a body with no hand, one still loading or gone.
+   *
+   * **The last word asked wins, and a word for what it already holds does nothing.** The server says the
+   * weapon again to every browser that says `seen` for a body it has armed, which a driven body's browser
+   * does every few seconds while its keeper is quiet, and re-arming the same weapon would put the blade out,
+   * drop the aim and the burst and build it all again each time. And two arms asked close together finish
+   * in whichever order their weapons were made ready in (one on the rack already, the other fetched and
+   * prepared), so each is numbered as it is asked (`arming`) and one overtaken while it waited is dropped:
+   * the body ends holding what was asked last, which is what the server's record says too.
+   */
+  async rearm(m: Mobile, template: string): Promise<string | null> {
+    const turn = (this.arming.get(m) ?? 0) + 1;
+    this.arming.set(m, turn);
+    const overtaken = () => this.arming.get(m) !== turn;
+    const cat = this.deps.catalogue();
+    const held = this.held.get(m);
+    if (!cat || !held || m.removed) return 'that body is not standing here';
+    if (m.dead) return `${m.label} is dead`;
+    await held.loaded;
+    if (overtaken()) return `${m.label} was asked to hold something else meanwhile`;
+    if (!m.ready || m.removed || m.dead) return `${m.label} has no body to arm`;
+    const packInfo = cat.packOf(m.entry);
+    const def = this.deps.weapons?.()?.weapons.find((w) => w.template === template) ?? null;
+    if (!def) return `nothing on this browser's weapons rack is ${template}`;
+    if (m.weapon === def.id) return null;
+    const why = forcedArmsRefusal(m.entry.name, packInfo?.hierarchy, def);
+    if (why) return why;
+    const arms = await this.armsFor(m.entry, packInfo, held.seed, { forcedTemplate: template, ranged: m.ownRanged });
+    const plan = this.withEvade(m.entry, packInfo, arms, m.hologram || m.essential);
+    if (overtaken()) return `${m.label} was asked to hold something else meanwhile`;
+    if (m.removed || m.dead) return `${m.label} went while the weapon was made ready`;
+    if (!plan?.equipment) return `${def.id} could not be put in ${m.label}'s hand`;
+    if (!m.rearm(plan.equipment, plan.extras)) return `${m.label} has no hand to hold ${def.id}`;
+    // Its tier again, now that what is in its hand is known (a lightsaber jumps higher).
+    m.applyFightTier(this.fightTier);
+    return null;
+  }
+
+  /** How many times each body has been asked to re-arm, so an arm overtaken while it waited is dropped (`rearm`). */
+  private readonly arming = new WeakMap<Mobile, number>();
 
   /** Weapon models already prepared (or being), by file: the rack's copies share their materials, so one preparation serves them all. */
   private readonly preparedWeapons = new Map<string, Promise<void>>();
@@ -902,31 +1049,6 @@ export class MobileManager {
     return out;
   }
 
-  /** The planet's own wildlife: `count` of an entry about a point, respawned rather than removed. Returns how many stood. */
-  spawnAmbient(entry: MobileEntry, count: number, centre: THREE.Vector3, overrides?: MobileSpawn['overrides']): number {
-    let n = 0;
-    for (let i = 0; i < count; i++) {
-      const p = this.pickSpot(centre);
-      const got = this.spawn(entry, { x: p.x, y: p.y, z: p.z }, { origin: 'ambient', overrides });
-      if (typeof got === 'string') break;
-      n++;
-    }
-    return n;
-  }
-
-  private pickSpot(centre: THREE.Vector3): THREE.Vector3 {
-    const terrain = this.deps.terrain;
-    for (let attempt = 0; attempt < 24; attempt++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 35 + Math.random() * 90;
-      const x = centre.x + Math.sin(a) * r;
-      const z = centre.z + Math.cos(a) * r;
-      const h = terrain.heightAt(x, z);
-      if (h > terrain.waterHeightAt(x, z) + 0.5) return new THREE.Vector3(x, h, z);
-    }
-    return new THREE.Vector3(centre.x, terrain.heightAt(centre.x, centre.z), centre.z);
-  }
-
   /** Take one away now: its colliders' handles go at the moment the body does, and its assets are released. */
   remove(m: Mobile): void {
     const i = this.live.indexOf(m);
@@ -965,8 +1087,8 @@ export class MobileManager {
   }
 
   /**
-   * Take away every spawned mobile the filter picks (all spawned ones without one); the wildlife
-   * stays, and so does everything the world holds. A body with a world name is never this call's:
+   * Take away every spawned mobile the filter picks (all spawned ones without one); everything the
+   * world holds stays, the lairs' creatures among it. A body with a world name is never this call's:
    * the NPC tab's clear took the town's people and a lair's creatures down with the ones stood by
    * hand, and they came straight back on the world's next pass. Returns how many.
    */
@@ -1050,24 +1172,12 @@ export class MobileManager {
       const m = this.live[i];
       const held = this.held.get(m);
       if (!held) continue;
-      // Spent: a spawned one is taken away, the wildlife comes back somewhere else.
+      // Spent: taken away. Whatever stood it -- a lair, a row, the console, the server's list -- stands
+      // it again on its own clock if it comes back at all; nothing here recycles a body by distance.
       // The fallen-out-of-the-world floor never applies inside a building: dungeon rooms go far below it.
-      const spent = (m.dead && m.deadTimer <= 0) || (!m.inside && m.pos.y < this.deps.terrain.floor - 20);
-      if (m.origin === 'spawned') {
-        if (spent) {
-          this.remove(m);
-          continue;
-        }
-      } else if (spent || m.pos.distanceTo(ctx.playerPos) > AMBIENT_RANGE) {
-        const p = this.pickSpot(ctx.playerPos);
-        m.respawn(p.x, p.y, p.z);
-        // Back on open ground, in no room.
-        held.cell = null;
-        held.cellFrom.copy(m.pos);
-        m.room = 0;
-        m.navCell = null;
-        m.setInside(false);
-        this.version++;
+      if ((m.dead && m.deadTimer <= 0) || (!m.inside && m.pos.y < this.deps.terrain.floor - 20)) {
+        this.remove(m);
+        continue;
       }
       // Its room, followed through the portals four times a second (staggered), and sooner when it has gone a couple of metres.
       if (!m.dead && (ctx.now - held.lastInside >= INSIDE_EVERY || held.cellFrom.distanceToSquared(m.pos) > FOLLOW_STEP * FOLLOW_STEP)) {
@@ -1162,8 +1272,16 @@ export class MobileManager {
   /** The shadow cascades' light boxes, read once at the top of `update` for every body's tier; null with shadows off or none wired. */
   private shadowBoxes: readonly THREE.Frustum[] | null = null;
 
+  /**
+   * How a body's own blade renderer lets its materials go before it is disposed, through the asset cache's
+   * own hook (`MobileAssets.forget`, which the world sets to `World.forgetMaterials`): one closure for every body.
+   */
+  private readonly forgetBlade = (materials: readonly THREE.Material[]): void => {
+    this.deps.assets.forget?.(materials);
+  };
+
   /** The world's far ground readers, handed to every body as the same two closures (commit 4b). */
-  private readonly groundCached = (x: number, z: number): number | null => this.deps.groundIfCached?.(x, z) ?? null;
+  private readonly groundCached =(x: number, z: number): number | null => this.deps.groundIfCached?.(x, z) ?? null;
   private readonly groundSolid = (x: number, z: number): boolean => this.deps.groundSolid?.(x, z) ?? true;
 
   /**
@@ -1299,6 +1417,34 @@ export class MobileManager {
    */
   cellFromOf(m: Mobile): THREE.Vector3 | null {
     return this.held.get(m)?.cellFrom ?? null;
+  }
+
+  /**
+   * A building put down in play is coming down: every body this browser keeps that is followed in one
+   * of its rooms is stood on the ground round its doorstep (`doorstepSpot`, a step apart) and put
+   * back outdoors before the rooms go, or it would be held in the air where a floor had been, walking
+   * corners of a building that is not there. Answers how many were moved; `first` is the doorstep spot
+   * the first of them takes, so the fighters stood out beside them can take the next ones.
+   */
+  standOutOf(building: object, door: { x: number; z: number }, first = 1): number {
+    let n = 0;
+    for (const m of this.live) {
+      const held = this.held.get(m);
+      if (!held || held.cell?.building !== building) continue;
+      const spot = doorstepSpot(first + n, door);
+      // A body another browser keeps is not moved (its keeper takes the same building down and stands
+      // it out there), but its rooms here go all the same, or this browser would go on following it
+      // through the portals of a building that is gone, held indoors and airless until something moved it.
+      const moved = m.standOut(spot.x, this.deps.terrain.heightAt(spot.x, spot.z), spot.z);
+      held.cell = null;
+      held.cellFrom.copy(m.pos);
+      m.room = 0;
+      m.navCell = null;
+      m.setInside(false);
+      m.setAirless(false);
+      if (moved) n++;
+    }
+    return n;
   }
 
   /** For `__debug.mobileCull`: every mobile's world sphere, whether it is on and near the screen, drawn, casting, and its tier. */

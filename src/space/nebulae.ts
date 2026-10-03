@@ -28,9 +28,11 @@ import {
   beamCurves,
   beamEnvelope,
   buildSheets,
+  clampOpacity,
   deepestInside,
   dimInside,
   seedOfName,
+  seenDepth,
   shareSheets,
   sheetCount,
   slotOf,
@@ -64,6 +66,12 @@ export interface NebulaeDeps {
   hurtShip(amount: number, from: THREE.Vector3): void;
   /** Whether nebula lightning may hurt a ship at all: the player's own setting. */
   damageEnabled(): boolean;
+  /**
+   * How solid the player wants the nebulae, 0 to 1 (the Graphics page's Nebula opacity): the sheets,
+   * the haze and the dimming of the flare and the rays all take it, as uniforms. Left out it is 1.
+   * Kept apart from `NEBULA_TUNE.alpha`, so the console's knob and the slider never overwrite each other.
+   */
+  opacity?(): number;
   /** Wall-clock milliseconds. The strikes are timed on it, so two browsers see the same ones. */
   now(): number;
   /** How a picture is loaded; the game leaves it out and three's own loader is used. A node check hands its own. */
@@ -695,11 +703,13 @@ export class Nebulae {
     const eye = camera.position;
     this.lastEye.copy(eye);
     const tan = Math.tan((camera.fov * Math.PI) / 360);
+    // The player's own slider, over the console's knob: uniforms only, so nothing is made or compiled.
+    const opacity = this.opacity;
     for (const set of this.sets) {
       const u = set.material.uniforms;
       u.uTanHalfFov.value = tan;
       u.uPullFrom.value = NEBULA_TUNE.pullFrom;
-      u.uAlpha.value = NEBULA_TUNE.alpha;
+      u.uAlpha.value = NEBULA_TUNE.alpha * opacity;
       (u.uNearFade.value as THREE.Vector2).set(NEBULA_TUNE.nearFadeFrom, NEBULA_TUNE.nearFadeTo);
       (u.uFarFade.value as THREE.Vector2).set(NEBULA_TUNE.farFadeFrom, NEBULA_TUNE.farFadeTo);
       (u.uScreenFade.value as THREE.Vector2).set(NEBULA_TUNE.screenFadeFrom, NEBULA_TUNE.screenFadeTo);
@@ -727,7 +737,7 @@ export class Nebulae {
       if (!on) continue;
       const colour = row!.facing.colour;
       (shell.material.uniforms.uColour.value as THREE.Color).setRGB(colour[1], colour[2], colour[3]);
-      shell.material.uniforms.uAlpha.value = colour[0] * depth * NEBULA_TUNE.shellAlpha;
+      shell.material.uniforms.uAlpha.value = colour[0] * depth * NEBULA_TUNE.shellAlpha * this.opacity;
       shell.material.uniforms.uTime.value = this.time * NEBULA_TUNE.shellDrift;
       shell.material.uniforms.uScale.value = NEBULA_TUNE.shellScale;
       shell.material.uniforms.uFloor.value = NEBULA_TUNE.shellFloor;
@@ -923,14 +933,19 @@ export class Nebulae {
   /** Where the camera was on the last frame that ran: the console's stand-in for "here". */
   readonly lastEye = new THREE.Vector3();
 
-  /** How much of the lens flare is left where the camera is; 1 outside every nebula. */
-  get flareDim(): number {
-    return dimInside(this.depthInside, NEBULA_TUNE.dimFlare);
+  /** The player's Nebula opacity, 0 to 1 (1 when the game gives none). */
+  get opacity(): number {
+    return clampOpacity(this.deps.opacity ? this.deps.opacity() : 1);
   }
 
-  /** How much of the god rays is left where the camera is; 1 outside every nebula. */
+  /** How much of the lens flare is left where the camera is; 1 outside every nebula, and eased toward 1 as the opacity is turned down. */
+  get flareDim(): number {
+    return dimInside(seenDepth(this.depthInside, this.opacity), NEBULA_TUNE.dimFlare);
+  }
+
+  /** How much of the god rays is left where the camera is; 1 outside every nebula, eased the same way. */
   get rayDim(): number {
-    return dimInside(this.depthInside, NEBULA_TUNE.dimRays);
+    return dimInside(seenDepth(this.depthInside, this.opacity), NEBULA_TUNE.dimRays);
   }
 
   /** What the console shows: the counts, where the camera is, and what the lightning has done. */
@@ -941,6 +956,8 @@ export class Nebulae {
       sets: this.sets.map((s) => ({ look: s.material.name, sheets: s.count, sorted: s.sorted })),
       inside: this.insideIndex >= 0 ? { name: this.rows[this.insideIndex].name, depth: Number(this.depthInside.toFixed(3)), jitter: this.rows[this.insideIndex].jitter, look: this.rows[this.insideIndex].shader } : null,
       dim: { flare: Number(this.flareDim.toFixed(3)), rays: Number(this.rayDim.toFixed(3)) },
+      // The Graphics page's Nebula opacity, over the sheets, the haze and the two dims above.
+      opacity: Number(this.opacity.toFixed(3)),
       haze: this.shells.map((s) => ({ look: s.look, drawn: s.mesh.visible, alpha: Number((s.material.uniforms.uAlpha.value as number).toFixed(3)) })),
       lightning: { ...this.tally, live: this.beams.filter((b) => b.age < b.seconds).length, damage: Number(this.tally.damage.toFixed(1)) },
       shown: this.shown,

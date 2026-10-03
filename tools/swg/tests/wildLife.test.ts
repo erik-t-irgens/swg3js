@@ -159,6 +159,46 @@ function nearWorld(areas: WildPack['areas'] = [nearArea], man: WildManifest = ma
   ok(bodies.every((b) => b.removed), 'and every body it stood is really taken down, not merely forgotten');
 }
 
+// ------------------------------------------------------------------ one of a site's people asked to follow the player
+{
+  // Given up to the people following the player (`WildLife.release`, src/world/followers.ts): off its
+  // site's books without being taken away, and counted as the site's loss to the player, so a site whose
+  // last body walks off with you waits its own clock rather than standing a fresh crowd in front of you --
+  // the very thing a body the game merely took away does not do, which is the control below.
+  const at = new THREE.Vector3(0, 0, 0);
+  const settle = (w: WildLife, deps: WildDeps, from: number): number => {
+    let t = from;
+    for (let i = 0; i < 12; i++) {
+      t += WILD_TUNE.everySeconds + 0.1;
+      w.step(WILD_TUNE.everySeconds + 0.1, t, at, deps);
+    }
+    return t;
+  };
+  const w = nearWorld();
+  const { deps, bodies } = game();
+  let t = settle(w, deps, 0);
+  const up = bodies.filter((b) => !b.removed && !b.dead);
+  ok(up.length > 1, `${up.length} bodies stand`);
+  const before = w.last.bodies;
+  ok(w.release(up[0] as never) && !up[0].removed && w.last.bodies === before - 1, 'one asked to follow is off its site\'s books, and still in the world');
+  ok(!w.release(up[0] as never), 'asked again, it is no site\'s to give');
+  for (const b of up.slice(1)) w.release(b as never);
+  const made = bodies.length;
+  t = settle(w, deps, t);
+  ok(w.last.bodies === 0 && bodies.length === made, `every one of them asked to follow, their sites wait their own clocks and nobody new is stood (${bodies.length - made} stood)`);
+  // The control: the same world's bodies merely taken away by the game are stood again at once.
+  const w2 = nearWorld();
+  const g2 = game();
+  const t2 = settle(w2, g2.deps, 0);
+  for (const b of g2.bodies) {
+    b.removed = true;
+    b.dead = true;
+  }
+  const made2 = g2.bodies.length;
+  settle(w2, g2.deps, t2);
+  ok(g2.bodies.length > made2, `while the same bodies merely taken away are stood again at once (${g2.bodies.length - made2} stood)`);
+}
+
 // ------------------------------------------------------------------ its own numbers and weapons
 {
   const man: WildManifest = {
@@ -315,6 +355,48 @@ function nearWorld(areas: WildPack['areas'] = [nearArea], man: WildManifest = ma
   w.step(1, 100 + LAIR_TUNE.respawn[1] + 1, at, deps);
   w.step(WILD_TUNE.everySeconds + 0.1, 100 + LAIR_TUNE.respawn[1] + 5, at, deps);
   ok(bodies.length > madeBefore, 'once the clock is out the same seed stands the same animals in the same places again');
+}
+
+// ------------------------------------------------------------------ a server's word that a name is down
+{
+  // Every other browser has a lair's body down for its row's wait once it is seen to die (`downFor`, the
+  // server's answer), and this browser must not stand it whole meanwhile.
+  const w = nearWorld();
+  let t = 0;
+  const downs = new Map<string, number>();
+  const { deps, bodies } = game({ downFor: (id) => Math.max(0, (downs.get(id) ?? -Infinity) - t) });
+  const at = new THREE.Vector3(0, 0, 0);
+  const allDown = game({ downFor: (id) => (id.startsWith('wild:') ? 30 : 0) });
+  nearWorld().step(1, 1, at, allDown.deps);
+  ok(allDown.bodies.length === 0, 'a site whose every body another browser has seen die stands none of them here');
+  for (let i = 0; i < 4; i++) {
+    t = i * 2;
+    w.step(WILD_TUNE.everySeconds + 0.1, t, at, deps);
+  }
+  const up = w.last.up;
+  const stood = bodies.length;
+  ok(up > 0 && stood > 0, `${up} sites and ${stood} bodies stand where nothing is down`);
+  // Everything killed at 100, and the server holding every name down well past every site's own clock --
+  // as a body whose word came back late, or a nest broken after its last guard, is held.
+  t = 100;
+  const late = 100 + LAIR_TUNE.respawn[1] + 40;
+  for (const b of bodies) {
+    b.dead = true;
+    downs.set(`wild:${b.how.id}`, late);
+  }
+  w.step(WILD_TUNE.everySeconds + 0.1, t, at, deps);
+  for (const when of [100 + LAIR_TUNE.respawn[1] + 1, 100 + LAIR_TUNE.respawn[1] + 5, late - 2]) {
+    t = when;
+    w.step(WILD_TUNE.everySeconds + 0.1, t, at, deps);
+  }
+  ok(bodies.length === stood, 'a site whose own clock is out waits while the server still holds any of its names down, rather than standing some and skipping the rest');
+  for (const when of [late + 1, late + 3, late + 5, late + 7]) {
+    t = when;
+    w.step(WILD_TUNE.everySeconds + 0.1, t, at, deps);
+  }
+  const back = bodies.slice(stood);
+  const firsts = new Set(bodies.slice(0, stood).filter((b) => b.how.id.endsWith(':0')).map((b) => b.how.id));
+  ok(back.length > 0 && [...firsts].every((id) => back.some((b) => b.how.id === id)), `once the last of them is out it comes back whole, its first body and all (${back.length} stood again)`);
 }
 
 // ------------------------------------------------------------------ killed is not the same as gone
@@ -742,6 +824,58 @@ const recsOf = (x: WildLife): Rec[] => [...(x as unknown as { standing: Map<stri
       setDifficulty(1);
     }
     bw.unload();
+  }
+
+  // ---------------------------------------------------------------- a nest another browser has broken
+  {
+    // Stood by a browser that walks up while every other has the nest broken: it stands broken here too.
+    const sw = new WildLife();
+    fine(() => sw.adopt(nestArea, man));
+    const shared: string[] = [];
+    const g = game({ nest: nestDeps, groundAt: slope, shareNest: (n) => void shared.push(n.npcId), downFor: (id) => (id.startsWith('camp:') ? 60 : 0) });
+    sw.step(1, 1, at, g.deps);
+    await settle();
+    const recs = recsOf(sw).filter((r) => r.nest);
+    ok(recs.length > 0 && recs.every((r) => r.nest!.dead) && shared.length === recs.length && shared.every((id) => id.startsWith('camp:')), 'a nest every other browser has broken stands broken here, under its site\'s own name on the wire');
+    sw.unload();
+  }
+
+  // ---------------------------------------------------------------- the nest broken after its last guard: one clock
+  {
+    // The site's own clock runs from its last body's death and the server holds the nest down from the
+    // nest's own; broken after the guard, the nest's runs later, and reviving on the site's clock stood it
+    // broken again for a whole cycle. The site waits out the later of the two.
+    const cw = new WildLife();
+    fine(() => cw.adopt(nestArea, man));
+    let t = 1;
+    const downs = new Map<string, number>();
+    const g = game({ nest: nestDeps, groundAt: slope, shareNest: () => undefined, downFor: (id) => Math.max(0, (downs.get(id) ?? -Infinity) - t) });
+    cw.step(1, t, at, g.deps);
+    await settle();
+    const rec = recsOf(cw).find((r) => r.nest?.up)!;
+    const nest = rec.nest!;
+    t = 10;
+    for (const b of rec.bodies) {
+      b.dead = true;
+      downs.set(`wild:${b.how.id}`, t + rec.wait);
+    }
+    cw.step(0.1, t, at, g.deps);
+    t = 20;
+    nest.damage(1e9);
+    downs.set(`camp:${rec.site.key}`, t + rec.wait);
+    cw.step(0.1, t, at, g.deps);
+    ok(nest.dead && rec.brokeAt === 10, 'its guard killed at 10 starts its clock, and the nest is knocked down at 20');
+    for (const when of [10 + rec.wait + 1, 10 + rec.wait + 3]) {
+      t = when;
+      cw.step(WILD_TUNE.everySeconds + 0.1, t, at, g.deps);
+    }
+    ok(nest.dead && rec.bodies.length === 0, "when the site's own clock is out the nest's is not, and the site waits rather than reviving it broken");
+    for (const when of [20 + rec.wait + 1, 20 + rec.wait + 3]) {
+      t = when;
+      cw.step(WILD_TUNE.everySeconds + 0.1, t, at, g.deps);
+    }
+    ok(!nest.dead && nest.up && rec.bodies.length > 0, 'and once the nest\'s is out too it comes back whole, guard and all');
+    cw.unload();
   }
 
   // ---------------------------------------------------------------- a guard killed, then the nest struck

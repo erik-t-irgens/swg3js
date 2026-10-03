@@ -530,6 +530,46 @@ export function mapFromGameZ(centreZ: number, z: number): number {
   return z + centreZ;
 }
 
+/**
+ * Where a world's map picture lies on its ground, in the map's own frame (the snapshot's): how many
+ * metres it spans and the point under its middle. The converter writes both into map.json
+ * (`tools/swg/mapframe.mjs`): the terrain's whole width about the origin on the launch worlds, the
+ * buildout area's composite rectangle on the expansion zones (Kachirho's picture is 2048 m about a
+ * point 112 m north of the origin, Mustafar's 8000 m about (-2880, 2976)). The map window, the
+ * galaxy map's thumbnails and the travel terminal all place a point on a picture through this one
+ * frame, so the three can never disagree about where a place is on it.
+ */
+export interface MapFrame {
+  /** Metres the picture spans, both ways. */
+  width: number;
+  /** The map point under the picture's middle. */
+  x: number;
+  z: number;
+}
+
+/**
+ * A map.json as the frame its picture covers. One written before the frame was read carries no
+ * `centre` and reads as the origin, so an old pack draws exactly as it always did; a width that is
+ * missing or nonsense reads as the planet-wide 16384 m every old reader fell back on.
+ */
+export function mapFrame(meta: { width?: unknown; centre?: unknown } | null | undefined): MapFrame {
+  const w = Number(meta?.width);
+  const c = (meta?.centre ?? null) as { x?: unknown; z?: unknown } | null;
+  const x = Number(c?.x);
+  const z = Number(c?.z);
+  return { width: Number.isFinite(w) && w > 0 ? w : 16384, x: Number.isFinite(x) ? x : 0, z: Number.isFinite(z) ? z : 0 };
+}
+
+/** A map X as a share of the picture across, from its left edge: 0 to 1 is on the picture. */
+export function mapShareX(frame: MapFrame, mapX: number): number {
+  return (mapX - frame.x) / frame.width + 0.5;
+}
+
+/** A map Z as a share of the picture down, from its top edge: the picture's Y runs the other way. */
+export function mapShareY(frame: MapFrame, mapZ: number): number {
+  return 0.5 - (mapZ - frame.z) / frame.width;
+}
+
 /** A map X to the canvas, from its left edge, at the scale and the point the window is looking at. */
 export function screenFromMapX(mapX: number, lookX: number, scale: number, width: number): number {
   return width / 2 + (mapX - lookX) / scale;

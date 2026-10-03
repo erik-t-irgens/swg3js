@@ -36,8 +36,30 @@ export interface BladeGlowTune {
   hue: number;
   /** Over a pixel that is mostly additive glow, the light is scaled by this (the surface's hue is unknown there). */
   glowDim: number;
-  /** Wrap-around Lambert: surfaces a little past side-on still catch some light, which hides depth-normal facets. */
+  /**
+   * Wrap-around Lambert: surfaces past side-on still catch some light. The normal is the depth
+   * buffer's, which is each triangle's flat face rather than the smoothed normal every other light
+   * shades with, so the nearer this is to 1 the less a body, a column or a hull shows its facets.
+   */
   wrap: number;
+  /** The share of the light that takes no notice of which way the surface faces at all: even across every face, so no edge shows in it. */
+  flat: number;
+  /** How much of the depth-aware smoothed normal replaces the one taken from the nearest neighbours: 0 none, 1 all of it. */
+  smooth: number;
+  /** Pixels between the smoothing's taps: two rings round the pixel, at one and two of these. */
+  smoothPx: number;
+  /**
+   * A smoothing tap counts only while its offset from the pixel lies within this sine of the pixel's
+   * own surface (its nearest-neighbour plane): a tap on something in front or behind, across a
+   * silhouette, is left out, so the smoothing never bends a normal toward another object.
+   */
+  smoothTol: number;
+  /**
+   * How much of the pixel's own brightness is kept in the albedo: its luminance over the light
+   * ceiling, the surface's colour as lit by everything else, over the assumed albedo. 0 is the hue
+   * alone, as the pass always had it; more lets a texture's detail show through the blade's light.
+   */
+  keep: number;
   /** Walls (normals near horizontal to `up`) get this share of what floors and ceilings get. */
   walls: number;
   /** No light from blades farther than this from the camera, fading from `fadeFrom`. */
@@ -58,7 +80,14 @@ export const BLADE_GLOW_TUNE: BladeGlowTune = {
   albedo: 0.45,
   hue: 0.6,
   glowDim: 0.85,
-  wrap: 0.3,
+  // The retune against the facets (the depth normal is each triangle's flat face): wrap toward 1 and
+  // a share of light that ignores the facing, a smoothed normal, and some of the surface's own detail.
+  wrap: 0.8,
+  flat: 0.3,
+  smooth: 1,
+  smoothPx: 2,
+  smoothTol: 0.5,
+  keep: 0.3,
   walls: 0.8,
   far: 60,
   fadeFrom: 45,
@@ -150,9 +179,139 @@ export function wrapLambert(cosine: number, wrap: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-/** What one channel of a white light adds on a neutral surface: irradiance x wrapLambert x albedo / PI (walls factor and fog left to the caller). */
+/** How much of the light a surface turned `cosine` to it takes: the wrapped Lambert term with `flat` of it facing-blind, mix(wrapLambert, 1, flat). */
+export function facing(cosine: number, t: BladeGlowTune): number {
+  const f = t.flat < 0 ? 0 : t.flat > 1 ? 1 : t.flat;
+  return wrapLambert(cosine, t.wrap) * (1 - f) + f;
+}
+
+/** What one channel of a white light adds on a neutral surface: irradiance x facing x albedo / PI (walls factor, fog and the kept brightness left to the caller). */
 export function radiance(d2: number, cosine: number, t: BladeGlowTune): number {
-  return (irradiance(d2, t) * wrapLambert(cosine, t.wrap) * t.albedo) / Math.PI;
+  return (irradiance(d2, t) * facing(cosine, t) * t.albedo) / Math.PI;
+}
+
+/** How bright a surface may be taken to be at most, over the assumed albedo: a white one fully lit by everything else. */
+export const KEEP_ALBEDO_FLOOR = 0.05;
+
+/**
+ * What the albedo is scaled by for the pixel's own brightness: its luminance over the light ceiling
+ * (0 to 1, the surface's colour as everything else lights it) over the assumed albedo, mixed in by
+ * `keep`, and not at all over a pixel the guard takes for glow (`guard` 0). 1 with `keep` 0.
+ */
+export function keptAlbedo(lum: number, ceiling: number, guard: number, t: BladeGlowTune): number {
+  const own = Math.min(1, Math.max(0, lum / Math.max(ceiling, 1e-3))) / Math.max(t.albedo, KEEP_ALBEDO_FLOOR);
+  const k = Math.min(1, Math.max(0, t.keep)) * Math.min(1, Math.max(0, guard));
+  return 1 + (own - 1) * k;
+}
+
+/**
+ * The smoothing kernel's two rings, counter-clockwise on the screen (x right, y up): the inner at one
+ * spacing, the outer at two, which with the pixel itself is the 5 by 5 square. The shader is written
+ * from these, so the two cannot drift apart.
+ */
+export const SMOOTH_RING_INNER: readonly (readonly [number, number])[] = [
+  [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1],
+];
+export const SMOOTH_RING_OUTER: readonly (readonly [number, number])[] = [
+  [2, 0], [2, 1], [2, 2], [1, 2], [0, 2], [-1, 2], [-2, 2], [-2, 1], [-2, 0], [-2, -1], [-2, -2], [-1, -2], [0, -2], [1, -2], [2, -2], [2, -1],
+];
+
+/**
+ * Newell's sum over one ring of taps, each given as its offset from the pixel's own point (view
+ * space): the area-weighted normal of the patch the ring encloses, which is the average of every
+ * facet inside it rather than any one of them. A tap whose offset leaves the pixel's own plane (unit
+ * normal n0) by more than `tol` of its length is skipped, the ring closing over the gap. Adds into
+ * `out` and returns how many taps counted; fewer than three add nothing.
+ */
+export function ringNewell(offsets: readonly Vec3Like[], n0: Vec3Like, tol: number, out: Vec3Like): number {
+  let count = 0;
+  let fx = 0;
+  let fy = 0;
+  let fz = 0;
+  let px = 0;
+  let py = 0;
+  let pz = 0;
+  let sx = 0;
+  let sy = 0;
+  let sz = 0;
+  for (let i = 0; i < offsets.length; i++) {
+    const s = offsets[i];
+    const len = Math.sqrt(s.x * s.x + s.y * s.y + s.z * s.z);
+    if (!(len > 1e-9) || Math.abs(s.x * n0.x + s.y * n0.y + s.z * n0.z) > tol * len) continue;
+    if (count === 0) {
+      fx = s.x;
+      fy = s.y;
+      fz = s.z;
+    } else {
+      sx += py * s.z - pz * s.y;
+      sy += pz * s.x - px * s.z;
+      sz += px * s.y - py * s.x;
+    }
+    px = s.x;
+    py = s.y;
+    pz = s.z;
+    count++;
+  }
+  if (count < 3) return count;
+  sx += py * fz - pz * fy;
+  sy += pz * fx - px * fz;
+  sz += px * fy - py * fx;
+  out.x += sx;
+  out.y += sy;
+  out.z += sz;
+  return count;
+}
+
+/**
+ * The normal the light is shaded with, written into `out`: the nearest-neighbour normal `n0` mixed
+ * toward the two rings' Newell normal by `smooth`, turned to face the eye (P is the pixel's view-space
+ * point, the eye at the origin). With no ring able to count, `n0` as it is.
+ */
+export function smoothedNormal(P: Vec3Like, n0: Vec3Like, inner: readonly Vec3Like[], outer: readonly Vec3Like[], t: BladeGlowTune, out: Vec3Like): Vec3Like {
+  out.x = 0;
+  out.y = 0;
+  out.z = 0;
+  const k = Math.min(1, Math.max(0, t.smooth));
+  let nx = n0.x;
+  let ny = n0.y;
+  let nz = n0.z;
+  if (k > 0) {
+    ringNewell(inner, n0, t.smoothTol, out);
+    ringNewell(outer, n0, t.smoothTol, out);
+    let len = Math.sqrt(out.x * out.x + out.y * out.y + out.z * out.z);
+    if (len > 1e-12) {
+      let mx = out.x / len;
+      let my = out.y / len;
+      let mz = out.z / len;
+      if (mx * n0.x + my * n0.y + mz * n0.z < 0) {
+        mx = -mx;
+        my = -my;
+        mz = -mz;
+      }
+      nx = n0.x + (mx - n0.x) * k;
+      ny = n0.y + (my - n0.y) * k;
+      nz = n0.z + (mz - n0.z) * k;
+      len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 1e-12) {
+        nx /= len;
+        ny /= len;
+        nz /= len;
+      } else {
+        nx = n0.x;
+        ny = n0.y;
+        nz = n0.z;
+      }
+    }
+  }
+  if (-(nx * P.x + ny * P.y + nz * P.z) < 0) {
+    nx = -nx;
+    ny = -ny;
+    nz = -nz;
+  }
+  out.x = nx;
+  out.y = ny;
+  out.z = nz;
+  return out;
 }
 
 /** 1 up to fadeFrom, 0 from far, smooth between. */

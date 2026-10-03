@@ -1,15 +1,23 @@
-// The Housing tab: the deeds a character owns, and what each one would put down.
+// The Housing tab: the buildings a character has standing, the deeds it owns, and what each deed
+// would put down.
 //
-// A double-click takes a deed in hand and the world goes into placing: the ghost of the building
-// appears, the grid the client itself drew goes under it, and the bar under the world offers the
-// turns. Nothing about placing is decided here.
+// A double-click on a deed takes it in hand and the world goes into placing: the ghost of the
+// building appears, the grid the client itself drew goes under it, and the bar under the world offers
+// the turns. Nothing about placing is decided here.
+//
+// "Your buildings" is at the top, and taking one down is asked in the page, never with the browser's
+// own `window.confirm`: the row's button turns into a question with two answers, and the one that
+// really does it stays shut for `HOUSING_TUNE.armMs`, so the click that asked cannot also answer.
+// Whether a building is the server's or this browser's own is the game's business, not this panel's:
+// it is handed rows and says which one was taken down.
 //
 // It is built exactly as the backpack is -- the inventory's own tab strip in the header, a list,
 // an examine pane -- and carries no colours of its own, so it wears the same eighteen every other
 // panel does.
 
-import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
-import { escapeHtml } from './catalogue';
+import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
+import { escapeHtml } from './catalogue.ts';
+import { HOUSING_TUNE } from '../world/myBuildings.ts';
 
 /** One deed as the panel shows it. */
 export interface HousingCell {
@@ -25,12 +33,25 @@ export interface HousingCell {
   standing: number;
 }
 
+/** One of the character's own buildings standing on this world. */
+export interface HousingBuilt {
+  /** What a take-down names. */
+  id: string;
+  name: string;
+  /** How far off and who keeps it, in one line. */
+  line: string;
+}
+
 export interface HousingModel {
   cells: HousingCell[];
   /** What to say when there are none: not converted, or simply none owned. */
   note: string;
   /** How many buildings this character has standing, and the most it may have. */
   built: { now: number; most: number };
+  /** The character's own buildings on this world, nearest first. */
+  mine: HousingBuilt[];
+  /** What to say under the heading when there are none. */
+  mineNote: string;
 }
 
 export class HousingUi {
@@ -39,14 +60,19 @@ export class HousingUi {
   onTab: (id: string) => void = () => {};
   /** A double-click, Enter, or the Place button: take this deed in hand. */
   onPlace: (id: string) => void = () => {};
-  /** Take one of the character's own buildings back down. */
+  /** One of the character's own buildings, to be taken down: asked and answered in the page already. */
   onRemove: (id: string) => void = () => {};
 
   private readonly list: HTMLElement;
   private readonly examine: HTMLElement;
   private readonly count: HTMLElement;
-  private model: HousingModel = { cells: [], note: '', built: { now: 0, most: 0 } };
+  private model: HousingModel = { cells: [], note: '', built: { now: 0, most: 0 }, mine: [], mineNote: '' };
   private picked = '';
+  /** The building whose take-down is being asked about, or ''. */
+  private asking = '';
+  /** Whether the answer that takes it down has been opened yet. */
+  private armed = false;
+  private armTimer = 0;
 
   /**
    * A close the player asked for -- the X button, or a click on the backdrop.
@@ -94,6 +120,8 @@ export class HousingUi {
   show(model: HousingModel): void {
     this.model = model;
     if (!model.cells.some((c) => c.id === this.picked)) this.picked = model.cells[0]?.id ?? '';
+    // A building that came down while the question was up has nothing left to be asked about.
+    if (this.asking && !model.mine.some((b) => b.id === this.asking)) this.stopAsking();
     this.draw();
     this.root.classList.remove('hidden');
     this.open = true;
@@ -102,12 +130,69 @@ export class HousingUi {
   hide(): void {
     this.root.classList.add('hidden');
     this.open = false;
+    this.stopAsking();
+  }
+
+  /**
+   * Ask about taking one building down, as its own Take down button does: what the pick-up key at a
+   * building's doorstep opens the tab onto. False when that building is not on the list.
+   */
+  ask(id: string): boolean {
+    if (!this.model.mine.some((b) => b.id === id)) return false;
+    this.asking = id;
+    this.armed = false;
+    window.clearTimeout(this.armTimer);
+    this.draw();
+    // Shut for a moment, so the press that asked cannot also answer.
+    this.armTimer = window.setTimeout(() => {
+      if (this.asking !== id) return;
+      this.armed = true;
+      const b = this.list.querySelector<HTMLButtonElement>('.housing-really');
+      if (b) {
+        b.disabled = false;
+        b.classList.remove('arming');
+      }
+    }, HOUSING_TUNE.armMs);
+    return true;
+  }
+
+  /** What is being asked, for the console. */
+  get askingAbout(): { id: string; armed: boolean } | null {
+    return this.asking ? { id: this.asking, armed: this.armed } : null;
+  }
+
+  private stopAsking(): void {
+    window.clearTimeout(this.armTimer);
+    this.asking = '';
+    this.armed = false;
+  }
+
+  private builtRows(): string {
+    const m = this.model;
+    const rows = m.mine
+      .map((b) => {
+        const asking = b.id === this.asking;
+        const answer = asking
+          ? `<div class="housing-confirm"><span class="housing-ask">Take ${escapeHtml(b.name)} down? Whatever stands in it goes with it.</span>` +
+            `<button class="housing-keep" data-built="${escapeHtml(b.id)}">Keep it</button>` +
+            `<button class="housing-really${this.armed ? '' : ' arming'}" data-built="${escapeHtml(b.id)}"${this.armed ? '' : ' disabled'}>Take it down</button></div>`
+          : `<button class="housing-down" data-built="${escapeHtml(b.id)}">Take down</button>`;
+        return (
+          `<div class="housing-built${asking ? ' asking' : ''}">` +
+          `<span class="housing-name">${escapeHtml(b.name)}</span>` +
+          `<span class="housing-line">${escapeHtml(b.line)}</span>` +
+          answer +
+          `</div>`
+        );
+      })
+      .join('');
+    return `<h3 class="housing-head">Your buildings <span>${m.mine.length ? `${m.mine.length} standing on this world` : escapeHtml(m.mineNote)}</span></h3>${rows}`;
   }
 
   private draw(): void {
     const m = this.model;
     this.count.textContent = m.built.most ? `${m.built.now} of ${m.built.most} standing` : `${m.cells.length} deeds`;
-    this.list.innerHTML = m.cells.length
+    const deeds = m.cells.length
       ? m.cells
           .map(
             (c) =>
@@ -119,6 +204,7 @@ export class HousingUi {
           )
           .join('')
       : `<p class="menu-hint">${escapeHtml(m.note)}</p>`;
+    this.list.innerHTML = `${this.builtRows()}<h3 class="housing-head">Deeds <span>double-click one to put it down</span></h3>${deeds}`;
     for (const row of this.list.querySelectorAll<HTMLElement>('.housing-row')) {
       row.addEventListener('click', () => {
         this.picked = row.dataset.deed!;
@@ -129,19 +215,31 @@ export class HousingUi {
         if (c && !c.why) this.onPlace(c.id);
       });
     }
+    for (const b of this.list.querySelectorAll<HTMLButtonElement>('.housing-down')) b.addEventListener('click', () => this.ask(b.dataset.built!));
+    for (const b of this.list.querySelectorAll<HTMLButtonElement>('.housing-keep')) {
+      b.addEventListener('click', () => {
+        this.stopAsking();
+        this.draw();
+      });
+    }
+    for (const b of this.list.querySelectorAll<HTMLButtonElement>('.housing-really')) {
+      b.addEventListener('click', () => {
+        const id = b.dataset.built!;
+        if (!this.armed || this.asking !== id) return;
+        this.stopAsking();
+        this.draw();
+        this.onRemove(id);
+      });
+    }
     const p = m.cells.find((c) => c.id === this.picked);
     this.examine.innerHTML = p
       ? `<h3>${escapeHtml(p.name)}</h3><p class="housing-line">${escapeHtml(p.line)}</p><p>${escapeHtml(p.desc || 'The game says nothing more about it.')}</p>` +
         `<p class="why">${escapeHtml(p.why)}</p>` +
-        `<div class="ship-action"><button class="place"${p.why ? ' disabled' : ''}>Place it</button>` +
-        `${p.standing ? '<button class="remove">Take one down</button>' : ''}</div>` +
-        `<p class="menu-hint">Double-click a deed to take it in hand. The wheel pushes it out and in, the two buttons under the world turn it, a click puts it down and Escape gives it up.</p>`
+        `<div class="ship-action"><button class="place"${p.why ? ' disabled' : ''}>Place it</button></div>` +
+        `<p class="menu-hint">Double-click a deed to take it in hand. The wheel pushes it out and in, the two buttons under the world turn it, a click puts it down and Escape gives it up. A building of yours comes down from the list above, or from its own doorstep with the key that picks a prop back up.</p>`
       : '';
     this.examine.querySelector('.place')?.addEventListener('click', () => {
       if (p && !p.why) this.onPlace(p.id);
-    });
-    this.examine.querySelector('.remove')?.addEventListener('click', () => {
-      if (p) this.onRemove(p.id);
     });
   }
 

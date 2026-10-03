@@ -5,7 +5,7 @@
 // Synthetic throughout: nothing here comes from the game's archives, and every line of speech it checks
 // is the module's own.
 import assert from 'node:assert/strict';
-import { GREET_CLIPS, TALK_LINES, TALK_TUNE, TALK_WORDS, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkShot, tuneTalk, whyNotTalk, type TalkBody } from '../../../src/world/talk.ts';
+import { GREET_CLIPS, TALK_LINES, TALK_TUNE, TALK_WORDS, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkPick, talkShot, tuneTalk, whyNotTalk, type TalkBody } from '../../../src/world/talk.ts';
 import { hostileSides, type Fighter } from '../../../src/combat/targets.ts';
 
 let checks = 0;
@@ -31,7 +31,9 @@ const body = (over: Partial<TalkBody> = {}): TalkBody => ({ humanoid: true, dead
   ok(whyNotTalk(body({ humanoid: false }), PLAYER) === 'not somebody to talk to', 'a creature, a droid or a hologram is not somebody to talk to');
   ok(whyNotTalk(body({ dead: true }), PLAYER) === 'gone' && whyNotTalk(body({ removed: true }), PLAYER) === 'gone', 'the dead and the taken away are gone');
   ok(whyNotTalk(body({ ready: false }), PLAYER) === 'not here yet', 'a body whose model is still coming is nobody yet');
-  ok(whyNotTalk(body({ isDriven: true }), PLAYER) !== null && whyNotTalk(body({ npcId: 'npc:7' }), PLAYER) !== null, 'a body the server shares is everybody\'s, and a follower is this browser\'s alone');
+  // With a server the world's people are everybody's, and refusing every one another browser keeps would
+  // leave the world mute for anybody not standing nearest: who thinks for a body is no reason not to talk.
+  ok(whyNotTalk(body({ isDriven: true }), PLAYER) === null && whyNotTalk(body({ npcId: 'stood:tatooine:7' }), PLAYER) === null, 'a body the server shares may be spoken to, whichever browser is thinking for it');
   ok(whyNotTalk(body({ fixture: true }), PLAYER) === 'at its post', "a fixture the world cannot work without is at its post (the collector's use key is the shuttle's)");
   ok(whyNotTalk(body({ engaged: true }), PLAYER) === 'in a fight', 'somebody in a fight, or holding a grudge from one, has no time to talk');
   // Hostile is two things: the side, whatever the temper, and a temper that would pick on the player.
@@ -63,6 +65,26 @@ const body = (over: Partial<TalkBody> = {}): TalkBody => ({ humanoid: true, dead
   const a = Math.acos(TALK_TUNE.cone);
   ok(!Number.isNaN(reachOf(Math.sin(a - 0.01) * 2.5, 0, Math.cos(a - 0.01) * 2.5, fx, fz)) && Number.isNaN(reachOf(Math.sin(a + 0.01) * 2.5, 0, Math.cos(a + 0.01) * 2.5, fx, fz)), `and the view's edge is ${((a * 180) / Math.PI).toFixed(0)} degrees either side of its middle`);
   ok(Number.isNaN(reachOf(Number.NaN, 0, 1, fx, fz)), 'a place that is not a number is in reach of nothing');
+  // Somebody following the player is asked squarely: never for standing close, only for being looked at.
+  ok(Number.isNaN(reachOf(0, 0, -1, fx, fz, TALK_TUNE, true)) && Number.isNaN(reachOf(0.9, 0, 0, fx, fz, TALK_TUNE, true)), `a follower at your elbow or behind you is not in reach for standing within ${TALK_TUNE.near} m`);
+  ok(Number.isNaN(reachOf(0, 0, 0, fx, fz, TALK_TUNE, true)) && near(reachOf(0, 0, 0, fx, fz), 0), 'nor one on top of you, which anybody else is');
+  ok(near(reachOf(0, 0, 1, fx, fz, TALK_TUNE, true), 1) && near(reachOf(0, 0, 2.5, fx, fz, TALK_TUNE, true), 2.5), 'but one you look at is, near or far, as anybody else is');
+}
+
+{
+  // Anybody else before a follower, and a follower only while nothing else in reach wants the key.
+  const other = { name: 'patron' };
+  const follower = { name: 'trooper' };
+  let asked = 0;
+  const wants = (v: boolean) => () => {
+    asked++;
+    return v;
+  };
+  ok(talkPick(other, follower, wants(false)) === other && asked === 0, 'somebody not following you has the key before a follower, and nothing else is asked');
+  ok(talkPick(other, null, wants(true)) === other, 'whatever else is in reach: a person you look at outranks a vehicle and a gate, the bar\'s own order');
+  ok(talkPick(null, follower, wants(false)) === follower && asked === 1, 'a follower has it when nobody else is there and nothing else wants it');
+  ok(talkPick(null, follower, wants(true)) === null, 'and yields it to a vehicle, a hull or a gate in reach, beside which a follower stands as a matter of course');
+  ok(talkPick(null, null, wants(false)) === null, 'nobody is nobody');
 }
 
 // --- what may be answered ------------------------------------------------------------------------------
@@ -75,6 +97,11 @@ const body = (over: Partial<TalkBody> = {}): TalkBody => ({ humanoid: true, dead
   ok(follower[0].id === 'stay' && follower[0].label === TALK_WORDS.stay && follower[0].enabled, `to somebody following you the first is "${follower[0].label}", whatever the count`);
   const full = talkOptions(false, true);
   ok(!full[0].enabled && full[0].why === TALK_WORDS.full && full[1].enabled, 'with as many following as may, "follow me" is refused in words and the way out stays open');
+  // Following is this browser's alone: a body another player's game keeps may be spoken to and not taken.
+  const theirs = talkOptions(false, false, [], true);
+  ok(!theirs[0].enabled && theirs[0].why === TALK_WORDS.keptElsewhere && theirs[1].enabled, `of a body another player's game keeps, "follow me" is refused in plain words ("${TALK_WORDS.keptElsewhere}")`);
+  ok(talkOptions(false, true, [], true)[0].why === TALK_WORDS.keptElsewhere, 'and that is the reason given, before how much company you already have');
+  ok(talkOptions(true, false, [], true)[0].id === 'stay', 'while one already following is asked to stop as before');
   // The number keys: 1 is the first, a refused one does nothing, one past the list is nothing.
   ok(pickOption(options, 1)?.id === 'follow' && pickOption(options, 2)?.id === 'leave', 'the number keys pick the answers in order, from 1');
   ok(pickOption(full, 1) === null && pickOption(full, 2)?.id === 'leave', 'a refused answer picked by its number is no answer');

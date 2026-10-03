@@ -112,6 +112,10 @@ export const STEP_FACTS = {
   // when it cannot be read, which is a wrong map nothing would ever ask about again: it waits for
   // whoever writes that file (the snapshot writes it, and terrain writes it again).
   maps: { order: 16, lock: 'pack', locks: ['galaxy'], needs: ['snapshot', 'terrain'], seconds: 20, bytes: 0.5 * GB, measured: 'one pack in place: 2.2 s, 310 MB' },
+  // The collision the client authored for each world's trees and rocks. It reads the appearances the
+  // manifest's flora category names (the snapshot writes it, and `flora` writes it again) and writes
+  // flora-collision.json into every pack in one run, so it holds them all.
+  floracollision: { order: 16.5, lock: 'pack', needs: ['snapshot', 'flora'], seconds: 10, bytes: 0.4 * GB, measured: 'seventeen worlds, 722 planted appearances: 1.6 s, 277 MB' },
   // The outdoor walkability grid. It is the one step here that opens no archive at all -- it reads
   // the pack's own terrain, placements and models -- so it mounts nothing, and almost all of its
   // time is the terrain generator running over sixty-seven million poles on one core. It is also

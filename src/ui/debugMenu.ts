@@ -4,6 +4,11 @@
 // console's commands with a UI; the README's Debugging table is the one place a helper is described,
 // so it is read here as data (`debugReadme.ts`) and never written a second time.
 //
+// The knobs are a group of their own at the top (`TUNING_HELPERS`), and a pinned call can be ticked to
+// run again once the first world is up after a reload (`runAtStart`), which is the one way a knob's
+// setting outlives the page: nothing a knob sets is saved by itself, and every call run that way is
+// said on the message line, so nothing -- god mode, a server's day -- comes back silently.
+//
 // It keeps the display's habits. Nothing here runs in a frame, open or shut: the list is read off
 // `__debug` when the window opens, the page is written when something is picked, typed or run, and
 // the only timer is the one that writes the console lines and the clock while a call is being waited
@@ -20,7 +25,7 @@
 // goes through `keepFocus`, which puts the keyboard back on the window rather than leaving it on the
 // page's body, where the game would take every key while the window was still up.
 
-import { DEBUG_MENU_TUNE, OTHER_GROUP, bestMatch, callText, captureConsole, describeValue, evaluateArgs, filterGroups, groupHelpers, isThenable, keepsColumns, pushHistory, readStore, sameCall, togglePin, toJsonText, writeStore, type CallRecord, type ConsoleLike, type ConsoleLine, type DebugStore, type HelperEntry, type ViewNode } from './debugModel.ts';
+import { DEBUG_MENU_TUNE, OTHER_GROUP, bestMatch, callText, captureConsole, describeValue, evaluateArgs, filterGroups, groupHelpers, isThenable, keepsColumns, pushHistory, readStore, sameCall, setAtStart, startCalls, togglePin, toJsonText, writeStore, type CallRecord, type ConsoleLike, type ConsoleLine, type DebugStore, type HelperEntry, type ViewNode } from './debugModel.ts';
 import { docKey, docsByHelper, firstArgs, inlineMarkdown, parseDebugTable, type DebugDoc, type DebugRow } from './debugReadme.ts';
 import { keyLabel } from './hud.ts';
 import { onBindingsChanged } from './hudPage.ts';
@@ -163,6 +168,9 @@ const DEBUG_MENU_CSS = `
 .dbg-saved .dbg-item { flex: 1 1 auto; min-width: 0; }
 .dbg-panel button.dbg-x { flex: none; background: transparent; border-color: transparent; color: var(--muted); padding: 0 5px; }
 .dbg-panel button.dbg-x:hover { color: var(--bad); border-color: transparent; }
+.dbg-panel button.dbg-start { flex: none; background: transparent; border-color: transparent; color: var(--muted); padding: 0 4px; }
+.dbg-panel button.dbg-start:hover { color: var(--accent); border-color: transparent; }
+.dbg-panel button.dbg-start.on { color: var(--good); }
 .dbg-none { color: var(--muted); font-size: 11px; margin: 2px 6px; }
 .dbg-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; padding: 8px 10px; overflow: hidden; }
 .dbg-title { display: flex; align-items: baseline; gap: 8px; flex: none; }
@@ -670,7 +678,7 @@ export class DebugMenu {
   }
 
   private drawSavedNow(): void {
-    const line = (rec: CallRecord, remove: () => void, list: HTMLElement) => {
+    const line = (rec: CallRecord, remove: () => void, list: HTMLElement, tick?: () => void) => {
       const row = el('div', 'dbg-saved');
       const b = el('button', 'dbg-item', callText(rec));
       b.type = 'button';
@@ -680,18 +688,35 @@ export class DebugMenu {
       x.type = 'button';
       x.title = 'take it off the list';
       x.addEventListener('click', remove);
+      // A pin's own tick: run it again at start, once the first world is up after a reload.
+      if (tick) {
+        const t = el('button', `dbg-start${rec.atStart ? ' on' : ''}`, rec.atStart ? '▶' : '▷');
+        t.type = 'button';
+        t.title = rec.atStart ? 'runs at start, once the first world is up after a reload: click to stop' : 'run this at start, once the first world is up after a reload (said on the message line as it runs)';
+        t.addEventListener('click', tick);
+        row.append(t);
+      }
       row.append(b, x);
       list.append(row);
     };
     this.pinsEl.replaceChildren();
-    if (!this.store.pinned.length) this.pinsEl.append(el('div', 'dbg-none', '☆ beside Run pins a call'));
+    if (!this.store.pinned.length) this.pinsEl.append(el('div', 'dbg-none', '☆ beside Run pins a call; ▷ beside a pin runs it at start'));
     for (const p of this.store.pinned) {
-      line(p, () => {
-        this.store.pinned = togglePin(this.store.pinned, p).list;
-        saveStore(this.store);
-        this.drawSaved();
-        this.drawPin();
-      }, this.pinsEl);
+      line(
+        p,
+        () => {
+          this.store.pinned = togglePin(this.store.pinned, p).list;
+          saveStore(this.store);
+          this.drawSaved();
+          this.drawPin();
+        },
+        this.pinsEl,
+        () => {
+          this.store.pinned = setAtStart(this.store.pinned, p, !p.atStart);
+          saveStore(this.store);
+          this.drawSaved();
+        },
+      );
     }
     this.recentEl.replaceChildren();
     if (!this.store.history.length) this.recentEl.append(el('div', 'dbg-none', 'nothing run yet'));
@@ -948,13 +973,67 @@ export class DebugMenu {
     }
   }
 
+  // ---- the pins run at start -----------------------------------------------------------------------
+
+  /** What the last run at start came to, call by call, for the console report; null before one has run. */
+  private startRan: string[] | null = null;
+
+  /**
+   * Every pin ticked to run at start (`startCalls`), in the order pinned, once the first world is up after
+   * a reload: each waited on before the next, for at most `DEBUG_MENU_TUNE.startWaitMs`, a call that throws
+   * or names a helper that is no longer there said in words and stepped over, and the whole said on the
+   * message line by `say` -- so a knob put back at start, god mode or a server's day among them, is never
+   * put back silently. Nothing here runs in a frame; the menu need not be open. Answers what ran.
+   */
+  async runAtStart(say: (line: string) => void): Promise<string[]> {
+    const calls = startCalls(this.store.pinned);
+    if (!calls.length) {
+      this.startRan = [];
+      return [];
+    }
+    const done: string[] = [];
+    for (const rec of calls) {
+      const text = `${rec.on === 'window' ? '' : '__debug.'}${callText(rec)}`;
+      const { fn, self } = this.lookup({ name: rec.helper, on: rec.on, haystack: '', doc: undefined });
+      if (typeof fn !== 'function') {
+        done.push(`${text}: there is no ${rec.helper} now`);
+        continue;
+      }
+      const parsed = evaluateArgs(rec.args);
+      if (!parsed.ok) {
+        done.push(`${text}: ${parsed.error}`);
+        continue;
+      }
+      try {
+        const out = (fn as (...a: unknown[]) => unknown).apply(self, parsed.args);
+        if (isThenable(out)) {
+          let timer = 0;
+          const late = new Promise<void>((resolve) => {
+            timer = window.setTimeout(resolve, DEBUG_MENU_TUNE.startWaitMs);
+          });
+          // Both ends handled, so a call that fails after nobody is waiting is not an unhandled one.
+          await Promise.race([Promise.resolve(out).then(() => undefined, () => undefined), late]);
+          window.clearTimeout(timer);
+        }
+        done.push(text);
+      } catch (err) {
+        done.push(`${text} threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.startRan = done;
+    say(`the debug menu ran at start: ${done.join('; ')}`);
+    return done;
+  }
+
   // ---- the console's own handle --------------------------------------------------------------------
 
   /**
    * `__debug.debugMenu({ … })`: open or shut it, pick a helper, fill the box, and run it, which is how
-   * a tab with no keyboard works the menu. A run is waited on before the answer comes back.
+   * a tab with no keyboard works the menu. A run is waited on before the answer comes back. `pin` pins
+   * the call in the box (or unpins it with false), `atStart` ticks that pin to run at start (or clears
+   * the tick), and `start` runs every ticked pin now, as a reload would once its first world is up.
    */
-  async drive(o: { open?: boolean; pick?: string; args?: string; run?: boolean } = {}): Promise<void> {
+  async drive(o: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean } = {}, say: (line: string) => void = () => {}): Promise<void> {
     // The list and the README as they stand, so the report that follows is the whole of it.
     this.readHelpers();
     await this.loadDocs();
@@ -970,7 +1049,19 @@ export class DebugMenu {
       this.argsEl.value = o.args;
       this.drawPin();
     }
+    const rec = this.current();
+    if (typeof o.pin === 'boolean' && rec) {
+      const pinned = this.store.pinned.some((p) => sameCall(p, rec));
+      if (pinned !== o.pin) this.store.pinned = togglePin(this.store.pinned, rec).list;
+    }
+    if (typeof o.atStart === 'boolean' && rec) this.store.pinned = setAtStart(this.store.pinned, rec, o.atStart);
+    if (typeof o.pin === 'boolean' || typeof o.atStart === 'boolean') {
+      saveStore(this.store);
+      this.drawPin();
+      this.drawSaved();
+    }
     if (o.run) await this.run();
+    if (o.start) await this.runAtStart(say);
   }
 
   /** What the menu holds, for `__debug.debugMenu()`. */
@@ -994,6 +1085,8 @@ export class DebugMenu {
       shown: this.hasValue ? (typeof this.value === 'object' && this.value !== null ? 'an object, drawn as a tree' : typeof this.value) : null,
       lines: this.written,
       pinned: this.store.pinned.map(callText),
+      atStart: startCalls(this.store.pinned).map(callText),
+      ranAtStart: this.startRan,
       recent: this.store.history.slice(0, 10).map(callText),
       key: keyLabel(this.deps.keys()[0] ?? ''),
     };

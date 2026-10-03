@@ -714,7 +714,15 @@ function chainLengths(plays: Played[]): number[] {
     // a person handed to another browser, which only ever gives it its loop after) would stand frozen in
     // the move's last frame for as long as it was held.
     ok(/this\.blades\.holster\(\);\s*\n\s*this\.takeBladeClip\(\);/.test(methodBody(text, 'private dropBlades(): void {')), `${name}: its move let go of takes the move's clip off with it`);
-    ok(/blockFrame\(a, this\.pos\.x, this\.pos\.y, this\.pos\.z, this\.facing, /.test(methodBody(text, 'blockBolt(bolt: Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean {')), `${name}: a bolt meeting its blade is judged in the one shared frame`);
+    // Judged in `blockFrom`, which a bolt reaching this body here and one reaching its copy on another
+    // browser (the keeper's answer, `npcHurt`) both ask; `blockBolt` is the first of the two.
+    ok(/blockFrame\(a, this\.pos\.x, this\.pos\.y, this\.pos\.z, this\.facing, /.test(methodBody(text, 'private blockFrom(dir: THREE.Vector3, point: THREE.Vector3, out: THREE.Vector3): boolean {')) && /if \(!this\.blockFrom\(bolt\.dir, point, out\)\) return false;/.test(methodBody(text, 'blockBolt(bolt: Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean {')), `${name}: a bolt meeting its blade is judged in the one shared frame`);
+    // Pinned as behaviour and not as the presence of a call: the driven copy holds the bolt for the blow
+    // it strikes in the same breath, and the keeper's blade, asked with it, marks the parry for every
+    // other screen and flies a bolt back.
+    ok(/if \(this\.driven\) \{[\s\S]*?this\.heldBoltAt = this\.now;[\s\S]*?return false;\s*\}/.test(methodBody(text, 'blockBolt(bolt: Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean {')), `${name}: a copy driven from elsewhere never turns a bolt itself, and holds it for the blow it is about to ask of its keeper`);
+    ok(/const bolt = this\.heldBoltAt === this\.now \? this\.heldBolt : null;/.test(methodBody(text, 'damage(amount: number, from?: THREE.Vector3, push = 0, source?: Living | null): void {')), `${name}: and that blow hands the keeper the bolt it held`);
+    ok(/if \(this\.blockFrom\([^)]*\)\) \{\s*this\.mark = 'block';[\s\S]{0,400}\.fire\(/.test(methodBody(text, 'npcHurt(')), `${name}: and its keeper's blade answers for it: the parry marked for every other screen, and a bolt flown back`);
     ok(/combatSounds\.saberSwing\(style, bx, by, bz, clip, seconds, this\)/.test(text) && /cancel: \(\) => combatSounds\.saberCancel\(this\)/.test(text), `${name}: its whooshes go out with their real length and filed under itself, and its cancel takes back only its own`);
     ok(/alongFacing\(this\.facing, im\.forward \* JKA_UNIT, im\.right \* JKA_UNIT, this\.pushAt\)/.test(methodBody(text, 'private leap(im: Impulse): void {')), `${name}: a leap is carried along its own facing and its own right`);
     ok(/shareOf\(this\.now, /.test(methodBody(text, 'private stepBlades(')), `${name}: every swing of the machine's opens with its share of a blow`);

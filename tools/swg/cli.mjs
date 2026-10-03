@@ -69,7 +69,13 @@
 //   node tools/swg/cli.mjs water <swg-dir> <planet>|all <out-dir>   each planet's water shaders: colour, opacity, ripple, drift and cube map (terrain does this too)
 //   node tools/swg/cli.mjs space <swg-dir> <zone>|all <out-dir>     a space zone (space_tatooine, ..., space_light1 Kessel, space_heavy1 Deep Space,
 //                                                                  space_ord_mantell): its stations, asteroid fields, planets, sky and hyperspace points
-//   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json)
+//   node tools/swg/cli.mjs maps <swg-dir> <out-dir>                 the client's planet map image into every converted planet pack (map.png, map.json),
+//                                                                  with the ground it covers: the buildout area's composite rectangle on the
+//                                                                  expansion zones, the terrain's width about the origin elsewhere (mapframe.mjs)
+//   node tools/swg/cli.mjs floracollision <swg-dir> <out-dir>       the collision shapes the client authored for every tree, rock and plant each
+//                                                                  converted world plants (a trunk, a few cylinders round a rock, nothing at all
+//                                                                  for a bush), into flora-collision.json beside its manifest (extent.mjs). It
+//                                                                  converts no model; snapshot and flora write the same file as they convert
 //   node tools/swg/cli.mjs navgrid <planet>|all <out-dir> [--cell=2] [--slope=47] [--skip-existing]
 //                                                                  bake a world's outdoor walkability grid (nav.json, nav.bin) from the pack
 //                                                                  it already has: the terrain, the placements and the models' own triangles.
@@ -219,6 +225,8 @@ import { moodEntries } from './moods.mjs';
 import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
+import { mapFrameOf } from './mapframe.mjs';
+import { floraCollisionFile, floraCollisionStatus } from './extent.mjs';
 import { CORE3_WORLDS } from './core3.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -1560,7 +1568,22 @@ function convertFlora(vfs, template, outDir, manifest) {
     }
   }
   manifest.categories.flora = [...defs.values()];
-  return { models: defs.size, missing, particles, families: families.length };
+  // The shapes the client collided with, beside the manifest rather than in it (a mesh shape is a
+  // few hundred numbers): what the `floracollision` command writes into a pack converted already.
+  const collision = writeFloraCollision(vfs, outDir, manifest.categories.flora);
+  return { models: defs.size, missing, particles, families: families.length, collision };
+}
+
+/**
+ * Write a pack's flora-collision.json from the appearances its flora defs name, and say what went in.
+ * It converts nothing: it reads each appearance's chain for the collision extent the client authored.
+ */
+function writeFloraCollision(vfs, outDir, defs) {
+  const file = floraCollisionFile(vfs, defs.map((d) => d.appearance).filter(Boolean), { flipX: !flags.has('--no-flip') });
+  writeFileSync(join(outDir, 'flora-collision.json'), JSON.stringify(file));
+  const c = file.counts;
+  console.log(`flora collision: ${c.appearances} appearances (${Object.entries(c.byKind).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ')}), ${Object.entries(c.shapes).map(([k, n]) => `${n} ${k}`).join(', ') || 'no shapes'}${c.unreadable ? `, ${c.unreadable} unreadable (guessed in the game)` : ''}${c.unreadParts ? `, ${c.unreadParts} parts of a kind not read` : ''}`);
+  return file;
 }
 
 /**
@@ -1798,7 +1821,7 @@ function customizationList(vfs, info) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** --var=a=1,b=2 â†’ Map of customization variable values (matched by full or short name). */
+/** --var=a=1,b=2 → Map of customization variable values (matched by full or short name). */
 function customizationValues(spec) {
   const values = new Map();
   for (const part of (spec ?? '').split(',')) {
@@ -2588,6 +2611,8 @@ function packStatus(dir) {
   let wantTravel = false;
   let wantFittings = false;
   let wantObjEffects = false;
+  /** The worlds whose trees and rocks still stand on guessed cylinders, each with why. */
+  const wantFloraCollision = [];
   for (const planet of GAME_PLANETS) {
     const packDir = join(dir, planet);
     const manifest = readJson(join(packDir, 'manifest.json'));
@@ -2613,6 +2638,9 @@ function packStatus(dir) {
     // they stand and asked for once each rather than shouted about.
     const travel = readJson(join(packDir, 'travel.json'));
     const fittings = readJson(join(packDir, 'fittings.json'));
+    // What the trees and rocks are solid at: the client's own collision shapes, or, with no file, a
+    // cylinder guessed from each model's box (a wide-canopied tree blocked at 80% of its canopy).
+    const floraCollision = floraCollisionStatus(readJson(join(packDir, 'flora-collision.json')), manifest.categories?.flora);
     // The cells' walkable floors, which a pack converted before they were read simply has not got:
     // the game falls back to walking straight at what it wants, so this asks rather than warns.
     const withCells = (manifest.categories?.layout ?? []).filter((m) => m.cells && m.cells.length);
@@ -2654,6 +2682,7 @@ function packStatus(dir) {
     const parts = [
       `${objects} objects`,
       `${flora} flora models`,
+      floraCollision.line,
       // A pack written before the client's table was read carries no count of it at all, which is
       // not the same thing as having read it and found none: say which, and say how many when known.
       pois ? `${(pois.pois ?? pois).length ?? 0} places${pois.clientPlaces === undefined ? ' (the client\'s own not read yet)' : `, ${pois.clientPlaces} the client's own`}` : 'no pois.json',
@@ -2744,6 +2773,7 @@ function packStatus(dir) {
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
+    if (floraCollision.stale) wantFloraCollision.push(`${planet} (${floraCollision.why})`);
     if (objects && !fittings) wantFittings = true;
     else if (fittings && fittings.version !== FITTINGS_PACK_VERSION) wantFittings = true;
     // Both commands **append** their models to the manifest's layout category, and a later
@@ -2761,6 +2791,8 @@ function packStatus(dir) {
   // to; `convert` reads the order from here, so naming them after the worlds is what keeps it right.
   if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
   if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world or its fittings");
+  // One run writes every world's file, and needs no model converted again.
+  if (wantFloraCollision.length) need(`floracollision <swg-dir> ${dir} --retail-only`, `the trees and rocks on ${wantFloraCollision.length} world${wantFloraCollision.length === 1 ? '' : 's'} are guessed cylinders, a wide tree solid across most of its canopy, instead of the trunks and rocks the client collided with (${wantFloraCollision.slice(0, 3).join(', ')}${wantFloraCollision.length > 3 ? ', ...' : ''})`);
   if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings, or a world was converted again after they were written: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
   const creatures = readJson(join(dir, 'creatures/manifest.json'));
   if (!creatures) {
@@ -3102,6 +3134,17 @@ function packStatus(dir) {
   const galaxyLine = galaxyStatus(readQuiet(join(dir, 'galaxy.json')));
   console.log(`  ${galaxyLine.line}`);
   if (galaxyLine.stale) need(`maps <swg-dir> ${dir} --retail-only`, 'the galaxy map has no shuttle routes (galaxy.json)');
+  // Where each map picture lies on its ground. A map.json written before the frame was read says
+  // nothing about it, and the expansion zones' pictures were then drawn over the terrain's whole
+  // width about the origin: Kachirho's twice too big, Mustafar's at twice its size and 4 km off, with
+  // every place huddled in the middle of the picture. `status` reads no archive, so it cannot tell a
+  // composite world from a launch world by the tables; it asks of any map.json that carries no
+  // `frame`, which one run of `maps` writes on every one of them.
+  const unframed = GAME_PLANETS.filter((p) => {
+    const m = readQuiet(join(dir, p, 'map.json'));
+    return m && m.image && !m.frame;
+  });
+  if (unframed.length) need(`maps <swg-dir> ${dir} --retail-only`, `${unframed.length} world map${unframed.length === 1 ? ' was' : 's were'} written before the map frame was read (${unframed.slice(0, 4).join(', ')}${unframed.length > 4 ? ', ...' : ''}): Kashyyyk's and Mustafar's pictures are drawn over the wrong ground and their places look shrunk toward the middle`);
   const mobiles = readQuiet(join(dir, 'mobiles/catalogue.json'));
   if (!mobiles) {
     console.log('  mobiles: none (the spawner has only the planet creatures)');
@@ -4491,10 +4534,10 @@ switch (cmd) {
       // The reasons, most common first, so a bug that fails every item shows as one line rather than hiding behind the usual few.
       const reasons = new Map();
       for (const f of failed) {
-        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, 'â€¦');
+        const why = f.replace(/^[^:]*: /, '').replace(/[a-z0-9_/.]+\.(sat|iff|mgn|lmg|sht)/gi, '…');
         reasons.set(why, (reasons.get(why) ?? 0) + 1);
       }
-      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} Ã— ${why}`).join('; ')}`);
+      console.log(`   ${failed.length} skipped: ${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([why, n]) => `${n} × ${why}`).join('; ')}`);
     }
     break;
   }
@@ -5080,7 +5123,7 @@ switch (cmd) {
         }
         // The hardpoint's own slot (weapon1 for weapon1_pos1) when the names carry one, else the
         // unnumbered ones; the lowest style (s01) of those; and every part of that style, since a
-        // gun comes as its parts (â€¦_0, â€¦_1) on the one hardpoint.
+        // gun comes as its parts (…_0, …_1) on the one hardpoint.
         const base = (t) => t.replace(/^.*\/shared_/, '').replace(/\.iff$/, '');
         const numbered = slot ? candidates.filter((t) => new RegExp(`${kind}${slot}(_|$)`, 'i').test(base(t))) : [];
         const pool = numbered.length ? numbered : candidates.filter((t) => !new RegExp(`${kind}\\d`, 'i').test(base(t)));
@@ -6464,13 +6507,17 @@ switch (cmd) {
 
   case 'maps': {
     // <swg-dir> <out-dir>: the client's own planet map (texture/ui_map_<planet>.dds) as map.png in
-    // every converted planet pack under <out-dir>, with map.json saying how wide a ground it
-    // covers (the terrain's width, from the pack's terrain.trn; the map shows the whole of it).
+    // every converted planet pack under <out-dir>, with map.json saying how wide a ground it covers
+    // and about which point (`mapframe.mjs`): the buildout area's composite rectangle where the
+    // client draws the map over one (the expansion zones), moved by the map adjustments' offset, and
+    // the terrain's whole width about the origin everywhere else (the ten launch worlds).
     if (!pos[2]) usage();
     const vfs = mount(pos[1]);
     const { parseTerrainTemplate } = await import('../../src/swg/terrain/trn.ts');
     // The zones whose map is not named for the pack.
     const MAP_NAMES = { kashyyyk_north_dungeons: 'ui_map_kashyyyk_north_dungeons_slaver', kashyyyk_south_dungeons: 'ui_map_kashyyyk_south_dungeons_hracca' };
+    const mapTable = (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))).rows : []);
+    const adjustments = mapTable('datatables/planetary_map/map_adjustments.iff');
     let done = 0;
     for (const planet of GAME_PLANETS) {
       const outDir = join(pos[2], planet);
@@ -6490,9 +6537,16 @@ switch (cmd) {
         }
       }
       const img = decodeDds(vfs.read(texture));
+      const frame = mapFrameOf({ planet, areas: mapTable(`datatables/buildout/areas_${planet}.iff`), adjustments, image: img, terrainWidth: width });
       writeFileSync(join(outDir, 'map.png'), encodePng(img.width, img.height, img.rgba));
-      writeFileSync(join(outDir, 'map.json'), JSON.stringify({ image: 'map.png', width, texture }, null, 2));
-      console.log(`${planet}: ${texture} ${img.width}x${img.height} over ${width} m -> ${join(outDir, 'map.png')}`);
+      // `centre` is in the map's own frame, the snapshot's (X not mirrored), as the places are; a
+      // map.json without it is one written before the frame was read, and the game draws it about
+      // the origin, which is what it always did.
+      const meta = { image: 'map.png', width: frame.width, centre: frame.centre, frame: frame.frame, texture };
+      if (frame.frame === 'composite') Object.assign(meta, { composite: frame.composite, terrainWidth: width }, frame.height ? { height: frame.height } : {}, frame.offset ? { offset: frame.offset } : {});
+      writeFileSync(join(outDir, 'map.json'), JSON.stringify(meta, null, 2));
+      const where = frame.frame === 'composite' ? `the composite ${frame.composite}, ${frame.width} m about ${frame.centre.x},${frame.centre.z}${frame.offset ? ` (moved ${frame.offset.x},${frame.offset.y} px by the map adjustments)` : ''}` : `the terrain's ${frame.width} m`;
+      console.log(`${planet}: ${texture} ${img.width}x${img.height} over ${where} -> ${join(outDir, 'map.png')}${frame.others ? ` (other composites allowed a map, not drawn: ${frame.others.join(', ')})` : ''}`);
       done++;
     }
     // galaxy.json: the game's own shuttle routes and each planet's ground width, for the galaxy map.
@@ -6502,6 +6556,41 @@ switch (cmd) {
     writeFileSync(join(pos[2], 'galaxy.json'), JSON.stringify(galaxy, null, 2));
     console.log(`galaxy.json: ${galaxy.planets.length} planets, ${galaxy.routes.length} shuttle routes -> ${join(pos[2], 'galaxy.json')}`);
     console.log(`${done} planet maps written`);
+    break;
+  }
+
+  case 'floracollision': {
+    // <swg-dir> <out-dir>: the collision the client authored for every tree, rock and plant each
+    // converted world plants, into flora-collision.json beside its manifest (extent.mjs). It reads
+    // the appearances the manifests' flora categories already name and converts no model, so a world
+    // gets the client's own trunks and rocks without being converted again.
+    if (!pos[2]) usage();
+    const vfs = mount(pos[1]);
+    let worlds = 0;
+    const kinds = {};
+    let blocking = 0;
+    let appearances = 0;
+    for (const planet of GAME_PLANETS) {
+      const outDir = join(pos[2], planet);
+      const manifestPath = join(outDir, 'manifest.json');
+      if (!existsSync(manifestPath)) continue;
+      let manifest;
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      } catch (err) {
+        console.log(`${planet}: manifest.json not read (${err.message})`);
+        continue;
+      }
+      const defs = (manifest.categories?.flora ?? []).filter((d) => d.appearance);
+      if (!defs.length) continue;
+      process.stdout.write(`${planet}: `);
+      const file = writeFloraCollision(vfs, outDir, defs);
+      worlds++;
+      for (const [k, n] of Object.entries(file.counts.byKind)) kinds[k] = (kinds[k] ?? 0) + n;
+      appearances += file.counts.appearances;
+      blocking += Object.values(file.appearances).filter((a) => a.shapes.length).length;
+    }
+    console.log(`${worlds} worlds: ${appearances} planted appearances read (one a world plants, so one planted on two worlds is counted on each), ${blocking} with a shape the client collided with and ${appearances - blocking} walked through (${Object.entries(kinds).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ')})`);
     break;
   }
 

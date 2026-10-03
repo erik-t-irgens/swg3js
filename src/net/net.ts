@@ -4,7 +4,7 @@
 import type { Look } from '../player/look';
 import type { ShipFit } from '../vehicles/shipFit';
 import { sharedClock } from '../world/sharedClock.ts';
-import { SESSION, Session, WIRE_VERSION, type CharacterSummary, type Settlement } from './session.ts';
+import { SESSION, Session, type CharacterSummary, type Settlement } from './session.ts';
 import { rideFields, type PeerAboard } from './aboardMath.ts';
 
 export interface Hello {
@@ -118,6 +118,11 @@ interface ServerWord {
   now?: number;
   epoch?: number;
   dayMs?: number;
+  /** Where the server anchored its day when an admin last changed its length (see `server/clock.mjs`). */
+  dayAt?: number;
+  dayFrom?: number;
+  /** A refusal (`day`'s, for one): what the word is about. */
+  do?: string;
   nonce?: string;
   word?: number;
   ff?: number;
@@ -144,6 +149,12 @@ interface ServerWord {
  * Invented: one second, small enough that the finest rate worth asking for is met.
  */
 const PING_TICK = 1000;
+
+/**
+ * The first wire whose relay reads the version a hello says, and so the first a hello said in a newer one
+ * than the server's has to be said again for (`Session.helloVersion`).
+ */
+const HELLO_VERSION_READ = 3;
 
 const STORAGE = 'swg.server';
 
@@ -173,6 +184,8 @@ export class Net {
    * nothing in the game to say why.
    */
   private greetedEarly = false;
+  /** The version the last hello on this line said; nought before one has gone. */
+  private helloSaid = 0;
   status: Status = 'off';
   id = 0;
   readonly peers = new Map<number, Peer>();
@@ -241,14 +254,21 @@ export class Net {
     // Before the handshake has settled the hello has not gone yet, and the one the handshake sends will
     // be this one: a server started with a join word listens to nothing until it knows who is there, so
     // a hello sent ahead of the claim would simply be dropped and never sent again.
-    if (this.online && this.greeted) this.send({ t: 'hello', v: WIRE_VERSION, ...hello });
+    if (this.online && this.greeted) this.sayHello(hello);
   }
 
   /** The hello, once per line, after the handshake has settled one way or the other. */
   private greet(): void {
     if (this.greeted || this.socket?.readyState !== WebSocket.OPEN) return;
     this.greeted = true;
-    if (this.hello) this.send({ t: 'hello', v: WIRE_VERSION, ...this.hello });
+    if (this.hello) this.sayHello(this.hello);
+  }
+
+  /** A hello said, in the version the session says to say it in (`Session.helloVersion`), and that version kept. */
+  private sayHello(hello: Hello): void {
+    const v = this.session.helloVersion();
+    this.helloSaid = v;
+    this.send({ t: 'hello', v, ...hello });
   }
 
   disconnect(): void {
@@ -297,6 +317,7 @@ export class Net {
       this.retryDelay = 1000;
       this.greeted = false;
       this.greetedEarly = false;
+      this.helloSaid = 0;
       this.setStatus('online', this.url);
       this.session.opening();
       // With no join word the hello goes at once, exactly as it always did, and the claim follows the
@@ -393,7 +414,7 @@ export class Net {
         this.hailTimer = 0;
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
-        sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined);
+        sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
         this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
@@ -402,6 +423,12 @@ export class Net {
         if (this.greetedEarly && server.word === 1) this.greeted = false;
         this.greetedEarly = false;
         this.greet();
+        // A hello that went at once, before the server had said which wire it speaks, said this browser's
+        // own. A relay of the third wire records a browser's version only when it is exactly its own and
+        // passes a creature's bite on only to one it recorded, so it is said again in the server's version;
+        // the second wire's relay read no version at all and is not sent a second hello it has no use for.
+        const v = this.session.helloVersion();
+        if (this.greeted && this.hello && this.helloSaid > v && v >= HELLO_VERSION_READ) this.sayHello(this.hello);
         // The round trips are only worth taking while the clock really is the server's: a greeting
         // whose clock could not be true leaves the day on this machine's own, and a timer asking
         // nothing every few seconds for the life of the page is worse than no timer at all.
@@ -413,6 +440,13 @@ export class Net {
         break;
       case 'pong':
         sharedClock.pong(Number(server.c), Number(server.s));
+        break;
+      case 'day':
+        // The world's admin changed how long a day is. The new length comes with the anchor the server
+        // made as it changed it, so the day goes on from the hour it was at; a refusal is a word for the
+        // one who asked. Nothing else of the clock moves, so the weather does not either.
+        if (server.do === 'refused') this.onNotice(typeof server.why === 'string' ? server.why.slice(0, 160) : 'the server would not change the day');
+        else if (Number(server.dayMs) > 0) sharedClock.dayWord(Number(server.dayMs), Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
         break;
       case 'claimed':
         // The server has us: this is what makes it a server session, not the welcome, because a server
@@ -551,6 +585,8 @@ export class Net {
       case 'npcState':
       case 'npcGone':
       case 'npcHurt':
+      // ...and a blow one of them struck this player at the browser that keeps it.
+      case 'npcBlow':
       // The places two players can both want: the server's answer to a claim on a station's dock
       // lane or on the spot on a hull that one ship rides another on. Handed over whole, as the
       // group's words are; what it means belongs to src/space/docking.ts.

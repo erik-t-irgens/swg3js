@@ -9,9 +9,16 @@
 // so is any body that would pick a fight with the player on sight (`hostileSides`, the one matrix every
 // body fights by). That second rule is also why no fighter stood from the console can ever be spoken
 // to: a fighter's side fights every person there is. Not in a fight is `Mobile.engaged`, which is a
-// target, a grudge it still holds, or a fight's own state. A body the server shares is everybody's and
-// a follower is this browser's alone, so a shared one is refused too, and so is a fixture the world
-// cannot work without (the ticket collector, whose use key is the shuttle's).
+// target, a grudge it still holds, or a fight's own state. A fixture the world cannot work without (the
+// ticket collector, whose use key is the shuttle's) is refused too.
+//
+// **Anybody this browser can see may be spoken to, whichever browser is thinking for them**: with a
+// server the world's people are everybody's, and refusing every one somebody else keeps would leave the
+// world mute for anybody not standing nearest. **Following is this browser's alone**, though: a follower
+// walks with this browser's player and is never handed to another keeper, so only a body this browser
+// keeps -- or one on no wire at all -- may be asked to follow, and one another player's game keeps is
+// refused in words (`talkOptions`' `keptElsewhere`). While spoken to, a body somebody else keeps goes on
+// doing what its keeper says: the conversation is this screen's, and nothing of it crosses.
 //
 // **Everything here is ours.** The client's conversation trees were the server's and never shipped, and
 // nothing the converter writes holds a greeting a stranger would say, so every line below is invented,
@@ -84,7 +91,7 @@ export interface TalkBody {
   readonly removed: boolean;
   /** Its model is up: a body still loading is nobody to talk to yet. */
   readonly ready: boolean;
-  /** Another browser thinks for it. */
+  /** Another browser thinks for it: it may be spoken to, and not asked to follow (`talkOptions`). */
   readonly isDriven: boolean;
   /** The name the server shares it under, or '' for one this browser alone holds. */
   readonly npcId: string;
@@ -104,7 +111,6 @@ export function whyNotTalk(b: TalkBody, player: Fighter): string | null {
   if (!b.humanoid) return 'not somebody to talk to';
   if (b.dead || b.removed) return 'gone';
   if (!b.ready) return 'not here yet';
-  if (b.isDriven || b.npcId) return 'shared with other players';
   if (b.fixture) return 'at its post';
   if (b.side === 'hostile' || hostileSides(b, player)) return 'hostile';
   if (b.engaged) return 'in a fight';
@@ -116,14 +122,33 @@ export function whyNotTalk(b: TalkBody, player: Fighter): string | null {
  * player's feet (`dx`, `dz`, and `dy` above them), with `fx`, `fz` the view's own forward across the
  * ground, a unit vector. NaN when it is out of reach -- too far, too far above or below, or off to the
  * side of the view past `cone` and not within `near` -- and otherwise the distance, so the nearest wins.
+ *
+ * `squarely` takes the `near` exemption away, so only a body inside the cone is in reach however close
+ * it stands: what somebody following the player is asked, since a follower stands at the player's elbow
+ * as a matter of course and would otherwise have the key every time the player stopped beside it.
  */
-export function reachOf(dx: number, dy: number, dz: number, fx: number, fz: number, tune = TALK_TUNE): number {
+export function reachOf(dx: number, dy: number, dz: number, fx: number, fz: number, tune = TALK_TUNE, squarely = false): number {
   if (!(Math.abs(dy) <= tune.rise)) return Number.NaN;
   const d = Math.hypot(dx, dz);
   if (!(d <= tune.reach)) return Number.NaN;
-  if (d <= tune.near || d < 1e-6) return d;
+  if (d < 1e-6) return squarely ? Number.NaN : d;
+  if (d <= tune.near && !squarely) return d;
   const cos = (dx * fx + dz * fz) / d;
   return cos >= tune.cone ? d : Number.NaN;
+}
+
+/**
+ * Which body the use key speaks to, of the nearest not following the player (`other`) and the nearest
+ * following them (`follower`, already asked `squarely`): anybody else before a follower, whatever their
+ * distances, and a follower only while nothing else in reach wants the key (`elseWants`: a vehicle, a
+ * hull to board, a gate). A follower is company that stands beside everything the player walks up to,
+ * and E at the speeder or the gate it happens to be standing by must still mean the speeder or the gate.
+ * `elseWants` is asked only when it could matter.
+ */
+export function talkPick<T>(other: T | null, follower: T | null, elseWants: () => boolean): T | null {
+  if (other) return other;
+  if (!follower) return null;
+  return elseWants() ? null : follower;
 }
 
 /** One answer in the window: what it is, its words, whether it may be chosen now and why not. */
@@ -140,16 +165,24 @@ export const TALK_WORDS = Object.freeze({
   stay: 'Stop following me.',
   leave: 'Stop talking.',
   full: 'you have as much company as you can take',
+  /** Said of a body another player's game is thinking for: it may be spoken to, and not asked to follow. */
+  keptElsewhere: 'another player’s game is looking after them, so they will not follow you',
+  /** Said of a body on the wire of a server too old to hear one walk off with a player: it stays at its post. */
+  serverKeeps: 'this server cannot let them walk off with you, so they will not follow you',
 });
 
 /**
  * The answers on offer: to a follower, stop following; to anybody else, follow, which is refused in
- * words once as many follow as may; and always the way out. Written into `out` when one is given.
+ * words once as many follow as may, and of a body another player's game keeps (`keptElsewhere`); and
+ * always the way out. Written into `out` when one is given.
  */
-export function talkOptions(following: boolean, full: boolean, out: TalkOption[] = []): TalkOption[] {
+export function talkOptions(following: boolean, full: boolean, out: TalkOption[] = [], keptElsewhere = false): TalkOption[] {
   out.length = 0;
   if (following) out.push({ id: 'stay', label: TALK_WORDS.stay, enabled: true, why: '' });
-  else out.push({ id: 'follow', label: TALK_WORDS.follow, enabled: !full, why: full ? TALK_WORDS.full : '' });
+  else {
+    const why = keptElsewhere ? TALK_WORDS.keptElsewhere : full ? TALK_WORDS.full : '';
+    out.push({ id: 'follow', label: TALK_WORDS.follow, enabled: !why, why });
+  }
   out.push({ id: 'leave', label: TALK_WORDS.leave, enabled: true, why: '' });
   return out;
 }

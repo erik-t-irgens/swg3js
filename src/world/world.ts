@@ -8,8 +8,7 @@ import { MobileManager } from './mobiles/manager';
 import type { Mobile } from './mobiles/mobile';
 import { MobileAssets } from './mobiles/assets';
 import { MobileCatalogue } from './mobiles/catalogue';
-import { ambientOverrides } from './mobiles/spawning';
-import { scratchWanted, wildlifeWanted } from './spawnSeed.ts';
+import { scratchWanted } from './spawnSeed.ts';
 import { DayCycle } from './daycycle';
 import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
@@ -33,6 +32,7 @@ import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './
 import { FLORA_WARM, FloraPlanter } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
+import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
@@ -49,7 +49,8 @@ import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
 import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
-import { FollowerSet, type FollowerOwner } from './followers.ts';
+import { FollowerSet, recruitOwner } from './followers.ts';
+import { TALK_WORDS } from './talk.ts';
 import { sharedClock } from './sharedClock.ts';
 import { worldNav } from './nav/nav.ts';
 import { MOBILE_CACHE } from './mobiles/assets.ts';
@@ -77,6 +78,9 @@ import { prepareForceEffects } from '../combat/forcePowers.ts';
 import { liveSettings } from '../core/settings.ts';
 import { CNT, perf, SEC } from '../core/perf.ts';
 import { peerBodies, type RemoteBodies } from '../net/remoteBodies.ts';
+// The world's creatures as a server shares them: whether a seen body is down, and the wire it goes on.
+import { owned } from '../net/owned.ts';
+import { npcNow } from '../net/npcNet.ts';
 import { remoteInteriors, type RemoteInteriors } from '../net/remoteInterior.ts';
 import { watchPeers } from '../net/remotePlayers.ts';
 import { ShipContacts } from '../space/contacts';
@@ -310,6 +314,8 @@ interface Chunk {
    * `floraBatch.ts`); null for the procedural props.
    */
   flora: THREE.Group | null;
+  /** Its plantings (step 7), kept so the trees' colliders can be worked out again when the console moves the rule; null for the procedural props. */
+  floraData: FloraChunkData | null;
   /** The chunk's middle in the world, on its ground: what the plant sweep measures from the eye. */
   mx: number;
   my: number;
@@ -467,7 +473,7 @@ class PlayerTarget implements Living {
    * already passes, and it is handed straight to the callback, which is what turns the red flash into
    * an arc on the side the blow came from.
    */
-  damage(amount: number, from?: THREE.Vector3): void {
+  damage(amount: number, from?: THREE.Vector3, _push?: number, _source?: Living | null): void {
     this.hurt(amount, from);
   }
   /**
@@ -2293,6 +2299,7 @@ export class World {
       contact.combat?.take(amount, from, null);
     },
     damageEnabled: (): boolean => liveSettings().nebulaLightningDamage,
+    opacity: (): number => liveSettings().nebulaOpacity,
     now: (): number => Date.now(),
   };
 
@@ -2549,6 +2556,16 @@ export class World {
     return this.basinBodies.size;
   }
 
+  /**
+   * The sky has been moved by hand (the creator's hour slider, settling after a drag): the reflections
+   * are taken again on the next frame rather than when their four-second clock next comes round, so a
+   * scrubbed hour does not wear the last hour's sky in every shiny surface. One capture, the very one
+   * the clock would have made; nothing compiles (`envMapCubeUVHeight` is the same 128 every time).
+   */
+  recaptureSky(): void {
+    this.envTimer = 99;
+  }
+
   /** Where reflections come from changed (`setReflectionSource`): the next refresh takes it up. */
   reflectionsChanged(): void {
     this.envWant = null;
@@ -2613,6 +2630,9 @@ export class World {
       }
       body.active = true;
       body.draft = draft;
+      // Measured against its own water, the very surface its depth was just read from, and not the
+      // one plane under the camera: a lake on a shelf, a basin, a column with no table at all.
+      body.waterY = surface + lift;
       body.object.position.copy(p);
       if (q) body.object.quaternion.copy(q);
       // Only a real arrival punches a crater; a wader bobbing does not.
@@ -2770,6 +2790,14 @@ export class World {
     const cols: RAPIER.Collider[] = [];
     cols.push(this.physics.createHeightfield(c.cx * CHUNK_SIZE, c.cz * CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, c.heights));
     for (const p of c.colliders) {
+      // A planting with the client's own shapes stands on them, exactly where they are (`floraCollision.ts`).
+      if (p.parts) {
+        for (const part of p.parts) {
+          const col = this.physics.createStaticPart(part);
+          if (col) cols.push(col);
+        }
+        continue;
+      }
       const ground = this.terrain.heightAt(p.x, p.z) - 0.5;
       const halfH = (p.top - ground) / 2;
       const col = this.physics.createStaticCylinder(p.x, ground + halfH, p.z, p.r, halfH);
@@ -3716,6 +3744,42 @@ export class World {
   }
 
   /**
+   * A building placed in play is about to come down: everybody this browser keeps standing in its
+   * rooms is stood outdoors round its doorstep first, which is the building's own origin on the
+   * ground (`housePlace.ts` stands a house at the ground under it). The player's room is let go of
+   * here and the doorstep handed back, for the caller to stand them on; the people, the creatures and
+   * the fighters are stood out by their managers. Null when the player was not inside it, or it has no
+   * rooms here.
+   *
+   * It must come before `unplaceBuilding`: the room the player is followed in, the ground hidden under
+   * a basement and every follower's path are all keyed on the building itself, and a building taken
+   * out of the world from under them leaves each of those naming one that is not there.
+   */
+  clearRoomsOf(key: string): THREE.Vector3 | null {
+    const b = this.layoutStream?.buildingOf(key);
+    if (!b) return null;
+    const door = { x: b.x, z: b.z };
+    // The people and creatures first, then the fighters on the spots after theirs: a fighter left in a
+    // room the streamer no longer has is held airless where the floor was (`Npc.move`).
+    const stood = this.mobiles ? this.mobiles.standOutOf(b, door) : 0;
+    this.npcs?.standOutOf(b, door, stood + 1);
+    // A ship stood in one of its rooms is outdoors from now on: its colliders take the terrain again
+    // and it is followed afresh from where it stands.
+    for (const v of this.vehicles) {
+      const held = this.vehicleRooms.get(v);
+      if (held?.cell?.building !== b) continue;
+      held.cell = null;
+      v.setInRoom(false);
+    }
+    if (this.cellState?.building !== b) return null;
+    this.cellState = null;
+    // Taken for a fresh start rather than a walk: the next frame follows the player from where they
+    // are put, outdoors, and the ground hidden under the basement comes back with it.
+    this.prevPlayerPos.x = Number.NaN;
+    return new THREE.Vector3(b.x, this.terrain.heightAt(b.x, b.z), b.z);
+  }
+
+  /**
    * Stand a named catalogue mobile at a place and leave it there, as the world's own standing people
    * are stood: spawned rather than roaming, with a world name so the hand-spawn cap and the NPC
    * tab's clear both step over it.
@@ -3810,6 +3874,42 @@ export class World {
    */
   placedNear(templates: ReadonlySet<string>, at: { x: number; y: number; z: number }, reach: number): PlacedObject | null {
     return this.layoutStream?.nearestPlaced(templates, at, reach) ?? null;
+  }
+
+  /**
+   * Which world this is, as a number every unload moves on (`loadGeneration`): the same planet loaded again
+   * after a trip to the select screen is a different world here, which a pack's name cannot say. What a
+   * caller that stands things across several awaits checks after each one (`App.standSeats`), so a run
+   * begun for the last world never puts anything into the next.
+   */
+  get generation(): number {
+    return this.loadGeneration;
+  }
+
+  /** Whether this world's own pack carries a model, so a thing drawn with it needs no other pack behind the world. */
+  packHas(model: string): boolean {
+    return !!this.pack?.find(model);
+  }
+
+  /** The kept list `dataPlacedNear` reads a building's furniture into. */
+  private readonly furnitureScratch: PlacedObject[] = [];
+
+  /**
+   * Whether something the world's own data placed -- a snapshot object, whose template is the game's own
+   * path, never a thing put down in play under a name of its own -- stands within `reach` metres of a point
+   * and is what `test` takes its template for: inside a building only on the same floor (`level` metres
+   * either way), out in the open anywhere over the point. What the seats of ours ask before standing a
+   * chair or a table the data already has (`seatProps.ts`). Asked once a world, never in a frame.
+   */
+  dataPlacedNear(test: (template: string) => boolean, x: number, y: number, z: number, reach: number, level: number): boolean {
+    const stream = this.layoutStream;
+    if (!stream) return false;
+    const inside = this.furnitureScratch;
+    stream.containedNear(x, z, reach, inside);
+    for (const o of inside) if (o.template.startsWith('object/') && Math.abs(o.y - y) <= level && test(o.template)) return true;
+    inside.length = 0;
+    for (const o of stream.objectsNear(x, z, reach)) if (o.template.startsWith('object/') && Math.hypot(o.x - x, o.z - z) <= reach && test(o.template)) return true;
+    return false;
   }
 
   /** Materials whose shaders have been asked for ahead of their first draw. */
@@ -4596,14 +4696,11 @@ export class World {
     this.eyeMeasured = false;
     this.eyeSpeedNow = 0;
     this.sweepDetail(center, 0, true);
-    // Nothing stands on its own any more. The planet's own wildlife used to be stood here -- through
-    // the catalogue (its own model, clips and brain) when it had landed and had the species, else the
-    // old creatures -- and it is now behind one switch, off unless this browser's storage says
-    // otherwise (`localStorage['swg.wildlife'] = '1'`, WILDLIFE_KEY in src/world/spawnSeed.ts). What
-    // is alive in a world is what somebody stood there, and what an admin stands belongs to the
-    // world. The switch is read once, here, and short-circuits before the catalogue is even asked, so
-    // an arrival with it off does exactly as much work as it did before and no more.
-    if (wildlifeWanted() && !this.ambientFromCatalogue(center)) this.creatures.spawnAround(center);
+    // What is alive in a world is what its data puts there -- the lairs, camps and nests laid on its
+    // spawn areas (`wildLife.ts`), the people at their posts (`standingPeople.ts`), the people of ours
+    // in the buildings the data leaves empty (`ambient/`) -- and what an admin stands. The planet's one
+    // species stood in a ring round the arrival point, which is what a world was before any of that, is
+    // gone, switch and all; the NPC tab still stands one of it by hand (`CreatureManager.spawnAt`).
     // The people the server stood here, before the screen lifts rather than after: every one within
     // range is stood in one forced pass, so their models are loaded and their programs compiled by
     // the warm-up that follows instead of a few at a time on live frames as the player walks in.
@@ -4620,8 +4717,8 @@ export class World {
     // to ride before this game had a garage or a world with anything in it, and both are now
     // furniture in a game that has its own -- so they are behind one switch, off unless this
     // browser's storage says otherwise (`localStorage['swg.scratch'] = '1'`, SCRATCH_KEY in
-    // src/world/spawnSeed.ts), exactly as the wildlife is. Read once, here, so an arrival with it
-    // off does no work at all for either.
+    // src/world/spawnSeed.ts). Read once, here, so an arrival with it off does no work at all for
+    // either.
     if (!scratchWanted()) return;
     // Here rather than in `loadPack`, because here the ground round the arrival has already been
     // generated (the `stream` above) and the loading screen's own compile still follows, so their
@@ -4634,23 +4731,6 @@ export class World {
     const speeder = createPlaceholderSpeeder(this.physics, this.scene, sx, this.terrain.heightAt(sx, sz) + 1.2, sz, Math.PI * 0.75);
     markActor(speeder.group);
     this.vehicles.push(speeder);
-  }
-
-  /**
-   * The planet's species stood as the catalogue's mobiles, `count` of them about the arrival point,
-   * with the planet's own health, blow and temper. Never waits: the catalogue is read only if it has
-   * already landed (this runs at arrival, in a frame), and the spot is the terrain's own height,
-   * which needs no stepped physics. False when anything is missing, leaving it to the old path.
-   */
-  private ambientFromCatalogue(center: THREE.Vector3): boolean {
-    const def = this.planet.creatures;
-    if (!def.count || this.planet.space || !this.mobiles) return false;
-    const cat = MobileCatalogue.loaded(import.meta.env.BASE_URL);
-    const entry = cat?.resolve(def.name);
-    if (!cat || !entry || !cat.ready(entry).ok) return false;
-    const n = this.mobiles.spawnAmbient(entry, def.count, center, ambientOverrides(def));
-    if (n) console.info(`creatures: ${def.name} stood from the catalogue (${entry.id}), ${n} about`);
-    return n > 0;
   }
 
   /** Each ship followed through a building's rooms: where it was last sampled, its room, and the wait until the next sample. */
@@ -5337,6 +5417,55 @@ export class World {
     return this.flora ? { planted: this.flora.planted, models: this.flora.modelCount, missing: [...this.flora.missing] } : null;
   }
 
+  /**
+   * The trees' and rocks' colliders of every chunk standing, worked out again under the rule as it is
+   * now (`FLORA_COLLISION`), and stood up again where a chunk has its physics: what the console calls
+   * after moving the rule, never a frame.
+   */
+  refreshFloraColliders(): void {
+    for (const c of this.chunks.values()) {
+      if (!c.floraData) continue;
+      c.colliders = floraColliders(c.floraData, []);
+      if (c.physics) {
+        this.removeChunkPhysics(c);
+        this.addChunkPhysics(c);
+      }
+    }
+  }
+
+  /**
+   * What the chunks standing are solid at, for `__debug.flora().collision`: of their collidable
+   * plantings, how many stand on the client's own shapes, how many on the guessed cylinder, and how
+   * many on nothing (walked through, as the client did); the shapes by kind; and how many models the
+   * pack has the client's word on.
+   */
+  floraCollisionReport(): { plantings: number; client: number; guessed: number; walkedThrough: number; shapes: Record<string, number>; withPhysics: number; models: { withShapes: number; walkedThrough: number; noWord: number } } {
+    const out = { plantings: 0, client: 0, guessed: 0, walkedThrough: 0, shapes: {} as Record<string, number>, withPhysics: 0, models: { withShapes: 0, walkedThrough: 0, noWord: 0 } };
+    for (const c of this.chunks.values()) {
+      if (!c.floraData) continue;
+      let collidable = 0;
+      for (let i = 0; i < c.floraData.n; i++) if (c.floraData.collidable[i]) collidable++;
+      out.plantings += collidable;
+      let standing = 0;
+      for (const col of c.colliders) {
+        standing++;
+        if (col.parts) {
+          out.client++;
+          for (const p of col.parts) out.shapes[p.kind] = (out.shapes[p.kind] ?? 0) + 1;
+        } else out.guessed++;
+      }
+      out.walkedThrough += collidable - standing;
+      if (c.physics) out.withPhysics++;
+    }
+    for (const def of this.pack?.category('flora') ?? []) {
+      if (!def.appearance) continue;
+      if (!def.collision) out.models.noWord++;
+      else if (def.collision.shapes.length) out.models.withShapes++;
+      else out.models.walkedThrough++;
+    }
+    return out;
+  }
+
   /** The snapshot's centre in SWG coordinates (the game's origin), when a converted pack is loaded. */
   /**
    * What the cover search can even be offered on this world, for `__debug.cover()`: how many placed
@@ -5382,8 +5511,10 @@ export class World {
         // creatures belong at their lair, so they are `spawned`, which the manager only ever takes
         // away when it is dead or has fallen out of the world. The `worldId` is what keeps the hand
         // -spawn cap and the NPC tab's clear off them. No `share`: every browser seeds the same lair
-        // from the same data, and a name the server has never heard is never put on the wire. Its own
-        // creature's numbers and weapons go with it (`WildSpawn`), as a standing person's do.
+        // from the same data, so it is never one of the server's records; with a server that speaks of
+        // them it goes on the wire by saying it has been seen, with its site's wait as how long it
+        // stays down (`respawn`). Its own creature's numbers and weapons go with it (`WildSpawn`), as a
+        // standing person's do.
         spawn: (entry, at, how) =>
           this.mobiles?.spawn(entry, at, {
             origin: 'spawned',
@@ -5392,7 +5523,12 @@ export class World {
             overrides: how.overrides,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
+            respawn: how.respawn,
           }) ?? 'no world',
+        // A body or a nest every other browser has seen go down is not stood here before its wait is out.
+        downFor: (id) => owned.downFor(id),
+        // A nest is one of the world's seen creatures too, under its site's own name.
+        shareNest: (nest, at, respawn) => npcNow()?.addSeen(nest, at, respawn),
         remove: (m) => this.mobiles?.remove(m),
         centre: () => this.layoutCenter,
         // A nest's own height is this world's to answer, unlike a creature's: the manager works one
@@ -5457,8 +5593,8 @@ export class World {
         catalogue: () => this.mobileCatalogue,
         // Stood as `spawned` with a world name, for the same reasons the wildlife is: the manager
         // leaves a spawned one where it was put, the name keeps the hand-spawn cap and the NPC tab's
-        // clear off it, and with no `share` it is never put on the wire for a server that has never
-        // heard of it to leave frozen.
+        // clear off it, and with no `share` it is never put on the wire as a server's own record. One
+        // that may be fought goes on it by saying it has been seen, with a server that speaks of that.
         // The row's own creature's numbers, mood, weapons and room (`PersonSpawn`), over the body's: a
         // body is shared by every creature drawn as it and carries one of their numbers.
         spawn: (entry, at, how) =>
@@ -5466,14 +5602,17 @@ export class World {
             origin: 'spawned',
             seed: how.seed,
             inside: how.inside,
-            worldId: `stood:${how.index}`,
+            worldId: how.id,
             essential: how.essential,
             overrides: how.overrides,
             mood: how.mood,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
             room: how.room,
+            respawn: how.respawn,
           }) ?? 'no world',
+        downFor: (id) => owned.downFor(id),
+        seeding: () => owned.seeding,
         remove: (m) => this.mobiles?.remove(m),
         holds: (id) => {
           const e = this.mobileCatalogue?.byId(id);
@@ -5507,19 +5646,29 @@ export class World {
     if (!mobiles || m.removed || m.dead) return 'gone';
     if (this.followers.following(m)) return 'already following you';
     if (this.followers.full) return 'you have as much company as you can take';
-    const id = mobiles.worldIdOf(m);
-    let owner: FollowerOwner;
-    if (!id) owner = 'own';
-    else if (id.startsWith('stood:')) owner = 'stood';
-    else if (id.startsWith('ours:')) {
-      if (!ambientPeople.release(m, this.simTime)) return 'not one of ours any more';
-      owner = 'adopted';
-    } else if (id.startsWith('wild:')) {
-      if (!wildLife.release(m)) return 'not one of its camp any more';
-      owner = 'adopted';
-    } else return 'kept by the world, not by you';
+    // A body another player's game is thinking for is not this browser's to walk off with: a follower is
+    // this browser's alone, and this one belongs to whoever keeps it.
+    if (m.isDriven) return TALK_WORDS.keptElsewhere;
+    // And asked before anything is taken off anybody's books: whether the wire will let it go. A body that
+    // may not leave it (a grant lost this instant, or a server too old to hear a creature walk off) refused
+    // after its lair or its row had let go of it would be nobody's at all.
+    if (!mobiles.mayUnshare(m)) return npcNow()?.active && !npcNow()?.seedingNow ? TALK_WORDS.serverKeeps : TALK_WORDS.keptElsewhere;
+    // Somebody asked to stop and not yet handed back is the set's already, and keeps the owner it had: one
+    // of ours or a lair's was taken off its books the first time, and asking them again would refuse it.
+    const whose = recruitOwner(mobiles.worldIdOf(m), this.followers.releasedOwner(m), {
+      ours: () => ambientPeople.release(m, this.simTime),
+      wild: () => wildLife.release(m),
+    });
+    if ('refused' in whose) return whose.refused;
+    // **Off the wire before it follows, and for good** (`neverShared`): a follower is this browser's alone
+    // and is never handed to another keeper. It was one this browser keeps (or one never on the wire), so
+    // the keeper's word that it has walked off takes every other browser's copy down and holds its post
+    // empty for its row's respawn, as after a death; holding it here instead -- kept on the wire, pinned
+    // to this browser for as long as it follows -- would leave every other browser's own lair or row still
+    // counting it as theirs, standing it at its post again and putting it away when they walked off.
+    if (!mobiles.unshare(m)) return TALK_WORDS.keptElsewhere;
     m.readyToFollow();
-    const why = this.followers.add(m, owner, this.playerTarget, this.simTime);
+    const why = this.followers.add(m, whose.owner, this.playerTarget, this.simTime);
     if (why) return why;
     // After it has left the furniture: `lendFightClips` puts it on its tier again, now that it may fight.
     mobiles.lendFightClips(m);
@@ -6144,12 +6293,13 @@ export class World {
     // The field is stepped after its bodies have moved and before anything is drawn, so the water
     // shader reads the surface those bodies just made.
     if (this.renderer && this.camera && this.waterMaterials.length) {
-      // The field is one plane. Beside a fountain it is the basin's, or the legs that go into the basin
-      // cut the planet's table metres below them and nothing rings.
+      // Every body is measured against its own water (`touch` above), so this height only hangs the
+      // overhead camera that draws them: the basin's beside a fountain, the table under the camera
+      // elsewhere, and where there is no table at all (most of Naboo and Tatooine) the camera's own.
       const cx = this.camera.position.x;
       const cz = this.camera.position.z;
       const basin = this.basinFootprints.length ? basinLevelNear(this.basinFootprints, playerPos.x, playerPos.z) : Number.NaN;
-      stepWaterSim(this.renderer, cx, cz, Number.isNaN(basin) ? this.terrain.waterHeightAt(cx, cz) : basin, dt);
+      stepWaterSim(this.renderer, cx, cz, Number.isNaN(basin) ? this.terrain.waterHeightAt(cx, cz) : basin, dt, this.camera.position.y);
     }
     this.emitDust(dt);
     if (this.waterMaterials.length) updateWaterDepth(playerPos.x, playerPos.z, (x, z) => this.terrain.heightIfCached(x, z, FAR_TILE, FAR_RES));
@@ -6229,7 +6379,11 @@ export class World {
   stepLiving(dt: number, playerPos: THREE.Vector3, camera: THREE.Camera | null): void {
     this.simTime += dt;
     surfaces.update(this.simTime, this.renderer);
-    const targets = this.targets(true);
+    // What the world's creatures and the fighters pick a fight out of: the one list of the living, and
+    // every other player a blow of theirs could reach (`RemoteBodies.prey`) whatever the players' own
+    // damage switch says, since such a blow is the keeper's word and not a player's. Which body may go
+    // after a peer at all is each body's own question (`mayFight`): only one this browser keeps on the wire.
+    const targets = this.npcTargets(this.targets(true));
     perf.begin(SEC.creatures);
     this.creatures.update(dt, playerPos, this.hurtPlayer);
     perf.end(SEC.creatures);
@@ -6439,9 +6593,15 @@ export class World {
     return MobileCatalogue.loaded(import.meta.env.BASE_URL);
   }
 
-  /** One kept callback rather than a fresh closure a frame; what it does is set by the loop. */
-  private readonly hurtPlayer = (damage: number, from?: THREE.Vector3): void => {
-    this.playerTarget.hurt(damage, from);
+  /**
+   * One kept callback rather than a fresh closure a frame; what it does is set by the loop. It goes
+   * through the record's own `damage`, with whatever bit, and not straight to `hurt`: an unprovoked bite is
+   * the one blow on the player that reaches no `damage` of its own, and anything wrapped round the record
+   * (the game's: where a blow came from, and who the followers should turn on) must hear it as it hears
+   * every other.
+   */
+  private readonly hurtPlayer = (damage: number, from?: THREE.Vector3, source?: Living): void => {
+    this.playerTarget.damage(damage, from, 0, source ?? null);
   };
 
   /**
@@ -6478,6 +6638,26 @@ export class World {
     for (const p of peers.living) this.livingList.push(p);
     if (this.hitWatch && gained) this.watchHits();
     return this.livingList;
+  }
+
+  /** The list the creatures fight over, refilled in place: `living`, then each peer on the creatures' own list who is not on it already. */
+  private readonly npcList: Living[] = [];
+
+  /**
+   * The living (`targets`) and every other player the world's creatures may fight (`RemoteBodies.prey`),
+   * in one kept array refilled every step, which is how often the living list itself is asked fresh. With
+   * no server, or one that carries no creature's blow, it is exactly the living list.
+   */
+  npcTargets(living: readonly Living[]): readonly Living[] {
+    const prey = this.peers().prey;
+    const out = this.npcList;
+    out.length = 0;
+    // Emptied before the plain list is handed back, too: kept full, it would hold the last bodies and
+    // peers it was filled with -- through an unload and at the select screen -- until prey came back.
+    if (!prey.length) return living;
+    for (let i = 0; i < living.length; i++) out.push(living[i]);
+    for (let i = 0; i < prey.length; i++) if (!(prey[i] as { listed?: boolean }).listed) out.push(prey[i]);
+    return out;
   }
 
   /**
@@ -7060,6 +7240,11 @@ export class World {
     for (const t of this.farTiles.values()) this.cutWhole(t);
   }
 
+  /** For the console (`__debug.reach()`): how many detailed ground chunks stand now, and how far they reach from the middle of the one underfoot. */
+  groundReport(): { chunks: number; metres: number } {
+    return { chunks: this.chunks.size, metres: Math.round((this.viewRadius + 0.5) * CHUNK_SIZE) };
+  }
+
   /** For the console (`__debug.farTiles()`): how many tiles, how the last cut left them, and whether the index attribute is each tile's own. */
   farTileReport(): { local: boolean; tiles: number; cut: number; ownIndex: number; quadsKept: number; quadsTotal: number } {
     let cut = 0;
@@ -7189,7 +7374,7 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, flora: this.flora ? propGroup : null, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).

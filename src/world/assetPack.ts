@@ -3,6 +3,7 @@ import { isReflective, registerReflective } from './envmap';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { surfaces } from './surfaces';
 import { drawnLevels } from './lodLevels.ts';
+import { mergeFloraCollision, type FloraCollision } from './floraCollision.ts';
 
 export interface CellLight {
   type: number;
@@ -80,6 +81,12 @@ export interface PackModelDef {
   portals?: { v: number[][]; i: number[] }[];
   /** Flora models: the appearance file the terrain's flora families name (e.g. appearance/tree_x.apt). */
   appearance?: string;
+  /**
+   * Flora models: the collision shapes the client authored for the appearance, from the pack's
+   * flora-collision.json (src/world/floraCollision.ts); an empty list is walked through. Absent on a
+   * pack converted before the pass, whose plantings stand on the guessed cylinder they always did.
+   */
+  collision?: FloraCollision;
   /** A particle effect (particles/<id>.json) rather than a mesh; placed like any other object. */
   particle?: boolean;
   /** Particle effects attached to this model (a lamp's flame), transforms in the converter's unflipped model space. */
@@ -366,6 +373,16 @@ export class AssetPack {
         }
       } catch {
         /* no floors in this pack: the game steers, as it always has */
+      }
+      // The trees' and rocks' own collision shapes, beside the manifest as the floors are. A pack
+      // converted before the pass has none, and its plantings stand on the guessed cylinders.
+      if (manifest.categories.flora?.length) {
+        try {
+          const cr = await fetch(`${baseUrl}flora-collision.json`);
+          if (cr.ok && (cr.headers.get('content-type') ?? '').includes('json')) mergeFloraCollision(manifest.categories.flora, await cr.json());
+        } catch {
+          /* no collision shapes in this pack: the trees are guessed, as they always were */
+        }
       }
       await pack.loadObjectEffects();
       return pack;

@@ -1,6 +1,6 @@
-// What a creature stood by hand is (src/world/spawnSeed.ts): the switch that keeps a planet's own
-// wildlife off, the name every browser works out for itself rather than being told, and the rolls a
-// record makes.
+// What a creature stood by hand is (src/world/spawnSeed.ts): the switch that keeps the developer's own
+// loose props off, the name every browser works out for itself rather than being told, and the rolls a
+// record makes -- and that the planet's old ring of its one species round the arrival point is gone.
 //
 // The whole point of the module is that two browsers which have never spoken about a creature beyond
 // its record stand the same creature, so almost everything here is the same question asked twice:
@@ -14,8 +14,8 @@ import { readFileSync } from 'node:fs';
 import {
   NOT_ADMIN,
   PendingSpawns,
+  SCRATCH_KEY,
   WAITING_FOR_CATALOGUE,
-  WILDLIFE_KEY,
   WORLD_HOLDS_IT,
   armsRng,
   browserSwitches,
@@ -30,8 +30,8 @@ import {
   spawnArgsFor,
   spawnIdFor,
   spawnRefusal,
+  scratchWanted,
   sweptByList,
-  wildlifeWanted,
   type SpawnRecord,
   type StandWhere,
 } from '../../../src/world/spawnSeed.ts';
@@ -45,16 +45,16 @@ const ok = (cond: boolean, what: string) => {
 
 const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
-// --- 1: the switch ----------------------------------------------------------------------------------
+// --- 1: the switch, and the old path gone ------------------------------------------------------------
 // Off is the answer to every question but the one word that turns it on, including the question asked
 // by a browser that has no storage at all and by one whose storage throws.
 {
-  ok(wildlifeWanted({ get: () => null }) === false, '1: a browser that has never set it stands no wildlife');
-  ok(wildlifeWanted({ get: () => '1' }) === true, '1: the switch on puts the planet’s own wildlife back');
-  ok(wildlifeWanted({ get: () => '0' }) === false, '1: and anything else leaves it off');
-  ok(wildlifeWanted({ get: () => 'true' }) === false, '1: including a word that looks like yes but is not the one');
+  ok(scratchWanted({ get: () => null }) === false, '1: a browser that has never set it stands no loose props');
+  ok(scratchWanted({ get: () => '1' }) === true, '1: the switch on puts the developer’s crates and bike back');
+  ok(scratchWanted({ get: () => '0' }) === false, '1: and anything else leaves it off');
+  ok(scratchWanted({ get: () => 'true' }) === false, '1: including a word that looks like yes but is not the one');
   ok(
-    wildlifeWanted({
+    scratchWanted({
       get: () => {
         throw new Error('no storage here');
       },
@@ -63,16 +63,21 @@ const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
   );
   // The default store is the guarded one; under node there is no localStorage at all, and asking must
   // answer rather than throw, since the world asks this on every arrival.
-  ok(wildlifeWanted() === false, '1: with no storage of any kind the answer is still false');
-  ok(browserSwitches().get(WILDLIFE_KEY) === null, '1: and the browser store answers nothing rather than throwing');
-  ok(WILDLIFE_KEY === 'swg.wildlife', '1: the switch is the one name the summary and the world both use');
-  // The world is the only place that asks, and it must ask before it looks at the catalogue: with the
-  // switch off an arrival has to do exactly the work it did before and no more. These two are read
-  // rather than run, and are the only two in this file that are: standing a planet up to watch an
-  // arrival is the whole game, and there is nothing pure underneath that call to try instead.
+  ok(scratchWanted() === false, '1: with no storage of any kind the answer is still false');
+  ok(browserSwitches().get(SCRATCH_KEY) === null, '1: and the browser store answers nothing rather than throwing');
+  ok(SCRATCH_KEY === 'swg.scratch', '1: the switch is the one name the world asks');
+  // The planet's one species stood in a ring round the arrival point -- the old automatic path, from
+  // before the lairs, the camps and the people at their posts -- is gone with its switch: what is alive
+  // in a world is what its data stands and what an admin stands. These are read rather than run:
+  // standing a planet up to watch an arrival is the whole game, and the thing being pinned is an absence.
   const world = src('../../../src/world/world.ts');
-  ok(/wildlifeWanted\(\) && !this\.ambientFromCatalogue\(center\)/.test(world), '1: the world asks the switch first and short-circuits before the catalogue');
-  ok(/this\.creatures\.spawnAround\(center\)/.test(world), '1: and the old path is still there to be turned back on');
+  const manager = src('../../../src/world/mobiles/manager.ts');
+  const creatures = src('../../../src/world/creatures.ts');
+  const seed = src('../../../src/world/spawnSeed.ts');
+  ok(!/ambientFromCatalogue|wildlifeWanted|spawnAround/.test(world), '1: an arrival stands nothing of the planet’s own species');
+  ok(!/spawnAmbient|AMBIENT_RANGE|'ambient'/.test(manager), '1: and the mobiles manager has no ambient wildlife to stand or recycle');
+  ok(!/spawnAround|pickSpot|respawn\(/.test(creatures), '1: nor the old creatures, which only the NPC tab stands now and which are never recycled');
+  ok(!/WILDLIFE_KEY|wildlifeWanted|swg\.wildlife/.test(seed), '1: and the switch that put it back is gone');
 }
 
 // --- 2: the name ------------------------------------------------------------------------------------
@@ -285,7 +290,13 @@ const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8')
   // from a record, and the list's handler asks that mark rather than the name alone.
   const manager = src('../../../src/world/mobiles/manager.ts');
   const main = src('../../../src/main.ts');
-  ok(/worldId: a\.id, listed: true, share: true \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
+  ok(/worldId: a\.id, listed: true, share: true, \.\.\.weapon \}\)/.test(manager) && /if \(opts\.listed\) this\.listed\.add\(m\);/.test(manager), '9: the manager marks a body stood from one of the list’s own records, and only those');
+  // The weapon the admin put in its hand rides the record the whole way: asked for with it, read off the
+  // row, and stood holding it on every browser, the admin's own included, rather than each arming it off
+  // its own list.
+  ok(/const weapon = typeof rec\.weapon === 'string' && rec\.weapon \? \{ weaponTemplate: rec\.weapon \} : \{\};/.test(manager), '9: a record that names a weapon stands its body holding that weapon');
+  ok(/owned\.askSpawn\(rec\.species, \[rec\.x, rec\.y \?\? 0, rec\.z\], rec\.heading, rec\.seed, rec\.id, !!rec\.inside, rec\.weapon \?\? ''\)/.test(main), '9: and the admin\'s ask carries the weapon to the server, which puts it in the record');
+  ok(/\.\.\.\(r\.weapon \? \{ weapon: r\.weapon \} : \{\}\)/.test(main), '9: and a row from the server is turned into a record with its weapon');
   ok(/if \(sweptByList\(id, mobiles\.fromList\(m\), wanted\)\) mobiles\.removeById\(id\);/.test(main) && !/if \(id && !wanted\.has\(id\)\) mobiles\.removeById\(id\);/.test(main), '9: and the list’s handler asks that mark, not the name alone');
 }
 

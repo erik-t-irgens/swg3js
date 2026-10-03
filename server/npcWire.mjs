@@ -1,5 +1,5 @@
 // The world's creatures as they cross between browsers: one browser thinks for each, and what it
-// thinks reaches everyone else through here. Four words, checked and shaped the way `wire.mjs`,
+// thinks reaches everyone else through here. Five words, checked and shaped the way `wire.mjs`,
 // `combatWire.mjs`, `shipWire.mjs` and `vehicleWire.mjs` already check everything else the server is
 // told -- a name matched against a class of characters and cut to length, a number checked finite
 // and clamped, a word matched against a list, and anything that fails dropped rather than answered.
@@ -19,7 +19,7 @@
 // is a bound on nonsense, not a rule about fighting.
 //
 // Dependency-free, shared by the server and by tools/swg/tests/npcWire.test.ts. The relay's own
-// `npcState`, `npcHit` and `npcDrop` cases are what call it, and the browser's half is
+// `npcState`, `npcHit`, `npcDrop` and `npcBlow` cases are what call it, and the browser's half is
 // src/net/npcNet.ts.
 
 /**
@@ -52,31 +52,43 @@ export const NPC_WIRE = {
   timer: 600,
   /** How many creatures' last places the server keeps for one world, so a newcomer is told where things are. */
   remember: 4096,
+  /** The fastest a bolt on a blow may claim to be going, metres a second (a ship's is 600). */
+  boltSpeed: 2000,
 };
 
 /**
  * What a creature may be doing: the game's own list of states (src/world/mobiles/types.ts), which
  * this must be kept in step with by hand.
  *
- * `cover` is the newest of them and is the one word here that nothing sends yet: the bodies that
- * take cover are the fighters, and a fighter is nobody else's -- it has no spawn record and does
- * not implement `NpcSubject`, so it never reaches this wire at all. It is listed all the same,
- * because the rule is that a state word is a state word everywhere, and a word this list has not
- * got is quietly turned into `idle` below rather than refused: a server left behind would draw a
- * body standing about while its own browser had it behind a crate. **A server already running must
- * be restarted for it.**
+ * `cover` is the newest of them: a tiered person from the catalogue and a fighter an admin stood both
+ * take cover, and both cross this wire. A word this list has not got is quietly turned into `idle`
+ * below rather than refused: a server left behind would draw a body standing about while its own
+ * browser had it behind a crate. **A server already running must be restarted for it.**
  */
 const STATES = ['loading', 'idle', 'wander', 'alert', 'chase', 'attack', 'cover', 'flee', 'return', 'knockdown', 'dying', 'dead'];
 
 /**
- * The things that must be seen once rather than eased into: it was struck, and it left the ground.
+ * The things that must be seen once rather than eased into: it was struck, it left the ground, it
+ * threw itself aside in Jedi Academy's roll, it jumped of its own accord, and its blade turned a bolt
+ * away. The place a roll or a jump carries it to is in the rows like any other place; what the mark
+ * says is which clip to play over it, since a body eased along the ground by a quarter-second's rows
+ * is otherwise a body sliding.
  *
  * A death is deliberately not one of them. It has a word of its own (the spawn list's `dead`, which
  * every browser hears from the server), a row is never sent for a creature that is already dead, and
  * a mark that nothing can produce is a rule nothing can reach: two ways to say one death is exactly
  * what this wave is written not to have.
  */
-const MARKS = ['hit', 'leap'];
+const MARKS = ['hit', 'leap', 'roll', 'jump', 'block'];
+
+/** Which way a roll or a jump went, off the way the body faced: Jedi Academy's four. */
+const DIRS = ['F', 'B', 'L', 'R'];
+
+/**
+ * How low a body stands, when it is not upright: the fighters' own three low postures. Upright is the
+ * field left out, so a row about a body on its feet is exactly the row it always was.
+ */
+const POSTURES = ['crouch', 'kneel', 'prone'];
 
 /** Why a creature is gone: it died, or it was taken away (an admin cleared it, or the world let it go). */
 const WHYS = ['dead', 'gone'];
@@ -147,7 +159,16 @@ export function cleanNpcRow(x) {
     v: num(x.v, 0, NPC_WIRE.speed, 0),
     hp: num(x.hp, 0, 1, 1),
   };
-  if (MARKS.includes(x.f)) out.f = x.f;
+  if (MARKS.includes(x.f)) {
+    out.f = x.f;
+    // A roll's or a jump's direction, and whether the jump was the Force's: what picks its clip.
+    if ((x.f === 'roll' || x.f === 'jump') && DIRS.includes(x.fd)) out.fd = x.fd;
+    if (x.f === 'jump' && x.ff === 1) out.ff = 1;
+  }
+  // How low it stands and whether it is in cover: both left out while it is on its feet in the open,
+  // so the rows of everything that never goes low are exactly what they were.
+  if (POSTURES.includes(x.po)) out.po = x.po;
+  if (x.cv === 1) out.cv = 1;
   const b = cleanNpcBrain(x.b);
   if (b) out.b = b;
   return out;
@@ -219,6 +240,39 @@ export function cleanNpcHit(x) {
   // for what its own wildlife did would turn the keeper's creature -- and its whole pack -- on a
   // player who did nothing. Unset, the blow lands with nobody to blame, which is the honest answer.
   if (x.b) out.b = 1;
+  // A bolt's own flight, when the blow was a bolt: which way it was going, how fast, its colour and its
+  // size. It is what lets the keeper ask its own creature's blade whether it turned that bolt away, and
+  // fly one back that looks like the one that came in; a blade, a blast or a bite carries none.
+  const d = point(x.d);
+  if (d) {
+    const len = Math.hypot(d[0], d[1], d[2]);
+    if (len > 1e-6) {
+      out.d = [d[0] / len, d[1] / len, d[2] / len];
+      out.s = num(x.s, 0, NPC_WIRE.boltSpeed, 0);
+      out.c = Math.floor(num(x.c, 0, 0xffffff, 0xff4a2a));
+      out.z = num(x.z, 0.1, 10, 1);
+    }
+  }
+  return out;
+}
+
+/**
+ * A cleaned copy of a blow one of the world's creatures struck against another player, or undefined:
+ * which player (`to`, their relay id), which creature struck it, how much, where from, and a word for
+ * what was struck (their hull rather than them). Its keeper is the only browser that may say this, and
+ * the player struck is the only one who takes it off -- the players' own rule, with the keeper in the
+ * shooter's place. It is never behind the server's friendly-fire switch, which is about two players.
+ */
+export function cleanNpcBlow(x) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const to = Number(x.to);
+  const i = npcId(x.i);
+  if (!Number.isInteger(to) || to <= 0 || !i) return undefined;
+  const a = num(x.a, 0, NPC_WIRE.damage, 0);
+  if (!(a > 0)) return undefined;
+  const out = { to, i, a, at: point(x.at) ?? [0, 0, 0] };
+  const w = word(x.w, NPC_WIRE.what);
+  if (w) out.w = w;
   return out;
 }
 
@@ -283,6 +337,12 @@ export class NpcPlaces {
         had.s = row.s;
         had.v = row.v;
         had.hp = row.hp;
+        // How low it stands and whether it is in cover are what it is doing, and a newcomer is told
+        // them: a body on one knee behind a crate is not a body standing in the open.
+        if (row.po) had.po = row.po;
+        else delete had.po;
+        if (row.cv) had.cv = 1;
+        else delete had.cv;
         // A mark is a thing that happened once: it is not kept, or a newcomer would be told about a
         // blow struck before they arrived and would play it as though it had just landed.
         continue;
@@ -291,13 +351,21 @@ export class NpcPlaces {
         this.dropped++;
         continue;
       }
-      held.set(row.i, { i: row.i, p: row.p, h: row.h, s: row.s, v: row.v, hp: row.hp });
+      const kept = { i: row.i, p: row.p, h: row.h, s: row.s, v: row.v, hp: row.hp };
+      if (row.po) kept.po = row.po;
+      if (row.cv) kept.cv = 1;
+      held.set(row.i, kept);
     }
   }
 
   /** A creature that died or was taken away is no longer anywhere. */
   gone(key, id) {
     this.worlds.get(key)?.delete(id);
+  }
+
+  /** Where one creature was last seen, as its keeper's row put it, or null when nothing has been said. */
+  at(key, id) {
+    return this.worlds.get(key)?.get(id)?.p ?? null;
   }
 
   /** Where everything on one world was last seen, as a batch's rows; an empty list when nothing is. */

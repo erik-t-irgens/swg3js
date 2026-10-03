@@ -91,6 +91,22 @@ export function readRow(raw: unknown): PlacedProp | null {
   return { thing, id: r.id, x, y, z, q: q as [number, number, number, number], ...(r.inside ? { inside: true } : {}) };
 }
 
+/** How a prop in hand is given up: Escape (`back`), Put away (`away`), or a travel and the select screen (`keep`). */
+export type LetGo = 'back' | 'away' | 'keep';
+
+/**
+ * What becomes of a prop given up while in hand, `pickedUp` saying whether it came out of the world:
+ * `gone` thrown away for good, which writes nothing back (the row left the store when it was picked
+ * up, and the Props tab is a catalogue with nothing to hand back); `stand` put back where it stood as
+ * the same thing; `write` written back and not stood, since the world is going; `nothing` for one
+ * taken fresh from the tab, which has nowhere to go back to.
+ */
+export function letGoOf(how: LetGo, pickedUp: boolean): 'gone' | 'stand' | 'write' | 'nothing' {
+  if (how === 'away') return 'gone';
+  if (!pickedUp) return 'nothing';
+  return how === 'keep' ? 'write' : 'stand';
+}
+
 /** What a list of rows comes to, for the console. */
 export function placedTally(rows: readonly PlacedProp[]): { placed: number; kinds: number } {
   return { placed: rows.length, kinds: new Set(rows.map((r) => r.id)).size };
@@ -172,7 +188,16 @@ export class PlacedProps {
       return null;
     }
     const row: PlacedProp = { thing: mintThing(now, rnd), id, x: at.x, y: at.y, z: at.z, q, ...(inside ? { inside: true } : {}) };
-    if (!(await deps.stand(row))) {
+    const world = this.world;
+    const up = await deps.stand(row);
+    // The world may have changed while the model loaded (a travel, the select screen): the row is the
+    // world it was put down in's, and must never be filed into the next one's store or stood there.
+    if (this.world !== world) {
+      if (up) deps.clear(row.thing);
+      this.note = 'the world changed while it was being put down';
+      return null;
+    }
+    if (!up) {
       this.note = 'it would not stand there';
       return null;
     }
@@ -192,6 +217,75 @@ export class PlacedProps {
     deps.clear(thing);
     save(this.world, this.rows);
     return row;
+  }
+
+  /**
+   * Put a row that was picked up back: the very same thing, under its own id, not a new one minted.
+   *
+   * The row goes back into the store **before** anything is awaited, so it is written down in the
+   * same breath as the call even when standing it cannot finish: a travel lets go of a prop in hand
+   * just before the world under it goes, and a re-put that waited on a model load used to land in a
+   * world that had already gone, after the pick-up had taken the row out of the store, and the
+   * thing was lost. With `stand` false it is only written down (the world is going anyway) and is
+   * stood with everything else the next time the world is entered.
+   *
+   * Answers whether it is standing now. A row already in the store is not written twice.
+   */
+  async restore(row: PlacedProp, deps: PlacedDeps, save: (world: string, rows: readonly PlacedProp[]) => void, stand = true): Promise<boolean> {
+    if (!this.world) {
+      this.note = 'there is no world to put it back in';
+      return false;
+    }
+    if (!this.rows.some((r) => r.thing === row.thing)) {
+      this.rows.push({ ...row });
+      save(this.world, this.rows);
+    }
+    if (!stand || this.up.has(row.thing)) return this.up.has(row.thing);
+    const world = this.world;
+    const up = await deps.stand(row);
+    // The world may have changed while the model loaded: the row is kept either way, and only a
+    // stand in the world it was put back into counts as standing.
+    if (up && this.world === world && this.rows.some((r) => r.thing === row.thing)) {
+      this.up.add(row.thing);
+      this.note = '';
+      return true;
+    }
+    if (!up) this.note = 'it could not be stood again just now; it is kept, and stands the next time you come here';
+    return false;
+  }
+
+  /**
+   * Write a row into one world's keeping without standing it, whichever world this store is in now.
+   *
+   * For a row whose world has been left while it was in flight: a prop picked up, moved and refused
+   * at its new spot goes back where it stood, and if a travel came while the new spot was being tried
+   * the store is already another world's (or none), so the row goes straight into its own world's
+   * stored list and stands with everything else on the next visit -- never into this store's rows,
+   * which are another world's, and never lost. Answers whether it was written.
+   */
+  keepIn(world: string, row: PlacedProp, store: { get(key: string): string | null }, save: (world: string, rows: readonly PlacedProp[]) => void): boolean {
+    if (!world) return false;
+    if (world === this.world) {
+      if (!this.rows.some((r) => r.thing === row.thing)) {
+        this.rows.push({ ...row });
+        save(this.world, this.rows);
+      }
+      return true;
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(store.get(propsKey(world)) ?? '[]');
+    } catch {
+      raw = [];
+    }
+    const rows: PlacedProp[] = [];
+    for (const r of Array.isArray(raw) ? raw : []) {
+      const read = readRow(r);
+      if (read) rows.push(read);
+    }
+    if (!rows.some((r) => r.thing === row.thing)) rows.push({ ...row });
+    save(world, rows);
+    return true;
   }
 
   /** The one nearest a point within `reach`, for "pick that up". */

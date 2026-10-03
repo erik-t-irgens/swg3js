@@ -19,9 +19,11 @@ import {
   beamCurves,
   beamEnvelope,
   buildSheets,
+  clampOpacity,
   deepestInside,
   dimInside,
   insideDepth,
+  seenDepth,
   pullScale,
   rampAt,
   seedOfName,
@@ -391,6 +393,7 @@ const row = (name: string, at: [number, number, number], radius: number, extra: 
   let flashes = 0;
   const shipPos = new THREE.Vector3(600, 0, 0);
   let shipRadius = 20;
+  let opacity = 1;
   const nebulae = await Nebulae.build(
     {
       place: () => null,
@@ -406,6 +409,7 @@ const row = (name: string, at: [number, number, number], radius: number, extra: 
         hurt += amount;
       },
       damageEnabled: () => true,
+      opacity: () => opacity,
       now: () => clock,
       texture: async () => new THREE.Texture(),
     },
@@ -444,6 +448,47 @@ const row = (name: string, at: [number, number, number], radius: number, extra: 
   ok(report.haze.some((h) => h.drawn), 'the haze comes up around the camera');
   ok(report.dim.flare < 0.2 && report.dim.rays < 0.3, 'and deep inside, the flare and the rays are mostly gone');
   ok(viewShakeAmount() > 0, 'a nebula the table gives a shake to shakes the view');
+
+  // The Graphics page's Nebula opacity: the sheets and the haze thinned together, the flare and the
+  // rays dimmed less to match, the console's own knob left as it is, and nothing made.
+  {
+    const sheetAlpha = () => set.group.children.filter((o) => o.name === 'nebula:mist' || o.name === 'nebula:glow').map((o) => ((o as THREE.Mesh).material as THREE.ShaderMaterial).uniforms.uAlpha.value as number);
+    const hazeAlpha = () => (set.report() as { haze: { drawn: boolean; alpha: number }[] }).haze.filter((h) => h.drawn).map((h) => h.alpha);
+    const materials = new Set(set.group.children.map((o) => (o as THREE.Mesh).material));
+    // The console's own knobs as they stand before the slider moves, whatever their defaults are.
+    const knobs = { alpha: NEBULA_TUNE.alpha, shellAlpha: NEBULA_TUNE.shellAlpha };
+    const full = { sheets: sheetAlpha(), haze: hazeAlpha(), dim: (set.report() as typeof report).dim };
+    ok(full.sheets.length === 2 && full.sheets.every((a) => a === NEBULA_TUNE.alpha), 'at 100% every sheet set is drawn at the console\'s own alpha');
+    opacity = 0.5;
+    set.update(0.016, camera);
+    const half = (set.report() as typeof report).dim;
+    ok(sheetAlpha().every((a) => Math.abs(a - NEBULA_TUNE.alpha * 0.5) < 1e-12), 'at 50% the sheets take half of it');
+    ok(hazeAlpha().every((a, i) => Math.abs(a - full.haze[i] * 0.5) < 2e-3) && hazeAlpha().length === full.haze.length, 'and the haze inside half of its own, together');
+    ok(half.flare > full.dim.flare && half.rays > full.dim.rays && half.flare < 1, `a thinned nebula takes less off the sun: the flare is left at ${half.flare} where it was ${full.dim.flare}`);
+    ok(Math.abs(half.flare - dimInside(seenDepth((set.report() as { inside: { depth: number } }).inside.depth, 0.5), NEBULA_TUNE.dimFlare)) < 2e-3, 'by the depth the camera is in, times the opacity');
+    opacity = 0;
+    set.update(0.016, camera);
+    const none = (set.report() as typeof report).dim;
+    ok(sheetAlpha().every((a) => a === 0) && hazeAlpha().every((a) => a === 0), 'at 0% nothing of it shows');
+    ok(none.flare === 1 && none.rays === 1, 'and the flare and the rays are left alone');
+    ok(NEBULA_TUNE.alpha === knobs.alpha && NEBULA_TUNE.shellAlpha === knobs.shellAlpha, 'the console\'s knobs are not written by the slider');
+    ok(set.group.children.every((o) => materials.has((o as THREE.Mesh).material)), 'and the slider makes no material: uniforms only, nothing compiles');
+    opacity = Number.NaN;
+    set.update(0.016, camera);
+    ok(sheetAlpha().every((a) => a === NEBULA_TUNE.alpha), 'a setting that is not a number reads as 100%');
+    opacity = 1;
+    set.update(0.016, camera);
+  }
+  ok(clampOpacity(2) === 1 && clampOpacity(-1) === 0 && clampOpacity(0.25) === 0.25, 'the opacity is held between 0 and 1');
+  ok(seenDepth(0.8, 0.5) === 0.4 && seenDepth(2, 1) === 1 && seenDepth(0.8, 0) === 0, 'the depth the dimming reads is the depth times the opacity');
+  // The slider itself: the set above is handed its opacity by the test, so what the game hands it is
+  // read out of the source (world.ts and the menu cannot load under node).
+  {
+    const read = (rel: string) => readFileSync(new URL(`../../../src/${rel}`, import.meta.url), 'utf8');
+    ok(/opacity: \(\): number => liveSettings\(\)\.nebulaOpacity,/.test(read('world/world.ts')), "the world hands the nebulae the Graphics page's own setting, read live");
+    ok(/\{ key: 'nebulaOpacity', label: 'Nebula opacity', kind: 'range', min: 0, max: 1,/.test(read('ui/menu.ts')), 'and the Graphics page has the slider, 0 to 100%');
+    ok(/nebulaOpacity: 1,/.test(read('core/settings.ts')), 'which starts at 100%, the nebulae as they are drawn');
+  }
 
   // The bolts: two at once and no more, and a strike that ends on the ship hurts it.
   shipPos.set(200, 0, 0);

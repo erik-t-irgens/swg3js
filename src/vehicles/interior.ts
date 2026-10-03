@@ -14,6 +14,7 @@ import { markActor } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
 import { LIFT_CELL, liftStops, stopAt, type LiftStop } from '../world/lifts';
 import type { Vehicle } from './vehicle';
+import { cellIndexOf, cellNameOf, ownCellIndex } from './cells.ts';
 
 /** What the ships manifest says of an interior model: its cells and bounds, as a pack model carries them. */
 export interface InteriorDef {
@@ -73,41 +74,9 @@ const ENTRY_HARDPOINT = /spawn|entry|entrance|start|arriv|player_?start|boarding
 /** How bright a room's lights are over the client's values, as the world's rooms have them. */
 const ROOM_LIGHT_SCALE = 3;
 
-/**
- * Which portal cell a node *is*, from its own name and nothing else: the converter names a cell's
- * node cell:<index>:<name>, and GLTFLoader strips the colons, so "cell:2:hall" arrives as
- * "cell2hall". -1 for anything that is not a cell's own node.
- *
- * This is the question to ask when a room is being shown, hidden or lifted out whole, because the
- * meshes under a cell are not rooms and must not be turned on one by one (that is what would show a
- * window's invisible pane). `cellIndexOf` below asks the other question, "which cell is this part
- * of", and both are written here so there is one spelling of the converter's naming.
- */
-export function ownCellIndex(o: THREE.Object3D | null): number {
-  const m = o ? /^cell[:_]?(\d+)/.exec(o.name) : null;
-  return m ? Number(m[1]) : -1;
-}
-
-/**
- * Which portal cell a node belongs to, from its own or an ancestor's name. -1 for a node of a
- * plain model.
- */
-export function cellIndexOf(o: THREE.Object3D | null): number {
-  for (let n = o; n; n = n.parent) {
-    const i = ownCellIndex(n);
-    if (i >= 0) return i;
-  }
-  return -1;
-}
-
-/** The cell's name from its node, "cell:2:hall" arriving as "cell2hall". */
-export function cellNameOf(o: THREE.Object3D | null): string {
-  for (let n = o; n; n = n.parent) {
-    const m = /^cell[:_]?\d+[:_]?(.*)$/.exec(n.name);
-    if (m) return m[1];
-  }
-  return '';
-}
+// Which cell a node is, and which it belongs to: the converter's one spelling of a cell's node,
+// kept in `cells.ts` so the hull can ask it without loading the rooms, and handed on from here.
+export { cellIndexOf, cellNameOf, ownCellIndex };
 
 /** A hardpoint node's name without its hp: prefix (the loader keeps the original name in userData), or null. */
 function hardpointNameOf(o: THREE.Object3D): string | null {

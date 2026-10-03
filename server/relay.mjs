@@ -65,21 +65,40 @@
 //   { t: 'duel', do: ask|accept|decline|end, to? }           the game's own COMBAT_DUEL and COMBAT_PEACE, at its own
 //                                                          128 m: how two players agree to fight where the server's
 //                                                          switch for it is off
-//   { t: 'spawn', do: add|remove|clear|dead, species?, at?, h?, seed?, id?, inside? }
-//                                                          the world's creatures (ownership.mjs). Nothing appears on
-//                                                          its own: an admin stands one by hand and what they stand
-//                                                          is the world's. `add`, `remove` and `clear` are the
-//                                                          admin's alone; `dead` is the word of whichever browser
-//                                                          was keeping that creature, and a death happens once
+//   { t: 'spawn', do: add|remove|clear|dead|taken|seen|unseen|arm, species?, at?, h?, seed?, id?, inside?, weapon?, r?, by? }
+//                                                          the world's creatures (ownership.mjs). An admin stands one
+//                                                          by hand (`add`, with the weapon the console put in its hand
+//                                                          if any), puts a weapon in the hand of one already standing
+//                                                          (`arm`), and takes them down (`remove`, `clear`). Every
+//                                                          browser stands the lairs, the nests and the people at their
+//                                                          posts for itself from the same data, and says so (`seen`,
+//                                                          with where and how long it stays dead once it dies) and when
+//                                                          it puts its body down (`unseen`); any browser with a claim
+//                                                          may. `dead` is the word of whichever browser was keeping it,
+//                                                          with whoever struck it in the last moments (`by`, relay ids),
+//                                                          and a death happens once; `taken` is that keeper saying one
+//                                                          has walked off with its player as a follower
 //   { t: 'keep', do: 'awake', a }                            this browser has been put to sleep, or woken: asleep it
 //                                                          keeps nothing, and the server picks again at once
-//   { t: 'npcState', r: [{ i, p, h, s, v, hp, f? }] }        where the creatures this browser keeps have got to, four
-//                                                          times a second (npcWire.mjs); rows for anything it was not
-//                                                          granted are dropped rather than passed on
-//   { t: 'npcHit', i, a, at, w?, b? }                        a blow struck against a creature somebody else keeps: it
-//                                                          goes to that keeper alone, who decides what it does
+//   { t: 'npcState', r: [{ i, p, h, s, v, hp, f?, fd?, ff?, po?, cv? }] }
+//                                                          where the creatures this browser keeps have got to, four
+//                                                          times a second, how low each stands and whether it is in
+//                                                          cover (npcWire.mjs); rows for anything it was not granted
+//                                                          are dropped rather than passed on
+//   { t: 'npcHit', i, a, at, w?, b?, d?, s?, c?, z? }        a blow struck against a creature somebody else keeps: it
+//                                                          goes to that keeper alone, who decides what it does -- with
+//                                                          the bolt's own flight when it was one, so the keeper's blade
+//                                                          can turn it away
 //   { t: 'npcDrop', i }                                      this browser cannot keep that one (no body, no species):
 //                                                          the grant goes back and it is not offered again for a while
+//   { t: 'npcBlow', to, i, a, at, w? }                       one of the creatures this browser keeps struck another
+//                                                          player: it goes to that player alone, who takes it off. It is
+//                                                          not behind the friendly-fire switch, which is about players,
+//                                                          so it is held to an allowance, the player within reach of
+//                                                          the creature, and (a seen one) a player whose own browser
+//                                                          stood that very creature (`Ownership.mayStrike`)
+//   { t: 'day', ms }                                       the admin changing how long a day is, for everybody: the day
+//                                                          is anchored where it stands so nobody's sun moves
 //   { t: 'items', do: list|get|add|drop|using, rows?, kind?, what?, id?, worn?, held? }
 //                                                          what this character owns (ledger.mjs). `list` is the
 //                                                          backpack handed up on a first claim; after that the
@@ -137,15 +156,26 @@
 //   { t: 'health', id, hp, d? }   { t: 'died', id, by? }
 //   { t: 'hurt', id, a, at, w? }   (to the one hurt and to nobody else, and only where they may be hurt)
 //   { t: 'duel', do: asked|sent|on|off|declined|refused, id?, why? }
-//   { t: 'spawn', do: 'list', world, rows: [{ id, world, species, at, h, seed, inside?, hp? }] }   (what stands on
-//                                                          this world, sent on arriving and again when it is cleared)
-//   { t: 'spawn', do: 'add', row }   { t: 'spawn', do: 'gone', id, why: dead|removed }
+//   { t: 'spawn', do: 'list', world, rows: [{ id, world, species, at, h, seed, inside?, hp?, weapon? }] }   (what an
+//                                                          admin stood on this world, sent on arriving and again when
+//                                                          it is cleared; never a seen one, which every browser stands
+//                                                          for itself)
+//   { t: 'spawn', do: 'add', row }   { t: 'spawn', do: 'gone', id, why: dead|removed|taken, back?, by? }
+//                                                          (`back`: seconds a seen one stays down before anybody stands
+//                                                           it again; `by`: who struck it last, as the keeper said)
 //   { t: 'spawn', do: 'refused', why }   (to whoever asked, and to nobody else)
+//   { t: 'spawn', do: 'local', id }   (to a browser that said it saw one this world cannot hold: keep it to yourself)
+//   { t: 'spawn', do: 'arm', id, weapon }   (the admin put that weapon in its hand: to everybody on its world, and
+//                                          to a browser that says it has seen one whose record carries a weapon)
 //   { t: 'keep', add: [id], drop: [id] }   (who thinks for which creature: the server's answer is the only one,
 //                                           and a browser never thinks for one it was not granted)
 //   { t: 'npcState', id?, r: [...] }   (a keeper's batch passed on to the rest of that world; with no `id` it is the
 //                                       picture a browser is handed on arriving, of where everything was last seen)
-//   { t: 'npcHurt', id, i, a, at, w?, b? }   (a blow, to the browser keeping that creature and to nobody else)
+//   { t: 'npcHurt', id, i, a, at, w?, b?, d?, s?, c?, z? }   (a blow, to the browser keeping that creature and to
+//                                                          nobody else)
+//   { t: 'npcBlow', id, i, a, at, w? }   (a creature kept at that browser struck you; you, and nobody else, take it off)
+//   { t: 'day', dayMs, dayAt?, dayFrom? }   (how long a day is now and where it was anchored, to everybody connected)
+//   { t: 'day', do: 'refused', why }   (to whoever asked, and to nobody else)
 //   { t: 'items', do: 'list', take: browser|server, rows: [{ id, kind, what, got }] }   (the settled list, sent back
 //                                                          in answer to a list or a get: the first one a character
 //                                                          hands up is written down, and after that this is the truth)
@@ -174,21 +204,28 @@ import { join } from 'node:path';
 import { cleanAsk } from './vehicleWire.mjs';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, cleanState } from './wire.mjs';
 import { Rooms, roomKey, roomLabel } from './rooms.mjs';
-import { WorldClock, DAY_MS } from './clock.mjs';
+import { WorldClock, DAY_MS, DAY_LIMITS, cleanDay } from './clock.mjs';
 import { STORE_TUNING, openStore } from './store.mjs';
 import { Sessions, adminFor, checkClaim, firstRegistered, isAdmin, makeNonce, summaryOf } from './identity.mjs';
-import { OWN_TUNING, Ownership, cleanKeep, cleanSpawn, maySpawn } from './ownership.mjs';
+import { OWN_TUNING, Ownership, cleanKeep, cleanSpawn, mayBlow, maySee, maySpawn } from './ownership.mjs';
 import { GROUP_RANGES, GROUP_TUNING, Groups, cleanChat, cleanGroup } from './groups.mjs';
 import { cleanCross, mayCross } from './crossWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
-import { NpcPlaces, cleanNpcBatch, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
+import { NpcPlaces, cleanNpcBatch, cleanNpcBlow, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
 import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
 
-/** What this server speaks. A browser that hears no hail is talking to the relay that came before. */
-const WIRE_VERSION = 2;
+/**
+ * What this server speaks. A browser that hears no hail is talking to the relay that came before. 3 is
+ * the seen creatures, a creature's blow on another player, a blade turning a bolt away at its keeper,
+ * how low a body stands on the wire, and the admin's day: a browser built for 3 does none of that
+ * against a server that says 2, and a browser built before 3 never sends any of it. 4 is the admin's
+ * `arm`, a weapon put in the hand of one of the world's creatures already standing, which a server that
+ * says 3 would drop in silence.
+ */
+const WIRE_VERSION = 4;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
@@ -286,7 +323,11 @@ const DATA = option('data', join(import.meta.dirname, 'data'));
 // player it registers its admin (see below), which is the person who started the server and joined it.
 const ADMIN = option('admin', process.env.SWG_ADMIN ?? '');
 const FRIENDLY_FIRE = flag('friendly-fire') || flag('ff');
-const DAY = Number(option('day', '')) > 0 ? Number(option('day', '')) * 1000 : DAY_MS;
+// Whether the day's length was named on the command line. Named, it stands for the run over whatever
+// the admin last set; not named, the admin's last word stands, and a world nobody ever changed keeps the
+// game's own twelve minutes.
+const DAY_GIVEN = Number(option('day', '')) > 0;
+const DAY = DAY_GIVEN ? Number(option('day', '')) * 1000 : DAY_MS;
 
 // ---------------------------------------------------------------------------------------------
 // The truth, the clock and the rooms
@@ -294,7 +335,15 @@ const DAY = Number(option('day', '')) > 0 ? Number(option('day', '')) * 1000 : D
 // The store knows when this world first ran and hands that to the clock, which is how the server can
 // say how old the world is. The time of day itself is the wall clock and needs nothing remembered.
 const store = openStore({ dir: DATA, saveEvery: TUNING['store.saveEvery'], renameTries: TUNING['store.renameTries'], log: (line) => console.log(`  ${line}`) });
-const clock = new WorldClock({ epoch: store.data.epoch, dayMs: DAY });
+// The day as it was left: the length and the anchor the admin's last change of it made, read back so a
+// restart does not move anybody's sun. A world nobody has changed the day of has no anchor and keeps the
+// day the wall clock always gave it.
+const lastDay = store.data.settings ?? {};
+const keptDay = Number(lastDay.dayMs) >= DAY_LIMITS.minMs && Number(lastDay.dayMs) <= DAY_LIMITS.maxMs && Number(lastDay.dayAt) > 0;
+const clock = keptDay ? new WorldClock({ epoch: store.data.epoch, dayMs: Number(lastDay.dayMs), dayAt: Number(lastDay.dayAt), dayFrom: Number(lastDay.dayFrom) || 0 }) : new WorldClock({ epoch: store.data.epoch, dayMs: DAY });
+// A length named on the command line over one the admin set: taken from where the day stands now, so
+// the sun goes on from the hour it was at rather than jumping to wherever the wall clock puts it.
+if (keptDay && DAY_GIVEN && DAY !== clock.dayMs) clock.setDay(DAY);
 const rooms = new Rooms();
 const sessions = new Sessions();
 // The groups are keyed by character, not by connection, which is what lets someone reload their
@@ -308,10 +357,10 @@ const groups = new Groups({ tuning: GROUP_TUNING });
 // group, a duel is a thing two people are doing this minute: it is held by connection and nothing
 // of it is written to disk.
 const duels = new Duels({ range: GROUP_RANGES.duel, seconds: COMBAT_WIRE.duel });
-// The world's creatures: what an admin has stood by hand, and which browser is thinking for each of
-// them this half-second (ownership.mjs). Nothing appears on its own -- the planet's automatic
-// wildlife is off -- so this list is empty until somebody stands something in it. It is not written
-// to disk: what stands in the world is a thing people are doing this evening, like a group.
+// The world's creatures: what an admin has stood by hand, what every browser stands for itself from
+// the same data and has said so (the lairs, the nests, the people at their posts), and which browser is
+// thinking for each of them this half-second (ownership.mjs). It is not written to disk: what stands in
+// the world is a thing people are doing this evening, like a group.
 const ownership = new Ownership({ tuning: OWN_TUNING });
 // Where each of the world's creatures was last said to be, so a browser arriving on a world is told
 // where things are standing rather than waiting a quarter of a second for the first batch. It is a
@@ -336,9 +385,9 @@ homes.load(store.data);
 // rest: a balance only in memory would be a different number after every restart.
 const purses = new Purses({ tuning: PURSE_TUNING, write: (rec) => store.change(rec) });
 purses.load(store.data);
-const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, dayMs: DAY };
+const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, ...clock.dayHand() };
 const had = store.data.settings ?? {};
-if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs) store.change({ t: 'settings', settings });
+if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs || (had.dayAt ?? 0) !== (settings.dayAt ?? 0)) store.change({ t: 'settings', settings });
 // A world played in before there was an admin at all takes the first player it ever registered, so
 // nobody has to name themselves on a command line to be the admin of their own world. A name given
 // on the command line stands for the run and is not written down: it is a switch, not the truth.
@@ -736,7 +785,11 @@ function onMessage(c, text, trimmed = false) {
     if (!hello) return;
     const first = !c.hello;
     c.hello = hello;
-    if (msg.v === WIRE_VERSION) c.v = WIRE_VERSION;
+    // The language the browser speaks, as far as this server speaks it: what a word only some browsers
+    // understand is held to (`npcBlow` is the third language's), so a browser a version behind still hears
+    // everything it can.
+    const v = Number(msg.v);
+    if (Number.isInteger(v) && v > 0) c.v = Math.min(WIRE_VERSION, v);
     const key = roomKey(hello.planet, hello.zone);
     const move = rooms.set(c.id, key);
     // A group's roster says what world each member is on, so it is told here and nowhere else; this
@@ -969,16 +1022,17 @@ function onMessage(c, text, trimmed = false) {
     else if (duel.do === 'decline') deliverTo(duels.decline(c.id));
     else if (duel.do === 'end') deliverTo(duels.end(c.id));
   } else if (msg.t === 'spawn') {
-    // The world's creatures. Nothing appears on its own: an admin stands one by hand and what they
-    // stand belongs to the world -- everyone on it is told, one browser thinks for it, and it is
-    // handed between browsers as people walk about. The asking browser is told along with everyone
-    // else rather than standing its own copy, so there is one path and not two.
+    // The world's creatures. An admin stands one by hand and what they stand belongs to the world --
+    // everyone on it is told, one browser thinks for it, and it is handed between browsers as people
+    // walk about. The asking browser is told along with everyone else rather than standing its own
+    // copy, so there is one path and not two. The ones every browser stands for itself are `seen`
+    // below, and are handed between browsers the same way without anybody being told to stand them.
     if (!c.hello) return;
     const ask = cleanSpawn(msg, OWN_TUNING);
     if (!ask) return;
     const world = rooms.keyOf(c.id);
     if (!world) return;
-    if (ask.do === 'dead') {
+    if (ask.do === 'dead' || ask.do === 'taken') {
       // A death is the word of whichever browser was keeping that creature, and of nobody else: it
       // is the one that was thinking for it. It is also the word of whoever was keeping it a moment
       // ago (`mayKill`, the grace in OWN_TUNING): a keeper drops one to nothing and says so in the
@@ -987,13 +1041,38 @@ function onMessage(c, text, trimmed = false) {
       // back up whole by whoever took it. A death happens once and stays, so a browser that takes
       // the creature over afterwards cannot stand it up again. It is not counted against the spawn
       // allowance below: a death is not a thing asked for, and a fight is not a key held down.
+      //
+      // `taken` is the same keeper saying the creature walked off with its player as a follower: to
+      // every other browser it is gone from its post, and a seen one's post stays empty for its own
+      // respawn exactly as after a death.
       if (!ownership.mayKill(c.id, ask.id)) return;
-      const end = ownership.died(ask.id);
+      const end = ask.do === 'dead' ? ownership.died(ask.id) : ownership.taken(ask.id);
       if (!end.ok) return;
       deliverTo(end);
-      sendToRoom(end.world, { t: 'spawn', do: 'gone', id: ask.id, why: 'dead' });
+      // Who struck it in its last moments, as its keeper names them, kept to the players really on
+      // this world. Nothing is written down about it: it goes out with the death and is a witness a
+      // later server can count kills by, and nothing here counts anything yet.
+      const by = (ask.by ?? []).filter((id) => {
+        const o = clients.get(id);
+        return !!o?.hello && rooms.keyOf(o.id) === end.world;
+      });
+      sendToRoom(end.world, { t: 'spawn', do: 'gone', id: ask.id, why: ask.do === 'dead' ? 'dead' : 'taken', ...(end.back ? { back: end.back } : {}), ...(by.length ? { by } : {}) });
       // It is gone, so the picture of where things stand forgets it.
       npcPlaces.gone(end.world, ask.id);
+      return;
+    }
+    if (ask.do === 'seen' || ask.do === 'unseen') {
+      // The lairs, the nests and the people at their posts, which every browser stands for itself
+      // from the same data: any browser that has said who it is may say it has stood one, or put one
+      // down, and need be nobody's admin to. What it says is only ever about its own body; what the
+      // creature is and where it is going stay its keeper's. Saying it has stood one is counted against
+      // an allowance of its own, since walking into a town says it of a few dozen people together.
+      if (!c.player) return;
+      if (ask.do === 'seen') {
+        c.seeing ??= { at: 0, lines: 0 };
+        if (!maySee(c.seeing, Date.now(), OWN_TUNING)) return;
+        deliverTo(ownership.sight(c.id, world, ask.id, ask.at, ask.r * 1000));
+      } else deliverTo(ownership.unsee(c.id, ask.id));
       return;
     }
     // The allowance is counted before anything is decided about who is asking, and before a word
@@ -1011,7 +1090,7 @@ function onMessage(c, text, trimmed = false) {
       // The seed is the server's when the browser named none: it is what each browser rolls the
       // creature's own numbers from, so it has to be the same one everywhere and it is decided once.
       const seed = ask.seed || (Math.random() * 0xffffffff) >>> 0;
-      const made = ownership.spawn({ world, species: ask.species, at: ask.at, h: ask.h, seed, by: c.player ?? '', id: ask.id ?? '', inside: !!ask.inside });
+      const made = ownership.spawn({ world, species: ask.species, at: ask.at, h: ask.h, seed, by: c.player ?? '', id: ask.id ?? '', inside: !!ask.inside, weapon: ask.weapon ?? '' });
       if (!made.ok) {
         send(c, { t: 'spawn', do: 'refused', why: made.why });
         return;
@@ -1023,6 +1102,16 @@ function onMessage(c, text, trimmed = false) {
       sendToRoom(world, { t: 'spawn', do: 'add', row: made.row });
       deliverTo(made);
       console.log(`  ${c.id} ${who(c)} stood ${made.row.species} on ${roomLabel(world)} as ${made.row.id}`);
+    } else if (ask.do === 'arm') {
+      // A weapon put in the hand of one already standing: the record carries it, and everybody on its
+      // world is told, the admin who asked included, so every browser re-arms its own copy the same way.
+      const armed = ownership.arm(ask.id, ask.weapon, world);
+      if (!armed.ok) {
+        send(c, { t: 'spawn', do: 'refused', why: armed.why });
+        return;
+      }
+      sendToRoom(world, { t: 'spawn', do: 'arm', id: ask.id, weapon: armed.weapon });
+      console.log(`  ${c.id} ${who(c)} put ${armed.weapon} in the hand of ${ask.id} on ${roomLabel(world)}`);
     } else if (ask.do === 'remove') {
       const off = ownership.remove(ask.id);
       if (!off.ok) return;
@@ -1080,7 +1169,52 @@ function onMessage(c, text, trimmed = false) {
     if (!world || world !== rooms.keyOf(c.id)) return;
     const keeper = ownership.keeperOf(hit.i);
     if (!keeper || keeper === c.id) return;
-    send(clients.get(keeper), { t: 'npcHurt', id: c.id, i: hit.i, a: hit.a, at: hit.at, ...(hit.w ? { w: hit.w } : {}), ...(hit.b ? { b: 1 } : {}) });
+    // The bolt's own flight goes with it when it was one, so the keeper's creature can turn it away.
+    const bolt = hit.d ? { d: hit.d, s: hit.s, c: hit.c, z: hit.z } : {};
+    send(clients.get(keeper), { t: 'npcHurt', id: c.id, i: hit.i, a: hit.a, at: hit.at, ...(hit.w ? { w: hit.w } : {}), ...(hit.b ? { b: 1 } : {}), ...bolt });
+  } else if (msg.t === 'npcBlow') {
+    // One of the creatures this browser keeps struck another player. The keeper is the creature's own
+    // browser, so it is the only one that may say this, and only of a creature it keeps (or kept a
+    // moment ago, the same grace a death has); and it goes to the player struck and to nobody else,
+    // who is the only place the number comes off -- the players' own rule, with the keeper where the
+    // shooter stands. Not behind the friendly-fire switch: that is about two players, and a peaceful
+    // world is not one where the wildlife cannot bite. Never dropped for being behind: it is a blow.
+    //
+    // Because it is not behind that switch it is held to everything this server can see instead, or a
+    // browser on another build could say a creature of its bit anybody anywhere for any amount: a word
+    // allowance of its own, the player struck within reach of where the creature was last said to stand,
+    // and, for one of the seen kind, a player whose own browser has stood that very creature
+    // (`Ownership.mayStrike`). And only to a browser that speaks of such blows at all: one built before
+    // them would drop the word, so it is not sent.
+    if (!c.hello) return;
+    const blow = cleanNpcBlow(msg);
+    if (!blow) return;
+    c.blowing ??= { at: 0, lines: 0 };
+    if (!mayBlow(c.blowing, Date.now(), OWN_TUNING)) return;
+    const world = ownership.worldOf(blow.i);
+    if (!world || world !== rooms.keyOf(c.id)) return;
+    const to = clients.get(blow.to);
+    if (!to || to === c || !to.hello || !((to.v ?? 0) >= 3) || rooms.keyOf(to.id) !== world) return;
+    if (!ownership.mayStrike(c.id, blow.i, to.id, npcPlaces.at(world, blow.i))) return;
+    send(to, { t: 'npcBlow', id: c.id, i: blow.i, a: blow.a, at: blow.at, ...(blow.w ? { w: blow.w } : {}) });
+  } else if (msg.t === 'day') {
+    // How long a day is, for everybody, from the one person who may say it. The day is anchored where it
+    // stands as it changes (clock.mjs), so nobody's sun jumps, and the anchor is what everybody connected
+    // is told -- on every world, since the day is the server's and not a world's. It is written down, so
+    // a restart keeps it, unless the next start names a length on its command line.
+    if (!c.hello) return;
+    const want = cleanDay(msg);
+    if (!want) return;
+    c.daying ??= { at: 0, lines: 0 };
+    if (!maySpawn(c.daying, Date.now(), OWN_TUNING)) return;
+    if (!admins(c)) {
+      send(c, { t: 'day', do: 'refused', why: 'only this world’s admin can change how long a day is' });
+      return;
+    }
+    const day = clock.setDay(want.ms);
+    store.change({ t: 'settings', settings: day });
+    for (const o of clients.values()) if (o.hello) send(o, { t: 'day', ...day });
+    console.log(`  ${c.id} ${who(c)} made a day ${Math.round(day.dayMs / 1000)} s long`);
   } else if (msg.t === 'npcDrop') {
     // A browser saying it cannot keep one: it has no body for that creature and cannot build one
     // (its catalogue does not know the species), or its model has still not landed. Keeping a
@@ -1488,8 +1622,9 @@ server.listen(PORT, () => {
   console.log(`  damage between players is ${FRIENDLY_FIRE ? 'on' : `off (--friendly-fire turns it on); with it off, two players may still agree to a duel, which reaches ${GROUP_RANGES.duel} m -- the client's own distance`}`);
   console.log(`  a group holds ${GROUP_TUNING.members}, an invitation reaches ${GROUP_RANGES.invite} m (the client's own distance), and a place is held for ${Math.round(GROUP_TUNING.hold / 1000)} s while someone reloads`);
   const admin = adminFor(store.data, ADMIN);
-  console.log(`  nothing appears in the world on its own: ${admin ? `${admin} is its admin and stands creatures by hand` : 'the first player this world meets becomes its admin and stands creatures by hand'} (--admin=<player id> names another)`);
+  console.log(`  ${admin ? `${admin} is this world's admin and stands creatures by hand` : 'the first player this world meets becomes its admin and stands creatures by hand'} (--admin=<player id> names another)`);
   console.log(`  one browser thinks for each of them: the nearest player within ${OWN_TUNING.range} m, changing hands only after another has been a quarter nearer for ${Math.round(OWN_TUNING.steady / 1000)} s`);
+  console.log(`  the lairs, nests and people every browser stands for itself are shared the same way once a browser says it has stood one, up to ${OWN_TUNING.seenPerWorld} a world: the nearest browser with a body for one keeps it, a dead one stays down for its own respawn, and one nobody keeps or sees for ${Math.round(OWN_TUNING.forget / 1000)} s is forgotten`);
   console.log(`  what each character owns is kept here too: ${ledger.describe()}; two players trade within ${GROUP_RANGES.trade} m -- the client's own distance -- and a swap is one line in the log or none`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

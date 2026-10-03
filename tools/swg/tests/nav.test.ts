@@ -511,9 +511,13 @@ function fakeBuilding(cells: CellDef[], portals: PortalDef[], offsetX = 0): { bu
   ok(hook !== null && /if \(corner\) face = corner;/.test(hook[0]), 'and only what it faces is taken from the path');
   ok(hook !== null && !/moveTo\s*=/.test(hook[0]), 'the goal it is measured against is never overridden, so it cannot stop a stride short of every corner');
   ok(hook !== null && /!this\.flyer/.test(hook[0]), 'and nothing that flies is pathed across a floor');
-  ok(/this\.navAgent\.clear\(\)/.test(mobile), 'a creature that respawns drops the corners it was walking');
+  ok(/this\.navAgent\.clear\(\)/.test(mobile), 'a creature stood somewhere new drops the corners it was walking');
   ok(/m\.navCell = held\.cell;/.test(manager) && /m\.navCell = null;/.test(manager), "the manager writes the room the path is keyed on beside the room it already wrote, and clears it on open ground");
+  // Three: where a body is stood, where it is followed, and where a building put down in play comes down
+  // round it (`standOutOf`, the fix round's take-down), which puts it on open ground. The fourth, where
+  // the old ambient wildlife came back somewhere else, went with that path (W11).
   ok((manager.match(/m\.navCell/g) ?? []).length === 3, 'in the three places it writes the room and nowhere else');
+  ok(/standOutOf\(building: object[\s\S]{0,900}m\.room = 0;\s*m\.navCell = null;/.test(manager), 'and the fourth puts a body out of a building that is coming down on open ground, in no room');
 }
 
 // --- 16: a room's floor over a body that stands on none ----------------------------------------------------

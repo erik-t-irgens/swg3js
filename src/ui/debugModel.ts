@@ -6,7 +6,11 @@
 // three.js objects a helper can answer with are recognised by the flags three sets on them
 // (`isVector3`, `isObject3D`, ...), never by importing three.
 
-/** Every number of the menu's that is ours. None of it is the game's; nothing here is saved. */
+/**
+ * Every number of the menu's that is ours. None of it is the game's. What is kept is the menu's own
+ * history and pins, in this browser's storage; what a knob sets is never kept by the menu, and comes
+ * back after a reload only for a pin ticked to run at start (`startCalls`).
+ */
 export const DEBUG_MENU_TUNE = {
   /** Calls kept in the history, newest first. */
   historyMax: 30,
@@ -28,25 +32,39 @@ export const DEBUG_MENU_TUNE = {
   flushMs: 500,
   /** Milliseconds the game's keys stand aside after Escape has shut the menu from a typed line. */
   escapeHoldMs: 400,
+  /** How long one pinned call run at start is waited on before the next is run, in milliseconds. */
+  startWaitMs: 10000,
 };
 
 // ---- groups and search ---------------------------------------------------------------------------
 
 /**
+ * The knobs: the helpers that set a number or a switch the owner turns while playing, rather than
+ * report or do something once -- how far the world is drawn and in how much detail, which plants block,
+ * god mode and the fights' difficulty, the hour, the day's length and the fog, the lightsaber glow and
+ * the flashlight, the speeders' hover, the nebulae, a weapon for a body already standing, and the seats
+ * under the seated people. Listed first, in a group of their own, so every one is in one place and a new
+ * one is a line here; the pins of these are the ones a tick runs again at start (`startCalls`).
+ */
+export const TUNING_HELPERS: readonly string[] = ['reach', 'lod', 'flora', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats'];
+
+/**
  * Where each helper is listed. A helper named in no group is listed under "Other", so one added to
- * `__debug` later still shows; a window knob is written with its own name (`__sharedDay`).
+ * `__debug` later still shows; a window knob is written with its own name (`__sharedDay`). No helper is
+ * filed twice: the knobs are in the first group and nowhere else.
  */
 export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] }[] = [
-  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'time', 'day', 'fog', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'gallery', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'cloning'] },
+  { title: 'Tuning', helpers: TUNING_HELPERS },
+  { title: 'Where and when', helpers: ['teleport', 'teleportSwg', 'swg', 'look', 'zoom', 'mouse', 'cell', 'near', 'find', 'player', 'scene', 'advance', 'advanceCost', 'breakFrames', 'map', 'mapGroup', 'galaxy', 'spaceMap', 'travel', 'gates', 'doorless', 'buildings', 'enter', 'interiors', 'gallery', 'show', 'character', 'capture', 'captureShip', 'goToShot', 'place', 'placeView', 'placeClock', 'cloning'] },
   { title: 'Travel, homes and trade', helpers: ['shuttle', 'terminal', 'ride', 'rigHull', 'fittings', 'house', 'homes', 'deed', 'prop', 'purse', 'trade'] },
   { title: 'Character and kit', helpers: ['appearance', 'recipe', 'morph', 'species', 'wardrobe', 'wear', 'remove', 'preview', 'closet', 'fpHead', 'headLook', 'mood', 'variant', 'anim', 'upper', 'split', 'steady', 'grip', 'items', 'give', 'use', 'destroy', 'backpack', 'startingKit', 'giveScreens', 'weapons', 'equip', 'heldFx', 'shine', 'select', 'burn', 'breath', 'heal', 'profile', 'gun', 'gunType'] },
-  { title: 'Fighting', helpers: ['saber', 'saberDefense', 'guns', 'bolts', 'turrets', 'turret', 'shootPlayer', 'blades', 'clash', 'scars', 'marks', 'powers', 'gadgets', 'forceLightning', 'footprints', 'ragdoll', 'kill', 'difficulty', 'wreck'] },
+  { title: 'Fighting', helpers: ['saber', 'saberDefense', 'guns', 'bolts', 'turrets', 'turret', 'shootPlayer', 'blades', 'clash', 'scars', 'marks', 'powers', 'gadgets', 'forceLightning', 'footprints', 'ragdoll', 'kill', 'wreck'] },
   { title: 'Creatures and people', helpers: ['creature', 'fighter', 'fighters', 'cover', 'send', 'nav', 'patrols', 'mobile', 'mobiles', 'mobileRoles', 'mobileAssets', 'mobileTune', 'stepProbe', 'mobileCull', 'wild', 'people', 'ours', 'talk', 'followers'] },
   { title: 'Vehicles and ships', helpers: ['vehicles', 'spawn', 'spawnBox', 'mount', 'unspawn', 'vehicleTune', 'vehicleState', 'shipFit', 'refit', 'paint', 'shipEdit', 'ship', 'controls', 'cockpit', 'cockpitFrame', 'seat', 'wings', 'landing', 'dock', 'boots', 'droid', 'shipShadows', 'shipDrift', 'pushBodies', 'flight', 'taunt', 'npcShips', 'npcShip', 'shipCombat'] },
-  { title: 'Space', helpers: ['cruise', 'jumps', 'jump', 'jumpState', 'jumpFx', 'nebulae', 'suns'] },
-  { title: 'Picture and effects', helpers: ['postfx', 'fxTiming', 'fxView', 'fxCheck', 'fxWarm', 'renderInfo', 'ssao', 'dof', 'previewDof', 'clouds', 'bladeGlow', 'heat', 'heatPlume', 'flare', 'flareTune', 'flareProbe', 'faceSun', 'roomAir', 'movers', 'motionProbe', 'motionTune', 'grade', 'gradeSelfTest', 'gradeCheck', 'shadows', 'shadowLook', 'ambient', 'normals', 'gloss', 'reflections', 'blackBox', 'specks', 'underwater', 'particles', 'ribbons', 'animTex'] },
+  { title: 'Space', helpers: ['cruise', 'jumps', 'jump', 'jumpState', 'jumpFx', 'suns'] },
+  { title: 'Picture and effects', helpers: ['postfx', 'fxTiming', 'fxView', 'fxCheck', 'fxWarm', 'renderInfo', 'ssao', 'dof', 'previewDof', 'clouds', 'heat', 'heatPlume', 'flare', 'flareTune', 'flareProbe', 'faceSun', 'roomAir', 'movers', 'motionProbe', 'motionTune', 'grade', 'gradeSelfTest', 'gradeCheck', 'shadows', 'shadowLook', 'ambient', 'normals', 'gloss', 'reflections', 'blackBox', 'specks', 'underwater', 'particles', 'ribbons', 'animTex'] },
   { title: 'Water, sky and weather', helpers: ['water', 'waterFx', 'waterSurface', 'sea', 'afloat', 'lava', 'ripples', 'fountains', 'weather', 'sky'] },
-  { title: 'Frame cost', helpers: ['perf', 'bench', 'cull', 'skeletons', 'farTiles', 'lod', 'placed', 'flora', 'passes', 'passLog', 'drawCalls', 'shaders', 'physics', 'props'] },
+  { title: 'Frame cost', helpers: ['perf', 'bench', 'cull', 'skeletons', 'farTiles', 'placed', 'passes', 'passLog', 'drawCalls', 'shaders', 'physics', 'props'] },
   { title: 'Sound', helpers: ['audio', 'sound', 'soundGain', 'ambience', 'audioSelfTest', 'footsteps', 'gunSounds', 'vehicleSounds', 'sabers', 'surface', 'band'] },
   { title: 'Display and keys', helpers: ['hud', 'hurt', 'hit', 'say', 'windows', 'bind', 'bindings', 'resetBindings', 'debugMenu'] },
   { title: 'Playing together', helpers: ['session', 'group', 'chat', 'combat', 'together', 'owned', 'npcs', '__sharedDay', '__aboard', '__board', '__peers', '__rooms', '__peerBlades', '__npcs'] },
@@ -750,6 +768,12 @@ export interface CallRecord {
   helper: string;
   on: 'debug' | 'window';
   args: string;
+  /**
+   * A pin's own tick: run it again once the first world is up after every reload (`startCalls`). A knob
+   * the owner wants kept is kept this way and no other, since what a knob sets is never itself saved;
+   * off unless ticked, and nothing but a pin carries it.
+   */
+  atStart?: boolean;
 }
 
 export interface DebugStore {
@@ -794,6 +818,8 @@ export function readStore(text: string | null | undefined): DebugStore {
   if (Array.isArray(r.pinned)) {
     for (const p of r.pinned) {
       const rec = recordOf(p);
+      // A pin's tick is the one field only a pin may carry, and only as the plain `true` it was written as.
+      if (rec && (p as Bag).atStart === true) rec.atStart = true;
       if (rec && !out.pinned.some((x) => sameCall(x, rec))) out.pinned.push(rec);
       if (out.pinned.length >= DEBUG_MENU_TUNE.pinnedMax) break;
     }
@@ -803,7 +829,9 @@ export function readStore(text: string | null | undefined): DebugStore {
 }
 
 export function writeStore(s: DebugStore): string {
-  return JSON.stringify({ history: s.history, pinned: s.pinned, last: s.last });
+  const pinned = s.pinned.map((p) => (p.atStart ? { helper: p.helper, on: p.on, args: p.args, atStart: true } : { helper: p.helper, on: p.on, args: p.args }));
+  const plain = (r: CallRecord | null) => (r ? { helper: r.helper, on: r.on, args: r.args } : null);
+  return JSON.stringify({ history: s.history.map((h) => ({ ...plain(h), at: h.at })), pinned, last: plain(s.last) });
 }
 
 export function sameCall(a: CallRecord, b: CallRecord): boolean {
@@ -827,4 +855,28 @@ export function togglePin(list: readonly CallRecord[], rec: CallRecord): { list:
 /** A call as one line: `perf({ frames: 240 })`, or `__sharedDay()`. */
 export function callText(rec: CallRecord): string {
   return `${rec.helper}(${rec.args.trim()})`;
+}
+
+/**
+ * A pin's tick set or cleared: the list again with that pin's `atStart` as `on`, every other pin as it
+ * was. A call that is not pinned is not ticked (the list comes back unchanged), since nothing but a pin is
+ * run at start.
+ */
+export function setAtStart(list: readonly CallRecord[], rec: CallRecord, on: boolean): CallRecord[] {
+  return list.map((p) => {
+    if (!sameCall(p, rec)) return p;
+    const out: CallRecord = { helper: p.helper, on: p.on, args: p.args };
+    if (on) out.atStart = true;
+    return out;
+  });
+}
+
+/**
+ * The pinned calls to run once the first world is up after a reload: those ticked, in the order they
+ * were pinned. Nothing a knob sets is ever saved by itself, so this is the whole of what comes back, and
+ * every one of them is said as it runs (`DebugMenu.runAtStart`): god mode or a server's day put back at
+ * start is never put back silently.
+ */
+export function startCalls(pinned: readonly CallRecord[]): CallRecord[] {
+  return pinned.filter((p) => p.atStart === true);
 }

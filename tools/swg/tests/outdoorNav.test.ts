@@ -342,7 +342,7 @@ ok(RANKS === NAV_RANKS && OTHER_REGION === NAV_OTHER && INDOOR === NAV_INDOOR, '
   const lastX = w.work.pulled[(n - 1) * 2];
   const lastZ = w.work.pulled[(n - 1) * 2 + 1];
   const k = cellOf(w.grid, lastX, lastZ);
-  ok(nibbleAt(w.grid, k) === 1, 'and the last corner stands on the bodyâ€™s own ground, not inside the room');
+  ok(nibbleAt(w.grid, k) === 1, 'and the last corner stands on the body’s own ground, not inside the room');
 
   const out = planRoute(w.grid, w.work, ...at(25, 25), ...at(180, 50));
   ok(out === 'unreachable', `and the way out of the room answers '${out}'`);

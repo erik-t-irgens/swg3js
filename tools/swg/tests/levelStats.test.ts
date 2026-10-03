@@ -55,6 +55,21 @@ const ok = (cond: boolean, what: string): void => {
   ok(statsAtLevel(10, rows.filter((r) => !r.person), true, 1)?.hp === curveOf(4000, 310).hp, "a kind with no rows of its own is read from everybody's");
   ok(statsAtLevel(0, rows, true) === null && statsAtLevel(10, [], true) === null && statsAtLevel(Number.NaN, rows, true) === null, 'no level, or no rows at all, is no answer: the body keeps its own numbers');
   ok(LEVEL_SAMPLES > 1, `the rows read about a level: the nearest ${LEVEL_SAMPLES}`);
+  // The middle and not the mean: one boss among three rows about a level does not drag everybody's numbers
+  // up with it. Three people at levels 19 to 21, the last a boss with a pool and a blow far past the others.
+  const three: LevelSample[] = [
+    { level: 19, ham: 400, damage: 50, person: true },
+    { level: 20, ham: 900, damage: 100, person: true },
+    { level: 21, ham: 10000, damage: 2000, person: true },
+  ];
+  const middle = statsAtLevel(20, three, true, 3);
+  const mean = curveOf((400 + 900 + 10000) / 3, (50 + 100 + 2000) / 3);
+  ok(!!middle && middle.hp === curveOf(900, 100).hp && middle.damage === curveOf(900, 100).damage, `three rows about a level give their middle pool and blow (${middle?.hp} and ${middle?.damage})`);
+  ok(!!middle && middle.hp !== mean.hp && middle.damage !== mean.damage, `not their mean, which the one boss among them would have made ${mean.hp} and ${mean.damage}`);
+  // And of an even count, the two middle ones halved.
+  const four = [...three, { level: 22, ham: 1600, damage: 150, person: true }];
+  const even = statsAtLevel(21, four, true, 4);
+  ok(!!even && even.hp === curveOf((900 + 1600) / 2, (100 + 150) / 2).hp, 'of four, the middle two halved');
 }
 
 // --- over the owner's catalogue, where it is converted ------------------------------------------------

@@ -13,6 +13,7 @@ import { PLANETS, packIdOf, planetBelow, type PlanetDef } from '../data/planets'
 import { destinationFor, drawnSystems, GALAXY_TUNE, loadGalaxyFile, planetTextureOf, systemOf, systemRoutes, worldsOf, zoneFor, type GalaxySystemDef } from '../data/galaxy';
 import { loadSpacePack, type Destination, type HyperspaceCatalogue } from '../space/spaceData';
 import { GALAXY_VIEW_TUNE, GalaxyView } from './galaxyView';
+import { mapFrame, mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
 
 /**
  * A named place from a converted pack's pois.json, in SWG coordinates. `place` is the client's own
@@ -90,7 +91,7 @@ export class GalaxyMap {
   private currentId = '';
   private currentZone: string | undefined;
   private readonly pois = new Map<string, Promise<Poi[]>>();
-  private readonly groundMaps = new Map<string, Promise<{ url: string; width: number } | null>>();
+  private readonly groundMaps = new Map<string, Promise<{ url: string; frame: MapFrame } | null>>();
   private readonly view: GalaxyView;
   private readonly viewHolder: HTMLElement;
   private readonly catchLayer: HTMLElement;
@@ -292,19 +293,19 @@ export class GalaxyMap {
   }
 
   /**
-   * A world's own ground map picture, from its pack, with the ground width the picture covers; null
-   * where none is converted. The width is what puts a city on it: the picture spans the ground from
-   * -width/2 to +width/2 both ways, with the places' own coordinates already in that frame.
+   * A world's own ground map picture, from its pack, with the ground the picture covers; null where
+   * none is converted. The frame is what puts a city on it (`mapFrame`): the picture spans its width
+   * both ways about its own middle, with the places' own coordinates already in that frame.
    */
-  private groundMap(packId: string): Promise<{ url: string; width: number } | null> {
+  private groundMap(packId: string): Promise<{ url: string; frame: MapFrame } | null> {
     let p = this.groundMaps.get(packId);
     if (!p) {
       const base = `${this.deps.baseUrl}assets-private/${packId}/`;
       p = fetch(`${base}map.json`)
         .then(async (res) => {
           if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          const meta = (await res.json()) as { image?: string; width?: number };
-          return meta.image ? { url: `${base}${meta.image}`, width: Number(meta.width) || 16384 } : null;
+          const meta = (await res.json()) as { image?: string; width?: number; centre?: { x: number; z: number } };
+          return meta.image ? { url: `${base}${meta.image}`, frame: mapFrame(meta) } : null;
         })
         .catch(() => null);
       this.groundMaps.set(packId, p);
@@ -330,7 +331,7 @@ export class GalaxyMap {
     box.insertBefore(wrap, after.nextSibling);
     const pois = await this.loadPois(packId);
     if (!wrap.isConnected) return;
-    const extent = meta.width;
+    const frame = meta.frame;
     // The cities and the ports, and on a world with no cities the client's own named places as well,
     // since there they are the names the world has: the lava world would be blank without them and
     // the tree world's main zone would be one starport among nine places it does not draw. A world
@@ -339,8 +340,8 @@ export class GalaxyMap {
     const withPlaces = pois.some((p) => p.kind === 'city') ? dotted : [...dotted, ...pois.filter((p) => p.kind === 'place')];
     for (const poi of withPlaces) {
       const travel = poi.kind === 'starport' || poi.kind === 'shuttleport';
-      const left = (poi.x + extent / 2) / extent;
-      const top = (extent / 2 - poi.z) / extent;
+      const left = mapShareX(frame, poi.x);
+      const top = mapShareY(frame, poi.z);
       if (!(left >= 0 && left <= 1 && top >= 0 && top <= 1)) continue;
       const dot = document.createElement('button');
       dot.type = 'button';

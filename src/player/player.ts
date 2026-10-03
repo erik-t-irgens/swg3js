@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { ClassId, Resource } from '../combat/kit';
 import type { ThirdPersonCamera } from '../core/camera';
 import type { Input } from '../core/input';
-import { Group, groups, RAPIER, type Physics } from '../core/physics';
+import { Group, groups, PLAYER_SOLVER, RAPIER, type Physics } from '../core/physics';
 import { markActor } from '../world/portalRender';
 import type { Vehicle } from '../vehicles/vehicle';
 import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
@@ -588,7 +588,9 @@ export class Player {
   /** A kinematic capsule with its character controller, in a physics world: the player's in the world, or in a ship's room. */
   private static makeBody(world: RAPIER.World): { body: RAPIER.RigidBody; collider: RAPIER.Collider; controller: RAPIER.KinematicCharacterController } {
     const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    const collider = world.createCollider(RAPIER.ColliderDesc.capsule(STAND_HALF_HEIGHT, CAPSULE_RADIUS).setTranslation(0, CAPSULE_RADIUS + STAND_HALF_HEIGHT, 0), body);
+    // In the solver as the player and nothing else (`PLAYER_SOLVER`), which every collider's default still
+    // takes and somebody following the player leaves out, so walking through a follower never shoves it.
+    const collider = world.createCollider(RAPIER.ColliderDesc.capsule(STAND_HALF_HEIGHT, CAPSULE_RADIUS).setTranslation(0, CAPSULE_RADIUS + STAND_HALF_HEIGHT, 0).setSolverGroups(PLAYER_SOLVER), body);
     const controller = world.createCharacterController(0.04);
     controller.enableAutostep(0.5, 0.2, true);
     controller.setMaxSlopeClimbAngle((55 * Math.PI) / 180);
@@ -1520,9 +1522,22 @@ export class Player {
     return true;
   }
 
-  takeDamage(amount: number): void {
+  /**
+   * God mode (`__debug.god`, `src/player/godMode.ts`): nothing takes health off. Asked first in
+   * `takeDamage`, which every way the player is hurt ends in, so this one flag is the whole of it for
+   * the body. Never saved: a reload is always mortal.
+   */
+  god = false;
+
+  /**
+   * Health off for a blow; false when it was refused (god mode), so the caller shows no red flash and
+   * no arc for a blow that did nothing. `force` is the console's own `kill('player')`, which still kills.
+   */
+  takeDamage(amount: number, force = false): boolean {
+    if (this.god && !force) return false;
     this.hp = Math.max(0, this.hp - amount * this.damageTaken);
     this.regenDelay = 5;
+    return true;
   }
 
   heal(amount: number): void {

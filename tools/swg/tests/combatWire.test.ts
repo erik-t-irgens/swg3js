@@ -289,6 +289,30 @@ function fight(id = 1, { server = true, ff = false } = {}) {
   const a = fight(1);
   a.net.fired(bolt({ source: { key: 55 } }));
   ok(a.of('shot').length === 0, '11: a creature’s or a fighter’s bolt is this browser’s own business and does not cross');
+  // One of the world's creatures this browser keeps on the wire is the exception: its shots cross as the
+  // player's do, so every other screen sees it fire and a bolt its blade turned away flies back. On an
+  // allowance of its own (`NpcNet.npcShotDue`), never the player's.
+  const k = fight(1);
+  let creatureShots = 0;
+  k.net.isNpcShot = (b) => (b.source?.key ?? 0) === 77 && ++creatureShots > 0;
+  for (let i = 0; i < COMBAT_TUNE.shotsPerSecond + 5; i++) k.net.fired(bolt({ source: { key: 77 } }));
+  ok(k.of('shot').length === COMBAT_TUNE.shotsPerSecond + 5 && creatureShots === COMBAT_TUNE.shotsPerSecond + 5, '11: a creature kept here on the wire has its shots cross, every one its own allowance lets go');
+  for (let i = 0; i < COMBAT_TUNE.shotsPerSecond; i++) k.net.fired(bolt());
+  ok(k.of('shot').length === 2 * COMBAT_TUNE.shotsPerSecond + 5, '11: and spends none of the player\'s: the player still has a whole second\'s worth after them');
+  ok(k.net.debug().held === 0, '11: so nothing of the player\'s was held back for it');
+  let asked = 0;
+  k.net.isNpcShot = () => {
+    asked++;
+    return false;
+  };
+  k.net.fired(bolt());
+  ok(asked === 0, '11: the creatures\' allowance is never asked about the player\'s own shot');
+  k.net.isNpcShot = () => {
+    throw new Error('the wiring broke');
+  };
+  const before = k.of('shot').length;
+  k.net.fired(bolt({ source: { key: 77 } }));
+  ok(k.of('shot').length === before, '11: and a hook that throws is a shot that does not cross');
   a.net.fired(bolt({ inert: true }));
   ok(a.of('shot').length === 0, '11: and a picture of somebody else’s shot never goes round again');
   a.net.hullNow = () => 4;

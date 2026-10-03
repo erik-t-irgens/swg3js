@@ -112,6 +112,11 @@ export interface WildSpawn {
   /** Its own creature's weapons, and the groups those names stand for. */
   weapons?: readonly string[];
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
+  /**
+   * How long it stays down once it dies, in seconds: its site's broken wait (`respawnWait`), which is
+   * what a server holds its death for so no browser stands it whole again before every other would.
+   */
+  respawn?: number;
 }
 
 /** What the wild world needs of the game. Narrow on purpose, so a node test can be the game. */
@@ -146,6 +151,17 @@ export interface WildDeps {
    * is always there.
    */
   groundReady?(x: number, z: number, reach: number): boolean;
+  /**
+   * How many seconds more one of the world's seen creatures stays down before anybody stands it again
+   * (`Owned.downFor`): a body or a nest every other browser saw die, or saw walk off with a player, is
+   * not stood whole here meanwhile. None, and nothing is ever down: the game played alone.
+   */
+  downFor?(id: string): number;
+  /**
+   * Put a nest on the wire as one of the world's seen creatures (`NpcNet.addSeen`), with where it stands
+   * and how long it stays down once broken. None, and a nest is this browser's own, as it always was.
+   */
+  shareNest?(nest: WildNest, at: { x: number; y: number; z: number }, respawn: number): void;
 }
 
 /** One standing site as the console sees it. */
@@ -566,6 +582,10 @@ export class WildLife {
       if (held?.file && deps.nest) {
         const nest = new WildNest(def.nest ?? 'nest', nestHealth(site));
         rec.nest = nest;
+        // One of the world's seen creatures, under its site's own name: a nest broken on one screen is
+        // broken on all of them, and down for the site's own wait. One every other browser has broken
+        // stands broken here.
+        this.shareNest(rec, deps);
         void nest.build(held.file, { x: middle.x, y: heightAt(middle.x, middle.z), z: middle.z }, deps.nest, held.effects, ground).then(
           (made) => {
             if (!made || this.standing.get(site.key) !== rec) nest.dispose();
@@ -598,14 +618,50 @@ export class WildLife {
   }
 
   /**
+   * Every nest standing put on the wire, now that a server that speaks of the seen ones has taken this
+   * browser (it came after they were stood, or back after a drop, which clears the wire). A nest already
+   * on it says nothing new. Answers how many.
+   */
+  shareNests(): number {
+    const deps = this.deps;
+    if (!deps?.shareNest) return 0;
+    let n = 0;
+    for (const rec of this.standing.values()) {
+      const nest = rec.nest;
+      if (!nest || nest.dead) continue;
+      this.shareNest(rec, deps);
+      n++;
+    }
+    return n;
+  }
+
+  /** A site's nest on the wire as `camp:` and its site's name, and told it is down if every other browser has it so. */
+  private shareNest(rec: Standing, deps: WildDeps): void {
+    const nest = rec.nest;
+    if (!nest || !deps.shareNest) return;
+    const id = `camp:${rec.site.key}`;
+    if (deps.downFor && deps.downFor(id) > 0) nest.npcEnd('dead');
+    nest.shareAs(id);
+    deps.shareNest(nest, { x: rec.at.x, y: deps.groundAt?.(rec.at.x, rec.at.z) ?? 0, z: rec.at.z }, rec.wait);
+  }
+
+  /**
    * Stand one of a site's bodies: its creature drawn from the lair (`creatureAt`), its spot drawn round
    * the middle and, at a camp, moved clear of the pieces, and its own creature's numbers and weapons
    * over its body's -- a body is shared by every creature drawn as it and carries one creature's
    * numbers, so a camp of level-forty raiders stood as whoever first wore their look.
+   *
+   * `index` is which of the site's bodies it is; with none it is the next the site has not made. Every
+   * browser draws body `n` of a site the same way, which is what lets one stand a body another
+   * browser's keeper sent out (`standKnown`). A body every other browser has seen die (or walk off with
+   * a player) is not stood whole here before its row's wait is out (`downFor`): its number is spent.
    */
-  private standOne(rec: Standing, cat: MobileCatalogue, deps: WildDeps): boolean {
-    const i = rec.made++;
+  private standOne(rec: Standing, cat: MobileCatalogue, deps: WildDeps, index = -1): boolean {
+    const i = index >= 0 ? index : rec.made++;
+    if (index >= 0) rec.made = Math.max(rec.made, index + 1);
     const site = rec.site;
+    const id = `${site.key}:${i}`;
+    if (deps.downFor && deps.downFor(`wild:${id}`) > 0) return false;
     const who = creatureAt(rec.def, site.seed, i);
     const c = who ? this.manifest?.creatures[who] : null;
     if (!c) return false;
@@ -634,10 +690,11 @@ export class WildLife {
     // outside, exactly like a lair that stood and then vanished.
     const m = deps.spawn(entry, { x: world.x, z: world.z, heading: -spot.heading }, {
       seed: site.seed ^ i,
-      id: `${site.key}:${i}`,
+      id,
       overrides: overridesOf(c),
       weapons: weaponsOf(c),
       weaponGroups: this.manifest?.weaponGroups ?? null,
+      respawn: rec.wait,
     });
     if (typeof m === 'string') {
       this.last.refused = m;
@@ -652,6 +709,31 @@ export class WildLife {
     m.homeX = rec.at.x;
     m.homeZ = rec.at.z;
     rec.bodies.push(m);
+    return true;
+  }
+
+  /**
+   * A body another browser's keeper has and this browser has not stood, under a lair's own name
+   * (`wild:<site>:<n>`): a struck nest's own, which only its keeper sends out. Stood here as body `n` of
+   * that site -- every browser draws a site's `n`th body the same way -- where the site is standing here,
+   * and the rows parked for it put it where it really is. Nothing for a site this browser is not
+   * standing: it is too far off to have one, and the rows age out on their own. True when it stood.
+   */
+  standKnown(id: string): boolean {
+    const deps = this.deps;
+    const cat = deps?.catalogue();
+    if (!deps || !cat || !id.startsWith('wild:')) return false;
+    const name = id.slice(5);
+    const cut = name.lastIndexOf(':');
+    if (cut <= 0) return false;
+    const rec = this.standing.get(name.slice(0, cut));
+    const n = Number(name.slice(cut + 1));
+    if (!rec || !Number.isInteger(n) || n < 0 || n > 4 * LAIR_TUNE.liveBodies) return false;
+    if (LAIR_TUNE.liveBodies - this.liveBodies() <= 0) return false;
+    // Not a second body under a name one of this site's already wears.
+    for (const m of rec.bodies) if (!m.removed && m.npcId === id) return false;
+    if (!this.standOne(rec, cat, deps, n)) return false;
+    this.count();
     return true;
   }
 
@@ -772,8 +854,23 @@ export class WildLife {
       // Once its clock is out the site comes back from the same seed: the same animals in the same
       // places, as the same world should. With respawning off the clock never runs out.
       if (list.length === 0 && rec.brokeAt > 0 && WILD_TUNE.respawns && now - rec.brokeAt >= rec.wait) {
+        // **One clock, the later of the two.** The site's own runs from its last body's death; a server
+        // holds each of its names down from that name's own death (a nest broken after the last guard
+        // fell, a body whose word came back a moment late), for the same wait plus the line's delay. A
+        // name still down when the site comes back would be stood dead here -- a nest revived broken for
+        // a whole cycle, a body skipped and the site one short -- so the site waits out the last of them.
+        // The wait is pushed on rather than asked again every frame, since asking makes a name a time.
+        const down = this.siteDown(rec);
+        if (down > 0) {
+          rec.brokeAt = now - rec.wait + down;
+          continue;
+        }
         if (standsAlone) {
           rec.nest?.revive();
+          // A fresh life on the wire as well: said again, so the server holds it alive (or tells this
+          // browser it is still down, when this browser's own clock ran out ahead of the server's).
+          const deps = this.deps;
+          if (deps) this.shareNest(rec, deps);
           rec.brokeAt = 0;
           rec.killed = 0;
           rec.helpedAt = -Infinity;
@@ -784,6 +881,20 @@ export class WildLife {
         }
       }
     }
+  }
+
+  /**
+   * How many seconds more the longest-held of a site's own names is down for on the server's word
+   * (`WildDeps.downFor`): its nest's and every body it may stand. 0 with nothing down, or nothing wired.
+   */
+  private siteDown(rec: Standing): number {
+    const downFor = this.deps?.downFor;
+    if (!downFor) return 0;
+    const key = rec.site.key;
+    let most = downFor(`camp:${key}`);
+    const n = Math.max(rec.made, standingAt(rec.def, rec.site));
+    for (let i = 0; i < n; i++) most = Math.max(most, downFor(`wild:${key}:${i}`));
+    return most;
   }
 
   private count(): void {

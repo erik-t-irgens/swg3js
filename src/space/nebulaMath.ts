@@ -553,3 +553,17 @@ export function shakeAt(seconds: number, amount: number, out: ViewShake, tune: N
 export function dimInside(depth: number, share: number): number {
   return clamp(1 - clamp(depth, 0, 1) * clamp(share, 0, 1), 0, 1);
 }
+
+/** The player's Nebula opacity as the nebulae read it: 0 to 1, and 1 for anything that is not a number. */
+export function clampOpacity(opacity: number): number {
+  return Number.isFinite(opacity) ? clamp(opacity, 0, 1) : 1;
+}
+
+/**
+ * How deep in a nebula the flare and the god rays are dimmed as if the camera were, with its sheets
+ * and its haze thinned to `opacity`: a nebula drawn at half its strength takes half as much off the
+ * sun as it would, and one drawn at nothing takes nothing. Fed to `dimInside` in the depth's place.
+ */
+export function seenDepth(depth: number, opacity: number): number {
+  return clamp(depth, 0, 1) * clampOpacity(opacity);
+}

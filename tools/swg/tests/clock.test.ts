@@ -9,7 +9,8 @@
 // With no server configured every one of these paths must be exactly what was there before, so the
 // first block checks the day against its old formula step for step.
 import assert from 'node:assert/strict';
-import { CLOCK_LIMITS, CLOCK_TUNE, SharedClock, dayTune, sharedClock, sharedNote } from '../../../src/world/sharedClock.ts';
+import { CLOCK_LIMITS, CLOCK_TUNE, SharedClock, dayTune, setOwnDayLength, sharedClock, sharedNote } from '../../../src/world/sharedClock.ts';
+import { DAY_LIMITS, DAY_MS, WorldClock, cleanDay, dayFraction as serverDayFraction, daysAt } from '../../../server/clock.mjs';
 import { DayCycle, phaseFor } from '../../../src/world/daycycle.ts';
 import { STEP_SECONDS, climateFor, consoleClock, scheduledLevel, seedOf } from '../../../src/world/weatherSchedule.ts';
 import { PLANETS } from '../../../src/data/planets.ts';
@@ -523,6 +524,82 @@ const EPOCH = 1_700_000_000_000;
   sharedClock.hail(wall, CLOCK_LIMITS.maxDayMs * 100);
   ok(day.dayLengthSeconds === 720, 'and so is one so long the sun would never move again');
   sharedClock.none();
+}
+
+// --- the server's day changes length without moving the sun ---
+{
+  let now = EPOCH + 1_234_567;
+  const clock = new WorldClock({ epoch: EPOCH, now: () => now });
+  ok(clock.dayFraction(0) === serverDayFraction(now, 0, DAY_MS), 'a server nobody changed the day of reads the very hour it always did, to the last bit');
+  ok(clock.dayHand().dayAt === undefined && clock.hand().dayAt === undefined, 'and hands out no anchor, so a browser built before one reads it exactly as before');
+  ok(daysAt(now, DAY_MS) === now / DAY_MS, 'with no anchor the day is the wall clock over its length');
+  const before = clock.dayFraction(0);
+  const hand = clock.setDay(1_800_000);
+  ok(hand.dayMs === 1_800_000 && hand.dayAt === now && near(hand.dayFrom as number, before, 1e-9), `a new length is anchored where the day stands this instant (${JSON.stringify(hand)})`);
+  ok(near(clock.dayFraction(0), before, 1e-9), 'so at the moment it changes the sun has not moved');
+  now += 90_000;
+  ok(near(clock.dayFraction(0), (before + 0.05) % 1, 1e-9), 'and from there it runs at the new length: ninety seconds of a half-hour day is a twentieth of it');
+  ok(clock.hand().dayAt === hand.dayAt && clock.hand().dayMs === 1_800_000, 'the hail carries the anchor from then on');
+  const reread = new WorldClock({ epoch: EPOCH, dayMs: 1_800_000, dayAt: hand.dayAt, dayFrom: hand.dayFrom, now: () => now });
+  ok(near(reread.dayFraction(0), clock.dayFraction(0), 1e-12), 'a server started again from what it wrote down reads the same hour');
+  const mid = clock.dayFraction(0);
+  clock.setDay(60_000);
+  ok(near(clock.dayFraction(0), mid, 1e-9), 'a second change, much shorter, does not move the sun either');
+  const kept = clock.dayHand();
+  ok(clock.setDay(10) === undefined || (clock.dayMs === 60_000 && clock.dayHand().dayAt === kept.dayAt), 'a length past the limits changes nothing');
+  ok(cleanDay({ t: 'day', ms: 600_000 })?.ms === 600_000, 'the admin\'s word carries a length in ms');
+  ok(cleanDay({ ms: DAY_LIMITS.minMs - 1 }) === undefined && cleanDay({ ms: DAY_LIMITS.maxMs + 1 }) === undefined && cleanDay({ ms: Number.NaN }) === undefined && cleanDay(null) === undefined && cleanDay([1]) === undefined, 'and anything shorter than a second, longer than a real day or not a number is no word at all');
+}
+
+// --- the browser follows the server's change of day without a jump ---
+{
+  let wall = EPOCH + 2_000_000;
+  sharedClock.wall = () => wall;
+  sharedClock.none();
+  const day = freshDay(0);
+  const server = new WorldClock({ epoch: EPOCH, now: () => wall });
+  sharedClock.hail(wall, DAY_MS);
+  day.update(0, false);
+  const was = sharedClock.timeOfDay(720, 0) as number;
+  ok(near(was, server.dayFraction(0), 1e-9), 'with a server the browser reads the server\'s own hour');
+  const weatherWas = sharedClock.walkSeconds();
+  const hand = server.setDay(1_800_000);
+  sharedClock.dayWord(hand.dayMs, hand.dayAt, hand.dayFrom);
+  ok(day.dayLengthSeconds === 1800, 'the server\'s word changes the length of the day');
+  ok(near(sharedClock.timeOfDay(1800, 0) as number, was, 1e-9), 'and the hour the shared clock says has not moved');
+  ok(sharedClock.walkSeconds() === weatherWas, 'the weather\'s clock is not touched at all, so its schedule has nothing to walk off');
+  const dayWas = day.time;
+  wall += 1000 / 60;
+  day.update(1 / 60, false);
+  ok(near(day.time, dayWas, 1e-4), `the drawn day goes on from where it was (${dayWas.toFixed(6)} to ${day.time.toFixed(6)})`);
+  wall += 90_000;
+  ok(near(sharedClock.timeOfDay(1800, 0) as number, server.dayFraction(0), 1e-9), 'and ninety seconds later the browser and the server still agree on the hour');
+  sharedClock.none();
+  sharedClock.dayWord(60_000, wall, 0.5);
+  ok(day.dayLengthSeconds === 720, 'with no server a day word is nobody\'s and changes nothing');
+}
+
+// --- the console's day length with a server: the admin asks, anybody else is told ---
+{
+  let wall = EPOCH + 3_000_000;
+  sharedClock.wall = () => wall;
+  sharedClock.none();
+  const day = freshDay(0);
+  sharedClock.hail(wall, DAY_MS);
+  let asked = 0;
+  sharedClock.adminDay = (s) => {
+    asked = s;
+    return `asked the server for a ${s} s day`;
+  };
+  const said = setOwnDayLength(600);
+  ok(asked === 600 && said === 'asked the server for a 600 s day', 'the admin\'s console asks the server rather than setting it here');
+  ok(day.dayLengthSeconds === 720, 'and nothing changes here until the server\'s word comes back');
+  sharedClock.adminDay = () => null;
+  ok(/admin/.test(setOwnDayLength(600)) && day.dayLengthSeconds === 720, 'anybody else is told in words whose it is');
+  sharedClock.adminDay = null;
+  sharedClock.none();
+  ok(/now 600 s/.test(setOwnDayLength(600)) && day.dayLengthSeconds === 600, 'and with no server the console sets it here exactly as it always did');
+  setOwnDayLength(null);
 }
 
 // --- where a planet sits in the shared day ---

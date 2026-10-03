@@ -266,6 +266,15 @@ export class CombatNet {
   cut: (bolt: ShotBolt, x: number, y: number, z: number) => void = () => {};
   /** Whether a bolt is this player's own, and so one that crosses. Everything else in the air is this browser's business alone. */
   isMine: (bolt: ShotBolt) => boolean = () => false;
+  /**
+   * Whether a bolt was fired by one of the world's creatures this browser keeps, and may cross this
+   * second under the creatures' own allowance (`NPC_TUNE.npcShotsPerSecond`, apart from the player's).
+   * Such a shot crosses exactly as the player's does -- every other browser flies a picture of it that
+   * hurts nothing, cut short where it landed here -- so a creature kept elsewhere is seen firing, and a
+   * bolt its blade turned away is seen flying back. What it does to another player is a blow of its own
+   * (`npcBlow`), never this shot. With nothing wired no creature's shot crosses, which is how it was.
+   */
+  isNpcShot: (bolt: ShotBolt) => boolean = () => false;
   /** Whose hull's rooms this player is standing in, 0 in the open world. */
   hullNow: () => number = () => 0;
   /**
@@ -358,15 +367,21 @@ export class CombatNet {
    * player's, so nothing goes round for ever.
    */
   fired(bolt: ShotBolt): void {
-    if (!this.active || bolt.inert || !this.isMine(bolt)) return;
-    const at = this.now();
-    if (at - this.shotWindow >= 1) {
-      this.shotWindow = at;
-      this.shotsThisSecond = 0;
-    }
-    if (++this.shotsThisSecond > COMBAT_TUNE.shotsPerSecond) {
-      this.stat.held++;
-      return;
+    if (!this.active || bolt.inert) return;
+    const mine = this.isMine(bolt);
+    // A creature's shot is asked about only when it is not the player's, and the asking spends its own
+    // allowance, so it is asked once and last.
+    if (!mine && !this.safeNpcShot(bolt)) return;
+    if (mine) {
+      const at = this.now();
+      if (at - this.shotWindow >= 1) {
+        this.shotWindow = at;
+        this.shotsThisSecond = 0;
+      }
+      if (++this.shotsThisSecond > COMBAT_TUNE.shotsPerSecond) {
+        this.stat.held++;
+        return;
+      }
     }
     // 1 upward, never 0: a shot numbered 0 would be a key this browser could not tell from "no
     // shot at all", and the numbers wrap rather than growing for ever.
@@ -407,6 +422,15 @@ export class CombatNet {
     if (hull) shot.in = hull;
     this.stat.sent++;
     this.send({ t: 'shot', ...shot });
+  }
+
+  /** A creature's shot, asked of the game; a hook that throws is a shot that does not cross. */
+  private safeNpcShot(bolt: ShotBolt): boolean {
+    try {
+      return this.isNpcShot(bolt);
+    } catch {
+      return false;
+    }
   }
 
   /**

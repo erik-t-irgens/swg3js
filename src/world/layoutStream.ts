@@ -817,6 +817,18 @@ export class LayoutStreamer {
   }
 
   /**
+   * The building standing under a key something was put down in play under, or null (not placed,
+   * or placed into a tier that has not loaded, or a thing with no rooms). A building made from a
+   * placement carries that placement as its `object`, whichever path built it.
+   */
+  buildingOf(template: string): Building | null {
+    const placed = this.placedByKey.get(template);
+    if (!placed) return null;
+    for (const b of this.buildings) if (b.object === placed) return b;
+    return null;
+  }
+
+  /**
    * A building put down in play is being taken up: everything filed under it is let go of. Only things
    * put down in play can stand in such a building (the layout's own furniture was hosted when the world
    * was read, before any house was), so those are the ones walked. Each loses its host, so a mesh made for
@@ -1793,7 +1805,7 @@ export class LayoutStreamer {
     for (const mesh of made) this.scene.add(mesh);
     if (!this.prepare) return;
     void this.prepare(made).catch((err) => {
-      console.warn('snapshot: a buildingâ€™s rooms could not be compiled ahead of being drawn', err);
+      console.warn('snapshot: a building’s rooms could not be compiled ahead of being drawn', err);
     });
   }
 
@@ -2007,7 +2019,7 @@ export class LayoutStreamer {
       // Squared, with the blocker's own disc folded into the bound rather than subtracted from a
       // root: `Math.hypot` is a call and a square root apiece, and this list is walked up to four
       // times a step over as many as fourteen hundred records. `dist - radius > reach` and
-      // `distÂ² > (reach + radius)Â²` are the same test for non-negative numbers.
+      // `dist² > (reach + radius)²` are the same test for non-negative numbers.
       const dx = b.x - x;
       const dz = b.z - z;
       const far = reach + b.radius;

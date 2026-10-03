@@ -16,8 +16,8 @@
 // dynamic body or the right to take health off itself: a blow struck here is asked of the keeper
 // (`src/net/npcNet.ts`) and the keeper's answer, which arrives as the health in the next batch or
 // as the word that it is gone, is what kills it. Taking one over is seamless on purpose: the brain
-// starts from where the body is standing, and no pose is reset, because a respawn's pose reset is
-// exactly what would make a creature flick as it changed hands.
+// starts from where the body is standing, and no pose is put back to rest, because that is exactly
+// what would make a creature flick as it changed hands.
 //
 // With no server none of this runs: `driven` is never set, `mine` answers yes for everything, and
 // every creature is this browser's own with its damage applied where it lands.
@@ -47,7 +47,8 @@ import { BLADE_RADIUS, BladePath, type Striker } from '../../combat/sweep';
 import { CLASH } from '../../combat/clash.ts';
 import { nextLivingKey, PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../../combat/kit';
 import { hostileSides, sideOf } from '../../combat/targets';
-import { copyBrain, npcNow, NPC_TUNE, type NpcBrain, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
+import { Strikers } from '../../combat/strikers.ts';
+import { copyBrain, mayFight, npcNow, NPC_TUNE, type NpcBolt, type NpcBrain, type NpcMark, type NpcRow, type NpcSubject } from '../../net/npcNet.ts';
 import { markActor } from '../portalRender';
 import { planBody, radiusToward, type BodyInput, type BodyPlan } from './shape';
 import { moveSpeeds, stepGait, type GaitStep } from './gait';
@@ -93,6 +94,10 @@ const tmpQ = new THREE.Quaternion();
  * blow arrives in the middle of a message and `damage` spends `tmp` on the knock it gives.
  */
 const blowFrom = new THREE.Vector3();
+/** A bolt off the wire asked of a blade (`npcHurt`): its heading, where it goes from the block, and where it leaves from. */
+const blockDir = new THREE.Vector3();
+const blockOut = new THREE.Vector3();
+const blockAt = new THREE.Vector3();
 /** Written into by the driven body every frame; the engine copies out of them at the call. */
 const driveAt = { x: 0, y: 0, z: 0 };
 const driveTurn = { x: 0, y: 0, z: 0, w: 1 };
@@ -178,6 +183,12 @@ export interface MobileEquipment {
   weaponClass?: string;
 }
 
+/**
+ * The roles a weapon's carry row speaks for (`rolesFromCarry` in arms.ts, and a lightsaber's swings):
+ * what a body changes when what is in its hand changes, and nothing else (`Mobile.rearm`).
+ */
+const COMBAT_ROLES = ['idleCombat', 'walkCombat', 'runCombat', 'gaitsCombat', 'toCombat', 'fromCombat', 'attacks', 'ranged', 'rangedAdditive', 'rangedStance', 'rangedAimed', 'rangedShots'] as const;
+
 /** Collision filters: outdoors everything, a hull ball everything but the terrain, indoors neither the terrain nor the shells. */
 const OUTSIDE = groups(Group.all, Group.all);
 const HULL_OUTSIDE = groups(Group.all, Group.all & ~Group.terrain);
@@ -238,7 +249,7 @@ export interface MobileSpawn {
   y: number;
   z: number;
   heading: number;
-  origin: 'spawned' | 'ambient';
+  origin: 'spawned';
   inside: boolean;
   /** The appearance's bind-pose box and the pack's hierarchy, from the catalogue. */
   bounds: { min: Vec3; max: Vec3 };
@@ -287,6 +298,12 @@ export interface MobileDeps {
    * into the open exactly as it always did.
    */
   cover?: CoverDeps | null;
+  /**
+   * How a lightsaber's blade renderer, which is this body's own, lets its materials go before it is
+   * disposed: out of the portal renderer's set and the shadow cascades' map (`World.forgetMaterials`), both
+   * strong, the first walked a dozen times a frame. With none they are only disposed, as they always were.
+   */
+  forgetMaterials?(materials: readonly THREE.Material[]): void;
 }
 
 export interface MobileContext {
@@ -318,12 +335,13 @@ interface Grudge {
 
 export class Mobile implements Living, NpcSubject {
   /**
-   * Its place in the one list of living things, for as long as it lives. A respawn is a new
-   * life, so it takes a new key: a brain that remembered this body must not find the fresh one.
+   * Its place in the one list of living things, for as long as it lives. A body is one life: whatever
+   * comes back at its post is a new body with a key of its own, so a brain that remembered this one
+   * never finds the next.
    */
-  key = nextLivingKey();
+  readonly key = nextLivingKey();
   readonly entry: MobileEntry;
-  readonly origin: 'spawned' | 'ambient';
+  readonly origin: 'spawned';
   readonly label: string;
   /**
    * Whose side it is on. Not readonly, for one reason: a person asked to follow the player takes the
@@ -332,6 +350,10 @@ export class Mobile implements Living, NpcSubject {
    */
   side: Side;
   aggression: Aggression;
+  /** Its own temper as it was stood, which a weapon put in an empty hand gives back (`rearm`). */
+  private readonly baseAggression: Aggression;
+  /** Whether it went passive for want of anything to fight with rather than by its own temper. */
+  private emptyHanded = false;
   /** Hangs at the body's middle, turned by the heading. */
   readonly group = new THREE.Group();
   /** Hangs at -feet, at the spawn's scale: the model's origin is on the ground. */
@@ -568,6 +590,8 @@ export class Mobile implements Living, NpcSubject {
   private swimming = false;
   private flyer: boolean;
   private muzzle: THREE.Object3D | null = null;
+  /** The muzzle its own skeleton has (a droid's gun bone), found when the model is hung; null for none. */
+  private ownMuzzle: THREE.Object3D | null = null;
   /** The weapon in the hand, when it holds one off the rack; its bolt when it is a gun. */
   weapon: string | null = null;
   private gun: GunProfile | null = null;
@@ -680,7 +704,6 @@ export class Mobile implements Living, NpcSubject {
   private readonly folded = new Map<THREE.Bone, FoldRecord>();
   private readonly bladeBase = new THREE.Vector3();
   private readonly bladeTip = new THREE.Vector3();
-  private readonly restPose = new Map<THREE.Object3D, { p: THREE.Vector3; q: THREE.Quaternion; s: THREE.Vector3 }>();
   private readonly memory = new Map<number, Grudge>();
   /** The last mind a keeper said this creature had, kept until this browser is asked to take it on. */
   private heldBrain: NpcBrain | null = null;
@@ -736,6 +759,28 @@ export class Mobile implements Living, NpcSubject {
   private toldOnce = false;
   /** Something this browser owes the wire about it while it keeps it: it was struck, it was thrown. */
   private mark: NpcMark | null = null;
+  /** Which way the roll or the jump that mark is about went, and whether the jump was the Force's. */
+  private markDir: RollDir = 'F';
+  private markForce = false;
+  /**
+   * A driven copy's jump, played from its keeper's mark: until when it is held in the air before it
+   * lands. The place comes from the keeper's rows; this is only how long the clips say it is up.
+   */
+  private hopDownAt = 0;
+  /**
+   * A bolt that reached this body while another browser keeps it, held for the blow the same bolt is
+   * about to strike (`blockBolt` is asked first, `damage` straight after): the keeper is asked whether
+   * its blade turned it away, which needs the bolt's own flight. Only ever held for an instant, and only
+   * on a body that carries a lightsaber.
+   */
+  private readonly heldBolt: NpcBolt = { dx: 0, dy: 0, dz: 1, speed: 0, color: 0xff4a2a, size: 1 };
+  private heldBoltAt = -Infinity;
+  /**
+   * A body that is this browser's alone whatever it is (`neverShared`): today nothing sets it but the
+   * console, and the named people of a story and a player's companions are what it is for. A follower is
+   * the other such body, by its follow order.
+   */
+  companion = false;
   /**
    * How a person fights beyond what the brain decides -- its tier, its ring and its slide, its cover,
    * its evade and its jump (`tactics.ts`) -- made when it is hung and null for everything that is not
@@ -813,6 +858,7 @@ export class Mobile implements Living, NpcSubject {
     this.label = e.name;
     this.side = sideOf(e);
     this.aggression = this.hologram ? 'passive' : (spawn.overrides?.aggression ?? e.stats?.aggression ?? 'defensive');
+    this.baseAggression = this.aggression;
     this.baseHp = spawn.overrides?.hp ?? e.stats?.hp ?? 80;
     this.baseBlow = spawn.overrides?.damage ?? e.stats?.damage ?? 8;
     this.maxHp = scaledByDifficulty(this.baseHp);
@@ -1180,6 +1226,9 @@ export class Mobile implements Living, NpcSubject {
     // Held until the clip has run out, or for the roll and the knob's recovery after it (`rollCommit`).
     this.tumbleUntil = this.now + rollCommit(length);
     this.startTumble();
+    // Every other browser is told, so its copy rolls rather than sliding along the ground it covers.
+    this.mark = 'roll';
+    this.markDir = dir;
     return true;
   }
 
@@ -1208,8 +1257,11 @@ export class Mobile implements Living, NpcSubject {
     this.grounded = false;
     this.hopping = true;
     this.hopAt = this.now;
-    // Off the ground: every other browser is told, as a knock that lifts one is.
-    this.mark = 'leap';
+    // Off the ground of its own accord: every other browser is told which jump, so its copy plays the
+    // same clips over the arc its keeper's rows carry it along.
+    this.mark = 'jump';
+    this.markDir = dir;
+    this.markForce = this.hopForce;
     this.hopAir = jumpClipName('INAIR', dir, this.hopForce, animator);
     const clip = jumpClipName('JUMP', dir, this.hopForce, animator);
     if (clip) animator.once(clip, { priority: SHOT_PRIORITY.attack, fadeIn: 0.05, fadeOut: 0.12 });
@@ -1318,12 +1370,10 @@ export class Mobile implements Living, NpcSubject {
         // Culled as a whole by the manager, and mesh by mesh only through the sphere set below.
         m.frustumCulled = false;
       }
-      if ((o as THREE.Bone).isBone) {
-        this.restPose.set(o, { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() });
-        // Found on the one walk the clone already takes, rather than on a walk of its own: this
-        // runs once per body and the aim then costs a list lookup a frame.
-        if (SPINE_BONE.test(o.name)) spines.push(o as THREE.Bone);
-      }
+      // Found on the one walk the clone already takes, rather than on a walk of its own: this runs once
+      // per body and the aim then costs a list lookup a frame. No rest pose is kept: nothing stands a body
+      // up again in place, so nothing ever needs one put back.
+      if ((o as THREE.Bone).isBone && SPINE_BONE.test(o.name)) spines.push(o as THREE.Bone);
     });
     this.spines = spines;
     this.carry = extras?.carry ?? 'unarmed';
@@ -1361,31 +1411,11 @@ export class Mobile implements Living, NpcSubject {
       }
       const r = this.roles;
       this.speeds = moveSpeeds(r, this.scale, this.entry.move);
-      this.melee = (this.flyer && r.hoverAttacks.length ? r.hoverAttacks : r.attacks).length > 0;
-      // The aimed pose the fold is only meaningful over, and the GLB really having it: a pack whose
-      // carry row names one the bake left out would otherwise fold a body over a clip that is not
-      // there. Read once, here, rather than on every frame of every armed body.
-      this.canAim = !!r.rangedAimed && animator.has(r.rangedAimed);
-      // And the shots, for the same reason and once for the same cost: a row says what the animation
-      // table holds, not what the bake wrote, so a name the bake left out would be a shot that plays
-      // nothing at all. What the GLB has is kept; with none of them left the pack's own ranged
-      // attack comes back, recoil and all, which is what a pack with no rows plays anyway.
-      if (r.rangedShots?.length) {
-        const have = r.rangedShots.filter((c) => animator.has(c));
-        r.rangedShots = have.length ? have : undefined;
-      }
-      if (r.ranged && !animator.has(r.ranged)) {
-        r.ranged = r.rangedShots?.[0] ?? ownRanged;
-        r.rangedAdditive = r.rangedShots?.length ? false : ownAdditive;
-      }
-      // Only what its own numbers give a ranged attack shoots, or the gun its own list put in its hand
-      // (`extras.ranged`): a pack with a ranged clip is not enough.
-      const ranged = this.rangedStat && this.rangedStat.range > 0 ? this.rangedStat : (extras?.ranged ?? null);
-      this.rangedRange = r.ranged && !this.hologram && ranged && ranged.range > 0 ? ranged.range * Math.max(1, Math.sqrt(this.scale)) : 0;
+      this.fitArms(ownRanged, ownAdditive, extras?.ranged ?? null);
       this.canSwim = !!(r.swim || r.swimIdle);
       if (this.entry.flags?.includes('static')) this.speeds = { walk: 0, run: 0 };
       // Nothing to strike or shoot with: passive, whatever the keywords say.
-      if (!this.melee && !this.rangedRange) this.aggression = 'passive';
+      if (!this.melee && !this.rangedRange) this.disarmTemper();
     } else this.aggression = 'passive';
     for (const re of MUZZLE_BONES) {
       scene.traverse((o) => {
@@ -1393,16 +1423,14 @@ export class Mobile implements Living, NpcSubject {
       });
       if (this.muzzle) break;
     }
+    // Its skeleton's own, which a gun taken out of its hand again leaves it with (`unequip`).
+    this.ownMuzzle = this.muzzle;
     // A person fights as a fighter does (`tactics.ts`): its low postures where its pack can draw them,
     // the crouch walk as a gait of its own, and its tier from its own level. The manager lays the
     // console's tier over it once the weapon is in its hand (`applyFightTier`), since a lightsaber
     // changes how high it jumps.
     if (this.humanoid && pack && this.animator) {
-      const played = this.animator;
-      const kind = this.carry === 'pistol' || this.carry === 'rifle' ? this.carry : null;
-      this.lowClips = lowClipsFor(pack.json, kind, (c) => played.has(c));
-      this.crouchGaits.length = 0;
-      if (this.lowClips?.crouchWalk) this.crouchGaits.push({ clip: this.lowClips.crouchWalk, speed: this.lowClips.crouchSpeed });
+      this.fitLow(pack);
       this.tactics ??= new GroundTactics(this.key % 2 === 0 ? 1 : -1);
       this.applyFightTier();
     }
@@ -1411,6 +1439,163 @@ export class Mobile implements Living, NpcSubject {
     // Asked again now its idle is known: a mood's idle may lay it at full length (`refitCull` above ran before the roles).
     this.applyCull();
     return { ok: true, warning };
+  }
+
+  /**
+   * What its roles and what its hands were given say it fights with: a blow of its own where it has
+   * swings, the aimed pose and the whole-body shots only where the GLB really has them, and a shot only
+   * where its own numbers give it a ranged attack or the gun in its hand does (`given`). `ownRanged` and
+   * `ownAdditive` are its pack's own ranged attack, which a row whose shots the bake left out falls back
+   * on. Asked when the model is hung, and again whenever what is in its hand changes (`rearm`).
+   */
+  private fitArms(ownRanged: string | null, ownAdditive: boolean, given: { range: number; additive: boolean } | null): void {
+    const r = this.roles;
+    const animator = this.animator;
+    if (!r || !animator) return;
+    this.melee = (this.flyer && r.hoverAttacks.length ? r.hoverAttacks : r.attacks).length > 0;
+    // The aimed pose the fold is only meaningful over, and the GLB really having it: a pack whose
+    // carry row names one the bake left out would otherwise fold a body over a clip that is not
+    // there. Read once, here, rather than on every frame of every armed body.
+    this.canAim = !!r.rangedAimed && animator.has(r.rangedAimed);
+    // And the shots, for the same reason and once for the same cost: a row says what the animation
+    // table holds, not what the bake wrote, so a name the bake left out would be a shot that plays
+    // nothing at all. What the GLB has is kept; with none of them left the pack's own ranged
+    // attack comes back, recoil and all, which is what a pack with no rows plays anyway.
+    if (r.rangedShots?.length) {
+      const have = r.rangedShots.filter((c) => animator.has(c));
+      r.rangedShots = have.length ? have : undefined;
+    }
+    if (r.ranged && !animator.has(r.ranged)) {
+      r.ranged = r.rangedShots?.[0] ?? ownRanged;
+      r.rangedAdditive = r.rangedShots?.length ? false : ownAdditive;
+    }
+    // Only what its own numbers give a ranged attack shoots, or the gun its own list put in its hand
+    // (`extras.ranged`): a pack with a ranged clip is not enough.
+    const ranged = this.rangedStat && this.rangedStat.range > 0 ? this.rangedStat : given;
+    this.rangedRange = r.ranged && !this.hologram && ranged && ranged.range > 0 ? ranged.range * Math.max(1, Math.sqrt(this.scale)) : 0;
+  }
+
+  /**
+   * Passive for want of anything to strike or shoot with, whatever its keywords say -- and remembered as
+   * that, so a weapon put in its hand later gives it its own temper back (`rearm`).
+   */
+  private disarmTemper(): void {
+    if (this.aggression !== 'passive') this.emptyHanded = true;
+    this.aggression = 'passive';
+  }
+
+  /** The low postures its pack can draw for what it carries now, and the crouch walk as a gait of its own. */
+  private fitLow(pack: PackAsset): void {
+    const played = this.animator;
+    if (!played) return;
+    const kind = this.carry === 'pistol' || this.carry === 'rifle' ? this.carry : null;
+    this.lowClips = lowClipsFor(pack.json, kind, (c) => played.has(c));
+    this.crouchGaits.length = 0;
+    if (this.lowClips?.crouchWalk) this.crouchGaits.push({ clip: this.lowClips.crouchWalk, speed: this.lowClips.crouchSpeed });
+  }
+
+  /**
+   * The weapon it holds taken out of its hand: the rack's copy let go (its geometry and materials are the
+   * rack's and are never disposed here), a lightsaber's blade renderer disposed and its moves dropped, and
+   * its muzzle back on its own skeleton. What its roles say it fights with is `rearm`'s to put right.
+   */
+  private unequip(): void {
+    if (this.blade) {
+      this.dropBlades();
+      this.disposeBlade();
+    }
+    this.blades = null;
+    this.bladeAnim = null;
+    const holder = this.holder;
+    if (holder) {
+      holder.parent?.remove(holder);
+      // Its meshes out of the list the manager writes the shadow flag on, in place.
+      let n = 0;
+      for (const m of this.meshes) {
+        let under = false;
+        for (let o: THREE.Object3D | null = m; o; o = o.parent) {
+          if (o === holder) {
+            under = true;
+            break;
+          }
+        }
+        if (!under) this.meshes[n++] = m;
+      }
+      this.meshes.length = n;
+    }
+    this.holder = null;
+    this.weapon = null;
+    this.gun = null;
+    this.hiltTop = 0.13;
+    this.muzzle = this.ownMuzzle;
+    this.refitCull();
+  }
+
+  /**
+   * Its lightsaber's blade renderer taken off and disposed, its materials let go of first (`forgetMaterials`):
+   * they joined the portal renderer's set and the cascades' map the first time the scan met them, and a
+   * disposed material left in either is walked for the rest of the world's life. A re-arm can do this to one
+   * body any number of times, which is why it is not left to the world's unload.
+   */
+  private disposeBlade(): void {
+    const blade = this.blade;
+    if (!blade) return;
+    blade.group.parent?.remove(blade.group);
+    const forget = this.deps.forgetMaterials;
+    if (forget) {
+      const materials: THREE.Material[] = [];
+      blade.group.traverse((o) => {
+        const m = (o as THREE.Mesh).material;
+        if (!m) return;
+        if (Array.isArray(m)) materials.push(...m);
+        else materials.push(m);
+      });
+      if (materials.length) forget(materials);
+    }
+    blade.dispose();
+    this.blade = null;
+  }
+
+  /**
+   * What is in its hand changed while it stands (`MobileManager.rearm`, the console's `arm`): the weapon it
+   * holds goes (`unequip`) and `e` takes its place, with the fighting roles its carry row gives (`extras`).
+   * Only the fighting roles move -- the combat stance and gaits, the swings, the shots -- and they are its
+   * pack's own again first, so nothing of the last weapon's row is left over; how it idles, walks and runs,
+   * and the mood it was stood in, are its own and stay. A body that had nothing to fight with and has now
+   * gets its own temper back; one left with nothing goes passive, as one stood empty-handed always has.
+   * Nothing here compiles: the weapon was prepared before it was handed over, and a lightsaber's blade is a
+   * program every loading screen already built. False with no body to arm (loading, dead, gone) or no hand.
+   */
+  rearm(e: MobileEquipment | null, extras: MobileExtras | null): boolean {
+    const pack = this.animPack;
+    const r = this.roles;
+    const animator = this.animator;
+    if (this.disposed || this.dead || !this.model || !pack || !r || !animator) return false;
+    this.unequip();
+    if (extras?.clips?.size) animator.lend(extras.clips);
+    const own = rolesFor(pack.json, this.entry.gender);
+    const into = r as unknown as Record<string, unknown>;
+    const fresh = own as unknown as Record<string, unknown>;
+    const laid = (extras?.roles ?? {}) as Record<string, unknown>;
+    for (const k of COMBAT_ROLES) into[k] = laid[k] !== undefined ? laid[k] : fresh[k];
+    this.carry = extras?.carry ?? 'unarmed';
+    this.carried = !!extras?.carried;
+    this.fitArms(own.ranged, own.rangedAdditive, extras?.ranged ?? null);
+    if (this.humanoid) this.fitLow(pack);
+    if (!this.lowClips && this.posture !== 'stand') this.setPosture('stand');
+    // Whatever it was doing with the last weapon is let go of: a burst, its aim, a decision about a range.
+    this.shotsLeft = 0;
+    this.dropAim();
+    this.decision = null;
+    this.thinkAt = 0;
+    const fights = this.melee || this.rangedRange > 0;
+    if (fights && this.emptyHanded) {
+      this.aggression = this.baseAggression;
+      this.emptyHanded = false;
+    } else if (!fights) this.disarmTemper();
+    if (e && !this.equip(e)) return false;
+    if (!this.downPhase) animator.loop(this.idleNow(), 1, 0.25);
+    return true;
   }
 
   /**
@@ -1774,14 +1959,39 @@ export class Mobile implements Living, NpcSubject {
    * loop when nothing weightier has the animator, and the blade rings where the bolt struck. A body
    * another browser thinks for turns nothing here: whatever it does is its keeper's.
    *
-   * **Local only, for now.** Nothing about a block crosses the relay: on a shooter's browser the kept
-   * body is driven and never blocks, so the blow goes to its keeper, who takes it off with no block
-   * asked; and on the keeper's browser another player's bolt is a picture (`inert`) and is never asked
-   * either. So with a server a person from the catalogue turns away only the bolts its keeper's own
-   * player fires, and every other screen sees those stop at it rather than fly back. Carrying the
-   * keeper's answer over the wire (a word like `blocked` beside the blow) is a wave of its own.
+   * **With a server the keeper answers for everybody.** On a shooter's browser the kept body is driven
+   * and never blocks: the bolt's own flight is held here for the blow it is about to strike, the blow
+   * is asked of the keeper with it (`npcHurt`), and the keeper's own blade decides there, flying a bolt
+   * of its own back that crosses as any of its shots does. On the keeper's browser a bolt of its own
+   * player's turned away here is cut short on every screen and flies on as this body's shot, which
+   * crosses too (`Bolts`), and either way every other screen is told with a mark, so its copy parries.
    */
   blockBolt(bolt: Bolt, point: THREE.Vector3, out: THREE.Vector3): boolean {
+    if (this.driven) {
+      // Held for the blow the same bolt strikes in the same breath, so the keeper can be asked about it.
+      if (this.blades && this.blade && !this.dead) {
+        const h = this.heldBolt;
+        h.dx = bolt.dir.x;
+        h.dy = bolt.dir.y;
+        h.dz = bolt.dir.z;
+        h.speed = bolt.speed;
+        h.color = bolt.color ?? 0xff4a2a;
+        h.size = bolt.size ?? 1;
+        this.heldBoltAt = this.now;
+      }
+      return false;
+    }
+    if (!this.blockFrom(bolt.dir, point, out)) return false;
+    this.mark = 'block';
+    return true;
+  }
+
+  /**
+   * Whether its lit blade turns away a bolt going along `dir` that reached it at `point`, writing where
+   * it goes from here to `out`; the parry and the ring are played when it does. Asked of a bolt that
+   * reached this body here, and of one that reached a copy of it on another browser (`npcHurt`).
+   */
+  private blockFrom(dir: THREE.Vector3, point: THREE.Vector3, out: THREE.Vector3): boolean {
     const b = this.blades;
     const blade = this.blade;
     const animator = this.animator;
@@ -1790,7 +2000,7 @@ export class Mobile implements Living, NpcSubject {
     // Out and lit: a blade still igniting or going out turns nothing.
     a.lit = blade.ignition >= 0.9 && this.fighting();
     a.tumbling = this.tumbling || this.now < this.tumbleUntil;
-    a.dir.copy(bolt.dir);
+    a.dir.copy(dir);
     a.hit.copy(point);
     blockFrame(a, this.pos.x, this.pos.y, this.pos.z, this.facing, BLOCK_EYE * this.scale);
     const t = this.targetRef;
@@ -1847,6 +2057,11 @@ export class Mobile implements Living, NpcSubject {
   /** Whether it has anything to fight with at all: a blow of its own, or a shot. */
   get canFight(): boolean {
     return this.melee || this.rangedRange > 0;
+  }
+
+  /** The ranged attack its own numbers give it, or null: what a gun put in its hand is judged against (`MobileManager.rearm`). */
+  get ownRanged(): { range: number; additive: boolean } | null {
+    return this.rangedStat;
   }
 
   // ---- being spoken to, and following ------------------------------------------------------------
@@ -1978,11 +2193,19 @@ export class Mobile implements Living, NpcSubject {
     row.v = this.speed;
     row.hp = this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
     // A thing that happened once is said once: it is taken as it is handed over, so a batch that is
-    // sent says it and the next one does not.
+    // sent says it and the next one does not. A roll and a jump say which way, and a jump whether it was
+    // the Force's, which is what picks their clips.
     if (this.mark) {
       row.f = this.mark;
+      if (this.mark === 'roll' || this.mark === 'jump') row.fd = this.markDir;
+      if (this.mark === 'jump' && this.markForce) row.ff = 1;
       this.mark = null;
     }
+    // How low it stands, and whether it is in its cover spot: what it is doing, said every batch, so a
+    // copy of it is on its knee behind the crate rather than standing in the open beside it.
+    if (this.posture !== 'stand') row.po = this.posture;
+    const tac = this.tactics;
+    if (tac?.coverKind && tac.inSpot(this.pos.x, this.pos.z)) row.cv = 1;
     // What it is thinking, so whoever takes it over next does not start it over. Written only when
     // there is something to say: a creature standing about with nothing on its mind costs no bytes.
     // A player is named by the relay id of the browser they are at (`p:<id>`), never as `'p'`, which
@@ -2075,7 +2298,30 @@ export class Mobile implements Living, NpcSubject {
       this.toldOnce = true;
       this.placeAt(this.toldAt.x, this.toldAt.y, this.toldAt.z, row.h);
     }
-    if (row.f) this.sawMark(row.f);
+    // How low it stands, as its keeper has it: the same posture, the same shell for a bolt to meet and
+    // the game's own one-shot between the two, where its pack has the clips at all. Not through a roll
+    // or a jump, whose clips have the whole body; the next row after one says it again.
+    this.toldCover = row.cv === 1;
+    const low = row.po ?? 'stand';
+    if (low !== this.posture && this.lowClips && !this.tumbling) this.drivenPosture(low);
+    if (row.f) this.sawMark(row.f, row.fd, row.ff === 1);
+  }
+
+  /** Whether its keeper last said it is in its cover spot; for the console, since nothing here moves it. */
+  private toldCover = false;
+
+  /**
+   * A driven copy put into the posture its keeper says: the shell and the aim point together, as the
+   * keeper's own are (`setPosture`), and the transition between the two played over its loop.
+   */
+  private drivenPosture(want: Posture): void {
+    const was = this.posture;
+    this.setPosture(want);
+    const animator = this.animator;
+    const pack = this.animPack;
+    if (!animator || !pack) return;
+    const clip = lowTransition(pack.json, was, want, this.toldSpeed > 0.3, (n) => animator.has(n));
+    if (clip) animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.08, fadeOut: 0.15 });
   }
 
   /**
@@ -2084,14 +2330,67 @@ export class Mobile implements Living, NpcSubject {
    * A death is not one of them and never arrives here. It has a word of its own, which reaches this
    * body as `npcEnd`, and two ways to say one death would be two paths for the same thing.
    */
-  private sawMark(mark: NpcMark): void {
+  private sawMark(mark: NpcMark, dir: RollDir = 'F', force = false): void {
     if (mark === 'hit') {
       this.flinch(0.1);
+      return;
+    }
+    const animator = this.animator;
+    if (mark === 'roll') {
+      // Jedi Academy's roll, as its keeper threw it: the clip over the ground the rows carry it across,
+      // on the low shell for as long as the roll lasts, so a bolt aimed at its chest goes over here too.
+      const clip = ROLL_CLIPS[dir];
+      if (!animator?.has(clip)) return;
+      if (this.posture !== 'stand') this.setPosture('stand');
+      this.rollLeft = EVADE_TUNE.rollTime;
+      const length = animator.once(clip, { priority: SHOT_PRIORITY.attack, fadeIn: 0.05, fadeOut: 0.15 }) ?? 0;
+      this.tumbleUntil = this.now + rollCommit(length);
+      this.reshape();
+      this.applyCull();
+      return;
+    }
+    if (mark === 'jump') {
+      // A jump of its own, as its keeper threw it: the take-off, the in-air loop while the clips say it
+      // is up, and the landing. The arc is the rows' own.
+      this.grounded = false;
+      if (!animator) return;
+      if (this.posture !== 'stand') this.setPosture('stand');
+      this.hopForce = force;
+      this.hopDir = dir;
+      this.hopAir = jumpClipName('INAIR', dir, force, animator);
+      const clip = jumpClipName('JUMP', dir, force, animator);
+      if (clip) animator.once(clip, { priority: SHOT_PRIORITY.attack, fadeIn: 0.05, fadeOut: 0.12 });
+      this.hopping = true;
+      this.hopAt = this.now;
+      // How long it is up: a plain hop's, or a Force jump's, out of the jump's own height at the world's
+      // gravity -- which is what the keeper threw it at, so the two land together near enough.
+      const up = jumpSpeed(jumpHeight(force ? 2 : 1), this.gravityNow());
+      this.hopDownAt = this.now + (up > 0 ? (2 * up) / Math.max(1e-3, this.gravityNow()) : 0.8);
+      this.applyCull();
+      return;
+    }
+    if (mark === 'block') {
+      // Its blade turned a bolt away at its keeper's: the parry over its loop and the ring. The bolt that
+      // flies back is the keeper's own and crosses as a shot of its, so it is seen here too.
+      const b = this.blades;
+      if (animator && b && !b.busy && animator.shotLevel < SHOT_PRIORITY.hit) {
+        const clip = parryClip(b.style, 'top', this.hasClip);
+        if (clip) animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.05, fadeOut: 0.15 });
+      }
+      this.bladeTipNow(tmp2);
+      combatSounds.saberContact('block', tmp2.x, tmp2.y, tmp2.z);
       return;
     }
     // 'leap': it left the ground. The ease carries the arc, since where it is is said four times a
     // second and it is the place that matters; what this says is that it is not walking.
     this.grounded = false;
+  }
+
+  /** Where its blade is this frame, or its chest where it holds none: where a parry rings. */
+  private bladeTipNow(out: THREE.Vector3): THREE.Vector3 {
+    const b = this.blade;
+    if (b?.glowing) return out.copy(b.drawnBase).lerp(b.drawnTip, 0.5);
+    return out.set(this.pos.x, this.pos.y + this.halfHeight * 1.2, this.pos.z);
   }
 
   /**
@@ -2172,12 +2471,50 @@ export class Mobile implements Living, NpcSubject {
    * keeps this creature, so it goes through the ordinary path: the grudge, the pack's alert, the
    * health and the death are all worked out exactly as they are for a blow struck here.
    */
-  npcHurt(amount: number, x: number, y: number, z: number, source: Living | null, _what = ''): void {
+  npcHurt(amount: number, x: number, y: number, z: number, source: Living | null, _what = '', bolt: NpcBolt | null = null): void {
     if (this.dead || this.disposed || this.driven) return;
     blowFrom.set(x, y, z);
+    // A bolt that reached its copy on the shooter's browser, asked of its own blade here first: the
+    // keeper answers the block for everybody. Turned away, nothing is taken off; every other screen is
+    // told with a mark, so its copy parries; and the bolt flies back from where it met the copy as a
+    // shot of this body's own, which crosses as its shots do, so the shooter sees it coming.
+    if (bolt && this.blades && this.blade) {
+      blockDir.set(bolt.dx, bolt.dy, bolt.dz);
+      if (this.blockFrom(blockDir, blowFrom, blockOut)) {
+        this.mark = 'block';
+        npcNow()?.noteBlocked();
+        blockAt.copy(blowFrom).addScaledVector(blockOut, 0.05);
+        this.deps.bolts.fire(blockAt, blockOut, { owner: 'enemy', damage: amount, metresPerSecond: bolt.speed > 0 ? bolt.speed : undefined, color: bolt.color, size: bolt.size, exclude: this.body, source: this });
+        this.deps.effects()?.burst(blowFrom, 0xbfe6ff, 0.6, 0.15);
+        return;
+      }
+    }
     // No push: what struck is somebody else's bolt or blade and nothing on the wire says how hard
     // it shoves. The health and the flinch are what cross.
     this.damage(amount, blowFrom, 0, source);
+  }
+
+  /**
+   * Who struck it within `seconds` of now, by living key: what its death names, so a later server can
+   * witness the kill (`NpcNet.strikersOf` turns the players among them into relay ids).
+   */
+  npcStruckBy(seconds: number, out: number[]): void {
+    // Its own record of blows (`Strikers`), never the brain's grudges: a passive creature keeps none, and
+    // the death that asks this is read after the body has died.
+    this.strikers.within(this.now, seconds, out);
+  }
+
+  /** Who has struck it lately, whatever its temper and whether or not it lives: what its death names. */
+  private readonly strikers = new Strikers();
+
+  /**
+   * Off the wire for good while it stands: it has become a body that is this browser's alone (a
+   * follower). Whatever another browser was doing with it is no longer anybody's business but this
+   * one's, so it is never driven again and never asks anybody about a blow.
+   */
+  unshare(): void {
+    if (this.driven) this.npcSetDriven(false);
+    this.shared = '';
   }
 
   /** The keeper says it is gone: it died there, or it was taken out of the world. */
@@ -2249,8 +2586,12 @@ export class Mobile implements Living, NpcSubject {
     // browser's, an NPC fighter of its or a turret of its is nobody over there, and sent under this
     // player's name the keeper's creature -- and, through its pack's alert, everything standing with
     // it -- would turn on a player who never touched it.
-    if (this.driven && this.shared && npcNow()?.askHit(this.shared, amount, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, '', source?.key === PLAYER_KEY)) return;
+    // A bolt that reached it this instant goes with the blow, so the keeper's blade can turn it away.
+    const bolt = this.heldBoltAt === this.now ? this.heldBolt : null;
+    this.heldBoltAt = -Infinity;
+    if (this.driven && this.shared && npcNow()?.askHit(this.shared, amount, this.pos.x, this.pos.y + this.halfHeight, this.pos.z, '', source?.key === PLAYER_KEY, bolt)) return;
     if (source && source.key !== this.key) {
+      this.strikers.note(source.key, this.now);
       this.remember(source, amount);
       this.deps.alert(this, source);
       // Struck by something standing well off is being shot at: a tiered person may throw itself aside.
@@ -2258,8 +2599,10 @@ export class Mobile implements Living, NpcSubject {
     }
     this.hp -= amount;
     // Something everyone else has to see once: what they are told is that it was struck, and their
-    // own copy flinches with the same clip this one is about to play.
-    this.mark = 'hit';
+    // own copy flinches with the same clip this one is about to play. The least of the marks: a roll, a
+    // jump, a parry or a knock off its feet already waiting for the batch says more, and a flinch over it
+    // would have the other screens see a slide where it threw itself aside.
+    if (!this.mark) this.mark = 'hit';
     if (this.hp <= 0) {
       this.die();
       return;
@@ -2935,12 +3278,30 @@ export class Mobile implements Living, NpcSubject {
     //    so nothing slides and nothing snaps between one word and the next.
     this.state = this.toldState;
     this.hitCd -= dt;
+    // A roll or a jump its keeper threw, played out here on the clips' own clock: the roll on its low
+    // shell for the roll's length, the jump held in the air until the clips bring it down.
+    if (this.rollLeft > 0) {
+      const left = this.rollLeft - dt;
+      if (left <= 0) this.endTumble();
+      else this.rollLeft = left;
+    } else if (this.hopping && this.now >= this.hopDownAt) {
+      const animator = this.animator;
+      const clip = animator ? jumpClipName('LAND', this.hopDir, this.hopForce, animator) : null;
+      if (clip && animator) {
+        const length = animator.once(clip, { priority: SHOT_PRIORITY.hit, fadeIn: 0.05, fadeOut: 0.15 }) ?? 0;
+        this.tumbleUntil = Math.max(this.tumbleUntil, this.now + Math.min(0.6, length));
+      }
+      this.endTumble();
+      this.grounded = true;
+    }
+    if (this.cullTumble && !this.tumbling && this.now >= this.tumbleUntil) this.applyCull();
     const move = this.entry.move;
     const accel = (this.toldSpeed > this.speeds.walk + 1e-3 ? move.accel?.[0] : move.accel?.[1]) ?? 4;
     const gait = stepGait(this.ramp, this.toldSpeed, accel, dt, this.gaitsNow(), this.idleNow(), this.scale, undefined, this.gaitOut);
     this.ramp = gait.ramp;
     this.speed = gait.speed;
-    if (!this.downPhase) this.animator?.loop(gait.clip ?? this.idleNow(), gait.timeScale);
+    // In the air its own loop holds whatever the rows' pace would ask for.
+    if (!this.downPhase) this.animator?.loop(this.hopping ? this.idleNow() : (gait.clip ?? this.idleNow()), gait.timeScale);
     this.animate(dt, tier);
     this.updateBlade(dt, ctx.camera);
   }
@@ -2997,6 +3358,9 @@ export class Mobile implements Living, NpcSubject {
     const reach = this.bladesOn ? Math.min(own, NPC_SABER_TUNE.closeTo) : own;
     for (const t of ctx.targets) {
       if (t === (this as Living) || t.key === this.key) continue;
+      // Another player only for a body whose blow can reach their browser: one this browser keeps on the
+      // wire. Anybody else would chase a picture it can never finish (`mayFight`).
+      if (!mayFight(t, this.shared)) continue;
       const dx = t.pos.x - this.pos.x;
       const dz = t.pos.z - this.pos.z;
       const grudge = this.memory.get(t.key);
@@ -3245,6 +3609,32 @@ export class Mobile implements Living, NpcSubject {
     if (this.roles && this.plainIdle && this.seatedIdleOnly) this.roles.idle = this.plainIdle;
     this.thinkAt = 0;
     this.applyCull();
+  }
+
+  /**
+   * Stood somewhere else at once, on its feet, out of any seat and with nothing carried over: the
+   * building it was standing in is being taken out of the world. Its path and its home's room go with
+   * the building, and its home is the doorstep it is stood on (a follower's is its
+   * place behind the leader again on its next thought): kept, they leashed it to a room that is not
+   * there and walked it home into one. A body another browser keeps loses its rooms all the same and is
+   * not moved, since its place is that browser's to say (it takes the same building down and stands it
+   * out there). Answers whether it was moved.
+   */
+  standOut(x: number, y: number, z: number): boolean {
+    if (this.disposed) return false;
+    this.navCell = null;
+    this.navAgent.clear();
+    this.homeCell = null;
+    if (this.driven) return false;
+    if (this.seatAt) this.rise(x, z);
+    this.placeAt(x, y + 0.05, z, this.heading);
+    if (this.body.isValid()) this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    resetStepWalker(this.stepWalk);
+    this.homeX = x;
+    this.homeZ = z;
+    this.goal = null;
+    this.thinkAt = 0;
+    return true;
   }
 
   /** Whether it is sitting on a seat just now. */
@@ -3534,7 +3924,7 @@ export class Mobile implements Living, NpcSubject {
     this.inner.position.set(0, this.liftLagY - this.plan.feet, this.liftLagZ);
   }
 
-  /** No lag at all: a respawn, or anything else that puts the body somewhere new. */
+  /** No lag at all: anything that puts the body somewhere new. */
   private dropLiftLag(): void {
     this.liftsSeen = this.stepWalk.lifts;
     this.liftLagY = 0;
@@ -3757,103 +4147,6 @@ export class Mobile implements Living, NpcSubject {
     return true;
   }
 
-  /** A fresh life at a new spot: everything a body can carry is cleared, the bones put back to rest. */
-  respawn(x: number, y: number, z: number): void {
-    if (this.disposed) return;
-    this.key = nextLivingKey();
-    this.endRagdoll();
-    for (const [bone, r] of this.restPose) {
-      bone.position.copy(r.p);
-      bone.quaternion.copy(r.q);
-      bone.scale.copy(r.s);
-    }
-    // Back in the rest pose: posed again on its next step, whatever its tier.
-    this.posed = false;
-    this.dead = false;
-    this.deadTimer = 0;
-    this.hp = this.maxHp;
-    this.dotDps = 0;
-    this.dotLeft = 0;
-    this.slowed = 0;
-    this.heldUntil = 0;
-    this.stunned = 0;
-    this.attackCd = 0;
-    this.rangedCd = 0;
-    this.hitCd = 0;
-    this.swingAt = 0;
-    this.swingUntil = 0;
-    this.swingSounded = false;
-    this.hitThisSwing.clear();
-    this.bladePath.reset();
-    // A fresh life with its blade at rest: no move, no push, no window, a full pool of Force.
-    this.dropBlades();
-    this.blades?.refill();
-    this.shotsLeft = 0;
-    // The carry and the aim. The bones have just been put back to their rest pose above, so the
-    // fold's record of what it last wrote describes a pose that no longer exists: cleared rather
-    // than unwound, or it would compare a rest-pose quaternion against a folded one, find them
-    // different, and take the fold as the clip's own -- which is the one way this can compound.
-    this.folded.clear();
-    this.dropAim();
-    this.sinceShot = Infinity;
-    // On its feet, with nothing it was doing carried over: no roll, no jump (its damping back with it),
-    // no spot, the standing shell.
-    this.dropTumble();
-    this.setPosture('stand');
-    this.tactics?.reset();
-    this.downPhase = null;
-    this.memory.clear();
-    this.targetKey = null;
-    this.targetRef = null;
-    this.decision = null;
-    this.goal = null;
-    this.until = 0;
-    this.blockedSince = null;
-    this.forgetKey = null;
-    this.stuck = 0;
-    this.stuckClock = 0;
-    resetStepWalker(this.stepWalk);
-    this.dropLiftLag();
-    this.wanderAt = -1;
-    this.thinkAt = 0;
-    // A path is a path through one room of one building; a body stood somewhere else carries none
-    // of it. The manager gives it its room again on its next follow.
-    this.navCell = null;
-    this.navAgent.clear();
-    this.legs.reset();
-    this.homeCell = null;
-    this.apart = false;
-    // A fresh life has not been spoken about yet, and owes the wire nothing about the last one.
-    this.toldOnce = false;
-    this.mark = null;
-    this.speed = 0;
-    this.ramp = 0;
-    this.swimming = false;
-    this.fading = 0;
-    this.queued = false;
-    this.grounded = true;
-    this.inner.scale.setScalar(this.scale);
-    this.homeX = x;
-    this.homeZ = z;
-    // Stood again on open ground, where the terrain is always a floor.
-    this.airless = false;
-    this.body.setEnabled(true);
-    this.body.setGravityScale(this.flyer ? 0 : 1, true);
-    this.body.setTranslation({ x, y: y + this.plan.feet + 0.05, z }, true);
-    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-    tmpQ.setFromAxisAngle(UP, this.heading);
-    this.body.setRotation({ x: tmpQ.x, y: tmpQ.y, z: tmpQ.z, w: tmpQ.w }, true);
-    this.pos.set(x, y, z);
-    this.state = this.model ? 'idle' : 'loading';
-    if (this.animator) {
-      this.animator.reset();
-      this.animator.loop(this.idleNow(), 1, 0);
-    }
-    // On its feet again (a death played as a clip never had a ragdoll to end): culled mesh by mesh once more.
-    this.applyCull();
-  }
-
   /** What the console shows of it. */
   describe(from?: THREE.Vector3): Record<string, unknown> {
     const c = this.plan.colliders[0];
@@ -3882,9 +4175,12 @@ export class Mobile implements Living, NpcSubject {
       run: Number(this.speeds.run.toFixed(2)),
       speed: Number(this.speed.toFixed(2)),
       tier: this.tier?.name ?? null,
-      // One of the world's creatures, and whether this browser is the one thinking for it.
+      // One of the world's creatures, and whether this browser is the one thinking for it; driven, how low
+      // its keeper says it stands and whether in its cover spot, which is what the wire carries of a fight.
       shared: this.shared || null,
       driven: this.driven,
+      told: this.driven ? { posture: this.posture, cover: this.toldCover, rolling: this.rollLeft > 0, inAir: this.hopping } : null,
+      companion: this.companion,
       shadow: this.meshes.some((m) => m.castShadow),
       visible: this.group.visible,
       inside: this.inside,
@@ -3943,16 +4239,19 @@ export class Mobile implements Living, NpcSubject {
   /** Taken out of the world: the body, the skeletons' bone textures and the mixer go; the caller releases the assets and the collider handles. */
   dispose(): void {
     if (this.disposed) return;
-    this.disposed = true;
-    this.dead = true;
     // Nothing is said about it going: this browser's body went, and the creature itself belongs to
     // the world (a travel, a world unloaded, a body cleared here). What is dropped is the wire's
     // hold on this body, and only while it is still this body the wire is holding: a creature stood
-    // again under the same id has already taken that place.
+    // again under the same id has already taken that place. **Before it is marked dead**, which the
+    // wire reads as "this died here": marked first, every lair creature and every person put down
+    // here was taken for a death, the word that this browser had no body for it any more was never
+    // said, and the creature froze on every other screen.
     if (this.shared) {
       const net = npcNow();
       if (net?.find(this.shared) === this) net.remove(this.shared);
     }
+    this.disposed = true;
+    this.dead = true;
     this.memory.clear();
     this.targetRef = null;
     this.endRagdoll();
@@ -3961,11 +4260,7 @@ export class Mobile implements Living, NpcSubject {
     this.animator = null;
     // The pack itself belongs to the asset cache, which the caller releases; only the hold on it goes.
     this.animPack = null;
-    if (this.blade) {
-      this.blade.group.parent?.remove(this.blade.group);
-      this.blade.dispose();
-      this.blade = null;
-    }
+    this.disposeBlade();
     // The rack's copy shares its geometry and materials with the rack: it is let go, never disposed.
     this.holder?.parent?.remove(this.holder);
     this.holder = null;

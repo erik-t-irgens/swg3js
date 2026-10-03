@@ -234,6 +234,47 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   // The gate stands aside for a person as it does for a vehicle, in the gather and in the key alike.
   ok(/free: !s\.lift && !s\.elevator && !s\.doorless && !s\.talk && !s\.near/.test(main), "the gather's gate stands aside for somebody to talk to");
   ok(/!peerRooms\(\)\?\.nearest\(p\.pos, BOARD_TUNE\.reach\) && !this\.talkTarget\(\)/.test(main), "and so does the key's own gate");
+
+  // The rest of the conversation's wiring in the frame loop, each line pinned inside the function it has to
+  // be in (a function's text from its signature to its own closing brace).
+  const body = (signature: RegExp): string => {
+    const m = signature.exec(main);
+    assert.ok(m, `no ${signature} in main.ts`);
+    let i = main.indexOf('{', m.index + m[0].length - 1);
+    const start = i;
+    let depth = 0;
+    for (; i < main.length; i++) {
+      if (main[i] === '{') depth++;
+      else if (main[i] === '}' && --depth === 0) break;
+    }
+    return main.slice(start, i + 1);
+  };
+  const target = body(/private talkTarget\(\): Mobile \| null \{/);
+  ok(/whyNotTalk\(m, me\)\) continue;/.test(target), 'the use key offers to talk only to somebody who may be spoken to (never a bandit, a droid or somebody fighting)');
+  ok(/if \(other && !this\.talkSeen\(other\)\) other = null;/.test(target) && /if \(follower && !this\.talkSeen\(follower\)\) follower = null;/.test(target) && /=== Infinity;/.test(body(/private talkSeen\(m: Mobile\): boolean \{/)) && /this\.physics\.blockDistance\(/.test(body(/private talkSeen\(m: Mobile\): boolean \{/)), 'and never through a wall: eye to face, against what stands still, for whoever it picks');
+  ok(/reachOf\([^;]*TALK_TUNE, follows\)/.test(target) && /return talkPick\(other, follower, this\.talkElseWants\);/.test(target), 'somebody following you is asked squarely, after anybody else, and yields to whatever else wants the key');
+  ok(/this\.nearestVehicle\(\)/.test(body(/private readonly talkElseWants = \(\): boolean => \{/)) && /GATE_TUNE\.reach/.test(body(/private readonly talkElseWants = \(\): boolean => \{/)), '... which is a vehicle, a hull to board or a gate in reach');
+  const gather = body(/private gatherPrompt\(simulate: boolean\): PromptState \{/);
+  ok(/const talk = this\.talkTarget\(\);\s*s\.talk = !!talk;/.test(gather), 'the bar is told who may be spoken to, with the rest of what it gathers');
+  ok(/else if \(S8\.talk\) prompt = `<b>E<\/b> talk to \$\{this\.promptTalk\}`;/.test(main), 'and the long line says whom');
+  for (const [what, sig] of [
+    ['a blow on you', /private hurtFrom\(from: THREE\.Vector3 \| null \| undefined\): void \{/],
+    ['a travel', /private async travel\(planet: PlanetDef, zoneId\?: string, ship\?: ShipCrossing\): Promise<Vehicle \| null> \{/],
+    ['a death', /private die\(\): void \{/],
+    ['the select screen', /private switchToSelect\(\): void \{/],
+  ] as [string, RegExp][]) {
+    ok(/this\.endTalk\(/.test(body(sig)), `${what} ends a conversation`);
+  }
+  const step = body(/private stepTalk\(dt: number\): void \{/);
+  ok(/input\.dropPresses\(\);/.test(step) && step.indexOf('input.dropPresses();') > step.indexOf('this.answerTalk(n)'), 'a conversation reads its answers and then takes every other press, so nothing else in the frame sees a key');
+  ok(/this\.cam\.yaw \+=/.test(step), "and turns the view to the one spoken to with the body, so the player's own turning rules agree with it");
+  ok(/DIGIT_CODES\[n - 1\]/.test(step) && !/consumeKey\(`Digit/.test(step), 'reading the number keys out of one table, with no string made a frame');
+  // A window that opens from its own key listener must not open hidden behind a conversation.
+  for (const what of ['const chatUi = new ChatUi(', 'const groupUi = new GroupUi(', 'const tradeUi = new TradeUi(', 'this.debugMenu = new DebugMenu(']) {
+    const at = main.indexOf(what);
+    const can = /canOpen: \(\) => [^\n]*/.exec(main.slice(at))?.[0] ?? '';
+    ok(at > 0 && /!this\.talkNow/.test(can), `${what.replace(/^(const |this\.)/, '').replace(/ = new .*/, '')} does not open over a conversation`);
+  }
 }
 
 {

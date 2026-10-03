@@ -3,11 +3,17 @@ import type { PlanetDef, TreeStyle } from '../data/planets';
 import { hash2 } from './noise';
 import { CHUNK_SIZE, type Terrain } from './terrain';
 import type { LoadedModel } from './assetPack';
+import type { ColliderPart } from './floraCollision.ts';
 
 /** A converted SWG model to scatter, with a relative placement chance. */
 export interface ScatterItem { model: LoadedModel; density: number; minScale: number; maxScale: number }
 
-export interface Collider { x: number; z: number; r: number; top: number }
+/**
+ * Something solid planted on a chunk: an upright cylinder from under the ground to `top`, `r` wide,
+ * or, for a planting the pack has the client's own collision shapes for, those shapes (`parts`,
+ * src/world/floraCollision.ts), with `r` and `top` then saying how far across they reach and how high.
+ */
+export interface Collider { x: number; z: number; r: number; top: number; parts?: readonly ColliderPart[] }
 export interface Exclusion { x: number; z: number; r: number }
 
 interface StyleParams {

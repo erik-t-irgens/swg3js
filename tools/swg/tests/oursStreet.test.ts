@@ -40,7 +40,7 @@ import { inflateRawSync } from 'node:zlib';
 import * as THREE from 'three';
 import { AmbientPeople, type AmbientDeps, type AmbientPort } from '../../../src/world/ambient/ambientPeople.ts';
 import { FILLER_TUNE } from '../../../src/world/ambient/fillers.ts';
-import { ROUTINE_TUNE, openRegion, rankedRegion, type TravellerPlan } from '../../../src/world/ambient/routines.ts';
+import { ROUTINE_TUNE, newHeadway, openRegion, rankedRegion, type TravellerPlan } from '../../../src/world/ambient/routines.ts';
 import { LIFT_CELL } from '../../../src/world/lifts.ts';
 import { DOOR_TUNE, exitsFrom, type DoorExit } from '../../../src/world/nav/doorway.ts';
 import { buildRoomGraph, type CellDef, type PortalDef } from '../../../src/world/nav/navRooms.ts';
@@ -140,6 +140,8 @@ class FakeBody {
   stuckEvents = 0;
   seatedIdleOnly = false;
   routine: unknown = null;
+  /** Being spoken to (`Mobile.listening`): the point it faces while the conversation lasts. */
+  listening: { x: number; z: number } | null = null;
   readonly entry = { id: 'person' };
   readonly legs = { phase: 0 };
   cleared = 0;
@@ -520,6 +522,81 @@ else {
       ROUTINE_TUNE.clearOut = was;
     }
   }
+}
+
+// ---------------------------------------------------------------- one of ours spoken to, and asked to follow
+//
+// Synthetic, whatever is converted: a traveller and a filler written into the runner's own books as it
+// keeps them, spoken to (`Mobile.listening`, which holds its day still) and then given up to the people
+// following the player (`AmbientPeople.release`, src/world/followers.ts), which takes it off the books
+// without taking it out of the world.
+{
+  type Books = Runner & { travelling: Map<number, unknown>; done: Map<number, number> };
+  const record = (id: string, num: number, body: FakeBody, over: Record<string, unknown> = {}) => ({
+    id,
+    num,
+    kind: num >= 0 ? 'arrive' : 'filler',
+    body,
+    walk: { going: true, goal: { x: 50, z: 0 }, building: null, room: 0 },
+    track: newHeadway(0),
+    who: 'somebody',
+    port: null,
+    plan: null,
+    state: { stage: 'enter', standUntil: 0 },
+    terminal: null,
+    wait: null,
+    dest: null,
+    fill: null,
+    slot: 0,
+    doorstep: false,
+    through: false,
+    via: null,
+    out: false,
+    replanned: false,
+    detour: null,
+    heldSince: Number.NaN,
+    trace: null,
+    ...over,
+  });
+  const ap = new AmbientPeople();
+  const run = ap as unknown as Books;
+  const deps = { remove: (m: FakeBody) => void (m.removed = true) } as unknown as AmbientDeps;
+  const at = new THREE.Vector3(0, 0, 0);
+
+  // Spoken to: not walked, put away or let go, however far off it is and however long it stands.
+  const talker = new FakeBody();
+  talker.pos.set(1e5, 0, 0);
+  talker.listening = { x: 0, z: 0 };
+  const tr = record('ours:t1', 1, talker);
+  tr.track.at = 3;
+  run.records.set(tr.id, tr as never);
+  run.travelling.set(1, tr);
+  run.walkOne(tr as never, 20, 30, at, deps);
+  ok(run.records.has('ours:t1') && !talker.removed && tr.track.at === 20 && tr.walk.goal.x === 50, "one of ours being spoken to is not walked, put away or let go, however far off; its walk's clock starts again, so the stand is not taken for a stall");
+  talker.listening = null;
+  run.walkOne(tr as never, 21, 31, at, deps);
+  ok(!run.records.has('ours:t1') && talker.removed, 'and spoken to no longer, one that far off is put away as ever');
+
+  // A traveller asked to follow: off the books, out of the travellers, done for its round, still in the world.
+  const trav = new FakeBody();
+  const rt = record('ours:t2', 2, trav, { plan: { round: 4 } });
+  run.records.set(rt.id, rt as never);
+  run.travelling.set(2, rt);
+  ok(ap.release(trav as never, 10) && !run.records.has('ours:t2') && !run.travelling.has(2) && run.done.get(2) === 4 && !trav.removed && ap.tally.recruited === 1, 'a traveller asked to follow is off our books without being taken away, and done for its round, so it is not stood again as well');
+  ok(!ap.release(trav as never, 11) && ap.tally.recruited === 1, 'asked again, it is not ours to give');
+
+  // A filler asked to follow: up off its seat, its place waiting for somebody new as when one leaves.
+  const sitter = new FakeBody();
+  sitter.seated = true;
+  sitter.routine = { sitting: true };
+  const slot = { state: 'staying', life: 2, nextAt: 0, leaveAt: 99 };
+  const fill = { spots: [{ frontX: 1, frontZ: 2 }], bodies: [] as unknown[], slots: [slot], seed: 5 };
+  const rf = record('ours:f1', -1, sitter, { kind: 'filler', fill, slot: 0 });
+  fill.bodies[0] = rf;
+  run.records.set(rf.id, rf as never);
+  ok(ap.release(sitter as never, 10) && !run.records.has('ours:f1') && fill.bodies[0] === null && !sitter.removed, 'a filler asked to follow is off our books without being taken away');
+  ok(!sitter.seated && sitter.routine === null, 'up off its seat, and walked by no routine of ours');
+  ok(slot.state === 'empty' && slot.life === 3 && slot.nextAt >= 10 && ap.tally.recruited === 2, `and its place waits for somebody new, as it does when one leaves (next at ${slot.nextAt.toFixed(1)} s)`);
 }
 
 console.log(`\nours in the street: ${passed} checks passed`);
