@@ -37,19 +37,27 @@ export class FxMoverList {
   readonly velocities: (THREE.Vector3 | null)[] = [];
   /** A subtree of the root left out of its draws, or null: a ship's separate room model while nobody aboard sees it (it only ever shows through the hull, where the depth test fails). */
   readonly skips: (THREE.Object3D | null)[] = [];
+  /**
+   * The mover is drawn by the passes on a layer of its own rather than the actors' (a door's leaf: the
+   * world's layer, or the rooms'), so the draw check takes it as shown on any layer once it is visible
+   * and in the frustum. Only for something the portal renderer hides by `visible` wherever its passes do
+   * not draw it, which is what keeps "shown" meaning "three projected it".
+   */
+  readonly anyLayer: boolean[] = [];
   length = 0;
 
   clear(): void {
     this.length = 0;
   }
 
-  add(root: THREE.Object3D, carried: boolean, kind: FxMoverKind, velocity: THREE.Vector3 | null = null, skip: THREE.Object3D | null = null): void {
+  add(root: THREE.Object3D, carried: boolean, kind: FxMoverKind, velocity: THREE.Vector3 | null = null, skip: THREE.Object3D | null = null, anyLayer = false): void {
     const i = this.length++;
     this.roots[i] = root;
     this.carried[i] = carried;
     this.kinds[i] = kind;
     this.velocities[i] = velocity;
     this.skips[i] = skip;
+    this.anyLayer[i] = anyLayer;
   }
 }
 
@@ -376,6 +384,8 @@ interface MoverRecord {
   velocity: THREE.Vector3 | null;
   /** The subtree the list leaves out (FxMoverList.skips); a change rescans. */
   skip: THREE.Object3D | null;
+  /** Drawn on a layer of its own, not the actors' (FxMoverList.anyLayer). */
+  anyLayer: boolean;
   /** The first named descendant, for stats. */
   name: string;
   /** ctx.frame it was last listed. */
@@ -593,6 +603,7 @@ export class VelocityProduct extends GeometryProduct {
       rec.kind = list.kinds[i];
       rec.carried = list.carried[i];
       rec.velocity = list.velocities[i];
+      rec.anyLayer = list.anyLayer[i];
       const skip = list.skips[i];
       if (rec.skip !== skip) {
         // Boarded or left: the draws are taken again with or without that subtree.
@@ -616,6 +627,7 @@ export class VelocityProduct extends GeometryProduct {
       carried: false,
       velocity: null,
       skip: null,
+      anyLayer: false,
       name: '',
       seen: -1,
       scanned: -1,
@@ -812,7 +824,7 @@ export class VelocityProduct extends GeometryProduct {
     s.draws.length = s.drawCount;
     if (s.drawCount === 0) return;
     // What first person keeps on the shadow layer (the player's head) is off the actor layer on purpose.
-    if (import.meta.env.DEV && !rec.warned && !mesh.layers.isEnabled(ACTOR_LAYER) && !isShadowOnly(mesh.layers.mask)) {
+    if (import.meta.env.DEV && !rec.warned && !rec.anyLayer && !mesh.layers.isEnabled(ACTOR_LAYER) && !isShadowOnly(mesh.layers.mask)) {
       rec.warned = true;
       console.warn(`velocity: ${mesh.name || mesh.type} under ${rec.name || rec.root.type} is not on the actor layer, so it is never drawn and blurs with the camera only`);
     }
@@ -984,7 +996,7 @@ export class VelocityProduct extends GeometryProduct {
         s.firstShown = -1;
         continue;
       }
-      const shown = visible && m.layers.isEnabled(ACTOR_LAYER) && (!m.frustumCulled || frustum.intersectsObject(m));
+      const shown = visible && (rec.anyLayer || m.layers.isEnabled(ACTOR_LAYER)) && (!m.frustumCulled || frustum.intersectsObject(m));
       s.firstShown = shownSince(s.firstShown, shown, frame);
       if (!shown) continue;
       // Shown on an earlier frame too: three has projected it, so its buffers exist.

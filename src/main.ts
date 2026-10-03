@@ -281,6 +281,7 @@ import { SWOOSH_TUNE } from './world/swooshTrail.ts';
 import { worldNav } from './world/nav/nav.ts';
 import { outdoorNav } from './world/nav/outdoorNav.ts';
 import { doorwayNav, type DoorTune } from './world/nav/doorway.ts';
+import { DOORS_TUNE, type DoorsTune } from './world/doorMath.ts';
 import { PATROL_TUNE, type PatrolTune } from './world/patrols.ts';
 // The long walk: its numbers and its knob. The order itself is `NpcManager.send`; this file only
 // has to turn a place name or a pair of coordinates into a point, because the world's own named
@@ -3745,6 +3746,25 @@ class App {
       },
       /** Building interiors: how many are built against how many every loaded building would hold. `force` builds them all to compare. */
       interiors: (force = false) => this.world.interiorStats(force),
+      /**
+       * The doors in the buildings' doorways (`src/world/doors.ts`): how many stand, are open and are
+       * moving, what became of the door models, how many sounds they have played, and the door nearest
+       * the player with its style, times, slide, trigger, sounds and how open it is. `{ tune }` moves
+       * `DOORS_TUNE` live, `{ hold: 'open' | 'shut' | 'auto' }` holds the nearest door, and
+       * `{ list: true }` (or a number of metres) lists every door within 30 m.
+       */
+      doors: (opts: { tune?: Partial<DoorsTune>; hold?: 'open' | 'shut' | 'auto'; list?: boolean | number } = {}) => {
+        if (opts.tune) {
+          const t = DOORS_TUNE as unknown as Record<string, unknown>;
+          for (const [k, v] of Object.entries(opts.tune)) if (k in t && typeof v === typeof t[k]) t[k] = v;
+        }
+        const at = this.player.worldPos;
+        const doors = this.world.doors;
+        const near = doors.nearest(at.x, at.y, at.z);
+        if (opts.hold && near) doors.hold(near.door, opts.hold === 'open' ? 1 : opts.hold === 'shut' ? -1 : 0);
+        const list = opts.list ? doors.around(at.x, at.y, at.z, typeof opts.list === 'number' ? opts.list : 30) : null;
+        return { ...doors.status(), tune: { ...DOORS_TUNE }, nearest: near ? doors.describe(near.door, at) : null, ...(list ? { list } : {}) };
+      },
       /** Draw calls of the whole frame, summed over the portal renderer's passes. */
       drawCalls: () => ({ calls: stats.calls, passes: this.portals.passes, triangles: stats.triangles }),
       // The player's position in the original game's coordinates (for terrain-check --at and /way).
@@ -12229,6 +12249,11 @@ class App {
     if (props) out.add(props, false, 'vehicle');
     // The shuttles, the same shape again: each root stands on its pad and the joints under it move.
     if (this.shuttleRigs) for (const r of this.shuttleRigs.roots(this.moverRoots)) out.add(r, false, 'vehicle');
+    // The doors' leaves that moved this step, each its own root. They stand on the world's layer or the
+    // rooms' rather than the actors', and the portal renderer hides an inner one wherever its rooms are
+    // not drawn, so the draw check takes them on any layer (`anyLayer`).
+    const leaves = w.doors.moved;
+    for (let i = 0; i < leaves.length; i++) out.add(leaves[i], false, 'vehicle', null, null, true);
     this.remotes.collectMovers(out);
   };
 

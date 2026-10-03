@@ -199,8 +199,8 @@ export class Physics {
         return null;
       }
       // One piece against something else. It meets whatever stands still -- a collider with no body
-      // of its own (the ground, a building, a room) or a fixed one -- and nothing that moves on its
-      // own. Which of the two the other body is was worked out before the step began: nothing here
+      // of its own (the ground, a building, a room) or a fixed one, and a door's leaf, which is a wall
+      // that moves -- and nothing that moves on its own. Which the other body is was worked out before the step began: nothing here
       // may call into the engine, because the world is mid-step and a call back into it is a
       // recursive borrow that throws out of the step's own callback (see `movers`).
       const other = p1 ? b2 : b1;
@@ -221,9 +221,13 @@ export class Physics {
    */
   private readonly movers = new Set<number>();
 
-  /** Kept, not made per call: this runs once a frame for every body in the streamed world while anything is dead. */
+  /**
+   * Kept, not made per call: this runs once a frame for every body in the streamed world while anything
+   * is dead. A wall that moves (a door's leaf, `markWall`) is no mover: a corpse lands against a shut door
+   * as it lands against the wall beside it, rather than falling through it into the next room.
+   */
   private readonly noteMover = (b: RAPIER.RigidBody): void => {
-    if (!b.isFixed()) this.movers.add(b.handle);
+    if (!b.isFixed() && !this.wallBodies.has(b.handle)) this.movers.add(b.handle);
   };
 
   private refreshMovers(): void {
@@ -400,6 +404,54 @@ export class Physics {
   }
 
   /**
+   * Colliders that move and are still walls: a door's leaf (src/world/doors.ts), which hangs on a
+   * kinematic body so that sliding it open never adds or removes a collider. Everything that stops only
+   * at what stands still -- a fighter's character controller, the camera's block ray, a gunner's line of
+   * fire -- asks this as well (`stillOrWall`), or a shut door would be no wall to a fighter, the camera
+   * would swing through it and a gunner would shoot it for want of seeing it. A corpse meets one as it
+   * meets a wall: a wall's body is never counted among the movers the contact filter keeps it from.
+   */
+  private readonly walls = new Set<number>();
+  /** Each wall's body, by the wall's handle, and how many walls each such body carries: the movers leave these out. */
+  private readonly wallOwner = new Map<number, number>();
+  private readonly wallBodies = new Map<number, number>();
+
+  markWall(c: RAPIER.Collider, on: boolean): void {
+    if (on) {
+      if (this.walls.has(c.handle)) return;
+      this.walls.add(c.handle);
+      const body = c.parent();
+      if (!body) return;
+      this.wallOwner.set(c.handle, body.handle);
+      this.wallBodies.set(body.handle, (this.wallBodies.get(body.handle) ?? 0) + 1);
+      return;
+    }
+    if (!this.walls.delete(c.handle)) return;
+    // Read back from the record, never from the collider: one being taken down may have lost its body.
+    const owner = this.wallOwner.get(c.handle);
+    if (owner === undefined) return;
+    this.wallOwner.delete(c.handle);
+    const left = (this.wallBodies.get(owner) ?? 1) - 1;
+    if (left > 0) this.wallBodies.set(owner, left);
+    else this.wallBodies.delete(owner);
+  }
+
+  /** Whether a collider is a wall that moves (a door's leaf). */
+  isWall(handle: number): boolean {
+    return this.walls.has(handle);
+  }
+
+  /**
+   * What stops whatever stops only at what stands still, with a shut door counted: a collider with no
+   * body, a fixed one, or a wall that moves (`markWall`). Kept, so a caller casting every step makes no
+   * closure: the fighters' character controller, the camera's block ray, a gunner's line of fire.
+   */
+  readonly stillOrWall = (c: RAPIER.Collider): boolean => {
+    const body = c.parent();
+    return !body || body.isFixed() || this.walls.has(c.handle);
+  };
+
+  /**
    * What the one ray that filters nothing at all passes over: another player's body, and a corpse.
    * Neither is a surface to stand on -- a peer standing under a speeder would be its road, and so
    * would a dead body lying under one -- and the two other rays that ask for a floor among things
@@ -498,8 +550,9 @@ export class Physics {
 
   /**
    * Distance from `from` toward `to` at which static geometry blocks a camera, or null when
-   * clear. Moving bodies (creatures, vehicles, the player) never block it; inside a building
-   * the ground and the building's shell are ignored, as they are for the player.
+   * clear. Moving bodies (creatures, vehicles, the player) never block it, a door's leaf does
+   * (`markWall`); inside a building the ground and the building's shell are ignored, as they are
+   * for the player.
    */
   /**
    * Heights of every upward-facing interior surface on the vertical line through a point,
@@ -531,10 +584,7 @@ export class Physics {
     if (len < 1e-4) return null;
     const ray = new RAPIER.Ray(from, { x: dx / len, y: dy / len, z: dz / len });
     const filter = groups(Group.all, inside ? Group.all & ~(Group.terrain | Group.exterior) : Group.all);
-    const hit = this.world.castRay(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, (c) => {
-      const body = c.parent();
-      return !body || body.isFixed();
-    });
+    const hit = this.world.castRay(ray, len, true, undefined, filter, undefined, excludeBody ?? undefined, this.stillOrWall);
     return hit ? hit.timeOfImpact : null;
   }
 
@@ -586,9 +636,12 @@ export class Physics {
   /**
    * Whether a fixed collider lies on the segment between two points (never a moving body), for
    * whether a lamp is in sight. With `inside`, the ground and building shells are ignored, as
-   * cameraBlock does for a camera inside a building. Makes no objects of its own.
+   * cameraBlock does for a camera inside a building. With `walls` a shut door counts as well
+   * (`stillOrWall`): a gunner's line of fire and a lamp's sight ask that way; the doorway test of who
+   * can reach whom does not, since a body within a blow's reach of a door is within the door's own
+   * radius and the door is opening for it. Makes no objects of its own.
    */
-  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean): boolean {
+  segmentBlocked(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, inside: boolean, walls = false): boolean {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dz = to.z - from.z;
@@ -602,7 +655,7 @@ export class Physics {
     r.dir.y = dy / len;
     r.dir.z = dz / len;
     const filter = inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
-    return this.world.castRay(r, len, true, undefined, filter, undefined, undefined, this.fixedOnly) !== null;
+    return this.world.castRay(r, len, true, undefined, filter, undefined, undefined, walls ? this.stillOrWall : this.fixedOnly) !== null;
   }
 
   /** The cover search's own ray, kept: a search casts a dozen and a half of these and must make nothing. */

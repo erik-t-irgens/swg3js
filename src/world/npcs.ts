@@ -1827,9 +1827,10 @@ export class Npc implements Living, ErrandBody, NpcSubject {
   }
 
   /**
-   * Whether a shot from here would reach a target's middle: one ray against what stands still,
-   * cast at a thought and never at a frame. Inside a building it ignores the terrain and the
-   * outer shells, as everything else of a body indoors does.
+   * Whether a shot from here would reach a target's middle: one ray against what stands still and
+   * a shut door, cast at a thought and never at a frame. Inside a building it ignores the terrain
+   * and the outer shells, as everything else of a body indoors does. A shut door is no line: the bolt
+   * would stop on it, so the brain closes in instead of standing to shoot, and the door opens for it.
    */
   private lineTo(t: Living): boolean {
     this.muzzle(tmp);
@@ -1839,7 +1840,7 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     LINE_TO.x = t.pos.x;
     LINE_TO.y = t.pos.y + t.halfHeight;
     LINE_TO.z = t.pos.z;
-    return !this.physics.segmentBlocked(LINE_FROM, LINE_TO, !!this.cell);
+    return !this.physics.segmentBlocked(LINE_FROM, LINE_TO, !!this.cell, true);
   }
 
   /**
@@ -3403,7 +3404,10 @@ export class Npc implements Living, ErrandBody, NpcSubject {
       moveAsk.x = this.wish.x;
       moveAsk.y = this.wish.y + dy;
       moveAsk.z = this.wish.z;
-      this.controller.computeColliderMovement(this.collider, moveAsk, undefined, this.cell ? INSIDE_FILTER : OUTSIDE_FILTER, staticOnly);
+      // What stops it walking is what stands still and a shut door (`Physics.stillOrWall`): a door's
+      // leaf hangs on a kinematic body so that sliding it never adds or removes a collider, and it is a
+      // wall all the same. Not the floor probe's rule, which wants what can be stood on.
+      this.controller.computeColliderMovement(this.collider, moveAsk, undefined, this.cell ? INSIDE_FILTER : OUTSIDE_FILTER, this.physics.stillOrWall);
       // Written into a vector of ours: with nowhere to write, rapier makes one every call, which
       // is one object per fighter per frame.
       const mv = this.controller.computedMovement(moveGot);

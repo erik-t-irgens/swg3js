@@ -45,6 +45,8 @@ import { LayoutStreamer, nearTierRange, type Building, type CellState, type Plac
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
+import { Doors, type DoorView } from './doors.ts';
+import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
@@ -623,6 +625,13 @@ export class World {
   private readonly structures: THREE.Object3D[] = [];
   private structureColliders: RAPIER.Collider[] = [];
   private layoutStream: LayoutStreamer | null = null;
+  /**
+   * The doors in the buildings' doorways (`doors.ts`): stood with each building's rooms by the streamer,
+   * opened by whatever walks up to them, stepped once a step. One for the session, emptied with each world.
+   */
+  readonly doors: Doors;
+  /** The space a door's sound is heard in, refilled for each one (`doorSound`). */
+  private readonly doorSpace: SoundSpace = { building: -1, cell: -1 };
   /** Particle effects from the pack (campfires, smoke, sparks), placed by the streamer. */
   private particles: ParticleEffects | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
@@ -826,6 +835,13 @@ export class World {
       },
       say: (text) => this.onNote?.(text),
     };
+    // The doors in the buildings' doorways: stood by the streamer with each building's rooms, their
+    // programs built on the paced queue before they are shown, and their sounds heard from the room the
+    // ear is in or from the street.
+    this.doors = new Doors(scene, physics, import.meta.env.BASE_URL);
+    this.doors.prepare = (objects) => this.prepareDoors(objects);
+    this.doors.onSound = (id, door) => this.doorSound(id, door);
+    this.doors.prepareSounds = (ids) => this.audio?.prepare(ids);
     scene.add(this.chunkRoot, this.sun, this.sun.target, this.hemi, this.fill, this.fill.target, this.splashes.points, this.dust.points);
     // What is added to the scene or the ground's root from here on is queued for the material scan (step 6).
     this.sceneAdds.watch(scene);
@@ -1641,6 +1657,8 @@ export class World {
       // A fountain's or a pool's water is drawn by the water system (the owner's call): reflecting,
       // rippling and ringed by rain like a lake, and never swelling.
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
+      // The doors in its buildings' doorways, stood with each building's rooms (`doors.ts`).
+      this.layoutStream.doorHost = this.doors;
       // The models the old rule would have loaded round the arrival start loading now, behind the screen, so
       // the sweep there builds their programs (step 6): the loading screen's `settle` asks again for where
       // the player really stands.
@@ -1796,6 +1814,10 @@ export class World {
     this.structures.length = 0;
     this.layoutStream?.dispose();
     this.layoutStream = null;
+    // The doors came down with their buildings' rooms just above; the door models go with the world they
+    // were prepared in, their materials out of the portal set and the cascades first.
+    this.forgetMaterials(this.doors.materials());
+    this.doors.unload();
     // A hold belongs to the world it was taken out on: nothing may carry one into the next one.
     this.streamHold = false;
     this.particles?.dispose();
@@ -6438,9 +6460,53 @@ export class World {
     // goes. Noclipping and stepping aboard leave the burn alone deliberately -- it goes on being
     // spent, every blow of it refused by the game's own rule about what may hurt the player, and the
     // burning manager draws nothing on a body that may not be attacked, so nothing is left standing.
+    // The doors, once everything that walks has moved: each opens for whoever is near it now, and its
+    // leaves and their bodies are put where it has got to before the physics steps and the frame is drawn.
+    perf.begin(SEC.doors);
+    this.stepDoors(dt, playerPos);
+    perf.end(SEC.doors);
     // What the ground itself does to whoever stands on it. Last, after everything alive has moved
     // and after the hulls, so a body is burnt where this step left it and not where it was.
     this.stepHazards(dt, playerPos);
+  }
+
+  /**
+   * Who is near a door this step, and the doors' own step (`doors.ts`): the player wherever they stand
+   * (in a hull's rooms the figure is in no building of this world, and nothing there has a door), every
+   * person and creature of the catalogue with its model up, every fighter and every other player's body,
+   * alive. Not `targets()`, which leaves the player out while a panel is open: a door must not shut on
+   * somebody who has stopped to read a menu in its doorway. Nothing allocated.
+   */
+  private stepDoors(dt: number, playerPos: THREE.Vector3): void {
+    const doors = this.doors;
+    if (!doors.count) return;
+    // Who they are is `gatherOpeners`' rule, which the node test pins (doorMath.ts).
+    gatherOpeners(doors, this.aboard ? null : playerPos, this.mobiles?.live, this.npcs.npcs, this.peers().standing);
+    doors.step(dt);
+  }
+
+  /** The door models' programs, built on the paced queue as a streamed tier's are; adopted at once with no pacing. */
+  private prepareDoors(objects: THREE.Object3D[]): Promise<void> {
+    if (SHADER_PACING) return this.prepareStreamed(objects);
+    for (const o of objects) this.adoptMaterials(o);
+    return Promise.resolve();
+  }
+
+  /**
+   * A door's sound: in the ear's own room when the ear is in that door's building (no wall between),
+   * out in the open for a door to the world heard from the street, and inside its building otherwise,
+   * which the mixer muffles for an ear outside it.
+   */
+  private doorSound(id: string, door: DoorView): void {
+    const building = this.spaceId(door.building);
+    let space: SoundSpace | undefined;
+    if (building >= 0 && this.listenerSpace.building === building) space = this.listenerSpace;
+    else if (!door.exit) {
+      this.doorSpace.building = building;
+      this.doorSpace.cell = door.cells[0] ?? -1;
+      space = this.doorSpace;
+    }
+    this.playSound(id, door.x, door.y, door.z, space);
   }
 
   /**

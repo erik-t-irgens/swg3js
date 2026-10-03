@@ -51,6 +51,8 @@ const SECTION_DEFS = [
   { key: 'people', parent: 'living' },
   { key: 'npcs', parent: 'living' },
   { key: 'ships', parent: 'living' },
+  // The doors in the buildings' doorways: who is near each, and the leaves of those that move.
+  { key: 'doors', parent: 'living' },
   { key: 'ambience', parent: 'world' },
   { key: 'physics', parent: '' },
   { key: 'camera', parent: '' },

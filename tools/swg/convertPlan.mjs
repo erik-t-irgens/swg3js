@@ -221,6 +221,11 @@ export const STEP_FACTS = {
   // and its fittings and travel rows and the props pack's list, so it waits for all four and holds
   // every pack and the props folder while it writes into them.
   objeffects: { order: 43, lock: 'pack', locks: ['props'], needs: ['snapshot', 'props', 'fittings', 'travel'], seconds: 10, bytes: 0.45 * GB, measured: 'thirty-three packs, 598 effects over 439 templates: 3.1 s, 337 MB' },
+  // The doors in the buildings' doorways: a table beside every world's and the gallery's manifest,
+  // built from the portal models those manifests list and each one's own `.pob`, and the door models
+  // once into a folder of their own. It reads what the snapshot and the gallery write, so it waits for
+  // both, and holds every pack and the doors folder while it writes into them.
+  doors: { order: 44, lock: 'pack', locks: ['doors'], needs: ['snapshot', 'gallery'], seconds: 10, bytes: 0.45 * GB, measured: 'seventeen packs, 2,034 doors and 80 door models: 3.5 s, 348 MB' },
 };
 
 // Which commands carry the planet (or the zone) they write, and **where** on their own command

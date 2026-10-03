@@ -76,6 +76,11 @@
 //                                                                  converted world plants (a trunk, a few cylinders round a rock, nothing at all
 //                                                                  for a bush), into flora-collision.json beside its manifest (extent.mjs). It
 //                                                                  converts no model; snapshot and flora write the same file as they convert
+//   node tools/swg/cli.mjs doors <swg-dir> <out-dir>                the doors standing in every converted portal building's doorways (each portal's
+//                                                                  door style and hardpoint, the client's door style table and the sounds its
+//                                                                  effects name), into doors.json beside each pack's manifest, and the door
+//                                                                  models once into <out-dir>/doors (doors.mjs). It converts no building, so it
+//                                                                  runs after snapshot and gallery and takes seconds
 //   node tools/swg/cli.mjs navgrid <planet>|all <out-dir> [--cell=2] [--slope=47] [--skip-existing]
 //                                                                  bake a world's outdoor walkability grid (nav.json, nav.bin) from the pack
 //                                                                  it already has: the terrain, the placements and the models' own triangles.
@@ -227,6 +232,7 @@ import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
 import { mapFrameOf } from './mapframe.mjs';
 import { floraCollisionFile, floraCollisionStatus } from './extent.mjs';
+import { DOORS_PACK_VERSION, doorModelId, doorsStale, packDoorTable, pobDoorReader, readDoorStyles } from './doors.mjs';
 import { CORE3_WORLDS } from './core3.mjs';
 import { loadEffect } from './texrender.mjs';
 import { readTemplate, stringParam } from './objtemplate.mjs';
@@ -3071,6 +3077,36 @@ function packStatus(dir) {
       console.log(`  deeds: ${rows.length} buildings a player can buy, ${withModel} with a model this game draws`);
       if ((deedPack.version ?? 0) !== DEED_PACK_VERSION) need(`deeds <swg-dir> ${dir} --retail-only`, 'the deeds were written in an older shape than this build reads');
     }
+  }
+  // The doors in the buildings' doorways (`doors`): a table per pack beside its manifest and the door
+  // models in one shared folder. Asked for again whenever a world or the gallery was converted after
+  // its table was written (the table is built from that layout's models), or a table names a door
+  // model the shared folder has not got. One run writes every pack, after the snapshot and the gallery.
+  {
+    const doorModels = readJson(join(dir, 'doors', 'manifest.json'));
+    const doorIds = doorModels?.version === DOORS_PACK_VERSION ? new Set((doorModels.categories?.doors ?? []).map((d) => d.id)) : new Set();
+    const stale = [];
+    let doorCount = 0;
+    let doorPacks = 0;
+    for (const name of [...GAME_PLANETS, 'gallery']) {
+      const packDir = join(dir, name);
+      const manifest = readJson(join(packDir, 'manifest.json'));
+      if (!manifest || !Object.values(manifest.categories ?? {}).flat().some((d) => d?.cells && /\.pob$/i.test(d.source ?? ''))) continue;
+      const file = join(packDir, 'doors.json');
+      const table = readJson(file);
+      const layoutFile = join(packDir, 'layout.json');
+      const why = doorsStale(table, { tableMtime: existsSync(file) ? statSync(file).mtimeMs : 0, manifestMtime: existsSync(layoutFile) ? statSync(layoutFile).mtimeMs : 0, models: doorIds });
+      if (why) stale.push(`${name} (${why})`);
+      else {
+        doorPacks++;
+        for (const rows of Object.values(table.models)) doorCount += rows.length;
+      }
+    }
+    if (doorPacks) console.log(`  doors: ${doorCount} over ${doorPacks} packs, ${doorIds.size} door models`);
+    // The door models are models like any other: converted before the current material format, they are
+    // asked for again, as the snapshot's, the props', the weapons' and the ships' are.
+    if (doorModels && (doorModels.materialFormat ?? 1) < MATERIAL_FORMAT) need(`doors <swg-dir> ${dir} --retail-only`, 'the door models were converted before the current material format');
+    else if (stale.length) need(`doors <swg-dir> ${dir} --retail-only`, `the buildings on ${stale.length} pack${stale.length === 1 ? '' : 's'} have no doors in their doorways, or were converted again after their doors were written (${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ', ...' : ''})`);
   }
   const readQuiet = (file) => {
     try {
@@ -5931,7 +5967,7 @@ switch (cmd) {
     console.log(`${pob.cells.length} cells, ${pob.portals.length} portal polygons`);
     pob.portals.forEach(({ verts, indices }, i) => console.log(`  portal ${i}: ${verts.length} verts, ${indices.length / 3} triangles, centre ${verts.reduce((a, v) => a.map((c, k) => c + v[k] / verts.length), [0, 0, 0]).map((v) => v.toFixed(2)).join(',')}`));
     pob.cells.forEach((c, i) => {
-      console.log(`  cell ${i} "${c.name}" ${c.appearance} floor ${c.floor || '-'}: ${c.portals.map((p) => `#${p.geometry}->${p.target}${p.passable ? '' : ' closed'}${p.disabled ? ' disabled' : ''}`).join(' ') || 'no portals'}`);
+      console.log(`  cell ${i} "${c.name}" ${c.appearance} floor ${c.floor || '-'}: ${c.portals.map((p) => `#${p.geometry}->${p.target}${p.passable ? '' : ' closed'}${p.disabled ? ' disabled' : ''}${p.doorStyle ? ` door ${p.doorStyle}${p.doorHardpoint ? '' : ' (no hardpoint)'}` : ''}`).join(' ') || 'no portals'}`);
       // The walkable floor the cell names, as the pack would read it.
       if (!c.floor) return;
       if (!vfs.has(c.floor)) {
@@ -7143,6 +7179,82 @@ switch (cmd) {
     const c = reader.counts;
     console.log(`objeffects: ${packs} packs; of ${c.templates} templates read, ${c.withClientData} name client data that hangs something and ${c.withEffects} hang an effect (${c.effects} in all)${c.missingHardpoint ? `; ${c.missingHardpoint} left out for a hardpoint their appearance has not got` : ''}${c.skeletal ? `; ${c.skeletal} on skeletal things, not placed` : ''}`);
     for (const m of reader.missing.slice(0, 5)) console.log(`  no hardpoint: ${m}`);
+    break;
+  }
+
+  case 'doors': {
+    // <swg-dir> <out-dir>: the doors standing in every converted portal building's doorways -- which
+    // portal carries one, its style out of the client's door style table, where it hangs and the
+    // sounds its client effects name -- as `doors.json` beside each pack's manifest, and the door
+    // models once into a folder every pack shares (`<out>/doors/`). `tools/swg/doors.mjs` says where
+    // each byte lives and what was measured.
+    //
+    // A pass of its own, as `objeffects` and `floracollision` are: it reads every pack's manifest and
+    // each building's own `.pob` again, writes the tables and the door models, and touches no
+    // building, so adding doors costs seconds instead of a reconversion of every world. It reads the
+    // manifests the snapshot and the gallery write, so it runs after both.
+    if (!pos[2]) usage();
+    const { readClientEffects } = await import('./soundsources.mjs');
+    const vfs = mount(pos[1]);
+    const out = pos[2];
+    const flipX = !flags.has('--no-flip');
+    const { styles, misspelt } = readDoorStyles(vfs);
+    if (!styles.size) {
+      console.log('doors: the archives hold no door style table, so nothing was written');
+      break;
+    }
+    const readDoors = pobDoorReader(vfs, styles);
+    // Every client effect any style names, read once: a door plays the sounds its effects name.
+    const wanted = new Set();
+    for (const s of styles.values()) for (const e of Object.values(s.effects)) if (e) wanted.add(e);
+    const effects = readClientEffects(vfs, wanted);
+    const soundsOf = (cef) => effects[cef]?.sounds ?? [];
+    const exists = (a) => vfs.has(a);
+    const appearances = new Set();
+    const total = { packs: 0, buildings: 0, withDoors: 0, doors: 0, fallback: 0, unread: 0, noModel: 0 };
+    for (const dir of readdirSync(out, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (!dir.isDirectory() || dir.name === 'doors') continue;
+      const packDir = join(out, dir.name);
+      const manifestFile = join(packDir, 'manifest.json');
+      if (!existsSync(manifestFile)) continue;
+      let manifest = null;
+      try {
+        manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+      } catch {
+        continue;
+      }
+      const defs = Object.values(manifest?.categories ?? {}).flat().filter((d) => d && d.cells && /\.pob$/i.test(d.source ?? ''));
+      if (!defs.length) continue;
+      const { file, counts, appearances: apps } = packDoorTable(defs, readDoors, styles, { flipX, exists, soundsOf });
+      writeFileSync(join(packDir, 'doors.json'), JSON.stringify(file));
+      for (const a of apps) appearances.add(a);
+      total.packs++;
+      for (const k of Object.keys(counts)) total[k] += counts[k];
+      console.log(`  ${dir.name}: ${counts.doors} doors in ${counts.withDoors} of ${counts.buildings} buildings, ${Object.keys(file.styles).length} styles${counts.fallback ? `, ${counts.fallback} hung by their portal with no hardpoint` : ''}${counts.noModel ? `, ${counts.noModel} left out for a model the archives have not got` : ''}${counts.unread ? `, ${counts.unread} buildings unreadable` : ''}`);
+    }
+    // The door models, once for every pack, as the travel rigs are.
+    const doorsDir = join(out, 'doors');
+    mkdirSync(doorsDir, { recursive: true });
+    const models = [];
+    let failed = 0;
+    for (const a of [...appearances].sort()) {
+      const id = doorModelId(a);
+      try {
+        const conv = convertOne(vfs, a, join(doorsDir, `${id}.glb`));
+        const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+        const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
+        models.push({ id, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance: a });
+      } catch (err) {
+        failed++;
+        console.warn(`  door model ${a} would not convert: ${err.message}`);
+      }
+    }
+    writeFileSync(join(doorsDir, 'manifest.json'), JSON.stringify({ planet: 'doors', version: DOORS_PACK_VERSION, materialFormat: MATERIAL_FORMAT, categories: { doors: models } }, null, 1));
+    console.log(`doors: ${total.doors} doors in ${total.withDoors} of ${total.buildings} portal buildings over ${total.packs} packs; ${models.length} door models -> ${doorsDir}${failed ? ` (${failed} would not convert)` : ''}`);
+    const rc = readDoors.counts;
+    console.log(`  read ${rc.files} portal files: ${rc.sides} portal sides name a style, ${rc.doors} doors${rc.unplaced ? `, ${rc.unplaced} in a portal lying flat with no hardpoint left out` : ''}${rc.disagree ? `, ${rc.disagree} whose two sides name different styles (the first side's taken)` : ''}${rc.missingStyle ? `, ${rc.missingStyle} naming a style the table has not got` : ''}${rc.forceField ? `, ${rc.forceField} force fields left out` : ''}${rc.disabled ? `, ${rc.disabled} in a disabled portal left out` : ''}`);
+    if (total.fallback) console.log(`  ${total.fallback} doors stand in a portal that names no hardpoint, hung at the bottom middle of the portal instead`);
+    if (misspelt) console.log(`  ${misspelt} of the style table's effects name the folder clienfeffect/, read as clienteffect/`);
     break;
   }
 
