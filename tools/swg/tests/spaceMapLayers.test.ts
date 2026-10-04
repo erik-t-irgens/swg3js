@@ -3,7 +3,7 @@
 // and the numbers are chosen to be easy to check by eye. Each case says what real shape it stands for.
 import assert from 'node:assert/strict';
 import {
-  distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_NONE, LABEL_TEXT, labelFrom, LAYERS, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, rgbOf, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type MapMark, type MapPack,
+  distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_NONE, LABEL_TEXT, labelFrom, LAYERS, mapFromGameX, mapFromGameZ, mapFromScreenX, mapFromScreenY, MapView, marksOf, ObjectList, Pool, poolWants, rgbOf, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, WAYPOINT_MAP_TUNE, WaypointList, waypointMapFeed, type MapMark, type MapPack,
 } from '../../../src/ui/spaceMapLayers.ts';
 
 let checks = 0;
@@ -195,13 +195,14 @@ ok(hasLayer(marks, 'stations') && !hasLayer(marksOf(null), 'stations'), 'the map
 ok(!hasLayer(old, 'nebulae'), 'an older pack gave no nebula');
 
 // 11. Every layer has a box, and the marks only ever use those layers. Every layer a zone's pack
-// fills has a zone-map icon; the group's is the one the client never drew, and it is the one layer a
-// planet's map shows a box for.
-ok(LAYERS.length === 7 && LAYERS.every((l) => !!l.label), 'each layer has a box with a name');
-ok(LAYERS.every((l) => (l.id === 'group' ? l.icon === '' && l.planet : /^zone_[a-z]+$/.test(l.icon) && !l.planet)), 'a pack\'s layers have an icon and are space only; the group has neither');
+// fills has a zone-map icon; the group's and the waypoints' are the ones the client never drew, and they
+// are the layers a planet's map shows a box for. A waypoint never wears the client's `zone_waypoint`.
+const OURS = ['group', 'waypoints'];
+ok(LAYERS.length === 8 && LAYERS.every((l) => !!l.label), 'each layer has a box with a name');
+ok(LAYERS.every((l) => (OURS.includes(l.id) ? l.icon === '' && l.planet : /^zone_[a-z]+$/.test(l.icon) && !l.planet)), 'a pack\'s layers have an icon and are space only; the group and the waypoints have neither');
 const ids = new Set(LAYERS.map((l) => l.id));
 ok(marks.every((m) => ids.has(m.layer)), 'every mark belongs to a layer that has a box');
-ok(marks.every((m) => m.layer !== 'group'), 'no pack can put anything in the group layer');
+ok(marks.every((m) => !OURS.includes(m.layer)), 'no pack can put anything in the group\'s layer or the waypoints\'');
 
 // 12. The group. Its list is filled in place every frame, like the ships': a frame of it makes no
 // entry, no array and no string once the group has been seen once, which is what lets the map read it
@@ -291,5 +292,28 @@ ok(near(east.x, mine.x - 1000 / SCALE) && near(east.y, mine.y), 'a member a kilo
 const north = screenOf(150, 1275);
 ok(near(north.y, mine.y - 1000 / SCALE) && near(north.x, mine.x), 'a member a kilometre along Z lands a kilometre up the screen');
 ok(near(screenFromMapX(LOOK.x, LOOK.x, SCALE, W), W / 2) && near(screenFromMapY(LOOK.z, LOOK.z, SCALE, H), H / 2), 'the point the window is looking at is the middle of the canvas');
+
+// 18. A right-click on the planet's map is a point of the map's own frame: the screen's projection
+// undone exactly, so a waypoint set where the cursor is stands where the cursor was.
+for (const [sx, sy] of [[0, 0], [W / 2, H / 2], [813.5, 41.25], [-20, H + 7]]) {
+  const mx = mapFromScreenX(sx, LOOK.x, SCALE, W);
+  const mz = mapFromScreenY(sy, LOOK.z, SCALE, H);
+  ok(near(screenFromMapX(mx, LOOK.x, SCALE, W), sx) && near(screenFromMapY(mz, LOOK.z, SCALE, H), sy), `the point under (${sx}, ${sy}) goes back onto the screen where it was clicked`);
+}
+
+// 19. The waypoints: a list filled in place every frame as the group's is, so a frame of it makes nothing
+// once as many have been seen once; a box only while there are any; and numbers of ours that are numbers.
+const wps = new WaypointList();
+for (let frame = 0; frame < 3; frame++) {
+  wps.begin();
+  wps.add('w1', 'Cantina', 'accent', false, 10, 0, 20);
+  wps.add('w2', 'Home', 'warn', true, -5, 0, 7);
+}
+ok(wps.length === 2 && wps.made === 2 && wps.tracked?.key === 'w2', 'three frames of two waypoints made two entries in all, and the tracked one is known');
+wps.begin();
+ok(wps.length === 0 && wps.tracked === null, 'a frame with none empties the list');
+ok(waypointMapFeed.fill === null, 'with nothing holding a book, there is nothing for the map to read');
+const wpKeys = Object.keys(WAYPOINT_MAP_TUNE) as (keyof typeof WAYPOINT_MAP_TUNE)[];
+ok(wpKeys.length === 6 && wpKeys.every((k) => Number.isFinite(WAYPOINT_MAP_TUNE[k]) && WAYPOINT_MAP_TUNE[k] > 0) && WAYPOINT_MAP_TUNE.waypointTracked > 1, 'every number the waypoints are drawn with is live, finite and positive, and the tracked one is drawn larger');
 
 console.log(`\n${checks} checks passed`);

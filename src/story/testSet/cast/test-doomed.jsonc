@@ -1,0 +1,13 @@
+// Somebody the story lets die (`kill`, in `test:fail`): mortal, so not essential. Speaks the branching test
+// conversation, which also makes the test choice, and vouches for the character to the clerk in `test:fail`.
+{
+  "id": "test-doomed",
+  "name": "TEST DOOMED",
+  "unknownAs": "TEST: a stranger",
+  "body": "dressed_architect_trainer_01",
+  "world": "tatooine",
+  "at": [3470, -4700],
+  "heading": 0,
+  "tree": "talk/test-branching",
+  "mortal": true,
+}

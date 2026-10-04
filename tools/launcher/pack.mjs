@@ -43,8 +43,18 @@ export const DIST_KINDS = new Set(['.html', '.js', '.css', '.wasm', '.json', '.s
 /** Game archives and the game's own file formats: never in a release, wherever they sit. */
 export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', '.mgn', '.sht', '.dds', '.ans', '.skt', '.lmg', '.sat', '.apt', '.pob', '.trn', '.lay', '.snd', '.cdf', '.stf', '.ws', '.gla', '.glm', '.clips']);
 
-/** The parts of the game's source the converter imports (it runs them with Node's type stripping). */
-const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts'];
+/**
+ * The parts of the game's source the converter and the server import (both run them with Node's type
+ * stripping). The story's rules are a folder of their own rather than a list here (`STORY_SOURCE`), since
+ * the server runs the very files the browser does and every wave of the story adds to them; the one file
+ * outside it they may import is the hashing.
+ */
+const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts', 'src/net/hash.ts', 'src/world/dayPhase.ts', 'src/world/weatherSchedule.ts'];
+/**
+ * The story's rules, its test set, and the adoptions of the emulator's conversations (`core3/`, which the
+ * server folds with the Core3 reference), all read from `src/story/` as they are.
+ */
+export const STORY_SOURCE = [/^src\/story\/.+\.ts$/, /^src\/story\/testSet\/.+$/, /^src\/story\/core3\/[^/]+\.jsonc$/];
 /** The launcher proper (the bootstrap is built into the exe and is not needed in the release). */
 const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 'tools/launcher/plan.mjs', 'tools/launcher/serve.mjs', 'tools/launcher/page.html', 'tools/launcher/README.md'];
 /** The converter's data files, beside its modules. */
@@ -95,6 +105,7 @@ export function distFiles(dist, tracked, root = null) {
   const manifestFile = join(dist, '.vite', 'manifest.json');
   if (!existsSync(join(dist, 'index.html'))) return { files: [], problems: [`${dist} holds no built game (index.html)`] };
   if (existsSync(join(dist, 'assets-private'))) return { files: [], problems: [`${dist} holds an assets-private folder: the pack builds the game itself with the private content's copy off`] };
+  if (existsSync(join(dist, 'story-private'))) return { files: [], problems: [`${dist} holds a story-private folder: the owner's own story never goes into a release`] };
   if (!existsSync(manifestFile)) return { files: [], problems: [`${dist} has no Vite manifest (.vite/manifest.json), so what the build made cannot be told from what else is there`] };
   const all = walk(dist).filter((rel) => rel !== '.vite/manifest.json');
   const present = new Set(all);
@@ -144,6 +155,7 @@ export function distFiles(dist, tracked, root = null) {
 export function refusal(rel) {
   const parts = rel.split(/[\\/]/);
   if (parts.some((p) => p.toLowerCase() === 'assets-private')) return 'is under assets-private';
+  if (parts.some((p) => p.toLowerCase() === 'story-private')) return 'is under story-private, the owner\'s own story';
   if (parts.some((p) => p === '..' || p === '' || p === '.')) return 'is not a plain relative path';
   if (FORBIDDEN_KINDS.has(extname(rel).toLowerCase())) return 'is a game archive or a game file format';
   if (basename(rel).toLowerCase() === '.env') return 'is a machine\'s own settings';
@@ -190,7 +202,7 @@ export function releaseFiles({ root = ROOT, dist, git = null, untracked = false 
   const gitList = [...new Set([...tracked.keys(), ...extra])].sort();
   // The Core3 reference goes with the converter: it is what travel, fittings, deeds, spawns, snapshot and
   // mobiles read in place of an emulator nobody running the launcher has (`tools/swg/core3ref.mjs`).
-  for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^tools\/swg\/core3ref\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel)) add(rel);
+  for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^tools\/swg\/core3ref\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel) || STORY_SOURCE.some((re) => re.test(rel))) add(rel);
   for (const rel of CONVERTER_DATA) add(rel);
   for (const rel of SOURCE_FILES) add(rel);
   // The launcher proper, and the root files.

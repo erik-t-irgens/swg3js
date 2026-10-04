@@ -13,7 +13,8 @@ import { PLANETS, packIdOf, planetBelow, type PlanetDef } from '../data/planets'
 import { destinationFor, drawnSystems, GALAXY_TUNE, loadGalaxyFile, planetTextureOf, systemOf, systemRoutes, worldsOf, zoneFor, type GalaxySystemDef } from '../data/galaxy';
 import { loadSpacePack, type Destination, type HyperspaceCatalogue } from '../space/spaceData';
 import { GALAXY_VIEW_TUNE, GalaxyView } from './galaxyView';
-import { mapFrame, mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
+import { mapShareX, mapShareY, type MapFrame } from './spaceMapLayers.ts';
+import { mapMeta } from './mapImages.ts';
 
 /**
  * A named place from a converted pack's pois.json, in SWG coordinates. `place` is the client's own
@@ -91,7 +92,6 @@ export class GalaxyMap {
   private currentId = '';
   private currentZone: string | undefined;
   private readonly pois = new Map<string, Promise<Poi[]>>();
-  private readonly groundMaps = new Map<string, Promise<{ url: string; frame: MapFrame } | null>>();
   private readonly view: GalaxyView;
   private readonly viewHolder: HTMLElement;
   private readonly catchLayer: HTMLElement;
@@ -300,19 +300,8 @@ export class GalaxyMap {
    * both ways about its own middle, with the places' own coordinates already in that frame.
    */
   private groundMap(packId: string): Promise<{ url: string; frame: MapFrame } | null> {
-    let p = this.groundMaps.get(packId);
-    if (!p) {
-      const base = `${this.deps.baseUrl}assets-private/${packId}/`;
-      p = fetch(`${base}map.json`)
-        .then(async (res) => {
-          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          const meta = (await res.json()) as { image?: string; width?: number; centre?: { x: number; z: number } };
-          return meta.image ? { url: `${base}${meta.image}`, frame: mapFrame(meta) } : null;
-        })
-        .catch(() => null);
-      this.groundMaps.set(packId, p);
-    }
-    return p;
+    // The one loader every map shares (`mapImages.ts`): a thumbnail wants the address, not the pixels.
+    return mapMeta(packId);
   }
 
   /**

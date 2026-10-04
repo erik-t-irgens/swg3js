@@ -1,0 +1,15 @@
+// Parallel steps, a join, `after` and `unless`: `left` and `right` run side by side; `alt` begins only if
+// `right` finishes while `left` is not yet done (unless left), and sets a flag; `meet` waits on both.
+{
+  "id": "join",
+  "title": "TEST: two at once",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["left", "right"],
+  "steps": {
+    "left": { "type": "signal", "signal": "debug:test-left", "objective": "TEST: the left signal", "next": ["meet"] },
+    "right": { "type": "signal", "signal": "debug:test-right", "objective": "TEST: the right signal", "next": ["meet", "alt"] },
+    "alt": { "type": "nothing", "unless": ["left"], "do": { "done": ["flag(test.join.alt, 1)"] }, "next": ["meet"] },
+    "meet": { "type": "join", "after": ["left", "right"], "ends": "done" },
+  },
+}

@@ -9,7 +9,7 @@
 // Run: node tools/swg/tests/lua.test.ts
 
 import assert from 'node:assert/strict';
-import { findCalls, parseLuaValue, readLua, LuaCall } from '../lua.mjs';
+import { findCalls, functionBodies, parseLuaValue, readLua, readStatements, LuaCall } from '../lua.mjs';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -112,6 +112,41 @@ function ok(cond: boolean, what: string): void {
 {
   const found = findCalls('function S:go()\n  spawnMobile(self.planet, mob[1], 60, mob[2], mob[3], mob[4], 0, 0)\nend', ['spawnMobile']);
   ok(found.length === 1 && (found[0].args[1] as LuaCall).call === '[]' && ((found[0].args[3] as LuaCall).args[1] as number) === 2, 'a call that stands a table\'s rows reads as which element of the row goes where');
+}
+
+// ------------------------------------------------------------------ a file read a statement at a time
+//
+// A conversation file declares a screen and then adds it to its template, and may declare a second screen
+// under the first one's name: read by name the first is lost, read in order both are there. A factory builds
+// its template inside a function body, which is cut out and read as a file of its own.
+{
+  const src = [
+    'tpl = ConvoTemplate:new { initialScreen = "a" }',
+    'scr = ConvoScreen:new { id = "a", leftDialog = "@t:s_1" }',
+    'tpl:addScreen(scr);',
+    'scr = ConvoScreen:new { id = "b", leftDialog = "@t:s_2" }',
+    'tpl:addScreen(scr); x = 1',
+    'addConversationTemplate("tplName", tpl);',
+    '-- tpl:addScreen(commented)',
+    'function makeOne(name, handler)',
+    '  local t = ConvoTemplate:new { luaClassHandler = handler }',
+    '  if name then t:addScreen(inner) end',
+    '  addConversationTemplate(name, t);',
+    'end',
+  ].join('\n');
+  const { statements, skipped } = readStatements(src);
+  const adds = statements.filter((s) => s.kind === 'method');
+  ok(adds.length === 2 && adds.every((s) => s.kind === 'method' && s.self === 'tpl' && s.method === 'addScreen' && s.args[0] === 'scr'), 'a method call reads as the method it is, with whose and its arguments, and a comment is no call');
+  const order = statements.map((s) => (s.kind === 'assign' ? `=${s.name}` : s.kind === 'method' ? `:${s.method}` : `${s.call.call}()`));
+  ok(order.join(' ') === '=tpl =scr :addScreen =scr :addScreen =x addConversationTemplate()' && skipped === 0, `statements come back in the order they are written, a second statement after a ';' on the same line included (${order.join(' ')})`);
+  const screens = statements.filter((s) => s.kind === 'assign' && s.name === 'scr').map((s) => (s.kind === 'assign' ? (s.value as { id: string }).id : ''));
+  ok(screens.join() === 'a,b', 'a name given twice is two values, each where it was given');
+  const fns = functionBodies(src);
+  ok(fns.length === 1 && fns[0].name === 'makeOne' && fns[0].params.join() === 'name,handler' && /addConversationTemplate\(name, t\)/.test(fns[0].body) && !/^\s*end\s*$/.test(fns[0].body.split('\n').pop() ?? ''), "a function's body is cut out by the matcher that steps over it, with its parameters, and reads as a file of its own");
+  const inner = readStatements(fns[0].body);
+  ok(inner.statements.some((s) => s.kind === 'assign' && s.name === 't') && inner.statements.some((s) => s.kind === 'call' && s.call.call === 'addConversationTemplate'), 'its own statements read, the `local` one and the registration');
+  const methods = functionBodies('function A:run(x)\n  if x == "loc1" then self:go(1) end\nend\nfunction B.c() end');
+  ok(methods.length === 2 && methods[0].name === 'A:run' && methods[0].tokens.some((t: { kind: string; value: unknown }) => t.kind === 'string' && t.value === 'loc1') && methods[1].name === 'B.c', "a method is named with its class, and its body's tokens say which strings and names it mentions");
 }
 
 console.log(`\nlua: ${passed} checks passed`);

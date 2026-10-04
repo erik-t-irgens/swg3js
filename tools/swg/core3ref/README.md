@@ -6,8 +6,12 @@ install needs the emulator: where the travel terminals, ticket collectors and sh
 server called each world's travel points, the other
 things the server stood on its buildings and the props its screenplays placed, what each deed makes and
 what it cost to keep, where the creatures and people stood, and each mobile's level, health and damage,
-the bodies a dress group is drawn from, the weapons a weapon group holds, and the Corellian corvette's
-crews and fittings by room name.
+the bodies a dress group is drawn from, the weapons a weapon group holds, the Corellian corvette's
+crews and fittings by room name, and what the server's people said as structure only: each
+conversation's screen names and links, the client's own string ids for its words (never the emulator's
+English, which is kept as null), where its handler acts, the heralds' places, and who speaks which
+conversation and greets in which of the client's reaction tables (`conversations.json`,
+`conversation-speakers.json`).
 
 These files hold only what the converter's own readers take out -- names, places, turns, counts and
 stats -- and never the scripts. They are written by `npm run swg -- core3-reference @CORE3`, which

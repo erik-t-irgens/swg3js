@@ -166,6 +166,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
       <input type="number" id="hostPort" min="1024" max="65535" value="8787">
       <span></span>
     </div>
+    <div class="row">
+      <label for="storyDir">Your story</label>
+      <input type="text" id="storyDir" spellcheck="false" placeholder="optional: a folder of your own quests, which the server runs">
+      <span></span>
+    </div>
     <div class="buttons">
       <button id="hostStart">Start the server</button>
       <button id="hostStop">Stop it</button>
@@ -310,6 +315,7 @@ function render() {
 
   setField('hostWord', s.settings.host?.word);
   setField('hostPort', String(s.settings.host?.port ?? 8787));
+  setField('storyDir', s.settings.storyDir);
   const r = s.relay;
   $('hostStart').disabled = !!(r && r.running);
   $('hostStop').disabled = !(r && r.running);
@@ -359,7 +365,7 @@ async function waitForRestart() {
   }
 }
 
-for (const id of ['swg', 'jka', 'out']) {
+for (const id of ['swg', 'jka', 'out', 'storyDir']) {
   const el = $(id);
   el.addEventListener('focus', () => editing.add(id));
   el.addEventListener('change', async () => {

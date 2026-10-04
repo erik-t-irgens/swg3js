@@ -1,0 +1,11 @@
+// expect: rule 3
+// Never loaded as part of the set: the checker must fail it. A step waits on a signal nothing raises.
+{
+  "id": "broken-unraised",
+  "title": "TEST: waits for ever",
+  "givers": [{ "kind": "debug" }],
+  "start": ["wait"],
+  "steps": {
+    "wait": { "type": "signal", "signal": "nobody-says-this", "objective": "TEST: wait for a word nobody sends", "ends": "done" },
+  },
+}

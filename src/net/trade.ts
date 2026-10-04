@@ -207,6 +207,13 @@ export class Trade {
   onWant: () => void = () => {};
   /** Something the player should read: a refusal, a trade ending, an item arriving. */
   onNote: (text: string) => void = () => {};
+  /**
+   * The server wrote a thing down for this character: the answer to one this browser gave itself (which it
+   * owns already), or one the server handed over on its own -- a job's reward, paid by the server through
+   * its own ledger and never through this browser's word -- which the backpack does not hold yet. The row
+   * is known before this is called, so putting the thing in the backpack never tells the server again.
+   */
+  onAdded: (item: TradeItem) => void = () => {};
 
   private live: TradeWindow | null = null;
   private question: TradeAsk | null = null;
@@ -601,7 +608,9 @@ export class Trade {
       }
       case 'added': {
         const row = readRow(msg.row);
-        if (row) this.rows.set(`${row.kind}:${row.id}`, row);
+        if (!row) break;
+        this.rows.set(`${row.kind}:${row.id}`, row);
+        this.onAdded(row);
         break;
       }
       case 'gone': {

@@ -432,8 +432,10 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   ok(driven > 0 && driven < books, 'a body another player\'s game keeps is refused in words before anything is done');
   ok(may > driven && may < books, 'whether the wire will let it go is asked before its lair or its row lets go of it');
   ok(leave > books && leave < add, 'and it leaves the wire before it follows, never after');
-  // A corvette's ticket taker's own answer is one more argument (`taker`), which leaves these as they were.
-  ok(/const options = talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven(, taker)?\);/.test(main), "the conversation offers no 'Follow me' to a body another browser keeps, and says why");
+  // A corvette's ticket taker's own answer is one more argument (`taker`), and a story person's post one more
+  // after it (`atPost`, which the companion shares, following by the story's word), which leave these as they
+  // were; every path builds them in `talkOptionsFor`.
+  ok(/return talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven(, taker(, this\.storyStands\.castOf\(m\) !== null( \|\| this\.companion\.isBody\(m\))?)?)?\);/.test(main) && !/[^.]talkOptions\(t?\.?following, this\.world/.test(main.replace(/return talkOptions\(following, this\.world/, '')), "the conversation offers no 'Follow me' to a body another browser keeps, and says why, on every path");
   const unshare = body(read('world/mobiles/manager.ts'), /unshare\(m: Mobile\): boolean \{/);
   ok(/if \(!this\.mayUnshare\(m\)\) return false;/.test(unshare) && /net\.leave\(id\)/.test(unshare) && /m\.unshare\(\);/.test(unshare), "the manager's own unshare refuses what may not leave, says it walked off and lets go of its name");
   const mayUnshare = body(read('world/mobiles/manager.ts'), /mayUnshare\(m: Mobile\): boolean \{/);

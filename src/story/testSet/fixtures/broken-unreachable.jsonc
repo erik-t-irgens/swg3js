@@ -1,0 +1,12 @@
+// expect: rule 2
+// Never loaded as part of the set: the checker must fail it. A step nothing leads to.
+{
+  "id": "broken-unreachable",
+  "title": "TEST: a room with no door",
+  "givers": [{ "kind": "debug" }],
+  "start": ["first"],
+  "steps": {
+    "first": { "type": "signal", "signal": "debug:test-first", "objective": "TEST: the first step", "ends": "done" },
+    "orphan": { "type": "signal", "signal": "debug:test-orphan", "objective": "TEST: a step nothing leads to", "ends": "done" },
+  },
+}

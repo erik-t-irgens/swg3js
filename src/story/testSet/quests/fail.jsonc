@@ -1,0 +1,29 @@
+// Every way it can go wrong that this pass builds, one after another: a fine (owed where the purse is short of
+// it), the clerk refusing to speak, TEST DOOMED vouching for the character to the clerk at a cost to themselves,
+// the Rebellion taking the character on and burning them, TEST DOOMED killed by the story with a notice that says
+// so, and `test:closedLater` closed for good. Not repeatable, which is what lets it close anything at all.
+{
+  "id": "fail",
+  "title": "TEST: everything goes wrong",
+  "givers": [{ "kind": "debug" }],
+  "start": ["fine"],
+  "steps": {
+    "fine": { "type": "nothing", "do": { "done": ["fine(25, \"TEST: a fine\", test.bank)"] }, "next": ["refuse"] },
+    "refuse": { "type": "nothing", "do": { "done": ["refuse(cast/test-clerk)"] }, "next": ["vouch"] },
+    "vouch": {
+      "type": "signal",
+      "signal": "debug:test-vouch",
+      "objective": "TEST: the clerk will not speak to you; wait for somebody to vouch for you",
+      "do": { "done": ["vouch(cast/test-doomed, cast/test-clerk, 10)"] },
+      "next": ["burn"],
+    },
+    "burn": { "type": "nothing", "do": { "done": ["activate(rebellion, test-cell)", "burn(rebellion)"] }, "next": ["kill"] },
+    "kill": {
+      "type": "signal",
+      "signal": "debug:test-kill",
+      "objective": "TEST: wait for word of TEST DOOMED",
+      "do": { "done": ["kill(cast/test-doomed, test-how, doc/test-death)", "doc(doc/test-death)", "close(closedLater)"] },
+      "ends": "done",
+    },
+  },
+}

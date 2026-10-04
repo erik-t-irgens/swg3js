@@ -223,6 +223,8 @@ const MUZZLE_BONES = MUZZLE_PATTERNS;
 const KNOCKDOWN_AT = 14;
 /** Seconds a knocked-down body lies before it gets up. */
 const KNOCKDOWN_LIE = 1.2;
+/** The game's own loop of a body lying incapacitated on its back: what a `downable` body lies in where it has it. */
+const INCAPACITATED = 'loop_incapacitated_face_up';
 /** Hit reactions at most this often (seconds). */
 const HIT_EVERY = 0.6;
 /** How long after death the body is taken away (spawned) or comes back (ambient), seconds. */
@@ -263,6 +265,8 @@ export interface MobileSpawn {
    * left out is the body's own; `level` is only ever shown.
    */
   overrides?: { hp?: number; damage?: number; aggression?: Aggression; level?: number; ranged?: { range: number; additive: boolean } | null };
+  /** The name it goes by, where it is not its entry's (a story's person). */
+  name?: string;
 }
 
 /** What a mobile needs of the game. */
@@ -286,6 +290,8 @@ export interface MobileDeps {
   hittableAt?(handle: number): Hittable | undefined;
   /** Asking for the ragdoll, which the manager starts a couple a frame. */
   wantRagdoll(self: Mobile): void;
+  /** It went down (`downable`) or got up again: it leaves the living list or joins it, which the manager's version says. */
+  onDowned?(self: Mobile, down: boolean): void;
   /**
    * The ground where the world already holds it, and whether a point is within the physics' reach: a body
    * outdoors past that reach reads the first and never makes terrain on the spot (commit 4b, `groundProbe.ts`).
@@ -342,7 +348,11 @@ export class Mobile implements Living, NpcSubject {
   readonly key = nextLivingKey();
   readonly entry: MobileEntry;
   readonly origin: 'spawned';
-  readonly label: string;
+  /**
+   * The name it goes by: its catalogue entry's, or the one it was stood with (`SpawnOpts.name`, a story's
+   * person). Not readonly: a story's person who introduces themselves mid-conversation is renamed (`rename`).
+   */
+  label: string;
   /**
    * Whose side it is on. Not readonly, for one reason: a person asked to follow the player takes the
    * player's side for as long as it follows, and its own back when it is asked to stop
@@ -470,6 +480,12 @@ export class Mobile implements Living, NpcSubject {
    * drawn, animated, lit, culled, followed through a building's portals and stood on the floor.
    */
   essential = false;
+  /**
+   * Goes down rather than dying when its health runs out: the story's companion (`src/world/companion.ts`). It
+   * then lies incapacitated -- out of the fight, thinking nothing, and out of `World.targets()`, so nothing picks
+   * on it -- until somebody gets it up again (`getUpFrom`). Only the story kills it.
+   */
+  downable = false;
   /**
    * A fixture the world cannot work without, stood as one (`SpawnOpts.fixture`): the ticket collector.
    * Nobody talks such a body away from its post (`src/world/talk.ts`).
@@ -737,8 +753,8 @@ export class Mobile implements Living, NpcSubject {
   private sidestepUntil = 0;
   private sidestep = 0;
   private waterAhead = false;
-  /** Knocked down: falling, lying, getting up, or not at all. */
-  private downPhase: 'fall' | 'lie' | 'up' | null = null;
+  /** Knocked down: falling, lying, getting up, out (a `downable` body whose health ran out), or not at all. */
+  private downPhase: 'fall' | 'lie' | 'up' | 'out' | null = null;
   private downUntil = 0;
   private readonly brainTargets: BrainTarget[] = [];
   /** The objects `brainTargets` is filled from, reused every thought. */
@@ -855,7 +871,7 @@ export class Mobile implements Living, NpcSubject {
     this.hologram = (e.flags ?? []).includes('hologram');
     this.humanoid = (e.kind === 'npc' || e.kind === 'dressed') && spawn.hierarchy === 'all_b' && !this.hologram && this.plan.kind === 'upright';
     this.flyer = this.plan.hover > 0;
-    this.label = e.name;
+    this.label = spawn.name || e.name;
     this.side = sideOf(e);
     this.aggression = this.hologram ? 'passive' : (spawn.overrides?.aggression ?? e.stats?.aggression ?? 'defensive');
     this.baseAggression = this.aggression;
@@ -955,6 +971,19 @@ export class Mobile implements Living, NpcSubject {
     if (this.targetKey !== null || this.memory.size > 0) return true;
     const s = this.state;
     return s === 'alert' || s === 'chase' || s === 'attack' || s === 'cover' || s === 'flee' || s === 'return' || s === 'knockdown';
+  }
+
+  /**
+   * Whether it is fighting, or still holds a grudge against, anybody `ours` says is on a side: what keeps the
+   * story's companion lying down while the fight that put them there goes on (`isThreat` in `companion.ts`),
+   * whatever its temper, since a creature that was only defending itself keeps its own while it fights. Asked
+   * a few times a second, and only while the companion lies down.
+   */
+  fights(ours: (key: number) => boolean): boolean {
+    if (this.dead) return false;
+    if (this.targetKey !== null && ours(this.targetKey)) return true;
+    for (const k of this.memory.keys()) if (ours(k)) return true;
+    return false;
   }
 
   // ---- fighting as a fighter does ------------------------------------------------------------------
@@ -2087,16 +2116,17 @@ export class Mobile implements Living, NpcSubject {
 
   /**
    * The greeting it turns to answer with: the first of `clips` its animator holds, played once over its
-   * idle as an emote is. False where it holds none, or something weightier is playing.
+   * idle as an emote is. The seconds it plays for, or nought where it holds none, or something weightier is
+   * playing.
    */
-  greet(clips: readonly string[]): boolean {
+  greet(clips: readonly string[]): number {
     const a = this.animator;
-    if (!a || this.dead || this.downPhase) return false;
+    if (!a || this.dead || this.downPhase) return 0;
     for (const c of clips) {
       if (!a.has(c)) continue;
-      return a.once(c, { priority: SHOT_PRIORITY.emote, fadeIn: 0.15, fadeOut: 0.25 }) !== null;
+      return a.once(c, { priority: SHOT_PRIORITY.emote, fadeIn: 0.15, fadeOut: 0.25 }) ?? 0;
     }
-    return false;
+    return 0;
   }
 
   /**
@@ -2142,6 +2172,39 @@ export class Mobile implements Living, NpcSubject {
    */
   lendClips(extra: ReadonlyMap<string, THREE.AnimationClip>): void {
     this.animator?.lend(extra);
+  }
+
+  /** Whether its animator holds a clip just now (its pack's, or one lent it): what a gesture is chosen among. */
+  canPlay(clip: string): boolean {
+    return !!this.animator?.has(clip);
+  }
+
+  /** A new name to go by: a story's person who has just introduced themselves. */
+  rename(name: string): void {
+    if (name) this.label = name;
+  }
+
+  /** The idle it stood in before a conversation laid one over it (`talkIdle`), or null while none is laid. */
+  private talkIdleWas: string | null = null;
+
+  /**
+   * The idle a conversation lays over it for the rest of the talk (a line's `mood:<name>`), lent from a rig
+   * already parsed; null puts back the one it stood in. Never on somebody seated, whose idle is the chair's.
+   */
+  talkIdle(clip: THREE.AnimationClip | null): void {
+    if (this.disposed || this.dead || !this.roles || this.seatAt) return;
+    if (clip) {
+      this.animator?.lend(new Map([[clip.name, clip]]));
+      if (!this.animator?.has(clip.name)) return;
+      this.talkIdleWas ??= this.roles.idle;
+      this.roles.idle = clip.name;
+    } else {
+      if (this.talkIdleWas === null) return;
+      this.roles.idle = this.talkIdleWas;
+      this.talkIdleWas = null;
+    }
+    if (!this.downPhase) this.animator?.loop(this.idleNow(), 1, 0.3);
+    this.applyCull();
   }
 
   // ---- one of the world's creatures ----------------------------------------------------------------
@@ -2568,7 +2631,8 @@ export class Mobile implements Living, NpcSubject {
   }
 
   damage(amount: number, from?: THREE.Vector3, push = 0, source?: Living | null): void {
-    if (this.dead || this.disposed) return;
+    // Down already: nothing more is taken off a body lying out of the fight.
+    if (this.dead || this.disposed || this.downPhase === 'out') return;
     // Essential: the blow lands, is heard and marks, and takes nothing off. Refused here rather than
     // by giving it a great deal of health, so that nothing anywhere has to know how much is enough.
     if (this.essential) return;
@@ -2604,7 +2668,8 @@ export class Mobile implements Living, NpcSubject {
     // would have the other screens see a slide where it threw itself aside.
     if (!this.mark) this.mark = 'hit';
     if (this.hp <= 0) {
-      this.die();
+      if (this.downable) this.goDown();
+      else this.die();
       return;
     }
     // A flinch, shorter the bigger it is: a repeater must not pin a krayt dragon in place.
@@ -2662,6 +2727,71 @@ export class Mobile implements Living, NpcSubject {
         this.applyCull();
       }
     }
+  }
+
+  /** Whether it lies down and out (a `downable` body whose health ran out), until somebody gets it up. */
+  get downed(): boolean {
+    return this.downPhase === 'out';
+  }
+
+  /**
+   * Down and out rather than dead: nothing left on its hands, no fight, no thought (every branch that asks
+   * `downPhase` stands it still), lying in the incapacitated loop where its body has one and in its death clip
+   * held where it has not, and out of the living list. Drawn whole while it lies there, since the standing
+   * body's cull sphere does not reach its head along the ground.
+   */
+  private goDown(): void {
+    this.hp = 0;
+    this.downPhase = 'out';
+    this.state = 'knockdown';
+    this.swingAt = 0;
+    this.swingUntil = 0;
+    this.shotsLeft = 0;
+    this.dotLeft = 0;
+    this.targetRef = null;
+    this.dropBlades();
+    this.endTumble();
+    this.forcedPosture = null;
+    this.setPosture('stand');
+    this.tactics?.dropCover(this.now, false);
+    this.dropAim();
+    const v = this.body.linvel();
+    this.body.setLinvel({ x: 0, y: Math.min(0, v.y), z: 0 }, true);
+    const a = this.animator;
+    if (a) {
+      if (this.canPlay(INCAPACITATED)) {
+        a.stopShot(0.15);
+        a.loop(INCAPACITATED, 1, 0.2);
+      } else a.once(this.roles?.down ?? this.roles?.hitHeavy ?? null, { hold: true, priority: SHOT_PRIORITY.down, fadeIn: 0.08 });
+    }
+    this.applyCull();
+    this.deps.onDowned?.(this, true);
+  }
+
+  /**
+   * Up again from down and out, with `share` of its health (`COMPANION_TUNE.reviveShare`): standing in its own
+   * idle, thinking again, and back on the living list. False for a body that was not down.
+   */
+  getUpFrom(share: number): boolean {
+    if (this.dead || this.disposed || this.downPhase !== 'out') return false;
+    this.hp = Math.max(1, Math.round(this.maxHp * Math.max(0, Math.min(1, share))));
+    this.memory.clear();
+    this.downPhase = null;
+    this.state = 'idle';
+    this.stunned = 0;
+    this.animator?.stopShot(0.2);
+    this.animator?.loop(this.idleNow(), 1, 0.3);
+    this.applyCull();
+    this.deps.onDowned?.(this, false);
+    return true;
+  }
+
+  /** Dead for good, down or up: what the story's `kill` does to its companion, the one way such a body dies. */
+  fall(): void {
+    if (this.dead || this.disposed) return;
+    this.downable = false;
+    this.die();
+    this.deps.onDowned?.(this, false);
   }
 
   private lieDown(): void {
@@ -3126,11 +3256,14 @@ export class Mobile implements Living, NpcSubject {
     }
     const sdt = dt * own;
     // 4. A burn eats at it in real time, whatever it is doing.
-    if (!this.dead && this.dotLeft > 0) {
+    if (!this.dead && this.dotLeft > 0 && this.downPhase !== 'out') {
       const step = Math.min(this.dotLeft, dt);
       this.dotLeft -= step;
       this.hp -= this.dotDps * step;
-      if (this.hp <= 0) this.die();
+      if (this.hp <= 0) {
+        if (this.downable) this.goDown();
+        else this.die();
+      }
     }
     // 5. Dead: the death clip plays out (the ragdoll starts from where it ends), the timer runs.
     if (this.dead) {

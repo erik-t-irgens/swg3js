@@ -1,0 +1,13 @@
+// The promotion beat at a TEST RUNG: offered only once the freelance track's next rung is reached and waits on
+// the story (`rankReady`), and it promotes the character to it. Not repeatable.
+{
+  "id": "standing",
+  "title": "TEST: a promotion",
+  "track": "freelance",
+  "needs": "trackIs(freelance, active) && rankReady(freelance)",
+  "givers": [{ "kind": "debug" }],
+  "start": ["beat"],
+  "steps": {
+    "beat": { "type": "nothing", "do": { "done": ["promote(freelance)"] }, "ends": "done" },
+  },
+}

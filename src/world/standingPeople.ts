@@ -439,6 +439,11 @@ export interface PeopleDeps {
    */
   downFor?(id: string): number;
   /**
+   * Whether the story killed this row's person for this character (a row a cast file promotes, by its stable
+   * key): never stood here again, and put down if they stand. The story's own, so for this browser alone.
+   */
+  gone?(key: string): boolean;
+  /**
    * Whether a row's body may stand where it stands at all (the world's frame). A world of copies (the
    * instances: sixteen corvettes a hundred and fifty metres apart) stands nobody but in the copy the
    * player is in, or the crew of the ship alongside would take the cap's places from the crew of this
@@ -763,7 +768,10 @@ export class StandingPeople {
         // somebody nearer still, and never one in a fight (`farthestFree`): somebody you are
         // fighting does not vanish. Nor, at any distance, one somebody else has for now (`keeps`): a
         // follower walks with the player and is as far from its own row as they are.
-        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z));
+        // So is one the story killed for this character, wherever they stand (a follower included: its row is
+        // never stood again once it is let go).
+        const gone = !!this.rows[i].key && !!deps.gone?.(this.rows[i].key!);
+        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z)) || gone;
         if (outside && !(here.body && deps.keeps?.(here.body))) {
           if (here.body) {
             deps.remove(here.body);
@@ -811,6 +819,8 @@ export class StandingPeople {
       if (!force && stood >= PEOPLE_TUNE.perPass) break;
       if (fullFought && fullKept) break;
       const r = this.rows[i];
+      // Somebody the story killed for this character is never stood again here.
+      if (r.key && deps.gone?.(r.key)) continue;
       // Where the body stands: a patroller at the first point of its walk, near where the town stood
       // it (it walks the rest later), everybody else at the row's own spot (`standPlaceOf`).
       const st = this.stands[i];
@@ -1118,6 +1128,41 @@ export class StandingPeople {
   rowOf(m: Mobile): StandingRow | null {
     for (const s of this.up.values()) if (s.body === m) return s.row;
     return null;
+  }
+
+  /**
+   * The body standing now for the row with this key (`row:<key>` names one of the game's people in a story),
+   * or null when nobody stands for it here: what a conversation, a console helper or a story finds them by.
+   */
+  bodyOfKey(key: string): Mobile | null {
+    for (const s of this.up.values()) if (s.row.key === key && s.body && !s.body.removed) return s.body;
+    return null;
+  }
+
+  /**
+   * Who a body standing now is in a story's terms: its row's key (`row:<key>`) and the creature it was stood
+   * as this life (a drawn crowd's person changes with each life), which is what gives it a conversation and
+   * a way of speaking. Null for a body this did not stand, or a row with no key (a pack before format 2).
+   */
+  speakerOf(m: Mobile): { key: string; who: string } | null {
+    for (const s of this.up.values()) if (s.body === m) return s.row.key ? { key: s.row.key, who: s.who || s.row.who } : null;
+    return null;
+  }
+
+  /**
+   * The creatures standing within `reach` metres across the ground of a point in the world's frame, written
+   * into `out` (emptied first): what the client's string tables are fetched for before anybody is spoken to.
+   */
+  whoNear(x: number, z: number, reach: number, out: string[]): string[] {
+    out.length = 0;
+    for (const s of this.up.values()) {
+      const b = s.body;
+      if (!b || b.removed) continue;
+      const dx = b.pos.x - x;
+      const dz = b.pos.z - z;
+      if (dx * dx + dz * dz <= reach * reach) out.push(s.who || s.row.who);
+    }
+    return out;
   }
 
   /**

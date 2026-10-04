@@ -1,0 +1,34 @@
+// TEST COMPANION's conversation: while they are with the character, an answer to have them wait here and one to
+// let them go their own way; otherwise an answer to take them on. Spoken to where they wait, they come back
+// before a word is said (the rules do that as the conversation opens). None of it is story.
+{
+  "format": 1,
+  "id": "test-companion",
+  "rev": 1,
+  "source": "test",
+  "speaker": "cast/test-companion",
+  "entry": [
+    { "when": "companion(cast/test-companion) == \"active\"", "to": "with" },
+    { "to": "hello" },
+  ],
+  "nodes": {
+    "hello": {
+      "say": ["TEST: The companion's first line."],
+      "replies": [
+        { "id": "join", "text": "TEST: Come with me.", "do": ["recruit(cast/test-companion)"], "to": "joined" },
+        { "id": "bye", "text": "TEST: Goodbye." },
+      ],
+    },
+    "joined": { "say": ["TEST: The companion comes along."], "end": true },
+    "with": {
+      "say": ["TEST: The companion is with you."],
+      "replies": [
+        { "id": "wait", "text": "TEST: Wait here.", "do": ["waitHere()"], "to": "waiting" },
+        { "id": "go", "text": "TEST: Go your own way.", "do": ["dismiss()"], "to": "gone" },
+        { "id": "bye", "text": "TEST: Carry on." },
+      ],
+    },
+    "waiting": { "say": ["TEST: The companion waits here."], "end": true },
+    "gone": { "say": ["TEST: The companion goes their own way."], "end": true },
+  },
+}

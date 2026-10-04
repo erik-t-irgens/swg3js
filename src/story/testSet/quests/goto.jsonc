@@ -1,0 +1,33 @@
+// Going to a place: a marker relative to where the quest was taken (the test set's alone), then the main
+// room of the Mos Eisley cantina, whose place (raw 3432.3, -4818.1) and cell name (`cantina`) are read
+// off the snapshot and the pack's manifest. The second step is a checkpoint, and the reward ends it.
+{
+  "id": "goto",
+  "rev": 1,
+  "title": "TEST: go to a place",
+  "client": "none",
+  "verb": "travel",
+  "track": "none",
+  "kind": "solo",
+  "harsh": false,
+  "abandon": true,
+  "restart": "checkpoint",
+  "repeat": { "every": "always" },
+  "needs": "!questActive(test:goto)",
+  "givers": [{ "kind": "debug" }, { "kind": "use", "object": "obj/test-terminal" }],
+  "stakes": "TEST: nothing is at risk.",
+  "start": ["outdoor"],
+  "steps": {
+    "outdoor": { "type": "goto", "objective": "TEST: walk to the marker", "at": { "rel": "start", "dx": 30, "dz": 0 }, "radius": 6, "next": ["cantina"] },
+    "cantina": {
+      "type": "goto",
+      "objective": "TEST: go into the cantina",
+      "at": { "world": "tatooine", "raw": [3432, -4818], "room": { "cell": "cantina", "template": "object/building/tatooine/shared_cantina_tatooine.iff" } },
+      "radius": 16,
+      "checkpoint": true,
+      "next": ["paid"],
+    },
+    "paid": { "type": "reward", "reward": { "credits": 10, "xp": 5, "standing": [{ "track": "freelance", "add": 10 }] }, "ends": "done" },
+  },
+  "outcomes": { "done": {}, "failed": {} },
+}

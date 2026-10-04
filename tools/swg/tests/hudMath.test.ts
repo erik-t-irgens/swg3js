@@ -147,6 +147,9 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
     ['.hud-acts', 'bottom', 'actionBottom'],
     ['.hud-cap', 'min-width', 'capW'],
     ['.hud-cap', 'height', 'capH'],
+    ['.hud-minimap', 'width', 'minimap'],
+    ['.hud-minimap', 'height', 'minimap'],
+    ['.hud-wp-label', 'margin-top', 'waypointMark'],
   ];
   const drift: string[] = [];
   for (const [selector, prop, key] of stated) {
@@ -163,6 +166,32 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
     if (Number(m[1]) !== HUD_SIZES[key]) drift.push(`${selector} ${prop}: stylesheet ${m[1]}, table ${key}=${HUD_SIZES[key]}`);
   }
   ok(drift.length === 0, `every size hud.css states again is the one in HUD_SIZES${drift.length ? `: ${drift.join('; ')}` : ''}`);
+
+  // The help block's place with the minimap up states the minimap's size a third time, inside a sum: the
+  // circle, the city name's margin and line, and the wrap's own margin, all on the HUD scale, over where
+  // the help block stands without it. Added up again here from the two stylesheets, so a change to any
+  // of them that is not carried into the sum is caught -- at the top of the scale range a sum that is a
+  // few pixels short lays the help block over the panel.
+  const blockOf = (text: string, selector: string): string => {
+    const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\\]\\\\#]/g, '\\$&')}\\s*\\{([^}]*)\\}`).exec(text);
+    return m ? m[1] : '';
+  };
+  const scaled = (block: string, prop: string): number => {
+    const m = new RegExp(`(?:^|;|\\s)${prop}\\s*:[^;]*?calc\\(\\s*([0-9.]+)px\\s*\\*\\s*var\\(--hud-scale\\)`).exec(block);
+    return m ? Number(m[1]) : Number.NaN;
+  };
+  const style = readFileSync(join(here, '..', '..', '..', 'src', 'style.css'), 'utf8');
+  const city = blockOf(css, '.hud-city');
+  const cityEm = Number(/(?:^|;|\s)height\s*:\s*([0-9.]+)em/.exec(city)?.[1]);
+  const cityLine = cityEm * scaled(city, 'font-size');
+  const wrapAdds = scaled(blockOf(css, '.hud-minimap'), 'height') + scaled(city, 'margin-top') + cityLine + scaled(blockOf(css, '.hud-minimap-wrap'), 'margin-bottom');
+  const helpBase = Number(/(?:^|;|\s)top\s*:\s*([0-9.]+)px/.exec(blockOf(style, '.help'))?.[1]);
+  const helpRule = /#hud\.minimap-on \.help\s*\{\s*top:\s*calc\(\s*([0-9.]+)px\s*\+\s*([0-9.]+)px\s*\*\s*var\(--hud-scale\)\s*\)/.exec(css);
+  ok(
+    Number.isFinite(wrapAdds) && !!helpRule && Number(helpRule[1]) === helpBase && Number(helpRule[2]) >= wrapAdds && Number(helpRule[2]) - wrapAdds < 1,
+    `with the minimap up the help block moves down by the whole of its wrap on the HUD scale (${helpRule ? `${helpRule[1]} + ${helpRule[2]}` : 'no rule'} against ${helpBase} + ${wrapAdds.toFixed(1)})`,
+  );
+  ok(/(?:^|;|\s)line-height\s*:\s*1\.3em/.test(city) && /white-space:\s*nowrap/.test(city), "and the city's line is one line of fixed height, so a name coming and going never moves the panel");
   ok(/--hud-msg-w/.test(css), "and the message column's width comes from the layout through `--hud-msg-w`");
   ok(/font-stretch:\s*var\(--hud-stretch\)/.test(css), 'the instrument face is condensed, as the design asks');
 }

@@ -1,0 +1,13 @@
+// A harsh beat: it cannot be started over, and dropping it ends it as a failure.
+{
+  "id": "harsh",
+  "title": "TEST: no second chances",
+  "harsh": true,
+  "restart": "never",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["hold"],
+  "steps": {
+    "hold": { "type": "signal", "signal": "debug:test-harsh", "objective": "TEST: wait for the harsh signal", "ends": "done" },
+  },
+}

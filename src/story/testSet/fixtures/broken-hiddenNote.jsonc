@@ -1,0 +1,12 @@
+// expect: rule 6
+// Never loaded as part of the set: the checker must fail it. A hidden step writes a journal note, but the
+// player is not there to have witnessed anything.
+{
+  "id": "broken-hiddenNote",
+  "title": "TEST: a note nobody saw",
+  "givers": [{ "kind": "debug" }],
+  "start": ["unseen"],
+  "steps": {
+    "unseen": { "type": "signal", "signal": "debug:test-unseen", "visible": false, "do": { "done": ["note(\"TEST: I saw it happen.\")"] }, "ends": "done" },
+  },
+}

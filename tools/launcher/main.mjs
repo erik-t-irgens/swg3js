@@ -10,7 +10,10 @@
 //     nothing; with the converter's own last line per step, each step's running time, a log on disk and
 //     a Stop that leaves nothing a second press cannot resume;
 //   - serves the built game at / and the converted content at /assets-private/, and opens the game;
-//   - hosts for friends if asked: the release's own server, with a join word.
+//   - serves the player's own story set at /story-private/ when they have named its folder (`storyDir`,
+//     empty by default), with its list of files at /story-private/index.json as the dev server makes it;
+//   - hosts for friends if asked: the release's own server, with a join word, the story folder named
+//     (`--story`) and the converted content (`--assets`, where it reads each planet's layout centre).
 //
 // Every child (the converter, the server) is the exe itself told which file to run, or plain Node when
 // this is started from a checkout with `node tools/launcher/main.mjs`. Nothing here talks to any network
@@ -26,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { checkJka, checkOut, checkSwg, formatBytes, FULL_CONVERSION_BYTES, roomFor } from './checks.mjs';
 import { labelOf, planSteps, readStatus } from './plan.mjs';
 import { resolveUnder, sendFile } from './serve.mjs';
+import { STORY_FILE, listStorySet } from '../../server/storySet.mjs';
 
 /** The port the launcher asks for first, and keeps: the game's characters live in the browser's storage for this address, so a port that moved would hide them. Ours. */
 export const PREFERRED_PORT = 47031;
@@ -149,13 +153,15 @@ export async function start(ctx) {
     jobs: 0,
     host: { word: '', port: RELAY_PORT },
     join: { server: '', word: '' },
+    /** The player's own story set, a folder of their own; nothing is served and no story is run from it while it is empty. */
+    storyDir: '',
     ...(readJson(settingsFile) ?? {}),
   };
   // Every folder is kept absolute, resolved once against the launcher's own working folder: the checks
   // run here, but the converter runs with the data folder as its working folder, so a relative path
   // handed on as typed would be checked in one place and converted from another.
   const absolute = (p) => (typeof p === 'string' && p.trim() ? resolve(p.trim()) : '');
-  for (const k of ['swg', 'jka', 'out']) settings[k] = absolute(settings[k]);
+  for (const k of ['swg', 'jka', 'out', 'storyDir']) settings[k] = absolute(settings[k]);
   const saveSettings = () => writeJson(settingsFile, settings);
 
   // What the page reads.
@@ -400,6 +406,10 @@ export async function start(ctx) {
     };
     const args = [`--port=${p}`, `--data=${join(dataDir, 'server')}`];
     if (w) args.push(`--word=${w}`);
+    // The player's own story, run by the server, and the converted content it reads each planet's layout
+    // centre from, so an arrival is checked against where the player really stands.
+    if (settings.storyDir) args.push(`--story=${settings.storyDir}`);
+    if (settings.out && checks.out?.ok) args.push(`--assets=${settings.out}`);
     const run = runChild(relayScript, args, { onLine: keep });
     relay = { running: true, port: p, word: w, lines, startedAt: Date.now(), child: run.child, log: relayLog };
     const mine = relay;
@@ -482,7 +492,7 @@ export async function start(ctx) {
     if (body === null) return json(res, 400, { ok: false, sentence: 'That request could not be read.' });
     switch (route) {
       case 'settings': {
-        for (const k of ['swg', 'jka', 'out']) if (typeof body[k] === 'string') settings[k] = absolute(body[k]);
+        for (const k of ['swg', 'jka', 'out', 'storyDir']) if (typeof body[k] === 'string') settings[k] = absolute(body[k]);
         if (body.join && typeof body.join === 'object') settings.join = { server: String(body.join.server ?? '').trim(), word: String(body.join.word ?? '').trim() };
         saveSettings();
         recheck();
@@ -574,6 +584,34 @@ export async function start(ctx) {
         return;
       }
       sendFile(req, res, file, { cache: 'no-cache' });
+      return;
+    }
+    // The player's own story set, as the dev server serves `story-private/`: its list of files made fresh on
+    // every ask, and its story files and nothing else. Nothing at all while no folder is named.
+    if (p.startsWith('/story-private/')) {
+      if (!settings.storyDir) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      if (p === '/story-private/index.json') {
+        let files = [];
+        try {
+          files = listStorySet(settings.storyDir).map((f) => f.path);
+        } catch {
+          files = [];
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ files }));
+        return;
+      }
+      const file = resolveUnder(settings.storyDir, p.slice('/story-private'.length));
+      if (!file || !STORY_FILE.test(file)) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
+      sendFile(req, res, file, { cache: 'no-store' });
       return;
     }
     const file = resolveUnder(distDir, p === '/' ? '/index.html' : p);

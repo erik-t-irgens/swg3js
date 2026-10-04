@@ -1,0 +1,21 @@
+// A choice made in a conversation: TEST DOOMED's answers choose `left` or `right`. Left goes on by its own
+// edge to a step that ends the job as `left`; right is under pressure, moves Trust once and ends it as
+// `right`. Not repeatable, which is what lets an option move Trust at all.
+{
+  "id": "choice",
+  "title": "TEST: make a choice",
+  "givers": [{ "kind": "debug" }],
+  "start": ["decide"],
+  "steps": {
+    "decide": {
+      "type": "choice",
+      "objective": "TEST: tell TEST DOOMED which way",
+      "options": [
+        { "id": "left", "label": "TEST: left", "next": ["went_left"] },
+        { "id": "right", "label": "TEST: right", "pressure": true, "stakes": "TEST: the right is the harder way", "do": ["trust(freelance, 1)"], "ends": "right" },
+      ],
+    },
+    "went_left": { "type": "nothing", "ends": "left" },
+  },
+  "outcomes": { "left": {}, "right": {} },
+}

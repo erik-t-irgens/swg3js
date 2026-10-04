@@ -1,0 +1,8 @@
+// The page the TEST: a document that depends on a choice job is decided on: its options stand at its foot.
+// None of it is story.
+kind: notice
+id: test-branch-ask
+title: TEST NOTICE 0001
+issuer: TEST ISSUER
+
+TEST: Choose A or B at the foot of this page. The next document reads differently for each.

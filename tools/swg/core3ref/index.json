@@ -42,7 +42,9 @@
   "readStatics": "statics.json",
   "readDressGroups": "dress-groups.json",
   "readWeaponGroups": "weapon-groups.json",
-  "readCorvette": "corvette.json"
+  "readCorvette": "corvette.json",
+  "readConversations": "conversations.json",
+  "readConversationSpeakers": "conversation-speakers.json"
  },
  "counts": {
   "readTravelBuildings": 24,
@@ -110,6 +112,8 @@
   "readStatics": 10621,
   "readDressGroups": 26,
   "readWeaponGroups": 111,
-  "readCorvette": 268
+  "readCorvette": 268,
+  "readConversations": 289,
+  "readConversationSpeakers": 1627
  }
 }

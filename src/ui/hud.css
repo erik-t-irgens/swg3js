@@ -327,6 +327,7 @@
 .hud-msg.hit-you { border-left-color: var(--bad); }
 .hud-msg.spatial { border-left-color: var(--component); }
 .hud-msg.note { border-left-color: var(--muted); color: var(--muted); }
+.hud-msg.story { border-left-color: var(--component); }
 
 /* --- key-caps and the action bar -------------------------------------------------------------------
  * At most four things you can do right now, each a cap and two or three words. The cap shows the key
@@ -528,6 +529,122 @@
   width: calc(44px * var(--hud-scale));
   height: calc(4px * var(--hud-scale));
 }
+
+/* --- the waypoints' distances ----------------------------------------------------------------------
+ * A small pool, moved by `translate3d` only and written when the distance has moved by a rounding step.
+ * Each stands under its mark, a mark's own size below the point it is placed at (`HUD_SIZES.waypointMark`),
+ * or inboard of the tracked one's edge arrow. */
+.hud-wp-labels { position: absolute; inset: 0; pointer-events: none; }
+.hud-wp-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin-top: calc(7px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  color: var(--ink);
+  white-space: nowrap;
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  will-change: transform;
+}
+.hud-wp-label[hidden] { display: none; }
+
+/* --- the jobs followed, down the right edge under the group's roster --------------------------------
+ * Up to three, each a title and its objective lines with what each counts, how far and how long. Its top
+ * is the one property a ResizeObserver on the roster writes (`--tracker-top`), only when the roster
+ * changes size; the fallback is where the roster itself starts. Nothing here moves per frame. */
+.hud-tracker {
+  position: absolute;
+  top: var(--tracker-top, 96px);
+  right: 12px;
+  width: calc(210px * var(--hud-scale));
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: calc(4px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+.hud-tracker[hidden] { display: none; }
+.hud-trk-note,
+.hud-trk-doc,
+.hud-trk-job {
+  box-sizing: border-box;
+  padding: calc(3px * var(--hud-scale)) calc(6px * var(--hud-scale));
+  background: var(--plate);
+  border: 1px solid var(--edge);
+  border-left: calc(2px * var(--hud-scale)) solid var(--component);
+  border-radius: calc(3px * var(--hud-scale));
+  color: var(--ink);
+}
+.hud-trk-note { border-left-color: var(--warn); color: var(--muted); white-space: normal; }
+/* A document still to read: a line of its own over the jobs, pointing to the journal where it is opened. */
+.hud-trk-doc { border-left-color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hud-trk-note[hidden],
+.hud-trk-doc[hidden],
+.hud-trk-job[hidden],
+.hud-trk-line[hidden] { display: none; }
+.hud-trk-title {
+  color: var(--component);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.hud-trk-line {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(6px * var(--hud-scale));
+  margin-top: calc(2px * var(--hud-scale));
+}
+.hud-trk-line .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-trk-line .value { flex: none; color: var(--muted); white-space: nowrap; }
+.hud-trk-line.done { color: var(--muted); text-decoration: line-through; }
+
+/* --- the minimap -----------------------------------------------------------------------------------
+ * A circle of the planet's own picture, first in the top-left panel and over the planet's name, with the
+ * name of a city fading in under it. Its canvas is drawn only when what it shows has moved; the city's
+ * fade is one animation the browser runs itself, written into its own sheet from `CITY_TUNE`. */
+.hud-minimap-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: calc(6px * var(--hud-scale));
+}
+.hud-minimap-wrap[hidden] { display: none; }
+.hud-minimap {
+  display: block;
+  width: calc(168px * var(--hud-scale));
+  height: calc(168px * var(--hud-scale));
+  border-radius: 50%;
+}
+/* One line of fixed height, so a name coming and going never moves the panel, and the help block below
+ * can be placed by arithmetic: 1.3em of 13px is 16.9px at scale 1. */
+.hud-city {
+  height: 1.3em;
+  line-height: 1.3em;
+  white-space: nowrap;
+  margin-top: calc(3px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-size: calc(13px * var(--hud-scale));
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  opacity: 0;
+}
+/* The help block stands under the panel, which the minimap has made taller by the whole of its wrap, all
+ * of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`), the name's margin (3) and line (16.9),
+ * and the wrap's own margin (6), 193.9 rounded up to 194. 92px is where the help block stands without it
+ * (`.help` in style.css), and `hudMath.test.ts` adds these up again from this file. */
+#hud.minimap-on .help { top: calc(92px + 194px * var(--hud-scale)); }
 
 /* --- a rising damage number (a setting, off by default) -------------------------------------------- */
 .hud-dmg {

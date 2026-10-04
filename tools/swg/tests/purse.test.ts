@@ -186,4 +186,67 @@ function browser(shared: boolean) {
   ok(creditText(1234567).includes('1,234,567'), 'a number of credits reads with its thousands marked');
 }
 
-console.log(`\n${passed} checks passed`);
+// ---------------------------------------------------------------- the server's word reaches the purse
+//
+// Everything above hands the purse its words by hand, and that is exactly how the one thing that was
+// wrong went unseen: the browser's socket (`src/net/net.ts`) had no case for the server's `purse` answer,
+// so it never reached the purse at all -- with a server every fare waited for ever and the balance read
+// nought. Here a real relay answers the browser's own `Net`, wired as the game wires it, so the word goes
+// the whole way or the check fails.
+if (typeof WebSocket === 'undefined') {
+  console.log('     the relay round trip was skipped: this node has no WebSocket of its own');
+  console.log(`\n${passed} checks passed`);
+} else {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'swg-purse-relay-'));
+  const port = 18795;
+  process.env.PORT = String(port);
+  process.argv.push(`--data=${dir}`);
+  await import('../../../server/relay.mjs');
+  // The browser's half needs a window's timers and somewhere to keep its change counter.
+  const shelf = new Map<string, string>();
+  const g = globalThis as unknown as Record<string, unknown>;
+  g.localStorage = { getItem: (k: string) => shelf.get(k) ?? null, setItem: (k: string, v: string) => void shelf.set(k, String(v)), removeItem: (k: string) => void shelf.delete(k) };
+  g.window = { setTimeout, clearTimeout, setInterval, clearInterval };
+  const { Net } = await import('../../../src/net/net.ts');
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const until = async (what: () => boolean, ms = 4000) => {
+    for (let t = 0; t < ms && !what(); t += 50) await wait(50);
+    return what();
+  };
+  const net = new Net();
+  const said: string[] = [];
+  const p = new Purse();
+  p.attach({ send: (m) => net.sendWord(m), say: (t) => void said.push(t), shared: () => net.session.authority === 'server', saved: () => null, save: () => {} });
+  // As `main.ts` does it: whatever the socket hands over that it does not read itself.
+  net.onWord = (msg) => {
+    if (msg?.t === 'purse') p.word(msg);
+  };
+  try {
+    net.session.noteCharacter({ id: 'char-purse', name: 'Han' }, { species: 'human_male', class: 'jedi', planet: 'tatooine', zone: '' });
+    net.connect(`ws://127.0.0.1:${port}`, { name: 'Han', species: 'human_male', class: 'jedi', planet: 'tatooine' });
+    ok(await until(() => net.session.authority === 'server'), 'a real relay takes the browser\'s claim');
+    p.ask();
+    ok(await until(() => p.known) && p.credits === PURSE_TUNING.start, `asked, the server's answer reaches the purse through the socket's own switch (${p.credits})`);
+    let went = false;
+    p.spend(1000, 'the shuttle to Naboo', () => (went = true));
+    ok(await until(() => went), 'a fare spent with a server is answered and the ride goes ahead, where before it waited for ever');
+    ok(p.credits === PURSE_TUNING.start - 1000 && p.report().waiting === null, 'and the balance is the server\'s, with nothing left waiting');
+    let far = false;
+    p.spend(PURSE_TUNING.start * 10, 'a palace', () => (far = true));
+    ok((await until(() => said.some((s) => s.includes('palace')))) && !far, 'and one it cannot pay is refused in the server\'s words, and nothing happens');
+  } finally {
+    net.disconnect();
+    setTimeout(() => {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* the server still has it open: a temp folder either way */
+      }
+      console.log(`\n${passed} checks passed`);
+      process.exit(0);
+    }, 200);
+  }
+}

@@ -50,7 +50,7 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { findCalls, readLua, LuaCall } from './lua.mjs';
+import { findCalls, functionBodies, readLua, readStatements, LuaCall } from './lua.mjs';
 
 /** The shape and tier words a region file declares for itself, which it does in its own `regions.lua`. */
 const REGION_CONSTS = { CIRCLE: 1, RECTANGLE: 2, RING: 3 };
@@ -1069,4 +1069,309 @@ export function frameCheck(named, pois) {
     within100: gaps.filter((g) => g <= 100).length,
     reading: asIs >= mirrored ? 'as-is' : 'mirrored',
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The conversations: what the server's people say, as a structure and nothing else.
+//
+// **A conversation of the server's is three things and only one of them is data.** A template
+// (`mobile/conversations/**.lua`) declares screens -- a line, whether it ends, and the answers, each
+// linking to another screen -- and adds them to itself in order. A handler class in the screenplays
+// picks the first screen, rewrites screens on the way and does whatever the conversation does. And the
+// words are the client's own string ids, or the emulator's own English, or nothing at all where the
+// handler fills them in. So what is kept is the structure -- screen names, links, the client's string
+// ids, the gesture a screen names -- and, from the handler, only *where* code acts: whether it picks the
+// first screen, edits the answers or sets the words, and which screens it names. The handler's code,
+// its conditions and the emulator's own English are never kept: a line or an answer written in the
+// emulator's words is kept as null and marked `core3-literal`, so nothing here ever pretends to be text.
+
+/**
+ * The factories that build one conversation over and over -- a theme park's every giver and target,
+ * every trainer -- by the shape each is kept as. The pets' and the informants' are left out: the
+ * informants register under a name the code makes up and are a mission type of the server's own, and
+ * a pet's conversation is its owner's commands, which no body in this game takes.
+ */
+export const CONVERSATION_SHAPES = { createMissionGiverConvoTemplate: 'themepark-giver', createMissionTargetConvoTemplate: 'themepark-target', createTrainerConversationTemplate: 'trainer' };
+
+/** A handler's calls that change a screen's answers, and those that set its words or fill them in. */
+const OPTION_CALLS = new Set(['addOption', 'removeOption', 'removeAllOptions']);
+const TEXT_CALLS = new Set(['setCustomDialogText', 'setDialogTextStringId', 'setDialogTextTO', 'setDialogTextTT', 'setDialogTextDI', 'setDialogTextDF', 'setDialogTextTU']);
+/** The class every handler is made from, whose own methods only follow the links. */
+const BASE_HANDLER = 'conv_handler';
+
+/** A table read from a file, as against a list or a marker. */
+const isTableValue = (v) => !!v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof LuaCall);
+
+/** A line's or an answer's words as kept: a client string id or a key of the tree's own table, or null and why not. */
+function conversationText(v) {
+  // A value the code hands in (a parameter, a call): filled per conversation, which is logic.
+  if (typeof v !== 'string' || v === '') return { text: null };
+  if (/^@[A-Za-z0-9_/.-]+:[A-Za-z0-9_.-]+$/.test(v) || /^:[A-Za-z0-9_.-]+$/.test(v)) return { text: v };
+  // The emulator's own English: never kept, and marked so nothing plays the line as if it were there.
+  return { text: null, needs: 'core3-literal' };
+}
+
+/** One screen as a node of the structure. */
+function screenNode(s) {
+  const custom = typeof s.customDialogText === 'string' && s.customDialogText !== '';
+  const say = custom ? { text: null, needs: 'core3-literal' } : conversationText(s.leftDialog);
+  const node = { id: s.id, say: say.text, end: s.stopConversation === true || s.stopConversation === 'true', replies: [] };
+  if (say.needs) node.needs = say.needs;
+  if (typeof s.animation === 'string' && s.animation) node.gesture = s.animation;
+  for (const o of Array.isArray(s.options) ? s.options : []) {
+    if (!Array.isArray(o)) continue;
+    const t = conversationText(o[0]);
+    const r = { text: t.text, to: typeof o[1] === 'string' && o[1] ? o[1] : null };
+    if (t.needs) r.needs = t.needs;
+    node.replies.push(r);
+  }
+  return node;
+}
+
+/**
+ * The templates one source declares and registers, read a statement at a time (`readStatements`): each
+ * screen as it was when it was added, so a name declared twice is two screens. A template made from
+ * another (`X = baseTemplate:new { ... }`) has the screens its base has when it is registered, and its
+ * own fields over the base's. `consts` stands each of a factory's parameters for a marker, so a value
+ * the caller hands in is read as the code's and not as words.
+ */
+function conversationTemplates(src, consts = {}) {
+  const { statements, skipped } = readStatements(src, consts);
+  const values = new Map();
+  const templates = new Map();
+  const registered = [];
+  for (const s of statements) {
+    if (s.kind === 'assign') {
+      values.set(s.name, s.value);
+      const v = s.value;
+      if (!isTableValue(v)) continue;
+      if (v.__class === 'ConvoTemplate') templates.set(s.name, { initial: typeof v.initialScreen === 'string' ? v.initialScreen : null, handler: v.luaClassHandler ?? null, screens: [], base: null });
+      else if (templates.has(v.__class)) {
+        const b = templates.get(v.__class);
+        templates.set(s.name, { initial: typeof v.initialScreen === 'string' ? v.initialScreen : b.initial, handler: v.luaClassHandler ?? b.handler, screens: null, base: v.__class });
+      }
+    } else if (s.kind === 'method' && s.method === 'addScreen' && templates.has(s.self)) {
+      const scr = typeof s.args[0] === 'string' ? values.get(s.args[0]) : s.args[0];
+      const t = templates.get(s.self);
+      if (isTableValue(scr) && scr.__class === 'ConvoScreen' && typeof scr.id === 'string' && t.screens) t.screens.push(screenNode(scr));
+    } else if (s.kind === 'call' && s.call.call === 'addConversationTemplate') {
+      const [name, v] = s.call.args;
+      const t = typeof v === 'string' ? templates.get(v) : null;
+      if (!t) continue;
+      const screens = t.screens ?? templates.get(t.base)?.screens ?? [];
+      registered.push({ name, initial: t.initial, handler: t.handler, base: t.base, nodes: screens.map((n) => JSON.parse(JSON.stringify(n))) });
+    }
+  }
+  return { registered, skipped };
+}
+
+/** Every `.lua` under a folder, by its own folder's walk. */
+function scriptFiles(dir) {
+  return luaFiles(dir).sort();
+}
+
+/**
+ * Every handler class the scripts define (`X = Y:new { ... }`) and every method on one (`function
+ * X:method(...)`), as the class each is made from and the tokens of each method's body: what a tree's
+ * handler is asked about.
+ */
+function handlerIndex(scripts) {
+  const base = new Map();
+  const methods = new Map();
+  for (const dir of [join(scripts, 'screenplays'), join(scripts, 'mobile', 'conversations')]) {
+    for (const file of scriptFiles(dir)) {
+      const src = readFileSync(file, 'utf8');
+      if (!src.includes(':new') && !src.includes('function')) continue;
+      let read;
+      try {
+        read = readLua(src);
+      } catch {
+        continue;
+      }
+      for (const [name, v] of read.values) if (isTableValue(v) && typeof v.__class === 'string' && !base.has(name)) base.set(name, v.__class);
+      for (const f of functionBodies(src)) {
+        const at = f.name.indexOf(':');
+        if (at < 0) continue;
+        const cls = f.name.slice(0, at);
+        if (!methods.has(cls)) methods.set(cls, new Map());
+        methods.get(cls).set(f.name.slice(at + 1), f.tokens);
+      }
+    }
+  }
+  return { base, methods };
+}
+
+/**
+ * Where a tree's handler acts, read off the names and strings its methods mention and nothing else:
+ * whether it picks the first screen (`entry`), edits the answers or decides the links (`options`), sets
+ * or fills in the words (`text`), which of the tree's screens it names (`screens`), and the screens its
+ * entry code names outright (`entries`). A handler nobody defines is `unread`: its logic is unknown, so
+ * the whole tree is the code's.
+ */
+function handlerLogic(handler, nodes, index) {
+  const logic = { entry: false, options: false, text: false, screens: [], entries: [] };
+  if (typeof handler !== 'string' || !handler || handler === BASE_HANDLER) return logic;
+  if (!index.base.has(handler) && !index.methods.has(handler)) return { ...logic, unread: true };
+  const ids = new Set(nodes.map((n) => n.id));
+  const screens = new Set();
+  const entries = [];
+  const seen = new Set();
+  for (let c = handler; c && c !== BASE_HANDLER && !seen.has(c); c = index.base.get(c)) {
+    seen.add(c);
+    for (const [method, tokens] of index.methods.get(c) ?? []) {
+      if (method === 'getInitialScreen') logic.entry = true;
+      if (method === 'getNextConversationScreen') logic.options = true;
+      for (let i = 0; i < tokens.length; i++) {
+        const k = tokens[i];
+        if (k.kind === 'name' && OPTION_CALLS.has(k.value)) logic.options = true;
+        if (k.kind === 'name' && TEXT_CALLS.has(k.value)) logic.text = true;
+        if (k.kind === 'string' && ids.has(k.value)) {
+          screens.add(k.value);
+          if (method === 'getInitialScreen' && tokens[i - 2]?.value === 'getScreen' && !entries.includes(k.value)) entries.push(k.value);
+        }
+      }
+    }
+  }
+  logic.screens = [...screens].sort();
+  logic.entries = entries;
+  return logic;
+}
+
+/**
+ * The heralds the server stood: the people who tell a player where a place is and put a waypoint on
+ * it. `multi` are the ones with a conversation of their own and several places to tell of (each a
+ * person, where they stand and the places in the order their screens number them, `loc1` to `loc4`),
+ * and `directions` the places the other heralds send a player to, each with the client's own string id
+ * for its name -- which is how the server named their waypoints, and the only names either list has in
+ * the client's words: the server's own name for each of `multi`'s places is its English, and is not
+ * kept. A place's price is kept where the server charged one.
+ */
+function readHeralds(scripts) {
+  const out = { multi: [], directions: [] };
+  for (const file of scriptFiles(join(scripts, 'screenplays'))) {
+    const src = readFileSync(file, 'utf8');
+    if (!src.includes('multiDestHeraldList')) continue;
+    for (const [, v] of readLua(src).values) {
+      if (!isTableValue(v) || !Array.isArray(v.multiDestHeraldList)) continue;
+      for (const r of v.multiDestHeraldList) {
+        if (!isTableValue(r) || typeof r.template !== 'string' || typeof r.planet !== 'string' || typeof r.stringFile !== 'string') continue;
+        if (![r.x, r.y, r.z].every((n) => typeof n === 'number')) continue;
+        const dests = [];
+        for (let n = 1; n <= 9; n++) {
+          const x = r[`dest${n}X`];
+          const z = r[`dest${n}Y`];
+          if (typeof x !== 'number' || typeof z !== 'number') break;
+          const d = { x, z };
+          const cost = r[`dest${n}Cost`];
+          if (typeof cost === 'number' && cost > 0) d.cost = cost;
+          // A name the server wrote as a key of the conversation's own table is the client's words.
+          const name = r[`dest${n}String`];
+          if (typeof name === 'string' && /^:[A-Za-z0-9_.-]+$/.test(name)) d.name = `@conversation/${r.stringFile}${name}`;
+          dests.push(d);
+        }
+        out.multi.push({ who: r.template, world: r.planet, x: r.x, y: typeof r.z === 'number' ? r.z : 0, z: r.y, heading: headingRadians(typeof r.angle === 'number' ? r.angle : 0), cell: typeof r.cell === 'number' ? r.cell : 0, table: `conversation/${r.stringFile}`, dests });
+      }
+      for (const r of Array.isArray(v.heraldList) ? v.heraldList : []) {
+        if (!isTableValue(r) || typeof r.planet !== 'string' || typeof r.stringFile !== 'string' || typeof r.destX !== 'number' || typeof r.destY !== 'number') continue;
+        out.directions.push({ world: r.planet, x: r.destX, z: r.destY, name: `@spawning/static_npc/${r.stringFile}:waypoint_name_1` });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Every conversation the server's people could hold, as structure: `{ trees, shapes, instances,
+ * heralds }`.
+ *
+ *   - `trees`, by the name each is registered under: the file it is in, its first screen, its
+ *     handler, its screens as nodes (`{ id, say, end, gesture?, replies: [{ text, to }], needs? }`), the
+ *     template it is made from where it is, and where its handler acts (`handlerLogic`);
+ *   - `shapes`, the conversations a factory builds again for each caller, by the shape's name, with the
+ *     factory's parameters (a value a caller hands in is a null, as the handler's are);
+ *   - `instances`, every factory call, by the name it registers: its shape, its handler and the words it
+ *     passes;
+ *   - `heralds` (`readHeralds`).
+ *
+ * Read with this file's own Lua reader and nothing else, and in statement order so nothing a file
+ * declares twice is lost. A line in the emulator's own words is null and `core3-literal`, an answer
+ * likewise, and a link to nothing is kept as null.
+ */
+export function readConversations(scripts) {
+  const root = join(scripts, 'mobile', 'conversations');
+  const trees = new Map();
+  const shapes = new Map();
+  const instances = new Map();
+  const factories = new Map();
+  const files = scriptFiles(root);
+  // The factories first, wherever they are defined: a caller may come before its factory in the walk.
+  for (const file of files) {
+    const src = readFileSync(file, 'utf8');
+    for (const f of functionBodies(src)) {
+      const shape = CONVERSATION_SHAPES[f.name];
+      if (!shape) continue;
+      const consts = Object.fromEntries(f.params.map((p) => [p, new LuaCall('param', [p])]));
+      const { registered } = conversationTemplates(f.body, consts);
+      const t = registered[0];
+      if (!t) continue;
+      const param = (v) => (v instanceof LuaCall && v.call === 'param' ? v.args[0] : null);
+      factories.set(f.name, { shape, params: f.params, nameAt: f.params.indexOf(param(t.name)), handlerAt: f.params.indexOf(param(t.handler)), handler: typeof t.handler === 'string' ? t.handler : null });
+      shapes.set(shape, { factory: f.name, params: f.params, file: file.slice(root.length + 1).replace(/\\/g, '/'), initial: t.initial || null, nodes: t.nodes });
+    }
+  }
+  const index = handlerIndex(scripts);
+  for (const file of files) {
+    const src = readFileSync(file, 'utf8');
+    const rel = file.slice(root.length + 1).replace(/\\/g, '/');
+    for (const t of conversationTemplates(src).registered) {
+      if (typeof t.name !== 'string' || !t.name) continue;
+      const handler = typeof t.handler === 'string' ? t.handler : null;
+      const tree = { file: rel, initial: t.initial || null, handler, nodes: t.nodes, logic: handlerLogic(handler, t.nodes, index) };
+      if (t.base) tree.base = t.base;
+      trees.set(t.name, tree);
+    }
+    for (const s of readStatements(src).statements) {
+      if (s.kind !== 'call') continue;
+      const f = factories.get(s.call.call);
+      if (!f) continue;
+      const name = s.call.args[f.nameAt];
+      if (typeof name !== 'string' || !name) continue;
+      const handler = f.handlerAt >= 0 ? s.call.args[f.handlerAt] : f.handler;
+      instances.set(name, { shape: f.shape, handler: typeof handler === 'string' ? handler : null, args: s.call.args.filter((a) => typeof a === 'string') });
+    }
+  }
+  const sorted = (m) => new Map([...m].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+  return { trees: sorted(trees), shapes: sorted(shapes), instances: sorted(instances), heralds: readHeralds(scripts) };
+}
+
+/**
+ * Who says what: every creature that names a conversation (`conversationTemplate`) or a way of
+ * speaking (`reactionStf`, the client's `npc_reaction` table it greets and says goodbye from), by the
+ * creature's name, as `{ tree?, diction? }`. A diction is the table's own name (`military`, `slang`).
+ * Its own reader, so `readCreatures` and the file it writes stay exactly as they were.
+ *
+ * A conversation a screenplay hands a body at run time (the junk dealers, the corvette's prisoners) is
+ * not here: which body gets it is the code's choice, made as it stands them.
+ */
+export function readConversationSpeakers(scripts) {
+  const root = join(scripts, 'mobile');
+  const skip = new Set(['lair', 'spawn', 'conversations', 'dressgroup', 'outfits']);
+  const out = new Map();
+  for (const file of luaFiles(root, skip)) {
+    let read;
+    try {
+      read = readLua(readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    for (const [name, v] of read.values) {
+      if (!isTableValue(v) || v.__class !== 'Creature') continue;
+      const row = {};
+      if (typeof v.conversationTemplate === 'string' && v.conversationTemplate) row.tree = v.conversationTemplate;
+      const m = typeof v.reactionStf === 'string' ? /^@npc_reaction\/([A-Za-z0-9_]+)$/.exec(v.reactionStf) : null;
+      if (m) row.diction = m[1];
+      if (row.tree || row.diction) out.set(name, row);
+    }
+  }
+  return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
 }

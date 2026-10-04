@@ -1,0 +1,18 @@
+// A reward of every kind, paid once: credits, an item (the starting kit's own plain shirt), experience
+// and standing. `back` loops round to the reward step again in the same run, which must pay nothing.
+{
+  "id": "reward",
+  "title": "TEST: a reward",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["give"],
+  "steps": {
+    "give": {
+      "type": "reward",
+      "reward": { "credits": 25, "xp": 10, "items": [{ "kind": "wear", "id": "shirt_s03", "n": 1 }], "standing": [{ "track": "freelance", "add": 5 }] },
+      "next": ["back", "finish"],
+    },
+    "back": { "type": "signal", "signal": "debug:test-again", "loop": true, "objective": "TEST: go round again", "next": ["give"] },
+    "finish": { "type": "signal", "signal": "debug:test-finish", "objective": "TEST: finish", "ends": "done" },
+  },
+}

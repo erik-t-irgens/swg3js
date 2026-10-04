@@ -1,0 +1,4 @@
+// The committed test set. Every text in it is labelled TEST and none of it is story: it exists to drive
+// every step type and rule through the engine, in the node tests and in the game. Loaded with the prefix
+// `test`, on by default only in single player under `npm run dev`.
+{ "prefix": "test", "title": "TEST SET" }

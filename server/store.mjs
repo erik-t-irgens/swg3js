@@ -1,7 +1,8 @@
 // The truth the server keeps between runs: the players it knows, their characters, the things they
 // own (a row per item, whose shape is the ledger's: see ledger.mjs), the buildings they have put
-// down (a row per house, whose shape is homes.mjs's) and the switches it was started with. One file
-// you can read, plus a log of the changes since it was last written.
+// down (a row per house, whose shape is homes.mjs's), each character's story book (whose shape is
+// `src/story/book.ts`'s, through stories.mjs) and the switches it was started with. One file you can
+// read, plus a log of the changes since it was last written.
 //
 // How it is written, and why: the snapshot goes to `world.json.tmp`, is flushed to the disk and
 // only then renamed over `world.json`, so a machine that loses power mid-write still has the last
@@ -17,7 +18,11 @@
 // open for as long as an editor is, and a quick retry is a full write and an fsync of the whole world
 // every time, which is a disk thrashed and a log filled for nothing.
 //
-// Not a database: what is kept here is a few hundred kilobytes you can read with any editor.
+// Not a database: what is kept here is a few hundred kilobytes you can read with any editor. The one part
+// that can grow past that is the words of the story's journals (`storyTexts`, stories.mjs), kept once for
+// everybody by their hash: past `textsApart` bytes they are written to `story-texts.json` beside the world,
+// the same way and first, and `world.json` names that file rather than carrying them. They only ever grow, so
+// a texts file newer than its world is never wrong, only fuller.
 // Dependency-free, node's own modules only.
 
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
@@ -25,6 +30,7 @@ import { join } from 'node:path';
 import { applyItems } from './ledger.mjs';
 import { applyHomes } from './homes.mjs';
 import { applyPurse } from './purse.mjs';
+import { applyStory, readStories } from './stories.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -35,7 +41,10 @@ export const STORE_VERSION = 1;
  * for this pass and kept together; the server carries them in its own `TUNING` so that
  * `--set store.saveEvery=10000` moves one for a run.
  */
-export const STORE_TUNING = { saveEvery: 30000, renameTries: 3 };
+export const STORE_TUNING = { saveEvery: 30000, renameTries: 3, textsApart: 4 * 1024 * 1024 };
+
+/** The file the journal's words are written to once they pass `textsApart`. */
+export const TEXTS_FILE = 'story-texts.json';
 
 /**
  * A table keyed by something a browser chose (a player id, a character id). It has no prototype, so
@@ -48,9 +57,13 @@ function table(from = null) {
   return out;
 }
 
-/** An empty world: every slot that exists, each filled by the file that owns its shape. */
+/**
+ * An empty world: every slot that exists, each filled by the file that owns its shape. `stories` is each
+ * character's story book, `storyArchive` the books a browser's copy replaced, kept whole, and `storyTexts` the
+ * words of the journals by their hash (stories.mjs).
+ */
 export function emptyWorld(epoch = Date.now()) {
-  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), purses: table(), settings: {} };
+  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), settings: {} };
 }
 
 /**
@@ -96,7 +109,7 @@ export function applyChange(data, rec) {
       // decides what each row looks like on disk, and the same function runs when the thing happens
       // and when the log is replayed on start. Anything neither of them knows is a record from a
       // newer server: kept in the log, not understood here, and not an error.
-      return applyItems(data, rec) || applyHomes(data, rec) || applyPurse(data, rec);
+      return applyItems(data, rec) || applyHomes(data, rec) || applyPurse(data, rec) || applyStory(data, rec);
   }
 }
 
@@ -106,17 +119,30 @@ export class Store {
    *           renameTries?: number, rename?: (from: string, to: string) => void,
    *           log?: (line: string) => void }} options
    */
-  constructor({ dir, epoch = Date.now(), now = () => Date.now(), saveEvery = STORE_TUNING.saveEvery, renameTries = STORE_TUNING.renameTries, rename = renameSync, log = () => {} } = {}) {
+  constructor({ dir, epoch = Date.now(), now = () => Date.now(), saveEvery = STORE_TUNING.saveEvery, renameTries = STORE_TUNING.renameTries, rename = renameSync, log = () => {}, textsApart = STORE_TUNING.textsApart } = {}) {
     this.dir = dir;
     this.file = join(dir, 'world.json');
     this.temp = join(dir, 'world.json.tmp');
     this.logFile = join(dir, 'world.log');
+    this.textsFile = join(dir, TEXTS_FILE);
+    this.textsTemp = join(dir, `${TEXTS_FILE}.tmp`);
+    this.textsApart = textsApart;
     this.now = now;
     this.saveEvery = saveEvery;
     this.renameTries = renameTries;
     this.rename = rename;
     this.say = log;
     this.dirty = false;
+    /**
+     * The journals' words, in characters, kept as they are added rather than counted again at every save; and
+     * whether any came since the words' own file was last written, which is the only time it is written again --
+     * a waypoint moved must not rewrite tens of megabytes of words nobody touched.
+     */
+    this.textBytes = 0;
+    this.textsDirty = true;
+    /** Lazy changes are in the log that the disk has not been asked to keep yet (`change`). */
+    this.unflushed = false;
+    this.flushes = 0;
     this.timer = null;
     this.fd = -1;
     this.data = emptyWorld(epoch);
@@ -127,15 +153,18 @@ export class Store {
   load(epoch) {
     mkdirSync(this.dir, { recursive: true });
     // A half-written temp file is never read: it is the thing the rename was going to replace.
-    if (existsSync(this.temp)) {
+    for (const temp of [this.temp, this.textsTemp]) {
+      if (!existsSync(temp)) continue;
       try {
-        unlinkSync(this.temp);
+        unlinkSync(temp);
         this.say('a half-written snapshot was left behind and has been thrown away');
       } catch {
         /* it can stay */
       }
     }
     let loaded = null;
+    // Whether the words came whole out of a file of their own, which then needs no writing until a word is added.
+    let wordsOnDisk = false;
     if (existsSync(this.file)) {
       try {
         const parsed = JSON.parse(readFileSync(this.file, 'utf8'));
@@ -148,7 +177,23 @@ export class Store {
     if (loaded) {
       // The tables are rebuilt rather than taken as they are: `JSON.parse` hands back plain objects,
       // and the keys in them came from a browser (see `table`).
-      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses) };
+      // The journal's words, when the world names a file of their own, are read from it; a file that will not
+      // read leaves them empty, and the entries that name them show as not kept rather than stopping the world.
+      let texts = loaded.storyTexts;
+      if (loaded.storyTextsFile === TEXTS_FILE) {
+        try {
+          texts = existsSync(this.textsFile) ? JSON.parse(readFileSync(this.textsFile, 'utf8')) : {};
+          wordsOnDisk = existsSync(this.textsFile);
+        } catch (err) {
+          this.say(`${TEXTS_FILE} could not be read (${err instanceof Error ? err.message : String(err)}): the journals' words start empty`);
+          texts = {};
+        }
+      }
+      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts) };
+      delete this.data.storyTextsFile;
+      // A story book's own tables are keyed by a browser too, a level further down: they are rebuilt
+      // before the log is played back onto them, so a replayed change meets the book a live one did.
+      readStories(this.data);
       this.say(`world.json read: ${Object.keys(this.data.players).length} players, ${Object.keys(this.data.characters).length} characters, up to change ${this.data.seq}`);
     }
     let knownEpoch = !!loaded && Number.isFinite(loaded.epoch);
@@ -169,10 +214,14 @@ export class Store {
         if (!Number.isFinite(q) || q <= this.data.seq) continue;
         if (applyChange(this.data, rec)) replayed++;
         if (rec.t === 'world' && Number.isFinite(rec.epoch)) knownEpoch = true;
+        if (rec.t === 'storyText') wordsOnDisk = false;
         this.data.seq = q;
       }
       if (replayed) this.say(`world.log replayed: ${replayed} changes since the snapshot, now at change ${this.data.seq}`);
     }
+    const texts = this.data.storyTexts ?? {};
+    for (const h of Object.keys(texts)) this.textBytes += typeof texts[h] === 'string' ? texts[h].length : 0;
+    this.textsDirty = !wordsOnDisk;
     this.fd = openSync(this.logFile, 'a');
     // A world that has never said when it began says so now, so every start after this one knows how
     // old the world is rather than calling it new.
@@ -187,18 +236,49 @@ export class Store {
    * Make a change: stamp it with the next sequence number, apply it, and put it in the log at once.
    * Changes here are rare (a player registering, a character's record, a switch), so the flush per
    * change costs nothing on the path anything is sent on.
+   *
+   * `lazy` is for the one kind of change that comes in a stream: a job's counter moving (a kill, an observe
+   * step's watch opening). It is applied and written to the log in its place like any other, so the order of
+   * the log is never wrong, but the disk is not asked to flush it: the next change that is not lazy flushes
+   * it with itself, and so does `flush`, which the story calls every few seconds and when a character goes.
+   * What a power cut can cost is a counter a few seconds back, never a reward or a step done, and a fight is
+   * not an fsync a kill.
    */
-  change(rec) {
+  change(rec, { lazy = false } = {}) {
     const stamped = { ...rec, q: ++this.data.seq, at: this.now() };
+    // A journal's words, new to the world: counted, and the words' own file is due to be written again.
+    const word = rec?.t === 'storyText' && typeof rec.h === 'string' && !Object.hasOwn(this.data.storyTexts ?? {}, rec.h);
     applyChange(this.data, stamped);
+    if (word && Object.hasOwn(this.data.storyTexts ?? {}, rec.h)) {
+      this.textBytes += this.data.storyTexts[rec.h].length;
+      this.textsDirty = true;
+    }
     this.dirty = true;
     try {
       writeSync(this.fd, `${JSON.stringify(stamped)}\n`);
-      fsyncSync(this.fd);
+      if (lazy) this.unflushed = true;
+      else {
+        fsyncSync(this.fd);
+        this.unflushed = false;
+      }
     } catch (err) {
       this.say(`world.log could not be written (${err instanceof Error ? err.message : String(err)})`);
     }
     return stamped;
+  }
+
+  /** Flush whatever lazy changes the log holds that the disk has not been asked to keep yet. True when there were some. */
+  flush() {
+    if (!this.unflushed || this.fd < 0) return false;
+    try {
+      fsyncSync(this.fd);
+      this.unflushed = false;
+      this.flushes = (this.flushes ?? 0) + 1;
+      return true;
+    } catch (err) {
+      this.say(`world.log could not be flushed (${err instanceof Error ? err.message : String(err)})`);
+      return false;
+    }
   }
 
   /**
@@ -210,9 +290,47 @@ export class Store {
    */
   saveNow() {
     if (!this.dirty) return { written: false, tries: 0, error: null };
+    // The journals' words, once they pass `textsApart`, go to a file of their own and go first: the world that
+    // names that file must never be in place before the words it no longer carries. That file is written only
+    // when a word has been added since it last was; otherwise the one in place already holds every word.
+    const texts = this.data.storyTexts ?? {};
+    const apart = this.textBytes > this.textsApart;
+    if (apart && (this.textsDirty || !existsSync(this.textsFile))) {
+      let words;
+      try {
+        words = JSON.stringify(texts);
+      } catch (err) {
+        this.say(`the journals' words could not be turned into a file: ${err instanceof Error ? err.message : String(err)}`);
+        return { written: false, tries: 0, error: err };
+      }
+      try {
+        const fd = openSync(this.textsTemp, 'w');
+        writeSync(fd, words);
+        fsyncSync(fd);
+        closeSync(fd);
+      } catch (err) {
+        this.say(`${TEXTS_FILE} could not be written (${err instanceof Error ? err.message : String(err)}); the log still has everything`);
+        return { written: false, tries: 0, error: err };
+      }
+      let placed = false;
+      let error = null;
+      for (let tries = 1; tries <= this.renameTries && !placed; tries++) {
+        try {
+          this.rename(this.textsTemp, this.textsFile);
+          placed = true;
+        } catch (err) {
+          error = err;
+        }
+      }
+      if (!placed) {
+        this.say(`${TEXTS_FILE} could not be put in place (${error instanceof Error ? error.message : String(error)}); the log still has everything`);
+        return { written: false, tries: this.renameTries, error };
+      }
+      this.textsDirty = false;
+    }
     let text;
     try {
-      text = JSON.stringify(this.data, null, 1);
+      text = JSON.stringify(apart ? { ...this.data, storyTexts: undefined, storyTextsFile: TEXTS_FILE } : this.data, null, 1);
     } catch (err) {
       this.say(`the world could not be turned into a file: ${err instanceof Error ? err.message : String(err)}`);
       return { written: false, tries: 0, error: err };
@@ -274,6 +392,7 @@ export class Store {
   close() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.flush();
     this.saveNow();
     if (this.fd >= 0) {
       try {

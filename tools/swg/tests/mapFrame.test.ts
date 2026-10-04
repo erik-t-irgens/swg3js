@@ -98,15 +98,20 @@ const PICTURE = { width: 1024, height: 1024 };
 // ---------------------------------------------------------------------------------------------
 // The readers and the converter use it.
 {
+  // Every map reads its picture through one shared loader now (`mapImages.ts`), which is where map.json
+  // becomes a frame; the readers below are checked to go through it rather than reading map.json again.
+  const images = src('src/ui/mapImages.ts');
+  ok((images.match(/frame: mapFrame\(meta\)/g) ?? []).length === 1, 'the one shared loader turns map.json into its frame');
   const mapUi = src('src/ui/mapUi.ts');
-  ok(/frame: mapFrame\(meta\)/.test(mapUi) && /this\.toScreen\(frame\.x - extent \/ 2, frame\.z \+ extent \/ 2\)/.test(mapUi), "the map window draws its picture about the frame's middle");
+  ok(/mapPicture\(packId\)/.test(mapUi) && !/map\.json/.test(mapUi.replace(/\/\/.*$/gm, '')) && /this\.toScreen\(frame\.x - extent \/ 2, frame\.z \+ extent \/ 2\)/.test(mapUi), "the map window takes its picture from the shared loader and draws it about the frame's middle");
   ok(!/this\.image\?\.width/.test(mapUi), 'and nothing in it reads a bare width any more');
   const galaxy = src('src/ui/galaxyMap.ts');
   ok(/mapShareX\(frame, poi\.x\)/.test(galaxy) && /mapShareY\(frame, poi\.z\)/.test(galaxy) && !/extent \/ 2 - poi\.z/.test(galaxy), "the galaxy map's thumbnail dots are placed through the frame");
   const terminal = src('src/ui/terminalUi.ts');
   ok((terminal.match(/mapShareX\(f, p\.x\)/g) ?? []).length === 2 && !/mapWidth/.test(terminal), "both of the terminal's dot layouts are placed through the frame");
   const main = src('src/main.ts');
-  ok(/mapFrame: meta\?\.frame \?\? mapFrame\(null\)/.test(main) && /frame: mapFrame\(meta\)/.test(main), 'the terminal is handed the frame its map.json gives');
+  ok(/mapFrame: meta\?\.frame \?\? mapFrame\(null\)/.test(main) && /return mapMeta\(pack\)/.test(main), 'the terminal is handed the frame its map.json gives, through the shared loader');
+  ok(/return mapMeta\(packId\)/.test(galaxy), "and so are the galaxy map's thumbnails");
   const cli = src('tools/swg/cli.mjs');
   ok(/mapFrameOf\(\{ planet, areas: mapTable\(`datatables\/buildout\/areas_\$\{planet\}\.iff`\), adjustments/.test(cli) && /map_adjustments\.iff/.test(cli), 'the maps command reads the areas table and the map adjustments');
   ok(/centre: frame\.centre, frame: frame\.frame/.test(cli), 'and writes the centre and the frame into map.json');

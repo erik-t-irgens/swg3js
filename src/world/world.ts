@@ -51,6 +51,7 @@ import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
+import { conversationPack } from './conversationPack.ts';
 import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
 import { FollowerSet, recruitOwner } from './followers.ts';
 import { TALK_WORDS } from './talk.ts';
@@ -1552,8 +1553,14 @@ export class World {
     await wildLife.load(this.packId, import.meta.env.BASE_URL);
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
-    // rows are taken from what that fetch already holds rather than fetched a second time.
-    standingPeople.adopt(wildLife.peopleRows() as StandingRow[], wildLife.peopleCreatures(), wildLife.peopleExtras());
+    // rows are taken from what that fetch already holds rather than fetched a second time. Beside them
+    // stand the heralds, whom no pack stands (`conversationPack.ts`): their file is fetched once a session
+    // at boot, and a load waits for it only a moment (four seconds, ours), since a world without them is the
+    // world as it was.
+    await Promise.race([conversationPack.pending, new Promise<void>((r) => setTimeout(r, 4000))]);
+    if (token !== this.loadToken) return null;
+    const people = wildLife.peopleRows() as StandingRow[];
+    standingPeople.adopt(people.length ? [...people, ...conversationPack.standRows(this.packId)] : people, wildLife.peopleCreatures(), wildLife.peopleExtras());
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];
@@ -3826,13 +3833,20 @@ export class World {
    * Indoors the height is given (`at.y`, the floor's, from the room's own frame), exactly as the world's
    * standing people are given theirs: the manager's own ground lookup starts from the terrain under the
    * building, which is metres below a raised floor, and answers that there is no floor there at all.
+   *
+   * With `cast` it is one of a story's people (`src/world/storyStands.ts`): stood under the name the player
+   * knows them by and in their mood, talkable rather than a fixture (a fixture is refused a conversation),
+   * essential unless the story made them mortal, and never on the wire, since a story's people are this
+   * browser's player's alone. The budget may refuse one like any body; it is asked for again later.
    */
-  standMobile(id: string, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, worldId: string, essential = false): Mobile | null {
+  standMobile(id: string, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, worldId: string, essential = false, cast?: { name?: string; mood?: string | null }): Mobile | null {
     const entry = this.mobileCatalogue?.byId(id);
     if (!entry) return null;
     // A fixture: the one caller is the ticket collectors, which the memory budget must never keep off
     // their pads (`SpawnOpts.fixture`).
-    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, fixture: true });
+    const m = cast
+      ? this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, ...(cast.name ? { name: cast.name } : {}), ...(cast.mood ? { mood: cast.mood } : {}) })
+      : this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, fixture: true });
     return typeof m === 'string' || !m ? null : m;
   }
 
@@ -5690,6 +5704,8 @@ export class World {
         keeps: (m) => this.followers.holds(m),
         // A world of copies stands nobody but in the copy the player is in.
         scope: (x, y, z) => this.inCopy(x, y, z),
+        // One of them the story killed for this character is never stood here again.
+        gone: (key) => this.peopleGone?.(key) ?? false,
       };
     }
     return this.peopleDepsKept;
@@ -5783,6 +5799,24 @@ export class World {
     mobiles.lendFightClips(m);
     return null;
   }
+
+  /**
+   * The story's companion taken on as the follower who walks first behind the player (`src/world/companion.ts`):
+   * a body this browser stood for them alone and never put on the wire, which goes down rather than dying, made
+   * ready to walk and on the player's side. Why not, in words, or null.
+   */
+  takeCompanion(m: Mobile): string | null {
+    if (!this.mobiles || m.removed || m.dead) return 'gone';
+    m.downable = true;
+    m.readyToFollow();
+    return this.followers.add(m, 'companion', this.playerTarget, this.simTime);
+  }
+
+  /**
+   * Whether one of the game's own people, by their row's stable key, is gone for this character (the story
+   * killed a row a cast file promoted): never stood again here. Set by the game, which holds the book.
+   */
+  peopleGone: ((key: string) => boolean) | null = null;
 
   /** What the people of ours are allowed to ask of this world. Kept, like the wild world's. */
   private ambientDepsKept: AmbientDeps | null = null;
@@ -6784,8 +6818,9 @@ export class World {
     this.livingList.length = 0;
     if (!this.playerTarget.dead) this.livingList.push(this.playerTarget);
     if (this.creatures) for (const c of this.creatures.creatures) this.livingList.push(c);
-    // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up).
-    if (this.mobiles) for (const m of this.mobiles.live) if (m.ready) this.livingList.push(m);
+    // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up),
+    // nor one lying down and out (the companion, `Mobile.downable`: the version moves when it goes down and gets up).
+    if (this.mobiles) for (const m of this.mobiles.live) if (m.ready && !m.downed) this.livingList.push(m);
     if (this.npcs) for (const n of this.npcs.npcs) this.livingList.push(n);
     // The other players: on this world, with a body made, whatever they are standing in or riding.
     for (const p of peers.living) this.livingList.push(p);

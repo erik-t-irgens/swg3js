@@ -3,6 +3,9 @@ dist
 .DS_Store
 *.log
 assets-private
+# The owner's own story (quests, conversations, documents): read by the dev server, the relay and
+# `npm run story:check` from beside the checkout, and never committed or packed into a release.
+story-private
 server/data
 .env
 *.tre

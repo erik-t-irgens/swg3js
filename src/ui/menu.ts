@@ -107,6 +107,8 @@ const ACTION_LABELS: Record<Action, string> = {
   takeProp: 'Pick up a prop of yours (in hand: put it away; at your door: take the building down)',
   putAway: 'Put away a prop in hand',
   debugMenu: 'Debug menu',
+  waypoints: 'Waypoints',
+  journal: 'Journal (jobs, documents, the file)',
 };
 
 /**

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
+import { planetPhase } from './dayPhase.ts';
 import { GAME_DAY_SECONDS, dayTune, registerDay, setDayNote, sharedClock } from './sharedClock.ts';
-import { rand3 } from './weatherSchedule.ts';
 
 /** The client's day: the clock runs 06:00 to 06:00, and the first 70% of it is daylight. */
 const DAY_NIGHT_SPLIT = 0.7;
@@ -15,21 +15,12 @@ const DAY_FAST_NOTE = 'Day running fast';
  * Where a planet's day sits against the shared clock, in days. Invented, and worked out from the
  * planet's own sun (its azimuth and its peak elevation, the two numbers the day is ever told about
  * a planet) so that it is the same number in every browser without anybody having to carry it: the
- * same planet is at the same hour for everyone, and the planets are not all at noon together.
- *
- * The salt is invented too, and chosen rather than picked out of the air: a hash of two numbers
- * spreads them no better than chance, and the first one tried put two of the game's planets at the
- * same hour to within half a second of a twelve-minute day. This one leaves the closest pair of the
- * thirteen suns the planet list actually has about a fortieth of a day apart, which the test
- * measures over that list so that a planet added later is noticed rather than quietly colliding.
+ * same planet is at the same hour for everyone, and the planets are not all at noon together. The
+ * arithmetic and its chosen salt are `dayPhase.ts`'s, which the server reads too, so the hour a story
+ * asks about on the server is the hour this sky is drawn at; the console's spread is this side's alone.
  */
-const PHASE_SALT = 29;
-
 export function phaseFor(azimuth: number, maxElevation: number): number {
-  const a = Math.round((Number.isFinite(azimuth) ? azimuth : 0) * 1000);
-  const e = Math.round((Number.isFinite(maxElevation) ? maxElevation : 0) * 1000);
-  const p = rand3(a, e, PHASE_SALT) * dayTune.phaseSpread;
-  return p - Math.floor(p);
+  return planetPhase(azimuth, maxElevation, dayTune.phaseSpread);
 }
 
 /** Time of day in [0, 1): 0 is midnight, 0.5 is noon. */

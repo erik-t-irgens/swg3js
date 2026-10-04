@@ -148,6 +148,11 @@ export const HUD_SIZES = {
   /** A key-cap. */
   capW: 22,
   capH: 18,
+  // --- the world's own places ---------------------------------------------------------------------
+  /** The minimap's circle, across, at the top left over the planet's name. */
+  minimap: 168,
+  /** A waypoint's mark in the world: this far from its middle to each of its points. */
+  waypointMark: 7,
   // --- the blocks --------------------------------------------------------------------------------
   /** The ship's condition, centred, this far up from the bottom. */
   conditionUp: 96,

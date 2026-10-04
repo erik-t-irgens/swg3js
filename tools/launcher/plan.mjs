@@ -49,6 +49,7 @@ const WORDS = {
   travel: 'Travel terminals and shuttles',
   fittings: 'What stands inside buildings',
   spawns: 'Where the creatures and people stand',
+  conversations: 'What the game’s people say',
   objeffects: 'Fires, fountains, torches and lamps',
   doors: 'Doors in the buildings',
   scenes: 'The character screens’ places',

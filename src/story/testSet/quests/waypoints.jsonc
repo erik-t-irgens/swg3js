@@ -1,0 +1,13 @@
+// Quest waypoints: the first step's appears by itself, switched on; switched off by the player it stays
+// off. The second step's starts switched off because the step says so. Both stand in Mos Eisley.
+{
+  "id": "waypoints",
+  "title": "TEST: waypoints",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["mark"],
+  "steps": {
+    "mark": { "type": "goto", "objective": "TEST: go to the first marker", "at": { "world": "tatooine", "raw": [3476, -4694] }, "radius": 4, "next": ["quiet"] },
+    "quiet": { "type": "goto", "objective": "TEST: go to the second marker", "at": { "world": "tatooine", "raw": [3619, -4801] }, "radius": 8, "waypoint": { "on": false }, "ends": "done" },
+  },
+}

@@ -16,7 +16,7 @@
 // the module is imported for its tables alone, and `Menu` itself is never built.
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { DEFAULT_SETTINGS, HUD_LINES_RANGE, HUD_SCALE_RANGE } from '../../../src/core/settings.ts';
+import { DEFAULT_SETTINGS, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE } from '../../../src/core/settings.ts';
 import { INTERFACE, notifyBindingsChanged, onBindingsChanged } from '../../../src/ui/hudPage.ts';
 
 let checks = 0;
@@ -105,6 +105,9 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
   ok(scale.min === HUD_SCALE_RANGE.min && scale.max === HUD_SCALE_RANGE.max, 'the scale slider runs from end to end of the range the console clamps to');
   ok(lines.min === HUD_LINES_RANGE.min && lines.max === HUD_LINES_RANGE.max, 'and so does the line count');
   ok(lines.requires?.includes('hudMessages') === true, 'the line count is greyed while the message line is off');
+  const reach = knobs.find((k) => k.key === 'hudMinimapRange')!;
+  ok(reach.min === HUD_MINIMAP_RANGE.min && reach.max === HUD_MINIMAP_RANGE.max, "the minimap's reach runs from end to end of the range `__debug.minimap` clamps to");
+  ok(reach.requires?.includes('hudMinimap') === true && knobs.find((k) => k.key === 'hudWaypointMarksInFlight')?.requires?.includes('hudWaypointMarks') === true, 'and the minimap\'s and the marks\' own knobs are greyed while their switch is off');
 }
 
 // ---------------------------------------------------------------------------------------------

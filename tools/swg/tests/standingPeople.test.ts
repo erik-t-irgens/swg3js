@@ -211,6 +211,37 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(bodies.length === 2, "and stood again once it is, on the row's own respawn rather than a number of ours");
 }
 
+// ------------------------------------------------------------------ killed by the story, for this character
+{
+  // One of the game's own people a cast file promotes, whom the story has killed (`PeopleDeps.gone`): never
+  // stood again however near the player comes, taken down at once where one stands, and only a body somebody
+  // else has for now (a follower) is left where it is until it is let go.
+  const killed = new Set<string>();
+  const held = new Set<Body>();
+  const p = new StandingPeople();
+  p.adopt([row({ who: 'doomed', key: 'k-doomed', x: 0 }), row({ who: 'other', key: 'k-other', x: 4 })]);
+  const { deps, bodies } = game({ gone: (key) => killed.has(key), keeps: (m) => held.has(m as unknown as Body) });
+  const at = new THREE.Vector3(0, 0, 0);
+  const next = PEOPLE_TUNE.everySeconds + 0.1;
+  killed.add('k-doomed');
+  p.step(1, 1, at, deps);
+  p.step(next, 5, at, deps);
+  ok(bodies.length === 1 && Math.abs(bodies[0].x) === 4, 'a row the story killed is never stood, while the one beside it is');
+  killed.clear();
+  p.step(next, 10, at, deps);
+  const doomed = bodies.find((b) => b.x === 0);
+  ok(!!doomed && !doomed.removed, 'alive again (another character), they are stood');
+  held.add(doomed!);
+  killed.add('k-doomed');
+  p.step(next, 15, at, deps);
+  ok(!doomed!.removed, 'killed while they follow the player, they are left where they are while they do');
+  held.delete(doomed!);
+  p.step(next, 20, at, deps);
+  ok(doomed!.removed && bodies.filter((b) => b.x === 0).length === 1, 'and once let go, taken down at once and never stood again at their row');
+  p.step(next, 25, at, deps);
+  ok(bodies.filter((b) => b.x === 0).length === 1 && !bodies.find((b) => Math.abs(b.x) === 4)!.removed, 'nor on any pass after, while everybody else stands');
+}
+
 // ------------------------------------------------------------------ a body somebody else has for now
 {
   // A person following the player (src/world/followers.ts) walks with them, as far from its own row as
@@ -941,7 +972,7 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   ok(/if \(!b \|\| b\.dead \|\| b\.removed \|\| b\.engaged \|\| s\.essential !== essential \|\| deps\?\.keeps\?\.\(b\)\) continue;/.test(src('world/standingPeople.ts')) && /get engaged\(\): boolean \{/.test(mobile), 'and nobody in a fight is put down to make room for somebody nearer, nor anybody of the other cap, nor anybody following the player');
 
   // What the town says about each row reaches the body the world stands, and the budget can make room.
-  ok(/standingPeople\.adopt\(wildLife\.peopleRows\(\) as StandingRow\[\], wildLife\.peopleCreatures\(\), wildLife\.peopleExtras\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows, and the towns' lists and weapon groups beside them");
+  ok(/const people = wildLife\.peopleRows\(\) as StandingRow\[\];\s*standingPeople\.adopt\(people\.length \? \[\.\.\.people, \.\.\.conversationPack\.standRows\(this\.packId\)\] : people, wildLife\.peopleCreatures\(\), wildLife\.peopleExtras\(\)\);/.test(worldSrc), "the world hands the people each creature's own numbers with the rows (and the heralds the conversations stand beside them), and the towns' lists and weapon groups beside them");
   // The name is the person's own (`stood:<world>:<index>`, unique across worlds so the server can hold it
   // once), and the row's respawn goes with it, which is how long its post stays empty once it dies.
   ok(/spawn: \(entry, at, how\) =>\s*this\.mobiles\?\.spawn\(entry, at, \{\s*origin: 'spawned',\s*seed: how\.seed,\s*inside: how\.inside,\s*worldId: how\.id,\s*essential: how\.essential,\s*overrides: how\.overrides,\s*mood: how\.mood,\s*weapons: how\.weapons,\s*weaponGroups: how\.weaponGroups,\s*room: how\.room,\s*respawn: how\.respawn,\s*\}\)/.test(worldSrc), "and stands each with its own creature's numbers, mood, weapons and room over its body's");

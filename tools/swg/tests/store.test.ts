@@ -222,5 +222,69 @@ const quiet = { saveEvery: 0, log: () => {} };
   b.close();
 }
 
+// --- 11: the story books -----------------------------------------------------------------------------------
+// Each character's story book and the archive of the books a browser's copy replaced: two more slots, held
+// to the same rules as every other table here, and played back from the log by the very function that
+// applies a change live (stories.mjs, through `src/story/book.ts`).
+{
+  const world = emptyWorld(1000);
+  ok(Object.getPrototypeOf(world.stories) === null && Object.getPrototypeOf(world.storyArchive) === null, '11: the story slots exist from the start and have no prototype of their own');
+  const book = { v: 1, char: 'c1', rev: 0, base: 0, local: 0, waypoints: [], nextWp: 1, wpOff: [], trackWp: null, tracked: [] };
+  ok(applyChange(world, { t: 'storyBook', id: 'c1', book }) === true && world.stories.c1.char === 'c1', '11: a book is written down whole');
+  const wp = { id: 'w1', name: 'Cantina', world: 'tatooine', f: 'raw', p: [1, 2, null], colour: 'accent', on: true, made: 5 };
+  ok(applyChange(world, { t: 'story', id: 'c1', ch: [{ k: 'wpSet', wp }] }) === true && world.stories.c1.waypoints.length === 1 && world.stories.c1.rev === 1, '11: a batch of changes is applied to it, at the next revision');
+  ok(applyChange(world, { t: 'story', id: 'nobody', ch: [{ k: 'wpSet', wp }] }) === false, '11: a batch for a character with no book is not understood');
+  for (let i = 0; i < 5; i++) applyChange(world, { t: 'storyArchive', id: 'c1', book: { ...book, rev: i } });
+  ok(world.storyArchive.c1.length === 3 && world.storyArchive.c1[2].rev === 4, '11: the archive keeps the last three books it was handed, newest last');
+  ok(applyChange(world, { t: 'storyBook', id: '__proto__', book: { ...book, char: '__proto__' } }) === false && applyChange(world, { t: 'storyBook', id: 'c2', book: { ...book } }) === false, '11: a book under a language name, or filed under another character than its own, is refused');
+  const dir = folder();
+  const a = openStore({ dir, epoch: 1000, ...quiet });
+  a.change({ t: 'storyBook', id: 'c1', book });
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'wpSet', wp }] });
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'wpEdit', id: 'w1', name: 'Home' }] });
+  const live = JSON.stringify(a.data.stories.c1);
+  a.close();
+  // Read back from the log alone, and again from a snapshot: both the same book as the one that was live.
+  const b = openStore({ dir, epoch: 5, ...quiet });
+  ok(JSON.stringify(b.data.stories.c1) === live, '11: a server started again plays the log back to the very same book');
+  b.saveNow();
+  b.close();
+  const c = openStore({ dir, epoch: 5, ...quiet });
+  ok(JSON.stringify(c.data.stories.c1) === live && Object.getPrototypeOf(c.data.stories) === null && Object.getPrototypeOf(c.data.storyArchive) === null, '11: and so does one started from the snapshot, its tables rebuilt with no prototype');
+  c.close();
+  // A world written before there were any story books reads back with empty slots rather than none.
+  const old = folder();
+  writeFileSync(join(old, 'world.json'), JSON.stringify({ v: STORE_VERSION, seq: 3, epoch: 1, players: {}, characters: {}, items: {}, houses: {}, purses: {}, settings: {} }));
+  const d = openStore({ dir: old, epoch: 5, ...quiet });
+  ok(Object.keys(d.data.stories).length === 0 && Object.getPrototypeOf(d.data.stories) === null && Array.isArray(Object.values(d.data.storyArchive)), '11: a world from before the story books reads back with the slots there and empty');
+  d.close();
+}
+
+// --- 12: a counter's changes, flushed lazily ------------------------------------------------------------------
+// A job's counter moving (a kill counted) is written in its place in the log but not flushed on its own: the
+// next change that is not lazy flushes it with itself, and `flush` does when the story asks. The log's order is
+// never wrong, and a server started again plays every lazy line back as it would any other.
+{
+  const dir = folder();
+  const a = openStore({ dir, epoch: 1000, ...quiet });
+  const book = { v: 1, char: 'c1', rev: 0, base: 0, local: 0, waypoints: [], nextWp: 1, wpOff: [], trackWp: null, tracked: [] };
+  a.change({ t: 'storyBook', id: 'c1', book });
+  ok(!a.unflushed, '12: a change that is not lazy leaves nothing waiting to be flushed');
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 1 }] }, { lazy: true });
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 2 }] }, { lazy: true });
+  ok(a.unflushed && a.data.stories.c1.flags.kills === 2 && a.data.stories.c1.rev === 2, '12: lazy changes are applied at once, and wait to be flushed');
+  ok(a.flush() === true && !a.unflushed && a.flushes === 1 && a.flush() === false, '12: a flush flushes them, and a second has nothing to do');
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 3 }] }, { lazy: true });
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'done', value: 1 }] });
+  ok(!a.unflushed, '12: and the next change that is not lazy flushes every lazy one before it with itself');
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 4 }] }, { lazy: true });
+  const live = JSON.stringify(a.data.stories.c1);
+  // Read back while the first store still holds the log open, its last line lazy: every line is in the log.
+  const b = openStore({ dir, epoch: 5, ...quiet });
+  ok(JSON.stringify(b.data.stories.c1) === live, '12: a server started again plays the lazy lines back in their places, to the very same book');
+  b.close();
+  a.close();
+}
+
 for (const dir of made) rmSync(dir, { recursive: true, force: true });
 console.log(`\n${checks} checks passed`);

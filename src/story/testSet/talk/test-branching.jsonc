@@ -1,0 +1,35 @@
+// The conversation research's test tree: an entry behind a flag the first node sets, two answers of which the
+// second needs ten credits and is shown greyed with its reason until then, and a gesture written by hand. A
+// third entry, while the choice job runs, makes the test choice either way. None of it is story.
+{
+  "format": 1,
+  "id": "test-branching",
+  "rev": 1,
+  "source": "test",
+  "speaker": "cast/test-doomed",
+  "entry": [
+    { "when": "questActive(test:choice)", "to": "choose" },
+    { "when": "flag(test.seen)", "to": "again" },
+    { "to": "first" },
+  ],
+  "nodes": {
+    "first": {
+      "say": ["TEST line one."],
+      "do": ["flag(test.seen, 1)"],
+      "replies": [
+        { "id": "a", "text": "TEST answer A.", "to": "a" },
+        { "id": "b", "text": "TEST answer B (needs 10 credits).", "when": "credits() >= 10", "show": "disable", "why": "TEST: not enough credits", "do": ["charge(10)"], "to": "a" },
+      ],
+    },
+    "a": { "say": [{ "text": "TEST line two!", "gesture": "emt_nod_head_once" }], "end": true },
+    "again": { "say": ["TEST: seen before."], "end": true },
+    "choose": {
+      "say": ["TEST: Which way, left or right?"],
+      "replies": [
+        { "id": "left", "text": "TEST: Left.", "do": ["choose(test:choice, decide, left)"], "to": "chose" },
+        { "id": "right", "text": "TEST: Right.", "stakes": "TEST: the right is the harder way", "do": ["choose(test:choice, decide, right)"], "to": "chose" },
+      ],
+    },
+    "chose": { "say": ["TEST: So be it."], "end": true },
+  },
+}

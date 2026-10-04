@@ -1,0 +1,14 @@
+// expect: rule 5
+// Never loaded as part of the set: the checker must fail it. A repeatable quest moves Trust, even under
+// pressure: Standing is the one that may be ground out, never Trust.
+{
+  "id": "broken-repeatTrust",
+  "title": "TEST: trust on tap",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["only"],
+  "steps": {
+    "only": { "type": "signal", "signal": "debug:test-only", "objective": "TEST: the only step", "ends": "done" },
+  },
+  "outcomes": { "done": { "pressure": true, "do": ["trust(freelance, 1)"] } },
+}

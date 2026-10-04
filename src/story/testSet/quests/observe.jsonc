@@ -1,0 +1,11 @@
+// Watching: twenty seconds inside the test square, summed over every visit.
+{
+  "id": "observe",
+  "title": "TEST: watch a place",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["watch"],
+  "steps": {
+    "watch": { "type": "observe", "area": "area/test-square", "seconds": 20, "objective": "TEST: stand in the test square for twenty seconds", "ends": "done" },
+  },
+}

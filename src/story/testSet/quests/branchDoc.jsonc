@@ -1,0 +1,22 @@
+// A choice made on a page, and a document that reads by it: the notice's foot offers A and B, and the letter
+// handed after reads the A version or the B version, each frozen into the journal as it was read. Two
+// characters who chose differently hold two different letters, and neither is the true one. Not repeatable, as
+// a choice that matters is not. None of it is story.
+{
+  "id": "branchDoc",
+  "title": "TEST: a document that depends on a choice",
+  "givers": [{ "kind": "debug" }],
+  "start": ["pick"],
+  "steps": {
+    "pick": {
+      "type": "choice",
+      "doc": "doc/test-branch-ask",
+      "objective": "TEST: choose A or B on the notice",
+      "options": [
+        { "id": "a", "label": "TEST: A", "next": ["letter"] },
+        { "id": "b", "label": "TEST: B", "stakes": "TEST: B reads differently", "next": ["letter"] },
+      ],
+    },
+    "letter": { "type": "document", "doc": "doc/test-branch", "ends": "done" },
+  },
+}

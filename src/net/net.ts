@@ -6,6 +6,7 @@ import type { ShipFit } from '../vehicles/shipFit';
 import { sharedClock } from '../world/sharedClock.ts';
 import { SESSION, Session, type CharacterSummary, type Settlement } from './session.ts';
 import { rideFields, type PeerAboard } from './aboardMath.ts';
+import { storyHailVersion } from '../story/storyWire.ts';
 
 export interface Hello {
   name: string;
@@ -137,6 +138,8 @@ interface ServerWord {
   by?: string;
   c?: number;
   s?: number;
+  /** The story a server's hail says it holds (`{ v, sets, tests }`); a relay before it says nothing. */
+  story?: unknown;
 }
 
 /**
@@ -415,7 +418,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story) });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -601,6 +604,14 @@ export class Net {
       case 'homeUp':
       case 'homeDown':
       case 'homeNo':
+      // What a character has to spend: the answer to asking, and the answer to a spend, which is the only
+      // thing that lets a fare paid with a server go on to the ride. This case was missing for as long as
+      // the purse has existed, so every spend with a server waited for ever and the balance read nought;
+      // `tools/swg/tests/netRoutes.test.ts` now fails for any word the server sends that has no case here.
+      case 'purse':
+      // The character's story book: the server's copy coming down in pieces, a request for this browser's,
+      // a batch of changes and a refusal. What they mean belongs to src/story/bookClient.ts.
+      case 'story':
       case 'duel':
         // The group and the words players type: handed over whole to whoever owns them. Nothing is
         // read here, so this switch does not have to grow a case for every word a group can say.

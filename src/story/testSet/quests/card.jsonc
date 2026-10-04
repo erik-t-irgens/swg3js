@@ -1,0 +1,16 @@
+// A job offered as its card: offered (by the console, or by the test clerk in conversation, which opens the card
+// once the talk ends), the card read, and Accept or Decline pressed at its foot. Taken, it is ten seconds of
+// waiting. Repeatable, so it can be offered again after it is turned down or done. None of it is story.
+{
+  "id": "card",
+  "title": "TEST: a work order",
+  "givers": [{ "kind": "debug" }, { "kind": "talk", "who": "cast/test-clerk" }],
+  "card": "doc/test-card",
+  "stakes": "TEST: nothing is at stake but a test",
+  "client": "civic",
+  "repeat": { "every": "always" },
+  "start": ["wait"],
+  "steps": {
+    "wait": { "type": "timer", "objective": "TEST: wait ten seconds", "for": { "seconds": 10 }, "ends": "done" },
+  },
+}

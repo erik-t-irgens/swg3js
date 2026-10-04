@@ -1,0 +1,10 @@
+// A job `test:fail` closes for good: once it has, it is never offered again, whatever its repeat says.
+{
+  "id": "closedLater",
+  "title": "TEST: closed later",
+  "givers": [{ "kind": "debug" }],
+  "start": ["wait"],
+  "steps": {
+    "wait": { "type": "signal", "signal": "debug:test-later", "objective": "TEST: wait for the later signal", "ends": "done" },
+  },
+}

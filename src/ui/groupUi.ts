@@ -24,8 +24,12 @@ export interface GroupScreenPoint {
  * not here: they are the game's, in `GROUP_RANGE`.
  */
 export const GROUP_UI_TUNE = {
-  /** Invented: the key that opens the panel. It is a raw code, not one of the game's bindings. */
-  panelKey: 'KeyY',
+  /**
+   * Invented: the key that opens the panel. It is a raw code, not one of the game's bindings. It was Y
+   * until the Waypoints window took Y as a binding of its own, and with a group standing one press then
+   * opened both; the full stop is a key nothing else in the game uses.
+   */
+  panelKey: 'Period',
   /** Invented: whether a chevron is drawn over a member who is far off. */
   chevrons: true,
   /** Invented: how high over a member's feet their chevron hangs, in metres. */

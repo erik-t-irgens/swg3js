@@ -52,6 +52,19 @@ export const ICON_IDS = [
   'ic-pencil',
   'ic-plus',
   'ic-speech',
+  // The story's: the three waypoint marks the overlay draws in the world, then the journal, a document,
+  // the file kept on you, the three tracks, a companion and a timer, which later waves put on the screen.
+  'ic-waypoint',
+  'ic-waypoint-quest',
+  'ic-waypoint-room',
+  'ic-journal',
+  'ic-document',
+  'ic-file',
+  'ic-rebellion',
+  'ic-empire',
+  'ic-freelance',
+  'ic-companion',
+  'ic-timer',
 ] as const;
 
 export type IconId = (typeof ICON_IDS)[number];
