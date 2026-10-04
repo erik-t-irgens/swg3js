@@ -14,6 +14,8 @@
 //                                                                  recipes as customize.json (images in customize/), and the NPC ship types with
 //                                                                  their tier fits, formations, taunts and hit effects as combat.json (--verbose lists its notes)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...] [--no-moods]   every playable species and gender as parts, with characters/index.json for the character creator
+//   node tools/swg/cli.mjs customization <swg-dir> <out-dir>       the creator's own table: each species' tabs, rows, words, linked colours, bald rule,
+//                                                                  hairstyles and creation palettes, as characters/customization.json (seconds; no model)
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs materials <swg-dir> <appearance-path | object/x.iff> | --ship=<id>   every shader an appearance uses, with its effect, alpha and what the converter makes of it (diagnostic)
@@ -235,6 +237,7 @@ import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { CORE3_REF_DIR, core3SourceFor, writeCore3Reference } from './core3ref.mjs';
 import { conversationsStatus } from './conversations.mjs';
+import { CUSTOMIZATION_FILE, buildCustomization, customizationStatus } from './customization.mjs';
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
@@ -3026,6 +3029,13 @@ function packStatus(dir) {
       need(`player <swg-dir> ${dir} --retail-only --jka=<jka-dir> && parts <swg-dir> ${dir} --retail-only && clips-save ${join(dir, 'player', 'human_male.glb')} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', 'human_male', 'rig.glb')} ${join(dir, 'player', 'jka.clips')} && species <swg-dir> ${dir} --retail-only`, `${withoutAimed.length} of the ${speciesIndex.species.length} species rigs have no aimed blaster pose (a body with a gun up freezes on a transition instead): ${names}${withoutAimed.length > 4 ? ' and more' : ''}`);
     }
   } else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
+  // The creator's own table, beside the index: its own `if`, so nothing above can hide it. It carries a
+  // format stamp and a named row, which is the check `player`, `parts` and `species` never had.
+  if (speciesIndex?.species?.length) {
+    const creator = customizationStatus(readJson(join(dir, ...CUSTOMIZATION_FILE.split('/'))));
+    console.log(`  ${creator.line}`);
+    if (creator.why) need(`customization <swg-dir> ${dir} --retail-only`, creator.why);
+  }
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else {
@@ -4660,6 +4670,45 @@ switch (cmd) {
     const index = writeSpeciesIndex(pos[2]);
     console.log(`\n-> ${join(pos[2], 'characters', 'index.json')}: ${index.species.length} characters (${done.length} converted now${failed.length ? `, ${failed.length} failed: ${failed.join('; ')}` : ''})`);
     for (const sp of index.species) console.log(`   ${sp.id.padEnd(22)} ${sp.parts} parts, ${sp.morphs.length} shape sliders, ${sp.variables.filter((v) => v.kind === 'palette').length} colour palettes, ${sp.variables.filter((v) => v.kind === 'index').length} choices, ${sp.jkaClips} Jedi Academy clips${sp.wardrobe ? `, wardrobe ${sp.wardrobe}` : ''}`);
+    break;
+  }
+
+  case 'customization': {
+    // <swg-dir> <out-dir>: the character creator's own table (tools/swg/customization.mjs), as one small
+    // file beside the species index. It reads six retail files and converts no model, so it takes
+    // seconds and needs nothing else converted first; the appearance page falls back on the packs' own
+    // variables, as it always did, while the file is not there.
+    if (!pos[2]) usage();
+    const t0 = Date.now();
+    const vfs = mount(pos[1]);
+    const read = {
+      table: (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))) : null),
+      strings: (p) => (vfs.has(p) ? parseStringTable(vfs.read(p)) : null),
+      palette: (p) => {
+        if (!vfs.has(p)) return null;
+        try {
+          return parsePalette(vfs.read(p));
+        } catch {
+          return null;
+        }
+      },
+      has: (p) => vfs.has(p),
+    };
+    let built;
+    try {
+      built = buildCustomization(read);
+    } catch (err) {
+      console.error(`customization: ${err.message}`);
+      process.exitCode = 1;
+      break;
+    }
+    const { file, counts } = built;
+    const target = join(pos[2], ...CUSTOMIZATION_FILE.split('/'));
+    mkdirSync(dirname(target), { recursive: true });
+    const text = JSON.stringify(file);
+    writeFileSync(target, text);
+    console.log(`customization: ${Object.keys(file.species).length} species, ${counts.rows} rows (${counts.words} with the client's words), ${counts.hair} hairstyles (${counts.hairMissing} the archives have not got), ${counts.palettes} palettes (${counts.colours} creator colours)${counts.skipped.length ? `, ${counts.skipped.length} interface palette${counts.skipped.length === 1 ? '' : 's'} left unread by rule` : ''}`);
+    console.log(`  ${(text.length / 1024).toFixed(0)} KB in ${((Date.now() - t0) / 1000).toFixed(1)} s -> ${target}`);
     break;
   }
 

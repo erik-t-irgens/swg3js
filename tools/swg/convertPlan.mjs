@@ -153,6 +153,10 @@ export const STEP_FACTS = {
   // `species` behind it. Without the bundle `species` says so and carries on, so the cost of
   // getting this wrong was silent.
   species: { order: 26, lock: 'characters', needs: ['parts', 'clips-save', 'clips-apply', 'wardrobe'], seconds: 150, bytes: 2.6 * GB, measured: 'every playable species: 118.4 s, 2,015 MB, 199 MB written' },
+  // The creator's own table: six small retail files joined into one file of its own beside the index.
+  // It reads nothing any other step writes and writes nothing another reads at conversion, so it waits
+  // for nothing and holds a lock of its own rather than the characters' one.
+  customization: { order: 26.5, lock: 'customization', needs: [], seconds: 5, bytes: 0.35 * GB, measured: 'twenty species, 418 rows, 36 palettes: 1.4 s, 305 MB, 200 KB written' },
   loading: { order: 27, lock: 'loading', needs: [], seconds: 5, bytes: 0.4 * GB, measured: '2.4 s, 315 MB, 10 pictures' },
   // The mobiles read characters/index.json and every wardrobe's wardrobe.json to dress their NPCs.
   // The catalogue over all 5,067 entries is built whatever the run converts, so what was measured on

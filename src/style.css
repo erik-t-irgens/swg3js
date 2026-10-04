@@ -44,6 +44,10 @@
      the same number through `HudCanvas.setScale`. */
   --hud-scale: 1;
 
+  /* The columns of a block of swatches on the appearance page: the game's own creator laid each palette
+     out in a count of its own, which each block sets on itself; this is the count for one that does not. */
+  --swatch-cols: 16;
+
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   color: var(--text);
 }
@@ -242,6 +246,11 @@ b { color: var(--accent); font-weight: 600; }
 .wardrobe-header .species { flex: none; max-width: 190px; padding: 4px 6px; font-size: 11px; background: color-mix(in srgb, var(--void) 45%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
 .wardrobe-slot.shape input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
 .wardrobe-slot.colour .swatches { flex: 1; display: flex; flex-wrap: wrap; gap: 2px; }
+/* The creator's own ramps: its creation colours in its own columns (--swatch-cols, set per block), then the
+   rest under a hairline. A swatch takes its cell, so a narrow window shrinks the grid rather than breaking it. */
+.wardrobe-slot.colour .swatches.ramp { flex: none; display: grid; grid-template-columns: repeat(var(--swatch-cols), minmax(6px, 14px)); }
+.wardrobe-slot.colour .swatches.ramp .swatch { width: 100%; height: auto; aspect-ratio: 1; }
+.wardrobe-slot.colour .swatch-more { font-size: 10px; color: var(--muted); border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); padding-top: 2px; margin-top: 3px; }
 .swatch { width: 14px; height: 14px; padding: 0; border: 1px solid color-mix(in srgb, var(--void) 60%, transparent); border-radius: 2px; cursor: pointer; }
 .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 .bake-hint { font-size: 11px; color: var(--muted); padding: 4px 0 8px; line-height: 1.5; }

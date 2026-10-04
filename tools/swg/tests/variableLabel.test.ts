@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { distinctLabels, paletteFamily, plainLabel, tagLabel, variableLabel } from '../../../src/ui/variableLabel.ts';
 import { recipeVariableDefs, type Recipe } from '../../../src/player/texrender.ts';
+import { packColours } from '../../../src/ui/creatorModel.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -59,8 +60,22 @@ function ok(cond: boolean, what: string): void {
   ok(/import \{ distinctLabels[^}]*\} from '\.\/variableLabel\.ts';/.test(page), 'the appearance page takes its colour names from variableLabel.ts');
   ok(/const names = distinctLabels\(colours\);/.test(page) && /row\(v, names\[colours\.indexOf\(v\)\] \?\? ''\)/.test(page), "each section's colours are named together, a second of one name numbered, and each row handed its own");
   ok(/const label = v\.kind === 'palette' \? named : prettyMorph\(short\);/.test(page), 'and a palette row wears that name, where it wore the variable\'s bare name');
-  ok(/live: true, palette: v\.palette \?\? m\?\.palette, tag: v\.tag \}/.test(page), "a live row carries the palette and the slot the customizer read it on, which are what name it");
-  ok(/live: false, palette: v\.palette \}/.test(page), "and a row only the manifest lists carries the manifest's palette");
+  // Which rows the page draws without the creator's table is `packColours`, a pure function, so it is run here.
+  ok(/packColours\(\{/.test(page), "the page's rows without the creator's table come from packColours");
+  const { rows } = packColours({
+    live: [{ key: 'shirt|/private/index_color_1', name: '/private/index_color_1', private: true, mesh: 'shirt', default: 0, kind: 'palette', palette: 'palette/wr_x.pal', tag: 'HUEB', colors: [[1, 2, 3]] }],
+    manifest: [
+      { name: '/private/index_color_1', private: true, kind: 'palette', default: 0, palette: 'palette/merged.pal', colors: [[1, 2, 3]], meshes: ['shirt'] },
+      { name: '/shared_owner/index_color_skin', private: false, kind: 'palette', default: 0, palette: 'palette/pc_skin_x.pal', colors: [[4, 5, 6]] },
+    ],
+    worn: new Set(['shirt']),
+    isLinked: () => false,
+    morphs: [],
+  });
+  const shirt = rows.find((r) => r.key === 'shirt|/private/index_color_1');
+  ok(!!shirt && shirt.live && shirt.palette === 'palette/wr_x.pal' && shirt.tag === 'HUEB', "a live row carries the palette and the slot the customizer read it on, which are what name it");
+  const skin = rows.find((r) => r.key === '/shared_owner/index_color_skin');
+  ok(!!skin && !skin.live && skin.palette === 'palette/pc_skin_x.pal', "and a row only the manifest lists carries the manifest's palette");
   ok(/\.\.\.\(d\.tag \? \{ tag: d\.tag \} : \{\}\)/.test(customizer), "the customizer hands each variable's slot on from the recipe");
 }
 

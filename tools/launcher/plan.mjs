@@ -34,6 +34,7 @@ const WORDS = {
   'clips-save': 'Jedi Academy clips, saved',
   'clips-apply': 'Jedi Academy clips, carried over',
   species: 'Every playable species',
+  customization: 'How the character creator is laid out',
   wardrobe: 'The wardrobe',
   mobiles: 'Creatures, droids and NPCs',
   weapons: 'Weapons and the Force',

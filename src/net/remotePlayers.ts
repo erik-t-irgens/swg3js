@@ -610,11 +610,10 @@ export class RemotePlayers {
     // ship other than the one they ride now changes nothing yet; its fit applies when that ship appears.
     const rv = r.vehicle;
     if (rv && hello.ship && hello.ship.id === rv.id) void this.refitRemote(r, rv, hello.ship.fit);
-    (r.label.material as THREE.SpriteMaterial).map?.dispose();
-    r.group.remove(r.label);
-    r.label = makeLabel(hello.name);
-    r.label.position.y = 2.15;
-    r.group.add(r.label);
+    // The name over the head is written again only when it is another name, and into the label it already
+    // has. Every colour or slider a peer moves sends a hello, and a label made anew each time left its
+    // material in the world's material sets, which the portal renderer walks a dozen times a frame.
+    if (r.label.userData.labelText !== hello.name) relabel(r.label, hello.name);
     if (speciesChanged) {
       if (r.rig) r.group.remove(r.rig.root);
       r.rig = null;
@@ -872,13 +871,24 @@ export class RemotePlayers {
     r.dance = isDanceClip(clip) || isMusicLoop(clip) ? clip : isFlourishClip(clip) ? r.dance : null;
   }
 
+  /**
+   * A name label let go: its material out of the world's sets and its picture freed. The material itself
+   * is not disposed, as it never was: that would let its program go with the last peer to leave, and the
+   * next peer's name would build it again on whatever frame it was first drawn.
+   */
+  private dropLabel(label: THREE.Sprite): void {
+    const mat = label.material as THREE.SpriteMaterial;
+    this.forget?.([mat]);
+    mat.map?.dispose();
+  }
+
   remove(id: number): void {
     const r = this.remotes.get(id);
     if (!r) return;
     this.remotes.delete(id);
     this.dropVehicle(r);
     this.scene.remove(r.group);
-    (r.label.material as THREE.SpriteMaterial).map?.dispose();
+    this.dropLabel(r.label);
     // Last, so whatever a watcher holds of them (a body in the physics, a blade) goes with them and
     // never outlives the peer or the world it was made in.
     for (const w of watchers) w.peerRemoved?.(id);
@@ -1228,12 +1238,10 @@ export function aboardKnob(opts?: { carrier?: number; glideSeconds?: number }): 
 const noPrepare = (): Promise<void> => Promise.resolve();
 const noPrepareRoots = (_roots: THREE.Object3D[]): Promise<void> => Promise.resolve();
 
-/** A name over the head: text on a small canvas, as a sprite that faces the camera. */
-function makeLabel(name: string): THREE.Sprite {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 64;
+/** A name drawn onto a label's canvas, over whatever was there. */
+function drawLabel(canvas: HTMLCanvasElement, name: string): void {
   const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = '600 28px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1244,10 +1252,30 @@ function makeLabel(name: string): THREE.Sprite {
   ctx.fill();
   ctx.fillStyle = '#dff1ff';
   ctx.fillText(name, 128, 33);
+}
+
+/** A name over the head: text on a small canvas, as a sprite that faces the camera. */
+function makeLabel(name: string): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  drawLabel(canvas, name);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
   sprite.scale.set(1.6, 0.4, 1);
   sprite.renderOrder = 10;
+  // The words it was made for, so a hello with the same name keeps it.
+  sprite.userData.labelText = name;
   return sprite;
+}
+
+/** Another name on a label already made: its canvas drawn again and uploaded, with no new material or texture. */
+function relabel(sprite: THREE.Sprite, name: string): void {
+  const tex = (sprite.material as THREE.SpriteMaterial).map as THREE.CanvasTexture | null;
+  const canvas = tex?.image as HTMLCanvasElement | undefined;
+  if (!tex || !canvas) return;
+  drawLabel(canvas, name);
+  tex.needsUpdate = true;
+  sprite.userData.labelText = name;
 }

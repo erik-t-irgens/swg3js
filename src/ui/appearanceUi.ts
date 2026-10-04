@@ -1,9 +1,17 @@
 // The appearance editor: species and gender, the shape sliders and the colours a character
 // takes, on the inventory's own tab beside the clothing, with the doll turning beside them.
+//
+// With the creator's own table converted (`characters/customization.json`), the page is laid out as the
+// game's creator was: its tabs in its order, its rows in theirs, under its words, a colour that follows
+// another hidden behind it and written with it, a colour that sets others setting them, and each palette's
+// creation colours first in the game's own columns. Which customizer key a row writes is decided in
+// `creatorView` (creatorModel.ts) and nowhere here. Without the table the page is what it always was:
+// every slider the pack has, then every colour, named by `variableLabel.ts`.
 import type { Character, SpeciesEntry } from '../player/character.ts';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import { distinctLabels, plainLabel } from './variableLabel.ts';
+import { CREATOR_TUNE, creatorTableNow, creatorView, hairNone, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorState, type CreatorTable, type CreatorView, type ViewRow } from './creatorModel.ts';
 
 export class AppearanceUi {
   readonly root: HTMLElement;
@@ -82,6 +90,13 @@ export class AppearanceUi {
 
   private baseUrl = '';
   private hair: { id: string; label: string }[] = [];
+  /** The creator's own table, once it has arrived; null when it is not converted (the page then lays itself out as before). */
+  private table: CreatorTable | null = null;
+  /** What the page drew last from the table, and its rows by name, which the swatches and sliders name. */
+  private view: CreatorView | null = null;
+  private readonly rowsByName = new Map<string, ViewRow>();
+  /** The last table row picked and every key it wrote, for the console. */
+  private lastPick: { row: string; value: number; keys: string[]; followers: string[]; sets: string[] } | null = null;
 
   /** Show a character: its sliders and colours, and the doll. */
   attach(character: Character, baseUrl = ''): void {
@@ -90,6 +105,7 @@ export class AppearanceUi {
     this.speciesId = character.manifest.id;
     const sel = this.root.querySelector<HTMLSelectElement>('.species')!;
     if (sel.value !== this.speciesId && [...sel.options].some((o) => o.value === this.speciesId)) sel.value = this.speciesId;
+    this.table = creatorTableNow(baseUrl) ?? null;
     this.build();
     // The hairstyles come from the wardrobe, which loads on its own time; the section fills in when it lands.
     void character.hairOptions(baseUrl).then((list) => {
@@ -97,15 +113,40 @@ export class AppearanceUi {
       this.hair = list;
       this.build();
     });
+    // The creator's table is fetched once a session; the page lays itself out again when it lands.
+    void loadCreatorTable(baseUrl).then((table) => {
+      if (this.character !== character || table === this.table) return;
+      this.table = table;
+      this.build();
+    });
+  }
+
+  /** Draw the page again from the character as it stands (a knob moved in the console). */
+  refresh(): void {
+    if (this.character) this.build();
   }
 
   /** The hairstyle section: the species' own styles, either gender's, and none. */
   private hairRows(): string {
     const c = this.character;
     if (!c || !this.hair.length) return '';
+    return `<h3 class="wardrobe-section">Hair <span>${this.hair.length} styles for this species</span></h3>${this.hairPicker()}`;
+  }
+
+  /**
+   * The style picker alone, which the table's hair tab opens with. No hair is offered only where the
+   * game let the species go bald (`hairNone`): a Twi'lek, a Zabrak or a Trandoshan always has lekku, horns
+   * or ridges. One already wearing none keeps that word, disabled, so the picker never claims a style
+   * that is not on; once a style is on there is no way back to none.
+   */
+  private hairPicker(): string {
+    const c = this.character;
+    if (!c || !this.hair.length) return '';
     const worn = c.hairWorn();
-    const options = [`<option value="">— none —</option>`, ...this.hair.map((h) => `<option value="${h.id}"${h.id === worn ? ' selected' : ''}>${h.label}</option>`)];
-    return `<h3 class="wardrobe-section">Hair <span>${this.hair.length} styles for this species</span></h3><label class="wardrobe-slot"><span class="slot-label">Style</span><select class="hair-pick">${options.join('')}</select><span class="slot-count">${this.hair.length}</span></label>`;
+    const none = hairNone(this.table?.species[c.manifest.id], this.hair.length > 0, !!worn);
+    const lead = none === 'offer' ? [`<option value="">— none —</option>`] : none === 'shown' ? [`<option value="" disabled selected>— none —</option>`] : [];
+    const options = [...lead, ...this.hair.map((h) => `<option value="${h.id}"${h.id === worn ? ' selected' : ''}>${h.label}</option>`)];
+    return `<label class="wardrobe-slot"><span class="slot-label">Style</span><select class="hair-pick">${options.join('')}</select><span class="slot-count">${this.hair.length}</span></label>`;
   }
 
   /** Say why there is nothing to edit, in place of the sliders. */
@@ -119,23 +160,15 @@ export class AppearanceUi {
     const c = this.character;
     if (!c) return '';
     const values = c.morphValues();
-    const names = Object.keys(values).sort();
-    const seen = new Set<string>();
     const rows: string[] = [];
     // Height first: a scale over the model within the species' own range.
     rows.push(`<label class="wardrobe-slot shape"><span class="slot-label">Height</span><input type="range" class="height" min="0" max="1" step="0.01" value="${c.height.toFixed(2)}" /><span class="slot-count">${c.height.toFixed(2)}</span></label>`);
-    for (const n of names) {
-      if (seen.has(n)) continue;
-      const pair = /^(.*)_0$/.exec(n);
-      const other = pair ? `${pair[1]}_1` : null;
-      if (other && other in values) {
-        seen.add(n);
-        seen.add(other);
-        const v = values[other] - values[n];
-        rows.push(`<label class="wardrobe-slot shape"><span class="slot-label">${prettyMorph(pair![1])}</span><input type="range" min="-1" max="1" step="0.02" value="${v.toFixed(2)}" data-lo="${n}" data-hi="${other}" /><span class="slot-count">${v.toFixed(2)}</span></label>`);
+    for (const s of packSliders(Object.keys(values))) {
+      if (s.lo) {
+        const v = values[s.hi] - values[s.lo];
+        rows.push(`<label class="wardrobe-slot shape"><span class="slot-label">${prettyMorph(s.name)}</span><input type="range" min="-1" max="1" step="0.02" value="${v.toFixed(2)}" data-lo="${s.lo}" data-hi="${s.hi}" /><span class="slot-count">${v.toFixed(2)}</span></label>`);
       } else {
-        seen.add(n);
-        rows.push(`<label class="wardrobe-slot shape"><span class="slot-label">${prettyMorph(n)}</span><input type="range" min="0" max="1" step="0.02" value="${values[n].toFixed(2)}" data-hi="${n}" /><span class="slot-count">${values[n].toFixed(2)}</span></label>`);
+        rows.push(`<label class="wardrobe-slot shape"><span class="slot-label">${prettyMorph(s.name)}</span><input type="range" min="0" max="1" step="0.02" value="${values[s.hi].toFixed(2)}" data-hi="${s.hi}" /><span class="slot-count">${values[s.hi].toFixed(2)}</span></label>`);
       }
     }
     return `<h3 class="wardrobe-section">Shape <span>${rows.length} sliders</span></h3>${rows.join('')}`;
@@ -146,35 +179,14 @@ export class AppearanceUi {
    * the pack's values by the converter, so a swatch is not applied live: picking one shows the
    * command that bakes the pack again with it.
    */
-  private colourRows(): string {
+  private colourRows(only?: (v: { key: string; private: boolean; mesh: string }) => boolean): string {
     const c = this.character;
     if (!c) return '';
     const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
-    const morphs = new Set(Object.keys(c.morphValues()).map((m) => m.replace(/_[01]$/, '')));
-    // Live variables come from the pack's recipes, each private one scoped to its own mesh (a
-    // shirt's colour 1 is not the pants' colour 1); a pack without recipes lists the manifest's.
-    const worn = c.wornMeshes();
-    const live = (c.customizer?.variables() ?? []).filter((v) => (!v.private || worn.has(v.mesh)) && !c.customizer!.isLinked(v.key));
-    const manifestVars = c.manifest.variables ?? [];
-    // The palette and the slot it tints go with each row, because they are what names it: the live
-    // row's are the customizer's own, read off that mesh's recipe, and the manifest's merged list is
-    // the fallback (it can name the wrong palette for a private variable another mesh shares a name with).
-    const rows: { key: string; name: string; private: boolean; mesh: string; kind: 'palette' | 'index'; colors?: number[][]; count?: number; default: number; live: boolean; palette?: string; tag?: string }[] = [];
-    const short = (n: string) => n.replace(/^.*\//, '');
-    for (const v of live) {
-      const m = manifestVars.find((mv) => short(mv.name) === short(v.name) && mv.private === v.private);
-      rows.push({ key: v.key, name: v.name, private: v.private, mesh: v.mesh, kind: v.kind, colors: v.colors ?? m?.colors, count: v.count ?? m?.count, default: v.default, live: true, palette: v.palette ?? m?.palette, tag: v.tag });
-    }
-    // What the manifest lists that no recipe reads live (a pack converted before live customization
-    // lists everything so) still shows, dimmed, with the bake command behind it.
-    for (const v of manifestVars) {
-      for (const mesh of v.private && v.meshes?.length ? v.meshes : ['']) {
-        if (v.private && live.length && !worn.has(mesh)) continue;
-        if (rows.some((r) => r.private === v.private && short(r.name) === short(v.name) && (!v.private || r.mesh === mesh))) continue;
-        if (v.private && live.length && c.customizer?.isLinked(`${mesh}|${v.name}`)) continue;
-        rows.push({ key: v.private ? `${mesh}|${v.name}` : v.name, name: v.name, private: v.private, mesh, kind: v.kind, colors: v.colors, count: v.count, default: v.default, live: false, palette: v.palette });
-      }
-    }
+    // Which rows and in which section is `packColours` (creatorModel.ts), which the node test runs; with the
+    // creator's table, `only` keeps what its rows did not take (a worn garment's own colours).
+    const cz = c.customizer;
+    const { rows, shared, byMesh } = packColours({ live: cz?.variables() ?? [], manifest: c.manifest.variables ?? [], worn: c.wornMeshes(), isLinked: (k) => !!cz?.isLinked(k), morphs: Object.keys(c.morphValues()), only });
     if (!rows.length) return '';
     // A palette colour is named for what it colours (`variableLabel.ts`): the head's `index_color_2`
     // reads its eyes' palette and is "Eye Color", where it used to be "Color 2". A choice among
@@ -203,12 +215,9 @@ export class AppearanceUi {
     const sections: string[] = [];
     // The owner's own: skin, hair, eyes and the like. A blend variable that a shape slider already
     // drives (blend_fat and the fat morph are one thing in the game) is left to that slider.
-    const shared = rows.filter((v) => !v.private && !morphs.has(v.name.replace(/^.*\//, '')));
     const sharedRows = drawn(shared);
     if (sharedRows.length) sections.push(`<h3 class="wardrobe-section">Skin, hair and eyes <span>${rows.some((v) => v.live) ? "rendered live from the game's own palettes and blueprints" : "this pack has no live recipes: run the converter's species command again"}</span></h3>${sharedRows.join('')}`);
     // Each worn piece's own colours, in a section of its own.
-    const byMesh = new Map<string, (typeof rows)[number][]>();
-    for (const v of rows.filter((v) => v.private)) (byMesh.get(v.mesh) ?? byMesh.set(v.mesh, []).get(v.mesh)!).push(v);
     for (const [mesh, list] of byMesh) {
       const html = drawn(list);
       if (html.length) sections.push(`<h3 class="wardrobe-section">${prettyMesh(mesh)} <span>its own colours</span></h3>${html.join('')}`);
@@ -254,12 +263,18 @@ export class AppearanceUi {
    * body it is meant to describe. The character is the only thing that knows.
    */
   private build(): void {
-    const shape = this.shapeRows();
-    const colours = this.colourRows();
     const c = this.character;
+    const view = this.tableView();
+    this.view = view;
+    this.rowsByName.clear();
     this.root.querySelector<HTMLElement>('.count')!.textContent = c ? `${Object.keys(c.morphValues()).length} sliders · ${(c.manifest.variables ?? []).length} variables` : '';
-    const hair = this.hairRows();
-    this.body.innerHTML = shape || colours || hair ? `${hair}${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
+    if (!view) {
+      // No table (or no live recipes): every slider the pack has, then every colour, as it always was.
+      const shape = this.shapeRows();
+      const colours = this.colourRows();
+      const hair = this.hairRows();
+      this.body.innerHTML = shape || colours || hair ? `${hair}${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
+    } else this.body.innerHTML = this.tableRows(view);
     if (c) this.preview.refresh(c);
     this.wireShape();
     const pick = this.body.querySelector<HTMLSelectElement>('.hair-pick');
@@ -289,21 +304,28 @@ export class AppearanceUi {
         const c = this.character;
         if (!c) return;
         const v = Number(input.value);
+        // A slider the game ran the other way (a female's torso) is turned round before it reaches the morphs.
+        const reverse = input.dataset.reverse === '1';
+        const m = reverse ? (input.dataset.lo ? -v : 1 - v) : v;
         if (input.dataset.lo) {
-          c.setMorph(input.dataset.lo, Math.max(0, -v));
-          c.setMorph(input.dataset.hi!, Math.max(0, v));
-        } else c.setMorph(input.dataset.hi!, v);
+          c.setMorph(input.dataset.lo, Math.max(0, -m));
+          c.setMorph(input.dataset.hi!, Math.max(0, m));
+        } else c.setMorph(input.dataset.hi!, m);
         input.nextElementSibling!.textContent = v.toFixed(2);
         // The same variable may pick the skin's texture (the game's fat and muscle blueprints do): follow it, once the slider settles.
-        const linked = c.customizer?.variables().find((cv) => !cv.private && cv.name.replace(/^.*\//, '') === input.dataset.hi && (cv.count ?? 0) > 1);
-        if (linked) {
+        // Each end of a pair is its own morph, so each end follows its own (a weight slider's skinny and fat).
+        const ends: [string, number][] = input.dataset.lo ? [[input.dataset.lo, Math.max(0, -m)], [input.dataset.hi!, Math.max(0, m)]] : [[input.dataset.hi!, m]];
+        const linked = ends.map(([name, amount]) => [c.customizer?.variables().find((cv) => !cv.private && cv.name.replace(/^.*\//, '') === name && (cv.count ?? 0) > 1), amount] as const).filter(([cv]) => !!cv);
+        if (linked.length) {
           window.clearTimeout(timer);
-          timer = window.setTimeout(() => c.setVariable(linked.key, Math.round(Math.max(0, v) * ((linked.count ?? 1) - 1))), 150);
+          timer = window.setTimeout(() => {
+            for (const [cv, amount] of linked) c.setVariable(cv!.key, Math.round(Math.max(0, amount) * ((cv!.count ?? 1) - 1)));
+          }, 150);
         }
         this.onChange();
       });
     }
-    for (const b of this.body.querySelectorAll<HTMLButtonElement>('.swatch')) {
+    for (const b of this.body.querySelectorAll<HTMLButtonElement>('.swatch[data-var]')) {
       b.addEventListener('click', () => this.pick(b.dataset.var!, Number(b.dataset.value)));
     }
     for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-var]')) {
@@ -314,6 +336,179 @@ export class AppearanceUi {
         timer = window.setTimeout(() => this.pick(input.dataset.var!, Number(input.value)), 120);
       });
     }
+    // The table's rows, which name the row rather than a variable: a row may write several.
+    for (const b of this.body.querySelectorAll<HTMLButtonElement>('.swatch[data-row]')) {
+      b.addEventListener('click', () => this.pickRow(b.dataset.row!, Number(b.dataset.value)));
+    }
+    for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-row]')) {
+      let timer = 0;
+      input.addEventListener('input', () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => this.pickRow(input.dataset.row!, Number(input.value)), 120);
+      });
+    }
+  }
+
+  // ---- the creator's own table ------------------------------------------------------------------
+
+  /** The view of the creator's table for the character shown, or null to lay the page out as before. */
+  private tableView(): CreatorView | null {
+    const c = this.character;
+    // Without live recipes no colour can change here, and the old page says so and shows the bake.
+    if (!c?.customizer || !this.table) return null;
+    return creatorView(this.table.species[c.manifest.id], this.stateOf(c));
+  }
+
+  /** What the view is worked out from: the character's sliders, live variables, body, worn hair. */
+  private stateOf(c: Character): CreatorState {
+    const status = c.status();
+    // A mesh with several materials loads as several meshes, the second onwards suffixed; the recipes name the first.
+    const names = (list: string[]) => list.flatMap((n) => [n, n.replace(/_\d+$/, '')]);
+    const hairKey = c.hairWorn();
+    return {
+      morphs: c.morphValues(),
+      bodyMorphs: c.manifest.parts.filter((p) => p.body).flatMap((p) => p.morphs ?? []),
+      variables: c.customizer?.variables() ?? [],
+      bodyMeshes: names(status.filter((p) => p.body).flatMap((p) => p.meshNames)),
+      hairMeshes: hairKey ? names(status.find((p) => p.name === hairKey)?.meshNames ?? []) : [],
+      hasHairObjects: this.hair.length > 0,
+    };
+  }
+
+  /** The table's groups, each under the game's word, the style picker at the top of the hair tab, then each worn garment's own colours. */
+  private tableRows(view: CreatorView): string {
+    const c = this.character!;
+    const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
+    const morphs = c.morphValues();
+    const out: string[] = [];
+    let picker = this.hairPicker();
+    for (const g of view.groups) {
+      const rows: string[] = [];
+      for (const r of g.rows) {
+        this.rowsByName.set(r.name, r);
+        const html = this.tableRow(r, values, morphs);
+        if (html) rows.push(html);
+      }
+      const lead = g.hair ? picker : '';
+      if (lead) picker = '';
+      if (!rows.length && !lead) continue;
+      out.push(`<h3 class="wardrobe-section">${esc(g.label)}${g.ours ? ' <span>ours: what the pack has and the game never showed</span>' : ''}</h3>${lead}${rows.join('')}`);
+    }
+    // A species with hairstyles whose table has no hair tab still gets its picker, where it always was.
+    if (picker) out.unshift(this.hairRows());
+    // Each worn garment's own colours (and a hairstyle's that no row names), as they always were.
+    const garments = this.colourRows((v) => ownSection(view, v));
+    out.push(garments || '<div class="bake-hint"></div>');
+    return out.join('');
+  }
+
+  /** One row of the table. */
+  private tableRow(r: ViewRow, values: Record<string, number>, morphs: Record<string, number>): string {
+    const label = esc(r.label);
+    const name = esc(r.name);
+    if (r.type === 'scale') {
+      const h = this.character!.height;
+      return `<label class="wardrobe-slot shape"><span class="slot-label">${label}</span><input type="range" class="height" min="0" max="1" step="0.01" value="${h.toFixed(2)}" /><span class="slot-count">${h.toFixed(2)}</span></label>`;
+    }
+    if (r.type === 'slider') {
+      const step = r.discrete ? 1 : 0.02;
+      const reverse = r.reverse ? ' data-reverse="1"' : '';
+      if (r.lo) {
+        const v = (r.reverse ? -1 : 1) * ((morphs[r.hi!] ?? 0) - (morphs[r.lo] ?? 0));
+        return `<label class="wardrobe-slot shape" data-row="${name}"><span class="slot-label">${label}</span><input type="range" min="-1" max="1" step="${step}" value="${v.toFixed(2)}" data-lo="${esc(r.lo)}" data-hi="${esc(r.hi!)}"${reverse} /><span class="slot-count">${v.toFixed(2)}</span></label>`;
+      }
+      const raw = morphs[r.hi!] ?? 0;
+      const v = r.reverse ? 1 - raw : raw;
+      return `<label class="wardrobe-slot shape" data-row="${name}"><span class="slot-label">${label}</span><input type="range" min="0" max="1" step="${step}" value="${v.toFixed(2)}" data-hi="${esc(r.hi!)}"${reverse} /><span class="slot-count">${v.toFixed(2)}</span></label>`;
+    }
+    const s = r.shows;
+    if (!s) return '';
+    const current = this.currentOf(r, values);
+    if (s.kind === 'palette' && s.colors?.length) {
+      const colours = s.colors;
+      const lay = swatchLayout(s.palette, colours.length, this.table);
+      const block = (from: number, to: number, cols: number): string => {
+        let html = '';
+        for (let i = from; i < to; i++) html += `<button class="swatch${i === current ? ' on' : ''}" data-row="${name}" data-value="${i}" style="background:rgb(${colours[i][0]},${colours[i][1]},${colours[i][2]})" title="${label} ${i + 1}"></button>`;
+        return `<div class="swatches ramp" style="--swatch-cols:${cols}">${html}</div>`;
+      };
+      // The colours the game's creator offered, in its own columns; then every other colour the palette has.
+      const more = lay.more ? `<div class="swatch-more">More colours</div>${block(lay.creation, colours.length, lay.moreColumns)}` : '';
+      return `<div class="wardrobe-slot colour" data-row="${name}"><span class="slot-label">${label}</span><div class="palette">${block(0, lay.creation, lay.columns)}${more}<input type="range" class="scrub" min="0" max="${colours.length - 1}" step="1" value="${current}" data-row="${name}" /></div><span class="slot-count">${current + 1}/${colours.length}</span></div>`;
+    }
+    if ((s.count ?? 0) > 1) {
+      return `<label class="wardrobe-slot colour" data-row="${name}"><span class="slot-label">${label}</span><input type="range" class="choice" min="0" max="${s.count! - 1}" step="1" value="${current}" data-row="${name}" /><span class="slot-count">${current + 1}/${s.count}</span></label>`;
+    }
+    return '';
+  }
+
+  /** A row's value now: its first key's. */
+  private currentOf(r: ViewRow, values: Record<string, number>): number {
+    const s = r.shows;
+    const key = r.keys[0];
+    const short = (s?.name ?? key ?? '').replace(/^.*\//, '');
+    return values[key] ?? (s ? values[s.name] : undefined) ?? values[short] ?? s?.default ?? 0;
+  }
+
+  /**
+   * A colour or choice of the table picked: the row's keys, then the rows that follow it with the same
+   * value, then (with `linkSelf`) the colours it also sets with the same index.
+   */
+  private pickRow(name: string, value: number): void {
+    const c = this.character;
+    const r = this.rowsByName.get(name);
+    if (!c || !r) return;
+    // Which keys and in what order is `pickWrites` (creatorModel.ts), which the node test runs.
+    let n = 0;
+    for (const k of pickWrites(r)) n += c.setVariable(k, value);
+    this.lastPick = { row: name, value, keys: [...r.keys], followers: [...r.followers], sets: CREATOR_TUNE.linkSelf ? [...r.sets] : [] };
+    const hint = this.body.querySelector<HTMLElement>('.bake-hint');
+    if (hint) hint.textContent = `${r.label} ${value + 1}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+    this.onChange();
+    this.syncRows();
+  }
+
+  /** Every table row's swatches, slider and count put back in step with the values (a pick sets others too). */
+  private syncRows(): void {
+    const c = this.character;
+    if (!c) return;
+    const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
+    for (const el of this.body.querySelectorAll<HTMLElement>('.wardrobe-slot.colour[data-row]')) {
+      const r = this.rowsByName.get(el.dataset.row!);
+      if (!r) continue;
+      const current = this.currentOf(r, values);
+      const input = el.querySelector<HTMLInputElement>('input[data-row]');
+      if (input) input.value = String(current);
+      for (const sw of el.querySelectorAll<HTMLElement>('.swatch')) sw.classList.toggle('on', Number(sw.dataset.value) === current);
+      const count = el.querySelector<HTMLElement>('.slot-count');
+      if (count && input) count.textContent = `${current + 1}/${Number(input.max) + 1}`;
+    }
+  }
+
+  /**
+   * What the console's `__debug.creator()` shows: whether the table is in, how the page is laid out for
+   * this character, each group with its row count, the rows that found nothing, what is hidden and why,
+   * the followers and the links, and the last pick with every key it wrote.
+   */
+  report(c: Character | null, table: CreatorTable | null | undefined): Record<string, unknown> {
+    const view = c && c === this.character && this.table === table ? this.view : c?.customizer && table ? creatorView(table.species[c.manifest.id], this.stateOf(c)) : null;
+    return {
+      loaded: table === undefined ? 'not yet' : !!table,
+      format: table?.format ?? null,
+      species: c?.manifest.id ?? null,
+      inTable: !!(c && table?.species[c.manifest.id]),
+      laidOut: view ? 'table' : 'packs',
+      // The bald rule as the style picker takes it: whether it offers no hair, says none without offering it, or leaves it out.
+      hairNone: c ? hairNone(table?.species[c.manifest.id], c === this.character ? this.hair.length > 0 : !!table?.species[c.manifest.id]?.hair?.length, !!c.hairWorn()) : null,
+      groups: view?.groups.map((g) => ({ id: g.id, label: g.label, rows: g.rows.length, ...(g.ours ? { ours: true } : {}) })) ?? [],
+      unresolved: view?.unresolved ?? [],
+      hidden: view?.hidden ?? [],
+      duplicates: view?.duplicates ?? [],
+      followers: view?.following ?? [],
+      links: view?.groups.flatMap((g) => g.rows.filter((r) => r.sets.length).map((r) => ({ row: r.name, sets: r.sets }))) ?? [],
+      lastPick: this.lastPick,
+      tune: { ...CREATOR_TUNE },
+    };
   }
 
   show(): void {
@@ -344,5 +539,10 @@ function prettyMesh(mesh: string): string {
 /** "blend_jaw" reads as "Jaw", "index_texture_1" as "Texture 1": a shape or a choice's name, tidied. */
 function prettyMorph(name: string): string {
   return plainLabel(name);
+}
+
+/** Text put in the page as text. */
+function esc(s: string): string {
+  return s.replace(/[&<>"]/g, (ch) => (ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : '&quot;'));
 }
 

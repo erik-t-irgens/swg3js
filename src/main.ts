@@ -307,7 +307,8 @@ import { peerBodies } from './net/remoteBodies.ts';
 // One creature stood by hand, as everything that talks about it says it.
 import { recordFor, sweptByList, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
-import { applyAppearance, dress, packLook } from './player/look';
+import { applyAppearance, dress, lookKeep, packLook, putBackLook } from './player/look';
+import { CREATOR_TUNE, creatorTableNow, loadCreatorTable, tuneCreator } from './ui/creatorModel.ts';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
@@ -3835,6 +3836,20 @@ class App {
         const c = this.player.rig?.character;
         if (!c) return 'no parts character';
         return { live: !!c.customizer, variables: (c.customizer?.variables() ?? []).map((v) => `${v.key}: ${v.kind}${v.colors ? ` ${v.colors.length} colours` : v.count ? ` ${v.count} choices` : ''}${v.private ? ` (private to ${v.mesh})` : ''} default ${v.default}`), manifest: (c.manifest.variables ?? []).map((v) => `${v.private ? 'private ' : ''}${v.name}: ${v.kind} ${v.colors?.length ?? v.count ?? '?'} from ${v.sources.join(', ')}${v.meshes?.length ? ` on ${v.meshes.join(', ')}` : ''}`), morphs: c.morphValues(), values: c.variableValues(), height: c.height };
+      },
+      /**
+       * The creator's own table (`characters/customization.json`) and how the appearance page is laid out
+       * from it for the player's character: whether it is loaded, each group with its row count, the rows
+       * that found nothing, what is hidden and why, the rows following others and the colours that set
+       * others, and the last pick with every key it wrote. `creator({ linkSelf: false })` stops a colour
+       * setting the ones the table links to it (a female's skin her lips); every knob is ours.
+       */
+      creator: (o?: Partial<typeof CREATOR_TUNE>) => {
+        if (o) {
+          tuneCreator(o);
+          if (this.appearanceUi.open) this.appearanceUi.refresh();
+        }
+        return this.appearanceUi.report(this.player.rig?.character ?? null, creatorTableNow(import.meta.env.BASE_URL));
       },
       /** What a mesh's live textures are made of (`recipe('head')`): shader stages, texture choices, palettes, blueprint operations and the values in force. */
       recipe: (mesh = 'head') => {
@@ -8660,19 +8675,9 @@ class App {
       figureTurn = run.catch(() => undefined);
       return run;
     };
-    // `applyAppearance` sets only the colours that differ from the pack's own, which is right on a
-    // fresh rig and wrong on one that another character of the same species has just worn: the first
-    // one's hair would stay on the second wherever the second kept the default. So every colour the
-    // rig holds is put back to what this record asks, or to the pack's own where it asks nothing.
-    const putBackLook = (character: Character, a: SavedCharacter['appearance'] | undefined) => {
-      const want = a?.values ?? {};
-      const back: Record<string, number> = {};
-      for (const [k, v] of Object.entries(character.variableValues())) {
-        const target = k in want ? want[k] : (character.manifest.values?.[k] ?? character.manifest.values?.[k.replace(/^.*\//, '')]);
-        if (typeof target === 'number' && target !== v && character.canCustomize(k)) back[k] = target;
-      }
-      if (Object.keys(back).length) character.customizer?.setAll(back);
-    };
+    // The rig may be the one another character of the same species has just worn: `putBackLook` (look.ts)
+    // puts every colour it holds back to what this record asks, or to the pack's own where it asks nothing,
+    // before this record's look goes on.
     this.select.loadFigure = (c, alive) =>
       inTurn(async () => {
         if (!alive()) return null;
@@ -8829,6 +8834,8 @@ class App {
 
     // Nothing loads until a character is chosen: the select screen first, the creator or the
     // world after. The species list is small and feeds both the creator and the console.
+    // The creator's own table is small (about 200 KB) and the appearance page and the console both read it.
+    void loadCreatorTable(import.meta.env.BASE_URL);
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
       this.speciesList = list;
       this.world.npcDeps.species = list.map((s) => s.id);
@@ -10058,6 +10065,9 @@ class App {
     this.current.appearance = this.appearanceOf(c);
     this.current.outfit = this.outfitOf(c);
     upsertCharacter(this.current);
+    // A colour or a slider changed is a change of look, which the others hear about as a change of
+    // clothes is: in a hello, a moment after the last change (`queueHello` waits 400 ms for the next).
+    this.queueHello();
   }
 
   /**
@@ -10138,7 +10148,11 @@ class App {
     // The ship this player flies (or last flew or stood out), with its components, droid and paint.
     const ship = this.helloShip();
     if (ship) this.helloShipId = ship.id;
-    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
+    // Only the colours on show go out: every shared one, and a mesh's own while that mesh is worn. The
+    // record keeps the rest, and the wire holds only so many numbers (`lookKeep`).
+    const rig = this.player.rig?.character;
+    const keep = rig ? lookKeep(rig.wornMeshes()) : undefined;
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
     this.net.session.noteCharacter(this.storyMarked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
@@ -11913,7 +11927,9 @@ class App {
     if (!character || character.manifest.id !== id) return `no parts pack for ${id}: run the converter's species command`;
     if (this.creating) {
       // A fresh start for the species, with the look last tuned for it in this browser when there is one.
-      this.applyAppearance(character, this.legacyAppearance(id));
+      const legacy = this.legacyAppearance(id);
+      putBackLook(character, legacy);
+      this.applyAppearance(character, legacy);
     } else if (this.current) {
       this.current.species = id;
       this.current.appearance = this.appearanceOf(character);
@@ -11952,7 +11968,14 @@ class App {
     // Whoever was played last leaves their weapons behind, even when the species is the same.
     this.equipment.reset();
     if (!this.creating) return;
-    if (character) this.applyAppearance(character, this.legacyAppearance(species));
+    if (character) {
+      // The rig is the last figure's when the species is the same, colours and all: those go back to the
+      // pack's own first, or the new character's first record carries the last one's skin, its garments'
+      // colours and its remembered hair colour.
+      const legacy = this.legacyAppearance(species);
+      putBackLook(character, legacy);
+      this.applyAppearance(character, legacy);
+    }
     this.showCreatorTab('appearance');
     // A place to stand in, if this install has any built. It is asked for after the panels are up
     // so the creator is usable the whole time the world is loading, and it answers false on a fresh
