@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { CREATOR_TUNE, CUSTOMIZATION_FORMAT, UNTABLED_GROUP, bareName, creatorView, hairNone, oneColour, ownSection, packColours, packSliders, pickWrites, readableTable, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorVariable, type CreatorView } from '../../../src/ui/creatorModel.ts';
+import { CREATOR_TUNE, CUSTOMIZATION_FORMAT, DYE_PALETTE, UNTABLED_GROUP, bareName, creatorView, hairNone, oneColour, ownSection, packColours, packSliders, pickWrites, readableTable, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorVariable, type CreatorView } from '../../../src/ui/creatorModel.ts';
 import { CUSTOMIZATION_FORMAT as CONVERTER_FORMAT } from '../customization.mjs';
 import { Customizer } from '../../../src/player/customizer.ts';
 
@@ -167,6 +167,9 @@ const rowOf = (view: CreatorView, name: string) => view.groups.flatMap((g) => g.
   ok([...all.byMesh.keys()].join() === 'head,shirt' && all.byMesh.get('head')!.map((r) => r.key).join() === 'head|/private/index_color_2', "each worn piece has its own section, a private copy of a shared colour is never on its own, and a piece not worn has none");
   const kept = packColours({ live, manifest, worn: new Set(['head', 'shirt']), isLinked, morphs: [], only: (r) => r.mesh === 'shirt' });
   ok(kept.rows.length === 1 && !kept.shared.length && kept.byMesh.get('shirt')?.length === 1, '`only` keeps a subset, which is how the table\'s page shows what its rows left');
+  const robe = v('robe|/private/index_color_dye', '/private/index_color_dye', true, 'robe', { palette: DYE_PALETTE, colors: [[255, 255, 255, 0]] });
+  const dyed = packColours({ live: [...live, robe], manifest, worn: new Set(['head', 'shirt', 'robe']), isLinked, morphs: [] });
+  ok(!dyed.rows.some((r) => r.palette === DYE_PALETTE) && !dyed.byMesh.has('robe'), "a garment's dye of ours has no row until a picker can set it (no swatch of its palette dyes)");
 }
 
 // ---------------------------------------------------------------- every species converted on this machine

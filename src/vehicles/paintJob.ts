@@ -1,7 +1,8 @@
 // One paint render: a ship paint recipe (customize.json) run for a set of values, and for a shader
 // that glows through a mask, split into its lit colour and its glow (glowSplit.ts) with the mask read
 // from the texture the values chose (for a MAIN mask, the chosen pattern's own MAIN, not the coloured
-// render). Shared by the paint worker and its main-thread fallback (paintRender.ts). Pure.
+// render). Shared by the paint worker and its main-thread fallback (paintRender.ts), and by a character's
+// customizer for the worn pieces whose recipes carry a glow (the wardrobe's, src/player/customizer.ts). Pure.
 import { liveShader, renderRecipe, valueOf, type Img, type Recipe, type Values } from '../player/texrender.ts';
 import { maskOf, splitGlow } from './glowSplit.ts';
 

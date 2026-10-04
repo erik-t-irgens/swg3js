@@ -226,6 +226,14 @@ export interface Wardrobe {
     fit?: ItemFit;
     /** The appearance converted; null on a worn-unseen entry (no meshes). */
     sat?: string | null;
+    /**
+     * What it takes (tools/swg/dye.mjs): a colour of the game's (a palette or a texture choice a recipe reads), a
+     * dye of ours (`/private/index_color_dye`, for a piece the game gave no colour), or nothing; absent on a pack
+     * converted before the dye.
+     */
+    colour?: 'palette' | 'dye' | 'none';
+    /** For a dyed piece, how much of what is drawn of it the dye reaches, 0..1. */
+    dyeCover?: number;
   }[];
 }
 

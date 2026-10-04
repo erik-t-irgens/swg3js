@@ -832,14 +832,37 @@ export function bakeShader(shader, baseTag = 'MAIN') {
   return { width, height, rgba, hasAlpha };
 }
 
-/** Whether the shader's first pass ever reads a texture factor or a slot other than the base one. */
-export function shaderNeedsBake(shader, baseTag = 'MAIN') {
+/**
+ * Whether the shader's first pass ever reads a texture factor or a slot other than the base one.
+ *
+ * `allPasses` also looks past the first pass, for the passes a customization variable reaches: one
+ * that reads a factor a palette variable sets, or a slot a texture choice picks. The whole
+ * `h_color2w_*` family lays its palettes on in passes 1 and 2 over a plain first pass, so read at the
+ * first pass alone the Mandalorian, Rebel assault, battle and spec-ops armour, the Kashyyykian hunting
+ * gear, the GCW pieces and the Ithorian bodysuits had their colours thrown away (CLAUDE.md gap 9).
+ * Only a variable's pass counts: a later pass with a fixed factor or a fixed texture -- the black
+ * specular factor the `a_specmap_*` effects read in their second pass, 152 of the wardrobe's shaders --
+ * changes nothing a colour can change, and baking it would only trade the plain path's surface
+ * (its glow split among it) for a bake of the same picture. Only the wardrobe asks for it so far.
+ */
+export function shaderNeedsBake(shader, baseTag = 'MAIN', { allPasses = false } = {}) {
   if (!shader || !shader.effect) return false;
   for (const stage of shader.effect.passes[0].stageList) {
     if (stage.colorOp === 0) break;
     const args = [...stage.colorArgs, ...stage.alphaArgs].filter((a) => a.arg === 5).length;
     if (args && shader.tfactors.size) return true;
     if (stage.textureTag !== baseTag && shader.textures.has(stage.textureTag)) return true;
+  }
+  if (!allPasses) return false;
+  const painted = new Set((shader.paletteFactors ?? []).map((p) => p.tag));
+  const chosen = new Set((shader.textureChoices ?? []).map((c) => c.tag));
+  if (!painted.size && !chosen.size) return false;
+  for (const pass of shader.effect.passes.slice(1)) {
+    for (const stage of pass.stageList) {
+      if (stage.colorOp === 0) break;
+      if (painted.has(pass.tfactorTag) && [...stage.colorArgs, ...stage.alphaArgs].some((a) => a.arg === 5)) return true;
+      if (stage.textureTag !== baseTag && chosen.has(stage.textureTag)) return true;
+    }
   }
   return false;
 }

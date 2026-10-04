@@ -34,7 +34,7 @@
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...] [--no-moods]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //   node tools/swg/cli.mjs loading <swg-dir> <out-dir> [--match=ui_load] [--list]   the game's loading-screen pictures, one per planet, as <out-dir>/loading/<planet>.png
-//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons]   every wearable and hairstyle as parts, with names, slots, species rules and pictures
+//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons] [--no-dye]   every wearable and hairstyle as parts, with names, slots, species rules, pictures and colours
 //   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...] [--no-moods]   body, head and worn items as separate GLBs on one shared skeleton
 //   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
@@ -200,8 +200,9 @@ import { iconMeshes, renderThumbnail, thumbTexture } from './thumbnail.mjs';
 import { effectAlphaMode, shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
+import { DYE_FORMAT, DYE_PALETTE, DYE_PALETTE_COLOURS, DYE_TUNE, EXTRA_GARMENT_PALETTES, colourOf, dyeBlock, dyeMesh, dyeSkip, readsVariable, wardrobeColourStatus } from './dye.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { MATERIAL_FORMAT, combineMasks, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
+import { MATERIAL_FORMAT, combineMasks, describeLines, describeSurface, maskOf, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
@@ -1776,9 +1777,15 @@ function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info,
     if (!recipeKeys.has(rkey)) {
       try {
         const shader = loadShader(vfs, g.shader, ctx);
-        if (shader?.effect && shaderNeedsBake(shader)) {
+        // The same rule as the GLB's own bake (`skinnedTexture`), so the recipe and the picture agree.
+        if (shader?.effect && shaderNeedsBake(shader, 'MAIN', { allPasses: !!ctx.everyPass })) {
           recipeKeys.add(rkey);
-          recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [] });
+          if (ctx.lateBakes && !shaderNeedsBake(shader)) ctx.lateBakes.add(rkey);
+          // A bake whose GLB carries its glow split out (skinnedTexture's `recipeGlow`) says how, in a ship paint
+          // recipe's shape, so a recolour is split the same way (src/vehicles/paintJob.ts); the mask's texture is
+          // among the shader's textures already, since every one of them is exported.
+          const glow = t?.recipeGlow ?? null;
+          recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [], ...(glow ? { glow } : {}) });
         }
       } catch (err) {
         info.skipped.push(`${g.shader}: no live recipe (${err.message})`);
@@ -1866,12 +1873,14 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   }
   info.shaderNotes.add(`${shaderPath}: ${describeShader(shader)}`);
   const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
-  if (!rendered && !(shader && shaderNeedsBake(shader))) return textureFor(vfs, shaderPath);
+  // `ctx.everyPass` (the wardrobe's) also bakes a shader whose palette is laid on after its first pass.
+  const allPasses = !!ctx.everyPass;
+  if (!rendered && !(shader && shaderNeedsBake(shader, 'MAIN', { allPasses }))) return textureFor(vfs, shaderPath);
   let image = rendered ? rendered.image : null;
   if (shader && shader.effect) {
     const s = { ...shader, textures: new Map(shader.textures) };
     for (const slot of slots ?? []) s.textures.set(slot.tag, slot.image);
-    if (!rendered || shaderNeedsBake(s, rendered.tag)) image = bakeShader(s, rendered ? rendered.tag : 'MAIN') ?? image;
+    if (!rendered || shaderNeedsBake(s, rendered.tag, { allPasses })) image = bakeShader(s, rendered ? rendered.tag : 'MAIN') ?? image;
   }
   if (!image) return textureFor(vfs, shaderPath);
   const pass = shader?.effect?.passes[0];
@@ -1887,6 +1896,13 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   // of itself discarded, and why no customizable wearable had a specular map at all. The image here
   // is the bake's; the rest is taken from the shader as it stands.
   const plain = textureFor(vfs, shaderPath);
+  // A shader baked only for a palette laid on after its first pass (the every-pass rule) was drawn by the
+  // plain path until now, its glow split out of its picture, and keeps that glow (two Ithorian helmets light
+  // their visors through a mask). Split out of the **bake**, by the same mask, so the base is the lit half:
+  // the plain path's glow laid over the whole bake lit the visor twice over by day, the fault the emismap
+  // lesson records. The recipe carries how it glows, so a recolour is split the same way. Every other bake
+  // stays as it was.
+  const late = allPasses && !rendered && plain?.emissive && !shaderNeedsBake(shader) ? bakeGlowSplit(vfs, shaderPath, shader, image, ctx) : null;
   const result = {
     path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`,
     png: encodePng(image.width, image.height, image.rgba),
@@ -1898,9 +1914,39 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
     ...(plain?.noShadow ? { noShadow: true } : {}),
     ...(plain?.mr ? { mr: plain.mr, metallic: plain.metallic, roughness: plain.roughness, ...(plain.glossFrom ? { glossFrom: plain.glossFrom } : {}) } : {}),
   };
-  // The icon's copy of the baked texture, reduced (the item pictures never decode a PNG just encoded).
+  if (late) {
+    const mask = `${late.glow.maskTag}.${late.glow.channel}`;
+    result.lit = { path: `${result.path}#lit:${mask}`, png: encodePng(late.lit.width, late.lit.height, late.lit.rgba) };
+    result.emissive = { path: `${result.path}#emis:${mask}`, png: encodePng(late.emis.width, late.emis.height, late.emis.rgba) };
+    // For the recipe (convertWearableMesh), not the GLB: kept off the entry's own fields.
+    Object.defineProperty(result, 'recipeGlow', { value: late.glow, enumerable: false });
+  }
+  // The icon's copy of the baked texture, reduced (the item pictures never decode a PNG just encoded); the
+  // whole bake, glow and all, as the plain path's thumbnail is its unsplit picture.
   if (wantThumbs) Object.defineProperty(result, 'thumb', { value: thumbTexture(image.width, image.height, image.rgba), enumerable: false });
   return result;
+}
+
+/**
+ * The glow of a shader the wardrobe bakes only for a palette laid on after its first pass, split out of the
+ * bake: the mask is the texture the shader's glow names (describeSurface, read as a paint shader's is,
+ * `paintGlow`), sampled nearest at the bake's size, and the split is surface.mjs's own `splitGlow`, in linear
+ * light, so the lit half and the glow add up to the bake. The run's own recipe for the shader is split at run
+ * time by src/vehicles/paintJob.ts, which reads the mask from the recipe's texture of that tag and splits by
+ * the same arithmetic byte for byte; so the split is made at the bake's own size, not capped at `GLOW_MAX` as a
+ * plain texture's is, or the two would differ texel for texel. Null when the shader does not glow by a mask or
+ * the mask glows nowhere (under 8/255, as the plain path decides).
+ *  -> { lit, emis, glow: { maskTag, channel, keepAlpha } } | null
+ */
+function bakeGlowSplit(vfs, shaderPath, shader, image, ctx) {
+  const glow = paintGlow(describeSurface(vfs, shaderPath, surfaceCache));
+  if (!glow) return null;
+  const file = shader.textureFiles?.get(glow.maskTag) ?? null;
+  const mask = shader.textures?.get(glow.maskTag) ?? (file ? loadImage(vfs, file, ctx.images) : null);
+  const m = mask ? maskOf(image, mask, glow.channel) : null;
+  if (!m) return null;
+  const { lit, emis } = splitGlow(image, m, glow.keepAlpha);
+  return { lit, emis, glow };
 }
 
 /**
@@ -2982,12 +3028,20 @@ function packStatus(dir) {
       }
       if (!wardrobe) continue;
       const items = itemPackStatus(wardrobe.items);
-      console.log(`  wardrobe ${folder}: ${items.items} items (${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${items.fitted} with species rules, ${items.unseen} worn unseen)`);
+      const list = Array.isArray(wardrobe.items) ? wardrobe.items : [];
+      const dyedPieces = list.filter((i) => i?.colour === 'dye').length;
+      const hairPictured = list.filter((i) => i?.kind === 'hair' && i.icon).length;
+      console.log(`  wardrobe ${folder}: ${items.items} items (${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${items.fitted} with species rules, ${items.unseen} worn unseen, ${dyedPieces} dyed, ${hairPictured} hairstyles pictured)`);
       if (items.missingKeys && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} has no item names, slots or icons (the backpack needs them)`);
       // A wardrobe converted before a baked shader carried its surface fields has no gloss maps and
       // draws its glass as a cut-out. It stamped nothing at all until now, so an old one reads as
       // format 1 and is asked for once.
       else if ((wardrobe.materialFormat ?? 1) < MATERIAL_FORMAT && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} was converted before a baked shader carried its gloss and its glass`);
+      // The colours and the hair pictures (dye.mjs), each reason its own ask and none chained to the ones
+      // above, so a stamp an earlier check is satisfied by can never hide them: the dye's stamp, a dyed
+      // garment the run must have made (a stamp from a broken run cannot pass for one), and the hairstyles'
+      // pictures. `need` gathers every reason under the folder's one command.
+      if (folder in M.WARDROBE_RUNS) for (const why of wardrobeColourStatus(wardrobe)) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} ${why}`);
     }
   }
   const speciesIndex = readJson(join(dir, 'characters/index.json'));
@@ -4467,6 +4521,17 @@ switch (cmd) {
 
     const templates = [...vfs.list()].filter((n) => kinds.some((k) => new RegExp(`^object/tangible/${k}/.*/shared_.*\\.iff$`).test(n))).sort();
     const ctx = renderContext(customizationValues(options.var));
+    // A palette laid on in any pass makes a live recipe, not one in the first pass alone (shaderNeedsBake's
+    // `allPasses`): the GLB's own bake and the recipe's test both read this, so a piece's picture and its
+    // recipe agree. The mobiles' wearables share convertWearableMesh and leave it unset.
+    ctx.everyPass = true;
+    // The recipes made by that rule alone, for the summary.
+    ctx.lateBakes = new Set();
+    // The dye of ours for the pieces that carry no colour of the game's (dye.mjs); --no-dye leaves it out.
+    const dyeOn = !flags.has('--no-dye');
+    const dyed = { recipes: 0, materials: new Set(), capped: [], skipped: new Map() };
+    // Each mesh once dyed, with how much of it the dye covers: a mesh two items share is dyed once.
+    const dyedMeshes = new Map();
     const catalogue = [];
     const failed = [];
     // The live recipes for the items whose look a colour changes (a shirt's palette factors, a
@@ -4486,6 +4551,11 @@ switch (cmd) {
     if (appearanceTable.size && !column) console.log(`   the appearance table has no column for ${speciesId}: every item is worn as its template says`);
     const has = (p) => vfs.has(p);
     const icons = !flags.has('--no-icons');
+    // How each picture is drawn (thumbnail.mjs): a garment a little turned from the front, as it always was;
+    // a hairstyle, the wig alone, turned further (ours: 40 degrees, since front on hides a braid and from
+    // behind hides the face it frames).
+    const WEAR_ICON = { view: 'wear' };
+    const HAIR_ICON = { view: 'wear', yawDeg: 40 };
     // The texture entries carry a reduced copy of their picture only while pictures are drawn.
     wantThumbs = icons;
     if (icons) mkdirSync(join(outDir, 'icons'), { recursive: true });
@@ -4508,7 +4578,8 @@ switch (cmd) {
         // The gender swap below, as the template alone would have had it: what "took the table's appearance" counts against.
         const ownWanted = satPath.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
         const ownChoice = ownWanted !== satPath && vfs.has(ownWanted) ? ownWanted : satPath;
-        const wantIcon = icons && kind !== 'hair' && !seenIds.has(id);
+        // Hair has its picture too now: the Appearance tab lays the styles out as a grid of them.
+        const wantIcon = icons && !seenIds.has(id);
         // One appearance converted for this folder: the gender swap, the skeleton test, every mesh.
         const wearFrom = (path) => {
           let satPath = path;
@@ -4524,18 +4595,22 @@ switch (cmd) {
           const entries = [];
           // The item's variables (a shirt's colour 1 and 2), noted per mesh as its shaders are read.
           const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
-          // Every mesh's groups and textures, for the picture; hair gets none (it is chosen on the Appearance tab).
+          // Every mesh's groups and textures, for the picture (hair's as much as a garment's), and each mesh's
+          // own with the texture entries its GLB was built from, for the dye.
           const drawn = { groups: [], textures: new Map() };
-          const onMesh = wantIcon ? (_name, kept, textures) => {
+          const meshes = [];
+          const onMesh = (name, kept, textures) => {
+            meshes.push({ name, kept, textures });
+            if (!wantIcon) return;
             drawn.groups.push(...kept);
             for (const [shader, t] of textures) drawn.textures.set(shader, t);
-          } : undefined;
+          };
           for (const name of sat.meshes) {
             const entry = convertWearableMesh(vfs, name, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry, onMesh });
             if (entry) entries.push(entry);
           }
           if (!entries.length) throw new Error('no mesh survived');
-          return { satPath, usedOtherGender, entries, info, drawn };
+          return { satPath, usedOtherGender, entries, info, drawn, meshes };
         };
         // The table's verdict for this folder's own column (items.mjs wardrobeChoice): a species' own cut wins over the
         // template (the men's bracelets, the Ithorian pieces); a path the archives lack, or misspelt, is the template's
@@ -4546,7 +4621,7 @@ switch (cmd) {
         if (choice.unseen) {
           // Worn unseen: this species takes the item's slots and nothing is drawn (the Ithorians' 172, built for the
           // humanoid skeleton), so the entry is written with no meshes rather than left out.
-          catalogue.push({ id, template: tpl, kind, sat: null, gender, name: desc.name, description: desc.description, slots: desc.slots, icon: null, fit: { hide: [speciesId] }, parts: [], variables: [] });
+          catalogue.push({ id, template: tpl, kind, sat: null, gender, name: desc.name, description: desc.description, slots: desc.slots, icon: null, fit: { hide: [speciesId] }, parts: [], variables: [], colour: 'none' });
           if (seenIds.has(id)) duplicates++;
           seenIds.add(id);
           unseen++;
@@ -4560,12 +4635,43 @@ switch (cmd) {
         if (choice.took) took++;
         const { entries, info, drawn, usedOtherGender } = made;
         satPath = made.satPath;
+        // What the piece takes: a colour of the game's wherever a recipe on it reads one; failing that, a dye of
+        // ours on every material that can take one (dye.mjs), worked out from the images its GLBs embed. Hair
+        // takes none: the four styles the game gave no colour (the Singing Mountain Clan's) are left as they are.
+        const meshNames = new Set(entries.map((e) => e.name));
+        if (dyeOn && kind !== 'hair' && !recipes.some((r) => meshNames.has(r.mesh) && readsVariable(r))) {
+          for (const m of made.meshes) {
+            if (dyedMeshes.has(m.name)) continue;
+            const targets = [];
+            for (const material of new Set(m.kept.map((g) => g.shader))) {
+              const tex = m.textures.get(material) ?? null;
+              const skip = dyeSkip(material, tex);
+              if (skip) {
+                dyed.skipped.set(skip, (dyed.skipped.get(skip) ?? 0) + 1);
+                continue;
+              }
+              targets.push({ material, tex, recipe: recipes.find((r) => r.mesh === m.name && r.material === material) ?? null });
+            }
+            const result = targets.length ? dyeMesh(m.name, targets, registry, DYE_TUNE) : null;
+            let shown = 0, covered = 0;
+            for (const x of result?.made ?? []) {
+              if (x.replaces) recipes[recipes.indexOf(x.replaces)] = x.recipe;
+              else recipes.push(x.recipe);
+              dyed.recipes++;
+              dyed.materials.add(x.material.toLowerCase());
+              shown += x.shown;
+              covered += x.covered;
+            }
+            if (result?.capped) dyed.capped.push(`${id} ${m.name} (wanted ${result.wanted.toFixed(1)})`);
+            dyedMeshes.set(m.name, { shown, covered });
+          }
+        }
         // One picture per id: a repeated id (five templates are appearance_invisible_s01) keeps the first entry's.
         let icon = null;
         if (seenIds.has(id)) duplicates++;
         else if (wantIcon) {
           try {
-            const pic = renderThumbnail(iconMeshes(drawn.groups, drawn.textures), { view: 'wear' });
+            const pic = renderThumbnail(iconMeshes(drawn.groups, drawn.textures), kind === 'hair' ? HAIR_ICON : WEAR_ICON);
             if (pic) {
               writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
               icon = `icons/${id}.png`;
@@ -4577,6 +4683,7 @@ switch (cmd) {
         seenIds.add(id);
         // The rest of the gender's species; this folder's own wears the entry's `sat`, whatever its cell names.
         const fit = wardrobeFit(row, gender, satPath, has, speciesId);
+        // `colour` (and `dyeCover`) are written once every piece is converted, from the recipes the run ends with.
         catalogue.push({ id, template: tpl, kind, sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, name: desc.name, description: desc.description, slots: desc.slots, icon, ...(fit ? { fit } : {}), parts: entries, variables: customizationList(vfs, info) });
         done++;
         if (done % 50 === 0) console.log(`  ${done} converted...`);
@@ -4585,16 +4692,60 @@ switch (cmd) {
       }
     }
     const bytes = catalogue.reduce((a, c) => a + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
+    // What each piece takes (dye.mjs colourOf), from the recipes the run ends with rather than the ones there were
+    // when the piece was met: a mesh two templates wear is dyed by whichever reaches it first (the two
+    // `appearance_invisible` bracelets wear the bracelets' own meshes). `dyeCover`, for a dyed piece, is how much
+    // of what is drawn of it the dye reaches, counted from the dye images as written.
+    {
+      const byMesh = new Map();
+      for (const r of recipes) (byMesh.get(r.mesh) ?? byMesh.set(r.mesh, []).get(r.mesh)).push(r);
+      for (const c of catalogue) {
+        if (!c.parts.length) continue;
+        c.colour = colourOf(c.parts.flatMap((p) => byMesh.get(p.name) ?? []));
+        if (c.colour !== 'dye') continue;
+        const share = c.parts.reduce((a, p) => ({ shown: a.shown + (dyedMeshes.get(p.name)?.shown ?? 0), covered: a.covered + (dyedMeshes.get(p.name)?.covered ?? 0) }), { shown: 0, covered: 0 });
+        if (share.shown) c.dyeCover = Math.round((share.covered / share.shown) * 1e4) / 1e4;
+      }
+    }
     // Stamped, so `status` can tell a wardrobe converted before a change to how a surface is read
     // from one converted after it. **This is the write the `wardrobe` command makes**; the other
     // one, in the parts path, writes a folder of its own, and stamping only that one left the owner
     // running the wardrobe four times over and being asked for it again each time.
-    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, items: catalogue }, null, 2));
+    // `dyeFormat` says the dye ran (dye.mjs, which `status` asks for again below it); `noDye` that it was left
+    // out on purpose with --no-dye, which is the owner's choice and not asked for again.
+    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, ...(dyeOn ? { dyeFormat: DYE_FORMAT } : { noDye: true }), items: catalogue }, null, 2));
     if (recipes.length) {
-      const palettes = exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r)));
-      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes }, null, 1));
+      // The palettes the recipes name, and the three garment palettes no piece names, kept for a picker. Ours is
+      // set after: `exportPalettes` writes `[]` for a palette the archives have not got, and an empty palette
+      // decodes as opaque white, which would dye every dyed piece white.
+      const palettes = exportPalettes(vfs, [...recipes.flatMap((r) => palettesOf(r)), ...EXTRA_GARMENT_PALETTES]);
+      for (const p of EXTRA_GARMENT_PALETTES) if (!palettes[p]?.length) console.log(`   the archives have no ${p}`);
+      if (dyed.recipes) palettes[DYE_PALETTE] = DYE_PALETTE_COLOURS.map((c) => [...c]);
+      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes, ...(dyeOn ? { dye: dyeBlock(DYE_TUNE) } : {}) }, null, 1));
+      // The folder keeps only the images this customize.json names. The registry numbers its files in the order it
+      // meets them, so a run that meets one image more early on renames every file after it, and every earlier
+      // run's copies stayed on disk unread: 1,839 files and about 165 MB in one human folder when this first ran.
+      const named = new Set(registry.ids.values());
+      let stale = 0;
+      for (const f of readdirSync(join(outDir, 'customize'))) {
+        if (!f.endsWith('.png') || named.has(f)) continue;
+        rmSync(join(outDir, 'customize', f), { force: true });
+        stale++;
+      }
+      if (stale) console.log(`   ${stale} images an earlier run left in customize/ removed`);
     }
     console.log(`-> ${outDir}: ${catalogue.length} items, ${catalogue.reduce((a, c) => a + c.parts.length, 0)} meshes, ${(bytes / 1e6).toFixed(1)} MB${recipes.length ? `; ${recipes.length} live colour recipes over ${registry.ids.size} images` : ''}`);
+    {
+      // The colours: the dye of ours, the palettes the every-pass rule kept, and the hairstyles' pictures.
+      const covers = catalogue.filter((c) => c.colour === 'dye').map((c) => c.dyeCover ?? 0);
+      const pct = (x) => `${Math.round(x * 100)}%`;
+      const late = catalogue.filter((c) => c.parts.some((p) => [...ctx.lateBakes].some((k) => k.endsWith(`|${p.name}`)))).length;
+      const hairPictures = catalogue.filter((c) => c.kind === 'hair' && c.icon).length;
+      const dyeLine = dyeOn ? `${dyed.recipes} recipes over ${dyed.materials.size} materials on ${covers.length} pieces, coverage mean ${covers.length ? pct(covers.reduce((a, b) => a + b, 0) / covers.length) : '-'}, min ${covers.length ? pct(Math.min(...covers)) : '-'}` : 'left out (--no-dye)';
+      console.log(`   dye: ${dyeLine}; every-pass palettes: ${late} pieces (${ctx.lateBakes.size} recipes); hair pictures: ${hairPictures}`);
+      if (dyed.skipped.size) console.log(`   left undyed: ${[...dyed.skipped].map(([why, n]) => `${n} ${why}`).join(', ')}`);
+      if (dyed.capped.length) console.log(`   dye brightness capped at ${DYE_TUNE.gainMax}x on ${dyed.capped.length}: ${dyed.capped.join('; ')}`);
+    }
     const withMorphs = catalogue.filter((c) => c.parts.some((p) => p.morphs.length)).length;
     const otherGender = catalogue.filter((c) => c.gender !== gender).length;
     console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);

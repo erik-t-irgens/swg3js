@@ -56,6 +56,23 @@ export function everyKeyEquals(values, size, ref, eps) {
 }
 
 /**
+ * The images a material's texture entry puts into a GLB, each as `{ path, png }`: the base colour (the
+ * lit half of a glowing texture, the opaque colour of a split or additive one, or the texture itself),
+ * the metal-rough image, the glow and the normal map; null for an entry that draws nothing. `buildGlb`
+ * reads its images through this and nothing else, so anything worked out from "what the GLB wears" --
+ * the wardrobe's dye masks (dye.mjs) -- is worked out from exactly the bytes the file embeds.
+ */
+export function glbImages(tex) {
+  if (!tex || tex.invisible) return null;
+  return {
+    base: tex.lit ?? tex.rgb ?? tex,
+    mr: tex.mr ? { path: `${tex.path}#mr`, png: tex.mr.png } : null,
+    emissive: tex.emissive ?? null,
+    normal: tex.normal ? { path: tex.normal.path, png: tex.normal.png } : null,
+  };
+}
+
+/**
  * `lods`: a model's lower detail levels, meshes named `lod:<n>` like any other, whose nodes go into a
  * second scene named `lods` (step 7) rather than the default one. Every loader that reads `gltf.scene`
  * -- the garage, a scene backdrop, the gallery page -- sees exactly the model it always did; only the
@@ -169,13 +186,14 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         mat.extras = { invisible: true };
       } else if (tex) {
         // The base colour: the lit half of a glowing texture, the opaque colour of a split or
-        // additive one, or the texture itself.
-        const baseColor = textureOf(tex.lit ?? tex.rgb ?? tex, !!tex.scroll);
+        // additive one, or the texture itself (`glbImages`, which the dye masks read too).
+        const embedded = glbImages(tex);
+        const baseColor = textureOf(embedded.base, !!tex.scroll);
         mat.pbrMetallicRoughness.baseColorTexture = { index: baseColor };
         if (tex.metallic !== undefined) mat.pbrMetallicRoughness.metallicFactor = tex.metallic;
         if (tex.roughness !== undefined) mat.pbrMetallicRoughness.roughnessFactor = tex.roughness;
-        if (tex.mr) mat.pbrMetallicRoughness.metallicRoughnessTexture = { index: imageFor({ path: `${tex.path}#mr`, png: tex.mr.png }) };
-        if (tex.normal) mat.normalTexture = { index: imageFor({ path: tex.normal.path, png: tex.normal.png }) };
+        if (embedded.mr) mat.pbrMetallicRoughness.metallicRoughnessTexture = { index: imageFor(embedded.mr) };
+        if (embedded.normal) mat.normalTexture = { index: imageFor(embedded.normal) };
         // Unlit screens and additive glows: GLTFLoader makes them MeshBasicMaterial, and
         // `userData.unlit` keeps them out of the shadow cascades.
         if (tex.unlit) {
@@ -184,8 +202,8 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
           mat.extras = { ...(mat.extras ?? {}), unlit: true };
         }
         let emissive;
-        if (tex.emissive) {
-          emissive = textureOf(tex.emissive);
+        if (embedded.emissive) {
+          emissive = textureOf(embedded.emissive);
           mat.emissiveTexture = { index: emissive };
           mat.emissiveFactor = [1, 1, 1];
         }

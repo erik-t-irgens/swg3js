@@ -132,7 +132,9 @@ export const STEP_FACTS = {
   // the one large piece of work that runs four ways at once. They stand first because the
   // character's own index waits for them, not because the converter's list has them there: the
   // README runs them later and then says to run the species again after.
-  wardrobe: { order: 20, lock: 'wardrobe', needs: [], seconds: 90, bytes: 1.25 * GB, measured: 'human_male, 1,340 items: 81.8 s, 943 MB' },
+  // Measured again with the hairstyles' pictures, the every-pass palettes and the dye: alone, and four side by side
+  // (human 116 s and Ithorian 42 s each, 3.2 GB drawn from the machine for all four).
+  wardrobe: { order: 20, lock: 'wardrobe', needs: [], seconds: 90, bytes: 1.25 * GB, measured: 'human_male, 1,340 items, with hair pictures and the dye: 87.2 s, 1,061 MB' },
   // The creatures and the character. `parts` and `species` both write characters/index.json, and
   // that index names each species' wardrobe folder from what is on disk when it is written
   // (writeSpeciesIndex in cli.mjs), so both wait for the wardrobes: a species indexed before its

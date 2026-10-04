@@ -214,6 +214,9 @@ export interface CreatorView {
 /** The ours-only group at the bottom. */
 export const UNTABLED_GROUP = 'untabled';
 
+/** The palette the wardrobe's dye of ours reads (tools/swg/dye.mjs writes it into customize.json). */
+export const DYE_PALETTE = 'swg3js/dye';
+
 /** A variable's name without its mesh or its path: `hum_m_head_l0|/private/index_color_2` is `index_color_2`. */
 export function bareName(name: string): string {
   return name.replace(/^.*\|/, '').replace(/^.*\//, '');
@@ -491,7 +494,9 @@ export interface PackManifestVariable {
  */
 export function packColours(input: { live: readonly CreatorVariable[]; manifest: readonly PackManifestVariable[]; worn: ReadonlySet<string>; isLinked: (key: string) => boolean; morphs: Iterable<string>; only?: (v: PackColour) => boolean }): { rows: PackColour[]; shared: PackColour[]; byMesh: Map<string, PackColour[]> } {
   const short = (n: string) => n.replace(/^.*\//, '');
-  const live = input.live.filter((v) => (!v.private || input.worn.has(v.mesh)) && !input.isLinked(v.key));
+  // A garment's dye of ours reads a palette whose one entry dyes nothing: only a colour carried whole does,
+  // which no swatch here can give, so its row waits for the picker that can.
+  const live = input.live.filter((v) => (!v.private || input.worn.has(v.mesh)) && !input.isLinked(v.key) && v.palette !== DYE_PALETTE);
   const rows: PackColour[] = [];
   // The palette and the slot it tints go with each row, because they are what names it: the live row's
   // are the customizer's own, read off that mesh's recipe, and the manifest's merged list is the fallback

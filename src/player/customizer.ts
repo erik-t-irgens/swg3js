@@ -3,9 +3,10 @@
 // A change re-renders only the recipes that read the variable, off the main thread's critical
 // path in idle time, one after another, so a slider that moves fast lands on its last value.
 import * as THREE from 'three';
-// The two imports carry their extensions so the node tests can load this module (a ship's paint uses it).
+// The imports carry their extensions so the node tests can load this module (a ship's paint uses it).
 import { type CustomizeFile, type Img, type Recipe, type Values, recipeNormal, recipeNormalFiles, recipeValueKey, recipeVariableDefs, recipeVariables, renderRecipe, variableKey } from './texrender.ts';
 import { decodePng } from './png.ts';
+import { type PaintImg, type PaintRecipe, runPaintJob } from '../vehicles/paintJob.ts';
 
 /**
  * A renderer that makes a recipe's texture somewhere else (a ship's paint renders in a worker): the
@@ -56,7 +57,15 @@ export function renderKeys(r: Recipe, values: Values, imageDir: string): { rende
   };
 }
 
-/** A texture for a render's pixels, as every render is put on a material: a colour in sRGB, a normal map as it stands, mipmapped and repeating. */
+/** The material slots a recipe's renders go on: its colour, its lighting detail, and a glowing shader's glow. */
+type TextureSlot = 'map' | 'normalMap' | 'emissiveMap';
+
+/** Where a recipe's render for a slot is kept: the colour under the material's own name, as `textureOf` reads it. */
+function slotKey(r: Recipe, slot: TextureSlot): string {
+  return slot === 'map' ? r.material : slot === 'normalMap' ? `${r.material}#normal` : `${r.material}#emis`;
+}
+
+/** A texture for a render's pixels, as every render is put on a material: a colour (or a glow) in sRGB, a normal map as it stands, mipmapped and repeating. */
 function renderTexture(img: Img, normal: boolean): THREE.DataTexture {
   const tex = new THREE.DataTexture(new Uint8Array(img.rgba), img.width, img.height, THREE.RGBAFormat);
   tex.colorSpace = normal ? THREE.NoColorSpace : THREE.SRGBColorSpace;
@@ -306,11 +315,12 @@ export class Customizer {
         await new Promise((resolve) => setTimeout(resolve, 0));
         const t0 = performance.now();
         const dir = this.dirOf.get(r) ?? '';
-        const img = renderRecipe(r, this.values, this.palettes, (file) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null));
+        const lookup = (file: string | null) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null);
+        const img = this.colourRender(r, this.values, lookup);
         if (!img) continue;
-        this.put(r, img);
+        if (this.put(r, img) && img.emis) this.putOwn(r, img.emis, 'emissiveMap');
         // The lighting detail the shader picks with the values too (the age's wrinkles).
-        const normal = recipeNormal(r, this.values, this.palettes, (file) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null));
+        const normal = recipeNormal(r, this.values, this.palettes, lookup);
         if (normal) this.putNormal(r, normal);
         const ms = performance.now() - t0;
         if (ms > 250) console.info(`customize: ${r.material} rendered in ${ms.toFixed(0)} ms (${img.width}x${img.height})`);
@@ -370,63 +380,105 @@ export class Customizer {
     const values: Values = new Map(this.values);
     const keys = renderKeys(r, values, dir);
     const lookup = (file: string | null) => (file ? this.images.get(`${dir}${file}`.toLowerCase()) ?? null : null);
-    const colour = await share.claim(keys.render, 'render', async () => {
+    // A render split into its lit colour and its glow (`splits`) is shared under keys of its own, so a look
+    // that splits and one that does not can never hand each other the wrong half.
+    const split = this.splits(r);
+    let glow: Img | null = null;
+    const colour = await share.claim(split ? `${keys.render}|lit` : keys.render, 'render', async () => {
       await this.loadImagesFor(r);
       // Between recipes the frame gets a turn, as it does unshared.
       await new Promise((resolve) => setTimeout(resolve, 0));
       const t0 = performance.now();
-      const img = renderRecipe(r, values, this.palettes, lookup);
+      const img = this.colourRender(r, values, lookup);
       const ms = performance.now() - t0;
       if (img && ms > 250) console.info(`customize: ${r.material} rendered in ${ms.toFixed(0)} ms (${img.width}x${img.height})`);
+      glow = img?.emis ?? null;
       return img ? renderTexture(img, false) : null;
     });
     // A render that came to nothing puts nothing, and no normal map either, as unshared.
     if (!colour) return;
-    this.putShared(r, colour as THREE.DataTexture, false);
+    this.putShared(r, colour as THREE.DataTexture, 'map');
+    if (split) {
+      const emis = await share.claim(`${keys.render}|glow`, 'render', async () => {
+        // Made here only when another look made the lit half: the glow is split from a render of its own.
+        if (!glow) {
+          await this.loadImagesFor(r);
+          glow = this.colourRender(r, values, lookup)?.emis ?? null;
+        }
+        return glow ? renderTexture(glow, false) : null;
+      });
+      if (emis) this.putShared(r, emis as THREE.DataTexture, 'emissiveMap');
+    }
     if (!keys.normal) return;
     const normal = await share.claim(keys.normal, 'normal', async () => {
       await this.loadImagesFor(r);
       const img = recipeNormal(r, values, this.palettes, lookup);
       return img ? renderTexture(img, true) : null;
     });
-    if (normal) this.putShared(r, normal as THREE.DataTexture, true);
+    if (normal) this.putShared(r, normal as THREE.DataTexture, 'normalMap');
   }
 
-  /** A shared texture on every material a recipe feeds: as `put`/`putNormal`, but never written into. */
-  private putShared(r: Recipe, tex: THREE.DataTexture, normal: boolean): void {
-    this.textures.set(normal ? `${r.material}#normal` : r.material, tex);
-    for (const m of this.materialsFor(r.material)) {
-      const std = m as THREE.MeshStandardMaterial;
-      if (normal) {
-        if (std.normalMap !== tex) {
-          std.normalMap = tex;
-          std.normalScale.copy(this.normalScale);
-          std.needsUpdate = true;
-        }
-      } else if (std.map !== tex) {
-        std.map = tex;
-        std.needsUpdate = true;
-      }
-    }
+  /**
+   * Whether a recipe's render is split into a lit colour and a glow: its shader glows through a mask (the
+   * converter wrote `glow`: a worn piece the wardrobe bakes for a palette laid on after its first pass, whose
+   * GLB carries the lit half as its base and the glow as its emissive) and a material it feeds has a glow map
+   * to take the glow. None is ever added, since that would be a new program; a material without one takes the
+   * whole colour, as it always did. A renderer elsewhere splits for itself (a ship's paint worker, whose owner
+   * puts the glow on in `onPut` and keeps it), so nothing here splits for it.
+   */
+  private splits(r: Recipe): boolean {
+    if (this.renderOff || !(r as PaintRecipe).glow) return false;
+    return this.materialsFor(r.material).some((m) => !!(m as THREE.MeshStandardMaterial).emissiveMap);
   }
 
-  private put(r: Recipe, img: Img): void {
-    if (!this.accept(r, img)) return;
-    let tex = this.textures.get(r.material);
+  /**
+   * A recipe's colour for these values on this thread: the render, or for a recipe that `splits`, its lit half
+   * with the glow beside it as `emis`, split exactly as the converter split the GLB's (paintJob.ts, the same job
+   * a ship's paint runs in its worker, through glowSplit.ts), so a recolour glows where and as the piece did.
+   * Without the split the whole render would go on `map` while the GLB's glow stayed on `emissiveMap`, and the
+   * glowing part would be lit twice over, the old colour's glow on the new colour.
+   */
+  private colourRender(r: Recipe, values: Values, lookup: (file: string | null) => Img | null): PaintImg | null {
+    return this.splits(r) ? runPaintJob(r as PaintRecipe, values, this.palettes, lookup) : renderRecipe(r, values, this.palettes, lookup);
+  }
+
+  /** A shared texture on every material a recipe feeds: as `put`/`putNormal`/`putOwn`, but never written into. */
+  private putShared(r: Recipe, tex: THREE.DataTexture, slot: TextureSlot): void {
+    this.textures.set(slotKey(r, slot), tex);
+    for (const m of this.materialsFor(r.material)) this.onSlot(m as THREE.MeshStandardMaterial, slot, tex);
+  }
+
+  /** Whether the colour went on (a ship's paint can refuse one that changed while it rendered). */
+  private put(r: Recipe, img: Img): boolean {
+    if (!this.accept(r, img)) return false;
+    this.putOwn(r, img, 'map');
+    this.onPut(r, img);
+    return true;
+  }
+
+  /**
+   * A render of this customizer's own on every material a recipe feeds, written into the texture it already has
+   * for that slot when the size is the same. A glow goes only where a glow map already is (`onSlot`).
+   */
+  private putOwn(r: Recipe, img: Img, slot: TextureSlot): void {
+    const key = slotKey(r, slot);
+    let tex = this.textures.get(key);
     if (!tex || tex.image.width !== img.width || tex.image.height !== img.height) {
       tex?.dispose();
-      tex = renderTexture(img, false);
-      this.textures.set(r.material, tex);
+      tex = renderTexture(img, slot === 'normalMap');
+      this.textures.set(key, tex);
     } else (tex.image.data as Uint8Array).set(img.rgba);
     tex.needsUpdate = true;
-    for (const m of this.materialsFor(r.material)) {
-      const std = m as THREE.MeshStandardMaterial;
-      if (std.map !== tex) {
-        std.map = tex;
-        std.needsUpdate = true;
-      }
-    }
-    this.onPut(r, img);
+    for (const m of this.materialsFor(r.material)) this.onSlot(m as THREE.MeshStandardMaterial, slot, tex);
+  }
+
+  /** One texture on one material's slot: a normal map at the customizer's strength, a glow only onto a glow map already there. */
+  private onSlot(std: THREE.MeshStandardMaterial, slot: TextureSlot, tex: THREE.Texture): void {
+    if (slot === 'emissiveMap' && !std.emissiveMap) return;
+    if (std[slot] === tex) return;
+    std[slot] = tex;
+    if (slot === 'normalMap') std.normalScale.copy(this.normalScale);
+    std.needsUpdate = true;
   }
 
   /** The texture a recipe last rendered to (its material's), or undefined before its first render. */
@@ -442,7 +494,7 @@ export class Customizer {
     this.normalScale.set(x, y);
     let n = 0;
     for (const r of this.recipes) {
-      const normal = this.textures.get(`${r.material}#normal`);
+      const normal = this.textures.get(slotKey(r, 'normalMap'));
       if (!normal) continue;
       for (const m of this.materialsFor(r.material)) {
         (m as THREE.MeshStandardMaterial).normalScale.copy(this.normalScale);
@@ -453,22 +505,7 @@ export class Customizer {
   }
 
   private putNormal(r: Recipe, img: Img): void {
-    const key = `${r.material}#normal`;
-    let tex = this.textures.get(key);
-    if (!tex || tex.image.width !== img.width || tex.image.height !== img.height) {
-      tex?.dispose();
-      tex = renderTexture(img, true);
-      this.textures.set(key, tex);
-    } else (tex.image.data as Uint8Array).set(img.rgba);
-    tex.needsUpdate = true;
-    for (const m of this.materialsFor(r.material)) {
-      const std = m as THREE.MeshStandardMaterial;
-      if (std.normalMap !== tex) {
-        std.normalMap = tex;
-        std.normalScale.copy(this.normalScale);
-        std.needsUpdate = true;
-      }
-    }
+    this.putOwn(r, img, 'normalMap');
   }
 
   /**
@@ -484,18 +521,16 @@ export class Customizer {
         if (this.active(r) && this.readsSetValue(r)) this.queued.add(r);
         continue;
       }
-      const normal = this.textures.get(`${r.material}#normal`);
+      const normal = this.textures.get(slotKey(r, 'normalMap'));
+      const emis = this.textures.get(slotKey(r, 'emissiveMap'));
+      // A lit half with no glow beside it would leave the glowing part dark: rendered whole for materials
+      // that had no glow map, it is rendered again, split, for the ones that came and have one.
+      if (!emis && this.splits(r)) this.queued.add(r);
       for (const m of this.materialsFor(r.material)) {
         const std = m as THREE.MeshStandardMaterial;
-        if (std.map !== tex) {
-          std.map = tex;
-          std.needsUpdate = true;
-        }
-        if (normal && std.normalMap !== normal) {
-          std.normalMap = normal;
-          std.normalScale.copy(this.normalScale);
-          std.needsUpdate = true;
-        }
+        this.onSlot(std, 'map', tex);
+        if (normal) this.onSlot(std, 'normalMap', normal);
+        if (emis) this.onSlot(std, 'emissiveMap', emis);
       }
     }
     if (this.queued.size) void this.run();
