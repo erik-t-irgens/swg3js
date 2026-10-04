@@ -93,7 +93,10 @@ import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
-import { groupMapFeed, mapFrame, type MapFrame } from './ui/spaceMapLayers.ts';
+import { groupMapFeed, mapFrame, waypointMapFeed, type MapFrame, type WaypointList } from './ui/spaceMapLayers.ts';
+import { BookClient, tuneStory, type StoryResult } from './story/bookClient.ts';
+import { browserStoryStorage } from './story/storyStore.ts';
+import { WAYPOINT_COLOURS, gameToRaw, isWaypointColour, rawToGameX, rawToGameZ, waypointName } from './story/waypoints.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { GIVE_TUNE } from './ui/giveModel.ts';
@@ -817,6 +820,21 @@ class App {
   private readonly remotes: RemotePlayers;
   /** Going where the group goes: what a leader's trip means here, and where to come out to be beside them. */
   private readonly together = new TravelTogether();
+  /**
+   * The character's story book (src/story/bookClient.ts): the copy this browser keeps, who holds it --
+   * this browser alone, or a server whose greeting says it holds a story -- and the waypoints set in it.
+   * A field initialiser so the session's hooks and the map can reach it from anywhere in the constructor;
+   * everything it needs is read at the moment it asks.
+   */
+  private readonly story = new BookClient({
+    store: browserStoryStorage(),
+    send: (msg) => this.net.sendWord(msg),
+    say: (text) => this.messages.system(text),
+    now: () => sharedClock.now(),
+    wall: () => Date.now(),
+    line: () => ({ authority: this.net.session.authority, story: this.net.session.storyVersion, status: this.net.status, mode: this.net.session.mode }),
+    known: () => knownToServer(this.current),
+  });
   private netStatus = 'off';
   private lastStateSent = 0;
   /** The wheel's eight slots, clip names; filled from the rig's own emotes the first time. */
@@ -2029,6 +2047,8 @@ class App {
         this.hyperspaceButton();
       },
       onTeleport: (poi) => void this.teleport(this.world.planet, poi, this.zone),
+      // A right-click on the planet's map sets a waypoint where it fell; a left-click still travels.
+      onMark: (x, z, near, metres) => this.markOnMap(x, z, near, metres),
     });
     this.map.onClose = () => this.toggleMap();
     // Every window moves by its header and sizes by its corner and far edges, and stays as it was left;
@@ -6802,6 +6822,34 @@ class App {
       }
       if (msg?.t === 'purse') purse.word(msg);
     };
+    // The purse is asked for on arriving, which on a first world comes before the line is open, so with
+    // a server the number read nought until a fare happened to be paid; it is asked again the moment a
+    // server has the claim, and on every line that comes back.
+    this.net.session.onClaimed(() => purse.ask());
+    // The character's story book. A server whose greeting says it holds a story holds the book while this
+    // browser plays there, and the book is settled once the claim is answered -- or, when two copies of
+    // the character tie, once the player has said which stands, by whichever way that is answered. Its
+    // words come in with the rest of the server's; its pacing and its waits run four times a second off
+    // the frame, so a book half handed up goes on going up in a tab nobody is looking at.
+    this.net.session.onClaimed(() => this.story.claimed(!!this.net.session.ask));
+    this.net.session.onAnswered(() => this.story.answered());
+    const storyWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      storyWordWas(msg);
+      if (msg?.t === 'story') this.story.word(msg);
+    };
+    window.setInterval(() => this.story.step(Date.now()), 250);
+    // A change made with nobody else holding the book is a change to the character, so the counter that
+    // settles an evening played alone rises with it (`characterMark`'s `story.local`). The settle that takes
+    // that count back to nought is not one: the session adopts the new mark without moving the counter, or
+    // this browser's copy would win the next claim over a server's the player had just chosen.
+    this.story.onChange((why, localWas) => {
+      if (!this.current || this.creating) return;
+      if (why === 'settled') this.net.session.noteSettled({ ...this.current, story: { local: localWas } }, this.storyMarked(this.current));
+      else this.net.session.noteCharacter(this.storyMarked(this.current));
+    });
+    // The waypoints on the map's own layer, read each frame the map draws from the book as it stands.
+    waypointMapFeed.fill = (out) => this.fillWaypoints(out);
     this.remotes.carrierPose = (to, pos, quat) => {
       const p = this.player;
       const v = to === this.net.id ? p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null : null;
@@ -6832,6 +6880,20 @@ class App {
     // are not here; they are `__debug.day()`'s.
     const debugRoot = (window as unknown as { __debug?: Record<string, unknown> }).__debug;
     if (debugRoot) debugRoot.session = (o?: Partial<typeof SESSION>) => (o ? { ...tuneSession(o), ...this.net.session.debug() } : this.net.session.debug());
+    if (debugRoot) {
+      // `__debug.story()`: who holds the character's story book (`local`, `server`, or `held` while it is
+      // settled or the line is coming back), its revision, the server revision it last matched, how many
+      // changes it holds that no server has seen, what is in it, and what has crossed the wire for it.
+      // `{ chunkGap, syncWait, wpPerSecond, offerChunk }` moves the browser's own numbers (`STORY_TUNE`).
+      debugRoot.story = (o?: Parameters<typeof tuneStory>[0]) => {
+        if (o) tuneStory(o);
+        return this.story.report();
+      };
+      // `__debug.waypoints(...)`: set, list, change and take away the character's own waypoints from the
+      // console, exactly as the map and (later) the Waypoints window do -- applied at once when this browser
+      // holds the book, asked of the server when it does.
+      debugRoot.waypoints = (o?: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null }) => this.debugWaypoints(o ?? { list: true });
+    }
 
     // ---- The world's creatures, and whose browser thinks for each of them. ----
     //
@@ -7493,7 +7555,7 @@ class App {
     this.tradeUsing = () => trade.tellUsing();
     // The moment the server has taken this browser's claim, its list goes up: a character the server
     // has never seen is written down from it, and after that the server's list is the truth.
-    this.net.session.onClaimed = () => trade.tell();
+    this.net.session.onClaimed(() => trade.tell());
     const tradeUi = new TradeUi(this.ui, {
       trade,
       note: (text) => this.messages.system(text),
@@ -8491,6 +8553,8 @@ class App {
     this.started = false;
     this.current = null;
     this.net.disconnect();
+    // The book goes with the character; the next one played reads its own.
+    this.story.use(null);
     this.world.leave();
     this.shipHud.clear();
     this.messages.clear();
@@ -9314,15 +9378,100 @@ class App {
     const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
-    this.net.session.noteCharacter(c, { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
+    this.net.session.noteCharacter(this.storyMarked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
     return hello;
+  }
+
+  /**
+   * The record the session counts changes on, with the story's own count of changes made here with nobody
+   * else holding the book: every call that notes the character goes through this, or the mark would
+   * differ from one call to the next and the counter would rise for nothing.
+   */
+  private storyMarked(c: SavedCharacter | null): (SavedCharacter & { story: { local: number } }) | null {
+    return c ? { ...c, story: { local: this.story.local } } : null;
+  }
+
+  /**
+   * The waypoints the map draws: the ones switched on, on the world the map shows, in the game's frame
+   * (a planet's are kept in the raw frame and turned here, about this world's own layout centre). It is
+   * read every frame the map window draws, so it makes nothing: an index loop over the book as it stands.
+   */
+  private fillWaypoints(out: WaypointList): void {
+    const book = this.story.book;
+    if (!book || !this.inWorld || !book.waypoints.length) return;
+    const here = packIdOf(this.world.planet, this.zone);
+    const c = this.world.layoutCenter;
+    const cx = c ? c.x : 0;
+    const cz = c ? c.z : 0;
+    for (let i = 0; i < book.waypoints.length; i++) {
+      const w = book.waypoints[i];
+      if (!w.on || w.world !== here) continue;
+      const raw = w.f === 'raw';
+      out.add(w.id, w.name, w.colour, book.trackWp === w.id, raw ? rawToGameX(cx, w.p[0]) : w.p[0], w.p[2] ?? 0, raw ? rawToGameZ(cz, w.p[1]) : w.p[1]);
+    }
+  }
+
+  /**
+   * A right-click on the planet's map: a waypoint where it fell, in the map's own frame (which is the raw
+   * one), named after the place nearest it when that is near enough to mean something. What came of it
+   * goes to the message line, since nothing else shows a waypoint set with the map open yet.
+   */
+  private markOnMap(x: number, z: number, near: string | null, metres: number): void {
+    const book = this.story.book;
+    if (!book || !this.inWorld) return;
+    const name = waypointName(near, metres, book.nextWp);
+    const out = this.story.addWaypoint({ name, world: packIdOf(this.world.planet, this.zone), f: 'raw', p: [x, z, null], on: true });
+    this.messages.system(out.ok ? `Waypoint set: ${name}` : `No waypoint: ${out.why}`);
+  }
+
+  /** Where the player stands, as a waypoint would keep it: the world, the frame, the place and the room. */
+  private waypointHere(): { world: string; f: 'raw' | 'game'; p: [number, number, number | null]; room?: { cell: string; template?: string } } {
+    const at = this.player.worldPos;
+    const world = packIdOf(this.world.planet, this.zone);
+    if (this.world.planet.space) return { world, f: 'game', p: [at.x, at.z, at.y] };
+    const raw = gameToRaw(at.x, at.z, this.world.layoutCenter);
+    const s = this.world.cellState;
+    const cell = s && s.cell > 0 ? s.building.model.def.cells?.find((c) => c.index === s.cell)?.name : undefined;
+    return { world, f: 'raw', p: [raw.x, raw.z, null], ...(cell ? { room: { cell, template: s!.building.template } } : {}) };
+  }
+
+  /** What `__debug.waypoints` does: one change, or several, through the book's own operations. */
+  private debugWaypoints(o: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null }): Record<string, unknown> {
+    const results: StoryResult[] = [];
+    if (o.add !== undefined) {
+      const colour = isWaypointColour(o.colour) ? o.colour : undefined;
+      if (o.add === 'here') {
+        if (!this.inWorld) results.push({ ok: false, why: 'there is no world to stand in' });
+        else results.push(this.story.addWaypoint({ name: o.name ?? `Waypoint ${this.story.book?.nextWp ?? 1}`, ...this.waypointHere(), colour, on: true }));
+      } else {
+        const a = o.add;
+        const space = !!this.world.planet?.space;
+        const room = a.cell ? { cell: a.cell, ...(a.template ? { template: a.template } : {}) } : undefined;
+        results.push(this.story.addWaypoint({ name: a.name ?? o.name ?? `Waypoint ${this.story.book?.nextWp ?? 1}`, world: a.world ?? packIdOf(this.world.planet, this.zone), f: a.f ?? (space ? 'game' : 'raw'), p: [a.x, a.z, typeof a.y === 'number' ? a.y : null], colour, on: true, ...(room ? { room } : {}) }));
+      }
+    } else if (o.id) {
+      if (o.colour !== undefined) results.push(this.story.recolourWaypoint(o.id, o.colour));
+      if (o.name !== undefined) results.push(this.story.renameWaypoint(o.id, o.name));
+      if (o.on !== undefined) results.push(this.story.switchWaypoint(o.id, o.on));
+    }
+    if (o.remove) results.push(this.story.removeWaypoint(o.remove));
+    if (o.track !== undefined) results.push(this.story.trackWaypoint(o.track));
+    if (o.clear) for (const w of [...(this.story.book?.waypoints ?? [])]) results.push(this.story.removeWaypoint(w.id));
+    const book = this.story.book;
+    return {
+      host: this.story.host,
+      local: this.story.local,
+      results,
+      colours: WAYPOINT_COLOURS,
+      ...(o.list || !results.length ? { list: (book?.waypoints ?? []).map((w) => ({ ...w, tracked: book?.trackWp === w.id })) } : { count: book?.waypoints.length ?? 0 }),
+    };
   }
 
   /** Send the hello again shortly (dressing several pieces sends one): a change of clothes or weapon reaches the others. */
   private queueHello(): void {
     // What the character owns, wears and flies has changed, whether or not anyone is connected: the
     // counter that settles an evening played offline rises here, and only when the record really moved.
-    this.net.session.noteCharacter(this.current);
+    this.net.session.noteCharacter(this.storyMarked(this.current));
     if (!this.net.online) return;
     window.clearTimeout(this.helloTimer);
     this.helloTimer = window.setTimeout(() => {
@@ -9770,6 +9919,9 @@ class App {
   private async play(c: SavedCharacter): Promise<void> {
     this.select.hide();
     this.current = c;
+    // Its story book, from this browser's storage, before anything notes the character: the counter the
+    // claim carries reads how many changes the book holds that no server has seen.
+    this.story.use(c.id);
     // The NPC pilots' taunts name the character played.
     this.world.ships.playerName = c.name;
     this.traveling = true;

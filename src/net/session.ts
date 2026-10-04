@@ -21,10 +21,11 @@ import { fromBase32, hmacSha256, sha256, toBase32, toHex, utf8 } from './hash.ts
  * The version of the language this browser speaks. An old relay ignores it; a new server reads it.
  * 3 is the seen creatures, a creature's blow on another player, the keeper turning a bolt away, how low
  * a body stands on the wire and the admin's day; 4 is the admin's `arm`, a weapon put in the hand of one
- * of the world's creatures already standing (`server/relay.mjs` says the same). None of those is ever
- * sent to a server that says less (`speaks`).
+ * of the world's creatures already standing; 5 is the story book, whose words go only to a server whose
+ * hail carries `story` (`storyVersion`) (`server/relay.mjs` says the same). None of those is ever sent to
+ * a server that says less (`speaks`).
  */
-export const WIRE_VERSION = 4;
+export const WIRE_VERSION = 5;
 
 /**
  * The label mixed into the key to make the verifier the server keeps. It is the server's
@@ -78,6 +79,8 @@ export interface Hail {
   word?: number;
   /** 1 when damage between players is switched on where this server is. */
   ff?: number;
+  /** The story the server holds, by version; 0 or absent for a server that holds none (every one before the book). */
+  story?: number;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -131,6 +134,11 @@ function stableJson(value: unknown): string {
  *
  * How the character looks is deliberately not in the mark either: a face retuned in the creator is not
  * something two copies of a character can disagree about in a way worth asking the player to settle.
+ *
+ * The story book is in it only by how many changes this browser made to it with nobody else holding it
+ * (`story.local`, src/story/bookClient.ts), and only while there are any: a character whose story was
+ * never played alone keeps exactly the mark it had before there was a story, so bringing a browser up to
+ * date never moves anybody's counter, and an evening of waypoints set offline settles this browser's way.
  */
 export function characterMark(c: {
   name?: string;
@@ -141,6 +149,7 @@ export function characterMark(c: {
   powers?: readonly string[];
   gadgets?: readonly string[];
   saber?: { color: string };
+  story?: { local: number };
 }): string {
   const parts: string[] = [];
   parts.push(`n:${c.name ?? ''}`);
@@ -152,6 +161,8 @@ export function characterMark(c: {
   parts.push(`p:${(c.powers ?? []).join(',')}`);
   parts.push(`g:${(c.gadgets ?? []).join(',')}`);
   parts.push(`b:${c.saber?.color ?? ''}`);
+  const local = Math.floor(Number(c.story?.local) || 0);
+  if (local > 0) parts.push(`q:${local}`);
   return toHex(sha256(utf8(parts.join('|')))).slice(0, 16);
 }
 
@@ -268,6 +279,8 @@ export interface SessionStats {
   admin: boolean;
   /** Which version of the language the far end speaks, as its greeting said; 0 until one does. */
   serverVersion: number;
+  /** The story the far end's greeting said it holds; 0 for none, which is every far end before the book. */
+  story: number;
 }
 
 /**
@@ -309,7 +322,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -317,15 +330,50 @@ export class Session {
   onAsk: (ask: { character: string; browser: CharacterSummary; server: CharacterSummary } | null) => void = () => {};
   /** How a character was settled, for whoever will apply the server's copy when there is one to apply. */
   onSettled: (what: Settlement, record: CharacterSummary | null) => void = () => {};
-  /**
-   * The server has taken this browser's claim. It is the moment the ledger hands its list up -- a
-   * character the server has never seen is written down from what this browser holds, and after that
-   * the server's rows are the truth (src/net/trade.ts). Nothing here knows what an item is: it says
-   * that the line is a server line with a character settled on it, and that is all.
-   */
-  onClaimed: (keep: Settlement | '') => void = () => {};
+  /** Whoever is told the claim was taken, and whoever is told a tie was answered: lists, in the order they were added. */
+  private readonly claimedHooks: ((keep: Settlement | '') => void)[] = [];
+  private readonly answeredHooks: ((take: 'browser' | 'server') => void)[] = [];
   /** Something to send: `Net` puts it on the socket. */
   send: (msg: Record<string, unknown>) => void = () => {};
+
+  /**
+   * Be told when the server has taken this browser's claim. It is the moment the ledger hands its list up
+   * -- a character the server has never seen is written down from what this browser holds, and after that
+   * the server's rows are the truth (src/net/trade.ts) -- and the moment the story book is settled. It was
+   * one slot, and the second thing to want it would have unplugged the first; now it is a list, each told
+   * in turn and one that throws costing only itself. Nothing here knows what an item or a book is: it says
+   * that the line is a server line with a character settled on it, and that is all. Answers the way to stop.
+   */
+  onClaimed(fn: (keep: Settlement | '') => void): () => void {
+    this.claimedHooks.push(fn);
+    return () => {
+      const i = this.claimedHooks.indexOf(fn);
+      if (i >= 0) this.claimedHooks.splice(i, 1);
+    };
+  }
+
+  /**
+   * Be told when a tie between two copies of the character has been answered -- by the player, by the
+   * answer they gave last time, or by the server when nobody answered -- which is when anything settled
+   * the character's way (the story book) may be settled too. Answers the way to stop.
+   */
+  onAnswered(fn: (take: 'browser' | 'server') => void): () => void {
+    this.answeredHooks.push(fn);
+    return () => {
+      const i = this.answeredHooks.indexOf(fn);
+      if (i >= 0) this.answeredHooks.splice(i, 1);
+    };
+  }
+
+  private tell<T>(hooks: ((x: T) => void)[], x: T): void {
+    for (const fn of [...hooks]) {
+      try {
+        fn(x);
+      } catch (err) {
+        console.warn('session: a listener failed', err);
+      }
+    }
+  }
 
   /**
    * The key is not made here. A browser with no server address set must be the game exactly as it was,
@@ -422,7 +470,7 @@ export class Session {
    * have changed: the counter goes up only when the record really moved, so starting the game twice is
    * not a change and an evening of trading is.
    */
-  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string } } | null, about?: CharacterAbout): void {
+  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number } } | null, about?: CharacterAbout): void {
     if (about) this.about = { species: about.species, class: about.class, planet: about.planet, zone: about.zone ?? '' };
     // A different character with nothing said about where it is: whatever place the session is holding
     // belongs to the one played before it, and taking it for this one's would read as a journey the
@@ -470,6 +518,35 @@ export class Session {
     this.charMark = mark;
     this.stat.character = c.id;
     this.stat.counter = counters[c.id].n;
+  }
+
+  /**
+   * The record moved only because a server and this browser came to agree about part of it: the story
+   * book settled, which takes its count of changes made alone back to nought and so takes `q:` out of the
+   * mark. That is not a change to the character, and counting it would make this browser's copy the newer
+   * one at the next claim -- written over the server's, even when the player had just chosen the server's
+   * -- and would make a tie answered from memory a fresh question. So the new mark is adopted without the
+   * counter moving, but only when the mark held is exactly the one the record had before the settle
+   * (`was`): anything else that moved meanwhile and was not yet noted is a real change, and is counted.
+   */
+  noteSettled(was: Parameters<Session['noteCharacter']>[0], now: Parameters<Session['noteCharacter']>[0]): void {
+    if (!was || !now || was.id !== now.id || now.id !== this.charId) {
+      this.noteCharacter(now);
+      return;
+    }
+    const counters = this.counters();
+    const held = counters[now.id];
+    if (!held || held.mark !== characterMark(was)) {
+      this.noteCharacter(now);
+      return;
+    }
+    const mark = characterMark(now);
+    if (held.mark !== mark) {
+      held.mark = mark;
+      this.saveCounters(counters);
+    }
+    this.charMark = mark;
+    this.stat.counter = held.n;
   }
 
   /** The change counter this browser holds for a character. */
@@ -546,6 +623,7 @@ export class Session {
     // closed: until this one answers, nobody may stand anything.
     this.stat.admin = false;
     this.stat.serverVersion = 0;
+    this.stat.story = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -593,6 +671,8 @@ export class Session {
     this.nonce = nonce;
     this.stat.mode = 'server';
     this.stat.serverVersion = Number(h.v) || 0;
+    // Which story it holds: heard here, in force only once the server has us (`storyVersion`).
+    this.stat.story = Number(h.story) > 0 ? Math.floor(Number(h.story)) : 0;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -643,7 +723,7 @@ export class Session {
     if (you?.character) this.stat.character = you.character;
     this.onNote(`joined the world as ${this.charName || you?.name || 'someone'}`);
     // Said last, so that whoever hands their list up is doing it with everything above already true.
-    this.onClaimed(this.stat.keep);
+    this.tell(this.claimedHooks, this.stat.keep);
   }
 
   /** The welcome, which on a server carries this connection's number and the friendly-fire switch. */
@@ -694,6 +774,8 @@ export class Session {
       this.onSettled('server', ask.server);
     }
     this.rememberAnswer(ask.character, take, storyOf(ask.server));
+    // After the answer has gone, so whatever settles next on this line is read by the server after it.
+    this.tell(this.answeredHooks, take);
     if (again) {
       this.onNote('this character was played in two places, as it was before: the answer you gave then still stands');
       return;
@@ -705,10 +787,13 @@ export class Session {
 
   /** The server's copy stands (it was newer, or the question went unanswered). */
   settled(character: string, take: string, record: CharacterSummary | null): void {
-    if (this.stat.ask && this.stat.ask.character === character) {
+    const answered = !!this.stat.ask && this.stat.ask.character === character;
+    if (answered) {
       this.stat.ask = null;
       this.onAsk(null);
     }
+    // A question nobody answered in time is answered by the server, and that is an answer like any other.
+    if (answered) this.tell(this.answeredHooks, take === 'browser' ? 'browser' : 'server');
     if (take !== 'server') return;
     this.stat.keep = 'server';
     // Nothing applies it yet: the server holds a character's name and counter, and what it owns comes
@@ -787,6 +872,16 @@ export class Session {
    */
   speaks(version: number): boolean {
     return this.stat.authority === 'server' && this.stat.serverVersion >= version;
+  }
+
+  /**
+   * The story the server holding the world holds, as its greeting said: what decides whether this
+   * browser keeps the story book itself or the server does (src/story/bookClient.ts). Nought with no
+   * server, against the relay that came before, against a server whose greeting says nothing of a story,
+   * and on a line that has dropped.
+   */
+  get storyVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.story : 0;
   }
 
   /**

@@ -430,6 +430,12 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   const packedPaths = new Set(packed.map((f) => f.path));
   const lost = refFiles.filter((f) => !packedPaths.has(f));
   ok(!lost.length, `the release carries the Core3 reference, all ${refFiles.length} files${lost.length ? ` (missing ${lost.join(', ')})` : ''}`);
+  // The server runs the story's rules from `src/story/` as they are, which is a folder rule rather than a
+  // name in a list: this pins it, so a rules file nobody imports yet ships as surely as one somebody does,
+  // and so does the one file outside the folder those rules may import.
+  const storyFiles = readdirSync(join(root, 'src', 'story')).filter((f) => f.endsWith('.ts')).map((f) => `src/story/${f}`);
+  const storyLost = [...storyFiles, 'src/net/hash.ts'].filter((f) => !packedPaths.has(f));
+  ok(storyFiles.length > 0 && !storyLost.length, `the release carries the story's rules and the hashing they may use (${storyFiles.length} files${storyLost.length ? `; missing ${storyLost.join(', ')}` : ''})`);
   const lib = join(scratch, 'importer');
   mkdirSync(join(lib, 'tools'), { recursive: true });
   writeFileSync(join(lib, 'tools', 'a.mjs'), "import './b.mjs';\nconst x = await import('../src/c.ts');\nnew URL('./d.json', import.meta.url);\nimport './gone.mjs';");

@@ -100,7 +100,7 @@ function open(url = 'ws://test:8787', word = '') {
   const { net, sock } = open();
   const hello = sock.word('hello');
   ok(!!hello, 'the hello goes at once when no join word is set, as it always did');
-  ok(hello!.v === WIRE_VERSION && WIRE_VERSION === 4, 'and says which language this browser speaks: the fourth, which speaks of the seen creatures, the day and re-arming one already standing');
+  ok(hello!.v === WIRE_VERSION && WIRE_VERSION === 5, 'and says which language this browser speaks: the fifth, which speaks of the seen creatures, the day, re-arming one already standing and the story book');
   ok(hello!.name === 'Han' && hello!.planet === 'tatooine', 'while carrying everything it always carried');
   ok(net.session.mode === 'waiting', 'though nothing is known about the server yet');
   await sleep(60);

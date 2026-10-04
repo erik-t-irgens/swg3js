@@ -132,8 +132,19 @@
 //                                                          asked for and never announced -- the answer is what the
 //                                                          browser may act on -- and one that would go below zero
 //                                                          moves nothing at all rather than going as far as it can
+//   { t: 'story', do: 'sync', has, base, local, known }      the character's story book (stories.mjs): what this browser's
+//                                                          copy holds, said once the claim is answered (or the tie is):
+//                                                          whether it has anything in it, the server revision it last
+//                                                          matched and how many changes it made with nobody holding it
+//   { t: 'story', do: 'offer', id, n, of, part, known }      its copy, asked for, in pieces of `story.offerChunk` a little
+//                                                          apart, so the allowance a second is never what drops it
+//   { t: 'story', do: 'wp', op: set|edit|on|off|gone|track, wp }   a waypoint set (the server gives it its id and its
+//                                                          time), renamed or recoloured, switched on or off, taken
+//                                                          away, or tracked (`wp.id` null for none)
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff }     sent the instant the socket opens, before anything is said
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story }   sent the instant the socket opens, before anything is
+//                                                          said; `story` is { v, sets, tests }, the story this server
+//                                                          holds, which a browser built before it never reads
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -196,6 +207,11 @@
 //                                                          what they need to hear is the id the server gave it)
 //   { t: 'homeNo', why }   (to whoever asked, and to nobody else)
 //   { t: 'purse', credits?, spent?, given?, what?, why? }   (to whoever asked, and to nobody else)
+//   { t: 'story', do: 'book', id, n, of, part, take }   (the server's book, in pieces, and whose copy stands: `browser`
+//                                                          when the browser's was just taken, `server` otherwise)
+//   { t: 'story', do: 'want', chunk }   (send your copy, in pieces of this many characters)
+//   { t: 'story', do: 'ch', rev, ch }   (a batch of changes, and the revision it made)
+//   { t: 'story', do: 'no', why }   (to whoever asked, and to nobody else)
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -221,6 +237,7 @@ import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledge
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
+import { STORY_TUNING, STORY_WIRE_VERSION, Stories } from './stories.mjs';
 
 /**
  * What this server speaks. A browser that hears no hail is talking to the relay that came before. 3 is
@@ -228,9 +245,11 @@ import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
  * how low a body stands on the wire, and the admin's day: a browser built for 3 does none of that
  * against a server that says 2, and a browser built before 3 never sends any of it. 4 is the admin's
  * `arm`, a weapon put in the hand of one of the world's creatures already standing, which a server that
- * says 3 would drop in silence.
+ * says 3 would drop in silence. 5 is the story book: a hail that says which story this server holds,
+ * and the `story` words. A browser speaks them only to a server whose hail carries `story`, so one
+ * built for 5 against a server that says 4 keeps its book itself.
  */
-const WIRE_VERSION = 4;
+const WIRE_VERSION = 5;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
@@ -314,6 +333,7 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('spot.') && has(SPOT_TUNING, name.slice(5))) SPOT_TUNING[name.slice(5)] = value;
   else if (name.startsWith('home.') && has(HOME_TUNING, name.slice(5))) HOME_TUNING[name.slice(5)] = value;
   else if (name.startsWith('purse.') && has(PURSE_TUNING, name.slice(6))) PURSE_TUNING[name.slice(6)] = value;
+  else if (name.startsWith('story.') && has(STORY_TUNING, name.slice(6))) STORY_TUNING[name.slice(6)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -390,6 +410,11 @@ homes.load(store.data);
 // rest: a balance only in memory would be a different number after every restart.
 const purses = new Purses({ tuning: PURSE_TUNING, write: (rec) => store.change(rec) });
 purses.load(store.data);
+// Each character's story book (stories.mjs), written down like the purses: the books are the store's
+// own, so a change goes through the store, which applies it and puts it in the log before anybody is
+// told, and the same function applies it again when the log is played back on start.
+const stories = new Stories({ tuning: STORY_TUNING, write: (rec) => store.change(rec), now: () => clock.now() });
+stories.load(store.data);
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, ...clock.dayHand() };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs || (had.dayAt ?? 0) !== (settings.dayAt ?? 0)) store.change({ t: 'settings', settings });
@@ -683,6 +708,10 @@ function onClaim(c, msg) {
   }
   c.player = verdict.player;
   c.character = verdict.character;
+  // How the character was settled, kept on the line: the story book is settled the same way, and its
+  // `sync` comes a moment later on this line, so it reads the verdict from here (and the answer to a
+  // tie, `onSettle`, rewrites it). Nothing kept it before, because nothing settled after the claim.
+  c.keep = verdict.keep;
   // The character: decision 4's merge, and nothing is thrown away without the player being told.
   if (verdict.keep === 'browser') {
     store.change({ t: 'character', id: verdict.character, character: verdict.offered });
@@ -696,6 +725,7 @@ function onClaim(c, msg) {
     const wait = setTimeout(() => {
       if (c.asking?.character !== verdict.character) return;
       c.asking = null;
+      c.keep = 'server';
       send(c, { t: 'settled', character: verdict.character, take: 'server', record: summaryOf(verdict.stored) });
       console.log(`  ${c.id} did not answer about ${verdict.character}: the server's copy stands, and the browser still has its own`);
     }, TUNING['settle.wait']);
@@ -734,6 +764,8 @@ function onSettle(c, msg) {
   if (!settle || c.asking?.character !== settle.character) return;
   const { offered, stored } = c.asking;
   c.asking = null;
+  // The answer is the verdict from here on, for whatever settles after the character (the story book).
+  c.keep = settle.take;
   if (settle.take === 'browser') {
     store.change({ t: 'character', id: settle.character, character: offered });
     console.log(`  ${c.id} kept the browser's copy of ${settle.character}`);
@@ -1380,6 +1412,15 @@ function onMessage(c, text, trimmed = false) {
       if (amount === null) return;
       deliverTo(purses.give(c.character, amount, c.id));
     }
+  } else if (msg.t === 'story') {
+    // The character's story book: what its copy holds, its copy handed up when it is asked for, and the
+    // waypoints changed. It is the character's and not the line's, so a browser that has not said which
+    // character it plays has none here; and a line that has just been taken over by a newer browser no
+    // longer speaks for it. Never trimmed with the news: every one of these is a decision, and a piece of
+    // a book dropped would leave the two copies of it disagreeing.
+    if (!c.hello || !c.character) return;
+    if (sessions.holder(c.character) !== c.id) return;
+    deliverTo(stories.hear(c, msg));
   } else if (msg.t === 'placeHome' || msg.t === 'removeHome') {
     // A building put down in the world. Unlike a dock claim this *is* written down -- it is the
     // thing the whole of it is for -- and unlike an item it belongs to a world rather than to a
@@ -1443,6 +1484,7 @@ const server = createServer((req, res) => {
         spots: spots.describe(),
         homes: homes.describe(),
         purses: purses.describe(),
+        stories: stories.describe(),
         joinWord: WORD ? 'set' : 'none',
         admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
@@ -1459,6 +1501,7 @@ const server = createServer((req, res) => {
         spot: SPOT_TUNING,
         home: HOME_TUNING,
         purse: PURSE_TUNING,
+        story: STORY_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,
@@ -1488,6 +1531,8 @@ server.on('upgrade', (req, socket) => {
     nonce: makeNonce(),
     player: null,
     character: null,
+    /** How the character it claimed was settled (`browser`, `server`, `same`, `ask`), and the answer to a tie once given. */
+    keep: '',
     /** The name a group knows this browser by, which outlives the line when it has claimed one. */
     member: null,
     /** What the character it claimed is called, before its first hello says so. */
@@ -1505,7 +1550,10 @@ server.on('upgrade', (req, socket) => {
   // no case for it and drops it without a word, which is exactly what is wanted: the welcome stays
   // where it has always been, sent once after the first hello, so nothing an old browser does runs
   // twice. A browser built for this that hears no hail knows it is talking to the old relay.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0 });
+  // `story` says which story this server holds; a browser built before it reads nothing of it, and one
+  // built for it keeps its book itself against any far end whose hail does not carry it. The sets are
+  // the story sets loaded, none until a later wave loads any; `tests` is whether the test set is on.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: { v: STORY_WIRE_VERSION, sets: [], tests: 0 } });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');
@@ -1569,6 +1617,9 @@ server.on('upgrade', (req, socket) => {
     // And whatever dock or spot on a hull it was holding is free at once, so nobody circles a lane a
     // browser that has gone still has its name on.
     spots.gone(c.id);
+    // A story book half handed up goes with the line: nothing of it was taken, and the browser offers
+    // it again the next time it settles.
+    stories.gone(c.id);
     // A world nobody is left standing on stops being remembered: the picture of where its creatures
     // had got to is only there for the next browser to arrive, and it is rebuilt from their batches.
     if (key && rooms.members(key).size === 0) npcPlaces.forget(key);
@@ -1621,6 +1672,12 @@ setInterval(() => deliverTo(ledger.tick()), LEDGER_TUNING.tick);
 // It is a slow clock on purpose: with nobody fighting it walks two empty tables once a minute.
 setInterval(() => deliverTo(duels.tick()), COMBAT_WIRE.tick);
 
+// A story book whose pieces stopped coming is given up and its browser told, so it asks again rather
+// than waiting on a book the server has stopped listening for. With nobody handing one up it walks an
+// empty map, so once a second costs nothing, and a book is given up within a second of its wait however
+// short a run sets `story.offerWait`.
+setInterval(() => deliverTo(stories.tick()), 1000);
+
 let closing = false;
 const shutDown = (why) => {
   if (closing) return;
@@ -1647,5 +1704,7 @@ server.listen(PORT, () => {
   console.log(`  one browser thinks for each of them: the nearest player within ${OWN_TUNING.range} m, changing hands only after another has been a quarter nearer for ${Math.round(OWN_TUNING.steady / 1000)} s`);
   console.log(`  the lairs, nests and people every browser stands for itself are shared the same way once a browser says it has stood one, up to ${OWN_TUNING.seenPerWorld} a world: the nearest browser with a body for one keeps it, a dead one stays down for its own respawn, and one nobody keeps or sees for ${Math.round(OWN_TUNING.forget / 1000)} s is forgotten`);
   console.log(`  what each character owns is kept here too: ${ledger.describe()}; two players trade within ${GROUP_RANGES.trade} m -- the client's own distance -- and a swap is one line in the log or none`);
+  const told = stories.describe();
+  console.log(`  each character's story book is kept here as well (${told.books} books, ${told.waypoints} waypoints): a copy played alone is taken when the character settles the browser's way, and the one it replaces is archived whole`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

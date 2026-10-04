@@ -1,7 +1,8 @@
 // The truth the server keeps between runs: the players it knows, their characters, the things they
 // own (a row per item, whose shape is the ledger's: see ledger.mjs), the buildings they have put
-// down (a row per house, whose shape is homes.mjs's) and the switches it was started with. One file
-// you can read, plus a log of the changes since it was last written.
+// down (a row per house, whose shape is homes.mjs's), each character's story book (whose shape is
+// `src/story/book.ts`'s, through stories.mjs) and the switches it was started with. One file you can
+// read, plus a log of the changes since it was last written.
 //
 // How it is written, and why: the snapshot goes to `world.json.tmp`, is flushed to the disk and
 // only then renamed over `world.json`, so a machine that loses power mid-write still has the last
@@ -25,6 +26,7 @@ import { join } from 'node:path';
 import { applyItems } from './ledger.mjs';
 import { applyHomes } from './homes.mjs';
 import { applyPurse } from './purse.mjs';
+import { applyStory } from './stories.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -48,9 +50,12 @@ function table(from = null) {
   return out;
 }
 
-/** An empty world: every slot that exists, each filled by the file that owns its shape. */
+/**
+ * An empty world: every slot that exists, each filled by the file that owns its shape. `stories` is each
+ * character's story book and `storyArchive` the books a browser's copy replaced, kept whole (stories.mjs).
+ */
 export function emptyWorld(epoch = Date.now()) {
-  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), purses: table(), settings: {} };
+  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), purses: table(), stories: table(), storyArchive: table(), settings: {} };
 }
 
 /**
@@ -96,7 +101,7 @@ export function applyChange(data, rec) {
       // decides what each row looks like on disk, and the same function runs when the thing happens
       // and when the log is replayed on start. Anything neither of them knows is a record from a
       // newer server: kept in the log, not understood here, and not an error.
-      return applyItems(data, rec) || applyHomes(data, rec) || applyPurse(data, rec);
+      return applyItems(data, rec) || applyHomes(data, rec) || applyPurse(data, rec) || applyStory(data, rec);
   }
 }
 
@@ -148,7 +153,7 @@ export class Store {
     if (loaded) {
       // The tables are rebuilt rather than taken as they are: `JSON.parse` hands back plain objects,
       // and the keys in them came from a browser (see `table`).
-      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses) };
+      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive) };
       this.say(`world.json read: ${Object.keys(this.data.players).length} players, ${Object.keys(this.data.characters).length} characters, up to change ${this.data.seq}`);
     }
     let knownEpoch = !!loaded && Number.isFinite(loaded.epoch);

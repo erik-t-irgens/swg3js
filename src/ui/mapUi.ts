@@ -12,6 +12,11 @@
 // and no server, and its box is not shown at all then — on a planet, where it is the only box there
 // is, that means no layer bar either, so a game playing alone has exactly the map it has always had.
 //
+// The character's own waypoints are another such layer, read from `waypointMapFeed`: a diamond in the
+// waypoint's own palette colour and its name where each one switched on stands, the tracked one ringed
+// on the planet and larger in space. A right-click on the planet's map sets one where it fell (a
+// left-click still travels), named for the place nearest it; its box shows only while there are any.
+//
 // The space view holds its own follow flag: it follows your ship until you slide the view, and F or
 // the Follow button puts it back. Nothing three draws is made during a frame: every mark, shell,
 // line, cone and label comes from a pool (`spaceMapLayers.ts`), grown to what a zone wants when its
@@ -20,9 +25,10 @@
 // not the one it was placed at last.
 
 import * as THREE from 'three';
-import { COL, colourOf } from '../core/palette.ts';
+import { COL, colourHex, colourOf, type PaletteName } from '../core/palette.ts';
 import type { GalaxyMap, Poi } from './galaxyMap';
-import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark } from './spaceMapLayers.ts';
+import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, mapFromScreenX, mapFromScreenY, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, WAYPOINT_MAP_TUNE, WaypointList, waypointMapFeed, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark, type WaypointMark } from './spaceMapLayers.ts';
+import { WAYPOINT_COLOURS } from '../story/waypoints.ts';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
 export interface MapSource {
@@ -55,6 +61,15 @@ export interface MapSource {
    * group at all.
    */
   group?(out: GroupList): void;
+  /** The character's waypoints, the same way: optional, and `waypointMapFeed` read in its place. */
+  waypoints?(out: WaypointList): void;
+  /**
+   * A right-click on the planet's map: a waypoint wanted at that point of the map's own frame (the
+   * snapshot's, which is the raw frame a planet's waypoints are kept in), with the name of the place
+   * nearest it and how far it is past that place's own radius, in metres (Infinity with none). Optional:
+   * with nothing here a right-click does nothing.
+   */
+  onMark?(x: number, z: number, near: string | null, metres: number): void;
 }
 
 interface MapImage {
@@ -143,15 +158,21 @@ function mapPixelRatio(): number {
 }
 
 /** The layers that are on when the map is first opened. */
-const LAYERS_ON: readonly LayerId[] = ['stations', 'points', 'launch', 'fields', 'nebulae', 'ships', 'group'];
+const LAYERS_ON: readonly LayerId[] = ['stations', 'points', 'launch', 'fields', 'nebulae', 'ships', 'group', 'waypoints'];
 
 /**
  * The colour each layer is drawn and named in, as three wants it and as CSS wants it. The group's is
  * a rose: far enough round from the violet a nebula's shell wears to be told from it at a glance, and
- * not the amber of a station, the cyan of a ship or the orange your own hull is drawn in.
+ * not the amber of a station, the cyan of a ship or the orange your own hull is drawn in. A waypoint
+ * wears its own palette colour; the layer's is only the one its box is named in.
  */
-const LAYER_COLOURS: Record<LayerId, number> = { stations: 0xffd27f, points: 0x9fe8a0, launch: 0xffffff, fields: 0x9aa7b8, nebulae: 0xc08fff, ships: 0x7fd7ff, group: 0xff5f9e };
-const LAYER_CSS: Record<LayerId, string> = { stations: '#ffd27f', points: '#9fe8a0', launch: '#ffffff', fields: '#9aa7b8', nebulae: '#c08fff', ships: '#7fd7ff', group: '#ff5f9e' };
+const LAYER_COLOURS: Record<LayerId, number> = { stations: 0xffd27f, points: 0x9fe8a0, launch: 0xffffff, fields: 0x9aa7b8, nebulae: 0xc08fff, ships: 0x7fd7ff, group: 0xff5f9e, waypoints: colourHex('accent') };
+const LAYER_CSS: Record<LayerId, string> = { stations: '#ffd27f', points: '#9fe8a0', launch: '#ffffff', fields: '#9aa7b8', nebulae: '#c08fff', ships: '#7fd7ff', group: '#ff5f9e', waypoints: 'var(--accent)' };
+
+/** A waypoint's palette name as an index the canvas draws with: an unknown name reads as `accent`. */
+function waypointCol(name: string): number {
+  return COL[name as PaletteName] ?? COL.accent;
+}
 
 /** The space view's own styles, added once so nothing outside this file has to carry them. */
 const SPACE_MAP_CSS = `
@@ -171,6 +192,8 @@ const SPACE_MAP_CSS = `
 .map-label[hidden] { display: none; }
 .map-label i { display: block; width: 14px; height: 14px; background: no-repeat center / contain; border-radius: 2px; }
 .map-label i.plain { width: 6px; height: 6px; margin: 0 4px; background: currentColor; }
+/* A waypoint's own mark beside its name: a diamond of ours in the waypoint's colour, never the client's icon. */
+.map-label i.wp { width: 7px; height: 7px; margin: 0 4px; background: currentColor; transform: rotate(45deg); border-radius: 1px; }
 .map-select { position: absolute; right: 10px; top: 10px; width: 230px; padding: 9px 11px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--void) 82%, transparent); border: 1px solid var(--panel-border); border-radius: 6px; }
 .map-select[hidden] { display: none; }
 .map-select h4 { margin: 0 0 3px; font-size: 13px; color: var(--accent); }
@@ -257,6 +280,17 @@ export class MapUi {
   private groupLabelPool!: Pool<HTMLElement>;
   /** What the last frame of each view drew of the group, for `__debug.mapGroup()`. */
   private readonly groupDrawn = { planet: 0, space: 0 };
+  // The waypoints: read once a frame into the list the map owns, drawn by both views from that one read.
+  private readonly waypointList = new WaypointList();
+  private readonly waypointLabels = new GroupLabels();
+  private waypointPool!: Pool<THREE.Mesh>;
+  private waypointLabelPool!: Pool<HTMLElement>;
+  /** One solid look per waypoint colour, made once: a mark is handed the one its colour names. */
+  private readonly waypointMaterials = new Map<string, THREE.MeshBasicMaterial>();
+  /** The colour each space label was last written in, by pool slot, so a still map writes nothing. */
+  private readonly waypointLabelColours: string[] = [];
+  /** What the last frame of each view drew of the waypoints, for `__debug.spaceMap()`. */
+  private readonly waypointDrawn = { planet: 0, space: 0 };
   /** The layer bar's boxes, so one can be taken out of it while there is nothing behind it. */
   private readonly layerBoxes = new Map<LayerId, HTMLElement>();
   /** The made-up group the console can stand to look at the layer with one browser; 0 is none. */
@@ -421,7 +455,7 @@ export class MapUi {
   private buildPools(): void {
     // One material a layer for the zone's own marks. The group is not one of them: nothing a pack
     // holds is ever in that layer, and its members wear a solid material of their own below.
-    for (const layer of LAYERS) if (layer.id !== 'group') this.markMaterials.set(layer.id, new THREE.MeshBasicMaterial({ color: LAYER_COLOURS[layer.id], wireframe: true }));
+    for (const layer of LAYERS) if (layer.id !== 'group' && layer.id !== 'waypoints') this.markMaterials.set(layer.id, new THREE.MeshBasicMaterial({ color: LAYER_COLOURS[layer.id], wireframe: true }));
     const markGeometry = new THREE.OctahedronGeometry(1);
     this.markPool = new Pool<THREE.Mesh>(
       () => {
@@ -492,6 +526,39 @@ export class MapUi {
       },
     );
     this.growGroupPools();
+    // The waypoints' marks: one solid look per colour a waypoint may wear, from the palette, sharing the
+    // group's shape and therefore its program; and names that wear a diamond of ours. Both pools grow to
+    // the number of waypoints the map has been handed, on the frame it first hands more than ever before.
+    for (const name of WAYPOINT_COLOURS) this.waypointMaterials.set(name, new THREE.MeshBasicMaterial({ color: colourHex(name) }));
+    this.waypointPool = new Pool<THREE.Mesh>(
+      () => {
+        const m = new THREE.Mesh(memberGeometry, this.waypointMaterials.get('accent')!);
+        this.groupMarks.add(m);
+        return m;
+      },
+      (m, on) => {
+        if (m.visible !== on) m.visible = on;
+      },
+    );
+    this.waypointLabelPool = new Pool<HTMLElement>(
+      () => {
+        const el = this.makeLabel(false);
+        el.dataset.layer = 'waypoints';
+        (el.firstElementChild as HTMLElement).className = 'wp';
+        return el;
+      },
+      (el, on) => {
+        if (el.hidden === on) el.hidden = !on;
+      },
+    );
+  }
+
+  /** The waypoints' pools, grown to the list's length when it has outgrown them. A comparison when it has not. */
+  private growWaypointPools(): void {
+    const want = this.waypointList.length;
+    if (this.waypointPool.items.length >= want && this.waypointLabelPool.items.length >= want) return;
+    this.waypointPool.grow(want);
+    this.waypointLabelPool.grow(want);
   }
 
   /**
@@ -547,7 +614,7 @@ export class MapUi {
   private attachDebug(): void {
     const w = window as unknown as { __debug?: Record<string, unknown> };
     if (!w.__debug || w.__debug.spaceMap) return;
-    w.__debug.spaceMap = (tune?: Partial<typeof MARK_TUNE> & Partial<typeof VIEW_TUNE> & Partial<typeof GROUP_MAP_TUNE>) => {
+    w.__debug.spaceMap = (tune?: Partial<typeof MARK_TUNE> & Partial<typeof VIEW_TUNE> & Partial<typeof GROUP_MAP_TUNE> & Partial<typeof WAYPOINT_MAP_TUNE>) => {
       if (tune) {
         for (const k of Object.keys(MARK_TUNE) as (keyof typeof MARK_TUNE)[]) {
           const v = tune[k];
@@ -561,6 +628,10 @@ export class MapUi {
           const v = tune[k];
           if (typeof v === 'number' && Number.isFinite(v)) GROUP_MAP_TUNE[k] = v;
         }
+        for (const k of Object.keys(WAYPOINT_MAP_TUNE) as (keyof typeof WAYPOINT_MAP_TUNE)[]) {
+          const v = tune[k];
+          if (typeof v === 'number' && Number.isFinite(v)) WAYPOINT_MAP_TUNE[k] = v;
+        }
       }
       return {
         follow: this.view.follow,
@@ -570,8 +641,10 @@ export class MapUi {
         marks: this.marks.length,
         selected: this.selected?.name ?? null,
         icons: this.icons.size,
-        pools: { marks: this.markPool.made, shells: this.shellPool.made, splines: this.splinePool.made, ships: this.shipPool.made, labels: this.labelPool.made, shipEntries: this.shipList.made },
-        tune: { ...MARK_TUNE, ...VIEW_TUNE, ...GROUP_MAP_TUNE },
+        // The character's waypoints as the map was last handed them, and what the last frame of each view drew.
+        waypoints: { handed: this.waypointList.length, drawn: { ...this.waypointDrawn }, writes: this.waypointLabels.writes },
+        pools: { marks: this.markPool.made, shells: this.shellPool.made, splines: this.splinePool.made, ships: this.shipPool.made, labels: this.labelPool.made, shipEntries: this.shipList.made, waypoints: this.waypointPool.made, waypointLabels: this.waypointLabelPool.made },
+        tune: { ...MARK_TUNE, ...VIEW_TUNE, ...GROUP_MAP_TUNE, ...WAYPOINT_MAP_TUNE },
       };
     };
     /**
@@ -762,14 +835,20 @@ export class MapUi {
     this.canvas2d.hidden = here.space;
     this.canvas3d.hidden = !here.space;
     this.labelLayer.hidden = !here.space;
-    // The group is read once a frame, before either view draws, so both draw from the same list and
-    // the bar can hide the layer's box the moment there is nobody in it.
+    // The group and the waypoints are read once a frame, before either view draws, so both draw from
+    // the same lists and the bar can hide a layer's box the moment there is nothing in it.
     this.readGroup();
+    this.readWaypoints();
     this.fitLayerBar(here.space);
-    // The view that is not drawing drew nothing of the group, so its count says so rather than
-    // holding what it drew the last time the map was the other way round.
-    if (here.space) this.groupDrawn.planet = 0;
-    else this.groupDrawn.space = 0;
+    // The view that is not drawing drew nothing of either, so its count says so rather than holding
+    // what it drew the last time the map was the other way round.
+    if (here.space) {
+      this.groupDrawn.planet = 0;
+      this.waypointDrawn.planet = 0;
+    } else {
+      this.groupDrawn.space = 0;
+      this.waypointDrawn.space = 0;
+    }
     if (!here.space) {
       this.selectBox.hidden = true;
       this.tip.hidden = true;
@@ -792,18 +871,26 @@ export class MapUi {
     if (fill) fill(this.groupList);
   }
 
+  /** The waypoints, into the list the map owns: whoever holds the book fills it, and with none it stays empty. */
+  private readWaypoints(): void {
+    this.waypointList.begin();
+    const fill = this.source.waypoints ?? waypointMapFeed.fill;
+    if (fill) fill(this.waypointList);
+    this.growWaypointPools();
+  }
+
   /**
    * Which boxes the bar shows: the zone's layers in space, the group's box wherever there is a group,
-   * and the Follow button only in space. On a planet with no group there is nothing to show, so the
-   * bar itself goes — the map is then exactly the map a game with no server has always had. Nothing
-   * is written unless it has changed.
+   * the waypoints' wherever there are any on the world shown, and the Follow button only in space. On a
+   * planet with neither there is nothing to show, so the bar itself goes — the map is then exactly the
+   * map a game with no server has always had. Nothing is written unless it has changed.
    */
   private fitLayerBar(space: boolean): void {
     let any = false;
     for (const layer of LAYERS) {
       const box = this.layerBoxes.get(layer.id);
       if (!box) continue;
-      const on = (space || layer.planet) && (layer.id !== 'group' || this.groupList.length > 0);
+      const on = (space || layer.planet) && (layer.id !== 'group' || this.groupList.length > 0) && (layer.id !== 'waypoints' || this.waypointList.length > 0);
       if (box.hidden === on) box.hidden = !on;
       if (on) any = true;
     }
@@ -883,6 +970,12 @@ export class MapUi {
     };
     c.addEventListener('pointerup', up);
     c.addEventListener('pointercancel', () => (this.dragging = false));
+    // A right-click sets a waypoint where it fell, in the map's own frame, and the browser's own menu
+    // never opens over the map.
+    c.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      this.markAt2d(e.offsetX, e.offsetY);
+    });
     c.addEventListener('wheel', (e) => {
       e.preventDefault();
       // Zoom about the cursor: the map point under it stays under it.
@@ -902,6 +995,28 @@ export class MapUi {
     const w = this.canvas2d.clientWidth;
     const h = this.canvas2d.clientHeight;
     return { x: screenFromMapX(mx, this.look.x, this.scale, w), y: screenFromMapY(mz, this.look.z, this.scale, h) };
+  }
+
+  /**
+   * The point of the planet's map under a place on its canvas, handed on as a waypoint wanted there, with
+   * the named place nearest it and how far it is past that place's own radius.
+   */
+  private markAt2d(x: number, y: number): void {
+    if (!this.source.onMark || !this.scale) return;
+    const w = this.canvas2d.clientWidth;
+    const h = this.canvas2d.clientHeight;
+    const mx = mapFromScreenX(x, this.look.x, this.scale, w);
+    const mz = mapFromScreenY(y, this.look.z, this.scale, h);
+    let near: Poi | null = null;
+    let past = Infinity;
+    for (const p of this.pois) {
+      const d = Math.max(0, Math.hypot(p.x - mx, p.z - mz) - (p.r || 0));
+      if (d < past) {
+        past = d;
+        near = p;
+      }
+    }
+    this.source.onMark(mx, mz, near?.name ?? null, past);
   }
 
   private poiAt(x: number, y: number): Poi | null {
@@ -1014,7 +1129,9 @@ export class MapUi {
         ctx.fillText(p.name, s.x + 6, s.y);
       }
     }
-    // The people you are grouped with, under your own mark so yours is never hidden by one of theirs.
+    // Your waypoints, then the people you are grouped with, both under your own mark so yours is never
+    // hidden by one of theirs.
+    this.drawWaypoints2d(w, h);
     this.drawGroup2d(w, h);
     // The player: an arrow the way they face (the map's X runs the other way from the game's).
     const p = this.source.player();
@@ -1047,7 +1164,7 @@ export class MapUi {
       ctx.fillText(text, s.x, s.y + 16);
       ctx.textAlign = 'left';
     }
-    this.readout.textContent = `${name} · ${Math.round(m.x)}, ${Math.round(m.z)}${p.altitude !== null ? ` · ${Math.round(p.altitude)} m up` : ''} · ${(this.scale * 100).toFixed(0)} m per 100 px · drag, wheel, double-click to centre, click a place to go`;
+    this.readout.textContent = `${name} · ${Math.round(m.x)}, ${Math.round(m.z)}${p.altitude !== null ? ` · ${Math.round(p.altitude)} m up` : ''} · ${(this.scale * 100).toFixed(0)} m per 100 px · drag, wheel, double-click to centre, click a place to go, right-click to mark`;
   }
 
   /**
@@ -1104,6 +1221,54 @@ export class MapUi {
       ctx.fillStyle = LAYER_CSS.group;
       ctx.fillText(m.label, sx + gap, sy);
       this.groupDrawn.planet++;
+    }
+  }
+
+  /**
+   * The waypoints on the planet's map: a diamond in each one's own colour where it stands and its name
+   * beside it, the tracked one larger and ringed. Drawn straight onto the canvas, through the same four
+   * projection functions as everything else on it, so a frame of it writes nothing to the page.
+   */
+  private drawWaypoints2d(w: number, h: number): void {
+    this.waypointDrawn.planet = 0;
+    if (!this.layersOn.has('waypoints') || !this.waypointList.length) return;
+    const ctx = this.ctx;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    const centre = this.source.center();
+    const cx = centre ? centre.x : 0;
+    const cz = centre ? centre.z : 0;
+    const shade = colourOf(COL.void);
+    for (let i = 0; i < this.waypointList.length; i++) {
+      const m = this.waypointList.items[i];
+      const sx = screenFromMapX(mapFromGameX(cx, m.x), this.look.x, this.scale, w);
+      const sy = screenFromMapY(mapFromGameZ(cz, m.z), this.look.z, this.scale, h);
+      if (sx < -60 || sy < -20 || sx > w + 60 || sy > h + 20) continue;
+      const colour = colourOf(waypointCol(m.colour));
+      const r = WAYPOINT_MAP_TUNE.waypointPixels * (m.tracked ? WAYPOINT_MAP_TUNE.waypointTracked : 1);
+      ctx.fillStyle = colour;
+      ctx.strokeStyle = shade;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - r);
+      ctx.lineTo(sx + r, sy);
+      ctx.lineTo(sx, sy + r);
+      ctx.lineTo(sx - r, sy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      if (m.tracked) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, r * WAYPOINT_MAP_TUNE.waypointRing, 0, Math.PI * 2);
+        ctx.strokeStyle = colour;
+        ctx.stroke();
+      }
+      const gap = WAYPOINT_MAP_TUNE.waypointGap;
+      ctx.fillStyle = shade;
+      ctx.fillText(m.name, sx + gap + 1, sy + 1);
+      ctx.fillStyle = colour;
+      ctx.fillText(m.name, sx + gap, sy);
+      this.waypointDrawn.planet++;
     }
   }
 
@@ -1450,6 +1615,50 @@ export class MapUi {
     this.splinePool.end();
     this.labelPool.end();
     this.drawGroup3d(w, h);
+    this.drawWaypoints3d(w, h);
+  }
+
+  /**
+   * The waypoints in space: a solid mark in each one's own colour where it stands, the tracked one larger,
+   * with its name beside it. The marks share the group's shape, and so its program; a name that says the
+   * same thing in the same place and colour writes nothing.
+   */
+  private drawWaypoints3d(w: number, h: number): void {
+    this.waypointPool.begin();
+    this.waypointLabelPool.begin();
+    this.waypointDrawn.space = 0;
+    if (this.layersOn.has('waypoints')) {
+      const size = Math.max(WAYPOINT_MAP_TUNE.waypointMin, this.view.orbit.distance * WAYPOINT_MAP_TUNE.waypointSize);
+      for (let i = 0; i < this.waypointList.length; i++) {
+        const m = this.waypointList.items[i];
+        const mesh = this.waypointPool.take();
+        mesh.position.set(m.x, m.y, m.z);
+        mesh.scale.setScalar(m.tracked ? size * WAYPOINT_MAP_TUNE.waypointTracked : size);
+        const mat = this.waypointMaterials.get(m.colour) ?? this.waypointMaterials.get('accent')!;
+        if (mesh.material !== mat) mesh.material = mat;
+        this.placeWaypointLabel(m, w, h);
+        this.waypointDrawn.space++;
+      }
+    }
+    this.waypointPool.end();
+    this.waypointLabelPool.end();
+  }
+
+  /** A waypoint's name over the space canvas, kept by pool slot as the group's names are. */
+  private placeWaypointLabel(m: WaypointMark, w: number, h: number): void {
+    this.scratch.set(m.x, m.y, m.z).project(this.camera3d);
+    if (this.scratch.z > 1 || Math.abs(this.scratch.x) > 1 || Math.abs(this.scratch.y) > 1) return;
+    const slot = this.waypointLabelPool.used;
+    const el = this.waypointLabelPool.take();
+    const px = Math.round((this.scratch.x * 0.5 + 0.5) * w) + 8;
+    const py = Math.round((-this.scratch.y * 0.5 + 0.5) * h) - 8;
+    const write = this.waypointLabels.place(slot, m.name, px, py);
+    if (write & LABEL_TEXT) (el.lastElementChild as HTMLElement).textContent = m.name;
+    if (write & LABEL_MOVE) el.style.transform = `translate(${px}px, ${py}px)`;
+    if (this.waypointLabelColours[slot] !== m.colour) {
+      this.waypointLabelColours[slot] = m.colour;
+      el.style.color = `var(--${m.colour})`;
+    }
   }
 
   /**

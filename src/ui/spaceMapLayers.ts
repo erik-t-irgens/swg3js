@@ -12,19 +12,21 @@
 // simply gives those layers nothing. Nothing in this file knows a zone's name or any of the game's
 // numbers; the test's data is all made up.
 //
-// One layer comes from nothing the converter wrote: the people you are grouped with. They are read
-// each frame out of `groupMapFeed`, which whoever holds the group sets and which is null while there
-// is none, so a game with no server draws that layer nothing and shows no box for it.
+// Two layers come from nothing the converter wrote: the people you are grouped with, and the
+// character's own waypoints. They are read each frame out of `groupMapFeed` and `waypointMapFeed`,
+// which whoever holds each sets; a feed with nothing to give gives nothing, so a game with no group and
+// no waypoints draws those layers nothing and shows no box for them.
 
 /** The map's switchable layers, in the order their boxes are shown. */
-export type LayerId = 'stations' | 'points' | 'launch' | 'fields' | 'nebulae' | 'ships' | 'group';
+export type LayerId = 'stations' | 'points' | 'launch' | 'fields' | 'nebulae' | 'ships' | 'group' | 'waypoints';
 
 /**
  * Each layer's box, the zone-map icon the client drew it with (`space_ui/<icon>.png` in the packs),
  * and whether it means anything on a planet as well as in space. Everything a zone's pack holds is
- * space only; the people you are grouped with are on whichever world you are on, so theirs is the one
- * box the planet's map shows — and the only one the client never drew, so it has no icon of its own
- * and its marks wear a plain dot.
+ * space only; the people you are grouped with and your own waypoints are on whichever world you are on,
+ * so theirs are the boxes the planet's map shows — and the only ones the client never drew, so they have
+ * no icon of the client's: a member wears a plain dot, and a waypoint a diamond of our own drawing (never
+ * the client's `zone_waypoint`, which is the launch point's, by the owner's decision).
  */
 export const LAYERS: readonly { id: LayerId; label: string; icon: string; planet: boolean }[] = [
   { id: 'stations', label: 'Stations', icon: 'zone_spacestation', planet: false },
@@ -34,6 +36,7 @@ export const LAYERS: readonly { id: LayerId; label: string; icon: string; planet
   { id: 'nebulae', label: 'Nebulae', icon: 'zone_nebula', planet: false },
   { id: 'ships', label: 'Ships', icon: 'zone_ship', planet: false },
   { id: 'group', label: 'Group', icon: '', planet: true },
+  { id: 'waypoints', label: 'Waypoints', icon: '', planet: true },
 ];
 
 /** One thing the map shows and can name, in the GAME frame (metres). */
@@ -579,6 +582,99 @@ export function screenFromMapX(mapX: number, lookX: number, scale: number, width
 export function screenFromMapY(mapZ: number, lookZ: number, scale: number, height: number): number {
   return height / 2 - (mapZ - lookZ) / scale;
 }
+
+/** A point on the canvas, from its left edge, back to a map X: `screenFromMapX` the other way round. */
+export function mapFromScreenX(sx: number, lookX: number, scale: number, width: number): number {
+  return lookX + (sx - width / 2) * scale;
+}
+
+/** A point on the canvas, from its top edge, back to a map Z. */
+export function mapFromScreenY(sy: number, lookZ: number, scale: number, height: number): number {
+  return lookZ - (sy - height / 2) * scale;
+}
+
+// ---- The character's own waypoints, on whichever map is showing. ----
+
+/**
+ * Invented: how the maps draw the character's waypoints. Every number here is ours and every one is live
+ * through `__debug.spaceMap({ waypointPixels, waypointRing, waypointGap, waypointSize, waypointMin,
+ * waypointTracked })`. The hundred a character may keep is the owner's own and is the book's, not here.
+ */
+export const WAYPOINT_MAP_TUNE = {
+  /** The planet map: half a waypoint's diamond, in screen pixels. */
+  waypointPixels: 5,
+  /** The planet map: the ring round the tracked one, as a multiple of its own half-diamond. */
+  waypointRing: 1.9,
+  /** The planet map: pixels between a waypoint's mark and its name. */
+  waypointGap: 9,
+  /** The space map: a waypoint's mark as a share of the distance looked at, so it holds its size on screen. */
+  waypointSize: 0.011,
+  /** The space map: a waypoint's mark is never smaller than this many metres. */
+  waypointMin: 10,
+  /** How much larger the tracked one is drawn, on both maps. */
+  waypointTracked: 1.5,
+};
+
+/** One waypoint the maps draw, filled in place by whoever holds the book. */
+export interface WaypointMark {
+  /** Its id in the book (`w12`, or a quest's `q:<quest>#<step>`), the same every frame. */
+  key: string;
+  name: string;
+  /** One of the palette's names (`src/story/waypoints.ts`'s `WAYPOINT_COLOURS`). */
+  colour: string;
+  tracked: boolean;
+  /** Where it is, in the GAME frame and in metres; the height is nought on a planet, where it stands on the ground. */
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * The waypoints the maps draw, written straight into entries the maps own: filling it makes no array, no
+ * string and no object once as many have been seen once, which is what lets it be read every frame.
+ */
+export class WaypointList {
+  readonly items: WaypointMark[] = [];
+  made = 0;
+  private n = 0;
+
+  begin(): void {
+    this.n = 0;
+  }
+
+  add(key: string, name: string, colour: string, tracked: boolean, x: number, y: number, z: number): void {
+    if (this.n === this.items.length) {
+      this.items.push({ key: '', name: '', colour: '', tracked: false, x: 0, y: 0, z: 0 });
+      this.made++;
+    }
+    const m = this.items[this.n++];
+    m.key = key;
+    m.name = name;
+    m.colour = colour;
+    m.tracked = tracked;
+    m.x = x;
+    m.y = y;
+    m.z = z;
+  }
+
+  get length(): number {
+    return this.n;
+  }
+
+  /** The tracked one, or null. */
+  get tracked(): WaypointMark | null {
+    for (let i = 0; i < this.n; i++) if (this.items[i].tracked) return this.items[i];
+    return null;
+  }
+}
+
+/**
+ * Where the maps read the waypoints from. Whoever holds the character's story book sets `fill`; it gives
+ * the waypoints that are switched on, on the world the map shows, in the game's frame, and nothing at all
+ * with no character in play. It is called once for every frame the map window draws, so it must make
+ * nothing and do no work beyond reading the book as it stands.
+ */
+export const waypointMapFeed: { fill: ((out: WaypointList) => void) | null } = { fill: null };
 
 // ---- The group: the people you are grouped with, on whichever map is showing. ----
 
