@@ -1,0 +1,10 @@
+// The page of the entry the TEST: an entry in the file job writes into the ISB's file: seen once the entry's
+// time has come. None of it is story.
+kind: intercept
+id: test-file-page
+title: TEST INTERCEPT 0001
+issuer: TEST ISSUER
+
+TEST: This is a test intercept, the page of a test entry in the file.
+
+[stamp] TEST CLASSIFIED

@@ -1,0 +1,19 @@
+// Documents and a call: a two-page memo handed over as the job begins and done once it is read to its last
+// page, which writes a note into the journal, then a call from the test clerk heard to its end in the
+// conversation band. Repeatable, so the memo can be handed over and read again. None of it is story.
+{
+  "id": "docs",
+  "title": "TEST: read a document",
+  "givers": [{ "kind": "debug" }],
+  "repeat": { "every": "always" },
+  "start": ["read"],
+  "steps": {
+    "read": {
+      "type": "document",
+      "doc": "doc/test-pages",
+      "do": { "done": ["note(\"TEST: a note in the journal, written where the player read the memo\")"] },
+      "next": ["call"],
+    },
+    "call": { "type": "comm", "doc": "doc/test-call", "who": "cast/test-clerk", "ends": "done" },
+  },
+}

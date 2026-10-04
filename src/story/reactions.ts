@@ -9,7 +9,9 @@
 // on the speaker's track is `niceAt` or more; mean when that track has burned them, or its Trust is
 // `meanTrust` or less; otherwise mid. The track is the speaker's faction's -- the Rebellion's for a rebel,
 // the Empire's for an imperial, and the freelance track for anybody else. Until this pass's last wave moves
-// Standing at all, everybody greets at mid.
+// Standing at all, everybody greets at mid. The ISB's file can only make it colder: a level of it that says so
+// (`reacts` in `file.jsonc`, handed over in the view) holds a track's people to `mid` or `mean` however the
+// numbers stand, from the moment the level is reached and before the player can read the entry that reached it.
 //
 // **Which line.** Drawn from the speaker's own key and the shared clock's `every`, so the same person says the
 // same thing for a while and then something else, the same in every browser, with nothing kept and nothing
@@ -56,13 +58,18 @@ export function trackOfFaction(faction: string | null | undefined): Track {
   return 'freelance';
 }
 
-/** How warmly somebody on a track greets the character this book is: nice, mid or mean (the head of this file). */
-export function warmthOf(book: Pick<StoryBook, 'tracks'> | null | undefined, track: Track): Warmth {
+/**
+ * How warmly somebody on a track greets the character this book is: nice, mid or mean (the head of this file),
+ * no warmer than `cap`, the coldest the ISB's file on them allows on that track.
+ */
+export function warmthOf(book: Pick<StoryBook, 'tracks'> | null | undefined, track: Track, cap?: 'mid' | 'mean' | null): Warmth {
   const t = book?.tracks?.[track] as { standing?: number; trust?: number; status?: string } | undefined;
-  if (!t) return 'mid';
-  if (t.status === 'burned' || (typeof t.trust === 'number' && t.trust <= REACTION_TUNE.meanTrust)) return 'mean';
-  if (typeof t.standing === 'number' && t.standing >= REACTION_TUNE.niceAt) return 'nice';
-  return 'mid';
+  let w: Warmth = 'mid';
+  if (t && (t.status === 'burned' || (typeof t.trust === 'number' && t.trust <= REACTION_TUNE.meanTrust))) w = 'mean';
+  else if (t && typeof t.standing === 'number' && t.standing >= REACTION_TUNE.niceAt) w = 'nice';
+  if (cap === 'mean') return 'mean';
+  if (cap === 'mid' && w === 'nice') return 'mid';
+  return w;
 }
 
 /** A number in [0, n) that depends on nothing but `seed`. */
@@ -113,11 +120,11 @@ export interface Reaction {
  * diction (they say the game's invented lines, as before). `has(table, key)` answers whether a table holds a
  * key once it has come, null before.
  */
-export function reactionFor(voice: ReactionVoice | null | undefined, book: Pick<StoryBook, 'tracks'> | null | undefined, speaker: string, now: number, has?: (table: string, key: string) => boolean | null): Reaction | null {
+export function reactionFor(voice: ReactionVoice | null | undefined, book: Pick<StoryBook, 'tracks'> | null | undefined, speaker: string, now: number, has?: (table: string, key: string) => boolean | null, react?: Partial<Record<Track, 'mid' | 'mean'>> | null): Reaction | null {
   const diction = voice?.diction;
   if (!diction || !/^[A-Za-z0-9_]{1,40}$/.test(diction)) return null;
   const track = trackOfFaction(voice?.faction);
-  const warmth = warmthOf(book, track);
+  const warmth = warmthOf(book, track, react?.[track] ?? null);
   const table = reactionTable(diction);
   const seed = reactionSeed(speaker, now);
   const keyHas = has ? (key: string) => has(table, key) : undefined;

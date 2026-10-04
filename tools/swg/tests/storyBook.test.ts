@@ -185,17 +185,18 @@ const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWa
   const c = cleanBook(JSON.parse(text))! as Record<string, unknown>;
   ok(!!c && Object.getPrototypeOf(c) === Object.prototype && !Object.prototype.hasOwnProperty.call(c, '__proto__') && !Object.prototype.hasOwnProperty.call(c, 'constructor') && !Object.prototype.hasOwnProperty.call(c, 'prototype'), 'a top-level __proto__, constructor or prototype in a book is not carried, and the book keeps a plain prototype');
   ok(c.x === undefined && c.admin === undefined && c.y === undefined && c.rev === 2 && (c.quests as Record<string, unknown>)['own:a'] !== undefined, 'nothing under them can be reached through the book, and the rest of it is read as it was');
-  // A later wave's section past the budget is dropped whole; one within it is kept.
+  // A later wave's section past the budget is dropped whole; one within it is kept. (`echoes` is a later
+  // pass's; the journal, which this used to stand in for, is a section of its own now.)
   const limits = { ...BOOK_LIMITS, sectionNodes: 50 };
-  const big = cleanBook({ ...emptyBook('char-1'), journal: Array.from({ length: 60 }, (_, i) => i) }, limits)!;
-  const small = cleanBook({ ...emptyBook('char-1'), journal: Array.from({ length: 40 }, (_, i) => i) }, limits)!;
-  ok(big.journal === undefined && Array.isArray(small.journal) && (small.journal as number[]).length === 40, `a later wave's section with more values than the book allows (${limits.sectionNodes}) is dropped whole, and one within it kept`);
+  const big = cleanBook({ ...emptyBook('char-1'), echoes: Array.from({ length: 60 }, (_, i) => i) }, limits)!;
+  const small = cleanBook({ ...emptyBook('char-1'), echoes: Array.from({ length: 40 }, (_, i) => i) }, limits)!;
+  ok(big.echoes === undefined && Array.isArray(small.echoes) && (small.echoes as number[]).length === 40, `a later wave's section with more values than the book allows (${limits.sectionNodes}) is dropped whole, and one within it kept`);
 }
 {
   // A section named for something every object already has. Looked up in a plain table of cleaners, these
   // found the language's own methods and called them, which threw out of the relay and took it down.
   const names = ['valueOf', 'hasOwnProperty', 'toString', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString', '__defineGetter__', '__lookupGetter__'];
-  const raw = JSON.parse(`{"v":1,"char":"char-1","rev":4,"waypoints":[],"nextWp":1,"wpOff":[],"trackWp":null,"tracked":[],${names.map((n) => `"${n}":1`).join(',')},"journal":[1,2]}`);
+  const raw = JSON.parse(`{"v":1,"char":"char-1","rev":4,"waypoints":[],"nextWp":1,"wpOff":[],"trackWp":null,"tracked":[],${names.map((n) => `"${n}":1`).join(',')},"echoes":[1,2]}`);
   let c: Record<string, unknown> | null = null;
   let threw = '';
   try {
@@ -203,7 +204,7 @@ const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWa
   } catch (e) {
     threw = String(e);
   }
-  ok(!threw && !!c && c.rev === 4 && Array.isArray(c.journal), `a book with sections named valueOf, hasOwnProperty, toString and the rest is cleaned, not thrown on (${threw || 'read'})`);
+  ok(!threw && !!c && c.rev === 4 && Array.isArray(c.echoes), `a book with sections named valueOf, hasOwnProperty, toString and the rest is cleaned, not thrown on (${threw || 'read'})`);
   ok(!!c && names.every((n) => !Object.prototype.hasOwnProperty.call(c, n)) && typeof c.toString === 'function' && typeof c.valueOf === 'function', 'and none of them is kept: the book still answers the language\'s own names with the language\'s own methods');
   ok(!!c && `${c}` === '[object Object]', 'so it can still be turned into words like any object');
   // The history a quest keeps, cut to its length as it is read.

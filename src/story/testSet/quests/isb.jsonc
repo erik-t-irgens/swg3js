@@ -1,0 +1,20 @@
+// An entry in the ISB's file: written as the job begins, heavy enough to cross the test file's first level at
+// once (which the Empire's people feel straight away), and seen in the File only after its reveal delay (six
+// game hours, three real minutes) or once its page is read. Repeatable, so the file grows each time. None of it
+// is story.
+{
+  "id": "file",
+  "title": "TEST: an entry in the file",
+  "givers": [{ "kind": "debug" }],
+  "repeat": { "every": "always" },
+  "start": ["mark"],
+  "steps": {
+    "mark": {
+      "type": "timer",
+      "objective": "TEST: wait five seconds",
+      "for": { "seconds": 5 },
+      "do": { "start": ["file(isb, incident, 12, doc/test-file-page, test-tag)"] },
+      "ends": "done",
+    },
+  },
+}

@@ -29,13 +29,17 @@
 //     once, refused when it cannot be met and never taken out of (nor credits put into) a purse a server keeps;
 //   - a conversation through this host: refused with no conversation open or to somebody else, its nodes handed
 //     to the listener before the call returns, a price charged out of the purse every time it is chosen and
-//     said, and one the purse would not give said as not spent.
+//     said, and one the purse would not give said as not spent;
+//   - a document through this host: handed to the window, frozen by its words' hash in the store handed in or in
+//     the host itself, read again as that very page, and read to its end; and a conversation's transcript
+//     written here as its window closes, once.
 //
 // Synthetic: no browser, no socket, nothing read from the game's files.
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { BookClient, STORY_TUNE, type StoryLine } from '../../../src/story/bookClient.ts';
-import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally } from '../../../src/story/localHost.ts';
+import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally, type TextKeep } from '../../../src/story/localHost.ts';
+import type { DocWord } from '../../../src/story/docRules.ts';
 import type { NodeWord } from '../../../src/story/storyHost.ts';
 import { Purse } from '../../../src/net/purse.ts';
 import { noteWords } from '../../../src/story/notes.ts';
@@ -64,7 +68,7 @@ const T0 = 1_800_000_000_000;
 const CANTINA = 'object/building/tatooine/shared_cantina_tatooine.iff';
 
 /** One whole stand-in game: a storage, a book client, a host, a world, a purse, a backpack and the detectors. */
-function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; refuseCharges?: boolean } = {}) {
+function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; refuseCharges?: boolean; texts?: TextKeep } = {}) {
   const store = new Map<string, string>();
   const storage = { get: (k: string) => store.get(k) ?? null, set: (k: string, v: string) => (store.set(k, v), true), remove: (k: string) => void store.delete(k) };
   const clock = { now: T0, wall: 1000 };
@@ -115,6 +119,7 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
     now: () => clock.now,
     wall: () => clock.wall,
     inWorld: () => world.inWorld,
+    ...(opts.texts ? { texts: opts.texts } : {}),
   });
   client.onChange(() => host.changed());
   client.use('char-1');
@@ -674,6 +679,40 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   r.said.length = 0;
   r.host.talk('pick', CLERK, 'pay');
   ok(r.paid.some((o) => o.charge === 10) && r.said.includes('10 credits could not be spent') && !r.said.includes('Spent 10 credits'), 'a price the purse would not give is said as not spent, never as spent');
+}
+
+// ---- documents and the journal through this browser's own host --------------------------------------------------------
+{
+  const CLERK = 'test:cast/test-clerk';
+  // With the browser's own store of words handed in, and without one (they then last as long as the host).
+  const store = new Map<string, string>();
+  const keep: TextKeep = { get: (h) => store.get(h), put: (t) => void Object.keys(t).forEach((h) => store.set(h, t[h])) };
+  for (const kept of [true, false]) {
+    const g = game(kept ? { texts: keep } : {});
+    const docs: DocWord[] = [];
+    g.host.onDoc((w) => docs.push(w));
+    g.host.grant('test:docs');
+    const first = g.host.read('test:doc/test-pages');
+    const e = g.client.book?.journal?.[0];
+    ok(first.ok && docs.length === 1 && !!docs[0].view && e?.kind === 'doc' && !!e.h && g.host.text(e.h) === JSON.stringify(docs[0].view) && (!kept || store.get(e.h) === g.host.text(e.h)), `a page read here is handed to the window before the call returns, and its words kept by their hash ${kept ? 'in the store handed in' : 'in the host itself'}`);
+    g.clock.now += 60000;
+    g.host.read('test:doc/test-pages');
+    ok(JSON.stringify(docs[1]?.view) === JSON.stringify(docs[0].view) && g.client.book!.journal!.filter((x) => x.kind === 'doc').length === 1, `and read again it is the very page first read, out of those words, with no second entry (${kept ? 'a store' : 'no store'})`);
+    g.host.read('test:doc/test-pages', { end: true });
+    ok(docs[2]?.end === true && g.stepOf('test:docs', 'read')?.state === 'done', 'read to its end, the answer says so, and the step waiting on it is done');
+  }
+  // A conversation's transcript, written as its window closes, with the name it showed.
+  const g = game({ texts: keep });
+  g.host.talk('open', CLERK);
+  g.host.talk('pick', CLERK, 'name');
+  g.host.talk('pick', CLERK, null);
+  g.host.talk('pick', CLERK, 'bye');
+  ok(!(g.client.book?.journal ?? []).some((x) => x.kind === 'talk'), 'a conversation under way writes nothing yet');
+  g.host.talk('close', CLERK, null, null, { read: {}, name: 'TEST: as shown' });
+  const t = g.client.book?.journal?.find((x) => x.kind === 'talk');
+  ok(!!t && t.with[0] === CLERK && t.title === 'TEST CLERK' && (t.lines?.length ?? 0) >= 5 && t.lines!.every((l) => !!l.h && store.has(l.h)), `closed, its transcript is written here, the clerk as named by then, every line's words kept (${t?.lines?.length} lines)`);
+  g.host.talk('close', CLERK, null, null, { read: {}, name: null });
+  ok(g.client.book!.journal!.filter((x) => x.kind === 'talk').length === 1, 'and closing again writes nothing more');
 }
 
 console.log(`\n${checks} checks passed`);

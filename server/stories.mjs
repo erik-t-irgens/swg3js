@@ -75,6 +75,19 @@
 // through the purse's own spend), its notes and view sent -- and the node it reached goes back to that line
 // alone (`node`).
 //
+// **Documents, the journal and the file (story 4).** A line asks to open a document (`read`); it is opened only
+// if this character was handed it (`whyNotRead`: a step's page, a card offered, one `doc()` handed, the page of a
+// file entry it may see now), read the first time as it stands, frozen into the journal and handed back as it
+// was read (`doc`) -- every later reading is that page, by its words' hash, whatever the owner has written
+// since. The words of every journal entry are kept once for everybody, by hash (`storyTexts`, records
+// `{ t: 'storyText', h, text }`, written before the batch that names them), up to `textsMax`; a line asks for the
+// words of a stretch of its journal it lost (`journal`), and when the server takes a book played alone it asks
+// that browser for the words of it the server has not got (`need`), which come up in pieces (`texts`) and are
+// kept only when each is what its hash says. A conversation's transcript is written as its window closes, the
+// client's own lines in the words the browser read them out in. A book handed up that would lose any of the
+// journal or the file within one timeline is refused, and the server's own stands (`shrinksWithin`). Nothing
+// about the file is ever said.
+//
 // **In pieces.** A browser's input is dropped past 64 KB a second, so a book goes up in pieces
 // (`src/story/storyWire.ts`) and is put back together here, no larger than `offerMax` and with no longer
 // than `offerWait` between one piece and the next. It comes down in pieces of the same size.
@@ -90,22 +103,24 @@
 // of the worlds, the sets' files, the purse and the ledger, who is the admin, who is grouped and which
 // creatures the world shares are all handed in too, so the tests run every rule here without a relay.
 
-import { BACKSTOP_LIMITS, BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, emptyBook, isCharacterId, markPaidBy, ownOf, whyNot } from '../src/story/book.ts';
+import { BACKSTOP_LIMITS, BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, emptyBook, isCharacterId, markPaidBy, ownOf, shrinksWithin, whyNot } from '../src/story/book.ts';
 import { HostCore } from '../src/story/hostCore.ts';
+import { isTextHash, journalHashes, textHash } from '../src/story/journal.ts';
 import { noteForWire } from '../src/story/notes.ts';
 import { awaits, evalCond, placeOf, rewardOfKey, whyNotGrant } from '../src/story/quests.ts';
 import { emptySet, joinSets, loadSet } from '../src/story/set.ts';
-import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, nodeWord } from '../src/story/storyWire.ts';
+import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, cleanTexts, nodeWord } from '../src/story/storyWire.ts';
 import { viewHash } from '../src/story/view.ts';
 import { gameToRawX, gameToRawZ, isQuestWaypoint } from '../src/story/waypoints.ts';
 
 /**
  * The story this server holds, as its hail says it: 1 was the book and its waypoints; 2 the jobs, run and
- * paid here; 3 is the conversations, played here. A browser never says a story word to a server whose hail
- * does not carry one, the jobs' words only to one that says 2, and a conversation only to one that says 3,
- * so a newer browser never asks an older server for a word it does not know.
+ * paid here; 3 the conversations, played here; 4 is the documents, the journal and the file. A browser never
+ * says a story word to a server whose hail does not carry one, the jobs' words only to one that says 2, a
+ * conversation only to one that says 3 and a document or the journal's words only to one that says 4, so a
+ * newer browser never asks an older server for a word it does not know.
  */
-export const STORY_WIRE_VERSION = 3;
+export const STORY_WIRE_VERSION = 4;
 
 /** Every number this file invents. None of them is from the game. */
 export const STORY_TUNING = {
@@ -161,6 +176,14 @@ export const STORY_TUNING = {
   flagMax: 2000,
   /** Steps one job's record may hold. */
   stepsMax: 64,
+  /** Entries one character's journal holds; past it nothing more is written, and nothing is ever taken away. */
+  journalMax: 20000,
+  /** Entries one agency's file on a character holds. */
+  fileMax: 5000,
+  /** Bytes of journal words this server keeps for everybody: past it an entry is still written, its words not kept. */
+  textsMax: 64 * 1024 * 1024,
+  /** Journal words `read`, `journal`, `texts` and `mine` words one browser may send in a second. */
+  docRate: 6,
 };
 
 /** What an opening or an answer over the allowance is told, as its node's reason. */
@@ -184,6 +207,8 @@ function limitsOf(tuning = STORY_TUNING) {
     quests: capped(tuning.questMax, BOOK_LIMITS.quests, BACKSTOP_LIMITS.quests),
     flags: capped(tuning.flagMax, BOOK_LIMITS.flags, BACKSTOP_LIMITS.flags),
     steps: capped(tuning.stepsMax, BOOK_LIMITS.steps, BACKSTOP_LIMITS.steps),
+    journal: capped(tuning.journalMax, BOOK_LIMITS.journal, BACKSTOP_LIMITS.journal),
+    file: capped(tuning.fileMax, BOOK_LIMITS.file, BACKSTOP_LIMITS.file),
   };
 }
 
@@ -250,6 +275,13 @@ export function nearShape(shape, x, z, slack = 0) {
  */
 export function applyStory(data, rec) {
   if (!rec || typeof rec !== 'object') return false;
+  if (rec.t === 'storyText') {
+    // A journal's words, kept once for everybody by their hash: only words that are what their hash says.
+    if (!isTextHash(rec.h) || typeof rec.text !== 'string' || rec.text.length > STORY_WIRE.textMax || textHash(rec.text) !== rec.h) return false;
+    data.storyTexts ??= Object.create(null);
+    data.storyTexts[rec.h] = rec.text;
+    return true;
+  }
   if (rec.t !== 'story' && rec.t !== 'storyBook' && rec.t !== 'storyArchive') return false;
   if (!isCharacterId(rec.id)) return false;
   data.stories ??= Object.create(null);
@@ -293,6 +325,13 @@ export function readStories(data) {
   }
   data.stories = books;
   data.storyArchive = archive;
+  // The journal's words, keyed by their hash: rebuilt with no prototype, and only a text under its own hash.
+  const texts = Object.create(null);
+  for (const h of Object.keys(data.storyTexts ?? {})) {
+    const t = data.storyTexts[h];
+    if (isTextHash(h) && typeof t === 'string') texts[h] = t;
+  }
+  data.storyTexts = texts;
   return data;
 }
 
@@ -343,7 +382,11 @@ export class Stories {
     this.core3Read = core3;
     /** How the game's own conversations were last read: the trees folded and played, and the adoptions' problems. */
     this.core3 = null;
-    this.data = { stories: Object.create(null), storyArchive: Object.create(null) };
+    this.data = { stories: Object.create(null), storyArchive: Object.create(null), storyTexts: Object.create(null) };
+    /** Bytes of journal words kept (`textsMax` holds it), and the words asked of a browser and coming up in pieces. */
+    this.textBytes = 0;
+    /** @type {Map<number, Reassembly>} words coming up in pieces, by line */
+    this.textsIn = new Map();
     /** The sets in use, joined, and how each read came out. */
     this.lib = emptySet();
     this.sets = [];
@@ -370,7 +413,7 @@ export class Stories {
     this.guarded = 0;
     this.changes = 0;
     this.refusals = 0;
-    this.stats = { events: 0, refused: 0, batches: 0, lazy: 0, flushed: 0, paidCredits: 0, paidItems: 0, charged: 0, settled: 0, settleCredits: 0, settleItems: 0, owedLater: 0, parked: 0, sweeps: 0, sweepMs: 0, views: 0, talks: 0, lastWhy: '' };
+    this.stats = { events: 0, refused: 0, batches: 0, lazy: 0, flushed: 0, paidCredits: 0, paidItems: 0, charged: 0, settled: 0, settleCredits: 0, settleItems: 0, owedLater: 0, parked: 0, sweeps: 0, sweepMs: 0, views: 0, talks: 0, reads: 0, entries: 0, transcripts: 0, texts: 0, textsFull: 0, needs: 0, textsTaken: 0, shrinks: 0, lastWhy: '' };
     /** Why events were refused, by kind, for the status page. */
     this.refusedBy = Object.create(null);
   }
@@ -379,7 +422,38 @@ export class Stories {
   load(data) {
     readStories(data);
     this.data = data;
+    this.textBytes = 0;
+    for (const h of Object.keys(data.storyTexts)) this.textBytes += data.storyTexts[h].length;
     return this;
+  }
+
+  /**
+   * Journal words kept, each once for everybody by its hash, written down before the batch that names them;
+   * past `textsMax` an entry is still written and only its words are not kept, which it then shows as such.
+   * Answers how many were new.
+   */
+  keepTexts(texts) {
+    let n = 0;
+    for (const h of Object.keys(texts ?? {})) {
+      const t = texts[h];
+      if (Object.hasOwn(this.data.storyTexts, h) || typeof t !== 'string') continue;
+      if (this.textBytes + t.length > this.tuning.textsMax) {
+        this.stats.textsFull++;
+        continue;
+      }
+      this.write({ t: 'storyText', h, text: t }, true);
+      if (Object.hasOwn(this.data.storyTexts, h)) {
+        this.textBytes += t.length;
+        this.stats.texts++;
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /** The words of a journal entry's hash, or undefined: what reading a frozen page looks it up by. */
+  textOf(h) {
+    return Object.hasOwn(this.data.storyTexts, h) ? this.data.storyTexts[h] : undefined;
   }
 
   // ---- the sets -------------------------------------------------------------------------------------------
@@ -470,7 +544,7 @@ export class Stories {
   windowsOf(session) {
     let w = this.windows.get(session);
     if (!w) {
-      w = { wp: { at: 0, lines: 0 }, sync: { at: 0, lines: 0 }, ev: { at: 0, lines: 0 }, talk: { at: 0, lines: 0 } };
+      w = { wp: { at: 0, lines: 0 }, sync: { at: 0, lines: 0 }, ev: { at: 0, lines: 0 }, talk: { at: 0, lines: 0 }, doc: { at: 0, lines: 0 } };
       this.windows.set(session, w);
     }
     return w;
@@ -515,6 +589,7 @@ export class Stories {
     if (word.do === 'offer') return this.offer(c, word);
     if (word.do === 'wp') return this.waypoint(c, word);
     if (word.do === 'talk') return this.talk(c, word);
+    if (word.do === 'read' || word.do === 'journal' || word.do === 'texts' || word.do === 'mine') return this.docWord(c, word);
     // The jobs' words: each counts against one allowance, and none is heard from a line whose book is not
     // settled here (it is being settled, or the line has only just been taken over by another browser).
     if (!mayStory(this.windowsOf(c.id).ev, Date.now(), this.tuning.evRate)) return { ok: false, why: 'too often', tell: [] };
@@ -621,6 +696,13 @@ export class Stories {
       this.guarded++;
       return this.answerAndRun(c, 'server');
     }
+    // A copy that descends from this server's own and has lost pages of the journal or the file is not the
+    // same story carried on: the server's stands, since neither ever shrinks within one timeline.
+    const shrink = shrinksWithin(offered, mine);
+    if (shrink) {
+      this.stats.shrinks++;
+      return this.refuse(c, shrink);
+    }
     if (mine) this.write({ t: 'storyArchive', id: character, book: mine });
     offered.rev = Math.max(mine?.rev ?? 0, offered.rev) + 1;
     offered.base = 0;
@@ -634,6 +716,14 @@ export class Stories {
     const out = this.answer(c.id, character, 'browser');
     this.payOwed(c, owed, out.tell);
     this.settled(c, out.tell);
+    // The journal's words this server has not got, asked of the browser that kept them: they come up in pieces.
+    const missing = journalHashes(offered.journal).filter((h) => !Object.hasOwn(this.data.storyTexts, h));
+    const line = this.lines.get(c.id);
+    if (missing.length && line) {
+      line.need = new Set(missing.slice(0, STORY_WIRE.needMax));
+      this.stats.needs++;
+      out.tell.push({ to: c.id, msg: { t: 'story', do: 'need', hashes: [...line.need] } });
+    }
     return out;
   }
 
@@ -718,14 +808,15 @@ export class Stories {
     for (const [session, other] of this.lines) if (session !== c.id && other.character === c.character) this.lines.delete(session);
     let line = this.lines.get(c.id);
     if (!line || line.character !== c.character) {
-      line = { session: c.id, character: c.character, c, core: null, talkCore: null, ready: false, entered: false, unread: false, hash: '', here: null, room: null, hour: null, hourAt: 0, areas: new Set(), kills: new Map(), killTimes: [], talk: null };
+      line = { session: c.id, character: c.character, c, core: null, talkCore: null, ready: false, entered: false, unread: false, hash: '', here: null, room: null, hour: null, hourAt: 0, areas: new Set(), kills: new Map(), killTimes: [], talk: null, talkLog: null, need: null };
       this.lines.set(c.id, line);
     }
     line.c = c;
     line.core = null;
     line.talkCore = null;
-    // A conversation is the book's it began on: a book settled again starts none.
+    // A conversation is the book's it began on: a book settled again starts none, and writes none it had.
     line.talk = null;
+    line.talkLog = null;
     line.entered = false;
     line.hash = '';
     line.ready = true;
@@ -748,7 +839,7 @@ export class Stories {
     const book = this.bookOf(line.character);
     if (!book || !this.ready) return null;
     if (line.core && line.core.book === book) return line.core;
-    line.core = new HostCore({ book, lib: this.lib, payer: 'server', limits: limitsOf(this.tuning), apply: (ch) => this.writeBatch(line.character, ch) });
+    line.core = new HostCore({ book, lib: this.lib, payer: 'server', limits: limitsOf(this.tuning), apply: (ch, texts) => this.writeBatch(line.character, ch, texts) });
     return line.core;
   }
 
@@ -764,12 +855,18 @@ export class Stories {
     const book = this.bookOf(line.character);
     if (!book || !this.lib.voices || !Object.keys(this.lib.voices).length) return null;
     if (line.talkCore && line.talkCore.book === book && line.talkCore.lib === this.lib) return line.talkCore;
-    line.talkCore = new HostCore({ book, lib: this.lib, payer: 'server', limits: limitsOf(this.tuning), apply: (ch) => this.writeBatch(line.character, ch) });
+    line.talkCore = new HostCore({ book, lib: this.lib, payer: 'server', limits: limitsOf(this.tuning), apply: (ch, texts) => this.writeBatch(line.character, ch, texts) });
     return line.talkCore;
   }
 
-  /** A batch the rules worked out, written down (and so applied, by the store): lazily when it is only counters. */
-  writeBatch(character, ch) {
+  /**
+   * A batch the rules worked out, written down (and so applied, by the store): lazily when it is only counters.
+   * The words of the journal entries it writes go down first, so a log played back never names words it has not
+   * read yet.
+   */
+  writeBatch(character, ch, texts) {
+    if (texts && Object.keys(texts).length) this.keepTexts(texts);
+    for (const c of ch) if (c?.k === 'journal') this.stats.entries++;
     const lazy = lazyBatch(ch);
     this.write({ t: 'story', id: character, ch }, lazy);
     this.stats.batches++;
@@ -836,6 +933,7 @@ export class Stories {
       hour: this.hourOf(line, world),
       grouped: !!this.grouped(c),
       species: c?.hello?.species ?? null,
+      name: typeof c?.hello?.name === 'string' ? c.hello.name : null,
       credits: this.purses ? this.purses.of(character) : null,
       has: this.ledger ? (kind, id) => (this.ledger.rowFor(character, kind, id) ? 1 : 0) : null,
       away: !line.entered,
@@ -1085,11 +1183,16 @@ export class Stories {
   talk(c, word) {
     const node = (why) => ({ ok: false, why, tell: [{ to: c.id, msg: nodeWord(word.speaker, null, why) }] });
     const line = this.lines.get(c.id);
-    // Closing works nothing out and only lets go of what the line holds, so it is never counted against the
-    // allowance: a close spent there would cost the very next opening.
+    // Closing works nothing out but the transcript, and only lets go of what the line holds, so it is never
+    // counted against the allowance: a close spent there would cost the very next opening.
     if (word.op === 'close') {
-      if (line && line.character === c.character) line.talk = null;
-      return { ok: true, tell: [] };
+      const tell = [];
+      if (line && line.character === c.character) {
+        line.c = c;
+        line.talk = null;
+        this.writeTalk(line, word.read ?? {}, word.name ?? null, tell);
+      }
+      return { ok: true, tell };
     }
     // Over the allowance an opening or an answer is answered with no node and why, as every other refusal
     // here is, so the window says so at once rather than waiting out its own clock in silence.
@@ -1107,13 +1210,107 @@ export class Stories {
       line.talk = null;
       return node(why);
     }
+    const tell = [];
+    // A conversation opened with another's transcript still unwritten: that one goes into the journal first.
+    if (word.op === 'open') this.writeTalk(line, {}, null, tell);
     const out = word.op === 'open' ? core.talkOpen(word.speaker, this.ctxOf(line), word.who ?? null) : core.talkPick(line.talk, word.reply, this.ctxOf(line));
     this.stats.talks++;
     line.talk = out.turn.state;
-    const tell = [];
+    if (out.turn.log) line.talkLog = { speaker: word.speaker, log: out.turn.log, core };
     this.finish(line, out.r, tell);
     tell.push({ to: line.session, msg: nodeWord(word.speaker, out.turn.view, out.turn.why) });
     return { ok: !out.turn.why, why: out.turn.why ?? undefined, tell };
+  }
+
+  /**
+   * What a line's last conversation said, written into its journal now the window has closed (or the line has),
+   * with the words the browser read out of the client's own lines and the name it showed; then forgotten. On
+   * the loop it was said on, which for one of the game's own people with no story read is the one that only talks.
+   */
+  writeTalk(line, read, name, tell) {
+    const t = line.talkLog;
+    line.talkLog = null;
+    if (!t || !t.log.length) return;
+    const book = this.bookOf(line.character);
+    if (!book || t.core.book !== book) return;
+    this.stats.transcripts++;
+    this.finish(line, t.core.talkJournal(t.speaker, t.log, read, name, this.ctxOf(line)), tell);
+  }
+
+  // ---- documents and the journal ---------------------------------------------------------------------------
+
+  /**
+   * A document's word, the journal's or a note of the player's own, from a line whose book is settled here: a
+   * document opened, read to its end or chosen on at its foot (`read`), the words of a stretch of the journal
+   * (`journal`), words the server asked for coming up in pieces (`texts`), and a note on an entry (`mine`). No
+   * faster than `docRate`.
+   */
+  docWord(c, word) {
+    if (!mayStory(this.windowsOf(c.id).doc, Date.now(), this.tuning.docRate)) return { ok: false, why: 'too often', tell: [] };
+    const line = this.lines.get(c.id);
+    if (!line || line.character !== c.character || !line.ready) return this.no(c.id, 'this character’s story is being settled with the server', 'job');
+    line.c = c;
+    if (word.do === 'texts') return this.takeTexts(line, word);
+    if (word.do === 'journal') return this.journalWords(line, word.from, word.count);
+    this.takeAt(line, word.at);
+    const core = this.coreOf(line);
+    if (!core) return this.no(c.id, 'no story is read here', 'job');
+    const tell = [];
+    if (word.do === 'mine') {
+      const r = core.mine(word.ref, word.text, this.ctxOf(line));
+      this.finish(line, r, tell, true);
+      return { ok: !r.why, why: r.why ?? undefined, tell };
+    }
+    this.stats.reads++;
+    const out = core.read(word.doc, { end: word.end, pick: word.pick }, this.ctxOf(line), (h) => this.textOf(h));
+    this.finish(line, out.r, tell, !!word.pick);
+    const w = out.word;
+    tell.push({ to: line.session, msg: { t: 'story', do: 'doc', doc: w.doc, view: w.view, foot: w.foot, entry: w.entry, ...(w.why ? { why: w.why } : {}), ...(w.from ? { from: w.from } : {}), ...(w.end ? { end: 1 } : {}) } });
+    return { ok: !w.why, why: w.why ?? undefined, tell };
+  }
+
+  /** The words of a stretch of a line's journal, `count` entries from `from`, as many as this server kept. */
+  journalWords(line, from, count) {
+    const journal = this.bookOf(line.character)?.journal ?? [];
+    const entries = journal.slice(from, from + Math.min(count, STORY_WIRE.journalMax));
+    const texts = Object.create(null);
+    for (const h of journalHashes(entries)) {
+      const t = this.textOf(h);
+      if (t !== undefined) texts[h] = t;
+    }
+    return { ok: true, tell: [{ to: line.session, msg: { t: 'story', do: 'journal', from, entries, texts } }] };
+  }
+
+  /**
+   * Words a line was asked for, coming up in pieces: put back together, and each kept only when the server
+   * asked this line for it and it is what its hash says.
+   */
+  takeTexts(line, word) {
+    let pieces = this.textsIn.get(line.session);
+    if (!pieces) {
+      pieces = new Reassembly(Math.min(this.tuning.offerMax, this.tuning.textsMax), this.tuning.offerWait);
+      this.textsIn.set(line.session, pieces);
+    }
+    const got = pieces.add(word, Date.now());
+    if (!got) return { ok: true, tell: [] };
+    this.textsIn.delete(line.session);
+    if ('why' in got) return { ok: false, why: got.why, tell: [] };
+    let raw;
+    try {
+      raw = JSON.parse(got.text);
+    } catch {
+      return { ok: false, why: 'those words could not be read', tell: [] };
+    }
+    const asked = line.need ?? new Set();
+    const texts = cleanTexts(raw, textHash);
+    const kept = Object.create(null);
+    for (const h of Object.keys(texts)) if (asked.has(h)) kept[h] = texts[h];
+    const n = this.keepTexts(kept);
+    this.flushLog();
+    for (const h of Object.keys(kept)) asked.delete(h);
+    if (!asked.size) line.need = null;
+    this.stats.textsTaken += n;
+    return { ok: true, kept: n, tell: [] };
   }
 
   /**
@@ -1341,6 +1538,8 @@ export class Stories {
       this.refusals++;
       tell.push({ to: session, msg: { t: 'story', do: 'no', why: 'the pieces stopped coming' } });
     }
+    // Words that stopped coming are given up: the entries they belong to show as not kept.
+    for (const [session, pieces] of this.textsIn) if (pieces.expire(now)) this.textsIn.delete(session);
     if (this.parked.length) {
       const late = this.parked.filter((p) => now - p.at > this.tuning.killPark);
       if (late.length) {
@@ -1374,8 +1573,12 @@ export class Stories {
     this.wanting.delete(session);
     this.offers.delete(session);
     this.windows.delete(session);
+    this.textsIn.delete(session);
     const line = this.lines.get(session);
     if (line) {
+      // A conversation cut off by the line closing was still heard, as far as it went: its transcript is written,
+      // with the client's own lines kept as their references, since nobody is left to read them out.
+      if (line.ready) this.writeTalk(line, {}, null, []);
       this.lines.delete(session);
       const core = line.ready && line.entered ? this.coreOf(line) : null;
       if (core) {
@@ -1400,8 +1603,13 @@ export class Stories {
     }
     let archived = 0;
     for (const id of Object.keys(this.data.storyArchive)) archived += Array.isArray(this.data.storyArchive[id]) ? this.data.storyArchive[id].length : 0;
+    let entries = 0;
+    for (const id of Object.keys(this.data.stories)) entries += this.data.stories[id]?.journal?.length ?? 0;
     return {
       v: STORY_WIRE_VERSION,
+      // The journals, and the words kept for them once for everybody by hash.
+      journal: { entries, texts: Object.keys(this.data.storyTexts).length, bytes: this.textBytes, max: this.tuning.textsMax, coming: this.textsIn.size },
+      docs: Object.keys(this.lib.docs ?? {}).length,
       sets: this.sets.map((s) => ({ ...s })),
       tests: this.tests,
       jobs: Object.keys(this.lib.quests).length,

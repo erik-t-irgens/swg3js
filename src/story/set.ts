@@ -5,9 +5,12 @@
 //
 // **The folder.** `story.jsonc` names the set's prefix and title; `quests/`, `areas/`, `objects/`, `talk/`
 // (the conversations) and `cast/` (the story's named people) hold one definition a file, in JSONC
-// (`jsonc.ts`; the last two are read in `talkSet.ts`). A later wave reads `docs/`, `file.jsonc`,
-// `calendar.jsonc` and `ladders.jsonc`; this one notes them and reads nothing of them. `fixtures/` is never
-// loaded at all: it holds files built to fail the checker.
+// (`jsonc.ts`; the last two are read in `talkSet.ts`); `docs/` holds the documents, one `<id>.doc.txt` a file
+// in a text format of their own (`doc.ts`); `file.jsonc` is the ISB file's levels and how long its entries
+// wait to be seen (`file.ts`), and `calendar.jsonc` the date a document's `{date}` reads (`doc.ts`), one of
+// each to a set, the owner's winning over the test set's when both are read. A later wave reads
+// `ladders.jsonc`; this one notes it and reads nothing of it. `fixtures/` is never loaded at all: it holds
+// files built to fail the checker.
 //
 // **Ids.** The loader prefixes every id with its set's (`goto` in the test set is `test:goto`, an object
 // `obj/test-terminal` is `test:obj/test-terminal`), so the owner writes plain names and two sets can never
@@ -31,7 +34,9 @@
 import { hashText } from '../net/hash.ts';
 import { BOOK_LIMITS, isFlagName, isQuestId, isStepName, isTrack, type Track } from './book.ts';
 import { cleanSpan, type Span } from './clock.ts';
+import { calendarOf, docLines, docOf, type CalendarDef, type DocDef } from './doc.ts';
 import { parseAction, parseCondition, type CondJson, type Lit } from './expr.ts';
+import { FILE_KINDS, fileDefOf, isFileKind, isFileTag, type FileDefIssue, type FilesDef } from './file.ts';
 import { lineAt, parseJsonc, pointer } from './jsonc.ts';
 import { castOf, isNodeName, talkOf, type CastDef, type TalkDef } from './talkSet.ts';
 import { cleanTextRef, type TextRef } from './text.ts';
@@ -40,6 +45,8 @@ import { cleanRoom, cleanWorld } from './waypoints.ts';
 
 export type { CondJson, Lit } from './expr.ts';
 export type { CastDef, TalkDef } from './talkSet.ts';
+export type { CalendarDef, DocDef } from './doc.ts';
+export type { FilesDef } from './file.ts';
 
 export interface Issue {
   level: 'error' | 'warning';
@@ -156,9 +163,11 @@ export interface StepDef {
   for: Span | null;
   outcome: string | null;
   options: OptionDef[] | null;
-  /** A talk step's speaker (`<set>:cast/<id>`, `row:<key>`) and the node of their conversation it waits for, or any node. */
+  /** A talk step's speaker (`<set>:cast/<id>`, `row:<key>`) and the node of their conversation it waits for, or any node; a call's caller. */
   who: string | null;
   node: string | null;
+  /** The document a `message`, `document` or `comm` step hands over and is done when it is read to its end; a `choice` step's own page, at whose foot its options stand. */
+  doc: string | null;
   /** A later wave's own fields (a document step's document), kept as they came. */
   later: Record<string, unknown> | null;
 }
@@ -258,6 +267,12 @@ export interface StorySet {
    * emulator's adopted conversations bind (`core3Trees.ts`). A story's own set binds nobody this way.
    */
   voices?: Record<string, string>;
+  /** The documents, by `<set>:doc/<id>`. */
+  docs?: Record<string, DocDef>;
+  /** The files an agency keeps (`file.jsonc`), or null with none: one to a joined set, the first read winning. */
+  file?: FilesDef | null;
+  /** The calendar `{date}` reads (`calendar.jsonc`), or null: one to a joined set, the first read winning. */
+  calendar?: CalendarDef | null;
   /** Files a later wave reads, noted and not read. */
   later: string[];
   files: number;
@@ -271,7 +286,7 @@ export interface LoadResult {
 }
 
 /** The signal prefixes the engine raises itself (`signals.ts` says which raiser each stands for). */
-export const ENGINE_SIGNALS = ['used', 'entered', 'left', 'room', 'died', 'world', 'talked', 'debug'] as const;
+export const ENGINE_SIGNALS = ['used', 'entered', 'left', 'room', 'died', 'world', 'talked', 'read', 'debug'] as const;
 /**
  * Words a set may not take as its prefix: the engine's signal prefixes, the id forms of the game's own
  * people, and `core3`, the emulator's own conversations' (`core3Trees.ts`).
@@ -410,6 +425,11 @@ export class FileScope {
           const [who, node] = rest.split('#');
           const id = this.ref(who, path, 'cast');
           return id ? `talked:${id}${node !== undefined ? `#${node}` : ''}` : null;
+        }
+        case 'read': {
+          // A document read to its end (a call heard to its end).
+          const id = this.ref(rest, path, 'doc');
+          return id ? `read:${id}` : null;
         }
         default:
           return /^[A-Za-z0-9_.-]{1,64}$/.test(rest) ? v : this.err(path, 'debug: is followed by a plain name');
@@ -681,6 +701,29 @@ export class FileScope {
         this.warn(path, 'that person condition arrives in wave 9 of this pass; until then it reads false');
         return { person: { ...(JSON.parse(JSON.stringify(p)) as Record<string, unknown>), who } };
       }
+      case 'witnessed': {
+        // `{ "witnessed": doc/<id>, "variant": "a" }`: the document is in the journal, as that version of it.
+        if (!extra(['variant'])) return null;
+        const doc = this.ref(o.witnessed, path, 'doc');
+        if (o.variant !== undefined && (typeof o.variant !== 'string' || !/^[A-Za-z0-9_-]{1,48}$/.test(o.variant))) return this.err(path, 'a variant is a plain name');
+        return doc ? { witnessed: doc, ...(o.variant !== undefined ? { variant: o.variant } : {}) } : null;
+      }
+      case 'file': {
+        // `{ "file": { "agency": "isb", "gte": 2 } }`: the level a file has reached, compared.
+        if (!extra([])) return null;
+        const f = o.file as Record<string, unknown> | null;
+        if (!f || typeof f !== 'object' || Array.isArray(f) || f.agency !== 'isb') return this.err(path, 'file is { "agency": "isb", "gte": n }');
+        const { agency, ...rest } = f;
+        const c = numberCompare(rest);
+        return c ? { file: { agency, ...c } } : this.err(path, `a file's level is compared with one of ${OP_KEYS.join(', ')}`);
+      }
+      case 'fileHas': {
+        // `{ "fileHas": ["isb", "tag"] }`: any entry of the file carries the tag.
+        if (!extra([])) return null;
+        const h = o.fileHas;
+        if (!Array.isArray(h) || h.length !== 2 || h[0] !== 'isb' || !isFileTag(h[1])) return this.err(path, 'fileHas is ["isb", tag], a tag a plain word');
+        return { fileHas: [h[0], h[1]] };
+      }
       default:
         return this.err(path, `${head} is not a condition this game knows`, 4);
     }
@@ -713,8 +756,43 @@ export class FileScope {
       if (a === null) return null;
       out.push(a);
     }
+    if (act === 'file' && !this.fileArgs(out, path)) return null;
     if (spec.wave > BUILT_WAVE) this.warn(path, `${act} arrives in wave ${spec.wave} of this pass; until then it does nothing`);
     return { act, args: out, wave: spec.wave };
+  }
+
+  /**
+   * `file(isb, kind, weight[, doc/<id>][, tag...])`, its arguments made what they are: the kind one of the
+   * file's, the weight nought or more (a file never shrinks), the page a document of this set or another
+   * (prefixed as every id is), and every other argument a tag. False, with why, when they are not.
+   */
+  private fileArgs(args: Lit[], path: string): boolean {
+    if (!isFileKind(args[1])) {
+      this.err(path, `file's kind is one of ${FILE_KINDS.join(', ')}`, 4);
+      return false;
+    }
+    if (typeof args[2] !== 'number' || args[2] < 0) {
+      this.err(path, 'file\'s weight is a number of nought or more: a file never shrinks', 4);
+      return false;
+    }
+    let doc = false;
+    for (let i = 3; i < args.length; i++) {
+      const a = args[i];
+      if (typeof a === 'string' && (a.startsWith('doc/') || a.includes(':doc/'))) {
+        if (doc) {
+          this.err(path, 'a file entry has one page at most');
+          return false;
+        }
+        const id = this.ref(a, path, 'doc');
+        if (!id) return false;
+        args[i] = id;
+        doc = true;
+      } else if (!isFileTag(a)) {
+        this.err(path, `${JSON.stringify(a)} is not a tag: a plain word`, 4);
+        return false;
+      }
+    }
+    return true;
   }
 
   private arg(a: unknown, path: string, kind: string, act: string, i: number): Lit | null {
@@ -891,7 +969,7 @@ const TYPE_KEYS: Record<string, string[]> = {
   wait: ['for'],
   end: ['outcome'],
   talk: ['who', 'node', 'n'],
-  choice: ['options'],
+  choice: ['options', 'doc'],
   message: ['doc'],
   document: ['doc'],
   comm: ['doc', 'who'],
@@ -989,6 +1067,7 @@ function stepOf(s: FileScope, name: string, v: unknown, path: string): StepDef |
     options: null,
     who: null,
     node: null,
+    doc: null,
     later: null,
   };
   switch (type) {
@@ -1068,8 +1147,17 @@ function stepOf(s: FileScope, name: string, v: unknown, path: string): StepDef |
           ends: r.ends === undefined || r.ends === null ? null : s.stepName(r.ends, `${p}/ends`),
         });
       });
+      // A choice made on a page: the document is handed over as the step begins, its options at its foot.
+      if (o.doc !== undefined) step.doc = s.ref(o.doc, `${path}/doc`, 'doc');
       break;
     }
+    case 'message':
+    case 'document':
+    case 'comm':
+      // Handed over as the step begins, and done once it is read (or, a call, heard) to its end.
+      step.doc = o.doc === undefined ? s.err(path, `a ${type} step names its document, in "doc"`) : s.ref(o.doc, `${path}/doc`, 'doc');
+      if (type === 'comm' && o.who !== undefined) step.who = s.ref(o.who, `${path}/who`, 'cast');
+      break;
     default: {
       // A later wave's step (talk, a document): its own fields kept as plain data for that wave.
       const later: Record<string, unknown> = {};
@@ -1196,7 +1284,6 @@ function questOf(s: FileScope, v: unknown): QuestDef | null {
     test: s.test,
     src: s.src(),
   };
-  if (o.card !== undefined) s.warn('/card', 'job cards arrive in wave 8 of this pass');
   if (!def.start.length) s.err('/start', 'a quest names the steps it starts with, in "start"');
   // A book keeps this many steps of one quest (the client's own never pass 16), so a longer quest could never finish.
   if (Object.keys(steps).length > BOOK_LIMITS.steps) s.err('/steps', `a quest has at most ${BOOK_LIMITS.steps} steps, not ${Object.keys(steps).length}`);
@@ -1259,15 +1346,28 @@ function objectOf(s: FileScope, v: unknown): ObjectDef | null {
 
 /** The folders and files a later wave reads, with that wave. */
 const LATER: [RegExp, string][] = [
-  [/^docs\//, 'documents arrive in wave 8 of this pass'],
-  [/^(file|calendar)\.jsonc$/, 'the file and the calendar arrive in wave 8 of this pass'],
   [/^ladders\.jsonc$/, 'ladders arrive in wave 9 of this pass'],
   [/^(jobs|boards)\//, 'job boards are kept for a later pass'],
 ];
 
 /** A set with nothing in it: what a host runs before any set is read. */
 export function emptySet(): StorySet {
-  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), voices: Object.create(null), later: [], files: 0 };
+  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), voices: Object.create(null), docs: Object.create(null), file: null, calendar: null, later: [], files: 0 };
+}
+
+/** A document's file read through a scope of its own, whose lines are the document's own (`/L<n>`). */
+function readDoc(f: { path: string; text: string }, set: StorySet, issues: Issue[]): void {
+  const s = new FileScope(f.path, docLines(f.text), set.prefix, set.test, issues);
+  const d = docOf(s, f.text, f.path);
+  if (!d) return;
+  const { src, test, hash, ...pure } = d;
+  void src;
+  void test;
+  void hash;
+  d.hash = hashText(stableText(pure)).slice(0, 16);
+  const docs = (set.docs ??= Object.create(null) as Record<string, DocDef>);
+  if (docs[d.id]) s.err('/L1', `${d.id} is defined twice (also in ${docs[d.id].src.file})`, 1);
+  else docs[d.id] = d;
 }
 
 /**
@@ -1317,9 +1417,30 @@ export function loadSet(files: { path: string; text: string }[], opts: { test?: 
       issues.push({ level: 'warning', file: f.path, line: 1, message: `not read yet: ${later[1]}` });
       continue;
     }
+    if (/^docs\//.test(f.path)) {
+      if (!f.path.endsWith('.doc.txt')) issues.push({ level: 'warning', file: f.path, line: 1, message: 'a document is docs/<id>.doc.txt: this file is not read' });
+      else readDoc(f, set, issues);
+      continue;
+    }
+    if (f.path === 'file.jsonc' || f.path === 'calendar.jsonc') {
+      const doc = parseJsonc(f.text);
+      if (doc.error) {
+        issues.push({ level: 'error', file: f.path, line: doc.error.line, col: doc.error.col, message: doc.error.message });
+        continue;
+      }
+      const canon: string[] = [];
+      canonicalKeys(doc.value, '', canon);
+      for (const p of canon) issues.push({ level: 'error', file: f.path, line: lineAt(doc.lines, p), message: 'nothing marks a version of anything as the canonical or true one', rule: 10 });
+      if (f.path === 'file.jsonc') {
+        const found: FileDefIssue[] = [];
+        set.file = fileDefOf(doc.value, found);
+        for (const i of found) issues.push({ level: i.level, file: f.path, line: lineAt(doc.lines, i.path), message: i.message });
+      } else set.calendar = calendarOf(doc.value, (path, message) => issues.push({ level: 'error', file: f.path, line: lineAt(doc.lines, path), message }));
+      continue;
+    }
     const kind = /^quests\//.test(f.path) ? 'quest' : /^areas\//.test(f.path) ? 'area' : /^objects\//.test(f.path) ? 'object' : /^talk\//.test(f.path) ? 'talk' : /^cast\//.test(f.path) ? 'cast' : null;
     if (!kind) {
-      if (/\.jsonc?$/.test(f.path)) issues.push({ level: 'warning', file: f.path, line: 1, message: 'not in a folder a set is read from (quests/, areas/, objects/, talk/, cast/), so not read' });
+      if (/\.jsonc?$/.test(f.path)) issues.push({ level: 'warning', file: f.path, line: 1, message: 'not in a folder a set is read from (quests/, areas/, objects/, talk/, cast/, docs/), so not read' });
       continue;
     }
     if (!f.path.endsWith('.jsonc')) {
@@ -1389,6 +1510,10 @@ export function joinSets(sets: StorySet[]): StorySet {
     Object.assign(out.talks, s.talks);
     Object.assign(out.cast, s.cast);
     if (s.voices) Object.assign(out.voices!, s.voices);
+    if (s.docs) Object.assign(out.docs!, s.docs);
+    // One file and one calendar to a story: the first set's that has one (the owner's, read before the test set's).
+    out.file ??= s.file ?? null;
+    out.calendar ??= s.calendar ?? null;
     out.later.push(...s.later);
     out.files += s.files;
     out.test ||= s.test;

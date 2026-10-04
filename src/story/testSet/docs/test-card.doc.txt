@@ -1,0 +1,12 @@
+// The TEST: a work order job's card: the offer itself, with Accept and Decline at its foot. None of it is story.
+kind: workorder
+id: test-card
+title: TEST WORK ORDER 0001
+issuer: TEST ISSUER
+client: civic
+
+TEST: This is a test work order. Accept it to take the job, or decline it.
+
+[field] TEST PAY: none
+[field] TEST DUE: none
+[stamp] TEST APPROVED

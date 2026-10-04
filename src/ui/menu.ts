@@ -108,6 +108,7 @@ const ACTION_LABELS: Record<Action, string> = {
   putAway: 'Put away a prop in hand',
   debugMenu: 'Debug menu',
   waypoints: 'Waypoints',
+  journal: 'Journal (jobs, documents, the file)',
 };
 
 /**

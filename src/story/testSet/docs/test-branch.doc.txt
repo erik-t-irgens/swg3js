@@ -1,0 +1,17 @@
+// A document in two versions: which one a character reads is the choice it made, frozen into its journal as it
+// read it, so two characters hold two different copies and neither is the true one. None of it is story.
+kind: letter
+id: test-branch
+title: TEST LETTER 0001
+issuer: TEST ISSUER
+
+TEST: This letter reads one way or the other.
+
+[slot answer]
+
+[sign] TEST SIGNATURE
+
+--- variant a when choiceOf(test:branchDoc, pick) == "a"
+[slot answer] TEST: You chose A, so this is the A version.
+--- variant b when choiceOf(test:branchDoc, pick) == "b"
+[slot answer] TEST: You chose B, so this is the B version.

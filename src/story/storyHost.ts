@@ -1,8 +1,8 @@
-// What every host of a story answers to, so the game's detectors, the tracker, the conversation window and the
-// console speak to one shape whoever holds the book: this browser alone (`localHost.ts`), or a server
-// (`remoteHost.ts`). A document read to its end joins it with the wave that brings documents. Pure: types and
-// nothing else.
+// What every host of a story answers to, so the game's detectors, the tracker, the conversation window, the
+// document window, the journal and the console speak to one shape whoever holds the book: this browser alone
+// (`localHost.ts`), or a server (`remoteHost.ts`). Pure: types and nothing else.
 
+import type { DocWord } from './docRules.ts';
 import type { StoryEvent } from './quests.ts';
 import type { NodeView } from './talkRules.ts';
 import type { StoryView } from './view.ts';
@@ -46,9 +46,20 @@ export interface StoryHost {
   canTalk(speaker: string, who?: string | null): boolean;
   /**
    * A conversation: open one with somebody, give an answer (`reply`; null lets a node that goes on by itself
-   * go on), or close it. What it reaches comes back through `onNode`, at once from this browser's own host.
+   * go on), or close it. What it reaches comes back through `onNode`, at once from this browser's own host. A
+   * close hands up what the window read out of the client's own lines (`read`, by reference) and the name it
+   * showed (`name`), for the transcript the journal keeps.
    */
-  talk(op: 'open' | 'pick' | 'close', speaker: string, reply?: string | null, who?: string | null): HostAnswer;
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply?: string | null, who?: string | null, close?: { read: Record<string, string>; name: string | null }): HostAnswer;
   /** Be told of every node a conversation reaches. Answers the way to stop being told. */
   onNode(fn: (node: NodeWord) => void): () => void;
+  /**
+   * A document handed over: open it (with `end` once its last page is shown), or choose at its foot (`pick`).
+   * The page comes back through `onDoc`, at once from this browser's own host.
+   */
+  read(doc: string, opts?: { end?: boolean; pick?: string | null }): HostAnswer;
+  /** Be told of every document a host hands the window. Answers the way to stop being told. */
+  onDoc(fn: (doc: DocWord) => void): () => void;
+  /** A note of the player's own on a journal entry. */
+  mine(ref: string, text: string): HostAnswer;
 }

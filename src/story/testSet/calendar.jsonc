@@ -1,0 +1,3 @@
+// The test set's calendar: every document's {date} reads this, and no date at all. The owner's own
+// calendar.jsonc counts days from a moment of the shared clock instead.
+{ "text": "[TEST DATE]" }

@@ -14,15 +14,41 @@
 // **A quest's waypoint** is never stored: it is `q:<quest>#<step>`, worked out from the step it belongs
 // to, shown as the player last switched it (`qwpOn`, `wpOff`), and otherwise switched on unless its step
 // says it starts off. The character's own waypoints are in the book already and are not repeated here.
+//
+// **Documents and the file.** The documents still to read (`docs`) are listed by their titles, never their
+// words: the words come only when one is opened, frozen as it is read (`docRules.ts`). The ISB's file is shown
+// as the entries the player may see just now (`file.entries`), each with its kind, its tags and its page, and
+// never its weight or the level the file has reached; how coldly a level makes a track's people greet the
+// character (`file.react`) is handed over too, since that is the file working on people before the player
+// can read why.
 
 import { hashText } from '../net/hash.ts';
-import type { StepRec, StoryBook } from './book.ts';
+import { ownOf, type StepRec, type StoryBook, type Track } from './book.ts';
+import { docIn, docsToRead, type DocItem } from './docRules.ts';
 import type { CondJson } from './expr.ts';
+import { FILE_KINDS, fileOf, reactsAt, revealed, type FileKind } from './file.ts';
 import { evalCond, placeOf, whyNotGrant, type StoryCtx } from './quests.ts';
 import { stableText, type KillMatch, type QuestDef, type Room, type Shape, type StepDef, type StorySet } from './set.ts';
+import { castIn } from './talkRules.ts';
 import { literalOf, type TextRef } from './text.ts';
 import { STEP_TYPES } from './vocab.ts';
 import { WAYPOINT_TUNE, type WaypointColour } from './waypoints.ts';
+
+/** One entry of the ISB's file the player may see: when, what kind, its tags and its page. Never its weight. */
+export interface FileEntryView {
+  id: string;
+  at: number;
+  kind: FileKind;
+  tags: string[];
+  doc?: string;
+  docTitle?: string;
+}
+
+/** The file as the player may see it, and how coldly it makes each track's people greet them. */
+export interface FileView {
+  entries: FileEntryView[];
+  react?: Partial<Record<Track, 'mid' | 'mean'>>;
+}
 
 export interface ObjectiveLine {
   quest: string;
@@ -117,6 +143,10 @@ export interface StoryView {
   objects: ObjectView[];
   tracked: string[];
   trackWp: string | null;
+  /** The documents still to read, oldest first. Absent: none (and from a server from before them). */
+  docs?: DocItem[];
+  /** The ISB's file as the player may see it. Absent: there is none. */
+  file?: FileView;
 }
 
 /** How many ended jobs the view carries, newest first: enough for the quest list, never the whole history. Ours. */
@@ -180,7 +210,14 @@ function madeText(step: StepDef, lib: StorySet): string {
       return `Talk to ${labelOr(c?.unknownAs, 'them')}`;
     }
     case 'choice':
-      return 'Decide';
+      return step.doc ? `Decide: ${labelOr(docIn(lib, step.doc)?.title, 'the marked page')}` : 'Decide';
+    case 'message':
+    case 'document':
+      return `Read: ${labelOr(step.doc ? docIn(lib, step.doc)?.title : null, 'the page handed to you')}`;
+    case 'comm': {
+      const c = step.who ? castIn(lib, step.who) : null;
+      return `Answer the call${c ? ` from ${labelOr(c.unknownAs, 'them')}` : ''}`;
+    }
     default:
       return 'Read it';
   }
@@ -363,7 +400,7 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
     if (c.side) v.side = c.side;
     cast.push(v);
   }
-  return {
+  const out: StoryView = {
     rev: book.rev,
     quests: [...quests, ...ended.slice(0, VIEW_ENDED_MAX)],
     waypoints,
@@ -373,6 +410,30 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
     tracked: [...book.tracked],
     trackWp: book.trackWp,
   };
+  const docs = docsToRead(book, lib);
+  if (docs.length) out.docs = docs;
+  const file = fileView(book, lib, ctx.now);
+  if (file) out.file = file;
+  return out;
+}
+
+/** The ISB's file as the player may see it just now, or null with none: the entries whose time has come or whose page was handed over. */
+export function fileView(book: StoryBook, lib: StorySet, now: number): FileView | null {
+  const rec = fileOf(book, 'isb');
+  if (!rec) return null;
+  const entries: FileEntryView[] = [];
+  for (const e of rec.entries) {
+    if (!revealed(e, now, (d) => ownOf(book.docs, d) !== undefined)) continue;
+    const v: FileEntryView = { id: e.id, at: e.at, kind: e.kind, tags: [...e.tags] };
+    if (e.doc) {
+      v.doc = e.doc;
+      const t = docIn(lib, e.doc)?.title;
+      if (t) v.docTitle = t;
+    }
+    entries.push(v);
+  }
+  const react = reactsAt(lib.file?.isb, rec.level);
+  return Object.keys(react).length ? { entries, react } : { entries };
 }
 
 /** A short hash of a view, so a host sends one only when it changed: the server sends a browser its view only then. */
@@ -387,7 +448,7 @@ export function viewHash(view: StoryView): string {
 // finite number, a cap on every list, and nothing carried that was not rebuilt.
 
 /** The caps on a view off the wire. Ours, and far past what a story shows. */
-export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32, cast: 400 };
+export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32, cast: 400, docs: 400 };
 
 const VIEW_CAST = /^[A-Za-z0-9_-]{1,24}:cast\/[A-Za-z0-9_.-]{1,96}$/;
 const VIEW_BODY = /^[A-Za-z0-9_./-]{1,160}$/;
@@ -631,6 +692,60 @@ function vList<T>(x: unknown, max: number, clean: (v: unknown) => T | null): T[]
   return out;
 }
 
+const VIEW_DOC = /^[A-Za-z0-9_-]{1,24}:doc\/[A-Za-z0-9_.-]{1,96}$/;
+const VIEW_DOC_KINDS = ['workorder', 'memo', 'log', 'intercept', 'letter', 'notice', 'declaration', 'dossier'];
+const VIEW_WHO = /^(row:[A-Za-z0-9_.-]{1,96}|[A-Za-z0-9_-]{1,24}:cast\/[A-Za-z0-9_.-]{1,96})$/;
+const VIEW_TAG = /^[A-Za-z0-9_.:-]{1,48}$/;
+
+function vDoc(x: unknown): DocItem | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_DOC);
+  const title = typeof o.title === 'string' ? o.title.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) : '';
+  const at = vNum(o.at, 0, 1e14);
+  if (!id || !title || at === null || typeof o.kind !== 'string' || !VIEW_DOC_KINDS.includes(o.kind)) return null;
+  const d: DocItem = { id, title, kind: o.kind as DocItem['kind'], at };
+  const quest = vWord(o.quest, VIEW_ID);
+  if (quest) d.quest = quest;
+  const step = vWord(o.step, VIEW_STEP);
+  if (step) d.step = step;
+  if (o.card === true) d.card = true;
+  const from = vWord(o.from, VIEW_WHO);
+  if (from) d.from = from;
+  const fromName = vText(o.fromName, 240);
+  if (fromName) d.fromName = fromName;
+  if (o.opened === true) d.opened = true;
+  return d;
+}
+
+function vFileEntry(x: unknown): FileEntryView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = typeof o.id === 'string' && /^f[1-9][0-9]{0,8}$/.test(o.id) ? o.id : null;
+  const at = vNum(o.at, 0, 1e14);
+  if (!id || at === null || typeof o.kind !== 'string' || !(FILE_KINDS as readonly string[]).includes(o.kind)) return null;
+  const v: FileEntryView = { id, at, kind: o.kind as FileKind, tags: vList(o.tags, 12, (t) => vWord(t, VIEW_TAG)) };
+  const doc = vWord(o.doc, VIEW_DOC);
+  if (doc) v.doc = doc;
+  if (typeof o.docTitle === 'string' && o.docTitle.trim()) v.docTitle = o.docTitle.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120);
+  return v;
+}
+
+function vFile(x: unknown): FileView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const out: FileView = { entries: vList(o.entries, 5000, vFileEntry) };
+  if (o.react && typeof o.react === 'object' && !Array.isArray(o.react)) {
+    const react: Partial<Record<Track, 'mid' | 'mean'>> = {};
+    for (const t of ['rebellion', 'empire', 'freelance'] as const) {
+      const r = (o.react as Record<string, unknown>)[t];
+      if (r === 'mid' || r === 'mean') react[t] = r;
+    }
+    if (Object.keys(react).length) out.react = react;
+  }
+  return out;
+}
+
 /** A view as a server sends it, rebuilt, or null when it is not one. */
 export function cleanView(x: unknown): StoryView | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
@@ -639,7 +754,7 @@ export function cleanView(x: unknown): StoryView | null {
   if (rev === null) return null;
   const tracked = vList(o.tracked, 100, (v) => vWord(v, VIEW_ID));
   const trackWp = typeof o.trackWp === 'string' && (/^w[0-9]{1,9}$/.test(o.trackWp) || /^q:[A-Za-z0-9_:./-]{1,121}#[A-Za-z0-9_.-]{1,48}$/.test(o.trackWp)) ? o.trackWp : null;
-  return {
+  const out: StoryView = {
     rev,
     quests: vList(o.quests, VIEW_WIRE.quests, vQuest),
     waypoints: vList(o.waypoints, VIEW_WIRE.waypoints, vWaypoint),
@@ -649,4 +764,9 @@ export function cleanView(x: unknown): StoryView | null {
     tracked,
     trackWp,
   };
+  const docs = vList(o.docs, VIEW_WIRE.docs, vDoc);
+  if (docs.length) out.docs = docs;
+  const file = vFile(o.file);
+  if (file) out.file = file;
+  return out;
 }

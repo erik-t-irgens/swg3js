@@ -96,7 +96,7 @@ export function checkFolder(dir, { worlds = worldIds(), catalogue = catalogueOf(
   const c = r.counts;
   const errors = r.errors.length + refused.length;
   print(
-    `${shown}: ${load.set.prefix ? `the ${load.set.prefix} set` : 'no set'} (${load.hash.slice(0, 12)}): ${many(c.quests, 'quest')}, ${many(c.steps, 'step')}, ${many(c.areas, 'area')}, ${many(c.objects, 'object')}, ${many(c.talks, 'conversation')} (${many(c.nodes, 'node')}), ${many(c.cast, 'cast member')}, ${many(c.signals, 'signal')} waited on; ` +
+    `${shown}: ${load.set.prefix ? `the ${load.set.prefix} set` : 'no set'} (${load.hash.slice(0, 12)}): ${many(c.quests, 'quest')}, ${many(c.steps, 'step')}, ${many(c.areas, 'area')}, ${many(c.objects, 'object')}, ${many(c.talks, 'conversation')} (${many(c.nodes, 'node')}), ${many(c.cast, 'cast member')}, ${many(c.docs, 'document')}, ${many(c.signals, 'signal')} waited on; ` +
       `${many(errors, 'error')}, ${many(r.warnings.length, 'warning')}` +
       `${c.unresolved ? `, ${many(c.unresolved, 'unresolved escape')}` : ''}${c.later ? `, ${many(c.later, 'thing')} a later wave reads` : ''}${catalogue ? '' : ' (no creature catalogue on this machine, so kill targets went unchecked)'}`,
   );

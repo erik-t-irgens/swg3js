@@ -98,6 +98,13 @@ import { mapMeta, mapPictureNow } from './ui/mapImages.ts';
 import { Minimap, MINIMAP_TUNE, tuneMinimap } from './ui/minimap.ts';
 import { WaypointHud, waypointWords } from './ui/waypointHud.ts';
 import { WaypointsUi, type WaypointRow, type WaypointsModel } from './ui/waypointsUi.ts';
+import { JournalUi, type JournalModel } from './ui/journalUi.ts';
+import { DocumentUi } from './ui/documentUi.ts';
+import { StoryTexts } from './story/textStore.ts';
+import { cleanDocView, docLinesOf } from './story/doc.ts';
+import type { DocWord } from './story/docRules.ts';
+import { JOURNAL_TUNE, NOT_KEPT, journalHashes, tuneJournal, type JournalEntry } from './story/journal.ts';
+import { FILE_KINDS, FILE_TUNE, fileOf, levelAt, tuneFile } from './story/file.ts';
 import { WaypointPlaces, WaypointSpots, makeRoomAnswer, wayIn, type PlaceDeps, type RoomAnswer } from './world/waypointPlace.ts';
 import type { RoomDoor } from './world/nav/navRooms.ts';
 import { CITY_TUNE, CityWatch, tuneCities } from './story/cities.ts';
@@ -105,7 +112,7 @@ import { BookClient, STORY_TUNE, tuneStory, type StoryResult } from './story/boo
 import { browserStoryStorage } from './story/storyStore.ts';
 import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally, type JobsLine, type LocalWallet } from './story/localHost.ts';
 import { JOBS_WAIT_OLD, JOBS_WAIT_UNREAD, REMOTE_TUNE, RemoteHost, tuneRemote } from './story/remoteHost.ts';
-import type { StoryAt } from './story/storyWire.ts';
+import { STORY_WIRE, type StoryAt } from './story/storyWire.ts';
 import { noteWords } from './story/notes.ts';
 import { UNRESOLVED, clientKey, tableOf, textOf, type TextRef } from './story/text.ts';
 import type { HostCtx } from './story/hostCore.ts';
@@ -172,7 +179,7 @@ import { TalkPlay, type PlayStep } from './world/talkPlay.ts';
 import { lendGestures } from './world/gestureLender.ts';
 import { GESTURE_TUNE, dictionOf, newGestureMemory, pickGesture, rememberGesture, replyGesture, tuneGestures, wordCount, type GestureMemory, type GesturePick } from './story/gestures.ts';
 import type { NodeWord } from './story/storyHost.ts';
-import type { LineView, NodeView, ReplyView } from './story/talkRules.ts';
+import { wholeRef, type LineView, type NodeView, type ReplyView } from './story/talkRules.ts';
 import type { ShotKind } from './story/talkSet.ts';
 import { FOLLOW_TUNE, isFollowerSource, tuneFollow } from './world/followers.ts';
 import { levelSamples, statsAtLevel, type LevelSample } from './world/levelStats.ts';
@@ -408,6 +415,11 @@ interface SendOpts {
 }
 /** The camera pitch a flyer holds its height at: the default view, a little above level. */
 const CAMERA_REST_PITCH = 0.32;
+/**
+ * Milliseconds a journal word asked of a server waits for its answer before it may be asked again: an ask a
+ * line dropped, or one that never went, is not a word lost for good. Ours.
+ */
+const JOURNAL_ASK_AGAIN = 10000;
 
 /**
  * The two readings the display's flight struct needs that no file of the game's carries. Both are
@@ -868,7 +880,7 @@ class App {
    * are stood as (`who`), which is what gives them their conversation; a conversation the console reviews
    * (`review`, `__debug.talkTree({ core3 })`) is played on a book of its own by this browser alone.
    */
-  private talkTree: { speaker: string; who: string | null; review: boolean; memory: GestureMemory; mood: string | null; diction: string | null; replies: ReplyView[]; lent: number; log: { node: string; line: number; words: number; clip: string | null; kind: GesturePick['kind'] | 'greeting'; family: string | null; why: string }[]; greetUntil: number } | null = null;
+  private talkTree: { speaker: string; who: string | null; review: boolean; memory: GestureMemory; mood: string | null; diction: string | null; replies: ReplyView[]; lent: number; log: { node: string; line: number; words: number; clip: string | null; kind: GesturePick['kind'] | 'greeting'; family: string | null; why: string }[]; greetUntil: number; read: Record<string, string> } | null = null;
   /** The last one, kept after it ended so `__debug.gestures()` can say what its lines played. */
   private lastTalkTree: App['talkTree'] = null;
   /** The lines of a story's conversation in turn, its answers, the player's own, and the waits (`src/world/talkPlay.ts`). */
@@ -934,6 +946,8 @@ class App {
     now: () => sharedClock.now(),
     wall: () => Date.now(),
     inWorld: () => !!this.current && this.inWorld && !this.creating,
+    // The journal's words, kept in this browser by their hash: read when the store is asked, never when this is made.
+    texts: { get: (h) => this.storyTexts.get(h), put: (t) => this.storyTexts.put(t) },
   });
   /**
    * The jobs, held by a server whose greeting says it runs them (src/story/remoteHost.ts): what the detectors
@@ -951,6 +965,7 @@ class App {
     // Whether one of the game's own people has a conversation the game plays: the server, holding the same
     // reference, is asked for it only then.
     voiced: (who) => conversationPack.voiced(who),
+    texts: { get: (h) => this.storyTexts.get(h), put: (t) => this.storyTexts.put(t) },
   });
   /** What the jobs watch for -- arrivals, rooms, areas, a world, kills, a death -- four times a second (src/world/storyWatch.ts). */
   private readonly storyWatch = new StoryWatch();
@@ -1123,6 +1138,27 @@ class App {
   private cityPack = '';
   /** The Waypoints window (Y). */
   private waypointsUi!: WaypointsUi;
+  /** The journal (O): the jobs, what the character witnessed, the documents to read and the ISB's file. */
+  private journalUi!: JournalUi;
+  /** The document window: a page handed over, read on paper; opened from the journal, never by itself. */
+  private documentUi!: DocumentUi;
+  /** The journal's words, kept in this browser by their hash (IndexedDB, or the session without it). */
+  private readonly storyTexts = new StoryTexts();
+  /**
+   * Journal words asked of a server, by hash, with when (on `performance.now()`): an ask with no answer -- a line
+   * that dropped, a word refused -- is forgotten after `JOURNAL_ASK_AGAIN`, so the words are asked again.
+   */
+  private readonly textsAsked = new Map<string, number>();
+  /** Journal words a server's answer carried the entry of and not the words: nobody kept them. */
+  private readonly textsUnkept = new Set<string>();
+  /** A job's card offered in a conversation: opened once the talk is over, the one document that opens by itself. */
+  private cardAfterTalk: string | null = null;
+  /** A page that came while a conversation held the screen: shown once it is over. */
+  private docAfterTalk: DocWord | null = null;
+  /** The document window was opened from the journal: closing it goes back to the journal. */
+  private docFromJournal = false;
+  /** A call being heard in the conversation band: whose, its lines, the one standing, and whether it is heard again from the journal. */
+  private commNow: { doc: string; name: string; lines: string[]; at: number; again: boolean; ended: boolean } | null = null;
   /** Each building model's way in to each of its named rooms, worked out once: a room's mark seen from the street. */
   private readonly wayIns = new WeakMap<object, Map<number, RoomDoor | null>>();
   private readonly wpTmp = new THREE.Vector3();
@@ -1553,6 +1589,7 @@ class App {
     this.waypointHud.attach(this.overlay);
     this.minimap = new Minimap(this.ui.querySelector<HTMLElement>('#hud .top-left')!, this.ui.querySelector<HTMLElement>('#hud')!, (pack) => mapPictureNow(pack));
     this.wireWaypoints();
+    this.wireJournal();
     // The jobs followed stand under the group's roster and follow it as it grows and shrinks; their words
     // are the story's, resolved here, and a place on another world is named as the map names it.
     this.tracker.text = (ref) => this.storyText(ref);
@@ -2046,7 +2083,8 @@ class App {
     // or the mouse while the world goes on round it.
     this.talkUi = new TalkUi(this.ui);
     this.talkUi.onPick = (n) => this.answerTalk(n);
-    this.talkUi.onNext = () => this.skipTalkLine();
+    // A click on the band moves a conversation on a line, or a call.
+    this.talkUi.onNext = () => (this.commNow ? this.nextCommLine() : this.skipTalkLine());
     // The nodes a story's conversation reaches, from whichever host is holding the story: this browser's own
     // answers at once, a server's when it does.
     this.questHost.onNode((w) => this.onTalkNode(w));
@@ -6381,7 +6419,7 @@ class App {
         const person = m ? standingPeople.speakerOf(m) : null;
         const who = person?.who ?? creature;
         const voice = conversationPack.voiceOf(who);
-        const r = reactionFor(voice, this.story.book, person ? `row:${person.key}` : `row:${who ?? 'nobody'}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key));
+        const r = reactionFor(voice, this.story.book, person ? `row:${person.key}` : `row:${who ?? 'nobody'}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key), this.jobs.view()?.file?.react ?? null);
         if (r) this.strings.want(r.table);
         const line = (ref: string) => ({ ref, words: this.storyText(ref) });
         return {
@@ -6396,6 +6434,153 @@ class App {
           conversations: conversationPack.report(),
           strings: this.strings.report(),
           tune: { ...REACTION_TUNE },
+        };
+      },
+      /**
+       * The documents (`src/story/doc.ts`, `src/story/docRules.ts`): with nothing, every one still to read, the
+       * document window as it stands, a call in the band, and the documents the sets read here hold. `{ open:
+       * '<doc>' }` opens one as the journal's Read does (a call plays in the band); `{ end: true }` turns the open
+       * one to its last page, which reads it to its end; `{ pick: n }` presses the nth button of its foot (on a card
+       * Accept is 1 and Decline 2); `{ next: true }` is the next line of a call; `{ close: true }` shuts the window.
+       * A document's id may be written without its set (`test-pages`).
+       */
+      docs: (opts?: { open?: string; end?: boolean; pick?: number; next?: boolean; close?: boolean }) => {
+        let said: string | null = null;
+        const view = this.jobs.view();
+        const lib = this.questHost.library;
+        const idOf = (d: string): string => {
+          if (d.includes(':')) return d;
+          const want = d.startsWith('doc/') ? d : `doc/${d}`;
+          return view?.docs?.find((x) => x.id.endsWith(`:${want}`))?.id ?? Object.keys(lib.docs ?? {}).find((x) => x.endsWith(`:${want}`)) ?? `test:${want}`;
+        };
+        if (opts?.open) {
+          const id = idOf(opts.open);
+          const r = this.jobs.read(id);
+          said = r.ok ? `asked for ${id}` : `could not open ${id}: ${r.why}`;
+        }
+        if (opts?.end && this.documentUi.open) {
+          this.documentUi.turn(Number.MAX_SAFE_INTEGER);
+          said = 'turned to the last page';
+        }
+        if (typeof opts?.pick === 'number') {
+          const buttons = [...this.documentUi.root.querySelectorAll<HTMLButtonElement>('.doc-foot button')];
+          const b = buttons[opts.pick - 1];
+          if (!b) said = `the foot has no button ${opts.pick} (${buttons.length})`;
+          else if (b.disabled) said = `button ${opts.pick} is greyed`;
+          else {
+            said = `pressed ${b.textContent ?? ''}`;
+            b.click();
+          }
+        }
+        if (opts?.next) {
+          said = this.commNow ? 'the next line of the call' : 'no call to go on with';
+          this.nextCommLine();
+        }
+        if (opts?.close) {
+          this.closeDocument();
+          this.endComm();
+          said = 'closed';
+        }
+        return {
+          said,
+          toRead: (this.jobs.view()?.docs ?? []).map((d) => ({ id: d.id, title: d.title, kind: d.kind, ...(d.quest ? { quest: d.quest } : {}), ...(d.step ? { step: d.step } : {}), ...(d.card ? { card: true } : {}), ...(d.from ? { call: d.from } : {}), ...(d.opened ? { opened: true } : {}) })),
+          window: this.documentUi.report(),
+          call: this.commNow ? { doc: this.commNow.doc, from: this.commNow.name, line: this.commNow.at + 1, lines: this.commNow.lines.length, heard: this.commNow.ended } : null,
+          inSets: Object.keys(lib.docs ?? {}).sort(),
+          host: this.jobs.kind,
+        };
+      },
+      /**
+       * The journal (`src/story/journal.ts`, the window `src/ui/journalUi.ts`): with nothing (or `list`), every entry
+       * the book holds with its kind, title, where and when, who was there, its job, and whether this browser has
+       * its words; the window as it stands; the words kept here. `{ open: true }` opens the window (`{ tab:
+       * 'jobs' | 'journal' | 'file' }` on a tab), `{ show: 'j3' }` opens an entry as the window's Open or Show does;
+       * `{ note: { on: 'j3', text: '...' } }` writes a note of the player's own on it; `{ tune: { page: 20 } }` moves
+       * `JOURNAL_TUNE`. With a server the entries are its book's and the words are asked of it.
+       */
+      journal: (opts?: { list?: boolean; open?: boolean; tab?: 'jobs' | 'journal' | 'file'; show?: string; note?: { on: string; text: string }; tune?: Partial<typeof JOURNAL_TUNE> }) => {
+        if (opts?.tune) tuneJournal(opts.tune);
+        const results: Record<string, unknown>[] = [];
+        if (opts?.open || opts?.tab) this.toggleJournal(true, opts.tab);
+        const entries = this.story.book?.journal ?? [];
+        if (opts?.show) {
+          const e = entries.find((x) => x.id === opts.show);
+          if (!e) results.push({ show: opts.show, ok: false, why: 'there is no such entry' });
+          else if (e.kind === 'doc' || e.kind === 'comm') {
+            this.openJournalEntry(e);
+            results.push({ show: e.id, ok: true });
+          } else {
+            this.toggleJournal(true, 'journal');
+            this.journalUi.select(e.id);
+            results.push({ show: e.id, ok: true });
+          }
+        }
+        if (opts?.note) results.push({ note: opts.note.on, ...this.jobs.mine(opts.note.on, opts.note.text) });
+        this.storyClock = 0;
+        this.stepStory(0, this.inWorld && !this.dying);
+        const words = (h: string | undefined): string => {
+          if (!h) return 'none';
+          const w = this.journalWords(h);
+          return typeof w === 'string' ? 'kept' : w === null ? 'asking' : 'not kept';
+        };
+        return {
+          results,
+          entries: (opts?.list === false ? [] : (this.story.book?.journal ?? [])).map((e) => ({ id: e.id, kind: e.kind, title: e.title ?? null, at: new Date(e.at).toISOString(), world: e.place?.world ?? null, with: e.with, ...(e.quest ? { quest: e.quest } : {}), ...(e.doc ? { doc: e.doc, variant: e.variant ?? null } : {}), ...(e.ref ? { on: e.ref } : {}), words: e.lines ? e.lines.map((l) => (l.h ? words(l.h) : 'reference')) : words(e.h) })),
+          window: this.journalUi.report(),
+          texts: this.storyTexts.report(),
+          asked: this.textsAsked.size,
+          unkept: this.textsUnkept.size,
+          host: this.jobs.kind,
+          tune: { ...JOURNAL_TUNE },
+        };
+      },
+      /**
+       * The ISB's file on the character (`src/story/file.ts`): the level it has reached and the exposure, every entry
+       * with its kind, weight, tags and page and how long until the player may see it, what the player sees of it
+       * now (the view's), how coldly it makes each track's people greet them, and the set's levels. `{ add: { kind:
+       * 'incident', weight: 5, doc: 'doc/test-file-page', tags: ['x'] } }` (or `add: true` for an incident of
+       * weight 1) writes an entry through the story's own `file()` action; `{ level: 2 }` writes one just heavy
+       * enough to reach that level by the set's thresholds. Both with this browser's own host only: on a server the
+       * file is written by the story and never by a console. `{ tune: { revealGameHours: 1 } }` moves `FILE_TUNE`.
+       */
+      file: (opts?: { add?: true | { kind?: string; weight?: number; doc?: string; tags?: string[] }; level?: number; tune?: Partial<typeof FILE_TUNE> }) => {
+        if (opts?.tune) tuneFile(opts.tune);
+        const results: Record<string, unknown>[] = [];
+        const lib = this.questHost.library;
+        const def = lib.file?.isb ?? null;
+        const book = this.story.book;
+        const add = (kind: string, weight: number, doc?: string, tags: string[] = []): void => {
+          if (this.remoteJobs.active) {
+            results.push({ ok: false, why: 'a server keeps this file: only its story writes in it' });
+            return;
+          }
+          const args = [kind, String(weight), ...(doc ? [doc.includes(':') || doc.startsWith('doc/') ? doc : `doc/${doc}`] : []), ...tags].join(', ');
+          results.push({ act: `file(isb, ${args})`, ...this.questHost.run([`file(isb, ${args})`]) });
+        };
+        if (opts?.add) {
+          const a = opts.add === true ? {} : opts.add;
+          add(a.kind && (FILE_KINDS as readonly string[]).includes(a.kind) ? a.kind : 'incident', typeof a.weight === 'number' && a.weight >= 0 ? a.weight : 1, a.doc, a.tags ?? []);
+        }
+        if (typeof opts?.level === 'number') {
+          const want = def?.levels[Math.max(0, Math.round(opts.level) - 1)];
+          const had = fileOf(this.story.book, 'isb');
+          if (!want) results.push({ ok: false, why: `the file has ${def?.levels.length ?? 0} levels` });
+          else add('incident', Math.max(0, Math.ceil(want.at - (had?.exposure ?? 0))));
+        }
+        const rec = fileOf(this.story.book, 'isb');
+        const now = this.jobs.now();
+        const shown = this.jobs.view()?.file ?? null;
+        return {
+          results,
+          level: rec?.level ?? 0,
+          byThresholds: levelAt(def, rec?.exposure ?? 0),
+          exposure: rec?.exposure ?? 0,
+          entries: (rec?.entries ?? []).map((e) => ({ id: e.id, kind: e.kind, weight: e.weight, tags: e.tags, ...(e.doc ? { doc: e.doc } : {}), source: e.source, seenIn: Math.max(0, Math.round((e.revealAt - now) / 1000)) })),
+          shown: shown?.entries.map((e) => e.id) ?? [],
+          react: shown?.react ?? {},
+          levels: def?.levels.map((l) => ({ at: l.at, name: l.name, reacts: l.reacts })) ?? [],
+          book: book ? 'held' : 'none',
+          tune: { ...FILE_TUNE },
         };
       },
       /**
@@ -7195,8 +7380,13 @@ class App {
     // reloads without a restart.
     this.story.onChange((why) => {
       this.questHost.changed();
-      // Another character, or none: the view a server sent is about nobody in play now.
-      if (why === 'use') this.remoteJobs.reset();
+      // Another character, or none: the view a server sent is about nobody in play now, and nor is what was asked
+      // of it for the journal's words.
+      if (why === 'use') {
+        this.remoteJobs.reset();
+        this.textsAsked.clear();
+        this.textsUnkept.clear();
+      }
     });
     this.questHost.onView(() => this.waypointsChanged());
     this.remoteJobs.onView(() => this.waypointsChanged());
@@ -8484,9 +8674,13 @@ class App {
         this.stopPlacingProp();
         return;
       }
-      // A conversation is left, and that is all the press does.
+      // A conversation is left, and that is all the press does; so is a call.
       if (this.talkNow && !this.menu.open) {
         this.endTalk();
+        return;
+      }
+      if (this.commNow && !this.menu.open) {
+        this.endComm();
         return;
       }
       // The Escape that dropped the lock (and so opened the menu) must not close it again in the same breath.
@@ -10387,6 +10581,328 @@ class App {
     if (!out.ok && out.why) this.messages.system(`No change: ${out.why}`);
   }
 
+  // ---- The journal and the documents: what was witnessed, what is to read, and the ISB's file. ----
+
+  /** The journal window (O) and the document window, and what the story hands either of them. Once, in the constructor. */
+  private wireJournal(): void {
+    const j = new JournalUi(this.ui);
+    this.journalUi = j;
+    const d = new DocumentUi(this.ui);
+    this.documentUi = d;
+    j.words = {
+      text: (r) => this.storyText(r),
+      world: (id) => worldNameOf(id),
+      who: (id) => this.storyWho(id),
+      quest: (id) => this.storyQuestTitle(id),
+      words: (h) => this.journalWords(h),
+      when: (at) => new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }),
+    };
+    j.trackedOf = (q) => !!this.jobs.view()?.tracked.includes(q);
+    j.onClose = () => this.toggleJournal(false);
+    j.onRead = (doc) => this.readDoc(doc, true);
+    j.onAccept = (q) => this.storySaid(this.jobs.accept(q));
+    j.onDecline = (q) => this.storySaid(this.jobs.decline(q));
+    j.onTrack = (q, on) => this.storySaid(this.jobs.track(q, on));
+    j.onDrop = (q) => this.storySaid(this.jobs.drop(q));
+    j.onRestart = (q) => this.storySaid(this.jobs.restart(q));
+    j.onOpenEntry = (e) => this.openJournalEntry(e);
+    j.onMine = (ref, text) => this.storySaid(this.jobs.mine(ref, text));
+    j.onWant = (at) => void this.wantJournalWords(at);
+    d.text = (r) => this.storyText(r);
+    d.onClose = () => this.closeDocument();
+    // The last page shown: the document is read to its end, and whoever holds the story is told.
+    d.onEnd = (doc) => this.readToEnd(doc);
+    // An offer answered at its card's foot, or a choice made at a page's: the page is put away with it.
+    d.onAccept = (q) => {
+      this.storySaid(this.jobs.accept(q));
+      this.closeDocument();
+    };
+    d.onDecline = (q) => {
+      this.storySaid(this.jobs.decline(q));
+      this.closeDocument();
+    };
+    d.onPick = (doc, option) => {
+      this.storySaid(this.jobs.read(doc, { pick: option }));
+      this.closeDocument();
+    };
+    draggable(j.root, '.ship-panel', '.ship-header', 'journal');
+    draggable(d.root, '.ship-panel', '.ship-header', 'document');
+    // The keys on the close buttons are the ones bound now, and follow a rebind.
+    const key = () => j.setKey(keyLabel(this.input.bindings.journal[0] ?? ''));
+    key();
+    onBindingsChanged(key);
+    d.setKey('Esc');
+    this.questHost.onDoc((w) => this.onDocWord(w));
+    this.remoteJobs.onDoc((w) => this.onDocWord(w));
+    // The words of a stretch of the journal came from the server: what that answer carried is answered, kept or
+    // not, and nothing else -- another ask may still be on its way.
+    this.remoteJobs.onJournal((_from, answered) => {
+      for (const h of answered) {
+        this.textsAsked.delete(h);
+        if (!this.storyTexts.has(h)) this.textsUnkept.add(h);
+      }
+      this.refreshJournal();
+    });
+    // The story moved (a view, a batch, a book read in): the journal follows while it is open.
+    this.questHost.onView(() => this.refreshJournal());
+    this.remoteJobs.onView(() => this.refreshJournal());
+    this.story.onChange(() => this.refreshJournal());
+    // Every word kept in this browser read in once, behind the first loading screen; nothing waits on it.
+    void this.storyTexts.load().then(() => this.refreshJournal());
+  }
+
+  /** What came of something asked of the story from a window: a refusal is said, anything else shows when it comes back. */
+  private storySaid(out: { ok: boolean; why?: string }): void {
+    if (!out.ok && out.why) this.messages.system(out.why);
+  }
+
+  /** O: the journal, open or shut. It closes every other panel to open, as the Waypoints window does. */
+  private toggleJournal(open = !this.journalUi.open, tab?: 'jobs' | 'journal' | 'file'): void {
+    if (!open) {
+      if (!this.journalUi.open) return;
+      this.journalUi.hide();
+      this.audio.ui.play('panelClose');
+      this.handBackMouse();
+      return;
+    }
+    if (!this.started || !this.inWorld || this.traveling) return;
+    this.closePanels();
+    this.map.hide();
+    this.journalUi.show(this.journalModel(), tab);
+    this.audio.ui.play('panelOpen');
+    this.freeMouse(true);
+  }
+
+  /** What the journal shows: built when it opens and when the story changes, never in a frame. */
+  private journalModel(): JournalModel {
+    const view = this.jobs.view();
+    const book = this.story.book;
+    const host = this.story.host;
+    const why = this.remoteJobs.active ? this.remoteJobs.waits() : this.storyJobsWait();
+    const note = host === 'held' ? "This character's story is being settled with the server, or the server is not answering." : why && why !== JOBS_WAIT_UNREAD ? `Your jobs wait: ${why}.` : host === 'server' ? 'Held by the server, and shown here as it answers.' : 'Kept in this browser.';
+    return { jobs: view?.quests ?? [], toRead: view?.docs ?? [], entries: book?.journal ?? [], file: view?.file ?? null, note };
+  }
+
+  /** The journal drawn again from the story, when it is open. */
+  private refreshJournal(): void {
+    if (this.journalUi?.open) this.journalUi.update(this.journalModel());
+  }
+
+  /** A person's name as the player knows them: one of the story's people by the name given or what they are called until then; anybody else as somebody. */
+  private storyWho(id: string): string {
+    const lib = this.questHost.library;
+    const c = lib.cast && Object.hasOwn(lib.cast, id) ? lib.cast[id] : null;
+    if (c) return this.storyText(this.story.book?.npcs?.[id]?.named !== undefined ? c.name : c.unknownAs);
+    const shown = this.jobs.view()?.cast.find((x) => x.id === id);
+    if (shown) return this.storyText(shown.name);
+    return id.startsWith('row:') ? 'somebody' : id.replace(/^[^:]*:cast\//, '').replace(/[_-]+/g, ' ');
+  }
+
+  /** A job's title, from what the view shows or the set read here, or its id. */
+  private storyQuestTitle(id: string): string {
+    const shown = this.jobs.view()?.quests.find((q) => q.id === id);
+    if (shown) return this.storyText(shown.title);
+    const def = this.questHost.library.quests[id];
+    return def ? this.storyText(def.title) : id;
+  }
+
+  /**
+   * A journal text by its hash: its words when this browser has them; null when it has not but a server may
+   * yet hand them over (asked or about to be); undefined when nobody kept them.
+   */
+  private journalWords(h: string): string | null | undefined {
+    const t = this.storyTexts.get(h);
+    if (t !== undefined) return t;
+    if (!this.remoteJobs.active) return undefined;
+    return this.textsUnkept.has(h) ? undefined : null;
+  }
+
+  /**
+   * The words of these entries of the journal (by their place in it, from nought) asked of the server: only
+   * entries with a word this browser has not got, not known lost and not asked within `JOURNAL_ASK_AGAIN`, in
+   * stretches no longer than one word may ask for, each marked asked only once its ask has really gone. Why the
+   * server cannot be asked just now, or null.
+   */
+  private wantJournalWords(at: readonly number[]): string | null {
+    if (!this.remoteJobs.active) return null;
+    const journal = this.story.book?.journal ?? [];
+    const now = performance.now();
+    const fresh = (h: string): boolean => !this.storyTexts.has(h) && !this.textsUnkept.has(h) && !(now - (this.textsAsked.get(h) ?? Number.NEGATIVE_INFINITY) < JOURNAL_ASK_AGAIN);
+    const want: number[] = [];
+    for (const i of at) if (journal[i] && journalHashes([journal[i]]).some(fresh)) want.push(i);
+    want.sort((a, b) => a - b);
+    for (let k = 0; k < want.length; ) {
+      const from = want[k];
+      let to = from;
+      while (k < want.length && want[k] - from < STORY_WIRE.journalMax) to = want[k++];
+      const r = this.remoteJobs.askJournal(from, to - from + 1);
+      if (!r.ok) return r.why ?? 'the server cannot be asked just now';
+      for (const h of journalHashes(journal.slice(from, to + 1))) if (fresh(h)) this.textsAsked.set(h, now);
+    }
+    return null;
+  }
+
+  /**
+   * A page read to its last line, in the document window or the call band: whoever holds the story is told. The
+   * answer says it answers this (`end`), so it never opens the page again (`onDocWord`).
+   */
+  private readToEnd(doc: string): void {
+    this.storySaid(this.jobs.read(doc, { end: true }));
+  }
+
+  /** A document handed over, asked for: the page comes back from whoever holds the story (`onDocWord`). */
+  private readDoc(doc: string, fromJournal: boolean): void {
+    this.docFromJournal = fromJournal;
+    const r = this.jobs.read(doc);
+    if (!r.ok && r.why) {
+      this.docFromJournal = false;
+      this.messages.system(r.why);
+    }
+  }
+
+  /**
+   * A page from whoever holds the story: shown on paper, or played in the conversation band when it is a call;
+   * the foot of the one already open brought up to date; kept until a conversation is over, since the band holds
+   * the screen while one lasts; a refusal said. A page with no words (a choice made at a foot) shows nothing.
+   */
+  private onDocWord(w: DocWord): void {
+    if (!w.view) {
+      if (w.why) this.messages.system(w.why);
+      return;
+    }
+    if (this.documentUi.doc === w.doc) {
+      this.documentUi.setFoot(w.foot);
+      return;
+    }
+    // The answer to a page read to its end, which says so itself: the window or the call it was read in had it
+    // already, and may have been shut since (a server answers a moment later), so it opens nothing and never
+    // starts a call again.
+    if (w.end) return;
+    if (this.talkNow) {
+      this.docAfterTalk = w;
+      return;
+    }
+    if (w.from) this.startComm(w.doc, w.from, docLinesOf(w.view), false);
+    else this.showDocument({ view: w.view, foot: w.foot });
+  }
+
+  /** The document window open on a page, every other panel shut. */
+  private showDocument(w: { view: NonNullable<DocWord['view']>; foot: DocWord['foot'] }, again = false, note?: string): void {
+    const fromJournal = this.docFromJournal;
+    this.closePanels();
+    this.map.hide();
+    this.docFromJournal = fromJournal;
+    this.documentUi.show({ view: w.view, foot: w.foot, again, ...(note ? { note } : {}) });
+    this.audio.ui.play('panelOpen');
+    this.freeMouse(true);
+  }
+
+  /** The document window shut: back to the journal when it was opened from there, else the mouse back to the game. */
+  private closeDocument(): void {
+    if (!this.documentUi.open) return;
+    this.documentUi.hide();
+    this.audio.ui.play('panelClose');
+    if (this.docFromJournal && this.inWorld) {
+      this.docFromJournal = false;
+      this.toggleJournal(true, this.journalUi.currentTab);
+      return;
+    }
+    this.docFromJournal = false;
+    this.handBackMouse();
+  }
+
+  /**
+   * An entry of the journal opened: a document as it was read, by the words it was frozen with, never worked out
+   * again; a call likewise, on paper. Words this browser has not got are asked of a server, or said not kept.
+   */
+  private openJournalEntry(e: JournalEntry): void {
+    // The page of a handing still to read (opened and not finished, or with a question at its foot still open):
+    // opened as a reading is, so it can be read to its end and answered there; its words are the frozen ones all
+    // the same.
+    const rec = e.doc ? this.story.book?.docs?.[e.doc] : undefined;
+    if (e.doc && rec?.j === e.id && this.jobs.view()?.docs?.some((d) => d.id === e.doc)) {
+      this.readDoc(e.doc, true);
+      return;
+    }
+    const words = e.h ? this.journalWords(e.h) : undefined;
+    if (words === null) {
+      const at = this.story.book?.journal?.indexOf(e) ?? -1;
+      const why = at >= 0 ? this.wantJournalWords([at]) : null;
+      this.messages.system(why ? `That page cannot be fetched just now: ${why}` : 'Fetching that page from the server');
+      return;
+    }
+    let view = null;
+    if (typeof words === 'string') {
+      try {
+        view = cleanDocView(JSON.parse(words));
+      } catch {
+        view = null;
+      }
+    }
+    if (!view) {
+      this.messages.system(NOT_KEPT);
+      return;
+    }
+    this.docFromJournal = true;
+    this.showDocument({ view, foot: null }, true, e.kind === 'comm' && e.with[0] ? `A call from ${this.storyWho(e.with[0])}` : undefined);
+  }
+
+  // ---- calls, in the conversation band ----
+
+  /**
+   * A call heard: its caller's name on the card, its lines one after another in the conversation band, with no
+   * camera and the world going on round it. Its last line shown is the call heard to its end.
+   */
+  private startComm(doc: string, from: string, lines: string[], again: boolean): void {
+    if (this.talkNow || !lines.length) return;
+    this.closePanels();
+    this.map.hide();
+    const name = this.storyWho(from);
+    this.commNow = { doc, name, lines, at: 0, again, ended: false };
+    this.talkUi.show(name, lines[0], []);
+    this.talkUi.setBanner('On the comm');
+    this.freeMouse(true);
+    this.audio.ui.play('panelOpen');
+    this.commShown();
+  }
+
+  /** The line standing in a call: the keys under it, and the call heard once its last is up. */
+  private commShown(): void {
+    const c = this.commNow;
+    if (!c) return;
+    const last = c.at >= c.lines.length - 1;
+    this.talkUi.say(c.lines[c.at], true);
+    if (last && !c.ended) {
+      c.ended = true;
+      if (!c.again) this.readToEnd(c.doc);
+    }
+  }
+
+  /** A click or a number in a call: the next line, or the call over after its last. */
+  private nextCommLine(): void {
+    const c = this.commNow;
+    if (!c) return;
+    if (c.at >= c.lines.length - 1) {
+      this.endComm();
+      return;
+    }
+    c.at++;
+    this.commShown();
+  }
+
+  private endComm(): void {
+    if (!this.commNow) return;
+    this.dropComm();
+    this.handBackMouse();
+  }
+
+  /** The call taken off the band, the mouse left to whoever is taking the screen. */
+  private dropComm(): void {
+    this.commNow = null;
+    this.talkUi.setBanner(null);
+    this.talkUi.hide();
+  }
+
   // ---- The jobs: whoever holds them, the detectors, the things they stand, the tracker and the message line. ----
 
   /**
@@ -10518,6 +11034,8 @@ class App {
   private sayStory(note: StoryNote, given: boolean): void {
     const words = noteWords(note, this.questHost.library, { text: (r) => this.storyText(r), itemName: (k, id) => this.storyItemName(k, id) }, given);
     if (words) this.messages.story(words);
+    // A job offered in a conversation: its card is the one document that opens by itself, once the talk is over.
+    if (note.k === 'offered' && this.talkNow) this.cardAfterTalk = note.quest;
   }
 
   /** Where the player stands as the detectors read it, refilled in place: the world, a point in its own frame, the room. */
@@ -10580,6 +11098,7 @@ class App {
       hour: this.world.planet ? hourOfDay(this.world.day.time) : null,
       grouped: this.groupIdNow() !== '',
       species: c?.species ?? null,
+      name: c?.name ?? null,
       credits: c ? purse.credits : null,
       has: (kind, id) => this.equipment.owned().filter((o) => o.kind === kind && o.id === id).length,
     };
@@ -15940,7 +16459,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.waypointsUi.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.waypointsUi.open || this.journalUi.open || this.documentUi.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -16696,6 +17215,13 @@ class App {
     if (this.housingUi.open) this.housingUi.hide();
     if (this.propsUi.open) this.propsUi.hide();
     if (this.waypointsUi.open) this.waypointsUi.hide();
+    if (this.journalUi.open) this.journalUi.hide();
+    if (this.documentUi.open) {
+      this.documentUi.hide();
+      this.docFromJournal = false;
+    }
+    // A call in the band stands aside for whatever takes the screen now.
+    if (this.commNow) this.dropComm();
     if (this.terminalUi.open) {
       // The galaxy goes home first: the terminal is about to be hidden with the map window's own
       // canvas and label layer sitting inside it, and nothing else would ever put them back.
@@ -18397,7 +18923,7 @@ class App {
       // How the speaker speaks: the client's own diction where the game gave them one, else what their side and body say.
       const diction = conversationPack.voiceOf(who)?.diction ?? dictionOf(cast?.side ?? m.side, m.entry.id);
       const mood = cast ? (cast.mood ?? null) : (standingPeople.rowOf(m)?.mood ?? null);
-      this.talkTree = { speaker, who, review: review !== null, memory, mood, diction, replies: [], lent, log: [], greetUntil: this.world.simTime + greeted };
+      this.talkTree = { speaker, who, review: review !== null, memory, mood, diction, replies: [], lent, log: [], greetUntil: this.world.simTime + greeted, read: Object.create(null) as Record<string, string> };
       this.talkPlay.open(this.world.simTime);
       this.talkUi.show(m.label, '', []);
       this.talkUi.setBanner(review !== null ? '[structure only]' : null);
@@ -18422,18 +18948,37 @@ class App {
     const m = t.body;
     const person = standingPeople.speakerOf(m);
     const voice = person ? conversationPack.voiceOf(person.who) : null;
-    t.reaction = person ? reactionFor(voice, this.story.book, `row:${person.key}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key)) : null;
+    // The ISB's file works on people before the player can read why: a level it has reached holds a track's people colder.
+    t.reaction = person ? reactionFor(voice, this.story.book, `row:${person.key}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key), this.jobs.view()?.file?.react ?? null) : null;
     if (t.reaction) this.strings.want(t.reaction.table);
     this.talkUi.setBanner(null);
     this.talkUi.show(m.label, t.reaction ? this.storyText(t.reaction.hi) : greetingOf(m.side, t.following, m.key), t.options);
   }
 
-  /** A word to whoever plays the conversation under way: the console's review is this browser's own, the rest the story's host. */
-  private talkSay(op: 'pick' | 'close', reply: string | null = null): void {
+  /**
+   * A word to whoever plays the conversation under way: the console's review is this browser's own, the rest the
+   * story's host. A close carries the name the band showed, which the caller hands in when the conversation has
+   * already been let go of (`endTalk` clears `talkNow` first).
+   */
+  private talkSay(op: 'pick' | 'close', reply: string | null = null, name: string | null = this.talkNow?.body.label ?? null): void {
     const tt = this.talkTree;
     if (!tt) return;
     if (tt.review) this.questHost.review(op, tt.speaker, reply);
+    // A close carries what the band read out of the client's own lines and the name it showed, for the journal.
+    else if (op === 'close') this.jobs.talk('close', tt.speaker, null, tt.who, { read: tt.read, name });
     else this.jobs.talk(op, tt.speaker, reply, tt.who);
+  }
+
+  /**
+   * A line said in the client's own words, as the band read it out: kept by its whole reference for the journal's
+   * transcript. Words not here yet (`[…]`, the table still on its way) are not words: the line stays its
+   * reference until they come (`refreshTalkWords` keeps it again then).
+   */
+  private keepReadLine(text: TextRef, strings: string | null | undefined, words: string): void {
+    const tt = this.talkTree;
+    if (!tt || tt.review || typeof text !== 'string' || words.includes(UNRESOLVED)) return;
+    const ref = wholeRef(text, strings);
+    if (typeof ref === 'string' && clientKey(ref) && (Object.hasOwn(tt.read, ref) || Object.keys(tt.read).length < 400)) tt.read[ref] = words;
   }
 
   /**
@@ -18451,7 +18996,10 @@ class App {
       if (this.talkPlay.mode === 'line') {
         const l = node.lines[this.talkPlay.line];
         if (!l || tableOf(l.text, node.strings) !== table) return;
-        this.talkUi.setLine(this.talkLineText(node, l));
+        const words = this.talkLineText(node, l);
+        this.talkUi.setLine(words);
+        // And the transcript keeps the words now seen, not the stand-in shown before them.
+        this.keepReadLine(l.text, node.strings, words);
         this.talkPlay.until = Math.max(this.talkPlay.until, this.world.simTime + this.talkLineHold(l));
       } else if (this.talkPlay.mode === 'choose') {
         const named = (ref: TextRef | null | undefined): boolean => !!ref && tableOf(ref) === table;
@@ -18557,6 +19105,7 @@ class App {
     if (!t || !tt || !l) return;
     const words = this.talkLineText(node, l);
     this.talkUi.say(words, i < node.lines.length - 1 || node.replies.length > 0 || node.next);
+    this.keepReadLine(l.text, node.strings, words);
     const m = t.body;
     const line = { tree: node.tree, node: node.node, line: i, text: words, tone: l.tone ?? null, ...(l.gesture !== undefined ? { slot: l.gesture } : {}) };
     const pick = pickGesture(line, { still: m.seated || m.dead, has: (c) => m.canPlay(c), mood: tt.mood, diction: tt.diction }, tt.memory);
@@ -18601,6 +19150,7 @@ class App {
     this.audio.ui.play('select');
     if (r.said !== null) {
       const said = this.storyText(r.said);
+      this.keepReadLine(r.said, this.talkPlay.node?.strings, said);
       this.talkUi.you(said);
       const clip = replyGesture(said, r.gesture, (c) => !!this.player.rig?.has(c));
       if (clip) this.playTalkGesture(clip);
@@ -18768,7 +19318,8 @@ class App {
     // idle a line laid over the speaker is put back.
     const tt = this.talkTree;
     if (tt) {
-      this.talkSay('close');
+      // The name the band showed, read off the conversation just let go of.
+      this.talkSay('close', null, t.body.label);
       this.talkTree = null;
       this.lastTalkTree = tt;
       this.talkPlay.close();
@@ -18777,12 +19328,20 @@ class App {
     t.body.listen(null);
     this.talkUi.setBanner(null);
     this.talkUi.hide();
+    // A card offered in the conversation opens now it is over, and a page that came while it held the screen.
+    const card = this.cardAfterTalk;
+    const queued = this.docAfterTalk;
+    this.cardAfterTalk = null;
+    this.docAfterTalk = null;
     if (!handBack) {
       this.talkCam.blend = 0;
       this.talkCam.body = null;
       return;
     }
     this.handBackMouse();
+    const cardDoc = card ? this.jobs.view()?.docs?.find((d) => d.card && d.quest === card) : null;
+    if (cardDoc) this.readDoc(cardDoc.id, false);
+    else if (queued) this.onDocWord(queued);
   }
 
   /**
@@ -19582,8 +20141,16 @@ class App {
       if (this.liftMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.liftMenu.pickKey(n);
       if (this.shuttleMenu.open) for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.shuttleMenu.pickKey(n);
       // A conversation takes the number keys for its answers and every other key the player has: the world
-      // goes on round it, and the player stands and listens (`stepTalk`).
+      // goes on round it, and the player stands and listens (`stepTalk`). A call takes them too: any number
+      // is the next line, and it is over the moment the player is down, away or travelling.
       if (this.talkNow) this.stepTalk(dt);
+      else if (this.commNow) {
+        let next = false;
+        for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) next = true;
+        input.dropPresses();
+        if (this.dying || this.traveling || !this.inWorld) this.endComm();
+        else if (next) this.nextCommLine();
+      }
 
       if (active) {
         // A passenger in a shuttle has the same few keys a jump leaves: the trip is theirs to step off
@@ -19602,6 +20169,10 @@ class App {
         // The Waypoints window, held back while a jump has the controls or a shuttle has the passenger,
         // as the map is: its "Show on map" opens the map, whose teleport would end either.
         if (input.pressedAction('waypoints') && !this.hyperspace.locksControls && !riding) this.toggleWaypoints();
+        // The journal, held back as the Waypoints window is, and not at a ship's controls, where O is the
+        // ultra cruise's own key.
+        const atControls = !!(player.mounted ?? player.piloting)?.spec.ship;
+        if (input.pressedAction('journal') && !this.hyperspace.locksControls && !riding && !atControls) this.toggleJournal();
         // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
         // it itself, and from one of its boxes it types a character and Escape is the way out.
         if (input.pressedAction('debugMenu')) this.debugMenu.toggle();
@@ -19671,7 +20242,8 @@ class App {
           if (input.justPressed(CUT_ENGINES_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && this.world.planet.space) wingsOf.askSetDown();
           // The ultra cruise: the same key starts a run and lets go of one. It says for itself where
           // it may run at all, so the only thing asked here is that a jump is not flying the hull.
-          if (input.justPressed(CRUISE_KEY) && !this.hyperspace.locksControls && !riding) this.ultraCruise.toggle();
+          // At a ship's controls only: O is the journal everywhere else.
+          if (input.justPressed(CRUISE_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && !riding) this.ultraCruise.toggle();
           dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
           if (input.pressedAction('emoteWheel') && !player.mounted) this.emoteWheel.show(this.emotes);

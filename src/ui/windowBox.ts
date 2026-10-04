@@ -74,6 +74,11 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   // The Waypoints window: a row is a swatch, a name, where it is, two switches and three buttons, so it
   // wants that width, and the height of the header and a few rows.
   waypoints: { w: 600, h: 260 },
+  // The journal: a job's row carries its name, how it stands and three buttons, and a page of the journal
+  // three filters and a pager over it, so it wants the waypoints' width and a little more height.
+  journal: { w: 620, h: 300 },
+  // A document: a page of paper that can still be read, its pager and its foot.
+  document: { w: 420, h: 320 },
 });
 
 /** The minimum of a window this table does not name. */

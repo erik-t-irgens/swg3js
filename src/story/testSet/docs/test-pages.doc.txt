@@ -1,0 +1,27 @@
+// A two-page document, read to its end by the TEST: read a document job. Every mark the format has stands on
+// it once: fields, a table, a stamp, a redaction lifted only for somebody who has met the test clerk, the
+// tokens, and a signature. None of it is story.
+kind: memo
+id: test-pages
+title: TEST MEMO 0001
+issuer: TEST ISSUER
+client: civic
+
+TEST: This is the first page of a test memo, written to {player} the {player.species} on {date}.
+
+[field] TEST FIELD: TEST VALUE
+[field] TEST REFERENCE: TEST 0001
+
+[table]
+| TEST ITEM | TEST COUNT |
+| TEST BOLT | 3 |
+| TEST NUT | 7 |
+[/table]
+
+TEST: A line some readers see whole: [redact when met(cast/test-clerk)] TEST WORDS FOR SOMEBODY WHO HAS MET {npc:cast/test-clerk} [/redact] and the rest of it.
+
+[stamp] TEST STAMP
+[page]
+TEST: This is the second page. Reading it to here reads the memo to its end.
+
+[sign] TEST SIGNATURE

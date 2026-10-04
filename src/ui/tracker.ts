@@ -12,8 +12,13 @@
 // What is followed is the jobs the book tracks; when none of them is still running, the newest job taken
 // is shown in their place (`autoTrack`), so a job just taken is on the screen without anybody asking.
 //
+// Above them stand the documents handed over and still to read that no step of a job already names ("Read:
+// <title>", "Call: <who>"), up to `docsMax`: a document never opens by itself, so this line, and the message
+// line's when it was handed, are what point to it; it is opened from the journal.
+//
 // Every number here is ours. Pure but for the elements it is handed, so the node test gives it a stand-in.
 
+import type { DocItem } from '../story/docRules.ts';
 import type { ObjectiveLine, QuestView, StoryView, WaypointView } from '../story/view.ts';
 
 export const TRACKER_TUNE = {
@@ -33,6 +38,8 @@ export const TRACKER_TUNE = {
   autoTrack: true,
   /** Objective lines one job shows at most; the ones still to do first. A pool, read once when it is built. */
   linesMax: 6,
+  /** Documents still to read shown at once, the oldest first. A pool, read once when it is built. */
+  docsMax: 3,
 };
 
 /** Set any of those, clamped; the answer is the table as it stands. `max` and `linesMax` are read when the tracker is built. */
@@ -46,7 +53,27 @@ export function tuneTracker(o: Partial<typeof TRACKER_TUNE>): typeof TRACKER_TUN
   if (n(o.secondsUnder)) TRACKER_TUNE.secondsUnder = Math.max(0, o.secondsUnder);
   if (typeof o.autoTrack === 'boolean') TRACKER_TUNE.autoTrack = o.autoTrack;
   if (n(o.linesMax)) TRACKER_TUNE.linesMax = Math.max(1, Math.min(12, Math.round(o.linesMax)));
+  if (n(o.docsMax)) TRACKER_TUNE.docsMax = Math.max(0, Math.min(8, Math.round(o.docsMax)));
   return TRACKER_TUNE;
+}
+
+/**
+ * The documents the tracker points to, into `out` (emptied first): still to read, not one a job's own step names
+ * (that step's objective line already says "Read"), the oldest first, up to `docsMax`. Answers how many.
+ */
+export function pickDocs(view: StoryView | null, out: DocItem[]): number {
+  out.length = 0;
+  for (const d of view?.docs ?? []) {
+    if (out.length >= TRACKER_TUNE.docsMax) break;
+    if (!d.step) out.push(d);
+  }
+  return out.length;
+}
+
+/** What the tracker says of a document still to read. */
+export function docLine(d: DocItem, text: (ref: NonNullable<DocItem['fromName']>) => string): string {
+  if (d.from) return `Call: ${d.fromName ? text(d.fromName) : 'someone'}`;
+  return `Read: ${d.title}`;
 }
 
 /** A distance as the tracker says it: to ten metres, then to a tenth of a kilometre. '' for none. */
@@ -166,6 +193,9 @@ export class Tracker {
   private noteNow = '';
   private noteShown = false;
   private readonly blocks: BlockEl[] = [];
+  /** The documents still to read, a line each, above the jobs. */
+  private readonly docEls: { root: HTMLElement; shown: boolean; textNow: string }[] = [];
+  private readonly docsPicked: DocItem[] = [];
   private shownNow = false;
   /** The words a text stands for: handed in by whoever resolves the client's strings. */
   text: (ref: QuestView['title']) => string = (ref) => (typeof ref === 'string' ? ref : ref.en);
@@ -187,6 +217,13 @@ export class Tracker {
     this.note.className = 'hud-trk-note';
     this.note.hidden = true;
     this.root.appendChild(this.note);
+    for (let i = 0; i < Math.max(0, Math.round(TRACKER_TUNE.docsMax)); i++) {
+      const d = document.createElement('div');
+      d.className = 'hud-trk-doc';
+      d.hidden = true;
+      this.root.appendChild(d);
+      this.docEls.push({ root: d, shown: false, textNow: '' });
+    }
     const max = Math.max(1, Math.round(TRACKER_TUNE.max));
     const linesMax = Math.max(1, Math.round(TRACKER_TUNE.linesMax));
     for (let b = 0; b < max; b++) {
@@ -255,8 +292,9 @@ export class Tracker {
       this.windowStart = ms;
     }
     const n = show ? pickShown(view, this.picked) : ((this.picked.length = 0), 0);
+    const docs = show && !held ? pickDocs(view, this.docsPicked) : ((this.docsPicked.length = 0), 0);
     const wantNote = show && !!held;
-    const want = show && (n > 0 || wantNote);
+    const want = show && (n > 0 || wantNote || docs > 0);
     if (want !== this.shownNow) {
       this.shownNow = want;
       this.setHidden(this.root, !want);
@@ -267,6 +305,17 @@ export class Tracker {
       this.setHidden(this.note, !wantNote);
     }
     if (wantNote && this.setText(this.note, this.noteNow, held)) this.noteNow = held;
+    for (let i = 0; i < this.docEls.length; i++) {
+      const el = this.docEls[i];
+      const d = i < docs ? this.docsPicked[i] : null;
+      if (!!d !== el.shown) {
+        el.shown = !!d;
+        this.setHidden(el.root, !d);
+      }
+      if (!d) continue;
+      const line = docLine(d, this.text);
+      if (this.setText(el.root, el.textNow, line)) el.textNow = line;
+    }
     for (let b = 0; b < this.blocks.length; b++) {
       const block = this.blocks[b];
       const q = b < n ? this.picked[b] : null;
@@ -379,6 +428,6 @@ export class Tracker {
       if (!block.shown || !this.shownNow) continue;
       jobs.push({ title: block.titleNow, lines: block.lines.filter((l) => l.shown).map((l) => (l.valueNow ? `${l.textNow} [${l.valueNow}]` : l.done ? `${l.textNow} (done)` : l.textNow)) });
     }
-    return { shown: this.shownNow, note: this.noteShown ? this.noteNow : '', jobs, top: this.topNow, writes: this.lastWrites, writesNow: this.writes, tune: { ...TRACKER_TUNE } };
+    return { shown: this.shownNow, note: this.noteShown ? this.noteNow : '', docs: this.docEls.filter((d) => d.shown).map((d) => d.textNow), jobs, top: this.topNow, writes: this.lastWrites, writesNow: this.writes, tune: { ...TRACKER_TUNE } };
   }
 }

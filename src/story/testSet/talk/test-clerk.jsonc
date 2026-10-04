@@ -5,7 +5,7 @@
 // and a shot written by hand, a line long enough to cut in close, and a goodbye said aloud in other words.
 // Once the talk job is done an answer hidden until then (a condition with no "show") pays a tip and moves
 // Trust, as often as it is chosen and only once to a character, to a node whose own action is a gesture.
-// None of it is story.
+// An answer offers the work order job, whose card opens once the conversation is over. None of it is story.
 {
   "format": 1,
   "id": "test-clerk",
@@ -31,6 +31,7 @@
         { "id": "press", "text": "TEST: Answer under pressure.", "pressure": true, "once": true, "stakes": "TEST: the clerk will remember this", "do": ["trust(freelance, 1)"], "to": "pressed" },
         { "id": "pay", "text": "TEST: Pay ten credits for the privilege.", "when": "credits() >= 10", "show": "disable", "why": "TEST: you cannot spare ten credits", "do": ["charge(10)"], "to": "paid" },
         { "id": "tip", "text": "TEST: A tip for the finished job?", "when": "questDone(test:talk)", "pressure": true, "do": ["pay(3)", "trust(freelance, 1)"], "to": "tipped" },
+        { "id": "card", "text": "TEST: Have you a work order?", "when": "questNone(test:card)", "do": ["offer(test:card)"], "to": "carded" },
         { "id": "bye", "text": "TEST: Goodbye.", "said": "TEST: Goodbye, then." },
       ],
     },
@@ -47,6 +48,7 @@
     "named": { "say": [{ "text": "TEST: I am the test clerk. Now you know my name.", "shot": "close-npc" }], "next": "hello" },
     "pressed": { "say": [{ "text": "TEST: Under pressure, then. I will remember that.", "tone": "nervous" }], "end": true },
     "paid": { "say": ["TEST: Ten credits taken. Thank you."], "end": true },
+    "carded": { "say": ["TEST: Here is a work order. Read it once we are done."], "end": true },
     "finished": { "say": ["TEST: Then the job is finished. Thank you."], "end": true },
   },
 }

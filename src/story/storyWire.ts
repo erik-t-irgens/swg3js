@@ -25,6 +25,15 @@
 // (`row:<key>`) carries the creature they are stood as (`who`), which is what gives them a conversation; a
 // server from before them ignores it and answers that they have nothing to say.
 //
+// **The documents and the journal (story 4).** A browser says `read` (open a document it was handed, with
+// `end` once its last page is shown, or `pick` for a choice at its foot), `journal` (the words of a stretch of
+// its journal, which it keeps beside the book and may have lost), `texts` (words the server asked for, in
+// pieces) and `mine` (a note of the player's own on an entry), and a conversation's `close` carries the words
+// it read out of the client's own lines and the name it showed. It is told `doc` (the page as it was read, its
+// foot and the entry it is frozen into, or why not), `journal` (those words) and `need` (the words of the
+// journal the server has not got, after it took this browser's book). None of these is ever said to a server
+// whose hail says less than 4.
+//
 // **Why in pieces.** The relay drops what a browser sends past 64 KB in a second and closes a line that
 // goes twice past it, so a book of any size goes up as pieces of `offerChunk` characters with a gap
 // between them, and comes down the same way so the two sides read it with the same code. A book is
@@ -34,6 +43,9 @@
 // Pure, nothing imported but this folder: the server reads these words with this file.
 
 import { cleanChange, isQuestId, isStepName, isTrack, isWho, type StoryChange } from './book.ts';
+import { cleanDocView, type DocView } from './doc.ts';
+import { cleanDocFoot, type DocFoot } from './docRules.ts';
+import { cleanJournalEntry, cleanMine, isDocId, isJournalId, isTextHash, type JournalEntry } from './journal.ts';
 import type { StoryEvent, StoryNote } from './quests.ts';
 import type { Room } from './set.ts';
 import { cleanNodeView, type NodeView } from './talkRules.ts';
@@ -56,6 +68,14 @@ export const STORY_WIRE = {
   tagsMax: 32,
   /** The most actions one `admin` word may run (`complete` names one step at a time). */
   adminMax: 1,
+  /** The most entries one `journal` word asks for, or carries the words of. */
+  journalMax: 200,
+  /** The most hashes one `need` asks for. */
+  needMax: 5000,
+  /** The most client lines a conversation's close hands up the words of. */
+  readMax: 400,
+  /** The longest words one line of a conversation, or one kept text, may be, in characters. */
+  textMax: 200000,
 };
 
 /** The jobs' operations any player may ask of their own book. */
@@ -90,7 +110,11 @@ export type StoryUp =
   | { do: 'ev'; ev: StoryEvent; at: StoryAt }
   | { do: 'q'; op: QuestOp; quest: string; at: StoryAt }
   | { do: 'admin'; op: AdminOp; quest?: string; step?: string; name?: string; ms?: number | null; at: StoryAt }
-  | { do: 'talk'; op: TalkOp; speaker: string; reply: string | null; at: StoryAt; who?: string };
+  | { do: 'talk'; op: TalkOp; speaker: string; reply: string | null; at: StoryAt; who?: string; read?: Record<string, string>; name?: string }
+  | { do: 'read'; doc: string; end: boolean; pick: string | null; at: StoryAt }
+  | { do: 'journal'; from: number; count: number }
+  | { do: 'texts'; id: number; n: number; of: number; part: string }
+  | { do: 'mine'; ref: string; text: string; at: StoryAt };
 
 /** A conversation's operations: open one, give an answer (or let a node go on), close it. */
 export const TALK_OPS = ['open', 'pick', 'close'] as const;
@@ -107,7 +131,10 @@ export type StoryDown =
   | { do: 'no'; why: string; of?: 'job' }
   | { do: 'view'; view: StoryView; off: number; read: boolean }
   | { do: 'note'; note: StoryNoteDown; given: boolean }
-  | { do: 'node'; speaker: string; view: NodeView | null; why: string | null };
+  | { do: 'node'; speaker: string; view: NodeView | null; why: string | null }
+  | { do: 'doc'; doc: string; view: DocView | null; foot: DocFoot | null; entry: string | null; why: string | null; from?: string; end?: true }
+  | { do: 'journal'; from: number; entries: JournalEntry[]; texts: Record<string, string> }
+  | { do: 'need'; hashes: string[] };
 
 const CONTROL = /[\u0000-\u001f\u007f]/g;
 /** A story's own id for one of its things (an object, an area): its set's prefix and its name, as a quest's is. */
@@ -237,7 +264,7 @@ export function cleanStoryAt(x: unknown): StoryAt {
   return out;
 }
 
-const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'charged', 'item', 'xp', 'standing', 'say'];
+const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'charged', 'item', 'xp', 'standing', 'say', 'doc', 'journal'];
 
 /** A fact for the message line as a server sends it, cleaned, or null. Its words are made here, in the browser. */
 export function cleanNoteDown(x: unknown): StoryNoteDown | null {
@@ -297,6 +324,21 @@ export function cleanNoteDown(x: unknown): StoryNoteDown | null {
     case 'say': {
       const text = cleanTextRef(o.text, 400);
       if (text) out = { k: 'say', text: typeof text === 'string' ? text : text.en };
+      break;
+    }
+    case 'doc': {
+      const title = typeof o.title === 'string' ? o.title.replace(CONTROL, '').slice(0, 160) : '';
+      if (!isDocId(o.doc) || !title.trim()) break;
+      const doc: Extract<StoryNote, { k: 'doc' }> = { k: 'doc', quest, doc: o.doc, title };
+      if (isWho(o.from)) doc.from = o.from;
+      const fromName = cleanTextRef(o.fromName, 240);
+      if (fromName) doc.fromName = fromName;
+      out = doc;
+      break;
+    }
+    case 'journal': {
+      const title = typeof o.title === 'string' ? o.title.replace(CONTROL, '').slice(0, 400) : '';
+      if (title.trim()) out = { k: 'journal', quest, title };
       break;
     }
   }
@@ -403,7 +445,46 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
       // three that mean something to every object, though what it keys is a table with no prototype.
       const who = wordOf(o.who, CREATURE);
       if (who && o.speaker.startsWith('row:')) word.who = who;
+      if (word.op === 'close') {
+        // What the browser read out of the client's own lines, by their reference, for the transcript; and the
+        // name it showed for the speaker. Only words, never markup: they are kept as text and shown as text.
+        if (Array.isArray(o.read)) {
+          const read: Record<string, string> = Object.create(null);
+          let n = 0;
+          for (const r of o.read) {
+            if (n >= STORY_WIRE.readMax || !r || typeof r !== 'object' || Array.isArray(r)) continue;
+            const ref = (r as Record<string, unknown>).ref;
+            const text = (r as Record<string, unknown>).text;
+            if (typeof ref !== 'string' || !/^@[A-Za-z0-9_/.-]{1,120}:[A-Za-z0-9_.-]{1,120}$/.test(ref) || typeof text !== 'string') continue;
+            const words = text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').slice(0, 4000);
+            if (!words.trim()) continue;
+            read[ref] = words;
+            n++;
+          }
+          if (n) word.read = read;
+        }
+        if (typeof o.name === 'string' && o.name.trim()) word.name = o.name.replace(CONTROL, '').slice(0, 120);
+      }
       return word;
+    }
+    if (o.do === 'read') {
+      if (!isDocId(o.doc)) return null;
+      if (o.pick !== undefined && o.pick !== null && !isStepName(o.pick)) return null;
+      return { do: 'read', doc: o.doc, end: o.end === 1 || o.end === true, pick: typeof o.pick === 'string' ? o.pick : null, at: cleanStoryAt(o.at) };
+    }
+    if (o.do === 'journal') {
+      const from = whole(o.from, 1e7);
+      const count = whole(o.count, STORY_WIRE.journalMax);
+      return from !== null && count !== null && count > 0 ? { do: 'journal', from, count } : null;
+    }
+    if (o.do === 'texts') {
+      const p = piece(o);
+      return p ? { do: 'texts', ...p } : null;
+    }
+    if (o.do === 'mine') {
+      if (!isJournalId(o.ref) || typeof o.text !== 'string') return null;
+      const text = cleanMine(o.text);
+      return text ? { do: 'mine', ref: o.ref, text, at: cleanStoryAt(o.at) } : null;
     }
     return null;
   }
@@ -446,7 +527,55 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
     if (o.tree !== undefined && !view) return null;
     return { do: 'node', speaker: o.speaker, view, why };
   }
+  if (o.do === 'doc') {
+    // The page as it was read, or none with why: it was never handed over, or was not kept.
+    if (!isDocId(o.doc)) return null;
+    const view = o.view === undefined || o.view === null ? null : cleanDocView(o.view);
+    if (o.view !== undefined && o.view !== null && (!view || view.id !== o.doc)) return null;
+    const why = typeof o.why === 'string' && o.why ? o.why.replace(CONTROL, '').slice(0, STORY_WIRE.whyMax) : null;
+    const word: Extract<StoryDown, { do: 'doc' }> = { do: 'doc', doc: o.doc, view, foot: cleanDocFoot(o.foot), entry: isJournalId(o.entry) ? o.entry : null, why };
+    if (isWho(o.from)) word.from = o.from;
+    // The answer to a reading to the end, which the window that sent it already shows.
+    if (o.end === 1 || o.end === true) word.end = true;
+    return word;
+  }
+  if (o.do === 'journal') {
+    const from = whole(o.from, 1e7);
+    if (from === null) return null;
+    const entries: JournalEntry[] = [];
+    if (Array.isArray(o.entries)) for (const e of o.entries) {
+      if (entries.length >= STORY_WIRE.journalMax) break;
+      const entry = cleanJournalEntry(e);
+      if (entry) entries.push(entry);
+    }
+    return { do: 'journal', from, entries, texts: cleanTexts(o.texts) };
+  }
+  if (o.do === 'need') {
+    const hashes: string[] = [];
+    if (Array.isArray(o.hashes)) for (const h of o.hashes) if (isTextHash(h) && !hashes.includes(h) && hashes.length < STORY_WIRE.needMax) hashes.push(h);
+    return { do: 'need', hashes };
+  }
   return null;
+}
+
+/**
+ * Texts by their hash, from the wire or a set of pieces put back together: each kept only when it is words and
+ * its hash is the one it says, so nothing can stand under a hash that is not its own. Answers the table (with
+ * no prototype); what is not one is left out.
+ */
+export function cleanTexts(x: unknown, hashOf?: (text: string) => string): Record<string, string> {
+  const out: Record<string, string> = Object.create(null);
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return out;
+  let n = 0;
+  for (const h of Object.keys(x)) {
+    if (n >= STORY_WIRE.needMax) break;
+    const t = (x as Record<string, unknown>)[h];
+    if (!isTextHash(h) || typeof t !== 'string' || t.length > STORY_WIRE.textMax) continue;
+    if (hashOf && hashOf(t) !== h) continue;
+    out[h] = t;
+    n++;
+  }
+  return out;
 }
 
 /** A node as the server says it: the node's own fields on the word, or none with why. */

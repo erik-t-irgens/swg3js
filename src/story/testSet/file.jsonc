@@ -1,0 +1,13 @@
+// The ISB's file in the test set: three levels at the design's test thresholds, the first of them making the
+// Empire's people greet a character on file coldly, and an entry seen six game hours after it is written (three
+// real minutes). The owner's own file.jsonc takes the place of this one. None of it is story.
+{
+  "isb": {
+    "levels": [
+      { "at": 10, "name": "TEST LEVEL 1", "reacts": { "empire": "mean" } },
+      { "at": 25, "name": "TEST LEVEL 2" },
+      { "at": 50, "name": "TEST LEVEL 3" },
+    ],
+    "reveal": { "gameHours": 6 },
+  },
+}

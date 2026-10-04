@@ -50,12 +50,23 @@
 // one of its options (`choose(q, s, option)`): the option's actions run, its choice is kept on the step, and
 // it goes on by the option's own edges, or by the step's when the option names none.
 //
+// **Documents** are handed over, never opened: a `message`, `document` or `comm` step hands its page over as
+// it begins, a `choice` step written on a page hands that page over with its options at the foot, `doc(d)`
+// hands one over anywhere, and a job offered hands over its card. What is handed is what the player has to
+// read (`docs` in the book), said once on the message line; a document read to its end (`docDone`, which
+// `docRules.ts` works out when the window says so) finishes every step waiting on it and raises `read:<doc>`.
+// A `note(words)` is written into the journal where it runs -- never while the character is away, since the
+// journal holds only what the player was there for -- and `file(isb, ...)` adds an entry to the ISB's file,
+// which nothing says out loud.
+//
 // What is the game's: the step types and their fields are the client's quest-task columns, named
 // beside each field in `set.ts`. Everything about how they run is ours.
 
 import { BOOK_LIMITS, applyChange, draftOf, ownOf, table, type BookLimits, type QuestRec, type StepRec, type StoryBook, type StoryChange, type Track } from './book.ts';
 import { gameDayOf, realDayOf } from './clock.ts';
 import type { CondJson, Lit } from './expr.ts';
+import { fileHas, fileLevel, fileOf, isFileKind, levelAt, nextFileId, revealAtOf, type FileEntry } from './file.ts';
+import { nextJournalId, textHash, type JournalEntry, type JournalPlace } from './journal.ts';
 import { scriptOf, type ScriptLook } from './scripts.ts';
 import { seedChance } from './seed.ts';
 import { CLEARED, type ActionDef, type Edge, type QuestDef, type Reward, type Room, type StepDef, type StorySet } from './set.ts';
@@ -86,6 +97,8 @@ export interface StoryCtx {
   credits?: number | null;
   /** How many of a thing the character owns (the ledger's kinds, `wear` and `weapon`): what `has` reads. */
   has?: ((kind: string, id: string) => number) | null;
+  /** The character's own name: what a document's `{player}` reads. */
+  name?: string | null;
   /**
    * The character is not in the world just now: logged off, or not yet come in while a host settles the
    * book it has just read. A span on the played clock that begins now keeps its length until `enter`.
@@ -126,15 +139,21 @@ export type StoryNote =
   | { k: 'item'; quest: string; kind: 'wear' | 'weapon'; id: string; n: number }
   | { k: 'xp'; quest: string; n: number }
   | { k: 'standing'; quest: string; track: Track; n: number }
-  | { k: 'say'; text: string };
+  | { k: 'say'; text: string }
+  /** A document handed over, to be read (`from`: a call, from whom, by the name the player knows them by). */
+  | { k: 'doc'; quest: string; doc: string; title: string; from?: string; fromName?: TextRef }
+  /** A new entry in the journal, by what it is called. */
+  | { k: 'journal'; quest: string; title: string };
 
 export interface StoryResult {
   /** The changes made, in order: what the host applies to its book and what goes down the wire. */
   ch: StoryChange[];
   pay: PayOrder[];
   notes: StoryNote[];
-  /** Documents handed over (a later wave). */
-  docs: unknown[];
+  /** Documents handed over, by id. */
+  docs: string[];
+  /** The words of every journal entry written, by their hash: what the host keeps beside the book. */
+  texts: Record<string, string>;
   /** Why the thing asked for did not happen, when it did not. */
   why: string | null;
   /** Words from a later wave that were met and did nothing. */
@@ -289,6 +308,21 @@ export function evalCond(c: CondJson | null | undefined, book: StoryBook, ctx: S
   }
   if ('heard' in c) return ownOf(book.heard, c.heard as string) !== undefined;
   if ('chosen' in c) return ownOf(book.heard, c.chosen as string) !== undefined;
+  // What the character witnessed and what the file holds, read at once: a file's level bites the moment it is
+  // reached, long before the player may read the entry that reached it.
+  if ('witnessed' in c) {
+    const doc = c.witnessed as string;
+    for (const e of book.journal ?? []) if ((e.kind === 'doc' || e.kind === 'comm') && e.doc === doc && (c.variant === undefined || e.variant === c.variant)) return true;
+    return false;
+  }
+  if ('file' in c) {
+    const f = c.file as CondJson & { agency: string };
+    return compare(fileLevel(book, f.agency), f);
+  }
+  if ('fileHas' in c) {
+    const [agency, tag] = c.fileHas as [string, string];
+    return fileHas(book, agency, tag);
+  }
   if ('person' in c) {
     const p = c.person as { who: string; is?: string };
     if ((p.is === 'met' || p.is === 'named') && Object.keys(p).length === 2) return ownOf(book.npcs, p.who)?.[p.is] !== undefined;
@@ -453,7 +487,9 @@ export class Draft {
   readonly ch: StoryChange[] = [];
   readonly pay: PayOrder[] = [];
   readonly notes: StoryNote[] = [];
-  readonly docs: unknown[] = [];
+  readonly docs: string[] = [];
+  /** The words of every journal entry this draft wrote, by their hash. */
+  texts: Record<string, string> = Object.create(null) as Record<string, string>;
   why: string | null = null;
   readonly tally: Tally = { unbuilt: 0, misses: 0 };
   private readonly queue: Work[] = [];
@@ -492,6 +528,107 @@ export class Draft {
     return this.lib.quests[q] ?? null;
   }
 
+  // ---- documents, the journal and the file -------------------------------------------------------------
+
+  /** Where the character is just now, as a journal entry keeps it, or null where the host cannot say. */
+  journalPlace(): JournalPlace | null {
+    const c = this.ctx;
+    if (!c.world || !c.here) return null;
+    const p: JournalPlace = { world: c.world, raw: [c.here[0], c.here[1]] };
+    if (c.room) p.room = { ...c.room };
+    return p;
+  }
+
+  /**
+   * One entry written into the journal, with its words kept beside it by their hash: the next id in line, now,
+   * where the character is. The entry, or null when the book would not take it (a full journal).
+   */
+  writeJournal(e: Omit<JournalEntry, 'id' | 'at' | 'place'>, texts: Record<string, string>): JournalEntry | null {
+    const entry: JournalEntry = { id: nextJournalId(this.book.journal?.length ?? 0), at: this.ctx.now, place: this.journalPlace(), ...e };
+    if (!this.change({ k: 'journal', entry })) return null;
+    for (const h of Object.keys(texts)) this.texts[h] = texts[h];
+    return entry;
+  }
+
+  /** A document's title as its definition has it, or its id with none. */
+  docTitle(doc: string): string {
+    const d = this.lib.docs && Object.hasOwn(this.lib.docs, doc) ? this.lib.docs[doc] : null;
+    return d?.title ?? doc;
+  }
+
+  /**
+   * A document handed over to be read: kept as handed (with the job and step it came from, a card's job, a
+   * call's caller) and said once. Nothing when it is handed over already and not yet read to its end.
+   */
+  handDoc(doc: string, from: { quest?: string; step?: string; card?: boolean; caller?: string | null }): void {
+    const had = ownOf(this.book.docs, doc);
+    if (had && had.done === undefined) return;
+    const c: StoryChange = { k: 'docGive', doc, at: this.ctx.now, ...(from.quest ? { quest: from.quest } : {}), ...(from.step ? { step: from.step } : {}), ...(from.card ? { card: 1 as const } : {}), ...(from.caller ? { from: from.caller } : {}) };
+    if (!this.change(c)) return;
+    this.docs.push(doc);
+    const caller = from.caller && this.lib.cast && Object.hasOwn(this.lib.cast, from.caller) ? this.lib.cast[from.caller] : null;
+    const fromName = caller ? (ownOf(this.book.npcs, from.caller!)?.named !== undefined ? caller.name : caller.unknownAs) : null;
+    this.notes.push({ k: 'doc', quest: from.quest ?? 'run', doc, title: this.docTitle(doc), ...(from.caller ? { from: from.caller } : {}), ...(fromName ? { fromName } : {}) });
+  }
+
+  /**
+   * A document read (a call heard) to its end: kept as read, every running step waiting on it done, and
+   * `read:<doc>` raised for anything else that waits on it. Answers why not, or null.
+   */
+  docDone(doc: string): string | null {
+    const had = ownOf(this.book.docs, doc);
+    if (!had) return 'that document was never handed over';
+    if (had.done === undefined && !this.change({ k: 'docDone', doc, at: this.ctx.now })) return this.why;
+    for (const { q, s, rec, step } of [...this.activeSteps()]) {
+      if ((step.type === 'message' || step.type === 'document' || step.type === 'comm') && step.doc === doc) this.queue.push({ k: 'complete', q, s, run: rec.run });
+    }
+    this.queue.push({ k: 'raise', name: `read:${doc}` });
+    return null;
+  }
+
+  /**
+   * A card handed over with an offer, put away once the offer is answered: taken, turned down or dropped. A
+   * card that was opened has been read, and is read to its end as any page is (`read:<card>` raised); one
+   * answered unopened, from the job's own row, is only put away.
+   */
+  private cardAnswered(q: string): void {
+    const card = this.def(q)?.card;
+    const had = card ? ownOf(this.book.docs, card) : undefined;
+    if (!card || !had || had.done !== undefined || !had.card) return;
+    if (had.j !== undefined) this.docDone(card);
+    else this.change({ k: 'docDone', doc: card, at: this.ctx.now });
+  }
+
+  /** An entry added to an agency's file: never said, never shown until its time, and read by conditions at once. */
+  fileEntry(agency: string, kind: string, weight: number, rest: readonly Lit[], scope: Scope): void {
+    if (agency !== 'isb' || !isFileKind(kind) || !(weight >= 0)) return;
+    const had = fileOf(this.book, agency);
+    let doc: string | undefined;
+    const tags: string[] = [];
+    for (const a of rest) {
+      if (typeof a !== 'string') continue;
+      if (a.includes(':doc/')) doc ??= a;
+      else if (!tags.includes(a)) tags.push(a);
+    }
+    const def = this.lib.file?.[agency] ?? null;
+    const now = this.ctx.now;
+    // The multiplier of the ranks held is one until the ranks arrive.
+    const mult = 1;
+    const entry: FileEntry = {
+      id: nextFileId(had?.entries.length ?? 0),
+      at: now,
+      kind,
+      weight,
+      mult,
+      tags,
+      source: { ...(scope.quest ? { quest: scope.quest } : {}), ...(scope.step ? { step: scope.step } : {}), ...(scope.talk ? { talk: scope.talk } : {}) },
+      revealAt: revealAtOf(def, kind, now),
+      ...(doc ? { doc } : {}),
+    };
+    const level = Math.max(had?.level ?? 0, levelAt(def, (had?.exposure ?? 0) + weight * mult));
+    this.change({ k: 'fileAdd', agency, entry, level });
+  }
+
   private setQuest(q: string, rec: QuestRec): boolean {
     return this.change({ k: 'qState', quest: q, rec });
   }
@@ -510,8 +647,8 @@ export class Draft {
 
   /** The answer: everything this draft did, or, once a circle was stopped, nothing but why. */
   result(): StoryResult {
-    if (this.broken) return { ch: [], pay: [], notes: [{ k: 'say', text: CIRCLE }], docs: [], why: CIRCLE, unbuilt: this.tally.unbuilt, misses: this.tally.misses };
-    return { ch: this.ch, pay: this.pay, notes: this.notes, docs: this.docs, why: this.why, unbuilt: this.tally.unbuilt, misses: this.tally.misses };
+    if (this.broken) return { ch: [], pay: [], notes: [{ k: 'say', text: CIRCLE }], docs: [], texts: Object.create(null) as Record<string, string>, why: CIRCLE, unbuilt: this.tally.unbuilt, misses: this.tally.misses };
+    return { ch: this.ch, pay: this.pay, notes: this.notes, docs: this.docs, texts: this.texts, why: this.why, unbuilt: this.tally.unbuilt, misses: this.tally.misses };
   }
 
   // ---- the queue -------------------------------------------------------------------------------------
@@ -533,6 +670,7 @@ export class Draft {
           this.pay.length = 0;
           this.notes.length = 0;
           this.docs.length = 0;
+          this.texts = Object.create(null) as Record<string, string>;
           this.why = CIRCLE;
           return;
         }
@@ -586,6 +724,8 @@ export class Draft {
       const base: QuestRec = rec ? without(rec, 'outcome', 'why') : { state: 'none', run: 0, at: 0, completions: 0, defRev: 0, defHash: '', steps: table<StepRec>(), history: [] };
       if (!this.setQuest(q, { ...base, state: 'offered', at: this.ctx.now, defRev: def.rev, defHash: def.hash })) return this.why;
       this.notes.push({ k: 'offered', quest: q, title: def.title });
+      // The offer is its card: handed over to be read, with Accept and Decline at its foot.
+      if (def.card) this.handDoc(def.card, { quest: q, card: true });
       return null;
     }
     return this.startRun(q, null, null);
@@ -596,13 +736,16 @@ export class Draft {
     if (rec?.state !== 'offered') return 'that job is not on offer';
     if (this.book.closed?.includes(q)) return 'that job is closed';
     if (!this.def(q)) return 'there is no such job';
+    this.cardAnswered(q);
     return this.startRun(q, null, null);
   }
 
   decline(q: string): string | null {
     const rec = this.quest(q);
     if (rec?.state !== 'offered') return 'that job is not on offer';
-    return this.setQuest(q, { ...rec, state: 'none' }) ? null : this.why;
+    if (!this.setQuest(q, { ...rec, state: 'none' })) return this.why;
+    this.cardAnswered(q);
+    return null;
   }
 
   /**
@@ -718,6 +861,9 @@ export class Draft {
     if (o.when && !this.holds(o.when, scope)) return 'that option is not open';
     if (!this.setStep(q, s, { ...cur, choice: option })) return this.why;
     this.touched.add(q);
+    // A choice made on its page puts the page away: it has been read and answered, and is read to its end as any
+    // page is (a page whose foot asks is not put away by its last page alone, `footAsks`).
+    if (step.doc && ownOf(this.book.docs, step.doc)) this.docDone(step.doc);
     this.actions(o.do, { ...scope, site: `${s}.opt.${option}` });
     this.queue.push({ k: 'complete', q, s, run: rec.run });
     return null;
@@ -860,6 +1006,8 @@ export class Draft {
     if (!this.setStep(q, s, sr)) return;
     this.touched.add(q);
     this.actions(step.do.start, { quest: q, run, step: s, site: `${s}.start` });
+    // A step's own page is handed over as it begins: to be read, heard, or chosen on at its foot.
+    if (step.doc && (step.type === 'message' || step.type === 'document' || step.type === 'comm' || step.type === 'choice')) this.handDoc(step.doc, { quest: q, step: s, caller: step.type === 'comm' ? step.who : null });
     const type = STEP_TYPES[step.type];
     if (type?.instant) {
       this.queue.push({ k: 'complete', q, s, run });
@@ -1072,6 +1220,26 @@ export class Draft {
       }
       case 'gesture':
         // Presentation, the browser's alone: a conversation's view carries it to the line it is played on.
+        return;
+      case 'doc':
+        // Handed by the job, not as any step's own page: the step a page belongs to is the one that waits on it.
+        this.handDoc(x, { quest: scope.quest });
+        return;
+      case 'note': {
+        // Only where the player is: the checker keeps a note off a hidden step, a world-clock deadline and a
+        // signal raised elsewhere, and a character away is not there to witness anything at all.
+        if (this.ctx.away) {
+          this.tally.misses++;
+          return;
+        }
+        const words = x;
+        const h = textHash(words);
+        const e = this.writeJournal({ kind: 'note', with: [], h, ...(scope.quest ? { quest: scope.quest } : {}), title: words.slice(0, 160) }, { [h]: words });
+        if (e) this.notes.push({ k: 'journal', quest: scope.quest ?? 'run', title: words });
+        return;
+      }
+      case 'file':
+        this.fileEntry(x, y as string, a.args[2] as number, a.args.slice(3), scope);
         return;
       case 'choose': {
         const why = this.choose(x, y as string, a.args[2] as string);

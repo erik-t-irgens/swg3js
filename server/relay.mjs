@@ -149,10 +149,18 @@
 //   { t: 'story', do: 'q', op: accept|decline|drop|restart|track|untrack, quest }   (story 2) a job, of this character's own
 //   { t: 'story', do: 'admin', op: reload|grant|offer|unstick|complete|signal|clock, quest?, step?, name?, ms? }
 //                                                          (story 2) the console's own operations, the admin's alone
-//   { t: 'story', do: 'talk', op: open|pick|close, speaker, reply?, who? }   (story 3) a conversation: open one with somebody,
-//                                                          give an answer (none lets a node go on by itself), close it;
-//                                                          one of the game's own people (`row:<key>`) is opened with the
-//                                                          creature they are stood as, which a relay before it ignores
+//   { t: 'story', do: 'talk', op: open|pick|close, speaker, reply?, who?, read?, name? }   (story 3) a conversation: open one
+//                                                          with somebody, give an answer (none lets a node go on by
+//                                                          itself), close it; one of the game's own people (`row:<key>`)
+//                                                          is opened with the creature they are stood as, which a relay
+//                                                          before it ignores; (story 4) a close carries the words the
+//                                                          browser read out of the client's own lines (`read`: [{ ref,
+//                                                          text }]) and the name it showed, for the journal's transcript
+//   { t: 'story', do: 'read', doc, end?, pick? }              (story 4) a document this character was handed: opened, read
+//                                                          to its last page (`end`), or chosen on at its foot (`pick`)
+//   { t: 'story', do: 'journal', from, count }               (story 4) the words of a stretch of the journal this browser lost
+//   { t: 'story', do: 'texts', id, n, of, part }             (story 4) the journal's words the server asked for, in pieces
+//   { t: 'story', do: 'mine', ref, text }                    (story 4) a note of the player's own on a journal entry
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story }   sent the instant the socket opens, before anything is
 //                                                          said; `story` is { v, sets, tests }, the story this server
@@ -231,6 +239,11 @@
 //   { t: 'story', do: 'note', note, given }   (story 2) a fact for the message line, whose words the browser makes
 //   { t: 'story', do: 'node', speaker, tree?, node?, name?, strings?, lines?, replies?, next?, end?, why? }   (story 3) the
 //                                            node a conversation reached, to the line that asked and nobody else, or none with why
+//   { t: 'story', do: 'doc', doc, view, foot, entry, why?, from?, end? }   (story 4) a document as this character read it, its
+//                                            foot and the journal entry it is frozen into, or none with why; `end` on the
+//                                            answer to a reading to the end, which the window that sent it already shows
+//   { t: 'story', do: 'journal', from, entries, texts }   (story 4) the words of a stretch of the journal, by their hash
+//   { t: 'story', do: 'need', hashes }   (story 4) the journal's words this server has not got, after it took that browser's book
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -305,6 +318,8 @@ const TUNING = {
   'store.saveEvery': STORE_TUNING.saveEvery,
   /** How many times a rename refused for an instant is tried before the next write is left to do it. */
   'store.renameTries': STORE_TUNING.renameTries,
+  /** Bytes of the story journals' words past which they are written to a file of their own beside the world. */
+  'store.textsApart': STORE_TUNING.textsApart,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -395,7 +410,7 @@ const ASSETS = option('assets', '') || (existsSync(BESIDE('assets-private')) ? B
 
 // The store knows when this world first ran and hands that to the clock, which is how the server can
 // say how old the world is. The time of day itself is the wall clock and needs nothing remembered.
-const store = openStore({ dir: DATA, saveEvery: TUNING['store.saveEvery'], renameTries: TUNING['store.renameTries'], log: (line) => console.log(`  ${line}`) });
+const store = openStore({ dir: DATA, saveEvery: TUNING['store.saveEvery'], renameTries: TUNING['store.renameTries'], textsApart: TUNING['store.textsApart'], log: (line) => console.log(`  ${line}`) });
 // The day as it was left: the length and the anchor the admin's last change of it made, read back so a
 // restart does not move anybody's sun. A world nobody has changed the day of has no anchor and keeps the
 // day the wall clock always gave it.

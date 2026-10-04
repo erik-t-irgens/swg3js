@@ -6,7 +6,8 @@
 // **How a book changes.** Only through `applyChanges`, which takes a batch of change records (a closed
 // list: `wpSet`, `wpEdit`, `wpOn`, `wpGone`, `qwpOn`, `trackWp`, `track` for the waypoints and the
 // tracker; `qState`, `step`, `flag`, `paid`, `xp`, `trackAdd`, `closed` for the jobs; `heard`, `npcMet`
-// for the conversations) and applies each
+// for the conversations; `docGive`, `docOpen`, `docDone`, `journal`, `fileAdd` for the documents, the
+// journal and the file) and applies each
 // one the book will take, in order, saying why for each it will not. The same batch on the same book
 // always comes out the same, which is what lets the server write a batch to its log and play it back
 // on start, and lets a browser apply the server's batch to its own copy and arrive at the same book.
@@ -45,8 +46,18 @@
 // the name of (`met`, `named`), which a later wave adds Standing, Trust and the rest to. Where a conversation
 // stands is never in the book: a host keeps that for the line it is on, so a reload starts it cleanly.
 //
+// **Documents, the journal and the file.** `docs` is every document handed over, by its id, with where it was
+// handed from, the journal entry it was frozen into the first time it was opened (`j`) and when it was read to
+// its end (`done`): what is still to read is what is handed and not done (`docGive`, `docOpen`, `docDone`).
+// `journal` is what the character witnessed, in order (`journal.ts`), and `files` what an agency has on them
+// (`file.ts`). Neither of the last two has a change that takes anything away: an entry is only ever added
+// (`journal`, `fileAdd`), each with the next id in line, and a list is replaced by a longer one rather than
+// changed in place, so a working copy (`draftOf`) shares them with the book it was taken from.
+//
 // Every number here is ours.
 
+import { cleanFileEntry, cleanFileRec, fileShrinks, isAgency, nextFileId, type Agency, type FileEntry, type FileRec } from './file.ts';
+import { cleanJournal, cleanJournalEntry, isDocId, isJournalId, journalShrinks, mineFits, nextJournalId, type JournalEntry } from './journal.ts';
 import { FORBIDDEN_KEYS, WAYPOINT_TUNE, cleanPlace, cleanWaypoint, cleanWaypointName, cleanWorld, isQuestWaypoint, isWaypointColour, isWaypointId, waypointNumber, type Waypoint, type WaypointColour } from './waypoints.ts';
 
 /** The shape of a book. A book of another version is not read as this one. */
@@ -89,8 +100,29 @@ export interface StoryBook {
   heard?: Record<string, number>;
   /** The people met (`<set>:cast/<id>`, `row:<key>`), and whether they gave their name. */
   npcs?: Record<string, NpcRec>;
+  /** Every document handed over, by its id: what is still to read, and the journal entry each was frozen into. */
+  docs?: Record<string, DocRec>;
+  /** What the character witnessed, in order: only ever added to. */
+  journal?: JournalEntry[];
+  /** What an agency has on the character, by agency (`isb`): only ever added to. */
+  files?: Partial<Record<Agency, FileRec>>;
   /** Sections a later wave writes, kept as they came. */
   [section: string]: unknown;
+}
+
+/**
+ * A document handed over: when (`at`), from where (the job and its step, or a job's card offered), who calls
+ * when it is a call (`from`), the journal entry it was frozen into the first time it was opened (`j`), and when
+ * it was read to its end (`done`). Handed again, it is a new handing: read again, and frozen again.
+ */
+export interface DocRec {
+  at: number;
+  quest?: string;
+  step?: string;
+  card?: 1;
+  from?: string;
+  j?: string;
+  done?: number;
 }
 
 /**
@@ -189,9 +221,15 @@ export interface BookLimits {
   heard: number;
   /** People a character remembers meeting. */
   npcs: number;
+  /** Entries a journal holds; past it nothing more is written, and nothing is ever taken away. */
+  journal: number;
+  /** Entries one agency's file holds. */
+  file: number;
+  /** Documents a book remembers handing over. */
+  docs: number;
 }
 
-export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 3, wpOff: 4000, sectionNodes: 200000, quests: 4000, steps: 64, flags: 2000, paid: 20000, closed: 4000, history: 8, heard: 20000, npcs: 4000 };
+export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 3, wpOff: 4000, sectionNodes: 200000, quests: 4000, steps: 64, flags: 2000, paid: 20000, closed: 4000, history: 8, heard: 20000, npcs: 4000, journal: 20000, file: 5000, docs: 4000 };
 
 /**
  * What a browser holds a book to that a server decided, rather than one it changes itself: the server's own
@@ -201,7 +239,7 @@ export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 
  * alone on top of it would then hand the server back a book shorter than the one it wrote down. A change a
  * browser makes itself is still held to `BOOK_LIMITS` when it is applied.
  */
-export const BACKSTOP_LIMITS: BookLimits = { waypoints: 10000, tracked: 100, wpOff: 100000, sectionNodes: 2000000, quests: 40000, steps: 640, flags: 20000, paid: 200000, closed: 40000, history: 8, heard: 200000, npcs: 40000 };
+export const BACKSTOP_LIMITS: BookLimits = { waypoints: 10000, tracked: 100, wpOff: 100000, sectionNodes: 2000000, quests: 40000, steps: 640, flags: 20000, paid: 200000, closed: 40000, history: 8, heard: 200000, npcs: 40000, journal: 200000, file: 50000, docs: 40000 };
 
 /** One change. A closed list: anything else is not a change this book takes. */
 export type StoryChange =
@@ -220,7 +258,12 @@ export type StoryChange =
   | { k: 'trackAdd'; track: Track; standing: number; trust?: number }
   | { k: 'closed'; quest: string }
   | { k: 'heard'; key: string; at: number }
-  | { k: 'npcMet'; who: string; at: number; named?: boolean };
+  | { k: 'npcMet'; who: string; at: number; named?: boolean }
+  | { k: 'docGive'; doc: string; at: number; quest?: string; step?: string; card?: 1; from?: string }
+  | { k: 'docOpen'; doc: string; j: string }
+  | { k: 'docDone'; doc: string; at: number }
+  | { k: 'journal'; entry: JournalEntry }
+  | { k: 'fileAdd'; agency: Agency; entry: FileEntry; level: number };
 
 /** The sections the first wave reads itself. Every other one is a section of its own (below) or a later wave's, kept as it came. */
 const KNOWN = ['v', 'char', 'rev', 'base', 'local', 'waypoints', 'nextWp', 'wpOff', 'trackWp', 'tracked'];
@@ -500,6 +543,45 @@ function cleanNpcs(x: unknown, limits: BookLimits): Record<string, NpcRec> | und
   return out;
 }
 
+/** One document's record, cleaned, or null. */
+function cleanDocRec(x: unknown): DocRec | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const at = time(o.at);
+  if (at === undefined) return null;
+  const out: DocRec = { at };
+  if (isQuestId(o.quest)) out.quest = o.quest;
+  if (isStepName(o.step)) out.step = o.step;
+  if (o.card === 1 || o.card === true) out.card = 1;
+  if (isWho(o.from)) out.from = o.from;
+  if (isJournalId(o.j)) out.j = o.j;
+  const done = time(o.done);
+  if (done !== undefined) out.done = done;
+  return out;
+}
+
+function cleanDocs(x: unknown, limits: BookLimits): Record<string, DocRec> | undefined {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const out = table<DocRec>();
+  for (const k of Object.keys(x)) {
+    if (!isDocId(k) || sizeOf(out) >= limits.docs) continue;
+    const rec = cleanDocRec((x as Record<string, unknown>)[k]);
+    if (rec) out[k] = rec;
+  }
+  return out;
+}
+
+function cleanFiles(x: unknown, limits: BookLimits): Partial<Record<Agency, FileRec>> | undefined {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const out = table<FileRec>() as Partial<Record<Agency, FileRec>>;
+  for (const k of Object.keys(x)) {
+    if (!isAgency(k)) continue;
+    const rec = cleanFileRec((x as Record<string, unknown>)[k], limits.file);
+    if (rec) out[k] = rec;
+  }
+  return out;
+}
+
 /**
  * The sections the jobs keep, each with its own cleaner. Read in the order a book has them, so a book read
  * back is the book written. A table with no prototype, because the key looked up in it is whatever the
@@ -515,6 +597,9 @@ const SECTIONS = table<(x: unknown, limits: BookLimits) => unknown>({
   qwpOn: cleanQwpOn,
   heard: cleanHeard,
   npcs: cleanNpcs,
+  docs: cleanDocs,
+  journal: (x, limits) => cleanJournal(x, limits.journal),
+  files: cleanFiles,
 });
 
 /** A new, empty book. */
@@ -659,6 +744,41 @@ export function cleanChange(x: unknown): StoryChange | null {
       if (!isWho(o.who) || at === undefined) return null;
       return o.named === true ? { k: 'npcMet', who: o.who, at, named: true } : { k: 'npcMet', who: o.who, at };
     }
+    case 'docGive': {
+      const at = time(o.at);
+      if (!isDocId(o.doc) || at === undefined) return null;
+      const out: Extract<StoryChange, { k: 'docGive' }> = { k: 'docGive', doc: o.doc, at };
+      if (o.quest !== undefined) {
+        if (!isQuestId(o.quest)) return null;
+        out.quest = o.quest;
+      }
+      if (o.step !== undefined) {
+        if (!isStepName(o.step)) return null;
+        out.step = o.step;
+      }
+      if (o.card === 1 || o.card === true) out.card = 1;
+      if (o.from !== undefined) {
+        if (!isWho(o.from)) return null;
+        out.from = o.from;
+      }
+      return out;
+    }
+    case 'docOpen':
+      return isDocId(o.doc) && isJournalId(o.j) ? { k: 'docOpen', doc: o.doc, j: o.j } : null;
+    case 'docDone': {
+      const at = time(o.at);
+      return isDocId(o.doc) && at !== undefined ? { k: 'docDone', doc: o.doc, at } : null;
+    }
+    case 'journal': {
+      // An entry's id is its place in its own journal, which is checked when it is taken (`whyNot`).
+      const entry = cleanJournalEntry(o.entry);
+      return entry ? { k: 'journal', entry } : null;
+    }
+    case 'fileAdd': {
+      if (!isAgency(o.agency) || typeof o.level !== 'number' || !Number.isInteger(o.level) || o.level < 0 || o.level > 1000) return null;
+      const entry = cleanFileEntry(o.entry);
+      return entry ? { k: 'fileAdd', agency: o.agency, entry, level: o.level } : null;
+    }
     default:
       return null;
   }
@@ -718,6 +838,35 @@ export function whyNot(book: StoryBook, c: StoryChange, limits: BookLimits = BOO
       const had = ownOf(book.npcs, c.who);
       if (had && had.met !== undefined && (!c.named || had.named !== undefined)) return 'that person is known already';
       return !had && sizeOf(book.npcs) >= limits.npcs ? `a character remembers ${limits.npcs} people` : null;
+    }
+    case 'docGive': {
+      const had = ownOf(book.docs, c.doc);
+      if (had && had.done === undefined) return 'that document is handed over already';
+      return !had && sizeOf(book.docs) >= limits.docs ? `a book remembers ${limits.docs} documents` : null;
+    }
+    case 'docOpen': {
+      const had = ownOf(book.docs, c.doc);
+      if (!had) return 'that document was never handed over';
+      if (had.j !== undefined) return 'that document is opened already';
+      return (book.journal ?? []).some((e) => e.id === c.j) ? null : 'there is no such journal entry';
+    }
+    case 'docDone': {
+      const had = ownOf(book.docs, c.doc);
+      if (!had) return 'that document was never handed over';
+      return had.done !== undefined ? 'that document is read already' : null;
+    }
+    case 'journal': {
+      // An entry is only ever the next one: written once, in its place, and never taken away.
+      const len = book.journal?.length ?? 0;
+      if (c.entry.id !== nextJournalId(len)) return `the next journal entry is ${nextJournalId(len)}, not ${c.entry.id}`;
+      if (c.entry.kind === 'mine' && !mineFits(book.journal, c.entry.ref)) return 'a note of your own is written on an entry of the journal';
+      return len >= limits.journal ? `a journal holds ${limits.journal} entries` : null;
+    }
+    case 'fileAdd': {
+      const rec = ownOf(book.files as Record<string, FileRec> | undefined, c.agency);
+      const len = rec?.entries.length ?? 0;
+      if (c.entry.id !== nextFileId(len)) return `the next file entry is ${nextFileId(len)}, not ${c.entry.id}`;
+      return len >= limits.file ? `a file holds ${limits.file} entries` : null;
     }
   }
 }
@@ -809,6 +958,37 @@ function applyOne(book: StoryBook, c: StoryChange): void {
       npcs[c.who] = row;
       return;
     }
+    // A document's record is replaced as a person's is; handed again, it is a new handing.
+    case 'docGive': {
+      const row: DocRec = { at: c.at };
+      if (c.quest) row.quest = c.quest;
+      if (c.step) row.step = c.step;
+      if (c.card) row.card = 1;
+      if (c.from) row.from = c.from;
+      (book.docs ??= table<DocRec>())[c.doc] = row;
+      return;
+    }
+    case 'docOpen': {
+      const docs = book.docs!;
+      docs[c.doc] = { ...docs[c.doc], j: c.j };
+      return;
+    }
+    case 'docDone': {
+      const docs = book.docs!;
+      docs[c.doc] = { ...docs[c.doc], done: c.at };
+      return;
+    }
+    // The journal and the files are replaced by a longer list, never pushed to, so a working copy that shares
+    // them with its book (`draftOf`) never moves the book.
+    case 'journal':
+      book.journal = [...(book.journal ?? []), c.entry];
+      return;
+    case 'fileAdd': {
+      const files = (book.files ??= table<FileRec>() as Partial<Record<Agency, FileRec>>);
+      const had = files[c.agency] ?? { entries: [], exposure: 0, level: 0 };
+      files[c.agency] = { entries: [...had.entries, c.entry], exposure: had.exposure + c.entry.weight * c.entry.mult, level: Math.max(had.level, c.level) };
+      return;
+    }
   }
 }
 
@@ -859,6 +1039,9 @@ export function draftOf(book: StoryBook): StoryBook {
   if (book.qwpOn) d.qwpOn = [...book.qwpOn];
   if (book.heard) d.heard = table(book.heard);
   if (book.npcs) d.npcs = table(book.npcs);
+  if (book.docs) d.docs = table(book.docs);
+  if (book.files) d.files = table(book.files as Record<string, FileRec>) as Partial<Record<Agency, FileRec>>;
+  // The journal is shared, never copied: a change replaces it with a longer list (`applyOne`).
   return d;
 }
 
@@ -902,14 +1085,35 @@ export function markPaidBy(book: StoryBook, by: 'server' | 'browser' | 'settle')
   return n;
 }
 
+/**
+ * Why a book handed up may not replace the one a server holds, when it would lose any of the journal or the
+ * file within one timeline, or null. One timeline is a book that descends from the server's own copy as it
+ * stands: it last matched that copy (`base`) at the revision the copy is at now, so everything in the copy was
+ * in the book when it was handed down, and only a book that has had pages taken out of it has fewer. A book
+ * from another timeline -- played from nothing, or from a revision the server has moved on from -- is not
+ * compared: two timelines are never merged, and which one stands is the character's own settle's to say.
+ */
+export function shrinksWithin(offered: StoryBook, mine: StoryBook | null | undefined): string | null {
+  if (!mine || offered.base <= 0 || offered.base !== mine.rev) return null;
+  return journalShrinks(offered.journal, mine.journal) ?? fileShrinks(offered, mine);
+}
+
 /** What a book holds, in numbers: what `__debug.story()` and the server's status page print. */
-export function bookSummary(book: StoryBook | null): { char: string; rev: number; base: number; local: number; waypoints: number; on: number; trackWp: string | null; tracked: number; wpOff: number; quests: number; active: number; flags: number; xp: number; heard: number; met: number; sections: string[] } | null {
+export function bookSummary(book: StoryBook | null): { char: string; rev: number; base: number; local: number; waypoints: number; on: number; trackWp: string | null; tracked: number; wpOff: number; quests: number; active: number; flags: number; xp: number; heard: number; met: number; journal: number; toRead: number; file: number; exposure: number; level: number; sections: string[] } | null {
   if (!book) return null;
   let on = 0;
   for (const w of book.waypoints) if (w.on) on++;
   let active = 0;
   for (const q of Object.keys(book.quests ?? {})) if (book.quests![q].state === 'active') active++;
+  let toRead = 0;
+  for (const d of Object.keys(book.docs ?? {})) if (book.docs![d].done === undefined) toRead++;
+  const isb = ownOf(book.files as Record<string, FileRec> | undefined, 'isb');
   return {
+    journal: book.journal?.length ?? 0,
+    toRead,
+    file: isb?.entries.length ?? 0,
+    exposure: isb?.exposure ?? 0,
+    level: isb?.level ?? 0,
     char: book.char,
     rev: book.rev,
     base: book.base,

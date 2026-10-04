@@ -4,8 +4,10 @@
 //
 // The lines are the design's: "Job: <title>", "Objective: <line>", "Done: <title>", "Failed: <title>
 // (<why>)", "Reached <waypoint>", "Paid <n> credits", "Experience <n> recorded (it counts for nothing
-// yet)". The rest are ours and in the same voice ("Spent <n> credits" for a price a conversation charged). Standing says which way it moved and never by how
-// much, since Standing is shown as a bar with its numbers hidden; Trust is never said at all.
+// yet)". The rest are ours and in the same voice ("Spent <n> credits" for a price a conversation charged,
+// "To read: <title>" for a document handed over, "A call from <who>" for a call, "Journal: <title>" for a
+// new entry in the journal). Standing says which way it moved and never by how much, since Standing is shown
+// as a bar with its numbers hidden; Trust and the ISB's file are never said at all.
 
 import type { StoryNote } from './quests.ts';
 import type { StorySet } from './set.ts';
@@ -90,5 +92,10 @@ export function noteWords(note: StoryNote, lib: StorySet, deps: NoteWordsDeps, g
       return note.n === 0 ? null : `${TRACK_WORDS[note.track] ?? note.track} standing ${note.n > 0 ? 'rose' : 'fell'}`;
     case 'say':
       return deps.text(note.text);
+    case 'doc':
+      // Pointed to, never opened: the journal (O) is where it is read.
+      return note.from ? `A call from ${note.fromName ? deps.text(note.fromName) : 'someone'}: ${deps.text(note.title)}` : `To read: ${deps.text(note.title)}`;
+    case 'journal':
+      return `Journal: ${deps.text(note.title)}`;
   }
 }

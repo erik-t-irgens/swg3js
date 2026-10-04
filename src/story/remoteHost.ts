@@ -30,12 +30,25 @@
 // to say. An opening or an answer goes up no sooner than `talkGap` after the last, under the server's own
 // allowance, so a click through short nodes is paced here rather than refused there.
 //
+// **Documents and the journal (story 4).** A server whose hail says 4 or more opens a document it handed over
+// when asked (`read`), and the page it read comes back (`doc`) to whoever listens, as a node does. The words of
+// the journal live beside the book: this browser keeps the ones it was shown (`texts`), asks the server for a
+// stretch it has not got (`journal`), and, when the server took a book played here and lacks words of it, is
+// asked for them (`need`) and sends them up in pieces a little apart (`texts`), never faster than the relay
+// takes. A note of the player's own is kept here as it goes up, since nothing else would ever bring its words
+// back. Those words go up no sooner than `docGap` after the last, so the server, which drops one past its
+// allowance without answering, is never sent one it would drop. A server that says less is asked for none of it.
+//
 // Nothing in here touches the page, three or a socket: what it needs is handed in (`RemoteDeps`), so the node
 // tests drive it against a fake and against the relay itself. Every number here is ours.
 
+import { STORY_TUNE } from './bookClient.ts';
+import { isUnkeptView, type DocWord } from './docRules.ts';
+import { cleanMine, journalHashes, textHash } from './journal.ts';
+import type { TextKeep } from './localHost.ts';
 import type { StoryEvent } from './quests.ts';
 import type { HostAnswer, NodeWord, StoryHost } from './storyHost.ts';
-import { cleanStoryWord, type StoryAt, type StoryNoteDown } from './storyWire.ts';
+import { bookText, chunkText, cleanStoryWord, cleanTexts, STORY_WIRE, type StoryAt, type StoryNoteDown } from './storyWire.ts';
 import type { StoryView } from './view.ts';
 
 /** The browser's own numbers for the server's host. Ours. */
@@ -50,6 +63,13 @@ export const REMOTE_TUNE = {
    * seconds do not line up: spaced this far apart no second holds more than three.
    */
   talkGap: 350,
+  /**
+   * The least milliseconds between two words about documents and the journal (`read`, `journal`, `mine`), under
+   * the server's six a second (`story.docRate`), which also counts the pieces of words handed up (`texts`, two a
+   * second at `chunkGap`): spaced this far apart no second holds more than three, so the two together stay under
+   * six, and nothing the server would drop without a word is ever sent.
+   */
+  docGap: 350,
 };
 
 /** Set any of those, clamped to what makes sense; the answer is the table as it now stands. */
@@ -57,6 +77,7 @@ export function tuneRemote(o: Partial<typeof REMOTE_TUNE>): typeof REMOTE_TUNE {
   if (typeof o.evPerSecond === 'number' && Number.isFinite(o.evPerSecond)) REMOTE_TUNE.evPerSecond = Math.max(1, Math.min(20, Math.round(o.evPerSecond)));
   if (typeof o.queueMax === 'number' && Number.isFinite(o.queueMax)) REMOTE_TUNE.queueMax = Math.max(4, Math.min(1000, Math.round(o.queueMax)));
   if (typeof o.talkGap === 'number' && Number.isFinite(o.talkGap)) REMOTE_TUNE.talkGap = Math.max(0, Math.min(5000, Math.round(o.talkGap)));
+  if (typeof o.docGap === 'number' && Number.isFinite(o.docGap)) REMOTE_TUNE.docGap = Math.max(0, Math.min(5000, Math.round(o.docGap)));
   return REMOTE_TUNE;
 }
 
@@ -64,6 +85,8 @@ export function tuneRemote(o: Partial<typeof REMOTE_TUNE>): typeof REMOTE_TUNE {
 export const JOBS_STORY = 2;
 /** The story a server must say it holds before a conversation is asked of it. */
 export const TALK_STORY = 3;
+/** The story a server must say it holds before a document, the journal's words or a note of the player's own is asked of it. */
+export const DOCS_STORY = 4;
 
 /** Why a server's jobs wait, when it holds the book and runs none (a relay from before the jobs). */
 export const JOBS_WAIT_OLD = 'this server keeps your story but runs no jobs yet, so your jobs wait';
@@ -95,6 +118,8 @@ export interface RemoteDeps {
    * one. The server holds the same reference and answers for itself. Absent: nobody of the game's is asked.
    */
   voiced?(who: string): boolean;
+  /** Where the journal's words are kept in this browser: what a server's `journal` answer is put into and its `need` read from. */
+  texts?: TextKeep;
 }
 
 export class RemoteHost implements StoryHost {
@@ -116,7 +141,15 @@ export class RemoteHost implements StoryHost {
   private sentInWindow = 0;
   /** When the last conversation word that works something out went up (`talkGap`), on the wall clock. */
   private lastTalk = Number.NEGATIVE_INFINITY;
-  readonly stats = { events: 0, sent: 0, dropped: 0, overflow: 0, ops: 0, views: 0, notes: 0, refusals: 0, talks: 0, nodes: 0, lastWhy: '' };
+  /** When the last word about documents or the journal went up (`docGap`), on the wall clock. */
+  private lastDoc = Number.NEGATIVE_INFINITY;
+  private readonly docListeners = new Set<(doc: DocWord) => void>();
+  private readonly journalListeners = new Set<(from: number, answered: readonly string[]) => void>();
+  /** Words the server asked for, going up a piece at a time, and when the last piece went. */
+  private textsOut: { id: number; parts: string[]; next: number } | null = null;
+  private textsId = 1;
+  private lastPiece = Number.NEGATIVE_INFINITY;
+  readonly stats = { events: 0, sent: 0, dropped: 0, overflow: 0, ops: 0, views: 0, notes: 0, refusals: 0, talks: 0, nodes: 0, docs: 0, journals: 0, needs: 0, pieces: 0, lastWhy: '' };
 
   constructor(deps: RemoteDeps) {
     this.deps = deps;
@@ -272,17 +305,96 @@ export class RemoteHost implements StoryHost {
    * game's own people goes up with the creature they are stood as (`who`), which a server from before them
    * leaves unread and answers that they have nothing to say.
    */
-  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, who: string | null = null): HostAnswer {
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, who: string | null = null, close?: { read: Record<string, string>; name: string | null }): HostAnswer {
     const why = this.whyNot() ?? (this.deps.line().story < TALK_STORY ? 'this server holds no conversations' : null);
     if (why) return { ok: false, why };
     this.stats.talks++;
-    this.push({ t: 'story', do: 'talk', op, speaker, ...(op === 'pick' && reply ? { reply } : {}), ...(op === 'open' && who ? { who } : {}), at: this.deps.at() });
+    // A close carries what the window read out of the client's own lines and the name it showed, for the
+    // transcript, to a server that keeps a journal; one from before it is told nothing it would not read.
+    const words = op === 'close' && close && this.deps.line().story >= DOCS_STORY ? { read: Object.keys(close.read).map((ref) => ({ ref, text: close.read[ref] })), ...(close.name ? { name: close.name } : {}) } : {};
+    this.push({ t: 'story', do: 'talk', op, speaker, ...(op === 'pick' && reply ? { reply } : {}), ...(op === 'open' && who ? { who } : {}), ...words, at: this.deps.at() });
     return { ok: true };
   }
 
   onNode(fn: (node: NodeWord) => void): () => void {
     this.nodeListeners.add(fn);
     return () => this.nodeListeners.delete(fn);
+  }
+
+  /** Why a document or the journal's words cannot be asked of the server just now, or null. */
+  private whyNotDocs(): string | null {
+    return this.whyNot() ?? (this.deps.line().story < DOCS_STORY ? 'this server keeps no documents or journal' : null);
+  }
+
+  /** A document asked of the server: opened, read to its end, or chosen on at its foot. The page comes back as `doc`. */
+  read(doc: string, opts: { end?: boolean; pick?: string | null } = {}): HostAnswer {
+    const why = this.whyNotDocs();
+    if (why) return { ok: false, why };
+    this.push({ t: 'story', do: 'read', doc, ...(opts.end ? { end: 1 } : {}), ...(opts.pick ? { pick: opts.pick } : {}), at: this.deps.at() });
+    return { ok: true };
+  }
+
+  onDoc(fn: (doc: DocWord) => void): () => void {
+    this.docListeners.add(fn);
+    return () => this.docListeners.delete(fn);
+  }
+
+  /**
+   * A note of the player's own on a journal entry, asked of the server, which writes it. Its words are kept here
+   * at once, under the hash the server will write them by (both clean them with `cleanMine`), so the note shows in
+   * its own words the moment its entry comes down rather than waiting on a server that is never asked for them.
+   */
+  mine(ref: string, text: string): HostAnswer {
+    const why = this.whyNotDocs();
+    if (why) return { ok: false, why };
+    const words = cleanMine(text);
+    if (!words) return { ok: false, why: 'a note says something' };
+    this.deps.texts?.put({ [textHash(words)]: words });
+    this.push({ t: 'story', do: 'mine', ref, text: words, at: this.deps.at() });
+    return { ok: true };
+  }
+
+  /**
+   * The words of a stretch of the journal (`from`, counted from nought, `count` entries, no more than one word
+   * carries) asked of the server, which this browser has not got. The answer names the entries it carried.
+   */
+  askJournal(from: number, count: number): HostAnswer {
+    const why = this.whyNotDocs();
+    if (why) return { ok: false, why };
+    this.stats.journals++;
+    this.push({ t: 'story', do: 'journal', from: Math.max(0, Math.floor(from)), count: Math.max(1, Math.min(STORY_WIRE.journalMax, Math.floor(count))) });
+    return { ok: true };
+  }
+
+  /** Be told whenever the words of a stretch of the journal have come: where it began, and the hashes of the entries it carried. */
+  onJournal(fn: (from: number, answered: readonly string[]) => void): () => void {
+    this.journalListeners.add(fn);
+    return () => this.journalListeners.delete(fn);
+  }
+
+  /** Words the server asked for (`need`), out of this browser's own store, sent up a piece at a time. */
+  private offerTexts(hashes: readonly string[]): void {
+    const keep = this.deps.texts;
+    if (!keep) return;
+    const out: Record<string, string> = {};
+    for (const h of hashes) {
+      const t = keep.get(h);
+      // Only words that are what their hash says: a store is a browser's and may hold anything.
+      if (t !== undefined && textHash(t) === h) out[h] = t;
+    }
+    if (!Object.keys(out).length) return;
+    this.textsOut = { id: this.textsId++, parts: chunkText(bookText(out), STORY_TUNE.offerChunk), next: 0 };
+  }
+
+  /** One piece of the words going up, no sooner than `chunkGap` after the last: under the relay's allowance a second. */
+  private sendPiece(now: number): void {
+    const o = this.textsOut;
+    if (!o || now - this.lastPiece < STORY_TUNE.chunkGap || !this.ready) return;
+    this.deps.send({ t: 'story', do: 'texts', id: o.id, n: o.next, of: o.parts.length, part: o.parts[o.next] });
+    this.lastPiece = now;
+    this.stats.pieces++;
+    o.next++;
+    if (o.next >= o.parts.length) this.textsOut = null;
   }
 
   /**
@@ -301,9 +413,12 @@ export class RemoteHost implements StoryHost {
       const m = this.queue[0];
       const paced = m.do === 'talk' && m.op !== 'close';
       if (paced && now - this.lastTalk < REMOTE_TUNE.talkGap) break;
+      const doc = m.do === 'read' || m.do === 'journal' || m.do === 'mine';
+      if (doc && now - this.lastDoc < REMOTE_TUNE.docGap) break;
       this.queue.shift();
       this.deps.send(m);
       if (paced) this.lastTalk = now;
+      if (doc) this.lastDoc = now;
       this.sentInWindow++;
       this.stats.sent++;
     }
@@ -320,8 +435,11 @@ export class RemoteHost implements StoryHost {
       // anybody's now.
       this.stats.dropped += this.queue.length;
       this.queue.length = 0;
+      this.textsOut = null;
     }
-    this.flush(this.deps.wall());
+    const wall = this.deps.wall();
+    this.flush(wall);
+    this.sendPiece(wall);
   }
 
   // ---- what comes down -----------------------------------------------------------------------------------
@@ -353,6 +471,39 @@ export class RemoteHost implements StoryHost {
           console.warn('story: a node listener failed', err);
         }
       }
+    } else if (w.do === 'doc') {
+      this.stats.docs++;
+      if (w.why) this.stats.lastWhy = w.why;
+      // The page as read is the journal's words too: kept by its hash, so reading it again here needs no word. A
+      // page saying its words were not kept is not words of anybody's.
+      if (w.view && this.deps.texts && !isUnkeptView(w.view)) {
+        const text = JSON.stringify(w.view);
+        this.deps.texts.put({ [textHash(text)]: text });
+      }
+      const word: DocWord = { doc: w.doc, view: w.view, foot: w.foot, entry: w.entry, why: w.why, ...(w.from ? { from: w.from } : {}), ...(w.end ? { end: true as const } : {}) };
+      for (const fn of this.docListeners) {
+        try {
+          fn(word);
+        } catch (err) {
+          console.warn('story: a document listener failed', err);
+        }
+      }
+    } else if (w.do === 'journal') {
+      // Only words that are what their hash says are kept.
+      const texts = cleanTexts(w.texts, textHash);
+      if (this.deps.texts && Object.keys(texts).length) this.deps.texts.put(texts);
+      // What this answer settles: the words of the entries it carried, kept or not; nothing it did not carry.
+      const answered = journalHashes(w.entries);
+      for (const fn of this.journalListeners) {
+        try {
+          fn(w.from, answered);
+        } catch (err) {
+          console.warn('story: a journal listener failed', err);
+        }
+      }
+    } else if (w.do === 'need') {
+      this.stats.needs++;
+      this.offerTexts(w.hashes);
     }
   }
 
@@ -360,6 +511,7 @@ export class RemoteHost implements StoryHost {
   reset(): void {
     this.queue.length = 0;
     this.nextTick.length = 0;
+    this.textsOut = null;
     this.off = 0;
     this.setsRead = true;
     if (this.current) {

@@ -23,7 +23,8 @@
 //   8. A place relative to where a quest began is only in the test set.
 //   9. Every `charge` stands on a choice whose condition asks `credits() >= ` at least that much.
 //  10. Nothing anywhere is marked canonical or "true".
-//  11. A document's slots: checked from the wave that brings documents.
+//  11. A document's slots exist: every slot a variant fills is one its body has (the loader's own check, since
+//      it is a document's alone), and every document a step, a card, an action or a condition names exists.
 //  12. A conversation's links resolve -- every entry, `next` and answer names a node it has, a talk step's
 //      node is one its speaker's conversation has, a cast member's conversation exists -- its last entry has
 //      no condition (nobody is ever mute), no node can be reached that neither ends, goes on nor offers
@@ -43,6 +44,7 @@
 // Each problem names its file and line. A warning is something the owner may mean; an error is something
 // that would leave a player stuck or the rules broken.
 
+import { CARD_KINDS, type DocSrc } from './doc.ts';
 import { readSlot } from './gestures.ts';
 import { lineAt } from './jsonc.ts';
 import { reachFrom, stepsOutOf } from './quests.ts';
@@ -73,7 +75,7 @@ export interface CheckOptions {
 export interface CheckResult {
   errors: Issue[];
   warnings: Issue[];
-  counts: { quests: number; steps: number; areas: number; objects: number; talks: number; nodes: number; cast: number; signals: number; unresolved: number; needs: number; later: number };
+  counts: { quests: number; steps: number; areas: number; objects: number; talks: number; nodes: number; cast: number; docs: number; signals: number; unresolved: number; needs: number; later: number };
 }
 
 /** Every condition's quest, step and area references, walked. */
@@ -244,7 +246,7 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
   const cat = opts.catalogue ?? null;
   const clips = opts.clips ?? null;
   const scripts = new Set(scriptNames());
-  const counts = { quests: 0, steps: 0, areas: Object.keys(set.areas).length, objects: Object.keys(set.objects).length, talks: 0, nodes: 0, cast: Object.keys(set.cast ?? {}).length, signals: 0, unresolved: 0, needs: 0, later: set.later.length };
+  const counts = { quests: 0, steps: 0, areas: Object.keys(set.areas).length, objects: Object.keys(set.objects).length, talks: 0, nodes: 0, cast: Object.keys(set.cast ?? {}).length, docs: Object.keys(set.docs ?? {}).length, signals: 0, unresolved: 0, needs: 0, later: set.later.length };
   const signalsSeen = new Set<string>();
   /** Every choice a `choose(q, s, option)` anywhere makes, as `<quest>#<step>`: a choice step none makes can never be done. */
   const chosen = new Set<string>();
@@ -269,6 +271,13 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       const prefix = who.slice(0, who.indexOf(':'));
       if (lib.sets.some((s) => s.name === prefix)) err(path, `there is no cast member ${who}`, 1);
       else warn(path, `${who} is in the ${prefix} set, which is not loaded here, so it cannot be checked`, 1);
+    };
+    /** A document of a set loaded here (rule 11's own half: a step's, a card's or an action's page must exist). */
+    const docRef = (doc: string, path: string): void => {
+      if (lib.docs && Object.hasOwn(lib.docs, doc)) return;
+      const prefix = doc.slice(0, doc.indexOf(':'));
+      if (lib.sets.some((s) => s.name === prefix)) err(path, `there is no document ${doc}`, 11);
+      else warn(path, `${doc} is in the ${prefix} set, which is not loaded here, so it cannot be checked`, 11);
     };
     /** A conversation's node (`<tree>#<node>`) or answer (`<tree>#<node>.<reply>`). */
     const talkRef = (ref: string, path: string): void => {
@@ -315,6 +324,11 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
         if (typeof x.inArea === 'string' && !lib.areas[x.inArea]) err(path, `there is no area ${x.inArea}`, 1);
         if (typeof x.heard === 'string') talkRef(x.heard, path);
         if (typeof x.chosen === 'string') talkRef(x.chosen, path);
+        if (typeof x.witnessed === 'string') {
+          docRef(x.witnessed, path);
+          const d = lib.docs && Object.hasOwn(lib.docs, x.witnessed) ? lib.docs[x.witnessed] : null;
+          if (d && typeof x.variant === 'string' && !d.variants.some((v) => v.id === x.variant)) err(path, `${x.witnessed} has no variant ${x.variant}`, 11);
+        }
         if (x.person && typeof (x.person as { who?: unknown }).who === 'string') whoRef((x.person as { who: string }).who, path);
         if (typeof x.script === 'string' && !scripts.has(x.script)) {
           counts.unresolved++;
@@ -370,11 +384,37 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
           case 'waypoint':
             if (worlds && typeof y === 'string' && !worlds.has(y)) err(p, `${y} is not a world this game has`, 7);
             break;
+          case 'doc':
+            docRef(x as string, p);
+            break;
+          case 'file':
+            for (const r of a.args.slice(3)) if (typeof r === 'string' && r.includes(':doc/')) docRef(r, p);
+            break;
         }
       });
     };
-    return { questRef, whoRef, condRefs, actionRefs, gestureRef };
+    return { questRef, whoRef, condRefs, actionRefs, gestureRef, docRef };
   };
+
+  // ---- the documents: what their conditions and their people name ----
+  for (const id of Object.keys(set.docs ?? {})) {
+    const d = set.docs![id];
+    const err: Err = (path, message, rule) => errors.push({ level: 'error', file: d.src.file, line: lineAt(d.src.lines, path), message, rule });
+    const warn: Warn = (path, message, rule) => warnings.push({ level: 'warning', file: d.src.file, line: lineAt(d.src.lines, path), message, ...(rule ? { rule } : {}) });
+    const { condRefs, whoRef } = refsFor(err, warn);
+    for (const who of d.names) whoRef(who, '/L1');
+    const walk = (list: DocSrc[]): void => {
+      for (const b of list) {
+        const spans = b.t === 'p' ? b.s : b.t === 'field' ? b.value : [];
+        for (const s of spans) if (typeof s !== 'string' && s.redact) condRefs(s.redact, `/L${b.line}`);
+      }
+    };
+    walk(d.body);
+    for (const v of d.variants) {
+      condRefs(v.when, `/L${v.line}`);
+      for (const k of Object.keys(v.fills)) walk(v.fills[k]);
+    }
+  }
 
   // ---- the conversations and the cast, first: their `choose` actions are what make a choice step doable ----
   for (const id of Object.keys(set.talks ?? {})) checkTalk(set.talks[id]);
@@ -484,7 +524,13 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       warnings.push({ level: 'warning', file, line: lineAt(q.src.lines, path), message, ...(rule ? { rule } : {}) });
     };
     const outcomeOk = (o: string): boolean => o === 'cleared' || o in q.outcomes;
-    const { questRef, whoRef, condRefs, actionRefs } = refsFor(err, warn);
+    const { questRef, whoRef, condRefs, actionRefs, docRef } = refsFor(err, warn);
+    // A card is the offer itself: a work order or a notice, with Accept and Decline at its foot.
+    if (q.card) {
+      docRef(q.card, '/card');
+      const d = lib.docs && Object.hasOwn(lib.docs, q.card) ? lib.docs[q.card] : null;
+      if (d && !CARD_KINDS.includes(d.kind)) warn('/card', `${q.card} is a ${d.kind}; a job's card is a ${CARD_KINDS.join(' or a ')}`);
+    }
     const placeCheck = (p: Place | null, path: string): void => {
       if (!p) return;
       const world = 'rel' in p ? p.world : p.world;
@@ -535,6 +581,8 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       for (const g of [...st.grant.done, ...st.grant.fail]) questRef(g, sp('grant'));
       if (st.object && !lib.objects[st.object]) err(sp('object'), `there is no object ${st.object}`, 1);
       if (st.area && !lib.areas[st.area]) err(sp('area'), `there is no area ${st.area}`, 1);
+      if (st.doc) docRef(st.doc, sp('doc'));
+      if (st.type === 'comm' && st.who) whoRef(st.who, sp('who'));
       if (st.type === 'talk' && st.who) {
         whoRef(st.who, sp('who'));
         // The node a talk step waits for must be one its speaker's conversation has.
@@ -680,11 +728,12 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
     }
   }
 
-  // ---- rule 3 for a choice: something must choose it, an answer in a conversation or a step's action ----
+  // ---- rule 3 for a choice: something must choose it, an answer in a conversation, a step's action, or its page ----
   for (const id of Object.keys(set.quests)) {
     const q = set.quests[id];
     for (const name of Object.keys(q.steps)) {
-      if (q.steps[name].type !== 'choice' || chosen.has(`${id}#${name}`)) continue;
+      // A choice written on a page is made at that page's foot.
+      if (q.steps[name].type !== 'choice' || q.steps[name].doc || chosen.has(`${id}#${name}`)) continue;
       errors.push({ level: 'error', file: q.src.file, line: lineAt(q.src.lines, stepPath(name)), message: `${name} is a choice nothing ever makes: no answer or action says choose(${id}, ${name}, <option>)`, rule: 3 });
     }
   }

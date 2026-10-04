@@ -29,18 +29,31 @@
 //
 // **Conversations.** Where one stands is kept here (`TalkState`), for this browser alone and never in the
 // book, so a reload starts it cleanly; each node it reaches is handed to whoever listens (`onNode`) the
-// moment it is worked out, which is how the window hears this host and a server's alike.
+// moment it is worked out, which is how the window hears this host and a server's alike. What was said is
+// kept with it and written into the journal as the window closes, with the words the window read out of the
+// client's own lines.
+//
+// **Documents.** A document handed over is opened, read to its end or chosen on at its foot here
+// (`docRules.ts`), and the page is handed to whoever listens (`onDoc`), as a node is. The words every journal
+// entry is written with are kept beside the book (`texts`, this browser's own store), by their hash.
 //
 // Every number here is ours.
 
 import { emptyBook, type StoryBook, type StoryChange } from './book.ts';
 import { STORY_TUNE } from './bookClient.ts';
+import type { DocWord } from './docRules.ts';
 import { HostCore, type HostCtx } from './hostCore.ts';
 import type { PayOrder, StoryEvent, StoryNote, StoryResult } from './quests.ts';
 import { emptySet, joinSets, loadSet, type Issue, type StorySet } from './set.ts';
 import type { HostAnswer, NodeWord, StoryHost } from './storyHost.ts';
-import { treeFor, type TalkState } from './talkRules.ts';
+import { treeFor, type TalkLogLine, type TalkState } from './talkRules.ts';
 import { viewHash, type StoryView } from './view.ts';
+
+/** Where a host keeps the words its journal entries are written with, by their hash (this browser's own store). */
+export interface TextKeep {
+  get(h: string): string | undefined;
+  put(texts: Record<string, string>): void;
+}
 
 /** One file of a set, as whoever read it hands it over. */
 export interface SetFile {
@@ -144,6 +157,8 @@ export interface LocalDeps {
   wall(): number;
   /** Whether the character is in the world: not on the select screen, not behind the first loading screen. */
   inWorld(): boolean;
+  /** Where the journal's words are kept. Absent: they last as long as this host. */
+  texts?: TextKeep;
 }
 
 /** How one set read came out, for the console. */
@@ -193,11 +208,21 @@ export class LocalHost implements StoryHost {
   private heldWas = false;
   /** Where the conversation under way stands, or null: this browser's alone, never the book's. */
   private talking: TalkState | null = null;
+  /** What the conversation under way (or the one just ended) has said, and to whom: written into the journal as its window closes. */
+  private talkLog: { speaker: string; log: TalkLogLine[] } | null = null;
   private readonly nodeListeners = new Set<(node: NodeWord) => void>();
-  readonly stats = { events: 0, dropped: 0, batches: 0, refused: 0, paid: 0, notes: 0, unbuilt: 0, misses: 0, sweeps: 0, talks: 0, picks: 0, lastWhy: '' };
+  private readonly docListeners = new Set<(doc: DocWord) => void>();
+  /** The journal's words when no store is handed in: they last as long as this host. */
+  private readonly ownTexts = new Map<string, string>();
+  readonly stats = { events: 0, dropped: 0, batches: 0, refused: 0, paid: 0, notes: 0, unbuilt: 0, misses: 0, sweeps: 0, talks: 0, picks: 0, reads: 0, entries: 0, lastWhy: '' };
 
   constructor(deps: LocalDeps) {
     this.deps = deps;
+  }
+
+  /** The words of a journal entry, by their hash, wherever this host keeps them. */
+  text(h: string): string | undefined {
+    return this.deps.texts ? this.deps.texts.get(h) : this.ownTexts.get(h);
   }
 
   // ---- the sets ---------------------------------------------------------------------------------------
@@ -314,8 +339,9 @@ export class LocalHost implements StoryHost {
     });
     this.entered = false;
     this.dirty = true;
-    // A conversation is the book's it began on, and never carries over to another.
+    // A conversation is the book's it began on, and never carries over to another, nor does what it said.
     this.talking = null;
+    this.talkLog = null;
     // Read in as for a character not yet in the world, so a played clock begun by the settling keeps its
     // time; brought in at once when the character already is.
     this.finish(this.core.load({ ...this.ctx(), away: true }), true);
@@ -399,6 +425,13 @@ export class LocalHost implements StoryHost {
       return { ok: false, why: 'the book would not take that just now' };
     }
     if (r.ch.length) this.stats.batches++;
+    // The words of every journal entry the batch wrote are kept beside the book, by their hash.
+    const hs = Object.keys(r.texts);
+    if (hs.length) {
+      if (this.deps.texts) this.deps.texts.put(r.texts);
+      else for (const h of hs) this.ownTexts.set(h, r.texts[h]);
+    }
+    for (const c of r.ch) if (c.k === 'journal') this.stats.entries++;
     // The book took the batch, and the rewards in it are recorded, before anything is handed over. A
     // payment that did not go through is said as one that did not, rather than as one that did.
     const refused = new Set<string>();
@@ -499,9 +532,10 @@ export class LocalHost implements StoryHost {
    * is worked out on the book with the very rules a server uses, applied and paid as any batch is, and handed
    * to every node listener before this answers; a refusal is handed over too, with no node and its reason.
    */
-  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, who: string | null = null): HostAnswer {
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, who: string | null = null, close?: { read: Record<string, string>; name: string | null }): HostAnswer {
     if (op === 'close') {
       this.talking = null;
+      this.writeTalk(close?.read ?? {}, close?.name ?? null);
       return { ok: true };
     }
     const core = this.ensure();
@@ -515,13 +549,72 @@ export class LocalHost implements StoryHost {
       this.tellNode({ speaker, view: null, why });
       return { ok: false, why };
     }
+    // A conversation opened with another still unwritten: what the last one said goes into the journal first.
+    if (op === 'open') this.writeTalk({}, null);
     const out = op === 'open' ? core.talkOpen(speaker, this.ctx(), who) : core.talkPick(this.talking!, reply, this.ctx());
     if (op === 'open') this.stats.talks++;
     else this.stats.picks++;
     const answer = this.finish(out.r);
     this.talking = this.refusedLast ? this.talking : out.turn.state;
+    if (!this.refusedLast && out.turn.log) this.talkLog = { speaker, log: out.turn.log };
     this.tellNode({ speaker, view: this.refusedLast ? null : out.turn.view, why: this.refusedLast ? (answer.why ?? null) : out.turn.why });
     return out.turn.why ? { ok: false, why: out.turn.why } : answer;
+  }
+
+  /**
+   * What the last conversation said, written into the journal now its window has closed, with the words the
+   * window read out of the client's own lines (`read`) and the name it showed; then forgotten. Only while this
+   * browser still holds the book it was said on: a server that took the book over writes its own.
+   */
+  private writeTalk(read: Record<string, string>, name: string | null): void {
+    const t = this.talkLog;
+    this.talkLog = null;
+    if (!t || !t.log.length) return;
+    const core = this.ensure();
+    if (!core) return;
+    this.finish(core.talkJournal(t.speaker, t.log, read, name, this.ctx()));
+  }
+
+  // ---- documents ------------------------------------------------------------------------------------------
+
+  /**
+   * A document handed over, opened (`end` once its last page is shown) or chosen on at its foot (`pick`): worked
+   * out with the very rules a server uses, applied and kept as any batch is, and the page handed to every
+   * document listener before this answers; a refusal is handed over too, with no page and its reason.
+   */
+  read(doc: string, opts: { end?: boolean; pick?: string | null } = {}): HostAnswer {
+    const core = this.ensure();
+    if (!core) {
+      const why = this.notNow() ?? 'nothing can be done just now';
+      this.tellDoc({ doc, view: null, foot: null, entry: null, why });
+      return { ok: false, why };
+    }
+    this.stats.reads++;
+    const out = core.read(doc, opts, this.ctx(), (h) => this.text(h));
+    const answer = this.finish(out.r);
+    const word = this.refusedLast ? { doc, view: null, foot: null, entry: null, why: answer.why ?? 'the book would not take that just now' } : out.word;
+    this.tellDoc(word);
+    return word.why ? { ok: false, why: word.why } : answer;
+  }
+
+  onDoc(fn: (doc: DocWord) => void): () => void {
+    this.docListeners.add(fn);
+    return () => this.docListeners.delete(fn);
+  }
+
+  private tellDoc(doc: DocWord): void {
+    for (const fn of this.docListeners) {
+      try {
+        fn(doc);
+      } catch (err) {
+        console.warn('story: a document listener failed', err);
+      }
+    }
+  }
+
+  /** A note of the player's own on a journal entry. */
+  mine(ref: string, text: string): HostAnswer {
+    return this.op((core, ctx) => core.mine(ref, text, ctx));
   }
 
   /** Where the conversation under way stands, for the console. */
@@ -620,7 +713,7 @@ export class LocalHost implements StoryHost {
       talks: Object.keys(this.lib.talks).filter((id) => !id.startsWith('core3:')).length,
       cast: Object.keys(this.lib.cast).length,
       core3: this.core3 ? { talks: Object.keys(this.core3.talks).length, voices: Object.keys(this.core3.voices ?? {}).length, joined: this.setsRead } : null,
-      talking: this.talking ? { ...this.talking, path: [...this.talking.path] } : null,
+      talking: this.talking ? { ...this.talking, path: [...this.talking.path], log: this.talking.log?.length ?? 0 } : null,
       view: this.current ? { quests: this.current.quests.length, watch: this.current.watch.length, waypoints: this.current.waypoints.length, objects: this.current.objects.length, cast: this.current.cast.length } : null,
       stats: { ...this.stats },
     };

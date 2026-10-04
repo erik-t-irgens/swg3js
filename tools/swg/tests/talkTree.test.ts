@@ -93,7 +93,7 @@ const ids = (v: NodeView | null): string[] => v?.replies.map((r) => `${r.id}${r.
   const h = hostOf();
   const a = h.talkOpen(CLERK, ctx());
   ok(a.turn.view?.node === 'hello' && a.turn.view.lines.length === 2 && a.turn.state?.speaker === CLERK, 'with nothing set, the conversation starts at its last entry, the one with no condition');
-  ok(same(ids(a.turn.view), ['job', 'name', 'rich-', 'press', 'pay', 'bye']), `an answer whose condition fails and is shown greyed is listed greyed; the rest are open (${ids(a.turn.view).join(' ')})`);
+  ok(same(ids(a.turn.view), ['job', 'name', 'rich-', 'press', 'pay', 'card', 'bye']), `an answer whose condition fails and is shown greyed is listed greyed; the rest are open (${ids(a.turn.view).join(' ')})`);
   const rich = a.turn.view!.replies.find((x) => x.id === 'rich')!;
   ok(!rich.enabled && rich.why === 'TEST: you need a million credits' && a.turn.view!.replies.find((x) => x.id === 'press')!.stakes === 'TEST: the clerk will remember this', 'a greyed answer carries its reason, and an answer with something at stake says it');
   ok(!ids(a.turn.view).some((r) => r.startsWith('tip')) && treeFor(lib, CLERK)!.nodes.hello.replies.some((r) => r.id === 'tip' && !!r.when && r.show !== 'disable'), 'an answer whose condition fails and that says nothing of how to show it is not shown at all, not even greyed');
@@ -511,7 +511,7 @@ if (typeof WebSocket === 'undefined') {
     const send = (m: unknown) => ws.send(JSON.stringify(m));
     await wait(150);
     const hail = got.find((m) => m.t === 'hail') as { story?: { v: number } } | undefined;
-    ok(hail?.story?.v === 3, 'the relay\'s hail says it plays conversations');
+    ok((hail?.story?.v ?? 0) >= 3, 'the relay\'s hail says it plays conversations');
     send({ t: 'claim', player: playerIdFor(key), key: verifierFor(key), proof: proofFor(verifierFor(key), nonce), character: 'c-talk', name: 'Han', counter: 1, about: { species: 'human_male', class: 'jedi', planet: 'tatooine', zone: '' } });
     await wait(150);
     send({ t: 'hello', name: 'Han', species: 'human_male', class: 'jedi', planet: 'tatooine', v: 5 });
@@ -523,7 +523,7 @@ if (typeof WebSocket === 'undefined') {
     send({ t: 'story', do: 'talk', op: 'open', speaker: CLERK, at: { p: [3483, -4690] } });
     await wait(200);
     const opened = cleanStoryWord([...got].reverse().find((m) => m.t === 'story' && m.do === 'node'), 'down');
-    ok(opened?.do === 'node' && opened.view?.node === 'hello' && opened.view.replies.length === 6, `the relay answers an opening with the node it reached (${opened?.do === 'node' ? opened.view?.node : 'none'})`);
+    ok(opened?.do === 'node' && opened.view?.node === 'hello' && opened.view.replies.length === 7, `the relay answers an opening with the node it reached (${opened?.do === 'node' ? opened.view?.node : 'none'})`);
     send({ t: 'story', do: 'talk', op: 'pick', speaker: CLERK, reply: 'job', at: {} });
     await wait(200);
     const given = cleanStoryWord([...got].reverse().find((m) => m.t === 'story' && m.do === 'node'), 'down');
@@ -541,7 +541,7 @@ if (typeof WebSocket === 'undefined') {
     send({ t: 'story', do: 'talk', op: 'close', speaker: herald, at: {} });
     await wait(100);
     const status = (await (await fetch(`http://127.0.0.1:${port}/`)).json()) as { stories: { talks: number; cast: number; v: number; stats: { talks: number }; core3: { played: number; trees: number; voiced: number } } };
-    ok(status.stories.v === 3 && status.stories.talks === 2 && status.stories.cast === 3 && status.stories.stats.talks === 3, 'the status page counts the conversations, the cast and the turns played');
+    ok(status.stories.v >= 3 && status.stories.talks === 2 && status.stories.cast === 3 && status.stories.stats.talks === 3, 'the status page counts the conversations, the cast and the turns played');
     ok(status.stories.core3?.played === 7 && status.stories.core3.trees === 289 && status.stories.core3.voiced === 7, "and the game's own: the seven heralds of the reference's 289 trees");
   } finally {
     ws.close();

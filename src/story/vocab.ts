@@ -24,9 +24,12 @@
  * items, Standing and Trust read, and money, things, experience, Standing, waypoints and words handed out.
  * Wave 6 brought the conversations: a choice made, a node heard, an answer given, a person met or named
  * read, and Trust under pressure, a charge, an introduction, a gesture and a choice made as actions, with
- * the `talk` and `choice` steps. (Wave 5 was the server's, and added no word.)
+ * the `talk` and `choice` steps. (Waves 5 and 7 were the server's and the game's own people, and added no
+ * word.) Wave 8 brought the documents, the journal and the file: a document witnessed, a file's level and
+ * its tags read, a document handed over, a note in the journal and an entry in the file as actions, with the
+ * `message`, `document` and `comm` steps.
  */
-export const BUILT_WAVE = 6;
+export const BUILT_WAVE = 8;
 
 export type ArgKind =
   | 'quest'

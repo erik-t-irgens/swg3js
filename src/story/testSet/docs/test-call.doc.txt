@@ -1,0 +1,10 @@
+// A call, heard to its end by the TEST: read a document job: each paragraph is a line the caller says, in the
+// conversation band, with no camera. None of it is story.
+kind: log
+id: test-call
+title: TEST CALL 0001
+issuer: TEST CLERK
+
+TEST: This is the first line of a test call.
+
+TEST: This is the second line, and the call ends after it.

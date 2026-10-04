@@ -9,8 +9,16 @@
 //
 // Synthetic throughout.
 import assert from 'node:assert/strict';
-import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, storyHailVersion } from '../../../src/story/storyWire.ts';
+import { fileURLToPath } from 'node:url';
+import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, cleanTexts, storyHailVersion } from '../../../src/story/storyWire.ts';
 import { emptyBook } from '../../../src/story/book.ts';
+import { HostCore } from '../../../src/story/hostCore.ts';
+import { JOURNAL_TUNE, cleanMine, textHash } from '../../../src/story/journal.ts';
+import { loadSet } from '../../../src/story/set.ts';
+import { cleanView } from '../../../src/story/view.ts';
+import { readStorySet } from '../../../server/storySet.mjs';
+
+const TESTSET = fileURLToPath(new URL('../../../src/story/testSet/', import.meta.url));
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -119,6 +127,35 @@ const ok = (cond: boolean, what: string) => {
   ok(cleanStoryWord({ do: 'note', note: { k: 'paid', credits: 'lots' } }, 'down') === null && (cleanStoryWord({ do: 'note', note: { k: 'item', kind: 'wear', id: 'shirt_s03', n: 1 }, given: 0 }, 'down') as { given: boolean }).given === false, 'a payment that is no number is no note, and a thing that did not arrive says so');
   const job = cleanStoryWord({ do: 'no', why: 'that job is not taken', of: 'job' }, 'down');
   ok(!!job && job.do === 'no' && job.of === 'job' && (cleanStoryWord({ do: 'no', why: 'x', of: 'book' }, 'down') as { of?: string }).of === undefined, 'a refusal about a job says so, and any other is about the book');
+}
+
+// ---- documents and the journal (story 4) ---------------------------------------------------------------------
+{
+  const read = cleanStoryWord({ t: 'story', do: 'read', doc: 'test:doc/test-pages', end: 1, at: {} }, 'up');
+  ok(!!read && read.do === 'read' && read.end && read.pick === null && cleanStoryWord({ do: 'read', doc: '__proto__' }, 'up') === null && cleanStoryWord({ do: 'read', doc: 'test:doc/x', pick: 'a b' }, 'up') === null, 'a reading names a document, read to its end or chosen on by a plain option; anything else is dropped');
+  ok((cleanStoryWord({ do: 'journal', from: 0, count: STORY_WIRE.journalMax + 1 }, 'up') === null) && !!cleanStoryWord({ do: 'journal', from: 3, count: STORY_WIRE.journalMax }, 'up'), 'a stretch of the journal is asked for no longer than one word carries');
+  const long = `${'TEST '.repeat(79)}x ${'y'.repeat(20)}`;
+  const mine = cleanStoryWord({ do: 'mine', ref: 'j1', text: `\u0000  ${long}  ` }, 'up');
+  ok(!!mine && mine.do === 'mine' && mine.text === cleanMine(`\u0000  ${long}  `) && !mine.text.includes('\u0000') && mine.text.length <= JOURNAL_TUNE.mineMax && cleanMine(mine.text) === mine.text && cleanMine(`${'a'.repeat(JOURNAL_TUNE.mineMax - 1)} b`) === cleanMine(cleanMine(`${'a'.repeat(JOURNAL_TUNE.mineMax - 1)} b`)), 'a note of the player\'s own is cleaned as every host cleans it, and cleaning it again changes nothing, even cut where a space falls');
+  const view = { id: 'test:doc/test-pages', kind: 'memo', title: 'TEST', variant: null, pages: [[{ t: 'p', s: ['TEST'] }]] };
+  const doc = cleanStoryWord({ t: 'story', do: 'doc', doc: 'test:doc/test-pages', view, foot: { k: 'choice', quest: 'test:branchDoc', step: 'pick', options: [{ id: 'a', label: 'TEST: A', enabled: true }] }, entry: 'j1', end: 1, from: 'test:cast/test-clerk' }, 'down');
+  ok(!!doc && doc.do === 'doc' && doc.view?.title === 'TEST' && doc.foot?.k === 'choice' && doc.entry === 'j1' && doc.end === true && doc.from === 'test:cast/test-clerk', 'a page comes down with its foot, its journal entry, who calls, and whether it answers a reading to the end');
+  ok(cleanStoryWord({ do: 'doc', doc: 'test:doc/other', view }, 'down') === null && (cleanStoryWord({ do: 'doc', doc: 'test:doc/test-pages', view: null, why: 'TEST: no' }, 'down') as { view: unknown; why: string; end?: true }).view === null && (cleanStoryWord({ do: 'doc', doc: 'test:doc/test-pages', view: null, why: 'x' }, 'down') as { end?: true }).end === undefined, 'a page under another document\'s name is dropped, a refusal carries no page, and only an answer to the end says so');
+  const kept = 'TEST: words the server kept';
+  const journal = cleanStoryWord({ do: 'journal', from: 4, entries: [{ id: 'j5', at: 1, kind: 'note', place: null, with: [], h: textHash(kept) }, { id: 'nonsense' }], texts: { [textHash(kept)]: kept, [textHash('TEST: other')]: 'TEST: forged', __proto__: 'x' } }, 'down');
+  ok(!!journal && journal.do === 'journal' && journal.from === 4 && journal.entries.length === 1 && journal.texts[textHash(kept)] === kept, 'a stretch of the journal comes down with the entries it can read and their words');
+  ok(!!journal && journal.do === 'journal' && Object.keys(cleanTexts(journal.texts, textHash)).length === 1, 'and words under a hash that is not their own are never kept');
+  const need = cleanStoryWord({ do: 'need', hashes: [textHash(kept), textHash(kept), 'nonsense', 7] }, 'down');
+  ok(!!need && need.do === 'need' && need.hashes.length === 1, 'a server\'s asking for words names each hash once, and nothing that is not one');
+  // A view round trip keeps what is to read and how coldly the file makes a track greet the character.
+  const host = new HostCore({ book: emptyBook('c-wire'), lib: loadSet(readStorySet(TESTSET).files.filter((f: { path: string }) => !f.path.startsWith('fixtures/')), { test: true }).set, payer: 'browser' });
+  const at = { now: 1_900_000_000_000, world: 'tatooine', here: [3482, -4690] as [number, number], room: null };
+  host.grant('test:docs', at);
+  host.grant('test:file', at);
+  const sent = host.view(at);
+  const back = cleanView(JSON.parse(JSON.stringify(sent)));
+  ok(!!sent.docs?.length && JSON.stringify(back?.docs) === JSON.stringify(sent.docs), 'a view off the wire keeps the documents still to read, as the server listed them');
+  ok(sent.file?.react?.empire === 'mean' && back?.file?.react?.empire === 'mean' && back.file.entries.length === sent.file.entries.length, 'and the file: how coldly the Empire\'s people greet the character, before any entry may be seen');
 }
 
 // ---- the hail ---------------------------------------------------------------------------------------------

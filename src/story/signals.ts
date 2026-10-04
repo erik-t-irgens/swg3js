@@ -6,7 +6,8 @@
 // `used:<object>` when E is pressed on a story object, `entered:<area>` and `left:<area>` at an area's
 // edge, `room:<template>#<cell>` on stepping into a room, `died:<who>` for a death the player is credited
 // with, `world:<id>` on arriving on a world, `talked:<who>#<node>` and `talked:<who>` from a cast member's
-// conversation (only for a node that conversation has), and `debug:<name>` from the console
+// conversation (only for a node that conversation has), `read:<doc>` when a document the set has is read to
+// its end, and `debug:<name>` from the console
 // (`__debug.signal`), which only the test set may wait on.
 // An engine prefix counts as a raiser of an object's or an area's signal only when that object or area is
 // declared, so a step waiting on a thing that is not there is caught. The NGE has 95 signals that nothing
@@ -96,6 +97,8 @@ export function raisersOf(lib: StorySet): Map<string, Raiser[]> {
     for (const n of Object.keys(t.nodes)) add(`talked:${id}#${n}`, { kind: 'talk', file: t.src.file, line: lineAt(t.src.lines, `/nodes/${n}`) });
   }
   for (const id of Object.keys(lib.objects)) add(`used:${id}`, { kind: 'object', file: lib.objects[id].src.file, line: 1 });
+  // A document the set has is read to its end by whoever it is handed to.
+  for (const id of Object.keys(lib.docs ?? {})) add(`read:${id}`, { kind: 'engine', file: lib.docs![id].src.file, line: 1 });
   for (const id of Object.keys(lib.areas)) {
     const a = lib.areas[id];
     add(`entered:${id}`, { kind: 'area', file: a.src.file, line: 1 });

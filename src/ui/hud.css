@@ -573,6 +573,7 @@
 }
 .hud-tracker[hidden] { display: none; }
 .hud-trk-note,
+.hud-trk-doc,
 .hud-trk-job {
   box-sizing: border-box;
   padding: calc(3px * var(--hud-scale)) calc(6px * var(--hud-scale));
@@ -583,7 +584,10 @@
   color: var(--ink);
 }
 .hud-trk-note { border-left-color: var(--warn); color: var(--muted); white-space: normal; }
+/* A document still to read: a line of its own over the jobs, pointing to the journal where it is opened. */
+.hud-trk-doc { border-left-color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-trk-note[hidden],
+.hud-trk-doc[hidden],
 .hud-trk-job[hidden],
 .hud-trk-line[hidden] { display: none; }
 .hud-trk-title {

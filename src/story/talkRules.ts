@@ -19,13 +19,27 @@
 // tree writes them (absent stays absent, for the game to fill at play time), and its answers -- each open
 // one, each refused one the tree shows greyed with its reason, none it hides -- with what is at stake. The
 // cleaner at the bottom rebuilds one off the wire field by field, as every story word is.
+//
+// **The transcript.** Every line a node says and every answer the player says aloud is kept, in turn, with
+// the conversation (`TalkState.log`, and on the turn that ends it `TalkTurn.log`), and once the window closes
+// the host writes it into the journal as one entry (`talkJournalWork`): each line by the hash of its words,
+// with the speaker as the player knew them then. A line in the client's own words is written as the browser
+// read it out, which it hands up as it closes; one it did not is kept as its reference rather than guessed.
 
 import { isWho, ownOf, type StoryBook } from './book.ts';
 import { TONES, type Tone } from './gestures.ts';
+import { JOURNAL_TUNE, textHash, type JournalLine } from './journal.ts';
 import { evalCond, type Draft, type StoryCtx, type Tally } from './quests.ts';
 import type { CastDef, StorySet } from './set.ts';
 import { FILL_KEYS, SHOT_KINDS, isNodeName, type FillKey, type LineDef, type NodeDef, type ReplyDef, type Shot, type ShotKind, type TalkDef } from './talkSet.ts';
-import { TEXT_MAX, cleanTextRef, type TextRef } from './text.ts';
+import { TEXT_MAX, cleanTextRef, literalOf, relativeKey, type TextRef } from './text.ts';
+
+/** One line of a transcript as it was said: the player's own or the speaker's, its words as written, and the substitutions the host could fill. */
+export interface TalkLogLine {
+  you?: 1;
+  text: TextRef;
+  fill?: Partial<Record<FillKey, string>>;
+}
 
 /** Where a conversation stands, as a host keeps it for the line it is on and never in the book. */
 export interface TalkState {
@@ -39,6 +53,8 @@ export interface TalkState {
   node: string;
   /** The nodes and answers walked, for the console. */
   path: string[];
+  /** Every line said so far, the player's own among them: what the journal keeps once it closes. */
+  log?: TalkLogLine[];
 }
 
 /** A substitution's words as the window is handed them: worked out, or one the browser fills (a name). */
@@ -92,6 +108,8 @@ export interface TalkTurn {
   why: string | null;
   /** The tree was revised under the conversation, which started again at its entry. */
   restarted?: true;
+  /** Every line said so far, kept on the turn too, since a turn that ends the conversation leaves no state to keep it on. */
+  log?: TalkLogLine[];
 }
 
 /** What a turn's work left for the view to be made from once everything it set off has run. */
@@ -99,6 +117,7 @@ export interface TalkPending {
   state: TalkState | null;
   why: string | null;
   restarted?: true;
+  log?: TalkLogLine[];
 }
 
 // ---- who speaks -----------------------------------------------------------------------------------------
@@ -140,15 +159,49 @@ function meet(d: Draft, who: string): void {
   if (ownOf(d.book.npcs, who)?.met === undefined) d.change({ k: 'npcMet', who, at: d.ctx.now });
 }
 
+/** A transcript with more lines on it, held to its length. */
+function logged(log: readonly TalkLogLine[] | undefined, more: TalkLogLine[]): TalkLogLine[] {
+  const out = [...(log ?? []), ...more];
+  return out.length > JOURNAL_TUNE.talkLines ? out.slice(0, JOURNAL_TUNE.talkLines) : out;
+}
+
+/**
+ * A text as the transcript keeps it: a line of the tree's own string table (`:key`) written out whole
+ * (`@<table>:<key>`), so it still says which line it was once the conversation it was said in is gone.
+ */
+export function wholeRef(text: TextRef, strings: string | null | undefined): TextRef {
+  const rel = relativeKey(text);
+  return rel !== null && strings ? `@${strings}:${rel}` : text;
+}
+
+/** A node's lines as the transcript keeps them: their words as written, with every substitution the book can fill. */
+function logLines(n: NodeDef, book: StoryBook, strings: string | null): TalkLogLine[] {
+  return n.say.map((l) => {
+    const line: TalkLogLine = { text: wholeRef(l.text, strings) };
+    const fill = fillView(l, book);
+    if (fill) {
+      const known: Partial<Record<FillKey, string>> = {};
+      for (const k of FILL_KEYS) {
+        const v = fill[k];
+        if (typeof v === 'string') known[k] = v;
+        else if (v && 'en' in v) known[k] = v.en;
+      }
+      if (Object.keys(known).length) line.fill = known;
+    }
+    return line;
+  });
+}
+
 /** A node reached: heard, its actions run, and the talk steps told (after the actions, so a job one grants is told too). */
-function enter(d: Draft, tree: TalkDef, speaker: string, node: string, path: readonly string[], who: string | null): TalkPending {
+function enter(d: Draft, tree: TalkDef, speaker: string, node: string, path: readonly string[], who: string | null, log?: readonly TalkLogLine[]): TalkPending {
   const n = tree.nodes[node];
-  if (!n) return { state: null, why: 'that part of the conversation is not there' };
+  if (!n) return { state: null, why: 'that part of the conversation is not there', log: log ? [...log] : [] };
   hear(d, `${tree.id}#${node}`);
   d.actions(n.do, { talk: tree.id, site: node });
   d.raiseLater(`talked:${speaker}#${node}`);
   d.raiseLater(`talked:${speaker}`);
-  return { state: { speaker, ...(who ? { who } : {}), tree: tree.id, hash: tree.hash, node, path: [...path, node] }, why: null };
+  const said = logged(log, logLines(n, d.book, tree.strings));
+  return { state: { speaker, ...(who ? { who } : {}), tree: tree.id, hash: tree.hash, node, path: [...path, node], log: said }, why: null, log: said };
 }
 
 /**
@@ -185,16 +238,47 @@ export function talkPickWork(d: Draft, state: TalkState, reply: string | null): 
   const node = tree?.nodes[state.node];
   if (!tree || tree.hash !== state.hash || !node) return { ...talkOpenWork(d, state.speaker, state.who ?? null), restarted: true };
   if (reply === null) {
-    if (!node.next || node.replies.length) return { state, why: 'that part of the conversation waits for an answer' };
-    return enter(d, tree, state.speaker, node.next, state.path, state.who ?? null);
+    if (!node.next || node.replies.length) return { state, why: 'that part of the conversation waits for an answer', log: state.log };
+    return enter(d, tree, state.speaker, node.next, state.path, state.who ?? null, state.log);
   }
   const r = node.replies.find((x) => x.id === reply);
-  if (!r) return { state, why: 'there is no such answer' };
-  if (replyOpen(d.book, tree, node, r, d.ctx, d.tally) !== 'open') return { state, why: 'that answer is not open' };
+  if (!r) return { state, why: 'there is no such answer', log: state.log };
+  if (replyOpen(d.book, tree, node, r, d.ctx, d.tally) !== 'open') return { state, why: 'that answer is not open', log: state.log };
   hear(d, `${tree.id}#${node.id}.${r.id}`);
   d.actions(r.do, { talk: tree.id, site: `${node.id}.${r.id}` });
-  if (!r.to) return { state: null, why: null };
-  return enter(d, tree, state.speaker, r.to, [...state.path, r.id], state.who ?? null);
+  // What the player says aloud goes into the transcript; a silent answer says nothing.
+  const said = r.said === null ? logged(state.log, []) : logged(state.log, [{ you: 1, text: wholeRef(r.said ?? r.text, tree.strings) }]);
+  if (!r.to) return { state: null, why: null, log: said };
+  return enter(d, tree, state.speaker, r.to, [...state.path, r.id], state.who ?? null, said);
+}
+
+/**
+ * A conversation's transcript, written into the journal once its window has closed: every line by the hash of
+ * its words, the speaker as the player knew them then. A line written in the story's own words is kept with
+ * every substitution the host could fill (the player's own name is filled as it is shown); one in the client's
+ * words is kept as the browser read it out (`read`, by its reference), and as its reference when it did not.
+ * Nothing when nothing was said. The entry, or null.
+ */
+export function talkJournalWork(d: Draft, speaker: string, log: readonly TalkLogLine[], read: Readonly<Record<string, string>>, name: string | null): ReturnType<Draft['writeJournal']> {
+  if (!log.length) return null;
+  const lines: JournalLine[] = [];
+  const texts: Record<string, string> = Object.create(null);
+  for (const l of log) {
+    const lit = literalOf(l.text);
+    let words: string | null = lit;
+    if (words !== null && l.fill) for (const k of FILL_KEYS) if (l.fill[k] !== undefined) words = words.split(`%${k}`).join(l.fill[k]!);
+    if (words === null && typeof l.text === 'string' && Object.hasOwn(read, l.text)) words = read[l.text];
+    if (words === null) {
+      if (typeof l.text === 'string') lines.push({ ...(l.you ? { you: 1 as const } : {}), ref: l.text });
+      continue;
+    }
+    const h = textHash(words);
+    texts[h] = words;
+    lines.push({ ...(l.you ? { you: 1 as const } : {}), h });
+  }
+  const known = nameFor(d.book, d.lib, speaker);
+  const title = (known ? literalOf(known) : null) ?? name ?? '';
+  return d.writeJournal({ kind: 'talk', with: [speaker], lines, ...(title ? { title: title.slice(0, 160) } : {}) }, texts);
 }
 
 // ---- what the window is shown ------------------------------------------------------------------------------

@@ -15,11 +15,19 @@
 // the host's own and are filled in here.
 
 import { BOOK_LIMITS, applyChanges, type BookLimits, type StoryBook, type StoryChange } from './book.ts';
+import { pickDocWork, readDocWork, type DocWord } from './docRules.ts';
+import { cleanMine, textHash } from './journal.ts';
 import { CIRCLE, plan, type Draft, type StoryCtx, type StoryEvent, type StoryResult } from './quests.ts';
 import { readAction, type StorySet } from './set.ts';
 import { watchdog } from './signals.ts';
-import { nodeView, talkOpenWork, talkPickWork, type NodeView, type TalkPending, type TalkState, type TalkTurn } from './talkRules.ts';
+import { nodeView, talkJournalWork, talkOpenWork, talkPickWork, type NodeView, type TalkLogLine, type TalkPending, type TalkState, type TalkTurn } from './talkRules.ts';
 import { viewOf, type StoryView } from './view.ts';
+
+/** A document read, worked out and applied: what it changed and wrote, and the word for the window. */
+export interface ReadResult {
+  r: StoryResult;
+  word: DocWord;
+}
 
 /** A conversation's turn worked out and applied: what it changed and paid, and the node it reached. */
 export interface TalkResult {
@@ -35,8 +43,11 @@ export interface HostOptions {
   lib: StorySet;
   payer: 'server' | 'browser';
   limits?: BookLimits;
-  /** How a batch is applied, when that is more than `applyChanges` (the server writes it down first). */
-  apply?: (ch: StoryChange[]) => void;
+  /**
+   * How a batch is applied, when that is more than `applyChanges` (the server writes it down first), with the
+   * words of the journal entries it writes, by their hash, so they can be kept before the entries that name them.
+   */
+  apply?: (ch: StoryChange[], texts: Record<string, string>) => void;
 }
 
 /**
@@ -69,7 +80,7 @@ export class HostCore {
   lib: StorySet;
   payer: 'server' | 'browser';
   limits: BookLimits;
-  private readonly applyBatch: ((ch: StoryChange[]) => void) | null;
+  private readonly applyBatch: ((ch: StoryChange[], texts: Record<string, string>) => void) | null;
 
   constructor(o: HostOptions) {
     this.book = o.book;
@@ -87,7 +98,7 @@ export class HostCore {
   private go(ctx: HostCtx, work: (d: Draft) => void): StoryResult {
     const r = planned(this.book, this.lib, this.ctxOf(ctx), work, this.limits);
     if (r.ch.length) {
-      if (this.applyBatch) this.applyBatch(r.ch);
+      if (this.applyBatch) this.applyBatch(r.ch, r.texts);
       else applyChanges(this.book, r.ch, this.limits);
     }
     return r;
@@ -207,14 +218,66 @@ export class HostCore {
       },
     );
     if (r.ch.length) {
-      if (this.applyBatch) this.applyBatch(r.ch);
+      if (this.applyBatch) this.applyBatch(r.ch, r.texts);
       else applyChanges(this.book, r.ch, this.limits);
     }
     if (r.why === CIRCLE) return { r, turn: { state: null, view: null, why: CIRCLE } };
     const { pending, view } = out;
     const turn: TalkTurn = { state: view ? pending.state : null, view, why: pending.why ?? (view ? null : r.why) };
     if (pending.restarted) turn.restarted = true;
+    if (pending.log) turn.log = pending.log;
     return { r, turn };
+  }
+
+  /**
+   * A conversation's transcript written into the journal, once its window has closed (`talkJournalWork`): the
+   * lines said, the words the browser read out for the client's own lines (`read`, by reference) and the name
+   * it showed for a speaker the story does not name. Nothing when nothing was said.
+   */
+  talkJournal(speaker: string, log: readonly TalkLogLine[], read: Readonly<Record<string, string>>, name: string | null, ctx: HostCtx): StoryResult {
+    return this.go(ctx, (d) => {
+      talkJournalWork(d, speaker, log, read, name);
+    });
+  }
+
+  /**
+   * A document opened (`readDocWork`), and with `end` read to its last page; with `pick`, a choice made at its
+   * foot. The page frozen the first time is read again by its words' hash out of `texts`.
+   */
+  read(doc: string, opts: { end?: boolean; pick?: string | null }, ctx: HostCtx, texts: (h: string) => string | undefined): ReadResult {
+    let word: DocWord = { doc, view: null, foot: null, entry: null, why: 'nothing was read' };
+    const r = this.go(ctx, (d) => {
+      if (opts.pick) {
+        const why = pickDocWork(d, doc, opts.pick);
+        if (why) d.why = why;
+        word = { doc, view: null, foot: null, entry: null, why };
+        return;
+      }
+      word = readDocWork(d, doc, !!opts.end, texts);
+      if (word.why) d.why ??= word.why;
+    });
+    if (r.why === CIRCLE) word = { doc, view: null, foot: null, entry: null, why: CIRCLE };
+    // The answer to a reading to the end says so, so the window that sent it never opens the page again.
+    if (opts.end) word = { ...word, end: true };
+    return { r, word };
+  }
+
+  /** A note of the player's own on a journal entry, written beside it and marked as theirs. */
+  mine(ref: string, words: string, ctx: HostCtx): StoryResult {
+    return this.go(ctx, (d) => {
+      const text = cleanMine(words);
+      if (!text) {
+        d.why = 'a note says something';
+        return;
+      }
+      const on = (d.book.journal ?? []).find((e) => e.id === ref);
+      if (!on || on.kind === 'mine') {
+        d.why = 'there is no such entry to write on';
+        return;
+      }
+      const h = textHash(text);
+      d.writeJournal({ kind: 'mine', with: [], ref, h, ...(on.quest ? { quest: on.quest } : {}) }, { [h]: text });
+    });
   }
 
   /**

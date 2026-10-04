@@ -59,7 +59,9 @@ export type Action =
   // The debug menu: every `__debug` helper, run from a window.
   | 'debugMenu'
   // The Waypoints window: every waypoint the character keeps, to mark, track, rename, colour and take away.
-  | 'waypoints';
+  | 'waypoints'
+  // The journal: the jobs, what the character witnessed, the documents to read and the ISB's file.
+  | 'journal';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -133,6 +135,9 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // The Waypoints window, on Y, as the story's design has it. The group's panel had Y as a raw key of its
   // own while a group stood; it moved to the full stop so the two never open on one press.
   waypoints: ['KeyY'],
+  // The journal, on O, as the story's design has it. The ultra cruise reads O as a key of its own, and only
+  // at a ship's controls, where the journal does not open: the two never answer one press.
+  journal: ['KeyO'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 
