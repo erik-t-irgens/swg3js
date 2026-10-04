@@ -525,5 +525,41 @@ function client(line: Partial<StoryLine> = {}) {
   r.c.use('char-1');
   ok(r.c.host === 'local', 'and so does the relay that came before');
 }
+{
+  // A server that runs the jobs: a job's word refused while the book is going up is about the job, and the
+  // book goes on going up; a refusal of the book itself still stops it.
+  const t = client({ authority: 'server', story: 2, status: 'online', mode: 'server' });
+  t.store.set('swg.story.char-1', bookText({ ...emptyBook('char-1'), rev: 3, base: 2, local: 1, waypoints: Array.from({ length: 20 }, (_, i) => wp(`w${i + 1}`)), nextWp: 21 }));
+  t.c.use('char-1');
+  t.c.claimed(false);
+  t.c.word({ t: 'story', do: 'want', chunk: 1000 });
+  const text = bookText(t.c.book);
+  const pieces = chunkText(text, 1000).length;
+  t.c.word({ t: 'story', do: 'no', why: 'only this world’s admin can do that', of: 'job' });
+  for (let i = 1; i < pieces; i++) {
+    t.tick(STORY_TUNE.chunkGap);
+    t.c.step(t.wall);
+  }
+  const up = t.sent.filter((m) => m.do === 'offer');
+  ok(pieces > 2 && up.length === pieces && up.map((m) => String(m.part)).join('') === text && t.said.includes('only this world’s admin can do that'), `a job's word refused mid-offer is said, and every one of the ${pieces} pieces still goes up`);
+  const u = client({ authority: 'server', story: 2, status: 'online', mode: 'server' });
+  u.store.set('swg.story.char-1', bookText({ ...emptyBook('char-1'), rev: 3, base: 2, local: 1, waypoints: Array.from({ length: 20 }, (_, i) => wp(`w${i + 1}`)), nextWp: 21 }));
+  u.c.use('char-1');
+  u.c.claimed(false);
+  u.c.word({ t: 'story', do: 'want', chunk: 1000 });
+  u.c.word({ t: 'story', do: 'no', why: 'the pieces came out of order' });
+  for (let i = 1; i < pieces; i++) {
+    u.tick(STORY_TUNE.chunkGap);
+    u.c.step(u.wall);
+  }
+  ok(u.sent.filter((m) => m.do === 'offer').length === 1, 'while a refusal of the book itself stops it after the first piece');
+  // Settled, a job's own waypoint is switched on the server like the character's own, by its key.
+  t.c.word({ t: 'story', do: 'book', id: 1, n: 0, of: 1, part: bookText({ ...cleanBook(JSON.parse(text))!, rev: 4, local: 0, base: 0 }), take: 'browser' });
+  t.sent.length = 0;
+  t.tick(1000);
+  const off = t.c.switchWaypoint('q:test:waypoints#mark', false);
+  const on = t.c.switchWaypoint('q:test:waypoints#mark', true);
+  ok(t.c.host === 'server' && off.ok && on.ok && t.sent.length === 2 && t.sent.every((m) => m.do === 'wp' && (m.wp as { id: string }).id === 'q:test:waypoints#mark') && t.sent[0].op === 'off' && t.sent[1].op === 'on', 'a job\'s waypoint switched with a server holding the book goes up as a waypoint word, off and on, by its key');
+}
 
 console.log(`\n${checks} checks passed`);

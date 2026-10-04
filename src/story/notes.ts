@@ -32,6 +32,17 @@ export function idWords(id: string): string {
 }
 
 /**
+ * A note as a server sends it to a browser that holds no set: an objective's own words and whether it was a
+ * place to reach go with it, so the browser says it exactly as its own host would have. Any other note is
+ * sent as it is; its words are made in the browser, the one side that can read the client's own strings.
+ */
+export function noteForWire(note: StoryNote, lib: StorySet): StoryNote & { line?: TextRef; goto?: boolean } {
+  if (note.k !== 'objective' && note.k !== 'objectiveDone') return note;
+  const step = lib.quests[note.quest]?.steps[note.step];
+  return step ? { ...note, line: stepText(step, lib), ...(step.type === 'goto' ? { goto: true } : {}) } : note;
+}
+
+/**
  * The line one note is said as, or null for one that says nothing. `given` is false for a thing the
  * host could not hand over (it was owned already, and a character holds one of each kind) or credits it
  * could not pay (nobody in play to pay them to): the line says so rather than claiming they arrived.
@@ -54,12 +65,15 @@ export function noteWords(note: StoryNote, lib: StorySet, deps: NoteWordsDeps, g
       return `Held: ${deps.text(note.title)} (${note.why})`;
     case 'objective':
     case 'objectiveDone': {
-      const step = lib.quests[note.quest]?.steps[note.step];
-      if (!step) return null;
-      const line = deps.text(stepText(step, lib));
+      // A server's note carries the objective's own words and whether it was a place to reach, since the
+      // browser it is sent to holds no set; this browser's own host looks the step up in the set it reads.
+      const sent = note as StoryNote & { line?: TextRef; goto?: boolean };
+      const step = sent.line ? null : lib.quests[note.quest]?.steps[note.step];
+      if (!sent.line && !step) return null;
+      const line = deps.text(sent.line ?? stepText(step!, lib));
       if (note.k === 'objective') return `Objective: ${line}`;
       // A place reached is the one an objective of going somewhere is done by.
-      return step.type === 'goto' ? `Reached ${line}` : `Objective done: ${line}`;
+      return (sent.line ? sent.goto === true : step!.type === 'goto') ? `Reached ${line}` : `Objective done: ${line}`;
     }
     case 'paid':
       return given ? `Paid ${note.credits.toLocaleString('en-GB')} credits` : `${note.credits.toLocaleString('en-GB')} credits could not be paid`;

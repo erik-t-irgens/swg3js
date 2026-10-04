@@ -49,7 +49,7 @@ export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', 
  * the server runs the very files the browser does and every wave of the story adds to them; the one file
  * outside it they may import is the hashing.
  */
-const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts', 'src/net/hash.ts'];
+const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts', 'src/net/hash.ts', 'src/world/dayPhase.ts', 'src/world/weatherSchedule.ts'];
 /** The story's rules and its test set, which the server imports from `src/story/` as they are. */
 export const STORY_SOURCE = [/^src\/story\/.+\.ts$/, /^src\/story\/testSet\/.+$/];
 /** The launcher proper (the bootstrap is built into the exe and is not needed in the release). */

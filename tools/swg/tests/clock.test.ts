@@ -618,4 +618,40 @@ const EPOCH = 1_700_000_000_000;
   ok(closest > 0.005, `and the two closest of them are a fair way apart (${(closest * 720).toFixed(1)} s of a 720 s day)`);
 }
 
+// --- the game hour a story asks about, worked out on the server, is the hour the browser's sky is at ---
+{
+  const { storyWorlds } = await import('../../../server/storyWorlds.mjs');
+  const { hourOfDay, planetPhase } = await import('../../../src/world/dayPhase.ts');
+  ok(PLANETS.every((p) => planetPhase(p.sky.sunAzimuth, p.sky.sunElevation) === phaseFor(p.sky.sunAzimuth, p.sky.sunElevation)), 'the server\'s phase for every planet is the browser\'s, at the spread everybody runs at');
+  let serverNow = EPOCH + 123_456_789;
+  const worlds = storyWorlds({ clock: new WorldClock({ epoch: EPOCH, now: () => serverNow }) });
+  const c = new SharedClock();
+  c.wall = () => serverNow;
+  c.hail(serverNow, DAY_MS);
+  let agree = 0;
+  let tried = 0;
+  for (let step = 0; step < 48; step++) {
+    serverNow += 15_000 + step * 7;
+    for (const p of PLANETS) {
+      const world = p.zones?.length ? p.zones[0].pack : p.id;
+      const browser = hourOfDay(c.timeOfDay(720, phaseFor(p.sky.sunAzimuth, p.sky.sunElevation)) ?? -1);
+      tried++;
+      if (worlds.hourOf(world) === browser) agree++;
+    }
+  }
+  ok(tried > 400 && agree === tried, `every planet's hour on the server is the hour its sky is drawn at in a browser on the same clock (${agree} of ${tried}, over a day)`);
+  ok(worlds.hourOf('nowhere') === null && storyWorlds({}).hourOf('tatooine') === null, 'and a world the list does not know, or a server with no clock, has no hour of its own');
+  // After the admin changes the day's length while the world runs, both still agree: the server's anchor is
+  // the one the browsers are told.
+  const anchored = new WorldClock({ epoch: EPOCH, now: () => serverNow });
+  const hand = anchored.setDay(600_000);
+  const w2 = storyWorlds({ clock: anchored });
+  const c2 = new SharedClock();
+  c2.wall = () => serverNow;
+  c2.hail(serverNow, hand.dayMs, hand.dayAt, hand.dayFrom);
+  serverNow += 200_000;
+  const tat = PLANETS.find((p) => p.id === 'tatooine')!;
+  ok(w2.hourOf('tatooine') === hourOfDay(c2.timeOfDay(600, phaseFor(tat.sky.sunAzimuth, tat.sky.sunElevation)) ?? -1), 'and so they do after the day\'s length is changed with the world running');
+}
+
 console.log(`\n${passed} checks passed`);

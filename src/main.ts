@@ -104,6 +104,8 @@ import { CITY_TUNE, CityWatch, tuneCities } from './story/cities.ts';
 import { BookClient, STORY_TUNE, tuneStory, type StoryResult } from './story/bookClient.ts';
 import { browserStoryStorage } from './story/storyStore.ts';
 import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, type JobsLine } from './story/localHost.ts';
+import { JOBS_WAIT_OLD, JOBS_WAIT_UNREAD, REMOTE_TUNE, RemoteHost, tuneRemote } from './story/remoteHost.ts';
+import type { StoryAt } from './story/storyWire.ts';
 import { noteWords } from './story/notes.ts';
 import { clientKey, textOf, type TextRef } from './story/text.ts';
 import type { HostCtx } from './story/hostCore.ts';
@@ -261,6 +263,7 @@ import { EmoteWheel } from './ui/emoteWheel';
 import { Net, type Hello, type PeerVehicle } from './net/net';
 import { SESSION, Session, tuneSession } from './net/session.ts';
 import { clockKnob } from './world/sharedClock.ts';
+import { hourOfDay } from './world/dayPhase.ts';
 // The group and the chat: the browser's half of what the server holds, and the two panels over it.
 import { sharedClock } from './world/sharedClock.ts';
 import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
@@ -897,6 +900,20 @@ class App {
     now: () => sharedClock.now(),
     wall: () => Date.now(),
     inWorld: () => !!this.current && this.inWorld && !this.creating,
+  });
+  /**
+   * The jobs, held by a server whose greeting says it runs them (src/story/remoteHost.ts): what the detectors
+   * see goes up with where the player stood, and the server's view and notes come down. The server is their
+   * only payer: its credits arrive through the purse, its things through the ledger's own word.
+   */
+  private readonly remoteJobs = new RemoteHost({
+    send: (msg) => this.net.sendWord(msg),
+    line: () => ({ host: this.story.host, story: this.net.session.storyVersion }),
+    char: () => (this.current && !this.creating ? this.current.id : null),
+    at: () => this.storyAt(),
+    now: () => sharedClock.now(),
+    wall: () => Date.now(),
+    note: (note, given) => this.sayStory(note, given),
   });
   /** What the jobs watch for -- arrivals, rooms, areas, a world, kills, a death -- four times a second (src/world/storyWatch.ts). */
   private readonly storyWatch = new StoryWatch();
@@ -6960,7 +6977,11 @@ class App {
     const storyWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
       storyWordWas(msg);
-      if (msg?.t === 'story') this.story.word(msg);
+      if (msg?.t === 'story') {
+        // The book's words are the book's; the jobs' view and notes are the server's host's.
+        this.story.word(msg);
+        this.remoteJobs.word(msg);
+      }
     };
     window.setInterval(() => this.story.step(Date.now()), 250);
     // A change made with nobody else holding the book is a change to the character, so the counter that
@@ -6979,8 +7000,13 @@ class App {
     // marks, the minimap and the map whenever it changes; the tracker reads it four times a second. The
     // sets are read now, and again whenever the dev server says the owner's folder changed, so an edit
     // reloads without a restart.
-    this.story.onChange(() => this.questHost.changed());
+    this.story.onChange((why) => {
+      this.questHost.changed();
+      // Another character, or none: the view a server sent is about nobody in play now.
+      if (why === 'use') this.remoteJobs.reset();
+    });
     this.questHost.onView(() => this.waypointsChanged());
+    this.remoteJobs.onView(() => this.waypointsChanged());
     void this.reloadStory();
     if (import.meta.hot) import.meta.hot.on('story:changed', () => void this.reloadStory());
     this.remotes.carrierPose = (to, pos, quat) => {
@@ -7033,14 +7059,16 @@ class App {
       // sets, what the view watches and the tracker shows -- and one operation or several: `grant`, `offer`,
       // `accept`, `decline`, `drop`, `restart`, `unstick`, `complete` (every step running, or the one `step`
       // names), `track`/`untrack`, `clock` (milliseconds the story's clock moves on, for a timer in a tab that
-      // draws no frames; `null` puts it back), `list` (every job the sets hold), `tracker` (`TRACKER_TUNE`)
-      // and `stands` (`STAND_TUNE`).
+      // draws no frames; `null` puts it back), `list` (every job the sets hold), `reload` (the sets read again),
+      // `tracker` (`TRACKER_TUNE`), `stands` (`STAND_TUNE`) and `remote` (`REMOTE_TUNE`). With a server running
+      // the jobs every operation goes to it, and the ones that only the console may do are its admin's alone.
       debugRoot.quests = (o?: Parameters<App['debugQuests']>[0]) => this.debugQuests(o ?? {});
       // `__debug.signal('test-ping')`: a signal raised for this character, as an action or the engine would;
       // a name with no prefix is a console signal (`debug:<name>`), which only the test set may wait on.
+      // On a server that runs the jobs it is the admin's alone and goes to the server.
       debugRoot.signal = (name: string) => {
         const n = typeof name === 'string' && name.includes(':') ? name : `debug:${name}`;
-        return { signal: n, ...this.questHost.event({ k: 'signal', name: n }) };
+        return { signal: n, ...(this.remoteJobs.active ? this.remoteJobs.signal(n) : this.questHost.event({ k: 'signal', name: n })) };
       };
       // `__debug.storyHere()`: where you stand as a story writes a place -- the world, the raw frame on a planet
       // (the game frame in space), and the room's cell and the building's template when you are in one --
@@ -7714,6 +7742,15 @@ class App {
       });
     };
     trade.onNote = (text) => this.messages.system(text);
+    // A thing the server handed over on its own -- a job's reward, which a server running the jobs pays
+    // through its ledger and never through this browser's word -- goes in the backpack here. The row is
+    // known already, so putting it there does not tell the server again; one this browser gave itself is
+    // owned already and changes nothing. The message line's word of it is the job's own note.
+    trade.onAdded = (item) => {
+      const rec = this.creating ? null : this.current;
+      if (!rec || this.equipment.owned().some((o) => o.kind === item.kind && o.id === item.id)) return;
+      if (this.equipment.give(item.kind, item.id) && this.backpack.open) void this.refreshBackpack();
+    };
     // An item given or destroyed here goes to the ledger as well, and what is on the body and in the
     // hands is said whenever it moves, since that is what the server refuses an offer of a worn
     // shirt with. Neither is how an item moves between two players: that is a trade, and only the
@@ -9631,7 +9668,7 @@ class App {
       out.add(w.id, w.name, w.colour, book.trackWp === w.id, raw ? rawToGameX(cx, w.p[0]) : w.p[0], w.p[2] ?? 0, raw ? rawToGameZ(cz, w.p[1]) : w.p[1]);
     }
     // The jobs' own, from the view as it last stood: no walk of the book is made for them.
-    const view = this.questHost.view();
+    const view = this.jobs.view();
     if (!view) return;
     for (let i = 0; i < view.waypoints.length; i++) {
       const w = view.waypoints[i];
@@ -9859,7 +9896,7 @@ class App {
       const here = packIdOf(planet, this.zone);
       for (const w of book.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, w.name, w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
       // And the jobs' own, switched on.
-      const view = this.questHost.view();
+      const view = this.jobs.view();
       if (view) for (const w of view.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, this.storyText(w.name), w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
     }
     this.minimap.setWaypoints(list);
@@ -9889,7 +9926,7 @@ class App {
       }
       // The jobs' own waypoints, which the book never holds: worked out from the step each belongs to, and
       // shown as the player last switched them.
-      const view = this.questHost.view();
+      const view = this.jobs.view();
       if (view) {
         for (const w of view.waypoints) {
           if (!w.on || w.world !== here) continue;
@@ -10100,7 +10137,17 @@ class App {
     if (!out.ok && out.why) this.messages.system(`No change: ${out.why}`);
   }
 
-  // ---- The jobs: the local host, its detectors, the things it stands, the tracker and the message line. ----
+  // ---- The jobs: whoever holds them, the detectors, the things they stand, the tracker and the message line. ----
+
+  /**
+   * Whoever works the character's jobs out just now: a server whose line holds the story (`remoteJobs`,
+   * which says why when it cannot be asked: settling, the line coming back, a server that runs no jobs), or
+   * this browser (`questHost`). Everything the detectors see, the tracker reads and the console asks goes to
+   * this one.
+   */
+  private get jobs(): LocalHost | RemoteHost {
+    return this.remoteJobs.active ? this.remoteJobs : this.questHost;
+  }
 
   /**
    * Every step of the story's own, kept: hands what the detectors saw to whoever holds the story. It is
@@ -10109,11 +10156,20 @@ class App {
    */
   private readonly raiseStory = (ev: StoryEvent): void => {
     try {
-      this.questHost.event(ev);
+      this.jobs.event(ev);
     } catch (err) {
       console.warn(`story: the ${ev.k} could not be worked out`, err);
     }
   };
+
+  /** Where the player stands as an event to a server carries it: the place in the story's frame, the room and the hour. Made per event, never per frame. */
+  private storyAt(): StoryAt {
+    const at = this.watchPlace();
+    const out: StoryAt = { room: at?.room ? { ...at.room } : null };
+    if (at) out.p = [at.x, at.z];
+    if (this.world.planet) out.hour = hourOfDay(this.world.day.time);
+    return out;
+  }
 
   /** What `jobsWait` is asked about, refilled in place: it is asked at every event and four times a second. */
   private readonly jobsLine: JobsLine = { inPlay: false, holdsBook: false, authority: 'me' };
@@ -10186,7 +10242,10 @@ class App {
     return true;
   }
 
-  /** One of the story's notes, said on the message line in the story's own colour. */
+  /**
+   * One of the story's notes, said on the message line in the story's own colour: this browser's own host's,
+   * or a server's, which carries an objective's own words with it since this browser holds no set of its.
+   */
   private sayStory(note: StoryNote, given: boolean): void {
     const words = noteWords(note, this.questHost.library, { text: (r) => this.storyText(r), itemName: (k, id) => this.storyItemName(k, id) }, given);
     if (words) this.messages.story(words);
@@ -10249,7 +10308,7 @@ class App {
       here: at ? [at.x, at.z] : null,
       room: at?.room ? { ...at.room } : null,
       areas: [...this.storyWatch.inside],
-      hour: this.world.planet ? Math.floor(this.world.day.time * 24) % 24 : null,
+      hour: this.world.planet ? hourOfDay(this.world.day.time) : null,
       grouped: this.groupIdNow() !== '',
       species: c?.species ?? null,
       credits: c ? purse.credits : null,
@@ -10266,7 +10325,7 @@ class App {
   private storyKill(m: Mobile, worldId?: string): void {
     try {
       const npc = killKey(m.npcId, worldId ?? this.world.mobiles?.worldIdOf(m) ?? '', m.key);
-      this.storyWatch.kill(this.questHost.view(), killOf(m.entry, npc), Date.now(), this.raiseStory);
+      this.storyWatch.kill(this.jobs.view(), killOf(m.entry, npc), Date.now(), this.raiseStory);
     } catch (err) {
       console.warn('story: a kill could not be told', err);
     }
@@ -10282,7 +10341,7 @@ class App {
     const p = this.player;
     if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying || this.talkNow) return null;
     const planet = this.world.planet;
-    const view = this.questHost.view();
+    const view = this.jobs.view();
     if (!planet || !view || !view.objects.length) return null;
     const at = p.worldPos;
     return this.storyStands.near(view.objects, this.packHere(planet), this.world.generation, this.world.layoutCenter, at.x, at.y, at.z, Date.now(), this.standDeps);
@@ -10292,7 +10351,7 @@ class App {
   private handleStoryUse(): boolean {
     const o = this.storyUseTarget();
     if (!o) return false;
-    const r = this.questHost.event({ k: 'use', object: o.id });
+    const r = this.jobs.event({ k: 'use', object: o.id });
     if (!r.ok && r.why) this.messages.system(r.why);
     return true;
   }
@@ -10310,8 +10369,11 @@ class App {
     this.storyClock -= dt;
     if (this.storyClock > 0) return;
     this.storyClock = 1 / Math.max(1, TRACKER_TUNE.hz);
-    const host = this.questHost;
-    host.tick();
+    // Both are stepped, whichever holds the jobs: this browser's own follows the book as it is handed between
+    // it and a server, and the server's sends what waited a tick.
+    this.questHost.tick();
+    this.remoteJobs.tick();
+    const host = this.jobs;
     if (simulate && this.inWorld && !this.dying) this.storyWatch.step(host.view(), this.watchPlace(), Date.now(), this.raiseStory);
     // Read again: what the detectors just raised may have moved a job on.
     const view = host.view();
@@ -10322,7 +10384,17 @@ class App {
     const flying = !!flown?.spec.ship && flown.airborne;
     const show = S.hudTracker && this.inWorld && !this.dying && (!flying || S.hudTrackerInFlight);
     let held = '';
-    const waits = this.story.host === 'held' ? 'Your jobs are held by the server, which is not answering.' : this.storyJobsWait() === JOBS_WAIT_CREDITS ? 'Your jobs wait: this server keeps your credits but not your story.' : '';
+    const remoteWhy = this.remoteJobs.active ? this.remoteJobs.waits() : null;
+    const waits =
+      this.story.host === 'held'
+        ? 'Your jobs are held by the server, which is not answering.'
+        : remoteWhy === JOBS_WAIT_OLD
+          ? 'Your jobs wait: this server keeps your story but runs no jobs yet.'
+          : remoteWhy === JOBS_WAIT_UNREAD
+            ? 'Your jobs wait: this server keeps your story but reads no story set.'
+            : this.storyJobsWait() === JOBS_WAIT_CREDITS && !this.remoteJobs.active
+            ? 'Your jobs wait: this server keeps your credits but not your story.'
+            : '';
     if (waits) {
       const book = this.story.book;
       for (const q of Object.keys(book?.quests ?? {})) if (book!.quests![q].state === 'active') held = waits;
@@ -10355,19 +10427,28 @@ class App {
     }
   }
 
-  /** What `__debug.story()` prints: the book, the host and its sets, and what the detectors remember. */
+  /** What `__debug.story()` prints: the book, the hosts and their sets, and what the detectors remember. */
   private storyReport(): Record<string, unknown> {
-    return { ...this.story.report(), tests: this.storyTests, quests: this.questHost.report(), watch: this.storyWatch.report() };
+    return { ...this.story.report(), tests: this.storyTests, jobs: this.remoteJobs.active ? 'server' : 'local', quests: this.questHost.report(), server: this.remoteJobs.report(), watch: this.storyWatch.report() };
   }
 
-  /** What `__debug.quests` does: one operation or several on the jobs held here, and the jobs as they stand. */
-  private debugQuests(o: { list?: boolean; grant?: string; offer?: string; accept?: string; decline?: string; drop?: string; complete?: string; step?: string; restart?: string; unstick?: string; track?: string; untrack?: string; clock?: number | null; tracker?: Partial<typeof TRACKER_TUNE>; stands?: Partial<typeof STAND_TUNE> }): Record<string, unknown> {
-    const host = this.questHost;
+  /**
+   * What `__debug.quests` does: one operation or several on the jobs, and the jobs as they stand. With a
+   * server running the jobs every operation goes to it: taking, turning down, dropping, starting over and
+   * following a job are any player's own; granting, offering, putting back, finishing a step, moving the
+   * clock and reading the sets again are its admin's alone, and its answer arrives as a batch, a view or a
+   * refusal on the message line rather than here. `reload` reads the sets again, the server's or this browser's.
+   */
+  private debugQuests(o: { list?: boolean; grant?: string; offer?: string; accept?: string; decline?: string; drop?: string; complete?: string; step?: string; restart?: string; unstick?: string; track?: string; untrack?: string; clock?: number | null; reload?: boolean; remote?: Partial<typeof REMOTE_TUNE>; tracker?: Partial<typeof TRACKER_TUNE>; stands?: Partial<typeof STAND_TUNE> }): Record<string, unknown> {
+    const local = this.questHost;
+    const remote = this.remoteJobs.active ? this.remoteJobs : null;
+    const host = remote ?? local;
     const results: Record<string, unknown>[] = [];
     const did = (what: string, r: { ok: boolean; why?: string }): void => {
-      results.push({ what, ...r });
+      results.push({ what, ...r, ...(remote && r.ok ? { sent: true } : {}) });
     };
     if (o.tracker) tuneTracker(o.tracker);
+    if (o.remote) tuneRemote(o.remote);
     if (o.stands) {
       for (const k of Object.keys(STAND_TUNE) as (keyof typeof STAND_TUNE)[]) {
         const v = o.stands[k];
@@ -10375,42 +10456,55 @@ class App {
       }
       this.storyStands.clear();
     }
+    if (o.reload) did('reload', remote ? remote.reload() : (void this.reloadStory(), { ok: true }));
+    // A job's id as the console writes it: with its prefix, or its name alone, found in the set read here
+    // or among the jobs a server's view shows (a server finds a bare name in its own sets itself).
+    const idOf = (q: string): string => (remote ? (q.includes(':') ? q : (this.remoteJobs.view()?.quests.find((x) => x.id.endsWith(`:${q}`))?.id ?? q)) : local.questId(q));
     if (o.grant) did(`grant ${o.grant}`, host.grant(o.grant));
     if (o.offer) did(`offer ${o.offer}`, host.offer(o.offer));
-    if (o.accept) did(`accept ${o.accept}`, host.accept(o.accept));
-    if (o.decline) did(`decline ${o.decline}`, host.decline(o.decline));
+    if (o.accept) did(`accept ${o.accept}`, host.accept(idOf(o.accept)));
+    if (o.decline) did(`decline ${o.decline}`, host.decline(idOf(o.decline)));
     if (o.complete) {
-      const id = host.questId(o.complete);
+      const id = idOf(o.complete);
       const rec = this.story.book?.quests?.[id];
       const steps = o.step ? [o.step] : Object.keys(rec?.steps ?? {}).filter((s) => rec!.steps[s].state === 'active');
       if (!steps.length) did(`complete ${id}`, { ok: false, why: 'that job has no step running' });
-      for (const s of steps) did(`complete ${id} ${s}`, host.run([`complete(${id}, ${s})`]));
+      for (const s of steps) did(`complete ${id} ${s}`, remote ? remote.complete(id, s) : local.run([`complete(${id}, ${s})`]));
     }
-    if (o.restart) did(`restart ${o.restart}`, host.restart(o.restart));
-    if (o.unstick) did(`unstick ${o.unstick}`, host.unstick(o.unstick));
-    if (o.drop) did(`drop ${o.drop}`, host.drop(o.drop));
-    if (o.track) did(`track ${o.track}`, host.track(o.track, true));
-    if (o.untrack) did(`untrack ${o.untrack}`, host.track(o.untrack, false));
-    if (o.clock === null) host.resetClock();
-    else if (typeof o.clock === 'number') host.shiftClock(o.clock);
+    if (o.restart) did(`restart ${o.restart}`, host.restart(idOf(o.restart)));
+    if (o.unstick) did(`unstick ${o.unstick}`, host.unstick(idOf(o.unstick)));
+    if (o.drop) did(`drop ${o.drop}`, host.drop(idOf(o.drop)));
+    if (o.track) did(`track ${o.track}`, host.track(idOf(o.track), true));
+    if (o.untrack) did(`untrack ${o.untrack}`, host.track(idOf(o.untrack), false));
+    if (remote) {
+      if (o.clock === null || typeof o.clock === 'number') did(`clock ${o.clock}`, remote.clock(o.clock));
+    } else if (o.clock === null) local.resetClock();
+    else if (typeof o.clock === 'number') local.shiftClock(o.clock);
     // Stepped once here, so a driven tab that draws no frames sees what the next tick would.
     this.storyClock = 0;
     this.stepStory(0, this.inWorld && !this.dying);
     const book = this.story.book;
-    const lib = host.library;
+    const lib = local.library;
+    const view = host.view();
+    // A job's title: the set's own here, the server's view's on a server (this browser holds none of its set).
+    const titleOf = (id: string): string => {
+      const def = remote ? null : lib.quests[id];
+      const shown = remote ? view?.quests.find((q) => q.id === id) : null;
+      return def ? this.storyText(def.title) : shown ? this.storyText(shown.title) : id;
+    };
     const quests: Record<string, unknown>[] = [];
     for (const id of Object.keys(book?.quests ?? {})) {
       const rec = book!.quests![id];
       const steps: Record<string, string> = {};
       for (const s of Object.keys(rec.steps)) steps[s] = `${rec.steps[s].state}${rec.steps[s].n ? ` ${rec.steps[s].n}` : ''}`;
-      quests.push({ id, title: lib.quests[id] ? this.storyText(lib.quests[id].title) : id, state: rec.state, run: rec.run, completions: rec.completions, ...(rec.outcome ? { outcome: rec.outcome } : {}), ...(rec.why ? { why: rec.why } : {}), steps });
+      quests.push({ id, title: titleOf(id), state: rec.state, run: rec.run, completions: rec.completions, ...(rec.outcome ? { outcome: rec.outcome } : {}), ...(rec.why ? { why: rec.why } : {}), steps });
     }
-    const view = host.view();
     return {
       host: host.report(),
       results,
       quests,
-      ...(o.list ? { set: Object.keys(lib.quests).sort().map((id) => ({ id, title: this.storyText(lib.quests[id].title), givers: lib.quests[id].givers.map((g) => g.kind), state: book?.quests?.[id]?.state ?? 'none' })) } : {}),
+      ...(o.list && !remote ? { set: Object.keys(lib.quests).sort().map((id) => ({ id, title: this.storyText(lib.quests[id].title), givers: lib.quests[id].givers.map((g) => g.kind), state: book?.quests?.[id]?.state ?? 'none' })) } : {}),
+      ...(o.list && remote ? { set: 'a server runs the jobs: its sets are its own, named on its status page' } : {}),
       view: view ? { tracked: view.tracked, watch: view.watch.map((w) => w.k + ('quest' in w ? ` ${w.quest}#${w.step}` : 'id' in w ? ` ${w.id}` : 'object' in w ? ` ${w.object}` : '')), waypoints: view.waypoints.map((w) => `${w.id}${w.on ? '' : ' (off)'}`), objects: view.objects.map((x) => x.id) } : null,
       tracker: this.tracker.report(),
       stands: this.storyStands.report(),
@@ -13673,7 +13767,7 @@ class App {
     // A job's step that fails on the player's death fails here, once; and the dead are in no area, so a
     // watch being kept is closed now rather than counting the time spent dead and coming back.
     try {
-      this.storyWatch.death(this.questHost.view(), this.raiseStory);
+      this.storyWatch.death(this.jobs.view(), this.raiseStory);
       this.storyWatch.leaveAll(this.raiseStory);
     } catch (err) {
       console.warn('story: the death could not be told', err);

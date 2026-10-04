@@ -287,8 +287,13 @@ const did = (f: Fake, what: string) => f.sent.filter((m) => m.do === what);
   ok(got.length === 1 && got[0].id === 'hat_s04' && got[0].row === 'i2', 'a list is read rather than trusted: a name that means something to an object, a repeat and anything malformed are all dropped');
   f.t.handle({ t: 'trade', do: 'state', id: 't1', with: 7, yours: { rows: [] }, theirs: { rows: [] } });
   ok(f.t.window === null, 'and a window with this browser on both sides of it is no window at all');
+  const handedOver: TradeItem[] = [];
+  f.t.onAdded = (item) => void handedOver.push(item);
   f.t.handle({ t: 'items', do: 'added', row: { id: 'i7', kind: 'weapon', what: 'baton_stun', got: 9 } });
   ok(f.t.rowOf('weapon', 'baton_stun') === 'i7', 'an item the server has written down is known by its row from then on');
+  ok(handedOver.length === 1 && handedOver[0].kind === 'weapon' && handedOver[0].id === 'baton_stun' && handedOver[0].row === 'i7', 'and one the server wrote down on its own (a job\'s reward, paid through its ledger) is handed on to go in the backpack, its row already known');
+  f.t.handle({ t: 'items', do: 'added', row: { id: 'i8', kind: 'nonsense', what: 'x' } });
+  ok(handedOver.length === 1, 'while a row that is not one is handed nowhere');
   f.t.handle({ t: 'items', do: 'gone', id: 'i7' });
   ok(f.t.rowOf('weapon', 'baton_stun') === '', 'and one it says is gone is no longer known by any row');
 }

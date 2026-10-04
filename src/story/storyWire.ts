@@ -7,6 +7,16 @@
 // characters, a length, a finite number, a hard cap on a list, and the three names that mean something
 // to the language refused outright -- and anything that fails is dropped rather than answered.
 //
+// **The jobs (story 2).** A server whose hail says `story.v` 2 or more runs the character's jobs itself,
+// and the browser speaks three more words to it: `ev` (something the detectors saw, with where the player
+// stood when they saw it), `q` (a job taken, turned down, dropped, started over, followed or not) and
+// `admin` (the console's own operations, which only the world's admin may use). It is told `view` (what the
+// interface shows, whenever that changed, and whether the server reads a story set at all: `read`) and
+// `note` (a fact for the message line: the words are made in
+// the browser, which is the only side that can read the client's own strings). A refusal about a job
+// rather than about the book carries `of: 'job'`, so the browser never takes it for a book that will not
+// come up. None of these is ever said to a server whose hail says less.
+//
 // **Why in pieces.** The relay drops what a browser sends past 64 KB in a second and closes a line that
 // goes twice past it, so a book of any size goes up as pieces of `offerChunk` characters with a gap
 // between them, and comes down the same way so the two sides read it with the same code. A book is
@@ -15,8 +25,12 @@
 //
 // Pure, nothing imported but this folder: the server reads these words with this file.
 
-import { cleanChange, type StoryChange } from './book.ts';
-import { cleanWaypointAsk, cleanWaypointName, isQuestWaypoint, isWaypointColour, isWaypointId, type WaypointAsk, type WaypointColour } from './waypoints.ts';
+import { cleanChange, isQuestId, isStepName, isTrack, type StoryChange } from './book.ts';
+import type { StoryEvent, StoryNote } from './quests.ts';
+import type { Room } from './set.ts';
+import { cleanTextRef, type TextRef } from './text.ts';
+import { cleanView, type StoryView } from './view.ts';
+import { cleanPlace, cleanRoom, cleanWaypointAsk, cleanWaypointName, cleanWorld, isQuestWaypoint, isWaypointColour, isWaypointId, type WaypointAsk, type WaypointColour } from './waypoints.ts';
 
 /** The caps on a word. Ours; the pacing and the sizes a server will take are its own (`STORY_TUNING`). */
 export const STORY_WIRE = {
@@ -28,7 +42,32 @@ export const STORY_WIRE = {
   whyMax: 160,
   /** The most changes one `ch` may carry. */
   changesMax: 1000,
+  /** The most tags a kill may carry. */
+  tagsMax: 32,
+  /** The most actions one `admin` word may run (`complete` names one step at a time). */
+  adminMax: 1,
 };
+
+/** The jobs' operations any player may ask of their own book. */
+export const QUEST_OPS = ['accept', 'decline', 'drop', 'restart', 'track', 'untrack'] as const;
+export type QuestOp = (typeof QUEST_OPS)[number];
+/** The console's operations, which only the world's admin may ask of a server. */
+export const ADMIN_OPS = ['reload', 'grant', 'offer', 'unstick', 'complete', 'signal', 'clock'] as const;
+export type AdminOp = (typeof ADMIN_OPS)[number];
+
+/** Where the player stood when the detectors saw something, as the browser saw it: what a server checks an event against. */
+export interface StoryAt {
+  /** Across the ground in the frame a story writes places in (raw on a planet, the game's in space). */
+  p?: [number, number];
+  /** The room, or null for none. */
+  room?: Room | null;
+  /**
+   * The game hour where the player stands, 0 to 23, as this browser's sky has it. A server works the hour out
+   * itself from its own clock and the planet's own sun, and takes this only for a world its list of planets
+   * does not know, and only while it is fresh.
+   */
+  hour?: number;
+}
 
 /** What a browser says. */
 export type StoryUp =
@@ -37,19 +76,215 @@ export type StoryUp =
   | { do: 'wp'; op: 'set'; wp: WaypointAsk }
   | { do: 'wp'; op: 'edit'; id: string; name?: string; colour?: WaypointColour }
   | { do: 'wp'; op: 'on' | 'off' | 'gone'; id: string }
-  | { do: 'wp'; op: 'track'; id: string | null };
+  | { do: 'wp'; op: 'track'; id: string | null }
+  | { do: 'ev'; ev: StoryEvent; at: StoryAt }
+  | { do: 'q'; op: QuestOp; quest: string; at: StoryAt }
+  | { do: 'admin'; op: AdminOp; quest?: string; step?: string; name?: string; ms?: number | null; at: StoryAt };
+
+/** A fact for the message line, with what a browser that holds no set needs to say it: an objective's own words and whether it was a place to reach. */
+export type StoryNoteDown = StoryNote & { line?: TextRef; goto?: boolean };
 
 /** What a server says. `whole` on a `ch` is false when a change in it could not be read: the batch is then asked for again whole. */
 export type StoryDown =
   | { do: 'book'; id: number; n: number; of: number; part: string; take: 'browser' | 'server' }
   | { do: 'want' }
   | { do: 'ch'; rev: number; ch: StoryChange[]; whole: boolean }
-  | { do: 'no'; why: string };
+  | { do: 'no'; why: string; of?: 'job' }
+  | { do: 'view'; view: StoryView; off: number; read: boolean }
+  | { do: 'note'; note: StoryNoteDown; given: boolean };
 
 const CONTROL = /[\u0000-\u001f\u007f]/g;
+/** A story's own id for one of its things (an object, an area): its set's prefix and its name, as a quest's is. */
+const THING_ID = /^[A-Za-z0-9_-]{1,24}:[A-Za-z0-9_./-]{1,96}$/;
+/** A signal's name: an engine prefix or a set's, then its name, which may itself be an id (`used:test:obj/test-terminal`). */
+const SIGNAL = /^[A-Za-z0-9_:./#-]{1,200}$/;
+/** A creature's catalogue id, group, social group or tag. */
+const CREATURE_WORD = /^[A-Za-z0-9_.:/ -]{1,96}$/;
+/** The name one body's death is known by on the wire (`killKey`). */
+const NPC = /^[A-Za-z0-9_.:/#-]{1,120}$/;
+/** A building's template. */
+const TEMPLATE = /^[A-Za-z0-9_./-]{1,160}$/;
+/**
+ * A job as a player names one at the console: with its set's prefix, or by its name alone, which the server
+ * finds in its own sets as the browser's host does in its own (`own:` first, then `test:`).
+ */
+const QUEST_REF = /^([A-Za-z0-9_-]{1,24}:)?[A-Za-z0-9_./-]{1,96}$/;
+
+function questRef(x: unknown): string | null {
+  return isQuestId(x) || wordOf(x, QUEST_REF) ? (x as string) : null;
+}
 
 function whole(x: unknown, max = 1e12): number | null {
   return typeof x === 'number' && Number.isInteger(x) && x >= 0 && x <= max ? x : null;
+}
+
+function wordOf(x: unknown, re: RegExp): string | null {
+  return typeof x === 'string' && re.test(x) && x !== '__proto__' && x !== 'constructor' && x !== 'prototype' ? x : null;
+}
+
+/** Two finite numbers across the ground, or null. */
+function pair(x: unknown): [number, number] | null {
+  if (!Array.isArray(x) || x.length !== 2) return null;
+  const p = cleanPlace(x);
+  return p ? [p[0], p[1]] : null;
+}
+
+/**
+ * Something a browser's detectors saw, cleaned, or null when it is not one. Every field is rebuilt; a
+ * kind the server never takes from a browser (the step machine's own `tick`) is not one.
+ */
+export function cleanStoryEvent(x: unknown): StoryEvent | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  switch (o.k) {
+    case 'arrive': {
+      const world = cleanWorld(o.world);
+      const p = pair(o.p);
+      if (!world || !p) return null;
+      const out: Extract<StoryEvent, { k: 'arrive' }> = { k: 'arrive', world, p };
+      const room = o.room === undefined || o.room === null ? null : cleanRoom(o.room);
+      if (room) out.room = room;
+      if (o.quest !== undefined) {
+        if (!isQuestId(o.quest)) return null;
+        out.quest = o.quest;
+      }
+      if (o.step !== undefined) {
+        if (!isStepName(o.step)) return null;
+        out.step = o.step;
+      }
+      return out;
+    }
+    case 'room': {
+      const room = cleanRoom({ cell: o.cell, template: o.template });
+      return room && typeof o.template === 'string' && TEMPLATE.test(o.template) ? { k: 'room', template: o.template, cell: room.cell } : null;
+    }
+    case 'area': {
+      const area = wordOf(o.area, THING_ID);
+      return area && typeof o.inside === 'boolean' ? { k: 'area', area, inside: o.inside } : null;
+    }
+    case 'use': {
+      const object = wordOf(o.object, THING_ID);
+      return object ? { k: 'use', object } : null;
+    }
+    case 'kill': {
+      const who = wordOf(o.who, CREATURE_WORD);
+      if (!who) return null;
+      const out: Extract<StoryEvent, { k: 'kill' }> = { k: 'kill', who };
+      const group = o.group === undefined ? null : wordOf(o.group, CREATURE_WORD);
+      if (group) out.group = group;
+      const social = o.social === undefined ? null : wordOf(o.social, CREATURE_WORD);
+      if (social) out.social = social;
+      if (Array.isArray(o.tags)) {
+        const tags: string[] = [];
+        for (const t of o.tags) {
+          const tag = wordOf(t, CREATURE_WORD);
+          if (tag && !tags.includes(tag) && tags.length < STORY_WIRE.tagsMax) tags.push(tag);
+        }
+        if (tags.length) out.tags = tags;
+      }
+      const npc = o.npc === undefined ? null : wordOf(o.npc, NPC);
+      if (npc) out.npc = npc;
+      return out;
+    }
+    case 'death':
+      return { k: 'death' };
+    case 'world': {
+      const world = cleanWorld(o.world);
+      return world ? { k: 'world', world } : null;
+    }
+    case 'signal': {
+      const name = wordOf(o.name, SIGNAL);
+      return name ? { k: 'signal', name } : null;
+    }
+    case 'enter':
+      return { k: 'enter' };
+    case 'leave':
+      return { k: 'leave' };
+    default:
+      return null;
+  }
+}
+
+/** Where the player stood, as a browser says it with an event, cleaned: anything that is not one is left out. */
+export function cleanStoryAt(x: unknown): StoryAt {
+  const out: StoryAt = {};
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return out;
+  const o = x as Record<string, unknown>;
+  const p = pair(o.p);
+  if (p) out.p = p;
+  if (o.room === null) out.room = null;
+  else if (o.room !== undefined) out.room = cleanRoom(o.room);
+  if (typeof o.hour === 'number' && Number.isFinite(o.hour) && o.hour >= 0 && o.hour < 24) out.hour = o.hour;
+  return out;
+}
+
+const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'item', 'xp', 'standing', 'say'];
+
+/** A fact for the message line as a server sends it, cleaned, or null. Its words are made here, in the browser. */
+export function cleanNoteDown(x: unknown): StoryNoteDown | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  if (typeof o.k !== 'string' || !NOTE_KINDS.includes(o.k)) return null;
+  const quest = isQuestId(o.quest) ? o.quest : 'run';
+  const count = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 1e12 ? v : null);
+  let out: StoryNoteDown | null = null;
+  switch (o.k) {
+    case 'job':
+    case 'offered':
+    case 'restarted':
+    case 'dropped': {
+      const title = cleanTextRef(o.title, 240);
+      if (title) out = { k: o.k, quest, title };
+      break;
+    }
+    case 'done':
+    case 'failed': {
+      const title = cleanTextRef(o.title, 240);
+      if (title && isStepName(o.outcome)) out = { k: o.k, quest, title, outcome: o.outcome };
+      break;
+    }
+    case 'stalled': {
+      const title = cleanTextRef(o.title, 240);
+      const why = typeof o.why === 'string' ? o.why.replace(CONTROL, '').slice(0, STORY_WIRE.whyMax) : '';
+      if (title) out = { k: 'stalled', quest, title, why };
+      break;
+    }
+    case 'objective':
+    case 'objectiveDone':
+      if (isStepName(o.step)) out = { k: o.k, quest, step: o.step };
+      break;
+    case 'paid': {
+      const credits = count(o.credits);
+      if (credits !== null) out = { k: 'paid', quest, credits };
+      break;
+    }
+    case 'item': {
+      const n = count(o.n);
+      const id = wordOf(o.id, CREATURE_WORD);
+      if ((o.kind === 'wear' || o.kind === 'weapon') && id && n !== null) out = { k: 'item', quest, kind: o.kind, id, n };
+      break;
+    }
+    case 'xp': {
+      const n = count(o.n);
+      if (n !== null) out = { k: 'xp', quest, n };
+      break;
+    }
+    case 'standing': {
+      const n = count(o.n);
+      if (isTrack(o.track) && n !== null) out = { k: 'standing', quest, track: o.track, n };
+      break;
+    }
+    case 'say': {
+      const text = cleanTextRef(o.text, 400);
+      if (text) out = { k: 'say', text: typeof text === 'string' ? text : text.en };
+      break;
+    }
+  }
+  if (!out) return null;
+  const line = o.line === undefined ? null : cleanTextRef(o.line, 400);
+  if (line) out.line = line;
+  if (o.goto === true) out.goto = true;
+  return out;
 }
 
 /** The pieces' own numbers: which book, which piece, how many, and the text. Null when any is wrong. */
@@ -98,9 +333,46 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
         if (isWaypointColour(wp.colour)) out.colour = wp.colour;
         return out.name === undefined && out.colour === undefined ? null : out;
       }
-      if (o.op === 'on' || o.op === 'off' || o.op === 'gone') return isWaypointId(wp.id) ? { do: 'wp', op: o.op, id: wp.id } : null;
+      // A quest's own waypoint may be switched as the character's own are (it is remembered by its key).
+      if (o.op === 'on' || o.op === 'off') return isWaypointId(wp.id) || isQuestWaypoint(wp.id) ? { do: 'wp', op: o.op, id: wp.id as string } : null;
+      if (o.op === 'gone') return isWaypointId(wp.id) ? { do: 'wp', op: o.op, id: wp.id } : null;
       if (o.op === 'track') return wp.id === null || isWaypointId(wp.id) || isQuestWaypoint(wp.id) ? { do: 'wp', op: 'track', id: (wp.id as string | null) ?? null } : null;
       return null;
+    }
+    if (o.do === 'ev') {
+      const ev = cleanStoryEvent(o.ev);
+      return ev ? { do: 'ev', ev, at: cleanStoryAt(o.at) } : null;
+    }
+    if (o.do === 'q') {
+      const quest = questRef(o.quest);
+      if (typeof o.op !== 'string' || !(QUEST_OPS as readonly string[]).includes(o.op) || !quest) return null;
+      return { do: 'q', op: o.op as QuestOp, quest, at: cleanStoryAt(o.at) };
+    }
+    if (o.do === 'admin') {
+      if (typeof o.op !== 'string' || !(ADMIN_OPS as readonly string[]).includes(o.op)) return null;
+      const out: { do: 'admin'; op: AdminOp; quest?: string; step?: string; name?: string; ms?: number | null; at: StoryAt } = { do: 'admin', op: o.op as AdminOp, at: cleanStoryAt(o.at) };
+      if (o.quest !== undefined) {
+        const quest = questRef(o.quest);
+        if (!quest) return null;
+        out.quest = quest;
+      }
+      if (o.step !== undefined) {
+        if (!isStepName(o.step)) return null;
+        out.step = o.step;
+      }
+      if (o.name !== undefined) {
+        const name = wordOf(o.name, SIGNAL);
+        if (!name) return null;
+        out.name = name;
+      }
+      if (o.ms === null) out.ms = null;
+      else if (typeof o.ms === 'number' && Number.isFinite(o.ms) && Math.abs(o.ms) <= 1e11) out.ms = Math.round(o.ms);
+      // Each operation names what it works on: a job for those that act on one, a signal's name, a clock's move.
+      if ((out.op === 'grant' || out.op === 'offer' || out.op === 'unstick' || out.op === 'complete') && !out.quest) return null;
+      if (out.op === 'complete' && !out.step) return null;
+      if (out.op === 'signal' && !out.name) return null;
+      if (out.op === 'clock' && out.ms === undefined) return null;
+      return out;
     }
     return null;
   }
@@ -121,7 +393,18 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
   }
   if (o.do === 'no') {
     const why = typeof o.why === 'string' ? o.why.replace(CONTROL, '').slice(0, STORY_WIRE.whyMax) : '';
-    return { do: 'no', why: why || 'the server would not' };
+    return o.of === 'job' ? { do: 'no', why: why || 'the server would not', of: 'job' } : { do: 'no', why: why || 'the server would not' };
+  }
+  if (o.do === 'view') {
+    const view = cleanView(o.view);
+    if (!view) return null;
+    const off = typeof o.off === 'number' && Number.isFinite(o.off) && Math.abs(o.off) <= 1e11 ? o.off : 0;
+    // Whether the server reads a story set at all: only an outright nought says it does not.
+    return { do: 'view', view, off, read: o.read !== 0 && o.read !== false };
+  }
+  if (o.do === 'note') {
+    const note = cleanNoteDown(o.note);
+    return note ? { do: 'note', note, given: o.given !== 0 && o.given !== false } : null;
   }
   return null;
 }

@@ -330,7 +330,254 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
   };
 }
 
-/** A short hash of a view, so a host sends one only when it changed (a later wave's server does). */
+/** A short hash of a view, so a host sends one only when it changed: the server sends a browser its view only then. */
 export function viewHash(view: StoryView): string {
   return hashText(stableText(view)).slice(0, 16);
+}
+
+// ---- a view off the wire ----------------------------------------------------------------------------------
+//
+// A browser on a server is sent its view and never the set, so what comes down is all it shows. It is
+// rebuilt field by field the house way before anything reads it: a class of characters, a length, a
+// finite number, a cap on every list, and nothing carried that was not rebuilt.
+
+/** The caps on a view off the wire. Ours, and far past what a story shows. */
+export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32 };
+
+const VIEW_ID = /^[A-Za-z0-9_-]{1,24}:[A-Za-z0-9_./-]{1,96}$/;
+const VIEW_STEP = /^[A-Za-z0-9_.-]{1,48}$/;
+const VIEW_WORD = /^[A-Za-z0-9_.:/ -]{1,96}$/;
+const VIEW_TEMPLATE = /^[A-Za-z0-9_./-]{1,160}$/;
+const VIEW_CELL = /^[A-Za-z0-9_ .-]{1,64}$/;
+const VIEW_WORLD = /^[^\u0000-\u001f\u007f]{1,64}$/;
+const VIEW_COLOURS = ['accent', 'ink', 'muted', 'good', 'warn', 'bad', 'hot', 'shield', 'armour', 'chassis', 'component', 'health', 'pool'];
+const VIEW_STATES = ['offered', 'active', 'done', 'failed', 'dropped', 'stalled', 'none'];
+const VIEW_REACH = 1e7;
+
+function vNum(x: unknown, least = -VIEW_REACH, most = VIEW_REACH): number | null {
+  return typeof x === 'number' && Number.isFinite(x) && x >= least && x <= most ? x : null;
+}
+
+function vWord(x: unknown, re: RegExp): string | null {
+  return typeof x === 'string' && re.test(x) && x !== '__proto__' && x !== 'constructor' && x !== 'prototype' ? x : null;
+}
+
+function vText(x: unknown, max = 400): TextRef | null {
+  if (typeof x === 'string') {
+    const s = x.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').slice(0, max);
+    return s.trim() ? s : null;
+  }
+  if (x && typeof x === 'object' && !Array.isArray(x) && typeof (x as { en?: unknown }).en === 'string') {
+    const s = (x as { en: string }).en.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').slice(0, max);
+    return s.trim() ? { en: s } : null;
+  }
+  return null;
+}
+
+function vPair(x: unknown): [number, number] | null {
+  if (!Array.isArray(x) || x.length !== 2) return null;
+  const a = vNum(x[0]);
+  const b = vNum(x[1]);
+  return a === null || b === null ? null : [a, b];
+}
+
+function vRoom(x: unknown): Room | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const cell = vWord(o.cell, VIEW_CELL);
+  if (!cell) return null;
+  const template = vWord(o.template, VIEW_TEMPLATE);
+  return template ? { cell, template } : { cell };
+}
+
+function vShape(x: unknown): Shape | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  if (o.kind === 'circle') {
+    const c = vPair(o.c);
+    const r = vNum(o.r, 0);
+    return c && r !== null ? { kind: 'circle', c, r } : null;
+  }
+  if (o.kind === 'rect') {
+    const min = vPair(o.min);
+    const max = vPair(o.max);
+    return min && max ? { kind: 'rect', min, max } : null;
+  }
+  if (o.kind === 'poly' && Array.isArray(o.pts) && o.pts.length >= 3 && o.pts.length <= VIEW_WIRE.polyPts) {
+    const pts: [number, number][] = [];
+    for (const p of o.pts) {
+      const q = vPair(p);
+      if (!q) return null;
+      pts.push(q);
+    }
+    return { kind: 'poly', pts };
+  }
+  return null;
+}
+
+function vKill(x: unknown): KillMatch | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const out: KillMatch = {};
+  if (Array.isArray(o.who)) {
+    const who: string[] = [];
+    for (const w of o.who) {
+      const s = vWord(w, VIEW_WORD);
+      if (s && who.length < VIEW_WIRE.who) who.push(s);
+    }
+    if (who.length) out.who = who;
+  }
+  const group = vWord(o.group, VIEW_WORD);
+  if (group) out.group = group;
+  const social = vWord(o.social, VIEW_WORD);
+  if (social) out.social = social;
+  const tag = vWord(o.tag, VIEW_WORD);
+  if (tag) out.tag = tag;
+  return out;
+}
+
+function vLine(x: unknown): ObjectiveLine | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const quest = vWord(o.quest, VIEW_ID);
+  const step = vWord(o.step, VIEW_STEP);
+  const text = vText(o.text);
+  if (!quest || !step || !text) return null;
+  const line: ObjectiveLine = { quest, step, text };
+  const n = vNum(o.n, 0, 1e12);
+  const of = vNum(o.of, 0, 1e12);
+  if (n !== null && of !== null) {
+    line.n = n;
+    line.of = of;
+  }
+  const deadline = vNum(o.deadline, 0, 1e14);
+  if (deadline !== null) line.deadline = deadline;
+  if (o.limit === true) line.limit = true;
+  const wp = typeof o.wp === 'string' && /^q:[A-Za-z0-9_:./-]{1,121}#[A-Za-z0-9_.-]{1,48}$/.test(o.wp) ? o.wp : null;
+  if (wp) line.wp = wp;
+  if (o.done === true) line.done = true;
+  return line;
+}
+
+function vQuest(x: unknown): QuestView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_ID);
+  const title = vText(o.title, 240);
+  if (!id || !title || typeof o.state !== 'string' || !VIEW_STATES.includes(o.state)) return null;
+  const lines: ObjectiveLine[] = [];
+  if (Array.isArray(o.lines)) {
+    for (const l of o.lines) {
+      const line = vLine(l);
+      if (line && lines.length < VIEW_WIRE.lines) lines.push(line);
+    }
+  }
+  const q: QuestView = { id, title, client: vWord(o.client, VIEW_WORD) ?? 'none', state: o.state, lines, canDrop: o.canDrop === true, canRestart: o.canRestart === true, at: vNum(o.at, 0, 1e14) ?? 0 };
+  const outcome = vWord(o.outcome, VIEW_STEP);
+  if (outcome) q.outcome = outcome;
+  const card = vWord(o.card, VIEW_ID);
+  if (card) q.card = card;
+  if (typeof o.stalled === 'string') q.stalled = o.stalled.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200);
+  return q;
+}
+
+function vWaypoint(x: unknown): WaypointView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = typeof o.id === 'string' && /^q:[A-Za-z0-9_:./-]{1,121}#[A-Za-z0-9_.-]{1,48}$/.test(o.id) ? o.id : null;
+  const name = vText(o.name, 240);
+  const world = vWord(o.world, VIEW_WORLD);
+  const quest = vWord(o.quest, VIEW_ID);
+  const step = vWord(o.step, VIEW_STEP);
+  const p = Array.isArray(o.p) && (o.p.length === 2 || o.p.length === 3) ? vPair([o.p[0], o.p[1]]) : null;
+  if (!id || !name || !world || !quest || !step || !p || (o.f !== 'raw' && o.f !== 'game')) return null;
+  const w: WaypointView = { id, name, world, f: o.f, p: [p[0], p[1], null], colour: (VIEW_COLOURS.includes(o.colour as string) ? o.colour : WAYPOINT_TUNE.defaultQuest) as WaypointColour, on: o.on !== false, quest, step };
+  const room = vRoom(o.room);
+  if (room) w.room = room;
+  return w;
+}
+
+function vWatch(x: unknown): Watch | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  switch (o.k) {
+    case 'arrive': {
+      const quest = vWord(o.quest, VIEW_ID);
+      const step = vWord(o.step, VIEW_STEP);
+      const world = vWord(o.world, VIEW_WORLD);
+      const p = vPair(o.p);
+      const radius = vNum(o.radius, 0);
+      if (!quest || !step || !world || !p || radius === null || (o.f !== 'raw' && o.f !== 'game')) return null;
+      const room = vRoom(o.room);
+      return { k: 'arrive', quest, step, world, f: o.f, p, radius, ...(room ? { room } : {}) };
+    }
+    case 'area': {
+      const id = vWord(o.id, VIEW_ID);
+      const world = vWord(o.world, VIEW_WORLD);
+      const shape = vShape(o.shape);
+      if (!id || !world || !shape) return null;
+      const room = vRoom(o.room);
+      return { k: 'area', id, world, shape, ...(room ? { room } : {}) };
+    }
+    case 'use': {
+      const object = vWord(o.object, VIEW_ID);
+      return object ? { k: 'use', object } : null;
+    }
+    case 'kill': {
+      const quest = vWord(o.quest, VIEW_ID);
+      const step = vWord(o.step, VIEW_STEP);
+      const match = vKill(o.match);
+      return quest && step && match ? { k: 'kill', quest, step, match } : null;
+    }
+    case 'room':
+    case 'death':
+    case 'world':
+      return { k: o.k };
+    default:
+      return null;
+  }
+}
+
+function vObject(x: unknown): ObjectView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_ID);
+  const world = vWord(o.world, VIEW_WORLD);
+  const template = vWord(o.template, VIEW_TEMPLATE);
+  const near = vPair(o.near);
+  const reach = vNum(o.reach, 0, 1000);
+  if (!id || !world || !template || !near || reach === null) return null;
+  return { id, world, template, near, reach, label: o.label === null || o.label === undefined ? null : vText(o.label, 240) };
+}
+
+/** Every list of a view, rebuilt with its own cleaner and held to its cap. */
+function vList<T>(x: unknown, max: number, clean: (v: unknown) => T | null): T[] {
+  const out: T[] = [];
+  if (!Array.isArray(x)) return out;
+  for (const v of x) {
+    if (out.length >= max) break;
+    const c = clean(v);
+    if (c) out.push(c);
+  }
+  return out;
+}
+
+/** A view as a server sends it, rebuilt, or null when it is not one. */
+export function cleanView(x: unknown): StoryView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const rev = vNum(o.rev, 0, 1e12);
+  if (rev === null) return null;
+  const tracked = vList(o.tracked, 100, (v) => vWord(v, VIEW_ID));
+  const trackWp = typeof o.trackWp === 'string' && (/^w[0-9]{1,9}$/.test(o.trackWp) || /^q:[A-Za-z0-9_:./-]{1,121}#[A-Za-z0-9_.-]{1,48}$/.test(o.trackWp)) ? o.trackWp : null;
+  return {
+    rev,
+    quests: vList(o.quests, VIEW_WIRE.quests, vQuest),
+    waypoints: vList(o.waypoints, VIEW_WIRE.waypoints, vWaypoint),
+    watch: vList(o.watch, VIEW_WIRE.watch, vWatch),
+    cast: [],
+    objects: vList(o.objects, VIEW_WIRE.objects, vObject),
+    tracked,
+    trackWp,
+  };
 }

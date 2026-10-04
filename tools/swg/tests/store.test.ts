@@ -260,5 +260,31 @@ const quiet = { saveEvery: 0, log: () => {} };
   d.close();
 }
 
+// --- 12: a counter's changes, flushed lazily ------------------------------------------------------------------
+// A job's counter moving (a kill counted) is written in its place in the log but not flushed on its own: the
+// next change that is not lazy flushes it with itself, and `flush` does when the story asks. The log's order is
+// never wrong, and a server started again plays every lazy line back as it would any other.
+{
+  const dir = folder();
+  const a = openStore({ dir, epoch: 1000, ...quiet });
+  const book = { v: 1, char: 'c1', rev: 0, base: 0, local: 0, waypoints: [], nextWp: 1, wpOff: [], trackWp: null, tracked: [] };
+  a.change({ t: 'storyBook', id: 'c1', book });
+  ok(!a.unflushed, '12: a change that is not lazy leaves nothing waiting to be flushed');
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 1 }] }, { lazy: true });
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 2 }] }, { lazy: true });
+  ok(a.unflushed && a.data.stories.c1.flags.kills === 2 && a.data.stories.c1.rev === 2, '12: lazy changes are applied at once, and wait to be flushed');
+  ok(a.flush() === true && !a.unflushed && a.flushes === 1 && a.flush() === false, '12: a flush flushes them, and a second has nothing to do');
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 3 }] }, { lazy: true });
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'done', value: 1 }] });
+  ok(!a.unflushed, '12: and the next change that is not lazy flushes every lazy one before it with itself');
+  a.change({ t: 'story', id: 'c1', ch: [{ k: 'flag', name: 'kills', value: 4 }] }, { lazy: true });
+  const live = JSON.stringify(a.data.stories.c1);
+  // Read back while the first store still holds the log open, its last line lazy: every line is in the log.
+  const b = openStore({ dir, epoch: 5, ...quiet });
+  ok(JSON.stringify(b.data.stories.c1) === live, '12: a server started again plays the lazy lines back in their places, to the very same book');
+  b.close();
+  a.close();
+}
+
 for (const dir of made) rmSync(dir, { recursive: true, force: true });
 console.log(`\n${checks} checks passed`);

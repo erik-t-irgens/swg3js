@@ -5,7 +5,7 @@
 // they are playing. No dependencies: a WebSocket server on Node's own http module, text frames
 // only, with the checking and the truth in sibling modules beside this one.
 //
-//   node server/relay.mjs [port] [--word=<something>] [--data=<folder>] [--friendly-fire]
+//   node server/relay.mjs [port] [--word=<something>] [--data=<folder>] [--friendly-fire] [--story=<folder>] [--story-tests] [--assets=<folder>]
 //   npm run relay -- --word=mos-eisley
 //
 // It still speaks to a browser built before any of this: such a browser never sends a claim, never
@@ -139,8 +139,16 @@
 //   { t: 'story', do: 'offer', id, n, of, part, known }      its copy, asked for, in pieces of `story.offerChunk` a little
 //                                                          apart, so the allowance a second is never what drops it
 //   { t: 'story', do: 'wp', op: set|edit|on|off|gone|track, wp }   a waypoint set (the server gives it its id and its
-//                                                          time), renamed or recoloured, switched on or off, taken
-//                                                          away, or tracked (`wp.id` null for none)
+//                                                          time), renamed or recoloured, switched on or off (a job's
+//                                                          own waypoint too, by its `q:` key), taken away, or tracked
+//                                                          (`wp.id` null for none)
+//   { t: 'story', do: 'ev', ev, at }                         (story 2) something this browser's detectors saw -- an
+//                                                          arrival, a room, an area, a use, a kill, a death, a world --
+//                                                          with where the player stood: the server checks what it can
+//                                                          and runs it (stories.mjs)
+//   { t: 'story', do: 'q', op: accept|decline|drop|restart|track|untrack, quest }   (story 2) a job, of this character's own
+//   { t: 'story', do: 'admin', op: reload|grant|offer|unstick|complete|signal|clock, quest?, step?, name?, ms? }
+//                                                          (story 2) the console's own operations, the admin's alone
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story }   sent the instant the socket opens, before anything is
 //                                                          said; `story` is { v, sets, tests }, the story this server
@@ -211,7 +219,12 @@
 //                                                          when the browser's was just taken, `server` otherwise)
 //   { t: 'story', do: 'want', chunk }   (send your copy, in pieces of this many characters)
 //   { t: 'story', do: 'ch', rev, ch }   (a batch of changes, and the revision it made)
-//   { t: 'story', do: 'no', why }   (to whoever asked, and to nobody else)
+//   { t: 'story', do: 'no', why, of? }   (to whoever asked, and to nobody else; `of: 'job'` for a job's word, so it is
+//                                         never taken for the book refused)
+//   { t: 'story', do: 'view', view, off, read }   (story 2) what the interface shows of the jobs, whenever it changed, how
+//                                            far the admin moved the story's clock on, and whether a story set is read
+//                                            here at all (0: none, and every job waits)
+//   { t: 'story', do: 'note', note, given }   (story 2) a fact for the message line, whose words the browser makes
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -220,6 +233,7 @@
 // where they are now, and the browser keeps what it already built and stops drawing them.
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { cleanAsk } from './vehicleWire.mjs';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, cleanState } from './wire.mjs';
@@ -237,7 +251,9 @@ import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledge
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
-import { STORY_TUNING, STORY_WIRE_VERSION, Stories } from './stories.mjs';
+import { STORY_TUNING, Stories } from './stories.mjs';
+import { readStorySet } from './storySet.mjs';
+import { storyWorlds } from './storyWorlds.mjs';
 
 /**
  * What this server speaks. A browser that hears no hail is talking to the relay that came before. 3 is
@@ -300,6 +316,11 @@ if (args.includes('--help') || args.includes('-h')) {
   --admin=<player id> who may stand creatures in the world (default: the first player this world met)
   --friendly-fire     let players hurt each other (off by default)
   --day=<seconds>     how long a day is (default ${DAY_MS / 1000}, the game's own)
+  --story=<folder>    your own story set (default story-private/ beside the checkout, when it is there)
+  --story-tests       run the committed test set's jobs as well (off by default)
+  --assets=<folder>   the converted content, read for each planet's layout centre so an arrival can be
+                      checked against where the player really is (default assets-private/ beside the
+                      checkout, when it is there; with none, arrivals are taken on the browser's word)
   --set <name>=<n>    move one of the server's own numbers for this run
   --help              this
 `);
@@ -353,6 +374,14 @@ const FRIENDLY_FIRE = flag('friendly-fire') || flag('ff');
 // game's own twelve minutes.
 const DAY_GIVEN = Number(option('day', '')) > 0;
 const DAY = DAY_GIVEN ? Number(option('day', '')) * 1000 : DAY_MS;
+// The owner's own story set: the folder named, or `story-private/` beside the checkout when there is one. Never
+// from `.env`, so a checkout and a launcher read the same thing; the launcher names its own setting's folder.
+const BESIDE = (name) => join(import.meta.dirname, '..', name);
+const STORY_DIR = option('story', '') || (existsSync(BESIDE('story-private')) ? BESIDE('story-private') : '');
+// The committed test set's jobs, which are labelled TEST and are never on unless asked for.
+const STORY_TESTS = flag('story-tests');
+// The converted content, read for each planet's layout centre and nothing else (storyWorlds.mjs).
+const ASSETS = option('assets', '') || (existsSync(BESIDE('assets-private')) ? BESIDE('assets-private') : '');
 
 // ---------------------------------------------------------------------------------------------
 // The truth, the clock and the rooms
@@ -412,9 +441,44 @@ const purses = new Purses({ tuning: PURSE_TUNING, write: (rec) => store.change(r
 purses.load(store.data);
 // Each character's story book (stories.mjs), written down like the purses: the books are the store's
 // own, so a change goes through the store, which applies it and puts it in the log before anybody is
-// told, and the same function applies it again when the log is played back on start.
-const stories = new Stories({ tuning: STORY_TUNING, write: (rec) => store.change(rec), now: () => clock.now() });
+// told, and the same function applies it again when the log is played back on start. A counter's change
+// goes in lazily (`Store.change`'s `lazy`) and is flushed with the next change that is not, or every few
+// seconds. From the second story the jobs run here too, against the sets read below, paid out of the
+// purses and the ledger above; what the server knows of the worlds is storyWorlds.mjs's.
+// The clock goes with it: the game hour a story's condition asks is worked out here, as every browser works
+// out the hour its sky is drawn at.
+const worlds = storyWorlds({ assets: ASSETS, clock });
+/** The story sets' files: the owner's folder, and the committed test set when it is switched on. */
+function readStorySets() {
+  const read = (dir) => {
+    try {
+      return readStorySet(dir);
+    } catch (err) {
+      return { files: [], refused: [err instanceof Error ? err.message : String(err)] };
+    }
+  };
+  const own = STORY_DIR ? read(STORY_DIR) : { files: [], refused: [] };
+  const test = STORY_TESTS ? read(join(import.meta.dirname, '..', 'src', 'story', 'testSet')) : { files: [], refused: [] };
+  return { own: own.files.length ? own.files : null, test: test.files.length ? test.files : null, refused: [...own.refused, ...test.refused] };
+}
+const stories = new Stories({
+  tuning: STORY_TUNING,
+  write: (rec, lazy) => store.change(rec, { lazy: !!lazy }),
+  flush: () => store.flush(),
+  now: () => clock.now(),
+  purses,
+  ledger,
+  worlds,
+  read: readStorySets,
+  admin: (c) => admins(c),
+  grouped: (c) => !!(c.member && groups.groupOf(c.member)),
+  // One of the world's creatures the server shares: a kill of it is credited on the server's own word of
+  // its death, and of nothing else.
+  shared: (npc) => ownership.worldOf(npc) !== '',
+  tests: STORY_TESTS,
+});
 stories.load(store.data);
+stories.readSets();
 const settings = { friendlyFire: FRIENDLY_FIRE, word: WORD ? 1 : 0, ...clock.dayHand() };
 const had = store.data.settings ?? {};
 if (had.friendlyFire !== settings.friendlyFire || had.word !== settings.word || had.dayMs !== settings.dayMs || (had.dayAt ?? 0) !== (settings.dayAt ?? 0)) store.change({ t: 'settings', settings });
@@ -1109,6 +1173,10 @@ function onMessage(c, text, trimmed = false) {
         const o = clients.get(id);
         return !!o?.hello && rooms.keyOf(o.id) === end.world;
       });
+      // The stories keep the death and its strikers for a few seconds: a job counts a kill of one of the
+      // world's creatures on this word, from every player it names or its keeper, and on nothing else. Kept
+      // before anybody is told, so a striker's report sent the moment it hears never comes ahead of it.
+      if (ask.do === 'dead') deliverTo(stories.death(ask.id, by, c.id, end.world));
       sendToRoom(end.world, { t: 'spawn', do: 'gone', id: ask.id, why: ask.do === 'dead' ? 'dead' : 'taken', ...(end.back ? { back: end.back } : {}), ...(by.length ? { by } : {}) });
       // It is gone, so the picture of where things stand forgets it.
       npcPlaces.gone(end.world, ask.id);
@@ -1314,6 +1382,8 @@ function onMessage(c, text, trimmed = false) {
       deliverTo(settled);
       send(c, { t: 'items', do: 'list', take: settled.take, rows: settled.rows });
       if (settled.take === 'browser') console.log(`  ${c.id} ${who(c)} handed up ${settled.rows.length} things, which this world now holds`);
+      // A job's reward of a thing that came while the backpack was still on its way up is handed over now.
+      deliverTo(stories.held(c.character));
       return;
     }
     if (ask.do === 'using') {
@@ -1551,9 +1621,9 @@ server.on('upgrade', (req, socket) => {
   // where it has always been, sent once after the first hello, so nothing an old browser does runs
   // twice. A browser built for this that hears no hail knows it is talking to the old relay.
   // `story` says which story this server holds; a browser built before it reads nothing of it, and one
-  // built for it keeps its book itself against any far end whose hail does not carry it. The sets are
-  // the story sets loaded, none until a later wave loads any; `tests` is whether the test set is on.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: { v: STORY_WIRE_VERSION, sets: [], tests: 0 } });
+  // built for it keeps its book itself against any far end whose hail does not carry it. `v` 2 is the jobs
+  // run here; the sets are the story sets read, by name and hash; `tests` is whether the test set is on.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail() });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');
@@ -1673,10 +1743,11 @@ setInterval(() => deliverTo(ledger.tick()), LEDGER_TUNING.tick);
 setInterval(() => deliverTo(duels.tick()), COMBAT_WIRE.tick);
 
 // A story book whose pieces stopped coming is given up and its browser told, so it asks again rather
-// than waiting on a book the server has stopped listening for. With nobody handing one up it walks an
-// empty map, so once a second costs nothing, and a book is given up within a second of its wait however
-// short a run sets `story.offerWait`.
-setInterval(() => deliverTo(stories.tick()), 1000);
+// than waiting on a book the server has stopped listening for; the connected characters' deadlines are
+// swept every `story.sweep`, a kill reported before its death waits no longer than `story.killPark`, and
+// the counters' lazy lines are flushed every `story.coalesce`. With nobody playing it walks empty maps,
+// so once a second costs nothing (faster when a run sets a shorter sweep).
+setInterval(() => deliverTo(stories.tick()), Math.max(100, Math.min(1000, Number(STORY_TUNING.sweep) || 1000)));
 
 let closing = false;
 const shutDown = (why) => {
@@ -1706,5 +1777,9 @@ server.listen(PORT, () => {
   console.log(`  what each character owns is kept here too: ${ledger.describe()}; two players trade within ${GROUP_RANGES.trade} m -- the client's own distance -- and a swap is one line in the log or none`);
   const told = stories.describe();
   console.log(`  each character's story book is kept here as well (${told.books} books, ${told.waypoints} waypoints): a copy played alone is taken when the character settles the browser's way, and the one it replaces is archived whole`);
+  const sets = told.sets.filter((s) => s.name !== 'refused');
+  console.log(`  the jobs run here: ${sets.length ? sets.map((s) => `${s.name} (${s.quests} jobs, ${s.hash.slice(0, 12)}${s.errors ? `, ${s.errors} problems -- npm run story:check names them` : ''})`).join(', ') : `no story set is read (${STORY_DIR ? `${STORY_DIR} holds none` : 'make story-private/ beside the checkout, or name one with --story='}), so no job runs`}${STORY_TESTS ? '' : '; the test set is off (--story-tests turns it on)'}`);
+  for (const s of told.sets) for (const line of s.first) console.log(`    ${s.name}: ${line}`);
+  console.log(`  ${ASSETS ? `a planet's arrivals are checked against where the player stands, about the layout centres in ${ASSETS}` : 'no converted content was named (--assets=<folder>), so a planet\'s arrivals are taken on the browser\'s word'}`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

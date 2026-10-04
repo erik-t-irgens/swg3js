@@ -277,12 +277,14 @@ export class BookClient {
     if (w.do === 'want') this.startOffer(msg.chunk);
     else if (w.do === 'book') this.piece(w);
     else if (w.do === 'ch') this.changes(w.rev, w.ch, w.whole);
-    else {
+    else if (w.do === 'no') {
       this.stats.refusals++;
       this.stats.lastWhy = w.why;
-      this.offer = null;
+      // A job's word refused is said and is nothing to do with the book: a book going up goes on going up.
+      if (!w.of) this.offer = null;
       this.deps.say(w.why);
     }
+    // The jobs' own words (`view`, `note`) are the server's host's to read (`remoteHost.ts`).
   }
 
   /** The server asked for this book: it goes up in pieces, the first at once and the rest a gap apart. */
@@ -447,12 +449,9 @@ export class BookClient {
   }
 
   switchWaypoint(id: string, on: boolean): StoryResult {
-    // A quest's waypoint is not in the book: what the player says of it is remembered by its key. A server
-    // runs the jobs from a later wave, and until then has nothing to switch.
-    if (isQuestWaypoint(id)) {
-      if (this.kind === 'server') return { ok: false, why: 'a job’s waypoint is switched on the server from a later wave' };
-      return this.change(on ? 'on' : 'off', { id }, { k: 'qwpOn', key: id, on });
-    }
+    // A quest's waypoint is not in the book: what the player says of it is remembered by its key, here or
+    // on the server that runs the jobs.
+    if (isQuestWaypoint(id)) return this.change(on ? 'on' : 'off', { id }, { k: 'qwpOn', key: id, on });
     return this.change(on ? 'on' : 'off', { id }, { k: 'wpOn', id, on });
   }
 

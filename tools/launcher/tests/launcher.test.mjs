@@ -469,13 +469,37 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   for (let i = 0; i < bytes.length; i++) bytes[i] = i & 255;
   writeFileSync(join(out, 'tatooine', 'big.glb'), bytes);
   mkdirSync(data, { recursive: true });
+  // The player's own story set, named the same way: its files are served, its index lists them, and
+  // nothing in it that is not a story file goes out.
+  const story = join(scratch, 'my story');
+  mkdirSync(join(story, 'quests'), { recursive: true });
+  writeFileSync(join(story, 'story.jsonc'), '{ "prefix": "mine" }');
+  writeFileSync(join(story, 'quests', 'errand.jsonc'), '{ "id": "errand" }');
+  writeFileSync(join(story, 'secret.bin'), 'not a story');
   // Typed as a relative path, as a player might: it is made absolute where it is checked, so the
   // converter, which runs in another working folder, is handed the same folder.
-  writeFileSync(join(data, 'settings.json'), JSON.stringify({ out: 'served content' }));
+  writeFileSync(join(data, 'settings.json'), JSON.stringify({ out: 'served content', storyDir: 'my story' }));
   const logs = [];
   const cwd = process.cwd();
   process.chdir(scratch);
-  const launcher = await start({ dataDir: data, appDir: app, open: false, port: 0, log: (l) => logs.push(l), update: { note: 'test' }, childCommand: (file, args) => ({ command: process.execPath, args: [file.endsWith('cli.mjs') ? join(root, 'tools', 'swg', 'cli.mjs') : file, ...args] }) });
+  // The server a player hosts is not really started here: what it would have been started with is kept, and
+  // a child that ends at once stands in for it.
+  const relayArgs = [];
+  const launcher = await start({
+    dataDir: data,
+    appDir: app,
+    open: false,
+    port: 0,
+    log: (l) => logs.push(l),
+    update: { note: 'test' },
+    childCommand: (file, args) => {
+      if (file.endsWith('relay.mjs')) {
+        relayArgs.push([...args]);
+        return { command: process.execPath, args: ['-e', ''] };
+      }
+      return { command: process.execPath, args: [file.endsWith('cli.mjs') ? join(root, 'tools', 'swg', 'cli.mjs') : file, ...args] };
+    },
+  });
   process.chdir(cwd);
   const port = launcher.port;
   const get = (path, headers = {}) =>
@@ -509,6 +533,30 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok((await get('/assets-private/tatooine/big.glb', { range: 'bytes=9000-' })).status === 416, 'a range past the end is answered 416');
   ok((await get('/assets-private/..%2f..%2fsettings.json')).status === 403, 'nothing outside the content folder is served');
   ok((await get('/assets-private/tatooine/none.glb')).status === 404, 'a file that is not there is 404');
+  const storyIndex = await get('/story-private/index.json');
+  ok(storyIndex.status === 200 && JSON.stringify(JSON.parse(storyIndex.body).files) === JSON.stringify(['quests/errand.jsonc', 'story.jsonc']), `the player's own story folder is listed at /story-private/index.json, its story files and nothing else (${storyIndex.body})`);
+  const storyFile = await get('/story-private/quests/errand.jsonc');
+  ok(storyFile.status === 200 && storyFile.body.toString() === '{ "id": "errand" }' && /no-store/.test(storyFile.headers['cache-control']), 'a story file is served from it, never kept');
+  ok((await get('/story-private/secret.bin')).status === 403 && (await get('/story-private/..%2fsettings.json')).status === 403, 'and nothing in it that is not a story file, nor anything outside it');
+  ok(JSON.parse(state.body).settings.storyDir === story, 'its folder too is kept absolute');
+  // Hosting for friends: the server is handed that folder as its story, and the converted content as the
+  // place it reads each planet's layout centre from, both absolute.
+  const post = (path, body) =>
+    new Promise((res, rej) => {
+      const data = Buffer.from(JSON.stringify(body));
+      const req = request({ host: '127.0.0.1', port, path, method: 'POST', headers: { host: `127.0.0.1:${port}`, 'x-swg3js-token': launcher.token, 'content-type': 'application/json', 'content-length': data.length } }, (r) => {
+        const chunks = [];
+        r.on('data', (d) => chunks.push(d));
+        r.on('end', () => res({ status: r.statusCode, body: Buffer.concat(chunks) }));
+      });
+      req.on('error', rej);
+      req.end(data);
+    });
+  const hosted = await post('/launcher/api/host', { on: true, port: 18999 });
+  const outOk = JSON.parse(state.body).checks.out?.ok === true;
+  const given = relayArgs[0] ?? [];
+  ok(hosted.status === 200 && JSON.parse(hosted.body).ok && relayArgs.length === 1 && given.includes('--port=18999') && given.includes(`--story=${story}`), `hosting starts the server with the player's own story folder (${given.join(' ')})`);
+  ok(outOk && given.includes(`--assets=${out}`), 'and the converted content, for each planet\'s layout centre');
   await launcher.shutdown({ exit: false });
   ok(!existsSync(join(data, 'launcher.json')), 'on the way out it takes its note away');
 }

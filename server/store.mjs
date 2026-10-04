@@ -122,6 +122,9 @@ export class Store {
     this.rename = rename;
     this.say = log;
     this.dirty = false;
+    /** Lazy changes are in the log that the disk has not been asked to keep yet (`change`). */
+    this.unflushed = false;
+    this.flushes = 0;
     this.timer = null;
     this.fd = -1;
     this.data = emptyWorld(epoch);
@@ -195,18 +198,43 @@ export class Store {
    * Make a change: stamp it with the next sequence number, apply it, and put it in the log at once.
    * Changes here are rare (a player registering, a character's record, a switch), so the flush per
    * change costs nothing on the path anything is sent on.
+   *
+   * `lazy` is for the one kind of change that comes in a stream: a job's counter moving (a kill, an observe
+   * step's watch opening). It is applied and written to the log in its place like any other, so the order of
+   * the log is never wrong, but the disk is not asked to flush it: the next change that is not lazy flushes
+   * it with itself, and so does `flush`, which the story calls every few seconds and when a character goes.
+   * What a power cut can cost is a counter a few seconds back, never a reward or a step done, and a fight is
+   * not an fsync a kill.
    */
-  change(rec) {
+  change(rec, { lazy = false } = {}) {
     const stamped = { ...rec, q: ++this.data.seq, at: this.now() };
     applyChange(this.data, stamped);
     this.dirty = true;
     try {
       writeSync(this.fd, `${JSON.stringify(stamped)}\n`);
-      fsyncSync(this.fd);
+      if (lazy) this.unflushed = true;
+      else {
+        fsyncSync(this.fd);
+        this.unflushed = false;
+      }
     } catch (err) {
       this.say(`world.log could not be written (${err instanceof Error ? err.message : String(err)})`);
     }
     return stamped;
+  }
+
+  /** Flush whatever lazy changes the log holds that the disk has not been asked to keep yet. True when there were some. */
+  flush() {
+    if (!this.unflushed || this.fd < 0) return false;
+    try {
+      fsyncSync(this.fd);
+      this.unflushed = false;
+      this.flushes = (this.flushes ?? 0) + 1;
+      return true;
+    } catch (err) {
+      this.say(`world.log could not be flushed (${err instanceof Error ? err.message : String(err)})`);
+      return false;
+    }
   }
 
   /**
@@ -282,6 +310,7 @@ export class Store {
   close() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.flush();
     this.saveNow();
     if (this.fd >= 0) {
       try {

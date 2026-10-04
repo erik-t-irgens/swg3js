@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { applyChanges, cleanBook, emptyBook, type StoryBook } from '../../../src/story/book.ts';
 import { HostCore, storyEvent, type HostCtx } from '../../../src/story/hostCore.ts';
-import { STALLED_REVISED, STALLED_STUCK, dueList, evalCond, nextDeadline, plan, settleDeadlines, type StoryResult } from '../../../src/story/quests.ts';
+import { STALLED_REVISED, STALLED_STUCK, dueList, evalCond, nextDeadline, plan, rewardOfKey, settleDeadlines, type StoryResult } from '../../../src/story/quests.ts';
 import { loadSet, stableText, type StorySet } from '../../../src/story/set.ts';
 import { raise, raisersFor } from '../../../src/story/signals.ts';
 import { questWaypointId, viewHash, viewOf } from '../../../src/story/view.ts';
@@ -783,6 +783,22 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   ok(sansPayer(browser.book) === sansPayer(server.book) && Object.keys(server.book.paid ?? {}).length > 0, 'a browser holding the book itself, told the same things, holds the same book, but for who paid');
   ok(stableText(mirror.map((r) => r.pay)) === stableText(results.map((r) => r.pay)) && results.every((r) => r.why === null) && mirror.every((r) => r.why === null), 'and is asked for the same payments, and neither refused anything');
   ok(results.flatMap((r) => r.pay).length === 2, 'only the reward\'s two payments were asked for, the loop round and the restart paying nothing');
+}
+
+// ---- what a paid key paid, read back off the set (a server's settle) ------------------------------------
+// A server that takes a book played alone pays what the browser paid out of its own purse: the amount is read
+// back off the server's set from the key alone, never off the browser.
+{
+  const r = rewardOfKey('test:reward#1#give', LIB);
+  ok(!!r && r.quest === 'test:reward' && r.n === 1 && r.credits === 25 && r.items.length === 1 && r.items[0].id === 'shirt_s03', 'a step\'s reward is read back from its key: its credits and its thing');
+  ok(rewardOfKey('test:goto#2#paid', LIB)?.credits === 10 && rewardOfKey('test:goto#2#paid', LIB)?.n === 2, 'with the completion it counts towards');
+  ok(rewardOfKey('test:words#1#do:hand.done.0', LIB)?.credits === 5, 'an action that pays credits, by where it was written');
+  const give = rewardOfKey('test:words#1#do:hand.done.1', LIB);
+  ok(!!give && give.credits === 0 && give.items[0]?.kind === 'wear' && give.items[0]?.id === 'shirt_s03', 'and one that hands a thing over');
+  const xp = rewardOfKey('test:words#1#do:hand.done.2', LIB);
+  ok(!!xp && xp.credits === 0 && xp.items.length === 0, 'an action that pays nothing a server pays again (experience) reads as nothing to hand over');
+  ok(rewardOfKey('test:words#1#do:hand.done.9', LIB) === null && rewardOfKey('test:words#1#do:hand.done.0.1', LIB) === null && rewardOfKey('run#1800000000000#do:0', LIB) === null, 'an action that is not there, one a script handed over and one the console paid cannot be read back');
+  ok(rewardOfKey('test:goto#0#paid', LIB) === null && rewardOfKey('test:goto#1#nowhere', LIB) === null && rewardOfKey('own:gone#1#paid', LIB) === null && rewardOfKey('test:timer#1#out:late', LIB) === null, 'nor a completion that is none, a step or a job the set does not have, or an outcome that pays nothing');
 }
 
 console.log(`\n${checks} checks passed`);

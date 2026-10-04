@@ -1303,6 +1303,59 @@ export function deadWaits(rec: QuestRec, def: QuestDef): string[] {
   return waiting.filter((s) => !ready.has(s));
 }
 
+/** What a paid key handed over that a server can pay again on a browser's behalf: credits and things. */
+export interface KeyReward {
+  quest: string;
+  /** The completion it counts towards. */
+  n: number;
+  credits: number;
+  items: { kind: 'wear' | 'weapon'; id: string; n: number }[];
+}
+
+const DO_STEP = /^(.+)\.(start|done|fail)\.(\d+)$/;
+const DO_OUT = /^out:(.+)\.(\d+)$/;
+
+/**
+ * What a reward's key paid, read back from the set it was paid under, or null when the set cannot say: the
+ * key's quest, step, outcome or action is not there, the key was the console's (`run#...`, keyed by the
+ * moment, with nothing written to read back), or the action was one a script handed over (a key with a
+ * further `.<j>`, whose amount was the script's). The key's own shape is `reward` and `payOnce` above:
+ * `<quest>#<n>#<step>`, `<quest>#<n>#out:<outcome>`, or `<quest>#<n>#do:<step>.<phase>.<i>` and
+ * `<quest>#<n>#do:out:<outcome>.<i>` for an action that pays. A step's or an outcome's name may itself
+ * hold a dot, so an action's place is read from its end.
+ */
+export function rewardOfKey(key: string, lib: StorySet): KeyReward | null {
+  const parts = key.split('#');
+  if (parts.length !== 3) return null;
+  const [quest, ns, site] = parts;
+  const def = lib.quests[quest];
+  const n = Number(ns);
+  if (!def || !Number.isInteger(n) || n < 1) return null;
+  const of = (r: Reward | null | undefined): KeyReward | null => (r ? { quest, n, credits: r.credits, items: r.items.map((i) => ({ ...i })) } : null);
+  if (site.startsWith('do:')) {
+    const at = site.slice(3);
+    let list: readonly ActionDef[] | null = null;
+    let i = -1;
+    const out = DO_OUT.exec(at);
+    const step = out ? null : DO_STEP.exec(at);
+    if (out) {
+      list = def.outcomes[out[1]]?.do ?? null;
+      i = Number(out[2]);
+    } else if (step) {
+      const st = def.steps[step[1]];
+      list = st ? st.do[step[2] as 'start' | 'done' | 'fail'] : null;
+      i = Number(step[3]);
+    }
+    const a = list?.[i];
+    if (!a) return null;
+    if (a.act === 'pay') return { quest, n, credits: Math.max(0, Math.floor(a.args[0] as number)), items: [] };
+    if (a.act === 'give') return { quest, n, credits: 0, items: [{ kind: a.args[0] as 'wear' | 'weapon', id: a.args[1] as string, n: typeof a.args[2] === 'number' ? Math.max(1, Math.floor(a.args[2])) : 1 }] };
+    return { quest, n, credits: 0, items: [] };
+  }
+  if (site.startsWith('out:')) return of(def.outcomes[site.slice(4)]?.reward);
+  return of(def.steps[site]?.reward);
+}
+
 /** Work out one event's worth of changes on a copy of a book, never touching the book. */
 export function plan(book: StoryBook, lib: StorySet, ctx: StoryCtx, work: (d: Draft) => void, limits?: BookLimits): StoryResult {
   const d = new Draft(book, lib, ctx, limits);

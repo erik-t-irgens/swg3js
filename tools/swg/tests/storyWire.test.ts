@@ -94,6 +94,33 @@ const ok = (cond: boolean, what: string) => {
   ok(cleanStoryWord({ do: 'sync', base: 0, local: 0 }, 'down') === null, 'a browser\'s word sent down is dropped');
 }
 
+// ---- the jobs' words (story 2) ----------------------------------------------------------------------------
+{
+  const ev = cleanStoryWord({ t: 'story', do: 'ev', ev: { k: 'arrive', world: 'tatooine', p: [3476, -4694], quest: 'test:goto', step: 'outdoor', extra: 1 }, at: { p: [1, 2], room: { cell: 'cantina', template: 'object/building/tatooine/shared_cantina_tatooine.iff' }, hour: 13, junk: 9 } }, 'up');
+  ok(!!ev && ev.do === 'ev' && ev.ev.k === 'arrive' && !('extra' in ev.ev) && ev.at.p?.[0] === 1 && ev.at.room?.cell === 'cantina' && ev.at.hour === 13 && !('junk' in ev.at), 'an event is read with where the player stood, and nothing carried that was not rebuilt');
+  ok(cleanStoryWord({ do: 'ev', ev: { k: 'tick' } }, 'up') === null && cleanStoryWord({ do: 'ev', ev: { k: 'arrive', world: 'tatooine', p: [1, 'x'] } }, 'up') === null && cleanStoryWord({ do: 'ev', ev: { k: 'use', object: '__proto__' } }, 'up') === null, 'a step machine\'s own tick, a place that is not two numbers and an id that is a language name are never events');
+  const kill = cleanStoryWord({ do: 'ev', ev: { k: 'kill', who: 'kreetle', social: 'rat', tags: ['a', 'a', 'b', 5], npc: 'wild:tatooine:3:0' } }, 'up');
+  ok(!!kill && kill.do === 'ev' && kill.ev.k === 'kill' && JSON.stringify(kill.ev.tags) === '["a","b"]' && kill.ev.npc === 'wild:tatooine:3:0' && JSON.stringify(kill.at) === '{}', 'a kill keeps its tags once each and its body\'s name, and an event with no place says none');
+  const q = cleanStoryWord({ do: 'q', op: 'drop', quest: 'goto', at: { p: [1, 2] } }, 'up');
+  ok(!!q && q.do === 'q' && q.op === 'drop' && q.quest === 'goto' && q.at.p?.[1] === 2, 'a job\'s word may name the job by its name alone, which the server finds in its own sets');
+  ok(cleanStoryWord({ do: 'q', op: 'steal', quest: 'test:goto' }, 'up') === null && cleanStoryWord({ do: 'q', op: 'drop', quest: 'a b' }, 'up') === null, 'an operation that is not one, or a job that is no name, is dropped');
+  ok(!!cleanStoryWord({ do: 'admin', op: 'complete', quest: 'test:goto', step: 'outdoor' }, 'up') && cleanStoryWord({ do: 'admin', op: 'complete', quest: 'test:goto' }, 'up') === null && cleanStoryWord({ do: 'admin', op: 'grant' }, 'up') === null, 'the console\'s words name what they work on: a step to finish, a job to grant');
+  ok(!!cleanStoryWord({ do: 'admin', op: 'clock', ms: null }, 'up') && !!cleanStoryWord({ do: 'admin', op: 'clock', ms: 31000 }, 'up') && cleanStoryWord({ do: 'admin', op: 'clock' }, 'up') === null && !!cleanStoryWord({ do: 'admin', op: 'signal', name: 'debug:test-ping' }, 'up') && !!cleanStoryWord({ do: 'admin', op: 'reload' }, 'up'), 'a clock moved or put back, a signal and a reload are words of their own');
+  ok(!!cleanStoryWord({ do: 'wp', op: 'off', wp: { id: 'q:test:waypoints#mark' } }, 'up') && cleanStoryWord({ do: 'wp', op: 'gone', wp: { id: 'q:test:waypoints#mark' } }, 'up') === null, 'a job\'s own waypoint may be switched as the character\'s own are, and never taken away');
+  const view = cleanStoryWord({ do: 'view', off: 5, view: { rev: 2, quests: [{ id: 'test:goto', title: { en: '@not a ref' }, client: 'none', state: 'active', lines: [{ quest: 'test:goto', step: 'outdoor', text: 'TEST: walk', n: 1, of: 3, deadline: 99, wp: 'q:test:goto#outdoor' }], canDrop: true, canRestart: false, at: 7 }, { id: 'bad id', title: 'x', state: 'active' }], waypoints: [{ id: 'q:test:goto#outdoor', name: 'TEST: walk', world: 'tatooine', f: 'raw', p: [1, 2, null], colour: 'void', on: true, quest: 'test:goto', step: 'outdoor' }], watch: [{ k: 'area', id: 'test:area/sq', world: 'tatooine', shape: { kind: 'poly', pts: [[0, 0], [1, 0]] } }, { k: 'kill', quest: 'test:kill', step: 'mites', match: { who: ['kreetle'] } }, { k: 'room' }], cast: [{ any: 1 }], objects: [{ id: 'test:obj/t', world: 'tatooine', template: 'object/x.iff', near: [1, 2], reach: 3, label: null }], tracked: ['test:goto', '__proto__'], trackWp: 'q:test:goto#outdoor' } }, 'down');
+  ok(!!view && view.do === 'view' && view.off === 5 && view.view.quests.length === 1 && view.view.quests[0].lines[0].of === 3, 'a view is rebuilt, a job that is not one dropped from it');
+  ok(!!view && view.do === 'view' && view.view.waypoints[0].colour === 'component' && view.view.watch.length === 2 && view.view.cast.length === 0 && view.view.tracked.length === 1 && view.view.objects[0].label === null, 'a colour not a waypoint\'s takes the quest colour, a polygon of two points is no area, the people stood are not read yet, and a language name is no job');
+  ok(cleanStoryWord({ do: 'view', view: { quests: [] } }, 'down') === null, 'and a view at no revision is no view');
+  const unread = cleanStoryWord({ do: 'view', off: 0, read: 0, view: { rev: 1, quests: [], waypoints: [], watch: [], cast: [], objects: [], tracked: [], trackWp: null } }, 'down');
+  const said = cleanStoryWord({ do: 'view', off: 0, read: 'nonsense', view: { rev: 1, quests: [], waypoints: [], watch: [], cast: [], objects: [], tracked: [], trackWp: null } }, 'down');
+  ok(!!unread && unread.do === 'view' && unread.read === false && !!view && view.do === 'view' && view.read === true && !!said && said.do === 'view' && said.read === true, 'a view says whether the server reads a story set: only an outright nought says it does not');
+  const note = cleanStoryWord({ do: 'note', note: { k: 'objectiveDone', quest: 'test:goto', step: 'outdoor', line: 'TEST: walk', goto: true }, given: 1 }, 'down');
+  ok(!!note && note.do === 'note' && note.note.k === 'objectiveDone' && note.note.line === 'TEST: walk' && note.note.goto === true && note.given, 'a note carries an objective\'s own words and whether it was a place to reach');
+  ok(cleanStoryWord({ do: 'note', note: { k: 'paid', credits: 'lots' } }, 'down') === null && (cleanStoryWord({ do: 'note', note: { k: 'item', kind: 'wear', id: 'shirt_s03', n: 1 }, given: 0 }, 'down') as { given: boolean }).given === false, 'a payment that is no number is no note, and a thing that did not arrive says so');
+  const job = cleanStoryWord({ do: 'no', why: 'that job is not taken', of: 'job' }, 'down');
+  ok(!!job && job.do === 'no' && job.of === 'job' && (cleanStoryWord({ do: 'no', why: 'x', of: 'book' }, 'down') as { of?: string }).of === undefined, 'a refusal about a job says so, and any other is about the book');
+}
+
 // ---- the hail ---------------------------------------------------------------------------------------------
 {
   ok(storyHailVersion({ v: 1, sets: [], tests: 0 }) === 1, 'a hail that carries a story says which');
