@@ -7,11 +7,20 @@
 // creation colours first in the game's own columns. Which customizer key a row writes is decided in
 // `creatorView` (creatorModel.ts) and nowhere here. Without the table the page is what it always was:
 // every slider the pack has, then every colour, named by `variableLabel.ts`.
+//
+// The hairstyles are a grid of the converter's pictures in the backpack's own cells, at the top of the
+// species' hair tab: this gender's styles in the game's order, the other gender's, then what the game never
+// offered (hairGrid.ts decides which and in what order). One click wears a style, through the game's
+// prepared path (`onHair`: loaded hidden, its colour carried over, settled and compiled before it shows).
 import type { Character, SpeciesEntry } from '../player/character.ts';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import { distinctLabels, plainLabel } from './variableLabel.ts';
-import { CREATOR_TUNE, creatorTableNow, creatorView, hairNone, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorState, type CreatorTable, type CreatorView, type ViewRow } from './creatorModel.ts';
+import { CREATOR_TUNE, creatorTableNow, creatorView, hairNone, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ViewRow } from './creatorModel.ts';
+import { NO_HAIR, hairCells, withOursHair, type HairGrid, type HairItem } from './hairGrid.ts';
+import { hairOfSpecies } from '../core/inventory.ts';
+import { groupHtml, GroupState } from './catalogue.ts';
+import { giveCellHtml } from './giveModel.ts';
 
 export class AppearanceUi {
   readonly root: HTMLElement;
@@ -76,7 +85,38 @@ export class AppearanceUi {
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) this.dismiss();
     });
+    // The hairstyles' cells, listened to once on the body, which every build fills again.
+    this.body.addEventListener('click', (e) => {
+      const cell = (e.target as HTMLElement).closest<HTMLElement>('.hair-grid .bp-cell[data-id]');
+      if (cell) this.pickHair(cell);
+    });
+    this.body.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const cell = (e.target as HTMLElement).closest<HTMLElement>('.hair-grid .bp-cell[data-id]');
+      if (!cell) return;
+      e.preventDefault();
+      this.pickHair(cell);
+    });
+    // A picture that will not load shows the style's number instead, as the backpack's do (error events do not bubble).
+    this.root.addEventListener(
+      'error',
+      (e) => {
+        const img = e.target as HTMLElement;
+        if (img.tagName !== 'IMG' || !img.parentElement) return;
+        const el = document.createElement('span');
+        el.className = 'bp-initials';
+        el.textContent = img.closest<HTMLElement>('[data-initials]')?.dataset.initials ?? '?';
+        img.replaceWith(el);
+      },
+      true,
+    );
   }
+
+  /**
+   * Put a hairstyle on, or none (`null`): the game's prepared path (`App.wearHairPrepared`), whose answer is
+   * what to say. Unset, the character puts it on at once, which is right only where no world draws it.
+   */
+  onHair: ((id: string | null) => Promise<string>) | null = null;
 
   /** The species the pack offers, for the picker in the header; hidden when there is only the one. */
   setSpecies(list: SpeciesEntry[], current: string): void {
@@ -89,7 +129,15 @@ export class AppearanceUi {
 
 
   private baseUrl = '';
-  private hair: { id: string; label: string }[] = [];
+  /** The species' hairstyles out of the wardrobe (both genders'), and the folder their pictures are in. */
+  private hair: HairItem[] = [];
+  private hairDir: string | null = null;
+  /** The grid drawn last, for the console. */
+  private hairGrid: HairGrid | null = null;
+  /** The style being put on ('' for none) while it loads: its cell is busy and every cell's click waits. */
+  private hairBusy: string | null = null;
+  /** The hair groups opened or shut by hand, so a rebuild keeps them so. */
+  private readonly hairGroups = new GroupState();
   /** The creator's own table, once it has arrived; null when it is not converted (the page then lays itself out as before). */
   private table: CreatorTable | null = null;
   /** What the page drew last from the table, and its rows by name, which the swatches and sliders name. */
@@ -100,6 +148,13 @@ export class AppearanceUi {
 
   /** Show a character: its sliders and colours, and the doll. */
   attach(character: Character, baseUrl = ''): void {
+    if (this.character !== character) {
+      // Another character's styles and pictures are not this one's; the same one's stand until its catalogue answers again.
+      this.hair = [];
+      this.hairDir = null;
+      this.hairBusy = null;
+      this.hairGroups.clear();
+    }
     this.character = character;
     this.baseUrl = baseUrl;
     this.speciesId = character.manifest.id;
@@ -108,11 +163,16 @@ export class AppearanceUi {
     this.table = creatorTableNow(baseUrl) ?? null;
     this.build();
     // The hairstyles come from the wardrobe, which loads on its own time; the section fills in when it lands.
-    void character.hairOptions(baseUrl).then((list) => {
-      if (this.character !== character) return;
-      this.hair = list;
-      this.build();
-    });
+    void character
+      .catalogue(baseUrl)
+      .then((w) => w.items)
+      .catch(() => [] as HairItem[])
+      .then((items) => {
+        if (this.character !== character) return;
+        this.hair = hairOfSpecies(items, character.speciesName);
+        this.hairDir = character.wardrobeDir;
+        this.build();
+      });
     // The creator's table is fetched once a session; the page lays itself out again when it lands.
     void loadCreatorTable(baseUrl).then((table) => {
       if (this.character !== character || table === this.table) return;
@@ -126,27 +186,67 @@ export class AppearanceUi {
     if (this.character) this.build();
   }
 
-  /** The hairstyle section: the species' own styles, either gender's, and none. */
-  private hairRows(): string {
-    const c = this.character;
-    if (!c || !this.hair.length) return '';
-    return `<h3 class="wardrobe-section">Hair <span>${this.hair.length} styles for this species</span></h3>${this.hairPicker()}`;
+  /** The hairstyle section of a page without a hair tab: its heading, then the grid (`hairGridHtml`'s). */
+  private hairSection(grid: string): string {
+    if (!grid) return '';
+    return `<h3 class="wardrobe-section">Hair <span>${this.hairGrid?.styles ?? 0} styles for this species</span></h3>${grid}`;
   }
 
   /**
-   * The style picker alone, which the table's hair tab opens with. No hair is offered only where the
-   * game let the species go bald (`hairNone`): a Twi'lek, a Zabrak or a Trandoshan always has lekku, horns
-   * or ridges. One already wearing none keeps that word, disabled, so the picker never claims a style
-   * that is not on; once a style is on there is no way back to none.
+   * The grid of styles alone, which the table's hair tab opens with: a folding group each (this gender's,
+   * the other's, what the game never offered), each cell a picture and "Style N", the worn one marked. No
+   * hair is a cell only where the game let the species go bald (`hairNone`): a Twi'lek, a Zabrak or a
+   * Trandoshan always has lekku, horns or ridges. A group opens on its own when it is the first or holds
+   * the worn style; one the player opened or shut stays so.
    */
-  private hairPicker(): string {
+  private hairGridHtml(): string {
     const c = this.character;
-    if (!c || !this.hair.length) return '';
-    const worn = c.hairWorn();
-    const none = hairNone(this.table?.species[c.manifest.id], this.hair.length > 0, !!worn);
-    const lead = none === 'offer' ? [`<option value="">— none —</option>`] : none === 'shown' ? [`<option value="" disabled selected>— none —</option>`] : [];
-    const options = [...lead, ...this.hair.map((h) => `<option value="${h.id}"${h.id === worn ? ' selected' : ''}>${h.label}</option>`)];
-    return `<label class="wardrobe-slot"><span class="slot-label">Style</span><select class="hair-pick">${options.join('')}</select><span class="slot-count">${this.hair.length}</span></label>`;
+    if (!c || !this.hair.length) {
+      this.hairGrid = null;
+      return '';
+    }
+    const grid = hairCells(this.table, this.hair, c.speciesName, c.genderName, c.hairWorn(), this.hairDir);
+    this.hairGrid = grid;
+    if (!grid.groups.length) return '';
+    const busy = this.hairBusy;
+    const groups = grid.groups.map((g, i) => {
+      const wanted = i === 0 || g.cells.some((x) => x.on);
+      const inner = g.cells.map((x) => giveCellHtml(x, { on: 'worn', selected: false, ...(busy === x.id ? { more: 'busy', corner: '<span class="bp-busy">putting on</span>' } : {}) })).join('');
+      return groupHtml(`hair:${g.id}`, g.label, g.cells.filter((x) => x.id !== NO_HAIR).length, g.note, this.hairGroups.isOpen(`hair:${g.id}`, wanted), inner);
+    });
+    return `<div class="hair-grid${busy !== null ? ' busy' : ''}">${groups.join('')}</div>`;
+  }
+
+  /**
+   * A style's cell clicked: it goes on through `onHair` (none, for the cell for no hair), its cell busy while
+   * it loads and every other click ignored meanwhile, and the page is drawn again from the character once
+   * it is on; a style that did not go on says why under the page. A click on what is already worn does nothing.
+   */
+  private pickHair(cell: HTMLElement): void {
+    const c = this.character;
+    if (!c || this.hairBusy !== null) return;
+    const id = cell.dataset.id ?? NO_HAIR;
+    const want = id || null;
+    const before = c.hairWorn();
+    if (want === before) return;
+    this.hairBusy = id;
+    cell.classList.add('busy');
+    cell.querySelector('.bp-pic')?.insertAdjacentHTML('beforeend', '<span class="bp-busy">putting on</span>');
+    cell.closest('.hair-grid')?.classList.add('busy');
+    const wear = this.onHair ?? ((style: string | null) => c.wearHair(style, this.baseUrl).then((on) => (on ? 'on' : 'not in this wardrobe')));
+    void wear(want)
+      .catch((err: unknown) => `could not put it on: ${err instanceof Error ? err.message : String(err)}`)
+      .then((said) => {
+        this.hairBusy = null;
+        if (this.character !== c) return;
+        this.build();
+        // Saved only when the style really changed: one that did not load, or was dropped because the
+        // character went (to the select screen, out of the creator) while it loaded, writes nothing into
+        // whichever record is current by now -- the same rig may be dressing the next one.
+        if (c.hairWorn() !== before) this.onChange();
+        const hint = this.body.querySelector<HTMLElement>('.bake-hint');
+        if (hint && c.hairWorn() !== want) hint.textContent = said;
+      });
   }
 
   /** Say why there is nothing to edit, in place of the sliders. */
@@ -272,21 +372,12 @@ export class AppearanceUi {
       // No table (or no live recipes): every slider the pack has, then every colour, as it always was.
       const shape = this.shapeRows();
       const colours = this.colourRows();
-      const hair = this.hairRows();
+      const hair = this.hairSection(this.hairGridHtml());
       this.body.innerHTML = shape || colours || hair ? `${hair}${shape}${colours}` : '<div class="wardrobe-empty">This character carries no shape sliders and lists no customization variables. A parts pack from the converter\'s <code>species</code> command has both.</div>';
     } else this.body.innerHTML = this.tableRows(view);
     if (c) this.preview.refresh(c);
     this.wireShape();
-    const pick = this.body.querySelector<HTMLSelectElement>('.hair-pick');
-    pick?.addEventListener('change', () => {
-      const ch = this.character;
-      if (!ch) return;
-      void ch.wearHair(pick.value || null, this.baseUrl).then(() => {
-        this.preview.refresh(ch);
-        this.build();
-        this.onChange();
-      });
-    });
+    this.hairGroups.wire(this.body);
     const height = this.body.querySelector<HTMLInputElement>('input.height');
     height?.addEventListener('input', () => {
       const ch = this.character;
@@ -356,7 +447,12 @@ export class AppearanceUi {
     const c = this.character;
     // Without live recipes no colour can change here, and the old page says so and shows the bake.
     if (!c?.customizer || !this.table) return null;
-    return creatorView(this.table.species[c.manifest.id], this.stateOf(c));
+    return creatorView(this.entryOf(c, this.table, this.hair.length > 0), this.stateOf(c));
+  }
+
+  /** The table's row for a character's species, with the hair tab of ours where the game gave it none (the Sullustan's). */
+  private entryOf(c: Character, table: CreatorTable, hasHairObjects: boolean): CreatorSpecies | null | undefined {
+    return withOursHair(table, table.species[c.manifest.id], c.speciesName, hasHairObjects);
   }
 
   /** What the view is worked out from: the character's sliders, live variables, body, worn hair. */
@@ -375,13 +471,13 @@ export class AppearanceUi {
     };
   }
 
-  /** The table's groups, each under the game's word, the style picker at the top of the hair tab, then each worn garment's own colours. */
+  /** The table's groups, each under the game's word, the grid of styles at the top of the hair tab, then each worn garment's own colours. */
   private tableRows(view: CreatorView): string {
     const c = this.character!;
     const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
     const morphs = c.morphValues();
     const out: string[] = [];
-    let picker = this.hairPicker();
+    let picker = this.hairGridHtml();
     for (const g of view.groups) {
       const rows: string[] = [];
       for (const r of g.rows) {
@@ -394,8 +490,8 @@ export class AppearanceUi {
       if (!rows.length && !lead) continue;
       out.push(`<h3 class="wardrobe-section">${esc(g.label)}${g.ours ? ' <span>ours: what the pack has and the game never showed</span>' : ''}</h3>${lead}${rows.join('')}`);
     }
-    // A species with hairstyles whose table has no hair tab still gets its picker, where it always was.
-    if (picker) out.unshift(this.hairRows());
+    // A species with hairstyles whose table has no hair tab still gets its grid, where the picker always was.
+    if (picker) out.unshift(this.hairSection(picker));
     // Each worn garment's own colours (and a hairstyle's that no row names), as they always were.
     const garments = this.colourRows((v) => ownSection(view, v));
     out.push(garments || '<div class="bake-hint"></div>');
@@ -491,14 +587,14 @@ export class AppearanceUi {
    * the followers and the links, and the last pick with every key it wrote.
    */
   report(c: Character | null, table: CreatorTable | null | undefined): Record<string, unknown> {
-    const view = c && c === this.character && this.table === table ? this.view : c?.customizer && table ? creatorView(table.species[c.manifest.id], this.stateOf(c)) : null;
+    const view = c && c === this.character && this.table === table ? this.view : c?.customizer && table ? creatorView(this.entryOf(c, table, !!table.species[c.manifest.id]?.hair?.length), this.stateOf(c)) : null;
     return {
       loaded: table === undefined ? 'not yet' : !!table,
       format: table?.format ?? null,
       species: c?.manifest.id ?? null,
       inTable: !!(c && table?.species[c.manifest.id]),
       laidOut: view ? 'table' : 'packs',
-      // The bald rule as the style picker takes it: whether it offers no hair, says none without offering it, or leaves it out.
+      // The bald rule as the grid of styles takes it: a cell for no hair on `offer` alone.
       hairNone: c ? hairNone(table?.species[c.manifest.id], c === this.character ? this.hair.length > 0 : !!table?.species[c.manifest.id]?.hair?.length, !!c.hairWorn()) : null,
       groups: view?.groups.map((g) => ({ id: g.id, label: g.label, rows: g.rows.length, ...(g.ours ? { ours: true } : {}) })) ?? [],
       unresolved: view?.unresolved ?? [],

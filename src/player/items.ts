@@ -2,7 +2,7 @@
 // description (the game's own, from the converted wardrobe and weapon packs), the body slots it
 // takes, its picture, and whether this character's species may wear it. Pure and node-loadable:
 // type-only imports apart from the rules module and the name maker, both with their extensions.
-import { fitFor, packPartOf, type Fit } from '../core/inventory.ts';
+import { fitFor, isHairKey, packPartOf, type Fit } from '../core/inventory.ts';
 import { prettyName } from '../ui/catalogue.ts';
 import type { Wardrobe } from './character';
 import type { WeaponCatalogue, WeaponClass, WeaponDef } from './weapons';
@@ -117,7 +117,7 @@ export function itemInfo(kind: 'wear' | 'weapon', id: string, ctx: ItemContext):
     slots: item?.slots ?? null,
     icon: item?.icon && ctx.wardrobeDir ? `${ctx.wardrobeDir}${item.icon}` : null,
     fit: fitFor(item?.fit, ctx.species, packPart !== null),
-    kindText: item?.kind === 'hair' || /^hair_/.test(id) ? 'Hair' : 'Clothing',
+    kindText: item?.kind === 'hair' || isHairKey(id) ? 'Hair' : 'Clothing',
     packPart,
     unseen: !!item && (item.parts?.length ?? 0) === 0,
     missing: !item && packPart === null,

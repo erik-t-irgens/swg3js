@@ -20,7 +20,7 @@ import type { Character, Wardrobe } from '../player/character';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import type { PreviewEffects } from './previewDof';
-import { OTHER_GROUP, SLOT_GROUPS, slotGroupOf } from '../core/inventory.ts';
+import { OTHER_GROUP, SLOT_GROUPS, isHairKey, slotGroupOf } from '../core/inventory.ts';
 import { escapeHtml, groupShell, GroupState } from './catalogue.ts';
 import { GIVE_TUNE, buildWardrobeView, countLine, giveCellHtml, openGroups, type GiveCell, type WardrobeView } from './giveModel.ts';
 
@@ -382,7 +382,7 @@ export class WardrobeUi {
         if (id) {
           if (!(await this.onWear(id))) refused.push(id);
         } else {
-          const parts = [...this.wornItems()].filter(([part, itemId]) => !/^hair_/.test(part) && slotOf(itemId) === slot).map(([part]) => part);
+          const parts = [...this.wornItems()].filter(([part, itemId]) => !isHairKey(part) && slotOf(itemId) === slot).map(([part]) => part);
           if (parts.length) this.onRemove(parts);
         }
       } finally {

@@ -11,7 +11,7 @@ import { Customizer, type RenderShare } from './customizer.ts';
 import { recordPartSources, type LookSources, type PartFile, type PartSources } from '../world/mobiles/lookShare.ts';
 import { markActor } from '../world/portalRender.ts';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
-import { fitFor, packPartOf, type ItemFit } from '../core/inventory.ts';
+import { fitFor, isHairKey, packPartOf, type ItemFit } from '../core/inventory.ts';
 import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
 import { partsToLoad } from './partsShown.ts';
 
@@ -517,7 +517,7 @@ export class Character {
       layer: outer?.occlusionLayer ?? 0,
       occludes: outer?.occludes ?? [],
       body: !!outer?.body,
-      meta: { kind: meta.kind ?? (/^hair_/.test(key) ? 'hair' : undefined), template: meta.template },
+      meta: { kind: meta.kind ?? (isHairKey(key) ? 'hair' : undefined), template: meta.template },
       head: null,
     });
     // Bare skin a garment leaves showing takes the wearer's own skin, which is the whole of why a
@@ -926,30 +926,42 @@ export class Character {
     return out;
   }
 
-  /** The hairstyles this species may wear, from the wardrobe: a species' hair suits both its genders. */
-  async hairOptions(baseUrl: string): Promise<{ id: string; label: string }[]> {
-    let w: Wardrobe;
-    try {
-      w = await this.catalogue(baseUrl);
-    } catch {
-      return [];
-    }
-    const species = (this.manifest.species ?? this.manifest.id.replace(/_(male|female)$/, '')).toLowerCase();
-    return w.items
-      .filter((i) => i.kind === 'hair' && (i.template.toLowerCase().includes(`/hair/${species}/`) || i.id.toLowerCase().includes(`hair_${species}_`)))
-      .map((i) => ({ id: i.id, label: i.id.replace(/^hair_[a-z]+_(male|female)_?/, '').replace(/_/g, ' ') || i.id }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+  /** The species without its gender, as the hair folders name it (`twilek`); its styles are `hairOfSpecies` over the catalogue. */
+  get speciesName(): string {
+    return (this.manifest.species ?? this.manifest.id.replace(/_(male|female)$/, '')).toLowerCase();
+  }
+
+  /** The gender the parts pack was made for. */
+  get genderName(): 'female' | 'male' {
+    return (this.manifest.gender ?? (/female/.test(this.manifest.id) ? 'female' : 'male')) === 'female' ? 'female' : 'male';
+  }
+
+  /** Whether a part is a hairstyle: what the catalogue said it was, else its name (a hairstyle id). */
+  private isHair(p: Part): boolean {
+    return !p.body && (p.meta.kind === 'hair' || isHairKey(p.key));
   }
 
   /** The hair worn now, by catalogue id, or null. */
   hairWorn(): string | null {
-    for (const p of this.parts.values()) if (p.worn && !p.body && /^hair_/.test(p.key)) return p.key;
+    for (const p of this.parts.values()) if (p.worn && this.isHair(p)) return p.key;
     return null;
   }
 
-  /** Put a hairstyle on (taking any other off), or none. */
+  /** Every hairstyle on now: one, ordinarily, but whatever is on has to come off when another goes on. */
+  hairsWorn(): string[] {
+    const out: string[] = [];
+    for (const p of this.parts.values()) if (p.worn && this.isHair(p)) out.push(p.key);
+    return out;
+  }
+
+  /**
+   * Put a hairstyle on (taking any other off), or none, at once: a style that has not been prepared shows
+   * on the frame it loads. The game puts hair on through `App.wearHairPrepared`, which loads it hidden,
+   * settles its colours and prepares it first; this is for a character no world draws (the console's
+   * `character()` copy).
+   */
   async wearHair(id: string | null, baseUrl: string): Promise<boolean> {
-    for (const p of [...this.parts.values()]) if (p.worn && !p.body && /^hair_/.test(p.key) && p.key !== id) this.remove(p.key);
+    for (const p of [...this.parts.values()]) if (p.worn && this.isHair(p) && p.key !== id) this.remove(p.key);
     if (!id) {
       this.applyOcclusion();
       return true;

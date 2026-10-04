@@ -22,6 +22,8 @@ export interface CreatorGroup {
   /** The tab holding the species' hair (hair, lekku, horns and hair, ridges, frills). */
   hair?: boolean;
   marking?: boolean;
+  /** A tab of ours, not the game's (the Sullustan's hair: hairGrid.ts). */
+  ours?: boolean;
 }
 
 /** One row of the creator, as the converter wrote it. */
@@ -43,6 +45,8 @@ export interface CreatorRow {
   sets?: string[];
   yaw?: number;
   random?: boolean | number;
+  /** A row of ours, not the game's (the Sullustan's hair colour: hairGrid.ts). */
+  ours?: boolean;
 }
 
 export interface CreatorHair {
@@ -160,7 +164,7 @@ export interface CreatorState {
   bodyMeshes: Iterable<string>;
   /** The worn hair's meshes, likewise; empty when bald. */
   hairMeshes: Iterable<string>;
-  /** Whether the species has hairstyles at all (so its hair tab holds the style picker). */
+  /** Whether the species has hairstyles at all (so its hair tab holds the grid of styles). */
   hasHairObjects: boolean;
 }
 
@@ -249,7 +253,7 @@ export function oneColour(colors: readonly number[][] | undefined): boolean {
  * - a live body variable no row names is hidden when its palette offers one colour, and stands in a group
  *   of ours at the bottom otherwise, as does a pack morph no row names;
  * - a group with nothing to show is left out, except the hair tab of a species with hairstyles, which
- *   holds the style picker.
+ *   holds the grid of styles (hairGrid.ts).
  */
 export function creatorView(entry: CreatorSpecies | null | undefined, state: CreatorState, tune: typeof CREATOR_TUNE = CREATOR_TUNE): CreatorView | null {
   if (!entry) return null;
@@ -288,7 +292,7 @@ export function creatorView(entry: CreatorSpecies | null | undefined, state: Cre
   const resolved = new Map<CreatorRow, ViewRow>();
   for (const r of rows) {
     const label = r.label ?? plainLabel(r.name);
-    const base = { name: r.name, label, type: r.type, followers: [] as string[], sets: [] as string[], ...(r.reverse ? { reverse: true } : {}), ...(r.discrete ? { discrete: true } : {}) };
+    const base = { name: r.name, label, type: r.type, followers: [] as string[], sets: [] as string[], ...(r.reverse ? { reverse: true } : {}), ...(r.discrete ? { discrete: true } : {}), ...(r.ours ? { ours: true } : {}) };
     if (r.type === 'scale') {
       resolved.set(r, { ...base, keys: [] });
       continue;
@@ -381,7 +385,7 @@ export function creatorView(entry: CreatorSpecies | null | undefined, state: Cre
     const list = rows.filter((r) => r.group === g.id && shown.has(r)).map((r) => resolved.get(r)!);
     const holdsPicker = !!g.hair && state.hasHairObjects;
     if (!list.length && !holdsPicker) continue;
-    groups.push({ id: g.id, label: g.label ?? plainLabel(g.id), hair: !!g.hair, rows: list });
+    groups.push({ id: g.id, label: g.label ?? plainLabel(g.id), hair: !!g.hair, rows: list, ...(g.ours ? { ours: true } : {}) });
   }
   // A row whose first tab the table never listed still shows, at the end of the game's tabs.
   const placed = new Set(entry.groups.map((g) => g.id));
@@ -418,10 +422,10 @@ export function ownSection(view: Pick<CreatorView, 'taken' | 'body'>, v: { key: 
 }
 
 /**
- * Whether the style picker offers no hair at all (the table's bald rule): `offer` where the species may go
+ * Whether no hair at all is offered among the styles (the table's bald rule): `offer` where the species may go
  * bald or the table says nothing (no table, no row for it, or no hairstyles to pick between); `shown` where
- * it may not but nothing is worn, so the picker says none without offering it (an existing character is
- * left as it is); `left out` where it may not and a style is on.
+ * it may not but nothing is worn (an existing character is left as it is); `left out` where it may not and
+ * a style is on. The grid of styles (hairGrid.ts) draws a cell for no hair on `offer` alone.
  */
 export function hairNone(entry: Pick<CreatorSpecies, 'bald'> | null | undefined, hasHairObjects: boolean, wearing: boolean): 'offer' | 'shown' | 'left out' {
   if (entry?.bald !== false || !hasHairObjects) return 'offer';

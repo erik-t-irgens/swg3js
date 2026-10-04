@@ -13,7 +13,7 @@
 import type * as THREE from 'three';
 import type { ClassId } from '../combat/kit';
 import type { SavedCharacter } from '../core/characters';
-import { chooseArrangement, normalizeOwned, occupancy, partToItemId, planHold, resolveKit, slotGroupOf, speciesWords, migrateInventory, type Fit, type Hand, type HeldRef, type OwnedItem } from '../core/inventory.ts';
+import { chooseArrangement, isHairKey, normalizeOwned, occupancy, partToItemId, planHold, resolveKit, slotGroupOf, speciesWords, migrateInventory, type Fit, type Hand, type HeldRef, type OwnedItem } from '../core/inventory.ts';
 import { itemInfo, wardrobeIndex, type ItemContext } from './items.ts';
 import type { Character } from './character';
 import type { Player } from './player';
@@ -68,6 +68,9 @@ export interface UseResult {
 }
 
 const DROPPED = 'dropped';
+
+/** What a use or a wear of a hairstyle says: hair is chosen on the appearance page, never worn as an item. */
+export const HAIR_ELSEWHERE = 'a hairstyle is chosen on the appearance page';
 
 /** What a list from the server changed here, in words: "two things came in, one went". */
 export function reconcileWords(came: number, gone: number): string {
@@ -137,7 +140,7 @@ export class Equipment {
 
   /** A worn part's catalogue id, by the catalogue last read; null for hair and pack parts with no item. */
   itemIdOf(part: string): string | null {
-    if (/^hair_/.test(part)) return null;
+    if (isHairKey(part)) return null;
     const w = this.lastCtx?.wardrobe;
     if (!w) return null;
     const index = wardrobeIndex(w);
@@ -227,7 +230,7 @@ export class Equipment {
     const index = wardrobeIndex(ctx.wardrobe);
     const out: { id: string; part: string; slots: string[] }[] = [];
     for (const p of c.status()) {
-      if (!p.worn || p.body || /^hair_/.test(p.name)) continue;
+      if (!p.worn || p.body || isHairKey(p.name)) continue;
       const id = partToItemId(p.name, (x) => index.has(x));
       if (!id || out.some((w) => w.id === id)) continue;
       let slots = this.slotsWorn.get(id);
@@ -294,6 +297,9 @@ export class Equipment {
     const ctx = await this.itemContext();
     if (!alive()) return DROPPED;
     const info = itemInfo('wear', id, ctx);
+    // Hair is never put on as an item (`wornPieces` leaves it out, so nothing here would take the style
+    // already on off, and two would be worn): the appearance page's own path puts a style on.
+    if (info.kindText === 'Hair') return HAIR_ELSEWHERE;
     if (!ctx.wardrobe && !info.packPart) return 'no wardrobe converted';
     if (info.missing) return 'not in this wardrobe';
     if (info.fit === 'block' && !opts.force) return `${speciesWords(ctx.species, true)} cannot wear this`;
@@ -432,6 +438,9 @@ export class Equipment {
     const dropped: UseResult = { note: DROPPED, wants: null };
     return this.run(`${kind}:${id}`, dropped, async (alive) => {
       if (kind === 'wear') {
+        // A hairstyle a record still owns from before hair stopped being an item (a Sullustan's
+        // `sul_hair_*`) is kept and never used: on or off, a style is the appearance page's.
+        if (isHairKey(id)) return { note: HAIR_ELSEWHERE, wants: null };
         if (this.wornPartOf(id)) return { note: this.takeOff(id), wants: null };
         return { note: await this.wearOp(id, {}, alive), wants: null };
       }

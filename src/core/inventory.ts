@@ -112,6 +112,32 @@ export function packPartOf(id: string, packParts: readonly string[]): string | n
   return null;
 }
 
+/**
+ * Whether a worn part's name is a hairstyle, which is never an item: hair belongs to the appearance page.
+ * Every hairstyle id begins `hair_` but the Sullustan's eighteen, which are `sul_hair_s<nn>_<f|m>`, and
+ * those were taken for wearables -- owned, put in the backpack, and never taken off when a style changed.
+ */
+export function isHairKey(key: string): boolean {
+  return /^(hair_|sul_hair_)/.test(key);
+}
+
+/** As much of a catalogue entry as the hair lists read. */
+export interface HairEntry {
+  id: string;
+  kind?: string;
+  template?: string;
+}
+
+/**
+ * A species' hairstyles out of a wardrobe, both genders' (a species' hair suits both): every hair entry
+ * whose template is under that species' hair folder or whose id names it. A wardrobe folder holds every
+ * species' hair, so the Singing Mountain Clan's, under a folder of their own, are never anyone's.
+ */
+export function hairOfSpecies<T extends HairEntry>(items: readonly T[], species: string): T[] {
+  const s = species.toLowerCase();
+  return items.filter((i) => i.kind === 'hair' && ((i.template ?? '').toLowerCase().includes(`/hair/${s}/`) || i.id.toLowerCase().includes(`hair_${s}_`)));
+}
+
 /** slot -> the id occupying it, from worn pieces and the arrangement each went on with, in wear order. */
 export function occupancy(worn: readonly { id: string; slots: readonly string[] }[]): Map<string, string> {
   const out = new Map<string, string>();
@@ -280,7 +306,7 @@ export function migrateInventory<T extends { items?: OwnedItem[]; outfit: string
   if (c.inv === 1) return c;
   const worn: OwnedItem[] = [];
   for (const part of c.outfit ?? []) {
-    if (/^hair_/.test(part)) continue;
+    if (isHairKey(part)) continue;
     const id = toItem(part);
     if (id) worn.push({ id, kind: 'wear', got: now });
   }

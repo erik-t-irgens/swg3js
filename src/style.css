@@ -48,6 +48,10 @@
      out in a count of its own, which each block sets on itself; this is the count for one that does not. */
   --swatch-cols: 16;
 
+  /* How wide a hairstyle's cell is on the appearance page: the backpack's own, `HAIR_TUNE.cell` in
+     hairGrid.ts, which the node test holds this to. */
+  --hair-cell: 76px;
+
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
   color: var(--text);
 }
@@ -446,6 +450,10 @@ b { color: var(--accent); font-weight: 600; }
 .give-body { padding-right: 6px; }
 /* A group's grid holds picture cells rather than one-line entries. */
 #wardrobe .cat-grid, #weapons .cat-grid { grid-template-columns: repeat(auto-fill, 76px); gap: 6px; padding: 4px 8px 8px; }
+/* The appearance page's hairstyles, in the backpack's own cells: a column is `HAIR_TUNE.cell` (hairGrid.ts)
+   wide, which the node test holds this fallback to. While a style is being put on every cell waits. */
+#appearance .cat-grid { grid-template-columns: repeat(auto-fill, var(--hair-cell, 76px)); gap: 6px; padding: 4px 8px 8px; }
+#appearance .hair-grid.busy .bp-cell { cursor: progress; }
 /* One line of name more than the backpack's cells, and room under it for the id's own part: a give
    list is read by name rather than recognised, and the game calls many things the same thing. */
 #wardrobe .bp-cell, #weapons .bp-cell { height: 116px; }

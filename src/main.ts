@@ -309,6 +309,7 @@ import { recordFor, sweptByList, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, lookKeep, packLook, putBackLook } from './player/look';
 import { CREATOR_TUNE, creatorTableNow, loadCreatorTable, tuneCreator } from './ui/creatorModel.ts';
+import { HAIR_TUNE, defaultHair, hairCarryFor, hairCells, type HairItem } from './ui/hairGrid.ts';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
@@ -2153,6 +2154,8 @@ class App {
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    // A hairstyle goes on the way every worn piece does: loaded hidden, coloured, compiled, then shown.
+    this.appearanceUi.onHair = (id) => this.wearHairPrepared(id);
     // Every panel that closes because the player asked hands the mouse back. Nine of them had no way
     // to say so: their X button and their backdrop called `hide()`, nothing cleared the input's
     // `captured`, and the game went on simulating with every key and the mouse dead -- the only way
@@ -3851,6 +3854,14 @@ class App {
         }
         return this.appearanceUi.report(this.player.rig?.character ?? null, creatorTableNow(import.meta.env.BASE_URL));
       },
+      /**
+       * The hairstyles' grid for the player's character (`src/ui/hairGrid.ts`): what is worn, each group with
+       * its cells and pictures, the style a new character of the species starts in, the remembered hair
+       * colours (`hair|<name>`) and the last change with the colours it carried. `hair('<id>')` puts a style on
+       * through the prepared path (`hair(null)` none), unsaved as `wear` is, and says how many programs were
+       * built for the character on the frames after the swap (`compiledOnSwap`, which must be 0).
+       */
+      hair: (id?: string | null) => (id === undefined ? this.hairReport() : this.debugHair(id)),
       /** What a mesh's live textures are made of (`recipe('head')`): shader stages, texture choices, palettes, blueprint operations and the values in force. */
       recipe: (mesh = 'head') => {
         const c = this.player.rig?.character;
@@ -9240,6 +9251,8 @@ class App {
     this.closePanels();
     // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
     this.equipment.reset();
+    // And a hairstyle still loading is dropped with them, or it would land on the next one's head.
+    this.dropHairChanges();
     // A new character has a purse of its own; the last one's number must not be read as this one's.
     purse.reset();
     // Nobody's music carries to the next character.
@@ -10068,6 +10081,173 @@ class App {
     // A colour or a slider changed is a change of look, which the others hear about as a change of
     // clothes is: in a hello, a moment after the last change (`queueHello` waits 400 ms for the next).
     this.queueHello();
+  }
+
+  /** The last change of hairstyle, for `__debug.hair()`: what went on and came off, the colours it carried and what it said. */
+  private hairChange: { on: string | null; off: string[]; carried: Record<string, number>; said: string } | null = null;
+  /**
+   * Counted up by every change of hairstyle, so one overtaken by the next puts nothing on, and by every
+   * change of who is being dressed (`dropHairChanges`).
+   */
+  private hairTurn = 0;
+
+  /**
+   * Whatever change of hairstyle is still loading puts nothing on: the character it was asked for has
+   * gone (to the select screen, into or out of the creator, or another record played). The rig itself
+   * outlives it whenever the next character is of the same species (`useSpecies` keeps it), so the
+   * character object alone cannot tell, exactly as it cannot for the equipment, whose own epoch is reset
+   * at the same moments.
+   */
+  private dropHairChanges(): void {
+    this.hairTurn++;
+  }
+
+  /**
+   * Put a hairstyle on, or none, in the one order that compiles before it shows, as every worn piece goes
+   * on: loaded hidden (`Character.loadPiece`), its colour carried over from the style it replaces, the
+   * colours settled, each new mesh prepared, the colour asked for again, and then in one synchronous step
+   * the old style off and the new one on (`Character.putOn`). Asked again after every wait whether the
+   * character is still the one, no later change has overtaken it and `still` (the caller's own condition)
+   * holds; if not, nothing is changed. The answer is what to say. Nothing is saved: the appearance page
+   * saves after it, and the console's `hair()` does not.
+   */
+  private async wearHairPrepared(id: string | null, still: () => boolean = () => true): Promise<string> {
+    const c = this.player.rig?.character;
+    if (!c) return 'this character is a single model';
+    const turn = ++this.hairTurn;
+    const alive = () => this.player.rig?.character === c && this.hairTurn === turn && still();
+    const overtaken = 'overtaken by another change';
+    if (!id) {
+      const off = c.hairsWorn();
+      c.putOn([], off);
+      this.hairChange = { on: null, off, carried: {}, said: off.length ? 'hair off' : 'no hair was on' };
+      return this.hairChange.said;
+    }
+    const wornNow = c.hairsWorn();
+    if (wornNow.length === 1 && wornNow[0] === id) return `${id} is on already`;
+    let got: { found: boolean; meshes: THREE.Object3D[] };
+    try {
+      got = await c.loadPiece(id, import.meta.env.BASE_URL);
+    } catch (err) {
+      return `could not put on ${id}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (!alive()) return overtaken;
+    if (!got.found) return `${id} is not in this wardrobe`;
+    // The new style's own colours, from the hair colour last picked, else from the style it replaces.
+    let carried = this.hairColourFor(c, id);
+    if (Object.keys(carried).length) c.customizer?.setAll(carried);
+    await c.customizer?.settled();
+    if (!alive()) return overtaken;
+    for (const m of got.meshes) {
+      await this.prepareRoot(m);
+      if (!alive()) return overtaken;
+    }
+    // The page's colour rows stay live while a style loads, and a hair colour picked meanwhile wrote the
+    // remembered `hair|` key and the worn style's keys, never this hidden one's: the carry is asked again
+    // right before the swap, and whatever it now says differently goes on and is settled first, or the
+    // style would show in the colour from before the pick. A colour only changes a texture, never a
+    // program, so what was prepared stands. Someone still scrubbing after a few rounds is not waited for:
+    // the last colour lands a moment after the style shows.
+    const cz = c.customizer;
+    for (let round = 0; cz; round++) {
+      const want = this.hairColourFor(c, id);
+      const moved: Record<string, number> = {};
+      for (const [k, v] of Object.entries(want)) if (cz.values.get(k) !== v) moved[k] = v;
+      if (!Object.keys(moved).length) break;
+      carried = { ...carried, ...moved };
+      cz.setAll(moved);
+      if (round >= HAIR_TUNE.recarryRounds) break;
+      await cz.settled();
+      if (!alive()) return overtaken;
+    }
+    const off = c.hairsWorn().filter((k) => k !== id);
+    c.putOn([id], off);
+    this.hairChange = { on: id, off, carried, said: `${id} on` };
+    return this.hairChange.said;
+  }
+
+  /**
+   * The colours a hairstyle loaded hidden takes before it is shown (`hairCarryFor`, then `carryHairColour`):
+   * each of its private palette colours from the remembered `hair|<name>`, else from the worn style's own
+   * key of that name.
+   */
+  private hairColourFor(c: Character, id: string): Record<string, number> {
+    const cz = c.customizer;
+    if (!cz) return {};
+    return hairCarryFor(c.status(), c.hairsWorn(), id, cz.values, cz.variables());
+  }
+
+  /**
+   * A new character of a species that may not go bald starts in the table's first creation style: a new
+   * Twi'lek has lekku, a Zabrak horns and a Trandoshan ridges. Only in the creator, only while nothing is
+   * worn, and put on as any style is (`wearHairPrepared`); an existing character is left as it is. A style
+   * picked on the page while the table and the wardrobe are still being read, or the creator left or
+   * opened again, has the say: the turn is taken now and asked again before anything is put on, and the
+   * put-on itself is dropped the moment the creator is left.
+   */
+  private async wearDefaultHair(c: Character): Promise<void> {
+    const turn = this.hairTurn;
+    const base = import.meta.env.BASE_URL;
+    const [table, items] = await Promise.all([loadCreatorTable(base), c.catalogue(base).then((w) => w.items as HairItem[]).catch(() => [] as HairItem[])]);
+    if (!this.creating || this.hairTurn !== turn || this.player.rig?.character !== c || c.hairWorn()) return;
+    const id = defaultHair(table, items, c.speciesName, c.genderName);
+    if (!id) return;
+    await this.wearHairPrepared(id, () => this.creating);
+    if (this.appearanceUi.open && this.player.rig?.character === c) this.appearanceUi.refresh();
+  }
+
+  /** What the console's `hair()` shows: what is worn, the grid's groups and cells, the remembered colours and the last change. */
+  private async hairReport(): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c) return { error: 'no parts character' };
+    const base = import.meta.env.BASE_URL;
+    const table = await loadCreatorTable(base);
+    const items = await c
+      .catalogue(base)
+      .then((w) => w.items as HairItem[])
+      .catch(() => [] as HairItem[]);
+    const grid = hairCells(table, items, c.speciesName, c.genderName, c.hairWorn(), c.wardrobeDir);
+    const remembered: Record<string, number> = {};
+    for (const [k, v] of c.customizer?.values ?? []) if (k.startsWith('hair|')) remembered[k] = v;
+    return {
+      species: c.manifest.id,
+      worn: c.hairWorn(),
+      fromTable: grid.fromTable,
+      none: grid.none,
+      styles: grid.styles,
+      groups: grid.groups.map((g) => ({ id: g.id, label: g.label, cells: g.cells.length, pictures: g.cells.filter((x) => x.picture === 'icon').length, worn: g.cells.find((x) => x.on)?.label ?? null })),
+      startsIn: defaultHair(table, items, c.speciesName, c.genderName),
+      remembered,
+      last: this.hairChange,
+    };
+  }
+
+  /**
+   * The console's `hair(id)`: a style put on (null for none) through the prepared path, and the programs
+   * built for the character's materials on the two frames after the swap (`compiledOnSwap`, which must be 0:
+   * every program is built before the style shows). Not saved, as the console's `wear` is not: a pick on the
+   * appearance page is what writes the record.
+   */
+  private async debugHair(id: string | null): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c) return { error: 'no parts character' };
+    const said = await this.wearHairPrepared(id);
+    const r = this.renderer;
+    const known = new Set<unknown>(r.info.programs ?? []);
+    const frames = await this.waitFrames(2);
+    const mats = new Set<THREE.Material>();
+    c.group.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (m) for (const x of Array.isArray(m) ? m : [m]) mats.add(x);
+    });
+    const made = new Set<unknown>();
+    for (const m of mats) {
+      if (!r.properties.has(m)) continue;
+      const programs = (r.properties.get(m) as { programs?: Map<string, unknown> }).programs;
+      for (const p of programs?.values() ?? []) if (!known.has(p)) made.add(p);
+    }
+    if (this.appearanceUi.open) this.appearanceUi.refresh();
+    return { said, compiledOnSwap: made.size, frames, inWorld: this.inWorld, ...(await this.hairReport()) };
   }
 
   /**
@@ -11659,11 +11839,14 @@ class App {
 
   /**
    * Compile something of the player's (or a peer's) before it is shown: the world's actor preparation,
-   * then the motion blur's. Outside the world nothing is drawn by the main renderer, and arriving
-   * compiles the whole scene behind the loading screen, so there is nothing to do.
+   * then the motion blur's. In play, and in the creator while it stands the figure in one of the captured
+   * places: that is a world loaded and drawn by the main renderer every frame (`stepScene`), so a style or
+   * a garment put on there would otherwise build its program on the frame it first shows. Anywhere else
+   * nothing is drawn by the main renderer (the creator's dark stage is the doll's own context), and both
+   * arriving and a place being stood compile the whole scene before it is shown, so there is nothing to do.
    */
   private async prepareRoot(root: THREE.Object3D): Promise<void> {
-    if (!this.inWorld) return;
+    if (!this.inWorld && !this.scene3d) return;
     await this.world.prepareActor(root);
     await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]);
   }
@@ -11768,7 +11951,11 @@ class App {
         fitNote,
       };
     };
-    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got));
+    // A hairstyle is the appearance page's and never an item, but a Sullustan played before that was so
+    // still owns the style it wore (`sul_hair_*`, which a hair test spelt `^hair_` took for a garment). The
+    // row is kept, since nothing an owned list holds is ever lost, and not shown: here it would read as a
+    // style in the backpack that could be put on beside the one worn.
+    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got)).filter((c) => !(c.kind === 'wear' && c.kindText === 'Hair'));
     // Anything worn or held that is not owned (it should not happen once a record is played) is shown all the same, so the panel matches the body.
     for (const id of Object.keys(snap.worn)) if (!cells.some((c) => c.kind === 'wear' && c.id === id)) cells.push(cell('wear', id, 0));
     for (const id of [snap.held.right, snap.held.left]) if (id && !cells.some((c) => c.kind === 'weapon' && c.id === id)) cells.push(cell('weapon', id, 0));
@@ -11930,6 +12117,8 @@ class App {
       const legacy = this.legacyAppearance(id);
       putBackLook(character, legacy);
       this.applyAppearance(character, legacy);
+      // A species that may not go bald starts in the game's first style.
+      void this.wearDefaultHair(character);
     } else if (this.current) {
       this.current.species = id;
       this.current.appearance = this.appearanceOf(character);
@@ -11960,6 +12149,8 @@ class App {
     this.select.hide();
     this.creating = true;
     this.current = null;
+    // Nobody's hairstyle still loading lands on the new character, whose rig may be the same one.
+    this.dropHairChanges();
     this.wardrobe.root.classList.add('creation');
     this.appearanceUi.root.classList.add('creation');
     this.creatorBar.show();
@@ -11975,6 +12166,8 @@ class App {
       const legacy = this.legacyAppearance(species);
       putBackLook(character, legacy);
       this.applyAppearance(character, legacy);
+      // The species the creator opens on goes through no species pick, and starts as one picked would.
+      void this.wearDefaultHair(character);
     }
     this.showCreatorTab('appearance');
     // A place to stand in, if this install has any built. It is asked for after the panels are up
@@ -12060,6 +12253,8 @@ class App {
 
   private leaveCreator(): void {
     this.creating = false;
+    // A style still loading (the default one, or a cell clicked) is the unmade character's: it goes with the creator.
+    this.dropHairChanges();
     this.closePanels();
     this.creatorBar.hide();
     this.enterPlaceLayout(false);
@@ -12106,6 +12301,8 @@ class App {
   private async play(c: SavedCharacter): Promise<void> {
     this.select.hide();
     this.current = c;
+    // A hairstyle still loading for whoever stood here before is not this character's.
+    this.dropHairChanges();
     // Its story book, from this browser's storage, before anything notes the character: the counter the
     // claim carries reads how many changes the book holds that no server has seen.
     this.story.use(c.id);

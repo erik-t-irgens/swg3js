@@ -2,10 +2,11 @@
 // the recipes settled, prepared, then shown with what it displaces in one step), the queue, reset and a
 // character changing under an operation, no record (the creator), no wardrobe, a weapon prepared on every
 // hold, the blade left as it was on a restore, the species packs' own pieces for a Wookiee, a destroy and a
-// second use that wait their turn, several parts off in one step, and a peer's dress (look.ts dressPrepared).
+// second use that wait their turn, several parts off in one step, a peer's dress (look.ts dressPrepared), and
+// a Sullustan's hair, which is no item however its id is spelt.
 // Plain node; the module is node-loadable (type-only imports apart from the rules and the item facts).
 import assert from 'node:assert/strict';
-import { Equipment, type EquipmentDeps } from '../../../src/player/equipment.ts';
+import { Equipment, HAIR_ELSEWHERE, type EquipmentDeps } from '../../../src/player/equipment.ts';
 import { dressPrepared } from '../../../src/player/look.ts';
 
 let checks = 0;
@@ -370,6 +371,31 @@ function setup(opts: { species?: string; wardrobe?: Item[] | null; worn?: string
   ok(r.warned.join() === 'zz' && r.worn.get('b') === true && r.worn.get('c') === false && r.worn.get('a') === true, 'a piece the wardrobe lacks is warned and left out; the outfit is what is worn');
   const stopped = await run((log) => !log.some((l) => l.startsWith('prepare(')));
   ok(!stopped.log.some((l) => l.startsWith('putOn(')) && stopped.worn.get('c') === true && stopped.worn.get('b') === false, 'a look given up during the first prepare changes nothing worn');
+}
+
+// --- 14: a Sullustan's hair is never an item: not owned, not in the worn list, not put on from the backpack -----
+{
+  // The Sullustan's ids are `sul_hair_s<nn>_<f|m>`, which a hair test spelt `^hair_` took for garments.
+  const hair = (id: string) => item(id, [['hair']], { kind: 'hair', template: `object/tangible/hair/sullustan/shared_${id}.iff` });
+  const wardrobe = [...WARDROBE, hair('sul_hair_s01_f'), hair('sul_hair_s02_f')];
+  const w = setup({ species: 'sullustan_female', wardrobe, worn: ['sul_hair_s01_f', 'shirt_s03'] });
+  // A record from before, which owns the style it wore as an item: kept, never used.
+  const rec = { id: 'r', name: 'R', species: 'sullustan_female', class: 'jedi', outfit: ['sul_hair_s01_f', 'shirt_s03'], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, items: [{ id: 'sul_hair_s02_f', kind: 'wear', got: 1 }] } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.itemContext();
+  ok(w.eq.itemIdOf('sul_hair_s01_f') === null && w.eq.itemIdOf('shirt_s03') === 'shirt_s03', "a worn Sullustan style is no item, as no other style is; the shirt beside it is");
+  ok(!('sul_hair_s01_f' in w.eq.snapshot().worn) && 'shirt_s03' in w.eq.snapshot().worn, 'the worn list the backpack and a trade read holds the shirt and not the hair');
+  await w.eq.use('wear', 'hat_s04');
+  const items = (rec.items as { id: string }[]).map((o) => o.id);
+  ok(items.includes('shirt_s03') && items.includes('hat_s04') && !items.includes('sul_hair_s01_f'), `a save owns what is worn but the hair (${items.join(', ')})`);
+  ok(items.includes('sul_hair_s02_f'), 'and the style an old record owned is kept: nothing an owned list holds is lost');
+  w.log.length = 0;
+  const used = await w.eq.use('wear', 'sul_hair_s02_f');
+  const worn = await w.eq.wear('sul_hair_s02_f');
+  ok(used.note === HAIR_ELSEWHERE && worn === HAIR_ELSEWHERE, `a style is neither used nor worn as an item (${used.note}; ${worn})`);
+  ok(!w.log.some((l) => l.startsWith('loadPiece(') || l.startsWith('putOn(')) && w.worn.get('sul_hair_s01_f') === true && !w.worn.has('sul_hair_s02_f'), 'so nothing is loaded, the worn style stays on and no second goes on beside it');
+  const off = await w.eq.use('wear', 'sul_hair_s01_f');
+  ok(off.note === HAIR_ELSEWHERE && w.worn.get('sul_hair_s01_f') === true, 'nor is the worn one taken off as an item');
 }
 
 console.log(`${checks} checks passed`);
