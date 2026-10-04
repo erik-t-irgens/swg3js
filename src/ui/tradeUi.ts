@@ -103,8 +103,13 @@ interface Cell {
   readonly el: HTMLButtonElement;
   readonly pic: HTMLElement;
   readonly name: HTMLElement;
-  /** `kind:id`, which is what a click hands back. */
+  /**
+   * Which thing the cell shows: its name, or the server's row where a pane's row names none (a server
+   * from before things had names). Two of one shirt are two cells with two keys.
+   */
   key: string;
+  /** The thing itself, which is what a click hands back: the backpack's own row, or the pane's. */
+  item: TradeItem | null;
   kind: 'wear' | 'weapon';
   id: string;
   nameText: string;
@@ -392,6 +397,7 @@ export class TradeUi {
         pic: el.querySelector<HTMLElement>('.pic')!,
         name: el.querySelector<HTMLElement>('.name')!,
         key: '',
+        item: null,
         kind: 'wear',
         id: '',
         nameText: '',
@@ -408,15 +414,15 @@ export class TradeUi {
   // ---- what the player presses ---------------------------------------------------------------------
 
   private clicked(pane: Pane, cell: Cell): void {
-    if (!cell.id) return;
+    if (!cell.id || !cell.item) return;
     const t = this.deps.trade;
     if (pane === 'pack') {
-      const why = t.putIn(cell.kind, cell.id);
+      const why = t.putIn(cell.item);
       if (why) this.deps.note(why);
       return;
     }
     if (pane === 'mine') {
-      const why = t.takeOut(cell.kind, cell.id);
+      const why = t.takeOut(cell.item);
       if (why) this.deps.note(why);
       return;
     }
@@ -595,15 +601,14 @@ export class TradeUi {
       this.title.textContent = title;
       this.stat.writes++;
     }
-    const offered = new Set(w.mine.map((o) => `${o.kind}:${o.id}`));
     const find = this.find.value.trim().toLowerCase();
     // The backpack pane: what is owned, less what is already in the trade. What is being worn or
     // held stays on it, dimmed, because a player looking for a shirt they are wearing must be told
-    // why it will not go in rather than left hunting for a cell that is not there.
+    // why it will not go in rather than left hunting for a cell that is not there. Two of one shirt
+    // are two cells, and the one in the trade is the one taken off this pane.
     const pack: { item: TradeItem; use: string }[] = [];
     for (const row of this.deps.owned()) {
-      const key = `${row.item.kind}:${row.item.id}`;
-      if (offered.has(key)) continue;
+      if (this.deps.trade.offered(row.item)) continue;
       if (find) {
         const name = this.deps.look(row.item.kind, row.item.id).name.toLowerCase();
         if (!name.includes(find) && !row.item.id.toLowerCase().includes(find)) continue;
@@ -667,6 +672,7 @@ export class TradeUi {
           cell.el.classList.add('hidden');
           cell.shown = false;
           cell.key = '';
+          cell.item = null;
           cell.id = '';
           this.stat.writes++;
         }
@@ -677,7 +683,10 @@ export class TradeUi {
         cell.shown = true;
         this.stat.writes++;
       }
-      const key = `${row.item.kind}:${row.item.id}`;
+      // The thing the cell is about is handed back on a click, so it is taken afresh whatever the
+      // picture does; the picture and the name are written only when the thing shown has changed.
+      cell.item = row.item;
+      const key = row.item.thing || (row.item.row ? `#${row.item.row}` : `${row.item.kind}:${row.item.id}`);
       if (key !== cell.key) {
         cell.key = key;
         cell.kind = row.item.kind;

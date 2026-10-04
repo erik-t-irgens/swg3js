@@ -422,6 +422,25 @@ const claimOf = (sent: Record<string, unknown>[]) => sent.find((m) => m.t === 'c
 }
 
 {
+  // How the far end keeps what characters own: heard in the greeting, in force once the server has us.
+  const a = session();
+  a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  a.it.opening();
+  a.it.hail({ v: 6, now: 1, nonce: NONCE, items: 2 });
+  ok(a.it.itemsVersion === 0 && a.it.debug().items === 2, 'a server that keeps a row per thing says so, and nothing rests on it until the claim is taken');
+  a.it.claimed({ character: 'char-1' }, 'same');
+  ok(a.it.itemsVersion === 2, 'once it is, two of one item may be handed up');
+  a.it.closed();
+  ok(a.it.itemsVersion === 0, 'and with the line gone, nothing is anybody\'s to keep but this browser\'s');
+  const b = session();
+  b.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  b.it.opening();
+  b.it.hail({ v: 5, now: 1, nonce: NONCE });
+  b.it.claimed({ character: 'char-1' }, 'same');
+  ok(b.it.itemsVersion === 0, 'a server whose greeting says nothing of it is one from before, which folds two of one item into one');
+}
+
+{
   // What the console reads and what the game reads are one thing, and neither outlives the line.
   const a = session();
   a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);

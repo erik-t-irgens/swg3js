@@ -13,7 +13,7 @@
 import type * as THREE from 'three';
 import type { ClassId } from '../combat/kit';
 import type { SavedCharacter } from '../core/characters';
-import { chooseArrangement, isHairKey, normalizeOwned, occupancy, partToItemId, planHold, resolveKit, slotGroupOf, speciesWords, migrateInventory, type Fit, type Hand, type HeldRef, type OwnedItem } from '../core/inventory.ts';
+import { ITEMS_MOST, chooseArrangement, collapseOwned, isHairKey, mintThing, normalizeOwned, occupancy, pairOwned, partToItemId, planHold, pruneThings, resolveKit, slotGroupOf, speciesWords, migrateInventory, wornThingOf, type Fit, type Hand, type HeldRef, type ListedItem, type OwnedItem } from '../core/inventory.ts';
 import { itemInfo, wardrobeIndex, type ItemContext } from './items.ts';
 import type { Character } from './character';
 import type { Player } from './player';
@@ -33,13 +33,19 @@ export interface EquipmentDeps {
   /** Something changed: what is owned, worn or held, or which items are being put on. */
   changed(what: 'owned' | 'worn' | 'held' | 'busy'): void;
   /**
-   * An item appeared in this character's list, or left it, on this browser's own say-so: the
+   * A thing appeared in this character's list, or left it, on this browser's own say-so: the
    * starting kit, a give, something worn that was not owned, a destroy. The wiring hands it to the
    * server so that its rows and this cache do not drift. A trade never comes this way -- an item
    * between two players is moved by the server and arrives here as a whole list (`reconcile`) --
    * and with no server nothing is wired to it at all, which is why it is optional.
    */
-  ledger?: (what: 'add' | 'drop', kind: 'wear' | 'weapon', id: string) => void;
+  ledger?: (what: 'add' | 'drop', item: OwnedItem) => void;
+  /**
+   * Why a second of an item may not be given here, or '' when it may: the server holding this
+   * character is one from before things had names, which would fold the second into the first.
+   * Optional; with nothing wired a second may always be given.
+   */
+  refuseAnother?: () => string;
   baseUrl: string;
 }
 
@@ -49,10 +55,18 @@ export interface EquipmentSnapshot {
   /** Worn catalogue items: id -> the part it is worn under. */
   worn: Record<string, string>;
   held: { right: string | null; left: string | null };
+  /** Which thing each worn item is (catalogue id to its name), where it is owned: two of one shirt, and the one on. */
+  wornThing: Record<string, string>;
+  /** Which thing is in each hand, where it is owned. */
+  heldThing: { right: string | null; left: string | null };
+  /** The record's own choices of which copy is worn and held, where it is not the oldest. */
+  chosen: { worn: Record<string, string>; held: Record<string, string> };
   /** Keys (`wear:<id>`, `weapon:<id>`) being put on or taken up. */
   busy: string[];
   /** The record's migration mark; null with no record. */
   inv: 1 | null;
+  /** Whether the record's items have been brought into named things (`collapseOwned`); null with no record. */
+  named: 1 | null;
   /** The record played, by name; null on the select screen and in the creator. */
   record: string | null;
   species: string;
@@ -166,12 +180,25 @@ export class Equipment {
     try {
       const ctx = await this.itemContext();
       if (epoch !== this.epoch) return;
+      let changed = false;
       if (c.inv !== 1) {
         const now = Date.now();
         const kit = resolveKit(c.class, this.look(ctx), now);
         migrateInventory(c, kit.items, (part) => this.itemIdOf(part), now);
-        this.deps.persist(c);
-      } else c.items = normalizeOwned(c.items);
+        changed = true;
+      } else {
+        // A row given a name here is saved with it, so the name a server is handed is the one the
+        // record keeps: minted afresh on every load, it would change under the server each time.
+        changed = (c.items ?? []).some((o) => !o?.thing);
+        c.items = normalizeOwned(c.items);
+      }
+      // Once, before any server is handed the list: a second copy the creator once made is collapsed
+      // to the one on the body, since a server that keeps two of one item would keep it for ever.
+      if (c.named !== 1) {
+        collapseOwned(c);
+        changed = true;
+      }
+      if (changed) this.deps.persist(c);
     } catch (err) {
       console.warn(`inventory: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -199,24 +226,90 @@ export class Equipment {
     return [...(this.deps.record()?.items ?? [])];
   }
 
-  /** Into the record's items, unsaved; true when it is new. */
+  /** Into the record's items, unsaved; true when it is new. One of each: an item already owned is not given again. */
   private addOwned(kind: 'wear' | 'weapon', id: string): boolean {
     const rec = this.deps.record();
     if (!rec) return false;
     const items = (rec.items ??= []);
     if (items.some((o) => o.kind === kind && o.id === id)) return false;
-    items.push({ id, kind, got: Date.now() });
-    this.deps.ledger?.('add', kind, id);
+    this.push(items, kind, id);
     return true;
   }
 
-  /** Give an item: true when it is new (and saved); false, and nothing, when it is owned already or no record is played. */
+  /** A new thing of one item into the list, under a name of its own, and told to the ledger. */
+  private push(items: OwnedItem[], kind: 'wear' | 'weapon', id: string): OwnedItem {
+    const got = Date.now();
+    let thing = mintThing(kind, id, got);
+    // A name is unique in one character's list and nowhere else, so it is only ever checked there.
+    while (items.some((o) => o.thing === thing)) thing = mintThing(kind, id, got);
+    const row: OwnedItem = { id, kind, got, thing };
+    items.push(row);
+    this.deps.ledger?.('add', row);
+    return row;
+  }
+
+  /**
+   * Give an item: true when it is new (and saved); false, and nothing, when it is owned already or no
+   * record is played. One of each, which is what the starting kit and a job's reward want; a second
+   * copy is `giveAnother`.
+   */
   give(kind: 'wear' | 'weapon', id: string): boolean {
     const rec = this.deps.record();
     if (!rec || !this.addOwned(kind, id)) return false;
     this.deps.persist(rec);
     this.deps.changed('owned');
     return true;
+  }
+
+  /**
+   * Give another of an item, whether or not one is owned already: the developer's give tab and the
+   * console. '' when it went in, else why not -- no character is being played, the character already
+   * holds as many things as a server keeps for one (`ITEMS_MOST`, which past it would cut or refuse the
+   * copy and take it away again at the next list), or the server holding this one folds two of one item
+   * into one, which would quietly cost the second.
+   */
+  giveAnother(kind: 'wear' | 'weapon', id: string): string {
+    const rec = this.deps.record();
+    if (!rec) return 'no character is being played';
+    if ((rec.items ?? []).length >= ITEMS_MOST) return `a character carries ${ITEMS_MOST} things`;
+    const refused = this.deps.refuseAnother?.() ?? '';
+    if (refused) return refused;
+    this.push((rec.items ??= []), kind, id);
+    this.deps.persist(rec);
+    this.deps.changed('owned');
+    return '';
+  }
+
+  /**
+   * A thing the server wrote down on its own -- a job's reward, paid through its ledger -- into the
+   * backpack under the name the server gave it, with nothing said back: the server is where it came
+   * from. False when it is here already (this browser's own, answered) or no record is played. A row
+   * from a server before things had names names none, and is given one here.
+   *
+   * It waits its turn in the queue like everything else that writes the items. The server sends the list
+   * and then the reward it owed, and the list's `reconcile` may still be waiting behind a piece going on:
+   * written at once, the reward was in the backpack before that older list was laid over it, which read it
+   * as gone and took it out while the server held it. Here already means the same thing by its name and
+   * what it is, as a list is paired (`pairOwned`); a name another of this character's things goes under,
+   * which nothing honest sends, is not taken over, and the next list pairs this one by what it is.
+   */
+  receive(item: ListedItem): Promise<boolean> {
+    return this.run('receive', false, async () => {
+      const rec = this.deps.record();
+      if (!rec) return false;
+      const items = (rec.items ??= []);
+      const same = (o: OwnedItem) => o.kind === item.kind && o.id === item.id && (!item.thing || o.thing === item.thing);
+      if (items.some(same)) return false;
+      const got = item.got || Date.now();
+      const thing = item.thing && !items.some((o) => o.thing === item.thing) ? item.thing : mintThing(item.kind, item.id, got);
+      const row: OwnedItem = { id: item.id, kind: item.kind, got, thing };
+      if (item.tint) row.tint = { ...item.tint };
+      if (item.tint !== undefined && item.tintAt) row.tintAt = item.tintAt;
+      items.push(row);
+      this.deps.persist(rec);
+      this.deps.changed('owned');
+      return true;
+    });
   }
 
   /**
@@ -259,6 +352,64 @@ export class Equipment {
   }
 
   /**
+   * The record's items, every one with a name. A record is read in through `load`, which names them, so
+   * this only ever names a row put in by hand since (the console, a test) -- and names it once, in place.
+   */
+  private namedItems(rec: SavedCharacter): OwnedItem[] {
+    if ((rec.items ?? []).some((o) => !o?.thing)) rec.items = normalizeOwned(rec.items);
+    return rec.items ?? [];
+  }
+
+  /** One owned thing by its name, or null. */
+  itemOf(thing: string): OwnedItem | null {
+    const rec = this.deps.record();
+    if (!thing || !rec) return null;
+    return this.namedItems(rec).find((o) => o.thing === thing) ?? null;
+  }
+
+  /**
+   * Which owned copy of an item is the one worn (a wardrobe item) or held (a weapon): the record's own
+   * choice while it stands, else the oldest. Null when none is owned. It says nothing about whether
+   * the item is on the body at all; that is the body's to say.
+   */
+  thingInUse(kind: 'wear' | 'weapon', id: string): string | null {
+    const rec = this.deps.record();
+    if (!rec) return null;
+    return wornThingOf(this.namedItems(rec), kind, id, kind === 'wear' ? rec.wornThings : rec.heldThings);
+  }
+
+  /** Make one owned copy the one worn or held, unsaved: written down only where it is not the oldest. */
+  private choose(kind: 'wear' | 'weapon', id: string, thing: string): void {
+    const rec = this.deps.record();
+    const it = this.itemOf(thing);
+    if (!rec || !it || it.kind !== kind || it.id !== id) return;
+    const key = kind === 'wear' ? 'wornThings' : 'heldThings';
+    const map: Record<string, string> = { ...(rec[key] ?? {}) };
+    if (wornThingOf(this.namedItems(rec), kind, id, null) === thing) delete map[id];
+    else map[id] = thing;
+    if (Object.keys(map).length) rec[key] = map;
+    else delete rec[key];
+  }
+
+  /**
+   * The other of two identical things becomes the one worn or held: nothing comes off and nothing is
+   * loaded -- the mesh is the item's and the same for both -- and the record says which copy it is.
+   */
+  private switchTo(kind: 'wear' | 'weapon', id: string, thing: string): string {
+    this.choose(kind, id, thing);
+    this.save();
+    this.deps.changed(kind === 'wear' ? 'worn' : 'held');
+    return `${this.nameOf(kind, id)}: ${kind === 'wear' ? 'wearing' : 'holding'} this one now`;
+  }
+
+  /** Whether `thing` is owned, is a copy of this item, and is not the copy in use now: the other of two. */
+  private isOtherCopy(kind: 'wear' | 'weapon', id: string, thing: string | undefined): thing is string {
+    if (!thing) return false;
+    const it = this.itemOf(thing);
+    return !!it && it.kind === kind && it.id === id && this.thingInUse(kind, id) !== thing;
+  }
+
+  /**
    * Run one operation after every earlier one, tied to the character and epoch it was asked for: a
    * reset or a character change while it waits ends it as `dropped`, touching nothing.
    */
@@ -290,8 +441,11 @@ export class Equipment {
     return this.run(`wear:${id}`, DROPPED, (alive) => this.wearOp(id, opts, alive));
   }
 
-  /** The body of `wear`, run in its turn in the queue (by `wear`, or by `use` once it has decided to put on). */
-  private async wearOp(id: string, opts: { give?: boolean; force?: boolean }, alive: () => boolean): Promise<string> {
+  /**
+   * The body of `wear`, run in its turn in the queue (by `wear`, or by `use` once it has decided to put
+   * on). `thing` is which owned copy goes on, where the backpack's own cell said.
+   */
+  private async wearOp(id: string, opts: { give?: boolean; force?: boolean; thing?: string }, alive: () => boolean): Promise<string> {
     const c = this.deps.character();
     if (!c) return 'this character is a single model';
     const ctx = await this.itemContext();
@@ -335,6 +489,7 @@ export class Equipment {
     this.slotsWorn.set(id, slots);
     for (const d of displaced) this.slotsWorn.delete(d);
     if (opts.give) this.addOwned('wear', id);
+    if (opts.thing) this.choose('wear', id, opts.thing);
     this.save();
     this.deps.changed('worn');
     const off = displaced.map((d) => this.nameOf('wear', d));
@@ -386,12 +541,15 @@ export class Equipment {
    * Take up a weapon: where it goes and what comes out of the hands by `planHold`, its model prepared on
    * every hold (unless `prepare` is false), then in hand. Returns the kit it wants; the caller switches.
    */
-  hold(def: WeaponDef, hand: Hand, opts: { give?: boolean; prepare?: boolean } = {}): Promise<UseResult> {
+  hold(def: WeaponDef, hand: Hand, opts: { give?: boolean; prepare?: boolean; thing?: string } = {}): Promise<UseResult> {
     return this.run(`weapon:${def.id}`, { note: DROPPED, wants: null }, (alive) => this.holdOp(def, hand, opts, alive));
   }
 
-  /** The body of `hold`, run in its turn in the queue (by `hold`, or by `use` once it has decided to take up). */
-  private async holdOp(def: WeaponDef, hand: Hand, opts: { give?: boolean; prepare?: boolean }, alive: () => boolean): Promise<UseResult> {
+  /**
+   * The body of `hold`, run in its turn in the queue (by `hold`, or by `use` once it has decided to take
+   * up). `thing` is which owned copy goes in the hand.
+   */
+  private async holdOp(def: WeaponDef, hand: Hand, opts: { give?: boolean; prepare?: boolean; thing?: string }, alive: () => boolean): Promise<UseResult> {
     const dropped: UseResult = { note: DROPPED, wants: null };
     const weapons = await this.deps.weaponsLoaded();
     if (!alive()) return dropped;
@@ -413,6 +571,7 @@ export class Equipment {
     for (const h of plan.stow) p.unequip(h);
     const wants = p.equip(def, model, plan.hand);
     if (opts.give) this.addOwned('weapon', def.id);
+    if (opts.thing) this.choose('weapon', def.id, opts.thing);
     this.save();
     this.deps.changed('held');
     const name = this.lastCtx ? itemInfo('weapon', def.id, this.lastCtx).name : def.id;
@@ -432,59 +591,75 @@ export class Equipment {
   /**
    * The backpack's double-click: on if off, off if on; a weapon to `hand` (default the right). Decided in
    * its turn in the queue, not when asked, so two quick uses of one item put it on and take it off again
-   * rather than both putting it on.
+   * rather than both putting it on. `thing` is the owned copy the cell was: when another copy of the
+   * item is the one on the body or in the hand, this one takes its place and nothing comes off.
    */
-  use(kind: 'wear' | 'weapon', id: string, hand?: Hand): Promise<UseResult> {
+  use(kind: 'wear' | 'weapon', id: string, hand?: Hand, thing?: string): Promise<UseResult> {
     const dropped: UseResult = { note: DROPPED, wants: null };
     return this.run(`${kind}:${id}`, dropped, async (alive) => {
       if (kind === 'wear') {
         // A hairstyle a record still owns from before hair stopped being an item (a Sullustan's
         // `sul_hair_*`) is kept and never used: on or off, a style is the appearance page's.
         if (isHairKey(id)) return { note: HAIR_ELSEWHERE, wants: null };
-        if (this.wornPartOf(id)) return { note: this.takeOff(id), wants: null };
-        return { note: await this.wearOp(id, {}, alive), wants: null };
+        if (this.wornPartOf(id)) {
+          if (this.isOtherCopy('wear', id, thing)) return { note: this.switchTo('wear', id, thing), wants: null };
+          return { note: this.takeOff(id), wants: null };
+        }
+        return { note: await this.wearOp(id, { thing }, alive), wants: null };
       }
       const e = this.deps.player.equipped;
+      const other = this.isOtherCopy('weapon', id, thing);
       if (hand === 'left') {
-        if (e.left?.id === id) return { note: this.stow('left'), wants: null };
+        if (e.left?.id === id) return { note: other ? this.switchTo('weapon', id, thing!) : this.stow('left'), wants: null };
       } else {
-        if (e.right?.id === id) return { note: this.stow('right'), wants: null };
-        if (e.left?.id === id) return { note: this.stow('left'), wants: null };
+        if (e.right?.id === id) return { note: other ? this.switchTo('weapon', id, thing!) : this.stow('right'), wants: null };
+        if (e.left?.id === id) return { note: other ? this.switchTo('weapon', id, thing!) : this.stow('left'), wants: null };
       }
       const weapons = await this.deps.weaponsLoaded();
       if (!alive()) return dropped;
       const def = weapons?.weapons.find((w) => w.id === id);
       if (!def) return { note: weapons ? 'not on the weapons rack' : 'no weapons converted', wants: null };
-      return this.holdOp(def, hand ?? 'right', {}, alive);
+      return this.holdOp(def, hand ?? 'right', { thing }, alive);
     });
   }
 
   /**
-   * Destroy an owned item: off the body or out of the hand first, then out of the items, saved. In the
-   * queue under the item's own key: a put-on or take-up of it still in flight finishes first, so its save
-   * (which gives whatever is worn and held) cannot bring the item back after it is destroyed.
+   * Destroy one owned thing: off the body or out of the hand first when it is the copy in use, then out
+   * of the items, saved -- that one row and no other, here and on the server alike. Without `thing` it
+   * is the copy in use, else the oldest (`thingInUse`). In the queue under the item's own key: a put-on
+   * or take-up of it still in flight finishes first, so its save (which gives whatever is worn and held)
+   * cannot bring the item back after it is destroyed.
    */
-  destroy(kind: 'wear' | 'weapon', id: string): Promise<string> {
-    const owns = (rec: SavedCharacter | null) => !!rec?.items?.some((o) => o.kind === kind && o.id === id);
+  destroy(kind: 'wear' | 'weapon', id: string, thing?: string): Promise<string> {
+    const target = (rec: SavedCharacter | null): string | null => {
+      if (!rec) return null;
+      const items = this.namedItems(rec);
+      if (thing) return items.some((o) => o.thing === thing && o.kind === kind && o.id === id) ? thing : null;
+      return wornThingOf(items, kind, id, kind === 'wear' ? rec.wornThings : rec.heldThings);
+    };
     const first = this.deps.record();
     if (!first) return Promise.resolve('no character is being played');
-    if (!owns(first)) return Promise.resolve('not owned');
+    if (!target(first)) return Promise.resolve('not owned');
     return this.run(`${kind}:${id}`, DROPPED, async (alive) => {
       await this.itemContext();
       if (!alive()) return DROPPED;
       const rec = this.deps.record();
       if (!rec) return 'no character is being played';
-      if (!owns(rec)) return 'not owned';
+      const doomed = target(rec);
+      const row = doomed ? (rec.items ?? []).find((o) => o.thing === doomed) : undefined;
+      if (!doomed || !row) return 'not owned';
       const name = this.nameOf(kind, id);
+      // Only the copy on the body or in the hand comes off: destroying the other of two leaves the one worn on.
+      const inUse = this.thingInUse(kind, id) === doomed;
       if (kind === 'wear') {
-        if (this.wornPartOf(id)) this.takeOff(id);
-      } else {
+        if (inUse && this.wornPartOf(id)) this.takeOff(id);
+      } else if (inUse) {
         const e = this.deps.player.equipped;
         if (e.right?.id === id) this.deps.player.unequip('right');
         if (e.left?.id === id) this.deps.player.unequip('left');
       }
-      rec.items = (rec.items ?? []).filter((o) => !(o.kind === kind && o.id === id));
-      this.deps.ledger?.('drop', kind, id);
+      rec.items = (rec.items ?? []).filter((o) => o.thing !== doomed);
+      this.deps.ledger?.('drop', row);
       this.save({ noGive: true });
       this.deps.changed('owned');
       this.deps.changed(kind === 'wear' ? 'worn' : 'held');
@@ -492,22 +667,25 @@ export class Equipment {
     });
   }
 
-  /** Whether this character owns an item now: what a trade asks before it will offer one. */
-  owns(kind: 'wear' | 'weapon', id: string): boolean {
-    return !!this.deps.record()?.items?.some((o) => o.kind === kind && o.id === id);
+  /** Whether this character owns a thing now, by its name: what a trade asks before it will offer one. */
+  owns(thing: string): boolean {
+    return !!this.itemOf(thing);
   }
 
   /**
-   * What an item is doing instead of sitting in the backpack: worn, or in one of the hands. It is
-   * what a trade reads to refuse something that is on the body rather than taking it off the player
-   * behind their back, and it is read from the body and the hands themselves, never from the record,
-   * because the record is written after the fact and a piece being put on is on before it is saved.
+   * What a thing is doing instead of sitting in the backpack: worn, or in one of the hands. It is what a
+   * trade reads to refuse something that is on the body rather than taking it off the player behind
+   * their back, and whether the item is on is read from the body and the hands themselves, never from
+   * the record, because the record is written after the fact and a piece being put on is on before it
+   * is saved. Of two of one shirt, only the copy in use (`thingInUse`) is; the other may be traded.
    */
-  inUse(kind: 'wear' | 'weapon', id: string): 'worn' | 'right' | 'left' | null {
-    if (kind === 'wear') return this.wornPartOf(id) ? 'worn' : null;
+  inUse(thing: string): 'worn' | 'right' | 'left' | null {
+    const it = this.itemOf(thing);
+    if (!it || this.thingInUse(it.kind, it.id) !== thing) return null;
+    if (it.kind === 'wear') return this.wornPartOf(it.id) ? 'worn' : null;
     const e = this.deps.player.equipped;
-    if (e.right?.id === id) return 'right';
-    if (e.left?.id === id) return 'left';
+    if (e.right?.id === it.id) return 'right';
+    if (e.left?.id === it.id) return 'left';
     return null;
   }
 
@@ -524,21 +702,28 @@ export class Equipment {
    * It runs in the queue like everything else, so a put-on or a take-up still in flight finishes
    * first and cannot land after the list it would contradict. Nothing is sent from here: the server
    * has already written the rows, and this is the browser catching up.
+   *
+   * The server's rows and this list are paired thing by thing (`pairOwned`): by name first, then what
+   * is left by kind and id, oldest with oldest, and a pair takes the server's name. Nothing is minted
+   * for a server that names its things, so a name and the colour on it survive every list. A thing
+   * that has gone comes off the body only when no other copy of it is left to wear. `now` is the
+   * server's clock as the list arrives, which a colour stamped here by a clock running fast is held to.
    */
-  reconcile(items: readonly OwnedItem[]): Promise<string> {
+  reconcile(items: readonly ListedItem[], now = Infinity): Promise<string> {
     return this.run('reconcile', DROPPED, async (alive) => {
       await this.itemContext();
       if (!alive()) return DROPPED;
       const rec = this.deps.record();
       if (!rec) return 'no character is being played';
-      const want = normalizeOwned(items as OwnedItem[]);
       const had = normalizeOwned(rec.items);
-      const wanted = new Set(want.map((o) => `${o.kind}:${o.id}`));
-      const gone = had.filter((o) => !wanted.has(`${o.kind}:${o.id}`));
-      const came = want.filter((o) => !had.some((h) => h.kind === o.kind && h.id === o.id));
+      const paired = pairOwned(had, items, undefined, now);
+      const want = paired.items;
+      const gone = paired.gone;
       let tookOff = false;
       let unhanded = false;
       for (const o of gone) {
+        // Another copy of it is still owned: the body keeps it on, and that copy is the one worn now.
+        if (want.some((w) => w.kind === o.kind && w.id === o.id)) continue;
         if (o.kind === 'wear') {
           if (this.wornPartOf(o.id)) {
             this.takeOff(o.id);
@@ -556,12 +741,23 @@ export class Equipment {
           unhanded = true;
         }
       }
+      // The record's choice of which copy is worn and held follows a thing whose name was the server's
+      // to give, so taking the server's name never quietly swaps one shirt for the other. After the
+      // taking off above, whose saves still read the list as it was.
+      for (const key of ['wornThings', 'heldThings'] as const) {
+        const map = rec[key];
+        if (!map) continue;
+        for (const id of Object.keys(map)) {
+          const to = paired.renamed.get(map[id]);
+          if (to) map[id] = to;
+        }
+      }
       rec.items = want;
       this.save({ noGive: true });
-      if (gone.length || came.length) this.deps.changed('owned');
+      if (gone.length || paired.came) this.deps.changed('owned');
       if (tookOff) this.deps.changed('worn');
       if (unhanded) this.deps.changed('held');
-      return reconcileWords(came.length, gone.length);
+      return reconcileWords(paired.came, gone.length);
     });
   }
 
@@ -574,6 +770,8 @@ export class Equipment {
     const rec = this.deps.record();
     const want = { ...(rec?.held ?? {}) };
     if (!want.right && !want.left) return;
+    // Which copy was in each hand, read before the first hand's save prunes the choice for the second.
+    const chosen = { ...(rec?.heldThings ?? {}) };
     const epoch = this.epoch;
     const p = this.deps.player;
     const lit = p.saberOn;
@@ -588,7 +786,7 @@ export class Equipment {
         unknown = true;
         continue;
       }
-      const r = await this.hold(def, hand, { prepare: opts.prepare });
+      const r = await this.hold(def, hand, { prepare: opts.prepare, thing: Object.prototype.hasOwnProperty.call(chosen, id) ? chosen[id] : undefined });
       if (r.note === DROPPED || epoch !== this.epoch) return;
     }
     if (!lit && p.saberOn) p.toggleSaber();
@@ -618,7 +816,18 @@ export class Equipment {
       if (e.left) this.addOwned('weapon', e.left.id);
     }
     rec.items = normalizeOwned(rec.items);
+    // Which copy is worn and held is kept only while that item is on and that copy is still owned.
+    // The worn half waits for a wardrobe to have been read (with none, nothing reads as worn), and the
+    // held half for the hands to be the ones the record is about (a resync saves before they are back).
+    if (this.lastCtx?.wardrobe) this.setChosen(rec, 'wornThings', pruneThings(rec.wornThings, rec.items, 'wear', new Set(this.wornPieces().map((w) => w.id))));
+    if (!opts.keepHands) this.setChosen(rec, 'heldThings', pruneThings(rec.heldThings, rec.items, 'weapon', new Set([e.right?.id, e.left?.id].filter((x): x is string => !!x))));
     this.deps.persist(rec);
+  }
+
+  /** A choice map on the record, or none at all when it is empty. */
+  private setChosen(rec: SavedCharacter, key: 'wornThings' | 'heldThings', map: Record<string, string> | undefined): void {
+    if (map && Object.keys(map).length) rec[key] = map;
+    else delete rec[key];
   }
 
   /** For the panel and the console: owned, worn, held, busy keys, the catalogues' state. */
@@ -626,13 +835,22 @@ export class Equipment {
     const rec = this.deps.record();
     const e = this.deps.player.equipped;
     const worn: Record<string, string> = {};
-    for (const w of this.wornPieces()) worn[w.id] = w.part;
+    const wornThing: Record<string, string> = {};
+    for (const w of this.wornPieces()) {
+      worn[w.id] = w.part;
+      const thing = this.thingInUse('wear', w.id);
+      if (thing) wornThing[w.id] = thing;
+    }
     return {
       owned: this.owned(),
       worn,
       held: { right: e.right?.id ?? null, left: e.left?.id ?? null },
+      wornThing,
+      heldThing: { right: e.right ? this.thingInUse('weapon', e.right.id) : null, left: e.left ? this.thingInUse('weapon', e.left.id) : null },
+      chosen: { worn: { ...(rec?.wornThings ?? {}) }, held: { ...(rec?.heldThings ?? {}) } },
       busy: [...this.busy.keys()],
       inv: rec?.inv ?? null,
+      named: rec?.named ?? null,
       record: rec?.name ?? null,
       species: this.deps.character()?.manifest.id ?? rec?.species ?? '',
       wardrobe: this.lastCtx ? !!this.lastCtx.wardrobe : null,

@@ -63,6 +63,11 @@ export class WardrobeUi {
   onWear: ((id: string) => Promise<boolean>) | null = null;
   /** Take worn parts off through the game's equipment, all in one step (saved with the character once); a note back. */
   onRemove: ((parts: string[]) => string) | null = null;
+  /**
+   * Give another copy of the piece picked into the backpack, a thing of its own, whether or not one is
+   * owned already; a note back. Only in the world, where the panel is a developer's give tool.
+   */
+  onGiveAnother: ((id: string) => string) | null = null;
   /** In the world the panel is a developer's give tool; in the creator it only dresses. */
   developer = false;
   /** A pick of the panel's own is going through the equipment: it rebuilds once at the end, so `refresh` waits for it. */
@@ -360,6 +365,7 @@ export class WardrobeUi {
       return;
     }
     if (what === 'use' && this.selected) await this.use(this.selected);
+    if (what === 'another' && this.selected && this.onGiveAnother) this.note(this.onGiveAnother(this.selected));
   }
 
   /** A double-click, or Enter: put it on, or take its slot off when it is on the body already. */
@@ -473,7 +479,10 @@ export class WardrobeUi {
     // "Take this slot off" is only offered when the slot holds something: worn, it is what the piece's
     // own button does, and with the slot empty there would be nothing for it to take off.
     const wearing = this.view?.groups.find((g) => g.id === c.group)?.wearing.length ?? 0;
-    const buttons = [c.on ? '' : `<button data-act="use">Wear</button>`, wearing ? `<button data-act="off:${escapeHtml(c.group)}">Take this slot off</button>` : ''].filter(Boolean).join('');
+    // "Give another" puts a second copy in the backpack, a thing of its own that may be worn, traded and
+    // coloured apart from the first: a developer's give, offered only in the world.
+    const another = this.developer && this.onGiveAnother ? `<button data-act="another" title="a second copy of this piece into the backpack">Give another</button>` : '';
+    const buttons = [c.on ? '' : `<button data-act="use">Wear</button>`, wearing ? `<button data-act="off:${escapeHtml(c.group)}">Take this slot off</button>` : '', another].filter(Boolean).join('');
     this.examine.innerHTML = `<div class="bp-examine-pic" data-initials="${escapeHtml(c.initials)}">${pic}</div><div class="bp-examine-text"><div class="bp-examine-head">${head}</div>${c.note ? `<div class="bp-fit ${c.fit}">${escapeHtml(c.note)}</div>` : ''}<div class="bp-state">${escapeHtml(slot)}${c.on ? ' · worn' : ''}</div>${paragraphs || '<p class="bp-nodesc">The game says nothing more about it.</p>'}</div><div class="bp-actions">${buttons}</div>`;
   }
 

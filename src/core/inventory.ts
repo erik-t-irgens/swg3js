@@ -35,7 +35,29 @@ export interface OwnedItem {
    * be two colours.
    */
   tint?: Record<string, number>;
+  /**
+   * When those colours were set, so the newer of two copies of them wins; absent for never. It is the
+   * clock the server hands out (`sharedClock.now()`, the server's own while one answers and this
+   * machine's while none does), never this machine's alone: a clock that runs fast would otherwise win
+   * against every colour set after it. A time past the server's clock is read as now wherever it is
+   * compared (`pairOwned`, `Trade.noteTint`, and the server's `cleanTintAt`).
+   */
+  tintAt?: number;
 }
+
+/**
+ * How many things one character may own: the server's own cap (`LEDGER_TUNING.items` in
+ * server/ledger.mjs), which a backpack handed up is cut to and an add past it is refused at. A copy
+ * given here past it would be cut or refused there and then gone at the next list, so the developer's
+ * "give another" stops at it in words. A test holds the two numbers equal.
+ */
+export const ITEMS_MOST = 400;
+
+/**
+ * How much of a catalogue id a thing's name carries: 60 characters, which with the moment (eight or
+ * nine base-36 digits), the chance (at most five) and the kind's letter and two bars stays under 80.
+ */
+const THING_ID_MOST = 60;
 
 /**
  * A name for one thing, from what it is and when it was got.
@@ -43,26 +65,39 @@ export interface OwnedItem {
  * It has to be unique within one character's own list and nowhere else, so it is short: the kind,
  * the catalogue id, the moment and a few characters of chance. `crypto.randomUUID` is not reached
  * for because this runs in a node test as well and a character's list is a few hundred rows at most.
+ *
+ * The id in it is cut at `THING_ID_MOST` characters, so a name is never past the 80 a server and this
+ * browser take one to (`cleanThing` in server/ledger.mjs, `readThing` in src/net/trade.ts): a name
+ * refused there is no name, and two of an item with no names are folded into one. The longest
+ * catalogue id the packs carry is 46 characters, so no name made so far is any different for it.
  */
 export function mintThing(kind: string, id: string, got: number, chance = Math.random): string {
   const tail = Math.floor(chance() * 0x1000000)
     .toString(36)
     .padStart(4, '0');
-  return `${kind[0] ?? 'x'}${id}|${Math.round(got).toString(36)}|${tail}`;
+  return `${kind[0] ?? 'x'}${id.slice(0, THING_ID_MOST)}|${Math.round(got).toString(36)}|${tail}`;
 }
 
 /**
- * A per-thing colour set, cleaned: the customizer's own variable names and whole numbers in its own
- * range. Anything else is dropped, so a record edited by hand cannot put a colour out of a palette.
+ * The lowest value a colour may take: a colour of its own rather than a palette's, written as a negative
+ * number, `-(0xRRGGBB + 1)`, so white is the lowest of all. A palette index is 0 to 255. The server keeps
+ * the same range (`cleanTintSet` in server/ledger.mjs).
  */
-export function cleanTint(tint: unknown, most = 255): Record<string, number> | undefined {
+export const TINT_LEAST = -16777216;
+
+/**
+ * A per-thing colour set, cleaned: the customizer's own variable names and whole numbers in its own
+ * range -- a palette index, or a colour of its own below nought. Anything else is dropped, so a record
+ * edited by hand cannot put a colour out of a palette.
+ */
+export function cleanTint(tint: unknown, most = 255, least = TINT_LEAST): Record<string, number> | undefined {
   if (!tint || typeof tint !== 'object' || Array.isArray(tint)) return undefined;
   const out: Record<string, number> = {};
   let any = false;
   for (const [k, v] of Object.entries(tint as Record<string, unknown>)) {
     if (!/^[A-Za-z0-9_./|-]{1,64}$/.test(k) || k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
     if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-    const n = Math.max(0, Math.min(most, Math.round(v)));
+    const n = Math.max(least, Math.min(most, Math.round(v)));
     out[k] = n;
     any = true;
   }
@@ -276,9 +311,170 @@ export function normalizeOwned(items: readonly OwnedItem[] | null | undefined, m
     const row: OwnedItem = { id: o.id, kind: o.kind, got, thing };
     const tint = cleanTint(o.tint);
     if (tint) row.tint = tint;
+    if (Number.isFinite(o.tintAt) && (o.tintAt ?? 0) > 0) row.tintAt = o.tintAt;
     out.push(row);
   }
   return out;
+}
+
+/**
+ * One of each item, the first of each kind and catalogue id in the order given: what bringing a
+ * character into the backpack means (`migrateInventory`), what the creator's first items are (it is
+ * handed what the character wears and the kit, which overlap), and what goes up to a server whose
+ * hail does not say it keeps two of one item.
+ */
+export function firstItems<T extends { id: string; kind: string }>(items: readonly T[]): T[] {
+  const once = new Map<string, T>();
+  for (const o of items) {
+    if (!o || typeof o.id !== 'string' || !o.id) continue;
+    const k = `${o.kind}:${o.id}`;
+    if (!once.has(k)) once.set(k, o);
+  }
+  return [...once.values()];
+}
+
+/**
+ * Which of a character's copies of one item is the one on the body or in a hand: the one the record
+ * names (`wornThings` for a worn piece, `heldThings` for a weapon, catalogue id to thing) while it is
+ * still owned, else the oldest copy, the first in the list on a tie. Null when none is owned. The one
+ * answer the backpack, the trade window and what the server is told is worn all read, so the three can
+ * never point at different shirts.
+ */
+export function wornThingOf(items: readonly OwnedItem[], kind: string, id: string, chosen?: Readonly<Record<string, string>> | null): string | null {
+  const want = chosen && Object.prototype.hasOwnProperty.call(chosen, id) ? chosen[id] : '';
+  let oldest: OwnedItem | null = null;
+  for (const o of items) {
+    if (o.kind !== kind || o.id !== id || !o.thing) continue;
+    if (want && o.thing === want) return o.thing;
+    if (!oldest || o.got < oldest.got) oldest = o;
+  }
+  return oldest?.thing ?? null;
+}
+
+/**
+ * The record's choice of which copy is worn or held, written down only when it is not the one the
+ * rule would take anyway, and kept only while that item is still on the body or in a hand and the copy
+ * still owned: the map never names a thing that is not there to wear.
+ */
+export function pruneThings(chosen: Readonly<Record<string, string>> | undefined, items: readonly OwnedItem[], kind: string, inUse: ReadonlySet<string>): Record<string, string> | undefined {
+  if (!chosen) return undefined;
+  let out: Record<string, string> | undefined;
+  for (const id of Object.keys(chosen)) {
+    if (!inUse.has(id)) continue;
+    const thing = chosen[id];
+    if (!items.some((o) => o.kind === kind && o.id === id && o.thing === thing)) continue;
+    // The oldest copy needs no line of its own: it is what absent means.
+    if (wornThingOf(items, kind, id, null) === thing) continue;
+    (out ??= {})[id] = thing;
+  }
+  return out;
+}
+
+/**
+ * One row of what a server says a character owns: what it is, which one (`thing`, absent from a server
+ * built before things had names), and its colours (`null` once taken off, absent when it never had any).
+ */
+export interface ListedItem {
+  id: string;
+  kind: 'wear' | 'weapon';
+  got: number;
+  thing?: string;
+  tint?: Record<string, number> | null;
+  tintAt?: number;
+}
+
+/**
+ * The server's list laid over this browser's, thing by thing, which is how a list that stands is
+ * taken without minting a single name: a server row and a local thing of the same name are the same
+ * thing; what is left is paired by kind and catalogue id, the oldest of each side with the oldest of
+ * the other, and the pair takes the server's name (`renamed`, old name to new). A server row with no
+ * local thing is a thing that came; a local thing with no server row is one that went.
+ *
+ * What a paired thing keeps: the server's name, kind, id and when it was got, and the newer of the two
+ * colours by when each was set -- the server's when it is as new, since it is the truth; a server row
+ * that says nothing of colour leaves this browser's alone. Nothing is minted for a server that names
+ * its things; a server from before names gives each new row a name here, as it always had to.
+ *
+ * `now` is the server's clock as this list is read. A colour this browser stamped later than that was
+ * stamped by a clock running fast, while no server answered, and is read -- and kept -- as set now: it
+ * still wins against what the server held before it, and stops winning against what comes after, which
+ * left alone it would have done for as long as the clock was ahead.
+ */
+export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem[], mint: (kind: string, id: string, got: number) => string = mintThing, now = Infinity): { items: OwnedItem[]; renamed: Map<string, string>; came: number; gone: OwnedItem[] } {
+  const byThing = new Map<string, OwnedItem>();
+  for (const o of had) if (o.thing) byThing.set(o.thing, o);
+  const used = new Set<OwnedItem>();
+  const out: (OwnedItem | null)[] = new Array(server.length).fill(null);
+  const renamed = new Map<string, string>();
+  let came = 0;
+  const cap = Number.isFinite(now) ? now : Infinity;
+  const merge = (local: OwnedItem, s: ListedItem): OwnedItem => {
+    used.add(local);
+    const thing = s.thing || local.thing || mint(s.kind, s.id, s.got);
+    if (local.thing && thing !== local.thing) renamed.set(local.thing, thing);
+    const row: OwnedItem = { id: s.id, kind: s.kind, got: s.got || local.got, thing };
+    const localAt = local.tintAt !== undefined ? Math.min(local.tintAt, cap) : undefined;
+    const theirs = s.tint !== undefined && (s.tintAt ?? 0) >= (localAt ?? 0);
+    const tint = theirs ? s.tint : local.tint;
+    const at = theirs ? s.tintAt : localAt;
+    if (tint) row.tint = { ...tint };
+    if (at && at > 0) row.tintAt = at;
+    return row;
+  };
+  // By name first.
+  const left: number[] = [];
+  for (let i = 0; i < server.length; i++) {
+    const s = server[i];
+    const local = s.thing ? byThing.get(s.thing) : undefined;
+    if (local && !used.has(local) && local.kind === s.kind && local.id === s.id) out[i] = merge(local, s);
+    else left.push(i);
+  }
+  // Then what is left, by what it is: the oldest with the oldest, each side in its own order on a tie.
+  const pool = new Map<string, OwnedItem[]>();
+  for (const o of had) {
+    if (used.has(o)) continue;
+    const k = `${o.kind}:${o.id}`;
+    const list = pool.get(k);
+    if (list) list.push(o);
+    else pool.set(k, [o]);
+  }
+  for (const list of pool.values()) list.sort((a, b) => a.got - b.got);
+  left.sort((a, b) => server[a].got - server[b].got || a - b);
+  for (const i of left) {
+    const s = server[i];
+    const local = pool.get(`${s.kind}:${s.id}`)?.shift();
+    if (local) out[i] = merge(local, s);
+    else {
+      const row: OwnedItem = { id: s.id, kind: s.kind, got: s.got, thing: s.thing || mint(s.kind, s.id, s.got) };
+      if (s.tint) row.tint = { ...s.tint };
+      if (s.tint !== undefined && s.tintAt && s.tintAt > 0) row.tintAt = s.tintAt;
+      out[i] = row;
+      came++;
+    }
+  }
+  const gone = had.filter((o) => !used.has(o));
+  return { items: normalizeOwned(out.filter((o): o is OwnedItem => !!o)), renamed, came, gone };
+}
+
+/**
+ * Bring a record's items into named things, once and in place: before a thing had a name nothing
+ * could give a character two of one item, so two of one kind and id in an old record are the creator's
+ * doing (it once handed a new character both the shirt it was dressed in and the kit's shirt) and are
+ * collapsed to the one on the body or in a hand (`wornThingOf`), and the record is marked `named: 1`.
+ * A record already marked comes back untouched. It runs before a server is first handed the list, or
+ * a server that keeps two of one item would keep the duplicate for ever.
+ */
+export function collapseOwned<T extends { items?: OwnedItem[]; named?: 1; wornThings?: Record<string, string>; heldThings?: Record<string, string> }>(c: T): T {
+  if (c.named === 1) return c;
+  const items = normalizeOwned(c.items);
+  const keep = new Set<string>();
+  for (const o of firstItems(items)) {
+    const thing = wornThingOf(items, o.kind, o.id, o.kind === 'wear' ? c.wornThings : c.heldThings);
+    if (thing) keep.add(thing);
+  }
+  c.items = items.filter((o) => !!o.thing && keep.has(o.thing));
+  c.named = 1;
+  return c;
 }
 
 /**
@@ -315,13 +511,7 @@ export function migrateInventory<T extends { items?: OwnedItem[]; outfit: string
   // collapse by kind and id happened in `normalizeOwned`, which now keeps duplicates because two of
   // one item are two things. So the collapse lives here, where it is right: bringing a character
   // into the backpack gives it one of each, and getting a second one afterwards is a second thing.
-  const once = new Map<string, OwnedItem>();
-  for (const o of [...(c.items ?? []), ...worn, ...kit]) {
-    if (!o || typeof o.id !== 'string' || !o.id) continue;
-    const k = `${o.kind}:${o.id}`;
-    if (!once.has(k)) once.set(k, o);
-  }
-  c.items = normalizeOwned([...once.values()]);
+  c.items = normalizeOwned(firstItems([...(c.items ?? []), ...worn, ...kit]));
   c.inv = 1;
   return c;
 }

@@ -136,7 +136,7 @@ import { GIVE_TUNE } from './ui/giveModel.ts';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
 import { Equipment } from './player/equipment';
 import { itemInfo, WEAPON_ORDER, type ItemContext } from './player/items';
-import { OFF_HAND_CLASSES, normalizeOwned, slotRank, slotWords, speciesWords } from './core/inventory';
+import { OFF_HAND_CLASSES, firstItems, normalizeOwned, slotRank, slotWords, speciesWords } from './core/inventory';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS, forceFxReport, type ForceFxTune } from './combat/forcePowers';
 import { setForceBeamLook } from './combat/forceLightning.ts';
@@ -290,7 +290,7 @@ import { hourOfDay } from './world/dayPhase.ts';
 import { sharedClock } from './world/sharedClock.ts';
 import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
-import { TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
+import { ITEMS_NAMED, OLD_SERVER_WORDS, TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
 import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
 import { DebugMenu } from './ui/debugMenu.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
@@ -757,7 +757,7 @@ class App {
    * when there is a server to tell; until then, and for ever in a game played alone, it is null and
    * the backpack is local storage exactly as it always was.
    */
-  private tradeLedger: ((what: 'add' | 'drop', kind: 'wear' | 'weapon', id: string) => void) | null = null;
+  private tradeLedger: ((what: 'add' | 'drop', item: TradeItem) => void) | null = null;
   /** Where "this is what I am wearing and holding" goes, for the same reason and by the same wiring. */
   private tradeUsing: (() => void) | null = null;
   /** Where the group roster's Trade button goes; the trade wiring fills it in. */
@@ -1691,7 +1691,10 @@ class App {
       // An item this browser gave itself or destroyed goes to the server's ledger as well, so its
       // rows and this cache do not drift. It is set by the trade wiring and is null until then, and
       // with no server it stays quiet: a game played alone writes to local storage and nowhere else.
-      ledger: (what, kind, id) => this.tradeLedger?.(what, kind, id),
+      ledger: (what, item) => this.tradeLedger?.(what, { kind: item.kind, id: item.id, got: item.got, thing: item.thing }),
+      // A second of an item is refused only where a server holds this character and is one from
+      // before things had names: it would fold the second into the first and the copy would be lost.
+      refuseAnother: () => (this.net.session.authority === 'server' && this.net.session.itemsVersion < ITEMS_NAMED ? OLD_SERVER_WORDS : ''),
       baseUrl: import.meta.env.BASE_URL,
     });
     // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
@@ -2169,6 +2172,8 @@ class App {
     // The Clothes (give) tab dresses through the equipment: the game's slots, the compile before the
     // piece shows, and in the world the piece given. In the creator nothing is given (no record).
     this.wardrobe.onWear = (id) => this.equipment.wear(id, { give: true, force: true }).then((note) => !/cannot|not in|no wardrobe|single model|dropped|could not/.test(note));
+    // The give tab's "Give another": a second copy of the piece into the backpack, a thing of its own.
+    this.wardrobe.onGiveAnother = (id) => this.equipment.giveAnother('wear', id) || 'another is in the backpack';
     this.wardrobe.onRemove = (parts) => this.equipment.takeOffParts(parts);
     this.weaponsUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.forceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -5929,43 +5934,79 @@ class App {
         const def = this.weapons?.find(name);
         return def ? this.equip(def, hand) : `no weapon matches ${name}`;
       },
-      /** The backpack's state: what is owned (with the game's name, where it is and the species' verdict), worn and held, what is being put on, the record's `inv`. */
+      /**
+       * The backpack's state: every owned thing by its own name (`thing`) with the game's name, where it
+       * is and the species' verdict -- of two of one shirt only the copy on the body reads `worn` -- what
+       * is worn and held and which thing each is, the record's choices of copy, what is being put on, the
+       * record's `inv` and `named`, and what the server's hail said of its items (`itemsVersion`: 2 keeps a
+       * row per thing, 0 is none or one from before, which folds two of one item into one).
+       */
       items: () => {
         const snap = this.equipment.snapshot();
         const ctx = this.equipment.lastContext;
-        const where = (kind: 'wear' | 'weapon', id: string) => (kind === 'weapon' ? (snap.held.right === id ? 'right' : snap.held.left === id ? 'left' : 'pack') : id in snap.worn ? 'worn' : 'pack');
+        const where = (o: { kind: 'wear' | 'weapon'; id: string; thing?: string }) =>
+          o.kind === 'weapon'
+            ? snap.held.right === o.id && snap.heldThing.right === o.thing
+              ? 'right'
+              : snap.held.left === o.id && snap.heldThing.left === o.thing
+                ? 'left'
+                : 'pack'
+            : o.id in snap.worn && snap.wornThing[o.id] === o.thing
+              ? 'worn'
+              : 'pack';
         return {
           inv: snap.inv,
+          named: snap.named,
+          itemsVersion: this.net.session.itemsVersion,
           record: snap.record,
           species: snap.species,
           wardrobe: snap.wardrobe,
           weapons: snap.weapons,
           owned: snap.owned.map((o) => {
             const info = ctx ? itemInfo(o.kind, o.id, ctx) : null;
-            return { id: o.id, kind: o.kind, name: info?.name ?? o.id, where: where(o.kind, o.id), fit: info?.fit ?? null, missing: info?.missing ?? null };
+            return { thing: o.thing ?? '', id: o.id, kind: o.kind, name: info?.name ?? o.id, where: where(o), got: o.got, fit: info?.fit ?? null, missing: info?.missing ?? null };
           }),
           worn: snap.worn,
           held: snap.held,
+          wornThing: snap.wornThing,
+          heldThing: snap.heldThing,
+          chosen: snap.chosen,
           busy: snap.busy,
         };
       },
-      /** Give an item: `give('wear', 'jacket_s02')`, `give('weapon', 'baton_stun')`. It goes in the backpack, not on. */
-      give: async (kind: 'wear' | 'weapon', id: string) => {
+      /**
+       * Give an item: `give('wear', 'jacket_s02')`, `give('weapon', 'baton_stun')`. It goes in the backpack,
+       * not on, one of each; `give('wear', 'shirt_s03', { another: true })` gives a second copy, a thing of
+       * its own, whether or not one is owned (refused on a server from before things had names).
+       */
+      give: async (kind: 'wear' | 'weapon', id: string, opts?: { another?: boolean }) => {
         if (kind !== 'wear' && kind !== 'weapon') return "kind is 'wear' or 'weapon'";
         const ctx = await this.equipment.itemContext();
         const info = itemInfo(kind, id, ctx);
         if (info.missing) return kind === 'wear' ? `${id} is not in this character's wardrobe` : `${id} is not on the weapons rack`;
         if (!this.current || this.creating) return 'no character is being played';
+        if (opts?.another) {
+          const why = this.equipment.giveAnother(kind, id);
+          return why || `another ${info.name} is in the backpack`;
+        }
         return this.equipment.give(kind, id) ? `${info.name} is in the backpack` : `${info.name} is owned already`;
       },
-      /** Use an item as a double-click does (on or off, in hand or put away); `use('sword_lightsaber_training', 'left')` for the left hand. */
+      /**
+       * Use an item as a double-click does (on or off, in hand or put away); `use('sword_lightsaber_training', 'left')`
+       * for the left hand. A thing's own name (`items().owned[i].thing`) uses that copy: the other of two
+       * worn shirts becomes the one worn.
+       */
       use: async (id: string, hand?: 'left') => {
+        const thing = this.equipment.itemOf(id);
+        if (thing?.thing) return this.useItem(thing.thing, hand);
         const kind = await this.kindOf(id);
         if (!kind) return `${id} is neither on the rack nor in the wardrobe`;
         return this.useItem(`${kind}:${id}`, hand);
       },
-      /** Destroy an owned item (taken off or put away first). */
+      /** Destroy an owned item (taken off or put away first): by a thing's own name, that one; by its id, the copy in use or the oldest. */
       destroy: async (id: string) => {
+        const thing = this.equipment.itemOf(id);
+        if (thing?.thing) return this.destroyItem(thing.thing);
         const owned = this.equipment.owned().find((o) => o.id === id);
         if (!owned) return `${id} is not owned`;
         return this.destroyItem(`${owned.kind}:${id}`);
@@ -8210,16 +8251,20 @@ class App {
     // the group's own 90 m is measured from; the server measures it again and is what decides.
     trade.meAt = (out) => groups.meAt(out);
     trade.peerAt = (id, out) => groups.peerAt(id, out);
-    trade.owns = (kind, id) => this.equipment.owns(kind, id);
-    trade.inUse = (kind, id) => this.equipment.inUse(kind, id);
+    // How the server keeps what characters own: a server that keeps a row per thing says so in its
+    // hail, and against one that does not this side keeps to one of each.
+    trade.itemsVersion = () => this.net.session.itemsVersion;
+    trade.owns = (thing) => this.equipment.owns(thing);
+    trade.inUse = (thing) => this.equipment.inUse(thing);
     // What this browser holds for the character in play, for the one moment it hands its list up.
     // The first time a character is handed up this is what the server writes down; after that its
-    // own rows stand and this browser is told them instead of being merged with.
+    // own rows stand and this browser is told them instead of being merged with. Each thing goes up
+    // under its own name, so the server keeps two of one shirt as two.
     trade.mine = () => {
       const rec = this.creating ? null : this.current;
       if (!rec) return null;
       const items: TradeItem[] = [];
-      for (const o of rec.items ?? []) items.push({ kind: o.kind, id: o.id, got: o.got });
+      for (const o of rec.items ?? []) items.push({ kind: o.kind, id: o.id, got: o.got, thing: o.thing });
       return items;
     };
     // What the record says about itself, which goes up with the list: "a server has taken this
@@ -8234,12 +8279,14 @@ class App {
     };
     // What is on the body and in the hands, which is what the server refuses an offer of a worn
     // shirt with. The whole of it each time, and only when it has moved.
+    // Of two of one shirt it is the one on the body that is named, so the other may still be offered.
     trade.using = () => {
       const snap = this.equipment.snapshot();
       const worn: TradeItem[] = [];
-      for (const id of Object.keys(snap.worn)) worn.push({ kind: 'wear', id, got: 0 });
+      for (const id of Object.keys(snap.worn)) worn.push({ kind: 'wear', id, got: 0, thing: snap.wornThing[id] });
       const held: TradeItem[] = [];
-      for (const id of [snap.held.right, snap.held.left]) if (id) held.push({ kind: 'weapon', id, got: 0 });
+      if (snap.held.right) held.push({ kind: 'weapon', id: snap.held.right, got: 0, thing: snap.heldThing.right ?? undefined });
+      if (snap.held.left) held.push({ kind: 'weapon', id: snap.held.left, got: 0, thing: snap.heldThing.left ?? undefined });
       return { worn, held };
     };
     // The server's list, which stands: the record is marked as the server's, and the equipment
@@ -8252,7 +8299,8 @@ class App {
       const wasKnown = knownToServer(rec);
       markKnownToServer(rec, this.net.session.counterOf(rec.id));
       if (take === 'server' && !wasKnown) this.messages.system('this server holds its own list of what this character owns, and it is the one that stands');
-      void this.equipment.reconcile(items).then((note) => {
+      // The server's clock as the list arrives: a colour stamped here by a clock running fast is held to it.
+      void this.equipment.reconcile(items, sharedClock.now()).then((note) => {
         if (note !== 'dropped' && note !== 'nothing in the backpack changed') this.messages.system(note);
         if (this.backpack.open) void this.refreshBackpack();
         // What is worn and held goes up after the list, because it is named by the server's own row
@@ -8262,21 +8310,25 @@ class App {
     };
     trade.onNote = (text) => this.messages.system(text);
     // A thing the server handed over on its own -- a job's reward, which a server running the jobs pays
-    // through its ledger and never through this browser's word -- goes in the backpack here. The row is
-    // known already, so putting it there does not tell the server again; one this browser gave itself is
-    // owned already and changes nothing. The message line's word of it is the job's own note.
+    // through its ledger and never through this browser's word -- goes in the backpack here, under the
+    // name the server gave it. The row is known already, so putting it there does not tell the server
+    // again; one this browser gave itself is owned already, under the same name, and changes nothing.
+    // The message line's word of it is the job's own note.
     trade.onAdded = (item) => {
       const rec = this.creating ? null : this.current;
-      if (!rec || this.equipment.owned().some((o) => o.kind === item.kind && o.id === item.id)) return;
-      if (this.equipment.give(item.kind, item.id) && this.backpack.open) void this.refreshBackpack();
+      if (!rec) return;
+      // In the equipment's queue, behind any list still waiting to be laid over the backpack.
+      void this.equipment.receive(item).then((came) => {
+        if (came && this.backpack.open) void this.refreshBackpack();
+      });
     };
     // An item given or destroyed here goes to the ledger as well, and what is on the body and in the
     // hands is said whenever it moves, since that is what the server refuses an offer of a worn
     // shirt with. Neither is how an item moves between two players: that is a trade, and only the
     // server moves those.
-    this.tradeLedger = (what, kind, id) => {
-      if (what === 'add') trade.noteAdded(kind, id, Date.now());
-      else trade.noteDropped(kind, id);
+    this.tradeLedger = (what, item) => {
+      if (what === 'add') trade.noteAdded(item);
+      else trade.noteDropped(item);
     };
     this.tradeUsing = () => trade.tellUsing();
     // The moment the server has taken this browser's claim, its list goes up: a character the server
@@ -8293,7 +8345,7 @@ class App {
       },
       owned: () => {
         const rows: { item: TradeItem; use: 'worn' | 'right' | 'left' | null }[] = [];
-        for (const o of this.equipment.owned()) rows.push({ item: { kind: o.kind, id: o.id, got: o.got }, use: this.equipment.inUse(o.kind, o.id) });
+        for (const o of this.equipment.owned()) rows.push({ item: { kind: o.kind, id: o.id, got: o.got, thing: o.thing }, use: o.thing ? this.equipment.inUse(o.thing) : null });
         return rows;
       },
       view: (eye, dir) => {
@@ -8408,23 +8460,30 @@ class App {
         if (o?.ui) tuneTradeUi(o.ui);
         if (o) tuneTrade(o);
         let answer = '';
-        const split = (key: string): ['wear' | 'weapon', string] | null => {
+        // An item named as a thing's own name, or as `wear:` or `weapon:` and its id: the copy put in is
+        // the first of it that is free (not in the trade, not worn, not in a hand), and the copy taken
+        // out the first of it that is in.
+        const pick = (key: string, inTrade: boolean): TradeItem | null => {
+          const owned = this.equipment.owned();
+          const named = owned.find((it) => it.thing === key);
           const i = key.indexOf(':');
           const kind = key.slice(0, i);
-          if (kind !== 'wear' && kind !== 'weapon') return null;
-          return [kind, key.slice(i + 1)];
+          const id = key.slice(i + 1);
+          const list = named ? [named] : kind === 'wear' || kind === 'weapon' ? owned.filter((it) => it.kind === kind && it.id === id) : [];
+          const items = list.map((it) => ({ kind: it.kind, id: it.id, got: it.got, thing: it.thing }) as TradeItem);
+          return items.find((it) => trade.offered(it) === inTrade && (inTrade || !this.equipment.inUse(it.thing ?? ''))) ?? items[0] ?? null;
         };
         if (typeof o?.ask === 'number') answer = trade.askTrade(o.ask) || `asked ${o.ask} to trade`;
         else if (o?.ask === true) answer = tradeUi.askLookedAt();
         if (o?.accept === true) trade.accept();
         if (o?.decline === true) trade.decline();
         if (typeof o?.put === 'string') {
-          const at = split(o.put);
-          answer = at ? trade.putIn(at[0], at[1]) || `${o.put} is in the trade` : `no item ${o.put}`;
+          const at = pick(o.put, false);
+          answer = at ? trade.putIn(at) || `${o.put} is in the trade` : `no item ${o.put}`;
         }
         if (typeof o?.take === 'string') {
-          const at = split(o.take);
-          answer = at ? trade.takeOut(at[0], at[1]) || `${o.take} is out of the trade` : `no item ${o.take}`;
+          const at = pick(o.take, true);
+          answer = at ? trade.takeOut(at) || `${o.take} is out of the trade` : `no item ${o.take}`;
         }
         if (typeof o?.ready === 'boolean') answer = trade.setReady(o.ready) || (o.ready ? 'you are happy with it' : 'you took that back');
         if (o?.cancel === true) trade.cancel();
@@ -11875,25 +11934,34 @@ class App {
     return null;
   }
 
-  /** The backpack's double-click (or Enter, or the console): on or off, in hand or put away; a weapon may switch the kit. */
-  private async useItem(key: string, hand?: 'left'): Promise<string> {
+  /**
+   * A backpack cell's key read back as an item: an owned thing's own name, which says which copy, or
+   * -- for something worn or held that is not owned, which has no name -- `wear:` or `weapon:` and its id.
+   */
+  private itemOfKey(key: string): { kind: 'wear' | 'weapon'; id: string; thing?: string } | null {
+    const owned = this.equipment.itemOf(key);
+    if (owned) return { kind: owned.kind, id: owned.id, thing: owned.thing };
     const i = key.indexOf(':');
     const kind = key.slice(0, i);
-    const id = key.slice(i + 1);
-    if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
-    const r = await this.equipment.use(kind, id, hand);
+    if (kind !== 'wear' && kind !== 'weapon') return null;
+    return { kind, id: key.slice(i + 1) };
+  }
+
+  /** The backpack's double-click (or Enter, or the console): on or off, in hand or put away; a weapon may switch the kit. */
+  private async useItem(key: string, hand?: 'left'): Promise<string> {
+    const it = this.itemOfKey(key);
+    if (!it) return `no item ${key}`;
+    const r = await this.equipment.use(it.kind, it.id, hand, it.thing);
     if (r.wants && r.wants !== this.kit.id && this.inWorld) this.setClass(r.wants);
     if (r.note !== 'dropped') this.messages.note(r.note);
     return r.note;
   }
 
-  /** Destroy an owned item for good. */
+  /** Destroy an owned item for good: the one thing the cell was, and no other copy of it. */
   private async destroyItem(key: string): Promise<string> {
-    const i = key.indexOf(':');
-    const kind = key.slice(0, i);
-    const id = key.slice(i + 1);
-    if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
-    const note = await this.equipment.destroy(kind, id);
+    const it = this.itemOfKey(key);
+    if (!it) return `no item ${key}`;
+    const note = await this.equipment.destroy(it.kind, it.id, it.thing);
     if (note !== 'dropped') this.messages.note(note);
     return note;
   }
@@ -11915,9 +11983,22 @@ class App {
     const busy = new Set(snap.busy);
     const newest = snap.owned.reduce((m, o) => Math.max(m, o.got), 0);
     const character = this.player.rig?.character ?? null;
-    const cell = (kind: 'wear' | 'weapon', id: string, got: number): BackpackCell => {
+    // A cell is one thing, keyed by its own name, so two of one shirt are two cells and only the copy
+    // on the body reads as worn; something worn or held that is not owned has no name and is keyed by
+    // what it is.
+    const cell = (kind: 'wear' | 'weapon', id: string, got: number, thing?: string): BackpackCell => {
       const info = itemInfo(kind, id, ctx);
-      const where: BackpackCell['where'] = kind === 'weapon' ? (snap.held.right === id ? 'right' : snap.held.left === id ? 'left' : 'pack') : id in snap.worn ? 'worn' : 'pack';
+      const mine = (on: string | null | undefined) => !thing || on === thing;
+      const where: BackpackCell['where'] =
+        kind === 'weapon'
+          ? snap.held.right === id && mine(snap.heldThing.right)
+            ? 'right'
+            : snap.held.left === id && mine(snap.heldThing.left)
+              ? 'left'
+              : 'pack'
+          : id in snap.worn && mine(snap.wornThing[id])
+            ? 'worn'
+            : 'pack';
       const first = info.slots?.[0];
       const slotsText = kind === 'weapon' ? (first ? slotWords(first) : '') : info.slots?.length ? `takes: ${info.slots.map((a) => slotWords(a)).join(' or ')}` : '';
       const classRank = info.cls ? WEAPON_ORDER.indexOf(info.cls) : WEAPON_ORDER.length;
@@ -11932,7 +12013,7 @@ class App {
             ? `worn unseen on ${speciesWords(ctx.species, false)}`
             : undefined;
       return {
-        key: info.key,
+        key: thing || info.key,
         kind,
         id,
         name: info.name,
@@ -11955,7 +12036,7 @@ class App {
     // still owns the style it wore (`sul_hair_*`, which a hair test spelt `^hair_` took for a garment). The
     // row is kept, since nothing an owned list holds is ever lost, and not shown: here it would read as a
     // style in the backpack that could be put on beside the one worn.
-    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got)).filter((c) => !(c.kind === 'wear' && c.kindText === 'Hair'));
+    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got, o.thing)).filter((c) => !(c.kind === 'wear' && c.kindText === 'Hair'));
     // Anything worn or held that is not owned (it should not happen once a record is played) is shown all the same, so the panel matches the body.
     for (const id of Object.keys(snap.worn)) if (!cells.some((c) => c.kind === 'wear' && c.id === id)) cells.push(cell('wear', id, 0));
     for (const id of [snap.held.right, snap.held.left]) if (id && !cells.some((c) => c.kind === 'weapon' && c.id === id)) cells.push(cell('weapon', id, 0));
@@ -12284,9 +12365,12 @@ class App {
       planet,
       created: Date.now(),
       played: 0,
-      items: normalizeOwned([...worn, ...kit.items]),
+      // One of each: what the creator dressed the character in and the kit overlap (a kit shirt worn
+      // in the creator), and a new character owns that shirt once, not twice.
+      items: normalizeOwned(firstItems([...worn, ...kit.items])),
       held: kit.held,
       inv: 1,
+      named: 1,
     };
     if (!upsertCharacter(record)) {
       this.creatorBar.note('No room for another character: delete one first.');

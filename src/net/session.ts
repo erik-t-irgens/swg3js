@@ -22,10 +22,12 @@ import { fromBase32, hmacSha256, sha256, toBase32, toHex, utf8 } from './hash.ts
  * 3 is the seen creatures, a creature's blow on another player, the keeper turning a bolt away, how low
  * a body stands on the wire and the admin's day; 4 is the admin's `arm`, a weapon put in the hand of one
  * of the world's creatures already standing; 5 is the story book, whose words go only to a server whose
- * hail carries `story` (`storyVersion`) (`server/relay.mjs` says the same). None of those is ever sent to
- * a server that says less (`speaks`).
+ * hail carries `story` (`storyVersion`); 6 is a row per thing in the item ledger, two of one item handed
+ * up, a thing named in an `add` and its colours sent only to a server whose hail says `items: 2`
+ * (`itemsVersion`) (`server/relay.mjs` says the same). None of those is ever sent to a server that says
+ * less (`speaks`).
  */
-export const WIRE_VERSION = 5;
+export const WIRE_VERSION = 6;
 
 /**
  * The label mixed into the key to make the verifier the server keeps. It is the server's
@@ -81,6 +83,8 @@ export interface Hail {
   ff?: number;
   /** The story the server holds, by version; 0 or absent for a server that holds none (every one before the book). */
   story?: number;
+  /** How the server keeps what characters own: 2 is a row per thing; 0 or absent folds two of one item into one. */
+  items?: number;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -281,6 +285,8 @@ export interface SessionStats {
   serverVersion: number;
   /** The story the far end's greeting said it holds; 0 for none, which is every far end before the book. */
   story: number;
+  /** How the far end's greeting said it keeps what characters own: 2 a row per thing, 0 one of each. */
+  items: number;
 }
 
 /**
@@ -322,7 +328,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -624,6 +630,7 @@ export class Session {
     this.stat.admin = false;
     this.stat.serverVersion = 0;
     this.stat.story = 0;
+    this.stat.items = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -673,6 +680,8 @@ export class Session {
     this.stat.serverVersion = Number(h.v) || 0;
     // Which story it holds: heard here, in force only once the server has us (`storyVersion`).
     this.stat.story = Number(h.story) > 0 ? Math.floor(Number(h.story)) : 0;
+    // How it keeps what characters own, the same way (`itemsVersion`).
+    this.stat.items = Number(h.items) > 0 ? Math.floor(Number(h.items)) : 0;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -882,6 +891,16 @@ export class Session {
    */
   get storyVersion(): number {
     return this.stat.authority === 'server' ? this.stat.story : 0;
+  }
+
+  /**
+   * How the server holding the world keeps what characters own, as its greeting said: 2 is a row per
+   * thing, so two of one item may be handed up, a thing named and its colours sent; anything less folds
+   * two of one item into one, and this browser keeps to one of each against it (src/net/trade.ts). Nought
+   * with no server, against the relay that came before and on a line that has dropped.
+   */
+  get itemsVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.items : 0;
   }
 
   /**

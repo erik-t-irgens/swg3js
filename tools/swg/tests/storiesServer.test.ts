@@ -17,7 +17,9 @@
 //   - a reward is paid once, through the purse and the ledger, and never again however often its step is
 //     reached or the browser reconnects;
 //   - a book played alone and taken by the server has its rewards the browser paid paid here, once, up to
-//     the cap a settle, the rest owed and paid at the next settle, never twice;
+//     the cap a settle, the rest owed and paid at the next settle, never twice; a thing such a reward gave
+//     while the backpack was still on its way up is written down, so a server started again before the
+//     backpack came hands it over, and one started again after hands it over no second time;
 //   - the deadlines of a connected character are swept on the server's clock, and an offline character's
 //     are settled at its claim, in the order they fell, each at its own time;
 //   - every other thing a browser says it saw is checked where the server can check it: a signal is never a
@@ -35,9 +37,11 @@
 //   - the browser's half sends a kill a tick late, drops what it sees while the line is held, says why in
 //     words that match the line's state, and takes the server's view and notes.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string): void => {
@@ -131,6 +135,36 @@ const { RemoteHost, JOBS_WAIT_OLD, JOBS_WAIT_UNREAD, JOBS_HELD, JOBS_SETTLING } 
   ok(wait()?.state === 'done', 'and it runs out twenty seconds after the character comes back, not ten minutes after it went');
 }
 
+// ---- what a job asks the server's own ledger: two of one shirt are two ---------------------------------------
+{
+  // The browser counts a character's things one by one, so `has(wear, shirt_s03, 2)` holds there for two
+  // shirts; the server's answer must come from its real ledger and count the same, or a condition would
+  // hold for a character played alone and fail for the same character on a server.
+  const { Stories, STORY_TUNING, applyStory } = await import('../../../server/stories.mjs');
+  const { Ledger } = await import('../../../server/ledger.mjs');
+  const { evalCond } = await import('../../../src/story/quests.ts');
+  const { emptyBook } = await import('../../../src/story/book.ts');
+  const now = 1_900_000_000_000;
+  const ledger = new Ledger({ now: () => now });
+  ledger.here('c-two', { session: 4, name: 'Two' });
+  ledger.settle('c-two', [
+    { kind: 'wear', what: 'shirt_s03', got: 1, thing: 'wshirt_s03|1|aaaa' },
+    { kind: 'wear', what: 'shirt_s03', got: 2, thing: 'wshirt_s03|2|bbbb' },
+    { kind: 'weapon', what: 'pistol_cdef', got: 3, thing: 'wpistol_cdef|3|cccc' },
+  ]);
+  const s = new Stories({ tuning: STORY_TUNING, write: (rec: object) => void applyStory(s.data, rec), now: () => now, ledger, read: () => ({ test: null, own: null }) });
+  s.readSets();
+  const c = { id: 4, character: 'c-two', keep: 'server', asking: null, hello: { planet: 'tatooine', zone: '' }, state: null };
+  s.hear(c, { t: 'story', do: 'sync', has: 0, base: 0, local: 0, known: 0 });
+  const line = s.lines.get(4);
+  ok(!!line, 'a character whose things the server holds has a line');
+  const ctx = s.ctxOf(line) as { has: ((kind: string, id: string) => number) | null };
+  ok(ctx.has?.('wear', 'shirt_s03') === 2 && ctx.has?.('weapon', 'pistol_cdef') === 1 && ctx.has?.('wear', 'hat_s04') === 0, 'the server counts what a character holds from its own ledger, two shirts as two');
+  const book = emptyBook('c-two');
+  const holds = (n: number) => evalCond({ has: { kind: 'wear', id: 'shirt_s03', n } }, book, ctx as Parameters<typeof evalCond>[2]);
+  ok(holds(2) && !holds(3), 'so has(wear, shirt_s03, 2) holds on the server for a character with two shirts, as it does in the browser, and asking for three does not');
+}
+
 if (typeof WebSocket === 'undefined') {
   note('the relay round trip was skipped: this node has no WebSocket of its own');
   console.log(`\n${passed} checks passed`);
@@ -174,9 +208,9 @@ if (typeof WebSocket === 'undefined') {
   const status = async () => (await (await fetch(`http://127.0.0.1:${port}/`)).json()) as { stories: Record<string, unknown> & { refusedBy: Record<string, number>; sets: { name: string; quests: number }[] } };
 
   /** A browser: a key (the same one makes the same player again), its character, and everything it heard. */
-  async function connect(name: string, character: string, o: { key?: Uint8Array; counter?: number; planet?: string } = {}) {
+  async function connect(name: string, character: string, o: { key?: Uint8Array; counter?: number; planet?: string; at?: number } = {}) {
     const key = o.key ?? new Uint8Array(randomBytes(32));
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${o.at ?? port}`);
     const got: Msg[] = [];
     let nonce = '';
     await new Promise<void>((done, fail) => {
@@ -685,6 +719,71 @@ if (typeof WebSocket === 'undefined') {
       ok(taken?.paid?.['test:reward#1#give']?.by === 'settle' && taken.paid['test:goto#1#paid']?.by === 'browser', 'the one paid is marked as the settle\'s, the one over the cap still the browser\'s and owed');
       ok(taken?.paid?.['test:goto#5#paid']?.by === 'browser' && taken.paid['test:kill#3#nothing']?.by === 'browser', 'and nothing is paid for a completion the book does not reach, nor for a key the set cannot read back');
       ok(d.story((m) => m.do === 'note' && /away from this server/.test(String((m.note as Msg).text))).length === 1, 'the player is told what was paid for the jobs done away');
+
+      // The reward's shirt is owed into a backpack the ledger does not hold yet, and the book already says it
+      // was paid. A server started again before the backpack comes up must still hand it over; one started
+      // again after that must not hand it over a second time.
+      const worldDir = join(dir, 'world');
+      const children: { child: ChildProcess; copy: string }[] = [];
+      const startOn = (from: string, at: number) => {
+        const copy = mkdtempSync(join(tmpdir(), 'swg-stories-restart-'));
+        for (const f of readdirSync(from)) copyFileSync(join(from, f), join(copy, f));
+        const child = spawn(process.execPath, [fileURLToPath(new URL('../../../server/relay.mjs', import.meta.url)), `--data=${copy}`, `--port=${at}`], { stdio: 'ignore' });
+        children.push({ child, copy });
+        return copy;
+      };
+      const reach = async (at: number, counter: number) => {
+        for (let tries = 0; tries < 40; tries++) {
+          await wait(150);
+          try {
+            return await connect('Biggs', 'c-d', { key: a.key, counter, at });
+          } catch {
+            /* not listening yet */
+          }
+        }
+        throw new Error(`no relay came up on ${at}`);
+      };
+      // A child that was killed has a signal and no exit code; asked to stop again it must not wait for an
+      // exit that has already happened.
+      const stop = (child: ChildProcess) => new Promise<void>((done) => {
+        if (child.exitCode !== null || child.signalCode !== null) return done();
+        child.once('exit', () => done());
+        child.kill();
+      });
+      try {
+        const port2 = port + 1;
+        const copy2 = startOn(worldDir, port2);
+        const r2 = await reach(port2, 1);
+        r2.send({ t: 'items', do: 'list', rows: [] });
+        await wait(600);
+        const gave = r2.last('items', (m) => m.do === 'added') as { row?: { id: string; what: string } } | undefined;
+        ok(gave?.row?.what === 'shirt_s03', 'a server started again before the backpack came up still hands over the thing the reward owed');
+        // Destroyed at once, so a second handing over could not hide behind there being one already.
+        r2.send({ t: 'items', do: 'drop', id: gave!.row!.id });
+        await settle();
+        ok(!!r2.last('items', (m) => m.do === 'gone'), 'and the player destroys it');
+        r2.close();
+        await settle();
+        await stop(children[0].child);
+        const port3 = port + 2;
+        startOn(copy2, port3);
+        const r3 = await reach(port3, 1);
+        r3.send({ t: 'items', do: 'get' });
+        await wait(1500);
+        const rows = ((r3.last('items', (m) => m.do === 'list') as { rows?: { what: string }[] } | undefined)?.rows ?? []);
+        ok(rows.length === 0 && !r3.last('items', (m) => m.do === 'added'), `and a server started again after that hands it over no second time (${rows.length} things, ${r3.got.filter((m) => m.t === 'items' && m.do === 'added').length} handed over)`);
+        r3.close();
+      } finally {
+        for (const { child, copy } of children) {
+          await stop(child);
+          try {
+            rmSync(copy, { recursive: true, force: true });
+          } catch {
+            /* a temp folder either way */
+          }
+        }
+      }
+
       d.send({ t: 'items', do: 'list', rows: [] });
       await settle();
       ok((d.last('items', (m) => m.do === 'added') as { row?: { what: string } } | undefined)?.row?.what === 'shirt_s03', 'the thing the reward gave is handed over once the ledger holds the backpack it was owed into');

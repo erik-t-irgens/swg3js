@@ -3,7 +3,7 @@
 // character into owned items, the starting kit, the species' verdict with the species packs' own
 // pieces, the words for slots, and a repeated id in a wardrobe. Plain node, no game files needed.
 import assert from 'node:assert/strict';
-import { OFF_HAND_CLASSES, chooseArrangement, cleanTint, countOf, fitFor, migrateInventory, mintThing, normalizeOwned, occupancy, packPartOf, partToItemId, planHold, resolveKit, slotWords, speciesWords, thingOf, type Fit, type HeldRef, type OwnedItem } from '../../../src/core/inventory.ts';
+import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, migrateInventory, mintThing, normalizeOwned, occupancy, packPartOf, pairOwned, partToItemId, planHold, pruneThings, resolveKit, slotWords, speciesWords, thingOf, wornThingOf, type Fit, type HeldRef, type OwnedItem } from '../../../src/core/inventory.ts';
 import { itemInfo, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
 
 let checks = 0;
@@ -183,8 +183,6 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
   ok(pistol.name === 'CDEF Pistol' && pistol.kindText === 'Pistol' && pistol.icon === 'http://x/weapons/icons/m.png' && !pistol.missing, 'a weapon: the game\'s name, its class and picture');
 }
 
-console.log(`${checks} checks passed`);
-
 // ---------------------------------------------------------------- one thing, and not one kind
 //
 // An item was only ever a kind for a long time -- two of one shirt were one row -- and that is
@@ -233,12 +231,17 @@ console.log(`${checks} checks passed`);
   const b = mintThing('wear', 'shirt_s01', 1000, () => 0.25);
   ok(a !== b, 'two things got at the same moment still have different names');
   ok(/^w/.test(a) && a.includes('shirt_s01'), "and a name says what it is, which is worth having when reading a record by eye");
+  const long = mintThing('weapon', 'x'.repeat(80), Date.now(), () => 0.999999);
+  ok(long.length <= 80 && /^[A-Za-z0-9_.:|-]+$/.test(long), `a name is never past the 80 characters a server takes one to, however long the id (${long.length}): a name refused is no name, and two of an item with none are folded into one`);
+  ok(mintThing('wear', 'x'.repeat(46), 1000, () => 0.5) === `w${'x'.repeat(46)}|${(1000).toString(36)}|${Math.floor(0.5 * 0x1000000).toString(36)}`, 'while one for the longest id the packs carry is made as it always was');
 }
 
 {
   ok(cleanTint({ 'index_color_1': 12 })!['index_color_1'] === 12, "a thing's own colours are kept by the customizer's own names");
   ok(cleanTint({ 'index_color_1': 300 })!['index_color_1'] === 255, 'a value past the palette is brought back into it');
-  ok(cleanTint({ 'index_color_1': -4 })!['index_color_1'] === 0, 'and one below it likewise');
+  ok(cleanTint({ 'index_color_1': -4 })!['index_color_1'] === -4, 'a value below nought is a colour of its own, -(0xRRGGBB + 1), and is kept as it is');
+  ok(cleanTint({ 'index_color_1': -(0xffffff + 1) })!['index_color_1'] === TINT_LEAST && cleanTint({ 'index_color_1': -99999999 })!['index_color_1'] === TINT_LEAST, 'white is the lowest a colour goes, and one past it is brought back to white');
+  ok(cleanTint({ 'index_color_1': -4 }, 255, 0)!['index_color_1'] === 0, 'and a caller that takes palette indices only can still hold the floor at nought');
   ok(cleanTint({ 'index_color_1': 2.6 })!['index_color_1'] === 3, 'a fraction is rounded: a palette has no half-colours');
   ok(cleanTint({ __proto__: 1 } as unknown) === undefined, "one of the language's own names is not a colour");
   ok(cleanTint({ a: 'red' } as unknown) === undefined && cleanTint(null) === undefined && cleanTint([1, 2] as unknown) === undefined, 'and nothing that is not a set of numbers is a set of colours');
@@ -247,4 +250,115 @@ console.log(`${checks} checks passed`);
 {
   const rows = normalizeOwned([{ id: 'a', kind: 'wear', got: 1, thing: 't1', tint: { 'index_color_1': 7 } }, { id: 'a', kind: 'wear', got: 1, thing: 't2' }] as OwnedItem[]);
   ok(rows[0].tint?.['index_color_1'] === 7 && rows[1].tint === undefined, 'two of one item may be two colours, which is the whole reason a thing has a name');
+  const timed = normalizeOwned([{ id: 'a', kind: 'wear', got: 1, thing: 't1', tint: { 'index_color_1': 7 }, tintAt: 99 }] as OwnedItem[]);
+  ok(timed[0].tintAt === 99, 'and when a colour was set is kept with it, so the newer of two copies of it can win');
 }
+
+// ---------------------------------------------------------------- one of each, and which one is worn
+//
+// The ledger keeps a row per thing now, so a character can really hold two of one shirt. What that
+// asks of the rules: the creator and the migration still give one of each, one pure answer says which
+// copy is on the body, a server's list is laid over this one without a single name minted, and a
+// record from before is collapsed once -- the one place a second copy could have come from.
+
+{
+  const a1 = { id: 'shirt', kind: 'wear', got: 1, thing: 'a1' } as OwnedItem;
+  const a2 = { id: 'shirt', kind: 'wear', got: 2, thing: 'a2' } as OwnedItem;
+  const b1 = { id: 'shirt', kind: 'weapon', got: 3, thing: 'b1' } as OwnedItem;
+  const once = firstItems([a1, a2, b1]);
+  ok(once.length === 2 && once[0] === a1 && once[1] === b1, 'firstItems keeps one of each kind and id, the first given');
+  ok(wornThingOf([a2, a1], 'wear', 'shirt', null) === 'a1', 'with no choice, the copy worn is the oldest');
+  ok(wornThingOf([a1, a2], 'wear', 'shirt', { shirt: 'a2' }) === 'a2', 'with one, it is the one chosen');
+  ok(wornThingOf([a1], 'wear', 'shirt', { shirt: 'a2' }) === 'a1', 'and a choice naming a copy no longer owned falls back to the oldest');
+  ok(wornThingOf([a1, a2], 'weapon', 'shirt', null) === null && wornThingOf([], 'wear', 'shirt', null) === null, 'none owned is none');
+  const tie = [{ ...a2, got: 1 }, a1] as OwnedItem[];
+  ok(wornThingOf(tie, 'wear', 'shirt', null) === 'a2', 'and two got in the same moment go by the order of the list');
+  const ctor = { id: 'constructor', kind: 'wear', got: 1, thing: 'c1' } as OwnedItem;
+  ok(wornThingOf([ctor], 'wear', 'constructor', {}) === 'c1', "a choice map is read by its own keys, never by the language's own names on every object");
+}
+
+{
+  const items = [
+    { id: 'shirt', kind: 'wear', got: 1, thing: 'a1' },
+    { id: 'shirt', kind: 'wear', got: 2, thing: 'a2' },
+    { id: 'hat', kind: 'wear', got: 3, thing: 'h1' },
+  ] as OwnedItem[];
+  const kept = pruneThings({ shirt: 'a2', hat: 'h1', boots: 'x' }, items, 'wear', new Set(['shirt', 'hat']));
+  ok(same(kept, { shirt: 'a2' }), `the choice is kept while the piece is on and the copy owned, and the oldest needs no line (${JSON.stringify(kept)})`);
+  ok(pruneThings({ shirt: 'a2' }, items, 'wear', new Set()) === undefined, 'a piece taken off takes its choice with it');
+  ok(pruneThings({ shirt: 'gone' }, items, 'wear', new Set(['shirt'])) === undefined, 'and a choice naming a copy that has gone is dropped');
+  ok(pruneThings(undefined, items, 'wear', new Set(['shirt'])) === undefined, 'nothing chosen is nothing');
+}
+
+{
+  // The creator's duplicate: a kit shirt worn in the creator was given twice, and before things had
+  // names nothing else could have given a character two of one item. Collapsed once, keeping the copy
+  // on the body.
+  const rec = {
+    items: [
+      { id: 'npe_shirt', kind: 'wear', got: 1, thing: 's1' },
+      { id: 'npe_shirt', kind: 'wear', got: 2, thing: 's2' },
+      { id: 'pistol', kind: 'weapon', got: 3, thing: 'p1' },
+      { id: 'pistol', kind: 'weapon', got: 4, thing: 'p2' },
+      { id: 'hat', kind: 'wear', got: 5, thing: 'h1' },
+    ] as OwnedItem[],
+    heldThings: { pistol: 'p2' },
+  } as { items: OwnedItem[]; named?: 1; heldThings?: Record<string, string> };
+  collapseOwned(rec);
+  ok(rec.named === 1, 'the record is marked, so the collapse runs once');
+  ok(same(rec.items.map((o) => o.thing), ['s1', 'p2', 'h1']), `one of each is kept, and of a held weapon the copy in the hand (${rec.items.map((o) => o.thing).join(',')})`);
+  rec.items.push({ id: 'hat', kind: 'wear', got: 6, thing: 'h2' });
+  collapseOwned(rec);
+  ok(rec.items.length === 4, 'and a record already marked keeps two of one item: from here on that is two things, not a mistake');
+  const old = collapseOwned({ items: [{ id: 'a', kind: 'wear', got: 1 }, { id: 'a', kind: 'wear', got: 1 }] as OwnedItem[] } as { items: OwnedItem[]; named?: 1 });
+  ok(old.items.length === 1 && !!old.items[0].thing, 'a record from before names had none, and comes out with one of each, named');
+}
+
+{
+  // A list from a server laid over this browser's. The names are the thing: a server that names
+  // its things is paired by name first and nothing is minted, and a name the server gave a thing this
+  // browser named otherwise is taken, the colour on it kept.
+  const had = [
+    { id: 'shirt', kind: 'wear', got: 10, thing: 'w-local-1', tint: { index_color_1: 4 } },
+    { id: 'shirt', kind: 'wear', got: 20, thing: 'w-local-2' },
+    { id: 'hat', kind: 'wear', got: 30, thing: 'h-same' },
+    { id: 'boots', kind: 'wear', got: 40, thing: 'b-gone' },
+  ] as OwnedItem[];
+  const server = [
+    { id: 'hat', kind: 'wear' as const, got: 30, thing: 'h-same' },
+    { id: 'shirt', kind: 'wear' as const, got: 11, thing: '0.i7' },
+    { id: 'shirt', kind: 'wear' as const, got: 21, thing: '0.i8' },
+    { id: 'pistol', kind: 'weapon' as const, got: 50, thing: '0.i9', tint: { index_color_1: 2 }, tintAt: 5 },
+  ];
+  let minted = 0;
+  const r = pairOwned(had, server, () => `m${minted++}`);
+  ok(minted === 0, 'not one name is minted for a server that names its things');
+  ok(r.items.length === 4 && r.came === 1 && r.gone.length === 1 && r.gone[0].thing === 'b-gone', `what came and what went are counted thing by thing (${r.came} came, ${r.gone.length} went)`);
+  ok(r.renamed.get('w-local-1') === '0.i7' && r.renamed.get('w-local-2') === '0.i8', 'the two shirts are paired oldest with oldest and take the server’s names');
+  const shirt = r.items.find((o) => o.thing === '0.i7')!;
+  ok(shirt.tint?.index_color_1 === 4, 'and the colour on the first shirt stays on the first shirt');
+  ok(r.items.find((o) => o.thing === 'h-same')?.got === 30, 'a thing of the same name is the same thing');
+  ok(r.items.find((o) => o.thing === '0.i9')?.tint?.index_color_1 === 2, 'a thing that came carries the colour the server holds for it');
+  const again = pairOwned(r.items, server, () => `m${minted++}`);
+  ok(again.came === 0 && again.gone.length === 0 && again.renamed.size === 0 && minted === 0, 'the same list again changes nothing and renames nothing');
+  // The colours by when they were set: the server's when it is as new, this browser's when newer.
+  const newer = pairOwned([{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 9 }, tintAt: 50 }] as OwnedItem[], [{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 1 }, tintAt: 40 }]);
+  ok(newer.items[0].tint?.index_color_1 === 9, 'a colour set here later than the server’s stays');
+  const older = pairOwned([{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 9 }, tintAt: 30 }] as OwnedItem[], [{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: null, tintAt: 40 }]);
+  ok(older.items[0].tint === undefined && older.items[0].tintAt === 40, 'and one the server took off since is off here too, with when');
+  // A colour stamped here by a clock running fast, while no server answered, is held to the server's clock
+  // as the list arrives: it still wins against what the server held before it, and only that.
+  const fast = pairOwned([{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 9 }, tintAt: 5_000_000 }] as OwnedItem[], [{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 1 }, tintAt: 900 }], undefined, 1000);
+  ok(fast.items[0].tint?.index_color_1 === 9 && fast.items[0].tintAt === 1000, 'a colour stamped here by a clock running fast beats what the server held before it, and is kept as set when the list came');
+  const after = pairOwned(fast.items, [{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 3 }, tintAt: 1500 }], undefined, 2000);
+  ok(after.items[0].tint?.index_color_1 === 3 && after.items[0].tintAt === 1500, 'so a colour the server takes after it wins in its turn, which it could not have done for as long as the clock was ahead');
+  const unclocked = pairOwned([{ id: 'hat', kind: 'wear', got: 1, thing: 'h', tint: { index_color_1: 9 }, tintAt: 5_000_000 }] as OwnedItem[], [{ id: 'hat', kind: 'wear', got: 1, thing: 'h' }]);
+  ok(unclocked.items[0].tintAt === 5_000_000, 'with no server clock handed in a time is kept as it was');
+  // A server from before names: its rows name nothing, so the pairing is by what each is, and the
+  // names this browser already has are kept rather than minted again on every list.
+  const plain = pairOwned(had.slice(0, 3), [{ id: 'shirt', kind: 'wear', got: 5 }, { id: 'hat', kind: 'wear', got: 30 }], () => `m${minted++}`);
+  ok(plain.items.map((o) => o.thing).join(',') === 'w-local-1,h-same' && minted === 0, 'a server from before names keeps the names already here, the oldest shirt with its one row');
+  ok(plain.gone.length === 1 && plain.gone[0].thing === 'w-local-2', 'and a second shirt it never held is not one it holds');
+}
+
+console.log(`${checks} checks passed`);

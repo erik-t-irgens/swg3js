@@ -91,7 +91,7 @@ if (typeof WebSocket === 'undefined') {
     const far = await connect('Leia', 'char-c', 'naboo');
     ok(admin.id > 0 && b.id > 0 && stranger.id > 0 && far.id > 0, 'four browsers, three of them saying who they are, are in');
     const hail = admin.last('hail') as Msg;
-    ok(hail.v === 5, `the relay speaks the fifth wire (${hail.v})`);
+    ok(hail.v === 6, `the relay speaks the sixth wire (${hail.v})`);
     ok(admin.all('welcome').length === 1 && b.all('welcome').length === 1, 'and a welcome is sent once and only once');
     admin.at(10);
     b.at(40);

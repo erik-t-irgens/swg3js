@@ -1,4 +1,4 @@
-﻿// What a character owns, and how two players hand something over.
+// What a character owns, and how two players hand something over.
 //
 // Until now a character and everything in its backpack lived in one browser's local storage: clear
 // that storage and the character is gone, and two browsers swapping an item had to trust each other
@@ -10,10 +10,12 @@
 // lost.** So:
 //
 //   - A row is one item: which character owns it, what kind it is (the pack it comes out of: a
-//     wardrobe piece or a weapon off the rack), what it is (the catalogue's own id), and when it was
-//     got. A character holds at most one row of a kind and an id, which is exactly what the backpack
-//     itself holds (`normalizeOwned` in src/core/inventory.ts drops a second copy), so the cache and
-//     the truth can never disagree about how many of a thing you have.
+//     wardrobe piece or a weapon off the rack), what it is (the catalogue's own id), when it was got,
+//     and **which one it is** -- its `thing`, the name the browser minted when it was got and never
+//     reuses. A character's table is keyed by that name, so two of one shirt are two rows and may be
+//     two colours (`tint`), traded apart and worn apart. A row the server made itself, and every row
+//     written before things had names, is named on read as `<world epoch>.<row id>`: a browser's
+//     own names always hold a `|`, so the two can never meet, and nothing on the disk is rewritten.
 //   - A character hands its list up the first time it is claimed and the server writes it down. From
 //     then on the server's list is the truth: a browser whose list disagrees is told the server's
 //     rather than merged with, because a merge is the one thing that can put an item back in a
@@ -63,16 +65,40 @@ export const LEDGER_TUNING = {
   'ask.perSecond': 8,
   /** How often the invitations and the idle trades are looked at, in ms. */
   tick: 1000,
+  /** How many colours one thing may carry: a garment reads a handful, so this is room and a cap. */
+  tintKeys: 16,
 };
+
+/**
+ * What a server built for named things says in its hail (`items`). A browser hears it and only then
+ * hands up two of one item, names a thing in an `add`, or sends a colour: a server that does not say
+ * it folds two of one item into one, so a browser built for this keeps to one of each against it.
+ */
+export const ITEMS_VERSION = 2;
 
 /** The two packs an item can come out of, which is what the backpack itself knows. */
 const KINDS = ['wear', 'weapon'];
 /** What a browser may ask about its own list. */
-const DOES = ['list', 'get', 'add', 'drop', 'using'];
+const DOES = ['list', 'get', 'add', 'drop', 'using', 'tint'];
 /** The steps of a trade a browser may ask for. */
 const STEPS = ['ask', 'accept', 'decline', 'offer', 'ready', 'unready', 'cancel'];
 /** A catalogue id, and a row id, are keys in the tables below: plain, short and nothing else. */
 const ID = /^[A-Za-z0-9_.:-]{1,80}$/;
+/**
+ * A thing's name. The browser mints `<kind letter><catalogue id>|<when, base 36>|<chance>`, so a name
+ * holds a `|` where an id never does; the server's own are `<epoch>.<row id>`. Either way it is a key in
+ * a character's table and nothing else.
+ */
+const THING = /^[A-Za-z0-9_.:|-]{1,80}$/;
+/** A colour's name: the customizer's own variable names, shared (`/shared_owner/...`) or a mesh's (`mesh|...`). */
+const TINT_KEY = /^[A-Za-z0-9_./|-]{1,64}$/;
+/**
+ * The range a colour may take: a palette index, 0 to 255, or a colour of its own written as a negative
+ * number, `-(0xRRGGBB + 1)`, which reaches down to -16,777,216. The same range `cleanTint` in
+ * src/core/inventory.ts keeps.
+ */
+const TINT_MOST = 255;
+const TINT_LEAST = -16777216;
 /**
  * Names an id may not have: they mean something to every object in the language rather than being a
  * key. The same belt wire.mjs and ownership.mjs wear.
@@ -83,6 +109,71 @@ const RESERVED = ['__proto__', 'constructor', 'prototype'];
 export function cleanItemId(x) {
   if (typeof x !== 'string' || !ID.test(x) || RESERVED.includes(x)) return '';
   return x;
+}
+
+/** A thing's name a browser sent, or '' when it is not one this server would use as a key. */
+export function cleanThing(x) {
+  if (typeof x !== 'string' || !THING.test(x) || RESERVED.includes(x)) return '';
+  return x;
+}
+
+/**
+ * A thing's colours a browser sent: `null` for none (which is a real answer and is written as `null`,
+ * never left out, or a log played back would bring the old colour home), a table of the customizer's
+ * own names to whole numbers in range, or undefined when it is not a colour at all. An empty table is
+ * none; one whose every name was refused is nothing, so a word made of nonsense cannot clear a colour.
+ * The table has no prototype, so a name it holds is a key and never a way into the language's own.
+ */
+export function cleanTintSet(x, tuning = LEDGER_TUNING) {
+  if (x === null) return null;
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const keys = Object.keys(x);
+  if (!keys.length) return null;
+  const out = Object.create(null);
+  let n = 0;
+  for (const k of keys) {
+    if (n >= tuning.tintKeys) break;
+    if (!TINT_KEY.test(k) || RESERVED.includes(k)) continue;
+    const v = x[k];
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    out[k] = Math.max(TINT_LEAST, Math.min(TINT_MOST, Math.round(v)));
+    n++;
+  }
+  return n ? out : undefined;
+}
+
+/**
+ * When a colour was set, or 0 for never: a browser's word, and never later than this server's own clock
+ * as the word arrives. Nothing can have been coloured after the server heard of it, so a time past that is
+ * a browser whose clock runs fast, and it is brought back to now. Kept as sent, a clock three hours ahead
+ * would have its colour refuse every later one for three hours, since the newest colour wins (`tint`).
+ */
+function cleanTintAt(x, now) {
+  const at = Number(x);
+  if (!Number.isFinite(at) || at <= 0) return 0;
+  return Math.min(Math.floor(at), now);
+}
+
+/**
+ * One row of a list handed up, as an object: a browser built for named things hands each row up as a
+ * short array, `[kind, what, got, thing]`, which is the same four fields without their names. Four
+ * hundred copies of the longest id there is fit in what a server takes from one browser in a second only
+ * that way: written out as objects they came to 66 KB against an allowance of 64. Anything else is handed
+ * on as it is, for `cleanRow` to read or refuse.
+ */
+function wireRow(x) {
+  if (!Array.isArray(x)) return x;
+  return { kind: x[0], what: x[1], got: x[2], thing: x[3] };
+}
+
+/** Two colour sets alike, `null` and none included. */
+function sameTint(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return (a ?? null) === (b ?? null);
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) if (a[k] !== b[k]) return false;
+  return true;
 }
 
 /** A list of row ids, capped, with the repeats and the nonsense taken out. */
@@ -103,16 +194,18 @@ function idList(x, cap) {
  * fails is dropped and never answered, so a browser on another build can neither grow the message nor
  * put a word through that nothing here knows.
  */
-export function cleanItems(x, tuning = LEDGER_TUNING) {
+export function cleanItems(x, tuning = LEDGER_TUNING, now = Date.now()) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
   if (typeof x.do !== 'string' || !DOES.includes(x.do)) return undefined;
   if (x.do === 'get') return { do: 'get' };
   if (x.do === 'list') {
     // What a browser brings on its first claim: its whole backpack, worn and held included. The row
-    // ids are the server's to mint, so any a browser sends are ignored rather than trusted.
+    // ids are the server's to mint, so any a browser sends are ignored rather than trusted; the names
+    // of the things are the browser's own, and are kept. A row is an object, or the short array a
+    // browser built for named things sends (`wireRow`).
     const rows = [];
     for (const one of Array.isArray(x.rows) ? x.rows : []) {
-      const row = cleanRow(one);
+      const row = cleanRow(wireRow(one), tuning, now);
       if (row) rows.push(row);
       if (rows.length >= tuning.items) break;
     }
@@ -124,7 +217,7 @@ export function cleanItems(x, tuning = LEDGER_TUNING) {
     return { do: 'list', rows, known: x.known === 1 || x.known === true, rev: Number.isFinite(rev) && rev > 0 ? Math.floor(rev) : 0 };
   }
   if (x.do === 'add') {
-    const row = cleanRow(x);
+    const row = cleanRow(x, tuning, now);
     if (!row) return undefined;
     return { do: 'add', ...row };
   }
@@ -133,19 +226,39 @@ export function cleanItems(x, tuning = LEDGER_TUNING) {
     if (!id) return undefined;
     return { do: 'drop', id };
   }
+  if (x.do === 'tint') {
+    // One thing's colours, by its row: `null` takes them off. When it was set is the browser's word,
+    // brought back to this server's own clock when it runs ahead of it, and now when it says nothing.
+    const id = cleanItemId(x.id);
+    const tint = cleanTintSet(x.tint, tuning);
+    if (!id || tint === undefined) return undefined;
+    return { do: 'tint', id, tint, at: cleanTintAt(x.at, now) || now };
+  }
   // What is on the body and in the hands, by row id: the whole of it each time, so anything not in
   // it is free again and nothing has to be unset.
   return { do: 'using', worn: idList(x.worn, tuning.items), held: idList(x.held, tuning.items) };
 }
 
-/** One line of a backpack a browser handed up: its kind and its catalogue id, and when it was got. */
-function cleanRow(x) {
+/**
+ * One line of a backpack a browser handed up: its kind and its catalogue id, when it was got, and
+ * -- from a browser built for named things -- which one it is and its colours. A row from a browser
+ * built before has no name and is folded with any other of its kind, as it always was.
+ */
+function cleanRow(x, tuning = LEDGER_TUNING, now = Date.now()) {
   if (!x || typeof x !== 'object') return undefined;
   if (typeof x.kind !== 'string' || !KINDS.includes(x.kind)) return undefined;
   const what = cleanItemId(x.what);
   if (!what) return undefined;
   const got = Number(x.got);
-  return { kind: x.kind, what, got: Number.isFinite(got) && got >= 0 ? Math.floor(got) : 0 };
+  const row = { kind: x.kind, what, got: Number.isFinite(got) && got >= 0 ? Math.floor(got) : 0 };
+  const thing = cleanThing(x.thing);
+  if (thing) row.thing = thing;
+  const tint = cleanTintSet(x.tint, tuning);
+  if (tint !== undefined) {
+    row.tint = tint;
+    row.tintAt = cleanTintAt(x.tintAt, now);
+  }
+  return row;
 }
 
 /** A cleaned copy of a `trade`, or undefined. */
@@ -188,6 +301,21 @@ export function mayItems(window, now, perSecond = LEDGER_TUNING['ask.perSecond']
 // one flush on the socket read path rather than one per thing in it.
 
 /**
+ * The world's row counter carried past an id that has been written down. It is kept in the world file
+ * as the houses keep theirs (`houseSeq`, homes.mjs): raised by the very records that write a row, so it
+ * is in the log the moment the row is and in every snapshot after, and it never comes down when a row is
+ * dropped. `Ledger.load` mints from it, so a row dropped and a restart never hand its id out again --
+ * and with it the name the server gives a thing itself, `<world epoch>.<row id>`. A world written before
+ * there was a counter has none, and its rows' own ids say where to start, which is what they always said.
+ */
+function countPast(data, id) {
+  const n = /^i(\d+)$/.exec(id);
+  if (!n) return;
+  const next = Number(n[1]) + 1;
+  if (!(Number(data.itemSeq) >= next)) data.itemSeq = next;
+}
+
+/**
  * Apply one item record to the world in memory. `store.mjs` hands anything it does not know itself
  * here, so this is the only place that decides what a row looks like on disk, and the same function
  * runs when a change is made and when the log is replayed. Returns true when it was understood.
@@ -199,6 +327,7 @@ export function applyItems(data, rec) {
       if (typeof rec.id !== 'string' || !rec.id) return false;
       const was = data.items[rec.id] ?? {};
       data.items[rec.id] = { ...was, ...rec.item, id: rec.id };
+      countPast(data, rec.id);
       return true;
     }
     case 'itemGone': {
@@ -214,7 +343,13 @@ export function applyItems(data, rec) {
       for (const id of Object.keys(data.items)) if (data.items[id]?.owner === rec.owner) delete data.items[id];
       for (const one of rec.rows) {
         if (!one || typeof one.id !== 'string' || !one.id) continue;
-        data.items[one.id] = { id: one.id, owner: rec.owner, kind: one.kind, what: one.what, got: one.got };
+        const row = { id: one.id, owner: rec.owner, kind: one.kind, what: one.what, got: one.got };
+        // A thing's own name and colours, where it has them: a row with no name is named on read.
+        if (typeof one.thing === 'string' && one.thing) row.thing = one.thing;
+        if (one.tint !== undefined) row.tint = one.tint;
+        if (Number.isFinite(one.tintAt) && one.tintAt > 0) row.tintAt = one.tintAt;
+        data.items[one.id] = row;
+        countPast(data, one.id);
       }
       return true;
     }
@@ -226,6 +361,9 @@ export function applyItems(data, rec) {
         if (!row) continue;
         row.owner = move.owner;
         if (Number.isFinite(move.got)) row.got = move.got;
+        // A thing that arrived where its name was already taken was given another, here and in the
+        // log alike, so a restart names it the same way the live server did.
+        if (typeof move.thing === 'string' && move.thing) row.thing = move.thing;
       }
       return true;
     }
@@ -234,30 +372,40 @@ export function applyItems(data, rec) {
   }
 }
 
-/** One row as every browser is sent it. */
+/**
+ * One row as every browser is sent it: the row's id, what it is, which one it is, and its colours when
+ * it has ever had any. A browser built before things had names reads the first four and nothing else.
+ */
 function rowOf(r) {
-  return { id: r.id, kind: r.kind, what: r.what, got: r.got };
+  const out = { id: r.id, kind: r.kind, what: r.what, got: r.got, thing: r.thing };
+  if (r.tint !== undefined) out.tint = r.tint;
+  if (r.tintAt) out.tintAt = r.tintAt;
+  return out;
 }
 
-/** The key a character's own table holds a row under: one of a kind and an id, and no more. */
-function keyOf(kind, what) {
+/** What a row is, which is what an old browser's list is folded by: one of a kind and an id. */
+function kindOf(kind, what) {
   return `${kind}:${what}`;
 }
 
 export class Ledger {
   /**
-   * @param {{ now?: () => number, tuning?: Record<string, number>, write?: (rec: object) => void }} options
+   * @param {{ now?: () => number, tuning?: Record<string, number>, write?: (rec: object, lazy?: boolean) => void, epoch?: number }} options
    * the clock to read, so a test can hand in its own and step it; the numbers to work to; and where a
    * change goes to be written down, which the relay wires to the store and a test wires to a plain
-   * object, so every rule in here can be run without a disk.
+   * object, so every rule in here can be run without a disk. A change written `lazy` (a colour) is in
+   * the log in its place and flushed with the next one that is not. `epoch` is the world's birth, which
+   * the server's own names for things are made from; `load` takes it from the world it reads.
    */
-  constructor({ now = () => Date.now(), tuning = LEDGER_TUNING, write = () => {} } = {}) {
+  constructor({ now = () => Date.now(), tuning = LEDGER_TUNING, write = () => {}, epoch = 0 } = {}) {
     this.now = now;
     this.tuning = tuning;
     this.write = write;
+    /** The world's birth in base 36: the first half of every name this server gives a thing itself. */
+    this.epoch36 = Math.max(0, Math.floor(Number(epoch) || 0)).toString(36);
     /** @type {Map<string, object>} row id to the row */
     this.rows = new Map();
-    /** @type {Map<string, Map<string, object>>} character to its rows by kind and id */
+    /** @type {Map<string, Map<string, object>>} character to its rows by the name of each thing */
     this.byOwner = new Map();
     /** @type {Set<string>} the characters whose list the server has been handed and now holds */
     this.settled = new Set();
@@ -288,6 +436,7 @@ export class Ledger {
     this.rows.clear();
     this.byOwner.clear();
     this.settled.clear();
+    if (Number.isFinite(Number(data?.epoch)) && Number(data.epoch) > 0) this.epoch36 = Math.floor(Number(data.epoch)).toString(36);
     let high = 0;
     for (const id of Object.keys(data?.items ?? {})) {
       // The high-water mark is taken from every id the file holds, kept or not, and before anything
@@ -302,14 +451,24 @@ export class Ledger {
       const owner = typeof kept.owner === 'string' ? kept.owner : '';
       const what = cleanItemId(kept.what);
       if (!kind || !owner || !what) continue;
-      const mine = this.table(owner);
-      // Two rows of one thing for one character cannot happen through anything here, and if a file
-      // ever held them the later one is dropped rather than carried: the backpack itself holds one.
-      if (mine.has(keyOf(kind, what))) continue;
-      this.keep({ id, owner, kind, what, got: Number(kept.got) || 0, use: '' });
+      // Every row is kept: two of one item for one character are two things. A row written before
+      // things had names -- every row a server before this one wrote, two of one kind included,
+      // which that server's own reader left on the disk and out of memory -- is named on read, and
+      // the file is not touched. A name already taken in that character's table (a file edited by
+      // hand; nothing here writes one) falls back to the server's own, so no row is ever lost to it.
+      const row = { id, owner, kind, what, got: Number(kept.got) || 0, use: '', thing: this.nameIn(this.table(owner), cleanThing(kept.thing), id) };
+      const tint = cleanTintSet(kept.tint, this.tuning);
+      if (tint !== undefined) row.tint = tint;
+      const at = Number(kept.tintAt);
+      if (Number.isFinite(at) && at > 0) row.tintAt = at;
+      this.keep(row);
     }
     for (const id of Object.keys(data?.characters ?? {})) if (data.characters[id]?.items === 1) this.settled.add(id);
-    this.nextRow = high + 1;
+    // The world's own counter where it has one, which still remembers a row that has since been dropped:
+    // the ids in the file alone do not, and reading them alone handed the newest row's id, and its name,
+    // out again after a restart (`countPast`).
+    const seq = Number(data?.itemSeq);
+    this.nextRow = Math.max(high + 1, Number.isFinite(seq) ? Math.floor(seq) : 0);
     return this;
   }
 
@@ -319,8 +478,12 @@ export class Ledger {
    * A browser is here playing this character. The same character opened in a second browser is the
    * newer one's from this instant (wave 1's takeover), and whatever trade the older line had is
    * broken off: the two browsers would otherwise both hold a window over one backpack.
+   *
+   * `named` is whether that browser names its things (`naming`): one built before things had names
+   * folds two of one item into one and is never handed a second (`finish`). Left out, it is taken to
+   * name them, which everything built for this ledger does; the relay says it for every line.
    */
-  here(character, { session = 0, name = '' } = {}) {
+  here(character, { session = 0, name = '', named = undefined } = {}) {
     const tell = [];
     if (!character) return { ok: false, why: 'nobody to be here', tell };
     // This line may have been playing somebody else a moment ago: a browser that goes back to the
@@ -343,12 +506,30 @@ export class Ledger {
       this.bySession.delete(had.session);
       this.cancelOf(character, tell, 'that character was opened in another browser');
     }
-    const person = had ?? { character, session: 0, name: '' };
+    const person = had ?? { character, session: 0, name: '', named: true };
     person.session = session;
     if (name) person.name = name;
+    if (named !== undefined) person.named = !!named;
     this.people.set(character, person);
     if (session) this.bySession.set(session, character);
     return { ok: true, tell };
+  }
+
+  /**
+   * What the browser on a line is built for, as its hello says: whether it names its things. A claim
+   * can come before the hello that says it (a server with a join word hears the claim first), so the
+   * relay says it again here whenever a hello arrives; only the line the character is being played on
+   * is listened to.
+   */
+  naming(session, named) {
+    const character = this.bySession.get(session);
+    const person = character ? this.people.get(character) : null;
+    if (person && person.session === session) person.named = !!named;
+  }
+
+  /** Whether the browser playing a character names its things: one that does not keeps one of each. */
+  namesThings(character) {
+    return this.people.get(character)?.named !== false;
   }
 
   /**
@@ -433,9 +614,21 @@ export class Ledger {
     return this.settled.has(character);
   }
 
-  /** The row a character has of one thing, or null. */
+  /** The oldest row a character has of one item, or null. */
   rowFor(character, kind, what) {
-    return this.owned(character)?.get(keyOf(kind, what)) ?? null;
+    let best = null;
+    for (const row of this.owned(character)?.values() ?? []) {
+      if (row.kind !== kind || row.what !== what) continue;
+      if (!best || row.got < best.got || (row.got === best.got && row.id < best.id)) best = row;
+    }
+    return best;
+  }
+
+  /** How many of one item a character has: a thing is one thing, and two of a shirt are two. */
+  countOf(character, kind, what) {
+    let n = 0;
+    for (const row of this.owned(character)?.values() ?? []) if (row.kind === kind && row.what === what) n++;
+    return n;
   }
 
   /** How many rows there are altogether, for the status page and for the tests to count. */
@@ -445,18 +638,63 @@ export class Ledger {
 
   /**
    * Something has come into a character's hands that nothing else gave it: the starting kit, the give
-   * tab, a reward. A second of a thing it already has is not an error and is not a second row.
+   * tab, a reward.
+   *
+   * Named (`thing`), it is that one thing, and the word is safe to say twice: a second `add` of a name
+   * this character already has is the same thing (`already`, `same`), never a second row. Unnamed --
+   * a browser built before things had names, or a job's reward paid here -- it is today's rule: make
+   * sure there is one, so a second of something the character already has is not a second row.
    */
-  add(character, kind, what, got = 0) {
+  add(character, kind, what, got = 0, { thing = '', tint = undefined, tintAt = 0 } = {}) {
     if (!character || !KINDS.includes(kind) || !cleanItemId(what)) return { ok: false, why: 'that is not a thing to own' };
     const mine = this.owned(character);
-    const had = mine?.get(keyOf(kind, what));
-    if (had) return { ok: true, row: rowOf(had), already: true };
+    const name = cleanThing(thing);
+    if (name) {
+      const had = mine?.get(name);
+      if (had && had.kind === kind && had.what === what) return { ok: true, row: rowOf(had), already: true, same: true };
+    } else {
+      const had = this.rowFor(character, kind, what);
+      if (had) return { ok: true, row: rowOf(had), already: true };
+    }
     if ((mine?.size ?? 0) >= this.tuning.items) return { ok: false, why: `a character carries ${this.tuning.items} things` };
     if (this.rows.size >= this.tuning.rows) return { ok: false, why: 'this server is holding as many things as it can' };
-    const row = { id: this.mint(), owner: character, kind, what, got: Number(got) || this.now(), use: '' };
+    const id = this.mint();
+    // A name somebody else's thing already has in this table -- a different item under the same name,
+    // which nothing honest sends -- is not taken over: the new one is given the server's own.
+    const row = { id, owner: character, kind, what, got: Number(got) || this.now(), use: '', thing: this.nameIn(this.table(character), name, id) };
+    const colour = tint === null ? null : tint ? cleanTintSet(tint, this.tuning) : undefined;
+    if (colour !== undefined) {
+      row.tint = colour;
+      row.tintAt = cleanTintAt(tintAt, this.now());
+    }
     this.keep(row);
-    this.write({ t: 'item', id: row.id, item: { owner: row.owner, kind: row.kind, what: row.what, got: row.got } });
+    this.write({ t: 'item', id: row.id, item: this.onDisk(row) });
+    return { ok: true, row: rowOf(row) };
+  }
+
+  /**
+   * A thing's colours, set by its owner: `null` takes them off. Refused while it is up in a trade, so
+   * the pane the other side is looking at is the thing they get, and refused when a colour set later
+   * somewhere else is already on it, so the newest always wins. Every time it compares is no later than
+   * this server's own clock when it was heard (`cleanTintAt`), so a browser whose clock runs fast wins
+   * only against what came before it and cannot hold a colour against what comes after. It is written
+   * lazily -- in the log in its place and flushed with the next change that is not -- because a colour is
+   * the one change that can come in a stream, and what a power cut can cost is a colour a few seconds
+   * back, never a thing.
+   */
+  tint(character, id, tint, at = this.now()) {
+    const row = this.rows.get(id);
+    if (!row || row.owner !== character) return { ok: false, why: 'you do not have that' };
+    if (this.inTrade.has(id)) return { ok: false, why: 'that is up in a trade' };
+    const colour = cleanTintSet(tint, this.tuning);
+    if (colour === undefined) return { ok: false, why: 'that is not a colour' };
+    const when = cleanTintAt(at, this.now()) || this.now();
+    if ((row.tintAt ?? 0) > when) return { ok: false, why: 'that was coloured more recently somewhere else', row: rowOf(row) };
+    if (sameTint(row.tint, colour) && row.tintAt === when) return { ok: true, row: rowOf(row), same: true };
+    row.tint = colour;
+    row.tintAt = when;
+    // `null` is written as `null`: left out, the log played back would bring the old colour home.
+    this.write({ t: 'item', id, item: { tint: colour, tintAt: when } }, true);
     return { ok: true, row: rowOf(row) };
   }
 
@@ -645,32 +883,69 @@ export class Ledger {
     return mine;
   }
 
-  /** Put a row in the tables. */
+  /** Put a row in the tables, under the name of the thing it is. */
   keep(row) {
     this.rows.set(row.id, row);
-    this.table(row.owner).set(keyOf(row.kind, row.what), row);
+    this.table(row.owner).set(row.thing, row);
   }
 
   /** Take a row out of the tables, and the table itself when it was the last row in it. */
   forget(row) {
     this.rows.delete(row.id);
     const mine = this.byOwner.get(row.owner);
-    if (mine && mine.get(keyOf(row.kind, row.what)) === row) mine.delete(keyOf(row.kind, row.what));
+    if (mine && mine.get(row.thing) === row) mine.delete(row.thing);
     if (mine && !mine.size) this.byOwner.delete(row.owner);
     this.inTrade.delete(row.id);
   }
 
-  /** A fresh row id. They run `i1`, `i2` and are never used twice, this run or any after it. */
+  /**
+   * A fresh row id. They run `i1`, `i2` and are never used twice, this run or any after it: every record
+   * that writes one carries the world's counter past it (`countPast`), and `load` starts from there.
+   */
   mint() {
     let key = `i${this.nextRow++}`;
     while (this.rows.has(key)) key = `i${this.nextRow++}`;
     return key;
   }
 
+  /** The name this server gives a thing itself: the world's birth and the row's own id, which nothing reuses. */
+  ownName(id) {
+    return `${this.epoch36}.${id}`;
+  }
+
+  /**
+   * The name a row goes under in a table: the one asked for when it is free there, else the server's
+   * own, else that with a count after it. `taken` is a table or a set -- anything with `has`.
+   */
+  nameIn(taken, wanted, id) {
+    if (wanted && !taken.has(wanted)) return wanted;
+    const own = this.ownName(id);
+    if (!taken.has(own)) return own;
+    let n = 2;
+    while (taken.has(`${own}.${n}`)) n++;
+    return `${own}.${n}`;
+  }
+
+  /**
+   * A row as the disk keeps it. The name is written only when it is not the server's own -- one worked
+   * out on read needs no line -- and the colours only when the thing has ever had any.
+   */
+  onDisk(row) {
+    const out = { owner: row.owner, kind: row.kind, what: row.what, got: row.got };
+    if (row.thing !== this.ownName(row.id)) out.thing = row.thing;
+    if (row.tint !== undefined) out.tint = row.tint;
+    if (row.tintAt) out.tintAt = row.tintAt;
+    return out;
+  }
+
   /**
    * Write a character's whole list down for the first time: one row per line, and nothing of that
    * character's kept that is not in it. It is only ever reached for a character the server has never
    * held a list for, so nothing anybody else owns can be touched by it.
+   *
+   * A browser built for named things hands each thing up under its own name, and two of one shirt are
+   * two rows; the same name twice is one thing. A browser built before hands up no names, and its list
+   * is folded by kind and id exactly as it always was, so it cannot make two of anything.
    */
   replace(character, rows) {
     let had = 0;
@@ -679,17 +954,33 @@ export class Ledger {
       had++;
     }
     const kept = [];
+    const named = new Set();
+    const unnamed = new Set();
     for (const one of rows ?? []) {
-      const row = cleanRow(one);
+      const row = cleanRow(wireRow(one), this.tuning, this.now());
       if (!row) continue;
-      const mine = this.owned(character);
-      if (mine?.has(keyOf(row.kind, row.what))) continue;
-      if ((mine?.size ?? 0) >= this.tuning.items) break;
+      if (row.thing) {
+        if (named.has(row.thing)) continue;
+        named.add(row.thing);
+      } else {
+        if (unnamed.has(kindOf(row.kind, row.what))) continue;
+        unnamed.add(kindOf(row.kind, row.what));
+      }
+      const mine = this.table(character);
+      if (mine.size >= this.tuning.items) break;
       if (this.rows.size >= this.tuning.rows) break;
-      const made = { id: this.mint(), owner: character, kind: row.kind, what: row.what, got: row.got || this.now(), use: '' };
+      const id = this.mint();
+      const made = { id, owner: character, kind: row.kind, what: row.what, got: row.got || this.now(), use: '', thing: this.nameIn(mine, row.thing, id) };
+      if (row.tint !== undefined) {
+        made.tint = row.tint;
+        if (row.tintAt) made.tintAt = row.tintAt;
+      }
       this.keep(made);
-      kept.push({ id: made.id, kind: made.kind, what: made.what, got: made.got });
+      const { owner: _owner, ...line } = this.onDisk(made);
+      kept.push({ id: made.id, ...line });
     }
+    // A character that ended with nothing has no table to keep.
+    if (!this.byOwner.get(character)?.size) this.byOwner.delete(character);
     // One record for the whole list rather than a line per row. Two reasons, and the second is the
     // one that matters: a settle with a full backpack would otherwise be four hundred writes and four
     // hundred flushes on the socket read path, with every other browser's news, clock and trade press
@@ -735,8 +1026,17 @@ export class Ledger {
   /**
    * The hand-over. Every row is checked once more against the tables as they are this instant -- still
    * owned by the side offering it, still not on a body or in a hand -- and what each side would end up
-   * holding is worked out before anything moves, so a swap that would leave somebody with two of one
-   * thing, or past what a character may carry, is refused whole rather than half done.
+   * holding is worked out before anything moves, so a swap that would leave somebody past what a
+   * character may carry is refused whole rather than half done. Two of one item are two things, so a
+   * second shirt for somebody who has one already is simply a second shirt -- unless the browser playing
+   * them was built before things had names (`namesThings`). That browser folds its list by kind and id
+   * and keeps one, so a second copy handed to it would be held here and never seen there, and the trade
+   * is refused whole, as every trade was before things had names.
+   *
+   * A thing keeps its name and its colours as it changes hands: the colour is the thing's and goes with
+   * it. A name the taking side already has for something else -- which only a hand-edited file or a
+   * browser lying about its names could bring about -- is changed to the server's own for that row, and
+   * the new name is in the move, so a log played back names it exactly as the live server did.
    *
    * Then one record with every move in it, written and flushed before either browser is told a word:
    * that is what makes "both rows change owner together or neither does" true through a power cut, a
@@ -745,24 +1045,45 @@ export class Ledger {
   finish(trade, tell) {
     const moves = [];
     const now = this.now();
-    /** @type {Map<string, Set<string>>} what each side will be holding, by kind and id */
+    /** @type {Map<string, Set<string>>} what each side will be holding, by the names of the things */
     const after = new Map();
     for (const side of [trade.a, trade.b]) after.set(side, new Set([...(this.owned(side)?.keys() ?? [])]));
+    /**
+     * @type {Map<string, Map<string, number>>} for a side whose browser keeps one of each, how many of each
+     * kind and id it will be holding: what it has, less what it gives, as the moves come in
+     */
+    const once = new Map();
+    for (const side of [trade.a, trade.b]) {
+      if (this.namesThings(side)) continue;
+      const counts = new Map();
+      for (const row of this.owned(side)?.values() ?? []) counts.set(kindOf(row.kind, row.what), (counts.get(kindOf(row.kind, row.what)) ?? 0) + 1);
+      once.set(side, counts);
+    }
     for (const side of [trade.a, trade.b]) {
       const other = side === trade.a ? trade.b : trade.a;
       for (const id of trade.offers.get(side) ?? []) {
         const row = this.rows.get(id);
         if (!row || row.owner !== side) return this.end(trade, tell, 'one of the things is no longer there to give');
         if (row.use) return this.end(trade, tell, 'one of the things is being worn or held');
-        after.get(side).delete(keyOf(row.kind, row.what));
-        moves.push({ id, owner: other, got: now, kind: row.kind, what: row.what });
+        after.get(side).delete(row.thing);
+        const counts = once.get(side);
+        if (counts) counts.set(kindOf(row.kind, row.what), (counts.get(kindOf(row.kind, row.what)) ?? 1) - 1);
+        moves.push({ id, owner: other, got: now, thing: '' });
       }
     }
     for (const move of moves) {
       const taking = after.get(move.owner);
-      const key = keyOf(move.kind, move.what);
-      if (taking.has(key)) return this.end(trade, tell, `${this.nameOf(move.owner)} already has one of those`);
-      taking.add(key);
+      const row = this.rows.get(move.id);
+      // A browser that keeps one of each would never see a second: refused whole, nothing moved.
+      const counts = once.get(move.owner);
+      if (counts) {
+        const key = kindOf(row.kind, row.what);
+        if ((counts.get(key) ?? 0) > 0) return this.end(trade, tell, `${this.nameOf(move.owner)} already has one of those`);
+        counts.set(key, 1);
+      }
+      const name = this.nameIn(taking, row.thing, row.id);
+      if (name !== row.thing) move.thing = name;
+      taking.add(name);
     }
     for (const side of [trade.a, trade.b]) {
       if (after.get(side).size > this.tuning.items) return this.end(trade, tell, `${this.nameOf(side)} cannot carry that much`);
@@ -776,13 +1097,17 @@ export class Ledger {
     this.close(trade);
     // Two players who both pressed with nothing in either pane have agreed to nothing: the window
     // closes and no line is written, since a record that moves no row is a flush for nothing.
-    if (moves.length) this.write({ t: 'itemMove', moves: moves.map((m) => ({ id: m.id, owner: m.owner, got: m.got })) });
-    for (const move of moves) {
-      const row = this.rows.get(move.id);
-      this.forget(row);
-      row.owner = move.owner;
-      row.got = move.got;
+    if (moves.length) this.write({ t: 'itemMove', moves: moves.map((m) => (m.thing ? { id: m.id, owner: m.owner, got: m.got, thing: m.thing } : { id: m.id, owner: m.owner, got: m.got })) });
+    // Every row moving comes out of the tables before any goes back in, so two things swapped under
+    // the same name each land in the other's table without one standing on the other in passing.
+    const moving = moves.map((move) => this.rows.get(move.id));
+    for (const row of moving) this.forget(row);
+    for (let i = 0; i < moves.length; i++) {
+      const row = moving[i];
+      row.owner = moves[i].owner;
+      row.got = moves[i].got;
       row.use = '';
+      if (moves[i].thing) row.thing = moves[i].thing;
       this.keep(row);
     }
     this.handed += moves.length;
