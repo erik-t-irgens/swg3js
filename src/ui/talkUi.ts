@@ -30,6 +30,8 @@ const TALK_CSS = `
 #talk .talk-bottom { bottom: 0; }
 #talk .talk-box { position: absolute; left: 50%; bottom: calc(7vh + 18px); transform: translateX(-50%); width: min(680px, 92vw); display: flex; flex-direction: column; gap: 8px; padding: 12px 16px 12px; background: color-mix(in srgb, var(--plate) 70%, transparent); border: 1px solid var(--edge); border-radius: 4px; pointer-events: auto; }
 #talk .talk-who { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+#talk .talk-banner { font-size: 11px; letter-spacing: 0.06em; color: var(--warn); }
+#talk .talk-banner[hidden] { display: none; }
 #talk .talk-line { font-size: 16px; line-height: 1.35; color: var(--ink); min-height: 1.35em; }
 #talk .talk-options { display: flex; flex-direction: column; gap: 4px; }
 #talk .talk-options[hidden] { display: none; }
@@ -69,6 +71,7 @@ export class TalkUi {
   onNext: () => void = () => {};
   private readonly parent: HTMLElement;
   private readonly who: HTMLElement;
+  private readonly banner: HTMLElement;
   private readonly line: HTMLElement;
   private readonly options: HTMLElement;
   private readonly keys: HTMLElement;
@@ -86,12 +89,14 @@ export class TalkUi {
       <div class="talk-bar talk-bottom"></div>
       <div class="talk-box">
         <div class="talk-who"></div>
+        <div class="talk-banner" hidden></div>
         <div class="talk-line"></div>
         <div class="talk-options"></div>
         <div class="talk-keys"></div>
       </div>`;
     parent.appendChild(this.root);
     this.who = this.root.querySelector('.talk-who')!;
+    this.banner = this.root.querySelector('.talk-banner')!;
     this.line = this.root.querySelector('.talk-line')!;
     this.options = this.root.querySelector('.talk-options')!;
     this.keys = this.root.querySelector('.talk-keys')!;
@@ -194,6 +199,25 @@ export class TalkUi {
     this.writes++;
   }
 
+  /**
+   * A note under the name, or none: `[structure only]` over a conversation the console plays from the
+   * emulator's structure alone, whose handler did things nothing here does.
+   */
+  setBanner(text: string | null): void {
+    const hidden = !text;
+    if (this.banner.hidden === hidden && (hidden || this.banner.textContent === text)) return;
+    this.banner.hidden = hidden;
+    this.banner.textContent = text ?? '';
+    this.writes += 2;
+  }
+
+  /** The words of the line standing, again, with nothing else moved: a line whose words have just come. */
+  setLine(line: string): void {
+    if (this.line.textContent === line) return;
+    this.line.textContent = line;
+    this.writes++;
+  }
+
   hide(): void {
     if (this.root.hidden) return;
     this.root.hidden = true;
@@ -203,10 +227,11 @@ export class TalkUi {
   }
 
   /** For the console: what the window shows. */
-  debug(): { open: boolean; who: string; line: string; options: string[]; writes: number } {
+  debug(): { open: boolean; who: string; banner: string | null; line: string; options: string[]; writes: number } {
     return {
       open: this.open,
       who: this.who.textContent ?? '',
+      banner: this.banner.hidden ? null : (this.banner.textContent ?? ''),
       line: this.line.textContent ?? '',
       options: [...this.options.querySelectorAll('button')].map((b) => `${b.textContent ?? ''}${b.disabled ? ' [refused]' : ''}`),
       writes: this.writes,

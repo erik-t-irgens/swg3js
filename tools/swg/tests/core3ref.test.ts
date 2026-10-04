@@ -81,6 +81,46 @@ const index = JSON.parse(readFileSync(join(CORE3_REF_DIR, 'index.json'), 'utf8')
   ok(!!missing.missing, 'a release that lost the files says so, rather than answering nothing in silence');
 }
 
+// ---------------------------------------------------------------- the conversations: structure, and none of the emulator's words
+{
+  const src = core3Source();
+  const conv = src.readConversations();
+  const speakers = src.readConversationSpeakers();
+  ok(conv.trees instanceof Map && conv.trees.size === 289 && conv.shapes instanceof Map && conv.shapes.size === 3 && conv.instances instanceof Map && conv.instances.size === 330, `the conversations as the emulator keeps them: 289 written by hand, 3 shapes its factories build again (the pets' and the informants' left out), 330 calls (${conv.trees.size}, ${conv.shapes.size}, ${conv.instances.size})`);
+  let screens = 0;
+  let replies = 0;
+  let words = 0;
+  const bad: string[] = [];
+  const isRef = (t: unknown): boolean => t === null || (typeof t === 'string' && (/^@[A-Za-z0-9_/.-]+:[A-Za-z0-9_.-]+$/.test(t) || /^:[A-Za-z0-9_.-]+$/.test(t)));
+  const walkNodes = (name: string, nodes: { id: string; say: unknown; replies: { text: unknown; to: unknown }[]; gesture?: unknown }[]): void => {
+    for (const n of nodes) {
+      screens++;
+      if (!isRef(n.say)) bad.push(`${name}#${n.id}`);
+      if (typeof n.say === 'string') words++;
+      if (n.gesture !== undefined && !/^[a-z0-9_]{1,64}$/.test(String(n.gesture))) bad.push(`${name}#${n.id} gesture`);
+      for (const r of n.replies) {
+        replies++;
+        if (!isRef(r.text)) bad.push(`${name}#${n.id} answer`);
+      }
+    }
+  };
+  for (const [name, t] of conv.trees) walkNodes(name, t.nodes);
+  for (const [name, s] of conv.shapes) walkNodes(name, s.nodes);
+  ok(screens > 4000 && replies > 3300 && words > 4000 && bad.length === 0, `every line and answer kept is the client's string id or a key of its own table, or nothing: none of the emulator's own words (${screens} screens, ${replies} answers${bad.length ? `; not: ${bad.slice(0, 5).join(', ')}` : ''})`);
+  const text = readFileSync(join(CORE3_REF_DIR, 'conversations.json'), 'utf8');
+  ok(!/Lord Nyax's Clan|Excited Journalist|customDialogText|function\s*\(|setDialogText|readData\(/.test(text), "nor a herald's place in the emulator's English, a custom name, a line of a handler or a call of one");
+  const herald = conv.trees.get('heraldCorellia2ConvoTemplate');
+  ok(herald?.handler === 'multi_dest_herald_conv_handler' && herald.initial === 'init' && herald.logic.screens.join() === 'loc1,loc2' && !herald.logic.entry && !herald.logic.options && !herald.logic.text, "a herald's handler names only its two location screens and does nothing else to the conversation");
+  ok(conv.heralds.multi.length === 8 && conv.heralds.multi.every((h: { dests: unknown[]; table: string }) => h.dests.length >= 2 && /^conversation\//.test(h.table)) && conv.heralds.directions.length === 50, 'the eight heralds with places of their own, each with two to four, and the fifty places the others send a player to');
+  let withTree = 0;
+  let withDiction = 0;
+  for (const v of speakers.values()) {
+    if (v.tree) withTree++;
+    if (v.diction) withDiction++;
+  }
+  ok(speakers instanceof Map && withTree === 815 && withDiction === 903 && speakers.get('rebel_trooper')?.diction === 'military', `who speaks which: 815 creatures name a conversation and 903 a way of speaking (${withTree}, ${withDiction})`);
+}
+
 // ---------------------------------------------------------------- the one that matters: the same answers as the folder
 
 {

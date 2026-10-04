@@ -21,7 +21,9 @@
 // answer (`reply`, or none for a node that goes on by itself), or close it -- and is told `node`: the node
 // the conversation has reached, its lines and the answers open just now, or none with why when it has ended
 // or was refused. The server keeps where the conversation stands for the line, never in the book. Neither
-// is ever said to a server whose hail says less than 3.
+// is ever said to a server whose hail says less than 3. An opening with one of the game's own people
+// (`row:<key>`) carries the creature they are stood as (`who`), which is what gives them a conversation; a
+// server from before them ignores it and answers that they have nothing to say.
 //
 // **Why in pieces.** The relay drops what a browser sends past 64 KB in a second and closes a line that
 // goes twice past it, so a book of any size goes up as pieces of `offerChunk` characters with a gap
@@ -88,7 +90,7 @@ export type StoryUp =
   | { do: 'ev'; ev: StoryEvent; at: StoryAt }
   | { do: 'q'; op: QuestOp; quest: string; at: StoryAt }
   | { do: 'admin'; op: AdminOp; quest?: string; step?: string; name?: string; ms?: number | null; at: StoryAt }
-  | { do: 'talk'; op: TalkOp; speaker: string; reply: string | null; at: StoryAt };
+  | { do: 'talk'; op: TalkOp; speaker: string; reply: string | null; at: StoryAt; who?: string };
 
 /** A conversation's operations: open one, give an answer (or let a node go on), close it. */
 export const TALK_OPS = ['open', 'pick', 'close'] as const;
@@ -131,6 +133,9 @@ function questRef(x: unknown): string | null {
 function whole(x: unknown, max = 1e12): number | null {
   return typeof x === 'number' && Number.isInteger(x) && x >= 0 && x <= max ? x : null;
 }
+
+/** A creature's name as the packs write it (`herald_corellia_karin`): what a game person is stood as. */
+const CREATURE = /^[A-Za-z0-9_.-]{1,96}$/;
 
 function wordOf(x: unknown, re: RegExp): string | null {
   return typeof x === 'string' && re.test(x) && x !== '__proto__' && x !== 'constructor' && x !== 'prototype' ? x : null;
@@ -393,7 +398,12 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
       if (typeof o.op !== 'string' || !(TALK_OPS as readonly string[]).includes(o.op) || !isWho(o.speaker)) return null;
       // No answer is a node going on by itself; an answer is named by its own id.
       if (o.reply !== undefined && o.reply !== null && !isNodeName(o.reply)) return null;
-      return { do: 'talk', op: o.op as TalkOp, speaker: o.speaker, reply: typeof o.reply === 'string' ? o.reply : null, at: cleanStoryAt(o.at) };
+      const word: Extract<StoryUp, { do: 'talk' }> = { do: 'talk', op: o.op as TalkOp, speaker: o.speaker, reply: typeof o.reply === 'string' ? o.reply : null, at: cleanStoryAt(o.at) };
+      // The creature a game person is stood as, held to the names every other word here is: never one of the
+      // three that mean something to every object, though what it keys is a table with no prototype.
+      const who = wordOf(o.who, CREATURE);
+      if (who && o.speaker.startsWith('row:')) word.who = who;
+      return word;
     }
     return null;
   }

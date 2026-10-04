@@ -29,8 +29,10 @@ import { TEXT_MAX, cleanTextRef, type TextRef } from './text.ts';
 
 /** Where a conversation stands, as a host keeps it for the line it is on and never in the book. */
 export interface TalkState {
-  /** Who speaks: `<set>:cast/<id>` (or, from a later wave, a game person's `row:<key>`). */
+  /** Who speaks: `<set>:cast/<id>`, or one of the game's own people, `row:<key>`. */
   speaker: string;
+  /** For one of the game's own people, the creature they are stood as: what binds them to a conversation (`voices`). */
+  who?: string;
   tree: string;
   /** The tree's hash when it began: a tree revised since starts again at its entry. */
   hash: string;
@@ -107,12 +109,15 @@ export function castIn(lib: StorySet, who: string): CastDef | null {
 }
 
 /**
- * The conversation a speaker speaks, or null: a cast member's own `tree`. (The game's own people's bindings
- * are a later wave's; until then nobody but the cast has a tree.)
+ * The conversation a speaker speaks, or null, in the order a speaker is resolved in: a cast member's own
+ * `tree`; then one of the game's own people (`row:<key>`) by the creature they are stood as (`creature`),
+ * through the conversations the game's own people have been given (`voices`, which binds only a tree that
+ * may be played). Anybody else has none, and greets in the client's reaction lines or the game's own.
  */
-export function treeFor(lib: StorySet, who: string): TalkDef | null {
+export function treeFor(lib: StorySet, who: string, creature?: string | null): TalkDef | null {
   const c = castIn(lib, who);
-  const id = c?.tree;
+  let id = c?.tree ?? null;
+  if (!c && who.startsWith('row:') && creature && lib.voices && Object.hasOwn(lib.voices, creature)) id = lib.voices[creature];
   return id && lib.talks && Object.hasOwn(lib.talks, id) ? lib.talks[id] : null;
 }
 
@@ -136,24 +141,29 @@ function meet(d: Draft, who: string): void {
 }
 
 /** A node reached: heard, its actions run, and the talk steps told (after the actions, so a job one grants is told too). */
-function enter(d: Draft, tree: TalkDef, speaker: string, node: string, path: readonly string[]): TalkPending {
+function enter(d: Draft, tree: TalkDef, speaker: string, node: string, path: readonly string[], who: string | null): TalkPending {
   const n = tree.nodes[node];
   if (!n) return { state: null, why: 'that part of the conversation is not there' };
   hear(d, `${tree.id}#${node}`);
   d.actions(n.do, { talk: tree.id, site: node });
   d.raiseLater(`talked:${speaker}#${node}`);
   d.raiseLater(`talked:${speaker}`);
-  return { state: { speaker, tree: tree.id, hash: tree.hash, node, path: [...path, node] }, why: null };
+  return { state: { speaker, ...(who ? { who } : {}), tree: tree.id, hash: tree.hash, node, path: [...path, node] }, why: null };
 }
 
-/** Open a conversation with somebody: the first entry whose condition holds, the person met. */
-export function talkOpenWork(d: Draft, speaker: string): TalkPending {
-  const tree = treeFor(d.lib, speaker);
-  if (!tree) return { state: null, why: 'they have nothing to say' };
+/**
+ * Open a conversation with somebody: the first entry whose condition holds, the person met. One of the
+ * game's own people is named by the creature they are stood as (`who`), which is what binds them to a
+ * conversation. `tree` opens that conversation whoever speaks it, which only the console's review of a
+ * conversation does (`__debug.talkTree({ core3 })`), on a book of its own.
+ */
+export function talkOpenWork(d: Draft, speaker: string, who: string | null = null, tree: string | null = null): TalkPending {
+  const def = tree ? (d.lib.talks && Object.hasOwn(d.lib.talks, tree) ? d.lib.talks[tree] : null) : treeFor(d.lib, speaker, who);
+  if (!def) return { state: null, why: 'they have nothing to say' };
   meet(d, speaker);
-  for (const e of tree.entry) {
+  for (const e of def.entry) {
     if (e.when && !d.holds(e.when)) continue;
-    return enter(d, tree, speaker, e.to, []);
+    return enter(d, def, speaker, e.to, [], who);
   }
   // The checker refuses a tree whose last entry has a condition, so this is a set that was never checked.
   return { state: null, why: 'nothing they say fits just now' };
@@ -173,10 +183,10 @@ export function replyOpen(book: StoryBook, tree: TalkDef, node: NodeDef, r: Repl
 export function talkPickWork(d: Draft, state: TalkState, reply: string | null): TalkPending {
   const tree = d.lib.talks && Object.hasOwn(d.lib.talks, state.tree) ? d.lib.talks[state.tree] : null;
   const node = tree?.nodes[state.node];
-  if (!tree || tree.hash !== state.hash || !node) return { ...talkOpenWork(d, state.speaker), restarted: true };
+  if (!tree || tree.hash !== state.hash || !node) return { ...talkOpenWork(d, state.speaker, state.who ?? null), restarted: true };
   if (reply === null) {
     if (!node.next || node.replies.length) return { state, why: 'that part of the conversation waits for an answer' };
-    return enter(d, tree, state.speaker, node.next, state.path);
+    return enter(d, tree, state.speaker, node.next, state.path, state.who ?? null);
   }
   const r = node.replies.find((x) => x.id === reply);
   if (!r) return { state, why: 'there is no such answer' };
@@ -184,7 +194,7 @@ export function talkPickWork(d: Draft, state: TalkState, reply: string | null): 
   hear(d, `${tree.id}#${node.id}.${r.id}`);
   d.actions(r.do, { talk: tree.id, site: `${node.id}.${r.id}` });
   if (!r.to) return { state: null, why: null };
-  return enter(d, tree, state.speaker, r.to, [...state.path, r.id]);
+  return enter(d, tree, state.speaker, r.to, [...state.path, r.id], state.who ?? null);
 }
 
 // ---- what the window is shown ------------------------------------------------------------------------------

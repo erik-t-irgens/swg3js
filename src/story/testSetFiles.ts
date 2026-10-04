@@ -1,5 +1,6 @@
 // Where the browser reads a story set's files from: the committed test set out of the build itself, and
-// the owner's own folder from the dev server (or a local build's copy of it). Browser only: the test set
+// the owner's own folder from the dev server (or a local build's copy of it); and the adoptions of the
+// emulator's conversations, which are read out of the build in the same way. Browser only: the test set
 // is gathered by the bundler (`import.meta.glob`), which nothing but the bundler understands, so no node
 // test and no server module ever imports this file. Both answer the files as the rules read them
 // (`{ path, text }`, relative paths with forward slashes), and the local host does the reading.
@@ -11,6 +12,20 @@
 // folder simply has no set of its own.
 
 const TEST_FILES = import.meta.glob('./testSet/**/*.{jsonc,json,txt}', { query: '?raw', import: 'default' });
+const ADOPTION_FILES = import.meta.glob('./core3/*.jsonc', { query: '?raw', import: 'default' });
+
+/**
+ * The adoptions of the emulator's conversations (`core3/*.jsonc`, `core3Trees.ts`): committed like the test
+ * set but read in every build, since they are the game's own people speaking and no test content.
+ */
+export async function core3AdoptionFiles(): Promise<{ path: string; text: string }[]> {
+  const out: { path: string; text: string }[] = [];
+  for (const key of Object.keys(ADOPTION_FILES).sort()) {
+    const text = await ADOPTION_FILES[key]();
+    if (typeof text === 'string') out.push({ path: key.replace(/^\.\/core3\//, ''), text });
+  }
+  return out;
+}
 
 /** The committed test set, without the fixtures built to fail the checker, which are never loaded. */
 export async function testSetFiles(): Promise<{ path: string; text: string }[]> {

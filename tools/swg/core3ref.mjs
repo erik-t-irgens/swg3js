@@ -4,8 +4,10 @@
 // the travel terminals, ticket collectors and shuttles a starport stands (`travel`), the other
 // children of a building and the props the screenplays put down (`fittings`, and the outdoor half in
 // `snapshot`), what a deed makes and what it costs (`deeds`), where the world's creatures and people
-// stood (`spawns`), each mobile's health and damage (`mobiles`), and what the server called each travel
-// point, which names a town's second and third shuttleport apart (`pois`). They used to open the owner's own
+// stood (`spawns`), each mobile's health and damage (`mobiles`), what the server called each travel
+// point, which names a town's second and third shuttleport apart (`pois`), and what its people said, as the
+// structure of its conversations and nothing more (`conversations`, and the relay, which plays the adopted
+// ones from it). They used to open the owner's own
 // Core3 checkout for them, which meant nobody else could have any of it: the launcher has no such
 // folder, and a player was never going to be asked to install an emulator to get a travel terminal.
 //
@@ -61,6 +63,10 @@ export const CORE3_READERS = {
   readDressGroups: { file: 'dress-groups.json', read: (dir) => C3.readDressGroups(dir) },
   readWeaponGroups: { file: 'weapon-groups.json', read: (dir) => C3.readWeaponGroups(dir) },
   readCorvette: { file: 'corvette.json', read: (dir) => C3.readCorvette(dir) },
+  // The conversations as structure only (screens, links, the client's string ids, where a handler acts),
+  // and who speaks which: two files, so `readCreatures`' own stays exactly as it was.
+  readConversations: { file: 'conversations.json', read: (dir) => C3.readConversations(dir) },
+  readConversationSpeakers: { file: 'conversation-speakers.json', read: (dir) => C3.readConversationSpeakers(dir) },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -250,6 +256,7 @@ function sizeOf(v) {
   if (v instanceof Map || v instanceof Set) return v.size;
   if (Array.isArray(v)) return v.length;
   if (v && typeof v === 'object') {
+    if (v.trees instanceof Map) return v.trees.size;
     if (Array.isArray(v.objects) || Array.isArray(v.mobiles)) return (v.objects?.length ?? 0) + (v.mobiles?.length ?? 0);
     if (v.statics instanceof Map) return [...v.statics.values()].reduce((n, rows) => n + rows.length, 0);
     if (Array.isArray(v.rebel) && Array.isArray(v.statics)) return v.rebel.length + (v.imperial?.length ?? 0) + (v.neutral?.length ?? 0);

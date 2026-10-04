@@ -89,6 +89,12 @@ export interface RemoteDeps {
   wall(): number;
   /** One fact for the message line, with whether its thing arrived; its words are the caller's to make. */
   note(note: StoryNoteDown, given: boolean): void;
+  /**
+   * Whether one of the game's own people, stood as this creature, has a conversation this browser knows the
+   * game gives them (`voices` of the conversations it folded): what decides whether the server is asked for
+   * one. The server holds the same reference and answers for itself. Absent: nobody of the game's is asked.
+   */
+  voiced?(who: string): boolean;
 }
 
 export class RemoteHost implements StoryHost {
@@ -250,18 +256,27 @@ export class RemoteHost implements StoryHost {
    * story with no conversation of their own is never asked for one, so the window does not wait a round trip
    * on a server that can only say they have nothing to say.
    */
-  canTalk(speaker: string): boolean {
-    if (!this.ready || this.deps.line().story < TALK_STORY || !this.setsRead) return false;
+  canTalk(speaker: string, who: string | null = null): boolean {
+    if (!this.ready || this.deps.line().story < TALK_STORY) return false;
+    // One of the game's own people: asked of the server when the game gives them a conversation, which the
+    // server, holding the same reference, answers for whether or not it reads a story set (the game's own
+    // conversations need none); one from before them refuses, and the window falls back on a greeting.
+    if (speaker.startsWith('row:')) return !!who && !!this.deps.voiced?.(who);
+    if (!this.setsRead) return false;
     const v = this.view();
     return !!v && v.cast.some((c) => c.id === speaker && c.talk);
   }
 
-  /** A conversation's turn, asked of the server, which answers with the node it reached (`word`). */
-  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null): HostAnswer {
+  /**
+   * A conversation's turn, asked of the server, which answers with the node it reached (`word`). One of the
+   * game's own people goes up with the creature they are stood as (`who`), which a server from before them
+   * leaves unread and answers that they have nothing to say.
+   */
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, who: string | null = null): HostAnswer {
     const why = this.whyNot() ?? (this.deps.line().story < TALK_STORY ? 'this server holds no conversations' : null);
     if (why) return { ok: false, why };
     this.stats.talks++;
-    this.push({ t: 'story', do: 'talk', op, speaker, ...(op === 'pick' && reply ? { reply } : {}), at: this.deps.at() });
+    this.push({ t: 'story', do: 'talk', op, speaker, ...(op === 'pick' && reply ? { reply } : {}), ...(op === 'open' && who ? { who } : {}), at: this.deps.at() });
     return { ok: true };
   }
 

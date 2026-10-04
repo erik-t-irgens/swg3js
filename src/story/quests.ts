@@ -61,7 +61,7 @@ import { seedChance } from './seed.ts';
 import { CLEARED, type ActionDef, type Edge, type QuestDef, type Reward, type Room, type StepDef, type StorySet } from './set.ts';
 import type { TextRef } from './text.ts';
 import { ACTIONS, BUILT_WAVE, OP_KEYS, STEP_TYPES } from './vocab.ts';
-import { WAYPOINT_TUNE, cleanWaypointName, type Waypoint } from './waypoints.ts';
+import { WAYPOINT_TUNE, cleanStoryWaypointName, sameStoryName, type Waypoint } from './waypoints.ts';
 
 /** What is true just now, as the host says it. Anything it cannot say is left out, and a condition on it reads false. */
 export interface StoryCtx {
@@ -992,14 +992,15 @@ export class Draft {
       case 'waypoint': {
         // A waypoint of the character's own, set by the story: minted by the host, as every personal one
         // is, marked as the story's (`by`), and set once -- a waypoint the story already set with the same
-        // name at the same place on the same world is already there. One the player set is never taken
+        // name at the same place on the same world is already there (or under that name cut short by a host
+        // from before a reference to the client's words was kept whole). One the player set is never taken
         // for it, whatever it is called.
-        const name = cleanWaypointName(x) ?? 'Waypoint';
+        const name = cleanStoryWaypointName(x) ?? 'Waypoint';
         const world = y as string;
         const px = a.args[2] as number;
         const pz = a.args[3] as number;
         const cell = a.args[4] as string | undefined;
-        if (this.book.waypoints.some((w) => w.by && w.name === name && w.world === world && w.p[0] === px && w.p[1] === pz)) return;
+        if (this.book.waypoints.some((w) => w.by && sameStoryName(w.name, name) && w.world === world && w.p[0] === px && w.p[1] === pz)) return;
         const wp: Waypoint = { id: `w${this.book.nextWp}`, name, world, f: world.startsWith('space_') ? 'game' : 'raw', p: [px, pz, null], colour: WAYPOINT_TUNE.defaultQuest, on: true, made: this.ctx.now, by: scope.quest ?? 'run' };
         if (cell) wp.room = { cell };
         this.change({ k: 'wpSet', wp });
@@ -1008,8 +1009,8 @@ export class Draft {
       case 'waypointGone': {
         // By its id (`w12`) or by the name the story gave it, which is all an author can know of one, read as
         // the name was kept (cleaned and cut). Only a waypoint a story set: the player's own are theirs.
-        const name = cleanWaypointName(x);
-        for (const w of [...this.book.waypoints]) if (w.by && (w.id === x || (name !== null && w.name === name))) this.change({ k: 'wpGone', id: w.id });
+        const name = cleanStoryWaypointName(x);
+        for (const w of [...this.book.waypoints]) if (w.by && (w.id === x || (name !== null && sameStoryName(w.name, name)))) this.change({ k: 'wpGone', id: w.id });
         return;
       }
       case 'say':

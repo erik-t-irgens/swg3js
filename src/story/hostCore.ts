@@ -217,9 +217,13 @@ export class HostCore {
     return { r, turn };
   }
 
-  /** Open a conversation with somebody: where their tree starts for this character. */
-  talkOpen(speaker: string, ctx: HostCtx): TalkResult {
-    return this.converse(ctx, (d) => talkOpenWork(d, speaker));
+  /**
+   * Open a conversation with somebody: where their tree starts for this character. One of the game's own
+   * people comes with the creature they are stood as (`who`); `tree` is the console's review, which opens a
+   * conversation whoever speaks it.
+   */
+  talkOpen(speaker: string, ctx: HostCtx, who: string | null = null, tree: string | null = null): TalkResult {
+    return this.converse(ctx, (d) => talkOpenWork(d, speaker, who, tree));
   }
 
   /** An answer given where a conversation stands (`reply`), or the node going on by itself (null). */

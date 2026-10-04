@@ -438,11 +438,13 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   // The server runs the story's rules from `src/story/` as they are, which is a folder rule rather than a
   // name in a list: this pins it, so a rules file nobody imports yet ships as surely as one somebody does,
   // and so does the one file outside the folder those rules may import.
-  // The test set goes too, at any depth, so a released relay started with --story-tests has it.
+  // The test set goes too, at any depth, so a released relay started with --story-tests has it; and so do the
+  // adoptions of the emulator's conversations (`src/story/core3/`), which a released relay folds with the
+  // reference and reads by folder, so no import names them either.
   const storyWalk = (dir, prefix) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? storyWalk(join(dir, e.name), `${prefix}${e.name}/`) : [`${prefix}${e.name}`]));
-  const storyFiles = storyWalk(join(root, 'src', 'story'), 'src/story/').filter((f) => f.endsWith('.ts') || f.startsWith('src/story/testSet/'));
+  const storyFiles = storyWalk(join(root, 'src', 'story'), 'src/story/').filter((f) => f.endsWith('.ts') || f.startsWith('src/story/testSet/') || f.startsWith('src/story/core3/'));
   const storyLost = [...storyFiles, 'src/net/hash.ts'].filter((f) => !packedPaths.has(f));
-  ok(storyFiles.length > 0 && storyFiles.some((f) => f.startsWith('src/story/testSet/quests/')) && !storyLost.length, `the release carries the story's rules, its test set and the hashing they may use (${storyFiles.length} files${storyLost.length ? `; missing ${storyLost.join(', ')}` : ''})`);
+  ok(storyFiles.length > 0 && storyFiles.some((f) => f.startsWith('src/story/testSet/quests/')) && storyFiles.some((f) => f.startsWith('src/story/core3/')) && !storyLost.length, `the release carries the story's rules, its test set, the adoptions of the emulator's conversations and the hashing they may use (${storyFiles.length} files${storyLost.length ? `; missing ${storyLost.join(', ')}` : ''})`);
   ok(!packed.some((f) => /(^|\/)story-private(\/|$)/i.test(f.path)), 'and nothing of story-private');
   const lib = join(scratch, 'importer');
   mkdirSync(join(lib, 'tools'), { recursive: true });

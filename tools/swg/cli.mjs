@@ -115,6 +115,11 @@
 //                                                                  the footprint grid, its lots and its upkeep, as <out-dir>/deeds.json
 //   node tools/swg/cli.mjs music <swg-dir> <out-dir>               the player music: one track per instrument per song, as <out-dir>/music
 //                                                                  (about 100 MB). The background score is deliberately left out
+//   node tools/swg/cli.mjs conversations <swg-dir> <out-dir> [--core3=<dir>]   what the game's own people say: the server's conversations
+//                                                                  as structure (out of the Core3 reference) for the people the packs stand, the
+//                                                                  heralds stood beside them, who greets in which of the client's reaction tables,
+//                                                                  and the client's own string tables all of it is in, as <out-dir>/conversations;
+//                                                                  it must run after spawns
 //   node tools/swg/cli.mjs spawns <out-dir> [--core3=<dir>]        where the world's creatures and its standing people really were, and every
 //                                                                  creature's own level, health and damage, read out of the Core3 reference
 //                                                                  in the checkout. It opens no game archive, so it takes no <swg-dir>,
@@ -163,7 +168,7 @@
 //        --ws-add=<archive>@x1,z1,x2,z2 (snapshot, why, audit: also place what an older publish's world snapshot in that
 //                       archive put inside the rectangle; stat <file> --all lists every archive carrying a file)
 //        --near=x,z,r (why: only objects within r metres of x,z; the pattern "." matches everything)
-//        --core3=<dir> (travel, fittings, deeds, spawns, snapshot, mobiles: read SWGEmu's MMOCoreORB/bin/scripts
+//        --core3=<dir> (travel, fittings, deeds, spawns, snapshot, mobiles, conversations: read SWGEmu's MMOCoreORB/bin/scripts
 //                       live instead of the Core3 reference in tools/swg/core3ref/; --core3=none reads neither)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -228,7 +233,8 @@ import { convertShipSounds, shipSoundStatus } from './shipsounds.mjs';
 import { extraEffectsStatus, forcePowersStatus } from './weapons.mjs';
 import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
-import { core3SourceFor, writeCore3Reference } from './core3ref.mjs';
+import { CORE3_REF_DIR, core3SourceFor, writeCore3Reference } from './core3ref.mjs';
+import { conversationsStatus } from './conversations.mjs';
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
@@ -3279,6 +3285,14 @@ function packStatus(dir) {
       const zone = existsSync(join(dir, 'dungeon1', 'manifest.json'));
       const why = instanceSpawnsWhy(zone, readQuiet(join(dir, 'dungeon1', 'spawns.json')), takers, (w) => (existsSync(join(dir, w, 'spawns.json')) ? (readQuiet(join(dir, w, 'spawns.json'))?.statics ?? []) : null));
       if (why) need(`spawns ${dir} --swg=<swg-dir> --retail-only`, why);
+    }
+    // What the game's own people say (`conversations`): the server's conversations they speak, the client's
+    // reaction lines they greet in and the client's string tables both are in. Asked for once there are
+    // people to speak, and again when the reference or a world's people changed under it.
+    if (spawnWorlds.length && spawnManifest) {
+      const talk = conversationsStatus(dir, CORE3_REF_DIR, readdirSync(dir).filter((w) => existsSync(join(dir, w, 'spawns.json'))));
+      console.log(talk.line);
+      if (talk.why) need(`conversations <swg-dir> ${dir} --retail-only`, talk.why);
     }
   }
   // The sound bank: every sound the game may play, the samples, and where each one is used.
@@ -7376,6 +7390,59 @@ switch (cmd) {
     console.log(`deeds: ${counts.deeds} buildings a player can buy, ${counts.named} named by the game, ${counts.withModel} with a model this game carries, ${counts.withFoot} with the grid the client placed them on`);
     if (!models.size) console.log('  the gallery pack is not converted, so no deed names a model: run `gallery` first');
     for (const f of faults.slice(0, 5)) console.log(`  footprint: ${f}`);
+    break;
+  }
+
+  case 'conversations': {
+    // <swg-dir> <out-dir> [--core3=<dir>]: what the game's own people say. The structure of the server's
+    // conversations and who speaks which come from the Core3 reference the converter carries, the people
+    // from the packs `spawns` wrote, and the words from the client's own string tables, so it runs after
+    // `spawns` and writes only under <out-dir>/conversations. `tools/swg/conversations.mjs` says what each
+    // file is and why this command stands the heralds itself.
+    if (!pos[2]) usage();
+    const c3 = core3SourceFor(options);
+    if (!c3 || c3.missing) {
+      console.log(`conversations: ${c3 ? c3.missing : '--core3=none: no emulator data, so no conversations'}`);
+      break;
+    }
+    const CV = await import('./conversations.mjs');
+    const out = pos[2];
+    let fleet = null;
+    try {
+      fleet = JSON.parse(readFileSync(join(out, 'spawns', 'manifest.json'), 'utf8'));
+    } catch {
+      fleet = null;
+    }
+    if (!fleet?.creatures) {
+      console.log(`conversations: no fleet manifest at ${join(out, 'spawns', 'manifest.json')}; run spawns first, since the people who speak are the ones it stands`);
+      break;
+    }
+    const t0 = Date.now();
+    const vfs = mount(pos[1]);
+    const packs = CV.packsUnder(out);
+    const plan = CV.planConversations({
+      conversations: c3.readConversations(),
+      speakers: c3.readConversationSpeakers(),
+      packs,
+      creatures: fleet.creatures,
+      reactionTables: CV.reactionTablesIn(vfs.list(`string/en/${CV.REACTION_DIR}/`)),
+    });
+    const readTable = (t) => {
+      const p = `string/en/${t}.stf`;
+      if (!vfs.has(p)) return null;
+      try {
+        return parseStringTable(vfs.read(p));
+      } catch {
+        return null;
+      }
+    };
+    // Stamped with the shipped reference's own hash, which is what `status` compares with.
+    const w = CV.writeConversations(out, plan, readTable, CV.referenceHash(CORE3_REF_DIR));
+    const c = plan.counts;
+    console.log(`conversations: ${c.trees} of the server's conversations (${c.instances} built by ${c.shapes} factories) for ${c.withTree} kinds of people, ${c.withDiction} who greet in the client's own reaction lines, ${c.heralds} heralds stood, over ${packs.length} worlds' people`);
+    console.log(`  ${w.written} of the client's string tables (${(w.bytes / 1048576).toFixed(2)} MB), core3.json ${(w.core3Bytes / 1024).toFixed(0)} KB, speakers.json ${(w.speakersBytes / 1024).toFixed(0)} KB, in ${((Date.now() - t0) / 1000).toFixed(1)} s -> ${join(out, 'conversations')}`);
+    if (w.missing.length) console.log(`  ${w.missing.length} tables the archives have not got: ${w.missing.slice(0, 8).join(', ')}${w.missing.length > 8 ? ', ...' : ''}`);
+    for (const n of plan.notes) console.log(`  ${n}`);
     break;
   }
 

@@ -107,11 +107,15 @@ import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally, type JobsLine, type
 import { JOBS_WAIT_OLD, JOBS_WAIT_UNREAD, REMOTE_TUNE, RemoteHost, tuneRemote } from './story/remoteHost.ts';
 import type { StoryAt } from './story/storyWire.ts';
 import { noteWords } from './story/notes.ts';
-import { clientKey, textOf, type TextRef } from './story/text.ts';
+import { UNRESOLVED, clientKey, tableOf, textOf, type TextRef } from './story/text.ts';
 import type { HostCtx } from './story/hostCore.ts';
 import type { PayOrder, StoryEvent, StoryNote } from './story/quests.ts';
 import type { CastView, StoryView } from './story/view.ts';
-import { ownSetFiles, testSetFiles } from './story/testSetFiles.ts';
+import { core3AdoptionFiles, ownSetFiles, testSetFiles } from './story/testSetFiles.ts';
+import { ClientStrings, STRINGS_TUNE, fillName } from './story/strings.ts';
+import { REACTION_TUNE, reactionFor, tuneReactions, type Reaction } from './story/reactions.ts';
+import { conversationPack } from './world/conversationPack.ts';
+import { tablesOf } from './story/core3Trees.ts';
 import { StoryWatch, creditedByWord, killKey, killOf, roomOf, type WatchPlace } from './world/storyWatch.ts';
 import { STAND_TUNE, StoryStands, type CastDeps } from './world/storyStands.ts';
 import { TRACKER_TUNE, TimeWarnings, Tracker, trackerTime, tuneTracker } from './ui/tracker.ts';
@@ -837,9 +841,11 @@ class App {
   private readonly talkUi: TalkUi;
   /**
    * The conversation under way, or null: whom, what may be answered, whether they follow, and until when
-   * a reply stands before the view goes back (NaN while the answers are up). One at a time.
+   * a reply stands before the view goes back (NaN while the answers are up). One at a time. `reaction` is the
+   * greeting and the farewell one of the game's own people says in the client's reaction lines, when they
+   * have a way of speaking and no conversation (src/story/reactions.ts).
    */
-  private talkNow: { body: Mobile; options: TalkOption[]; following: boolean; replyUntil: number; since: number } | null = null;
+  private talkNow: { body: Mobile; options: TalkOption[]; following: boolean; replyUntil: number; since: number; reaction: Reaction | null } | null = null;
   /** The point the one spoken to turns to: the player's place, kept and written each frame. */
   private readonly talkAt = { x: 0, z: 0 };
   /**
@@ -858,9 +864,11 @@ class App {
    * A story's conversation under way (`src/story/talkRules.ts`), or null while the game's own greeting is
    * spoken: whose conversation, the speaker as the gesture rule reads them, the answers on offer, and every
    * line's gesture as it was chosen (for `__debug.gestures`). The node it stands at is the player's
-   * (`talkPlay`); the cut is the camera's (`talkCut`).
+   * (`talkPlay`); the cut is the camera's (`talkCut`). One of the game's own people carries the creature they
+   * are stood as (`who`), which is what gives them their conversation; a conversation the console reviews
+   * (`review`, `__debug.talkTree({ core3 })`) is played on a book of its own by this browser alone.
    */
-  private talkTree: { speaker: string; memory: GestureMemory; mood: string | null; diction: string | null; replies: ReplyView[]; lent: number; log: { node: string; line: number; words: number; clip: string | null; kind: GesturePick['kind'] | 'greeting'; family: string | null; why: string }[]; greetUntil: number } | null = null;
+  private talkTree: { speaker: string; who: string | null; review: boolean; memory: GestureMemory; mood: string | null; diction: string | null; replies: ReplyView[]; lent: number; log: { node: string; line: number; words: number; clip: string | null; kind: GesturePick['kind'] | 'greeting'; family: string | null; why: string }[]; greetUntil: number } | null = null;
   /** The last one, kept after it ended so `__debug.gestures()` can say what its lines played. */
   private lastTalkTree: App['talkTree'] = null;
   /** The lines of a story's conversation in turn, its answers, the player's own, and the waits (`src/world/talkPlay.ts`). */
@@ -940,6 +948,9 @@ class App {
     now: () => sharedClock.now(),
     wall: () => Date.now(),
     note: (note, given) => this.sayStory(note, given),
+    // Whether one of the game's own people has a conversation the game plays: the server, holding the same
+    // reference, is asked for it only then.
+    voiced: (who) => conversationPack.voiced(who),
   });
   /** What the jobs watch for -- arrivals, rooms, areas, a world, kills, a death -- four times a second (src/world/storyWatch.ts). */
   private readonly storyWatch = new StoryWatch();
@@ -953,6 +964,15 @@ class App {
   private storyTests = import.meta.env.DEV;
   /** Each client string a story names that nothing could resolve, said once in the console. */
   private readonly storyUnresolved = new Set<string>();
+  /**
+   * The client's own string tables (src/story/strings.ts): fetched as somebody who speaks from one comes near,
+   * and kept for the session. What every reference a story, a conversation or a greeting names is read from.
+   */
+  private readonly strings = new ClientStrings(import.meta.env.BASE_URL, (url) => fetch(url));
+  /** Reused by the pass that fetches the tables of whoever stands near, four times a second. */
+  private readonly nearWho: string[] = [];
+  /** Each story waypoint's client-string name read apart once, since the map names them on every frame (`waypointWords`); null for one that names nothing. */
+  private readonly waypointRefs = new Map<string, { table: string; key: string; missing: boolean } | null>();
   private netStatus = 'off';
   private lastStateSent = 0;
   /** The wheel's eight slots, clip names; filled from the rig's own emotes the first time. */
@@ -6249,7 +6269,7 @@ class App {
         const play = this.talkPlay;
         return {
           said,
-          talking: t ? { with: t.body.label, key: t.body.key, following: t.following, options: t.options.map((o, i) => `${i + 1 + (this.talkTree?.replies.length ?? 0)}. ${o.label}${o.enabled ? '' : ` (${o.why})`}`), replying: Number.isFinite(t.replyUntil) } : null,
+          talking: t ? { with: t.body.label, key: t.body.key, following: t.following, options: t.options.map((o, i) => `${i + 1 + (this.talkTree?.replies.length ?? 0)}. ${o.label}${o.enabled ? '' : ` (${o.why})`}`), replying: Number.isFinite(t.replyUntil), reaction: t.reaction ? { warmth: t.reaction.warmth, track: t.reaction.track, hi: t.reaction.hi, bye: t.reaction.bye } : null } : null,
           // A story's conversation: whose, the conversation and the node it stands at, and where in it the window is.
           tree: this.talkTree ? play.node?.tree ?? null : null,
           node: this.talkTree ? play.node?.node ?? null : null,
@@ -6274,18 +6294,35 @@ class App {
        * nearest one stood) opens one with a cast member stood within `keep` metres, as E would; `{ pick: n }`
        * answers by number (the story's answers first, the game's own after) once the answers show; `{ next:
        * true }` moves on a line, as a click does; `{ step: seconds }` lets the lines stand that long; `{ tune }`
-       * moves `TALK_TREE_TUNE`.
+       * moves `TALK_TREE_TUNE`. One of the game's own people is opened as `{ open: 'row:<key>' }` (a herald,
+       * say). `{ core3: '<template>' }` plays any of the emulator's conversations here that can be read through
+       * -- adopted or not, handler or none -- with the nearest body that may be spoken to, under a
+       * "[structure only]" banner and on a book of its own that nothing keeps, for review.
        */
-      talkTree: (opts?: { open?: string; pick?: number; next?: boolean; step?: number; tune?: Partial<typeof TALK_TREE_TUNE> }) => {
+      talkTree: (opts?: { open?: string; core3?: string; pick?: number; next?: boolean; step?: number; tune?: Partial<typeof TALK_TREE_TUNE> }) => {
         if (opts?.tune) tuneTalkTree(opts.tune);
         let said: string | null = null;
-        if (opts?.open) {
-          const at = this.player.worldPos;
+        const at = this.player.worldPos;
+        const tooFar = (m: Mobile): string | null => (Math.hypot(m.pos.x - at.x, m.pos.z - at.z) > TALK_TUNE.keep ? `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)` : null);
+        if (opts?.open?.startsWith('row:')) {
+          const m = standingPeople.bodyOfKey(opts.open.slice(4));
+          said = !m ? `nobody stands for ${opts.open} here (the people are stood within ${PEOPLE_TUNE.build} m of the player)` : (tooFar(m) ?? this.startTalk(m) ?? `talking to ${m.label}`);
+        } else if (opts?.open) {
           const live = (this.world.mobiles?.live ?? []).filter((m) => !m.removed && this.storyStands.castOf(m));
           const m = opts.open === 'nearest' ? live.sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0] : live.find((x) => this.storyStands.castOf(x) === opts.open);
           if (!m) said = opts.open === 'nearest' ? 'none of the story\'s people is stood here' : `${opts.open} is not stood here (the cast are stood within ${STAND_TUNE.castNear} m of where the story puts them)`;
-          else if (Math.hypot(m.pos.x - at.x, m.pos.z - at.z) > TALK_TUNE.keep) said = `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)`;
-          else said = this.startTalk(m) ?? `talking to ${m.label}`;
+          else said = tooFar(m) ?? this.startTalk(m) ?? `talking to ${m.label}`;
+        }
+        if (opts?.core3) {
+          const me = this.world.playerTarget;
+          const why = conversationPack.whyNotReview(opts.core3);
+          const m = (this.world.mobiles?.live ?? []).filter((x) => !x.removed && !whyNotTalk(x, me) && !tooFar(x)).sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0];
+          // Its words on their way first: nobody near speaks this tree, so nothing has asked for them.
+          const def = conversationPack.set?.talks[`core3:talk/${opts.core3}`];
+          if (def) for (const t of tablesOf(def)) this.strings.want(t);
+          if (why) said = why;
+          else if (!m) said = `nobody within ${TALK_TUNE.keep} m may be spoken to, to say it`;
+          else said = this.startTalk(m, `core3:talk/${opts.core3}`) ?? `${m.label} says ${opts.core3}, structure only`;
         }
         if (opts?.next) {
           this.skipTalkLine();
@@ -6301,9 +6338,11 @@ class App {
         const host = this.jobs;
         return {
           said,
-          host: host.kind,
-          canTalk: this.talkTree ? host.canTalk(this.talkTree.speaker) : null,
+          host: this.talkTree?.review ? 'review' : host.kind,
+          canTalk: this.talkTree ? this.talkTree.review || host.canTalk(this.talkTree.speaker, this.talkTree.who) : null,
           speaker: this.talkTree?.speaker ?? null,
+          who: this.talkTree?.who ?? null,
+          conversations: conversationPack.report(),
           ...play.report(),
           lines: node ? node.lines.map((l, i) => `${i === play.line ? '> ' : '  '}${this.talkLineText(node, l)}`) : [],
           answers: this.talkUi.debug().options,
@@ -6314,6 +6353,49 @@ class App {
           castWhy: this.castWhy(),
           castStats: { ...this.storyStands.stats },
           tune: { ...TALK_TREE_TUNE },
+        };
+      },
+      /**
+       * How the game's own people greet you in the client's reaction lines (`src/story/reactions.ts`): for
+       * somebody standing near -- the nearest with a way of speaking, or `{ who }`, a creature's name, a row's
+       * `row:<key>` or a body's key -- their creature, diction and faction, the track that sets how warm they
+       * are and how warm, the greeting and the farewell they would say now (the reference and its words), and
+       * whether the table those are in has come. `{ tune }` moves `REACTION_TUNE` (`niceAt`, `meanTrust`,
+       * `every`). Also what the conversations' files came to, and the strings fetched.
+       */
+      reactions: (opts?: { who?: string | number; tune?: Partial<typeof REACTION_TUNE> }) => {
+        if (opts?.tune) tuneReactions(opts.tune);
+        const at = this.player.worldPos;
+        const near = standingPeople.whoNear(at.x, at.z, STRINGS_TUNE.fetchReach * 2, []);
+        const live = (this.world.mobiles?.live ?? []).filter((m) => !m.removed && standingPeople.speakerOf(m));
+        const byDistance = (a: Mobile, b: Mobile): number => a.pos.distanceTo(at) - b.pos.distanceTo(at);
+        let m: Mobile | null = null;
+        let creature: string | null = null;
+        const w = opts?.who;
+        if (typeof w === 'number') m = live.find((x) => x.key === w) ?? null;
+        else if (typeof w === 'string' && w.startsWith('row:')) m = standingPeople.bodyOfKey(w.slice(4));
+        else if (typeof w === 'string') {
+          creature = w;
+          m = live.filter((x) => standingPeople.speakerOf(x)?.who === w).sort(byDistance)[0] ?? null;
+        } else m = live.filter((x) => conversationPack.voiceOf(standingPeople.speakerOf(x)?.who)?.diction).sort(byDistance)[0] ?? null;
+        const person = m ? standingPeople.speakerOf(m) : null;
+        const who = person?.who ?? creature;
+        const voice = conversationPack.voiceOf(who);
+        const r = reactionFor(voice, this.story.book, person ? `row:${person.key}` : `row:${who ?? 'nobody'}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key));
+        if (r) this.strings.want(r.table);
+        const line = (ref: string) => ({ ref, words: this.storyText(ref) });
+        return {
+          who,
+          speaker: person ? `row:${person.key}` : null,
+          body: m ? { key: m.key, name: m.label, away: Math.round(m.pos.distanceTo(at) * 10) / 10 } : null,
+          voice: voice ? { ...voice } : null,
+          conversation: who && conversationPack.voiced(who) ? 'played' : voice?.tree ? 'kept, not played' : null,
+          reaction: r ? { track: r.track, warmth: r.warmth, table: r.table, loaded: this.strings.has(r.table), hi: line(r.hi), bye: line(r.bye) } : null,
+          why: !who ? 'nobody of the game\'s own stands near' : !voice?.diction ? `${who} has no way of speaking of the client's, and greets in our own words` : null,
+          near: [...new Set(near)].map((n) => ({ who: n, diction: conversationPack.voiceOf(n)?.diction ?? null, played: conversationPack.voiced(n) })),
+          conversations: conversationPack.report(),
+          strings: this.strings.report(),
+          tune: { ...REACTION_TUNE },
         };
       },
       /**
@@ -7120,6 +7202,20 @@ class App {
     this.remoteJobs.onView(() => this.waypointsChanged());
     void this.reloadStory();
     if (import.meta.hot) import.meta.hot.on('story:changed', () => void this.reloadStory());
+    // The game's own people's words (src/world/conversationPack.ts): the server's conversations the heralds and
+    // whoever else is adopted speak, folded once a session and joined to whatever story this browser holds; a
+    // world's load waits a moment for them, since the heralds stand beside its people. And a line shown before
+    // the client's table it is in came is said again the moment the table lands.
+    void conversationPack.load(import.meta.env.BASE_URL, () => core3AdoptionFiles()).then(() => {
+      this.questHost.useCore3(conversationPack.set);
+      for (const p of conversationPack.problems) console.warn(`conversations: ${p}`);
+    });
+    // And a waypoint a story named with the client's words, shown as `[…]` in the Waypoints window or on the
+    // minimap before them (both are built when the book changes and never in a frame), is shown again in them.
+    this.strings.onLoad((table) => {
+      this.refreshTalkWords(table);
+      this.refreshWaypointWords(table);
+    });
     this.remotes.carrierPose = (to, pos, quat) => {
       const p = this.player;
       const v = to === this.net.id ? p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null : null;
@@ -9763,6 +9859,47 @@ class App {
   }
 
   /**
+   * A waypoint's own name as it is shown: as it stands, or, where a story set it (`by`) and named it with one of
+   * the client's own strings (a herald's place), in the client's words. The name of a waypoint of the player's own
+   * is never read as a reference, whatever it looks like. A story's reference that a server or a browser from before such names
+   * were kept whole cut short names nothing, and is shown as the waypoint it is. The map asks on every frame
+   * it draws, so a reference is read apart once (`waypointRefs`) and nothing is made after: a table on its way
+   * is asked for by a lookup that makes nothing, and one that came without the key is said once.
+   */
+  private waypointWords(w: { name: string; by?: string }): string {
+    const name = w.name;
+    if (!w.by || !name.startsWith('@')) return name;
+    let ref = this.waypointRefs.get(name);
+    if (ref === undefined) {
+      const k = clientKey(name);
+      ref = k ? { table: k.table, key: k.key, missing: false } : null;
+      this.waypointRefs.set(name, ref);
+    }
+    if (!ref) return 'Waypoint';
+    if (ref.missing) return UNRESOLVED;
+    const words = this.strings.look(ref.table, ref.key);
+    if (words !== null) return fillName(words, this.current?.name ?? 'you');
+    if (this.strings.has(ref.table)) {
+      ref.missing = true;
+      this.storyLook(ref.table, ref.key);
+    }
+    // Otherwise asked for, and shown again when its table lands (`refreshWaypointWords`).
+    return UNRESOLVED;
+  }
+
+  /** A client table came: whatever shows a story's waypoint named from it, built only when the book changes, is built again. */
+  private refreshWaypointWords(table: string): void {
+    const book = this.story.book;
+    if (!book) return;
+    for (const w of book.waypoints) {
+      if (w.by && w.name.startsWith('@') && this.waypointRefs.get(w.name)?.table === table) {
+        this.waypointsChanged();
+        return;
+      }
+    }
+  }
+
+  /**
    * The waypoints the map draws: the ones switched on, on the world the map shows, in the game's frame
    * (a planet's are kept in the raw frame and turned here, about this world's own layout centre). It is
    * read every frame the map window draws, so it makes nothing: an index loop over the book as it stands.
@@ -9778,7 +9915,7 @@ class App {
       const w = book.waypoints[i];
       if (!w.on || w.world !== here) continue;
       const raw = w.f === 'raw';
-      out.add(w.id, w.name, w.colour, book.trackWp === w.id, raw ? rawToGameX(cx, w.p[0]) : w.p[0], w.p[2] ?? 0, raw ? rawToGameZ(cz, w.p[1]) : w.p[1]);
+      out.add(w.id, this.waypointWords(w), w.colour, book.trackWp === w.id, raw ? rawToGameX(cx, w.p[0]) : w.p[0], w.p[2] ?? 0, raw ? rawToGameZ(cz, w.p[1]) : w.p[1]);
     }
     // The jobs' own, from the view as it last stood: no walk of the book is made for them.
     const view = this.jobs.view();
@@ -10007,7 +10144,7 @@ class App {
     const planet = this.world.planet;
     if (book && planet) {
       const here = packIdOf(planet, this.zone);
-      for (const w of book.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, w.name, w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
+      for (const w of book.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, this.waypointWords(w), w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
       // And the jobs' own, switched on.
       const view = this.jobs.view();
       if (view) for (const w of view.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, this.storyText(w.name), w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
@@ -10035,7 +10172,7 @@ class App {
       for (const w of book.waypoints) {
         if (!w.on || w.world !== here) continue;
         const raw = w.f === 'raw';
-        spots.add(w.id, w.name, w.colour, book.trackWp === w.id, false, raw ? rawToGameX(cx, w.p[0]) : w.p[0], raw ? rawToGameZ(cz, w.p[1]) : w.p[1], raw || w.p[2] === null ? Number.NaN : w.p[2], w.room?.cell ?? '', w.room?.template ?? '');
+        spots.add(w.id, this.waypointWords(w), w.colour, book.trackWp === w.id, false, raw ? rawToGameX(cx, w.p[0]) : w.p[0], raw ? rawToGameZ(cz, w.p[1]) : w.p[1], raw || w.p[2] === null ? Number.NaN : w.p[2], w.room?.cell ?? '', w.room?.template ?? '');
       }
       // The jobs' own waypoints, which the book never holds: worked out from the step each belongs to, and
       // shown as the player last switched them.
@@ -10192,7 +10329,7 @@ class App {
         const dz = (raw ? rawToGameZ(cz, w.p[1]) : w.p[1]) - at.z;
         d = !raw && w.p[2] !== null ? Math.hypot(dx, w.p[2] - at.y, dz) : Math.hypot(dx, dz);
       }
-      return { id: w.id, name: w.name, world: w.world, worldName: worldNameOf(w.world), here: isHere, d, distance: isHere ? waypointWords(d) : '', colour: w.colour, on: w.on, tracked: book?.trackWp === w.id, room: w.room?.cell ?? '' };
+      return { id: w.id, name: this.waypointWords(w), world: w.world, worldName: worldNameOf(w.world), here: isHere, d, distance: isHere ? waypointWords(d) : '', colour: w.colour, on: w.on, tracked: book?.trackWp === w.id, room: w.room?.cell ?? '' };
     });
     const count = book?.waypoints.length ?? 0;
     const host = this.story.host;
@@ -10312,22 +10449,35 @@ class App {
   };
 
   /**
-   * The words a story's text stands for: a literal as it is, a client string looked up (the client's
-   * strings arrive with the conversations, so until then `[…]`, said once in the console for each), and
-   * the player's own name where the game's lines write `%TU` or `%NU`.
+   * The words a story's text stands for: a literal as it is, a client string looked up in the client's own
+   * tables (`this.strings`; `[…]` while a table is on its way, and for a line its table has not got, said once
+   * in the console), and the player's own name where the game's lines write `%TU` or `%NU`.
    */
   private storyText(ref: TextRef): string {
     // Kept, not made per call: the map asks for a job's waypoint's name on every frame it draws.
-    const words = textOf(ref, this.storyLook);
-    return words.includes('%') ? words.replace(/%TU|%NU/g, this.current?.name ?? 'you') : words;
+    return fillName(textOf(ref, this.storyLook), this.current?.name ?? 'you');
   }
 
-  /** A client string looked up: nothing answers yet, and each one is said once in the console. */
+  /**
+   * The client's string tables the game's own people within `STRINGS_TUNE.fetchReach` speak from -- their
+   * conversation's and their reaction table -- asked for now, so their words are here before they are spoken
+   * to. A table here or on its way costs nothing to ask for again; nothing here allocates once each creature's
+   * list has been worked out.
+   */
+  private wantNearStrings(): void {
+    if (conversationPack.status !== 'ready' || !this.inWorld) return;
+    const at = this.player.worldPos;
+    for (const who of standingPeople.whoNear(at.x, at.z, STRINGS_TUNE.fetchReach, this.nearWho)) for (const t of conversationPack.tablesFor(who)) this.strings.want(t);
+  }
+
+  /** A client string looked up: one its table has come without is said once in the console; one still on its way is asked for. */
   private readonly storyLook = (table: string, key: string): string | null => {
+    const words = this.strings.look(table, key);
+    if (words !== null || !this.strings.has(table)) return words;
     const k = `@${table}:${key}`;
     if (!this.storyUnresolved.has(k)) {
       this.storyUnresolved.add(k);
-      console.info(`story: no words for ${k} yet (the client's own strings arrive with the conversations)`);
+      console.info(`story: no words for ${k} (its table has no such line)`);
     }
     return null;
   };
@@ -10498,6 +10648,8 @@ class App {
     const view = host.view();
     // The story's people near the player stood, the rest taken down, and a name given mid-conversation worn.
     this.stepCast(view);
+    // The client's string tables of the game's own people standing near, on their way before anybody speaks.
+    this.wantNearStrings();
     this.timeWarnings.check(view, host.now(), this.warnStory);
     const S = this.settings;
     const p = this.player;
@@ -18191,22 +18343,33 @@ class App {
    * Speak to somebody, or say why not. They turn to face the player and greet them, the display stands
    * aside for the window, and the mouse is freed for the answers; the player stands and listens.
    *
-   * One of the story's people with a conversation of their own speaks it (`talkTree`): whoever holds the
-   * story is asked for its first node, the window waits on it with the speaker's name, and the lines then
-   * play in turn. Its answers come first and the game's own way out after them; story people stay at their
-   * post, so they are not asked to follow. Anybody else, or a story person whose host cannot answer just now,
-   * says the game's own greeting with the game's own answers, as before.
+   * Who speaks is resolved in one order: one of the story's people (their cast id); else one of the game's
+   * own people, named by their row (`row:<key>`) and the creature they are stood as, which may be given one
+   * of the server's conversations (an adopted one: the heralds); else, with a way of speaking, the client's
+   * own reaction lines; else our own greeting.
+   *
+   * Somebody with a conversation speaks it (`talkTree`): whoever holds the story is asked for its first node,
+   * the window waits on it with the speaker's name, and the lines then play in turn. Its answers come first
+   * and the game's own after them; story people stay at their post, so they are not asked to follow.
+   * Anybody else, or somebody whose host cannot answer just now, greets in the client's reaction lines or
+   * the game's own words, with the game's own answers (`talkGreeting`).
    */
-  private startTalk(m: Mobile): string | null {
+  private startTalk(m: Mobile, review: string | null = null): string | null {
     if (this.talkNow) this.endTalk(false);
     const why = whyNotTalk(m, this.world.playerTarget);
     if (why) return why;
     const following = this.world.followers.following(m);
-    const speaker = this.storyStands.castOf(m);
+    const castId = this.storyStands.castOf(m);
+    const person = castId ? null : standingPeople.speakerOf(m);
+    const speaker = castId ?? (person ? `row:${person.key}` : review ? 'row:review' : null);
+    const who = person?.who ?? null;
     const host = this.jobs;
+    // Their words on their way, should nobody have come near enough to ask for them before (the console's `to`).
+    if (who) for (const t of conversationPack.tablesFor(who)) this.strings.want(t);
     // Asked only of somebody with a conversation of their own: the host says whether it can answer for them
-    // (a server's view, this browser's sets), so one with none goes straight to the game's own greeting.
-    const tree = !!speaker && host.canTalk(speaker);
+    // (a server's view and the game's own conversations, this browser's sets), so one with none goes straight
+    // to the greeting. A conversation the console reviews is this browser's own to play, whoever holds the story.
+    const tree = !!speaker && (review !== null || host.canTalk(speaker, who));
     const options = this.talkOptionsFor(m, following);
     const at = this.player.worldPos;
     this.talkAt.x = at.x;
@@ -18214,7 +18377,7 @@ class App {
     m.listen(this.talkAt);
     // Not from a chair: a greeting is a whole-body clip, and played over a seated idle it stands the body up.
     const greeted = TALK_TUNE.greet && (!tree || TALK_TREE_TUNE.greetAtOpen) && !m.seated ? m.greet(GREET_CLIPS) : 0;
-    this.talkNow = { body: m, options, following, replyUntil: Number.NaN, since: this.world.simTime };
+    this.talkNow = { body: m, options, following, replyUntil: Number.NaN, since: this.world.simTime, reaction: null };
     this.talkCam.body = m;
     Object.assign(this.talkCut, newCut());
     this.talkSided = false;
@@ -18223,7 +18386,7 @@ class App {
     this.freeMouse(true);
     this.audio.ui.play('panelOpen');
     if (tree && speaker) {
-      const cast = host.view()?.cast.find((c) => c.id === speaker) ?? null;
+      const cast = castId ? (host.view()?.cast.find((c) => c.id === castId) ?? null) : null;
       // Every gesture of a rig already parsed, lent before the first line is chosen among them.
       const lent = lendGestures(m, { parsedRigClips: (prefer) => Character.parsedRigClips(prefer) });
       const memory = newGestureMemory();
@@ -18231,17 +18394,73 @@ class App {
       // and standing in for any line's own until it has played out (`showTalkLine`).
       const greetClip = greeted > 0 ? (GREET_CLIPS.find((c) => m.canPlay(c)) ?? null) : null;
       if (greetClip) rememberGesture(memory, { clip: greetClip, kind: 'hand', family: 'greet', why: 'the greeting' });
-      this.talkTree = { speaker, memory, mood: cast?.mood ?? null, diction: dictionOf(cast?.side ?? m.side, m.entry.id), replies: [], lent, log: [], greetUntil: this.world.simTime + greeted };
+      // How the speaker speaks: the client's own diction where the game gave them one, else what their side and body say.
+      const diction = conversationPack.voiceOf(who)?.diction ?? dictionOf(cast?.side ?? m.side, m.entry.id);
+      const mood = cast ? (cast.mood ?? null) : (standingPeople.rowOf(m)?.mood ?? null);
+      this.talkTree = { speaker, who, review: review !== null, memory, mood, diction, replies: [], lent, log: [], greetUntil: this.world.simTime + greeted };
       this.talkPlay.open(this.world.simTime);
       this.talkUi.show(m.label, '', []);
+      this.talkUi.setBanner(review !== null ? '[structure only]' : null);
       this.talkUi.waiting();
       // This browser's own host answers at once (`onTalkNode`), a server's when it does.
-      host.talk('open', speaker);
+      if (review !== null) this.questHost.review('open', speaker, null, review);
+      else host.talk('open', speaker, null, who);
       return null;
     }
     this.talkTree = null;
-    this.talkUi.show(m.label, greetingOf(m.side, following, m.key), options);
+    this.talkGreeting(this.talkNow);
     return null;
+  }
+
+  /**
+   * The greeting of somebody with no conversation to hold: one of the game's own people with a way of speaking
+   * says one of the client's reaction lines (`reactions.ts`), warm or cold by the character's Standing on their
+   * side's track, and keeps its farewell for the way out; anybody else says one of our own lines. The game's own
+   * answers under it either way.
+   */
+  private talkGreeting(t: NonNullable<App['talkNow']>): void {
+    const m = t.body;
+    const person = standingPeople.speakerOf(m);
+    const voice = person ? conversationPack.voiceOf(person.who) : null;
+    t.reaction = person ? reactionFor(voice, this.story.book, `row:${person.key}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key)) : null;
+    if (t.reaction) this.strings.want(t.reaction.table);
+    this.talkUi.setBanner(null);
+    this.talkUi.show(m.label, t.reaction ? this.storyText(t.reaction.hi) : greetingOf(m.side, t.following, m.key), t.options);
+  }
+
+  /** A word to whoever plays the conversation under way: the console's review is this browser's own, the rest the story's host. */
+  private talkSay(op: 'pick' | 'close', reply: string | null = null): void {
+    const tt = this.talkTree;
+    if (!tt) return;
+    if (tt.review) this.questHost.review(op, tt.speaker, reply);
+    else this.jobs.talk(op, tt.speaker, reply, tt.who);
+  }
+
+  /**
+   * A client string table came (`this.strings`): a line of the conversation under way, its answers, or a
+   * greeting, whose words are in that table is said again, and a line given its full time now that it has
+   * them. Only those: a table comes once a session, so one a shown line is in came after it was shown, and
+   * any other -- somebody walking near, whose tables are fetched ahead -- leaves the window as it is.
+   */
+  private refreshTalkWords(table: string): void {
+    const t = this.talkNow;
+    if (!t) return;
+    const tt = this.talkTree;
+    const node = this.talkPlay.node;
+    if (tt && node) {
+      if (this.talkPlay.mode === 'line') {
+        const l = node.lines[this.talkPlay.line];
+        if (!l || tableOf(l.text, node.strings) !== table) return;
+        this.talkUi.setLine(this.talkLineText(node, l));
+        this.talkPlay.until = Math.max(this.talkPlay.until, this.world.simTime + this.talkLineHold(l));
+      } else if (this.talkPlay.mode === 'choose') {
+        const named = (ref: TextRef | null | undefined): boolean => !!ref && tableOf(ref) === table;
+        if (node.replies.some((r) => named(r.text) || named(r.why) || named(r.stakes))) this.talkUi.setChoices(this.talkChoices(node));
+      }
+      return;
+    }
+    // The greeting, while it stands under the answers (a reply said since stands in its own words).
+    if (!tt && t.reaction && t.reaction.table === table && !Number.isFinite(t.replyUntil)) this.talkUi.setLine(this.storyText(t.reaction.hi));
   }
 
   /**
@@ -18278,19 +18497,18 @@ class App {
         if (node) this.showTalkChoices(node);
         return;
       case 'next':
-        this.jobs.talk('pick', tt.speaker, null);
+        this.talkSay('pick', null);
         return;
       case 'end':
         this.endTalk();
         return;
       case 'fallback': {
-        // Nothing came in time, or nothing could be said: the game's own greeting and answers instead.
+        // Nothing came in time, or nothing could be said: the greeting and the game's own answers instead.
         if (step.why) console.info(`story: ${tt.speaker} has nothing to say just now (${step.why})`);
-        this.jobs.talk('close', tt.speaker);
+        this.talkSay('close');
         this.talkTree = null;
-        const m = t.body;
-        t.options = this.talkOptionsFor(m, t.following);
-        this.talkUi.show(m.label, greetingOf(m.side, t.following, m.key), t.options);
+        t.options = this.talkOptionsFor(t.body, t.following);
+        this.talkGreeting(t);
         return;
       }
     }
@@ -18318,7 +18536,7 @@ class App {
         words = words.split(`%${k}`).join(s);
       }
     }
-    return words.includes('%') ? words.replace(/%TU|%NU/g, this.current?.name ?? 'you') : words;
+    return fillName(words, this.current?.name ?? 'you');
   }
 
   /** How long a line of the node in play stands: for its words, and its own wait after. */
@@ -18361,10 +18579,15 @@ class App {
     const tt = this.talkTree;
     if (!t || !tt) return;
     tt.replies = node.replies;
-    const choices: TalkChoice[] = node.replies.map((r) => ({ label: this.storyText(r.text), enabled: r.enabled, why: r.why ? this.storyText(r.why) : '', ...(r.stakes ? { stakes: this.storyText(r.stakes) } : {}) }));
-    for (const o of t.options) choices.push(o);
-    this.talkUi.setChoices(choices);
+    this.talkUi.setChoices(this.talkChoices(node));
     askCut(this.talkCut, 'over-player', this.talkCut.side);
+  }
+
+  /** A node's answers as the window lists them, in the words they stand for just now, with the game's own after them. */
+  private talkChoices(node: NodeView): TalkChoice[] {
+    const choices: TalkChoice[] = node.replies.map((r) => ({ label: this.storyText(r.text), enabled: r.enabled, why: r.why ? this.storyText(r.why) : '', ...(r.stakes ? { stakes: this.storyText(r.stakes) } : {}) }));
+    for (const o of this.talkNow?.options ?? []) choices.push(o);
+    return choices;
   }
 
   /**
@@ -18384,7 +18607,7 @@ class App {
       askCut(this.talkCut, r.shot === undefined ? 'over-npc' : (r.shot?.kind ?? 'hold'), r.shot?.side ?? this.talkCut.side);
     } else this.talkUi.waiting();
     this.talkPlay.said(r, this.world.simTime);
-    this.jobs.talk('pick', tt.speaker, r.id);
+    this.talkSay('pick', r.id);
   }
 
   /** The player's own gesture in a conversation: played as an emote is, but never sent to the others (`playEmote` sends). */
@@ -18441,6 +18664,13 @@ class App {
     if (!o) return;
     this.audio.ui.play('select');
     if (o.id === 'leave') {
+      // One of the game's own people who greeted in the client's reaction lines says its farewell, which stands
+      // its moment before the view goes back; anybody else lets the player go at once.
+      if (!tt && t.reaction) {
+        this.talkUi.reply(this.storyText(t.reaction.bye));
+        t.replyUntil = this.world.simTime + TALK_TUNE.replyFor;
+        return;
+      }
       this.endTalk();
       return;
     }
@@ -18538,13 +18768,14 @@ class App {
     // idle a line laid over the speaker is put back.
     const tt = this.talkTree;
     if (tt) {
+      this.talkSay('close');
       this.talkTree = null;
       this.lastTalkTree = tt;
       this.talkPlay.close();
-      this.jobs.talk('close', tt.speaker);
       t.body.talkIdle(null);
     }
     t.body.listen(null);
+    this.talkUi.setBanner(null);
     this.talkUi.hide();
     if (!handBack) {
       this.talkCam.blend = 0;

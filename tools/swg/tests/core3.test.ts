@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findCalls, parseLuaValue, readLua, LuaCall } from '../lua.mjs';
-import { flagWords, frameCheck, heightCheck, intoRoom, joinCatalogue, readCorvette, readCreatures, readDressGroups, readLairs, readRegions, readSpawnGroups, readStatics, readWeaponGroups, settleStatics, staticsOfFile, CORE3_WORLDS, STATIC_TUNE } from '../core3.mjs';
+import { flagWords, frameCheck, heightCheck, intoRoom, joinCatalogue, readConversations, readConversationSpeakers, readCorvette, readCreatures, readDressGroups, readLairs, readRegions, readSpawnGroups, readStatics, readWeaponGroups, settleStatics, staticsOfFile, CORE3_WORLDS, STATIC_TUNE } from '../core3.mjs';
 import { core3Source } from '../core3ref.mjs';
 
 let passed = 0;
@@ -415,6 +415,158 @@ type Row = { key: string; who: string | null; x: number; y: number; z: number; h
     const more = [...entries.map((e) => ({ ...e, ready: true })), { id: 'dressed_c', template: 'object/mobile/shared_dressed_c.iff', ready: true, kind: 'dressed', group: 'g', name: 'C' }, { id: 'dressed_d', template: 'object/mobile/shared_dressed_d.iff', ready: true, kind: 'dressed', group: 'g', name: 'D' }];
     const cult = joinCatalogue(both as never, more as never, groups).joined.get('cultist') as { dress?: string[]; bodies?: string[] } | undefined;
     ok(cult?.dress?.join() === 'crowd,crowd_too' && cult.bodies?.join() === 'dressed_a,dressed_b,dressed_c,dressed_d', `a creature naming two groups and a body of its own names both groups and may be every body of all three (${cult?.bodies?.join()})`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ------------------------------------------------------------------ the conversations: structure, handlers, factories, heralds, speakers
+// A folder of our own in the scripts' shapes, every name and word in it made up: what decides what may be
+// played is pinned here, on every machine, and not only where the emulator's own checkout is.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'core3-conv-'));
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+  try {
+    const put = (rel: string, text: string) => {
+      mkdirSync(join(dir, rel, '..'), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    };
+    put('mobile/conversations/test/test_conv.lua', [
+      'testConvoTemplate = ConvoTemplate:new {',
+      '  initialScreen = "init",',
+      '  templateType = "Lua",',
+      '  luaClassHandler = "test_conv_handler",',
+      '  screens = {}',
+      '}',
+      'init = ConvoScreen:new {',
+      '  id = "init",',
+      '  leftDialog = "@conversation/test:s_1",',
+      '  animation = "explain",',
+      '  stopConversation = "false",',
+      '  options = {',
+      '    { "@conversation/test:s_2", "loc1" },',
+      '    { "TEST words the emulator wrote itself.", "bye" },',
+      '    { ":s_3", "" },',
+      '  }',
+      '}',
+      'testConvoTemplate:addScreen(init);',
+      'loc1 = ConvoScreen:new {',
+      '  id = "loc1",',
+      '  leftDialog = "@conversation/test:s_4",',
+      '  stopConversation = "true",',
+      '  options = {}',
+      '}',
+      'testConvoTemplate:addScreen(loc1);',
+      '-- The same name declared again: a second screen, which a read by name would lose the first of.',
+      'loc1 = ConvoScreen:new {',
+      '  id = "bye",',
+      '  leftDialog = "TEST the emulator\'s own goodbye.",',
+      '  stopConversation = "true",',
+      '  options = {}',
+      '}',
+      'testConvoTemplate:addScreen(loc1);',
+      'custom = ConvoScreen:new {',
+      '  id = "custom",',
+      '  leftDialog = "@conversation/test:s_5",',
+      '  customDialogText = "TEST words put in by hand.",',
+      '  stopConversation = "true",',
+      '  options = {}',
+      '}',
+      'testConvoTemplate:addScreen(custom);',
+      'addConversationTemplate("testConvoTemplate", testConvoTemplate);',
+      '',
+      'otherConvoTemplate = ConvoTemplate:new { initialScreen = "start", templateType = "Lua", luaClassHandler = "inherit_conv_handler", screens = {} }',
+      'start = ConvoScreen:new { id = "start", leftDialog = "@conversation/test:s_6", stopConversation = "true", options = {} }',
+      'otherConvoTemplate:addScreen(start);',
+      'addConversationTemplate("otherConvoTemplate", otherConvoTemplate);',
+      'lostConvoTemplate = ConvoTemplate:new { initialScreen = "start", templateType = "Lua", luaClassHandler = "nobody_wrote_this_handler", screens = {} }',
+      'lostConvoTemplate:addScreen(start);',
+      'addConversationTemplate("lostConvoTemplate", lostConvoTemplate);',
+      'wordsConvoTemplate = ConvoTemplate:new { initialScreen = "start", templateType = "Lua", luaClassHandler = "words_conv_handler", screens = {} }',
+      'wordsConvoTemplate:addScreen(start);',
+      'addConversationTemplate("wordsConvoTemplate", wordsConvoTemplate);',
+      'plainConvoTemplate = ConvoTemplate:new { initialScreen = "start", templateType = "Lua", luaClassHandler = "conv_handler", screens = {} }',
+      'plainConvoTemplate:addScreen(start);',
+      'addConversationTemplate("plainConvoTemplate", plainConvoTemplate);',
+    ].join('\n'));
+    put('screenplays/test/conversations/test_conv_handler.lua', [
+      'test_conv_handler = conv_handler:new {}',
+      'function test_conv_handler:getInitialScreen(pPlayer, pNpc, pConvTemplate)',
+      '  local convoTemplate = LuaConversationTemplate(pConvTemplate)',
+      '  return convoTemplate:getScreen("init")',
+      'end',
+      'function test_conv_handler:runScreenHandlers(pConvTemplate, pPlayer, pNpc, selectedOption, pConvScreen)',
+      '  local screen = LuaConversationScreen(pConvScreen)',
+      '  if screen:getScreenID() == "loc1" then',
+      '    screen:addOption("@conversation/test:s_9", "custom")',
+      '  end',
+      '  return pConvScreen',
+      'end',
+      'inherit_conv_handler = test_conv_handler:new {}',
+      'words_conv_handler = conv_handler:new {}',
+      'function words_conv_handler:runScreenHandlers(pConvTemplate, pPlayer, pNpc, selectedOption, pConvScreen)',
+      '  local screen = LuaConversationScreen(pConvScreen)',
+      '  screen:setDialogTextStringId("@conversation/test:s_8")',
+      '  return pConvScreen',
+      'end',
+    ].join('\n'));
+    put('mobile/conversations/trainer/trainer_conv.lua', [
+      'function createTrainerConversationTemplate(templateName, typeOfTrainer)',
+      '  trainerConvoTemplate = ConvoTemplate:new { initialScreen = "", templateType = "Lua", luaClassHandler = "trainerConvHandler", screens = {} }',
+      '  trainerType = ConvoScreen:new { id = "trainerType", leftDialog = "trainerType", stopConversation = "false", options = { { "trainerType", typeOfTrainer } } }',
+      '  trainerConvoTemplate:addScreen(trainerType);',
+      '  intro = ConvoScreen:new { id = "intro", leftDialog = "@skill_teacher:intro", stopConversation = "true", options = {} }',
+      '  trainerConvoTemplate:addScreen(intro);',
+      '  addConversationTemplate(templateName, trainerConvoTemplate);',
+      'end',
+    ].join('\n'));
+    // A caller before its factory in the walk.
+    put('mobile/conversations/a_first/trainers.lua', 'createTrainerConversationTemplate("trainer_test_convotemplate", "trainer_test")\n');
+    put('screenplays/tasks/misc/heralds.lua', [
+      'heraldScreenPlay = ScreenPlay:new {',
+      '  heraldList = {',
+      '    { planet = "tatooine", template = "herald_one", x = 1, z = 2, y = 3, angle = 0, cell = 0, destX = 100, destY = -200, stringFile = "herald_test_place" },',
+      '  },',
+      '  multiDestHeraldList = {',
+      '    { planet = "tatooine", template = "herald_two", x = 10.5, z = 20, y = -30.25, angle = 90, cell = 0, dest1X = 400, dest1Y = -500, dest1String = "TEST Some Place", dest2X = 600, dest2Y = 700, dest2String = ":s_77", dest2Cost = 60, stringFile = "heraldtest" },',
+      '  },',
+      '}',
+    ].join('\n'));
+    put('mobile/test/herald_two.lua', 'herald_two = Creature:new {\n  objectName = "",\n  conversationTemplate = "testConvoTemplate",\n  reactionStf = "@npc_reaction/fancy",\n}\nCreatureTemplates:addCreatureTemplate(herald_two, "herald_two")\n');
+    put('mobile/test/street.lua', 'street_kid = Creature:new {\n  reactionStf = "@npc_reaction/slang",\n}\nodd_one = Creature:new {\n  reactionStf = "@npc_reaction/../x",\n}\nnot_a_body = Lair:new {\n  conversationTemplate = "testConvoTemplate",\n}\n');
+
+    const read = readConversations(dir) as {
+      trees: Map<string, { initial: string | null; handler: string | null; nodes: { id: string; say: string | null; end: boolean; gesture?: string; needs?: string; replies: { text: string | null; to: string | null; needs?: string }[] }[]; logic: { entry: boolean; options: boolean; text: boolean; screens: string[]; entries: string[]; unread?: boolean } }>;
+      shapes: Map<string, { factory: string; params: string[]; nodes: { id: string; say: string | null; needs?: string; replies: { text: string | null; to: string | null; needs?: string }[] }[] }>;
+      instances: Map<string, { shape: string; handler: string | null; args: string[] }>;
+      heralds: { multi: { who: string; world: string; x: number; y: number; z: number; heading: number; cell: number; table: string; dests: { x: number; z: number; cost?: number; name?: string }[] }[]; directions: { world: string; x: number; z: number; name: string }[] };
+    };
+    const t = read.trees.get('testConvoTemplate')!;
+    ok(!!t && t.initial === 'init' && t.handler === 'test_conv_handler' && t.nodes.map((n) => n.id).join() === 'init,loc1,bye,custom', `a template's screens are read in the order they are added, a name declared twice twice (${t?.nodes.map((n) => n.id).join()})`);
+    const [init, loc1, bye, custom] = t.nodes;
+    ok(init.say === '@conversation/test:s_1' && init.gesture === 'explain' && !init.end && loc1.end && init.replies[0].text === '@conversation/test:s_2' && init.replies[0].to === 'loc1', "a screen keeps the client's string id, the gesture it names, whether it ends and its answers' links");
+    ok(init.replies[1].text === null && init.replies[1].needs === 'core3-literal' && bye.say === null && bye.needs === 'core3-literal', "the emulator's own English is never kept: a line or an answer in it is null, and marked");
+    ok(init.replies[2].text === ':s_3' && init.replies[2].to === null, "a key of the tree's own table is kept, and a link to nothing is null");
+    ok(custom.say === null && custom.needs === 'core3-literal', 'a screen whose words are put in by hand is the emulator\'s, whatever its line says');
+    ok(t.logic.entry && same(t.logic.entries, ['init']) && t.logic.options && !t.logic.text && same(t.logic.screens, ['custom', 'init', 'loc1']), `a handler is read for where it acts: the first screen it picks, answers it adds, and the screens it names (${t.logic.screens.join()})`);
+    const other = read.trees.get('otherConvoTemplate')!;
+    ok(other.logic.entry && other.logic.options && !other.logic.unread, 'a handler made from another acts where the one it is made from does');
+    ok(read.trees.get('lostConvoTemplate')!.logic.unread === true, 'one nobody wrote is unread, and so the whole tree is the code\'s');
+    const words = read.trees.get('wordsConvoTemplate')!.logic;
+    ok(words.text && !words.options && !words.entry && words.screens.length === 0, 'one that sets the words without naming where says so, and names no screen');
+    const plainLogic = read.trees.get('plainConvoTemplate')!.logic;
+    ok(!plainLogic.entry && !plainLogic.options && !plainLogic.text && !plainLogic.unread, 'and the plain handler every one is made from only follows the links');
+    const shape = read.shapes.get('trainer')!;
+    ok(!!shape && shape.factory === 'createTrainerConversationTemplate' && same(shape.params, ['templateName', 'typeOfTrainer']) && shape.nodes[0].replies[0].to === null && shape.nodes[0].say === null && shape.nodes[1].say === '@skill_teacher:intro', "a factory's conversation is kept as a shape, a value its caller hands in read as the code's and never as words");
+    const inst = read.instances.get('trainer_test_convotemplate')!;
+    ok(!!inst && inst.shape === 'trainer' && inst.handler === 'trainerConvHandler' && same(inst.args, ['trainer_test_convotemplate', 'trainer_test']), 'and every call of it by the name it registers, with its handler and what it passes, a caller before the factory included');
+    const h = read.heralds.multi[0];
+    ok(read.heralds.multi.length === 1 && h.who === 'herald_two' && h.world === 'tatooine' && h.x === 10.5 && h.y === 20 && h.z === -30.25 && Math.abs(h.heading - Math.PI / 2) < 1e-3 && h.table === 'conversation/heraldtest', "a herald with several places stands where the screenplay says, its second number the height");
+    ok(h.dests.length === 2 && h.dests[0].x === 400 && h.dests[0].z === -500 && h.dests[0].name === undefined && h.dests[1].x === 600 && h.dests[1].z === 700 && h.dests[1].cost === 60 && h.dests[1].name === '@conversation/heraldtest:s_77', "their places in order, x then across, a price where one is charged, and a name only in the client's words");
+    ok(same(read.heralds.directions, [{ world: 'tatooine', x: 100, z: -200, name: '@spawning/static_npc/herald_test_place:waypoint_name_1' }]), "and the other heralds' places, each named with the client's own string id");
+    const speakers = readConversationSpeakers(dir) as Map<string, { tree?: string; diction?: string }>;
+    ok(speakers.get('herald_two')?.tree === 'testConvoTemplate' && speakers.get('herald_two')?.diction === 'fancy' && speakers.get('street_kid')?.diction === 'slang' && speakers.get('street_kid')?.tree === undefined, 'who speaks which: a creature\'s conversation and the reaction table it greets from');
+    ok(!speakers.has('odd_one') && !speakers.has('not_a_body') && [...speakers.keys()].join() === 'herald_two,street_kid', 'and nothing that is not a creature, or names a table that is not one');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

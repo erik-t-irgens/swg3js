@@ -50,8 +50,11 @@ export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', 
  * outside it they may import is the hashing.
  */
 const SOURCE_FILES = ['src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts', 'src/net/hash.ts', 'src/world/dayPhase.ts', 'src/world/weatherSchedule.ts'];
-/** The story's rules and its test set, which the server imports from `src/story/` as they are. */
-export const STORY_SOURCE = [/^src\/story\/.+\.ts$/, /^src\/story\/testSet\/.+$/];
+/**
+ * The story's rules, its test set, and the adoptions of the emulator's conversations (`core3/`, which the
+ * server folds with the Core3 reference), all read from `src/story/` as they are.
+ */
+export const STORY_SOURCE = [/^src\/story\/.+\.ts$/, /^src\/story\/testSet\/.+$/, /^src\/story\/core3\/[^/]+\.jsonc$/];
 /** The launcher proper (the bootstrap is built into the exe and is not needed in the release). */
 const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 'tools/launcher/plan.mjs', 'tools/launcher/serve.mjs', 'tools/launcher/page.html', 'tools/launcher/README.md'];
 /** The converter's data files, beside its modules. */

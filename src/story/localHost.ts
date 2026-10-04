@@ -33,7 +33,7 @@
 //
 // Every number here is ours.
 
-import type { StoryBook, StoryChange } from './book.ts';
+import { emptyBook, type StoryBook, type StoryChange } from './book.ts';
 import { STORY_TUNE } from './bookClient.ts';
 import { HostCore, type HostCtx } from './hostCore.ts';
 import type { PayOrder, StoryEvent, StoryNote, StoryResult } from './quests.ts';
@@ -165,6 +165,12 @@ export class LocalHost implements StoryHost {
   readonly kind = 'local';
   private readonly deps: LocalDeps;
   private lib: StorySet = emptySet();
+  /** The story's own sets as last read, and the game's own conversations, which the library joins (`joined`). */
+  private storySets: StorySet[] = [];
+  private core3: StorySet | null = null;
+  private setsRead = false;
+  /** A conversation the console reviews, on a book of its own that nothing keeps (`review`). */
+  private reviewing: { core: HostCore; state: TalkState | null } | null = null;
   /** Whether a set has been read at all: until then nothing is worked out. */
   private ready = false;
   private core: HostCore | null = null;
@@ -218,8 +224,26 @@ export class LocalHost implements StoryHost {
     if (parts.own) read(parts.own, false);
     if (parts.test) read(parts.test, true);
     this.sets = reports;
-    this.useLibrary(loaded.length ? joinSets(loaded) : emptySet());
+    this.storySets = loaded;
+    this.setsRead = true;
+    this.useLibrary(this.joined());
     return reports;
+  }
+
+  /**
+   * The game's own conversations (`core3Trees.ts`), joined to whatever story sets are read: the browser
+   * folds them once the converter's file has come. Held until the story's own sets have been read, since a
+   * library holding only these would read every job in the book as revised away.
+   */
+  useCore3(set: StorySet | null): void {
+    this.core3 = set;
+    if (this.setsRead) this.useLibrary(this.joined());
+  }
+
+  /** The story's sets read and the game's own conversations, as one. */
+  private joined(): StorySet {
+    const all = this.core3 ? [...this.storySets, this.core3] : this.storySets;
+    return all.length ? joinSets(all) : emptySet();
   }
 
   /**
@@ -466,8 +490,8 @@ export class LocalHost implements StoryHost {
   // ---- conversations --------------------------------------------------------------------------------------
 
   /** Whether this browser can speak for somebody just now: it works the jobs out here, and they have a tree in the sets read. */
-  canTalk(speaker: string): boolean {
-    return !this.notNow() && !!treeFor(this.lib, speaker);
+  canTalk(speaker: string, who: string | null = null): boolean {
+    return !this.notNow() && !!treeFor(this.lib, speaker, who);
   }
 
   /**
@@ -475,7 +499,7 @@ export class LocalHost implements StoryHost {
    * is worked out on the book with the very rules a server uses, applied and paid as any batch is, and handed
    * to every node listener before this answers; a refusal is handed over too, with no node and its reason.
    */
-  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null): HostAnswer {
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, who: string | null = null): HostAnswer {
     if (op === 'close') {
       this.talking = null;
       return { ok: true };
@@ -491,7 +515,7 @@ export class LocalHost implements StoryHost {
       this.tellNode({ speaker, view: null, why });
       return { ok: false, why };
     }
-    const out = op === 'open' ? core.talkOpen(speaker, this.ctx()) : core.talkPick(this.talking!, reply, this.ctx());
+    const out = op === 'open' ? core.talkOpen(speaker, this.ctx(), who) : core.talkPick(this.talking!, reply, this.ctx());
     if (op === 'open') this.stats.talks++;
     else this.stats.picks++;
     const answer = this.finish(out.r);
@@ -503,6 +527,31 @@ export class LocalHost implements StoryHost {
   /** Where the conversation under way stands, for the console. */
   get talkState(): TalkState | null {
     return this.talking;
+  }
+
+  /**
+   * The console's review of a conversation (`__debug.talkTree({ core3 })`): `tree` opened with `speaker`
+   * whoever speaks it, and played through by the same rules, on a book made for it and thrown away after --
+   * so it moves nothing of the character's, pays nothing and says nothing on the message line, whoever
+   * holds the story. Its nodes go to the same listeners as any conversation's.
+   */
+  review(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null, tree: string | null = null): HostAnswer {
+    if (op === 'close') {
+      this.reviewing = null;
+      return { ok: true };
+    }
+    if (op === 'open') this.reviewing = { core: new HostCore({ book: emptyBook('review'), lib: this.lib, payer: 'browser' }), state: null };
+    const r = this.reviewing;
+    if (!r || (op === 'pick' && !r.state)) {
+      const why = 'there is no conversation under review';
+      this.tellNode({ speaker, view: null, why });
+      return { ok: false, why };
+    }
+    const ctx = this.ctx();
+    const out = op === 'open' ? r.core.talkOpen(speaker, ctx, null, tree) : r.core.talkPick(r.state!, reply, ctx);
+    r.state = out.turn.state;
+    this.tellNode({ speaker, view: out.turn.view, why: out.turn.why });
+    return out.turn.why ? { ok: false, why: out.turn.why } : { ok: true };
   }
 
   onNode(fn: (node: NodeWord) => void): () => void {
@@ -568,8 +617,9 @@ export class LocalHost implements StoryHost {
       quests: Object.keys(this.lib.quests).length,
       active,
       clock: this.offset,
-      talks: Object.keys(this.lib.talks).length,
+      talks: Object.keys(this.lib.talks).filter((id) => !id.startsWith('core3:')).length,
       cast: Object.keys(this.lib.cast).length,
+      core3: this.core3 ? { talks: Object.keys(this.core3.talks).length, voices: Object.keys(this.core3.voices ?? {}).length, joined: this.setsRead } : null,
       talking: this.talking ? { ...this.talking, path: [...this.talking.path] } : null,
       view: this.current ? { quests: this.current.quests.length, watch: this.current.watch.length, waypoints: this.current.waypoints.length, objects: this.current.objects.length, cast: this.current.cast.length } : null,
       stats: { ...this.stats },

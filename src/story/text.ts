@@ -70,6 +70,16 @@ export function relativeKey(ref: TextRef): string | null {
 }
 
 /**
+ * The client's table a TextRef's words are in, or null for a literal: a client string's own table, or the
+ * tree's own (`strings`) for a tree-relative one. What tells a shown line apart from a table that just came.
+ */
+export function tableOf(ref: TextRef, strings?: string | null): string | null {
+  const client = clientKey(ref);
+  if (client) return client.table;
+  return strings && relativeKey(ref) !== null ? strings : null;
+}
+
+/**
  * The words a TextRef stands for: a literal as it is, a reference through `look` (handed the table and
  * the key; a tree-relative one is looked up in the tree's own table, `strings`), and `[…]` when nothing
  * answers. `%TU` and `%NU` are left for whoever shows the words, since only the browser knows the name.

@@ -38,13 +38,17 @@ export interface StoryHost {
   view(): StoryView | null;
   /** Be told whenever the view has changed. Answers the way to stop being told. */
   onView(fn: (view: StoryView | null) => void): () => void;
-  /** Whether this host can be asked to speak for somebody just now: false sends the window straight to the game's own greeting. */
-  canTalk(speaker: string): boolean;
+  /**
+   * Whether this host can be asked to speak for somebody just now: false sends the window straight to the
+   * game's own greeting. One of the game's own people (`row:<key>`) comes with the creature they are stood as
+   * (`who`), which is what gives them a conversation.
+   */
+  canTalk(speaker: string, who?: string | null): boolean;
   /**
    * A conversation: open one with somebody, give an answer (`reply`; null lets a node that goes on by itself
    * go on), or close it. What it reaches comes back through `onNode`, at once from this browser's own host.
    */
-  talk(op: 'open' | 'pick' | 'close', speaker: string, reply?: string | null): HostAnswer;
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply?: string | null, who?: string | null): HostAnswer;
   /** Be told of every node a conversation reaches. Answers the way to stop being told. */
   onNode(fn: (node: NodeWord) => void): () => void;
 }

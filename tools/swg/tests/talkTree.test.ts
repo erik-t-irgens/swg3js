@@ -531,8 +531,18 @@ if (typeof WebSocket === 'undefined') {
     ok(given?.do === 'node' && given.view?.node === 'given' && ch.some((c) => c.k === 'qState' && c.quest === 'test:talk'), 'and an answer with the next node, the job it granted written down and sent as a batch');
     send({ t: 'story', do: 'talk', op: 'close', speaker: CLERK, at: {} });
     await wait(100);
-    const status = (await (await fetch(`http://127.0.0.1:${port}/`)).json()) as { stories: { talks: number; cast: number; v: number; stats: { talks: number } } };
-    ok(status.stories.v === 3 && status.stories.talks === 2 && status.stories.cast === 3 && status.stories.stats.talks === 2, 'the status page counts the conversations, the cast and the turns played');
+    // One of the game's own people: a herald, by her row and the creature she is stood as, out of the Core3
+    // reference the relay folds beside the sets it reads.
+    const herald = 'row:h98e10cfdf08';
+    send({ t: 'story', do: 'talk', op: 'open', speaker: herald, who: 'herald_corellia_karin', at: {} });
+    await wait(200);
+    const spoke = cleanStoryWord([...got].reverse().find((m) => m.t === 'story' && m.do === 'node'), 'down');
+    ok(spoke?.do === 'node' && spoke.speaker === herald && spoke.view?.tree === 'core3:talk/heraldCorellia2ConvoTemplate' && spoke.view.node === 'init' && /^@conversation\/heraldcorellia2:/.test(String(spoke.view.lines[0]?.text)), `the relay plays a herald's conversation in the client's own words (${spoke?.do === 'node' ? spoke.view?.node : 'none'})`);
+    send({ t: 'story', do: 'talk', op: 'close', speaker: herald, at: {} });
+    await wait(100);
+    const status = (await (await fetch(`http://127.0.0.1:${port}/`)).json()) as { stories: { talks: number; cast: number; v: number; stats: { talks: number }; core3: { played: number; trees: number; voiced: number } } };
+    ok(status.stories.v === 3 && status.stories.talks === 2 && status.stories.cast === 3 && status.stories.stats.talks === 3, 'the status page counts the conversations, the cast and the turns played');
+    ok(status.stories.core3?.played === 7 && status.stories.core3.trees === 289 && status.stories.core3.voiced === 7, "and the game's own: the seven heralds of the reference's 289 trees");
   } finally {
     ws.close();
     await wait(100);

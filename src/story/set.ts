@@ -253,6 +253,11 @@ export interface StorySet {
   talks: Record<string, TalkDef>;
   /** The story's named people, by `<set>:cast/<id>`. */
   cast: Record<string, CastDef>;
+  /**
+   * The game's own people who speak a conversation, by the creature they are stood as, to its id: what the
+   * emulator's adopted conversations bind (`core3Trees.ts`). A story's own set binds nobody this way.
+   */
+  voices?: Record<string, string>;
   /** Files a later wave reads, noted and not read. */
   later: string[];
   files: number;
@@ -267,8 +272,11 @@ export interface LoadResult {
 
 /** The signal prefixes the engine raises itself (`signals.ts` says which raiser each stands for). */
 export const ENGINE_SIGNALS = ['used', 'entered', 'left', 'room', 'died', 'world', 'talked', 'debug'] as const;
-/** Words a set may not take as its prefix: the engine's signal prefixes and the id forms of the game's own people. */
-const NOT_A_PREFIX = [...ENGINE_SIGNALS, 'q', 'row', 'stood', 'job', 'obj', 'area', 'cast', 'doc', 'talk'];
+/**
+ * Words a set may not take as its prefix: the engine's signal prefixes, the id forms of the game's own
+ * people, and `core3`, the emulator's own conversations' (`core3Trees.ts`).
+ */
+const NOT_A_PREFIX = [...ENGINE_SIGNALS, 'q', 'row', 'stood', 'job', 'obj', 'area', 'cast', 'doc', 'talk', 'core3'];
 /** The committed test set's prefix, which no other set may take. */
 export const TEST_PREFIX = 'test';
 
@@ -1259,7 +1267,7 @@ const LATER: [RegExp, string][] = [
 
 /** A set with nothing in it: what a host runs before any set is read. */
 export function emptySet(): StorySet {
-  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), later: [], files: 0 };
+  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), voices: Object.create(null), later: [], files: 0 };
 }
 
 /**
@@ -1363,8 +1371,10 @@ export function loadSet(files: { path: string; text: string }[], opts: { test?: 
 }
 
 /**
- * Several sets as one: the owner's and the test set, side by side. Their prefixes keep their ids apart; a
- * set whose prefix another already took is left out rather than allowed to replace it.
+ * Several sets as one: the owner's and the test set, side by side, and the game's own conversations
+ * (`core3Trees.ts`), which list no set of their own and so leave the joined set's name, hash and readiness
+ * as the story's sets make them. Their prefixes keep their ids apart; a set whose prefix another already
+ * took is left out rather than allowed to replace it.
  */
 export function joinSets(sets: StorySet[]): StorySet {
   const out = emptySet();
@@ -1378,6 +1388,7 @@ export function joinSets(sets: StorySet[]): StorySet {
     Object.assign(out.objects, s.objects);
     Object.assign(out.talks, s.talks);
     Object.assign(out.cast, s.cast);
+    if (s.voices) Object.assign(out.voices!, s.voices);
     out.later.push(...s.later);
     out.files += s.files;
     out.test ||= s.test;

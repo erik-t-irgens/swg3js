@@ -1121,6 +1121,41 @@ export class StandingPeople {
   }
 
   /**
+   * The body standing now for the row with this key (`row:<key>` names one of the game's people in a story),
+   * or null when nobody stands for it here: what a conversation, a console helper or a story finds them by.
+   */
+  bodyOfKey(key: string): Mobile | null {
+    for (const s of this.up.values()) if (s.row.key === key && s.body && !s.body.removed) return s.body;
+    return null;
+  }
+
+  /**
+   * Who a body standing now is in a story's terms: its row's key (`row:<key>`) and the creature it was stood
+   * as this life (a drawn crowd's person changes with each life), which is what gives it a conversation and
+   * a way of speaking. Null for a body this did not stand, or a row with no key (a pack before format 2).
+   */
+  speakerOf(m: Mobile): { key: string; who: string } | null {
+    for (const s of this.up.values()) if (s.body === m) return s.row.key ? { key: s.row.key, who: s.who || s.row.who } : null;
+    return null;
+  }
+
+  /**
+   * The creatures standing within `reach` metres across the ground of a point in the world's frame, written
+   * into `out` (emptied first): what the client's string tables are fetched for before anybody is spoken to.
+   */
+  whoNear(x: number, z: number, reach: number, out: string[]): string[] {
+    out.length = 0;
+    for (const s of this.up.values()) {
+      const b = s.body;
+      if (!b || b.removed) continue;
+      const dx = b.pos.x - x;
+      const dz = b.pos.z - z;
+      if (dx * dx + dz * dz <= reach * reach) out.push(s.who || s.row.who);
+    }
+    return out;
+  }
+
+  /**
    * Every row somebody sits at, in the world's frame -- carried into it here, with the layout's centre,
    * if no pass has done it yet -- each where its body is stood, the way it faces and what its mood sits
    * on (`seatOfMood`): what the chairs and tables of ours are stood under (`seatProps.ts`). A guard's row

@@ -51,6 +51,7 @@ import { gatherOpeners } from './doorMath.ts';
 import { wildLife, type WildDeps } from './wildLife.ts';
 import { relativeRoot } from './packPath.ts';
 import { standingPeople, type PeopleDeps, type StandingRow } from './standingPeople.ts';
+import { conversationPack } from './conversationPack.ts';
 import { ambientPeople, type AmbientDeps } from './ambient/ambientPeople.ts';
 import { FollowerSet, recruitOwner } from './followers.ts';
 import { TALK_WORDS } from './talk.ts';
@@ -1552,8 +1553,14 @@ export class World {
     await wildLife.load(this.packId, import.meta.env.BASE_URL);
     if (token !== this.loadToken) return null;
     // The people who stand somewhere and stay there ride in the same pack the wildlife does, so the
-    // rows are taken from what that fetch already holds rather than fetched a second time.
-    standingPeople.adopt(wildLife.peopleRows() as StandingRow[], wildLife.peopleCreatures(), wildLife.peopleExtras());
+    // rows are taken from what that fetch already holds rather than fetched a second time. Beside them
+    // stand the heralds, whom no pack stands (`conversationPack.ts`): their file is fetched once a session
+    // at boot, and a load waits for it only a moment (four seconds, ours), since a world without them is the
+    // world as it was.
+    await Promise.race([conversationPack.pending, new Promise<void>((r) => setTimeout(r, 4000))]);
+    if (token !== this.loadToken) return null;
+    const people = wildLife.peopleRows() as StandingRow[];
+    standingPeople.adopt(people.length ? [...people, ...conversationPack.standRows(this.packId)] : people, wildLife.peopleCreatures(), wildLife.peopleExtras());
     this.packProgress = 0.12;
 
     const scatter: ScatterItem[] = [];

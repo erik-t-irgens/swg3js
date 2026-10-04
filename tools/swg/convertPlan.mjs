@@ -226,6 +226,10 @@ export const STEP_FACTS = {
   // once into a folder of their own. It reads what the snapshot and the gallery write, so it waits for
   // both, and holds every pack and the doors folder while it writes into them.
   doors: { order: 44, lock: 'pack', locks: ['doors'], needs: ['snapshot', 'gallery'], seconds: 10, bytes: 0.45 * GB, measured: 'seventeen packs, 2,034 doors and 80 door models: 3.5 s, 348 MB' },
+  // What the game's own people say: the server's conversations for the people `spawns` stood, and the
+  // client's string tables they are in. It reads every world's `spawns.json` and the fleet manifest, so it
+  // waits for `spawns`, and writes only its own folder, so it holds that and nothing else.
+  conversations: { order: 45, lock: 'conversations', needs: ['spawns'], seconds: 10, bytes: 0.4 * GB, measured: '118 conversations, 779 kinds of people, 183 string tables: 1.6 s, 304 MB, 1.3 MB written' },
 };
 
 // Which commands carry the planet (or the zone) they write, and **where** on their own command

@@ -149,8 +149,10 @@
 //   { t: 'story', do: 'q', op: accept|decline|drop|restart|track|untrack, quest }   (story 2) a job, of this character's own
 //   { t: 'story', do: 'admin', op: reload|grant|offer|unstick|complete|signal|clock, quest?, step?, name?, ms? }
 //                                                          (story 2) the console's own operations, the admin's alone
-//   { t: 'story', do: 'talk', op: open|pick|close, speaker, reply? }   (story 3) a conversation: open one with somebody,
-//                                                          give an answer (none lets a node go on by itself), close it
+//   { t: 'story', do: 'talk', op: open|pick|close, speaker, reply?, who? }   (story 3) a conversation: open one with somebody,
+//                                                          give an answer (none lets a node go on by itself), close it;
+//                                                          one of the game's own people (`row:<key>`) is opened with the
+//                                                          creature they are stood as, which a relay before it ignores
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story }   sent the instant the socket opens, before anything is
 //                                                          said; `story` is { v, sets, tests }, the story this server
@@ -257,6 +259,7 @@ import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mj
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
 import { STORY_TUNING, Stories } from './stories.mjs';
 import { readStorySet } from './storySet.mjs';
+import { readCore3Story } from './core3Story.mjs';
 import { storyWorlds } from './storyWorlds.mjs';
 
 /**
@@ -480,6 +483,8 @@ const stories = new Stories({
   // its death, and of nothing else.
   shared: (npc) => ownership.worldOf(npc) !== '',
   tests: STORY_TESTS,
+  // The game's own conversations, out of the Core3 reference every release carries (core3Story.mjs).
+  core3: () => readCore3Story(),
 });
 stories.load(store.data);
 stories.readSets();
@@ -1784,6 +1789,7 @@ server.listen(PORT, () => {
   const sets = told.sets.filter((s) => s.name !== 'refused');
   console.log(`  the jobs run here: ${sets.length ? sets.map((s) => `${s.name} (${s.quests} jobs, ${s.hash.slice(0, 12)}${s.errors ? `, ${s.errors} problems -- npm run story:check names them` : ''})`).join(', ') : `no story set is read (${STORY_DIR ? `${STORY_DIR} holds none` : 'make story-private/ beside the checkout, or name one with --story='}), so no job runs`}${STORY_TESTS ? '' : '; the test set is off (--story-tests turns it on)'}`);
   for (const s of told.sets) for (const line of s.first) console.log(`    ${s.name}: ${line}`);
+  if (told.core3) console.log(`  the game's own people speak ${told.core3.played} of the ${told.core3.trees} conversations the Core3 reference keeps (the ${told.core3.adopted} adopted), ${told.core3.voiced} kinds of them${sets.length ? '' : ', once a story set is read'}${told.core3.errors.length ? `; the adoptions read with ${told.core3.errors.length} problem(s): ${told.core3.errors.slice(0, 3).join('; ')}` : ''}`);
   console.log(`  ${ASSETS ? `a planet's arrivals are checked against where the player stands, about the layout centres in ${ASSETS}` : 'no converted content was named (--assets=<folder>), so a planet\'s arrivals are taken on the browser\'s word'}`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

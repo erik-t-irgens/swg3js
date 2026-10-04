@@ -1,0 +1,25 @@
+// The heralds of the game's towns, adopted: the first of the emulator's conversations this game plays.
+//
+// Each of these people tells a player about places on their world and puts a waypoint on the one asked
+// about. The conversation is the emulator's structure in the client's own words (`core3ref/
+// conversations.json`); all its handler did besides follow the links was to put that waypoint down when a
+// screen named `loc1` to `loc4` (and `loc1a`, the first said another way) was reached, at the place the
+// emulator's herald table gives that number. So each tree here takes its waypoints from that table
+// (`"waypoints": "heralds"`, `core3Trees.ts`), quest-coloured, named in the client's own words, and the
+// handler has nothing left to do.
+//
+// Seven of the eight: Tatooine's second herald charges for some places and adds the answers that pay
+// from its own code, which is left unadopted until that is written fresh here.
+{
+  "format": 1,
+  "credit": "Conversation structure from SWGEmu Core3's scripts (MMOCoreORB/bin/scripts, AGPL-3.0, https://github.com/swgemu/Core3): screen names and links only; the words are the client's own.",
+  "trees": {
+    "heraldCorellia1ConvoTemplate": { "waypoints": "heralds" },
+    "heraldCorellia2ConvoTemplate": { "waypoints": "heralds" },
+    "heraldLok1ConvoTemplate": { "waypoints": "heralds" },
+    "heraldLok2ConvoTemplate": { "waypoints": "heralds" },
+    "heraldNaboo1ConvoTemplate": { "waypoints": "heralds" },
+    "heraldNaboo2ConvoTemplate": { "waypoints": "heralds" },
+    "heraldTatooine1ConvoTemplate": { "waypoints": "heralds" }
+  }
+}

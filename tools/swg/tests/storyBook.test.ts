@@ -20,7 +20,7 @@ import { BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, cleanCh
 import { evalCond } from '../../../src/story/quests.ts';
 import { Stories, applyStory } from '../../../server/stories.mjs';
 import { openStore } from '../../../server/store.mjs';
-import { WAYPOINT_COLOURS, WAYPOINT_TUNE, cleanWaypoint, cleanWaypointAsk, gameToRaw, gameToRawX, gameToRawZ, rawToGame, rawToGameX, rawToGameZ, waypointName, type Waypoint } from '../../../src/story/waypoints.ts';
+import { WAYPOINT_COLOURS, WAYPOINT_TUNE, cleanStoryWaypointName, cleanWaypoint, cleanWaypointAsk, cleanWaypointName, sameStoryName, gameToRaw, gameToRawX, gameToRawZ, rawToGame, rawToGameX, rawToGameZ, waypointName, type Waypoint } from '../../../src/story/waypoints.ts';
 import { ASIDE_KEPT, asideBook, asides, loadBook, saveBook, setAside, type StoryStorage } from '../../../src/story/storyStore.ts';
 import { BookClient, STORY_TUNE, type StoryLine } from '../../../src/story/bookClient.ts';
 import { bookText, chunkText } from '../../../src/story/storyWire.ts';
@@ -66,6 +66,13 @@ const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWa
   ok(cleanWaypoint({ ...ask(), id: 'w3', made: 1, by: 'own:wages' })!.by === 'own:wages' && cleanWaypoint({ ...ask(), id: 'w3', made: 1, by: 'run' })!.by === 'run', 'a stored waypoint a story set keeps the job that set it');
   ok(cleanWaypoint({ ...ask(), id: 'w3', made: 1, by: 'not a job' })!.by === undefined && cleanWaypoint({ ...ask(), id: 'w3', made: 1 })!.by === undefined, 'and one that names no job, or none, is the player\'s own');
   ok(!('by' in (cleanWaypointAsk(ask({ by: 'own:wages' })) as Record<string, unknown>)), 'a browser asking to set one never marks it as a story\'s');
+  // A story names a place with one of the client's own strings, which cut to length would name nothing: kept
+  // whole on a waypoint a story set, and only there, so a name a player types is never read as a reference.
+  const ref = '@spawning/static_npc/herald_test_a_place_with_a_long_name:waypoint_name_1';
+  ok(ref.length > WAYPOINT_TUNE.nameMax && cleanWaypoint({ ...ask({ name: ref }), id: 'w4', made: 1, by: 'run' })!.name === ref && cleanStoryWaypointName(ref) === ref, "a story's waypoint named with one of the client's strings keeps the reference whole");
+  ok(cleanWaypointAsk(ask({ name: ref }))!.name.length === WAYPOINT_TUNE.nameMax && cleanWaypoint({ ...ask({ name: ref }), id: 'w4', made: 1 })!.name.length === WAYPOINT_TUNE.nameMax && cleanWaypointName(ref)!.length === WAYPOINT_TUNE.nameMax, "while a player's, asked for or kept, is cut to length whatever it looks like");
+  ok(cleanStoryWaypointName(`@x:${'y'.repeat(200)}`)!.length === WAYPOINT_TUNE.nameMax && cleanStoryWaypointName('  Fort Tusken ') === 'Fort Tusken', "and a story's name that is not a reference is cleaned as any other");
+  ok(sameStoryName(ref, ref) && sameStoryName(ref.slice(0, WAYPOINT_TUNE.nameMax), ref) && !sameStoryName(ref.slice(0, 20), ref) && !sameStoryName('Cantina', 'Cantina2') && !sameStoryName('x'.repeat(WAYPOINT_TUNE.nameMax), 'x'.repeat(60)), 'a story waypoint cut short by a host from before is still the same waypoint, and nothing else is');
 }
 
 // ---- frames -------------------------------------------------------------------------------------------

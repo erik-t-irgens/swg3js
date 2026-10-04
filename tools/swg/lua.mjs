@@ -36,7 +36,7 @@
 // and counted (`skipped`) rather than thrown: the data around it is kept, and the count says how much
 // was not.
 
-/** One token: `{ kind, value, line }`. */
+/** One token: `{ kind, value, line, at }`, `at` being where it starts in the source. */
 function tokenise(src) {
   const out = [];
   let i = 0;
@@ -76,12 +76,13 @@ function tokenise(src) {
       if (at < 0) throw new Error(`lua: an unterminated long string on line ${line}`);
       const body = src.slice(i + open.length, at);
       for (const ch of body) if (ch === '\n') line++;
-      out.push({ kind: 'string', value: body.replace(/^\n/, ''), line });
+      out.push({ kind: 'string', value: body.replace(/^\n/, ''), line, at: i });
       i = at + close.length;
       continue;
     }
     if (c === '"' || c === "'") {
       let s = '';
+      const from = i;
       i++;
       while (i < n && src[i] !== c) {
         if (src[i] === '\\') {
@@ -95,25 +96,26 @@ function tokenise(src) {
       }
       if (i >= n) throw new Error(`lua: an unterminated string on line ${line}`);
       i++;
-      out.push({ kind: 'string', value: s, line });
+      out.push({ kind: 'string', value: s, line, at: from });
       continue;
     }
     if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
       // `0.` is a number in Lua as much as `0.5` is, and the server's own creature files write it.
       const m = /^(0[xX][0-9a-fA-F]+|(?:[0-9]+(?:\.(?!\.)[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?)/.exec(src.slice(i, i + 64));
       if (!m) throw new Error(`lua: a number that will not read on line ${line}`);
-      out.push({ kind: 'number', value: Number(m[1]), line });
+      out.push({ kind: 'number', value: Number(m[1]), line, at: i });
       i += m[1].length;
       continue;
     }
     if (/[A-Za-z_]/.test(c)) {
       let s = '';
+      const from = i;
       while (i < n && isName(src[i])) s += src[i++];
-      out.push({ kind: 'name', value: s, line });
+      out.push({ kind: 'name', value: s, line, at: from });
       continue;
     }
     if (src.startsWith('..', i)) {
-      out.push({ kind: 'op', value: '..', line });
+      out.push({ kind: 'op', value: '..', line, at: i });
       i += 2;
       continue;
     }
@@ -121,7 +123,7 @@ function tokenise(src) {
     // appear in a statement this steps over, and tokenising them is what lets it step over them
     // rather than stopping the run on a file whose data is perfectly readable.
     if ('{}[](),;=+-*/%^:#<>~&|.'.includes(c)) {
-      out.push({ kind: 'op', value: c, line });
+      out.push({ kind: 'op', value: c, line, at: i });
       i++;
       continue;
     }
@@ -480,4 +482,109 @@ export function readLua(src, consts = {}) {
     i = statementEnd(t, i);
   }
   return { values, calls, skipped, skippedLines };
+}
+
+/**
+ * Every top-level statement of a file **in the order it is written**, as a list: an assignment
+ * (`{ kind: 'assign', name, value, line }`), a call (`{ kind: 'call', call, line }`, the `LuaCall`) and a
+ * method call (`{ kind: 'method', self, method, args, line }`, `tpl:addScreen(screen)`).
+ *
+ * `readLua` keeps the last value a name was given, which is what a file of data wants; this is for a
+ * file that builds something a statement at a time, where the order is the meaning. The server's
+ * conversation files are that: a screen is declared and then added to its template, and seven of them
+ * declare a second screen under a name a first one already had -- read by name, the first screen is lost
+ * and the second is added twice. Functions are stepped over whole, as `readLua` steps over them
+ * (`functionBodies` reads them), and a statement that will not read is stepped over and counted.
+ */
+export function readStatements(src, consts = {}) {
+  const t = tokenise(src);
+  const table = Object.assign(Object.create(null), consts);
+  const out = [];
+  let skipped = 0;
+  let i = 0;
+  while (i < t.length) {
+    const tok = t[i];
+    // `local name = ...` reads as the assignment it is, and a `;` ends a statement and starts none.
+    if ((tok.kind === 'name' && tok.value === 'local') || (tok.kind === 'op' && tok.value === ';')) {
+      i++;
+      continue;
+    }
+    if (tok.kind === 'name' && BLOCK_OPENERS.has(tok.value)) {
+      i = blockEnd(t, i);
+      continue;
+    }
+    try {
+      if (tok.kind === 'name' && t[i + 1]?.kind === 'op' && t[i + 1].value === '=') {
+        const [v, next] = parseValue(t, i + 2, table);
+        out.push({ kind: 'assign', name: tok.value, value: v, line: tok.line });
+        if (typeof v === 'number' || typeof v === 'string') table[tok.value] = v;
+        i = next;
+        continue;
+      }
+      if (tok.kind === 'name' && t[i + 1]?.kind === 'op' && t[i + 1].value === '(') {
+        const [v, next] = parseValue(t, i, table);
+        if (v instanceof LuaCall) out.push({ kind: 'call', call: v, line: tok.line });
+        i = next;
+        continue;
+      }
+      // `self:method(args)`: read as the method call it is, its arguments as values.
+      if (tok.kind === 'name' && t[i + 1]?.kind === 'op' && t[i + 1].value === ':' && t[i + 2]?.kind === 'name' && t[i + 3]?.kind === 'op' && t[i + 3].value === '(') {
+        const [call, next] = parseValue(t, i + 2, table);
+        if (call instanceof LuaCall) out.push({ kind: 'method', self: tok.value, method: call.call, args: call.args, line: tok.line });
+        i = next;
+        continue;
+      }
+    } catch {
+      skipped++;
+      i = statementEnd(t, i);
+      continue;
+    }
+    i = statementEnd(t, i);
+  }
+  return { statements: out, skipped };
+}
+
+/**
+ * Every named function a file defines, as `{ name, params, line, body, tokens }`: its name as written
+ * (`createTrainerConversationTemplate`, `HeraldConvoHandler:runScreenHandlers`), the names of its
+ * parameters, the source of its body (everything between the parameters' closing bracket and its own
+ * `end`, which `readStatements` can read as a file of its own) and that body's tokens, so a caller can ask
+ * which names and strings it mentions without reading its comments. Cut out with `blockEnd`, the
+ * matcher `readLua` steps over a function with, so the two agree about where one ends. A function written
+ * inside a value is not a named function and is not listed; one inside another is the outer one's.
+ */
+export function functionBodies(src) {
+  const t = tokenise(src);
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    const k = t[i];
+    if (k.kind !== 'name' || k.value !== 'function') continue;
+    let j = i + 1;
+    let name = '';
+    if (t[j]?.kind === 'name') {
+      name = t[j].value;
+      j++;
+      if (t[j]?.kind === 'op' && t[j].value === ':' && t[j + 1]?.kind === 'name') {
+        name += `:${t[j + 1].value}`;
+        j += 2;
+      }
+    }
+    const end = blockEnd(t, i);
+    if (!name || !(t[j]?.kind === 'op' && t[j].value === '(')) {
+      i = end - 1;
+      continue;
+    }
+    const params = [];
+    j++;
+    while (t[j] && !(t[j].kind === 'op' && t[j].value === ')')) {
+      if (t[j].kind === 'name') params.push(t[j].value);
+      j++;
+    }
+    const closing = t[end - 1];
+    const from = t[j] ? t[j].at + 1 : src.length;
+    const to = closing && closing.value === 'end' ? closing.at : src.length;
+    out.push({ name, params, line: k.line, body: src.slice(from, Math.max(from, to)), tokens: t.slice(j + 1, end - 1) });
+    i = end - 1;
+  }
+  return out;
 }

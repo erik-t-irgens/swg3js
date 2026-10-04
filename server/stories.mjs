@@ -68,9 +68,12 @@
 // and never in the book, so a reload or a dropped line starts it again at its entry, and a set read again
 // under somebody mid-conversation starts it again there too. A cast member with a place in the story is
 // spoken to only from within `talkReach` and `talkSlack` of it, on its world, while its `stand` holds; one
-// of the game's own people is taken on the browser's word. Each turn runs through the same host loop as
-// everything else -- written down, paid (a `charge` through the purse's own spend), its notes and view sent
-// -- and the node it reached goes back to that line alone (`node`).
+// of the game's own people is taken on the browser's word, with the creature the browser says they are stood
+// as (`who`), which is what gives them one of the game's own conversations: the Core3 reference's structure,
+// folded with the adoptions of ours (`core3Story.mjs`) and joined to whatever sets are read, never counting as
+// one, and spoken even with no set read at all (`talkCoreOf`). Each turn runs through the same host loop as everything else -- written down, paid (a `charge`
+// through the purse's own spend), its notes and view sent -- and the node it reached goes back to that line
+// alone (`node`).
 //
 // **In pieces.** A browser's input is dropped past 64 KB a second, so a book goes up in pieces
 // (`src/story/storyWire.ts`) and is put back together here, no larger than `offerMax` and with no longer
@@ -317,12 +320,14 @@ export class Stories {
    *   grouped?: (c: object) => boolean,
    *   shared?: (npc: string) => boolean,
    *   tests?: boolean,
+   *   core3?: (() => { set: object, report: object, errors: object[] } | null) | null,
    * }} options the numbers to work to; where a record goes to be applied and kept (and whether it is a
    * counter's, to be flushed lazily) and how the log is flushed; the shared clock a story's times are
-   * written in; who pays; what the server knows of the worlds; how the sets' files are read; and who is the
-   * admin, who is grouped and which creatures the world shares.
+   * written in; who pays; what the server knows of the worlds; how the sets' files are read; who is the
+   * admin, who is grouped and which creatures the world shares; and how the game's own conversations are
+   * read (`core3Story.mjs`), which are joined to whatever sets are read and never make one of their own.
    */
-  constructor({ tuning = STORY_TUNING, write = () => {}, flush = () => {}, now = () => Date.now(), purses = null, ledger = null, worlds = NO_WORLDS, read = null, admin = () => false, grouped = () => false, shared = () => false, tests = false } = {}) {
+  constructor({ tuning = STORY_TUNING, write = () => {}, flush = () => {}, now = () => Date.now(), purses = null, ledger = null, worlds = NO_WORLDS, read = null, admin = () => false, grouped = () => false, shared = () => false, tests = false, core3 = null } = {}) {
     this.tuning = tuning;
     this.write = write;
     this.flushLog = flush;
@@ -335,6 +340,9 @@ export class Stories {
     this.grouped = grouped;
     this.shared = shared;
     this.tests = !!tests;
+    this.core3Read = core3;
+    /** How the game's own conversations were last read: the trees folded and played, and the adoptions' problems. */
+    this.core3 = null;
     this.data = { stories: Object.create(null), storyArchive: Object.create(null) };
     /** The sets in use, joined, and how each read came out. */
     this.lib = emptySet();
@@ -396,6 +404,17 @@ export class Stories {
     if (this.tests) take(files.test, true);
     for (const why of files.refused ?? []) reports.push({ name: 'refused', hash: '', quests: 0, errors: 1, warnings: 0, first: [why] });
     this.sets = reports;
+    // The game's own conversations join whatever sets were read. They list no set, so a server that reads
+    // none is still one that reads no story and works no job out for anybody; its heralds still speak, through
+    // a loop that only ever talks (`talkCoreOf`).
+    let core3 = null;
+    try {
+      core3 = this.core3Read ? this.core3Read() : null;
+    } catch (err) {
+      core3 = { set: null, report: null, errors: [{ file: 'core3', line: 1, message: err instanceof Error ? err.message : String(err) }] };
+    }
+    this.core3 = core3 ? { report: core3.report ?? null, errors: (core3.errors ?? []).map((i) => `${i.file}:${i.line}: ${i.message}`) } : null;
+    if (core3?.set) loaded.push(core3.set);
     this.lib = loaded.length ? joinSets(loaded) : emptySet();
     return reports;
   }
@@ -699,11 +718,12 @@ export class Stories {
     for (const [session, other] of this.lines) if (session !== c.id && other.character === c.character) this.lines.delete(session);
     let line = this.lines.get(c.id);
     if (!line || line.character !== c.character) {
-      line = { session: c.id, character: c.character, c, core: null, ready: false, entered: false, unread: false, hash: '', here: null, room: null, hour: null, hourAt: 0, areas: new Set(), kills: new Map(), killTimes: [], talk: null };
+      line = { session: c.id, character: c.character, c, core: null, talkCore: null, ready: false, entered: false, unread: false, hash: '', here: null, room: null, hour: null, hourAt: 0, areas: new Set(), kills: new Map(), killTimes: [], talk: null };
       this.lines.set(c.id, line);
     }
     line.c = c;
     line.core = null;
+    line.talkCore = null;
     // A conversation is the book's it began on: a book settled again starts none.
     line.talk = null;
     line.entered = false;
@@ -730,6 +750,22 @@ export class Stories {
     if (line.core && line.core.book === book) return line.core;
     line.core = new HostCore({ book, lib: this.lib, payer: 'server', limits: limitsOf(this.tuning), apply: (ch) => this.writeBatch(line.character, ch) });
     return line.core;
+  }
+
+  /**
+   * The host loop a line speaks to one of the game's own people through while no story set is read: the
+   * library is the game's own conversations alone (`core3`, which list no set, so `ready` stays false and no
+   * job is worked out for anybody), and nothing but a conversation is ever opened or answered on it -- never a
+   * load, a sweep or a new library, which would hold every job in the book to a library that has none of them
+   * and read each as revised away. What a turn changes (heard, met, a herald's waypoint) is written down and
+   * sent as any batch is. Null when there are no such conversations to speak, or no book.
+   */
+  talkCoreOf(line) {
+    const book = this.bookOf(line.character);
+    if (!book || !this.lib.voices || !Object.keys(this.lib.voices).length) return null;
+    if (line.talkCore && line.talkCore.book === book && line.talkCore.lib === this.lib) return line.talkCore;
+    line.talkCore = new HostCore({ book, lib: this.lib, payer: 'server', limits: limitsOf(this.tuning), apply: (ch) => this.writeBatch(line.character, ch) });
+    return line.talkCore;
   }
 
   /** A batch the rules worked out, written down (and so applied, by the store): lazily when it is only counters. */
@@ -1061,7 +1097,9 @@ export class Stories {
     if (!line || line.character !== c.character || !line.ready) return node('this character’s story is being settled with the server');
     line.c = c;
     this.takeAt(line, word.at);
-    const core = this.coreOf(line);
+    // One of the game's own people speaks the game's own conversations, which need no story set: with none read
+    // they are spoken through a loop that only ever talks (`talkCoreOf`).
+    const core = this.coreOf(line) ?? (word.speaker.startsWith('row:') ? this.talkCoreOf(line) : null);
     if (!core) return node('no story is read here');
     if (word.op === 'pick' && (!line.talk || line.talk.speaker !== word.speaker)) return node('you are not talking to them');
     const why = this.whyNotTalk(line, word.speaker);
@@ -1069,7 +1107,7 @@ export class Stories {
       line.talk = null;
       return node(why);
     }
-    const out = word.op === 'open' ? core.talkOpen(word.speaker, this.ctxOf(line)) : core.talkPick(line.talk, word.reply, this.ctxOf(line));
+    const out = word.op === 'open' ? core.talkOpen(word.speaker, this.ctxOf(line), word.who ?? null) : core.talkPick(line.talk, word.reply, this.ctxOf(line));
     this.stats.talks++;
     line.talk = out.turn.state;
     const tell = [];
@@ -1078,7 +1116,12 @@ export class Stories {
     return { ok: !out.turn.why, why: out.turn.why ?? undefined, tell };
   }
 
-  /** Why a line may not speak to somebody just now, or null. A game person (`row:`) is taken on the browser's word. */
+  /**
+   * Why a line may not speak to somebody just now, or null. A game person (`row:`) is taken on the browser's
+   * word, and so is the creature it says they are stood as, which is what gives them a conversation: the
+   * server knows none of the game's people, and every one they could be speaks only what the game's own
+   * conversations (`core3`) give that creature.
+   */
   whyNotTalk(line, speaker) {
     if (speaker.startsWith('row:')) return null;
     const cast = Object.hasOwn(this.lib.cast, speaker) ? this.lib.cast[speaker] : null;
@@ -1362,8 +1405,11 @@ export class Stories {
       sets: this.sets.map((s) => ({ ...s })),
       tests: this.tests,
       jobs: Object.keys(this.lib.quests).length,
-      talks: Object.keys(this.lib.talks).length,
+      // The story's own conversations; the game's own are counted beside them.
+      talks: Object.keys(this.lib.talks).filter((id) => !id.startsWith('core3:')).length,
       cast: Object.keys(this.lib.cast).length,
+      // The game's own conversations: how many were folded, which may be played and by how many creatures.
+      core3: this.core3?.report ? { trees: this.core3.report.trees, played: this.core3.report.played.length, voiced: this.core3.report.voiced, adopted: this.core3.report.adopted.length, errors: this.core3.errors } : null,
       talking: [...this.lines.values()].filter((l) => l.talk).length,
       books,
       active,

@@ -147,11 +147,37 @@ export function isWaypointColour(x: unknown): x is WaypointColour {
   return typeof x === 'string' && (WAYPOINT_COLOURS as readonly string[]).includes(x);
 }
 
-/** A name: control characters out, trimmed, cut to length. Empty is null. */
+/**
+ * The whole of a name that is one of the client's own strings (`@spawning/static_npc/herald_lok_kimogila_cult:
+ * waypoint_name_1`, what a herald names the place it tells of with): kept whole on a waypoint a story set and
+ * shown in the client's words, since cut to length it would name nothing.
+ */
+const CLIENT_NAME = /^@[A-Za-z0-9_/.-]{1,120}:[A-Za-z0-9_.-]{1,120}$/;
+
+/** A name: control characters out, trimmed, cut to length. Empty is null. What a player names one with, whatever it looks like. */
 export function cleanWaypointName(x: unknown, max = WAYPOINT_TUNE.nameMax): string | null {
   if (typeof x !== 'string') return null;
   const out = x.replace(CONTROL, '').trim().slice(0, max).trim();
   return out || null;
+}
+
+/**
+ * A name a story gives a waypoint: as a player's is, but a reference to one of the client's own strings is kept
+ * whole. Only ever for a waypoint a story set (`by`), so a name a player types is never read as a reference.
+ */
+export function cleanStoryWaypointName(x: unknown): string | null {
+  if (typeof x !== 'string') return null;
+  const plain = x.replace(CONTROL, '').trim();
+  return CLIENT_NAME.test(plain) ? plain : cleanWaypointName(plain);
+}
+
+/**
+ * Whether a story waypoint's kept name is the one a story names now: the same, or the very name cut to length
+ * by a server or a browser from before a story's references were kept whole -- so talking to a herald again
+ * never sets a second waypoint at a place the book already holds under its cut name.
+ */
+export function sameStoryName(kept: string, name: string): boolean {
+  return kept === name || (name.length > WAYPOINT_TUNE.nameMax && name.startsWith('@') && kept === name.slice(0, WAYPOINT_TUNE.nameMax));
 }
 
 /**
@@ -192,9 +218,10 @@ export function cleanPlace(x: unknown): [number, number, number | null] | null {
 
 /**
  * What a browser asked to set, cleaned, or null. Everything is rebuilt field by field, so nothing a
- * browser adds to the object is ever carried on: an unknown field, a `__proto__`, a second name.
+ * browser adds to the object is ever carried on: an unknown field, a `__proto__`, a second name. `story`
+ * reads the name as a story's (`cleanStoryWaypointName`), which only a waypoint a story set is.
  */
-export function cleanWaypointAsk(x: unknown): WaypointAsk | null {
+export function cleanWaypointAsk(x: unknown, story = false): WaypointAsk | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
   const o = x as Record<string, unknown>;
   const world = cleanWorld(o.world);
@@ -203,7 +230,7 @@ export function cleanWaypointAsk(x: unknown): WaypointAsk | null {
   const f = o.f === 'game' ? 'game' : o.f === 'raw' ? 'raw' : null;
   if (!f) return null;
   const out: WaypointAsk = {
-    name: cleanWaypointName(o.name) ?? 'Waypoint',
+    name: (story ? cleanStoryWaypointName(o.name) : cleanWaypointName(o.name)) ?? 'Waypoint',
     world,
     f,
     p,
@@ -223,11 +250,12 @@ export function cleanWaypoint(x: unknown): Waypoint | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
   const o = x as Record<string, unknown>;
   if (!isWaypointId(o.id)) return null;
-  const ask = cleanWaypointAsk(o);
+  const by = typeof o.by === 'string' && SET_BY.test(o.by) ? o.by : null;
+  const ask = cleanWaypointAsk(o, by !== null);
   if (!ask) return null;
   const made = typeof o.made === 'number' && Number.isFinite(o.made) && o.made >= 0 ? o.made : 0;
   const out: Waypoint = { id: o.id, ...ask, made };
-  if (typeof o.by === 'string' && SET_BY.test(o.by)) out.by = o.by;
+  if (by !== null) out.by = by;
   return out;
 }
 
