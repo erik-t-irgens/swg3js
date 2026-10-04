@@ -93,10 +93,17 @@ import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
-import { groupMapFeed, mapFrame, waypointMapFeed, type MapFrame, type WaypointList } from './ui/spaceMapLayers.ts';
+import { groupMapFeed, mapFrame, waypointMapFeed, WaypointList, type MapFrame } from './ui/spaceMapLayers.ts';
+import { mapMeta, mapPictureNow } from './ui/mapImages.ts';
+import { Minimap, MINIMAP_TUNE, tuneMinimap } from './ui/minimap.ts';
+import { WaypointHud, waypointWords } from './ui/waypointHud.ts';
+import { WaypointsUi, type WaypointRow, type WaypointsModel } from './ui/waypointsUi.ts';
+import { WaypointPlaces, WaypointSpots, wayIn, type PlaceDeps, type RoomAnswer } from './world/waypointPlace.ts';
+import type { RoomDoor } from './world/nav/navRooms.ts';
+import { CITY_TUNE, CityWatch, tuneCities } from './story/cities.ts';
 import { BookClient, tuneStory, type StoryResult } from './story/bookClient.ts';
 import { browserStoryStorage } from './story/storyStore.ts';
-import { WAYPOINT_COLOURS, gameToRaw, isWaypointColour, rawToGameX, rawToGameZ, waypointName } from './story/waypoints.ts';
+import { WAYPOINT_COLOURS, WAYPOINT_TUNE, gameToRaw, gameToRawX, gameToRawZ, isWaypointColour, rawToGameX, rawToGameZ, tuneWaypointView, waypointName } from './story/waypoints.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { GIVE_TUNE } from './ui/giveModel.ts';
@@ -269,7 +276,7 @@ import { applyAppearance, dress, packLook } from './player/look';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
-import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
+import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
 import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
@@ -400,6 +407,24 @@ const CAMERA_REST_PITCH = 0.32;
  * pixel), and shows the red flash alone.
  */
 const HUD_WIRING = { gunBits: 32, heatIsHeadroom: true, promptHz: 8, nearbyHz: 4, hurtRange: 400 };
+
+/**
+ * Ours: how far past a building's own radius a room's waypoint may be and still be that building's. The
+ * point was marked standing in the room, so it is inside the building; the slack is for a building
+ * whose rooms overhang its shell.
+ */
+const WAYPOINT_ROOM_SLACK = 20;
+
+/** A world in words, from the pack it loads from: the planet's name, and the zone's after it. */
+function worldNameOf(pack: string): string {
+  for (const p of PLANETS) {
+    if (p.zones?.length) {
+      const z = p.zones.find((x) => x.pack === pack);
+      if (z) return `${p.name}, ${z.name}`;
+    } else if (p.id === pack) return p.name;
+  }
+  return pack;
+}
 
 /** What `__debug.perf()` takes; see `App.perfDebug` and the README's Debugging section. */
 /** `__debug.cull(o)`: the portal renderer's visible set. */
@@ -964,6 +989,29 @@ class App {
   /** Where a world point lands on the screen, for the rising numbers: filled in place, never new. */
   private readonly feedbackPoint = new THREE.Vector3();
   /**
+   * The character's waypoints in the world (`src/ui/waypointHud.ts`): a mark of our own where each one
+   * stands, drawn on the overlay every frame from places worked out at the action bar's gather
+   * (`src/world/waypointPlace.ts`), and the distance to the tracked one and the nearest in view as two
+   * page labels written only when they change.
+   */
+  private readonly waypointHud = new WaypointHud(this.ui);
+  private readonly waypointPlaces = new WaypointPlaces();
+  /** The waypoints of this world the gather reads, written in place from the book. */
+  private readonly waypointSpots = new WaypointSpots();
+  /** The minimap at the top left and the waypoints it draws, refilled only when the book changes. */
+  private minimap!: Minimap;
+  private readonly minimapList = new WaypointList();
+  /** How many times the book's waypoints have changed, so the minimap knows to draw again. */
+  private waypointVersion = 0;
+  /** The city walked into, for the name under the minimap, and the world its memory is of. */
+  private readonly cityWatch = new CityWatch();
+  private cityPack = '';
+  /** The Waypoints window (Y). */
+  private waypointsUi!: WaypointsUi;
+  /** Each building model's way in to each of its named rooms, worked out once: a room's mark seen from the street. */
+  private readonly wayIns = new WeakMap<object, Map<number, RoomDoor | null>>();
+  private readonly wpTmp = new THREE.Vector3();
+  /**
    * Where the blow being dealt to the player right now came from, held for the length of one call.
    * It is set by the wrapper in the constructor and read by the frame loop's damage closure as the
    * second source: the player's own record hands the direction to its callback itself, and this
@@ -1385,6 +1433,11 @@ class App {
     onBindingsChanged(hudBindingsChanged);
     // What is in each hand: the live object the player keeps, and the rack's own picture for an item.
     this.hud.setHandSource({ equipped: this.player.equipped, icon: (item) => (this.weapons ? this.weapons.iconUrl(item as WeaponDef) : null) });
+    // The waypoints' marks go on the same overlay; the minimap is the top-left panel's first child, a
+    // canvas of its own, with the planet's picture from the one loader every map shares.
+    this.waypointHud.attach(this.overlay);
+    this.minimap = new Minimap(this.ui.querySelector<HTMLElement>('#hud .top-left')!, this.ui.querySelector<HTMLElement>('#hud')!, (pack) => mapPictureNow(pack));
+    this.wireWaypoints();
     // The comms and the ship's status line; the world (assigned above) hands the taunts over.
     this.shipHud = new ShipHud(this.ui);
     // Its shapes go on the overlay, in the palette's own colours; its one-shot lines and the pilots'
@@ -5104,7 +5157,9 @@ class App {
           // are the last full second's. The message line is counted apart: it writes only when
           // something was said or is fading, which is by design, and its own counter is a lifetime
           // total, so adding it here would put a rising number where a 0 is meant to stand.
-          writes: body.writes + ship.writes + fb.writes,
+          // The waypoints' labels and the minimap's city line are counted in with the rest: none of them
+          // writes anything while nothing moves.
+          writes: body.writes + ship.writes + fb.writes + this.waypointHud.writesLastSecond + this.minimap.writesLastSecond,
           byDesign: body.byDesign,
           lineWrites: { lastSecond: this.lineWritesLast, total: line.writes },
           scale: L.scale,
@@ -5138,6 +5193,9 @@ class App {
           // The plate over a head, and the line in the corner it replaced.
           plates: { shown: plate.shown, label: plate.label, writes: plate.writes, enabled: plate.enabled, tune: { ...PLATE_TUNE } },
           nearby: { name: this.nearbyName, hz: HUD_WIRING.nearbyHz },
+          // The waypoints' marks and labels, and the minimap: what the last frame drew of each and what it wrote.
+          waypoints: { ...this.waypointHud.report() },
+          minimap: { showing: this.minimap.showing, redraws: this.minimap.redraws, dots: this.minimap.dots, writes: this.minimap.writesLastSecond },
           wiring: { ...HUD_WIRING },
         };
       },
@@ -6892,7 +6950,12 @@ class App {
       // `__debug.waypoints(...)`: set, list, change and take away the character's own waypoints from the
       // console, exactly as the map and (later) the Waypoints window do -- applied at once when this browser
       // holds the book, asked of the server when it does.
-      debugRoot.waypoints = (o?: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null }) => this.debugWaypoints(o ?? { list: true });
+      debugRoot.waypoints = (o?: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null; marks?: boolean; tune?: Parameters<typeof tuneWaypointView>[0] }) => this.debugWaypoints(o ?? { list: true });
+      // `__debug.minimap(...)`: the minimap at the top left and the city name under it -- whether it is
+      // showing and why not, how many times it has been drawn (which a still player must not move), the
+      // points it drew, the city it says and its own numbers. `{ range, northUp, on }` set the three
+      // Interface settings as the page does; `{ tune }` moves `MINIMAP_TUNE`, `{ city }` moves `CITY_TUNE`.
+      debugRoot.minimap = (o?: { range?: number; northUp?: boolean; on?: boolean; tune?: Partial<typeof MINIMAP_TUNE>; city?: Partial<typeof CITY_TUNE> }) => this.debugMinimap(o ?? {});
     }
 
     // ---- The world's creatures, and whose browser thinks for each of them. ----
@@ -7438,7 +7501,7 @@ class App {
     draggable(groupUi.root, '.group-panel', 'h3', 'group');
     if (debugRoot) {
       // `__debug.group()` reads what the group is doing and `__debug.group({ chevron: 60 })` sets one
-      // of this side's own numbers; `{ ui: { panelKey: 'KeyY' } }` sets the panel's. The distances an
+      // of this side's own numbers; `{ ui: { panelKey: 'Comma' } }` sets the panel's. The distances an
       // invitation, a trade and a duel reach are the game's own table's and are printed, not settable.
       debugRoot.group = (o?: Partial<typeof GROUP_TUNE> & { ui?: Partial<typeof GROUP_UI_TUNE> }) => {
         if (o?.ui) tuneGroupUi(o.ui);
@@ -8555,6 +8618,13 @@ class App {
     this.net.disconnect();
     // The book goes with the character; the next one played reads its own.
     this.story.use(null);
+    // And its marks, their labels and the city walked into with it. The minimap comes down here too, as
+    // the overlay and the roster do below, because only an in-world frame ever stood it aside: left up,
+    // its last world's circle would stand over a creator drawn in a captured place.
+    this.waypointPlaces.reset();
+    this.waypointHud.clear();
+    this.cityWatch.reset();
+    this.minimap.standDown();
     this.world.leave();
     this.shipHud.clear();
     this.messages.clear();
@@ -8686,6 +8756,11 @@ class App {
       case 'hudDamageNumbers':
       case 'hudNameplate':
       case 'hudJediCrosshair':
+      case 'hudMinimap':
+      case 'hudMinimapRange':
+      case 'hudMinimapNorthUp':
+      case 'hudWaypointMarks':
+      case 'hudWaypointMarksInFlight':
         // A size, a backing store and a few switches: no shader and no element is made.
         this.applyHudSettings();
         break;
@@ -8716,6 +8791,12 @@ class App {
     // permanent crosshair changes how a saber fight feels.
     this.hud.setCrosshair(true, S.hudJediCrosshair);
     this.plates.setEnabled(S.hudNameplate);
+    // The waypoints' marks and the minimap: the scale, the two switches on the marks, and a drawing of the
+    // minimap at whatever reach and orientation the page now says (both are read by its own step).
+    this.waypointHud.setScale(scale);
+    this.waypointHud.setShown(S.hudWaypointMarks, S.hudWaypointMarksInFlight);
+    this.minimap.setScale(scale);
+    this.minimap.redraw();
     this.hudLayoutFor(scale);
     // The message column the layout worked out, so a long line cannot run under the centred blocks on
     // a narrow window. One property write, on a resize and a change of scale, never in a frame.
@@ -9045,9 +9126,18 @@ class App {
       this.shipHud.idle();
       this.feedback.idle();
       this.hud.idle();
+      // The waypoints' distances are page labels, not canvas: they go too, once, or they would stand
+      // over the death card and every panel.
+      this.waypointHud.idle();
       return;
     }
     this.hud.draw();
+    // The waypoints' marks under the flight display's shapes, so the reticle is drawn over a mark that
+    // happens to stand behind it rather than the other way round.
+    const p = this.player;
+    const flown = p.mounted ?? p.piloting;
+    const at = p.worldPos;
+    this.waypointHud.draw(this.waypointPlaces, this.cam.camera, window.innerWidth, window.innerHeight, at.x, at.y, at.z, !!flown?.spec.ship && flown.airborne);
     this.shipHud.draw();
     this.feedback.draw();
     if (this.cullShow) this.drawCullRects(o);
@@ -9399,7 +9489,7 @@ class App {
   private fillWaypoints(out: WaypointList): void {
     const book = this.story.book;
     if (!book || !this.inWorld || !book.waypoints.length) return;
-    const here = packIdOf(this.world.planet, this.zone);
+    const here = this.packHere(this.world.planet);
     const c = this.world.layoutCenter;
     const cx = c ? c.x : 0;
     const cz = c ? c.z : 0;
@@ -9436,7 +9526,39 @@ class App {
   }
 
   /** What `__debug.waypoints` does: one change, or several, through the book's own operations. */
-  private debugWaypoints(o: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null }): Record<string, unknown> {
+  private debugWaypoints(o: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null; marks?: boolean; tune?: Parameters<typeof tuneWaypointView>[0] }): Record<string, unknown> {
+    if (o.tune) tuneWaypointView(o.tune);
+    if (o.marks) {
+      // The marks as the last gather placed them and what the last frame drew of them. A driven tab draws no
+      // frames, so the gather and one drawing of the overlay are run here first: `__debug.advance` steps
+      // the world but not the display.
+      this.gatherWaypoints();
+      // Only where a frame would draw it: never over the death card, a panel or the map.
+      if (this.inWorld && !this.dying && !this.anyPanelOpen() && !this.map.open) {
+        this.cam.camera.updateMatrixWorld();
+        this.drawOverlay(true);
+      }
+      const places = this.waypointPlaces;
+      const hud = this.waypointHud.report();
+      const marks: Record<string, unknown>[] = [];
+      for (let i = 0; i < places.count; i++) {
+        const m = places.marks[i];
+        marks.push({ id: m.id, name: m.name, kind: m.kind === 1 ? 'quest' : m.kind === 2 ? 'room' : 'personal', tracked: m.tracked, how: m.how, at: [Math.round(m.x * 10) / 10, Math.round(m.y * 10) / 10, Math.round(m.z * 10) / 10], d: Math.round(m.d * 10) / 10 });
+      }
+      return {
+        marks,
+        drawn: hud.drawn,
+        arrows: hud.arrows,
+        labels: this.waypointHud.labelTexts(),
+        labelWrites: hud.writes,
+        shown: hud.shown,
+        inFlight: hud.inFlight,
+        gathers: places.stats.gathers,
+        probes: { last: places.stats.probesLast, total: places.stats.probes },
+        reached: places.stats.reached,
+        tune: { ...WAYPOINT_TUNE },
+      };
+    }
     const results: StoryResult[] = [];
     if (o.add !== undefined) {
       const colour = isWaypointColour(o.colour) ? o.colour : undefined;
@@ -9465,6 +9587,364 @@ class App {
       colours: WAYPOINT_COLOURS,
       ...(o.list || !results.length ? { list: (book?.waypoints ?? []).map((w) => ({ ...w, tracked: book?.trackWp === w.id })) } : { count: book?.waypoints.length ?? 0 }),
     };
+  }
+
+  // ---- Waypoints in the world, the minimap and the Waypoints window. ----
+
+  /** What `__debug.minimap` does: the three settings as the page sets them, the two tunes, and a report. */
+  private debugMinimap(o: { range?: number; northUp?: boolean; on?: boolean; tune?: Partial<typeof MINIMAP_TUNE>; city?: Partial<typeof CITY_TUNE> }): Record<string, unknown> {
+    const S = this.settings;
+    let changed = false;
+    if (typeof o.range === 'number' && Number.isFinite(o.range)) {
+      S.hudMinimapRange = Math.max(HUD_MINIMAP_RANGE.min, Math.min(HUD_MINIMAP_RANGE.max, Math.round(o.range)));
+      changed = true;
+    }
+    if (typeof o.northUp === 'boolean') {
+      S.hudMinimapNorthUp = o.northUp;
+      changed = true;
+    }
+    if (typeof o.on === 'boolean') {
+      S.hudMinimap = o.on;
+      changed = true;
+    }
+    if (changed) this.applyHudSettings();
+    if (o.tune) {
+      tuneMinimap(o.tune);
+      this.minimap.redraw();
+    }
+    if (o.city) {
+      tuneCities(o.city);
+      this.minimap.retune();
+    }
+    // Stepped once here, so a driven tab that draws no frames still sees what a frame would do.
+    this.stepMinimap();
+    const v = this.minimapView;
+    const planet = this.world.planet;
+    const why = !S.hudMinimap ? 'switched off' : !this.inWorld || !planet ? 'no world' : planet.space ? 'in space' : planet.instances ? 'in a dungeon copy' : mapPictureNow(v.pack) === undefined ? 'the picture is on its way' : mapPictureNow(v.pack) === null ? 'this world has no picture' : '';
+    return {
+      showing: this.minimap.showing,
+      why,
+      pack: v.pack,
+      at: [Math.round(v.x), Math.round(v.z)],
+      range: v.range,
+      northUp: v.northUp,
+      redraws: this.minimap.redraws,
+      dots: this.minimap.dots,
+      writes: this.minimap.writesLastSecond,
+      city: { here: this.cityWatch.here, shown: this.minimap.cityShown, said: this.cityWatch.said, quiet: this.cityWatch.quiet },
+      tune: { ...MINIMAP_TUNE },
+      cityTune: { ...CITY_TUNE },
+    };
+  }
+
+  /** What a waypoint's mark asks of the world: the ground already built, the ground made, a room's floor, a room. */
+  private placeDeps!: PlaceDeps;
+  /** What the minimap is handed each frame: one object, refilled. */
+  private readonly minimapView = { wanted: false, pack: '', x: 0, z: 0, heading: 0, range: 800, northUp: true };
+  /** The pack of the world in play, worked out again only when the planet or the zone has changed. */
+  private readonly packMemo: { planet: PlanetDef | null; zone: string | undefined; pack: string } = { planet: null, zone: undefined, pack: '' };
+
+  /**
+   * The pack of the world in play, for the paths that run every frame or every gather. `packIdOf` on a
+   * world split into zones (Kashyyyk) is a `find` with a new closure each call, which a frame may not
+   * make; so it is asked only when the planet or the zone differs from the last time, and the two are
+   * compared rather than remembered from any one place that sets them.
+   */
+  private packHere(planet: PlanetDef): string {
+    const m = this.packMemo;
+    if (m.planet !== planet || m.zone !== this.zone) {
+      m.planet = planet;
+      m.zone = this.zone;
+      m.pack = packIdOf(planet, this.zone);
+    }
+    return m.pack;
+  }
+  /** A waypoint of your own reached: said once per approach, the one thing about a waypoint the message line says. */
+  private readonly onWaypointReached = (m: { name: string }): void => this.messages.note(`Waypoint reached: ${m.name}`);
+
+  /** The Waypoints window, what the marks ask of the world, and the book's changes reaching both. Once, in the constructor. */
+  private wireWaypoints(): void {
+    const ui = new WaypointsUi(this.ui);
+    this.waypointsUi = ui;
+    ui.onClose = () => this.toggleWaypoints(false);
+    ui.onMark = () => this.markHere();
+    ui.onRename = (id, name) => this.waypointSaid(this.story.renameWaypoint(id, name));
+    ui.onColour = (id, colour) => this.waypointSaid(this.story.recolourWaypoint(id, colour));
+    ui.onSwitch = (id, on) => this.waypointSaid(this.story.switchWaypoint(id, on));
+    ui.onTrack = (id) => {
+      // Tracking one that is switched off switches it on: an arrow nobody can see points at nothing.
+      const w = id ? this.story.book?.waypoints.find((x) => x.id === id) : null;
+      if (w && !w.on) this.waypointSaid(this.story.switchWaypoint(w.id, true));
+      this.waypointSaid(this.story.trackWaypoint(id));
+    };
+    ui.onRemove = (id) => this.waypointSaid(this.story.removeWaypoint(id));
+    ui.onShowOnMap = (id) => this.showWaypointOnMap(id);
+    draggable(ui.root, '.ship-panel', '.ship-header', 'waypoints');
+    // The key on its close button is the one bound now, and follows a rebind.
+    const key = () => ui.setKey(keyLabel(this.input.bindings.waypoints[0] ?? ''));
+    key();
+    onBindingsChanged(key);
+    this.placeDeps = {
+      space: () => !!this.world.planet?.space,
+      groundCached: (x, z) => this.world.groundIfCached(x, z),
+      ground: (x, z) => this.world.groundAt(x, 0, z, false),
+      floor: (x, y, z) => this.world.groundAt(x, y, z, true),
+      room: (cell, template, x, z, out) => this.roomOfWaypoint(cell, template, x, z, out),
+    };
+    // The book changed (a waypoint set, renamed, recoloured, switched, tracked, taken away, or a book read
+    // in or settled): the minimap draws again, the window shows it and the marks are gathered afresh.
+    this.story.onChange(() => this.waypointsChanged());
+  }
+
+  /** The book's waypoints changed, or the world did: everything that shows them is told. */
+  private waypointsChanged(): void {
+    this.waypointVersion++;
+    this.fillMinimapWaypoints();
+    if (this.waypointsUi.open) this.waypointsUi.update(this.waypointsModel());
+    // The marks at the next gather rather than up to an eighth of a second on.
+    this.promptClock = 0;
+  }
+
+  /**
+   * The minimap's points: every waypoint switched on, on this world, in the map's own frame -- which is the
+   * frame a planet's waypoints are kept in, so a point is copied and never turned. Only when the book or the
+   * world changes, never in a frame.
+   */
+  private fillMinimapWaypoints(): void {
+    const list = this.minimapList;
+    list.begin();
+    const book = this.story.book;
+    const planet = this.world.planet;
+    if (book && planet) {
+      const here = packIdOf(planet, this.zone);
+      for (const w of book.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, w.name, w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
+    }
+    this.minimap.setWaypoints(list);
+  }
+
+  /**
+   * Where the waypoints' marks stand and the city walked into: at the action bar's gather, a few times a
+   * second, never on every frame. The book's waypoints on this world are read into the kept list in the
+   * game's frame (a planet's are kept in the raw one and turned about the layout centre here) and the
+   * places worked out from it; nothing is made once the lists have grown to what the world asks of them.
+   */
+  private gatherWaypoints(): void {
+    const spots = this.waypointSpots;
+    spots.begin();
+    const book = this.story.book;
+    const planet = this.world.planet;
+    const at = this.player.worldPos;
+    if (book && planet && this.inWorld) {
+      const here = this.packHere(planet);
+      const c = this.world.layoutCenter;
+      const cx = c ? c.x : 0;
+      const cz = c ? c.z : 0;
+      for (const w of book.waypoints) {
+        if (!w.on || w.world !== here) continue;
+        const raw = w.f === 'raw';
+        spots.add(w.id, w.name, w.colour, book.trackWp === w.id, false, raw ? rawToGameX(cx, w.p[0]) : w.p[0], raw ? rawToGameZ(cz, w.p[1]) : w.p[1], raw || w.p[2] === null ? Number.NaN : w.p[2], w.room?.cell ?? '', w.room?.template ?? '');
+      }
+    }
+    // A mark with no ground yet stands at the eye: the camera's own height, as the last frame left it.
+    const eyeY = this.cam.camera.matrixWorld.elements[13];
+    this.waypointPlaces.gather(spots, at.x, at.y, at.z, eyeY, performance.now() / 1000, this.placeDeps, this.onWaypointReached);
+    this.stepCities();
+  }
+
+  /**
+   * The city walked into, from the world's own `pois.json` rows (`src/story/cities.ts`), and its name under
+   * the minimap. The name is the minimap's and goes with it: a world with no minimap says no city.
+   */
+  private stepCities(): void {
+    const planet = this.world.planet;
+    if (!planet) return;
+    const pack = this.packHere(planet);
+    if (pack !== this.cityPack) {
+      this.cityPack = pack;
+      this.cityWatch.reset();
+    }
+    if (!this.minimap.showing || this.placeNamesFor !== pack) return;
+    const c = this.world.layoutCenter;
+    const at = this.player.worldPos;
+    const said = this.cityWatch.step(this.placeNames, gameToRawX(c ? c.x : 0, at.x), gameToRawZ(c ? c.z : 0, at.z), performance.now() / 1000);
+    if (said) this.minimap.showCity(said);
+  }
+
+  /** The minimap, once a frame: up or aside as the world and the setting say, and drawn only when it must be. */
+  private stepMinimap(): void {
+    const S = this.settings;
+    const v = this.minimapView;
+    const planet = this.world.planet;
+    v.wanted = S.hudMinimap && this.inWorld && !!planet && !planet.space && !planet.instances;
+    if (v.wanted && planet) {
+      const p = this.player;
+      // Riding or flying low, the hull's heading is the way you face, as the map window's arrow has it.
+      const hull = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+      const at = p.worldPos;
+      const c = this.world.layoutCenter;
+      v.pack = this.packHere(planet);
+      v.x = gameToRawX(c ? c.x : 0, at.x);
+      v.z = gameToRawZ(c ? c.z : 0, at.z);
+      v.heading = hull ? hull.heading : p.heading;
+      v.range = Math.max(HUD_MINIMAP_RANGE.min, Math.min(HUD_MINIMAP_RANGE.max, S.hudMinimapRange));
+      v.northUp = S.hudMinimapNorthUp;
+    }
+    this.minimap.update(v);
+  }
+
+  /**
+   * The room a waypoint names, for its mark: the nearest streamed building with a room of that name (and
+   * the template, where the waypoint kept one) that the point stands within; whether you are in that
+   * building and in that very room; the room's middle to look down for its floor from; and its way in --
+   * the first doorway on the way from outside through the building's own room graph -- in the world.
+   */
+  private roomOfWaypoint(cell: string, template: string, x: number, z: number, out: RoomAnswer): void {
+    let best: Building | null = null;
+    let bestD = Infinity;
+    let index = -1;
+    for (const b of this.world.buildings) {
+      if (template && b.template !== template) continue;
+      const cells = b.model.def.cells;
+      if (!cells) continue;
+      const d = Math.hypot(b.x - x, b.z - z);
+      // The point was marked standing in the room, so it is inside the building's reach: a room of the
+      // same name in the next town's copy of the building is not this one.
+      if (d >= bestD || d > b.radius + WAYPOINT_ROOM_SLACK) continue;
+      let found = -1;
+      for (let i = 0; i < cells.length; i++) {
+        if (cells[i].index > 0 && cells[i].name === cell) {
+          found = cells[i].index;
+          break;
+        }
+      }
+      if (found < 0) continue;
+      bestD = d;
+      best = b;
+      index = found;
+    }
+    out.found = !!best;
+    if (!best) return;
+    const s = this.world.cellState;
+    out.inside = !!s && s.building === best;
+    out.inRoom = out.inside && !!s && s.cell === index;
+    const cells = best.model.def.cells!;
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i].index !== index) continue;
+      const { min, max } = cells[i].bounds;
+      out.top = this.wpTmp.set((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2).applyMatrix4(best.matrix).y;
+      break;
+    }
+    const key = best.model as unknown as object;
+    let doors = this.wayIns.get(key);
+    if (!doors) {
+      doors = new Map();
+      this.wayIns.set(key, doors);
+    }
+    let door = doors.get(index);
+    if (door === undefined) {
+      door = wayIn(worldNav.forBuilding(best).rooms, index);
+      doors.set(index, door);
+    }
+    out.door = !!door;
+    if (door) {
+      const w = this.wpTmp.set(door.x, door.y, door.z).applyMatrix4(best.matrix);
+      out.doorX = w.x;
+      out.doorY = w.y;
+      out.doorZ = w.z;
+    }
+  }
+
+  /** Y: the Waypoints window, open or shut. It closes every other panel to open, as the spawner does. */
+  private toggleWaypoints(open = !this.waypointsUi.open): void {
+    if (!open) {
+      if (!this.waypointsUi.open) return;
+      this.waypointsUi.hide();
+      this.audio.ui.play('panelClose');
+      this.handBackMouse();
+      return;
+    }
+    if (!this.started || !this.inWorld || this.traveling) return;
+    this.closePanels();
+    this.map.hide();
+    this.waypointsUi.show(this.waypointsModel());
+    this.audio.ui.play('panelOpen');
+    this.freeMouse(true);
+  }
+
+  /** What the Waypoints window shows: built when it opens and when the book changes, never in a frame. */
+  private waypointsModel(): WaypointsModel {
+    const book = this.story.book;
+    const planet = this.world.planet;
+    const here = planet && this.inWorld ? packIdOf(planet, this.zone) : '';
+    const c = this.world.layoutCenter;
+    const cx = c ? c.x : 0;
+    const cz = c ? c.z : 0;
+    const at = this.player.worldPos;
+    const rows: WaypointRow[] = (book?.waypoints ?? []).map((w) => {
+      const isHere = w.world === here;
+      let d = Infinity;
+      if (isHere) {
+        const raw = w.f === 'raw';
+        const dx = (raw ? rawToGameX(cx, w.p[0]) : w.p[0]) - at.x;
+        const dz = (raw ? rawToGameZ(cz, w.p[1]) : w.p[1]) - at.z;
+        d = !raw && w.p[2] !== null ? Math.hypot(dx, w.p[2] - at.y, dz) : Math.hypot(dx, dz);
+      }
+      return { id: w.id, name: w.name, world: w.world, worldName: worldNameOf(w.world), here: isHere, d, distance: isHere ? waypointWords(d) : '', colour: w.colour, on: w.on, tracked: book?.trackWp === w.id, room: w.room?.cell ?? '' };
+    });
+    const count = book?.waypoints.length ?? 0;
+    const host = this.story.host;
+    const markWhy = !book || !this.inWorld ? 'there is no world to stand in' : host === 'held' ? 'the story is being settled with the server' : count >= WAYPOINT_TUNE.max ? `${WAYPOINT_TUNE.max} is as many as a character keeps` : '';
+    const note =
+      host === 'server'
+        ? 'Held by the server, and shown here as it answers.'
+        : host === 'held'
+          ? "This character's story is being settled with the server, or the server is not answering: nothing can change until it is."
+          : 'Kept in this browser. A right-click on the planet’s map marks a waypoint too.';
+    return { rows, count, max: WAYPOINT_TUNE.max, markWhy, note };
+  }
+
+  /** "Mark here": a waypoint where you stand, with your room if you are in one, named for the place nearest. */
+  private markHere(): void {
+    const book = this.story.book;
+    if (!book || !this.inWorld) return;
+    const here = this.waypointHere();
+    let near: string | null = null;
+    let past = Infinity;
+    if (here.f === 'raw') {
+      for (const p of this.placeNames) {
+        const d = Math.max(0, Math.hypot(p.x - here.p[0], p.z - here.p[1]) - (p.r || 0));
+        if (d < past) {
+          past = d;
+          near = p.name;
+        }
+      }
+    }
+    const name = waypointName(near, past, book.nextWp);
+    const out = this.story.addWaypoint({ name, ...here, on: true });
+    this.messages.system(out.ok ? `Waypoint set: ${name}` : `No waypoint: ${out.why}`);
+  }
+
+  /** "Show on map": the map window opened on the waypoint, on this world. */
+  private showWaypointOnMap(id: string): void {
+    const w = this.story.book?.waypoints.find((x) => x.id === id);
+    const planet = this.world.planet;
+    if (!w || !planet) return;
+    if (w.world !== packIdOf(planet, this.zone)) {
+      this.messages.system('That waypoint is on another world.');
+      return;
+    }
+    this.waypointsUi.hide();
+    // A planet's waypoint is kept in the map's own frame, so it is the point the map opens on; in space
+    // the map is the zone's own view and follows the ship as it always does.
+    if (w.f === 'raw') this.map.showAt(w.p[0], w.p[1]);
+    else this.map.show();
+    this.input.captured = true;
+    this.input.releaseLock();
+  }
+
+  /** What came of a change asked for from the window: a refusal is said, a change shows when it is made. */
+  private waypointSaid(out: StoryResult): void {
+    if (!out.ok && out.why) this.messages.system(`No change: ${out.why}`);
   }
 
   /** Send the hello again shortly (dressing several pieces sends one): a change of clothes or weapon reaches the others. */
@@ -10244,6 +10724,15 @@ class App {
     this.endConsoleShuttles('the world changed');
     // The houses this browser put down itself are not written down anywhere: they went with the world.
     this.localHomes.clear();
+    // The waypoints' marks and their grounds were the last world's, and so was the city walked into; the
+    // minimap's points and the window are this world's from here (its planet and zone are set), and the
+    // minimap draws again once its picture is in.
+    this.waypointPlaces.reset();
+    this.waypointHud.clear();
+    this.cityWatch.reset();
+    this.minimap.clearCity();
+    this.minimap.redraw();
+    this.waypointsChanged();
     // In no dungeon copy until a travel into one stands the player there.
     this.instanceHere = null;
     this.copyFittings = [];
@@ -10775,6 +11264,9 @@ class App {
     // reaches is a system with none. A world swapped under the hull with the last one's gates still
     // pointed at would be the one place they could be wrong and never show.
     this.zoneGates.use(import.meta.env.BASE_URL, packIdOf(planet, this.zone));
+    // And what `arrive` does for the waypoints: the window, if it is open through the jump, and the
+    // marks' next gather are this system's from here.
+    this.waypointsChanged();
     if (!this.world.vehicles.includes(hull)) return null;
     // At the arrival's start, facing the arrival, before anything streams: the world streams round where the hull is.
     hull.teleport(pose.pos, pose.quaternion, 0);
@@ -14171,23 +14663,9 @@ class App {
     };
   }
 
-  /** A world's own map picture and the ground it covers (`mapFrame`), fetched once per world for the session. */
-  private readonly terminalMaps = new Map<string, Promise<{ url: string; frame: MapFrame } | null>>();
-
+  /** A world's own map picture and the ground it covers (`mapFrame`), from the one loader every map shares. */
   private terminalMap(pack: string): Promise<{ url: string; frame: MapFrame } | null> {
-    let p = this.terminalMaps.get(pack);
-    if (!p) {
-      const base = `${import.meta.env.BASE_URL}assets-private/${pack}/`;
-      p = fetch(`${base}map.json`)
-        .then(async (res) => {
-          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          const meta = (await res.json()) as { image?: string; width?: number; centre?: { x: number; z: number } };
-          return meta.image ? { url: `${base}${meta.image}`, frame: mapFrame(meta) } : null;
-        })
-        .catch(() => null);
-      this.terminalMaps.set(pack, p);
-    }
-    return p;
+    return mapMeta(pack);
   }
 
   /** Buy what the terminal has picked: the fare comes out and a ticket goes in hand. */
@@ -14543,7 +15021,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.waypointsUi.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -15298,6 +15776,7 @@ class App {
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.housingUi.open) this.housingUi.hide();
     if (this.propsUi.open) this.propsUi.hide();
+    if (this.waypointsUi.open) this.waypointsUi.hide();
     if (this.terminalUi.open) {
       // The galaxy goes home first: the terminal is about to be hidden with the map window's own
       // canvas and label layer sitting inside it, and nothing else would ever put them back.
@@ -17854,6 +18333,9 @@ class App {
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
+        // The Waypoints window, held back while a jump has the controls or a shuttle has the passenger,
+        // as the map is: its "Show on map" opens the map, whose teleport would end either.
+        if (input.pressedAction('waypoints') && !this.hyperspace.locksControls && !riding) this.toggleWaypoints();
         // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
         // it itself, and from one of its boxes it types a character and Escape is the way out.
         if (input.pressedAction('debugMenu')) this.debugMenu.toggle();
@@ -18118,6 +18600,9 @@ class App {
           this.promptClock = 1 / Math.max(1, HUD_WIRING.promptHz);
           this.promptLive = true;
           this.actions.set(this.gatherPrompt(true));
+          // Where the waypoints' marks stand, and the city walked into, on the same clock: both are
+          // walks and lookups, and a frame only projects what this left.
+          this.gatherWaypoints();
         }
       }
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
@@ -18286,6 +18771,8 @@ class App {
       // The breath goes last: it is null on dry land and with a full lungful, and the row is not on
       // the page at all while it is, so an ordinary frame writes nothing for it.
       this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
+      // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
+      this.stepMinimap();
       // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The
       // crosshair is cast from the camera, so the eye and the direction are read straight out of its
       // world matrix into two kept vectors: column 3 is where it stands, column 2 negated is where

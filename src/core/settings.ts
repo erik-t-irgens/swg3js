@@ -124,6 +124,16 @@ export interface Settings extends FxSettings {
   hudNameplate: boolean;
   /** A crosshair for a Jedi as well as a Bounty Hunter, since a Force power is aimed too. */
   hudJediCrosshair: boolean;
+  /** The minimap at the top left: the planet's own picture round you, with your waypoints on it. */
+  hudMinimap: boolean;
+  /** Metres from the minimap's middle to its rim, 300 to 3200. */
+  hudMinimapRange: number;
+  /** North at the top of the minimap; off, the map turns so the way you face is up. */
+  hudMinimapNorthUp: boolean;
+  /** Your waypoints marked where they stand in the world. */
+  hudWaypointMarks: boolean;
+  /** The same marks while flying a ship. */
+  hudWaypointMarksInFlight: boolean;
   // Gameplay.
   /**
    * How hard the world's own people and creatures are: one scale on their health and their blows,
@@ -197,6 +207,14 @@ export const DEFAULT_SETTINGS: Settings = {
   hudDamageNumbers: false,
   hudNameplate: true,
   hudJediCrosshair: true,
+  // Ours, all five: the minimap and the marks start on because they are the only way a waypoint is
+  // seen without opening the map; eight hundred metres is the design's reach, and north up is how the
+  // map window itself is drawn.
+  hudMinimap: true,
+  hudMinimapRange: 800,
+  hudMinimapNorthUp: true,
+  hudWaypointMarks: true,
+  hudWaypointMarksInFlight: true,
   // Ours, and one: every body stands at its own numbers until the player says otherwise.
   difficulty: 1,
   ...FX_DEFAULTS,
@@ -206,6 +224,8 @@ export const DEFAULT_SETTINGS: Settings = {
 export const HUD_SCALE_RANGE = { min: 0.75, max: 1.5 } as const;
 export const HUD_DPR_RANGE = { min: 1, max: 2 } as const;
 export const HUD_LINES_RANGE = { min: 3, max: 8 } as const;
+/** The minimap's reach, in metres from its middle to its rim: the menu and `__debug.minimap` clamp to it. */
+export const HUD_MINIMAP_RANGE = { min: 300, max: 3200 } as const;
 
 /**
  * The settings this session is playing with: the object `loadSettings` last returned, which the

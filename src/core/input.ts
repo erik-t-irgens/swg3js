@@ -57,7 +57,9 @@ export type Action =
   // A prop in hand that was picked back up: throw it away rather than put it back.
   | 'putAway'
   // The debug menu: every `__debug` helper, run from a window.
-  | 'debugMenu';
+  | 'debugMenu'
+  // The Waypoints window: every waypoint the character keeps, to mark, track, rename, colour and take away.
+  | 'waypoints';
 
 /**
  * Default bindings, as KeyboardEvent codes and `Mouse<button>`. Crouch has X beside Ctrl
@@ -128,6 +130,9 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // one left of 1, which nothing else in this game uses. It types a character into a box, so inside
   // the menu's own boxes it is Escape that shuts it.
   debugMenu: ['Backquote'],
+  // The Waypoints window, on Y, as the story's design has it. The group's panel had Y as a raw key of its
+  // own while a group stood; it moved to the full stop so the two never open on one press.
+  waypoints: ['KeyY'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
 

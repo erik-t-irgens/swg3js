@@ -319,4 +319,37 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(bar((s) => void ((s.near = 'mount'), (s.lift = true)), false) === '', 'a panel, the map, the death card: (nothing)');
 }
 
+// --- no default binding shares a panel's own raw key ----------------------------------------------
+// Two panels listen for a raw key code of their own, outside the bindings table and so outside the
+// Controls page: the group's panel and the trade window. A default binding on the same code opens two
+// things on one press, which is exactly what Y did the day the Waypoints window took it while the group
+// panel still listened for it. Both sides are read as text, the bindings because `src/core/input.ts`
+// declares a parameter property node will not strip, the tunes so nothing of the net layer is loaded.
+{
+  const src = read('src/core/input.ts');
+  const body = /export const DEFAULT_BINDINGS[^{]*\{([\s\S]*?)\n\};/.exec(src);
+  assert.ok(body, 'the bindings table was found in src/core/input.ts');
+  const byCode = new Map<string, string[]>();
+  for (const m of body[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\[([^\]]*)\]/gm)) {
+    for (const code of m[2].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)) {
+      byCode.set(code, [...(byCode.get(code) ?? []), m[1]]);
+    }
+  }
+  const rawKey = (file: string, tune: string): string => {
+    const m = new RegExp(`export const ${tune} = \\{[\\s\\S]*?\\n\\s*panelKey: '([A-Za-z0-9]+)'`).exec(read(file));
+    assert.ok(m, `${tune}.panelKey was found in ${file}`);
+    return m[1];
+  };
+  const group = rawKey('src/ui/groupUi.ts', 'GROUP_UI_TUNE');
+  const trade = rawKey('src/ui/tradeUi.ts', 'TRADE_UI_TUNE');
+  ok(!byCode.has(group), `the group panel's raw key (${group}) is no default binding${byCode.has(group) ? `: ${byCode.get(group)!.join(', ')} take it` : ''}`);
+  // The one pair that stands on purpose, from before this check: T fast-forwards the day and also brings
+  // back a trade window left open. Fast-forward is the developer's (it runs only while play simulates)
+  // and the trade's T acts only while a trade stands, so the two have shared it since the trade was
+  // built. Anything else on the trade's key fails.
+  const tradeTakers = (byCode.get(trade) ?? []).filter((a) => !(trade === 'KeyT' && a === 'fastForward'));
+  ok(tradeTakers.length === 0, `the trade window's raw key (${trade}) is no default binding but the day's fast-forward, which has always shared it${tradeTakers.length ? `: ${tradeTakers.join(', ')} take it` : ''}`);
+  ok(group !== trade, 'and the two panels do not share one');
+}
+
 console.log(`\n${checks} checks passed`);

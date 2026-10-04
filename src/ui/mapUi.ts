@@ -29,6 +29,7 @@ import { COL, colourHex, colourOf, type PaletteName } from '../core/palette.ts';
 import type { GalaxyMap, Poi } from './galaxyMap';
 import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, mapFromScreenX, mapFromScreenY, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, WAYPOINT_MAP_TUNE, WaypointList, waypointMapFeed, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark, type WaypointMark } from './spaceMapLayers.ts';
 import { WAYPOINT_COLOURS } from '../story/waypoints.ts';
+import { mapPicture } from './mapImages.ts';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
 export interface MapSource {
@@ -73,13 +74,16 @@ export interface MapSource {
 }
 
 interface MapImage {
-  image: HTMLImageElement;
+  image: CanvasImageSource;
   /** The ground the picture covers, in the map's own frame (`mapFrame`). */
   frame: MapFrame;
 }
 
 /** The frame drawn while no picture is converted: the planet-wide 16384 m about the origin, as a grid. */
 const NO_PICTURE: MapFrame = mapFrame(null);
+
+/** Ours: metres to the pixel the planet's map opens at when it is asked to show a point (`showAt`). */
+const FOCUS_SCALE = 4;
 
 type Tab = 'here' | 'galaxy';
 
@@ -210,9 +214,18 @@ export class MapUi {
   private readonly canvas2d = document.createElement('canvas');
   private readonly canvas3d = document.createElement('canvas');
   private readonly ctx: CanvasRenderingContext2D;
-  private readonly images = new Map<string, Promise<MapImage | null>>();
   private image: MapImage | null = null;
+  /**
+   * A point of the map's own frame to open on (`showAt`), held until the world's picture has answered --
+   * arrived, or turned out not to exist -- and let go by the first fit made after that.
+   */
+  private focus: { x: number; z: number } | null = null;
   private imageFor = '';
+  /**
+   * Whether the picture asked for `imageFor` has answered, with a picture or with none. A world with no
+   * picture answers null and never sets `image`, so `image` alone cannot say the wait is over.
+   */
+  private imageDone = false;
   private pois: Poi[] = [];
   private poisFor = '';
   private frame = 0;
@@ -601,6 +614,9 @@ export class MapUi {
   show(tab: Tab = 'here'): void {
     this.root.classList.remove('hidden');
     this.followed = false;
+    // Opened the ordinary way, it opens on you: a point asked for by an earlier "Show on map" that never
+    // found its picture is not this opening's. `showAt` sets its own after this.
+    this.focus = null;
     this.view.followShip();
     this.attachDebug();
     this.showTab(tab);
@@ -900,26 +916,24 @@ export class MapUi {
 
   // ---- The planet: the client's map, panned and zoomed. ----
 
+  /** The world's picture, from the one loader every map shares (`mapImages.ts`), decoded once per pack. */
   private loadImage(packId: string): Promise<MapImage | null> {
-    let p = this.images.get(packId);
-    if (!p) {
-      const base = `${import.meta.env.BASE_URL}assets-private/${packId}/`;
-      p = fetch(`${base}map.json`)
-        .then(async (res) => {
-          if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
-          const meta = (await res.json()) as { image: string; width?: number; centre?: { x: number; z: number } };
-          const image = new Image();
-          await new Promise<void>((resolve, reject) => {
-            image.onload = () => resolve();
-            image.onerror = () => reject(new Error(`${meta.image} did not load`));
-            image.src = `${base}${meta.image}`;
-          });
-          return { image, frame: mapFrame(meta) };
-        })
-        .catch(() => null);
-      this.images.set(packId, p);
-    }
-    return p;
+    return mapPicture(packId);
+  }
+
+  /**
+   * Open on the planet's map with a point of its own frame in the middle, at a scale the ground can be
+   * read at: the Waypoints window's "Show on map". The point is kept until the picture has answered and
+   * fitted, so a world whose picture is still on its way opens on the waypoint and not on the player.
+   *
+   * It is not fitted here but on the next draw, which first finds out which world's picture it draws: just
+   * after a travel `image` is still the last world's, and a fit made with it would let the point go
+   * before this world's picture had even been asked for.
+   */
+  showAt(mapX: number, mapZ: number): void {
+    this.show('here');
+    this.focus = { x: mapX, z: mapZ };
+    this.followed = false;
   }
 
   /** Game coordinates to the map's (the snapshot's): the game mirrors X and recentres. */
@@ -932,10 +946,22 @@ export class MapUi {
     const w = this.canvas2d.clientWidth || 900;
     const h = this.canvas2d.clientHeight || 560;
     this.scale = (this.image?.frame ?? NO_PICTURE).width / Math.min(w, h);
-    const p = this.source.player();
-    const m = this.toMap(p.x, p.z);
-    this.look.x = m.x;
-    this.look.z = m.z;
+    // A point asked for (`showAt`) is looked at close enough to read the ground round it, ours, and
+    // is let go once this world's picture has answered: until then the picture's arrival fits the map
+    // again, and must fit it on the point. Every fit runs after `draw2d` has set `imageFor` to the world
+    // it draws, so `imageDone` is this world's answer and never the last world's.
+    const f = this.focus;
+    if (f) {
+      this.scale = Math.min(this.scale, FOCUS_SCALE);
+      this.look.x = f.x;
+      this.look.z = f.z;
+      if (this.imageDone) this.focus = null;
+    } else {
+      const p = this.source.player();
+      const m = this.toMap(p.x, p.z);
+      this.look.x = m.x;
+      this.look.z = m.z;
+    }
     this.followed = true;
   }
 
@@ -1046,9 +1072,11 @@ export class MapUi {
     if (this.imageFor !== packId) {
       this.imageFor = packId;
       this.image = null;
+      this.imageDone = false;
       void this.loadImage(packId).then((img) => {
         if (this.imageFor === packId) {
           this.image = img;
+          this.imageDone = true;
           this.fit();
         }
       });

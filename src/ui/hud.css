@@ -529,6 +529,65 @@
   height: calc(4px * var(--hud-scale));
 }
 
+/* --- the waypoints' distances ----------------------------------------------------------------------
+ * A small pool, moved by `translate3d` only and written when the distance has moved by a rounding step.
+ * Each stands under its mark, a mark's own size below the point it is placed at (`HUD_SIZES.waypointMark`),
+ * or inboard of the tracked one's edge arrow. */
+.hud-wp-labels { position: absolute; inset: 0; pointer-events: none; }
+.hud-wp-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin-top: calc(7px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  color: var(--ink);
+  white-space: nowrap;
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  will-change: transform;
+}
+.hud-wp-label[hidden] { display: none; }
+
+/* --- the minimap -----------------------------------------------------------------------------------
+ * A circle of the planet's own picture, first in the top-left panel and over the planet's name, with the
+ * name of a city fading in under it. Its canvas is drawn only when what it shows has moved; the city's
+ * fade is one animation the browser runs itself, written into its own sheet from `CITY_TUNE`. */
+.hud-minimap-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: calc(6px * var(--hud-scale));
+}
+.hud-minimap-wrap[hidden] { display: none; }
+.hud-minimap {
+  display: block;
+  width: calc(168px * var(--hud-scale));
+  height: calc(168px * var(--hud-scale));
+  border-radius: 50%;
+}
+/* One line of fixed height, so a name coming and going never moves the panel, and the help block below
+ * can be placed by arithmetic: 1.3em of 13px is 16.9px at scale 1. */
+.hud-city {
+  height: 1.3em;
+  line-height: 1.3em;
+  white-space: nowrap;
+  margin-top: calc(3px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-size: calc(13px * var(--hud-scale));
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+  opacity: 0;
+}
+/* The help block stands under the panel, which the minimap has made taller by the whole of its wrap, all
+ * of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`), the name's margin (3) and line (16.9),
+ * and the wrap's own margin (6), 193.9 rounded up to 194. 92px is where the help block stands without it
+ * (`.help` in style.css), and `hudMath.test.ts` adds these up again from this file. */
+#hud.minimap-on .help { top: calc(92px + 194px * var(--hud-scale)); }
+
 /* --- a rising damage number (a setting, off by default) -------------------------------------------- */
 .hud-dmg {
   position: absolute;

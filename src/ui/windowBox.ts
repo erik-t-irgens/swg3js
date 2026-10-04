@@ -71,6 +71,9 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   trade: { w: 520, h: 320 },
   // The debug menu: its list of helpers beside an arguments box and an answer that can still be read.
   debug: { w: 560, h: 360 },
+  // The Waypoints window: a row is a swatch, a name, where it is, two switches and three buttons, so it
+  // wants that width, and the height of the header and a few rows.
+  waypoints: { w: 600, h: 260 },
 });
 
 /** The minimum of a window this table does not name. */

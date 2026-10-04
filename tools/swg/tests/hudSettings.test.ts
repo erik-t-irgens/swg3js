@@ -30,7 +30,7 @@ const bag = new Map<string, string>();
   removeItem: (k: string) => void bag.delete(k),
 };
 
-const { DEFAULT_SETTINGS, HUD_SCALE_RANGE, HUD_DPR_RANGE, HUD_LINES_RANGE, loadSettings, saveSettings } = await import('../../../src/core/settings.ts');
+const { DEFAULT_SETTINGS, HUD_SCALE_RANGE, HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, loadSettings, saveSettings } = await import('../../../src/core/settings.ts');
 
 // The eight keys and the kind of value each must carry.
 const HUD_KEYS = [
@@ -42,6 +42,12 @@ const HUD_KEYS = [
   ['hudMessages', 'boolean'],
   ['hudMessageLines', 'number'],
   ['hudFullPrompts', 'boolean'],
+  // The story's: the minimap, its reach and which way is up, and the waypoints' marks on foot and in flight.
+  ['hudMinimap', 'boolean'],
+  ['hudMinimapRange', 'number'],
+  ['hudMinimapNorthUp', 'boolean'],
+  ['hudWaypointMarks', 'boolean'],
+  ['hudWaypointMarksInFlight', 'boolean'],
 ] as const;
 
 // -------------------------------------------------------------------------------------------
@@ -62,6 +68,7 @@ const HUD_KEYS = [
     ['scale', HUD_SCALE_RANGE],
     ['dpr', HUD_DPR_RANGE],
     ['lines', HUD_LINES_RANGE],
+    ['minimap reach', HUD_MINIMAP_RANGE],
   ] as const) {
     ok(range.min < range.max, `the ${name} range runs from its low end to its high one (${range.min}..${range.max})`);
     ok(Number.isFinite(range.min) && Number.isFinite(range.max), `the ${name} range is two real numbers`);
@@ -70,6 +77,7 @@ const HUD_KEYS = [
   ok(clamp(DEFAULT_SETTINGS.hudScale, HUD_SCALE_RANGE) === DEFAULT_SETTINGS.hudScale, `the scale range contains its own default (${DEFAULT_SETTINGS.hudScale})`);
   ok(clamp(DEFAULT_SETTINGS.hudDpr, HUD_DPR_RANGE) === DEFAULT_SETTINGS.hudDpr, `the backing store range contains its own default (${DEFAULT_SETTINGS.hudDpr})`);
   ok(clamp(DEFAULT_SETTINGS.hudMessageLines, HUD_LINES_RANGE) === DEFAULT_SETTINGS.hudMessageLines, `the line-count range contains its own default (${DEFAULT_SETTINGS.hudMessageLines})`);
+  ok(clamp(DEFAULT_SETTINGS.hudMinimapRange, HUD_MINIMAP_RANGE) === DEFAULT_SETTINGS.hudMinimapRange, `the minimap's reach contains its own default (${DEFAULT_SETTINGS.hudMinimapRange} m)`);
   // What the console helper does with a wild value, spelled out here so the ends are pinned.
   ok(clamp(12, HUD_SCALE_RANGE) === HUD_SCALE_RANGE.max, 'a scale far over the top clamps to the top');
   ok(clamp(-4, HUD_SCALE_RANGE) === HUD_SCALE_RANGE.min, 'a scale under the bottom clamps to the bottom');
@@ -87,9 +95,10 @@ const HUD_KEYS = [
     ok(a === b, `with nothing saved, ${key} is its default`);
   }
 
-  const changed = { ...fresh, hudScale: 1.25, hudArcs: false, hudMessageLines: 4 };
+  const changed = { ...fresh, hudScale: 1.25, hudArcs: false, hudMessageLines: 4, hudMinimapRange: 1600, hudMinimapNorthUp: false };
   saveSettings(changed);
   const back = loadSettings();
+  ok(back.hudMinimapRange === 1600 && back.hudMinimapNorthUp === false, "the minimap's reach and its orientation come back");
   ok(back.hudScale === 1.25, 'a scale saved comes back');
   ok(back.hudArcs === false, 'a switch turned off comes back off');
   ok(back.hudMessageLines === 4, 'a line count saved comes back');

@@ -21,7 +21,12 @@ export const WAYPOINT_COLOURS = ['accent', 'ink', 'muted', 'good', 'warn', 'bad'
 
 export type WaypointColour = (typeof WAYPOINT_COLOURS)[number];
 
-/** The numbers of a waypoint's own data. Nothing here is the game's. */
+/**
+ * The numbers of a waypoint: its own data first (what the book keeps, which the server reads too), then
+ * how one is shown in the world (`src/ui/waypointHud.ts`, `src/world/waypointPlace.ts`). Nothing here is
+ * the game's. The view's numbers are live through `__debug.waypoints({ tune })`, which takes them and
+ * never the data's, since a hundred moved in one browser would be a book the server refuses.
+ */
 export const WAYPOINT_TUNE = {
   /** How many waypoints a character keeps that it set itself (the owner's number). A quest's do not count. */
   max: 100,
@@ -36,7 +41,52 @@ export const WAYPOINT_TUNE = {
    * named for it ("Near Mos Eisley"); further off it is "Waypoint <n>". Ours.
    */
   nearName: 1000,
+  // ---- the view: every one of these is ours ----------------------------------------------------------
+  // A mark's own size is not here: it is `HUD_SIZES.waypointMark`, the one table every size on the
+  // screen is kept in, which the stylesheet states again for the label under it.
+  /** The dot in the middle of a quest's mark, in pixels at scale 1. */
+  questDotPx: 2,
+  /** The caret over or under a mark that stands well above or below you, in pixels at scale 1. */
+  caretPx: 4,
+  /** Metres above or below your feet past which a mark carries that caret. */
+  heightHint: 4,
+  /** The most marks drawn at once: the nearest that are switched on, and the tracked one whatever its distance. */
+  marksMax: 10,
+  /** Distance labels: the tracked waypoint's and the nearest one in view. A pool, read once when it is built. */
+  labelsMax: 2,
+  /** Metres from a waypoint of your own at which the message line says it is reached, once per approach. */
+  reachSay: 8,
+  /** Metres within which a mark is stood on the ground under it; past that its bearing is what matters. */
+  groundReach: 1500,
+  /** The most ground probes that may generate ground, a gather (eight a second); the rest wait their turn. */
+  probesPerTick: 2,
+  /** Seconds before a mark's ground is asked for again. */
+  regroundEvery: 5,
+  /** A distance under `farFrom` is said to this many metres. */
+  nearRound: 10,
+  /** Metres from which a distance is said in kilometres. */
+  farFrom: 1000,
+  /** A distance in kilometres is said to this many of them. */
+  farRound: 0.1,
 };
+
+/** The view's numbers, which `tuneWaypointView` may move. The data's above them are left alone. */
+const VIEW_KEYS = ['questDotPx', 'caretPx', 'heightHint', 'marksMax', 'labelsMax', 'reachSay', 'groundReach', 'probesPerTick', 'regroundEvery', 'nearRound', 'farFrom', 'farRound'] as const;
+
+/** Move any of the view's numbers, each held to something that makes sense; the answer is the table as it stands. */
+export function tuneWaypointView(o: Partial<Record<(typeof VIEW_KEYS)[number], number>>): typeof WAYPOINT_TUNE {
+  const t = WAYPOINT_TUNE as unknown as Record<string, number>;
+  for (const k of VIEW_KEYS) {
+    const v = o[k];
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    // Counts are whole and at least one; a size, a distance or a time may not be negative; the rounding
+    // steps may not be nought, or a distance would be divided by nothing.
+    if (k === 'marksMax' || k === 'labelsMax' || k === 'probesPerTick') t[k] = Math.max(k === 'probesPerTick' ? 0 : 1, Math.min(64, Math.round(v)));
+    else if (k === 'nearRound' || k === 'farRound') t[k] = Math.max(1e-3, v);
+    else t[k] = Math.max(0, v);
+  }
+  return WAYPOINT_TUNE;
+}
 
 /**
  * One waypoint. `p` is where it stands: x and z across the ground in the frame `f` names, then the

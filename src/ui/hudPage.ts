@@ -6,7 +6,7 @@
 // one (it reaches for `document`, and both it and `input.ts` declare fields in their constructor
 // parameters, which node's type stripping will not take). Nothing in this file touches the page, so
 // the test needs no browser at all.
-import { HUD_LINES_RANGE, HUD_SCALE_RANGE, type Settings } from '../core/settings.ts';
+import { HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, type Settings } from '../core/settings.ts';
 
 /** One control on a settings page. `choice` is a list whose values are words rather than numbers. */
 export interface Knob {
@@ -54,6 +54,16 @@ export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'hudMessages', label: 'The message line', kind: 'toggle', hint: 'The lines at the bottom left: what hit you, what you hit, a crash, a part going down, a jump, the relay. Off, those notices are not said anywhere else, so leave it on unless it is in the way.' },
       { key: 'hudMessageLines', label: 'Lines kept', kind: 'range', min: HUD_LINES_RANGE.min, max: HUD_LINES_RANGE.max, step: 1, format: (v) => `${v}`, requires: ['hudMessages'], hint: 'How many stand at once before the oldest goes. Ours: eight is what a busy fight fills.' },
       { key: 'hudFullPrompts', label: 'Full prompts', kind: 'toggle', hint: 'The long line naming every key, under the short bar of four actions. Off to begin with, since the bar already puts your own key on everything it offers; turn it on when you want to check whether the bar has hidden something you use, and say what is missing.' },
+    ],
+  },
+  {
+    title: 'Map and waypoints',
+    knobs: [
+      { key: 'hudMinimap', label: 'Minimap', kind: 'toggle', hint: "The planet's own map in a circle at the top left, round you, with your arrow and every waypoint that is switched on; the name of a city fades in under it as you walk in. It stands aside in space, in the dungeons and on a world with no map picture." },
+      { key: 'hudMinimapRange', label: 'Minimap reach', kind: 'range', min: HUD_MINIMAP_RANGE.min, max: HUD_MINIMAP_RANGE.max, step: 100, format: (v) => `${v} m`, requires: ['hudMinimap'], hint: 'How far from you the rim of the minimap is. The pictures are sixteen metres to the pixel, so close in they are soft; ours, eight hundred to begin with.' },
+      { key: 'hudMinimapNorthUp', label: 'North up', kind: 'toggle', requires: ['hudMinimap'], hint: 'North at the top, with your arrow turning; off, the map turns with you and the way you face is up.' },
+      { key: 'hudWaypointMarks', label: 'Waypoints in the world', kind: 'toggle', hint: 'A mark where each waypoint switched on stands, the distance under the tracked one and the nearest, and an arrow at the edge of the screen pointing at the tracked one when it is out of sight. The Waypoints window lists every one of them.' },
+      { key: 'hudWaypointMarksInFlight', label: 'Waypoints while flying', kind: 'toggle', requires: ['hudWaypointMarks'], hint: 'The same marks over the flight display, at the controls of a ship.' },
     ],
   },
   {
