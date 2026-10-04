@@ -1,5 +1,6 @@
 // What the interface is shown of a story, worked out in one place: the jobs with their objective lines,
-// the quests' own waypoints, what the detectors should watch, and the story objects that answer E. Pure.
+// the quests' own waypoints, what the detectors should watch, the story objects that answer E, and the
+// story's people to stand (the cast, by the name the player knows them by). Pure.
 // A browser on a server is sent this (from a later wave) and never the story set, so nothing a player has
 // not been shown yet is ever in their browser; with no server the browser works it out itself, from the
 // same function.
@@ -17,7 +18,7 @@
 import { hashText } from '../net/hash.ts';
 import type { StepRec, StoryBook } from './book.ts';
 import type { CondJson } from './expr.ts';
-import { placeOf, whyNotGrant, type StoryCtx } from './quests.ts';
+import { evalCond, placeOf, whyNotGrant, type StoryCtx } from './quests.ts';
 import { stableText, type KillMatch, type QuestDef, type Room, type Shape, type StepDef, type StorySet } from './set.ts';
 import { literalOf, type TextRef } from './text.ts';
 import { STEP_TYPES } from './vocab.ts';
@@ -85,13 +86,34 @@ export interface ObjectView {
   label: TextRef | null;
 }
 
+/**
+ * One of the story's named people the browser stands: the body, where (in the frame the story writes places
+ * in), which way they face (degrees in that frame), their mood, the name the player knows them by -- their
+ * own once they have given it, else what they are called until then -- and whether they have anything to say.
+ */
+export interface CastView {
+  id: string;
+  name: TextRef;
+  named: boolean;
+  body: string;
+  world: string;
+  f: 'raw' | 'game';
+  at: [number, number];
+  room?: Room;
+  heading: number;
+  mood?: string;
+  side?: string;
+  talk: boolean;
+  essential: boolean;
+}
+
 export interface StoryView {
   rev: number;
   quests: QuestView[];
   waypoints: WaypointView[];
   watch: Watch[];
-  /** The people the story stands (a later wave). */
-  cast: unknown[];
+  /** The people the story stands just now: every cast member whose `stand` holds. */
+  cast: CastView[];
   objects: ObjectView[];
   tracked: string[];
   trackWp: string | null;
@@ -153,8 +175,10 @@ function madeText(step: StepDef, lib: StorySet): string {
       if (s.startsWith('died:')) return `Kill ${s.slice(5).replace(/_/g, ' ')}`;
       return 'Wait for word';
     }
-    case 'talk':
-      return 'Talk to them';
+    case 'talk': {
+      const c = step.who && lib.cast && Object.hasOwn(lib.cast, step.who) ? lib.cast[step.who] : null;
+      return `Talk to ${labelOr(c?.unknownAs, 'them')}`;
+    }
     case 'choice':
       return 'Decide';
     default:
@@ -214,6 +238,13 @@ function conditionAreas(lib: StorySet): string[] {
       walk((st.options ?? []).map((o) => o.when));
     }
   }
+  // A conversation's conditions and a cast member's `stand` may ask for an area too.
+  for (const id of Object.keys(lib.talks ?? {})) {
+    const t = lib.talks[id];
+    walk(t.entry.map((e) => e.when));
+    for (const n of Object.keys(t.nodes)) walk(t.nodes[n].replies.map((r) => r.when));
+  }
+  for (const id of Object.keys(lib.cast ?? {})) walk(lib.cast[id].stand);
   const list = [...out].sort();
   AREA_CACHE.set(lib, list);
   return list;
@@ -318,12 +349,26 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
   if (flags.death) watch.push({ k: 'death' });
   if (flags.world) watch.push({ k: 'world' });
   ended.sort((a, b) => (endedAt.get(b) ?? 0) - (endedAt.get(a) ?? 0));
+  // The story's people: every one whose `stand` holds for this character just now, by the name it knows them by.
+  const cast: CastView[] = [];
+  for (const id of Object.keys(lib.cast ?? {}).sort()) {
+    const c = lib.cast[id];
+    if (c.stand && !evalCond(c.stand, book, ctx)) continue;
+    const known = book.npcs && Object.hasOwn(book.npcs, id) ? book.npcs[id] : undefined;
+    const named = known?.named !== undefined;
+    const talk = !!c.tree && !!lib.talks && Object.hasOwn(lib.talks, c.tree);
+    const v: CastView = { id, name: named ? c.name : c.unknownAs, named, body: c.body, world: c.world, f: c.f, at: [c.at[0], c.at[1]], heading: c.heading, talk, essential: c.essential };
+    if (c.room) v.room = { ...c.room };
+    if (c.mood) v.mood = c.mood;
+    if (c.side) v.side = c.side;
+    cast.push(v);
+  }
   return {
     rev: book.rev,
     quests: [...quests, ...ended.slice(0, VIEW_ENDED_MAX)],
     waypoints,
     watch,
-    cast: [],
+    cast,
     objects: [...objects.values()],
     tracked: [...book.tracked],
     trackWp: book.trackWp,
@@ -342,7 +387,31 @@ export function viewHash(view: StoryView): string {
 // finite number, a cap on every list, and nothing carried that was not rebuilt.
 
 /** The caps on a view off the wire. Ours, and far past what a story shows. */
-export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32 };
+export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32, cast: 400 };
+
+const VIEW_CAST = /^[A-Za-z0-9_-]{1,24}:cast\/[A-Za-z0-9_.-]{1,96}$/;
+const VIEW_BODY = /^[A-Za-z0-9_./-]{1,160}$/;
+const VIEW_MOOD = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+function vCast(x: unknown): CastView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_CAST);
+  const name = vText(o.name, 240);
+  const body = vWord(o.body, VIEW_BODY);
+  const world = vWord(o.world, VIEW_WORLD);
+  const at = vPair(o.at);
+  const heading = vNum(o.heading, -360, 360);
+  if (!id || !name || !body || !world || !at || heading === null || (o.f !== 'raw' && o.f !== 'game')) return null;
+  const v: CastView = { id, name, named: o.named === true, body, world, f: o.f, at, heading, talk: o.talk === true, essential: o.essential !== false };
+  const room = vRoom(o.room);
+  if (room) v.room = room;
+  const mood = vWord(o.mood, VIEW_MOOD);
+  if (mood) v.mood = mood;
+  const side = vWord(o.side, VIEW_MOOD);
+  if (side) v.side = side;
+  return v;
+}
 
 const VIEW_ID = /^[A-Za-z0-9_-]{1,24}:[A-Za-z0-9_./-]{1,96}$/;
 const VIEW_STEP = /^[A-Za-z0-9_.-]{1,48}$/;
@@ -575,7 +644,7 @@ export function cleanView(x: unknown): StoryView | null {
     quests: vList(o.quests, VIEW_WIRE.quests, vQuest),
     waypoints: vList(o.waypoints, VIEW_WIRE.waypoints, vWaypoint),
     watch: vList(o.watch, VIEW_WIRE.watch, vWatch),
-    cast: [],
+    cast: vList(o.cast, VIEW_WIRE.cast, vCast),
     objects: vList(o.objects, VIEW_WIRE.objects, vObject),
     tracked,
     trackWp,

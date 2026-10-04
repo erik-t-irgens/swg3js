@@ -7,8 +7,9 @@
 //
 // With no folder named it checks the owner's own `story-private/` beside the checkout, when there is one,
 // and then the committed test set (`src/story/testSet/`). Worlds are checked against the game's own list
-// of planets, zones and space zones; kill targets against the creature catalogue in `assets-private/`
-// when this machine has one (a warning only: the catalogue is the converted pack's, not the story's).
+// of planets, zones and space zones; kill targets and cast bodies against the creature catalogue in
+// `assets-private/` when this machine has one, and a conversation's gesture clips against the player's own
+// body's clip list there (warnings only: both are the converted packs', not the story's).
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -53,6 +54,21 @@ export function catalogueOf(root = ROOT) {
   }
 }
 
+/**
+ * The clips the player's own body has (the human male rig's list, which every humanoid species shares), or
+ * null when this machine has no species converted: a conversation's gesture clip is checked against it.
+ */
+export function clipsOf(root = ROOT) {
+  const file = join(root, 'assets-private', 'characters', 'human_male', 'parts.json');
+  if (!existsSync(file)) return null;
+  try {
+    const j = JSON.parse(readFileSync(file, 'utf8'));
+    return Array.isArray(j.clips) ? new Set(j.clips.filter((c) => typeof c === 'string')) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `n thing` or `n things`. */
 const many = (n, one, more = `${one}s`) => `${n} ${n === 1 ? one : more}`;
 
@@ -69,18 +85,18 @@ export function defaultFolders(root = ROOT) {
  * Check one folder; answers how many errors it has. Only the committed test set is read as the test set,
  * whatever any folder's own `story.jsonc` says (`test` is that folder, or what the caller says).
  */
-export function checkFolder(dir, { worlds = worldIds(), catalogue = catalogueOf(), print = console.log, root = ROOT, test = resolve(dir) === resolve(join(root, 'src', 'story', 'testSet')) } = {}) {
+export function checkFolder(dir, { worlds = worldIds(), catalogue = catalogueOf(), clips = clipsOf(), print = console.log, root = ROOT, test = resolve(dir) === resolve(join(root, 'src', 'story', 'testSet')) } = {}) {
   const shown = (relative(root, dir) || dir).split(sep).join('/');
   const { files, refused } = readStorySet(dir);
   const load = loadSet(files, { test: test === true });
-  const r = checkSet(load, { worlds, catalogue });
+  const r = checkSet(load, { worlds, catalogue, clips });
   for (const why of refused) print(`${shown}: error: ${why}`);
   for (const i of r.errors) print(issueLine(i, shown));
   for (const i of r.warnings) print(issueLine(i, shown));
   const c = r.counts;
   const errors = r.errors.length + refused.length;
   print(
-    `${shown}: ${load.set.prefix ? `the ${load.set.prefix} set` : 'no set'} (${load.hash.slice(0, 12)}): ${many(c.quests, 'quest')}, ${many(c.steps, 'step')}, ${many(c.areas, 'area')}, ${many(c.objects, 'object')}, ${many(c.signals, 'signal')} waited on; ` +
+    `${shown}: ${load.set.prefix ? `the ${load.set.prefix} set` : 'no set'} (${load.hash.slice(0, 12)}): ${many(c.quests, 'quest')}, ${many(c.steps, 'step')}, ${many(c.areas, 'area')}, ${many(c.objects, 'object')}, ${many(c.talks, 'conversation')} (${many(c.nodes, 'node')}), ${many(c.cast, 'cast member')}, ${many(c.signals, 'signal')} waited on; ` +
       `${many(errors, 'error')}, ${many(r.warnings.length, 'warning')}` +
       `${c.unresolved ? `, ${many(c.unresolved, 'unresolved escape')}` : ''}${c.later ? `, ${many(c.later, 'thing')} a later wave reads` : ''}${catalogue ? '' : ' (no creature catalogue on this machine, so kill targets went unchecked)'}`,
   );
@@ -102,7 +118,7 @@ if (main) {
       errors++;
       continue;
     }
-    errors += checkFolder(dir, { root, catalogue: catalogueOf(root) });
+    errors += checkFolder(dir, { root, catalogue: catalogueOf(root), clips: clipsOf(root) });
   }
   process.exitCode = errors ? 1 : 0;
 }

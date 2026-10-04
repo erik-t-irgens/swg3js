@@ -3,8 +3,9 @@
 // server and the checker's command line (reading them with node's `fs`, `server/storySet.mjs`) all read
 // a set the same way, and none of them reads it twice.
 //
-// **The folder.** `story.jsonc` names the set's prefix and title; `quests/`, `areas/` and `objects/` hold
-// one definition a file, in JSONC (`jsonc.ts`). A later wave reads `talk/`, `cast/`, `docs/`, `file.jsonc`,
+// **The folder.** `story.jsonc` names the set's prefix and title; `quests/`, `areas/`, `objects/`, `talk/`
+// (the conversations) and `cast/` (the story's named people) hold one definition a file, in JSONC
+// (`jsonc.ts`; the last two are read in `talkSet.ts`). A later wave reads `docs/`, `file.jsonc`,
 // `calendar.jsonc` and `ladders.jsonc`; this one notes them and reads nothing of them. `fixtures/` is never
 // loaded at all: it holds files built to fail the checker.
 //
@@ -32,11 +33,13 @@ import { BOOK_LIMITS, isFlagName, isQuestId, isStepName, isTrack, type Track } f
 import { cleanSpan, type Span } from './clock.ts';
 import { parseAction, parseCondition, type CondJson, type Lit } from './expr.ts';
 import { lineAt, parseJsonc, pointer } from './jsonc.ts';
+import { castOf, isNodeName, talkOf, type CastDef, type TalkDef } from './talkSet.ts';
 import { cleanTextRef, type TextRef } from './text.ts';
 import { ACTIONS, BUILT_WAVE, CLIENTS, COND_HEADS, ITEM_KINDS, OP_KEYS, STEP_TYPES, VERBS, arity, argKindAt, readiness } from './vocab.ts';
 import { cleanRoom, cleanWorld } from './waypoints.ts';
 
 export type { CondJson, Lit } from './expr.ts';
+export type { CastDef, TalkDef } from './talkSet.ts';
 
 export interface Issue {
   level: 'error' | 'warning';
@@ -82,6 +85,8 @@ export interface Reward {
   xp: number;
   items: { kind: 'wear' | 'weapon'; id: string; n: number }[];
   standing: { track: Track; add: number }[];
+  /** Trust moved, which only an action under pressure hands over (`trust(t, n)`); never written in a reward. */
+  trust?: { track: Track; add: number }[];
 }
 
 /** Which deaths a kill step counts: every field given must match (catalogue id, group, social group, tag). */
@@ -151,7 +156,10 @@ export interface StepDef {
   for: Span | null;
   outcome: string | null;
   options: OptionDef[] | null;
-  /** A later wave's own fields (a talk step's speaker, a document step's document), kept as they came. */
+  /** A talk step's speaker (`<set>:cast/<id>`, `row:<key>`) and the node of their conversation it waits for, or any node. */
+  who: string | null;
+  node: string | null;
+  /** A later wave's own fields (a document step's document), kept as they came. */
   later: Record<string, unknown> | null;
 }
 
@@ -241,6 +249,10 @@ export interface StorySet {
   quests: Record<string, QuestDef>;
   areas: Record<string, AreaDef>;
   objects: Record<string, ObjectDef>;
+  /** The conversations, by `<set>:talk/<id>`. */
+  talks: Record<string, TalkDef>;
+  /** The story's named people, by `<set>:cast/<id>`. */
+  cast: Record<string, CastDef>;
   /** Files a later wave reads, noted and not read. */
   later: string[];
   files: number;
@@ -302,13 +314,18 @@ export function stableText(x: unknown): string {
     .join(',')}}`;
 }
 
-/** One file's checking: its name, its lines, the set's prefix and where every problem goes. */
-class FileScope {
+/**
+ * One file's checking: its name, its lines, the set's prefix and where every problem goes. A conversation's
+ * file is read through it too (`talkSet.ts`), with `tree` naming that conversation while it is read, so a
+ * node it names without its tree (`heard(hello)`) is one of its own.
+ */
+export class FileScope {
   file: string;
   lines: Map<string, number>;
   prefix: string;
   test: boolean;
   issues: Issue[];
+  tree: string | null = null;
 
   constructor(file: string, lines: Map<string, number>, prefix: string, test: boolean, issues: Issue[]) {
     this.file = file;
@@ -339,8 +356,8 @@ class FileScope {
     return isQuestId(full) ? full : this.err(path, `${JSON.stringify(v)} is not a quest id`);
   }
 
-  /** An id of one kind (`obj/<id>`, `area/<id>`, `cast/<id>`, `doc/<id>`), prefixed. */
-  ref(v: unknown, path: string, kind: 'obj' | 'area' | 'cast' | 'doc'): string | null {
+  /** An id of one kind (`obj/<id>`, `area/<id>`, `cast/<id>`, `doc/<id>`, `talk/<id>`), prefixed. */
+  ref(v: unknown, path: string, kind: 'obj' | 'area' | 'cast' | 'doc' | 'talk'): string | null {
     if (typeof v !== 'string') return this.err(path, `expected ${kind}/<id>`);
     const colon = v.indexOf(':');
     const set = colon >= 0 ? v.slice(0, colon) : this.prefix;
@@ -396,6 +413,30 @@ class FileScope {
 
   stepName(v: unknown, path: string): string | null {
     return isStepName(v) ? v : this.err(path, `${JSON.stringify(v)} is not a step's name`);
+  }
+
+  /**
+   * A conversation's node as `heard` names one: `[set:]talk/<id>#<node>`, or inside a conversation's own file
+   * the node alone. With `reply`, an answer as `chosen` names one: `...#<node>.<reply>`.
+   */
+  talkRef(v: unknown, path: string, reply: boolean): string | null {
+    const what = reply ? 'an answer is written talk/<id>#<node>.<reply> (or <node>.<reply> inside its own conversation)' : 'a node is written talk/<id>#<node> (or the node alone inside its own conversation)';
+    if (typeof v !== 'string') return this.err(path, what);
+    const hash = v.indexOf('#');
+    let tree: string | null;
+    let rest: string;
+    if (hash >= 0) {
+      tree = this.ref(v.slice(0, hash), path, 'talk');
+      rest = v.slice(hash + 1);
+      if (!tree) return null;
+    } else {
+      tree = this.tree;
+      rest = v;
+      if (!tree) return this.err(path, what);
+    }
+    const parts = rest.split('.');
+    if (parts.length !== (reply ? 2 : 1) || !parts.every(isNodeName)) return this.err(path, what);
+    return `${tree}#${rest}`;
   }
 
   names(v: unknown, path: string, one: (x: unknown, p: string) => string | null): string[] {
@@ -602,6 +643,36 @@ class FileScope {
         const c = numberCompare(rest);
         return c ? { [head]: { track, ...c } } : this.err(path, `${head} compares the track's number with one of ${OP_KEYS.join(', ')}`);
       }
+      case 'choice': {
+        // `{ "choice": [quest, step], "eq": "option" }`: the option a choice step was answered with.
+        if (!extra(['eq']) || !Array.isArray(o.choice) || o.choice.length !== 2) return this.err(path, 'a choice condition is { "choice": [quest, step], "eq": option }');
+        const q = this.quest(o.choice[0], path);
+        const s = this.stepName(o.choice[1], path);
+        if (!isStepName(o.eq)) return this.err(path, 'a choice is compared with an option\'s id');
+        return q && s ? { choice: [q, s], eq: o.eq } : null;
+      }
+      case 'heard': {
+        if (!extra([])) return null;
+        const ref = this.talkRef(o.heard, path, false);
+        return ref ? { heard: ref } : null;
+      }
+      case 'chosen': {
+        if (!extra([])) return null;
+        const ref = this.talkRef(o.chosen, path, true);
+        return ref ? { chosen: ref } : null;
+      }
+      case 'person': {
+        // `met` and `named` are this wave's; Standing, Trust, access and whether they are alive are the
+        // ninth's, kept as they are and read as false until then.
+        if (!extra([])) return null;
+        const p = o.person as Record<string, unknown> | null;
+        if (!p || typeof p !== 'object' || Array.isArray(p)) return this.err(path, 'a person condition is { "person": { "who": cast/<id>, "is": "met" | "named" } }');
+        const who = this.ref(p.who, path, 'cast');
+        if (!who) return null;
+        if ((p.is === 'met' || p.is === 'named') && Object.keys(p).length === 2) return { person: { who, is: p.is } };
+        this.warn(path, 'that person condition arrives in wave 9 of this pass; until then it reads false');
+        return { person: { ...(JSON.parse(JSON.stringify(p)) as Record<string, unknown>), who } };
+      }
       default:
         return this.err(path, `${head} is not a condition this game knows`, 4);
     }
@@ -668,6 +739,10 @@ class FileScope {
         return this.ref(a, path, 'obj');
       case 'who':
         return this.ref(a, path, 'cast');
+      case 'node':
+        return this.talkRef(a, path, false);
+      case 'reply':
+        return this.talkRef(a, path, true);
       case 'doc':
         return this.ref(a, path, 'doc');
       case 'track':
@@ -807,7 +882,7 @@ const TYPE_KEYS: Record<string, string[]> = {
   timer: ['for'],
   wait: ['for'],
   end: ['outcome'],
-  talk: ['who', 'node'],
+  talk: ['who', 'node', 'n'],
   choice: ['options'],
   message: ['doc'],
   document: ['doc'],
@@ -904,9 +979,20 @@ function stepOf(s: FileScope, name: string, v: unknown, path: string): StepDef |
     for: null,
     outcome: null,
     options: null,
+    who: null,
+    node: null,
     later: null,
   };
   switch (type) {
+    case 'talk': {
+      // Done when the speaker's conversation reaches the node (or any node), which the conversation raises
+      // as `talked:<who>#<node>` and `talked:<who>`: what the step waits on is that signal.
+      step.who = o.who === undefined ? s.err(path, 'a talk step names who, in "who"') : s.ref(o.who, `${path}/who`, 'cast');
+      if (o.node !== undefined) step.node = isNodeName(o.node) ? o.node : s.err(`${path}/node`, 'a node is a plain name with no dot');
+      if (step.who) step.signal = `talked:${step.who}${step.node ? `#${step.node}` : ''}`;
+      step.n = s.int(o.n, `${path}/n`, 1, 1, 100000);
+      break;
+    }
     case 'goto':
       step.at = o.at === undefined ? s.err(`${path}`, 'a goto step names where, in "at"') : s.place(o.at, `${path}/at`);
       step.radius = s.num(o.radius, `${path}/radius`, GOTO_RADIUS, 0.5, 100000);
@@ -1066,7 +1152,8 @@ function questOf(s: FileScope, v: unknown): QuestDef | null {
           if (r.outcome !== undefined && !isStepName(r.outcome)) s.err(`${p}/outcome`, 'an outcome is a plain name');
           if (after) givers.push({ kind: 'chain', after, outcome: isStepName(r.outcome) ? r.outcome : null });
         } else if (r.kind === 'talk') {
-          s.warn(p, 'talk givers arrive in wave 6 of this pass; until then nobody offers this quest by talking');
+          // Who offers it, by talking: a marker the checker holds to the cast. The offer itself is an answer's
+          // `offer()` or `grant()` in that person's conversation.
           const who = s.ref(r.who, `${p}/who`, 'cast');
           if (who) givers.push({ kind: 'talk', who });
         } else if (r.kind === 'board') s.err(p, 'job boards are kept for a later pass and are not built in this pass', 4);
@@ -1164,8 +1251,6 @@ function objectOf(s: FileScope, v: unknown): ObjectDef | null {
 
 /** The folders and files a later wave reads, with that wave. */
 const LATER: [RegExp, string][] = [
-  [/^talk\//, 'conversations arrive in wave 6 of this pass'],
-  [/^cast\//, 'the cast arrives in wave 6 of this pass'],
   [/^docs\//, 'documents arrive in wave 8 of this pass'],
   [/^(file|calendar)\.jsonc$/, 'the file and the calendar arrive in wave 8 of this pass'],
   [/^ladders\.jsonc$/, 'ladders arrive in wave 9 of this pass'],
@@ -1174,7 +1259,7 @@ const LATER: [RegExp, string][] = [
 
 /** A set with nothing in it: what a host runs before any set is read. */
 export function emptySet(): StorySet {
-  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), later: [], files: 0 };
+  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), later: [], files: 0 };
 }
 
 /**
@@ -1224,9 +1309,9 @@ export function loadSet(files: { path: string; text: string }[], opts: { test?: 
       issues.push({ level: 'warning', file: f.path, line: 1, message: `not read yet: ${later[1]}` });
       continue;
     }
-    const kind = /^quests\//.test(f.path) ? 'quest' : /^areas\//.test(f.path) ? 'area' : /^objects\//.test(f.path) ? 'object' : null;
+    const kind = /^quests\//.test(f.path) ? 'quest' : /^areas\//.test(f.path) ? 'area' : /^objects\//.test(f.path) ? 'object' : /^talk\//.test(f.path) ? 'talk' : /^cast\//.test(f.path) ? 'cast' : null;
     if (!kind) {
-      if (/\.jsonc?$/.test(f.path)) issues.push({ level: 'warning', file: f.path, line: 1, message: 'not in a folder a set is read from (quests/, areas/, objects/), so not read' });
+      if (/\.jsonc?$/.test(f.path)) issues.push({ level: 'warning', file: f.path, line: 1, message: 'not in a folder a set is read from (quests/, areas/, objects/, talk/, cast/), so not read' });
       continue;
     }
     if (!f.path.endsWith('.jsonc')) {
@@ -1252,6 +1337,21 @@ export function loadSet(files: { path: string; text: string }[], opts: { test?: 
       if (!a) continue;
       if (set.areas[a.id]) s.err('/id', `${a.id} is defined twice (also in ${set.areas[a.id].src.file})`, 1);
       else set.areas[a.id] = a;
+    } else if (kind === 'talk') {
+      const t = talkOf(s, doc.value);
+      if (!t) continue;
+      const { src, test, hash, ...pure } = t;
+      void src;
+      void test;
+      void hash;
+      t.hash = hashText(stableText(pure)).slice(0, 16);
+      if (set.talks[t.id]) s.err('/id', `${t.id} is defined twice (also in ${set.talks[t.id].src.file})`, 1);
+      else set.talks[t.id] = t;
+    } else if (kind === 'cast') {
+      const c = castOf(s, doc.value);
+      if (!c) continue;
+      if (set.cast[c.id]) s.err('/id', `${c.id} is defined twice (also in ${set.cast[c.id].src.file})`, 1);
+      else set.cast[c.id] = c;
     } else {
       const o = objectOf(s, doc.value);
       if (!o) continue;
@@ -1276,6 +1376,8 @@ export function joinSets(sets: StorySet[]): StorySet {
     Object.assign(out.quests, s.quests);
     Object.assign(out.areas, s.areas);
     Object.assign(out.objects, s.objects);
+    Object.assign(out.talks, s.talks);
+    Object.assign(out.cast, s.cast);
     out.later.push(...s.later);
     out.files += s.files;
     out.test ||= s.test;

@@ -17,6 +17,12 @@
 // rather than about the book carries `of: 'job'`, so the browser never takes it for a book that will not
 // come up. None of these is ever said to a server whose hail says less.
 //
+// **The conversations (story 3).** A browser says `talk` -- open a conversation with somebody, give an
+// answer (`reply`, or none for a node that goes on by itself), or close it -- and is told `node`: the node
+// the conversation has reached, its lines and the answers open just now, or none with why when it has ended
+// or was refused. The server keeps where the conversation stands for the line, never in the book. Neither
+// is ever said to a server whose hail says less than 3.
+//
 // **Why in pieces.** The relay drops what a browser sends past 64 KB in a second and closes a line that
 // goes twice past it, so a book of any size goes up as pieces of `offerChunk` characters with a gap
 // between them, and comes down the same way so the two sides read it with the same code. A book is
@@ -25,9 +31,11 @@
 //
 // Pure, nothing imported but this folder: the server reads these words with this file.
 
-import { cleanChange, isQuestId, isStepName, isTrack, type StoryChange } from './book.ts';
+import { cleanChange, isQuestId, isStepName, isTrack, isWho, type StoryChange } from './book.ts';
 import type { StoryEvent, StoryNote } from './quests.ts';
 import type { Room } from './set.ts';
+import { cleanNodeView, type NodeView } from './talkRules.ts';
+import { isNodeName } from './talkSet.ts';
 import { cleanTextRef, type TextRef } from './text.ts';
 import { cleanView, type StoryView } from './view.ts';
 import { cleanPlace, cleanRoom, cleanWaypointAsk, cleanWaypointName, cleanWorld, isQuestWaypoint, isWaypointColour, isWaypointId, type WaypointAsk, type WaypointColour } from './waypoints.ts';
@@ -79,7 +87,12 @@ export type StoryUp =
   | { do: 'wp'; op: 'track'; id: string | null }
   | { do: 'ev'; ev: StoryEvent; at: StoryAt }
   | { do: 'q'; op: QuestOp; quest: string; at: StoryAt }
-  | { do: 'admin'; op: AdminOp; quest?: string; step?: string; name?: string; ms?: number | null; at: StoryAt };
+  | { do: 'admin'; op: AdminOp; quest?: string; step?: string; name?: string; ms?: number | null; at: StoryAt }
+  | { do: 'talk'; op: TalkOp; speaker: string; reply: string | null; at: StoryAt };
+
+/** A conversation's operations: open one, give an answer (or let a node go on), close it. */
+export const TALK_OPS = ['open', 'pick', 'close'] as const;
+export type TalkOp = (typeof TALK_OPS)[number];
 
 /** A fact for the message line, with what a browser that holds no set needs to say it: an objective's own words and whether it was a place to reach. */
 export type StoryNoteDown = StoryNote & { line?: TextRef; goto?: boolean };
@@ -91,7 +104,8 @@ export type StoryDown =
   | { do: 'ch'; rev: number; ch: StoryChange[]; whole: boolean }
   | { do: 'no'; why: string; of?: 'job' }
   | { do: 'view'; view: StoryView; off: number; read: boolean }
-  | { do: 'note'; note: StoryNoteDown; given: boolean };
+  | { do: 'note'; note: StoryNoteDown; given: boolean }
+  | { do: 'node'; speaker: string; view: NodeView | null; why: string | null };
 
 const CONTROL = /[\u0000-\u001f\u007f]/g;
 /** A story's own id for one of its things (an object, an area): its set's prefix and its name, as a quest's is. */
@@ -218,7 +232,7 @@ export function cleanStoryAt(x: unknown): StoryAt {
   return out;
 }
 
-const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'item', 'xp', 'standing', 'say'];
+const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'charged', 'item', 'xp', 'standing', 'say'];
 
 /** A fact for the message line as a server sends it, cleaned, or null. Its words are made here, in the browser. */
 export function cleanNoteDown(x: unknown): StoryNoteDown | null {
@@ -253,9 +267,10 @@ export function cleanNoteDown(x: unknown): StoryNoteDown | null {
     case 'objectiveDone':
       if (isStepName(o.step)) out = { k: o.k, quest, step: o.step };
       break;
-    case 'paid': {
+    case 'paid':
+    case 'charged': {
       const credits = count(o.credits);
-      if (credits !== null) out = { k: 'paid', quest, credits };
+      if (credits !== null) out = { k: o.k, quest, credits };
       break;
     }
     case 'item': {
@@ -374,6 +389,12 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
       if (out.op === 'clock' && out.ms === undefined) return null;
       return out;
     }
+    if (o.do === 'talk') {
+      if (typeof o.op !== 'string' || !(TALK_OPS as readonly string[]).includes(o.op) || !isWho(o.speaker)) return null;
+      // No answer is a node going on by itself; an answer is named by its own id.
+      if (o.reply !== undefined && o.reply !== null && !isNodeName(o.reply)) return null;
+      return { do: 'talk', op: o.op as TalkOp, speaker: o.speaker, reply: typeof o.reply === 'string' ? o.reply : null, at: cleanStoryAt(o.at) };
+    }
     return null;
   }
   if (o.do === 'book') {
@@ -406,7 +427,21 @@ export function cleanStoryWord(x: unknown, dir: 'up' | 'down'): StoryUp | StoryD
     const note = cleanNoteDown(o.note);
     return note ? { do: 'note', note, given: o.given !== 0 && o.given !== false } : null;
   }
+  if (o.do === 'node') {
+    // The node's own fields are the word's (`speaker`, `tree`, `node`, `lines`, `replies`, `next`, `end`), or
+    // none with a reason: the conversation has ended, or the server would not open it.
+    if (!isWho(o.speaker)) return null;
+    const why = typeof o.why === 'string' && o.why ? o.why.replace(CONTROL, '').slice(0, STORY_WIRE.whyMax) : null;
+    const view = o.tree === undefined ? null : cleanNodeView(o);
+    if (o.tree !== undefined && !view) return null;
+    return { do: 'node', speaker: o.speaker, view, why };
+  }
   return null;
+}
+
+/** A node as the server says it: the node's own fields on the word, or none with why. */
+export function nodeWord(speaker: string, view: NodeView | null, why: string | null): Record<string, unknown> {
+  return view ? { t: 'story', do: 'node', ...view, ...(why ? { why } : {}) } : { t: 'story', do: 'node', speaker, ...(why ? { why } : {}) };
 }
 
 /** The story a server's hail says it holds: its version, 0 when it says nothing (every relay before this one). */

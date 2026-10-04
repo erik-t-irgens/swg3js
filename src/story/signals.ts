@@ -5,8 +5,9 @@
 // **Raisers.** An action (`signal(name)`), a step ending (`signalsOut`), and the engine's own prefixes:
 // `used:<object>` when E is pressed on a story object, `entered:<area>` and `left:<area>` at an area's
 // edge, `room:<template>#<cell>` on stepping into a room, `died:<who>` for a death the player is credited
-// with, `world:<id>` on arriving on a world, `talked:<who>#<node>` from a conversation (a later wave), and
-// `debug:<name>` from the console (`__debug.signal`, a later wave), which only the test set may wait on.
+// with, `world:<id>` on arriving on a world, `talked:<who>#<node>` and `talked:<who>` from a cast member's
+// conversation (only for a node that conversation has), and `debug:<name>` from the console
+// (`__debug.signal`), which only the test set may wait on.
 // An engine prefix counts as a raiser of an object's or an area's signal only when that object or area is
 // declared, so a step waiting on a thing that is not there is caught. The NGE has 95 signals that nothing
 // raises; the checker allows this game none.
@@ -76,6 +77,24 @@ export function raisersOf(lib: StorySet): Map<string, Raiser[]> {
     }
     for (const o of Object.keys(q.outcomes)) fromActions(q.outcomes[o].do, id, file, lineAt(lines, `/outcomes/${o}`));
   }
+  // A conversation raises what its nodes' and answers' actions raise, and every cast member who speaks one
+  // raises `talked:<who>` at each node reached and `talked:<who>#<node>` for that node.
+  for (const id of Object.keys(lib.talks ?? {})) {
+    const t = lib.talks[id];
+    for (const n of Object.keys(t.nodes)) {
+      const node = t.nodes[n];
+      const line = lineAt(t.src.lines, `/nodes/${n}`);
+      fromActions(node.do, '', t.src.file, line);
+      for (const r of node.replies) fromActions(r.do, '', t.src.file, line);
+    }
+  }
+  for (const id of Object.keys(lib.cast ?? {})) {
+    const c = lib.cast[id];
+    const t = c.tree && lib.talks && Object.hasOwn(lib.talks, c.tree) ? lib.talks[c.tree] : null;
+    if (!t) continue;
+    add(`talked:${id}`, { kind: 'talk', file: c.src.file, line: 1 });
+    for (const n of Object.keys(t.nodes)) add(`talked:${id}#${n}`, { kind: 'talk', file: t.src.file, line: lineAt(t.src.lines, `/nodes/${n}`) });
+  }
   for (const id of Object.keys(lib.objects)) add(`used:${id}`, { kind: 'object', file: lib.objects[id].src.file, line: 1 });
   for (const id of Object.keys(lib.areas)) {
     const a = lib.areas[id];
@@ -87,14 +106,16 @@ export function raisersOf(lib: StorySet): Map<string, Raiser[]> {
 }
 
 /**
- * Who raises a signal: the set's own raisers, and the engine for the prefixes it raises for anything (a
- * room, a world, a death), the console for `debug:` and the conversations for `talked:`.
+ * Who raises a signal: the set's own raisers (a cast member's conversation among them), and the engine for
+ * the prefixes it raises for anything (a room, a world, a death), the console for `debug:`, and the game's
+ * own people for a `talked:row:` (whose conversations a later wave binds; a cast member's must be one this
+ * set has).
  */
 export function raisersFor(lib: StorySet, name: string): Raiser[] {
   const own = raisersOf(lib).get(name) ?? [];
   if (/^(room|world|died):/.test(name)) return [...own, { kind: 'engine', file: '', line: 0 }];
   if (name.startsWith('debug:')) return [...own, { kind: 'debug', file: '', line: 0 }];
-  if (name.startsWith('talked:')) return [...own, { kind: 'talk', file: '', line: 0 }];
+  if (name.startsWith('talked:row:')) return [...own, { kind: 'talk', file: '', line: 0 }];
   return own;
 }
 

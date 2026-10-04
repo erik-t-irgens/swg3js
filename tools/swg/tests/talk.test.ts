@@ -5,7 +5,9 @@
 // Synthetic throughout: nothing here comes from the game's archives, and every line of speech it checks
 // is the module's own.
 import assert from 'node:assert/strict';
-import { GREET_CLIPS, TALK_LINES, TALK_TUNE, TALK_WORDS, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkPick, talkShot, tuneTalk, whyNotTalk, type TalkBody } from '../../../src/world/talk.ts';
+import { GREET_CLIPS, TALK_LINES, TALK_TREE_TUNE, TALK_TUNE, TALK_WORDS, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkPick, talkShot, tuneTalk, whyNotTalk, type TalkBody } from '../../../src/world/talk.ts';
+import { TalkPlay } from '../../../src/world/talkPlay.ts';
+import type { NodeView, ReplyView } from '../../../src/story/talkRules.ts';
 import { hostileSides, type Fighter } from '../../../src/combat/targets.ts';
 
 let checks = 0;
@@ -110,6 +112,9 @@ const body = (over: Partial<TalkBody> = {}): TalkBody => ({ humanoid: true, dead
   const kept: ReturnType<typeof talkOptions> = [];
   const back = talkOptions(false, false, kept);
   ok(back === kept && kept.length === 2 && talkOptions(true, false, kept) === kept && kept[0].id === 'stay', 'the answers are written into the list handed in, emptied first');
+  // One of the story's people stays at their post: the story takes them down away from it, so led off they would vanish.
+  const post = talkOptions(false, false, [], false, false, true);
+  ok(post.length === 1 && post[0].id === 'leave' && talkOptions(true, false, [], false, false, true).map((o) => o.id).join() === 'leave', 'one of the story\'s people is offered neither follow nor stop following, only the way out');
 }
 
 // --- what they say ------------------------------------------------------------------------------------
@@ -177,6 +182,64 @@ const body = (over: Partial<TalkBody> = {}): TalkBody => ({ humanoid: true, dead
   tuneTalk({ easeIn: 0 });
   ok(stepBlend(0, 1, 0.001) === 1, 'an ease of nought is there at once');
   tuneTalk({ easeIn: was });
+}
+
+// --- a story's conversation played in turn (src/world/talkPlay.ts) -------------------------------------
+
+{
+  const hold = 2;
+  const play = new TalkPlay(() => hold);
+  const line = (text: string) => ({ text });
+  const reply = (id: string, more: Partial<ReplyView> = {}): ReplyView => ({ id, text: `TEST ${id}`, said: `TEST ${id}`, enabled: true, ...more });
+  const node = (lines: number, replies: ReplyView[], more: Partial<NodeView> = {}): NodeView => ({ speaker: 'test:cast/c', tree: 'test:talk/t', node: 'n', lines: Array.from({ length: lines }, (_, i) => line(`TEST ${i}`)), replies, next: false, end: false, ...more });
+  play.open(0);
+  ok(play.mode === 'waiting' && play.step(TALK_TREE_TUNE.wait - 0.1) === null, 'the window opens waiting on the first node');
+  const s1 = play.arrive({ speaker: 'test:cast/c', view: node(2, [reply('a'), reply('b')]), why: null }, 1);
+  ok(s1?.k === 'line' && s1.index === 0 && play.until === 1 + hold, 'a node arrives and its first line stands for as long as it takes');
+  ok(play.step(2) === null && play.step(3)?.k === 'line' && play.line === 1, 'the next line follows once the first has stood its time');
+  ok(play.skip(3.5)?.k === 'choose' && play.mode === 'choose', 'a click or a digit moves on at once, and after the last line the answers show');
+  play.said(reply('a'), 4);
+  ok(play.mode === 'said' && play.until === 4 + TALK_TUNE.replyFor, `the player's answer is said for ${TALK_TUNE.replyFor} s`);
+  ok(play.arrive({ speaker: 'test:cast/c', view: node(1, [], { end: true }), why: null }, 4.2) === null && !!play.pending, 'a node that comes while the answer is being said waits until it has been');
+  const after = play.step(4 + TALK_TUNE.replyFor);
+  ok(after?.k === 'line' && play.node?.end === true, 'and then plays');
+  ok(play.step(4 + TALK_TUNE.replyFor + hold)?.k === 'end' && !play.active, 'a node that ends ends the conversation once its lines are said');
+  // Going on by itself, and a silent answer.
+  play.open(10);
+  play.arrive({ speaker: 'test:cast/c', view: node(1, [], { next: true }), why: null }, 10);
+  ok(play.step(10 + hold)?.k === 'next' && play.mode === 'asking', 'a node that goes on by itself asks for the next once its lines are said');
+  ok(play.step(10 + hold + TALK_TREE_TUNE.wait)?.k === 'end', 'and a node that never comes ends it after the wait');
+  play.open(20);
+  play.arrive({ speaker: 'test:cast/c', view: node(0, [reply('quiet', { said: null })]), why: null }, 20);
+  ok(play.mode === 'choose', 'a node with nothing to say goes straight to its answers');
+  play.said(reply('quiet', { said: null }), 21);
+  ok(play.until === 21 && play.step(21) === null && play.mode === 'asking', 'a silent answer is said for no time at all, and the next node is waited on');
+  ok(play.arrive({ speaker: 'test:cast/c', view: null, why: null }, 21.5)?.k === 'end', 'an answer that ends the conversation ends it');
+  // Nothing came, or nothing could be said: the game's own greeting.
+  play.open(30);
+  ok(play.step(30 + TALK_TREE_TUNE.wait)?.k === 'fallback', `with no node after ${TALK_TREE_TUNE.wait} s the window falls back on the game's own greeting`);
+  play.open(40);
+  const refused = play.arrive({ speaker: 'test:cast/c', view: null, why: 'they have nothing to say' }, 40.1);
+  ok(refused?.k === 'fallback' && refused.why === 'they have nothing to say', 'and so it does at once when the host says there is nothing to say');
+  play.close();
+  ok(play.arrive({ speaker: 'test:cast/c', view: node(1, []), why: null }, 50) === null, 'a node that arrives after the conversation has closed is dropped');
+  // A node with nothing to say that only goes on: asked past at the next step, never inside the call that handed
+  // it over (this browser's own host answers inside that very call, so a run of them would nest turn in turn).
+  play.open(60);
+  const quiet = (): NodeView => node(0, [], { next: true });
+  ok(play.arrive({ speaker: 'test:cast/c', view: quiet(), why: null }, 60) === null && play.mode === 'onward', 'a node with nothing to say that only goes on asks for nothing as it arrives');
+  ok(play.step(60)?.k === 'next' && play.mode === 'asking', 'and is asked past at the next step');
+  let ended = false;
+  for (let i = 0; i < TALK_TREE_TUNE.quietMax + 2 && !ended; i++) {
+    const s = play.arrive({ speaker: 'test:cast/c', view: quiet(), why: null }, 61 + i);
+    if (s?.k === 'end') ended = true;
+    else play.step(61 + i);
+  }
+  ok(ended && !play.active && play.quiet === TALK_TREE_TUNE.quietMax + 1, `a ring of them going on for ever is ended after ${TALK_TREE_TUNE.quietMax} in a row`);
+  play.open(80);
+  play.arrive({ speaker: 'test:cast/c', view: quiet(), why: null }, 80);
+  play.step(80);
+  ok(play.arrive({ speaker: 'test:cast/c', view: node(1, [], { end: true }), why: null }, 80.1)?.k === 'line' && play.quiet === 0, 'and one with something to say after them starts the count again');
 }
 
 // --- the knob ----------------------------------------------------------------------------------------

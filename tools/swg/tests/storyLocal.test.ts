@@ -24,13 +24,20 @@
 //   - while a server holds the book, nothing here works it out, and nor against a server that keeps the
 //     credits but holds no story (a reward recorded as paid there would never arrive);
 //   - leaving every area on the way somewhere else closes an observe step's watch;
-//   - the server's word of a death carries who struck it through to the wiring (`Owned.onGone`).
+//   - the server's word of a death carries who struck it through to the wiring (`Owned.onGone`);
+//   - every payment goes through the game's own `payLocally`, and a price is taken out of the real purse at
+//     once, refused when it cannot be met and never taken out of (nor credits put into) a purse a server keeps;
+//   - a conversation through this host: refused with no conversation open or to somebody else, its nodes handed
+//     to the listener before the call returns, a price charged out of the purse every time it is chosen and
+//     said, and one the purse would not give said as not spent.
 //
 // Synthetic: no browser, no socket, nothing read from the game's files.
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { BookClient, STORY_TUNE, type StoryLine } from '../../../src/story/bookClient.ts';
-import { JOBS_WAIT_CREDITS, LocalHost, jobsWait } from '../../../src/story/localHost.ts';
+import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally } from '../../../src/story/localHost.ts';
+import type { NodeWord } from '../../../src/story/storyHost.ts';
+import { Purse } from '../../../src/net/purse.ts';
 import { noteWords } from '../../../src/story/notes.ts';
 import type { PayOrder, StoryEvent } from '../../../src/story/quests.ts';
 import { questWaypointId } from '../../../src/story/view.ts';
@@ -57,7 +64,7 @@ const T0 = 1_800_000_000_000;
 const CANTINA = 'object/building/tatooine/shared_cantina_tatooine.iff';
 
 /** One whole stand-in game: a storage, a book client, a host, a world, a purse, a backpack and the detectors. */
-function game(opts: { sets?: boolean; own?: { path: string; text: string }[] } = {}) {
+function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; refuseCharges?: boolean } = {}) {
   const store = new Map<string, string>();
   const storage = { get: (k: string) => store.get(k) ?? null, set: (k: string, v: string) => (store.set(k, v), true), remove: (k: string) => void store.delete(k) };
   const clock = { now: T0, wall: 1000 };
@@ -78,18 +85,27 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[] } =
     holds: () => why() === null,
     whyNot: why,
     apply: (ch) => client.applyLocal(ch),
+    // Through the very function the game pays with (`payLocally`), over a purse and a backpack of the test's own.
     pay: (o) => {
       paid.push(o);
-      if (o.credits) {
-        purse.credits += o.credits;
-        return true;
-      }
-      if (o.item) {
-        const k = `${o.item.kind}:${o.item.id}`;
-        if (owned.has(k)) return false;
-        owned.add(k);
-      }
-      return true;
+      // A purse that will not give what a price asks: what a charge spent elsewhere in the same moment meets.
+      if (opts.refuseCharges && o.charge) return false;
+      return payLocally(o, {
+        serverKeeps: () => line.authority === 'server',
+        credits: () => purse.credits,
+        give: (n) => void (purse.credits += n),
+        spend: (n, then) => {
+          if (purse.credits < n) return;
+          purse.credits -= n;
+          then();
+        },
+        item: (kind, id) => {
+          const k = `${kind}:${id}`;
+          if (owned.has(k)) return false;
+          owned.add(k);
+          return true;
+        },
+      });
     },
     note: (n, given) => {
       const w = noteWords(n, host.library, { text: (r) => textOf(r) }, given);
@@ -616,6 +632,48 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[] } =
   o.handle({ t: 'spawn', do: 'gone', id: 'wild:lair:2', why: 'dead' });
   o.handle({ t: 'spawn', do: 'gone', id: 'wild:lair:3', why: 'taken', by: [7] });
   ok(heard.length === 3 && heard[0].by.join() === '7,3' && heard[1].by.length === 0 && heard[2].by.length === 0, `a death's strikers reach the wiring as relay ids, cleaned (${heard.map((h) => `${h.why}:[${h.by.join()}]`).join(' ')}), and nothing else carries any`);
+}
+
+// ---- the game's own payment, out of the real purse ------------------------------------------------------------------
+{
+  const saved: number[] = [];
+  const p = new Purse();
+  p.attach({ send: () => {}, say: () => {}, shared: () => false, saved: () => 40, save: (n) => void saved.push(n) });
+  const wallet = (server = false) => ({ serverKeeps: () => server, credits: () => p.credits, give: (n: number) => void p.give(n), spend: (n: number, then: () => void) => p.spend(n, 'That', then), item: () => true });
+  ok(payLocally({ key: 'k', charge: 10 }, wallet()) && p.credits === 30 && saved[saved.length - 1] === 30, 'a price is taken out of the purse at once with no server, and the character saved with what is left');
+  ok(!payLocally({ key: 'k', charge: 50 }, wallet()) && p.credits === 30, 'one the purse cannot meet takes nothing, and says it did not');
+  ok(!payLocally({ key: 'k', charge: 10 }, wallet(true)) && !payLocally({ key: 'k', credits: 10 }, wallet(true)) && p.credits === 30, 'and nothing goes into or out of a purse a server keeps');
+  ok(payLocally({ key: 'k', credits: 5 }, wallet()) && p.credits === 35, 'while a reward\'s credits go in');
+}
+
+// ---- a conversation through this browser's own host: its nodes handed over, a price taken out of the purse -----------
+{
+  const CLERK = 'test:cast/test-clerk';
+  const g = game();
+  const nodes: NodeWord[] = [];
+  g.host.onNode((n) => nodes.push(n));
+  ok(g.host.canTalk(CLERK) && !g.host.canTalk('test:cast/test-companion') && !g.host.canTalk('test:cast/nobody'), 'this browser speaks for a cast member with a conversation in the sets it read, and for nobody else');
+  const stray = g.host.talk('pick', CLERK, 'pay');
+  ok(!stray.ok && stray.why === 'you are not talking to them' && nodes.length === 1 && nodes[0].view === null && nodes[0].why === stray.why && g.paid.length === 0, 'an answer with no conversation open is refused, the refusal handed over with no node, and nothing is paid');
+  ok(g.host.talk('open', CLERK).ok && nodes.length === 2 && nodes[1].view?.node === 'hello' && g.host.talkState?.speaker === CLERK, 'an opening is worked out, kept, and its node handed over before the call returns');
+  const wrong = g.host.talk('pick', 'test:cast/test-doomed', 'a');
+  ok(!wrong.ok && nodes[2].view === null && g.host.talkState?.speaker === CLERK, 'an answer to somebody else is refused, and the conversation under way stands');
+  const before = g.purse.credits;
+  g.said.length = 0;
+  g.host.talk('pick', CLERK, 'pay');
+  ok(nodes[3]?.view?.node === 'paid' && g.paid.filter((o) => o.charge === 10).length === 1 && g.purse.credits === before - 10 && g.said.includes('Spent 10 credits'), `a price is handed over as a charge, taken out of the purse and said (${before} to ${g.purse.credits})`);
+  g.host.talk('open', CLERK);
+  g.host.talk('pick', CLERK, null);
+  g.host.talk('pick', CLERK, 'pay');
+  ok(g.purse.credits === before - 20, 'and taken again every time it is chosen');
+  g.host.talk('close', CLERK);
+  ok(g.host.talkState === null && !g.host.talk('pick', CLERK, null).ok, 'closing lets it go: an answer after it is refused');
+  // A charge the purse refuses (spent elsewhere in the same moment) is said as one that was not made.
+  const r = game({ refuseCharges: true });
+  r.host.talk('open', CLERK);
+  r.said.length = 0;
+  r.host.talk('pick', CLERK, 'pay');
+  ok(r.paid.some((o) => o.charge === 10) && r.said.includes('10 credits could not be spent') && !r.said.includes('Spent 10 credits'), 'a price the purse would not give is said as not spent, never as spent');
 }
 
 console.log(`\n${checks} checks passed`);

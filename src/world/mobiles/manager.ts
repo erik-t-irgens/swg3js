@@ -121,6 +121,8 @@ export interface SpawnOpts {
    * parsed (`Character.parsedRigMood`); a mood with no branch there leaves it in its own idle.
    */
   mood?: string;
+  /** The name it goes by in place of its entry's: a story's person, as the player knows them (`Mobile.rename` changes it later). */
+  name?: string;
   /**
    * What its own creature fought with, first and second, as the emulator wrote them (a group's name, a
    * template or `unarmed`), and the groups those names stand for: it is armed from these before any
@@ -487,6 +489,7 @@ export class MobileManager {
       hierarchy,
       scale: opts.scale ?? (rolls ? scaleFrom(entry.size?.scale, rolls.scale) : undefined),
       overrides: opts.overrides,
+      ...(opts.name ? { name: opts.name } : {}),
     };
     const m = new Mobile(spawn, {
       physics: this.deps.physics,

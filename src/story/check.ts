@@ -23,18 +23,33 @@
 //   8. A place relative to where a quest began is only in the test set.
 //   9. Every `charge` stands on a choice whose condition asks `credits() >= ` at least that much.
 //  10. Nothing anywhere is marked canonical or "true".
-//  11, 12. A document's slots and a conversation's links: checked from the waves that bring them.
-//  13. A kill step's target is in the creature catalogue (a warning, since the catalogue is the pack's).
+//  11. A document's slots: checked from the wave that brings documents.
+//  12. A conversation's links resolve -- every entry, `next` and answer names a node it has, a talk step's
+//      node is one its speaker's conversation has, a cast member's conversation exists -- its last entry has
+//      no condition (nobody is ever mute), no node can be reached that neither ends, goes on nor offers
+//      an answer, unless an importer marked it `needs`, and no nodes go on to each other in a ring with
+//      nothing said and no answer offered (a conversation that would turn for ever in one frame). A node
+//      nothing reaches, and one that says nothing and only goes on, are warned about.
+//  13. A kill step's target, and a cast member's body, are in the creature catalogue (warnings, since the
+//      catalogue is the pack's).
 //  14. Unresolved escapes (`call` names nothing registered) and `needs` markers are counted.
+//
+// Rules 5 and 9 reach the conversations too: Trust moves only in an answer marked `pressure` (never in a
+// node's own actions), and a `charge` stands on an answer whose condition asks for the money. Every gesture
+// a conversation names is one of the library's (a clip, a family, an alias or a mood); with the player's
+// own body's clip list in hand (`clips`) a clip that body has not got is warned about. `cues` are warned
+// about as kept and not played yet. A `choice` step that no answer ever chooses can never be done (rule 3).
 //
 // Each problem names its file and line. A warning is something the owner may mean; an error is something
 // that would leave a player stuck or the rules broken.
 
+import { readSlot } from './gestures.ts';
 import { lineAt } from './jsonc.ts';
 import { reachFrom, stepsOutOf } from './quests.ts';
 import { scriptNames } from './scripts.ts';
 import { joinSets, stepPath, type ActionDef, type CondJson, type Issue, type LoadResult, type Place, type QuestDef, type StepDef, type StorySet } from './set.ts';
 import { isLevelSignal, raisersFor, waitedOn } from './signals.ts';
+import type { TalkDef } from './talkSet.ts';
 import { readiness, STEP_TYPES } from './vocab.ts';
 
 export interface Catalogue {
@@ -51,12 +66,14 @@ export interface CheckOptions {
   catalogue?: Catalogue | null;
   /** Other sets loaded beside this one, whose ids a reference may name. */
   others?: readonly StorySet[];
+  /** The clips the player's own body has (a species rig's list), when this machine has one: a gesture clip not in it is warned about. */
+  clips?: ReadonlySet<string> | null;
 }
 
 export interface CheckResult {
   errors: Issue[];
   warnings: Issue[];
-  counts: { quests: number; steps: number; areas: number; objects: number; signals: number; unresolved: number; needs: number; later: number };
+  counts: { quests: number; steps: number; areas: number; objects: number; talks: number; nodes: number; cast: number; signals: number; unresolved: number; needs: number; later: number };
 }
 
 /** Every condition's quest, step and area references, walked. */
@@ -225,21 +242,17 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
   const lib = opts.others?.length ? joinSets([set, ...opts.others]) : set;
   const worlds = opts.worlds ? new Set(opts.worlds) : null;
   const cat = opts.catalogue ?? null;
+  const clips = opts.clips ?? null;
   const scripts = new Set(scriptNames());
-  const counts = { quests: 0, steps: 0, areas: Object.keys(set.areas).length, objects: Object.keys(set.objects).length, signals: 0, unresolved: 0, needs: 0, later: set.later.length };
+  const counts = { quests: 0, steps: 0, areas: Object.keys(set.areas).length, objects: Object.keys(set.objects).length, talks: 0, nodes: 0, cast: Object.keys(set.cast ?? {}).length, signals: 0, unresolved: 0, needs: 0, later: set.later.length };
   const signalsSeen = new Set<string>();
+  /** Every choice a `choose(q, s, option)` anywhere makes, as `<quest>#<step>`: a choice step none makes can never be done. */
+  const chosen = new Set<string>();
 
-  for (const id of Object.keys(set.quests)) {
-    const q = set.quests[id];
-    counts.quests++;
-    const file = q.src.file;
-    const err = (path: string, message: string, rule: number): void => {
-      errors.push({ level: 'error', file, line: lineAt(q.src.lines, path), message, rule });
-    };
-    const warn = (path: string, message: string, rule?: number): void => {
-      warnings.push({ level: 'warning', file, line: lineAt(q.src.lines, path), message, ...(rule ? { rule } : {}) });
-    };
-    const outcomeOk = (o: string): boolean => o === 'cleared' || o in q.outcomes;
+  type Err = (path: string, message: string, rule: number) => void;
+  type Warn = (path: string, message: string, rule?: number) => void;
+  /** The reference checks every file shares, reporting to its own file. */
+  const refsFor = (err: Err, warn: Warn) => {
     /** A quest id: in this set, in a set beside it, or in a set not loaded here (a warning: it cannot be checked). */
     const questRef = (ref: string, path: string): QuestDef | null => {
       const d = lib.quests[ref];
@@ -248,6 +261,39 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       if (lib.sets.some((s) => s.name === prefix)) err(path, `${ref} is not a quest of the ${prefix} set`, 1);
       else warn(path, `${ref} is in the ${prefix} set, which is not loaded here, so it cannot be checked`, 1);
       return null;
+    };
+    /** A person: a cast member of a set loaded here, or one of the game's own people (`row:`), whom a later wave binds. */
+    const whoRef = (who: string, path: string): void => {
+      if (who.startsWith('row:')) return;
+      if (lib.cast && Object.hasOwn(lib.cast, who)) return;
+      const prefix = who.slice(0, who.indexOf(':'));
+      if (lib.sets.some((s) => s.name === prefix)) err(path, `there is no cast member ${who}`, 1);
+      else warn(path, `${who} is in the ${prefix} set, which is not loaded here, so it cannot be checked`, 1);
+    };
+    /** A conversation's node (`<tree>#<node>`) or answer (`<tree>#<node>.<reply>`). */
+    const talkRef = (ref: string, path: string): void => {
+      const [tree, rest] = ref.split('#');
+      const t = lib.talks && Object.hasOwn(lib.talks, tree) ? lib.talks[tree] : null;
+      if (!t) {
+        const prefix = tree.slice(0, tree.indexOf(':'));
+        if (lib.sets.some((s) => s.name === prefix)) err(path, `there is no conversation ${tree}`, 1);
+        else warn(path, `${tree} is in the ${prefix} set, which is not loaded here, so it cannot be checked`, 1);
+        return;
+      }
+      const [node, reply] = rest.split('.');
+      const n = t.nodes[node];
+      if (!n) err(path, `${tree} has no node ${node}`, 12);
+      else if (reply !== undefined && !n.replies.some((r) => r.id === reply)) err(path, `${tree}'s node ${node} has no answer ${reply}`, 12);
+    };
+    /** A gesture slot: one of the library's, and, with the body's own list in hand, a clip that body has. */
+    const gestureRef = (slot: string | null | undefined, path: string): void => {
+      if (typeof slot !== 'string') return;
+      const s = readSlot(slot);
+      if (!s) {
+        err(path, `${slot} is not a gesture: a clip (emt_nod), a family (@agree), an alias (explain) or a mood (mood:sad)`, 4);
+        return;
+      }
+      if (s.kind === 'clips' && clips) for (const c of s.clips) if (!clips.has(c)) warn(path, `${c} is not one of the body's own clips, so the line is said standing still`);
     };
     const condRefs = (c: CondJson | null | undefined, path: string): void =>
       walkCond(c, (x) => {
@@ -259,18 +305,22 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
           const d = questRef(x.step[0] as string, path);
           if (d && !d.steps[x.step[1] as string]) err(path, `${x.step[0]} has no step ${x.step[1]}`, 1);
         }
+        if (Array.isArray(x.choice)) {
+          const d = questRef(x.choice[0] as string, path);
+          const st = d?.steps[x.choice[1] as string];
+          if (d && !st) err(path, `${x.choice[0]} has no step ${x.choice[1]}`, 1);
+          else if (st && (st.type !== 'choice' || !st.options?.some((o) => o.id === x.eq))) err(path, `${x.choice[0]}'s step ${x.choice[1]} is not a choice with an option ${String(x.eq)}`, 1);
+        }
         if (typeof x.completions === 'string') questRef(x.completions, path);
         if (typeof x.inArea === 'string' && !lib.areas[x.inArea]) err(path, `there is no area ${x.inArea}`, 1);
+        if (typeof x.heard === 'string') talkRef(x.heard, path);
+        if (typeof x.chosen === 'string') talkRef(x.chosen, path);
+        if (x.person && typeof (x.person as { who?: unknown }).who === 'string') whoRef((x.person as { who: string }).who, path);
         if (typeof x.script === 'string' && !scripts.has(x.script)) {
           counts.unresolved++;
           warn(path, `call(${x.script}) names no registered script, so it reads false`, 14);
         }
       });
-    const placeCheck = (p: Place | null, path: string): void => {
-      if (!p) return;
-      const world = 'rel' in p ? p.world : p.world;
-      if (world && worlds && !worlds.has(world)) err(path, `${world} is not a world this game has`, 7);
-    };
     const actionRefs = (list: readonly ActionDef[], path: string): void => {
       list.forEach((a, i) => {
         const p = `${path}/${i}`;
@@ -297,6 +347,20 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
             if (d && y !== undefined && y !== 'cleared' && !((y as string) in d.outcomes)) err(p, `${x} has no outcome ${y}`, 1);
             break;
           }
+          case 'choose': {
+            const d = questRef(x as string, p);
+            const st = d?.steps[y as string];
+            if (d && (!st || st.type !== 'choice')) err(p, `${x} has no choice step ${y}`, 1);
+            else if (st && !st.options?.some((o) => o.id === a.args[2])) err(p, `${x}'s choice ${y} has no option ${String(a.args[2])}`, 1);
+            chosen.add(`${x}#${y}`);
+            break;
+          }
+          case 'introduce':
+            whoRef(x as string, p);
+            break;
+          case 'gesture':
+            gestureRef(x as string, p);
+            break;
           case 'call':
             if (!scripts.has(x as string)) {
               counts.unresolved++;
@@ -309,6 +373,123 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
         }
       });
     };
+    return { questRef, whoRef, condRefs, actionRefs, gestureRef };
+  };
+
+  // ---- the conversations and the cast, first: their `choose` actions are what make a choice step doable ----
+  for (const id of Object.keys(set.talks ?? {})) checkTalk(set.talks[id]);
+  for (const id of Object.keys(set.cast ?? {})) {
+    const c = set.cast[id];
+    const err: Err = (path, message, rule) => errors.push({ level: 'error', file: c.src.file, line: lineAt(c.src.lines, path), message, rule });
+    const warn: Warn = (path, message, rule) => warnings.push({ level: 'warning', file: c.src.file, line: lineAt(c.src.lines, path), message, ...(rule ? { rule } : {}) });
+    const { condRefs } = refsFor(err, warn);
+    if (worlds && !worlds.has(c.world)) err('/world', `${c.world} is not a world this game has`, 7);
+    if (c.tree && !(lib.talks && Object.hasOwn(lib.talks, c.tree))) err('/tree', `there is no conversation ${c.tree}`, 12);
+    if (cat && !cat.ids.has(c.body)) warn('/body', `${c.body} is not in the creature catalogue`, 13);
+    condRefs(c.stand, '/stand');
+  }
+
+  /** One conversation: its links, its entries, its dead ends, and Trust, charges and gestures where they may be. */
+  function checkTalk(t: TalkDef): void {
+    counts.talks++;
+    const err: Err = (path, message, rule) => errors.push({ level: 'error', file: t.src.file, line: lineAt(t.src.lines, path), message, rule });
+    const warn: Warn = (path, message, rule) => warnings.push({ level: 'warning', file: t.src.file, line: lineAt(t.src.lines, path), message, ...(rule ? { rule } : {}) });
+    const { condRefs, actionRefs, gestureRef, whoRef } = refsFor(err, warn);
+    if (t.speaker) whoRef(t.speaker, '/speaker');
+    const last = t.entry[t.entry.length - 1];
+    if (last?.when) err(`/entry/${t.entry.length - 1}`, 'the last entry has no condition, so nobody is ever mute', 12);
+    t.entry.forEach((e, i) => {
+      if (!t.nodes[e.to]) err(`/entry/${i}`, `the entry goes to ${e.to}, which is not a node of this conversation`, 12);
+      condRefs(e.when, `/entry/${i}`);
+    });
+    // Which nodes the entries reach, through `next` and answers.
+    const reached = new Set<string>();
+    const todo = t.entry.map((e) => e.to);
+    while (todo.length) {
+      const n = todo.pop()!;
+      const node = t.nodes[n];
+      if (!node || reached.has(n)) continue;
+      reached.add(n);
+      if (node.next) todo.push(node.next);
+      for (const r of node.replies) if (r.to) todo.push(r.to);
+    }
+    // Nodes that go on to each other with nothing said and no answer offered: a ring of them would be asked
+    // for one after another with nothing for the player to read or press, for ever. Each ring said once.
+    const quiet = (name: string): boolean => {
+      const n = t.nodes[name];
+      return !!n && !n.say.length && !n.replies.length && !!n.next;
+    };
+    const ringed = new Set<string>();
+    for (const start of Object.keys(t.nodes)) {
+      if (!quiet(start) || ringed.has(start)) continue;
+      const walked: string[] = [];
+      let at = start;
+      while (quiet(at) && !walked.includes(at)) {
+        walked.push(at);
+        at = t.nodes[at].next!;
+      }
+      if (!walked.includes(at)) continue;
+      const ring = walked.slice(walked.indexOf(at));
+      if (!ring.some((r) => ringed.has(r))) err(`/nodes/${at}/next`, `${[...ring, at].join(' -> ')} go on to each other with nothing said and no answer offered, for ever`, 12);
+      for (const r of ring) ringed.add(r);
+    }
+    for (const name of Object.keys(t.nodes)) {
+      const n = t.nodes[name];
+      counts.nodes++;
+      const p = `/nodes/${name}`;
+      if (n.needs) counts.needs++;
+      if (!reached.has(name)) warn(p, `${name} is never reached from the entries`, 12);
+      if (n.next && !t.nodes[n.next]) err(`${p}/next`, `${name} goes on to ${n.next}, which is not a node of this conversation`, 12);
+      if (!n.end && !n.next && !n.replies.length && !n.needs) err(p, `${name} neither ends, goes on, nor offers an answer: mark it "end": true`, 12);
+      if (n.end && (n.next || n.replies.length)) warn(p, `${name} ends, so its ${n.next ? 'next' : 'answers'} are never reached`);
+      if (!n.say.length && !n.replies.length && n.next) warn(`${p}/say`, `${name} says nothing and only goes on to ${n.next}`);
+      else if (!n.say.length && !n.next) warn(`${p}/say`, `${name} says nothing`);
+      actionRefs(n.do, `${p}/do`);
+      for (const a of n.do) {
+        if (a.act === 'trust') err(`${p}/do`, 'Trust moves only on an answer marked "pressure": true, never as a node is reached', 5);
+        if (a.act === 'charge') err(`${p}/do`, 'charge belongs on an answer whose condition asks credits() >= the amount', 9);
+      }
+      n.say.forEach((l, i) => gestureRef(l.gesture, `${p}/say/${i}/gesture`));
+      n.replies.forEach((r, i) => {
+        const rp = `${p}/replies/${i}`;
+        if (r.to && !t.nodes[r.to]) err(`${rp}/to`, `answer ${r.id} goes on to ${r.to}, which is not a node of this conversation`, 12);
+        condRefs(r.when, `${rp}/when`);
+        actionRefs(r.do, `${rp}/do`);
+        gestureRef(r.gesture, `${rp}/gesture`);
+        for (const a of r.do) {
+          if (a.act === 'trust' && !r.pressure) err(`${rp}/do`, `answer ${r.id} moves Trust without being marked "pressure": true`, 5);
+          if (a.act === 'charge') {
+            const want = a.args[0] as number;
+            let asked = false;
+            walkCond(r.when, (c) => {
+              const cr = c.credits as Record<string, unknown> | undefined;
+              if (cr && typeof cr.gte === 'number' && cr.gte >= want) asked = true;
+              if (cr && typeof cr.gt === 'number' && cr.gt >= want - 1) asked = true;
+            });
+            if (!asked) err(`${rp}/when`, `answer ${r.id} charges ${want} credits without asking credits() >= ${want} in its condition`, 9);
+          }
+        }
+      });
+    }
+  }
+
+  for (const id of Object.keys(set.quests)) {
+    const q = set.quests[id];
+    counts.quests++;
+    const file = q.src.file;
+    const err = (path: string, message: string, rule: number): void => {
+      errors.push({ level: 'error', file, line: lineAt(q.src.lines, path), message, rule });
+    };
+    const warn = (path: string, message: string, rule?: number): void => {
+      warnings.push({ level: 'warning', file, line: lineAt(q.src.lines, path), message, ...(rule ? { rule } : {}) });
+    };
+    const outcomeOk = (o: string): boolean => o === 'cleared' || o in q.outcomes;
+    const { questRef, whoRef, condRefs, actionRefs } = refsFor(err, warn);
+    const placeCheck = (p: Place | null, path: string): void => {
+      if (!p) return;
+      const world = 'rel' in p ? p.world : p.world;
+      if (world && worlds && !worlds.has(world)) err(path, `${world} is not a world this game has`, 7);
+    };
 
     // ---- the quest's own fields ----
     if (typeof q.abandon === 'string' && !outcomeOk(q.abandon)) err('/abandon', `abandon names the outcome ${q.abandon}, which the quest does not declare`, 1);
@@ -320,6 +501,7 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
         const d = questRef(g.after, `/givers/${i}`);
         if (d && g.outcome && !(g.outcome in d.outcomes)) err(`/givers/${i}`, `${g.after} has no outcome ${g.outcome}`, 1);
       }
+      if (g.kind === 'talk') whoRef(g.who, `/givers/${i}`);
     });
     for (const s of q.start) if (!q.steps[s]) err('/start', `start names ${s}, which is not a step of this quest`, 1);
     const repeatable = q.repeat.every !== 'never';
@@ -353,6 +535,14 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       for (const g of [...st.grant.done, ...st.grant.fail]) questRef(g, sp('grant'));
       if (st.object && !lib.objects[st.object]) err(sp('object'), `there is no object ${st.object}`, 1);
       if (st.area && !lib.areas[st.area]) err(sp('area'), `there is no area ${st.area}`, 1);
+      if (st.type === 'talk' && st.who) {
+        whoRef(st.who, sp('who'));
+        // The node a talk step waits for must be one its speaker's conversation has.
+        const c = lib.cast && Object.hasOwn(lib.cast, st.who) ? lib.cast[st.who] : null;
+        const t = c?.tree && lib.talks && Object.hasOwn(lib.talks, c.tree) ? lib.talks[c.tree] : null;
+        if (c && !t) err(sp('who'), `${st.who} has no conversation, so nothing can be said to them`, 12);
+        else if (t && st.node && !t.nodes[st.node]) err(sp('node'), `${st.who}'s conversation has no node ${st.node}`, 12);
+      }
       placeCheck(st.at, sp('at'));
       placeCheck(st.waypoint?.at ?? null, sp('waypoint'));
       const all = [...st.do.start, ...st.do.done, ...st.do.fail];
@@ -487,6 +677,15 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
             break;
           }
         }
+    }
+  }
+
+  // ---- rule 3 for a choice: something must choose it, an answer in a conversation or a step's action ----
+  for (const id of Object.keys(set.quests)) {
+    const q = set.quests[id];
+    for (const name of Object.keys(q.steps)) {
+      if (q.steps[name].type !== 'choice' || chosen.has(`${id}#${name}`)) continue;
+      errors.push({ level: 'error', file: q.src.file, line: lineAt(q.src.lines, stepPath(name)), message: `${name} is a choice nothing ever makes: no answer or action says choose(${id}, ${name}, <option>)`, rule: 3 });
     }
   }
 

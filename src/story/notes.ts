@@ -4,7 +4,7 @@
 //
 // The lines are the design's: "Job: <title>", "Objective: <line>", "Done: <title>", "Failed: <title>
 // (<why>)", "Reached <waypoint>", "Paid <n> credits", "Experience <n> recorded (it counts for nothing
-// yet)". The rest are ours and in the same voice. Standing says which way it moved and never by how
+// yet)". The rest are ours and in the same voice ("Spent <n> credits" for a price a conversation charged). Standing says which way it moved and never by how
 // much, since Standing is shown as a bar with its numbers hidden; Trust is never said at all.
 
 import type { StoryNote } from './quests.ts';
@@ -77,6 +77,8 @@ export function noteWords(note: StoryNote, lib: StorySet, deps: NoteWordsDeps, g
     }
     case 'paid':
       return given ? `Paid ${note.credits.toLocaleString('en-GB')} credits` : `${note.credits.toLocaleString('en-GB')} credits could not be paid`;
+    case 'charged':
+      return given ? `Spent ${note.credits.toLocaleString('en-GB')} credits` : `${note.credits.toLocaleString('en-GB')} credits could not be spent`;
     case 'item': {
       const name = deps.itemName ? deps.itemName(note.kind, note.id) : idWords(note.id);
       if (!given) return `${name}: owned already, so nothing more was given`;

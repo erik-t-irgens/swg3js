@@ -11,6 +11,12 @@
 //
 // It builds its own element and says what was chosen; it knows nothing about bodies, followers or the
 // camera. Every colour on it is one of the eighteen.
+//
+// A story's conversation plays through it a line at a time (`say`): the speaker's name as the player knows
+// it, each line in turn, the player's own answer as "You: ..." (`you`), and then the answers numbered, one
+// that may not be chosen greyed with its reason and what is at stake shown under any answer that names it.
+// While a line stands, a click on the window moves on (`onNext`), as any digit does. Nothing marks an
+// answer as one under pressure. Every word goes in with `textContent`, so nobody's words are read as markup.
 
 // Every class is the window's own (`talk-`): the page already has a `.bar` (the health bars, a fixed
 // width), a `.bottom` (the display's own block, moved half its width left) and a `.keys` (the help's
@@ -32,6 +38,9 @@ const TALK_CSS = `
 #talk .talk-opt[disabled] { color: var(--muted); cursor: default; opacity: 0.6; }
 #talk .talk-num { color: var(--accent); margin-right: 8px; }
 #talk .talk-why { color: var(--muted); margin-left: 8px; font-size: 12px; }
+#talk .talk-stakes { display: block; margin: 3px 0 0 22px; font-size: 12px; color: var(--warn); }
+#talk .talk-line.talk-you { color: var(--muted); font-style: italic; }
+#talk .talk-line.talk-wait { color: var(--muted); }
 #talk .talk-keys { font-size: 11px; letter-spacing: 0.05em; color: var(--muted); }
 `;
 
@@ -44,17 +53,20 @@ function installStyle(): void {
   document.head.appendChild(style);
 }
 
-/** One answer as the window is told it: its words, whether it may be chosen, and why not. */
+/** One answer as the window is told it: its words, whether it may be chosen, why not, and what is at stake. */
 export interface TalkChoice {
   label: string;
   enabled: boolean;
   why: string;
+  stakes?: string;
 }
 
 export class TalkUi {
   readonly root: HTMLElement;
   /** An answer chosen with the mouse, by its number from 1. */
   onPick: (n: number) => void = () => {};
+  /** A click on the window while a line stands and no answer shows: on to the next line. */
+  onNext: () => void = () => {};
   private readonly parent: HTMLElement;
   private readonly who: HTMLElement;
   private readonly line: HTMLElement;
@@ -88,6 +100,10 @@ export class TalkUi {
       const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-n]');
       if (b && !b.disabled) this.onPick(Number(b.dataset.n));
     });
+    // A click anywhere else on the box, while no answer is offered, moves a conversation on a line.
+    this.root.querySelector('.talk-box')!.addEventListener('click', (e) => {
+      if (this.options.hidden && !(e.target as HTMLElement).closest('button')) this.onNext();
+    });
   }
 
   get open(): boolean {
@@ -100,6 +116,7 @@ export class TalkUi {
     this.parent.classList.add('talking');
     this.who.textContent = name;
     this.line.textContent = said;
+    this.line.classList.remove('talk-you', 'talk-wait');
     this.setChoices(choices);
     this.writes += 4;
   }
@@ -125,6 +142,12 @@ export class TalkUi {
           why.textContent = `(${c.why})`;
           b.append(why);
         }
+        if (c.stakes) {
+          const stakes = document.createElement('span');
+          stakes.className = 'talk-stakes';
+          stakes.textContent = c.stakes;
+          b.append(stakes);
+        }
         return b;
       }),
     );
@@ -134,8 +157,40 @@ export class TalkUi {
 
   /** What they say back, with no answers under it. */
   reply(said: string): void {
-    this.line.textContent = said;
+    this.say(said);
+  }
+
+  /** One of the speaker's lines, with no answers under it: a click or any digit moves on. */
+  say(line: string, more = false): void {
+    this.line.textContent = line;
+    this.line.classList.remove('talk-you', 'talk-wait');
     this.setChoices([]);
+    if (more) this.keys.textContent = 'Click or any number for the next line · Esc leaves';
+    this.writes += 2;
+  }
+
+  /** The player's own answer, said aloud. */
+  you(said: string): void {
+    this.line.textContent = `You: ${said}`;
+    this.line.classList.remove('talk-wait');
+    this.line.classList.add('talk-you');
+    this.setChoices([]);
+    this.writes += 2;
+  }
+
+  /** Waiting for somebody to answer (a server's node on its way). */
+  waiting(): void {
+    this.line.textContent = '…';
+    this.line.classList.remove('talk-you');
+    this.line.classList.add('talk-wait');
+    this.setChoices([]);
+    this.writes += 2;
+  }
+
+  /** The speaker's name, as the player knows it now (somebody who has just given their name). */
+  setName(name: string): void {
+    if (this.who.textContent === name) return;
+    this.who.textContent = name;
     this.writes++;
   }
 

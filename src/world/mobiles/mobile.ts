@@ -263,6 +263,8 @@ export interface MobileSpawn {
    * left out is the body's own; `level` is only ever shown.
    */
   overrides?: { hp?: number; damage?: number; aggression?: Aggression; level?: number; ranged?: { range: number; additive: boolean } | null };
+  /** The name it goes by, where it is not its entry's (a story's person). */
+  name?: string;
 }
 
 /** What a mobile needs of the game. */
@@ -342,7 +344,11 @@ export class Mobile implements Living, NpcSubject {
   readonly key = nextLivingKey();
   readonly entry: MobileEntry;
   readonly origin: 'spawned';
-  readonly label: string;
+  /**
+   * The name it goes by: its catalogue entry's, or the one it was stood with (`SpawnOpts.name`, a story's
+   * person). Not readonly: a story's person who introduces themselves mid-conversation is renamed (`rename`).
+   */
+  label: string;
   /**
    * Whose side it is on. Not readonly, for one reason: a person asked to follow the player takes the
    * player's side for as long as it follows, and its own back when it is asked to stop
@@ -855,7 +861,7 @@ export class Mobile implements Living, NpcSubject {
     this.hologram = (e.flags ?? []).includes('hologram');
     this.humanoid = (e.kind === 'npc' || e.kind === 'dressed') && spawn.hierarchy === 'all_b' && !this.hologram && this.plan.kind === 'upright';
     this.flyer = this.plan.hover > 0;
-    this.label = e.name;
+    this.label = spawn.name || e.name;
     this.side = sideOf(e);
     this.aggression = this.hologram ? 'passive' : (spawn.overrides?.aggression ?? e.stats?.aggression ?? 'defensive');
     this.baseAggression = this.aggression;
@@ -2087,16 +2093,17 @@ export class Mobile implements Living, NpcSubject {
 
   /**
    * The greeting it turns to answer with: the first of `clips` its animator holds, played once over its
-   * idle as an emote is. False where it holds none, or something weightier is playing.
+   * idle as an emote is. The seconds it plays for, or nought where it holds none, or something weightier is
+   * playing.
    */
-  greet(clips: readonly string[]): boolean {
+  greet(clips: readonly string[]): number {
     const a = this.animator;
-    if (!a || this.dead || this.downPhase) return false;
+    if (!a || this.dead || this.downPhase) return 0;
     for (const c of clips) {
       if (!a.has(c)) continue;
-      return a.once(c, { priority: SHOT_PRIORITY.emote, fadeIn: 0.15, fadeOut: 0.25 }) !== null;
+      return a.once(c, { priority: SHOT_PRIORITY.emote, fadeIn: 0.15, fadeOut: 0.25 }) ?? 0;
     }
-    return false;
+    return 0;
   }
 
   /**
@@ -2142,6 +2149,39 @@ export class Mobile implements Living, NpcSubject {
    */
   lendClips(extra: ReadonlyMap<string, THREE.AnimationClip>): void {
     this.animator?.lend(extra);
+  }
+
+  /** Whether its animator holds a clip just now (its pack's, or one lent it): what a gesture is chosen among. */
+  canPlay(clip: string): boolean {
+    return !!this.animator?.has(clip);
+  }
+
+  /** A new name to go by: a story's person who has just introduced themselves. */
+  rename(name: string): void {
+    if (name) this.label = name;
+  }
+
+  /** The idle it stood in before a conversation laid one over it (`talkIdle`), or null while none is laid. */
+  private talkIdleWas: string | null = null;
+
+  /**
+   * The idle a conversation lays over it for the rest of the talk (a line's `mood:<name>`), lent from a rig
+   * already parsed; null puts back the one it stood in. Never on somebody seated, whose idle is the chair's.
+   */
+  talkIdle(clip: THREE.AnimationClip | null): void {
+    if (this.disposed || this.dead || !this.roles || this.seatAt) return;
+    if (clip) {
+      this.animator?.lend(new Map([[clip.name, clip]]));
+      if (!this.animator?.has(clip.name)) return;
+      this.talkIdleWas ??= this.roles.idle;
+      this.roles.idle = clip.name;
+    } else {
+      if (this.talkIdleWas === null) return;
+      this.roles.idle = this.talkIdleWas;
+      this.talkIdleWas = null;
+    }
+    if (!this.downPhase) this.animator?.loop(this.idleNow(), 1, 0.3);
+    this.applyCull();
   }
 
   // ---- one of the world's creatures ----------------------------------------------------------------

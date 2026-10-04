@@ -43,6 +43,13 @@
 // it is given) is stopped at `WORK_MAX` pieces of work, and everything that event had worked out is
 // thrown away: nothing is changed and nothing is paid, and the answer says only why.
 //
+// **Conversations** run their actions through this same machine (`talkRules.ts`): a node's and an answer's
+// actions are keyed by the conversation and where they are written (`<tree>#1#do:<node>[.<reply>].<i>`), so
+// a payment in a conversation is paid once to a character however often the answer is given, while a
+// charge (`charge(n)`) is taken every time, as a price is. A `choice` step is done when an answer chooses
+// one of its options (`choose(q, s, option)`): the option's actions run, its choice is kept on the step, and
+// it goes on by the option's own edges, or by the step's when the option names none.
+//
 // What is the game's: the step types and their fields are the client's quest-task columns, named
 // beside each field in `set.ts`. Everything about how they run is ours.
 
@@ -100,11 +107,12 @@ export type StoryEvent =
   | { k: 'leave' }
   | { k: 'tick' };
 
-/** A payment for the host to make: credits through its purse, an item through its ledger. */
+/** A payment for the host to make: credits through its purse, an item through its ledger, or a price taken out of the purse (`charge`). */
 export interface PayOrder {
   key: string;
   credits?: number;
   item?: { kind: 'wear' | 'weapon'; id: string; n: number };
+  charge?: number;
 }
 
 /** What the message line may say about it. The words are the display's (a later wave); these are the facts. */
@@ -114,6 +122,7 @@ export type StoryNote =
   | { k: 'stalled'; quest: string; title: TextRef; why: string }
   | { k: 'objective' | 'objectiveDone'; quest: string; step: string }
   | { k: 'paid'; quest: string; credits: number }
+  | { k: 'charged'; quest: string; credits: number }
   | { k: 'item'; quest: string; kind: 'wear' | 'weapon'; id: string; n: number }
   | { k: 'xp'; quest: string; n: number }
   | { k: 'standing'; quest: string; track: Track; n: number }
@@ -164,6 +173,8 @@ interface Scope {
   site?: string;
   /** The completion an action that pays counts towards, where the caller knows it better than the record does. */
   n?: number;
+  /** The conversation a list of actions was written in: what one that pays is keyed by instead of a quest. */
+  talk?: string;
 }
 
 export interface Tally {
@@ -270,6 +281,20 @@ export function evalCond(c: CondJson | null | undefined, book: StoryBook, ctx: S
     const row = ownOf(book.tracks as Record<string, { standing: number; trust: number }> | undefined, t.track);
     return compare(row ? row[which] : 0, t);
   }
+  // The conversations' memory: an option a choice step was answered with, a node reached, an answer given,
+  // a person met or named. Anything else asked of a person is a later wave's.
+  if ('choice' in c) {
+    const [q, s] = c.choice as [string, string];
+    return stepIn(questIn(book, q), s)?.choice === c.eq;
+  }
+  if ('heard' in c) return ownOf(book.heard, c.heard as string) !== undefined;
+  if ('chosen' in c) return ownOf(book.heard, c.chosen as string) !== undefined;
+  if ('person' in c) {
+    const p = c.person as { who: string; is?: string };
+    if ((p.is === 'met' || p.is === 'named') && Object.keys(p).length === 2) return ownOf(book.npcs, p.who)?.[p.is] !== undefined;
+    if (tally) tally.unbuilt++;
+    return false;
+  }
   if ('chance' in c) return seedChance(c.chance as number, ctx.char, scope.quest ?? '', scope.run ?? 0, c.seed as string);
   if ('script' in c) {
     const s = scriptOf(c.script as string);
@@ -326,7 +351,7 @@ export function whyNotGrant(book: StoryBook, lib: StorySet, q: string, ctx: Stor
 
 /** The signal a step waits on, or null for a step that waits on none. */
 export function awaits(step: StepDef): string | null {
-  if (step.type === 'signal') return step.signal;
+  if (step.type === 'signal' || step.type === 'talk') return step.signal;
   if (step.type === 'use') return step.object ? `used:${step.object}` : null;
   return null;
 }
@@ -675,6 +700,34 @@ export class Draft {
     }
   }
 
+  /**
+   * Answer a choice step with one of its options: the option must be open (its `when`), and the step running.
+   * The option's actions run at once, the choice is kept on the step, and the step is done, going on by the
+   * option's own edges (`complete`). Answers why not, or null.
+   */
+  choose(q: string, s: string, option: string): string | null {
+    const rec = this.quest(q);
+    if (!rec || rec.state !== 'active') return 'that job is not running';
+    const step = this.def(q)?.steps[s];
+    if (!step || step.type !== 'choice' || !step.options) return 'that is not a choice';
+    const cur = stepIn(rec, s);
+    if (!cur || cur.state !== 'active') return 'that choice is not open';
+    const o = step.options.find((x) => x.id === option);
+    if (!o) return 'there is no such option';
+    const scope = { quest: q, run: rec.run, step: s };
+    if (o.when && !this.holds(o.when, scope)) return 'that option is not open';
+    if (!this.setStep(q, s, { ...cur, choice: option })) return this.why;
+    this.touched.add(q);
+    this.actions(o.do, { ...scope, site: `${s}.opt.${option}` });
+    this.queue.push({ k: 'complete', q, s, run: rec.run });
+    return null;
+  }
+
+  /** A signal raised once the work queued before it is done: what a conversation's node raises after its own actions. */
+  raiseLater(name: string): void {
+    this.queue.push({ k: 'raise', name });
+  }
+
   /** Hold a quest where it is, with the plain reason it shows. */
   stall(q: string, why: string): void {
     const rec = this.quest(q);
@@ -732,6 +785,8 @@ export class Draft {
     }
     if (r.xp > 0 && this.change({ k: 'xp', add: r.xp })) this.notes.push({ k: 'xp', quest: q, n: r.xp });
     for (const s of r.standing) this.standing(q, s.track, s.add);
+    // Trust is never said on the message line (the owner's call: it shows only in words, elsewhere).
+    for (const t of r.trust ?? []) if (t.add !== 0) this.change({ k: 'trackAdd', track: t.track, standing: 0, trust: t.add });
   }
 
   /**
@@ -834,7 +889,11 @@ export class Draft {
     if (step.visible !== false && !STEP_TYPES[step.type]?.instant) this.notes.push({ k: 'objectiveDone', quest: q, step: s });
     for (const name of step.signalsOut.done) this.queue.push({ k: 'raise', name });
     for (const g of step.grant.done) this.queue.push({ k: 'grant', q: g, how: 'grant' });
-    if (step.type === 'end') this.queue.push({ k: 'end', q, outcome: step.outcome ?? 'done', run });
+    // A choice goes on by the option chosen: its end, or its edges, and the step's own only where it names neither.
+    const option = step.type === 'choice' && cur.choice ? step.options?.find((o) => o.id === cur.choice) : undefined;
+    if (option?.ends) this.queue.push({ k: 'end', q, outcome: option.ends, run });
+    else if (option?.next.length) for (const t of option.next) this.queue.push({ k: 'activate', q, s: t, run });
+    else if (step.type === 'end') this.queue.push({ k: 'end', q, outcome: step.outcome ?? 'done', run });
     else if (step.ends) this.queue.push({ k: 'end', q, outcome: step.ends, run });
     else this.follow(q, run, step.next, step.nextOne, scope);
     this.wakeAll(q, run);
@@ -898,6 +957,11 @@ export class Draft {
    * `run`), it is keyed by the moment instead, so each call pays once.
    */
   private payOnce(scope: Scope, at: string, r: Reward): void {
+    // In a conversation: once to a character, keyed by the conversation and where the action is written.
+    if (scope.talk) {
+      this.reward(scope.talk, 1, `#do:${at}`, r);
+      return;
+    }
     const q = scope.quest;
     const n = q ? (scope.n ?? (this.quest(q)?.completions ?? 0) + 1) : Math.floor(this.ctx.now);
     this.reward(q ?? 'run', n, `#do:${at}`, r);
@@ -985,6 +1049,34 @@ export class Draft {
       case 'unflag':
         this.change({ k: 'flag', name: x, value: null });
         return;
+      case 'trust':
+        // Only ever under pressure, which the checker holds the data to; once a place it is written, as a reward is.
+        this.payOnce(scope, at, { credits: 0, xp: 0, items: [], standing: [], trust: [{ track: x as Track, add: y as number }] });
+        return;
+      case 'charge': {
+        // A price, taken every time: the answer that charges it asks `credits() >= n` first (the checker's
+        // rule 9), so with the host's own purse read just before, the spend goes through.
+        const n = Math.max(0, Math.floor(a.args[0] as number));
+        const whose = scope.talk ?? scope.quest ?? 'run';
+        if (n > 0) {
+          this.pay.push({ key: `${whose}#charge:${at}`, charge: n });
+          this.notes.push({ k: 'charged', quest: whose, credits: n });
+        }
+        return;
+      }
+      case 'introduce': {
+        const had = ownOf(this.book.npcs, x);
+        if (!had || had.named === undefined || had.met === undefined) this.change({ k: 'npcMet', who: x, at: this.ctx.now, named: true });
+        return;
+      }
+      case 'gesture':
+        // Presentation, the browser's alone: a conversation's view carries it to the line it is played on.
+        return;
+      case 'choose': {
+        const why = this.choose(x, y as string, a.args[2] as string);
+        if (why) this.why ??= why;
+        return;
+      }
       case 'call': {
         const s = scriptOf(x);
         if (!s?.act || this.scriptDepth >= SCRIPT_DEPTH) {
@@ -1310,10 +1402,23 @@ export interface KeyReward {
   n: number;
   credits: number;
   items: { kind: 'wear' | 'weapon'; id: string; n: number }[];
+  /** Paid in a conversation (`quest` is the conversation): once to a character, with no completion to reach. */
+  talk?: true;
 }
 
 const DO_STEP = /^(.+)\.(start|done|fail)\.(\d+)$/;
 const DO_OUT = /^out:(.+)\.(\d+)$/;
+const DO_OPT = /^(.+)\.opt\.([^.]+)\.(\d+)$/;
+/** An action in a conversation: `<node>.<i>` for a node's own, `<node>.<reply>.<i>` for an answer's. */
+const DO_TALK = /^([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?\.(\d+)$/;
+
+/** What one action handed over, as a key reads it back. */
+function paidBy(a: ActionDef | undefined): { credits: number; items: KeyReward['items'] } | null {
+  if (!a) return null;
+  if (a.act === 'pay') return { credits: Math.max(0, Math.floor(a.args[0] as number)), items: [] };
+  if (a.act === 'give') return { credits: 0, items: [{ kind: a.args[0] as 'wear' | 'weapon', id: a.args[1] as string, n: typeof a.args[2] === 'number' ? Math.max(1, Math.floor(a.args[2])) : 1 }] };
+  return { credits: 0, items: [] };
+}
 
 /**
  * What a reward's key paid, read back from the set it was paid under, or null when the set cannot say: the
@@ -1328,8 +1433,17 @@ export function rewardOfKey(key: string, lib: StorySet): KeyReward | null {
   const parts = key.split('#');
   if (parts.length !== 3) return null;
   const [quest, ns, site] = parts;
-  const def = lib.quests[quest];
   const n = Number(ns);
+  const talk = lib.talks && Object.hasOwn(lib.talks, quest) ? lib.talks[quest] : null;
+  if (talk) {
+    // A conversation's: `<tree>#1#do:<node>[.<reply>].<i>`, read back off the node or the answer it names.
+    const m = n === 1 && site.startsWith('do:') ? DO_TALK.exec(site.slice(3)) : null;
+    const node = m ? talk.nodes[m[1]] : undefined;
+    const list = node ? (m![2] ? node.replies.find((r) => r.id === m![2])?.do : node.do) : undefined;
+    const got = paidBy(list?.[Number(m?.[3])]);
+    return got ? { quest, n, ...got, talk: true } : null;
+  }
+  const def = lib.quests[quest];
   if (!def || !Number.isInteger(n) || n < 1) return null;
   const of = (r: Reward | null | undefined): KeyReward | null => (r ? { quest, n, credits: r.credits, items: r.items.map((i) => ({ ...i })) } : null);
   if (site.startsWith('do:')) {
@@ -1337,20 +1451,22 @@ export function rewardOfKey(key: string, lib: StorySet): KeyReward | null {
     let list: readonly ActionDef[] | null = null;
     let i = -1;
     const out = DO_OUT.exec(at);
-    const step = out ? null : DO_STEP.exec(at);
+    const opt = out ? null : DO_OPT.exec(at);
+    const step = out || opt ? null : DO_STEP.exec(at);
     if (out) {
       list = def.outcomes[out[1]]?.do ?? null;
       i = Number(out[2]);
+    } else if (opt) {
+      // A choice's option: `<step>.opt.<option>.<i>`.
+      list = def.steps[opt[1]]?.options?.find((o) => o.id === opt[2])?.do ?? null;
+      i = Number(opt[3]);
     } else if (step) {
       const st = def.steps[step[1]];
       list = st ? st.do[step[2] as 'start' | 'done' | 'fail'] : null;
       i = Number(step[3]);
     }
-    const a = list?.[i];
-    if (!a) return null;
-    if (a.act === 'pay') return { quest, n, credits: Math.max(0, Math.floor(a.args[0] as number)), items: [] };
-    if (a.act === 'give') return { quest, n, credits: 0, items: [{ kind: a.args[0] as 'wear' | 'weapon', id: a.args[1] as string, n: typeof a.args[2] === 'number' ? Math.max(1, Math.floor(a.args[2])) : 1 }] };
-    return { quest, n, credits: 0, items: [] };
+    const got = paidBy(list?.[i]);
+    return got ? { quest, n, ...got } : null;
   }
   if (site.startsWith('out:')) return of(def.outcomes[site.slice(4)]?.reward);
   return of(def.steps[site]?.reward);

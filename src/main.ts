@@ -98,22 +98,22 @@ import { mapMeta, mapPictureNow } from './ui/mapImages.ts';
 import { Minimap, MINIMAP_TUNE, tuneMinimap } from './ui/minimap.ts';
 import { WaypointHud, waypointWords } from './ui/waypointHud.ts';
 import { WaypointsUi, type WaypointRow, type WaypointsModel } from './ui/waypointsUi.ts';
-import { WaypointPlaces, WaypointSpots, wayIn, type PlaceDeps, type RoomAnswer } from './world/waypointPlace.ts';
+import { WaypointPlaces, WaypointSpots, makeRoomAnswer, wayIn, type PlaceDeps, type RoomAnswer } from './world/waypointPlace.ts';
 import type { RoomDoor } from './world/nav/navRooms.ts';
 import { CITY_TUNE, CityWatch, tuneCities } from './story/cities.ts';
 import { BookClient, STORY_TUNE, tuneStory, type StoryResult } from './story/bookClient.ts';
 import { browserStoryStorage } from './story/storyStore.ts';
-import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, type JobsLine } from './story/localHost.ts';
+import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally, type JobsLine, type LocalWallet } from './story/localHost.ts';
 import { JOBS_WAIT_OLD, JOBS_WAIT_UNREAD, REMOTE_TUNE, RemoteHost, tuneRemote } from './story/remoteHost.ts';
 import type { StoryAt } from './story/storyWire.ts';
 import { noteWords } from './story/notes.ts';
 import { clientKey, textOf, type TextRef } from './story/text.ts';
 import type { HostCtx } from './story/hostCore.ts';
 import type { PayOrder, StoryEvent, StoryNote } from './story/quests.ts';
-import type { StoryView } from './story/view.ts';
+import type { CastView, StoryView } from './story/view.ts';
 import { ownSetFiles, testSetFiles } from './story/testSetFiles.ts';
 import { StoryWatch, creditedByWord, killKey, killOf, roomOf, type WatchPlace } from './world/storyWatch.ts';
-import { STAND_TUNE, StoryStands } from './world/storyStands.ts';
+import { STAND_TUNE, StoryStands, type CastDeps } from './world/storyStands.ts';
 import { TRACKER_TUNE, TimeWarnings, Tracker, trackerTime, tuneTracker } from './ui/tracker.ts';
 import { WAYPOINT_COLOURS, WAYPOINT_TUNE, gameToRaw, gameToRawX, gameToRawZ, isWaypointColour, rawToGameX, rawToGameZ, tuneWaypointView, waypointName } from './story/waypoints.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
@@ -160,8 +160,16 @@ import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
 // Speaking to somebody, and the people who follow you (`src/world/talk.ts`, `src/world/followers.ts`).
-import { TalkUi } from './ui/talkUi.ts';
-import { GREET_CLIPS, TALK_LINES, TALK_TUNE, easeShare, greetingOf, lineOf, newTalkShot, pickOption, pullIn, reachOf, stepBlend, talkOptions, talkPick, talkShot, tuneTalk, whyNotTalk, type TalkOption } from './world/talk.ts';
+import { TalkUi, type TalkChoice } from './ui/talkUi.ts';
+import { GREET_CLIPS, SHOT_TUNE, TALK_LINES, TALK_TREE_TUNE, TALK_TUNE, askCut, autoLineShot, chooseSide, easeShare, giveUpCramped, greetingOf, lineHold, lineOf, newCut, newTalkShot, pickOption, pullIn, pullShot, reachOf, shotCramped, stepBlend, stepCut, talkOptions, talkPick, talkShotOf, tuneShots, tuneTalk, tuneTalkTree, whyNotTalk, type ShotSide, type TalkOption } from './world/talk.ts';
+// A story's conversation played in that window: its lines in turn, a gesture for each, and the camera cut
+// between the two (`src/world/talkPlay.ts`, `src/story/gestures.ts`, `src/world/gestureLender.ts`).
+import { TalkPlay, type PlayStep } from './world/talkPlay.ts';
+import { lendGestures } from './world/gestureLender.ts';
+import { GESTURE_TUNE, dictionOf, newGestureMemory, pickGesture, rememberGesture, replyGesture, tuneGestures, wordCount, type GestureMemory, type GesturePick } from './story/gestures.ts';
+import type { NodeWord } from './story/storyHost.ts';
+import type { LineView, NodeView, ReplyView } from './story/talkRules.ts';
+import type { ShotKind } from './story/talkSet.ts';
 import { FOLLOW_TUNE, isFollowerSource, tuneFollow } from './world/followers.ts';
 import { levelSamples, statsAtLevel, type LevelSample } from './world/levelStats.ts';
 import { TRAVEL_TUNE, addTicket, canBoard, collectorWords, pickTicket, rigTimes, shuttleAt, shuttleWords, ticketText, travelPackReadable, travelThingAt, travelThingsOf, type ShuttleState, type ShuttleTimes, type Ticket, type TravelRig, type TravelRow, type TravelThing } from './world/travelTerminal.ts';
@@ -607,6 +615,8 @@ let bootBody: import('@dimforge/rapier3d-compat').RigidBody | null = null;
 const boltFrom = new THREE.Vector3();
 /** The view's forward across the ground, for who the use key would speak to; written in place. */
 const talkLook = new THREE.Vector3();
+/** No story people at all: what the cast is stood from while there is no view. */
+const NO_CAST: readonly CastView[] = [];
 /** A ship's shot: where it leaves and which way (bolts.fire and effects.flash copy what they are given). */
 const shotFrom = new THREE.Vector3();
 const shotDir = new THREE.Vector3();
@@ -844,6 +854,22 @@ class App {
   private promptUse = '';
   /** What a conversation does once its last reply has stood (a corvette's taker sends the player on their way). */
   private talkThen: (() => void) | null = null;
+  /**
+   * A story's conversation under way (`src/story/talkRules.ts`), or null while the game's own greeting is
+   * spoken: whose conversation, the speaker as the gesture rule reads them, the answers on offer, and every
+   * line's gesture as it was chosen (for `__debug.gestures`). The node it stands at is the player's
+   * (`talkPlay`); the cut is the camera's (`talkCut`).
+   */
+  private talkTree: { speaker: string; memory: GestureMemory; mood: string | null; diction: string | null; replies: ReplyView[]; lent: number; log: { node: string; line: number; words: number; clip: string | null; kind: GesturePick['kind'] | 'greeting'; family: string | null; why: string }[]; greetUntil: number } | null = null;
+  /** The last one, kept after it ended so `__debug.gestures()` can say what its lines played. */
+  private lastTalkTree: App['talkTree'] = null;
+  /** The lines of a story's conversation in turn, its answers, the player's own, and the waits (`src/world/talkPlay.ts`). */
+  private readonly talkPlay = new TalkPlay((l) => this.talkLineHold(l));
+  /** The camera's cut between the one speaking and the one listening, and whether this conversation's side has been chosen yet. */
+  private readonly talkCut = newCut();
+  private talkSided = false;
+  /** A shot the console holds the camera to (`__debug.shots`), or null for the conversation's own. */
+  private shotForce: { kind: ShotKind; side: ShotSide | null } | null = null;
   /**
    * The dungeon copy the player is in (`src/world/instances.ts`): which dungeon, the thing the layout placed
    * for the copy, where the player was stood on arriving and in which room, and where the copy stands
@@ -2000,6 +2026,11 @@ class App {
     // or the mouse while the world goes on round it.
     this.talkUi = new TalkUi(this.ui);
     this.talkUi.onPick = (n) => this.answerTalk(n);
+    this.talkUi.onNext = () => this.skipTalkLine();
+    // The nodes a story's conversation reaches, from whichever host is holding the story: this browser's own
+    // answers at once, a server's when it does.
+    this.questHost.onNode((w) => this.onTalkNode(w));
+    this.remoteJobs.onNode((w) => this.onTalkNode(w));
     // The band: an instrument in hand plays its own track of a song, and everybody in earshot is
     // heard on theirs. There is no world music in this game and none is wanted.
     this.bandBar = new BandBar(this.ui);
@@ -4603,6 +4634,8 @@ class App {
         this.audio.advancing = true;
         try {
           for (let i = 0; i < Math.round(seconds / dt); i++) {
+            // A conversation's lines stand and move on with the simulation, as the frame loop has them.
+            if (this.talkNow) this.stepTalk(dt);
             this.stepEmoteKeys();
             this.stepEmoteEnd();
             this.player.update(dt, this.input, this.cam, this.world);
@@ -6206,21 +6239,23 @@ class App {
           else if (!within(m)) said = `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)`;
           else said = this.startTalk(m) ?? `talking to ${m.label}`;
         }
-        if (typeof opts?.pick === 'number') {
-          const t = this.talkNow;
-          const o = t ? pickOption(t.options, opts.pick) : null;
-          said = !t ? 'no conversation to answer' : !o ? `answer ${opts.pick} is not on offer` : `answered: ${o.label}`;
-          this.answerTalk(opts.pick);
-        }
+        if (typeof opts?.pick === 'number') said = this.debugPick(opts.pick);
         const me = this.world.playerTarget;
         this.cam.forward(talkLook);
         const near = typeof opts?.near === 'number' && Number.isFinite(opts.near) ? opts.near : TALK_TUNE.reach * 4;
         const t = this.talkNow;
         const tc = this.talkCam;
         const r2 = (n: number): number => Math.round(n * 100) / 100;
+        const play = this.talkPlay;
         return {
           said,
-          talking: t ? { with: t.body.label, key: t.body.key, following: t.following, options: t.options.map((o, i) => `${i + 1}. ${o.label}${o.enabled ? '' : ` (${o.why})`}`), replying: Number.isFinite(t.replyUntil) } : null,
+          talking: t ? { with: t.body.label, key: t.body.key, following: t.following, options: t.options.map((o, i) => `${i + 1 + (this.talkTree?.replies.length ?? 0)}. ${o.label}${o.enabled ? '' : ` (${o.why})`}`), replying: Number.isFinite(t.replyUntil) } : null,
+          // A story's conversation: whose, the conversation and the node it stands at, and where in it the window is.
+          tree: this.talkTree ? play.node?.tree ?? null : null,
+          node: this.talkTree ? play.node?.node ?? null : null,
+          speaker: this.talkTree?.speaker ?? null,
+          play: this.talkTree ? play.report() : null,
+          cut: { kind: this.talkCut.kind, side: this.talkCut.side, held: r2(this.talkCut.held), want: this.talkCut.want, cuts: this.talkCut.cuts },
           window: this.talkUi.debug(),
           hudHidden: this.ui.classList.contains('talking'),
           camera: { blend: r2(tc.blend), at: tc.body ? [r2(tc.to.x), r2(tc.to.y), r2(tc.to.z)] : null, look: tc.body ? [r2(tc.look.x), r2(tc.look.y), r2(tc.look.z)] : null },
@@ -6231,6 +6266,82 @@ class App {
             .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, this.world.followers.following(m))), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
           tune: { ...TALK_TUNE },
         };
+      },
+      /**
+       * A story's conversation (`src/story/talkRules.ts`, played by `src/world/talkPlay.ts`). With nothing, the
+       * one under way: whose, the conversation and node, the lines and the answers as the window has them, the
+       * mode, the cut, and the story's people stood. `{ open: 'test:cast/test-clerk' }` (or `'nearest'`, the
+       * nearest one stood) opens one with a cast member stood within `keep` metres, as E would; `{ pick: n }`
+       * answers by number (the story's answers first, the game's own after) once the answers show; `{ next:
+       * true }` moves on a line, as a click does; `{ step: seconds }` lets the lines stand that long; `{ tune }`
+       * moves `TALK_TREE_TUNE`.
+       */
+      talkTree: (opts?: { open?: string; pick?: number; next?: boolean; step?: number; tune?: Partial<typeof TALK_TREE_TUNE> }) => {
+        if (opts?.tune) tuneTalkTree(opts.tune);
+        let said: string | null = null;
+        if (opts?.open) {
+          const at = this.player.worldPos;
+          const live = (this.world.mobiles?.live ?? []).filter((m) => !m.removed && this.storyStands.castOf(m));
+          const m = opts.open === 'nearest' ? live.sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0] : live.find((x) => this.storyStands.castOf(x) === opts.open);
+          if (!m) said = opts.open === 'nearest' ? 'none of the story\'s people is stood here' : `${opts.open} is not stood here (the cast are stood within ${STAND_TUNE.castNear} m of where the story puts them)`;
+          else if (Math.hypot(m.pos.x - at.x, m.pos.z - at.z) > TALK_TUNE.keep) said = `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)`;
+          else said = this.startTalk(m) ?? `talking to ${m.label}`;
+        }
+        if (opts?.next) {
+          this.skipTalkLine();
+          said = 'on to the next line';
+        }
+        if (typeof opts?.step === 'number' && Number.isFinite(opts.step) && opts.step > 0) {
+          const dbg = (window as unknown as { __debug: { advance(s: number): void } }).__debug;
+          dbg.advance(Math.min(60, opts.step));
+        }
+        if (typeof opts?.pick === 'number') said = this.debugPick(opts.pick);
+        const play = this.talkPlay;
+        const node = play.node;
+        const host = this.jobs;
+        return {
+          said,
+          host: host.kind,
+          canTalk: this.talkTree ? host.canTalk(this.talkTree.speaker) : null,
+          speaker: this.talkTree?.speaker ?? null,
+          ...play.report(),
+          lines: node ? node.lines.map((l, i) => `${i === play.line ? '> ' : '  '}${this.talkLineText(node, l)}`) : [],
+          answers: this.talkUi.debug().options,
+          window: this.talkUi.debug(),
+          state: this.questHost.talkState,
+          cast: this.storyStands.report().cast,
+          castView: (host.view()?.cast ?? []).map((c) => `${c.id} on ${c.world}${c.talk ? '' : ' (nothing to say)'}`),
+          castWhy: this.castWhy(),
+          castStats: { ...this.storyStands.stats },
+          tune: { ...TALK_TREE_TUNE },
+        };
+      },
+      /**
+       * The gestures a conversation's lines are said with (`src/story/gestures.ts`): every line of the one
+       * under way (or the last) with the clip it played, or stillness and why, its family and its words;
+       * how many gestures the speaker was lent; and `GESTURE_TUNE`. `{ every: true }` makes every line move,
+       * for comparison; `{ rate: { base: 0.5, exclaim: 0.6 } }` moves the rates.
+       */
+      gestures: (opts?: { every?: boolean; rate?: Partial<typeof GESTURE_TUNE> }) => {
+        if (opts?.rate) tuneGestures(opts.rate);
+        if (typeof opts?.every === 'boolean') tuneGestures({ every: opts.every });
+        const tt = this.talkTree ?? this.lastTalkTree;
+        return { speaker: tt?.speaker ?? null, lent: tt?.lent ?? 0, lines: tt ? tt.log.map((r) => ({ ...r })) : [], tune: { ...GESTURE_TUNE } };
+      },
+      /**
+       * The camera of a conversation (`talkShotOf` in `src/world/talk.ts`): the shot standing, its side, how
+       * long it has stood, the one asked for, the cuts made and the shots given up as too cramped to stand
+       * (`cramped`), and `SHOT_TUNE`. `{ kind: 'over-npc' }` (any of
+       * over-player, over-npc, close-npc, close-player, two, wide) holds the camera to that shot, `{ side:
+       * 'left' }` to that side, for comparison; `{ kind: null }` gives the shot back to the conversation;
+       * `{ tune: { hold: 2, reverseBack: 2 } }` moves the numbers.
+       */
+      shots: (opts?: { kind?: ShotKind | null; side?: ShotSide; tune?: Partial<typeof SHOT_TUNE> }) => {
+        if (opts?.tune) tuneShots(opts.tune);
+        if (opts?.kind === null) this.shotForce = null;
+        else if (opts?.kind || opts?.side) this.shotForce = { kind: opts.kind ?? this.talkCut.kind, side: opts.side ?? null };
+        const c = this.talkCut;
+        return { talking: !!this.talkNow, kind: c.kind, side: c.side, held: Math.round(c.held * 100) / 100, want: c.want, wantSide: c.wantSide, cuts: c.cuts, cramped: c.cramped, forced: this.shotForce ? { ...this.shotForce } : null, tune: { ...SHOT_TUNE } };
       },
       /**
        * The people following you (`src/world/followers.ts`): each with who stood it, how far off it is, its
@@ -8776,6 +8887,8 @@ class App {
     this.storyWatch.reset();
     this.forgetStoryPlace();
     this.storyStands.clear();
+    // The story's people stood for this character are this character's alone.
+    this.storyStands.clearCast((b) => this.world.unstandMobile(b as Mobile));
     this.timeWarnings.clear();
     this.promptUse = '';
     // And its marks, their labels and the city walked into with it. The minimap comes down here too, as
@@ -10232,15 +10345,21 @@ class App {
    */
   private payStory(order: PayOrder): boolean {
     if (!this.current || this.creating) return false;
-    if (order.credits) {
-      if (this.net.session.authority === 'server') return false;
-      purse.give(order.credits);
-      return true;
-    }
-    // A character keeps one of each thing: one already owned is said rather than given twice.
-    if (order.item) return this.equipment.give(order.item.kind, order.item.id);
-    return true;
+    return payLocally(order, this.storyWallet);
   }
+
+  /**
+   * The purse and the backpack as the story pays out of them (`payLocally`): a price taken through the
+   * purse's own spend, which with no server runs at once, and a thing given as the backpack gives one (a
+   * character keeps one of each, so one owned already is said rather than given twice).
+   */
+  private readonly storyWallet: LocalWallet = {
+    serverKeeps: () => this.net.session.authority === 'server',
+    credits: () => purse.credits,
+    give: (n) => void purse.give(n),
+    spend: (n, then) => purse.spend(n, 'That', then),
+    item: (kind, id) => this.equipment.give(kind, id),
+  };
 
   /**
    * One of the story's notes, said on the message line in the story's own colour: this browser's own host's,
@@ -10377,6 +10496,8 @@ class App {
     if (simulate && this.inWorld && !this.dying) this.storyWatch.step(host.view(), this.watchPlace(), Date.now(), this.raiseStory);
     // Read again: what the detectors just raised may have moved a job on.
     const view = host.view();
+    // The story's people near the player stood, the rest taken down, and a name given mid-conversation worn.
+    this.stepCast(view);
     this.timeWarnings.check(view, host.now(), this.warnStory);
     const S = this.settings;
     const p = this.player;
@@ -10401,6 +10522,55 @@ class App {
     }
     this.tracker.update(view, this.watchPlace(), host.now(), show, held, performance.now());
   }
+
+  /**
+   * The story's people, stood near the player and taken down away from them (`StoryStands.stepCast`): only on
+   * foot in a world being simulated, never during a trip, and through the world's own prepared path, so a body
+   * is out of sight until its programs are built. Four times a second, from the jobs' own step.
+   */
+  private stepCast(view: StoryView | null): void {
+    const planet = this.world.planet;
+    if (this.castWhy() || !planet) return;
+    const at = this.player.worldPos;
+    this.storyStands.stepCast(view?.cast ?? NO_CAST, this.packHere(planet), this.world.generation, this.world.layoutCenter, at.x, at.z, Date.now(), this.castDeps);
+  }
+
+  /** Why the story's people are not being stood just now, in a few words, or null when they are. */
+  private castWhy(): string | null {
+    if (!this.world.planet || !this.inWorld) return 'no world';
+    if (this.traveling) return 'travelling';
+    if (!this.world.mobiles) return 'this world has no mobiles manager';
+    return null;
+  }
+
+  /** The room answer a cast member in a room is stood with, refilled in place. */
+  private readonly castRoom = makeRoomAnswer();
+
+  /** What standing the story's people asks of the world. */
+  private readonly castDeps: CastDeps = {
+    stand: (c, x, z, y, heading, name) => {
+      const inside = y !== null;
+      const m = this.world.standMobile(c.body, inside ? { x, y: y as number, z, heading } : { x, z, heading }, inside, `cast:${c.id}`, c.essential, { name, mood: c.mood ?? null });
+      // An essential one does not think and stands where it was stood; a mortal one thinks, so it is given the
+      // post a standing person keeps (`keepPost`), held still on its own spot: it fights and flees as anybody
+      // does and walks home after, never wandering off the place the story (and a server's reach) measures from.
+      if (m && !c.essential) {
+        m.homeX = x;
+        m.homeZ = z;
+        m.post = { kind: 'still', heading, tune: PEOPLE_TUNE };
+      }
+      return m;
+    },
+    unstand: (b) => this.world.unstandMobile(b as Mobile),
+    roomFloor: (c, x, z) => {
+      const room = c.room;
+      if (!room) return null;
+      const out = this.castRoom;
+      this.roomOfWaypoint(room.cell, room.template ?? '', x, z, out);
+      return out.found ? this.world.groundAt(x, out.top, z, true) : null;
+    },
+    text: (ref) => this.storyText(ref),
+  };
 
   /** How many times the sets have been asked for, so an answer to an older ask is dropped. */
   private storyLoads = 0;
@@ -10429,7 +10599,11 @@ class App {
 
   /** What `__debug.story()` prints: the book, the hosts and their sets, and what the detectors remember. */
   private storyReport(): Record<string, unknown> {
-    return { ...this.story.report(), tests: this.storyTests, jobs: this.remoteJobs.active ? 'server' : 'local', quests: this.questHost.report(), server: this.remoteJobs.report(), watch: this.storyWatch.report() };
+    // The tracks' Standing and Trust as the book holds them, and the people met, which a conversation moves.
+    const book = this.story.book;
+    const tracks = book?.tracks ? JSON.parse(JSON.stringify(book.tracks)) : {};
+    const npcs = book?.npcs ? JSON.parse(JSON.stringify(book.npcs)) : {};
+    return { ...this.story.report(), tracks, npcs, tests: this.storyTests, jobs: this.remoteJobs.active ? 'server' : 'local', quests: this.questHost.report(), server: this.remoteJobs.report(), watch: this.storyWatch.report() };
   }
 
   /**
@@ -18016,40 +18190,254 @@ class App {
   /**
    * Speak to somebody, or say why not. They turn to face the player and greet them, the display stands
    * aside for the window, and the mouse is freed for the answers; the player stands and listens.
+   *
+   * One of the story's people with a conversation of their own speaks it (`talkTree`): whoever holds the
+   * story is asked for its first node, the window waits on it with the speaker's name, and the lines then
+   * play in turn. Its answers come first and the game's own way out after them; story people stay at their
+   * post, so they are not asked to follow. Anybody else, or a story person whose host cannot answer just now,
+   * says the game's own greeting with the game's own answers, as before.
    */
   private startTalk(m: Mobile): string | null {
     if (this.talkNow) this.endTalk(false);
     const why = whyNotTalk(m, this.world.playerTarget);
     if (why) return why;
     const following = this.world.followers.following(m);
-    // A corvette's ticket taker offers the trip to its faction's copy of the ship first (`instances.ts`).
-    const taker = !!corvetteFor(standingPeople.rowOf(m)?.takes);
-    // Anybody may be spoken to whichever browser keeps them; only one this browser keeps may follow.
-    const options = talkOptions(following, this.world.followers.full, [], m.isDriven, taker);
+    const speaker = this.storyStands.castOf(m);
+    const host = this.jobs;
+    // Asked only of somebody with a conversation of their own: the host says whether it can answer for them
+    // (a server's view, this browser's sets), so one with none goes straight to the game's own greeting.
+    const tree = !!speaker && host.canTalk(speaker);
+    const options = this.talkOptionsFor(m, following);
     const at = this.player.worldPos;
     this.talkAt.x = at.x;
     this.talkAt.z = at.z;
     m.listen(this.talkAt);
     // Not from a chair: a greeting is a whole-body clip, and played over a seated idle it stands the body up.
-    if (TALK_TUNE.greet && !m.seated) m.greet(GREET_CLIPS);
+    const greeted = TALK_TUNE.greet && (!tree || TALK_TREE_TUNE.greetAtOpen) && !m.seated ? m.greet(GREET_CLIPS) : 0;
     this.talkNow = { body: m, options, following, replyUntil: Number.NaN, since: this.world.simTime };
     this.talkCam.body = m;
+    Object.assign(this.talkCut, newCut());
+    this.talkSided = false;
     this.closePanels();
     this.map.hide();
-    this.talkUi.show(m.label, greetingOf(m.side, following, m.key), options);
     this.freeMouse(true);
     this.audio.ui.play('panelOpen');
+    if (tree && speaker) {
+      const cast = host.view()?.cast.find((c) => c.id === speaker) ?? null;
+      // Every gesture of a rig already parsed, lent before the first line is chosen among them.
+      const lent = lendGestures(m, { parsedRigClips: (prefer) => Character.parsedRigClips(prefer) });
+      const memory = newGestureMemory();
+      // The greeting is the conversation's first gesture: remembered, so the rule does not play it again at once,
+      // and standing in for any line's own until it has played out (`showTalkLine`).
+      const greetClip = greeted > 0 ? (GREET_CLIPS.find((c) => m.canPlay(c)) ?? null) : null;
+      if (greetClip) rememberGesture(memory, { clip: greetClip, kind: 'hand', family: 'greet', why: 'the greeting' });
+      this.talkTree = { speaker, memory, mood: cast?.mood ?? null, diction: dictionOf(cast?.side ?? m.side, m.entry.id), replies: [], lent, log: [], greetUntil: this.world.simTime + greeted };
+      this.talkPlay.open(this.world.simTime);
+      this.talkUi.show(m.label, '', []);
+      this.talkUi.waiting();
+      // This browser's own host answers at once (`onTalkNode`), a server's when it does.
+      host.talk('open', speaker);
+      return null;
+    }
+    this.talkTree = null;
+    this.talkUi.show(m.label, greetingOf(m.side, following, m.key), options);
     return null;
   }
 
   /**
+   * A node a story's conversation reached, from whichever host holds the story: the speaker's name as the
+   * player now knows it (somebody who has just introduced themselves is renamed where they stand), a refusal
+   * said, and the node played in turn. Anything about another speaker, or none, is dropped.
+   */
+  private onTalkNode(w: NodeWord): void {
+    const t = this.talkNow;
+    const tt = this.talkTree;
+    if (!t || !tt || w.speaker !== tt.speaker) return;
+    if (w.view?.name) {
+      const name = this.storyText(w.view.name);
+      this.talkUi.setName(name);
+      t.body.rename(name);
+    }
+    // A refusal mid-conversation (walked out of reach, too much said at once) ends it, and says why; one at the
+    // opening falls back on the game's own greeting instead, and is said in the console (`applyTalkStep`).
+    if (w.why && (w.view || this.talkPlay.node)) this.messages.system(w.why);
+    this.applyTalkStep(this.talkPlay.arrive(w, this.world.simTime));
+  }
+
+  /** What the conversation's play says to do: a line, the answers, the next node asked for, the end, or the game's own greeting instead. */
+  private applyTalkStep(step: PlayStep | null): void {
+    const t = this.talkNow;
+    const tt = this.talkTree;
+    const node = this.talkPlay.node;
+    if (!step || !t || !tt) return;
+    switch (step.k) {
+      case 'line':
+        if (node) this.showTalkLine(node, step.index);
+        return;
+      case 'choose':
+        if (node) this.showTalkChoices(node);
+        return;
+      case 'next':
+        this.jobs.talk('pick', tt.speaker, null);
+        return;
+      case 'end':
+        this.endTalk();
+        return;
+      case 'fallback': {
+        // Nothing came in time, or nothing could be said: the game's own greeting and answers instead.
+        if (step.why) console.info(`story: ${tt.speaker} has nothing to say just now (${step.why})`);
+        this.jobs.talk('close', tt.speaker);
+        this.talkTree = null;
+        const m = t.body;
+        t.options = this.talkOptionsFor(m, t.following);
+        this.talkUi.show(m.label, greetingOf(m.side, t.following, m.key), t.options);
+        return;
+      }
+    }
+  }
+
+  /**
+   * The game's own answers for somebody: a corvette's ticket taker offers the trip to its faction's copy of the
+   * ship first (`instances.ts`); anybody may be spoken to whichever browser keeps them, and only one this browser
+   * keeps may follow; and one of the story's people stays at their post, offered neither follow nor stop
+   * following (the story takes them down away from it, and the companion is a later wave's).
+   */
+  private talkOptionsFor(m: Mobile, following: boolean): TalkOption[] {
+    const taker = !!corvetteFor(standingPeople.rowOf(m)?.takes);
+    return talkOptions(following, this.world.followers.full, [], m.isDriven, taker, this.storyStands.castOf(m) !== null);
+  }
+
+  /** The words of a line: a reference looked up (in the conversation's own table for a `:key`), its substitutions filled, the player's name for `%TU`. */
+  private talkLineText(node: NodeView, l: LineView): string {
+    let words = textOf(l.text, this.storyLook, node.strings);
+    if (l.fill) {
+      for (const k of ['TO', 'TT', 'DI', 'DF'] as const) {
+        const v = l.fill[k];
+        if (v === undefined) continue;
+        const s = typeof v === 'string' ? v : 'ask' in v ? (v.ask === 'npc.name' ? (this.talkNow?.body.label ?? '') : (this.current?.name ?? 'you')) : v.en;
+        words = words.split(`%${k}`).join(s);
+      }
+    }
+    return words.includes('%') ? words.replace(/%TU|%NU/g, this.current?.name ?? 'you') : words;
+  }
+
+  /** How long a line of the node in play stands: for its words, and its own wait after. */
+  private talkLineHold(l: LineView): number {
+    const node = this.talkPlay.node;
+    return lineHold(node ? wordCount(this.talkLineText(node, l)) : 0, l.wait ?? 0);
+  }
+
+  /**
+   * One line of the speaker's, shown with its gesture and its shot: the gesture the line names, or the rule's
+   * (`pickGesture`), played over the speaker's idle; and the shot the line names, or over the player's shoulder
+   * (close in on a long line that follows another of theirs), cut to once the shot standing has had its time.
+   */
+  private showTalkLine(node: NodeView, i: number): void {
+    const t = this.talkNow;
+    const tt = this.talkTree;
+    const l = node.lines[i];
+    if (!t || !tt || !l) return;
+    const words = this.talkLineText(node, l);
+    this.talkUi.say(words, i < node.lines.length - 1 || node.replies.length > 0 || node.next);
+    const m = t.body;
+    const line = { tree: node.tree, node: node.node, line: i, text: words, tone: l.tone ?? null, ...(l.gesture !== undefined ? { slot: l.gesture } : {}) };
+    const pick = pickGesture(line, { still: m.seated || m.dead, has: (c) => m.canPlay(c), mood: tt.mood, diction: tt.diction }, tt.memory);
+    // While the opening greeting still plays it stands in for a line's own clip: played over it, the line's would
+    // cut it off the moment the first node came (this browser's own host answers in the same breath).
+    const greeting = !!pick.clip && this.world.simTime < tt.greetUntil;
+    if (!greeting) rememberGesture(tt.memory, pick);
+    if (pick.clip && !greeting) m.greet([pick.clip]);
+    else if (pick.kind === 'mood' && pick.mood) m.talkIdle(Character.parsedRigMood(pick.mood, m.entry.species ?? undefined));
+    if (greeting) tt.log.push({ node: node.node, line: i, words: wordCount(words), clip: null, kind: 'greeting', family: pick.family, why: `${pick.clip} held back: the greeting still plays` });
+    else tt.log.push({ node: node.node, line: i, words: wordCount(words), clip: pick.clip, kind: pick.kind, family: pick.family, why: pick.why });
+    if (tt.log.length > 40) tt.log.shift();
+    const shot = l.shot === undefined ? autoLineShot(i, wordCount(words)) : (l.shot?.kind ?? 'hold');
+    askCut(this.talkCut, shot, l.shot?.side ?? this.talkCut.side);
+  }
+
+  /** The node's answers, numbered, a refused one greyed with its reason and what is at stake under any that names it, with the game's own way out after them. */
+  private showTalkChoices(node: NodeView): void {
+    const t = this.talkNow;
+    const tt = this.talkTree;
+    if (!t || !tt) return;
+    tt.replies = node.replies;
+    const choices: TalkChoice[] = node.replies.map((r) => ({ label: this.storyText(r.text), enabled: r.enabled, why: r.why ? this.storyText(r.why) : '', ...(r.stakes ? { stakes: this.storyText(r.stakes) } : {}) }));
+    for (const o of t.options) choices.push(o);
+    this.talkUi.setChoices(choices);
+    askCut(this.talkCut, 'over-player', this.talkCut.side);
+  }
+
+  /**
+   * One of the story's answers chosen: said aloud as "You: ..." under its own reverse shot, the player
+   * gesturing on a strong cue (a yes, a no, thanks) or as the answer says, while whoever holds the story works
+   * out where it leads. A silent answer says nothing and goes straight on.
+   */
+  private answerTree(r: ReplyView): void {
+    const tt = this.talkTree;
+    if (!tt || !r.enabled) return;
+    this.audio.ui.play('select');
+    if (r.said !== null) {
+      const said = this.storyText(r.said);
+      this.talkUi.you(said);
+      const clip = replyGesture(said, r.gesture, (c) => !!this.player.rig?.has(c));
+      if (clip) this.playTalkGesture(clip);
+      askCut(this.talkCut, r.shot === undefined ? 'over-npc' : (r.shot?.kind ?? 'hold'), r.shot?.side ?? this.talkCut.side);
+    } else this.talkUi.waiting();
+    this.talkPlay.said(r, this.world.simTime);
+    this.jobs.talk('pick', tt.speaker, r.id);
+  }
+
+  /** The player's own gesture in a conversation: played as an emote is, but never sent to the others (`playEmote` sends). */
+  private playTalkGesture(clip: string): void {
+    const rig = this.player.rig;
+    if (!rig || this.player.mounted) return;
+    rig.play(clip, { fadeIn: 0.15, loop: false });
+  }
+
+  /** A click on the window or a digit while a line stands: on to the next. */
+  private skipTalkLine(): void {
+    if (this.talkTree) this.applyTalkStep(this.talkPlay.skip(this.world.simTime));
+  }
+
+  /** The console's number key in a conversation, said back in words: what it answered, or why it could not. */
+  private debugPick(n: number): string {
+    const t = this.talkNow;
+    if (!t) return 'no conversation to answer';
+    const tt = this.talkTree;
+    if (tt) {
+      if (this.talkPlay.mode !== 'choose') return `the answers are not showing yet (${this.talkPlay.mode})`;
+      if (n >= 1 && n <= tt.replies.length) {
+        const r = tt.replies[n - 1];
+        if (!r.enabled) return `answer ${n} is greyed: ${r.why ? this.storyText(r.why) : 'no reason given'}`;
+        this.answerTalk(n);
+        return `answered: ${this.storyText(r.text)}`;
+      }
+    }
+    const o = pickOption(t.options, n - (tt?.replies.length ?? 0));
+    const said = o ? `answered: ${o.label}` : `answer ${n} is not on offer`;
+    this.answerTalk(n);
+    return said;
+  }
+
+  /**
    * An answer, by its number from 1: stop talking, which ends it now, or follow me and stop following me,
-   * each with a reply that stands a moment before the view goes back. A refused answer does nothing.
+   * each with a reply that stands a moment before the view goes back. A refused answer does nothing. In a
+   * story's conversation the story's answers come first (`answerTree`), and only while they are offered.
    */
   private answerTalk(n: number): void {
     const t = this.talkNow;
-    if (!t || Number.isFinite(t.replyUntil)) return;
-    const o = pickOption(t.options, n);
+    if (!t) return;
+    const tt = this.talkTree;
+    let at = n;
+    if (tt) {
+      if (this.talkPlay.mode !== 'choose') return;
+      if (n >= 1 && n <= tt.replies.length) {
+        this.answerTree(tt.replies[n - 1]);
+        return;
+      }
+      at = n - tt.replies.length;
+    } else if (Number.isFinite(t.replyUntil)) return;
+    const o = pickOption(t.options, at);
     if (!o) return;
     this.audio.ui.play('select');
     if (o.id === 'leave') {
@@ -18095,8 +18483,14 @@ class App {
    */
   private stepTalk(dt: number): void {
     const input = this.input;
-    for (let n = 1; n <= 9; n++) if (input.consumeKey(DIGIT_CODES[n - 1])) this.answerTalk(n);
+    for (let n = 1; n <= 9; n++) {
+      if (!input.consumeKey(DIGIT_CODES[n - 1])) continue;
+      // In a story's conversation a digit while a line stands moves on, and picks only once the answers show.
+      if (this.talkTree && this.talkPlay.mode !== 'choose') this.skipTalkLine();
+      else this.answerTalk(n);
+    }
     input.dropPresses();
+    if (this.talkTree) this.applyTalkStep(this.talkPlay.step(this.world.simTime));
     const t = this.talkNow;
     if (!t) return;
     const m = t.body;
@@ -18140,6 +18534,16 @@ class App {
     this.talkThen = null;
     if (!t) return;
     this.talkNow = null;
+    // A story's conversation is let go of where it is held (it starts again at its entry next time), and the
+    // idle a line laid over the speaker is put back.
+    const tt = this.talkTree;
+    if (tt) {
+      this.talkTree = null;
+      this.lastTalkTree = tt;
+      this.talkPlay.close();
+      this.jobs.talk('close', tt.speaker);
+      t.body.talkIdle(null);
+    }
     t.body.listen(null);
     this.talkUi.hide();
     if (!handBack) {
@@ -18151,10 +18555,14 @@ class App {
   }
 
   /**
-   * The view over the shoulder, eased in and out over the orbit the camera has just taken this frame: from
-   * the player's eye behind them, to their right and a touch above, looking at the face of the one spoken
-   * to (`talkShot`), pulled in before anything solid behind the player by the camera's own block test.
-   * After the conversation it eases back from where the shot last stood. Allocates nothing.
+   * The view of the conversation, eased in and out over the orbit the camera has just taken this frame. The
+   * shot is the cut's (`talkCut`): over the player's shoulder onto the face of the one spoken to as it opens,
+   * and from there whatever the lines and the answers ask for -- the reverse shot over their shoulder while
+   * the player speaks, close in on a long line -- each cut to at once once the shot standing has had its
+   * `hold`. The side of the line between the two is chosen on the conversation's first frame by the block
+   * test (the player's right shoulder unless it is walled in and the left has more room), and every shot keeps
+   * to it. Each is pulled in before anything solid behind whoever it hangs off. After the conversation it
+   * eases back from where the shot last stood. Allocates nothing.
    */
   private talkCamera(blocked: import('./core/camera').CameraBlocker | null, dt: number): void {
     const tc = this.talkCam;
@@ -18167,13 +18575,47 @@ class App {
     const cam = this.cam.camera;
     if (m && !m.removed) {
       const p = this.player.worldPos;
-      const shot = talkShot(p.x, p.y + this.player.eyeHeight, p.z, m.pos.x, m.pos.y + m.plan.height * TALK_TUNE.face, m.pos.z, tc.shot);
-      tc.from.set(p.x, p.y + this.player.eyeHeight, p.z);
-      tc.to.set(shot.cx, shot.cy, shot.cz);
-      if (blocked && shot.reach > 1e-3) {
-        const allowed = pullIn(shot.reach, blocked(tc.from, tc.to));
-        if (allowed < shot.reach) tc.to.sub(tc.from).multiplyScalar(allowed / shot.reach).add(tc.from);
+      const py = p.y + this.player.eyeHeight;
+      const ny = m.pos.y + m.plan.height * TALK_TUNE.face;
+      const cut = this.talkCut;
+      if (!this.talkSided && this.talkNow) {
+        this.talkSided = true;
+        let side: ShotSide = 'right';
+        if (blocked) {
+          const right = talkShotOf('over-player', 'right', p.x, py, p.z, m.pos.x, ny, m.pos.z, tc.shot);
+          const reach = right.reach;
+          tc.from.set(right.ax, right.ay, right.az);
+          tc.to.set(right.cx, right.cy, right.cz);
+          const rightRoom = pullIn(reach, blocked(tc.from, tc.to));
+          const left = talkShotOf('over-player', 'left', p.x, py, p.z, m.pos.x, ny, m.pos.z, tc.shot);
+          tc.to.set(left.cx, left.cy, left.cz);
+          side = chooseSide(reach, rightRoom, pullIn(reach, blocked(tc.from, tc.to)));
+        }
+        cut.side = side;
+        cut.wantSide = side;
       }
+      const force = this.shotForce;
+      if (force) {
+        if (force.kind !== 'hold') cut.kind = cut.want = force.kind;
+        if (force.side) cut.side = cut.wantSide = force.side;
+      } else if (this.talkNow) stepCut(cut, dt);
+      let shot = talkShotOf(cut.kind, cut.side, p.x, py, p.z, m.pos.x, ny, m.pos.z, tc.shot);
+      if (blocked && shot.reach > 1e-3) {
+        tc.from.set(shot.ax, shot.ay, shot.az);
+        tc.to.set(shot.cx, shot.cy, shot.cz);
+        let allowed = pullIn(shot.reach, blocked(tc.from, tc.to));
+        // Too cramped to stand (a wall close behind whoever it hangs off): given up for the shot over the
+        // player's shoulder before it is ever drawn. Not while the console forces a shot, which is for looking.
+        if (!force && shotCramped(cut.kind, shot.reach, allowed)) {
+          giveUpCramped(cut);
+          shot = talkShotOf(cut.kind, cut.side, p.x, py, p.z, m.pos.x, ny, m.pos.z, tc.shot);
+          tc.from.set(shot.ax, shot.ay, shot.az);
+          tc.to.set(shot.cx, shot.cy, shot.cz);
+          allowed = pullIn(shot.reach, blocked(tc.from, tc.to));
+        }
+        pullShot(shot, allowed);
+      }
+      tc.to.set(shot.cx, shot.cy, shot.cz);
       tc.look.set(shot.lx, shot.ly, shot.lz);
       tc.m.lookAt(tc.to, tc.look, cam.up);
       tc.q.setFromRotationMatrix(tc.m);
@@ -19340,7 +19782,10 @@ class App {
       // clamped `dt`: a notice sent as a panel opened must still fade while it is open, or it would
       // be standing there when the panel closes, and under a long stall a clamped delta would hold
       // every line far past its eight seconds.
-      this.messages.update(rawDt);
+      // Except while a conversation is up: its window hides everything else on the screen, the message line
+      // with it (`#ui.talking`), so what a conversation says there -- a job given, a payment, a price, a
+      // refusal -- would otherwise run out its time unseen. The line stands still until the window goes.
+      this.messages.update(this.talkNow ? 0 : rawDt);
       // The group's roster: it takes the list from the group module itself and writes only what has
       // changed — eight rows of number comparisons, nothing allocated, and nothing written at all
       // while nobody has moved.

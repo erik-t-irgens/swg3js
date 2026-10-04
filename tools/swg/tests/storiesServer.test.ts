@@ -266,7 +266,7 @@ if (typeof WebSocket === 'undefined') {
     // ---- the hail, and the admin's words ------------------------------------------------------------------
     const a = await open('Han', 'c-a');
     const hail = a.last('hail') as { dayMs?: number; story?: { v: number; sets: { name: string; hash: string }[]; tests: number } };
-    ok(hail.story?.v === 2 && hail.story.tests === 1 && hail.story.sets.map((s) => s.name).sort().join() === 'own,test' && hail.story.sets.every((s) => /^[0-9a-f]{64}$/.test(s.hash)), `the hail says the server runs jobs, with its sets by name and hash and the test set on (${JSON.stringify(hail.story?.sets.map((s) => s.name))})`);
+    ok(hail.story?.v === 3 && hail.story.tests === 1 && hail.story.sets.map((s) => s.name).sort().join() === 'own,test' && hail.story.sets.every((s) => /^[0-9a-f]{64}$/.test(s.hash)), `the hail says the server runs jobs, with its sets by name and hash and the test set on (${JSON.stringify(hail.story?.sets.map((s) => s.name))})`);
     a.send({ t: 'items', do: 'list', rows: [] });
     a.sync();
     await settle();

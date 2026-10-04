@@ -22,8 +22,11 @@
 /**
  * The waves of this pass this build has reached. Wave 4 moved it on as it wired the local host: credits,
  * items, Standing and Trust read, and money, things, experience, Standing, waypoints and words handed out.
+ * Wave 6 brought the conversations: a choice made, a node heard, an answer given, a person met or named
+ * read, and Trust under pressure, a charge, an introduction, a gesture and a choice made as actions, with
+ * the `talk` and `choice` steps. (Wave 5 was the server's, and added no word.)
  */
-export const BUILT_WAVE = 4;
+export const BUILT_WAVE = 6;
 
 export type ArgKind =
   | 'quest'

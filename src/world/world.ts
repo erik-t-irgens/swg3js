@@ -3826,13 +3826,20 @@ export class World {
    * Indoors the height is given (`at.y`, the floor's, from the room's own frame), exactly as the world's
    * standing people are given theirs: the manager's own ground lookup starts from the terrain under the
    * building, which is metres below a raised floor, and answers that there is no floor there at all.
+   *
+   * With `cast` it is one of a story's people (`src/world/storyStands.ts`): stood under the name the player
+   * knows them by and in their mood, talkable rather than a fixture (a fixture is refused a conversation),
+   * essential unless the story made them mortal, and never on the wire, since a story's people are this
+   * browser's player's alone. The budget may refuse one like any body; it is asked for again later.
    */
-  standMobile(id: string, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, worldId: string, essential = false): Mobile | null {
+  standMobile(id: string, at: { x: number; z: number; y?: number; heading?: number }, inside: boolean, worldId: string, essential = false, cast?: { name?: string; mood?: string | null }): Mobile | null {
     const entry = this.mobileCatalogue?.byId(id);
     if (!entry) return null;
     // A fixture: the one caller is the ticket collectors, which the memory budget must never keep off
     // their pads (`SpawnOpts.fixture`).
-    const m = this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, fixture: true });
+    const m = cast
+      ? this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, ...(cast.name ? { name: cast.name } : {}), ...(cast.mood ? { mood: cast.mood } : {}) })
+      : this.mobiles?.spawn(entry, at, { origin: 'spawned', inside, worldId, essential, fixture: true });
     return typeof m === 'string' || !m ? null : m;
   }
 

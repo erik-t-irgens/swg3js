@@ -15,10 +15,17 @@
 // the host's own and are filled in here.
 
 import { BOOK_LIMITS, applyChanges, type BookLimits, type StoryBook, type StoryChange } from './book.ts';
-import { plan, type Draft, type StoryCtx, type StoryEvent, type StoryResult } from './quests.ts';
+import { CIRCLE, plan, type Draft, type StoryCtx, type StoryEvent, type StoryResult } from './quests.ts';
 import { readAction, type StorySet } from './set.ts';
 import { watchdog } from './signals.ts';
+import { nodeView, talkOpenWork, talkPickWork, type NodeView, type TalkPending, type TalkState, type TalkTurn } from './talkRules.ts';
 import { viewOf, type StoryView } from './view.ts';
+
+/** A conversation's turn worked out and applied: what it changed and paid, and the node it reached. */
+export interface TalkResult {
+  r: StoryResult;
+  turn: TalkTurn;
+}
 
 /** What a host is told about the moment: everything in a `StoryCtx` but the character and the payer, which are its own. */
 export type HostCtx = Omit<StoryCtx, 'char' | 'payer'>;
@@ -32,8 +39,12 @@ export interface HostOptions {
   apply?: (ch: StoryChange[]) => void;
 }
 
-/** A plan with the watchdog run over what it left, so a step that can never be done is moved on at once. */
-function planned(book: StoryBook, lib: StorySet, ctx: StoryCtx, work: (d: Draft) => void, limits?: BookLimits): StoryResult {
+/**
+ * A plan with the watchdog run over what it left, so a step that can never be done is moved on at once.
+ * `after` reads the worked-out copy of the book once everything has run (a conversation's node is shown as
+ * the book stands after the node's own actions and whatever they set off).
+ */
+function planned(book: StoryBook, lib: StorySet, ctx: StoryCtx, work: (d: Draft) => void, limits?: BookLimits, after?: (d: Draft) => void): StoryResult {
   return plan(
     book,
     lib,
@@ -42,6 +53,7 @@ function planned(book: StoryBook, lib: StorySet, ctx: StoryCtx, work: (d: Draft)
       work(d);
       d.run();
       watchdog(d);
+      after?.(d);
     },
     limits,
   );
@@ -172,5 +184,46 @@ export class HostCore {
   /** What the interface is shown. */
   view(ctx: HostCtx): StoryView {
     return viewOf(this.book, this.lib, this.ctxOf(ctx));
+  }
+
+  /**
+   * One turn of a conversation, worked out on a copy, applied like any other batch, and the node it reached
+   * shown as the copy stood once everything had run. A circle in the data is stopped as any event's is, and
+   * then nothing is shown and nothing is kept.
+   */
+  private converse(ctx: HostCtx, work: (d: Draft) => TalkPending): TalkResult {
+    const out: { pending: TalkPending; view: NodeView | null } = { pending: { state: null, why: 'nothing was said' }, view: null };
+    const c = this.ctxOf(ctx);
+    const r = planned(
+      this.book,
+      this.lib,
+      c,
+      (d) => {
+        out.pending = work(d);
+      },
+      this.limits,
+      (d) => {
+        out.view = out.pending.state ? nodeView(d.book, this.lib, out.pending.state, d.ctx, d.tally) : null;
+      },
+    );
+    if (r.ch.length) {
+      if (this.applyBatch) this.applyBatch(r.ch);
+      else applyChanges(this.book, r.ch, this.limits);
+    }
+    if (r.why === CIRCLE) return { r, turn: { state: null, view: null, why: CIRCLE } };
+    const { pending, view } = out;
+    const turn: TalkTurn = { state: view ? pending.state : null, view, why: pending.why ?? (view ? null : r.why) };
+    if (pending.restarted) turn.restarted = true;
+    return { r, turn };
+  }
+
+  /** Open a conversation with somebody: where their tree starts for this character. */
+  talkOpen(speaker: string, ctx: HostCtx): TalkResult {
+    return this.converse(ctx, (d) => talkOpenWork(d, speaker));
+  }
+
+  /** An answer given where a conversation stands (`reply`), or the node going on by itself (null). */
+  talkPick(state: TalkState, reply: string | null, ctx: HostCtx): TalkResult {
+    return this.converse(ctx, (d) => talkPickWork(d, state, reply));
   }
 }

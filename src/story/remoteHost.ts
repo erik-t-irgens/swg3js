@@ -23,11 +23,18 @@
 // view says `read` nought): what the detectors see is dropped, and only the console's words go up, since the
 // admin's `reload` is how a set comes to be read.
 //
+// **Conversations (story 3).** A server whose hail says 3 or more keeps where a conversation stands for the
+// line and is asked for each turn (`talk`); the node it reaches comes back (`node`) and is handed to whoever
+// listens, exactly as this browser's own host hands its own. A server that says less is never asked, and the
+// window falls back on the game's own greeting there; so it does for somebody the server's view says has nothing
+// to say. An opening or an answer goes up no sooner than `talkGap` after the last, under the server's own
+// allowance, so a click through short nodes is paced here rather than refused there.
+//
 // Nothing in here touches the page, three or a socket: what it needs is handed in (`RemoteDeps`), so the node
 // tests drive it against a fake and against the relay itself. Every number here is ours.
 
 import type { StoryEvent } from './quests.ts';
-import type { HostAnswer, StoryHost } from './storyHost.ts';
+import type { HostAnswer, NodeWord, StoryHost } from './storyHost.ts';
 import { cleanStoryWord, type StoryAt, type StoryNoteDown } from './storyWire.ts';
 import type { StoryView } from './view.ts';
 
@@ -37,17 +44,26 @@ export const REMOTE_TUNE = {
   evPerSecond: 8,
   /** The most words that may wait their turn: past it the oldest event is dropped and counted. */
   queueMax: 60,
+  /**
+   * The least milliseconds between two conversation words that work something out (an opening or an answer;
+   * a close goes at once), under the server's four a second (`story.talkRate`) even when the two clocks'
+   * seconds do not line up: spaced this far apart no second holds more than three.
+   */
+  talkGap: 350,
 };
 
 /** Set any of those, clamped to what makes sense; the answer is the table as it now stands. */
 export function tuneRemote(o: Partial<typeof REMOTE_TUNE>): typeof REMOTE_TUNE {
   if (typeof o.evPerSecond === 'number' && Number.isFinite(o.evPerSecond)) REMOTE_TUNE.evPerSecond = Math.max(1, Math.min(20, Math.round(o.evPerSecond)));
   if (typeof o.queueMax === 'number' && Number.isFinite(o.queueMax)) REMOTE_TUNE.queueMax = Math.max(4, Math.min(1000, Math.round(o.queueMax)));
+  if (typeof o.talkGap === 'number' && Number.isFinite(o.talkGap)) REMOTE_TUNE.talkGap = Math.max(0, Math.min(5000, Math.round(o.talkGap)));
   return REMOTE_TUNE;
 }
 
 /** The story a server must say it holds before its jobs' words are spoken to it. */
 export const JOBS_STORY = 2;
+/** The story a server must say it holds before a conversation is asked of it. */
+export const TALK_STORY = 3;
 
 /** Why a server's jobs wait, when it holds the book and runs none (a relay from before the jobs). */
 export const JOBS_WAIT_OLD = 'this server keeps your story but runs no jobs yet, so your jobs wait';
@@ -86,12 +102,15 @@ export class RemoteHost implements StoryHost {
   /** Whether the server reads a story set at all, as its last view said. */
   private setsRead = true;
   private readonly listeners = new Set<(view: StoryView | null) => void>();
+  private readonly nodeListeners = new Set<(node: NodeWord) => void>();
   /** Words waiting their turn, and the kills that wait a tick before they join them. */
   private readonly queue: Record<string, unknown>[] = [];
   private readonly nextTick: Record<string, unknown>[] = [];
   private window = 0;
   private sentInWindow = 0;
-  readonly stats = { events: 0, sent: 0, dropped: 0, overflow: 0, ops: 0, views: 0, notes: 0, refusals: 0, lastWhy: '' };
+  /** When the last conversation word that works something out went up (`talkGap`), on the wall clock. */
+  private lastTalk = Number.NEGATIVE_INFINITY;
+  readonly stats = { events: 0, sent: 0, dropped: 0, overflow: 0, ops: 0, views: 0, notes: 0, refusals: 0, talks: 0, nodes: 0, lastWhy: '' };
 
   constructor(deps: RemoteDeps) {
     this.deps = deps;
@@ -225,7 +244,38 @@ export class RemoteHost implements StoryHost {
     return this.op({ t: 'story', do: 'admin', op: 'reload' });
   }
 
-  /** Send what is waiting, no more than the allowance a second. */
+  /**
+   * Whether a server can be asked to speak for somebody just now: it runs this character's jobs, says it holds
+   * conversations, and its last view says that person has something to say (`CastView.talk`). Somebody of the
+   * story with no conversation of their own is never asked for one, so the window does not wait a round trip
+   * on a server that can only say they have nothing to say.
+   */
+  canTalk(speaker: string): boolean {
+    if (!this.ready || this.deps.line().story < TALK_STORY || !this.setsRead) return false;
+    const v = this.view();
+    return !!v && v.cast.some((c) => c.id === speaker && c.talk);
+  }
+
+  /** A conversation's turn, asked of the server, which answers with the node it reached (`word`). */
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null): HostAnswer {
+    const why = this.whyNot() ?? (this.deps.line().story < TALK_STORY ? 'this server holds no conversations' : null);
+    if (why) return { ok: false, why };
+    this.stats.talks++;
+    this.push({ t: 'story', do: 'talk', op, speaker, ...(op === 'pick' && reply ? { reply } : {}), at: this.deps.at() });
+    return { ok: true };
+  }
+
+  onNode(fn: (node: NodeWord) => void): () => void {
+    this.nodeListeners.add(fn);
+    return () => this.nodeListeners.delete(fn);
+  }
+
+  /**
+   * Send what is waiting, no more than the allowance a second, and a conversation's opening or answer no sooner
+   * than `talkGap` after the last: one sent past the server's own allowance would be answered only with a
+   * refusal, so it waits its turn at the head of the queue instead (the words behind it wait with it, which keeps
+   * them in the order they were said).
+   */
   private flush(now: number): void {
     if (!this.ready) return;
     if (now - this.window >= 1000) {
@@ -233,7 +283,12 @@ export class RemoteHost implements StoryHost {
       this.sentInWindow = 0;
     }
     while (this.queue.length && this.sentInWindow < REMOTE_TUNE.evPerSecond) {
-      this.deps.send(this.queue.shift()!);
+      const m = this.queue[0];
+      const paced = m.do === 'talk' && m.op !== 'close';
+      if (paced && now - this.lastTalk < REMOTE_TUNE.talkGap) break;
+      this.queue.shift();
+      this.deps.send(m);
+      if (paced) this.lastTalk = now;
       this.sentInWindow++;
       this.stats.sent++;
     }
@@ -273,6 +328,16 @@ export class RemoteHost implements StoryHost {
     } else if (w.do === 'no' && w.of === 'job') {
       this.stats.refusals++;
       this.stats.lastWhy = w.why;
+    } else if (w.do === 'node') {
+      this.stats.nodes++;
+      if (w.why) this.stats.lastWhy = w.why;
+      for (const fn of this.nodeListeners) {
+        try {
+          fn({ speaker: w.speaker, view: w.view, why: w.why });
+        } catch (err) {
+          console.warn('story: a node listener failed', err);
+        }
+      }
     }
   }
 

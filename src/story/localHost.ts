@@ -25,7 +25,11 @@
 // **Paying.** The book records a reward before anything is handed over, so a reward is never paid twice
 // whatever happens between the two: credits go to the purse, a thing to the backpack (a character keeps
 // one of each, so one already owned is said rather than given twice), experience is recorded and pays for
-// nothing yet.
+// nothing yet. A conversation's price (`charge`) is taken out of the purse each time it is charged.
+//
+// **Conversations.** Where one stands is kept here (`TalkState`), for this browser alone and never in the
+// book, so a reload starts it cleanly; each node it reaches is handed to whoever listens (`onNode`) the
+// moment it is worked out, which is how the window hears this host and a server's alike.
 //
 // Every number here is ours.
 
@@ -34,7 +38,8 @@ import { STORY_TUNE } from './bookClient.ts';
 import { HostCore, type HostCtx } from './hostCore.ts';
 import type { PayOrder, StoryEvent, StoryNote, StoryResult } from './quests.ts';
 import { emptySet, joinSets, loadSet, type Issue, type StorySet } from './set.ts';
-import type { HostAnswer, StoryHost } from './storyHost.ts';
+import type { HostAnswer, NodeWord, StoryHost } from './storyHost.ts';
+import { treeFor, type TalkState } from './talkRules.ts';
 import { viewHash, type StoryView } from './view.ts';
 
 /** One file of a set, as whoever read it hands it over. */
@@ -72,6 +77,45 @@ export function jobsWait(l: JobsLine): string | null {
   return null;
 }
 
+/** What paying out of this browser's own purse and backpack asks of them (`payLocally`). */
+export interface LocalWallet {
+  /** Whether a server keeps this character's credits: then nothing here may put credits in or take them out. */
+  serverKeeps(): boolean;
+  /** What the character has. */
+  credits(): number;
+  /** Put credits in. */
+  give(n: number): void;
+  /** Take credits out, calling `then` only if they really went (with no server, before this returns). */
+  spend(n: number, then: () => void): void;
+  /** One thing into the backpack; false for one owned already, which is said rather than given twice. */
+  item(kind: 'wear' | 'weapon', id: string): boolean;
+}
+
+/**
+ * One payment of the story's, out of this browser's own purse and backpack: what the game's `pay` dep is. A
+ * price (`charge`) is taken only when the money is there and really moves, and false says it did not, which
+ * the host turns into "could not be spent" rather than "Spent"; credits are put in; a thing goes into the
+ * backpack. Never into or out of a purse a server keeps, where only its admin may put credits in and only its
+ * own answer may take them out.
+ */
+export function payLocally(order: PayOrder, w: LocalWallet): boolean {
+  if (order.charge) {
+    if (w.serverKeeps() || w.credits() < order.charge) return false;
+    let taken = false;
+    w.spend(order.charge, () => {
+      taken = true;
+    });
+    return taken;
+  }
+  if (order.credits) {
+    if (w.serverKeeps()) return false;
+    w.give(order.credits);
+    return true;
+  }
+  if (order.item) return w.item(order.item.kind, order.item.id);
+  return true;
+}
+
 export interface LocalDeps {
   /** The book in hand, or null with no character in play. */
   book(): StoryBook | null;
@@ -88,7 +132,7 @@ export interface LocalDeps {
    * False when the book would not take it (a server took it over a moment ago): then nothing is paid.
    */
   apply(ch: StoryChange[]): boolean;
-  /** One payment. False when nothing was handed over (a thing owned already). */
+  /** One payment (the game's is `payLocally`). False when nothing moved: a thing owned already, a price the purse would not give. */
   pay(order: PayOrder): boolean;
   /** One note for the message line; `given` is false for a thing that could not be handed over. */
   note(note: StoryNote, given: boolean): void;
@@ -137,9 +181,14 @@ export class LocalHost implements StoryHost {
   private sets: SetReport[] = [];
   /** Set when the book would not take the batch just worked out: what `finish` pays nothing for. */
   private refused = false;
+  /** Whether the last batch `finish` saw was refused, for a conversation's turn, which then shows nothing it did not keep. */
+  private refusedLast = false;
   /** Whether this browser held a book at the last tick. */
   private heldWas = false;
-  readonly stats = { events: 0, dropped: 0, batches: 0, refused: 0, paid: 0, notes: 0, unbuilt: 0, misses: 0, sweeps: 0, lastWhy: '' };
+  /** Where the conversation under way stands, or null: this browser's alone, never the book's. */
+  private talking: TalkState | null = null;
+  private readonly nodeListeners = new Set<(node: NodeWord) => void>();
+  readonly stats = { events: 0, dropped: 0, batches: 0, refused: 0, paid: 0, notes: 0, unbuilt: 0, misses: 0, sweeps: 0, talks: 0, picks: 0, lastWhy: '' };
 
   constructor(deps: LocalDeps) {
     this.deps = deps;
@@ -241,6 +290,8 @@ export class LocalHost implements StoryHost {
     });
     this.entered = false;
     this.dirty = true;
+    // A conversation is the book's it began on, and never carries over to another.
+    this.talking = null;
     // Read in as for a character not yet in the world, so a played clock begun by the settling keeps its
     // time; brought in at once when the character already is.
     this.finish(this.core.load({ ...this.ctx(), away: true }), true);
@@ -314,6 +365,7 @@ export class LocalHost implements StoryHost {
   private finish(r: StoryResult, refresh = false): HostAnswer {
     this.stats.unbuilt += r.unbuilt;
     this.stats.misses += r.misses;
+    this.refusedLast = this.refused;
     if (this.refused) {
       // The book did not take the batch, so nothing it records was recorded: nothing is paid or said, or a
       // reward could be paid that the book would pay again.
@@ -330,10 +382,11 @@ export class LocalHost implements StoryHost {
       if (this.deps.pay(o)) this.stats.paid++;
       else if (o.item) refused.add(`${o.item.kind}:${o.item.id}`);
       else if (o.credits) refused.add(`credits:${o.credits}`);
+      else if (o.charge) refused.add(`charge:${o.charge}`);
     }
     for (const n of r.notes) {
       this.stats.notes++;
-      const failed = (n.k === 'item' && refused.has(`${n.kind}:${n.id}`)) || (n.k === 'paid' && refused.has(`credits:${n.credits}`));
+      const failed = (n.k === 'item' && refused.has(`${n.kind}:${n.id}`)) || (n.k === 'paid' && refused.has(`credits:${n.credits}`)) || (n.k === 'charged' && refused.has(`charge:${n.credits}`));
       this.deps.note(n, !failed);
     }
     if (r.why) this.stats.lastWhy = r.why;
@@ -410,6 +463,63 @@ export class LocalHost implements StoryHost {
     return this.op((core, ctx) => core.run(actions, ctx));
   }
 
+  // ---- conversations --------------------------------------------------------------------------------------
+
+  /** Whether this browser can speak for somebody just now: it works the jobs out here, and they have a tree in the sets read. */
+  canTalk(speaker: string): boolean {
+    return !this.notNow() && !!treeFor(this.lib, speaker);
+  }
+
+  /**
+   * Open a conversation, give an answer (null lets a node go on by itself), or close it. The node it reaches
+   * is worked out on the book with the very rules a server uses, applied and paid as any batch is, and handed
+   * to every node listener before this answers; a refusal is handed over too, with no node and its reason.
+   */
+  talk(op: 'open' | 'pick' | 'close', speaker: string, reply: string | null = null): HostAnswer {
+    if (op === 'close') {
+      this.talking = null;
+      return { ok: true };
+    }
+    const core = this.ensure();
+    if (!core) {
+      const why = this.notNow() ?? 'nothing can be done just now';
+      this.tellNode({ speaker, view: null, why });
+      return { ok: false, why };
+    }
+    if (op === 'pick' && (!this.talking || this.talking.speaker !== speaker)) {
+      const why = 'you are not talking to them';
+      this.tellNode({ speaker, view: null, why });
+      return { ok: false, why };
+    }
+    const out = op === 'open' ? core.talkOpen(speaker, this.ctx()) : core.talkPick(this.talking!, reply, this.ctx());
+    if (op === 'open') this.stats.talks++;
+    else this.stats.picks++;
+    const answer = this.finish(out.r);
+    this.talking = this.refusedLast ? this.talking : out.turn.state;
+    this.tellNode({ speaker, view: this.refusedLast ? null : out.turn.view, why: this.refusedLast ? (answer.why ?? null) : out.turn.why });
+    return out.turn.why ? { ok: false, why: out.turn.why } : answer;
+  }
+
+  /** Where the conversation under way stands, for the console. */
+  get talkState(): TalkState | null {
+    return this.talking;
+  }
+
+  onNode(fn: (node: NodeWord) => void): () => void {
+    this.nodeListeners.add(fn);
+    return () => this.nodeListeners.delete(fn);
+  }
+
+  private tellNode(node: NodeWord): void {
+    for (const fn of this.nodeListeners) {
+      try {
+        fn(node);
+      } catch (err) {
+        console.warn('story: a node listener failed', err);
+      }
+    }
+  }
+
   // ---- the view ---------------------------------------------------------------------------------------
 
   view(): StoryView | null {
@@ -458,7 +568,10 @@ export class LocalHost implements StoryHost {
       quests: Object.keys(this.lib.quests).length,
       active,
       clock: this.offset,
-      view: this.current ? { quests: this.current.quests.length, watch: this.current.watch.length, waypoints: this.current.waypoints.length, objects: this.current.objects.length } : null,
+      talks: Object.keys(this.lib.talks).length,
+      cast: Object.keys(this.lib.cast).length,
+      talking: this.talking ? { ...this.talking, path: [...this.talking.path] } : null,
+      view: this.current ? { quests: this.current.quests.length, watch: this.current.watch.length, waypoints: this.current.waypoints.length, objects: this.current.objects.length, cast: this.current.cast.length } : null,
       stats: { ...this.stats },
     };
   }

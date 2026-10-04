@@ -5,7 +5,8 @@
 //
 // **How a book changes.** Only through `applyChanges`, which takes a batch of change records (a closed
 // list: `wpSet`, `wpEdit`, `wpOn`, `wpGone`, `qwpOn`, `trackWp`, `track` for the waypoints and the
-// tracker; `qState`, `step`, `flag`, `paid`, `xp`, `trackAdd`, `closed` for the jobs) and applies each
+// tracker; `qState`, `step`, `flag`, `paid`, `xp`, `trackAdd`, `closed` for the jobs; `heard`, `npcMet`
+// for the conversations) and applies each
 // one the book will take, in order, saying why for each it will not. The same batch on the same book
 // always comes out the same, which is what lets the server write a batch to its log and play it back
 // on start, and lets a browser apply the server's batch to its own copy and arrive at the same book.
@@ -37,6 +38,12 @@
 //
 // **A quest's waypoint switched by the player** is remembered both ways: `wpOff` for one switched off,
 // `qwpOn` for one switched on, so a waypoint whose step starts it off can be switched on and stays so.
+//
+// **Conversations** keep two sections and nothing else: `heard`, every node a character has reached and
+// every answer it has given (`<tree>#<node>`, `<tree>#<node>.<reply>`), with when it first happened, which is
+// what `heard(...)`, `chosen(...)` and a reply's `once` read; and `npcs`, the people it has met and been told
+// the name of (`met`, `named`), which a later wave adds Standing, Trust and the rest to. Where a conversation
+// stands is never in the book: a host keeps that for the line it is on, so a reload starts it cleanly.
 //
 // Every number here is ours.
 
@@ -78,8 +85,22 @@ export interface StoryBook {
   xp?: number;
   /** Standing (and, from a later wave, Trust and rank) on each of the three tracks. */
   tracks?: Partial<Record<Track, TrackRec>>;
+  /** Every node reached and answer given in a conversation (`<tree>#<node>`, `<tree>#<node>.<reply>`), with when it first was. */
+  heard?: Record<string, number>;
+  /** The people met (`<set>:cast/<id>`, `row:<key>`), and whether they gave their name. */
+  npcs?: Record<string, NpcRec>;
   /** Sections a later wave writes, kept as they came. */
   [section: string]: unknown;
+}
+
+/**
+ * A person as a character knows them: when they first spoke (`met`) and when they gave their name (`named`).
+ * A later wave adds Standing, Trust and access; what it adds is kept as it came.
+ */
+export interface NpcRec {
+  met?: number;
+  named?: number;
+  [field: string]: unknown;
 }
 
 /** A quest as a character holds it. `offered` waits on an answer; `stalled` waits on Drop or an author. */
@@ -164,9 +185,13 @@ export interface BookLimits {
   closed: number;
   /** Past runs a quest remembers the outcome of. */
   history: number;
+  /** Conversation nodes reached and answers given that a book remembers. */
+  heard: number;
+  /** People a character remembers meeting. */
+  npcs: number;
 }
 
-export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 3, wpOff: 4000, sectionNodes: 200000, quests: 4000, steps: 64, flags: 2000, paid: 20000, closed: 4000, history: 8 };
+export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 3, wpOff: 4000, sectionNodes: 200000, quests: 4000, steps: 64, flags: 2000, paid: 20000, closed: 4000, history: 8, heard: 20000, npcs: 4000 };
 
 /**
  * What a browser holds a book to that a server decided, rather than one it changes itself: the server's own
@@ -176,7 +201,7 @@ export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 
  * alone on top of it would then hand the server back a book shorter than the one it wrote down. A change a
  * browser makes itself is still held to `BOOK_LIMITS` when it is applied.
  */
-export const BACKSTOP_LIMITS: BookLimits = { waypoints: 10000, tracked: 100, wpOff: 100000, sectionNodes: 2000000, quests: 40000, steps: 640, flags: 20000, paid: 200000, closed: 40000, history: 8 };
+export const BACKSTOP_LIMITS: BookLimits = { waypoints: 10000, tracked: 100, wpOff: 100000, sectionNodes: 2000000, quests: 40000, steps: 640, flags: 20000, paid: 200000, closed: 40000, history: 8, heard: 200000, npcs: 40000 };
 
 /** One change. A closed list: anything else is not a change this book takes. */
 export type StoryChange =
@@ -192,8 +217,10 @@ export type StoryChange =
   | { k: 'flag'; name: string; value: number | string | null }
   | { k: 'paid'; key: string; at: number; by: 'server' | 'browser' | 'settle' }
   | { k: 'xp'; add: number }
-  | { k: 'trackAdd'; track: Track; standing: number }
-  | { k: 'closed'; quest: string };
+  | { k: 'trackAdd'; track: Track; standing: number; trust?: number }
+  | { k: 'closed'; quest: string }
+  | { k: 'heard'; key: string; at: number }
+  | { k: 'npcMet'; who: string; at: number; named?: boolean };
 
 /** The sections the first wave reads itself. Every other one is a section of its own (below) or a later wave's, kept as it came. */
 const KNOWN = ['v', 'char', 'rev', 'base', 'local', 'waypoints', 'nextWp', 'wpOff', 'trackWp', 'tracked'];
@@ -210,6 +237,10 @@ const FLAG_NAME = /^[A-Za-z0-9_.:/-]{1,64}$/;
 const PAID_KEY = /^[A-Za-z0-9_:./#-]{1,240}$/;
 /** A definition's hash as a run keeps it: sixteen hex digits, or nothing for a record from before it. */
 const DEF_HASH = /^([0-9a-f]{16})?$/;
+/** A conversation's node or answer as `heard` keeps it: `<tree>#<node>` or `<tree>#<node>.<reply>`. */
+const HEARD_KEY = /^[A-Za-z0-9_-]{1,24}:talk\/[A-Za-z0-9_.-]{1,96}#[A-Za-z0-9_-]{1,48}(\.[A-Za-z0-9_-]{1,48})?$/;
+/** A person a story names: one of a set's cast (`<set>:cast/<id>`), or one of the game's own people (`row:<key>`). */
+const WHO = /^(row:[A-Za-z0-9_.-]{1,96}|[A-Za-z0-9_-]{1,24}:cast\/[A-Za-z0-9_.-]{1,96})$/;
 /** The longest flag value, a reason or a parameter, in characters. */
 const WORDS_MAX = 200;
 /** How deep a later wave's section may nest before it is not well formed. */
@@ -236,6 +267,14 @@ export function isFlagName(x: unknown): x is string {
 
 export function isTrack(x: unknown): x is Track {
   return typeof x === 'string' && (TRACKS as readonly string[]).includes(x);
+}
+
+export function isHeardKey(x: unknown): x is string {
+  return typeof x === 'string' && HEARD_KEY.test(x);
+}
+
+export function isWho(x: unknown): x is string {
+  return typeof x === 'string' && WHO.test(x);
 }
 
 function count(x: unknown, least = 0): number {
@@ -430,6 +469,37 @@ function cleanTracks(x: unknown): Partial<Record<Track, TrackRec>> | undefined {
   return out;
 }
 
+function cleanHeard(x: unknown, limits: BookLimits): Record<string, number> | undefined {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const out = table<number>();
+  for (const k of Object.keys(x)) {
+    const at = time((x as Record<string, unknown>)[k]);
+    if (!isHeardKey(k) || at === undefined || sizeOf(out) >= limits.heard) continue;
+    out[k] = at;
+  }
+  return out;
+}
+
+function cleanNpcs(x: unknown, limits: BookLimits): Record<string, NpcRec> | undefined {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const out = table<NpcRec>();
+  for (const k of Object.keys(x)) {
+    const v = (x as Record<string, unknown>)[k];
+    if (!isWho(k) || !v || typeof v !== 'object' || Array.isArray(v) || sizeOf(out) >= limits.npcs) continue;
+    // What a later wave keeps on a person is kept when it is plain data, as any later section is.
+    const rest = plainCopy(v, 1, { left: 200 });
+    const row: NpcRec = { ...(rest && typeof rest === 'object' && !Array.isArray(rest) ? (rest as Record<string, unknown>) : {}) };
+    delete row.met;
+    delete row.named;
+    const met = time((v as Record<string, unknown>).met);
+    const named = time((v as Record<string, unknown>).named);
+    if (met !== undefined) row.met = met;
+    if (named !== undefined) row.named = named;
+    out[k] = row;
+  }
+  return out;
+}
+
 /**
  * The sections the jobs keep, each with its own cleaner. Read in the order a book has them, so a book read
  * back is the book written. A table with no prototype, because the key looked up in it is whatever the
@@ -443,6 +513,8 @@ const SECTIONS = table<(x: unknown, limits: BookLimits) => unknown>({
   xp: (x) => (typeof x === 'number' && Number.isFinite(x) && Math.abs(x) <= COUNT_MAX ? Math.floor(x) : undefined),
   tracks: cleanTracks,
   qwpOn: cleanQwpOn,
+  heard: cleanHeard,
+  npcs: cleanNpcs,
 });
 
 /** A new, empty book. */
@@ -567,10 +639,26 @@ export function cleanChange(x: unknown): StoryChange | null {
     }
     case 'xp':
       return typeof o.add === 'number' && Number.isInteger(o.add) && Math.abs(o.add) <= 1e9 ? { k: 'xp', add: o.add } : null;
-    case 'trackAdd':
-      return isTrack(o.track) && typeof o.standing === 'number' && Number.isFinite(o.standing) && Math.abs(o.standing) <= 1e9 ? { k: 'trackAdd', track: o.track, standing: o.standing } : null;
+    case 'trackAdd': {
+      if (!isTrack(o.track) || typeof o.standing !== 'number' || !Number.isFinite(o.standing) || Math.abs(o.standing) > 1e9) return null;
+      const out: { k: 'trackAdd'; track: Track; standing: number; trust?: number } = { k: 'trackAdd', track: o.track, standing: o.standing };
+      if (o.trust !== undefined) {
+        if (typeof o.trust !== 'number' || !Number.isFinite(o.trust) || Math.abs(o.trust) > 1e9) return null;
+        out.trust = o.trust;
+      }
+      return out;
+    }
     case 'closed':
       return isQuestId(o.quest) ? { k: 'closed', quest: o.quest } : null;
+    case 'heard': {
+      const at = time(o.at);
+      return isHeardKey(o.key) && at !== undefined ? { k: 'heard', key: o.key, at } : null;
+    }
+    case 'npcMet': {
+      const at = time(o.at);
+      if (!isWho(o.who) || at === undefined) return null;
+      return o.named === true ? { k: 'npcMet', who: o.who, at, named: true } : { k: 'npcMet', who: o.who, at };
+    }
     default:
       return null;
   }
@@ -622,6 +710,15 @@ export function whyNot(book: StoryBook, c: StoryChange, limits: BookLimits = BOO
     case 'closed':
       if (book.closed?.includes(c.quest)) return 'that job is already closed';
       return (book.closed?.length ?? 0) >= limits.closed ? `a character keeps ${limits.closed} closed jobs` : null;
+    case 'heard':
+      // Only the first time is kept: what `heard` and `once` read is that it happened at all.
+      if (ownOf(book.heard, c.key) !== undefined) return 'that is heard already';
+      return sizeOf(book.heard) >= limits.heard ? `a book remembers ${limits.heard} things heard` : null;
+    case 'npcMet': {
+      const had = ownOf(book.npcs, c.who);
+      if (had && had.met !== undefined && (!c.named || had.named !== undefined)) return 'that person is known already';
+      return !had && sizeOf(book.npcs) >= limits.npcs ? `a character remembers ${limits.npcs} people` : null;
+    }
   }
 }
 
@@ -693,12 +790,25 @@ function applyOne(book: StoryBook, c: StoryChange): void {
     case 'trackAdd': {
       const tracks = (book.tracks ??= table<TrackRec>());
       const t = tracks[c.track] ?? { standing: 0, trust: 0 };
-      tracks[c.track] = { ...t, standing: t.standing + c.standing };
+      tracks[c.track] = { ...t, standing: t.standing + c.standing, trust: (t.trust ?? 0) + (c.trust ?? 0) };
       return;
     }
     case 'closed':
       (book.closed ??= []).push(c.quest);
       return;
+    case 'heard':
+      (book.heard ??= table<number>())[c.key] = c.at;
+      return;
+    case 'npcMet': {
+      // A person's record is replaced, never changed in place, as the jobs' are (`draftOf`).
+      const npcs = (book.npcs ??= table<NpcRec>());
+      const had = npcs[c.who];
+      const row: NpcRec = { ...had };
+      row.met ??= c.at;
+      if (c.named) row.named ??= c.at;
+      npcs[c.who] = row;
+      return;
+    }
   }
 }
 
@@ -747,6 +857,8 @@ export function draftOf(book: StoryBook): StoryBook {
   if (book.closed) d.closed = [...book.closed];
   if (book.tracks) d.tracks = table(book.tracks as Record<string, TrackRec>);
   if (book.qwpOn) d.qwpOn = [...book.qwpOn];
+  if (book.heard) d.heard = table(book.heard);
+  if (book.npcs) d.npcs = table(book.npcs);
   return d;
 }
 
@@ -791,7 +903,7 @@ export function markPaidBy(book: StoryBook, by: 'server' | 'browser' | 'settle')
 }
 
 /** What a book holds, in numbers: what `__debug.story()` and the server's status page print. */
-export function bookSummary(book: StoryBook | null): { char: string; rev: number; base: number; local: number; waypoints: number; on: number; trackWp: string | null; tracked: number; wpOff: number; quests: number; active: number; flags: number; xp: number; sections: string[] } | null {
+export function bookSummary(book: StoryBook | null): { char: string; rev: number; base: number; local: number; waypoints: number; on: number; trackWp: string | null; tracked: number; wpOff: number; quests: number; active: number; flags: number; xp: number; heard: number; met: number; sections: string[] } | null {
   if (!book) return null;
   let on = 0;
   for (const w of book.waypoints) if (w.on) on++;
@@ -811,6 +923,8 @@ export function bookSummary(book: StoryBook | null): { char: string; rev: number
     active,
     flags: sizeOf(book.flags),
     xp: book.xp ?? 0,
+    heard: sizeOf(book.heard),
+    met: sizeOf(book.npcs),
     sections: Object.keys(book).filter((k) => !KNOWN.includes(k)),
   };
 }

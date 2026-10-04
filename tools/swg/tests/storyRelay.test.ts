@@ -119,7 +119,7 @@ if (typeof WebSocket === 'undefined') {
     // ---- the hail --------------------------------------------------------------------------------------------
     const a = await open('Han', 'c-a');
     const hail = a.last('hail') as Msg;
-    ok(hail.v === 5 && (hail.story as Msg)?.v === 2 && Array.isArray((hail.story as Msg).sets) && (hail.story as Msg).tests === 0, `the relay speaks the fifth wire and its hail says it holds a story, and runs its jobs (${JSON.stringify(hail.story)})`);
+    ok(hail.v === 5 && (hail.story as Msg)?.v === 3 && Array.isArray((hail.story as Msg).sets) && (hail.story as Msg).tests === 0, `the relay speaks the fifth wire and its hail says it holds a story, runs its jobs and plays its conversations (${JSON.stringify(hail.story)})`);
     ok(a.got.filter((m) => m.t === 'welcome').length === 1, 'and the welcome is still sent once and only once');
 
     // ---- a character the server has never seen ---------------------------------------------------------------

@@ -1,0 +1,13 @@
+// A job given by the clerk's conversation and done in it: the talk step waits for the clerk's conversation to
+// reach its `finished` node (`talked:test:cast/test-clerk#finished`), then the reward ends it.
+{
+  "id": "talk",
+  "title": "TEST: talk to the clerk",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }, { "kind": "talk", "who": "cast/test-clerk" }],
+  "start": ["report"],
+  "steps": {
+    "report": { "type": "talk", "who": "cast/test-clerk", "node": "finished", "objective": "TEST: tell the clerk the job is done", "next": ["paid"] },
+    "paid": { "type": "reward", "reward": { "credits": 5, "xp": 1 }, "ends": "done" },
+  },
+}

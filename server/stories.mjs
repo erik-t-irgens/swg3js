@@ -62,6 +62,16 @@
 // A console signal: only the admin's. Timers: the server's own clock. Everything else a job does, the step
 // machine itself refuses when it may not.
 //
+// **Conversations (story 3).** A line asks to open a conversation with somebody, gives answers and closes it
+// (`talk`), no more than `talkRate` openings and answers a second (a close is never counted, and one over the
+// allowance is answered with no node and why); the server keeps where it stands for that line (`line.talk`)
+// and never in the book, so a reload or a dropped line starts it again at its entry, and a set read again
+// under somebody mid-conversation starts it again there too. A cast member with a place in the story is
+// spoken to only from within `talkReach` and `talkSlack` of it, on its world, while its `stand` holds; one
+// of the game's own people is taken on the browser's word. Each turn runs through the same host loop as
+// everything else -- written down, paid (a `charge` through the purse's own spend), its notes and view sent
+// -- and the node it reached goes back to that line alone (`node`).
+//
 // **In pieces.** A browser's input is dropped past 64 KB a second, so a book goes up in pieces
 // (`src/story/storyWire.ts`) and is put back together here, no larger than `offerMax` and with no longer
 // than `offerWait` between one piece and the next. It comes down in pieces of the same size.
@@ -80,18 +90,19 @@
 import { BACKSTOP_LIMITS, BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, emptyBook, isCharacterId, markPaidBy, ownOf, whyNot } from '../src/story/book.ts';
 import { HostCore } from '../src/story/hostCore.ts';
 import { noteForWire } from '../src/story/notes.ts';
-import { awaits, placeOf, rewardOfKey, whyNotGrant } from '../src/story/quests.ts';
+import { awaits, evalCond, placeOf, rewardOfKey, whyNotGrant } from '../src/story/quests.ts';
 import { emptySet, joinSets, loadSet } from '../src/story/set.ts';
-import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord } from '../src/story/storyWire.ts';
+import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, nodeWord } from '../src/story/storyWire.ts';
 import { viewHash } from '../src/story/view.ts';
 import { gameToRawX, gameToRawZ, isQuestWaypoint } from '../src/story/waypoints.ts';
 
 /**
- * The story this server holds, as its hail says it: 1 was the book and its waypoints; 2 is the jobs, run
- * and paid here. A browser never says a story word to a server whose hail does not carry one, and the jobs'
- * words only to one that says 2, so a newer browser never asks an older server for a word it does not know.
+ * The story this server holds, as its hail says it: 1 was the book and its waypoints; 2 the jobs, run and
+ * paid here; 3 is the conversations, played here. A browser never says a story word to a server whose hail
+ * does not carry one, the jobs' words only to one that says 2, and a conversation only to one that says 3,
+ * so a newer browser never asks an older server for a word it does not know.
  */
-export const STORY_WIRE_VERSION = 2;
+export const STORY_WIRE_VERSION = 3;
 
 /** Every number this file invents. None of them is from the game. */
 export const STORY_TUNING = {
@@ -115,8 +126,12 @@ export const STORY_TUNING = {
   evRate: 10,
   /** Metres past a step's own radius within which an arrival is believed: a position comes up ten times a second and the player keeps walking. */
   arriveSlack: 25,
-  /** Metres past an object's reach within which using it is believed, for the same reason. */
+  /** Metres past an object's reach, or a cast member's `talkReach`, within which using it or speaking to them is believed, for the same reason. */
   talkSlack: 6,
+  /** Metres from a cast member's place within which a browser speaks to them (the browser's own reach, `TALK_TUNE.reach`). */
+  talkReach: 3,
+  /** Conversation words (an opening or an answer; a close is never counted) one browser may send in a second. */
+  talkRate: 4,
   /** Metres round an object's point the browser looks for the thing of its template in (`STAND_TUNE.find`), which a use is measured past. */
   useFind: 30,
   /**
@@ -144,6 +159,9 @@ export const STORY_TUNING = {
   /** Steps one job's record may hold. */
   stepsMax: 64,
 };
+
+/** What an opening or an answer over the allowance is told, as its node's reason. */
+export const TALK_TOO_OFTEN = 'too much said at once: wait a moment';
 
 /** A number off the tuning, held between nought and a cap; the fallback when it is not a number at all. */
 function capped(v, fallback, cap) {
@@ -327,7 +345,7 @@ export class Stories {
     this.wanting = new Map();
     /** @type {Map<number, Reassembly>} a book coming up, by line */
     this.offers = new Map();
-    /** @type {Map<number, { wp: { at: number, lines: number }, sync: { at: number, lines: number }, ev: { at: number, lines: number } }>} each line's allowances */
+    /** @type {Map<number, { wp: { at: number, lines: number }, sync: { at: number, lines: number }, ev: { at: number, lines: number }, talk: { at: number, lines: number } }>} each line's allowances */
     this.windows = new Map();
     /** @type {Map<number, object>} each line whose book is settled here, and its jobs */
     this.lines = new Map();
@@ -344,7 +362,7 @@ export class Stories {
     this.guarded = 0;
     this.changes = 0;
     this.refusals = 0;
-    this.stats = { events: 0, refused: 0, batches: 0, lazy: 0, flushed: 0, paidCredits: 0, paidItems: 0, settled: 0, settleCredits: 0, settleItems: 0, owedLater: 0, parked: 0, sweeps: 0, sweepMs: 0, views: 0, lastWhy: '' };
+    this.stats = { events: 0, refused: 0, batches: 0, lazy: 0, flushed: 0, paidCredits: 0, paidItems: 0, charged: 0, settled: 0, settleCredits: 0, settleItems: 0, owedLater: 0, parked: 0, sweeps: 0, sweepMs: 0, views: 0, talks: 0, lastWhy: '' };
     /** Why events were refused, by kind, for the status page. */
     this.refusedBy = Object.create(null);
   }
@@ -433,7 +451,7 @@ export class Stories {
   windowsOf(session) {
     let w = this.windows.get(session);
     if (!w) {
-      w = { wp: { at: 0, lines: 0 }, sync: { at: 0, lines: 0 }, ev: { at: 0, lines: 0 } };
+      w = { wp: { at: 0, lines: 0 }, sync: { at: 0, lines: 0 }, ev: { at: 0, lines: 0 }, talk: { at: 0, lines: 0 } };
       this.windows.set(session, w);
     }
     return w;
@@ -477,6 +495,7 @@ export class Stories {
     if (word.do === 'sync') return this.sync(c, word);
     if (word.do === 'offer') return this.offer(c, word);
     if (word.do === 'wp') return this.waypoint(c, word);
+    if (word.do === 'talk') return this.talk(c, word);
     // The jobs' words: each counts against one allowance, and none is heard from a line whose book is not
     // settled here (it is being settled, or the line has only just been taken over by another browser).
     if (!mayStory(this.windowsOf(c.id).ev, Date.now(), this.tuning.evRate)) return { ok: false, why: 'too often', tell: [] };
@@ -631,8 +650,9 @@ export class Stories {
       if (row.by !== 'browser') continue;
       const r = rewardOfKey(key, this.lib);
       if (!r) continue;
-      const rec = ownOf(offered.quests, r.quest);
-      if (!rec || r.n > rec.completions + 1) continue;
+      // A conversation's reward is once to a character, with no job's completion for it to reach.
+      const rec = r.talk ? null : ownOf(offered.quests, r.quest);
+      if (!r.talk && (!rec || r.n > rec.completions + 1)) continue;
       if (r.credits > room) {
         this.stats.owedLater++;
         continue;
@@ -679,11 +699,13 @@ export class Stories {
     for (const [session, other] of this.lines) if (session !== c.id && other.character === c.character) this.lines.delete(session);
     let line = this.lines.get(c.id);
     if (!line || line.character !== c.character) {
-      line = { session: c.id, character: c.character, c, core: null, ready: false, entered: false, unread: false, hash: '', here: null, room: null, hour: null, hourAt: 0, areas: new Set(), kills: new Map(), killTimes: [] };
+      line = { session: c.id, character: c.character, c, core: null, ready: false, entered: false, unread: false, hash: '', here: null, room: null, hour: null, hourAt: 0, areas: new Set(), kills: new Map(), killTimes: [], talk: null };
       this.lines.set(c.id, line);
     }
     line.c = c;
     line.core = null;
+    // A conversation is the book's it began on: a book settled again starts none.
+    line.talk = null;
     line.entered = false;
     line.hash = '';
     line.ready = true;
@@ -1019,6 +1041,58 @@ export class Stories {
   }
 
   /**
+   * A conversation's word from a line: open one with somebody, give an answer (or let a node go on), close it.
+   * Not from a line whose book is not settled here; a cast member only from within reach of where the story
+   * stands them, on their world, while their `stand` holds (checked again at every answer, since a player may
+   * walk off); and no faster than `talkRate`. The node reached goes back to the line, or none with why.
+   */
+  talk(c, word) {
+    const node = (why) => ({ ok: false, why, tell: [{ to: c.id, msg: nodeWord(word.speaker, null, why) }] });
+    const line = this.lines.get(c.id);
+    // Closing works nothing out and only lets go of what the line holds, so it is never counted against the
+    // allowance: a close spent there would cost the very next opening.
+    if (word.op === 'close') {
+      if (line && line.character === c.character) line.talk = null;
+      return { ok: true, tell: [] };
+    }
+    // Over the allowance an opening or an answer is answered with no node and why, as every other refusal
+    // here is, so the window says so at once rather than waiting out its own clock in silence.
+    if (!mayStory(this.windowsOf(c.id).talk, Date.now(), this.tuning.talkRate)) return { ...node(TALK_TOO_OFTEN), why: 'too often' };
+    if (!line || line.character !== c.character || !line.ready) return node('this character’s story is being settled with the server');
+    line.c = c;
+    this.takeAt(line, word.at);
+    const core = this.coreOf(line);
+    if (!core) return node('no story is read here');
+    if (word.op === 'pick' && (!line.talk || line.talk.speaker !== word.speaker)) return node('you are not talking to them');
+    const why = this.whyNotTalk(line, word.speaker);
+    if (why) {
+      line.talk = null;
+      return node(why);
+    }
+    const out = word.op === 'open' ? core.talkOpen(word.speaker, this.ctxOf(line)) : core.talkPick(line.talk, word.reply, this.ctxOf(line));
+    this.stats.talks++;
+    line.talk = out.turn.state;
+    const tell = [];
+    this.finish(line, out.r, tell);
+    tell.push({ to: line.session, msg: nodeWord(word.speaker, out.turn.view, out.turn.why) });
+    return { ok: !out.turn.why, why: out.turn.why ?? undefined, tell };
+  }
+
+  /** Why a line may not speak to somebody just now, or null. A game person (`row:`) is taken on the browser's word. */
+  whyNotTalk(line, speaker) {
+    if (speaker.startsWith('row:')) return null;
+    const cast = Object.hasOwn(this.lib.cast, speaker) ? this.lib.cast[speaker] : null;
+    if (!cast) return 'there is nobody of that name in this story';
+    const world = this.worldOf(line.c);
+    if (!world || cast.world !== world) return 'they are not on the world you stand on';
+    const ctx = { ...this.ctxOf(line), char: line.character, payer: 'server' };
+    if (cast.stand && !evalCond(cast.stand, line.core.book, ctx)) return 'they are not here just now';
+    const own = this.ownPlace(line.c, world);
+    if (own && Math.hypot(own[0] - cast.at[0], own[1] - cast.at[1]) > this.tuning.talkReach + this.tuning.talkSlack) return 'you are too far from them to talk';
+    return null;
+  }
+
+  /**
    * The console's own operations, which only the world's admin may use, and only on their own character:
    * read the sets again, grant or offer a job, put a held one back, finish a step, raise a signal, and move
    * the story's clock on (for every character, since it is the server's one clock).
@@ -1064,9 +1138,10 @@ export class Stories {
       if (this.pay(line, o, tell)) continue;
       if (o.item) failed.add(`${o.item.kind}:${o.item.id}`);
       else if (o.credits) failed.add(`credits:${o.credits}`);
+      else if (o.charge) failed.add(`charge:${o.charge}`);
     }
     for (const n of r.notes) {
-      const not = (n.k === 'item' && failed.has(`${n.kind}:${n.id}`)) || (n.k === 'paid' && failed.has(`credits:${n.credits}`));
+      const not = (n.k === 'item' && failed.has(`${n.kind}:${n.id}`)) || (n.k === 'paid' && failed.has(`credits:${n.credits}`)) || (n.k === 'charged' && failed.has(`charge:${n.credits}`));
       tell.push({ to: line.session, msg: { t: 'story', do: 'note', note: noteForWire(n, this.lib), given: not ? 0 : 1 } });
     }
     if (r.why) this.stats.lastWhy = r.why;
@@ -1092,8 +1167,15 @@ export class Stories {
     tell.push({ to: line.session, msg: { t: 'story', do: 'view', view, off: this.offset, read } });
   }
 
-  /** One payment: credits through the purse, a thing through the ledger. False when nothing was handed over. */
+  /** One payment: credits through the purse, a thing through the ledger, a price through the purse's own spend. False when nothing was handed over. */
   pay(line, o, tell) {
+    if (o.charge) {
+      if (!this.purses) return false;
+      const r = this.purses.spend(line.character, o.charge, line.session, 'that');
+      tell.push(...r.tell);
+      if (r.ok) this.stats.charged += o.charge;
+      return r.ok;
+    }
     if (o.credits) {
       if (!this.purses) return false;
       const r = this.purses.give(line.character, o.credits, line.session);
@@ -1280,6 +1362,9 @@ export class Stories {
       sets: this.sets.map((s) => ({ ...s })),
       tests: this.tests,
       jobs: Object.keys(this.lib.quests).length,
+      talks: Object.keys(this.lib.talks).length,
+      cast: Object.keys(this.lib.cast).length,
+      talking: [...this.lines.values()].filter((l) => l.talk).length,
       books,
       active,
       waypoints,

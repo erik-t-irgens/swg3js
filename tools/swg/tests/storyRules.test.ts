@@ -365,7 +365,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
     { id: 'first', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:first', ends: 'won' } }, outcomes: { won: {} } },
     { id: 'second', title: 'TEST', givers: [{ kind: 'chain', after: 'first', outcome: 'won' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:second', failOn: ['death'], ends: 'done' } } },
     { id: 'dice', title: 'TEST', givers: [{ kind: 'debug' }], start: ['never', 'always'], steps: { never: { type: 'nothing', chance: 0 }, always: { type: 'signal', signal: 'debug:dice', chance: 1, ends: 'done' } } },
-    { id: 'later', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:later', do: { done: ['gesture(emt_wave1)'] }, next: [{ to: 'rich', when: 'met(cast/somebody)' }, { to: 'poor', when: 'call(test.always)' }, { to: 'nobody', when: 'call(nothing.here)' }] }, rich: { type: 'nothing' }, poor: { type: 'nothing' }, nobody: { type: 'nothing' } } },
+    { id: 'later', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:later', do: { done: ['promote(empire)'] }, next: [{ to: 'rich', when: 'alive(cast/somebody)' }, { to: 'poor', when: 'call(test.always)' }, { to: 'nobody', when: 'call(nothing.here)' }] }, rich: { type: 'nothing' }, poor: { type: 'nothing' }, nobody: { type: 'nothing' } } },
     { id: 'circle', title: 'TEST', givers: [{ kind: 'debug' }], start: ['a'], steps: { a: { type: 'nothing', loop: true, next: ['b'] }, b: { type: 'nothing', loop: true, next: ['a'] } } },
   ]);
   const h = hostOf(lib);

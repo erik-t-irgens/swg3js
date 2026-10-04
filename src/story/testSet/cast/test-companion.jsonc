@@ -1,0 +1,11 @@
+// The companion a later wave makes of somebody: until then stood as any cast member is, with nothing of
+// their own to say, so the game's own greeting and answers are what they have.
+{
+  "id": "test-companion",
+  "name": "TEST COMPANION",
+  "body": "dressed_armorsmith_trainer_01",
+  "world": "tatooine",
+  "at": [3484, -4701],
+  "heading": 180,
+  "companion": true,
+}

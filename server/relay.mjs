@@ -149,6 +149,8 @@
 //   { t: 'story', do: 'q', op: accept|decline|drop|restart|track|untrack, quest }   (story 2) a job, of this character's own
 //   { t: 'story', do: 'admin', op: reload|grant|offer|unstick|complete|signal|clock, quest?, step?, name?, ms? }
 //                                                          (story 2) the console's own operations, the admin's alone
+//   { t: 'story', do: 'talk', op: open|pick|close, speaker, reply? }   (story 3) a conversation: open one with somebody,
+//                                                          give an answer (none lets a node go on by itself), close it
 // Server to browser:
 //   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story }   sent the instant the socket opens, before anything is
 //                                                          said; `story` is { v, sets, tests }, the story this server
@@ -225,6 +227,8 @@
 //                                            far the admin moved the story's clock on, and whether a story set is read
 //                                            here at all (0: none, and every job waits)
 //   { t: 'story', do: 'note', note, given }   (story 2) a fact for the message line, whose words the browser makes
+//   { t: 'story', do: 'node', speaker, tree?, node?, name?, strings?, lines?, replies?, next?, end?, why? }   (story 3) the
+//                                            node a conversation reached, to the line that asked and nobody else, or none with why
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,

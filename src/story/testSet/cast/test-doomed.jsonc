@@ -1,0 +1,13 @@
+// Somebody the story may one day let die (a later wave's `kill`): mortal, so not essential. Speaks the
+// branching test conversation, which also makes the test choice.
+{
+  "id": "test-doomed",
+  "name": "TEST DOOMED",
+  "unknownAs": "TEST: a stranger",
+  "body": "dressed_architect_trainer_01",
+  "world": "tatooine",
+  "at": [3470, -4700],
+  "heading": 0,
+  "tree": "talk/test-branching",
+  "mortal": true,
+}

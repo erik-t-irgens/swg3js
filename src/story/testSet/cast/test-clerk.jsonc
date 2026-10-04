@@ -1,0 +1,14 @@
+// A clerk who stands in the test square (raw 3482, -4690, a few metres off the mission terminal) and speaks
+// the clerk's test conversation. Called "TEST: a clerk" until asked who they are. The body is a dressed
+// businessman out of the creature catalogue.
+{
+  "id": "test-clerk",
+  "name": "TEST CLERK",
+  "unknownAs": "TEST: a clerk",
+  "body": "dressed_businessman_human_male_01",
+  "world": "tatooine",
+  "at": [3482, -4690],
+  "heading": 90,
+  "mood": "conversation",
+  "tree": "talk/test-clerk",
+}
