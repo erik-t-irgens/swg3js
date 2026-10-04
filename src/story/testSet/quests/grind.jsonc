@@ -1,0 +1,19 @@
+// Standing ground out: taken again as often as it is asked for, each time 20 freelance Standing, capped at 40
+// a real day, so the third run in a day gives none. Its first run has the freelance track take the character on,
+// which reaches TEST RUNG 1 by itself. Repeatable, so it may move neither Trust nor close anything.
+{
+  "id": "grind",
+  "title": "TEST: grind for standing",
+  "track": "freelance",
+  "repeat": { "every": "always", "standingPerRealDay": 40 },
+  "givers": [{ "kind": "debug" }],
+  "start": ["work"],
+  "steps": {
+    "work": {
+      "type": "reward",
+      "do": { "start": ["activate(freelance, test-cell)"] },
+      "reward": { "standing": [{ "track": "freelance", "add": 20 }] },
+      "ends": "done",
+    },
+  },
+}

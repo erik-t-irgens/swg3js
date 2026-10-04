@@ -29,7 +29,7 @@
 //     once, refused when it cannot be met and never taken out of (nor credits put into) a purse a server keeps;
 //   - a conversation through this host: refused with no conversation open or to somebody else, its nodes handed
 //     to the listener before the call returns, a price charged out of the purse every time it is chosen and
-//     said, and one the purse would not give said as not spent;
+//     said, and one the purse would not give said as not spent; a fine the purse would not give owed instead;
 //   - a document through this host: handed to the window, frozen by its words' hash in the store handed in or in
 //     the host itself, read again as that very page, and read to its end; and a conversation's transcript
 //     written here as its window closes, once.
@@ -363,7 +363,7 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
         givers: [{ kind: 'debug' }],
         start: ['work'],
         steps: {
-          work: { type: 'signal', signal: 'debug:work', objective: 'TEST: work', do: { done: ['pay(7)', 'xp(2)', 'standing(empire, 3)', 'standing(rebellion, -2)', 'give(weapon, pistol_dl44, 2)'] }, next: ['again'] },
+          work: { type: 'signal', signal: 'debug:work', objective: 'TEST: work', do: { done: ['pay(7)', 'xp(2)', 'standing(empire, 3)', 'standing(rebellion, 5)', 'standing(rebellion, -2)', 'give(weapon, pistol_dl44, 2)', 'standing(freelance, -4)'] }, next: ['again'] },
           again: { type: 'signal', signal: 'debug:again', objective: 'TEST: again', loop: true, next: ['work'] },
         },
       }),
@@ -374,13 +374,13 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   g.host.grant('own:wages');
   g.host.event({ k: 'signal', name: 'debug:work' });
   const give = g.paid.find((p) => p.item);
-  ok(g.purse.credits === credits + 7 && g.client.book!.xp === 2 && g.client.book!.tracks?.empire?.standing === 3 && g.client.book!.tracks?.rebellion?.standing === -2, 'pay, xp and standing each hand over what they say, a loss of Standing included');
-  ok(give?.item?.kind === 'weapon' && give.item.id === 'pistol_dl44' && give.item.n === 2 && give.key === 'own:wages#1#do:work.done.4', `give hands over as many as it says, keyed by where it is written (${give?.key})`);
+  ok(g.purse.credits === credits + 7 && g.client.book!.xp === 2 && g.client.book!.tracks?.empire?.standing === 3 && g.client.book!.tracks?.rebellion?.standing === 3 && g.client.book!.tracks?.freelance === undefined, 'pay, xp and standing each hand over what they say, a loss of Standing included, and a loss never takes a track below nought');
+  ok(give?.item?.kind === 'weapon' && give.item.id === 'pistol_dl44' && give.item.n === 2 && give.key === 'own:wages#1#do:work.done.5', `give hands over as many as it says, keyed by where it is written (${give?.key})`);
   ok(g.said.includes('Received pistol dl44 ×2') && g.said.includes('Empire standing rose') && g.said.includes('Rebellion standing fell') && g.said.includes('Paid 7 credits'), 'and the message line says the thing and how many, and which way each Standing moved');
   g.host.event({ k: 'signal', name: 'debug:again' });
   ok(g.stepOf('own:wages', 'work')?.state === 'active', 'looped round to the paying step in the same run');
   g.host.event({ k: 'signal', name: 'debug:work' });
-  ok(g.purse.credits === credits + 7 && g.paid.length === 2 && g.client.book!.xp === 2 && g.client.book!.tracks?.empire?.standing === 3 && g.client.book!.tracks?.rebellion?.standing === -2, 'and done again: nothing more is paid, given, recorded or moved');
+  ok(g.purse.credits === credits + 7 && g.paid.length === 2 && g.client.book!.xp === 2 && g.client.book!.tracks?.empire?.standing === 3 && g.client.book!.tracks?.rebellion?.standing === 3, 'and done again: nothing more is paid, given, recorded or moved');
 }
 
 // ---- a waypoint a story sets is the story's: set once, and taken away without touching the player's own -------------
@@ -657,7 +657,7 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   const g = game();
   const nodes: NodeWord[] = [];
   g.host.onNode((n) => nodes.push(n));
-  ok(g.host.canTalk(CLERK) && !g.host.canTalk('test:cast/test-companion') && !g.host.canTalk('test:cast/nobody'), 'this browser speaks for a cast member with a conversation in the sets it read, and for nobody else');
+  ok(g.host.canTalk(CLERK) && g.host.canTalk('test:cast/test-companion') && !g.host.canTalk('row:abc') && !g.host.canTalk('test:cast/nobody'), 'this browser speaks for a cast member with a conversation in the sets it read (the companion now has one), and for nobody else');
   const stray = g.host.talk('pick', CLERK, 'pay');
   ok(!stray.ok && stray.why === 'you are not talking to them' && nodes.length === 1 && nodes[0].view === null && nodes[0].why === stray.why && g.paid.length === 0, 'an answer with no conversation open is refused, the refusal handed over with no node, and nothing is paid');
   ok(g.host.talk('open', CLERK).ok && nodes.length === 2 && nodes[1].view?.node === 'hello' && g.host.talkState?.speaker === CLERK, 'an opening is worked out, kept, and its node handed over before the call returns');
@@ -679,6 +679,12 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   r.said.length = 0;
   r.host.talk('pick', CLERK, 'pay');
   ok(r.paid.some((o) => o.charge === 10) && r.said.includes('10 credits could not be spent') && !r.said.includes('Spent 10 credits'), 'a price the purse would not give is said as not spent, never as spent');
+  // A fine the purse refuses after all is owed instead, in a batch of its own: taken or owed, never neither.
+  r.said.length = 0;
+  const rev = r.client.book!.rev;
+  const fined = r.host.run(['fine(25, "TEST: a fine", test.bank)']);
+  ok(fined.ok && r.paid.some((o) => o.charge === 25 && o.owe === 'test.bank') && r.client.book!.debts?.['test.bank'] === 25 && r.client.book!.rev === rev + 1, `a fine the purse would not give is owed in full, in a batch of its own (${JSON.stringify(r.client.book!.debts)}, rev ${rev} to ${r.client.book!.rev})`);
+  ok(r.said.includes('Fined: TEST: a fine; 25 credits owed to test bank') && !r.said.some((w) => /Fined 25 credits/.test(w)), `and said as owed, never as taken (${r.said.join(' | ')})`);
 }
 
 // ---- documents and the journal through this browser's own host --------------------------------------------------------

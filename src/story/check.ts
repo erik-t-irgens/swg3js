@@ -36,7 +36,12 @@
 //  14. Unresolved escapes (`call` names nothing registered) and `needs` markers are counted.
 //
 // Rules 5 and 9 reach the conversations too: Trust moves only in an answer marked `pressure` (never in a
-// node's own actions), and a `charge` stands on an answer whose condition asks for the money. Every gesture
+// node's own actions), and a `charge` stands on an answer whose condition asks for the money. A named person's
+// own Trust is Trust: `npc(w, s, t)` with any `t` but nought is held to rule 5 exactly as `trust()` is. Rule 1
+// reaches the story's people and the ladders: a person given a record of their own (`npc`, `refuse`, `vouch`,
+// `kill`, `recruit`, and the conditions on their Standing, Trust, access and life) is one the story names -- a
+// cast member, or a row a cast file promotes -- the companion recruited is a cast member marked a companion, a
+// rung a condition names is on its track's ladder, and a job a rung closes exists. Every gesture
 // a conversation names is one of the library's (a clip, a family, an alias or a mood); with the player's
 // own body's clip list in hand (`clips`) a clip that body has not got is warned about. `cues` are warned
 // about as kept and not played yet. A `choice` step that no answer ever chooses can never be done (rule 3).
@@ -272,6 +277,23 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       if (lib.sets.some((s) => s.name === prefix)) err(path, `there is no cast member ${who}`, 1);
       else warn(path, `${who} is in the ${prefix} set, which is not loaded here, so it cannot be checked`, 1);
     };
+    /**
+     * A person given a record of their own: a cast member, or one of the game's own people a cast file promotes.
+     * Anybody else keeps only the met and named stamps a conversation writes, and the server refuses more.
+     */
+    const namedRef = (who: string, path: string): void => {
+      if (!who.startsWith('row:')) {
+        whoRef(who, path);
+        return;
+      }
+      if (!Object.keys(lib.cast ?? {}).some((id) => lib.cast[id].row === who)) err(path, `${who} is not one of the story's named people: promote the row in a cast file ({ "id", "row": "${who}", "name" }) to give them a record of their own`, 1);
+    };
+    /** A rung a condition names, on its track's ladder (`none` is no rank, and any ladder has it). */
+    const rungRef = (track: string, rung: string, path: string): void => {
+      if (rung === 'none') return;
+      const ladder = lib.ladders?.tracks[track as 'rebellion' | 'empire' | 'freelance'];
+      if (!ladder?.rungs.some((r) => r.id === rung)) err(path, `the ${track} ladder has no rung ${rung}`, 1);
+    };
     /** A document of a set loaded here (rule 11's own half: a step's, a card's or an action's page must exist). */
     const docRef = (doc: string, path: string): void => {
       if (lib.docs && Object.hasOwn(lib.docs, doc)) return;
@@ -329,7 +351,23 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
           const d = lib.docs && Object.hasOwn(lib.docs, x.witnessed) ? lib.docs[x.witnessed] : null;
           if (d && typeof x.variant === 'string' && !d.variants.some((v) => v.id === x.variant)) err(path, `${x.witnessed} has no variant ${x.variant}`, 11);
         }
-        if (x.person && typeof (x.person as { who?: unknown }).who === 'string') whoRef((x.person as { who: string }).who, path);
+        if (x.person && typeof (x.person as { who?: unknown }).who === 'string') {
+          const p = x.person as { who: string; is?: string };
+          // Met and named are anybody's; everything else asked of a person is a named person's record.
+          if (p.is === 'met' || p.is === 'named') whoRef(p.who, path);
+          else namedRef(p.who, path);
+        }
+        if (x.rank && typeof x.rank === 'object') {
+          const r = x.rank as { track: string; eq?: string; atLeast?: string };
+          if (typeof r.eq === 'string') rungRef(r.track, r.eq, path);
+          if (typeof r.atLeast === 'string') rungRef(r.track, r.atLeast, path);
+        }
+        if (x.companion && typeof (x.companion as { who?: unknown }).who === 'string') {
+          const who = (x.companion as { who: string }).who;
+          whoRef(who, path);
+          const c = lib.cast && Object.hasOwn(lib.cast, who) ? lib.cast[who] : null;
+          if (c && !c.companion) err(path, `${who} is not a companion: their cast file says "companion": true to be one`, 1);
+        }
         if (typeof x.script === 'string' && !scripts.has(x.script)) {
           counts.unresolved++;
           warn(path, `call(${x.script}) names no registered script, so it reads false`, 14);
@@ -390,11 +428,45 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
           case 'file':
             for (const r of a.args.slice(3)) if (typeof r === 'string' && r.includes(':doc/')) docRef(r, p);
             break;
+          case 'npc':
+          case 'refuse':
+            namedRef(x as string, p);
+            break;
+          case 'vouch':
+            namedRef(x as string, p);
+            namedRef(y as string, p);
+            break;
+          case 'kill':
+            namedRef(x as string, p);
+            for (const r of a.args.slice(1)) if (typeof r === 'string' && r.includes(':doc/')) docRef(r, p);
+            break;
+          case 'recruit': {
+            namedRef(x as string, p);
+            const c = lib.cast && Object.hasOwn(lib.cast, x as string) ? lib.cast[x as string] : null;
+            if (c && !c.companion) err(p, `${x} is not a companion: their cast file says "companion": true to be recruited`, 1);
+            break;
+          }
+          case 'assign':
+            if (x !== 'empire') warn(p, `assign gives a track one of the Empire's divisions, and ${x} is not the Empire`);
+            break;
         }
       });
     };
     return { questRef, whoRef, condRefs, actionRefs, gestureRef, docRef };
   };
+
+  /** Whether an action moves Trust: `trust()`, or a named person's own Trust through `npc(w, s, t)` with `t` not nought. */
+  const movesTrust = (a: ActionDef): boolean => a.act === 'trust' || (a.act === 'npc' && typeof a.args[2] === 'number' && a.args[2] !== 0);
+
+  // ---- the ladders: every job a rung closes is a job ----
+  if (set.ladders) {
+    const err: Err = (path, message, rule) => errors.push({ level: 'error', file: 'ladders.jsonc', line: 1, message: path ? `${path}: ${message}` : message, rule });
+    const warn: Warn = (path, message, rule) => warnings.push({ level: 'warning', file: 'ladders.jsonc', line: 1, message: path ? `${path}: ${message}` : message, ...(rule ? { rule } : {}) });
+    const { questRef } = refsFor(err, warn);
+    for (const t of Object.keys(set.ladders.tracks) as ('rebellion' | 'empire' | 'freelance')[]) {
+      for (const r of set.ladders.tracks[t]?.rungs ?? []) for (const q of r.closes) questRef(q, `/${t}/${r.id}/closes`);
+    }
+  }
 
   // ---- the documents: what their conditions and their people name ----
   for (const id of Object.keys(set.docs ?? {})) {
@@ -423,8 +495,14 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
     const err: Err = (path, message, rule) => errors.push({ level: 'error', file: c.src.file, line: lineAt(c.src.lines, path), message, rule });
     const warn: Warn = (path, message, rule) => warnings.push({ level: 'warning', file: c.src.file, line: lineAt(c.src.lines, path), message, ...(rule ? { rule } : {}) });
     const { condRefs } = refsFor(err, warn);
-    if (worlds && !worlds.has(c.world)) err('/world', `${c.world} is not a world this game has`, 7);
     if (c.tree && !(lib.talks && Object.hasOwn(lib.talks, c.tree))) err('/tree', `there is no conversation ${c.tree}`, 12);
+    if (c.row) {
+      // A promoted row stands nobody: the world stands them. Two files promoting one row would be two people.
+      const twin = Object.keys(set.cast).find((other) => other !== id && set.cast[other].row === c.row);
+      if (twin && twin < id) err('/row', `${c.row} is promoted twice (also by ${twin})`, 1);
+      continue;
+    }
+    if (worlds && !worlds.has(c.world)) err('/world', `${c.world} is not a world this game has`, 7);
     if (cat && !cat.ids.has(c.body)) warn('/body', `${c.body} is not in the creature catalogue`, 13);
     condRefs(c.stand, '/stand');
   }
@@ -486,7 +564,7 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       else if (!n.say.length && !n.next) warn(`${p}/say`, `${name} says nothing`);
       actionRefs(n.do, `${p}/do`);
       for (const a of n.do) {
-        if (a.act === 'trust') err(`${p}/do`, 'Trust moves only on an answer marked "pressure": true, never as a node is reached', 5);
+        if (movesTrust(a)) err(`${p}/do`, 'Trust moves only on an answer marked "pressure": true, never as a node is reached', 5);
         if (a.act === 'charge') err(`${p}/do`, 'charge belongs on an answer whose condition asks credits() >= the amount', 9);
       }
       n.say.forEach((l, i) => gestureRef(l.gesture, `${p}/say/${i}/gesture`));
@@ -497,7 +575,7 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
         actionRefs(r.do, `${rp}/do`);
         gestureRef(r.gesture, `${rp}/gesture`);
         for (const a of r.do) {
-          if (a.act === 'trust' && !r.pressure) err(`${rp}/do`, `answer ${r.id} moves Trust without being marked "pressure": true`, 5);
+          if (movesTrust(a) && !r.pressure) err(`${rp}/do`, `answer ${r.id} moves Trust without being marked "pressure": true`, 5);
           if (a.act === 'charge') {
             const want = a.args[0] as number;
             let asked = false;
@@ -556,8 +634,8 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       const path = `/outcomes/${o}`;
       actionRefs(od.do, `${path}/do`);
       for (const a of od.do) {
-        if (a.act === 'trust' && !od.pressure) err(path, 'Trust moves only under pressure: mark this outcome "pressure": true, or take the trust out', 5);
-        if (a.act === 'trust' && repeatable) err(path, 'a repeatable quest may not move Trust (Standing is the grindable one)', 5);
+        if (movesTrust(a) && !od.pressure) err(path, 'Trust moves only under pressure: mark this outcome "pressure": true, or take the trust out', 5);
+        if (movesTrust(a) && repeatable) err(path, 'a repeatable quest may not move Trust (Standing is the grindable one)', 5);
         if (a.act === 'close' && repeatable) err(path, 'a repeatable quest may not close anything', 5);
         if (a.act === 'charge') err(path, 'charge belongs on a choice whose condition asks credits() >= the amount', 9);
       }
@@ -627,14 +705,14 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
       }
       // Rule 5: Trust only under pressure, and neither Trust nor closing in a repeatable quest.
       for (const a of all) {
-        if (a.act === 'trust') err(sp('do'), 'Trust moves only under pressure: on a choice\'s option or an outcome marked "pressure": true', 5);
+        if (movesTrust(a)) err(sp('do'), 'Trust moves only under pressure: on a choice\'s option or an outcome marked "pressure": true', 5);
         if (a.act === 'close' && repeatable) err(sp('do'), 'a repeatable quest may not close anything', 5);
         if (a.act === 'charge') err(sp('do'), 'charge belongs on a choice whose condition asks credits() >= the amount', 9);
       }
       for (const o of st.options ?? []) {
         for (const a of o.do) {
-          if (a.act === 'trust' && !o.pressure) err(sp('options'), `option ${o.id} moves Trust without being marked "pressure": true`, 5);
-          if (a.act === 'trust' && repeatable) err(sp('options'), 'a repeatable quest may not move Trust (Standing is the grindable one)', 5);
+          if (movesTrust(a) && !o.pressure) err(sp('options'), `option ${o.id} moves Trust without being marked "pressure": true`, 5);
+          if (movesTrust(a) && repeatable) err(sp('options'), 'a repeatable quest may not move Trust (Standing is the grindable one)', 5);
           if (a.act === 'close' && repeatable) err(sp('options'), 'a repeatable quest may not close anything', 5);
           if (a.act === 'charge') {
             // Rule 9: the option's own condition must ask for at least the amount charged.

@@ -439,6 +439,11 @@ export interface PeopleDeps {
    */
   downFor?(id: string): number;
   /**
+   * Whether the story killed this row's person for this character (a row a cast file promotes, by its stable
+   * key): never stood here again, and put down if they stand. The story's own, so for this browser alone.
+   */
+  gone?(key: string): boolean;
+  /**
    * Whether a row's body may stand where it stands at all (the world's frame). A world of copies (the
    * instances: sixteen corvettes a hundred and fifty metres apart) stands nobody but in the copy the
    * player is in, or the crew of the ship alongside would take the cap's places from the crew of this
@@ -763,7 +768,10 @@ export class StandingPeople {
         // somebody nearer still, and never one in a fight (`farthestFree`): somebody you are
         // fighting does not vanish. Nor, at any distance, one somebody else has for now (`keeps`): a
         // follower walks with the player and is as far from its own row as they are.
-        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z));
+        // So is one the story killed for this character, wherever they stand (a follower included: its row is
+        // never stood again once it is let go).
+        const gone = !!this.rows[i].key && !!deps.gone?.(this.rows[i].key!);
+        const outside = away > PEOPLE_TUNE.drop || (!!deps.scope && !deps.scope(st.x, st.y, st.z)) || gone;
         if (outside && !(here.body && deps.keeps?.(here.body))) {
           if (here.body) {
             deps.remove(here.body);
@@ -811,6 +819,8 @@ export class StandingPeople {
       if (!force && stood >= PEOPLE_TUNE.perPass) break;
       if (fullFought && fullKept) break;
       const r = this.rows[i];
+      // Somebody the story killed for this character is never stood again here.
+      if (r.key && deps.gone?.(r.key)) continue;
       // Where the body stands: a patroller at the first point of its walk, near where the town stood
       // it (it walks the rest later), everybody else at the row's own spot (`standPlaceOf`).
       const st = this.stands[i];

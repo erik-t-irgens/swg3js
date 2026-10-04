@@ -18,7 +18,9 @@
 // **The cast** are the story's named people: a body from the creature catalogue, stood where the file says
 // on a world, facing its `heading` (degrees, in the frame its place is written in), in a mood, speaking a
 // conversation (`tree`), known by `unknownAs` until somebody introduces them (`introduce`), and stood only
-// while `stand` holds. A cast member is essential -- takes no harm and never dies -- unless `mortal`.
+// while `stand` holds. A cast member is essential -- takes no harm and never dies -- unless `mortal`. One may be
+// the story's companion (`companion: true`, whom `recruit` takes on). A cast file may instead promote one of the
+// game's own people (`row`), which makes them a named person of the story without standing anybody.
 //
 // Every default here is ours.
 
@@ -152,6 +154,11 @@ export interface CastDef {
   essential: boolean;
   mortal: boolean;
   companion: boolean;
+  /**
+   * One of the game's own people this file promotes to a named person (`row:<key>`): kept under that row's key,
+   * given the name and the side written here, and never stood by the story, since the world stands them.
+   */
+  row?: string;
   test: boolean;
   src: Source;
 }
@@ -388,13 +395,45 @@ export function talkOf(s: TalkScope, v: unknown): TalkDef | null {
   return def;
 }
 
-/** One cast file, read and checked as far as it stands alone. */
+/** A row of the game's own people, as a cast file promotes one. */
+const ROW = /^row:[A-Za-z0-9_.-]{1,96}$/;
+
+/**
+ * One cast file, read and checked as far as it stands alone. A file with a `row` promotes one of the game's own
+ * people to a named person instead (`{ "id", "row": "row:<key>", "name", "unknownAs", "side", "tree" }`): it
+ * stands nobody, so it names no body, world or place.
+ */
 export function castOf(s: TalkScope, v: unknown): CastDef | null {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return s.err('', 'a cast file holds one person');
   const o = v as Record<string, unknown>;
   if (typeof o.id !== 'string' || !REF_NAME.test(o.id) || o.id.includes(':')) return s.err('/id', 'a cast member needs an "id": a plain name');
-  for (const k of Object.keys(o)) if (!['id', 'name', 'unknownAs', 'body', 'world', 'at', 'room', 'heading', 'mood', 'side', 'tree', 'stand', 'essential', 'mortal', 'companion'].includes(k)) s.warn(`/${k}`, `${k} is not a field of a cast member`);
+  for (const k of Object.keys(o)) if (!['id', 'name', 'unknownAs', 'body', 'world', 'at', 'room', 'heading', 'mood', 'side', 'tree', 'stand', 'essential', 'mortal', 'companion', 'row'].includes(k)) s.warn(`/${k}`, `${k} is not a field of a cast member`);
   const name = s.text(o.name, '/name', true);
+  if (o.row !== undefined) {
+    if (typeof o.row !== 'string' || !ROW.test(o.row)) return s.err('/row', 'a promotion names one of the game\'s own people as "row:<key>"');
+    for (const k of ['body', 'world', 'at', 'room', 'heading', 'stand', 'companion']) if (o[k] !== undefined) s.warn(`/${k}`, `a promoted row is stood by the world, so its ${k} is not read`);
+    const mortal = s.bool(o.mortal, '/mortal', false);
+    return {
+      id: `${s.prefix}:cast/${o.id}`,
+      name: name ?? o.id,
+      unknownAs: s.text(o.unknownAs, '/unknownAs') ?? name ?? o.id,
+      body: '',
+      world: '',
+      f: 'raw',
+      at: [0, 0],
+      heading: 0,
+      mood: null,
+      side: o.side === undefined ? null : typeof o.side === 'string' && WORD.test(o.side) ? o.side : s.err('/side', 'a side is a plain name'),
+      tree: o.tree === undefined ? null : s.ref(o.tree, '/tree', 'talk'),
+      stand: null,
+      essential: !mortal,
+      mortal,
+      companion: false,
+      row: o.row,
+      test: s.test,
+      src: s.src(),
+    };
+  }
   const world = cleanWorld(o.world);
   if (!world) return s.err('/world', 'a cast member names the world they stand on', 7);
   if (typeof o.body !== 'string' || !CATALOGUE_ID.test(o.body)) return s.err('/body', 'a cast member names the creature catalogue entry they are stood as, in "body"');
@@ -429,6 +468,5 @@ export function castOf(s: TalkScope, v: unknown): CastDef | null {
   };
   if (def.essential && def.mortal) s.warn('/essential', 'a cast member who is mortal is not essential: mortal wins');
   if (def.mortal) def.essential = false;
-  if (def.companion) s.warn('/companion', 'the companion arrives in wave 9 of this pass; until then a companion is stood as any cast member is');
   return def;
 }

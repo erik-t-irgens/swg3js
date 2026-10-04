@@ -501,6 +501,11 @@ export class MobileManager {
       seaSwellAt: this.deps.seaSwellAt ? (x, z, flat) => this.deps.seaSwellAt!(x, z, flat) : undefined,
       hittableAt: (h) => this.deps.hittableAt?.(h),
       wantRagdoll: (self) => this.queueRagdoll(self),
+      // A body gone down or got up again leaves the living list or joins it: the world builds that list anew
+      // only when this number moves.
+      onDowned: () => {
+        this.version++;
+      },
       groundIfCached: this.deps.groundIfCached ? this.groundCached : undefined,
       groundSolid: this.deps.groundSolid ? this.groundSolid : undefined,
       cover: this.deps.blockers ? this.coverDeps : null,

@@ -14,7 +14,7 @@
 // player is, and whether the character is in the world at all (`away`). The character and who pays are
 // the host's own and are filled in here.
 
-import { BOOK_LIMITS, applyChanges, type BookLimits, type StoryBook, type StoryChange } from './book.ts';
+import { BOOK_LIMITS, applyChanges, type BookLimits, type StoryBook, type StoryChange, type Track } from './book.ts';
 import { pickDocWork, readDocWork, type DocWord } from './docRules.ts';
 import { cleanMine, textHash } from './journal.ts';
 import { CIRCLE, plan, type Draft, type StoryCtx, type StoryEvent, type StoryResult } from './quests.ts';
@@ -175,20 +175,34 @@ export class HostCore {
     return this.op(ctx, (d) => (d.change({ k: 'track', quest, on }) ? null : d.why));
   }
 
+  /** The console's own move of a track: Standing, Trust and the rung held set outright (`Draft.consoleTrack`). */
+  setTrack(track: Track, patch: { standing?: number; trust?: number; rank?: string | null }, ctx: HostCtx): StoryResult {
+    return this.go(ctx, (d) => d.consoleTrack(track, patch));
+  }
+
+  /**
+   * A fine's charge the purse refused after the batch that made it was applied, owed to what the fine names
+   * instead (`Draft.owe`): what both hosts do when a `PayOrder` with `owe` does not go through.
+   */
+  owe(to: string, n: number, ctx: HostCtx): StoryResult {
+    return this.go(ctx, (d) => d.owe(to, n));
+  }
+
   /**
    * Actions written outside any file, as the console writes them (`"complete(test:goto, outdoor)"`), each
    * read and checked as a file's would be. Ids without a prefix are taken as the test set's.
    */
   run(actions: readonly unknown[], ctx: HostCtx, prefix = 'test'): StoryResult {
     return this.go(ctx, (d) => {
-      for (const a of actions) {
+      actions.forEach((a, i) => {
         const act = readAction(a, prefix);
         if (typeof act === 'string') {
           d.why ??= act;
-          continue;
+          return;
         }
-        d.actions([act], {});
-      }
+        // Each in its own place, so two that pay in one console line are two payments and not one paid twice.
+        d.actions([act], { site: `console${i}` });
+      });
     });
   }
 

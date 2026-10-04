@@ -87,6 +87,8 @@ export const JOBS_STORY = 2;
 export const TALK_STORY = 3;
 /** The story a server must say it holds before a document, the journal's words or a note of the player's own is asked of it. */
 export const DOCS_STORY = 4;
+/** The story a server must say it holds before it is told the companion went down or got up (Standing, the people and the companion). */
+export const PEOPLE_STORY = 5;
 
 /** Why a server's jobs wait, when it holds the book and runs none (a relay from before the jobs). */
 export const JOBS_WAIT_OLD = 'this server keeps your story but runs no jobs yet, so your jobs wait';
@@ -201,6 +203,11 @@ export class RemoteHost implements StoryHost {
       return { ok: false, why };
     }
     if (ev.k === 'tick') return { ok: true };
+    // A server from before the companion would refuse word of one as something no browser says happened.
+    if (ev.k === 'companion' && this.deps.line().story < PEOPLE_STORY) {
+      this.stats.dropped++;
+      return { ok: false, why: 'this server keeps no companion' };
+    }
     this.stats.events++;
     const msg = { t: 'story', do: 'ev', ev, at: this.deps.at() };
     if (ev.k === 'kill') this.nextTick.push(msg);

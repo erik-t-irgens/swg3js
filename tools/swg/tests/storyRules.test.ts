@@ -365,7 +365,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
     { id: 'first', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:first', ends: 'won' } }, outcomes: { won: {} } },
     { id: 'second', title: 'TEST', givers: [{ kind: 'chain', after: 'first', outcome: 'won' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:second', failOn: ['death'], ends: 'done' } } },
     { id: 'dice', title: 'TEST', givers: [{ kind: 'debug' }], start: ['never', 'always'], steps: { never: { type: 'nothing', chance: 0 }, always: { type: 'signal', signal: 'debug:dice', chance: 1, ends: 'done' } } },
-    { id: 'later', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:later', do: { done: ['promote(empire)'] }, next: [{ to: 'rich', when: 'alive(cast/somebody)' }, { to: 'poor', when: 'call(test.always)' }, { to: 'nobody', when: 'call(nothing.here)' }] }, rich: { type: 'nothing' }, poor: { type: 'nothing' }, nobody: { type: 'nothing' } } },
+    { id: 'later', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:later', do: { done: ['promote(empire)'] }, next: [{ to: 'rich', when: '!alive(cast/somebody)' }, { to: 'poor', when: 'call(test.always)' }, { to: 'nobody', when: 'call(nothing.here)' }] }, rich: { type: 'nothing' }, poor: { type: 'nothing' }, nobody: { type: 'nothing' } } },
     { id: 'circle', title: 'TEST', givers: [{ kind: 'debug' }], start: ['a'], steps: { a: { type: 'nothing', loop: true, next: ['b'] }, b: { type: 'nothing', loop: true, next: ['a'] } } },
   ]);
   const h = hostOf(lib);
@@ -384,7 +384,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   ok(seedRoll('char-1', 'own:dice', 1, 'chance:x') === seedRoll('char-1', 'own:dice', 1, 'chance:x') && seedRoll('char-1', 'own:dice', 1, 'chance:x') !== seedRoll('char-1', 'own:dice', 2, 'chance:x'), 'a roll is the same for the same character, quest, run and place, and another run rolls again');
   h.grant('own:later', at(T0));
   const lr = h.event({ k: 'signal', name: 'debug:later' }, at(T0 + 1));
-  ok(lr.unbuilt === 2 && lr.misses === 1 && stepOf(h, 'own:later', 'poor')?.state === 'done' && stepOf(h, 'own:later', 'rich') === undefined && stepOf(h, 'own:later', 'nobody') === undefined, 'a later wave\'s action does nothing and its condition reads false, both counted; a registered script answers and an unknown one reads false, counted');
+  ok(lr.unbuilt === 0 && lr.misses === 1 && !h.book.tracks?.empire?.rank && stepOf(h, 'own:later', 'poor')?.state === 'done' && stepOf(h, 'own:later', 'rich') === undefined && stepOf(h, 'own:later', 'nobody') === undefined, 'with every wave of the pass built nothing reads as a later wave\'s: a promotion with no rung above does nothing, somebody the story never killed is alive; a registered script answers and an unknown one reads false, counted');
   const revBefore = h.book.rev;
   const c = h.grant('own:circle', at(T0));
   ok(/circle/.test(c.why ?? '') && c.notes.length === 1 && c.notes[0].k === 'say', 'a circle in the data is stopped and said, rather than hanging the host');

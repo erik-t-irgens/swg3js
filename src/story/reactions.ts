@@ -8,8 +8,9 @@
 // **How warm.** Ours, on the bible's two axes rather than the server's one: nice when the player's Standing
 // on the speaker's track is `niceAt` or more; mean when that track has burned them, or its Trust is
 // `meanTrust` or less; otherwise mid. The track is the speaker's faction's -- the Rebellion's for a rebel,
-// the Empire's for an imperial, and the freelance track for anybody else. Until this pass's last wave moves
-// Standing at all, everybody greets at mid. The ISB's file can only make it colder: a level of it that says so
+// the Empire's for an imperial, and the freelance track for anybody else. One of the game's own people a story
+// names (a promoted row) is as cold as their own Trust says too. Both numbers are `STANDING_TUNE`'s, which this
+// table only shows. The ISB's file can only make it colder: a level of it that says so
 // (`reacts` in `file.jsonc`, handed over in the view) holds a track's people to `mid` or `mean` however the
 // numbers stand, from the moment the level is reached and before the player can read the entry that reached it.
 //
@@ -22,13 +23,24 @@
 
 import { hashText } from '../net/hash.ts';
 import type { StoryBook, Track } from './book.ts';
+import { STANDING_TUNE } from './standing.ts';
 
-/** Every number of ours. */
+/** Every number of ours: the two thresholds are `STANDING_TUNE`'s own, read and written through here. */
 export const REACTION_TUNE = {
-  /** Standing on the speaker's track at or past which they greet warmly (the design's, beside its `STANDING_TUNE`). */
-  niceAt: 2500,
-  /** Trust on the speaker's track at or below which they greet coldly. */
-  meanTrust: -3,
+  /** Standing on the speaker's track at or past which they greet warmly. */
+  get niceAt(): number {
+    return STANDING_TUNE.niceAt;
+  },
+  set niceAt(v: number) {
+    STANDING_TUNE.niceAt = v;
+  },
+  /** Trust on the speaker's track (or their own) at or below which they greet coldly. */
+  get meanTrust(): number {
+    return STANDING_TUNE.meanTrust;
+  },
+  set meanTrust(v: number) {
+    STANDING_TUNE.meanTrust = v;
+  },
   /** Milliseconds of the shared clock a person keeps to one greeting before the draw moves on. */
   every: 600000,
   /** Lines a table holds of each kind and warmth: the client's own number. */
@@ -124,7 +136,12 @@ export function reactionFor(voice: ReactionVoice | null | undefined, book: Pick<
   const diction = voice?.diction;
   if (!diction || !/^[A-Za-z0-9_]{1,40}$/.test(diction)) return null;
   const track = trackOfFaction(voice?.faction);
-  const warmth = warmthOf(book, track, react?.[track] ?? null);
+  // A named person's own Trust (only a person the story names has one: the rules refuse it anybody else) makes
+  // them as cold as their track would, and never warmer.
+  const npcs = (book as Partial<Pick<StoryBook, 'npcs'>> | null | undefined)?.npcs;
+  const own = npcs && Object.hasOwn(npcs, speaker) ? npcs[speaker] : undefined;
+  const ownCold = typeof own?.trust === 'number' && own.trust <= REACTION_TUNE.meanTrust;
+  const warmth = ownCold ? 'mean' : warmthOf(book, track, react?.[track] ?? null);
   const table = reactionTable(diction);
   const seed = reactionSeed(speaker, now);
   const keyHas = has ? (key: string) => has(table, key) : undefined;

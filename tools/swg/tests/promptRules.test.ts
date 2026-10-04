@@ -248,16 +248,34 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // The story's companion lying down within reach (`src/world/companion.ts`): holding the key gets them up.
+  // After a story's thing and before a person, as the game's dispatch takes it (`handleRevive`).
+  const n = fill(at({ revive: true }));
+  ok(n === 1 && words(n)[0] === PROMPT_WORDS.revive && keys(n)[0] === 'mount', `the companion down beside you: get them up, on the use key (${show(n).join(', ')})`);
+  const thing = fill(at({ revive: true, use: true }));
+  ok(thing === 1 && words(thing)[0] === PROMPT_WORDS.use, `a story's thing in reach keeps the key (${show(thing).join(', ')})`);
+  for (const [what, fields] of [
+    ['somebody to talk to', { talk: true }],
+    ['a speeder', { near: 'mount' as const }],
+  ] as [string, Record<string, unknown>][]) {
+    const both = fill(at({ revive: true, ...fields }));
+    ok(both === 1 && words(both)[0] === PROMPT_WORDS.revive, `the companion down beside ${what}: getting them up has the key (${show(both).join(', ')})`);
+  }
+  ok(PROMPT_WORDS.revive.length <= PROMPT.maxLabel, `"${PROMPT_WORDS.revive}" fits the bar`);
+}
+
+{
   // The game's own dispatch has to agree with the bar, or the key would do one thing and the cap say
   // another. It is one line in the frame loop, read out of the source: what is underfoot (the lift, an
   // elevator, a doorway), then a dungeon copy's things (`instances.ts`), then a port's own things, then
-  // a thing a story stands, then somebody to talk to, then a gate, then a vehicle or a hull, which is
-  // `handleMount`'s. A reordering there fails here.
+  // a thing a story stands, then the companion lying down, then somebody to talk to, then a gate, then a
+  // vehicle or a hull, which is `handleMount`'s. A reordering there fails here.
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
-  const line = /if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleStoryUse\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
-  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a dungeon copy, a port, a story\'s thing, a person, a gate, a vehicle');
+  const line = /if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleStoryUse\(\) && !this\.handleRevive\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
+  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a dungeon copy, a port, a story\'s thing, the companion down, a person, a gate, a vehicle');
   ok([...main.matchAll(/this\.handleTalk\(\)/g)].length === 1, 'and talking is reached from that one place');
   ok([...main.matchAll(/this\.handleStoryUse\(\)/g)].length === 1, "and a story's thing from that one place too");
+  ok([...main.matchAll(/this\.handleRevive\(\)/g)].length === 1, 'and getting the companion up from that one place too');
   // The gate stands aside for a person as it does for a vehicle, in the gather and in the key alike.
   ok(/free: !s\.lift && !s\.elevator && !s\.doorless && !s\.use && !s\.talk && !s\.near/.test(main), "the gather's gate stands aside for somebody to talk to, and for a story's thing");
   ok(/!peerRooms\(\)\?\.nearest\(p\.pos, BOARD_TUNE\.reach\) && !this\.talkTarget\(\)/.test(main), "and so does the key's own gate");

@@ -1,4 +1,4 @@
-// The journal window (O): three tabs. **Jobs** -- what is to read (documents handed over and calls waiting, each
+// The journal window (O): five tabs. **Jobs** -- what is to read (documents handed over and calls waiting, each
 // opened from here and never by itself), the jobs offered (their card to read, Accept and Decline), the jobs
 // running with their objective lines (Track, Drop and Restart where the job allows them), and the jobs ended
 // with how they ended, as facts and never as narrative. **Journal** -- what the character witnessed, in order:
@@ -7,6 +7,11 @@
 // said, and the player may write a note of their own on any entry, marked as theirs. **File** -- what the ISB
 // has on the character that the player may see by now, as one growing dossier: never the weight of anything,
 // and never the level it has reached.
+//
+// **People** -- the story's named people the character has met, by the name they know them by, with where and when
+// each was last seen, and gone only once it is known; and the companion, and how they stand. **Standing** -- each
+// track's rank in words, a bar to the next rung with its numbers hidden, Trust in words only, a suspension or a
+// burn said in words, and experience, recorded and counting for nothing yet.
 //
 // It is a panel: it frees the mouse and the game does not simulate while it is up. What it shows is a model it
 // is handed, built when it opens and when the story changes, never in a frame, and every change is asked of the
@@ -20,7 +25,9 @@
 
 import { journalFacets, journalPage, minesOn, NOT_KEPT, JOURNAL_TUNE, type JournalEntry } from '../story/journal.ts';
 import type { DocItem } from '../story/docRules.ts';
-import type { FileView, QuestView } from '../story/view.ts';
+import type { PersonView } from '../story/people.ts';
+import type { StandingView, TrackView } from '../story/standing.ts';
+import type { CompanionView, FileView, QuestView } from '../story/view.ts';
 import type { TextRef } from '../story/text.ts';
 
 const JOURNAL_CSS = `
@@ -57,6 +64,17 @@ const JOURNAL_CSS = `
 #journal .jr-dossier .hd { font-weight: 700; letter-spacing: 0.16em; margin: 0 0 8px; }
 #journal .jr-dossier .en { margin: 0 0 8px; padding: 0 0 6px; border-bottom: 1px dashed color-mix(in srgb, var(--void) 35%, transparent); }
 #journal .jr-dossier button { margin-left: 6px; padding: 1px 6px; font-size: 11px; color: var(--void); background: transparent; border: 1px solid var(--void); border-radius: 3px; cursor: pointer; }
+#journal .jr-track { margin: 0 0 12px; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 4px; }
+#journal .jr-track .t { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+#journal .jr-track .r { margin: 2px 0 6px; font-size: 14px; color: var(--ink); }
+#journal .jr-track .s { font-size: 12px; color: var(--muted); }
+#journal .jr-track .s.burned { color: var(--bad); }
+#journal .jr-track .s.suspended { color: var(--warn); }
+#journal .jr-track .s.ready { color: var(--good); }
+#journal .jr-bar { display: block; height: 6px; margin: 4px 0 6px; background: color-mix(in srgb, var(--ink) 10%, transparent); border-radius: 3px; overflow: hidden; }
+#journal .jr-bar > i { display: block; height: 100%; background: var(--accent); }
+#journal .jr-xp { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+#journal .jr-row.gone .jr-name { color: var(--muted); text-decoration: line-through; }
 `;
 
 let styled = false;
@@ -68,7 +86,7 @@ function installStyle(): void {
   document.head.appendChild(style);
 }
 
-export type JournalTab = 'jobs' | 'journal' | 'file';
+export type JournalTab = 'jobs' | 'journal' | 'file' | 'people' | 'standing';
 
 /** What the window is handed: built when it opens and when the story changes. */
 export interface JournalModel {
@@ -76,8 +94,32 @@ export interface JournalModel {
   toRead: DocItem[];
   entries: JournalEntry[];
   file: FileView | null;
+  /** The named people met, and the companion. */
+  people: PersonView[];
+  companion: CompanionView | null;
+  /** The tracks in words, and experience. */
+  standing: StandingView | null;
   /** A line under the tabs: who holds the story, or why nothing can be done just now. */
   note: string;
+}
+
+const TRACK_WORDS: Readonly<Record<string, string>> = Object.freeze({ rebellion: 'The Rebellion', empire: 'The Empire', freelance: 'Freelance work' });
+const COMPANION_WORDS: Readonly<Record<string, string>> = Object.freeze({ active: 'with you', downed: 'down, and waiting for you to get them up', waiting: 'waiting where you told them', released: 'gone their own way', dead: 'gone' });
+
+/** How a track stands with the character, in words: never a number. */
+export function trackStatusWords(t: TrackView): string {
+  switch (t.status) {
+    case 'burned':
+      return t.burnedFrom ? `Burned. They remember ${t.burnedFrom}.` : 'Burned.';
+    case 'suspended':
+      return 'Suspended.';
+    case 'used':
+      return 'They have a use for you.';
+    case 'active':
+      return t.ready ? `Taken on. ${t.next ? `${t.next} is within reach.` : ''}`.trim() : 'Taken on.';
+    default:
+      return 'Nothing between you yet.';
+  }
 }
 
 /** How the window says what it shows: the game's words for texts, worlds, people, jobs and the journal's own words. */
@@ -135,7 +177,7 @@ export class JournalUi {
   private readonly note: HTMLElement;
   private readonly closeButton: HTMLButtonElement;
   private readonly tabs: HTMLButtonElement[];
-  private model: JournalModel = { jobs: [], toRead: [], entries: [], file: null, note: '' };
+  private model: JournalModel = { jobs: [], toRead: [], entries: [], file: null, people: [], companion: null, standing: null, note: '' };
   private tab: JournalTab = 'jobs';
   private page = Number.POSITIVE_INFINITY;
   private filter: { world: string; who: string; quest: string } = { world: '', who: '', quest: '' };
@@ -158,7 +200,7 @@ export class JournalUi {
           <button class="close">Close</button>
         </div>
         <div class="ship-body">
-          <div class="jr-tabs"><button data-tab="jobs">Jobs</button><button data-tab="journal">Journal</button><button data-tab="file">File</button></div>
+          <div class="jr-tabs"><button data-tab="jobs">Jobs</button><button data-tab="journal">Journal</button><button data-tab="file">File</button><button data-tab="people">People</button><button data-tab="standing">Standing</button></div>
           <div class="jr-body"></div>
           <p class="menu-hint jr-note"></p>
         </div>
@@ -227,7 +269,7 @@ export class JournalUi {
   /** What the window shows, for the console. */
   report(): Record<string, unknown> {
     const page = journalPage(this.model.entries, this.filterOf(), this.page);
-    return { open: this.open, tab: this.tab, toRead: this.model.toRead.length, jobs: this.model.jobs.length, entries: this.model.entries.length, page: page.page + 1, pages: page.pages, shown: page.entries.map((e) => e.id), selected: this.selected || null, file: this.model.file?.entries.length ?? 0, filter: { ...this.filter }, writes: this.writes };
+    return { open: this.open, tab: this.tab, toRead: this.model.toRead.length, jobs: this.model.jobs.length, entries: this.model.entries.length, page: page.page + 1, pages: page.pages, shown: page.entries.map((e) => e.id), selected: this.selected || null, file: this.model.file?.entries.length ?? 0, people: this.model.people.length, tracks: this.model.standing?.tracks.length ?? 0, filter: { ...this.filter }, writes: this.writes };
   }
 
   private filterOf(): { world: string | null; who: string | null; quest: string | null } {
@@ -246,6 +288,8 @@ export class JournalUi {
     this.root.querySelector('.ship-title')!.textContent = this.model.toRead.length ? `${this.model.toRead.length} to read` : '';
     if (this.tab === 'jobs') this.drawJobs();
     else if (this.tab === 'journal') this.drawJournal();
+    else if (this.tab === 'people') this.drawPeople();
+    else if (this.tab === 'standing') this.drawStanding();
     else this.drawFile();
     this.writes += 3;
   }
@@ -489,5 +533,49 @@ export class JournalUi {
       sheet.append(en);
     }
     this.body.replaceChildren(sheet);
+  }
+
+  /** The named people met, last seen first, by the name the character knows; and the companion, and how they stand. */
+  private drawPeople(): void {
+    const m = this.model;
+    const w = this.words;
+    const nodes: HTMLElement[] = [];
+    if (m.companion) {
+      nodes.push(this.el('div', 'jr-head', 'Your companion'));
+      nodes.push(this.row([this.el('span', 'jr-name', w.text(m.companion.name)), this.el('span', 'jr-meta', COMPANION_WORDS[m.companion.state] ?? m.companion.state)], m.companion.state === 'dead' ? 'jr-row gone' : 'jr-row'));
+    }
+    nodes.push(this.el('div', 'jr-head', 'People you have met'));
+    if (!m.people.length) nodes.push(this.el('div', 'jr-empty', 'Nobody the story knows by name yet.'));
+    for (const p of m.people) {
+      const seen = p.gone ? 'gone' : p.lastSeenAt !== undefined ? `last seen ${p.lastSeenWhere ? `on ${w.world(p.lastSeenWhere)} ` : ''}${w.when(p.lastSeenAt)}` : 'met';
+      nodes.push(this.row([this.el('span', 'jr-name', w.text(p.name)), this.el('span', 'jr-meta', seen)], p.gone ? 'jr-row gone' : 'jr-row'));
+    }
+    this.body.replaceChildren(...nodes);
+  }
+
+  /** Each track: the rank in words, a bar to the next rung with no numbers on it, Trust in words, how it stands; then experience. */
+  private drawStanding(): void {
+    const s = this.model.standing;
+    const nodes: HTMLElement[] = [];
+    if (!s || !s.tracks.length) nodes.push(this.el('div', 'jr-empty', 'No side has any use for you yet.'));
+    for (const t of s?.tracks ?? []) {
+      const box = document.createElement('div');
+      box.className = 'jr-track';
+      box.append(this.el('div', 't', TRACK_WORDS[t.track] ?? t.track), this.el('div', 'r', t.rank ?? 'No rank'));
+      if (t.bar !== null && t.status !== 'burned') {
+        const bar = document.createElement('span');
+        bar.className = 'jr-bar';
+        const fill = document.createElement('i');
+        fill.style.width = `${Math.round(t.bar * 100)}%`;
+        bar.append(fill);
+        box.append(bar);
+      }
+      box.append(this.el('div', `s ${t.status === 'burned' ? 'burned' : t.status === 'suspended' ? 'suspended' : t.ready ? 'ready' : ''}`.trim(), trackStatusWords(t)));
+      box.append(this.el('div', 's', t.trust));
+      if (t.division) box.append(this.el('div', 's', `Division: ${t.division.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}`));
+      nodes.push(box);
+    }
+    nodes.push(this.el('div', 'jr-xp', `Experience: ${(s?.xp ?? 0).toLocaleString('en-GB')} (recorded; counts for nothing yet)`));
+    this.body.replaceChildren(...nodes);
   }
 }

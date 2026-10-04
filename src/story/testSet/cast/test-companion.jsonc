@@ -1,5 +1,6 @@
-// The companion a later wave makes of somebody: until then stood as any cast member is, with nothing of
-// their own to say, so the game's own greeting and answers are what they have.
+// The story's test companion: stood here until recruited (`recruit(cast/test-companion)`, by `test:companion` or
+// their own conversation's answer), then beside the player wherever they go, and where they were left once told
+// to wait or let go.
 {
   "id": "test-companion",
   "name": "TEST COMPANION",
@@ -7,5 +8,6 @@
   "world": "tatooine",
   "at": [3484, -4701],
   "heading": 180,
+  "tree": "talk/test-companion",
   "companion": true,
 }

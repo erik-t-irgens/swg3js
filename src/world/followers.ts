@@ -194,9 +194,10 @@ export interface FollowerBody {
  * Who stood a follower, which says who takes it away when it is done with: the standing people keep
  * their own (`stood`, and the set only says it `holds` it while it follows), one of ours or a lair's was
  * given up to the set outright (`adopted`, and the set takes it away), and one stood by hand is the
- * manager's as it always was (`own`).
+ * manager's as it always was (`own`). The story's companion (`companion`, `src/world/companion.ts`) is its
+ * keeper's: it walks first behind the player, takes no place under `most`, and is never handed back here.
  */
-export type FollowerOwner = 'stood' | 'adopted' | 'own';
+export type FollowerOwner = 'stood' | 'adopted' | 'own' | 'companion';
 
 /**
  * Who a body asked to follow belongs to, from what the world calls it, or why it may not follow, in words.
@@ -261,9 +262,11 @@ export class FollowerSet<B extends FollowerBody = FollowerBody> {
     return this.kept.length;
   }
 
-  /** Whether no one more may follow. */
+  /** Whether no one more may follow. The companion takes nobody's place. */
   get full(): boolean {
-    return this.kept.length >= FOLLOW_TUNE.most;
+    let n = 0;
+    for (const k of this.kept) if (k.owner !== 'companion') n++;
+    return n >= FOLLOW_TUNE.most;
   }
 
   /** The bodies following, in their order. */
@@ -273,6 +276,12 @@ export class FollowerSet<B extends FollowerBody = FollowerBody> {
 
   following(b: B): boolean {
     for (const k of this.kept) if (k.body === b) return true;
+    return false;
+  }
+
+  /** Whether somebody following has that living key: what the companion asks of whoever is still in a fight. */
+  hasKey(key: number): boolean {
+    for (const k of this.kept) if (k.body.key === key) return true;
     return false;
   }
 
@@ -304,7 +313,7 @@ export class FollowerSet<B extends FollowerBody = FollowerBody> {
   add(b: B, owner: FollowerOwner, leader: Living, now: number): string | null {
     if (b.dead || b.removed) return 'gone';
     if (this.following(b)) return 'already following you';
-    if (this.full) return 'you have as much company as you can take';
+    if (owner !== 'companion' && this.full) return 'you have as much company as you can take';
     const back = this.released.findIndex((r) => r.body === b);
     if (back >= 0) this.released.splice(back, 1);
     const order: FollowOrder = {
@@ -323,7 +332,10 @@ export class FollowerSet<B extends FollowerBody = FollowerBody> {
       parkZ: 0,
       stuckSeen: Number.POSITIVE_INFINITY,
     };
-    this.kept.push({ body: b, owner, since: now, order, was: { side: b.side, aggression: b.aggression, essential: b.essential, post: b.post } });
+    // The companion walks first behind the player, in slot 0, whoever else follows.
+    const kept: Kept<B> = { body: b, owner, since: now, order, was: { side: b.side, aggression: b.aggression, essential: b.essential, post: b.post } };
+    if (owner === 'companion') this.kept.unshift(kept);
+    else this.kept.push(kept);
     b.side = 'player';
     b.aggression = b.canFight ? 'defensive' : 'passive';
     b.essential = false;
@@ -349,6 +361,21 @@ export class FollowerSet<B extends FollowerBody = FollowerBody> {
     this.restore(k);
     this.released.push({ body: b, owner: k.owner });
     this.tally.dismissed++;
+    this.place();
+    return true;
+  }
+
+  /**
+   * A follower taken off the set altogether, put back as it was where it stands and not held to be handed back:
+   * the story's companion handed to the story's cast (`CompanionDeps.handBack`), whose it is from then on. False
+   * for a body that was not following.
+   */
+  giveUp(b: B): boolean {
+    const i = this.kept.findIndex((k) => k.body === b);
+    if (i < 0) return false;
+    const k = this.kept[i];
+    this.kept.splice(i, 1);
+    this.restore(k);
     this.place();
     return true;
   }

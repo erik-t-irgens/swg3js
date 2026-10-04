@@ -145,7 +145,9 @@
 //   { t: 'story', do: 'ev', ev, at }                         (story 2) something this browser's detectors saw -- an
 //                                                          arrival, a room, an area, a use, a kill, a death, a world --
 //                                                          with where the player stood: the server checks what it can
-//                                                          and runs it (stories.mjs)
+//                                                          and runs it (stories.mjs); (story 5) and the companion this
+//                                                          browser stands going down or getting up (`{ k: 'companion',
+//                                                          up }`), which only a server saying story 5 is told
 //   { t: 'story', do: 'q', op: accept|decline|drop|restart|track|untrack, quest }   (story 2) a job, of this character's own
 //   { t: 'story', do: 'admin', op: reload|grant|offer|unstick|complete|signal|clock, quest?, step?, name?, ms? }
 //                                                          (story 2) the console's own operations, the admin's alone
@@ -235,7 +237,10 @@
 //                                         never taken for the book refused)
 //   { t: 'story', do: 'view', view, off, read }   (story 2) what the interface shows of the jobs, whenever it changed, how
 //                                            far the admin moved the story's clock on, and whether a story set is read
-//                                            here at all (0: none, and every job waits)
+//                                            here at all (0: none, and every job waits); (story 5) the view also
+//                                            carries the tracks in words (`standing`), the named people met (`people`)
+//                                            and the companion, and a batch the changes that move them (`trackSet`,
+//                                            `npc`, `debt`, `companion`): no new word
 //   { t: 'story', do: 'note', note, given }   (story 2) a fact for the message line, whose words the browser makes
 //   { t: 'story', do: 'node', speaker, tree?, node?, name?, strings?, lines?, replies?, next?, end?, why? }   (story 3) the
 //                                            node a conversation reached, to the line that asked and nobody else, or none with why

@@ -27,9 +27,11 @@
  * the `talk` and `choice` steps. (Waves 5 and 7 were the server's and the game's own people, and added no
  * word.) Wave 8 brought the documents, the journal and the file: a document witnessed, a file's level and
  * its tags read, a document handed over, a note in the journal and an entry in the file as actions, with the
- * `message`, `document` and `comm` steps.
+ * `message`, `document` and `comm` steps. Wave 9, the last of the pass, brought rank, status and division read
+ * on the tracks, a named person's own Standing, Trust, access and life, the companion and what is owed, with
+ * the actions that move each of them: the ladders, the story's people, the consequences and the companion.
  */
-export const BUILT_WAVE = 8;
+export const BUILT_WAVE = 9;
 
 export type ArgKind =
   | 'quest'
@@ -166,8 +168,9 @@ export const ACTIONS = table<FnSpec>(
     fn('suspend', ['track', 'number'], 9),
     fn('burn', ['track'], 9),
     fn('assign', ['track', 'string'], 9),
-    fn('useTrack', ['track'], 9),
-    fn('activate', ['track'], 9),
+    // A cell may be named as a track takes the character on: nothing else in the vocabulary sets one, and a burn empties it.
+    fn('useTrack', ['track', 'string?'], 9),
+    fn('activate', ['track', 'string?'], 9),
     fn('npc', ['who', 'number', 'number'], 9),
     fn('refuse', ['who'], 9),
     fn('vouch', ['who', 'who', 'number'], 9),

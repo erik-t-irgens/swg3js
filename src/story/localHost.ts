@@ -39,7 +39,7 @@
 //
 // Every number here is ours.
 
-import { emptyBook, type StoryBook, type StoryChange } from './book.ts';
+import { emptyBook, ownOf, type StoryBook, type StoryChange, type Track } from './book.ts';
 import { STORY_TUNE } from './bookClient.ts';
 import type { DocWord } from './docRules.ts';
 import { HostCore, type HostCtx } from './hostCore.ts';
@@ -435,19 +435,45 @@ export class LocalHost implements StoryHost {
     // The book took the batch, and the rewards in it are recorded, before anything is handed over. A
     // payment that did not go through is said as one that did not, rather than as one that did.
     const refused = new Set<string>();
+    let more = false;
+    // What a refused fine came to be owed, by its own key: the debt's whole now.
+    const owedNow = new Map<string, number>();
     for (const o of r.pay) {
       if (this.deps.pay(o)) this.stats.paid++;
       else if (o.item) refused.add(`${o.item.kind}:${o.item.id}`);
       else if (o.credits) refused.add(`credits:${o.credits}`);
-      else if (o.charge) refused.add(`charge:${o.charge}`);
+      else if (o.charge && o.owe) {
+        // A fine the purse would not give after all is owed instead, in a batch of its own: a fine always
+        // ends taken or owed, and never neither.
+        const key = `fine:${o.owe}:${o.charge}`;
+        refused.add(key);
+        const core = this.core;
+        if (!core) continue;
+        const back = core.owe(o.owe, o.charge, this.ctx());
+        if (this.refused) {
+          this.refused = false;
+          this.stats.refused++;
+          this.dirty = true;
+        } else if (back.ch.length) {
+          this.stats.batches++;
+          more = true;
+          owedNow.set(key, ownOf(core.book.debts, o.owe) ?? 0);
+        }
+      } else if (o.charge) refused.add(`charge:${o.charge}`);
     }
     for (const n of r.notes) {
       this.stats.notes++;
+      if (n.k === 'fined' && refused.has(`fine:${n.to}:${n.credits}`)) {
+        // Nothing was taken: said as owed in full, or, should even the debt not have been taken, as not taken.
+        const owed = owedNow.get(`fine:${n.to}:${n.credits}`);
+        this.deps.note(owed === undefined ? n : { ...n, credits: 0, owed }, owed !== undefined);
+        continue;
+      }
       const failed = (n.k === 'item' && refused.has(`${n.kind}:${n.id}`)) || (n.k === 'paid' && refused.has(`credits:${n.credits}`)) || (n.k === 'charged' && refused.has(`charge:${n.credits}`));
       this.deps.note(n, !failed);
     }
     if (r.why) this.stats.lastWhy = r.why;
-    if (r.ch.length || refresh) this.refresh();
+    if (r.ch.length || more || refresh) this.refresh();
     return r.why ? { ok: false, why: r.why } : { ok: true };
   }
 
@@ -518,6 +544,11 @@ export class LocalHost implements StoryHost {
   /** Actions written at the console (`complete(test:goto, outdoor)`), each read and checked as a file's would be. */
   run(actions: readonly string[]): HostAnswer {
     return this.op((core, ctx) => core.run(actions, ctx));
+  }
+
+  /** The console's own move of a track (`__debug.standing`): Standing, Trust and the rung held set outright. */
+  setTrack(track: Track, patch: { standing?: number; trust?: number; rank?: string | null }): HostAnswer {
+    return this.op((core, ctx) => core.setTrack(track, patch, ctx));
   }
 
   // ---- conversations --------------------------------------------------------------------------------------

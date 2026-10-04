@@ -248,9 +248,9 @@ const look = (h: string) => texts.get(h);
   ok(cleanDocView({ ...view, id: 'nonsense' }) === null && cleanDocView({ ...view, kind: 'scroll' }) === null, 'and one with no document\'s id or kind is not one');
   const docs = Object.values(lib.docs ?? {});
   const unlabelled = docs.flatMap((d) => docWords(d).filter((w) => !/^TEST\b/.test(w.text.trim())).map((w) => `${d.id}:${w.line} ${w.text}`));
-  ok(docs.length === 6 && unlabelled.length === 0, `every word the test set's documents carry is labelled TEST, and so is every title (${unlabelled.join('; ') || `${docs.length} documents`})`);
+  ok(docs.length === 7 && unlabelled.length === 0, `every word the test set's documents carry is labelled TEST, and so is every title (${unlabelled.join('; ') || `${docs.length} documents`})`);
   const r = checkSet(loadSet(testFiles, { test: true }));
-  ok(!r.errors.length && r.counts.docs === 6, 'and the set checks clean with its documents');
+  ok(!r.errors.length && r.counts.docs === 7, 'and the set checks clean with its documents');
 }
 {
   // Rule 11's other half: every document a card, a step, an action or a condition names exists.

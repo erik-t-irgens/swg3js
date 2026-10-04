@@ -14,7 +14,9 @@
 // them, or on another world. They are stood through the world's own prepared path (`World.standMobile` with
 // `cast`), so a body is out of sight until its programs are built and nothing compiles on a live frame. A
 // person who gives their name mid-conversation is renamed where they stand. One in a room is stood on that
-// room's floor once a building near the point with a cell of that name has streamed in.
+// room's floor once a building near the point with a cell of that name has streamed in. Nobody is stood inside
+// the player (`clear`). The story's companion passes between the cast and their keeper as one body, handed over
+// and taken back where it stands (`release`, `adopt`), never one taken down and another stood.
 //
 // Pure: the world is asked through `StandDeps` and `CastDeps`, so the node test hands it a world of its own.
 // Every number here is ours.
@@ -35,6 +37,12 @@ export const STAND_TUNE = {
   castFar: 180,
   /** Milliseconds before a cast member the world would not stand (no floor yet, the budget full) is asked for again. */
   castRetry: 3000,
+  /**
+   * Metres from the player within which nobody is stood: one whose place is nearer is stood this far off it, away
+   * from the player. A companion told to wait keeps where the player stood when they said so, which is the
+   * player's own spot the next time they are stood there (a reload in place), and a body is never stood inside one.
+   */
+  clear: 1.2,
 };
 
 /** A body stood for a cast member, as standing it needs to know it. */
@@ -79,7 +87,7 @@ export class StoryStands {
   private readonly stood = new Map<string, Stood>();
   /** When the world last would not stand a cast member, by id. */
   private readonly refusedAt = new Map<string, number>();
-  readonly stats = { looks: 0, found: 0, castStood: 0, castDown: 0, castRefused: 0, renamed: 0 };
+  readonly stats = { looks: 0, found: 0, castStood: 0, castDown: 0, castRefused: 0, renamed: 0, castMoved: 0, handedOver: 0, takenBack: 0 };
 
   /**
    * Stand the cast near the player and take down the rest, a few times a second: `px`, `pz` are the player in
@@ -131,7 +139,19 @@ export class StoryStands {
       }
       // A planet's heading is in the raw frame, which mirrors X: turned into the world's as its places are.
       const heading = ((space ? c.heading : -c.heading) * Math.PI) / 180;
-      const body = deps.stand(c, x, z, y, heading, deps.text(c.name));
+      // Never inside the player: stood off them, away from them, or behind the way the person faces when the
+      // two places are one.
+      let sx = x;
+      let sz = z;
+      const off = Math.hypot(x - px, z - pz);
+      if (off < STAND_TUNE.clear) {
+        const ux = off > 1e-3 ? (x - px) / off : -Math.sin(heading);
+        const uz = off > 1e-3 ? (z - pz) / off : -Math.cos(heading);
+        sx = px + ux * STAND_TUNE.clear;
+        sz = pz + uz * STAND_TUNE.clear;
+        this.stats.castMoved++;
+      }
+      const body = deps.stand(c, sx, sz, y, heading, deps.text(c.name));
       if (!body) {
         this.refusedAt.set(c.id, now);
         this.stats.castRefused++;
@@ -152,6 +172,33 @@ export class StoryStands {
   /** The body stood for a cast member, or null. */
   bodyOf(id: string): CastBody | null {
     return this.stood.get(id)?.body ?? null;
+  }
+
+  /**
+   * A cast member's body handed over where it stands to whoever takes them next (the companion's keeper, as they
+   * are taken on or come back): off the cast's books, so nothing here takes it down, and never taken down here
+   * on the way. Null when nobody is stood for them in this world (`gen`).
+   */
+  release(id: string, gen: number): CastBody | null {
+    const s = this.stood.get(id);
+    if (!s || s.gen !== gen || s.body.removed) return null;
+    this.stood.delete(id);
+    this.refusedAt.delete(id);
+    this.stats.handedOver++;
+    return s.body;
+  }
+
+  /**
+   * A body handed to the cast where it stands (the companion told to wait or let go), kept on the books as though
+   * stood here: taken down as any cast member is, away from the player, on another world, or once the story stops
+   * standing them. One already stood for that member is taken down first, so a person is never stood twice.
+   */
+  adopt(id: string, body: CastBody, gen: number, deps: Pick<CastDeps, 'unstand'>): void {
+    const had = this.stood.get(id);
+    if (had && had.body !== body && !had.body.removed && had.gen === gen) deps.unstand(had.body);
+    this.stood.set(id, { body, gen });
+    this.refusedAt.delete(id);
+    this.stats.takenBack++;
   }
 
   /** Every cast member taken down (another character), through `unstand` while the world they stood in is up. */

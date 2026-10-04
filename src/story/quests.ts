@@ -57,17 +57,30 @@
 // `docRules.ts` works out when the window says so) finishes every step waiting on it and raises `read:<doc>`.
 // A `note(words)` is written into the journal where it runs -- never while the character is away, since the
 // journal holds only what the player was there for -- and `file(isb, ...)` adds an entry to the ISB's file,
-// which nothing says out loud.
+// which nothing says out loud. An entry weighs its weight times the exposure of every rung the character holds.
+//
+// **Standing, the people and the consequences.** Every move of a track is worked out here and written whole
+// (`trackSet`, with `standing.ts`'s arithmetic): Standing and Trust clamped to their ranges, a rung written
+// `auto` taken the moment it is reached, a promotion, a demotion (closing the jobs its rung closes), a
+// suspension (lifted by the sweep when its time is up), a burn, an assignment, a track taking the character on.
+// Rank changes are said on the message line in words; Trust is never said, nor anything about the file. A named
+// person's own Standing, Trust, access and life are their record's (`npc`), and only a person the story names
+// has one (`people.ts`): anything else asked for is refused. A fine takes what the purse holds and owes the rest
+// (`debt`), so the purse never goes below nought. `kill(w)` is for good, per character: they are never stood or
+// spoken to again, and every step waiting on them is held by the watchdog. The one companion is recruited,
+// told to wait, let go, and goes down and comes back up as the browser that stands them says (`companion`).
 //
 // What is the game's: the step types and their fields are the client's quest-task columns, named
 // beside each field in `set.ts`. Everything about how they run is ours.
 
-import { BOOK_LIMITS, applyChange, draftOf, ownOf, table, type BookLimits, type QuestRec, type StepRec, type StoryBook, type StoryChange, type Track } from './book.ts';
-import { gameDayOf, realDayOf } from './clock.ts';
+import { BOOK_LIMITS, TRACKS, applyChange, draftOf, isDebtKey, ownOf, table, type BookLimits, type CompanionRec, type Division, type NpcRec, type QuestRec, type StepRec, type StoryBook, type StoryChange, type Track, type TrackRec, type WaitAt } from './book.ts';
+import { GAME_HOUR_MS, gameDayOf, realDayOf } from './clock.ts';
 import type { CondJson, Lit } from './expr.ts';
 import { fileHas, fileLevel, fileOf, isFileKind, levelAt, nextFileId, revealAtOf, type FileEntry } from './file.ts';
 import { nextJournalId, textHash, type JournalEntry, type JournalPlace } from './journal.ts';
+import { accessOf, castFor, isNamed, npcOf, whoOf } from './people.ts';
 import { scriptOf, type ScriptLook } from './scripts.ts';
+import { assigned, burned, clampNpcStanding, clampStanding, clampTrust, demoted, exposureOf, ladderOf, liftSuspension, nextRungOf, promoted, rankAtLeast, rankReady, statusOf, suspended, trackOf, withHistory, withStatus, type RankWhat } from './standing.ts';
 import { seedChance } from './seed.ts';
 import { CLEARED, type ActionDef, type Edge, type QuestDef, type Reward, type Room, type StepDef, type StorySet } from './set.ts';
 import type { TextRef } from './text.ts';
@@ -118,14 +131,21 @@ export type StoryEvent =
   | { k: 'signal'; name: string }
   | { k: 'enter' }
   | { k: 'leave' }
-  | { k: 'tick' };
+  | { k: 'tick' }
+  /** The companion went down in a fight, or got up again: the browser that stands them says so, since they are its own. */
+  | { k: 'companion'; up: boolean };
 
-/** A payment for the host to make: credits through its purse, an item through its ledger, or a price taken out of the purse (`charge`). */
+/**
+ * A payment for the host to make: credits through its purse, an item through its ledger, or a price taken out of
+ * the purse (`charge`). A fine's charge names what it is owed to (`owe`): should the purse refuse it after all, the
+ * host owes it there instead (`HostCore.owe`), so a fine always ends taken or owed and never neither.
+ */
 export interface PayOrder {
   key: string;
   credits?: number;
   item?: { kind: 'wear' | 'weapon'; id: string; n: number };
   charge?: number;
+  owe?: string;
 }
 
 /** What the message line may say about it. The words are the display's (a later wave); these are the facts. */
@@ -143,7 +163,13 @@ export type StoryNote =
   /** A document handed over, to be read (`from`: a call, from whom, by the name the player knows them by). */
   | { k: 'doc'; quest: string; doc: string; title: string; from?: string; fromName?: TextRef }
   /** A new entry in the journal, by what it is called. */
-  | { k: 'journal'; quest: string; title: string };
+  | { k: 'journal'; quest: string; title: string }
+  /** A rank or a track's standing with the character changed: said in words, never in numbers. */
+  | { k: 'rank'; track: Track; what: RankWhat; rank?: string | null; division?: string }
+  /** A fine: what the purse gave, and what is owed now and to whom. */
+  | { k: 'fined'; quest: string; credits: number; owed: number; reason: string; to: string }
+  /** The companion joined, was told to wait, was let go, or came back to the character. */
+  | { k: 'companion'; who: string; name: TextRef; what: 'joined' | 'waits' | 'released' | 'rejoined' };
 
 export interface StoryResult {
   /** The changes made, in order: what the host applies to its book and what goes down the wire. */
@@ -235,13 +261,14 @@ function stepIn(rec: QuestRec | null | undefined, s: string): StepRec | undefine
 /**
  * Whether a condition holds for this book just now. A condition from a later wave reads false and is
  * counted in `tally.unbuilt`; a `call` nothing answers, or that throws, reads false and is counted in
- * `tally.misses`. Pure: reads the book and the context and nothing else.
+ * `tally.misses`. Pure: reads the book, the context and the set (`lib`, for what a ladder or the cast says:
+ * `rankAtLeast`, `rankReady`, a named person's access) and nothing else; with no set those read false.
  */
-export function evalCond(c: CondJson | null | undefined, book: StoryBook, ctx: StoryCtx, scope: Scope = {}, tally?: Tally): boolean {
+export function evalCond(c: CondJson | null | undefined, book: StoryBook, ctx: StoryCtx, scope: Scope = {}, tally?: Tally, lib?: StorySet | null): boolean {
   if (!c) return true;
-  if ('all' in c) return (c.all as CondJson[]).every((x) => evalCond(x, book, ctx, scope, tally));
-  if ('any' in c) return (c.any as CondJson[]).some((x) => evalCond(x, book, ctx, scope, tally));
-  if ('not' in c) return !evalCond(c.not as CondJson, book, ctx, scope, tally);
+  if ('all' in c) return (c.all as CondJson[]).every((x) => evalCond(x, book, ctx, scope, tally, lib));
+  if ('any' in c) return (c.any as CondJson[]).some((x) => evalCond(x, book, ctx, scope, tally, lib));
+  if ('not' in c) return !evalCond(c.not as CondJson, book, ctx, scope, tally, lib);
   if ('quest' in c) {
     const q = c.quest as string;
     const rec = questIn(book, q);
@@ -324,10 +351,43 @@ export function evalCond(c: CondJson | null | undefined, book: StoryBook, ctx: S
     return fileHas(book, agency, tag);
   }
   if ('person' in c) {
-    const p = c.person as { who: string; is?: string };
-    if ((p.is === 'met' || p.is === 'named') && Object.keys(p).length === 2) return ownOf(book.npcs, p.who)?.[p.is] !== undefined;
+    // Met, named, alive (the truth: nobody the story has not killed is dead), their own Standing and Trust
+    // toward the character, and whether they will speak to them.
+    const p = c.person as { who: string; is?: string; standing?: CondJson; trust?: CondJson; access?: string };
+    const who = whoOf(lib, p.who);
+    const rec = ownOf(book.npcs, who);
+    if ((p.is === 'met' || p.is === 'named') && Object.keys(p).length === 2) return rec?.[p.is] !== undefined;
+    if (p.is === 'alive') return rec?.alive !== false;
+    if (p.standing) return compare(rec?.standing ?? 0, p.standing);
+    if (p.trust) return compare(rec?.trust ?? 0, p.trust);
+    if (p.access) return accessOf(book, lib, who, ctx.now) === p.access;
     if (tally) tally.unbuilt++;
     return false;
+  }
+  if ('rank' in c) {
+    // The rung held by its id (`none` for no rank), at least a rung on the ladder, or ready for the story's promotion beat.
+    const r = c.rank as { track: Track; eq?: string; atLeast?: string; ready?: boolean };
+    if (r.ready) return rankReady(book, lib?.ladders, r.track, ctx.now);
+    if (r.atLeast !== undefined) return rankAtLeast(book, lib?.ladders, r.track, r.atLeast);
+    return (trackOf(book, r.track).rank ?? 'none') === r.eq;
+  }
+  if ('track' in c) {
+    const t = c.track as { track: Track; is?: string; division?: string };
+    const rec = trackOf(book, t.track);
+    if (t.is !== undefined) return statusOf(rec, ctx.now) === t.is;
+    return t.division !== undefined && rec.division === t.division;
+  }
+  if ('companion' in c) {
+    const k = c.companion as { who?: string; is?: string; up?: boolean };
+    const rec = book.companion ?? null;
+    if (k.up) return rec?.state === 'active';
+    const who = whoOf(lib, k.who ?? '');
+    if (k.is === 'none') return !rec || rec.who !== who;
+    return !!rec && rec.who === who && rec.state === k.is;
+  }
+  if ('debt' in c) {
+    const d = c.debt as CondJson & { to: string };
+    return compare(ownOf(book.debts, d.to) ?? 0, d);
   }
   if ('chance' in c) return seedChance(c.chance as number, ctx.char, scope.quest ?? '', scope.run ?? 0, c.seed as string);
   if ('script' in c) {
@@ -379,7 +439,7 @@ export function whyNotGrant(book: StoryBook, lib: StorySet, q: string, ctx: Stor
     const again = whyNotAgain(rec, def, ctx.now);
     if (again) return again;
   }
-  if (def.needs && !evalCond(def.needs, book, ctx, { quest: q, run: (rec?.run ?? 0) + 1 })) return 'this job is not for you yet';
+  if (def.needs && !evalCond(def.needs, book, ctx, { quest: q, run: (rec?.run ?? 0) + 1 }, undefined, lib)) return 'this job is not for you yet';
   return null;
 }
 
@@ -500,6 +560,11 @@ export class Draft {
   private restarting = false;
   /** Set once a circle has been stopped: from then on this draft changes nothing and its answer is only why. */
   private broken = false;
+  /**
+   * Credits this draft has asked the purse for (prices and fines): what a fine may still take is what the purse
+   * said, less these, so two in one event never take the same credits twice.
+   */
+  private spent = 0;
 
   constructor(book: StoryBook, lib: StorySet, ctx: StoryCtx, limits: BookLimits = BOOK_LIMITS) {
     this.book = draftOf(book);
@@ -612,8 +677,8 @@ export class Draft {
     }
     const def = this.lib.file?.[agency] ?? null;
     const now = this.ctx.now;
-    // The multiplier of the ranks held is one until the ranks arrive.
-    const mult = 1;
+    // Knowing more names is more exposure: every rung held makes the entry that much heavier, frozen as it is written.
+    const mult = exposureOf(this.book, this.lib.ladders);
     const entry: FileEntry = {
       id: nextFileId(had?.entries.length ?? 0),
       at: now,
@@ -638,7 +703,7 @@ export class Draft {
   }
 
   holds(c: CondJson | null | undefined, scope: Scope = {}): boolean {
-    return evalCond(c, this.book, this.ctx, scope, this.tally);
+    return evalCond(c, this.book, this.ctx, scope, this.tally, this.lib);
   }
 
   private here(): { world: string; p: [number, number] } | null {
@@ -932,12 +997,18 @@ export class Draft {
     if (r.xp > 0 && this.change({ k: 'xp', add: r.xp })) this.notes.push({ k: 'xp', quest: q, n: r.xp });
     for (const s of r.standing) this.standing(q, s.track, s.add);
     // Trust is never said on the message line (the owner's call: it shows only in words, elsewhere).
-    for (const t of r.trust ?? []) if (t.add !== 0) this.change({ k: 'trackAdd', track: t.track, standing: 0, trust: t.add });
+    for (const t of r.trust ?? []) {
+      if (t.add === 0) continue;
+      const rec = trackOf(this.book, t.track);
+      const next = clampTrust(rec.trust + t.add);
+      if (next !== rec.trust && this.setTrack(t.track, { ...rec, trust: next })) this.autoPromote(t.track);
+    }
   }
 
   /**
-   * Standing on a track. A repeatable quest gives no more than its `standingPerRealDay` in one real day
-   * (Standing may be ground out, but only so fast); a loss is never capped.
+   * Standing on a track, held between nought and `standingMax`. A repeatable quest gives no more than its
+   * `standingPerRealDay` in one real day (Standing may be ground out, but only so fast); a loss is never capped.
+   * Written as the track's whole record, and a rung taken by itself the moment it is reached (`autoPromote`).
    */
   private standing(q: string, track: Track, add: number): void {
     const def = this.def(q);
@@ -949,7 +1020,140 @@ export class Draft {
       amount = Math.max(0, Math.min(add, def.repeat.standingPerRealDay - given));
       if (amount > 0) this.setQuest(q, { ...rec, day: [day, given + amount] });
     }
-    if (amount !== 0 && this.change({ k: 'trackAdd', track, standing: amount })) this.notes.push({ k: 'standing', quest: q, track, n: amount });
+    if (amount === 0) return;
+    const t = trackOf(this.book, track);
+    const next = clampStanding(t.standing + amount);
+    if (next === t.standing || !this.setTrack(track, { ...t, standing: next })) return;
+    this.notes.push({ k: 'standing', quest: q, track, n: next - t.standing });
+    this.autoPromote(track);
+  }
+
+  // ---- the tracks, the people, the consequences and the companion -----------------------------------------
+
+  /** A track's whole record written, with what the message line says of it. False when the book would not take it. */
+  private setTrack(t: Track, rec: TrackRec, note?: StoryNote): boolean {
+    if (!this.change({ k: 'trackSet', track: t, rec })) return false;
+    if (note) this.notes.push(note);
+    return true;
+  }
+
+  /**
+   * Every rung written `auto` that a track has reached, taken: one at a time, lowest first, and only while the
+   * track has taken the character on. A rung the story promotes with a beat is never taken here.
+   */
+  private autoPromote(t: Track): void {
+    const ladder = ladderOf(this.lib.ladders, t);
+    for (let i = 0; i < ladder.rungs.length; i++) {
+      const rec = trackOf(this.book, t);
+      const next = nextRungOf(ladder, rec);
+      if (!next || next.promote !== 'auto' || statusOf(rec, this.ctx.now) !== 'active' || rec.standing < next.standing || rec.trust < next.trust) return;
+      const up = promoted(rec, ladder, this.ctx.now);
+      if (!up || !this.setTrack(t, up, { k: 'rank', track: t, what: 'promoted', rank: next.name })) return;
+    }
+  }
+
+  /** Every suspension whose time has run out, lifted, and said. What the sweep's settle does after the deadlines. */
+  private liftSuspensions(now: number): void {
+    for (const t of TRACKS) {
+      const rec = ownOf(this.book.tracks as Record<string, TrackRec> | undefined, t);
+      const lifted = rec ? liftSuspension(rec, now) : null;
+      if (lifted && this.setTrack(t, lifted, { k: 'rank', track: t, what: 'reinstated' })) this.autoPromote(t);
+    }
+  }
+
+  /** Where the character is just now, as a companion told to wait keeps it, or null where the host cannot say. */
+  private waitHere(): WaitAt | null {
+    const c = this.ctx;
+    if (!c.world || !c.here) return null;
+    const w: WaitAt = { world: c.world, raw: [c.here[0], c.here[1]] };
+    if (c.room) w.room = { cell: c.room.cell };
+    return w;
+  }
+
+  /**
+   * A named person's record changed: their old one with these fields over it. Refused, with why, for anybody the
+   * story does not name, whose record keeps only the met and named stamps a conversation writes (`people.ts`).
+   */
+  private setNpc(who: string, patch: NpcRec): boolean {
+    if (!isNamed(this.lib, who)) {
+      this.why ??= `${who} is not one of the story's named people, so keeps no record of their own`;
+      return false;
+    }
+    return this.change({ k: 'npc', who, rec: { ...(npcOf(this.book, who) ?? {}), ...patch } });
+  }
+
+  /** A person's name as the character knows them, for the message line. */
+  private nameOf(who: string): TextRef {
+    const c = castFor(this.lib, who);
+    if (!c) return who;
+    return npcOf(this.book, who)?.named !== undefined ? c.name : c.unknownAs;
+  }
+
+  /** The companion's record replaced, with what the message line says of it. */
+  private setCompanion(rec: CompanionRec | null, what?: 'joined' | 'waits' | 'released' | 'rejoined'): boolean {
+    if (!this.change({ k: 'companion', rec })) return false;
+    if (what && rec) this.notes.push({ k: 'companion', who: rec.who, name: this.nameOf(rec.who), what });
+    return true;
+  }
+
+  /**
+   * Somebody spoken to: when they were last seen, and where. Only a person the story names keeps that, and the
+   * companion who waits where they were told to comes back to the character (`talkRules.ts` asks this as a
+   * conversation opens).
+   */
+  seen(who: string): void {
+    const key = whoOf(this.lib, who);
+    if (isNamed(this.lib, key)) this.change({ k: 'npc', who: key, rec: { ...(npcOf(this.book, key) ?? {}), lastSeenAt: this.ctx.now, ...(this.ctx.world ? { lastSeenWhere: this.ctx.world } : {}) } });
+    const c = this.book.companion;
+    if (c && c.who === key && (c.state === 'waiting' || c.state === 'released')) this.setCompanion({ ...c, state: 'active' }, 'rejoined');
+  }
+
+  /**
+   * What a fine could not take after all owed instead: the purse refused the charge the batch was worked out
+   * with (it moved between the reading and the spending, or a server keeps it). The host's word, once the purse
+   * has answered, so a fine always ends taken or owed and never neither.
+   */
+  owe(to: string, n: number): void {
+    const add = Math.floor(n);
+    if (!isDebtKey(to) || !(add > 0)) return;
+    this.change({ k: 'debt', to, owed: (ownOf(this.book.debts, to) ?? 0) + add });
+  }
+
+  /** The companion down in a fight, or up again, as the browser that stands them says. */
+  companionUp(up: boolean): void {
+    const c = this.book.companion;
+    if (!c) return;
+    if (!up && c.state === 'active') this.setCompanion({ ...c, state: 'downed', downs: c.downs + 1, downedAt: this.ctx.now });
+    else if (up && c.state === 'downed') this.setCompanion({ ...c, state: 'active' });
+  }
+
+  /**
+   * The console's own move of a track (`__debug.standing`): Standing, Trust and the rung held set outright, held
+   * to their ranges as the rules hold them and written into the history as the console's. Nothing is said.
+   */
+  consoleTrack(t: Track, patch: { standing?: number; trust?: number; rank?: string | null }): void {
+    const old = trackOf(this.book, t);
+    let rec: TrackRec = { ...old };
+    if (typeof patch.standing === 'number' && Number.isFinite(patch.standing)) rec.standing = clampStanding(patch.standing);
+    if (typeof patch.trust === 'number' && Number.isFinite(patch.trust)) rec.trust = clampTrust(Math.round(patch.trust));
+    if (patch.rank !== undefined) {
+      const ladder = ladderOf(this.lib.ladders, t);
+      if (patch.rank !== null && !ladder.rungs.some((r) => r.id === patch.rank)) {
+        this.why ??= `the ${t} ladder has no rung ${patch.rank}`;
+        return;
+      }
+      rec = withHistory({ ...rec, rank: patch.rank }, this.ctx.now, 'console', old.rank ?? null, patch.rank);
+    }
+    this.setTrack(t, rec);
+  }
+
+  /** A track's change answered by `standing.ts`, written and said; why not when there was nothing to change. */
+  private trackAct(t: Track, next: TrackRec | null, note: StoryNote | null, none: string): void {
+    if (!next) {
+      this.why ??= none;
+      return;
+    }
+    if (this.setTrack(t, next, note ?? undefined)) this.autoPromote(t);
   }
 
   // ---- steps -----------------------------------------------------------------------------------------
@@ -1210,12 +1414,158 @@ export class Draft {
         if (n > 0) {
           this.pay.push({ key: `${whose}#charge:${at}`, charge: n });
           this.notes.push({ k: 'charged', quest: whose, credits: n });
+          this.spent += n;
         }
         return;
       }
+      // ---- the tracks ----
+      case 'promote': {
+        const t = x as Track;
+        const ladder = ladderOf(this.lib.ladders, t);
+        const up = promoted(trackOf(this.book, t), ladder, this.ctx.now);
+        const name = up ? (ladder.rungs.find((r) => r.id === up.rank)?.name ?? null) : null;
+        this.trackAct(t, up, { k: 'rank', track: t, what: 'promoted', rank: name }, 'there is no rung above that one');
+        return;
+      }
+      case 'demote': {
+        const t = x as Track;
+        const ladder = ladderOf(this.lib.ladders, t);
+        const down = demoted(trackOf(this.book, t), ladder, typeof y === 'number' ? y : 1, this.ctx.now);
+        if (!down) {
+          this.why ??= 'there is no rank to take';
+          return;
+        }
+        const name = ladder.rungs.find((r) => r.id === down.rec.rank)?.name ?? null;
+        if (!this.setTrack(t, down.rec, { k: 'rank', track: t, what: 'demoted', rank: name })) return;
+        // What the rungs left behind open is closed with them.
+        for (const q of down.closes) if (!this.book.closed?.includes(q)) this.change({ k: 'closed', quest: q });
+        return;
+      }
+      case 'suspend': {
+        const t = x as Track;
+        const until = this.ctx.now + Math.max(0, (y as number) * GAME_HOUR_MS);
+        this.trackAct(t, suspended(trackOf(this.book, t), until, this.ctx.now), { k: 'rank', track: t, what: 'suspended' }, 'that track has not taken the character on');
+        return;
+      }
+      case 'burn': {
+        const t = x as Track;
+        const rec = trackOf(this.book, t);
+        if (rec.status === 'burned') return;
+        this.setTrack(t, burned(rec, ladderOf(this.lib.ladders, t), this.ctx.now), { k: 'rank', track: t, what: 'burned' });
+        return;
+      }
+      case 'assign': {
+        const t = x as Track;
+        this.trackAct(t, assigned(trackOf(this.book, t), y as Division, this.ctx.now), { k: 'rank', track: t, what: 'assigned', division: y as string }, 'already assigned there');
+        return;
+      }
+      case 'useTrack':
+      case 'activate': {
+        const t = x as Track;
+        const status = a.act === 'activate' ? 'active' : 'used';
+        const next = withStatus(trackOf(this.book, t), status, this.ctx.now, typeof y === 'string' ? y : undefined);
+        if (next) this.trackAct(t, next, next.status === trackOf(this.book, t).status ? null : { k: 'rank', track: t, what: status }, '');
+        return;
+      }
+      // ---- the story's people ----
+      case 'npc': {
+        const who = whoOf(this.lib, x);
+        const rec = npcOf(this.book, who);
+        const standing = clampNpcStanding((rec?.standing ?? 0) + (y as number));
+        const trust = clampTrust((rec?.trust ?? 0) + (a.args[2] as number));
+        this.setNpc(who, { standing, trust });
+        return;
+      }
+      case 'refuse':
+        this.setNpc(whoOf(this.lib, x), { access: 'refused' });
+        return;
+      case 'vouch': {
+        // The voucher spends their own regard for the character on it: their Standing toward them falls by the cost.
+        const by = whoOf(this.lib, x);
+        const who = whoOf(this.lib, y as string);
+        if (!isNamed(this.lib, by) || !isNamed(this.lib, who)) {
+          this.why ??= 'only the story\'s named people vouch, and only for one another';
+          return;
+        }
+        if (this.setNpc(who, { access: 'vouched' })) this.setNpc(by, { standing: clampNpcStanding((npcOf(this.book, by)?.standing ?? 0) - Math.max(0, a.args[2] as number)) });
+        return;
+      }
+      case 'kill': {
+        // For good, and for this character alone: never stood or spoken to again. What the character knows of it is
+        // the page that tells them (`doc`), or the companion falling beside them.
+        const who = whoOf(this.lib, x);
+        if (npcOf(this.book, who)?.alive === false) return;
+        const how = typeof y === 'string' && !y.includes(':doc/') ? y : undefined;
+        const doc = a.args.find((v, i) => i > 0 && typeof v === 'string' && v.includes(':doc/')) as string | undefined;
+        const c = this.book.companion;
+        const beside = !!c && c.who === who && c.state !== 'dead';
+        const known: { alive?: boolean; by?: string } = { ...(npcOf(this.book, who)?.known ?? {}) };
+        if (doc) known.by = doc;
+        if (beside) known.alive = false;
+        if (!this.setNpc(who, { alive: false, diedAt: this.ctx.now, ...(how ? { how } : {}), known })) return;
+        if (beside) this.setCompanion({ ...c!, state: 'dead' });
+        return;
+      }
+      // ---- what is owed ----
+      case 'fine': {
+        // What the purse holds is taken, and the rest owed: the purse never goes below nought.
+        const n = Math.max(0, Math.floor(a.args[0] as number));
+        const to = typeof a.args[2] === 'string' && isDebtKey(a.args[2]) ? a.args[2] : 'fines';
+        const whose = scope.talk ?? scope.quest ?? 'run';
+        const purse = typeof this.ctx.credits === 'number' && Number.isFinite(this.ctx.credits) ? this.ctx.credits : 0;
+        const take = Math.min(n, Math.max(0, Math.floor(purse - this.spent)));
+        const rest = n - take;
+        if (take > 0) {
+          this.pay.push({ key: `${whose}#fine:${at}`, charge: take, owe: to });
+          this.spent += take;
+        }
+        const owed = (ownOf(this.book.debts, to) ?? 0) + rest;
+        if (rest > 0) this.change({ k: 'debt', to, owed });
+        if (n > 0) this.notes.push({ k: 'fined', quest: whose, credits: take, owed: rest > 0 ? owed : 0, reason: y as string, to });
+        return;
+      }
+      case 'debt': {
+        if (!isDebtKey(x)) return;
+        const owed = Math.max(0, (ownOf(this.book.debts, x) ?? 0) + (y as number));
+        if (owed !== (ownOf(this.book.debts, x) ?? 0)) this.change({ k: 'debt', to: x, owed });
+        return;
+      }
+      // ---- the companion ----
+      case 'recruit': {
+        const who = whoOf(this.lib, x);
+        if (!castFor(this.lib, who)?.companion) {
+          this.why ??= `${who} is not one of the story's companions`;
+          return;
+        }
+        if (npcOf(this.book, who)?.alive === false) {
+          this.why ??= 'they are not there any more';
+          return;
+        }
+        const c = this.book.companion;
+        if (c && c.who !== who && (c.state === 'active' || c.state === 'waiting' || c.state === 'downed')) {
+          this.why ??= 'one companion at a time';
+          return;
+        }
+        if (c && c.who === who && c.state === 'active') return;
+        this.setCompanion({ who, state: 'active', downs: c && c.who === who ? c.downs : 0, recruitedAt: this.ctx.now }, 'joined');
+        return;
+      }
+      case 'dismiss':
+      case 'waitHere': {
+        const c = this.book.companion;
+        if (!c || c.state === 'dead' || c.state === 'released') return;
+        const where = this.waitHere() ?? c.waitAt;
+        const next: CompanionRec = { ...c, state: a.act === 'dismiss' ? 'released' : 'waiting' };
+        if (where) next.waitAt = where;
+        else delete next.waitAt;
+        this.setCompanion(next, a.act === 'dismiss' ? 'released' : 'waits');
+        return;
+      }
       case 'introduce': {
-        const had = ownOf(this.book.npcs, x);
-        if (!had || had.named === undefined || had.met === undefined) this.change({ k: 'npcMet', who: x, at: this.ctx.now, named: true });
+        // Under the key everything else reads them by: a promoted row's own, however the story wrote them.
+        const who = whoOf(this.lib, x);
+        const had = ownOf(this.book.npcs, who);
+        if (!had || had.named === undefined || had.met === undefined) this.change({ k: 'npcMet', who, at: this.ctx.now, named: true });
         return;
       }
       case 'gesture':
@@ -1386,6 +1736,8 @@ export class Draft {
       this.run();
     }
     this.ctx = { ...this.ctx, now };
+    // A suspension whose time has run out is over, stamped with when it ran out.
+    if (!this.broken) this.liftSuspensions(now);
   }
 
   /**
@@ -1472,6 +1824,9 @@ export class Draft {
         return;
       case 'tick':
         this.settle(this.ctx.now);
+        return;
+      case 'companion':
+        this.companionUp(ev.up);
         return;
     }
   }

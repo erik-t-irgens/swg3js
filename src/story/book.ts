@@ -7,7 +7,8 @@
 // list: `wpSet`, `wpEdit`, `wpOn`, `wpGone`, `qwpOn`, `trackWp`, `track` for the waypoints and the
 // tracker; `qState`, `step`, `flag`, `paid`, `xp`, `trackAdd`, `closed` for the jobs; `heard`, `npcMet`
 // for the conversations; `docGive`, `docOpen`, `docDone`, `journal`, `fileAdd` for the documents, the
-// journal and the file) and applies each
+// journal and the file; `trackSet`, `npc`, `debt`, `companion` for Standing, the story's people, what is
+// owed and the companion) and applies each
 // one the book will take, in order, saying why for each it will not. The same batch on the same book
 // always comes out the same, which is what lets the server write a batch to its log and play it back
 // on start, and lets a browser apply the server's batch to its own copy and arrive at the same book.
@@ -53,6 +54,15 @@
 // (`file.ts`). Neither of the last two has a change that takes anything away: an entry is only ever added
 // (`journal`, `fileAdd`), each with the next id in line, and a list is replaced by a longer one rather than
 // changed in place, so a working copy (`draftOf`) shares them with the book it was taken from.
+//
+// **Standing, the people, the debts and the companion.** A track's whole record -- its Standing and Trust,
+// the rank held, its status, its cell, the Empire's division, a suspension and what a burn left behind, and
+// the history of all of it -- is replaced whole (`trackSet`), as a named person's is (`npc`: their own
+// Standing and Trust, whether they will speak to the character, whether they are alive and what the
+// character knows of that, and where they were last seen), a debt is set to what is owed (`debt`), and the
+// one companion's record is replaced or cleared (`companion`). Every number in them is worked out by the rules
+// (`quests.ts`, `standing.ts`) before it is written, clamped and capped, so applying a batch is storing it and
+// two hosts whose tunes differ still apply each other's batches to the same book.
 //
 // Every number here is ours.
 
@@ -106,8 +116,56 @@ export interface StoryBook {
   journal?: JournalEntry[];
   /** What an agency has on the character, by agency (`isb`): only ever added to. */
   files?: Partial<Record<Agency, FileRec>>;
+  /** What the character owes, by whom it is owed to: credits a fine could not take, and debts the story wrote. */
+  debts?: Record<string, number>;
+  /** The one companion, or null with none. */
+  companion?: CompanionRec | null;
   /** Sections a later wave writes, kept as they came. */
   [section: string]: unknown;
+}
+
+/** What a named person lets the character do: speak freely, warily, not at all, or again since somebody vouched for them. */
+export type Access = 'open' | 'wary' | 'refused' | 'vouched';
+export const ACCESS: readonly Access[] = ['open', 'wary', 'refused', 'vouched'];
+
+/** How a track stands with the character: never asked, holding leverage over them, taken on, suspended, or burned. */
+export type TrackStatus = 'none' | 'used' | 'active' | 'suspended' | 'burned';
+export const TRACK_STATUSES: readonly TrackStatus[] = ['none', 'used', 'active', 'suspended', 'burned'];
+
+/** The Empire's divisions a character may be assigned to (the bible's six). */
+export const DIVISIONS = ['surveillance', 'investigations', 'interrogation', 'internalAffairs', 'enforcement', 'reEducation'] as const;
+export type Division = (typeof DIVISIONS)[number];
+
+/** One line of a track's history: when, what was done, and what it changed from and to. */
+export interface TrackHistory {
+  at: number;
+  what: string;
+  from: string | number | null;
+  to: string | number | null;
+}
+
+/** Where a companion told to wait is waiting: the world, the place in the frame a story writes places in, and a room. */
+export interface WaitAt {
+  world: string;
+  raw: [number, number];
+  room?: { cell: string };
+}
+
+export type CompanionState = 'active' | 'waiting' | 'downed' | 'dead' | 'released';
+export const COMPANION_STATES: readonly CompanionState[] = ['active', 'waiting', 'downed', 'dead', 'released'];
+
+/**
+ * The one companion: who, how they stand (with the character, waiting where they were told to, down in a fight,
+ * dead by the story's word, or let go and back where they were left), where they wait, how many times they have
+ * gone down, and when they last did and when they joined.
+ */
+export interface CompanionRec {
+  who: string;
+  state: CompanionState;
+  waitAt?: WaitAt;
+  downs: number;
+  downedAt?: number;
+  recruitedAt: number;
 }
 
 /**
@@ -126,12 +184,24 @@ export interface DocRec {
 }
 
 /**
- * A person as a character knows them: when they first spoke (`met`) and when they gave their name (`named`).
- * A later wave adds Standing, Trust and access; what it adds is kept as it came.
+ * A person as a character knows them: when they first spoke (`met`) and when they gave their name (`named`);
+ * and, for a person the story names (a cast member, or one of the game's own people a cast file promotes),
+ * their own Standing and Trust toward the character, whether they will speak to them (`access`), whether
+ * they are alive -- the truth, which the People tab never shows -- and what the character knows of it
+ * (`known`: dead, and the document that told them), with when and where they were last seen.
  */
 export interface NpcRec {
   met?: number;
   named?: number;
+  standing?: number;
+  trust?: number;
+  access?: Access;
+  alive?: boolean;
+  diedAt?: number;
+  how?: string;
+  known?: { alive?: boolean; by?: string };
+  lastSeenAt?: number;
+  lastSeenWhere?: string;
   [field: string]: unknown;
 }
 
@@ -188,10 +258,25 @@ export interface PaidRec {
   by?: 'server' | 'browser' | 'settle';
 }
 
-/** A track's numbers. A later wave adds rank, status and the rest; what it adds is kept as it came. */
+/**
+ * A track as the character stands on it: Standing and Trust, the rung held (`rank`, a ladder's rung id, or
+ * null), the status, the cell (the Rebellion's cell, the Empire's sector office, the freelance licence), the
+ * Empire's division, a suspension's end, what a burn left behind (`burnedFrom`), when the status last changed
+ * (`since`) and the history of every change, newest last. Only Standing and Trust are always there: a record
+ * from before ranks reads as no rank, status none.
+ */
 export interface TrackRec {
   standing: number;
   trust: number;
+  rank?: string | null;
+  status?: TrackStatus;
+  cell?: string | null;
+  division?: Division;
+  attached?: string;
+  suspendedUntil?: number;
+  burnedFrom?: string;
+  since?: number;
+  history?: TrackHistory[];
   [field: string]: unknown;
 }
 
@@ -227,9 +312,13 @@ export interface BookLimits {
   file: number;
   /** Documents a book remembers handing over. */
   docs: number;
+  /** People a debt is owed to. */
+  debts: number;
+  /** Lines of one track's history. */
+  trackHistory: number;
 }
 
-export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 3, wpOff: 4000, sectionNodes: 200000, quests: 4000, steps: 64, flags: 2000, paid: 20000, closed: 4000, history: 8, heard: 20000, npcs: 4000, journal: 20000, file: 5000, docs: 4000 };
+export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 3, wpOff: 4000, sectionNodes: 200000, quests: 4000, steps: 64, flags: 2000, paid: 20000, closed: 4000, history: 8, heard: 20000, npcs: 2000, journal: 20000, file: 5000, docs: 4000, debts: 200, trackHistory: 64 };
 
 /**
  * What a browser holds a book to that a server decided, rather than one it changes itself: the server's own
@@ -239,7 +328,7 @@ export const BOOK_LIMITS: BookLimits = { waypoints: WAYPOINT_TUNE.max, tracked: 
  * alone on top of it would then hand the server back a book shorter than the one it wrote down. A change a
  * browser makes itself is still held to `BOOK_LIMITS` when it is applied.
  */
-export const BACKSTOP_LIMITS: BookLimits = { waypoints: 10000, tracked: 100, wpOff: 100000, sectionNodes: 2000000, quests: 40000, steps: 640, flags: 20000, paid: 200000, closed: 40000, history: 8, heard: 200000, npcs: 40000, journal: 200000, file: 50000, docs: 40000 };
+export const BACKSTOP_LIMITS: BookLimits = { waypoints: 10000, tracked: 100, wpOff: 100000, sectionNodes: 2000000, quests: 40000, steps: 640, flags: 20000, paid: 200000, closed: 40000, history: 8, heard: 200000, npcs: 40000, journal: 200000, file: 50000, docs: 40000, debts: 2000, trackHistory: 640 };
 
 /** One change. A closed list: anything else is not a change this book takes. */
 export type StoryChange =
@@ -263,7 +352,11 @@ export type StoryChange =
   | { k: 'docOpen'; doc: string; j: string }
   | { k: 'docDone'; doc: string; at: number }
   | { k: 'journal'; entry: JournalEntry }
-  | { k: 'fileAdd'; agency: Agency; entry: FileEntry; level: number };
+  | { k: 'fileAdd'; agency: Agency; entry: FileEntry; level: number }
+  | { k: 'trackSet'; track: Track; rec: TrackRec }
+  | { k: 'npc'; who: string; rec: NpcRec }
+  | { k: 'debt'; to: string; owed: number }
+  | { k: 'companion'; rec: CompanionRec | null };
 
 /** The sections the first wave reads itself. Every other one is a section of its own (below) or a later wave's, kept as it came. */
 const KNOWN = ['v', 'char', 'rev', 'base', 'local', 'waypoints', 'nextWp', 'wpOff', 'trackWp', 'tracked'];
@@ -495,19 +588,137 @@ function cleanQwpOn(x: unknown, limits: BookLimits): string[] | undefined {
   return out;
 }
 
-function cleanTracks(x: unknown): Partial<Record<Track, TrackRec>> | undefined {
+/** A rung's id, a cell's name, a division's: a plain word. */
+const RANK_WORD = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** What a debt is owed to: a plain name, as a flag's is (`cast/x`, `fines`, `test.bank`). */
+const DEBT_KEY = /^[A-Za-z0-9_.:/-]{1,64}$/;
+
+export function isRankWord(x: unknown): x is string {
+  return typeof x === 'string' && RANK_WORD.test(x) && !FORBIDDEN_KEYS.includes(x);
+}
+
+export function isDebtKey(x: unknown): x is string {
+  return typeof x === 'string' && DEBT_KEY.test(x) && !FORBIDDEN_KEYS.includes(x);
+}
+
+function finite(x: unknown, lo = -COUNT_MAX, hi = COUNT_MAX): number | undefined {
+  return typeof x === 'number' && Number.isFinite(x) && x >= lo && x <= hi ? x : undefined;
+}
+
+/**
+ * One track's record, cleaned: Standing and Trust always (nought where they are not numbers), every field this
+ * wave knows rebuilt to its kind, and the history held to its length from the newest. Anything else a later
+ * wave adds is kept when it is plain data, as any later section is.
+ */
+export function cleanTrackRec(x: unknown, limits: BookLimits = BOOK_LIMITS): TrackRec | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const r = x as Record<string, unknown>;
+  const rest = plainCopy(r, 1, { left: 2000 });
+  const row: TrackRec = { ...(rest && typeof rest === 'object' && !Array.isArray(rest) ? (rest as Record<string, unknown>) : {}), standing: 0, trust: 0 };
+  for (const k of ['rank', 'status', 'cell', 'division', 'attached', 'suspendedUntil', 'burnedFrom', 'since', 'history']) delete row[k];
+  row.standing = finite(r.standing) ?? 0;
+  row.trust = finite(r.trust) ?? 0;
+  if (r.rank === null) row.rank = null;
+  else if (isRankWord(r.rank)) row.rank = r.rank;
+  if ((TRACK_STATUSES as readonly unknown[]).includes(r.status)) row.status = r.status as TrackStatus;
+  if (r.cell === null) row.cell = null;
+  else if (isRankWord(r.cell)) row.cell = r.cell;
+  if ((DIVISIONS as readonly unknown[]).includes(r.division)) row.division = r.division as Division;
+  if (isRankWord(r.attached)) row.attached = r.attached;
+  const until = time(r.suspendedUntil);
+  if (until !== undefined) row.suspendedUntil = until;
+  if (isRankWord(r.burnedFrom)) row.burnedFrom = r.burnedFrom;
+  const since = time(r.since);
+  if (since !== undefined) row.since = since;
+  if (Array.isArray(r.history)) {
+    const history: TrackHistory[] = [];
+    for (const h of r.history) {
+      if (!h || typeof h !== 'object' || Array.isArray(h)) continue;
+      const o = h as Record<string, unknown>;
+      const what = words(o.what);
+      if (!what) continue;
+      const side = (v: unknown): string | number | null => (typeof v === 'number' && Number.isFinite(v) ? v : typeof v === 'string' ? (words(v) ?? null) : null);
+      history.push({ at: time(o.at) ?? 0, what: what.slice(0, 32), from: side(o.from), to: side(o.to) });
+    }
+    while (history.length > limits.trackHistory) history.shift();
+    row.history = history;
+  }
+  return row;
+}
+
+function cleanTracks(x: unknown, limits: BookLimits): Partial<Record<Track, TrackRec>> | undefined {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
   const out: Partial<Record<Track, TrackRec>> = table<TrackRec>();
   for (const t of TRACKS) {
-    const v = (x as Record<string, unknown>)[t];
-    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
-    const r = v as Record<string, unknown>;
-    // What a later wave adds to a track is kept when it is plain data, as any later section is.
-    const rest = plainCopy(r, 1, { left: 2000 });
-    const row: TrackRec = { ...(rest && typeof rest === 'object' && !Array.isArray(rest) ? (rest as Record<string, unknown>) : {}), standing: 0, trust: 0 };
-    row.standing = typeof r.standing === 'number' && Number.isFinite(r.standing) ? r.standing : 0;
-    row.trust = typeof r.trust === 'number' && Number.isFinite(r.trust) ? r.trust : 0;
-    out[t] = row;
+    const row = cleanTrackRec((x as Record<string, unknown>)[t], limits);
+    if (row) out[t] = row;
+  }
+  return out;
+}
+
+/** One person's record, cleaned: every field this wave knows rebuilt to its kind, anything else plain data kept as it came. */
+export function cleanNpcRec(x: unknown): NpcRec | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const v = x as Record<string, unknown>;
+  // What a later wave keeps on a person is kept when it is plain data, as any later section is.
+  const rest = plainCopy(v, 1, { left: 200 });
+  const row: NpcRec = { ...(rest && typeof rest === 'object' && !Array.isArray(rest) ? (rest as Record<string, unknown>) : {}) };
+  for (const k of ['met', 'named', 'standing', 'trust', 'access', 'alive', 'diedAt', 'how', 'known', 'lastSeenAt', 'lastSeenWhere']) delete row[k];
+  const met = time(v.met);
+  const named = time(v.named);
+  if (met !== undefined) row.met = met;
+  if (named !== undefined) row.named = named;
+  const standing = finite(v.standing, -1e9, 1e9);
+  if (standing !== undefined) row.standing = standing;
+  const trust = finite(v.trust, -1e9, 1e9);
+  if (trust !== undefined) row.trust = trust;
+  if ((ACCESS as readonly unknown[]).includes(v.access)) row.access = v.access as Access;
+  if (typeof v.alive === 'boolean') row.alive = v.alive;
+  const died = time(v.diedAt);
+  if (died !== undefined) row.diedAt = died;
+  if (isRankWord(v.how)) row.how = v.how;
+  if (v.known && typeof v.known === 'object' && !Array.isArray(v.known)) {
+    const k = v.known as Record<string, unknown>;
+    const known: { alive?: boolean; by?: string } = {};
+    if (typeof k.alive === 'boolean') known.alive = k.alive;
+    if (isDocId(k.by)) known.by = k.by;
+    row.known = known;
+  }
+  const seen = time(v.lastSeenAt);
+  if (seen !== undefined) row.lastSeenAt = seen;
+  const where = words(v.lastSeenWhere);
+  if (where) row.lastSeenWhere = where.slice(0, 64);
+  return row;
+}
+
+/** The one companion's record, cleaned, or null when it is not one. */
+export function cleanCompanionRec(x: unknown): CompanionRec | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  if (!isWho(o.who) || !(COMPANION_STATES as readonly unknown[]).includes(o.state)) return null;
+  const out: CompanionRec = { who: o.who, state: o.state as CompanionState, downs: count(o.downs), recruitedAt: time(o.recruitedAt) ?? 0 };
+  const down = time(o.downedAt);
+  if (down !== undefined) out.downedAt = down;
+  if (o.waitAt && typeof o.waitAt === 'object' && !Array.isArray(o.waitAt)) {
+    const w = o.waitAt as Record<string, unknown>;
+    const world = cleanWorld(w.world);
+    const p = Array.isArray(w.raw) && w.raw.length === 2 ? cleanPlace(w.raw) : null;
+    if (world && p) {
+      out.waitAt = { world, raw: [p[0], p[1]] };
+      const room = w.room && typeof w.room === 'object' ? (w.room as Record<string, unknown>).cell : undefined;
+      if (typeof room === 'string' && /^[A-Za-z0-9_ .-]{1,64}$/.test(room)) out.waitAt.room = { cell: room };
+    }
+  }
+  return out;
+}
+
+function cleanDebts(x: unknown, limits: BookLimits): Record<string, number> | undefined {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  const out = table<number>();
+  for (const k of Object.keys(x)) {
+    const v = finite((x as Record<string, unknown>)[k], 0, 1e12);
+    if (!isDebtKey(k) || v === undefined || v <= 0 || sizeOf(out) >= limits.debts) continue;
+    out[k] = v;
   }
   return out;
 }
@@ -527,18 +738,9 @@ function cleanNpcs(x: unknown, limits: BookLimits): Record<string, NpcRec> | und
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
   const out = table<NpcRec>();
   for (const k of Object.keys(x)) {
-    const v = (x as Record<string, unknown>)[k];
-    if (!isWho(k) || !v || typeof v !== 'object' || Array.isArray(v) || sizeOf(out) >= limits.npcs) continue;
-    // What a later wave keeps on a person is kept when it is plain data, as any later section is.
-    const rest = plainCopy(v, 1, { left: 200 });
-    const row: NpcRec = { ...(rest && typeof rest === 'object' && !Array.isArray(rest) ? (rest as Record<string, unknown>) : {}) };
-    delete row.met;
-    delete row.named;
-    const met = time((v as Record<string, unknown>).met);
-    const named = time((v as Record<string, unknown>).named);
-    if (met !== undefined) row.met = met;
-    if (named !== undefined) row.named = named;
-    out[k] = row;
+    if (!isWho(k) || sizeOf(out) >= limits.npcs) continue;
+    const row = cleanNpcRec((x as Record<string, unknown>)[k]);
+    if (row) out[k] = row;
   }
   return out;
 }
@@ -600,6 +802,8 @@ const SECTIONS = table<(x: unknown, limits: BookLimits) => unknown>({
   docs: cleanDocs,
   journal: (x, limits) => cleanJournal(x, limits.journal),
   files: cleanFiles,
+  debts: cleanDebts,
+  companion: (x) => (x === null ? null : (cleanCompanionRec(x) ?? undefined)),
 });
 
 /** A new, empty book. */
@@ -779,6 +983,24 @@ export function cleanChange(x: unknown): StoryChange | null {
       const entry = cleanFileEntry(o.entry);
       return entry ? { k: 'fileAdd', agency: o.agency, entry, level: o.level } : null;
     }
+    case 'trackSet': {
+      // A whole record, held only to the backstop's history: the rules wrote it to their own caps already.
+      const rec = isTrack(o.track) ? cleanTrackRec(o.rec, BACKSTOP_LIMITS) : null;
+      return rec ? { k: 'trackSet', track: o.track as Track, rec } : null;
+    }
+    case 'npc': {
+      const rec = isWho(o.who) ? cleanNpcRec(o.rec) : null;
+      return rec ? { k: 'npc', who: o.who as string, rec } : null;
+    }
+    case 'debt': {
+      const owed = finite(o.owed, 0, 1e12);
+      return isDebtKey(o.to) && owed !== undefined ? { k: 'debt', to: o.to, owed } : null;
+    }
+    case 'companion': {
+      if (o.rec === null) return { k: 'companion', rec: null };
+      const rec = cleanCompanionRec(o.rec);
+      return rec ? { k: 'companion', rec } : null;
+    }
     default:
       return null;
   }
@@ -868,6 +1090,14 @@ export function whyNot(book: StoryBook, c: StoryChange, limits: BookLimits = BOO
       if (c.entry.id !== nextFileId(len)) return `the next file entry is ${nextFileId(len)}, not ${c.entry.id}`;
       return len >= limits.file ? `a file holds ${limits.file} entries` : null;
     }
+    case 'trackSet':
+      return (c.rec.history?.length ?? 0) > limits.trackHistory ? `a track keeps ${limits.trackHistory} lines of history` : null;
+    case 'npc':
+      return !ownOf(book.npcs, c.who) && sizeOf(book.npcs) >= limits.npcs ? `a character remembers ${limits.npcs} people` : null;
+    case 'debt':
+      return c.owed > 0 && ownOf(book.debts, c.to) === undefined && sizeOf(book.debts) >= limits.debts ? `a character owes at most ${limits.debts} people` : null;
+    case 'companion':
+      return null;
   }
 }
 
@@ -989,6 +1219,23 @@ function applyOne(book: StoryBook, c: StoryChange): void {
       files[c.agency] = { entries: [...had.entries, c.entry], exposure: had.exposure + c.entry.weight * c.entry.mult, level: Math.max(had.level, c.level) };
       return;
     }
+    // A track's, a person's and the companion's records are replaced whole, and a debt is set to what is owed:
+    // the rules worked every number out before they wrote it, so storing it is all there is to do here.
+    case 'trackSet':
+      (book.tracks ??= table<TrackRec>())[c.track] = c.rec;
+      return;
+    case 'npc':
+      (book.npcs ??= table<NpcRec>())[c.who] = c.rec;
+      return;
+    case 'debt': {
+      const debts = (book.debts ??= table<number>());
+      if (c.owed > 0) debts[c.to] = c.owed;
+      else delete debts[c.to];
+      return;
+    }
+    case 'companion':
+      book.companion = c.rec;
+      return;
   }
 }
 
@@ -1041,7 +1288,9 @@ export function draftOf(book: StoryBook): StoryBook {
   if (book.npcs) d.npcs = table(book.npcs);
   if (book.docs) d.docs = table(book.docs);
   if (book.files) d.files = table(book.files as Record<string, FileRec>) as Partial<Record<Agency, FileRec>>;
-  // The journal is shared, never copied: a change replaces it with a longer list (`applyOne`).
+  if (book.debts) d.debts = table(book.debts);
+  // The journal is shared, never copied: a change replaces it with a longer list (`applyOne`). The companion's
+  // record is replaced whole, never changed in place, so it is shared as it is.
   return d;
 }
 
@@ -1099,8 +1348,15 @@ export function shrinksWithin(offered: StoryBook, mine: StoryBook | null | undef
 }
 
 /** What a book holds, in numbers: what `__debug.story()` and the server's status page print. */
-export function bookSummary(book: StoryBook | null): { char: string; rev: number; base: number; local: number; waypoints: number; on: number; trackWp: string | null; tracked: number; wpOff: number; quests: number; active: number; flags: number; xp: number; heard: number; met: number; journal: number; toRead: number; file: number; exposure: number; level: number; sections: string[] } | null {
+export function bookSummary(book: StoryBook | null): { char: string; rev: number; base: number; local: number; waypoints: number; on: number; trackWp: string | null; tracked: number; wpOff: number; quests: number; active: number; flags: number; xp: number; heard: number; met: number; journal: number; toRead: number; file: number; exposure: number; level: number; ranks: Record<string, string>; debts: number; companion: string | null; sections: string[] } | null {
   if (!book) return null;
+  const ranks: Record<string, string> = {};
+  for (const t of TRACKS) {
+    const r = ownOf(book.tracks as Record<string, TrackRec> | undefined, t);
+    if (r && (r.rank || (r.status && r.status !== 'none'))) ranks[t] = `${r.rank ?? 'no rank'} (${r.status ?? 'none'})`;
+  }
+  let debts = 0;
+  for (const k of Object.keys(book.debts ?? {})) debts += book.debts![k];
   let on = 0;
   for (const w of book.waypoints) if (w.on) on++;
   let active = 0;
@@ -1129,6 +1385,9 @@ export function bookSummary(book: StoryBook | null): { char: string; rev: number
     xp: book.xp ?? 0,
     heard: sizeOf(book.heard),
     met: sizeOf(book.npcs),
+    ranks,
+    debts,
+    companion: book.companion ? `${book.companion.who} (${book.companion.state})` : null,
     sections: Object.keys(book).filter((k) => !KNOWN.includes(k)),
   };
 }

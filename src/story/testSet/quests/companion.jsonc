@@ -1,0 +1,18 @@
+// The companion: TEST COMPANION recruited as the job begins, then everything the companion does left to the
+// player -- travelling with them, going down in a fight and being got up again, being told to wait and spoken to
+// there to come back -- until the console's signal ends it.
+{
+  "id": "companion",
+  "title": "TEST: a companion",
+  "givers": [{ "kind": "debug" }],
+  "start": ["join"],
+  "steps": {
+    "join": { "type": "nothing", "do": { "done": ["recruit(cast/test-companion)"] }, "next": ["along"] },
+    "along": {
+      "type": "signal",
+      "signal": "debug:test-companion-done",
+      "objective": "TEST: travel with TEST COMPANION, get them up when they go down, tell them to wait and talk to them again",
+      "ends": "done",
+    },
+  },
+}

@@ -5704,6 +5704,8 @@ export class World {
         keeps: (m) => this.followers.holds(m),
         // A world of copies stands nobody but in the copy the player is in.
         scope: (x, y, z) => this.inCopy(x, y, z),
+        // One of them the story killed for this character is never stood here again.
+        gone: (key) => this.peopleGone?.(key) ?? false,
       };
     }
     return this.peopleDepsKept;
@@ -5797,6 +5799,24 @@ export class World {
     mobiles.lendFightClips(m);
     return null;
   }
+
+  /**
+   * The story's companion taken on as the follower who walks first behind the player (`src/world/companion.ts`):
+   * a body this browser stood for them alone and never put on the wire, which goes down rather than dying, made
+   * ready to walk and on the player's side. Why not, in words, or null.
+   */
+  takeCompanion(m: Mobile): string | null {
+    if (!this.mobiles || m.removed || m.dead) return 'gone';
+    m.downable = true;
+    m.readyToFollow();
+    return this.followers.add(m, 'companion', this.playerTarget, this.simTime);
+  }
+
+  /**
+   * Whether one of the game's own people, by their row's stable key, is gone for this character (the story
+   * killed a row a cast file promoted): never stood again here. Set by the game, which holds the book.
+   */
+  peopleGone: ((key: string) => boolean) | null = null;
 
   /** What the people of ours are allowed to ask of this world. Kept, like the wild world's. */
   private ambientDepsKept: AmbientDeps | null = null;
@@ -6798,8 +6818,9 @@ export class World {
     this.livingList.length = 0;
     if (!this.playerTarget.dead) this.livingList.push(this.playerTarget);
     if (this.creatures) for (const c of this.creatures.creatures) this.livingList.push(c);
-    // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up).
-    if (this.mobiles) for (const m of this.mobiles.live) if (m.ready) this.livingList.push(m);
+    // A mobile whose model is still loading neither thinks nor is fought over (the manager bumps its version when one is up),
+    // nor one lying down and out (the companion, `Mobile.downable`: the version moves when it goes down and gets up).
+    if (this.mobiles) for (const m of this.mobiles.live) if (m.ready && !m.downed) this.livingList.push(m);
     if (this.npcs) for (const n of this.npcs.npcs) this.livingList.push(n);
     // The other players: on this world, with a body made, whatever they are standing in or riding.
     for (const p of peers.living) this.livingList.push(p);

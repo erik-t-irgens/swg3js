@@ -7,10 +7,10 @@
 // (the conversations) and `cast/` (the story's named people) hold one definition a file, in JSONC
 // (`jsonc.ts`; the last two are read in `talkSet.ts`); `docs/` holds the documents, one `<id>.doc.txt` a file
 // in a text format of their own (`doc.ts`); `file.jsonc` is the ISB file's levels and how long its entries
-// wait to be seen (`file.ts`), and `calendar.jsonc` the date a document's `{date}` reads (`doc.ts`), one of
-// each to a set, the owner's winning over the test set's when both are read. A later wave reads
-// `ladders.jsonc`; this one notes it and reads nothing of it. `fixtures/` is never loaded at all: it holds
-// files built to fail the checker.
+// wait to be seen (`file.ts`), `calendar.jsonc` the date a document's `{date}` reads (`doc.ts`), and
+// `ladders.jsonc` the ranks of the three tracks and the words Trust is shown in (`standing.ts`), one of each to
+// a set, the owner's winning over the test set's when both are read. `fixtures/` is never loaded at all: it
+// holds files built to fail the checker.
 //
 // **Ids.** The loader prefixes every id with its set's (`goto` in the test set is `test:goto`, an object
 // `obj/test-terminal` is `test:obj/test-terminal`), so the owner writes plain names and two sets can never
@@ -38,6 +38,7 @@ import { calendarOf, docLines, docOf, type CalendarDef, type DocDef } from './do
 import { parseAction, parseCondition, type CondJson, type Lit } from './expr.ts';
 import { FILE_KINDS, fileDefOf, isFileKind, isFileTag, type FileDefIssue, type FilesDef } from './file.ts';
 import { lineAt, parseJsonc, pointer } from './jsonc.ts';
+import { isDivision, laddersOf, type LadderIssue, type LaddersDef } from './standing.ts';
 import { castOf, isNodeName, talkOf, type CastDef, type TalkDef } from './talkSet.ts';
 import { cleanTextRef, type TextRef } from './text.ts';
 import { ACTIONS, BUILT_WAVE, CLIENTS, COND_HEADS, ITEM_KINDS, OP_KEYS, STEP_TYPES, VERBS, arity, argKindAt, readiness } from './vocab.ts';
@@ -47,6 +48,7 @@ export type { CondJson, Lit } from './expr.ts';
 export type { CastDef, TalkDef } from './talkSet.ts';
 export type { CalendarDef, DocDef } from './doc.ts';
 export type { FilesDef } from './file.ts';
+export type { LaddersDef } from './standing.ts';
 
 export interface Issue {
   level: 'error' | 'warning';
@@ -273,6 +275,8 @@ export interface StorySet {
   file?: FilesDef | null;
   /** The calendar `{date}` reads (`calendar.jsonc`), or null: one to a joined set, the first read winning. */
   calendar?: CalendarDef | null;
+  /** The ranks of the three tracks and the words Trust is shown in (`ladders.jsonc`), or null: one to a joined set, the first read winning. */
+  ladders?: LaddersDef | null;
   /** Files a later wave reads, noted and not read. */
   later: string[];
   files: number;
@@ -690,16 +694,60 @@ export class FileScope {
         return ref ? { chosen: ref } : null;
       }
       case 'person': {
-        // `met` and `named` are this wave's; Standing, Trust, access and whether they are alive are the
-        // ninth's, kept as they are and read as false until then.
+        // Met, named or alive; their own Standing or Trust compared with a number; or their access, one word.
         if (!extra([])) return null;
         const p = o.person as Record<string, unknown> | null;
-        if (!p || typeof p !== 'object' || Array.isArray(p)) return this.err(path, 'a person condition is { "person": { "who": cast/<id>, "is": "met" | "named" } }');
+        if (!p || typeof p !== 'object' || Array.isArray(p)) return this.err(path, 'a person condition is { "person": { "who": cast/<id>, "is": "met" | "named" | "alive" } }, or their "standing", "trust" or "access"');
         const who = this.ref(p.who, path, 'cast');
         if (!who) return null;
-        if ((p.is === 'met' || p.is === 'named') && Object.keys(p).length === 2) return { person: { who, is: p.is } };
-        this.warn(path, 'that person condition arrives in wave 9 of this pass; until then it reads false');
-        return { person: { ...(JSON.parse(JSON.stringify(p)) as Record<string, unknown>), who } };
+        const keys = Object.keys(p).filter((k) => k !== 'who');
+        if (keys.length !== 1) return this.err(path, 'a person condition asks one thing of them');
+        const k = keys[0];
+        if (k === 'is') return p.is === 'met' || p.is === 'named' || p.is === 'alive' ? { person: { who, is: p.is } } : this.err(path, 'a person is met, named or alive');
+        if (k === 'standing' || k === 'trust') {
+          const c = numberCompare(p[k]);
+          return c ? { person: { who, [k]: c } } : this.err(path, `a person's ${k} is compared with one of ${OP_KEYS.join(', ')}, with a number`);
+        }
+        if (k === 'access') return p.access === 'open' || p.access === 'wary' || p.access === 'refused' || p.access === 'vouched' ? { person: { who, access: p.access } } : this.err(path, 'access is open, wary, refused or vouched');
+        return this.err(path, `${k} is not something asked of a person`);
+      }
+      case 'rank': {
+        // `{ "rank": { "track": t, "eq": rung } }`, `{ ..., "atLeast": rung }` or `{ ..., "ready": true }`.
+        if (!extra([])) return null;
+        const r = o.rank as Record<string, unknown> | null;
+        if (!r || typeof r !== 'object' || Array.isArray(r) || !isTrack(r.track) || Object.keys(r).length !== 2) return this.err(path, 'a rank condition is { "rank": { "track": t, "eq" | "atLeast": rung } } or { ..., "ready": true }');
+        if (r.ready === true) return { rank: { track: r.track, ready: true } };
+        if (typeof r.eq === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(r.eq)) return { rank: { track: r.track, eq: r.eq } };
+        if (typeof r.atLeast === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(r.atLeast)) return { rank: { track: r.track, atLeast: r.atLeast } };
+        return this.err(path, 'a rank is a rung\'s id');
+      }
+      case 'track': {
+        // `{ "track": { "track": t, "is": status } }` or `{ ..., "division": d }`.
+        if (!extra([])) return null;
+        const r = o.track as Record<string, unknown> | null;
+        if (!r || typeof r !== 'object' || Array.isArray(r) || !isTrack(r.track) || Object.keys(r).length !== 2) return this.err(path, 'a track condition is { "track": { "track": t, "is": status } } or { ..., "division": d }');
+        if (r.is !== undefined) return ['none', 'used', 'active', 'suspended', 'burned'].includes(r.is as string) ? { track: { track: r.track, is: r.is } } : this.err(path, 'a track is none, used, active, suspended or burned');
+        if (r.division !== undefined) return isDivision(r.division) ? { track: { track: r.track, division: r.division } } : this.err(path, 'a division is surveillance, investigations, interrogation, internalAffairs, enforcement or reEducation');
+        return this.err(path, 'a track condition asks its status or its division');
+      }
+      case 'companion': {
+        // `{ "companion": { "who": cast/<id>, "is": state } }` or `{ "companion": { "up": true } }`.
+        if (!extra([])) return null;
+        const c = o.companion as Record<string, unknown> | null;
+        if (!c || typeof c !== 'object' || Array.isArray(c)) return this.err(path, 'a companion condition is { "companion": { "who", "is" } } or { "companion": { "up": true } }');
+        if (c.up === true && Object.keys(c).length === 1) return { companion: { up: true } };
+        const who = this.ref(c.who, path, 'cast');
+        if (!who) return null;
+        return ['none', 'active', 'waiting', 'downed', 'dead', 'released'].includes(c.is as string) && Object.keys(c).length === 2 ? { companion: { who, is: c.is } } : this.err(path, 'a companion is none, active, waiting, downed, dead or released');
+      }
+      case 'debt': {
+        // `{ "debt": { "to": name, "gt": 0 } }`: what is owed to somebody, compared.
+        if (!extra([])) return null;
+        const d = o.debt as Record<string, unknown> | null;
+        if (!d || typeof d !== 'object' || Array.isArray(d) || typeof d.to !== 'string' || !/^[A-Za-z0-9_.:/-]{1,64}$/.test(d.to)) return this.err(path, 'a debt condition is { "debt": { "to": name, "gt": n } }');
+        const { to, ...rest } = d;
+        const c = numberCompare(rest);
+        return c ? { debt: { to, ...c } } : this.err(path, `a debt is compared with one of ${OP_KEYS.join(', ')}, with a number`);
       }
       case 'witnessed': {
         // `{ "witnessed": doc/<id>, "variant": "a" }`: the document is in the journal, as that version of it.
@@ -757,6 +805,21 @@ export class FileScope {
       out.push(a);
     }
     if (act === 'file' && !this.fileArgs(out, path)) return null;
+    if (act === 'assign' && !isDivision(out[1])) return this.err(path, 'assign names one of the Empire\'s divisions: surveillance, investigations, interrogation, internalAffairs, enforcement or reEducation', 4);
+    if ((act === 'fine' || act === 'debt') && out[act === 'fine' ? 2 : 0] !== undefined && !/^[A-Za-z0-9_.:/-]{1,64}$/.test(String(out[act === 'fine' ? 2 : 0]))) return this.err(path, `${act} owes a debt to a plain name`, 4);
+    if ((act === 'activate' || act === 'useTrack') && out[1] !== undefined && !/^[A-Za-z0-9_.:-]{1,64}$/.test(String(out[1]))) return this.err(path, `${act}'s cell is a plain word`, 4);
+    if (act === 'kill') {
+      // `kill(w[, how][, doc/<id>])`: the page that tells the character may stand where `how` would, and is a
+      // document's id either way, prefixed as every id is.
+      for (let i = 1; i < out.length; i++) {
+        const v = String(out[i]);
+        if (v.startsWith('doc/') || v.includes(':doc/')) {
+          const id = this.ref(v, path, 'doc');
+          if (!id) return null;
+          out[i] = id;
+        } else if (i === 2 || !/^[A-Za-z0-9_.-]{1,64}$/.test(v)) return this.err(path, 'kill\'s how is a plain word, and its page a document', 4);
+      }
+    }
     if (spec.wave > BUILT_WAVE) this.warn(path, `${act} arrives in wave ${spec.wave} of this pass; until then it does nothing`);
     return { act, args: out, wave: spec.wave };
   }
@@ -1344,15 +1407,12 @@ function objectOf(s: FileScope, v: unknown): ObjectDef | null {
   return { id: `${s.prefix}:obj/${o.id}`, world, template: o.template, near: [near[0], near[1]], reach: s.num(o.reach, '/reach', OBJECT_REACH, 0.5, 100), label: s.text(o.label, '/label'), test: s.test, src: s.src() };
 }
 
-/** The folders and files a later wave reads, with that wave. */
-const LATER: [RegExp, string][] = [
-  [/^ladders\.jsonc$/, 'ladders arrive in wave 9 of this pass'],
-  [/^(jobs|boards)\//, 'job boards are kept for a later pass'],
-];
+/** The folders and files a later pass reads, with why they are not read yet. */
+const LATER: [RegExp, string][] = [[/^(jobs|boards)\//, 'job boards are kept for a later pass']];
 
 /** A set with nothing in it: what a host runs before any set is read. */
 export function emptySet(): StorySet {
-  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), voices: Object.create(null), docs: Object.create(null), file: null, calendar: null, later: [], files: 0 };
+  return { name: '', prefix: '', title: '', hash: '', sets: [], test: false, quests: Object.create(null), areas: Object.create(null), objects: Object.create(null), talks: Object.create(null), cast: Object.create(null), voices: Object.create(null), docs: Object.create(null), file: null, calendar: null, ladders: null, later: [], files: 0 };
 }
 
 /** A document's file read through a scope of its own, whose lines are the document's own (`/L<n>`). */
@@ -1422,7 +1482,7 @@ export function loadSet(files: { path: string; text: string }[], opts: { test?: 
       else readDoc(f, set, issues);
       continue;
     }
-    if (f.path === 'file.jsonc' || f.path === 'calendar.jsonc') {
+    if (f.path === 'file.jsonc' || f.path === 'calendar.jsonc' || f.path === 'ladders.jsonc') {
       const doc = parseJsonc(f.text);
       if (doc.error) {
         issues.push({ level: 'error', file: f.path, line: doc.error.line, col: doc.error.col, message: doc.error.message });
@@ -1434,6 +1494,10 @@ export function loadSet(files: { path: string; text: string }[], opts: { test?: 
       if (f.path === 'file.jsonc') {
         const found: FileDefIssue[] = [];
         set.file = fileDefOf(doc.value, found);
+        for (const i of found) issues.push({ level: i.level, file: f.path, line: lineAt(doc.lines, i.path), message: i.message });
+      } else if (f.path === 'ladders.jsonc') {
+        const found: LadderIssue[] = [];
+        set.ladders = laddersOf(doc.value, set.prefix, found);
         for (const i of found) issues.push({ level: i.level, file: f.path, line: lineAt(doc.lines, i.path), message: i.message });
       } else set.calendar = calendarOf(doc.value, (path, message) => issues.push({ level: 'error', file: f.path, line: lineAt(doc.lines, path), message }));
       continue;
@@ -1511,9 +1575,11 @@ export function joinSets(sets: StorySet[]): StorySet {
     Object.assign(out.cast, s.cast);
     if (s.voices) Object.assign(out.voices!, s.voices);
     if (s.docs) Object.assign(out.docs!, s.docs);
-    // One file and one calendar to a story: the first set's that has one (the owner's, read before the test set's).
+    // One file, one calendar and one set of ladders to a story: the first set's that has one (the owner's, read
+    // before the test set's).
     out.file ??= s.file ?? null;
     out.calendar ??= s.calendar ?? null;
+    out.ladders ??= s.ladders ?? null;
     out.later.push(...s.later);
     out.files += s.files;
     out.test ||= s.test;

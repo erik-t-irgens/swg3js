@@ -177,6 +177,11 @@ export interface PromptState {
    */
   use: boolean;
   /**
+   * The story's companion lying down within reach (`src/world/companion.ts`): holding the key gets them up.
+   * After a story's thing and before a person, as the key takes it.
+   */
+  revive: boolean;
+  /**
    * Somebody in front of you who may be spoken to (`src/world/talk.ts`): a person, neither hostile nor
    * fighting, in reach and in the view. The cap says only that you would talk; who it is goes on the
    * long line, which has room for a name.
@@ -219,6 +224,7 @@ export function newPromptState(): PromptState {
     instance: '',
     travel: '',
     use: false,
+    revive: false,
     talk: false,
     gate: '',
     boots: false,
@@ -245,6 +251,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.instance = '';
   s.travel = '';
   s.use = false;
+  s.revive = false;
   s.talk = false;
   s.gate = '';
   s.boots = false;
@@ -303,6 +310,8 @@ export const PROMPT_WORDS = Object.freeze({
   // A thing a story stands: the world's own terminal, sign or crate that a job waits on. The cap says what
   // you would do; what it is goes on the long line.
   use: 'use',
+  // The companion lying down beside you: held, the key gets them up.
+  revive: 'get them up',
   // Somebody you are looking at who may be spoken to. The cap says what you would do, never whom: a
   // name is the thing you are looking at, and it is written on the long line instead.
   talk: 'talk',
@@ -471,6 +480,9 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   // takes it (`handleTravel`, then `handleStoryUse`, then `handleTalk`): a terminal is walked up to, and a
   // traveller standing at it is not what the key is for.
   else if (s.use) n = push(out, n, 'mount', W.use);
+  // The companion lying down within reach, after a story's thing and before a person (`handleRevive`, then
+  // `handleTalk`): lying there they are nobody to talk to, and getting them up is what the key is for.
+  else if (s.revive) n = push(out, n, 'mount', W.revive);
   // Somebody to talk to comes after all of those -- a terminal is a thing you walked up to use, and a
   // traveller standing at it is not what E is for there -- and before a vehicle in reach and a gate:
   // a person must be in front of the view to be offered at all, while a vehicle is in reach whichever

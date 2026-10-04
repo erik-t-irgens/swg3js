@@ -148,6 +148,7 @@ const same = (a: unknown, b: unknown) => stableText(a) === stableText(b);
     { path: 'quests/b.jsonc', text: '{\n  "id": "b",\n  "title": "B",\n  "start": ["s"],\n  "steps": { "s": { "type": "nothing" } }\n}\n' },
     { path: 'fixtures/broken.jsonc', text: 'not even json' },
     { path: 'ladders.jsonc', text: '{}' },
+    { path: 'boards/town.jsonc', text: '{}' },
   ];
   const r = loadSet(files);
   const q = r.set.quests['own:a'];
@@ -155,7 +156,7 @@ const same = (a: unknown, b: unknown) => stableText(a) === stableText(b);
   ok(same(q.needs, { quest: 'own:b', is: 'done' }) && q.steps.s.grant.done[0] === 'own:b' && q.givers[0].kind === 'use' && (q.givers[0] as { object: string }).object === 'own:obj/desk', 'a reference inside the set without its prefix gets the set\'s');
   ok(q.steps.s.signal === 'used:own:obj/desk' && q.steps.t.signal === 'own:ping' && q.steps.t.do.done[0].args[0] === 'test:x', 'an engine signal\'s own id is prefixed, a plain signal is the set\'s own, and a reference into another set keeps its prefix');
   ok(!!r.set.objects['own:obj/desk'] && same(r.set.areas['own:area/yard'].shape, { kind: 'rect', min: [0, 0], max: [10, 10] }), 'objects and areas take their kind into their id, and a rect\'s corners are put in order');
-  ok(r.set.later.includes('ladders.jsonc') && r.warnings.some((w) => /wave 9/.test(w.message)) && !r.errors.some((e) => e.file.startsWith('fixtures/')), 'a later wave\'s file is noted and not read, and the fixtures are never loaded at all');
+  ok(r.set.later.includes('boards/town.jsonc') && !r.set.later.includes('ladders.jsonc') && !!r.set.ladders && r.warnings.some((w) => /later pass/.test(w.message)) && !r.errors.some((e) => e.file.startsWith('fixtures/')), 'a later pass\'s file (a job board) is noted and not read, the ladders are read now, and the fixtures are never loaded at all');
   ok(/^[0-9a-f]{16}$/.test(q.hash) && q.hash !== r.set.quests['own:b'].hash, 'every quest carries a hash of its own definition');
   const crlfFiles = files.map((f) => ({ ...f, text: f.text.replace(/\n/g, '\r\n') }));
   const crlf = loadSet(crlfFiles);
@@ -225,11 +226,13 @@ const same = (a: unknown, b: unknown) => stableText(a) === stableText(b);
   const r = loadSet(files, { test: true });
   ok(refused.length === 0 && r.errors.length === 0 && r.set.test && r.set.prefix === 'test', `the test set reads with no errors (${r.errors.map((e) => `${e.file}:${e.line} ${e.message}`).join('; ')})`);
   // The design's eleven, the fourth wave's own (`words`: what a job hands over and reads), the sixth's two (a talk step and a
-  // choice), and the eighth's four (documents and a call, a card, a document that depends on a choice, an entry in the file).
-  const want = ['goto', 'signal', 'kill', 'timer', 'join', 'reward', 'repeat', 'harsh', 'branchNext', 'observe', 'waypoints', 'words', 'talk', 'choice', 'docs', 'card', 'branchDoc', 'file'].map((q) => `test:${q}`);
-  ok(want.every((q) => r.set.quests[q]) && Object.keys(r.set.quests).length === want.length, `it holds exactly the design's eleven test quests, the fourth wave's twelfth, the sixth wave's two and the eighth's four (${Object.keys(r.set.quests).join(', ')})`);
-  ok(Object.keys(r.set.docs ?? {}).length === 6 && !!r.set.file?.isb && r.set.calendar?.text === '[TEST DATE]', 'and its six documents, its file and its calendar, which prints only "[TEST DATE]"');
-  ok(r.warnings.every((w) => !/arrive[s]? in wave 4/.test(w.message)), 'and none of its words waits for the fourth wave any more');
+  // choice), the eighth's four (documents and a call, a card, a document that depends on a choice, an entry in the file), and the
+  // ninth's five (Standing ground out, a promotion beat, everything going wrong, a job closed by it, and the companion).
+  const want = ['goto', 'signal', 'kill', 'timer', 'join', 'reward', 'repeat', 'harsh', 'branchNext', 'observe', 'waypoints', 'words', 'talk', 'choice', 'docs', 'card', 'branchDoc', 'file', 'grind', 'standing', 'fail', 'closedLater', 'companion'].map((q) => `test:${q}`);
+  ok(want.every((q) => r.set.quests[q]) && Object.keys(r.set.quests).length === want.length, `it holds exactly the design's eleven test quests, the fourth wave's twelfth, the sixth wave's two, the eighth's four and the ninth's five (${Object.keys(r.set.quests).join(', ')})`);
+  ok(Object.keys(r.set.docs ?? {}).length === 7 && !!r.set.file?.isb && r.set.calendar?.text === '[TEST DATE]', 'and its seven documents, its file and its calendar, which prints only "[TEST DATE]"');
+  ok(r.set.ladders?.tracks.freelance?.rungs.map((g) => g.name).join() === 'TEST RUNG 1,TEST RUNG 2,TEST RUNG 3' && r.set.ladders.trustWords?.every((w) => /^TEST TRUST \d$/.test(w)) === true && r.set.later.length === 0, 'and its ladders, every rung a TEST RUNG and every word of Trust a TEST one, with nothing left for a later wave');
+  ok(r.warnings.every((w) => !/arrive[s]? in wave \d/.test(w.message)), 'and none of its words waits for a later wave any more');
   const fixtures = files.filter((f) => f.path.startsWith('fixtures/'));
   ok(fixtures.length === 6 && !Object.keys(r.set.quests).some((q) => q.includes('broken')), 'its six fixtures are in the folder and never loaded');
   const manifest = readFileSync(new URL('story.jsonc', dir), 'utf8');

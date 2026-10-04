@@ -21,13 +21,25 @@
 // never its weight or the level the file has reached; how coldly a level makes a track's people greet the
 // character (`file.react`) is handed over too, since that is the file working on people before the player
 // can read why.
+//
+// **Standing, the people and the companion.** The Standing tab is shown each track's rank in words, a bar to
+// the next rung and Trust in words (`standing`), never a number, which is why a browser on a server is handed
+// this and never the book's own figures to read; the People tab, the named people met by the name the character
+// knows them by, with where and when they were last seen and gone only once it is known (`people`); and the
+// companion, who to stand beside the player and how they stand (`companion`). The cast stood leaves out anybody
+// the story killed, the rows a cast file promotes (the world stands them), and the companion while they are with
+// the player -- stood as their follower instead -- and stands one told to wait where they were told. Who of the
+// named people will not speak just now (`mute`) is handed over too, since somebody with no conversation of their
+// own is greeted without any host being asked, and the burned track's refusal must hold for them as well.
 
 import { hashText } from '../net/hash.ts';
-import { ownOf, type StepRec, type StoryBook, type Track } from './book.ts';
+import { COMPANION_STATES, DIVISIONS, TRACK_STATUSES, ownOf, type CompanionState, type Division, type StepRec, type StoryBook, type Track, type TrackStatus } from './book.ts';
 import { docIn, docsToRead, type DocItem } from './docRules.ts';
 import type { CondJson } from './expr.ts';
 import { FILE_KINDS, fileOf, reactsAt, revealed, type FileKind } from './file.ts';
+import { TALK_GONE, aliveOf, castFor, peopleView, whyNotSpeak, type PersonView } from './people.ts';
 import { evalCond, placeOf, whyNotGrant, type StoryCtx } from './quests.ts';
+import { standingView, type StandingView, type TrackView } from './standing.ts';
 import { stableText, type KillMatch, type QuestDef, type Room, type Shape, type StepDef, type StorySet } from './set.ts';
 import { castIn } from './talkRules.ts';
 import { literalOf, type TextRef } from './text.ts';
@@ -133,6 +145,31 @@ export interface CastView {
   essential: boolean;
 }
 
+/**
+ * The companion as the browser stands them: who, the body, the name the player knows them by, how they stand,
+ * and where they wait when told to. Stood beside the player as their follower while `active` or `downed`.
+ */
+export interface CompanionView {
+  id: string;
+  name: TextRef;
+  body: string;
+  mood?: string;
+  state: CompanionState;
+  downs: number;
+  waitAt?: { world: string; raw: [number, number]; room?: { cell: string } };
+}
+
+/**
+ * One of the story's named people who will not speak to the character just now, by the key they are kept under,
+ * and why: the story killed them, or they refused (themselves, or as a contact of a track that burned the
+ * character). What a greeting reads for somebody with no conversation of their own, whom no host is ever asked
+ * about, so the refusal holds for them too.
+ */
+export interface MuteView {
+  id: string;
+  why: 'gone' | 'refused';
+}
+
 export interface StoryView {
   rev: number;
   quests: QuestView[];
@@ -147,6 +184,14 @@ export interface StoryView {
   docs?: DocItem[];
   /** The ISB's file as the player may see it. Absent: there is none. */
   file?: FileView;
+  /** The three tracks as the Standing tab shows them, never a number. Absent: from a server from before them. */
+  standing?: StandingView;
+  /** The named people met, as the People tab shows them. Absent: none. */
+  people?: PersonView[];
+  /** The companion. Absent: none. */
+  companion?: CompanionView;
+  /** The named people who will not speak to the character just now. Absent: none (and from a server from before them). */
+  mute?: MuteView[];
 }
 
 /** How many ended jobs the view carries, newest first: enough for the quest list, never the whole history. Ours. */
@@ -387,15 +432,23 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
   if (flags.world) watch.push({ k: 'world' });
   ended.sort((a, b) => (endedAt.get(b) ?? 0) - (endedAt.get(a) ?? 0));
   // The story's people: every one whose `stand` holds for this character just now, by the name it knows them by.
+  // Never one the story killed, a row a cast file promotes (the world stands them), or the companion while they are
+  // with the player; the companion told to wait, or let go, stands where they were left.
   const cast: CastView[] = [];
+  const comp = book.companion ?? null;
   for (const id of Object.keys(lib.cast ?? {}).sort()) {
     const c = lib.cast[id];
-    if (c.stand && !evalCond(c.stand, book, ctx)) continue;
+    if (c.row || !aliveOf(book, id)) continue;
+    const mine = comp && comp.who === id ? comp : null;
+    if (mine && (mine.state === 'active' || mine.state === 'downed' || mine.state === 'dead')) continue;
+    if (!mine && c.stand && !evalCond(c.stand, book, ctx, {}, undefined, lib)) continue;
     const known = book.npcs && Object.hasOwn(book.npcs, id) ? book.npcs[id] : undefined;
     const named = known?.named !== undefined;
     const talk = !!c.tree && !!lib.talks && Object.hasOwn(lib.talks, c.tree);
-    const v: CastView = { id, name: named ? c.name : c.unknownAs, named, body: c.body, world: c.world, f: c.f, at: [c.at[0], c.at[1]], heading: c.heading, talk, essential: c.essential };
-    if (c.room) v.room = { ...c.room };
+    const wait = mine?.waitAt ?? null;
+    const v: CastView = { id, name: named ? c.name : c.unknownAs, named, body: c.body, world: wait ? wait.world : c.world, f: (wait ? wait.world : c.world).startsWith('space_') ? 'game' : 'raw', at: wait ? [wait.raw[0], wait.raw[1]] : [c.at[0], c.at[1]], heading: c.heading, talk, essential: c.essential };
+    if (wait?.room) v.room = { cell: wait.room.cell };
+    else if (c.room && !wait) v.room = { ...c.room };
     if (c.mood) v.mood = c.mood;
     if (c.side) v.side = c.side;
     cast.push(v);
@@ -414,7 +467,38 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
   if (docs.length) out.docs = docs;
   const file = fileView(book, lib, ctx.now);
   if (file) out.file = file;
+  out.standing = standingView(book, lib.ladders, ctx.now);
+  const people = peopleView(book, lib);
+  if (people.length) out.people = people;
+  const companion = companionView(book, lib);
+  if (companion) out.companion = companion;
+  const mute = muteView(book, lib, ctx.now);
+  if (mute.length) out.mute = mute;
   return out;
+}
+
+/** The named people who will not speak to the character just now (`MuteView`), by their keys in order. */
+export function muteView(book: StoryBook, lib: StorySet, now: number): MuteView[] {
+  const out: MuteView[] = [];
+  for (const id of Object.keys(lib.cast ?? {}).sort()) {
+    const key = lib.cast[id].row ?? id;
+    const no = whyNotSpeak(book, lib, key, now);
+    if (no) out.push({ id: key, why: no === TALK_GONE ? 'gone' : 'refused' });
+  }
+  return out;
+}
+
+/** The companion as the browser stands them, or null with none (or one whose cast member the sets no longer have). */
+export function companionView(book: StoryBook, lib: StorySet): CompanionView | null {
+  const rec = book.companion;
+  if (!rec) return null;
+  const c = castFor(lib, rec.who);
+  if (!c || c.row) return null;
+  const named = ownOf(book.npcs, rec.who)?.named !== undefined;
+  const v: CompanionView = { id: rec.who, name: named ? c.name : c.unknownAs, body: c.body, state: rec.state, downs: rec.downs };
+  if (c.mood) v.mood = c.mood;
+  if (rec.waitAt) v.waitAt = { world: rec.waitAt.world, raw: [rec.waitAt.raw[0], rec.waitAt.raw[1]], ...(rec.waitAt.room ? { room: { cell: rec.waitAt.room.cell } } : {}) };
+  return v;
 }
 
 /** The ISB's file as the player may see it just now, or null with none: the entries whose time has come or whose page was handed over. */
@@ -448,7 +532,7 @@ export function viewHash(view: StoryView): string {
 // finite number, a cap on every list, and nothing carried that was not rebuilt.
 
 /** The caps on a view off the wire. Ours, and far past what a story shows. */
-export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32, cast: 400, docs: 400 };
+export const VIEW_WIRE = { quests: 400, lines: 64, waypoints: 1000, watch: 2000, objects: 1000, polyPts: 256, who: 32, cast: 400, docs: 400, people: 2000, mute: 400 };
 
 const VIEW_CAST = /^[A-Za-z0-9_-]{1,24}:cast\/[A-Za-z0-9_.-]{1,96}$/;
 const VIEW_BODY = /^[A-Za-z0-9_./-]{1,160}$/;
@@ -746,6 +830,74 @@ function vFile(x: unknown): FileView | null {
   return out;
 }
 
+const VIEW_RUNG = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/** A line of words off the wire: no control characters, held to a length, null when there is nothing. */
+function vWords(x: unknown, max: number): string | null {
+  if (typeof x !== 'string') return null;
+  const s = x.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+  return s.trim() ? s : null;
+}
+
+function vTrack(x: unknown): TrackView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const trust = vWords(o.trust, 80);
+  if (typeof o.track !== 'string' || !['rebellion', 'empire', 'freelance'].includes(o.track) || !trust || !(TRACK_STATUSES as readonly unknown[]).includes(o.status)) return null;
+  const bar = o.bar === null ? null : vNum(o.bar, 0, 1);
+  const v: TrackView = { track: o.track as Track, rank: vWords(o.rank, 80), rankId: vWord(o.rankId, VIEW_RUNG), next: vWords(o.next, 80), bar, trust, status: o.status as TrackStatus, ready: o.ready === true };
+  if ((DIVISIONS as readonly unknown[]).includes(o.division)) v.division = o.division as Division;
+  const cell = vWord(o.cell, VIEW_RUNG);
+  if (cell) v.cell = cell;
+  const burnedFrom = vWords(o.burnedFrom, 80);
+  if (burnedFrom) v.burnedFrom = burnedFrom;
+  return v;
+}
+
+function vStanding(x: unknown): StandingView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  return { tracks: vList(o.tracks, 3, vTrack), xp: vNum(o.xp, -1e12, 1e12) ?? 0 };
+}
+
+function vPerson(x: unknown): PersonView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_WHO);
+  const name = vText(o.name, 240);
+  if (!id || !name) return null;
+  const v: PersonView = { id, name };
+  const at = vNum(o.lastSeenAt, 0, 1e14);
+  if (at !== null) v.lastSeenAt = at;
+  const where = vWord(o.lastSeenWhere, VIEW_WORLD);
+  if (where) v.lastSeenWhere = where;
+  if (o.gone === true) v.gone = true;
+  return v;
+}
+
+function vCompanion(x: unknown): CompanionView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_CAST);
+  const name = vText(o.name, 240);
+  const body = vWord(o.body, VIEW_BODY);
+  if (!id || !name || !body || !(COMPANION_STATES as readonly unknown[]).includes(o.state)) return null;
+  const v: CompanionView = { id, name, body, state: o.state as CompanionState, downs: vNum(o.downs, 0, 1e9) ?? 0 };
+  const mood = vWord(o.mood, VIEW_MOOD);
+  if (mood) v.mood = mood;
+  if (o.waitAt && typeof o.waitAt === 'object' && !Array.isArray(o.waitAt)) {
+    const w = o.waitAt as Record<string, unknown>;
+    const world = vWord(w.world, VIEW_WORLD);
+    const raw = vPair(w.raw);
+    if (world && raw) {
+      v.waitAt = { world, raw };
+      const room = vRoom(w.room);
+      if (room) v.waitAt.room = { cell: room.cell };
+    }
+  }
+  return v;
+}
+
 /** A view as a server sends it, rebuilt, or null when it is not one. */
 export function cleanView(x: unknown): StoryView | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
@@ -768,5 +920,20 @@ export function cleanView(x: unknown): StoryView | null {
   if (docs.length) out.docs = docs;
   const file = vFile(o.file);
   if (file) out.file = file;
+  const standing = vStanding(o.standing);
+  if (standing) out.standing = standing;
+  const people = vList(o.people, VIEW_WIRE.people, vPerson);
+  if (people.length) out.people = people;
+  const companion = vCompanion(o.companion);
+  if (companion) out.companion = companion;
+  const mute = vList(o.mute, VIEW_WIRE.mute, vMute);
+  if (mute.length) out.mute = mute;
   return out;
+}
+
+function vMute(x: unknown): MuteView | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const id = vWord(o.id, VIEW_WHO);
+  return id && (o.why === 'gone' || o.why === 'refused') ? { id, why: o.why } : null;
 }

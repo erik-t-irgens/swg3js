@@ -88,6 +88,13 @@
 // journal or the file within one timeline is refused, and the server's own stands (`shrinksWithin`). Nothing
 // about the file is ever said.
 //
+// **Standing, the people and the companion (story 5).** No new word: the ranks, a named person's record, what is
+// owed and the companion all travel as changes and views, worked out by the same rules. What the server adds is
+// the named-people rule on a book handed up (`namedOnly`): a record of anybody this server's story does not name
+// keeps its met and named stamps and nothing more, as the rules already refuse to write more for one. The
+// companion is the browser's own body, so its word that they went down or got up is believed; the companion is
+// spoken to wherever they walk with the player, and where they were told to wait when they wait.
+//
 // **In pieces.** A browser's input is dropped past 64 KB a second, so a book goes up in pieces
 // (`src/story/storyWire.ts`) and is put back together here, no larger than `offerMax` and with no longer
 // than `offerWait` between one piece and the next. It comes down in pieces of the same size.
@@ -107,6 +114,7 @@ import { BACKSTOP_LIMITS, BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, c
 import { HostCore } from '../src/story/hostCore.ts';
 import { isTextHash, journalHashes, textHash } from '../src/story/journal.ts';
 import { noteForWire } from '../src/story/notes.ts';
+import { namedOnly } from '../src/story/people.ts';
 import { awaits, evalCond, placeOf, rewardOfKey, whyNotGrant } from '../src/story/quests.ts';
 import { emptySet, joinSets, loadSet } from '../src/story/set.ts';
 import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, cleanTexts, nodeWord } from '../src/story/storyWire.ts';
@@ -115,12 +123,14 @@ import { gameToRawX, gameToRawZ, isQuestWaypoint } from '../src/story/waypoints.
 
 /**
  * The story this server holds, as its hail says it: 1 was the book and its waypoints; 2 the jobs, run and
- * paid here; 3 the conversations, played here; 4 is the documents, the journal and the file. A browser never
- * says a story word to a server whose hail does not carry one, the jobs' words only to one that says 2, a
- * conversation only to one that says 3 and a document or the journal's words only to one that says 4, so a
- * newer browser never asks an older server for a word it does not know.
+ * paid here; 3 the conversations, played here; 4 the documents, the journal and the file; 5 is Standing, the
+ * story's named people and the companion. A browser never says a story word to a server whose hail does not
+ * carry one, the jobs' words only to one that says 2, a conversation only to one that says 3, a document or the
+ * journal's words only to one that says 4, and word of its companion going down only to one that says 5, so a
+ * newer browser never asks an older server for a word it does not know. Story 5 adds no word of its own:
+ * everything it carries travels as changes and views.
  */
-export const STORY_WIRE_VERSION = 4;
+export const STORY_WIRE_VERSION = 5;
 
 /** Every number this file invents. None of them is from the game. */
 export const STORY_TUNING = {
@@ -184,6 +194,8 @@ export const STORY_TUNING = {
   textsMax: 64 * 1024 * 1024,
   /** Journal words `read`, `journal`, `texts` and `mine` words one browser may send in a second. */
   docRate: 6,
+  /** People a character's book remembers: those met, and the story's named people with their own records. */
+  npcMax: 2000,
 };
 
 /** What an opening or an answer over the allowance is told, as its node's reason. */
@@ -209,6 +221,7 @@ function limitsOf(tuning = STORY_TUNING) {
     steps: capped(tuning.stepsMax, BOOK_LIMITS.steps, BACKSTOP_LIMITS.steps),
     journal: capped(tuning.journalMax, BOOK_LIMITS.journal, BACKSTOP_LIMITS.journal),
     file: capped(tuning.fileMax, BOOK_LIMITS.file, BACKSTOP_LIMITS.file),
+    npcs: capped(tuning.npcMax, BOOK_LIMITS.npcs, BACKSTOP_LIMITS.npcs),
   };
 }
 
@@ -413,7 +426,7 @@ export class Stories {
     this.guarded = 0;
     this.changes = 0;
     this.refusals = 0;
-    this.stats = { events: 0, refused: 0, batches: 0, lazy: 0, flushed: 0, paidCredits: 0, paidItems: 0, charged: 0, settled: 0, settleCredits: 0, settleItems: 0, owedLater: 0, parked: 0, sweeps: 0, sweepMs: 0, views: 0, talks: 0, reads: 0, entries: 0, transcripts: 0, texts: 0, textsFull: 0, needs: 0, textsTaken: 0, shrinks: 0, lastWhy: '' };
+    this.stats = { events: 0, refused: 0, batches: 0, lazy: 0, flushed: 0, paidCredits: 0, paidItems: 0, charged: 0, settled: 0, settleCredits: 0, settleItems: 0, owedLater: 0, parked: 0, sweeps: 0, sweepMs: 0, views: 0, talks: 0, reads: 0, entries: 0, transcripts: 0, texts: 0, textsFull: 0, needs: 0, textsTaken: 0, shrinks: 0, unnamed: 0, lastWhy: '' };
     /** Why events were refused, by kind, for the status page. */
     this.refusedBy = Object.create(null);
   }
@@ -703,6 +716,10 @@ export class Stories {
       this.stats.shrinks++;
       return this.refuse(c, shrink);
     }
+    // Named people only: a record of somebody this server's story does not name keeps its met and named stamps
+    // and nothing more, and a companion the story has no companion of is let go. Only with a set read, since with
+    // none every person would read as unnamed.
+    if (this.ready) this.stats.unnamed += namedOnly(offered, this.lib);
     if (mine) this.write({ t: 'storyArchive', id: character, book: mine });
     offered.rev = Math.max(mine?.rev ?? 0, offered.rev) + 1;
     offered.base = 0;
@@ -1064,6 +1081,10 @@ export class Stories {
       case 'enter':
       case 'leave':
         return null;
+      case 'companion':
+        // The companion is the browser's own body, stood for that browser alone: its word that they went down or
+        // got up is all there is to go on, and the rules move only a companion the book already has.
+        return null;
       default:
         return 'that is not something a browser says happened';
     }
@@ -1324,11 +1345,17 @@ export class Stories {
     const cast = Object.hasOwn(this.lib.cast, speaker) ? this.lib.cast[speaker] : null;
     if (!cast) return 'there is nobody of that name in this story';
     const world = this.worldOf(line.c);
-    if (!world || cast.world !== world) return 'they are not on the world you stand on';
+    // The companion walks with the player, so is spoken to wherever they are; told to wait, they stand where
+    // they were left, which is where they are measured from.
+    const comp = line.core?.book?.companion;
+    const mine = comp && comp.who === speaker && comp.state !== 'dead' ? comp : null;
+    if (mine && (mine.state === 'active' || mine.state === 'downed')) return world ? null : 'they are not on the world you stand on';
+    const where = mine?.waitAt ? { world: mine.waitAt.world, at: mine.waitAt.raw } : { world: cast.world, at: cast.at };
+    if (!world || where.world !== world) return 'they are not on the world you stand on';
     const ctx = { ...this.ctxOf(line), char: line.character, payer: 'server' };
-    if (cast.stand && !evalCond(cast.stand, line.core.book, ctx)) return 'they are not here just now';
+    if (!mine && cast.stand && !evalCond(cast.stand, line.core.book, ctx, {}, undefined, this.lib)) return 'they are not here just now';
     const own = this.ownPlace(line.c, world);
-    if (own && Math.hypot(own[0] - cast.at[0], own[1] - cast.at[1]) > this.tuning.talkReach + this.tuning.talkSlack) return 'you are too far from them to talk';
+    if (own && Math.hypot(own[0] - where.at[0], own[1] - where.at[1]) > this.tuning.talkReach + this.tuning.talkSlack) return 'you are too far from them to talk';
     return null;
   }
 
@@ -1374,13 +1401,33 @@ export class Stories {
     const book = this.bookOf(line.character);
     if (r.ch.length && book) tell.push({ to: line.session, msg: { t: 'story', do: 'ch', rev: book.rev, ch: r.ch } });
     const failed = new Set();
+    // What a refused fine came to be owed, by its own key: the debt's whole now.
+    const owedNow = new Map();
     for (const o of r.pay) {
       if (this.pay(line, o, tell)) continue;
       if (o.item) failed.add(`${o.item.kind}:${o.item.id}`);
       else if (o.credits) failed.add(`credits:${o.credits}`);
-      else if (o.charge) failed.add(`charge:${o.charge}`);
+      else if (o.charge && o.owe) {
+        // A fine the purse would not give after all is owed instead, in a batch of its own sent after the
+        // one that made it: a fine always ends taken or owed, and never neither.
+        const key = `fine:${o.owe}:${o.charge}`;
+        failed.add(key);
+        const core = this.coreOf(line);
+        const back = core ? core.owe(o.owe, o.charge, this.ctxOf(line)) : null;
+        const after = this.bookOf(line.character);
+        if (back?.ch.length && after) {
+          tell.push({ to: line.session, msg: { t: 'story', do: 'ch', rev: after.rev, ch: back.ch } });
+          owedNow.set(key, ownOf(after.debts, o.owe) ?? 0);
+        }
+      } else if (o.charge) failed.add(`charge:${o.charge}`);
     }
     for (const n of r.notes) {
+      if (n.k === 'fined' && failed.has(`fine:${n.to}:${n.credits}`)) {
+        // Nothing was taken: said as owed in full, or, should even the debt not have been taken, as not taken.
+        const owed = owedNow.get(`fine:${n.to}:${n.credits}`);
+        tell.push({ to: line.session, msg: { t: 'story', do: 'note', note: noteForWire(owed === undefined ? n : { ...n, credits: 0, owed }, this.lib), given: owed === undefined ? 0 : 1 } });
+        continue;
+      }
       const not = (n.k === 'item' && failed.has(`${n.kind}:${n.id}`)) || (n.k === 'paid' && failed.has(`credits:${n.credits}`)) || (n.k === 'charged' && failed.has(`charge:${n.credits}`));
       tell.push({ to: line.session, msg: { t: 'story', do: 'note', note: noteForWire(n, this.lib), given: not ? 0 : 1 } });
     }

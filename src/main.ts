@@ -121,6 +121,9 @@ import type { CastView, StoryView } from './story/view.ts';
 import { core3AdoptionFiles, ownSetFiles, testSetFiles } from './story/testSetFiles.ts';
 import { ClientStrings, STRINGS_TUNE, fillName } from './story/strings.ts';
 import { REACTION_TUNE, reactionFor, tuneReactions, type Reaction } from './story/reactions.ts';
+import { STANDING_TUNE, tuneStanding } from './story/standing.ts';
+import { TALK_GONE, TALK_REFUSED } from './story/people.ts';
+import { COMPANION_TUNE, CompanionKeeper, isThreat, tuneCompanion, type CompanionDeps, type ThreatLike } from './world/companion.ts';
 import { conversationPack } from './world/conversationPack.ts';
 import { tablesOf } from './story/core3Trees.ts';
 import { StoryWatch, creditedByWord, killKey, killOf, roomOf, type WatchPlace } from './world/storyWatch.ts';
@@ -971,6 +974,16 @@ class App {
   private readonly storyWatch = new StoryWatch();
   /** The things a story stands in the world, found among what the world already places (src/world/storyStands.ts). */
   private readonly storyStands = new StoryStands();
+  /** The story's one companion, stood beside the player while they are with them (src/world/companion.ts). */
+  private readonly companion = new CompanionKeeper<Mobile>();
+  /** The use key held beside the companion while they are down: the hold that gets them up runs while this is set. */
+  private reviving = false;
+  /** The camera's frustum, made once: whether the companion is in view before being stood again behind the player. */
+  private readonly companionFrustum = new THREE.Frustum();
+  private readonly companionMatrix = new THREE.Matrix4();
+  /** Where a floor beside the player is looked for, and the no-way-at-all `spawnSpot` is asked with: kept. */
+  private readonly companionFrom = new THREE.Vector3();
+  private readonly companionStill = new THREE.Vector3();
   /** The time limits about to run out, each said once on the message line. */
   private readonly timeWarnings = new TimeWarnings();
   /** Counts down to the detectors' next look, on the real clock. */
@@ -1647,6 +1660,12 @@ class App {
     // number per blow: the line merges a repeat within two seconds into a count, and a count that
     // climbed once a second would bury everything else the game says.
     this.world.onNote = (text) => this.messages.system(text);
+    // One of the game's own people the story killed for this character (a promoted row) is never stood again here.
+    this.world.peopleGone = (key) => {
+      const npcs = this.story.book?.npcs;
+      const row = `row:${key}`;
+      return !!npcs && Object.hasOwn(npcs, row) && npcs[row].alive === false;
+    };
     // The bar reads the keys you have bound straight out of the input, which the Controls page edits
     // in place: a rebind reaches the caps on the bar's next fill with nothing having to be told.
     this.actions.setBindings(this.input.bindings);
@@ -2370,8 +2389,23 @@ class App {
        * `{ gcw: 'rebel' }` hands this world's towns to the other side and stands its guards (Imperial is
        * the default, the server's own for a world nobody holds), and `{ restand: true }` puts everybody
        * down to be stood again on the next pass.
+       *
+       * `{ story: true }` answers for the story's named people instead (`src/story/people.ts`), who are a different
+       * thing from the bodies above: what the journal's People tab shows (the named people met, by the name the
+       * character knows, last seen where and when, gone once it is known), and beside it the truth the tab never
+       * shows -- every record's own Standing, Trust, access and life -- with what is owed and the companion's record.
        */
-      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean }) => {
+      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean; story?: boolean }) => {
+        if (opts?.story) {
+          const book = this.story.book;
+          return {
+            shown: this.jobs.view()?.people ?? [],
+            records: book?.npcs ? JSON.parse(JSON.stringify(book.npcs)) : {},
+            debts: book?.debts ? { ...book.debts } : {},
+            companion: book?.companion ? { ...book.companion } : null,
+            host: this.jobs.kind,
+          };
+        }
         const moved = opts?.tune ? standingPeople.retune(opts.tune) : [];
         if (typeof opts?.respawn === 'boolean') standingPeople.setRespawns(opts.respawn);
         const deps = this.world.standingPeopleDeps();
@@ -4694,6 +4728,8 @@ class App {
           for (let i = 0; i < Math.round(seconds / dt); i++) {
             // A conversation's lines stand and move on with the simulation, as the frame loop has them.
             if (this.talkNow) this.stepTalk(dt);
+            // And the hold that gets the companion up, while the use key is held down.
+            this.stepRevive(dt);
             this.stepEmoteKeys();
             this.stepEmoteEnd();
             this.player.update(dt, this.input, this.cam, this.world);
@@ -5353,7 +5389,7 @@ class App {
             rebinds: bar.rebinds,
             styled: bar.styled,
             list: this.actionsList(bar.shown),
-            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, travel: s.travel, use: s.use, useWhat: this.promptUse, talk: s.talk, gate: s.gate, gateTo: this.promptGate, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
+            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, travel: s.travel, use: s.use, useWhat: this.promptUse, revive: s.revive, talk: s.talk, gate: s.gate, gateTo: this.promptGate, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
             hz: HUD_WIRING.promptHz,
           },
           // The damage feedback: the arcs standing, the numbers rising, and how long ago a shot of
@@ -6494,11 +6530,11 @@ class App {
        * The journal (`src/story/journal.ts`, the window `src/ui/journalUi.ts`): with nothing (or `list`), every entry
        * the book holds with its kind, title, where and when, who was there, its job, and whether this browser has
        * its words; the window as it stands; the words kept here. `{ open: true }` opens the window (`{ tab:
-       * 'jobs' | 'journal' | 'file' }` on a tab), `{ show: 'j3' }` opens an entry as the window's Open or Show does;
+       * 'jobs' | 'journal' | 'file' | 'people' | 'standing' }` on a tab), `{ show: 'j3' }` opens an entry as the window's Open or Show does;
        * `{ note: { on: 'j3', text: '...' } }` writes a note of the player's own on it; `{ tune: { page: 20 } }` moves
        * `JOURNAL_TUNE`. With a server the entries are its book's and the words are asked of it.
        */
-      journal: (opts?: { list?: boolean; open?: boolean; tab?: 'jobs' | 'journal' | 'file'; show?: string; note?: { on: string; text: string }; tune?: Partial<typeof JOURNAL_TUNE> }) => {
+      journal: (opts?: { list?: boolean; open?: boolean; tab?: 'jobs' | 'journal' | 'file' | 'people' | 'standing'; show?: string; note?: { on: string; text: string }; tune?: Partial<typeof JOURNAL_TUNE> }) => {
         if (opts?.tune) tuneJournal(opts.tune);
         const results: Record<string, unknown>[] = [];
         if (opts?.open || opts?.tab) this.toggleJournal(true, opts.tab);
@@ -6582,6 +6618,66 @@ class App {
           book: book ? 'held' : 'none',
           tune: { ...FILE_TUNE },
         };
+      },
+      /**
+       * Standing and Trust on the three tracks (`src/story/standing.ts`): each track's numbers as the book holds them
+       * (the console's alone: the player never sees one), its rank, status, cell, division and history, what the
+       * Standing tab shows of it, and the ladders the sets read here. `{ track: 'freelance', standing: 30, trust: 2,
+       * rank: 'f2' }` sets any of those outright, held to their ranges, with this browser's own host only (on a server
+       * only its story moves a track); `rank: null` takes the rank away. `{ tune }` moves `STANDING_TUNE`.
+       */
+      standing: (opts?: { track?: 'rebellion' | 'empire' | 'freelance'; standing?: number; trust?: number; rank?: string | null; tune?: Partial<typeof STANDING_TUNE> }) => {
+        if (opts?.tune) tuneStanding(opts.tune);
+        const results: Record<string, unknown>[] = [];
+        if (opts?.track && (opts.standing !== undefined || opts.trust !== undefined || opts.rank !== undefined)) {
+          if (this.remoteJobs.active) results.push({ ok: false, why: 'a server keeps this character\'s standing: only its story moves it' });
+          else results.push({ track: opts.track, ...this.questHost.setTrack(opts.track, { standing: opts.standing, trust: opts.trust, rank: opts.rank }) });
+        }
+        this.storyClock = 0;
+        this.stepStory(0, this.inWorld && !this.dying);
+        const book = this.story.book;
+        const lib = this.questHost.library;
+        return {
+          results,
+          tracks: book?.tracks ? JSON.parse(JSON.stringify(book.tracks)) : {},
+          shown: this.jobs.view()?.standing ?? null,
+          xp: book?.xp ?? 0,
+          ladders: lib.ladders ? Object.fromEntries(Object.entries(lib.ladders.tracks).map(([t, l]) => [t, { floor: l?.floor ?? 0, rungs: (l?.rungs ?? []).map((r) => `${r.id} ${r.name} (${r.promote} at ${r.standing}${r.trust > -1000 ? `, trust ${r.trust}` : ''})`) }])) : null,
+          host: this.jobs.kind,
+          tune: { ...STANDING_TUNE },
+        };
+      },
+      /**
+       * The companion (`src/world/companion.ts`): the book's record, the view's, and the keeper's body -- stood or not,
+       * down or up, how far off, how long the use key has been held, and its tallies -- and `COMPANION_TUNE`.
+       * `{ recruit: true }` (or a cast id) recruits TEST COMPANION through the story's own `recruit()`, with this
+       * browser's own host only; `{ down: true }` takes the body's health to nought, which lays it down; `{ revive:
+       * true }` gets it up as the held use key would; `{ tune }` moves the numbers.
+       */
+      companion: (opts?: { recruit?: true | string; down?: boolean; revive?: boolean; tune?: Partial<typeof COMPANION_TUNE> }) => {
+        if (opts?.tune) tuneCompanion(opts.tune);
+        const results: Record<string, unknown>[] = [];
+        if (opts?.recruit) {
+          const id = opts.recruit === true ? 'cast/test-companion' : opts.recruit.replace(/^test:/, '');
+          if (this.remoteJobs.active) results.push({ ok: false, why: 'a server holds this character\'s story: only its story recruits' });
+          else results.push({ act: `recruit(${id})`, ...this.questHost.run([`recruit(${id})`]) });
+        }
+        const body = this.companion.body;
+        if (opts?.down) {
+          if (!body || body.downed) results.push({ ok: false, why: body ? 'down already' : 'no companion is stood' });
+          else {
+            body.damage(body.hp + 1);
+            results.push({ ok: body.downed, why: body.downed ? undefined : 'the blow did not lay them down' });
+          }
+        }
+        if (opts?.revive) {
+          const up = !!body && this.companionDeps.getUp(body, COMPANION_TUNE.reviveShare);
+          results.push(up ? { ok: true } : { ok: false, why: body ? 'not down' : 'no companion is stood' });
+        }
+        this.storyClock = 0;
+        this.stepStory(0, this.inWorld && !this.dying);
+        const at = this.player.worldPos;
+        return { results, book: this.story.book?.companion ?? null, view: this.jobs.view()?.companion ?? null, keeper: this.companion.report(at.x, at.z), followers: this.world.followers.count, host: this.jobs.kind };
       },
       /**
        * The gestures a conversation's lines are said with (`src/story/gestures.ts`): every line of the one
@@ -9177,8 +9273,11 @@ class App {
     this.storyWatch.reset();
     this.forgetStoryPlace();
     this.storyStands.clear();
-    // The story's people stood for this character are this character's alone.
+    // The story's people stood for this character are this character's alone, and so is the companion.
     this.storyStands.clearCast((b) => this.world.unstandMobile(b as Mobile));
+    if (this.companion.body && !this.companion.body.removed) this.world.unstandMobile(this.companion.body);
+    this.companion.clear();
+    this.reviving = false;
     this.timeWarnings.clear();
     this.promptUse = '';
     // And its marks, their labels and the city walked into with it. The minimap comes down here too, as
@@ -9593,6 +9692,9 @@ class App {
       const thing = this.storyUseTarget();
       s.use = !!thing;
       this.promptUse = thing ? this.storyText(thing.label ?? 'it') : '';
+      // The companion lying down within reach: holding the key gets them up.
+      const here = p.worldPos;
+      s.revive = !room && this.companion.revivable(here.x, here.z);
       // Somebody in front of you who may be spoken to. Gathered whatever else is beside you, like the
       // port's things, so the bar's own chain decides which of the things that want the key shows; the
       // name is kept for the long line, which has room for it.
@@ -9670,7 +9772,7 @@ class App {
     const act = gateAction({
       live: s.live,
       onFoot: !p.mounted && !p.piloting && !p.aboard && !p.noclip,
-      free: !s.lift && !s.elevator && !s.doorless && !s.use && !s.talk && !s.near && !s.boots && !s.eva && !s.instance,
+      free: !s.lift && !s.elevator && !s.doorless && !s.use && !s.talk && !s.near && !s.boots && !s.eva && !s.instance && !s.revive,
       since: this.zoneGates.since(this.world.simTime),
       d: near ? near.d : null,
       to: !!near?.gate.to,
@@ -10657,7 +10759,7 @@ class App {
   }
 
   /** O: the journal, open or shut. It closes every other panel to open, as the Waypoints window does. */
-  private toggleJournal(open = !this.journalUi.open, tab?: 'jobs' | 'journal' | 'file'): void {
+  private toggleJournal(open = !this.journalUi.open, tab?: 'jobs' | 'journal' | 'file' | 'people' | 'standing'): void {
     if (!open) {
       if (!this.journalUi.open) return;
       this.journalUi.hide();
@@ -10680,7 +10782,7 @@ class App {
     const host = this.story.host;
     const why = this.remoteJobs.active ? this.remoteJobs.waits() : this.storyJobsWait();
     const note = host === 'held' ? "This character's story is being settled with the server, or the server is not answering." : why && why !== JOBS_WAIT_UNREAD ? `Your jobs wait: ${why}.` : host === 'server' ? 'Held by the server, and shown here as it answers.' : 'Kept in this browser.';
-    return { jobs: view?.quests ?? [], toRead: view?.docs ?? [], entries: book?.journal ?? [], file: view?.file ?? null, note };
+    return { jobs: view?.quests ?? [], toRead: view?.docs ?? [], entries: book?.journal ?? [], file: view?.file ?? null, people: view?.people ?? [], companion: view?.companion ?? null, standing: view?.standing ?? null, note };
   }
 
   /** The journal drawn again from the story, when it is open. */
@@ -11165,6 +11267,11 @@ class App {
     if (simulate && this.inWorld && !this.dying) this.storyWatch.step(host.view(), this.watchPlace(), Date.now(), this.raiseStory);
     // Read again: what the detectors just raised may have moved a job on.
     const view = host.view();
+    // The companion beside the player while they are with them, and told of going down and getting up: first,
+    // whether or not the game simulates, so a body handed between them and the story's cast (taken on, told to
+    // wait, let go, come back) changes hands before the cast's own pass would take it down as somebody it no
+    // longer stands, with whoever is speaking to them still speaking to the same person.
+    this.stepCompanion(view);
     // The story's people near the player stood, the rest taken down, and a name given mid-conversation worn.
     this.stepCast(view);
     // The client's string tables of the game's own people standing near, on their way before anybody speaks.
@@ -11217,19 +11324,28 @@ class App {
   /** The room answer a cast member in a room is stood with, refilled in place. */
   private readonly castRoom = makeRoomAnswer();
 
+  /**
+   * How one of the story's people keeps their place: an essential one does not think and stands where it was
+   * stood; a mortal one thinks, so it is given the post a standing person keeps (`keepPost`), held still on its
+   * own spot: it fights and flees as anybody does and walks home after, never wandering off the place the story
+   * (and a server's reach) measures from.
+   */
+  private castPost(m: Mobile, essential: boolean, x: number, z: number, heading: number): void {
+    m.essential = essential;
+    if (essential) return;
+    m.homeX = x;
+    m.homeZ = z;
+    m.post = { kind: 'still', heading, tune: PEOPLE_TUNE };
+  }
+
   /** What standing the story's people asks of the world. */
   private readonly castDeps: CastDeps = {
     stand: (c, x, z, y, heading, name) => {
       const inside = y !== null;
       const m = this.world.standMobile(c.body, inside ? { x, y: y as number, z, heading } : { x, z, heading }, inside, `cast:${c.id}`, c.essential, { name, mood: c.mood ?? null });
-      // An essential one does not think and stands where it was stood; a mortal one thinks, so it is given the
-      // post a standing person keeps (`keepPost`), held still on its own spot: it fights and flees as anybody
-      // does and walks home after, never wandering off the place the story (and a server's reach) measures from.
-      if (m && !c.essential) {
-        m.homeX = x;
-        m.homeZ = z;
-        m.post = { kind: 'still', heading, tune: PEOPLE_TUNE };
-      }
+      if (m) this.castPost(m, c.essential, x, z, heading);
+      // The story's companion waiting where they were left goes down rather than dying, as beside the player.
+      if (m && this.jobs.view()?.companion?.id === c.id) m.downable = true;
       return m;
     },
     unstand: (b) => this.world.unstandMobile(b as Mobile),
@@ -11242,6 +11358,151 @@ class App {
     },
     text: (ref) => this.storyText(ref),
   };
+
+  /**
+   * What the companion's keeper asks of the world (`src/world/companion.ts`): a body stood behind the player
+   * through the world's own prepared path (out of sight until its programs are built) and taken on as follower
+   * slot 0, never on the wire; taken back down; got up; felled by the story; whether anything hostile is near;
+   * whether the camera sees it; and the host told of each going down and getting up.
+   */
+  private readonly companionDeps: CompanionDeps<Mobile> = {
+    stand: (v, x, z, heading, y) => {
+      const p = this.player;
+      const inside = this.world.inside;
+      const at = inside ? { x, y: y ?? p.worldPos.y, z, heading } : { x, z, heading };
+      const m = this.world.standMobile(v.body, at, inside, `companion:${v.id}`, false, { name: this.storyText(v.name), mood: v.mood ?? null });
+      if (!m) return null;
+      const why = this.world.takeCompanion(m);
+      if (why) {
+        this.world.unstandMobile(m);
+        return null;
+      }
+      this.companionLent = false;
+      return m;
+    },
+    floor: (x, z) => {
+      // Nothing that stands still between the player's middle and the spot, a body's width past it, and a floor
+      // under it within a step or two of the player's own: never through a wall, off a room's edge or down a drop.
+      const p = this.player.worldPos;
+      const inside = this.world.inside;
+      const dx = x - p.x;
+      const dz = z - p.z;
+      const d = Math.hypot(dx, dz);
+      const past = d > 1e-3 ? (d + COMPANION_TUNE.clearPad) / d : 1;
+      const mid = p.y + 1;
+      if (this.physics.blockDistance(p.x, mid, p.z, p.x + dx * past, mid, p.z + dz * past, inside) !== Infinity) return null;
+      const spot = this.world.spawnSpot(this.companionFrom.set(x, p.y, z), this.companionStill, 0, inside);
+      if (!spot || Math.abs(spot.y - p.y) > COMPANION_TUNE.floorRise) return null;
+      return spot.y;
+    },
+    adopt: (v) => {
+      // The story's cast standing them already: the body taken on where it stands, so whoever is speaking to them
+      // goes on speaking to the same person. One the follower set will not take goes back to the cast.
+      const gen = this.world.generation;
+      const b = this.storyStands.release(v.id, gen) as Mobile | null;
+      if (!b) return null;
+      if (this.world.takeCompanion(b)) {
+        this.storyStands.adopt(v.id, b, gen, this.castDeps);
+        return null;
+      }
+      this.companionLent = false;
+      return b;
+    },
+    handBack: (b, v) => {
+      // Told to wait, or let go: off the follower set, back on their own side and temper where they stand, and the
+      // story's cast again, which keeps them there.
+      if (b.removed || b.dead) return false;
+      const cast = this.jobs.view()?.cast.find((c) => c.id === v.id) ?? null;
+      if (!cast) return false;
+      this.world.followers.giveUp(b);
+      this.castPost(b, cast.essential, b.pos.x, b.pos.z, b.heading);
+      this.storyStands.adopt(v.id, b, this.world.generation, this.castDeps);
+      return true;
+    },
+    unstand: (b) => this.world.unstandMobile(b),
+    getUp: (b, share) => b.getUpFrom(share),
+    fall: (b) => b.fall(),
+    hostileNear: (b, radius) => {
+      // Anything still in the fight: hostile to the player's side on sight, or still after the player, a follower
+      // or the companion whatever its temper (`isThreat`).
+      const side = this.world.playerTarget;
+      for (const t of this.world.targets()) {
+        if (t === b || t === side || Math.hypot(t.pos.x - b.pos.x, t.pos.z - b.pos.z) > radius) continue;
+        if (isThreat(t as ThreatLike, side, this.companionOurs)) return true;
+      }
+      return false;
+    },
+    inView: (b) => {
+      const cam = this.cam.camera;
+      this.companionMatrix.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+      this.companionFrustum.setFromProjectionMatrix(this.companionMatrix);
+      return this.companionFrustum.containsPoint(b.pos);
+    },
+    tell: (up) => {
+      this.jobs.event({ k: 'companion', up });
+    },
+  };
+  /** Whether the companion stood last has been lent what a fight needs: done once their model is up. */
+  private companionLent = false;
+
+  /** Whether a living key is on the player's side: the player, or anybody following them, the companion first. */
+  private readonly companionOurs = (key: number): boolean => key === this.world.playerTarget.key || this.world.followers.hasKey(key);
+
+  /**
+   * The companion, a few times a second from the jobs' own step: stood beside the player while they are with
+   * them, aboard and not drawn in anything ridden or flown, stood again when left far behind out of sight, the
+   * host told when they go down and get up, and got up by themselves after a while with nothing hostile near.
+   * Only where the story's people are stood at all (`castWhy`).
+   */
+  private stepCompanion(view: StoryView | null, forced = false): void {
+    if ((this.castWhy() && !forced) || !this.world.mobiles) return;
+    const p = this.player;
+    const at = p.worldPos;
+    const onFoot = !p.mounted && !p.piloting && !p.aboard && !p.eva && !p.noclip && !this.ride?.riding && !this.world.planet?.space;
+    const did = this.companion.step(view?.companion ?? null, { onFoot, gen: this.world.generation, x: at.x, z: at.z, heading: p.heading, now: this.world.simTime }, this.companionDeps);
+    const body = this.companion.body;
+    // Lent the rolls and jumps a fight needs once there is a model to lend them to.
+    if (body && !this.companionLent && body.ready) {
+      this.companionLent = true;
+      this.world.mobiles.lendFightClips(body);
+    }
+    const name = view?.companion ? this.storyText(view.companion.name) : 'Your companion';
+    if (did === 'down') this.messages.system(`${name} is down: hold ${keyLabel(this.input.bindings.mount[0] ?? '')} beside them to get them up`);
+    else if (did === 'up') this.messages.system(`${name} is up again`);
+  }
+
+  /**
+   * The companion stood behind the loading screen of an arrival, and their model waited for (bounded), so the
+   * sweep that follows builds their programs rather than the first frames after the screen lifts.
+   */
+  private async standCompanionNow(): Promise<void> {
+    const v = this.jobs.view()?.companion;
+    if (!v || (v.state !== 'active' && v.state !== 'downed')) return;
+    this.stepCompanion(this.jobs.view(), true);
+    const body = this.companion.body;
+    const until = performance.now() + COMPANION_TUNE.standWait;
+    while (body && !body.ready && !body.removed && performance.now() < until) await new Promise((r) => setTimeout(r, 100));
+  }
+
+  /** E beside the companion lying down: the hold that gets them up begins, and runs while the key is held (`stepRevive`). */
+  private handleRevive(): boolean {
+    const at = this.player.worldPos;
+    if (this.player.mounted || this.player.piloting || this.player.aboard || !this.companion.revivable(at.x, at.z)) return false;
+    this.reviving = true;
+    return true;
+  }
+
+  /** Every simulated frame while the use key is held beside the companion lying down: up once held long enough. */
+  private stepRevive(dt: number): void {
+    if (!this.reviving) return;
+    const at = this.player.worldPos;
+    const r = this.companion.hold(dt, this.input.held('mount'), at.x, at.z, this.companionDeps);
+    if (r >= 1) {
+      const v = this.jobs.view()?.companion;
+      this.messages.system(`${v ? this.storyText(v.name) : 'Your companion'} is up again`);
+    }
+    if (r >= 1 || r < 0 || (r === 0 && !this.input.held('mount'))) this.reviving = false;
+  }
 
   /** How many times the sets have been asked for, so an answer to an older ask is dropped. */
   private storyLoads = 0;
@@ -11917,6 +12178,10 @@ class App {
       this.loadingScreen.setWhat(`loading ${stage}`);
       await new Promise((r) => setTimeout(r, 100));
     }
+    // The companion stood beside the player behind this screen, as every follower is dropped at a change of world,
+    // and their model waited for (bounded), so the sweep below builds their programs and not the first frames after.
+    this.loadingScreen.setWhat('your companion');
+    await this.standCompanionNow();
     // The world's shuttles stood and made ready before the screen lifts, bounded: they are stood once the
     // pack is in, one after another, and one stood after the screen had gone built its programs on the
     // first frames the world was shown -- the far pad's own shuttle, after a crossing, right under the eyes
@@ -18885,7 +19150,8 @@ class App {
     const why = whyNotTalk(m, this.world.playerTarget);
     if (why) return why;
     const following = this.world.followers.following(m);
-    const castId = this.storyStands.castOf(m);
+    // The companion walking with the player is the story's cast member too, stood by their keeper.
+    const castId = this.storyStands.castOf(m) ?? (this.companion.isBody(m) ? this.companion.who : null);
     const person = castId ? null : standingPeople.speakerOf(m);
     const speaker = castId ?? (person ? `row:${person.key}` : review ? 'row:review' : null);
     const who = person?.who ?? null;
@@ -18947,6 +19213,23 @@ class App {
   private talkGreeting(t: NonNullable<App['talkNow']>): void {
     const m = t.body;
     const person = standingPeople.speakerOf(m);
+    // One of the story's named people who will not speak to the character says only that: refused by their own
+    // word or as a contact of a track that burned the character, or gone. The view says who (`mute`), since the
+    // burned track's rule reads the sets, which a browser on a server does not hold; the record itself still
+    // answers for a server from before the view carried it.
+    const castId = this.storyStands.castOf(m) ?? (this.companion.isBody(m) ? this.companion.who : null);
+    const key = castId ?? (person ? `row:${person.key}` : null);
+    const muted = key ? (this.jobs.view()?.mute?.find((x) => x.id === key) ?? null) : null;
+    const book = this.story.book;
+    const own = key && book?.npcs && Object.hasOwn(book.npcs, key) ? book.npcs[key] : undefined;
+    const gone = muted?.why === 'gone' || own?.alive === false;
+    if (muted || (own && (own.access === 'refused' || own.alive === false))) {
+      t.reaction = null;
+      t.options = t.options.filter((o) => o.id === 'leave');
+      this.talkUi.setBanner(null);
+      this.talkUi.show(m.label, gone ? TALK_GONE : TALK_REFUSED, t.options);
+      return;
+    }
     const voice = person ? conversationPack.voiceOf(person.who) : null;
     // The ISB's file works on people before the player can read why: a level it has reached holds a track's people colder.
     t.reaction = person ? reactionFor(voice, this.story.book, `row:${person.key}`, sharedClock.now(), (table, key) => this.strings.hasKey(table, key), this.jobs.view()?.file?.react ?? null) : null;
@@ -19051,6 +19334,15 @@ class App {
         this.endTalk();
         return;
       case 'fallback': {
+        // Somebody who has refused the character (or is gone) says only that, with nothing but the way out under it.
+        if (step.why === TALK_REFUSED || step.why === TALK_GONE) {
+          this.talkSay('close');
+          this.talkTree = null;
+          t.options = this.talkOptionsFor(t.body, t.following).filter((o) => o.id === 'leave');
+          this.talkUi.setBanner(null);
+          this.talkUi.show(t.body.label, step.why, t.options);
+          return;
+        }
         // Nothing came in time, or nothing could be said: the greeting and the game's own answers instead.
         if (step.why) console.info(`story: ${tt.speaker} has nothing to say just now (${step.why})`);
         this.talkSay('close');
@@ -19066,11 +19358,12 @@ class App {
    * The game's own answers for somebody: a corvette's ticket taker offers the trip to its faction's copy of the
    * ship first (`instances.ts`); anybody may be spoken to whichever browser keeps them, and only one this browser
    * keeps may follow; and one of the story's people stays at their post, offered neither follow nor stop
-   * following (the story takes them down away from it, and the companion is a later wave's).
+   * following (the story takes them down away from it), as is the companion, who follows by the story's word.
    */
   private talkOptionsFor(m: Mobile, following: boolean): TalkOption[] {
     const taker = !!corvetteFor(standingPeople.rowOf(m)?.takes);
-    return talkOptions(following, this.world.followers.full, [], m.isDriven, taker, this.storyStands.castOf(m) !== null);
+    // The companion follows by the story's word, never the game's own follow and stay answers.
+    return talkOptions(following, this.world.followers.full, [], m.isDriven, taker, this.storyStands.castOf(m) !== null || this.companion.isBody(m));
   }
 
   /** The words of a line: a reference looked up (in the conversation's own table for a `:key`), its substitutions filled, the player's name for `%TU`. */
@@ -20218,10 +20511,13 @@ class App {
             if (riding) this.ride?.pressE();
             else if (!this.hyperspace.locksControls) {
               // The order the bar's own rules offer them in (`promptRules.ts`, whose test pins this line):
-              // what is underfoot, a port's own things, somebody you are looking at, a gate, and a vehicle.
-              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
+              // what is underfoot, a port's own things, a story's thing, the companion lying down beside you,
+              // somebody you are looking at, a gate, and a vehicle.
+              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleRevive() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
+          // The key still held beside the companion lying down: the hold that gets them up goes on.
+          this.stepRevive(dt);
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
           if (player.noclip && input.pressedAction('noclipFaster')) player.noclipSpeed = Math.min(2000, player.noclipSpeed * 1.5);
           if (player.noclip && input.pressedAction('noclipSlower')) player.noclipSpeed = Math.max(2, player.noclipSpeed / 1.5);
@@ -20473,6 +20769,7 @@ class App {
         else if (S8.instance) prompt = S8.instance === 'keypad' ? '<b>E</b> use the keypad' : S8.instance === 'pod' ? '<b>E</b> the escape pod: off this ship' : S8.instance === 'out' ? `<b>E</b> back the way you came in` : '<b>E</b> go in';
         else if (S8.travel) prompt = `<b>E</b> ${this.promptTravel}`;
         else if (S8.use) prompt = `<b>E</b> use ${this.promptUse}`;
+        else if (S8.revive) prompt = `hold <b>E</b> to get your companion up`;
         else if (S8.talk) prompt = `<b>E</b> talk to ${this.promptTalk}`;
         else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
         // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.

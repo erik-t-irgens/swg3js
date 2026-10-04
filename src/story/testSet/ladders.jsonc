@@ -1,0 +1,24 @@
+// The ladders of the committed test set: a few rungs a track, named TEST RUNG n, and five TEST words for Trust.
+// Freelance has a first rung taken by itself the moment the track takes the character on, a second the story
+// promotes to with a beat (`test:standing`) once 30 Standing is reached, and a third taken by itself at 60
+// Standing and a point of Trust. The owner's own ladders.jsonc takes the place of this one. None of it is story.
+{
+  "trustWords": ["TEST TRUST 1", "TEST TRUST 2", "TEST TRUST 3", "TEST TRUST 4", "TEST TRUST 5"],
+  "freelance": {
+    "floor": 5,
+    "rungs": [
+      { "id": "f1", "name": "TEST RUNG 1", "standing": 0, "promote": "auto", "exposure": 1 },
+      { "id": "f2", "name": "TEST RUNG 2", "standing": 30, "trust": 0, "pays": 1.2, "brief": 1, "exposure": 1.5 },
+      { "id": "f3", "name": "TEST RUNG 3", "standing": 60, "trust": 1, "promote": "auto", "pays": 1.5, "brief": 3, "exposure": 2 },
+    ],
+  },
+  "rebellion": {
+    "rungs": [
+      { "id": "r1", "name": "TEST RUNG 1", "standing": 0, "promote": "auto" },
+      { "id": "r2", "name": "TEST RUNG 2", "standing": 20 },
+    ],
+  },
+  "empire": {
+    "rungs": [{ "id": "e1", "name": "TEST RUNG 1", "standing": 0, "promote": "auto", "exposure": 2 }],
+  },
+}

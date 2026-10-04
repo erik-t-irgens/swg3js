@@ -323,7 +323,7 @@ if (typeof WebSocket === 'undefined') {
     a.send({ t: 'story', do: 'sync', has: 0, base: 0, local: 0, known: 0 });
     await wait(250);
     const hail = a.got.find((m) => m.t === 'hail') as { story?: { v: number } };
-    ok(hail.story?.v === 4, 'the relay\'s hail says it keeps the documents and the journal (story 4)');
+    ok((hail.story?.v ?? 0) >= 4, 'the relay\'s hail says it keeps the documents and the journal (story 4 or later)');
     a.send({ t: 'story', do: 'read', doc: 'test:doc/test-pages', at: {} });
     await wait(150);
     const refused = a.last((m) => m.do === 'doc') as Msg | undefined;

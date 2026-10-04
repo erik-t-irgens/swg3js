@@ -30,9 +30,9 @@ import { ownOf, type StoryBook } from './book.ts';
 import { dateText, type DocBlock, type DocDef, type DocSpan, type DocSrc, type DocView, type SrcSpan } from './doc.ts';
 import { fileOf, revealed } from './file.ts';
 import { NOT_KEPT, textHash, type JournalEntry } from './journal.ts';
+import { castFor, whoOf } from './people.ts';
 import { evalCond, type Draft, type StoryCtx } from './quests.ts';
 import type { OptionDef, StorySet } from './set.ts';
-import { castIn } from './talkRules.ts';
 import { literalOf, type TextRef } from './text.ts';
 
 /** The foot of a page: a card's Accept and Decline, or a choice's options. Worked out at every reading. */
@@ -174,13 +174,13 @@ export function renderDoc(def: DocDef, r: ReadCtx): DocView {
 export function readCtxOf(d: Draft, scope: { quest?: string; run?: number }): ReadCtx {
   const c = d.ctx;
   return {
-    holds: (cond) => evalCond(cond, d.book, c, scope, d.tally),
+    holds: (cond) => evalCond(cond, d.book, c, scope, d.tally, d.lib),
     player: c.name || 'you',
     species: speciesWords(c.species),
     npc: (who) => {
-      const cast = castIn(d.lib, who);
+      const cast = castFor(d.lib, who);
       if (!cast) return 'someone';
-      const named = ownOf(d.book.npcs, who)?.named !== undefined;
+      const named = ownOf(d.book.npcs, whoOf(d.lib, who))?.named !== undefined;
       return literalOf(named ? cast.name : cast.unknownAs) ?? 'someone';
     },
     date: dateText(d.lib.calendar, c.now),
@@ -230,7 +230,7 @@ export function footOf(book: StoryBook, lib: StorySet, doc: string, ctx: StoryCt
     k: 'choice',
     quest: c.quest,
     step: c.step,
-    options: c.options.map((o) => ({ id: o.id, label: o.label ?? o.id, enabled: !o.when || evalCond(o.when, book, ctx, scope), ...(o.stakes ? { stakes: o.stakes } : {}) })),
+    options: c.options.map((o) => ({ id: o.id, label: o.label ?? o.id, enabled: !o.when || evalCond(o.when, book, ctx, scope, undefined, lib), ...(o.stakes ? { stakes: o.stakes } : {}) })),
   };
 }
 
@@ -355,8 +355,8 @@ export function docsToRead(book: StoryBook, lib: StorySet): DocItem[] {
     if (rec.card) item.card = true;
     if (rec.from) {
       item.from = rec.from;
-      const c = castIn(lib, rec.from);
-      if (c) item.fromName = ownOf(book.npcs, rec.from)?.named !== undefined ? c.name : c.unknownAs;
+      const c = castFor(lib, rec.from);
+      if (c) item.fromName = ownOf(book.npcs, whoOf(lib, rec.from))?.named !== undefined ? c.name : c.unknownAs;
     }
     if (rec.j) item.opened = true;
     out.push(item);

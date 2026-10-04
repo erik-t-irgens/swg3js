@@ -1,0 +1,10 @@
+// The notice the TEST: everything goes wrong job hands over as the story kills TEST DOOMED: once it is read, the
+// People tab shows them gone, and not before. None of it is story.
+kind: notice
+id: test-death
+title: TEST NOTICE 0001
+issuer: TEST ISSUER
+
+TEST: This is a test notice. It says that TEST DOOMED is gone.
+
+[stamp] TEST NOTICE

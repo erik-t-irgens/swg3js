@@ -29,6 +29,7 @@
 import { isWho, ownOf, type StoryBook } from './book.ts';
 import { TONES, type Tone } from './gestures.ts';
 import { JOURNAL_TUNE, textHash, type JournalLine } from './journal.ts';
+import { castFor, whoOf, whyNotSpeak } from './people.ts';
 import { evalCond, type Draft, type StoryCtx, type Tally } from './quests.ts';
 import type { CastDef, StorySet } from './set.ts';
 import { FILL_KEYS, SHOT_KINDS, isNodeName, type FillKey, type LineDef, type NodeDef, type ReplyDef, type Shot, type ShotKind, type TalkDef } from './talkSet.ts';
@@ -129,22 +130,23 @@ export function castIn(lib: StorySet, who: string): CastDef | null {
 
 /**
  * The conversation a speaker speaks, or null, in the order a speaker is resolved in: a cast member's own
- * `tree`; then one of the game's own people (`row:<key>`) by the creature they are stood as (`creature`),
- * through the conversations the game's own people have been given (`voices`, which binds only a tree that
- * may be played). Anybody else has none, and greets in the client's reaction lines or the game's own.
+ * `tree` (one of the game's own people a cast file promotes included); then one of the game's own people
+ * (`row:<key>`) by the creature they are stood as (`creature`), through the conversations the game's own
+ * people have been given (`voices`, which binds only a tree that may be played). Anybody else has none, and
+ * greets in the client's reaction lines or the game's own.
  */
 export function treeFor(lib: StorySet, who: string, creature?: string | null): TalkDef | null {
-  const c = castIn(lib, who);
+  const c = castFor(lib, who);
   let id = c?.tree ?? null;
-  if (!c && who.startsWith('row:') && creature && lib.voices && Object.hasOwn(lib.voices, creature)) id = lib.voices[creature];
+  if (!id && who.startsWith('row:') && creature && lib.voices && Object.hasOwn(lib.voices, creature)) id = lib.voices[creature];
   return id && lib.talks && Object.hasOwn(lib.talks, id) ? lib.talks[id] : null;
 }
 
 /** The speaker's name as this character knows them: given (`named`), or what they are called until then. */
 export function nameFor(book: StoryBook, lib: StorySet, who: string): TextRef | null {
-  const c = castIn(lib, who);
+  const c = castFor(lib, who);
   if (!c) return null;
-  return ownOf(book.npcs, who)?.named !== undefined ? c.name : c.unknownAs;
+  return ownOf(book.npcs, whoOf(lib, who))?.named !== undefined ? c.name : c.unknownAs;
 }
 
 // ---- the work, on a copy of the book ---------------------------------------------------------------------
@@ -213,7 +215,15 @@ function enter(d: Draft, tree: TalkDef, speaker: string, node: string, path: rea
 export function talkOpenWork(d: Draft, speaker: string, who: string | null = null, tree: string | null = null): TalkPending {
   const def = tree ? (d.lib.talks && Object.hasOwn(d.lib.talks, tree) ? d.lib.talks[tree] : null) : treeFor(d.lib, speaker, who);
   if (!def) return { state: null, why: 'they have nothing to say' };
-  meet(d, speaker);
+  // Somebody the story killed says nothing to anybody, and somebody who has refused the character says only that.
+  // The console's review of a conversation is on a book of its own, and is never refused.
+  if (!tree) {
+    const no = whyNotSpeak(d.book, d.lib, whoOf(d.lib, speaker), d.ctx.now);
+    if (no) return { state: null, why: no };
+  }
+  meet(d, whoOf(d.lib, speaker));
+  // When and where they were last seen, and the companion waiting here brought back.
+  if (!tree) d.seen(speaker);
   for (const e of def.entry) {
     if (e.when && !d.holds(e.when)) continue;
     return enter(d, def, speaker, e.to, [], who);
@@ -223,9 +233,9 @@ export function talkOpenWork(d: Draft, speaker: string, who: string | null = nul
 }
 
 /** Whether an answer is offered just now, and whether it may be chosen: hidden, greyed, or open. */
-export function replyOpen(book: StoryBook, tree: TalkDef, node: NodeDef, r: ReplyDef, ctx: StoryCtx, tally?: Tally): 'hidden' | 'disabled' | 'open' {
+export function replyOpen(book: StoryBook, tree: TalkDef, node: NodeDef, r: ReplyDef, ctx: StoryCtx, tally?: Tally, lib?: StorySet | null): 'hidden' | 'disabled' | 'open' {
   if (r.once && ownOf(book.heard, `${tree.id}#${node.id}.${r.id}`) !== undefined) return 'hidden';
-  if (r.when && !evalCond(r.when, book, ctx, {}, tally)) return r.show === 'disable' ? 'disabled' : 'hidden';
+  if (r.when && !evalCond(r.when, book, ctx, {}, tally, lib)) return r.show === 'disable' ? 'disabled' : 'hidden';
   return 'open';
 }
 
@@ -243,7 +253,7 @@ export function talkPickWork(d: Draft, state: TalkState, reply: string | null): 
   }
   const r = node.replies.find((x) => x.id === reply);
   if (!r) return { state, why: 'there is no such answer', log: state.log };
-  if (replyOpen(d.book, tree, node, r, d.ctx, d.tally) !== 'open') return { state, why: 'that answer is not open', log: state.log };
+  if (replyOpen(d.book, tree, node, r, d.ctx, d.tally, d.lib) !== 'open') return { state, why: 'that answer is not open', log: state.log };
   hear(d, `${tree.id}#${node.id}.${r.id}`);
   d.actions(r.do, { talk: tree.id, site: `${node.id}.${r.id}` });
   // What the player says aloud goes into the transcript; a silent answer says nothing.
@@ -335,7 +345,7 @@ export function nodeView(book: StoryBook, lib: StorySet, state: TalkState, ctx: 
   }
   const replies: ReplyView[] = [];
   for (const r of node.replies) {
-    const open = replyOpen(book, tree, node, r, ctx, tally);
+    const open = replyOpen(book, tree, node, r, ctx, tally, lib);
     if (open === 'hidden') continue;
     const v: ReplyView = { id: r.id, text: r.text, said: r.said === undefined ? r.text : r.said, enabled: open === 'open' };
     if (open === 'disabled' && r.why) v.why = r.why;

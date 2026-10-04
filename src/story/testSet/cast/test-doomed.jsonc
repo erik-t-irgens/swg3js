@@ -1,5 +1,5 @@
-// Somebody the story may one day let die (a later wave's `kill`): mortal, so not essential. Speaks the
-// branching test conversation, which also makes the test choice.
+// Somebody the story lets die (`kill`, in `test:fail`): mortal, so not essential. Speaks the branching test
+// conversation, which also makes the test choice, and vouches for the character to the clerk in `test:fail`.
 {
   "id": "test-doomed",
   "name": "TEST DOOMED",

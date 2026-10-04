@@ -4,7 +4,7 @@
 //
 // What is pinned:
 //
-//   - the committed test set reads its two conversations and its three cast members, ids prefixed;
+//   - the committed test set reads its three conversations and its three cast members, ids prefixed;
 //   - entries are tried in order and the first whose condition holds is where a conversation starts, and the
 //     last entry, which has none, is where everybody else starts: nobody is mute;
 //   - an answer whose condition fails is hidden, or shown greyed with its reason; one chosen once is gone;
@@ -77,11 +77,11 @@ const ids = (v: NodeView | null): string[] => v?.replies.map((r) => `${r.id}${r.
 // ---- the test set reads ----------------------------------------------------------------------------------
 {
   ok(loaded.errors.length === 0, `the test set reads with no errors (${loaded.errors.map((e) => `${e.file}:${e.line} ${e.message}`).join('; ')})`);
-  ok(Object.keys(lib.talks).sort().join() === 'test:talk/test-branching,test:talk/test-clerk' && Object.keys(lib.cast).length === 3, 'its two conversations and its three cast members, ids prefixed');
+  ok(Object.keys(lib.talks).sort().join() === 'test:talk/test-branching,test:talk/test-clerk,test:talk/test-companion' && Object.keys(lib.cast).length === 3, 'its three conversations and its three cast members, ids prefixed');
   const t = lib.talks['test:talk/test-clerk'];
   ok(/^[0-9a-f]{16}$/.test(t.hash) && t.speaker === CLERK && t.entry.length === 3 && !t.entry[2].when, 'a conversation carries its own hash, its speaker, and a last entry with no condition');
   ok(lib.cast[CLERK].tree === 'test:talk/test-clerk' && lib.cast[CLERK].essential && !lib.cast[DOOMED].essential && lib.cast[DOOMED].mortal, 'a cast member is essential unless mortal');
-  ok(treeFor(lib, CLERK)?.id === 'test:talk/test-clerk' && treeFor(lib, 'test:cast/test-companion') === null && treeFor(lib, 'row:abc') === null, 'only a cast member with a tree of their own speaks one');
+  ok(treeFor(lib, CLERK)?.id === 'test:talk/test-clerk' && treeFor(lib, 'test:cast/test-companion')?.id === 'test:talk/test-companion' && treeFor(lib, 'test:cast/nobody') === null && treeFor(lib, 'row:abc') === null, 'only a cast member with a tree of their own speaks one');
   const line = t.nodes.hello.say[0];
   ok(line.tone === 'warm' && line.gesture === undefined && line.shot === undefined && t.nodes.given.say[0].gesture === 'emt_nod_head_once' && t.nodes.named.say[0].shot?.kind === 'close-npc', 'a line left to the game keeps its slots absent; one filled by hand keeps them');
   const r = t.nodes.hello.replies.find((x) => x.id === 'bye')!;
@@ -302,7 +302,7 @@ const ids = (v: NodeView | null): string[] => v?.replies.map((r) => `${r.id}${r.
   const h = hostOf();
   const view = viewOf(h.book, lib, { now: clock, char: 'char-r', payer: 'browser' });
   remote.word({ t: 'story', do: 'view', view, off: 0 });
-  ok(remote.canTalk(CLERK) && !remote.canTalk('test:cast/test-companion') && !remote.canTalk('test:cast/nobody'), 'then it is asked for somebody its view says has a conversation, never for one of the story\'s people with none');
+  ok(remote.canTalk(CLERK) && remote.canTalk('test:cast/test-companion') && !remote.canTalk('test:cast/nobody') && !remote.canTalk('row:abc'), 'then it is asked for somebody its view says has a conversation, never for anybody it does not say so of');
   ok(remote.talk('open', CLERK).ok && sent.length === 1 && sent[0].do === 'talk' && sent[0].op === 'open' && sent[0].speaker === CLERK && !!sent[0].at, 'an opening goes up at once, with where the player stood');
   remote.talk('pick', CLERK, 'job');
   ok(sent.length === 1 && (remote.report().queued as number) === 1, `an answer straight after it waits its turn rather than being refused there (${REMOTE_TUNE.talkGap} ms apart)`);
@@ -541,7 +541,7 @@ if (typeof WebSocket === 'undefined') {
     send({ t: 'story', do: 'talk', op: 'close', speaker: herald, at: {} });
     await wait(100);
     const status = (await (await fetch(`http://127.0.0.1:${port}/`)).json()) as { stories: { talks: number; cast: number; v: number; stats: { talks: number }; core3: { played: number; trees: number; voiced: number } } };
-    ok(status.stories.v >= 3 && status.stories.talks === 2 && status.stories.cast === 3 && status.stories.stats.talks === 3, 'the status page counts the conversations, the cast and the turns played');
+    ok(status.stories.v >= 3 && status.stories.talks === 3 && status.stories.cast === 3 && status.stories.stats.talks === 3, 'the status page counts the conversations, the cast and the turns played');
     ok(status.stories.core3?.played === 7 && status.stories.core3.trees === 289 && status.stories.core3.voiced === 7, "and the game's own: the seven heralds of the reference's 289 trees");
   } finally {
     ws.close();

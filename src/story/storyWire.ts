@@ -246,6 +246,8 @@ export function cleanStoryEvent(x: unknown): StoryEvent | null {
       return { k: 'enter' };
     case 'leave':
       return { k: 'leave' };
+    case 'companion':
+      return typeof o.up === 'boolean' ? { k: 'companion', up: o.up } : null;
     default:
       return null;
   }
@@ -264,7 +266,8 @@ export function cleanStoryAt(x: unknown): StoryAt {
   return out;
 }
 
-const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'charged', 'item', 'xp', 'standing', 'say', 'doc', 'journal'];
+const NOTE_KINDS = ['job', 'offered', 'restarted', 'dropped', 'done', 'failed', 'stalled', 'objective', 'objectiveDone', 'paid', 'charged', 'item', 'xp', 'standing', 'say', 'doc', 'journal', 'rank', 'fined', 'companion'];
+const RANK_WHATS = ['promoted', 'demoted', 'suspended', 'reinstated', 'burned', 'assigned', 'used', 'active'];
 
 /** A fact for the message line as a server sends it, cleaned, or null. Its words are made here, in the browser. */
 export function cleanNoteDown(x: unknown): StoryNoteDown | null {
@@ -339,6 +342,27 @@ export function cleanNoteDown(x: unknown): StoryNoteDown | null {
     case 'journal': {
       const title = typeof o.title === 'string' ? o.title.replace(CONTROL, '').slice(0, 400) : '';
       if (title.trim()) out = { k: 'journal', quest, title };
+      break;
+    }
+    case 'rank': {
+      if (!isTrack(o.track) || typeof o.what !== 'string' || !RANK_WHATS.includes(o.what)) break;
+      const rank: Extract<StoryNote, { k: 'rank' }> = { k: 'rank', track: o.track, what: o.what as Extract<StoryNote, { k: 'rank' }>['what'] };
+      if (typeof o.rank === 'string' && o.rank.trim()) rank.rank = o.rank.replace(CONTROL, '').slice(0, 80);
+      if (typeof o.division === 'string' && /^[A-Za-z]{1,32}$/.test(o.division)) rank.division = o.division;
+      out = rank;
+      break;
+    }
+    case 'fined': {
+      const credits = count(o.credits);
+      const owed = count(o.owed);
+      const to = wordOf(o.to, CREATURE_WORD);
+      const reason = typeof o.reason === 'string' ? o.reason.replace(CONTROL, '').slice(0, 200) : '';
+      if (credits !== null && owed !== null && to) out = { k: 'fined', quest, credits, owed, reason, to };
+      break;
+    }
+    case 'companion': {
+      const name = cleanTextRef(o.name, 240);
+      if (isWho(o.who) && name && (o.what === 'joined' || o.what === 'waits' || o.what === 'released' || o.what === 'rejoined')) out = { k: 'companion', who: o.who, name, what: o.what };
       break;
     }
   }

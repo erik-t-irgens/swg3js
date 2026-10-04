@@ -14,8 +14,8 @@
 // raises; the checker allows this game none.
 //
 // **The watchdog.** At load and after every change, a step waiting on a signal whose every raiser lives
-// in a quest now closed to the character and no longer running (or, from a later wave, depends on a cast
-// member who is dead) can never be done, and neither can a step waiting `after` one that was skipped,
+// in a quest now closed to the character and no longer running, or is the conversation of somebody the story
+// has killed, can never be done, and neither can a step waiting `after` one that was skipped,
 // failed, or lies on a branch the run did not take. It follows its `onStuck`: skip it, go to a named step,
 // or -- the default -- hold the quest with "Nobody is left who can sign this off", shown in the quest list
 // and never in the journal, with Drop costing nothing. A step whose definition vanished is the revision
@@ -40,6 +40,8 @@ export interface Raiser {
   kind: 'action' | 'out' | 'object' | 'area' | 'engine' | 'debug' | 'talk';
   /** The quest an action or a step's signal lives in: what a closed quest takes with it. */
   quest?: string;
+  /** The cast member whose conversation raises it: what their death takes with it. */
+  who?: string;
   file: string;
   line: number;
 }
@@ -93,8 +95,10 @@ export function raisersOf(lib: StorySet): Map<string, Raiser[]> {
     const c = lib.cast[id];
     const t = c.tree && lib.talks && Object.hasOwn(lib.talks, c.tree) ? lib.talks[c.tree] : null;
     if (!t) continue;
-    add(`talked:${id}`, { kind: 'talk', file: c.src.file, line: 1 });
-    for (const n of Object.keys(t.nodes)) add(`talked:${id}#${n}`, { kind: 'talk', file: t.src.file, line: lineAt(t.src.lines, `/nodes/${n}`) });
+    // A promoted row speaks as the row it is (`row:<key>`), which is who a talk step names.
+    const who = c.row ?? id;
+    add(`talked:${who}`, { kind: 'talk', who, file: c.src.file, line: 1 });
+    for (const n of Object.keys(t.nodes)) add(`talked:${who}#${n}`, { kind: 'talk', who, file: t.src.file, line: lineAt(t.src.lines, `/nodes/${n}`) });
   }
   for (const id of Object.keys(lib.objects)) add(`used:${id}`, { kind: 'object', file: lib.objects[id].src.file, line: 1 });
   // A document the set has is read to its end by whoever it is handed to.
@@ -118,7 +122,7 @@ export function raisersFor(lib: StorySet, name: string): Raiser[] {
   const own = raisersOf(lib).get(name) ?? [];
   if (/^(room|world|died):/.test(name)) return [...own, { kind: 'engine', file: '', line: 0 }];
   if (name.startsWith('debug:')) return [...own, { kind: 'debug', file: '', line: 0 }];
-  if (name.startsWith('talked:row:')) return [...own, { kind: 'talk', file: '', line: 0 }];
+  if (name.startsWith('talked:row:')) return [...own, { kind: 'talk', who: name.slice('talked:'.length).split('#')[0], file: '', line: 0 }];
   return own;
 }
 
@@ -140,6 +144,8 @@ const WATCH_PASSES = 8;
  * and its steps can still raise what they raise (a quest that closes itself on its first step, say).
  */
 function raiserAlive(r: Raiser, book: StoryBook): boolean {
+  // A conversation of somebody the story killed is never spoken again, so it raises nothing more.
+  if (r.who && ownOf(book.npcs, r.who)?.alive === false) return false;
   if (!r.quest || !book.closed?.includes(r.quest)) return true;
   return ownOf(book.quests, r.quest)?.state === 'active';
 }

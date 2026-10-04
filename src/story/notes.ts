@@ -7,7 +7,11 @@
 // yet)". The rest are ours and in the same voice ("Spent <n> credits" for a price a conversation charged,
 // "To read: <title>" for a document handed over, "A call from <who>" for a call, "Journal: <title>" for a
 // new entry in the journal). Standing says which way it moved and never by how much, since Standing is shown
-// as a bar with its numbers hidden; Trust and the ISB's file are never said at all.
+// as a bar with its numbers hidden; Trust and the ISB's file are never said at all. A rank changing is said in
+// words ("Rebellion: promoted to Courier", "Empire: suspended", "Freelance: you are burned"), a fine with what
+// it took and what is owed, and the companion joining, waiting, going or coming back by the name the player
+// knows them by. A named person's own Standing and Trust, a refusal, a vouching and a death are never said:
+// the player learns them from the people themselves, and a death from the page that tells it.
 
 import type { StoryNote } from './quests.ts';
 import type { StorySet } from './set.ts';
@@ -97,5 +101,52 @@ export function noteWords(note: StoryNote, lib: StorySet, deps: NoteWordsDeps, g
       return note.from ? `A call from ${note.fromName ? deps.text(note.fromName) : 'someone'}: ${deps.text(note.title)}` : `To read: ${deps.text(note.title)}`;
     case 'journal':
       return `Journal: ${deps.text(note.title)}`;
+    case 'rank':
+      return rankWords(note);
+    case 'fined': {
+      // A host whose purse refused the fine's charge owes it instead and says so (`credits` nought, `owed` the
+      // whole); `given` false is a fine that could be neither taken nor owed, which says it was not taken.
+      const reason = deps.text(note.reason);
+      const took = note.credits > 0 && given ? `Fined ${note.credits.toLocaleString('en-GB')} credits` : 'Fined';
+      const lost = note.credits > 0 && !given ? `; ${note.credits.toLocaleString('en-GB')} credits could not be taken` : '';
+      const owed = note.owed > 0 ? `; ${note.owed.toLocaleString('en-GB')} credits owed to ${idWords(note.to)}` : '';
+      return `${took}${reason ? `: ${reason}` : ''}${lost}${owed}`;
+    }
+    case 'companion': {
+      const name = deps.text(note.name);
+      switch (note.what) {
+        case 'joined':
+          return `${name} is with you`;
+        case 'waits':
+          return `${name} waits here for you`;
+        case 'released':
+          return `${name} goes their own way`;
+        default:
+          return `${name} is with you again`;
+      }
+    }
+  }
+}
+
+/** A rank's change in words: the track, then what happened to the character on it. Never a number. */
+export function rankWords(note: Extract<StoryNote, { k: 'rank' }>): string {
+  const t = TRACK_WORDS[note.track] ?? note.track;
+  switch (note.what) {
+    case 'promoted':
+      return note.rank ? `${t}: promoted to ${note.rank}` : `${t}: promoted`;
+    case 'demoted':
+      return note.rank ? `${t}: demoted to ${note.rank}` : `${t}: your rank is taken from you`;
+    case 'suspended':
+      return `${t}: suspended`;
+    case 'reinstated':
+      return `${t}: your suspension is over`;
+    case 'burned':
+      return `${t}: you are burned`;
+    case 'assigned':
+      return `${t}: assigned to ${(note.division ?? '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}`;
+    case 'used':
+      return `${t}: they have a use for you`;
+    default:
+      return `${t}: taken on`;
   }
 }
