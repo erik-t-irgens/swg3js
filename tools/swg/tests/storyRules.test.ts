@@ -365,7 +365,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
     { id: 'first', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:first', ends: 'won' } }, outcomes: { won: {} } },
     { id: 'second', title: 'TEST', givers: [{ kind: 'chain', after: 'first', outcome: 'won' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:second', failOn: ['death'], ends: 'done' } } },
     { id: 'dice', title: 'TEST', givers: [{ kind: 'debug' }], start: ['never', 'always'], steps: { never: { type: 'nothing', chance: 0 }, always: { type: 'signal', signal: 'debug:dice', chance: 1, ends: 'done' } } },
-    { id: 'later', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:later', do: { done: ['pay(5)'] }, next: [{ to: 'rich', when: 'credits() >= 5' }, { to: 'poor', when: 'call(test.always)' }, { to: 'nobody', when: 'call(nothing.here)' }] }, rich: { type: 'nothing' }, poor: { type: 'nothing' }, nobody: { type: 'nothing' } } },
+    { id: 'later', title: 'TEST', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'signal', signal: 'debug:later', do: { done: ['gesture(emt_wave1)'] }, next: [{ to: 'rich', when: 'met(cast/somebody)' }, { to: 'poor', when: 'call(test.always)' }, { to: 'nobody', when: 'call(nothing.here)' }] }, rich: { type: 'nothing' }, poor: { type: 'nothing' }, nobody: { type: 'nothing' } } },
     { id: 'circle', title: 'TEST', givers: [{ kind: 'debug' }], start: ['a'], steps: { a: { type: 'nothing', loop: true, next: ['b'] }, b: { type: 'nothing', loop: true, next: ['a'] } } },
   ]);
   const h = hostOf(lib);
@@ -391,6 +391,48 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   ok(c.ch.length === 0 && c.pay.length === 0 && q(h, 'own:circle') === undefined && h.book.rev === revBefore, 'and everything that event worked out is thrown away: the book is left exactly as it was');
   const hour = evalCond({ hour: [22, 4] }, emptyBook('x'), { now: 0, char: 'x', payer: 'browser', hour: 2 }) && !evalCond({ hour: [22, 4] }, emptyBook('x'), { now: 0, char: 'x', payer: 'browser', hour: 12 });
   ok(hour && !evalCond({ hour: [0, 24] }, emptyBook('x'), { now: 0, char: 'x', payer: 'browser' }), 'an hour range may wrap past midnight, and with no hour told it reads false');
+}
+
+// ---- what the character has: credits, a thing owned, Standing and Trust ----------------------------------------
+{
+  const book = emptyBook('x');
+  book.tracks = { freelance: { standing: 2, trust: 7 } } as StoryBook['tracks'];
+  const counts: Record<string, number> = { 'wear:shirt_s03': 1, 'weapon:pistol_dl44': 2 };
+  const ctx = (extra: Record<string, unknown> = {}) => ({ now: 0, char: 'x', payer: 'browser' as const, credits: 5, has: (k: string, id: string) => counts[`${k}:${id}`] ?? 0, ...extra });
+  const holds = (c: unknown, extra: Record<string, unknown> = {}) => evalCond(c as Parameters<typeof evalCond>[0], book, ctx(extra));
+  ok(holds({ credits: { gte: 5 } }) && !holds({ credits: { gte: 5 } }, { credits: 4 }) && !holds({ credits: { gte: 0 } }, { credits: null }) && holds({ credits: { lt: 6 } }), 'credits() >= 5 holds with five and not with four; with the purse unknown it reads false');
+  ok(holds({ has: { kind: 'wear', id: 'shirt_s03' } }) && !holds({ has: { kind: 'wear', id: 'pants_s01' } }) && !holds({ has: { kind: 'weapon', id: 'shirt_s03' } }), 'has(kind, id) holds for a thing owned, and not for one that is not, nor under the other kind');
+  ok(holds({ has: { kind: 'weapon', id: 'pistol_dl44', n: 2 } }) && !holds({ has: { kind: 'wear', id: 'shirt_s03', n: 2 } }) && !holds({ has: { kind: 'wear', id: 'shirt_s03' } }, { has: null }), 'and asks for as many as it says; with the backpack unknown it reads false');
+  ok(holds({ standing: { track: 'freelance', gte: 2 } }) && !holds({ standing: { track: 'freelance', gte: 3 } }) && !holds({ standing: { track: 'freelance', gte: 7 } }), 'standing(track) reads the track\'s Standing, not its Trust');
+  ok(holds({ trust: { track: 'freelance', gte: 7 } }) && !holds({ trust: { track: 'freelance', gte: 8 } }) && !holds({ trust: { track: 'freelance', lte: 2 } }), 'trust(track) reads the track\'s Trust, not its Standing');
+  ok(holds({ standing: { track: 'empire', gte: 0 } }) && !holds({ standing: { track: 'empire', gt: 0 } }) && !holds({ trust: { track: 'rebellion', gt: 0 } }), 'a track never touched stands at nought');
+  // The same four written as an author writes them, each shown false while the others stay true.
+  const lib = setOf('own', [{ id: 'rich', title: 'TEST', needs: 'credits() >= 5 && has(weapon, pistol_dl44, 2) && standing(freelance) >= 2 && trust(freelance) >= 7', givers: [{ kind: 'debug' }], start: ['s'], steps: { s: { type: 'nothing' } } }]);
+  const needs = lib.quests['own:rich'].needs;
+  ok(holds(needs), 'written as an expression, all four together hold');
+  ok(!holds(needs, { credits: 4 }) && !holds(needs, { has: (k: string, id: string) => (k === 'weapon' && id === 'pistol_dl44' ? 1 : 0) }), 'and one credit short, or one pistol short, they do not');
+  const poorer = emptyBook('x');
+  poorer.tracks = { freelance: { standing: 1, trust: 7 } } as StoryBook['tracks'];
+  const warier = emptyBook('x');
+  warier.tracks = { freelance: { standing: 2, trust: 6 } } as StoryBook['tracks'];
+  ok(!evalCond(needs, poorer, ctx()) && !evalCond(needs, warier, ctx()), 'nor with a point less Standing, or a point less Trust');
+}
+
+// ---- an action that pays is paid once per completion, wherever its step is begun again ---------------------------
+{
+  const lib = setOf('own', [
+    { id: 'wages', title: 'TEST', givers: [{ kind: 'debug' }], start: ['work'], steps: { work: { type: 'signal', signal: 'debug:work', do: { start: ['xp(1)'], done: ['pay(7)', 'standing(empire, 3)'] }, next: ['again'] }, again: { type: 'signal', signal: 'debug:again', loop: true, next: ['work'] } } },
+  ]);
+  const h = hostOf(lib, 'server');
+  const g0 = h.grant('own:wages', at(T0));
+  const w1 = h.event({ k: 'signal', name: 'debug:work' }, at(T0 + 1));
+  ok(g0.ch.some((c) => c.k === 'xp') && w1.pay.length === 1 && w1.pay[0].credits === 7 && w1.pay[0].key === 'own:wages#1#do:work.done.0' && h.book.tracks?.empire?.standing === 3, `an action that pays is keyed by its quest, the completion and where it is written (${w1.pay[0]?.key})`);
+  h.event({ k: 'signal', name: 'debug:again' }, at(T0 + 2));
+  const w2 = h.event({ k: 'signal', name: 'debug:work' }, at(T0 + 3));
+  ok(w2.pay.length === 0 && h.book.xp === 1 && h.book.tracks?.empire?.standing === 3, 'reached again in the same run, its step begun and done again: nothing more paid, recorded or moved');
+  const r = h.restart('own:wages', at(T0 + 4));
+  const w3 = h.event({ k: 'signal', name: 'debug:work' }, at(T0 + 5));
+  ok(r.pay.length === 0 && w3.pay.length === 0 && h.book.xp === 1 && h.book.tracks?.empire?.standing === 3 && q(h, 'own:wages')?.run === 2, 'nor when the job is started over and the step done in the new run');
 }
 
 // ---- a reward belongs to the completion it counts towards, never to the run --------------------------------

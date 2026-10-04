@@ -62,6 +62,10 @@ const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWa
   const cleaned = cleanWaypointAsk(odd) as Record<string, unknown>;
   ok(!!cleaned && !('extra' in cleaned) && !Object.prototype.hasOwnProperty.call(cleaned, '__proto__') && (cleaned as { admin?: unknown }).admin === undefined, 'nothing the cleaner did not rebuild is carried on, a __proto__ key included');
   ok(cleanWaypoint({ ...ask(), id: 'q:own:x#a', made: 1 }) === null && cleanWaypoint({ ...ask(), id: 'w12', made: 1 })!.id === 'w12', 'a stored waypoint is w and a number, never a quest\'s');
+  // Who set one a story set is the host's to keep and never a browser's to ask for.
+  ok(cleanWaypoint({ ...ask(), id: 'w3', made: 1, by: 'own:wages' })!.by === 'own:wages' && cleanWaypoint({ ...ask(), id: 'w3', made: 1, by: 'run' })!.by === 'run', 'a stored waypoint a story set keeps the job that set it');
+  ok(cleanWaypoint({ ...ask(), id: 'w3', made: 1, by: 'not a job' })!.by === undefined && cleanWaypoint({ ...ask(), id: 'w3', made: 1 })!.by === undefined, 'and one that names no job, or none, is the player\'s own');
+  ok(!('by' in (cleanWaypointAsk(ask({ by: 'own:wages' })) as Record<string, unknown>)), 'a browser asking to set one never marks it as a story\'s');
 }
 
 // ---- frames -------------------------------------------------------------------------------------------

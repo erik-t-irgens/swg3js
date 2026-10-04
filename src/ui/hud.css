@@ -327,6 +327,7 @@
 .hud-msg.hit-you { border-left-color: var(--bad); }
 .hud-msg.spatial { border-left-color: var(--component); }
 .hud-msg.note { border-left-color: var(--muted); color: var(--muted); }
+.hud-msg.story { border-left-color: var(--component); }
 
 /* --- key-caps and the action bar -------------------------------------------------------------------
  * At most four things you can do right now, each a cap and two or three words. The cap shows the key
@@ -549,6 +550,59 @@
   will-change: transform;
 }
 .hud-wp-label[hidden] { display: none; }
+
+/* --- the jobs followed, down the right edge under the group's roster --------------------------------
+ * Up to three, each a title and its objective lines with what each counts, how far and how long. Its top
+ * is the one property a ResizeObserver on the roster writes (`--tracker-top`), only when the roster
+ * changes size; the fallback is where the roster itself starts. Nothing here moves per frame. */
+.hud-tracker {
+  position: absolute;
+  top: var(--tracker-top, 96px);
+  right: 12px;
+  width: calc(210px * var(--hud-scale));
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: calc(4px * var(--hud-scale));
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+.hud-tracker[hidden] { display: none; }
+.hud-trk-note,
+.hud-trk-job {
+  box-sizing: border-box;
+  padding: calc(3px * var(--hud-scale)) calc(6px * var(--hud-scale));
+  background: var(--plate);
+  border: 1px solid var(--edge);
+  border-left: calc(2px * var(--hud-scale)) solid var(--component);
+  border-radius: calc(3px * var(--hud-scale));
+  color: var(--ink);
+}
+.hud-trk-note { border-left-color: var(--warn); color: var(--muted); white-space: normal; }
+.hud-trk-note[hidden],
+.hud-trk-job[hidden],
+.hud-trk-line[hidden] { display: none; }
+.hud-trk-title {
+  color: var(--component);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.hud-trk-line {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(6px * var(--hud-scale));
+  margin-top: calc(2px * var(--hud-scale));
+}
+.hud-trk-line .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-trk-line .value { flex: none; color: var(--muted); white-space: nowrap; }
+.hud-trk-line.done { color: var(--muted); text-decoration: line-through; }
 
 /* --- the minimap -----------------------------------------------------------------------------------
  * A circle of the planet's own picture, first in the top-left panel and over the planet's name, with the

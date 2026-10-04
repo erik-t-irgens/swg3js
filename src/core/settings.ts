@@ -134,6 +134,10 @@ export interface Settings extends FxSettings {
   hudWaypointMarks: boolean;
   /** The same marks while flying a ship. */
   hudWaypointMarksInFlight: boolean;
+  /** The jobs followed, down the right edge under the group's roster. */
+  hudTracker: boolean;
+  /** The same while flying a ship. */
+  hudTrackerInFlight: boolean;
   // Gameplay.
   /**
    * How hard the world's own people and creatures are: one scale on their health and their blows,
@@ -215,6 +219,10 @@ export const DEFAULT_SETTINGS: Settings = {
   hudMinimapNorthUp: true,
   hudWaypointMarks: true,
   hudWaypointMarksInFlight: true,
+  // Ours, both: the jobs followed stand on the screen on foot, and stand aside at a ship's controls, where
+  // the flight display has the right edge's attention.
+  hudTracker: true,
+  hudTrackerInFlight: false,
   // Ours, and one: every body stands at its own numbers until the player says otherwise.
   difficulty: 1,
   ...FX_DEFAULTS,

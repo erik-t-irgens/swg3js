@@ -41,7 +41,7 @@ const fixtures = files.filter((f) => f.path.startsWith('fixtures/'));
   const cat = catalogueOf(ROOT);
   const r = checkSet(loadSet(testFiles, { test: true }), { worlds, catalogue: cat });
   ok(r.errors.length === 0, `the committed test set has no errors (${r.errors.map((e) => issueLine(e)).join('; ')})`);
-  ok(r.counts.quests === 11 && r.counts.areas === 1 && r.counts.objects === 1 && r.counts.signals > 0, `and the checker read all of it (${JSON.stringify(r.counts)})`);
+  ok(r.counts.quests === 12 && r.counts.areas === 1 && r.counts.objects === 1 && r.counts.signals > 0, `and the checker read all of it (${JSON.stringify(r.counts)})`);
   ok(r.warnings.every((w) => /debug:/.test(w.message)), `its only warnings are its console signals, which the test set alone may wait on (${r.warnings.filter((w) => !/debug:/.test(w.message)).map((w) => issueLine(w)).join('; ')})`);
   if (cat) ok(!r.warnings.some((w) => w.rule === 13), `its kill targets are all in this machine's creature catalogue (${cat.ids.size} entries)`);
   else console.log('skip the kill targets against the catalogue: assets-private/mobiles/catalogue.json is not on this machine');
@@ -288,7 +288,7 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
 {
   const cli = join(ROOT, 'tools', 'story', 'check.mjs');
   const plain = spawnSync(process.execPath, [cli, TESTSET], { encoding: 'utf8', cwd: ROOT });
-  ok(plain.status === 0 && /the test set .*: 11 quests.* 0 errors/.test(plain.stdout), `the command line passes the test set (${plain.stdout.trim().split('\n').at(-1)})`);
+  ok(plain.status === 0 && /the test set .*: 12 quests.* 0 errors/.test(plain.stdout),`the command line passes the test set (${plain.stdout.trim().split('\n').at(-1)})`);
   const dir = mkdtempSync(join(tmpdir(), 'story-check-'));
   try {
     mkdirSync(join(dir, 'quests'));

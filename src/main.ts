@@ -101,8 +101,18 @@ import { WaypointsUi, type WaypointRow, type WaypointsModel } from './ui/waypoin
 import { WaypointPlaces, WaypointSpots, wayIn, type PlaceDeps, type RoomAnswer } from './world/waypointPlace.ts';
 import type { RoomDoor } from './world/nav/navRooms.ts';
 import { CITY_TUNE, CityWatch, tuneCities } from './story/cities.ts';
-import { BookClient, tuneStory, type StoryResult } from './story/bookClient.ts';
+import { BookClient, STORY_TUNE, tuneStory, type StoryResult } from './story/bookClient.ts';
 import { browserStoryStorage } from './story/storyStore.ts';
+import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, type JobsLine } from './story/localHost.ts';
+import { noteWords } from './story/notes.ts';
+import { clientKey, textOf, type TextRef } from './story/text.ts';
+import type { HostCtx } from './story/hostCore.ts';
+import type { PayOrder, StoryEvent, StoryNote } from './story/quests.ts';
+import type { StoryView } from './story/view.ts';
+import { ownSetFiles, testSetFiles } from './story/testSetFiles.ts';
+import { StoryWatch, creditedByWord, killKey, killOf, roomOf, type WatchPlace } from './world/storyWatch.ts';
+import { STAND_TUNE, StoryStands } from './world/storyStands.ts';
+import { TRACKER_TUNE, TimeWarnings, Tracker, trackerTime, tuneTracker } from './ui/tracker.ts';
 import { WAYPOINT_COLOURS, WAYPOINT_TUNE, gameToRaw, gameToRawX, gameToRawZ, isWaypointColour, rawToGameX, rawToGameZ, tuneWaypointView, waypointName } from './story/waypoints.ts';
 import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
@@ -424,6 +434,15 @@ function worldNameOf(pack: string): string {
     } else if (p.id === pack) return p.name;
   }
   return pack;
+}
+
+/**
+ * Whether a living thing is one of the world's mobiles (a creature, a droid, a person), whose death a job's
+ * kill step counts by its catalogue entry. Asked of the body itself, since the type is only a type here.
+ */
+function isMobileBody(t: unknown): t is Mobile {
+  const m = t as { entry?: unknown; npcId?: unknown } | null;
+  return !!m && typeof m === 'object' && !!m.entry && typeof m.npcId === 'string';
 }
 
 /** What `__debug.perf()` takes; see `App.perfDebug` and the README's Debugging section. */
@@ -818,6 +837,8 @@ class App {
   private readonly talkCam = { blend: 0, body: null as Mobile | null, shot: newTalkShot(), from: new THREE.Vector3(), to: new THREE.Vector3(), look: new THREE.Vector3(), q: new THREE.Quaternion(), m: new THREE.Matrix4() };
   /** Who the use key would speak to, gathered with the rest of the bar's state, and their name for the long line. */
   private promptTalk = '';
+  /** The story's thing the use key would work, gathered with the rest, by its label for the long line. */
+  private promptUse = '';
   /** What a conversation does once its last reply has stood (a corvette's taker sends the player on their way). */
   private talkThen: (() => void) | null = null;
   /**
@@ -860,6 +881,35 @@ class App {
     line: () => ({ authority: this.net.session.authority, story: this.net.session.storyVersion, status: this.net.status, mode: this.net.session.mode }),
     known: () => knownToServer(this.current),
   });
+  /**
+   * The jobs, held by this browser while nobody else holds the book (src/story/localHost.ts): the shared
+   * rules over the book above and the sets read here, paying out of the character's own purse and
+   * backpack. Everything it needs is read at the moment it asks, so it can be a field initialiser.
+   */
+  private readonly questHost = new LocalHost({
+    book: () => this.story.book,
+    holds: () => this.storyJobsHere(),
+    whyNot: () => this.storyJobsWait(),
+    apply: (ch) => this.story.applyLocal(ch),
+    pay: (order) => this.payStory(order),
+    note: (note, given) => this.sayStory(note, given),
+    ctx: () => this.storyCtx(),
+    now: () => sharedClock.now(),
+    wall: () => Date.now(),
+    inWorld: () => !!this.current && this.inWorld && !this.creating,
+  });
+  /** What the jobs watch for -- arrivals, rooms, areas, a world, kills, a death -- four times a second (src/world/storyWatch.ts). */
+  private readonly storyWatch = new StoryWatch();
+  /** The things a story stands in the world, found among what the world already places (src/world/storyStands.ts). */
+  private readonly storyStands = new StoryStands();
+  /** The time limits about to run out, each said once on the message line. */
+  private readonly timeWarnings = new TimeWarnings();
+  /** Counts down to the detectors' next look, on the real clock. */
+  private storyClock = 0;
+  /** Whether the committed test set is read: under `npm run dev`, or asked for at the console. Never in a release unless asked. */
+  private storyTests = import.meta.env.DEV;
+  /** Each client string a story names that nothing could resolve, said once in the console. */
+  private readonly storyUnresolved = new Set<string>();
   private netStatus = 'off';
   private lastStateSent = 0;
   /** The wheel's eight slots, clip names; filled from the rig's own emotes the first time. */
@@ -995,6 +1045,8 @@ class App {
    * page labels written only when they change.
    */
   private readonly waypointHud = new WaypointHud(this.ui);
+  /** The jobs followed, down the right edge under the roster (src/ui/tracker.ts): DOM written only when its words change. */
+  private readonly tracker = new Tracker(this.ui);
   private readonly waypointPlaces = new WaypointPlaces();
   /** The waypoints of this world the gather reads, written in place from the book. */
   private readonly waypointSpots = new WaypointSpots();
@@ -1438,6 +1490,11 @@ class App {
     this.waypointHud.attach(this.overlay);
     this.minimap = new Minimap(this.ui.querySelector<HTMLElement>('#hud .top-left')!, this.ui.querySelector<HTMLElement>('#hud')!, (pack) => mapPictureNow(pack));
     this.wireWaypoints();
+    // The jobs followed stand under the group's roster and follow it as it grows and shrinks; their words
+    // are the story's, resolved here, and a place on another world is named as the map names it.
+    this.tracker.text = (ref) => this.storyText(ref);
+    this.tracker.worldName = (id) => worldNameOf(id);
+    this.tracker.follow(this.roster.root, ROSTER_TUNE.top, 6);
     // The comms and the ship's status line; the world (assigned above) hands the taunts over.
     this.shipHud = new ShipHud(this.ui);
     // Its shapes go on the overlay, in the palette's own colours; its one-shot lines and the pilots'
@@ -1479,6 +1536,10 @@ class App {
     this.world.watchPlayerHits((hit, amount, killed) => {
       this.landedHit(hit, amount, killed);
       if (!killed) this.world.followers.assist(hit);
+      // A body of the world's own finished by the player's blow is a kill a job may be counting. One
+      // another browser keeps never finishes here (the blow goes to its keeper); the server's word of its
+      // death, with the player among those who struck, is what counts that one (`owned.onGone`).
+      else if (isMobileBody(hit)) this.storyKill(hit);
     });
     // What the world says once, in words: standing in a flow, and stepping out of one. It goes to the
     // message line like every other one-shot notice and never to the prompt, which is rewritten every
@@ -4564,6 +4625,9 @@ class App {
             // so without this `vehicleSounds()` would list nothing after a simulated minute of flight.
             vehicleSounds.setListener(eye.x, eye.y, eye.z, this.listenerPose.space);
             this.stepVehicleSounds(dt);
+            // The jobs' detectors and their sweep, on the clock this moves on, so a walk to a job's place
+            // can be taken from a tab that draws no frames.
+            this.stepStory(dt, true);
             this.input.endFrame();
           }
         } finally {
@@ -5159,7 +5223,8 @@ class App {
           // total, so adding it here would put a rising number where a 0 is meant to stand.
           // The waypoints' labels and the minimap's city line are counted in with the rest: none of them
           // writes anything while nothing moves.
-          writes: body.writes + ship.writes + fb.writes + this.waypointHud.writesLastSecond + this.minimap.writesLastSecond,
+          // The jobs followed are counted in too: they write nothing while nothing moves and no clock runs.
+          writes: body.writes + ship.writes + fb.writes + this.waypointHud.writesLastSecond + this.minimap.writesLastSecond + this.tracker.writesLastSecond,
           byDesign: body.byDesign,
           lineWrites: { lastSecond: this.lineWritesLast, total: line.writes },
           scale: L.scale,
@@ -5180,7 +5245,7 @@ class App {
             rebinds: bar.rebinds,
             styled: bar.styled,
             list: this.actionsList(bar.shown),
-            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, gate: s.gate, gateTo: this.promptGate, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
+            state: { live: s.live, jump: s.jump, noclip: s.noclip, mounted: s.mounted, piloting: s.piloting, kind: s.vehicle.kind, lift: s.lift, elevator: s.elevator, doorless: s.doorless, travel: s.travel, use: s.use, useWhat: this.promptUse, talk: s.talk, gate: s.gate, gateTo: this.promptGate, boots: s.boots, bootsReach: s.bootsReach, aboard: s.aboard, atControls: s.atControls, eva: s.eva, near: s.near, shipMenu: s.shipMenu },
             hz: HUD_WIRING.promptHz,
           },
           // The damage feedback: the arcs standing, the numbers rising, and how long ago a shot of
@@ -5196,6 +5261,7 @@ class App {
           // The waypoints' marks and labels, and the minimap: what the last frame drew of each and what it wrote.
           waypoints: { ...this.waypointHud.report() },
           minimap: { showing: this.minimap.showing, redraws: this.minimap.redraws, dots: this.minimap.dots, writes: this.minimap.writesLastSecond },
+          tracker: this.tracker.report(),
           wiring: { ...HUD_WIRING },
         };
       },
@@ -6908,6 +6974,15 @@ class App {
     });
     // The waypoints on the map's own layer, read each frame the map draws from the book as it stands.
     waypointMapFeed.fill = (out) => this.fillWaypoints(out);
+    // The jobs, held here while nobody else holds the book. They follow the book as it changes (a
+    // waypoint switched, a settle with a server, another character played), and their view reaches the
+    // marks, the minimap and the map whenever it changes; the tracker reads it four times a second. The
+    // sets are read now, and again whenever the dev server says the owner's folder changed, so an edit
+    // reloads without a restart.
+    this.story.onChange(() => this.questHost.changed());
+    this.questHost.onView(() => this.waypointsChanged());
+    void this.reloadStory();
+    if (import.meta.hot) import.meta.hot.on('story:changed', () => void this.reloadStory());
     this.remotes.carrierPose = (to, pos, quat) => {
       const p = this.player;
       const v = to === this.net.id ? p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null : null;
@@ -6942,11 +7017,35 @@ class App {
       // `__debug.story()`: who holds the character's story book (`local`, `server`, or `held` while it is
       // settled or the line is coming back), its revision, the server revision it last matched, how many
       // changes it holds that no server has seen, what is in it, and what has crossed the wire for it.
-      // `{ chunkGap, syncWait, wpPerSecond, offerChunk }` moves the browser's own numbers (`STORY_TUNE`).
-      debugRoot.story = (o?: Parameters<typeof tuneStory>[0]) => {
+      // `{ chunkGap, syncWait, wpPerSecond, offerChunk, repeatEv, killDedupe, sweep }` moves the browser's own
+      // numbers (`STORY_TUNE`). `{ tests: true }` reads the committed test set (on by default only under
+      // `npm run dev`), `{ tests: false }` stops reading it, and `{ reload: true }` reads the sets again; those
+      // answer once the sets are in.
+      debugRoot.story = (o?: Parameters<typeof tuneStory>[0] & { tests?: boolean; reload?: boolean }) => {
         if (o) tuneStory(o);
-        return this.story.report();
+        if (o && (typeof o.tests === 'boolean' || o.reload)) {
+          if (typeof o.tests === 'boolean') this.storyTests = o.tests;
+          return this.reloadStory().then(() => this.storyReport());
+        }
+        return this.storyReport();
       };
+      // `__debug.quests(...)`: the jobs held here -- every job the book holds with its steps, the host and its
+      // sets, what the view watches and the tracker shows -- and one operation or several: `grant`, `offer`,
+      // `accept`, `decline`, `drop`, `restart`, `unstick`, `complete` (every step running, or the one `step`
+      // names), `track`/`untrack`, `clock` (milliseconds the story's clock moves on, for a timer in a tab that
+      // draws no frames; `null` puts it back), `list` (every job the sets hold), `tracker` (`TRACKER_TUNE`)
+      // and `stands` (`STAND_TUNE`).
+      debugRoot.quests = (o?: Parameters<App['debugQuests']>[0]) => this.debugQuests(o ?? {});
+      // `__debug.signal('test-ping')`: a signal raised for this character, as an action or the engine would;
+      // a name with no prefix is a console signal (`debug:<name>`), which only the test set may wait on.
+      debugRoot.signal = (name: string) => {
+        const n = typeof name === 'string' && name.includes(':') ? name : `debug:${name}`;
+        return { signal: n, ...this.questHost.event({ k: 'signal', name: n }) };
+      };
+      // `__debug.storyHere()`: where you stand as a story writes a place -- the world, the raw frame on a planet
+      // (the game frame in space), and the room's cell and the building's template when you are in one --
+      // ready to paste into a quest, an area or an object.
+      debugRoot.storyHere = () => this.storyHere();
       // `__debug.waypoints(...)`: set, list, change and take away the character's own waypoints from the
       // console, exactly as the map and (later) the Waypoints window do -- applied at once when this browser
       // holds the book, asked of the server when it does.
@@ -7179,7 +7278,15 @@ class App {
       for (const id of [...this.world.npcs.worldIds]) if (!wanted.has(id)) this.world.npcs.removeById(id);
     };
     owned.onAdd = (row) => standRow(row, this.worldKey());
-    owned.onGone = (id, why, back, fresh) => {
+    owned.onGone = (id, why, back, fresh, by) => {
+      // A death that names this browser's player among those who struck it is a kill a job may count,
+      // whoever kept the body: the one case `watchPlayerHits` cannot see is a body another browser keeps,
+      // and this word is its only witness. A body this browser keeps and the player finished was counted
+      // when the blow landed, and the second word of it is the same kill.
+      if (creditedByWord(why, fresh, this.net.id, by)) {
+        const m = this.world.mobiles?.mobileById(id) ?? null;
+        if (m) this.storyKill(m, id);
+      }
       // A body this browser has only just stood, of one that was already down everywhere else (the
       // server's answer to its `seen`, to it alone): nothing died here, so nothing plays a death or counts
       // as a kill at its post. It is held down for the server's wait and taken away quietly -- but for a
@@ -8207,6 +8314,9 @@ class App {
     this.select.show(loadCharacters());
     // Where the character stands is written back now and then, and when the page goes.
     window.addEventListener('pagehide', () => this.savePlace(true));
+    // The character leaves the world with the page too, so a job's clock that counts only time played
+    // stops with the time it has left rather than running out while nobody is playing.
+    window.addEventListener('pagehide', () => this.questHost.leave());
     // A physics world that breaks is not stepped again; the page is reloaded into the character that
     // was playing, and here is where the reloaded page picks it back up.
     Physics.onBroken = (p, err) => this.physicsBroke(p, err);
@@ -8571,6 +8681,11 @@ class App {
     // The console's shuttle trips and parked hull with them, their hulls taken away and their pads let go of.
     this.endConsoleShuttles('leaving for the select screen');
     this.savePlace(true);
+    // The character leaves the world for the story first, while it is still the character in play, its purse
+    // and backpack still its own and the line still up: a clock that counts only time played stops with the
+    // time it has left, and the change counter moves with the record that is still there to carry it.
+    // Done once the purse is reset, the line put down or the character gone, it could pay a reward to nobody.
+    this.questHost.leave();
     // The player's own trip after the place is written, so a passenger is kept where the ticket goes,
     // and before anything gets them off what they ride: the trip puts its passenger down itself. Then
     // whatever still holds a pad, since no hold of this character's may reach the next one's world.
@@ -8616,8 +8731,16 @@ class App {
     this.started = false;
     this.current = null;
     this.net.disconnect();
-    // The book goes with the character; the next one played reads its own.
+    // The book goes with the character (it left the world for the story above); the next one played reads
+    // its own. The jobs followed, the detectors' memory, the room they last read (and the building it holds
+    // on to) and the things found for the story go with them.
     this.story.use(null);
+    this.tracker.clear();
+    this.storyWatch.reset();
+    this.forgetStoryPlace();
+    this.storyStands.clear();
+    this.timeWarnings.clear();
+    this.promptUse = '';
     // And its marks, their labels and the city walked into with it. The minimap comes down here too, as
     // the overlay and the roster do below, because only an in-world frame ever stood it aside: left up,
     // its last world's circle would stand over a creator drawn in a captured place.
@@ -8761,6 +8884,8 @@ class App {
       case 'hudMinimapNorthUp':
       case 'hudWaypointMarks':
       case 'hudWaypointMarksInFlight':
+      case 'hudTracker':
+      case 'hudTrackerInFlight':
         // A size, a backing store and a few switches: no shader and no element is made.
         this.applyHudSettings();
         break;
@@ -8797,6 +8922,8 @@ class App {
     this.waypointHud.setShown(S.hudWaypointMarks, S.hudWaypointMarksInFlight);
     this.minimap.setScale(scale);
     this.minimap.redraw();
+    // The jobs followed read their two switches at their own next update, a quarter of a second off.
+    this.storyClock = 0;
     this.hudLayoutFor(scale);
     // The message column the layout worked out, so a long line cannot run under the centred blocks on
     // a narrow window. One property write, on a resize and a change of scale, never in a frame.
@@ -9022,6 +9149,10 @@ class App {
       const use = this.travelHere();
       s.travel = use ? (use.kind === 'terminal' ? 'terminal' : 'collector') : this.shipTerminalNear() ? 'ship' : '';
       this.promptTravel = s.travel === 'collector' && use ? this.collectorLine(use) : s.travel === 'ship' ? 'the ship terminal: your own ship' : s.travel ? 'the ticket terminal: buy a ticket' : '';
+      // A thing a story stands, in reach: gathered whatever else is beside you, like the port's things.
+      const thing = this.storyUseTarget();
+      s.use = !!thing;
+      this.promptUse = thing ? this.storyText(thing.label ?? 'it') : '';
       // Somebody in front of you who may be spoken to. Gathered whatever else is beside you, like the
       // port's things, so the bar's own chain decides which of the things that want the key shows; the
       // name is kept for the long line, which has room for it.
@@ -9099,7 +9230,7 @@ class App {
     const act = gateAction({
       live: s.live,
       onFoot: !p.mounted && !p.piloting && !p.aboard && !p.noclip,
-      free: !s.lift && !s.elevator && !s.doorless && !s.talk && !s.near && !s.boots && !s.eva && !s.instance,
+      free: !s.lift && !s.elevator && !s.doorless && !s.use && !s.talk && !s.near && !s.boots && !s.eva && !s.instance,
       since: this.zoneGates.since(this.world.simTime),
       d: near ? near.d : null,
       to: !!near?.gate.to,
@@ -9488,7 +9619,7 @@ class App {
    */
   private fillWaypoints(out: WaypointList): void {
     const book = this.story.book;
-    if (!book || !this.inWorld || !book.waypoints.length) return;
+    if (!book || !this.inWorld) return;
     const here = this.packHere(this.world.planet);
     const c = this.world.layoutCenter;
     const cx = c ? c.x : 0;
@@ -9498,6 +9629,15 @@ class App {
       if (!w.on || w.world !== here) continue;
       const raw = w.f === 'raw';
       out.add(w.id, w.name, w.colour, book.trackWp === w.id, raw ? rawToGameX(cx, w.p[0]) : w.p[0], w.p[2] ?? 0, raw ? rawToGameZ(cz, w.p[1]) : w.p[1]);
+    }
+    // The jobs' own, from the view as it last stood: no walk of the book is made for them.
+    const view = this.questHost.view();
+    if (!view) return;
+    for (let i = 0; i < view.waypoints.length; i++) {
+      const w = view.waypoints[i];
+      if (!w.on || w.world !== here) continue;
+      const raw = w.f === 'raw';
+      out.add(w.id, this.storyText(w.name), w.colour, book.trackWp === w.id, raw ? rawToGameX(cx, w.p[0]) : w.p[0], 0, raw ? rawToGameZ(cz, w.p[1]) : w.p[1]);
     }
   }
 
@@ -9718,6 +9858,9 @@ class App {
     if (book && planet) {
       const here = packIdOf(planet, this.zone);
       for (const w of book.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, w.name, w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
+      // And the jobs' own, switched on.
+      const view = this.questHost.view();
+      if (view) for (const w of view.waypoints) if (w.on && w.world === here && w.f === 'raw') list.add(w.id, this.storyText(w.name), w.colour, book.trackWp === w.id, w.p[0], 0, w.p[1]);
     }
     this.minimap.setWaypoints(list);
   }
@@ -9743,6 +9886,16 @@ class App {
         if (!w.on || w.world !== here) continue;
         const raw = w.f === 'raw';
         spots.add(w.id, w.name, w.colour, book.trackWp === w.id, false, raw ? rawToGameX(cx, w.p[0]) : w.p[0], raw ? rawToGameZ(cz, w.p[1]) : w.p[1], raw || w.p[2] === null ? Number.NaN : w.p[2], w.room?.cell ?? '', w.room?.template ?? '');
+      }
+      // The jobs' own waypoints, which the book never holds: worked out from the step each belongs to, and
+      // shown as the player last switched them.
+      const view = this.questHost.view();
+      if (view) {
+        for (const w of view.waypoints) {
+          if (!w.on || w.world !== here) continue;
+          const raw = w.f === 'raw';
+          spots.add(w.id, this.storyText(w.name), w.colour, book.trackWp === w.id, true, raw ? rawToGameX(cx, w.p[0]) : w.p[0], raw ? rawToGameZ(cz, w.p[1]) : w.p[1], Number.NaN, w.room?.cell ?? '', w.room?.template ?? '');
+        }
       }
     }
     // A mark with no ground yet stands at the eye: the camera's own height, as the last frame left it.
@@ -9945,6 +10098,337 @@ class App {
   /** What came of a change asked for from the window: a refusal is said, a change shows when it is made. */
   private waypointSaid(out: StoryResult): void {
     if (!out.ok && out.why) this.messages.system(`No change: ${out.why}`);
+  }
+
+  // ---- The jobs: the local host, its detectors, the things it stands, the tracker and the message line. ----
+
+  /**
+   * Every step of the story's own, kept: hands what the detectors saw to whoever holds the story. It is
+   * called from inside a blow, a death and an arrival, so a fault in a story is said in the console and
+   * goes no further: combat, dying and travelling never stop for one.
+   */
+  private readonly raiseStory = (ev: StoryEvent): void => {
+    try {
+      this.questHost.event(ev);
+    } catch (err) {
+      console.warn(`story: the ${ev.k} could not be worked out`, err);
+    }
+  };
+
+  /** What `jobsWait` is asked about, refilled in place: it is asked at every event and four times a second. */
+  private readonly jobsLine: JobsLine = { inPlay: false, holdsBook: false, authority: 'me' };
+
+  /**
+   * Why this browser does not work the character's jobs out just now, or null when it does: a character in
+   * play (not the creator), nobody else holding its story book, and no server keeping its credits -- a
+   * server from before the stories lets only its admin put credits in, so a job paid here would be recorded
+   * as paid and never arrive (`jobsWait` says the whole of it).
+   */
+  private storyJobsWait(): string | null {
+    const l = this.jobsLine;
+    l.inPlay = !!this.current && !this.creating;
+    l.holdsBook = this.story.holdsHere();
+    l.authority = this.net.session.authority;
+    return jobsWait(l);
+  }
+
+  private storyJobsHere(): boolean {
+    return this.storyJobsWait() === null;
+  }
+
+  /** A time limit about to run out, said once: "<title>: 10 minutes left". */
+  private readonly warnStory = (q: { title: TextRef }, _line: unknown, left: number): void => {
+    const n = Math.max(1, Math.ceil(left / 60000));
+    this.messages.story(`${this.storyText(q.title)}: ${n} minute${n === 1 ? '' : 's'} left`);
+  };
+
+  /**
+   * The words a story's text stands for: a literal as it is, a client string looked up (the client's
+   * strings arrive with the conversations, so until then `[…]`, said once in the console for each), and
+   * the player's own name where the game's lines write `%TU` or `%NU`.
+   */
+  private storyText(ref: TextRef): string {
+    // Kept, not made per call: the map asks for a job's waypoint's name on every frame it draws.
+    const words = textOf(ref, this.storyLook);
+    return words.includes('%') ? words.replace(/%TU|%NU/g, this.current?.name ?? 'you') : words;
+  }
+
+  /** A client string looked up: nothing answers yet, and each one is said once in the console. */
+  private readonly storyLook = (table: string, key: string): string | null => {
+    const k = `@${table}:${key}`;
+    if (!this.storyUnresolved.has(k)) {
+      this.storyUnresolved.add(k);
+      console.info(`story: no words for ${k} yet (the client's own strings arrive with the conversations)`);
+    }
+    return null;
+  };
+
+  /** A thing's own name, out of the catalogues the backpack has read; its id in words before they are. */
+  private storyItemName(kind: 'wear' | 'weapon', id: string): string {
+    const ctx = this.equipment.lastContext;
+    return ctx ? itemInfo(kind, id, ctx).name : id.replace(/[_./-]+/g, ' ');
+  }
+
+  /**
+   * One payment of the story's, into this character's own purse and backpack. Never with no character in
+   * play (the host does not work then, so this is the second line, not the first) and never into a purse a
+   * server keeps, where only its admin may put credits in.
+   */
+  private payStory(order: PayOrder): boolean {
+    if (!this.current || this.creating) return false;
+    if (order.credits) {
+      if (this.net.session.authority === 'server') return false;
+      purse.give(order.credits);
+      return true;
+    }
+    // A character keeps one of each thing: one already owned is said rather than given twice.
+    if (order.item) return this.equipment.give(order.item.kind, order.item.id);
+    return true;
+  }
+
+  /** One of the story's notes, said on the message line in the story's own colour. */
+  private sayStory(note: StoryNote, given: boolean): void {
+    const words = noteWords(note, this.questHost.library, { text: (r) => this.storyText(r), itemName: (k, id) => this.storyItemName(k, id) }, given);
+    if (words) this.messages.story(words);
+  }
+
+  /** Where the player stands as the detectors read it, refilled in place: the world, a point in its own frame, the room. */
+  private readonly storyPlace: WatchPlace = { world: '', x: 0, z: 0, room: null };
+  /** The room last read, kept while the player stays in it, so standing in one makes nothing. */
+  private readonly storyRoomOf: { building: unknown; cell: number; room: WatchPlace['room'] } = { building: null, cell: -1, room: null };
+
+  /**
+   * The room last read let go of: on a new world and on the way to the select screen. It holds the building
+   * itself (and through it the model), which nothing else holds once the world it stood in is unloaded.
+   */
+  private forgetStoryPlace(): void {
+    const kept = this.storyRoomOf;
+    kept.building = null;
+    kept.cell = -1;
+    kept.room = null;
+    this.storyPlace.room = null;
+  }
+
+  private watchPlace(): WatchPlace | null {
+    const planet = this.world.planet;
+    if (!planet || !this.inWorld) return null;
+    const p = this.storyPlace;
+    // The world position: aboard a hull's rooms `player.pos` is in the hull's frame.
+    const at = this.player.worldPos;
+    p.world = this.packHere(planet);
+    if (planet.space) {
+      p.x = at.x;
+      p.z = at.z;
+      p.room = null;
+      return p;
+    }
+    const c = this.world.layoutCenter;
+    p.x = gameToRawX(c ? c.x : 0, at.x);
+    p.z = gameToRawZ(c ? c.z : 0, at.z);
+    const s = this.world.cellState;
+    const kept = this.storyRoomOf;
+    if (!s || s.cell <= 0) {
+      kept.building = null;
+      kept.cell = -1;
+      kept.room = null;
+    } else if (kept.building !== s.building || kept.cell !== s.cell) {
+      kept.building = s.building;
+      kept.cell = s.cell;
+      kept.room = roomOf(s.building.template, s.building.model.def.cells, s.cell);
+    }
+    p.room = kept.room;
+    return p;
+  }
+
+  /** What is true just now, as the story's conditions read it. */
+  private storyCtx(): Omit<HostCtx, 'now' | 'away'> {
+    const at = this.watchPlace();
+    const c = this.current;
+    return {
+      world: at ? at.world : null,
+      here: at ? [at.x, at.z] : null,
+      room: at?.room ? { ...at.room } : null,
+      areas: [...this.storyWatch.inside],
+      hour: this.world.planet ? Math.floor(this.world.day.time * 24) % 24 : null,
+      grouped: this.groupIdNow() !== '',
+      species: c?.species ?? null,
+      credits: c ? purse.credits : null,
+      has: (kind, id) => this.equipment.owned().filter((o) => o.kind === kind && o.id === id).length,
+    };
+  }
+
+  /**
+   * A body the player is credited with killing, handed to the detectors with what a kill step matches on.
+   * Its death is known by one name whichever way it was heard (`killKey`: the blow seen here and the
+   * server's word of it are one kill); `worldId` is the world's own name for it where the caller already
+   * has it. Called from inside a blow and from the server's word of a death, so a fault goes no further.
+   */
+  private storyKill(m: Mobile, worldId?: string): void {
+    try {
+      const npc = killKey(m.npcId, worldId ?? this.world.mobiles?.worldIdOf(m) ?? '', m.key);
+      this.storyWatch.kill(this.questHost.view(), killOf(m.entry, npc), Date.now(), this.raiseStory);
+    } catch (err) {
+      console.warn('story: a kill could not be told', err);
+    }
+  }
+
+  /** What the things a story stands ask of the world: the placed thing of a template nearest a point. */
+  private readonly standDeps = {
+    placed: (template: string, x: number, y: number, z: number, reach: number) => this.world.placedNear(new Set([template]), { x, y, z }, reach),
+  };
+
+  /** The story's thing the use key would work from where the player stands, or null. */
+  private storyUseTarget(): StoryView['objects'][number] | null {
+    const p = this.player;
+    if (p.mounted || p.piloting || p.aboard || p.eva || p.noclip || this.traveling || this.dying || this.talkNow) return null;
+    const planet = this.world.planet;
+    const view = this.questHost.view();
+    if (!planet || !view || !view.objects.length) return null;
+    const at = p.worldPos;
+    return this.storyStands.near(view.objects, this.packHere(planet), this.world.generation, this.world.layoutCenter, at.x, at.y, at.z, Date.now(), this.standDeps);
+  }
+
+  /** E at a story's thing: what a job is waiting on, or what offers one. False when there is none, and E goes on to what else it means. */
+  private handleStoryUse(): boolean {
+    const o = this.storyUseTarget();
+    if (!o) return false;
+    const r = this.questHost.event({ k: 'use', object: o.id });
+    if (!r.ok && r.why) this.messages.system(r.why);
+    return true;
+  }
+
+  /**
+   * Four times a second, from the frame loop and from `__debug.advance`: the host's own step (the character
+   * in or out, the deadlines swept once a second), the detectors while the game simulates, the time limits
+   * about to run out, and the jobs followed.
+   */
+  private stepStory(dt: number, simulate: boolean): void {
+    // A travel begun takes the player out of every area they stood in, said at once so an observe step's
+    // watch stops counting where the trip began rather than on the far side of it. Nothing at all once
+    // they are said, which is every frame of the trip after the first.
+    if (this.traveling && this.storyWatch.inside.length) this.storyWatch.leaveAll(this.raiseStory);
+    this.storyClock -= dt;
+    if (this.storyClock > 0) return;
+    this.storyClock = 1 / Math.max(1, TRACKER_TUNE.hz);
+    const host = this.questHost;
+    host.tick();
+    if (simulate && this.inWorld && !this.dying) this.storyWatch.step(host.view(), this.watchPlace(), Date.now(), this.raiseStory);
+    // Read again: what the detectors just raised may have moved a job on.
+    const view = host.view();
+    this.timeWarnings.check(view, host.now(), this.warnStory);
+    const S = this.settings;
+    const p = this.player;
+    const flown = p.mounted ?? p.piloting;
+    const flying = !!flown?.spec.ship && flown.airborne;
+    const show = S.hudTracker && this.inWorld && !this.dying && (!flying || S.hudTrackerInFlight);
+    let held = '';
+    const waits = this.story.host === 'held' ? 'Your jobs are held by the server, which is not answering.' : this.storyJobsWait() === JOBS_WAIT_CREDITS ? 'Your jobs wait: this server keeps your credits but not your story.' : '';
+    if (waits) {
+      const book = this.story.book;
+      for (const q of Object.keys(book?.quests ?? {})) if (book!.quests![q].state === 'active') held = waits;
+    }
+    this.tracker.update(view, this.watchPlace(), host.now(), show, held, performance.now());
+  }
+
+  /** How many times the sets have been asked for, so an answer to an older ask is dropped. */
+  private storyLoads = 0;
+
+  /**
+   * The story's sets read again: the committed test set when it is on, and the owner's own folder, each
+   * handed to the local host, which holds the book to them at once. On boot, on the dev server's word that
+   * the folder changed, and at the console.
+   */
+  private async reloadStory(): Promise<void> {
+    const load = ++this.storyLoads;
+    const [test, own] = await Promise.all([
+      this.storyTests
+        ? testSetFiles().catch((err) => {
+            console.warn('story: the test set did not load', err);
+            return null;
+          })
+        : Promise.resolve(null),
+      ownSetFiles(import.meta.env.BASE_URL).catch(() => null),
+    ]);
+    if (load !== this.storyLoads) return;
+    for (const r of this.questHost.setSets({ test, own })) {
+      if (r.errors) console.warn(`story: the ${r.name} set read with ${r.errors} problem(s) -- npm run story:check names them all\n  ${r.first.join('\n  ')}`);
+    }
+  }
+
+  /** What `__debug.story()` prints: the book, the host and its sets, and what the detectors remember. */
+  private storyReport(): Record<string, unknown> {
+    return { ...this.story.report(), tests: this.storyTests, quests: this.questHost.report(), watch: this.storyWatch.report() };
+  }
+
+  /** What `__debug.quests` does: one operation or several on the jobs held here, and the jobs as they stand. */
+  private debugQuests(o: { list?: boolean; grant?: string; offer?: string; accept?: string; decline?: string; drop?: string; complete?: string; step?: string; restart?: string; unstick?: string; track?: string; untrack?: string; clock?: number | null; tracker?: Partial<typeof TRACKER_TUNE>; stands?: Partial<typeof STAND_TUNE> }): Record<string, unknown> {
+    const host = this.questHost;
+    const results: Record<string, unknown>[] = [];
+    const did = (what: string, r: { ok: boolean; why?: string }): void => {
+      results.push({ what, ...r });
+    };
+    if (o.tracker) tuneTracker(o.tracker);
+    if (o.stands) {
+      for (const k of Object.keys(STAND_TUNE) as (keyof typeof STAND_TUNE)[]) {
+        const v = o.stands[k];
+        if (typeof v === 'number' && Number.isFinite(v) && v >= 0) STAND_TUNE[k] = v;
+      }
+      this.storyStands.clear();
+    }
+    if (o.grant) did(`grant ${o.grant}`, host.grant(o.grant));
+    if (o.offer) did(`offer ${o.offer}`, host.offer(o.offer));
+    if (o.accept) did(`accept ${o.accept}`, host.accept(o.accept));
+    if (o.decline) did(`decline ${o.decline}`, host.decline(o.decline));
+    if (o.complete) {
+      const id = host.questId(o.complete);
+      const rec = this.story.book?.quests?.[id];
+      const steps = o.step ? [o.step] : Object.keys(rec?.steps ?? {}).filter((s) => rec!.steps[s].state === 'active');
+      if (!steps.length) did(`complete ${id}`, { ok: false, why: 'that job has no step running' });
+      for (const s of steps) did(`complete ${id} ${s}`, host.run([`complete(${id}, ${s})`]));
+    }
+    if (o.restart) did(`restart ${o.restart}`, host.restart(o.restart));
+    if (o.unstick) did(`unstick ${o.unstick}`, host.unstick(o.unstick));
+    if (o.drop) did(`drop ${o.drop}`, host.drop(o.drop));
+    if (o.track) did(`track ${o.track}`, host.track(o.track, true));
+    if (o.untrack) did(`untrack ${o.untrack}`, host.track(o.untrack, false));
+    if (o.clock === null) host.resetClock();
+    else if (typeof o.clock === 'number') host.shiftClock(o.clock);
+    // Stepped once here, so a driven tab that draws no frames sees what the next tick would.
+    this.storyClock = 0;
+    this.stepStory(0, this.inWorld && !this.dying);
+    const book = this.story.book;
+    const lib = host.library;
+    const quests: Record<string, unknown>[] = [];
+    for (const id of Object.keys(book?.quests ?? {})) {
+      const rec = book!.quests![id];
+      const steps: Record<string, string> = {};
+      for (const s of Object.keys(rec.steps)) steps[s] = `${rec.steps[s].state}${rec.steps[s].n ? ` ${rec.steps[s].n}` : ''}`;
+      quests.push({ id, title: lib.quests[id] ? this.storyText(lib.quests[id].title) : id, state: rec.state, run: rec.run, completions: rec.completions, ...(rec.outcome ? { outcome: rec.outcome } : {}), ...(rec.why ? { why: rec.why } : {}), steps });
+    }
+    const view = host.view();
+    return {
+      host: host.report(),
+      results,
+      quests,
+      ...(o.list ? { set: Object.keys(lib.quests).sort().map((id) => ({ id, title: this.storyText(lib.quests[id].title), givers: lib.quests[id].givers.map((g) => g.kind), state: book?.quests?.[id]?.state ?? 'none' })) } : {}),
+      view: view ? { tracked: view.tracked, watch: view.watch.map((w) => w.k + ('quest' in w ? ` ${w.quest}#${w.step}` : 'id' in w ? ` ${w.id}` : 'object' in w ? ` ${w.object}` : '')), waypoints: view.waypoints.map((w) => `${w.id}${w.on ? '' : ' (off)'}`), objects: view.objects.map((x) => x.id) } : null,
+      tracker: this.tracker.report(),
+      stands: this.storyStands.report(),
+      clock: host.clockOffset,
+      tune: { ...TRACKER_TUNE },
+    };
+  }
+
+  /** What `__debug.storyHere()` prints: where you stand, as a story's place is written, ready to paste. */
+  private storyHere(): Record<string, unknown> {
+    if (!this.inWorld || !this.world.planet) return { why: 'there is no world to stand in' };
+    const here = this.waypointHere();
+    const round = (n: number): number => Math.round(n * 10) / 10;
+    const place: Record<string, unknown> = { world: here.world, [here.f]: [round(here.p[0]), round(here.p[1])] };
+    if (here.room) place.room = { ...here.room };
+    const text = JSON.stringify(place);
+    console.info(`story: here is ${text}`);
+    return { place, text, world: here.world, frame: here.f, cell: here.room?.cell ?? null, template: here.room?.template ?? null, building: this.world.cellState?.building.template ?? null };
   }
 
   /** Send the hello again shortly (dressing several pieces sends one): a change of clothes or weapon reaches the others. */
@@ -10733,6 +11217,13 @@ class App {
     this.minimap.clearCity();
     this.minimap.redraw();
     this.waypointsChanged();
+    // What the jobs' detectors remember is the last world's: the areas stood in there are left, said so an
+    // observe step's watch is closed rather than left counting here (the travel's start has normally said
+    // it already), and whatever is true here is raised afresh, the world itself included.
+    this.storyWatch.leaveAll(this.raiseStory);
+    this.storyWatch.reset();
+    this.forgetStoryPlace();
+    this.storyClock = 0;
     // In no dungeon copy until a travel into one stands the player there.
     this.instanceHere = null;
     this.copyFittings = [];
@@ -13179,6 +13670,14 @@ class App {
     this.ride?.abort('died', true);
     if (this.dying) return;
     this.dying = true;
+    // A job's step that fails on the player's death fails here, once; and the dead are in no area, so a
+    // watch being kept is closed now rather than counting the time spent dead and coming back.
+    try {
+      this.storyWatch.death(this.questHost.view(), this.raiseStory);
+      this.storyWatch.leaveAll(this.raiseStory);
+    } catch (err) {
+      console.warn('story: the death could not be told', err);
+    }
     this.closePanels();
     this.map.hide();
     this.player.startRagdoll();
@@ -18382,7 +18881,7 @@ class App {
             else if (!this.hyperspace.locksControls) {
               // The order the bar's own rules offer them in (`promptRules.ts`, whose test pins this line):
               // what is underfoot, a port's own things, somebody you are looking at, a gate, and a vehicle.
-              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
+              if (!this.handleElevator() && !this.handleInstance() && !this.handleTravel() && !this.handleStoryUse() && !this.handleTalk() && !this.handleZoneGate()) this.handleMount();
             } else this.pressJumpE();
           }
           if (input.pressedAction('noclip') && !player.mounted && !this.hyperspace.locksControls) player.toggleNoclip();
@@ -18605,6 +19104,10 @@ class App {
           this.gatherWaypoints();
         }
       }
+      // The jobs: what their detectors see four times a second while the game simulates, their deadlines
+      // swept once a second whatever it is doing (a world clock runs on while a panel is open), and the
+      // jobs followed under the roster.
+      this.stepStory(rawDt, simulate);
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
       // The long line of every key is what it always was, but it is now a setting, and it costs
       // nothing on the frame path either way: the *conditions* were always its cost, not the words,
@@ -18630,6 +19133,7 @@ class App {
         else if (S8.doorless) prompt = `<b>E</b> enter ${this.promptDoorless} (no way in on foot)`;
         else if (S8.instance) prompt = S8.instance === 'keypad' ? '<b>E</b> use the keypad' : S8.instance === 'pod' ? '<b>E</b> the escape pod: off this ship' : S8.instance === 'out' ? `<b>E</b> back the way you came in` : '<b>E</b> go in';
         else if (S8.travel) prompt = `<b>E</b> ${this.promptTravel}`;
+        else if (S8.use) prompt = `<b>E</b> use ${this.promptUse}`;
         else if (S8.talk) prompt = `<b>E</b> talk to ${this.promptTalk}`;
         else if (player.piloting) prompt = `at the controls of the ${player.piloting.spec.label} · ${player.piloting.landed ? `landed · <b>W</b> or <b>Space</b> lifts off` : `<b>W</b>/<b>S</b> throttle · mouse steers${player.piloting.spec.ship && SHIP_GROUND.rule === 'landing' ? ` · hold <b>Ctrl</b> to set down · <b>${keyName(CUT_ENGINES_KEY)}</b> cuts the engines` : ''}`} · <b>Alt</b> looks around · <b>E</b> lets go · ${Math.round(Math.abs(player.piloting.speed) * 3.6)} km/h${shipHint}${player.piloting.landNote ? ` · ${player.piloting.landNote}` : ''}`;
         // Standing on something out in space: the boots hold, a jump lets go, and E climbs into a ship beside you.

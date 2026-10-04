@@ -4,6 +4,7 @@
 // underneath it. A tiny stand-in for the browser's DOM, which counts every write it is given, so the
 // module's own count of what it wrote can be checked against what the elements actually took.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -242,13 +243,14 @@ const TIMES = '×';
 // --- kinds, speakers and colours --------------------------------------------------------------------
 {
   const m = build();
-  ok(MESSAGE_KINDS.length === 5, 'five kinds');
+  ok(MESSAGE_KINDS.length === 6, 'six kinds (a job\'s news the sixth)');
   for (const kind of MESSAGE_KINDS) m.say(kind, `a ${kind} line`);
   const classes = shownOf(m).map((c) => c.className);
-  ok(classes.length === 5 && classes.every((c) => c.startsWith('hud-msg ')), 'every line keeps the class the stylesheet lays it out by');
+  ok(classes.length === 6 && classes.every((c) => c.startsWith('hud-msg ')), 'every line keeps the class the stylesheet lays it out by');
   const kinds = classes.map((c) => c.split(' ').find((x) => x !== 'hud-msg'));
-  ok(kinds.includes('system') && kinds.includes('you-hit') && kinds.includes('hit-you') && kinds.includes('spatial') && kinds.includes('note'), 'each kind puts its own class on its line');
-  ok(new Set(kinds).size === 5, 'and the five are five different ones');
+  ok(kinds.includes('system') && kinds.includes('you-hit') && kinds.includes('hit-you') && kinds.includes('spatial') && kinds.includes('note') && kinds.includes('story'), 'each kind puts its own class on its line');
+  ok(new Set(kinds).size === 6, 'and the six are six different ones');
+  ok(/\.hud-msg\.story\s*\{\s*border-left-color:\s*var\(--component\)/.test(readFileSync(new URL('../../../src/ui/hud.css', import.meta.url), 'utf8')), "a job's news wears the component colour on its rule, as the stylesheet says");
   const m2 = build();
   m2.spatial('a pilot', 'you are outmatched', '#ff9a6a');
   const who = (shownOf(m2)[0].children as El[])[0];

@@ -1,0 +1,25 @@
+// The fourth wave's words: what a job hands over and what it reads. One step pays, gives the starting kit's
+// own plain shirt (owned already, so it is said rather than given twice), records experience and Standing,
+// sets a waypoint of the character's own in the test square and says something; then the fork reads what
+// the character has -- credits, the shirt, the Standing just given -- and the waypoint is tidied away.
+{
+  "id": "words",
+  "title": "TEST: what a job hands over",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["hand"],
+  "steps": {
+    "hand": {
+      "type": "signal",
+      "signal": "debug:test-hand",
+      "objective": "TEST: send the hand-over signal",
+      "do": {
+        "done": ["pay(5)", "give(wear, shirt_s03)", "xp(3)", "standing(freelance, 2)", "waypoint(\"TEST: the job's own waypoint\", tatooine, 3476, -4694)", "say(\"TEST: said by the job\")"],
+      },
+      "nextOne": [{ "to": "rich", "when": "credits() >= 5 && has(wear, shirt_s03) && standing(freelance) >= 2" }, { "to": "poor" }],
+    },
+    "rich": { "type": "signal", "signal": "debug:test-tidy", "objective": "TEST: tidy the waypoint away", "do": { "done": ["waypointGone(\"TEST: the job's own waypoint\")"] }, "ends": "done" },
+    "poor": { "type": "end", "outcome": "poor" },
+  },
+  "outcomes": { "poor": { "failure": true } },
+}

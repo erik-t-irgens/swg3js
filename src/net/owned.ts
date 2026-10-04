@@ -211,8 +211,12 @@ export class Owned {
    * `fresh` is the server answering this browser alone about a body it has only just stood: the creature
    * was already down when this browser said it had one. Nothing died here -- the body is to go quietly,
    * never to play a death nobody saw or count as a kill at its post.
+   *
+   * `by` is who struck it in its last moments, as its keeper named them and the server kept to the players
+   * really on that world, by their relay ids: the one witness this browser has to a kill of a creature
+   * another browser keeps. Empty for anything but a death, and from a server that sends no such list.
    */
-  onGone: (id: string, why: GoneWhy, back: number, fresh: boolean) => void = () => {};
+  onGone: (id: string, why: GoneWhy, back: number, fresh: boolean, by: readonly number[]) => void = () => {};
   /** The server could hold no more seen ones on this world: the body under this name is this browser's own to keep. */
   onLocal: (id: string) => void = () => {};
   /**
@@ -637,7 +641,7 @@ export class Owned {
         // grant back in the same breath, and a body nobody has told to stop is the one way a creature
         // could go on thinking after it was gone.
         if (this.keeping.delete(id)) this.note(id, false);
-        if (had || seen) this.onGone(id, why, back, seen && msg.fresh === 1);
+        if (had || seen) this.onGone(id, why, back, seen && msg.fresh === 1, why === 'dead' ? readStrikers(msg.by) : NOBODY);
         break;
       }
       case 'local': {
@@ -717,7 +721,7 @@ export class Owned {
       if (seen.has(id)) continue;
       this.rows.delete(id);
       if (this.keeping.delete(id)) this.note(id, false);
-      this.onGone(id, 'removed', 0, false);
+      this.onGone(id, 'removed', 0, false, NOBODY);
     }
     this.stat.known = this.rows.size;
     this.stat.kept = this.keeping.size;
@@ -811,6 +815,17 @@ function readId(x: unknown): string {
  * here rests on a NUL surviving a copy of the tree. The same class server/wire.mjs strips.
  */
 const CONTROL = /[\u0000-\u001f\u007f]/g;
+
+/** Nobody: the strikers of anything that was not a death, one list for all of them. */
+const NOBODY: readonly number[] = Object.freeze([]);
+
+/** Who struck a creature, as the server names them: relay ids, at most the eight a keeper says. */
+function readStrikers(x: unknown): readonly number[] {
+  if (!Array.isArray(x) || !x.length) return NOBODY;
+  const out: number[] = [];
+  for (const v of x.slice(0, 8)) if (typeof v === 'number' && Number.isInteger(v) && v > 0 && !out.includes(v)) out.push(v);
+  return out.length ? out : NOBODY;
+}
 
 /** Words from the far end: cut, and never parsed as anything. */
 function readWords(x: unknown, cap = 160): string {

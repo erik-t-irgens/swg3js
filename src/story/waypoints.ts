@@ -105,10 +105,16 @@ export interface Waypoint {
   on: boolean;
   /** When it was set, in shared-clock milliseconds. */
   made: number;
+  /**
+   * The job that set it (`run` for one set at the console), on a waypoint a story set and on no other: what
+   * a story's `waypointGone` may take away and what its `waypoint` counts as already there, so a story never
+   * touches one the player set. Kept by the host and never asked for by a browser.
+   */
+  by?: string;
 }
 
-/** What a browser may ask for when it sets one: everything but the id and the time, which the host gives it. */
-export type WaypointAsk = Omit<Waypoint, 'id' | 'made'>;
+/** What a browser may ask for when it sets one: everything but the id, the time and who set it, which are the host's. */
+export type WaypointAsk = Omit<Waypoint, 'id' | 'made' | 'by'>;
 
 /** Names a key or an id may not have: the three that mean something to every object in the language. */
 export const FORBIDDEN_KEYS: readonly string[] = ['__proto__', 'constructor', 'prototype'];
@@ -209,7 +215,10 @@ export function cleanWaypointAsk(x: unknown): WaypointAsk | null {
   return out;
 }
 
-/** A stored waypoint, cleaned, or null: an ask with its id and its time. */
+/** Who set a waypoint a story set: a job's id (the book's own pattern for one), or `run` for the console's. */
+const SET_BY = /^(run|[A-Za-z0-9_-]{1,24}:[A-Za-z0-9_./-]{1,96})$/;
+
+/** A stored waypoint, cleaned, or null: an ask with its id, its time and, for one a story set, who set it. */
 export function cleanWaypoint(x: unknown): Waypoint | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
   const o = x as Record<string, unknown>;
@@ -217,7 +226,9 @@ export function cleanWaypoint(x: unknown): Waypoint | null {
   const ask = cleanWaypointAsk(o);
   if (!ask) return null;
   const made = typeof o.made === 'number' && Number.isFinite(o.made) && o.made >= 0 ? o.made : 0;
-  return { id: o.id, ...ask, made };
+  const out: Waypoint = { id: o.id, ...ask, made };
+  if (typeof o.by === 'string' && SET_BY.test(o.by)) out.by = o.by;
+  return out;
 }
 
 /** The counter a personal waypoint's id was minted from. */

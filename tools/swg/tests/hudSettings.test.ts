@@ -48,6 +48,9 @@ const HUD_KEYS = [
   ['hudMinimapNorthUp', 'boolean'],
   ['hudWaypointMarks', 'boolean'],
   ['hudWaypointMarksInFlight', 'boolean'],
+  // The jobs followed, on foot and in flight.
+  ['hudTracker', 'boolean'],
+  ['hudTrackerInFlight', 'boolean'],
 ] as const;
 
 // -------------------------------------------------------------------------------------------

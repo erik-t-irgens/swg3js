@@ -21,7 +21,9 @@
 // place (`<quest>#<n>#<step>`, `n` one more than the completions before it), and the book refuses to
 // record one twice. So a restart, a drop and a fresh grant, or a failure and a retry all reach the same
 // key and pay nothing the first try already paid, while a quest done and taken again is a new completion
-// and pays again -- nothing is ever paid twice, whichever host pays it.
+// and pays again -- nothing is ever paid twice, whichever host pays it. An action that hands something
+// over (`pay`, `give`, `xp`, `standing`) is a reward of its own, keyed the same way by where it is written
+// (`<quest>#<n>#do:<step>.<phase>.<i>`), so a step begun again in the same completion pays it once.
 //
 // **Repeats, restarts, revisions.** A quest ended is taken again only as its `repeat` says (`never`,
 // `always`, a cooldown, once a game day or a real day, up to a limit). A restart begins a new run at the
@@ -52,6 +54,7 @@ import { seedChance } from './seed.ts';
 import { CLEARED, type ActionDef, type Edge, type QuestDef, type Reward, type Room, type StepDef, type StorySet } from './set.ts';
 import type { TextRef } from './text.ts';
 import { ACTIONS, BUILT_WAVE, OP_KEYS, STEP_TYPES } from './vocab.ts';
+import { WAYPOINT_TUNE, cleanWaypointName, type Waypoint } from './waypoints.ts';
 
 /** What is true just now, as the host says it. Anything it cannot say is left out, and a condition on it reads false. */
 export interface StoryCtx {
@@ -72,6 +75,10 @@ export interface StoryCtx {
   hour?: number | null;
   grouped?: boolean;
   species?: string | null;
+  /** What the character has to spend, as its purse says: what `credits() >= n` reads. Unknown reads false. */
+  credits?: number | null;
+  /** How many of a thing the character owns (the ledger's kinds, `wear` and `weapon`): what `has` reads. */
+  has?: ((kind: string, id: string) => number) | null;
   /**
    * The character is not in the world just now: logged off, or not yet come in while a host settles the
    * book it has just read. A span on the played clock that begins now keeps its length until `enter`.
@@ -150,6 +157,13 @@ interface Scope {
   quest?: string;
   run?: number;
   step?: string;
+  /**
+   * Where a list of actions was written (`<step>.start`, `<step>.done`, `<step>.fail`, `out:<outcome>`):
+   * what an action that pays is keyed by, with its place in the list, so it is paid once wherever it runs.
+   */
+  site?: string;
+  /** The completion an action that pays counts towards, where the caller knows it better than the record does. */
+  n?: number;
 }
 
 export interface Tally {
@@ -242,6 +256,20 @@ export function evalCond(c: CondJson | null | undefined, book: StoryBook, ctx: S
   }
   if ('grouped' in c) return !!ctx.grouped;
   if ('species' in c) return !!ctx.species && ctx.species === c.species;
+  // What the character has to spend and what it owns are the host's to say (its purse, its ledger); a
+  // host that cannot say reads false, as any condition on something unknown does.
+  if ('credits' in c) return typeof ctx.credits === 'number' && Number.isFinite(ctx.credits) && compare(ctx.credits, c.credits as CondJson);
+  if ('has' in c) {
+    const h = c.has as { kind: string; id: string; n?: number };
+    const n = ctx.has ? ctx.has(h.kind, h.id) : null;
+    return typeof n === 'number' && n >= (h.n ?? 1);
+  }
+  if ('standing' in c || 'trust' in c) {
+    const which = 'standing' in c ? 'standing' : 'trust';
+    const t = c[which] as CondJson & { track: Track };
+    const row = ownOf(book.tracks as Record<string, { standing: number; trust: number }> | undefined, t.track);
+    return compare(row ? row[which] : 0, t);
+  }
   if ('chance' in c) return seedChance(c.chance as number, ctx.char, scope.quest ?? '', scope.run ?? 0, c.seed as string);
   if ('script' in c) {
     const s = scriptOf(c.script as string);
@@ -582,6 +610,7 @@ export class Draft {
     const dropped = (): string | null => {
       const next: QuestRec = { ...without(rec, 'why'), state: 'dropped', history: capHistory([...rec.history, { run: rec.run, outcome: 'dropped', at: now }], this.limits.history) };
       if (!this.setQuest(q, next)) return this.why;
+      this.untrack(q);
       this.notes.push({ k: 'dropped', quest: q, title: def?.title ?? q });
       return null;
     };
@@ -654,6 +683,11 @@ export class Draft {
     this.notes.push({ k: 'stalled', quest: q, title: this.def(q)?.title ?? q, why });
   }
 
+  /** A job off the tracker, when it is on it. */
+  private untrack(q: string): void {
+    if (this.book.tracked.includes(q)) this.change({ k: 'track', quest: q, on: false });
+  }
+
   /** End a quest's run with an outcome: its reward paid once, its actions run, any quest chained after it granted. */
   private end(q: string, outcome: string, run: number): void {
     const rec = this.quest(q);
@@ -662,14 +696,16 @@ export class Draft {
     const now = this.ctx.now;
     const history = capHistory([...rec.history, { run, outcome, at: now }], this.limits.history);
     if (outcome === CLEARED) {
-      this.setQuest(q, { ...without(rec, 'outcome', 'why'), state: 'none', ended: now, history });
+      if (this.setQuest(q, { ...without(rec, 'outcome', 'why'), state: 'none', ended: now, history })) this.untrack(q);
       return;
     }
     const od = def?.outcomes[outcome];
     const failure = od ? od.failure : outcome === 'failed';
     if (!this.setQuest(q, { ...without(rec, 'why'), state: failure ? 'failed' : 'done', outcome, ended: now, completions: rec.completions + (failure ? 0 : 1), history })) return;
+    // A job that has ended leaves the tracker, so the three it holds are always jobs still to do.
+    this.untrack(q);
     if (od?.reward) this.reward(q, rec.completions + 1, `#out:${outcome}`, od.reward);
-    if (od) this.actions(od.do, { quest: q, run });
+    if (od) this.actions(od.do, { quest: q, run, site: `out:${outcome}`, n: rec.completions + 1 });
     this.notes.push({ k: failure ? 'failed' : 'done', quest: q, title: def?.title ?? q, outcome });
     for (const id of Object.keys(this.lib.quests)) {
       for (const g of this.lib.quests[id].givers) if (g.kind === 'chain' && g.after === q && (!g.outcome || g.outcome === outcome)) this.queue.push({ k: 'grant', q: id, how: 'grant' });
@@ -768,7 +804,7 @@ export class Draft {
     if (step.type === 'observe' && step.area && !away && this.ctx.areas?.includes(step.area)) sr.since = now;
     if (!this.setStep(q, s, sr)) return;
     this.touched.add(q);
-    this.actions(step.do.start, { quest: q, run, step: s });
+    this.actions(step.do.start, { quest: q, run, step: s, site: `${s}.start` });
     const type = STEP_TYPES[step.type];
     if (type?.instant) {
       this.queue.push({ k: 'complete', q, s, run });
@@ -794,7 +830,7 @@ export class Draft {
     this.touched.add(q);
     const scope = { quest: q, run, step: s };
     if (step.reward) this.reward(q, rec.completions + 1, `#${s}`, step.reward);
-    this.actions(step.do.done, scope);
+    this.actions(step.do.done, { ...scope, site: `${s}.done` });
     if (step.visible !== false && !STEP_TYPES[step.type]?.instant) this.notes.push({ k: 'objectiveDone', quest: q, step: s });
     for (const name of step.signalsOut.done) this.queue.push({ k: 'raise', name });
     for (const g of step.grant.done) this.queue.push({ k: 'grant', q: g, how: 'grant' });
@@ -827,7 +863,7 @@ export class Draft {
     if (!cur || cur.state !== 'active' || !step) return;
     if (!this.setStep(q, s, { state: 'failed', n: cur.n, at: this.ctx.now })) return;
     this.touched.add(q);
-    this.actions(step.do.fail, { quest: q, run, step: s });
+    this.actions(step.do.fail, { quest: q, run, step: s, site: `${s}.fail` });
     for (const name of step.signalsOut.fail) this.queue.push({ k: 'raise', name });
     for (const g of step.grant.fail) this.queue.push({ k: 'grant', q: g, how: 'grant' });
     if (step.onFail.length) for (const t of step.onFail) this.queue.push({ k: 'activate', q, s: t, run });
@@ -852,10 +888,22 @@ export class Draft {
   // ---- actions ---------------------------------------------------------------------------------------
 
   actions(list: readonly ActionDef[], scope: Scope): void {
-    for (const a of list) this.act(a, scope);
+    for (let i = 0; i < list.length; i++) this.act(list[i], scope, `${scope.site ?? 'do'}.${i}`);
   }
 
-  private act(a: ActionDef, scope: Scope): void {
+  /**
+   * An action that hands something over -- credits, a thing, experience, Standing -- paid once, as a
+   * reward is: keyed by its quest, the completion it counts towards and where it was written (`at`),
+   * recorded first and paid only when the book did not have it. Written outside any quest (the console's
+   * `run`), it is keyed by the moment instead, so each call pays once.
+   */
+  private payOnce(scope: Scope, at: string, r: Reward): void {
+    const q = scope.quest;
+    const n = q ? (scope.n ?? (this.quest(q)?.completions ?? 0) + 1) : Math.floor(this.ctx.now);
+    this.reward(q ?? 'run', n, `#do:${at}`, r);
+  }
+
+  private act(a: ActionDef, scope: Scope, at: string): void {
     if (a.wave > BUILT_WAVE) {
       this.tally.unbuilt++;
       return;
@@ -863,6 +911,46 @@ export class Draft {
     const x = a.args[0] as string;
     const y = a.args[1];
     switch (a.act) {
+      case 'pay':
+        this.payOnce(scope, at, { credits: Math.max(0, Math.floor(a.args[0] as number)), xp: 0, items: [], standing: [] });
+        return;
+      case 'give': {
+        const n = typeof a.args[2] === 'number' ? Math.max(1, Math.floor(a.args[2])) : 1;
+        this.payOnce(scope, at, { credits: 0, xp: 0, items: [{ kind: x as 'wear' | 'weapon', id: y as string, n }], standing: [] });
+        return;
+      }
+      case 'xp':
+        this.payOnce(scope, at, { credits: 0, xp: Math.max(0, Math.floor(a.args[0] as number)), items: [], standing: [] });
+        return;
+      case 'standing':
+        this.payOnce(scope, at, { credits: 0, xp: 0, items: [], standing: [{ track: x as Track, add: y as number }] });
+        return;
+      case 'waypoint': {
+        // A waypoint of the character's own, set by the story: minted by the host, as every personal one
+        // is, marked as the story's (`by`), and set once -- a waypoint the story already set with the same
+        // name at the same place on the same world is already there. One the player set is never taken
+        // for it, whatever it is called.
+        const name = cleanWaypointName(x) ?? 'Waypoint';
+        const world = y as string;
+        const px = a.args[2] as number;
+        const pz = a.args[3] as number;
+        const cell = a.args[4] as string | undefined;
+        if (this.book.waypoints.some((w) => w.by && w.name === name && w.world === world && w.p[0] === px && w.p[1] === pz)) return;
+        const wp: Waypoint = { id: `w${this.book.nextWp}`, name, world, f: world.startsWith('space_') ? 'game' : 'raw', p: [px, pz, null], colour: WAYPOINT_TUNE.defaultQuest, on: true, made: this.ctx.now, by: scope.quest ?? 'run' };
+        if (cell) wp.room = { cell };
+        this.change({ k: 'wpSet', wp });
+        return;
+      }
+      case 'waypointGone': {
+        // By its id (`w12`) or by the name the story gave it, which is all an author can know of one, read as
+        // the name was kept (cleaned and cut). Only a waypoint a story set: the player's own are theirs.
+        const name = cleanWaypointName(x);
+        for (const w of [...this.book.waypoints]) if (w.by && (w.id === x || (name !== null && w.name === name))) this.change({ k: 'wpGone', id: w.id });
+        return;
+      }
+      case 'say':
+        this.notes.push({ k: 'say', text: x });
+        return;
       case 'offer':
       case 'grant':
         this.queue.push({ k: 'grant', q: x, how: a.act === 'offer' ? 'offer' : 'grant' });
@@ -912,13 +1000,15 @@ export class Draft {
         }
         this.scriptDepth++;
         try {
-          for (const o of Array.isArray(out) ? out : []) {
+          const list = Array.isArray(out) ? out : [];
+          for (let j = 0; j < list.length; j++) {
+            const o = list[j];
             const spec = ACTIONS[o?.act];
             if (!spec || spec.reserved || !Array.isArray(o.args)) {
               this.tally.misses++;
               continue;
             }
-            this.act({ act: o.act, args: o.args, wave: spec.wave }, scope);
+            this.act({ act: o.act, args: o.args, wave: spec.wave }, scope, `${at}.${j}`);
           }
         } finally {
           this.scriptDepth--;

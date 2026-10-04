@@ -23,7 +23,7 @@
 import { BACKSTOP_LIMITS, BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, emptyBook, type StoryBook, type StoryChange } from './book.ts';
 import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord } from './storyWire.ts';
 import { loadBook, saveBook, setAside, type StoryStorage } from './storyStore.ts';
-import { cleanWaypointAsk, cleanWaypointName, isWaypointColour, type Waypoint, type WaypointColour } from './waypoints.ts';
+import { cleanWaypointAsk, cleanWaypointName, isQuestWaypoint, isWaypointColour, type Waypoint, type WaypointColour } from './waypoints.ts';
 
 /** The browser's own numbers, every one ours. The sizes a server takes are the server's (`STORY_TUNING`). */
 export const STORY_TUNE = {
@@ -35,10 +35,23 @@ export const STORY_TUNE = {
   wpPerSecond: 3,
   /** The piece a book is cut into when a server asks for it without saying (one that does says so in its `want`). */
   offerChunk: 24000,
+  /**
+   * Milliseconds between two raisings of something the detectors see that is still true (standing at the
+   * place, in the room, in the area, on the world): an event dropped while nobody could take it costs
+   * nothing that is still true when somebody can.
+   */
+  repeatEv: 2000,
+  /** Milliseconds within which a second word of one body's death is the same kill (a blow seen here, then the server's word of it). */
+  killDedupe: 30000,
+  /** Milliseconds between two sweeps of the deadlines by the story held here. */
+  sweep: 1000,
 };
 
 /** Set any of those, clamped to what makes sense; the answer is the table as it now stands. */
 export function tuneStory(o: Partial<typeof STORY_TUNE>): typeof STORY_TUNE {
+  if (typeof o.repeatEv === 'number' && Number.isFinite(o.repeatEv)) STORY_TUNE.repeatEv = Math.max(250, Math.min(60000, Math.round(o.repeatEv)));
+  if (typeof o.killDedupe === 'number' && Number.isFinite(o.killDedupe)) STORY_TUNE.killDedupe = Math.max(0, Math.min(600000, Math.round(o.killDedupe)));
+  if (typeof o.sweep === 'number' && Number.isFinite(o.sweep)) STORY_TUNE.sweep = Math.max(100, Math.min(60000, Math.round(o.sweep)));
   if (typeof o.chunkGap === 'number' && Number.isFinite(o.chunkGap)) STORY_TUNE.chunkGap = Math.max(50, Math.min(10000, Math.round(o.chunkGap)));
   if (typeof o.syncWait === 'number' && Number.isFinite(o.syncWait)) STORY_TUNE.syncWait = Math.max(500, Math.min(120000, Math.round(o.syncWait)));
   if (typeof o.wpPerSecond === 'number' && Number.isFinite(o.wpPerSecond)) STORY_TUNE.wpPerSecond = Math.max(1, Math.min(20, Math.round(o.wpPerSecond)));
@@ -133,6 +146,15 @@ export class BookClient {
   /** Changes made here with nobody else holding the book, since a server last matched it. */
   get local(): number {
     return this.bk?.local ?? 0;
+  }
+
+  /**
+   * Whether this browser holds a book just now, worked out from the line as it is this moment rather than
+   * as the last step found it: what the story held here asks before it works anything out.
+   */
+  holdsHere(): boolean {
+    this.derive();
+    return this.kind === 'local' && !!this.bk;
   }
 
   /**
@@ -425,6 +447,12 @@ export class BookClient {
   }
 
   switchWaypoint(id: string, on: boolean): StoryResult {
+    // A quest's waypoint is not in the book: what the player says of it is remembered by its key. A server
+    // runs the jobs from a later wave, and until then has nothing to switch.
+    if (isQuestWaypoint(id)) {
+      if (this.kind === 'server') return { ok: false, why: 'a job’s waypoint is switched on the server from a later wave' };
+      return this.change(on ? 'on' : 'off', { id }, { k: 'qwpOn', key: id, on });
+    }
     return this.change(on ? 'on' : 'off', { id }, { k: 'wpOn', id, on });
   }
 
@@ -435,6 +463,23 @@ export class BookClient {
   /** Track one waypoint, a personal one or a quest's, or none. */
   trackWaypoint(id: string | null): StoryResult {
     return this.change('track', { id }, { k: 'trackWp', id });
+  }
+
+  /**
+   * A batch the story held here worked out (`localHost.ts`), applied to this very book as a change made
+   * here: kept, counted in `local` -- which is what the character's change counter reads, so a job played
+   * alone settles as the rest of the character does -- and told. Only while this browser holds the book.
+   */
+  applyLocal(ch: StoryChange[]): boolean {
+    this.derive();
+    const bk = this.bk;
+    if (!bk || this.kind !== 'local' || !ch.length) return false;
+    const out = applyChanges(bk, ch, BOOK_LIMITS);
+    if (!out.applied.length) return false;
+    bk.local++;
+    saveBook(this.deps.store, bk);
+    this.emit('mine', bk.local - 1);
+    return true;
   }
 
   /** What `__debug.story()` prints. */

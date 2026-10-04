@@ -19,8 +19,11 @@
 // None of it is the game's: the words are ours, and the client columns an importer would fill are named
 // beside the step fields in `set.ts`.
 
-/** The waves of this pass this build has reached. Wave 4 moves it on as it wires the local host. */
-export const BUILT_WAVE = 3;
+/**
+ * The waves of this pass this build has reached. Wave 4 moved it on as it wired the local host: credits,
+ * items, Standing and Trust read, and money, things, experience, Standing, waypoints and words handed out.
+ */
+export const BUILT_WAVE = 4;
 
 export type ArgKind =
   | 'quest'

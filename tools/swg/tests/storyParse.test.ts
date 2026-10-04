@@ -194,6 +194,28 @@ const same = (a: unknown, b: unknown) => stableText(a) === stableText(b);
   const impostor = loadSet([{ path: 'story.jsonc', text: '{ "prefix": "test", "title": "mine" }' }, { path: 'quests/rel.jsonc', text: '{ "id": "rel", "title": "TEST", "start": ["a"], "steps": { "a": { "type": "goto", "at": { "rel": "start", "dx": 1, "dz": 1 }, "ends": "done" } } }' }]);
   ok(impostor.errors.length === 1 && /test set's/.test(impostor.errors[0].message) && !impostor.set.test && Object.keys(impostor.set.quests).length === 0, 'a set that declares the test set\'s prefix without being loaded as the test set is refused, and read no further');
   ok(!r.set.test && !loadSet(files, {}).set.test && loadSet(files, { test: true }).set.test, 'and nothing is the test set unless the caller says so');
+
+  // The fourth wave's conditions as an importer writes them, as JSON: each malformed one refused in its
+  // own words, and the well-formed ones read.
+  const needs = (id: string, cond: unknown) => ({ path: `quests/${id}.jsonc`, text: JSON.stringify({ id, title: 'TEST', needs: cond, start: ['s'], steps: { s: { type: 'nothing' } } }) });
+  const fourth = loadSet([
+    files[0],
+    needs('c1', { credits: { gte: '5' } }),
+    needs('c2', { credits: { gte: 1, lt: 9 } }),
+    needs('c3', { credits: { about: 1 } }),
+    needs('h1', { has: { kind: 'ship', id: 'x' } }),
+    needs('h2', { has: { kind: 'wear', id: 'x', colour: 1 } }),
+    needs('h3', { has: { kind: 'wear', id: 'x', n: 0 } }),
+    needs('s1', { standing: { track: 'hutt', gte: 1 } }),
+    needs('s2', { trust: { track: 'empire', gte: 1, lte: 5 } }),
+    needs('s3', { standing: { track: 'empire' } }),
+    needs('good', { all: [{ credits: { gte: 5 } }, { has: { kind: 'weapon', id: 'pistol_dl44', n: 2 } }, { standing: { track: 'freelance', gte: 2 } }, { trust: { track: 'rebellion', lt: 0 } }] }),
+  ]);
+  const errIn = (file: string, re: RegExp) => fourth.errors.some((e) => e.file === `quests/${file}.jsonc` && re.test(e.message));
+  ok(errIn('c1', /credits is/) && errIn('c2', /credits is/) && errIn('c3', /credits is/), 'credits compared with a word, with two comparisons, or with one the game does not know is refused');
+  ok(errIn('h1', /has is/) && errIn('h2', /names a kind, an id and how many/) && errIn('h3', /whole number from 1/), 'has naming a kind the ledger has not, a field it has not, or none of a thing is refused');
+  ok(errIn('s1', /standing is/) && errIn('s2', /trust compares/) && errIn('s3', /standing compares/), 'Standing or Trust on a track the game has not, with two comparisons or with none is refused');
+  ok(!fourth.errors.some((e) => e.file === 'quests/good.jsonc') && same(fourth.set.quests['own:good']?.needs, { all: [{ credits: { gte: 5 } }, { has: { kind: 'weapon', id: 'pistol_dl44', n: 2 } }, { standing: { track: 'freelance', gte: 2 } }, { trust: { track: 'rebellion', lt: 0 } }] }), 'and the four written well are read as they were written');
 }
 
 // ---- the committed test set, read as the game reads it ------------------------------------------------
@@ -202,8 +224,10 @@ const same = (a: unknown, b: unknown) => stableText(a) === stableText(b);
   const { files, refused } = readStorySet(decodeURIComponent(dir.pathname.replace(/^\/([A-Za-z]:)/, '$1')));
   const r = loadSet(files, { test: true });
   ok(refused.length === 0 && r.errors.length === 0 && r.set.test && r.set.prefix === 'test', `the test set reads with no errors (${r.errors.map((e) => `${e.file}:${e.line} ${e.message}`).join('; ')})`);
-  const want = ['goto', 'signal', 'kill', 'timer', 'join', 'reward', 'repeat', 'harsh', 'branchNext', 'observe', 'waypoints'].map((q) => `test:${q}`);
-  ok(want.every((q) => r.set.quests[q]) && Object.keys(r.set.quests).length === want.length, `it holds exactly the design's eleven test quests (${Object.keys(r.set.quests).join(', ')})`);
+  // The design's eleven, and the fourth wave's own (`words`: what a job hands over and reads).
+  const want = ['goto', 'signal', 'kill', 'timer', 'join', 'reward', 'repeat', 'harsh', 'branchNext', 'observe', 'waypoints', 'words'].map((q) => `test:${q}`);
+  ok(want.every((q) => r.set.quests[q]) && Object.keys(r.set.quests).length === want.length, `it holds exactly the design's eleven test quests and the fourth wave's twelfth (${Object.keys(r.set.quests).join(', ')})`);
+  ok(r.warnings.every((w) => !/arrive[s]? in wave 4/.test(w.message)), 'and none of its words waits for the fourth wave any more');
   const fixtures = files.filter((f) => f.path.startsWith('fixtures/'));
   ok(fixtures.length === 6 && !Object.keys(r.set.quests).some((q) => q.includes('broken')), 'its six fixtures are in the folder and never loaded');
   const manifest = readFileSync(new URL('story.jsonc', dir), 'utf8');

@@ -172,6 +172,11 @@ export interface PromptState {
    */
   travel: '' | 'terminal' | 'collector' | 'ship';
   /**
+   * A thing a story stands in reach (`src/world/storyStands.ts`): the world's own terminal or sign that a
+   * job is waiting on, or that offers one. After a port's things and before a person, as the key takes it.
+   */
+  use: boolean;
+  /**
    * Somebody in front of you who may be spoken to (`src/world/talk.ts`): a person, neither hostile nor
    * fighting, in reach and in the view. The cap says only that you would talk; who it is goes on the
    * long line, which has room for a name.
@@ -213,6 +218,7 @@ export function newPromptState(): PromptState {
     doorless: false,
     instance: '',
     travel: '',
+    use: false,
     talk: false,
     gate: '',
     boots: false,
@@ -238,6 +244,7 @@ export function resetPromptState(s: PromptState): PromptState {
   s.doorless = false;
   s.instance = '';
   s.travel = '';
+  s.use = false;
   s.talk = false;
   s.gate = '';
   s.boots = false;
@@ -293,6 +300,9 @@ export const PROMPT_WORDS = Object.freeze({
   ticketTerminal: 'the ticket terminal',
   collector: 'the ticket collector',
   shipTerminal: 'the ship terminal',
+  // A thing a story stands: the world's own terminal, sign or crate that a job waits on. The cap says what
+  // you would do; what it is goes on the long line.
+  use: 'use',
   // Somebody you are looking at who may be spoken to. The cap says what you would do, never whom: a
   // name is the thing you are looking at, and it is written on the long line instead.
   talk: 'talk',
@@ -457,6 +467,10 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
   // orders them: a lift shaft, an elevator and a doorway are all underfoot and all outrank a terminal
   // you have walked up to.
   else if (s.travel) n = push(out, n, 'mount', s.travel === 'collector' ? W.collector : s.travel === 'ship' ? W.shipTerminal : W.ticketTerminal);
+  // A thing a story stands is used after a port's own things and before a person, as the game's own dispatch
+  // takes it (`handleTravel`, then `handleStoryUse`, then `handleTalk`): a terminal is walked up to, and a
+  // traveller standing at it is not what the key is for.
+  else if (s.use) n = push(out, n, 'mount', W.use);
   // Somebody to talk to comes after all of those -- a terminal is a thing you walked up to use, and a
   // traveller standing at it is not what E is for there -- and before a vehicle in reach and a gate:
   // a person must be in front of the view to be offered at all, while a vehicle is in reach whichever

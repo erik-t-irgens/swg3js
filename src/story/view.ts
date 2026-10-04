@@ -31,6 +31,8 @@ export interface ObjectiveLine {
   of?: number;
   /** When the step runs out, on the shared clock. */
   deadline?: number;
+  /** That deadline is a time limit, which fails the step, rather than a timer or a wait, which finishes it. */
+  limit?: true;
   /** The quest's waypoint for this step. */
   wp?: string;
   done?: boolean;
@@ -48,6 +50,8 @@ export interface QuestView {
   canRestart: boolean;
   /** Why it is held, when it is. */
   stalled?: string;
+  /** When this run began (or the job was offered), on the shared clock: the newest is the one a tracker with nothing tracked shows. */
+  at: number;
 }
 
 export interface WaypointView {
@@ -116,6 +120,11 @@ function labelOr(label: TextRef | null | undefined, fallback: string): string {
   return (label && literalOf(label)) || fallback;
 }
 
+/** What a step's line says: its author's words, or the ones made from its type when there are none. */
+export function stepText(step: StepDef, lib: StorySet): TextRef {
+  return step.objective ?? madeText(step, lib);
+}
+
 /** What a step's line says when its author wrote none. */
 function madeText(step: StepDef, lib: StorySet): string {
   switch (step.type) {
@@ -158,7 +167,7 @@ export function objectiveOf(quest: string, step: StepDef, cur: StepRec, lib: Sto
   if (STEP_TYPES[step.type]?.instant) return null;
   const done = cur.state === 'done';
   if (step.visible === false || (step.visible === 'after' && !done) || (cur.state !== 'active' && !done)) return null;
-  const line: ObjectiveLine = { quest, step: step.name, text: step.objective ?? madeText(step, lib) };
+  const line: ObjectiveLine = { quest, step: step.name, text: stepText(step, lib) };
   if (done) line.done = true;
   if (step.type === 'kill' || ((step.type === 'signal' || step.type === 'use') && step.n > 1)) {
     line.n = Math.min(cur.n, step.n);
@@ -169,7 +178,10 @@ export function objectiveOf(quest: string, step: StepDef, cur: StepRec, lib: Sto
     line.n = Math.min(step.seconds, Math.floor(watched / 1000));
     line.of = step.seconds;
   }
-  if (!done && cur.deadline !== undefined) line.deadline = cur.deadline;
+  if (!done && cur.deadline !== undefined) {
+    line.deadline = cur.deadline;
+    if (!step.for) line.limit = true;
+  }
   const rec = book.quests?.[quest];
   if (!done && rec && placeOf(rec, step, cur)) line.wp = questWaypointId(quest, step.name);
   return line;
@@ -234,7 +246,7 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
     const rec = book.quests![q];
     const def = lib.quests[q];
     if (rec.state === 'none' || rec.state === 'dropped') continue;
-    const qv: QuestView = { id: q, title: def?.title ?? q, client: def?.client ?? 'none', state: rec.state, lines: [], canDrop: canDrop(def, rec.state), canRestart: canRestart(def, rec.state) };
+    const qv: QuestView = { id: q, title: def?.title ?? q, client: def?.client ?? 'none', state: rec.state, lines: [], canDrop: canDrop(def, rec.state), canRestart: canRestart(def, rec.state), at: rec.at };
     if (rec.outcome !== undefined) qv.outcome = rec.outcome;
     if (def?.card) qv.card = def.card;
     if (rec.state === 'stalled') qv.stalled = rec.why ?? '';
@@ -284,6 +296,8 @@ export function viewOf(book: StoryBook, lib: StorySet, ctx: StoryCtx): StoryView
       } else if (sig.startsWith('entered:') || sig.startsWith('left:')) areas.add(sig.slice(sig.indexOf(':') + 1));
       else if (sig.startsWith('room:')) flags.room = true;
       else if (sig.startsWith('world:')) flags.world = true;
+      // A death the player is credited with raises `died:<who>`, which only the kill detector sees.
+      else if (sig.startsWith('died:')) watch.push({ k: 'kill', quest: q, step: s, match: { who: [sig.slice(5)] } });
     }
   }
   // The things that give a job the player may take just now answer E too.

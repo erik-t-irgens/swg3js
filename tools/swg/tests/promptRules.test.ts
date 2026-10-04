@@ -223,17 +223,43 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // A thing a story stands (`src/world/storyStands.ts`): the world's own terminal or sign a job waits on.
+  // It comes after a port's own things and before a person, as the game's dispatch takes it.
+  const n = fill(at({ use: true }));
+  ok(n === 1 && words(n)[0] === PROMPT_WORDS.use && keys(n)[0] === 'mount', `a story's thing in reach: use, on the use key (${show(n).join(', ')})`);
+  for (const [what, fields, want] of [
+    ['a lift shaft', { lift: true }, PROMPT_WORDS.lift],
+    ['an elevator', { elevator: 'up' as const }, PROMPT_WORDS.up],
+    ['a building with no way in', { doorless: true }, PROMPT_WORDS.inside],
+    ['a ticket terminal', { travel: 'terminal' as const }, PROMPT_WORDS.ticketTerminal],
+  ] as [string, Record<string, unknown>, string][]) {
+    const both = fill(at({ use: true, ...fields }));
+    ok(both === 1 && words(both)[0] === want, `a story's thing beside ${what}: ${what} keeps the key (${show(both).join(', ')})`);
+  }
+  for (const [what, fields] of [
+    ['somebody to talk to', { talk: true }],
+    ['a speeder', { near: 'mount' as const }],
+    ['a gate', { gate: 'travel' as const }],
+  ] as [string, Record<string, unknown>][]) {
+    const both = fill(at({ use: true, ...fields }));
+    ok(both === 1 && words(both)[0] === PROMPT_WORDS.use, `a story's thing beside ${what}: use has the key, and ${what} is not shown under it too (${show(both).join(', ')})`);
+  }
+  ok(PROMPT_WORDS.use.length <= PROMPT.maxLabel, `"${PROMPT_WORDS.use}" fits the bar`);
+}
+
+{
   // The game's own dispatch has to agree with the bar, or the key would do one thing and the cap say
   // another. It is one line in the frame loop, read out of the source: what is underfoot (the lift, an
   // elevator, a doorway), then a dungeon copy's things (`instances.ts`), then a port's own things, then
-  // somebody to talk to, then a gate, then a vehicle or a hull, which is `handleMount`'s. A reordering
-  // there fails here.
+  // a thing a story stands, then somebody to talk to, then a gate, then a vehicle or a hull, which is
+  // `handleMount`'s. A reordering there fails here.
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
-  const line = /if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
-  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a dungeon copy, a port, a person, a gate, a vehicle');
+  const line = /if \(!this\.handleElevator\(\) && !this\.handleInstance\(\) && !this\.handleTravel\(\) && !this\.handleStoryUse\(\) && !this\.handleTalk\(\) && !this\.handleZoneGate\(\)\) this\.handleMount\(\);/.exec(main);
+  ok(!!line, 'the use key is dispatched in the bar\'s own order: underfoot, a dungeon copy, a port, a story\'s thing, a person, a gate, a vehicle');
   ok([...main.matchAll(/this\.handleTalk\(\)/g)].length === 1, 'and talking is reached from that one place');
+  ok([...main.matchAll(/this\.handleStoryUse\(\)/g)].length === 1, "and a story's thing from that one place too");
   // The gate stands aside for a person as it does for a vehicle, in the gather and in the key alike.
-  ok(/free: !s\.lift && !s\.elevator && !s\.doorless && !s\.talk && !s\.near/.test(main), "the gather's gate stands aside for somebody to talk to");
+  ok(/free: !s\.lift && !s\.elevator && !s\.doorless && !s\.use && !s\.talk && !s\.near/.test(main), "the gather's gate stands aside for somebody to talk to, and for a story's thing");
   ok(/!peerRooms\(\)\?\.nearest\(p\.pos, BOARD_TUNE\.reach\) && !this\.talkTarget\(\)/.test(main), "and so does the key's own gate");
 
   // The rest of the conversation's wiring in the frame loop, each line pinned inside the function it has to

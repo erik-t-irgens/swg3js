@@ -279,6 +279,16 @@ export const OBJECT_REACH = 3;
 /** Standing a repeatable quest may give in one real day, unless it says otherwise (the design's 500). */
 export const STANDING_PER_REAL_DAY = 500;
 
+/** `{ gte: 50 }` and its kind: exactly one comparison, with a finite number. Null when it is not one. */
+function numberCompare(x: unknown): Record<string, number> | null {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
+  const o = x as Record<string, unknown>;
+  const keys = Object.keys(o);
+  if (keys.length !== 1 || !(OP_KEYS as readonly string[]).includes(keys[0])) return null;
+  const v = o[keys[0]];
+  return typeof v === 'number' && Number.isFinite(v) ? { [keys[0]]: v } : null;
+}
+
 /** A value as plain text with its keys in order, for hashing a definition. */
 export function stableText(x: unknown): string {
   if (x === null || typeof x !== 'object') return JSON.stringify(x) ?? 'null';
@@ -566,6 +576,31 @@ class FileScope {
         const args = o.args === undefined ? [] : o.args;
         if (!Array.isArray(args) || !args.every((a) => typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean')) return this.err(path, 'a script\'s arguments are a list of values');
         return { script: o.script, args: [...args] };
+      }
+      case 'credits': {
+        // `{ "credits": { "gte": 50 } }`: what the character has to spend, compared with a number.
+        if (!extra([])) return null;
+        const c = numberCompare(o.credits);
+        return c ? { credits: c } : this.err(path, 'credits is { "gte": n }, or one of the other comparisons, with a number');
+      }
+      case 'has': {
+        // `{ "has": { "kind": "wear", "id": "shirt_s03", "n": 1 } }`: a thing of the ledger's own two kinds owned.
+        if (!extra([])) return null;
+        const h = o.has as Record<string, unknown> | null;
+        if (!h || typeof h !== 'object' || Array.isArray(h) || !(ITEM_KINDS as readonly unknown[]).includes(h.kind) || typeof h.id !== 'string' || !/^[A-Za-z0-9_./-]{1,96}$/.test(h.id)) return this.err(path, 'has is { "kind": "wear" | "weapon", "id": <its id>, "n": 1 }');
+        if (Object.keys(h).some((k) => k !== 'kind' && k !== 'id' && k !== 'n')) return this.err(path, 'has names a kind, an id and how many');
+        if (h.n !== undefined && (typeof h.n !== 'number' || !Number.isInteger(h.n) || h.n < 1 || h.n > 1000)) return this.err(path, 'how many is a whole number from 1');
+        return { has: { kind: h.kind, id: h.id, ...(h.n !== undefined ? { n: h.n } : {}) } };
+      }
+      case 'standing':
+      case 'trust': {
+        // `{ "standing": { "track": "freelance", "gte": 10 } }`: a track's number, compared.
+        if (!extra([])) return null;
+        const t = o[head] as Record<string, unknown> | null;
+        if (!t || typeof t !== 'object' || Array.isArray(t) || !isTrack(t.track)) return this.err(path, `${head} is { "track": rebellion | empire | freelance, "gte": n }`);
+        const { track, ...rest } = t;
+        const c = numberCompare(rest);
+        return c ? { [head]: { track, ...c } } : this.err(path, `${head} compares the track's number with one of ${OP_KEYS.join(', ')}`);
       }
       default:
         return this.err(path, `${head} is not a condition this game knows`, 4);

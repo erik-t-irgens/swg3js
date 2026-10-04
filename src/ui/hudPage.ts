@@ -57,13 +57,15 @@ export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
     ],
   },
   {
-    title: 'Map and waypoints',
+    title: 'Map, waypoints and jobs',
     knobs: [
       { key: 'hudMinimap', label: 'Minimap', kind: 'toggle', hint: "The planet's own map in a circle at the top left, round you, with your arrow and every waypoint that is switched on; the name of a city fades in under it as you walk in. It stands aside in space, in the dungeons and on a world with no map picture." },
       { key: 'hudMinimapRange', label: 'Minimap reach', kind: 'range', min: HUD_MINIMAP_RANGE.min, max: HUD_MINIMAP_RANGE.max, step: 100, format: (v) => `${v} m`, requires: ['hudMinimap'], hint: 'How far from you the rim of the minimap is. The pictures are sixteen metres to the pixel, so close in they are soft; ours, eight hundred to begin with.' },
       { key: 'hudMinimapNorthUp', label: 'North up', kind: 'toggle', requires: ['hudMinimap'], hint: 'North at the top, with your arrow turning; off, the map turns with you and the way you face is up.' },
       { key: 'hudWaypointMarks', label: 'Waypoints in the world', kind: 'toggle', hint: 'A mark where each waypoint switched on stands, the distance under the tracked one and the nearest, and an arrow at the edge of the screen pointing at the tracked one when it is out of sight. The Waypoints window lists every one of them.' },
       { key: 'hudWaypointMarksInFlight', label: 'Waypoints while flying', kind: 'toggle', requires: ['hudWaypointMarks'], hint: 'The same marks over the flight display, at the controls of a ship.' },
+      { key: 'hudTracker', label: 'Jobs followed', kind: 'toggle', hint: 'Down the right edge under the group: up to three of the jobs you follow, each with its objectives, what each is counting, how far off its place is and how long it has left. With none followed, the newest job taken.' },
+      { key: 'hudTrackerInFlight', label: 'Jobs while flying', kind: 'toggle', requires: ['hudTracker'], hint: 'The same at the controls of a ship. Off to begin with, since the flight display has the edges then.' },
     ],
   },
   {

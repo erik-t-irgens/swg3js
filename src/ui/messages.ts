@@ -11,10 +11,10 @@
 // nothing fading the whole module writes nothing at all.
 
 /** What a line is about. The colour of its left rule follows it; nothing else does. */
-export type MessageKind = 'system' | 'youHit' | 'hitYou' | 'spatial' | 'note';
+export type MessageKind = 'system' | 'youHit' | 'hitYou' | 'spatial' | 'note' | 'story';
 
 /** The kinds, in the order the settings and the debug helper list them. */
-export const MESSAGE_KINDS: readonly MessageKind[] = Object.freeze(['system', 'youHit', 'hitYou', 'spatial', 'note'] as MessageKind[]);
+export const MESSAGE_KINDS: readonly MessageKind[] = Object.freeze(['system', 'youHit', 'hitYou', 'spatial', 'note', 'story'] as MessageKind[]);
 
 /** The class a kind puts on its line, as the HUD stylesheet spells it. The stylesheet owns how each looks. */
 const KIND_CLASS: Readonly<Record<MessageKind, string>> = Object.freeze({
@@ -23,6 +23,7 @@ const KIND_CLASS: Readonly<Record<MessageKind, string>> = Object.freeze({
   hitYou: 'hit-you',
   spatial: 'spatial',
   note: 'note',
+  story: 'story',
 });
 
 /**
@@ -30,7 +31,8 @@ const KIND_CLASS: Readonly<Record<MessageKind, string>> = Object.freeze({
  * loaded (see `styleless`): each is the named colour with a literal of the same value behind it, so it is
  * right whether or not `:root` carries the name yet. Which kind wears which is ours: the instrument's own
  * colour for the game speaking, green for a blow you landed, red for one you took, plain ink for someone
- * else's words, and the muted grey for an aside.
+ * else's words, the muted grey for an aside, and the component colour for a job's news, which is the
+ * colour a job's own waypoint wears.
  */
 const KIND_RULE: Readonly<Record<MessageKind, string>> = Object.freeze({
   system: 'var(--accent, #7fd7ff)',
@@ -38,6 +40,7 @@ const KIND_RULE: Readonly<Record<MessageKind, string>> = Object.freeze({
   hitYou: 'var(--bad, #ff5a4a)',
   spatial: 'var(--component, #ffd27f)',
   note: 'var(--muted, #9fb3c4)',
+  story: 'var(--component, #ffd27f)',
 });
 
 /**
@@ -328,6 +331,11 @@ export class MessageLine {
   /** Somebody else's words, in their own colour. */
   spatial(speaker: string, text: string, colour: string): void {
     this.say('spatial', text, speaker, colour);
+  }
+
+  /** A job's news: taken, an objective set or done, a place reached, paid, ended, short of time. */
+  story(text: string): void {
+    this.say('story', text);
   }
 
   /** Once a frame. Ages the lines, fades the last second of each, and retires the ones that are done. */
