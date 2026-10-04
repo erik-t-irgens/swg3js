@@ -12,15 +12,33 @@
 // species' hair tab: this gender's styles in the game's order, the other gender's, then what the game never
 // offered (hairGrid.ts decides which and in what order). One click wears a style, through the game's
 // prepared path (`onHair`: loaded hidden, its colour carried over, settled and compiled before it shows).
-import type { Character, SpeciesEntry } from '../player/character.ts';
+//
+// A colour row is a strip -- the colour now, then the colours the creator offered -- and a click on it opens
+// the picker under the row (dyePicker.ts): the row's own palette, and for a garment, a hairstyle or a dye of
+// ours every garment and creator palette there is, and for an eye colour every species' eyes. A worn piece's
+// colours stand in one section a piece, under the game's name for it, a row a variable however many of its
+// meshes read it (`itemSections`), and a pick writes every one of those meshes' keys.
+import type { Character, SpeciesEntry, Wardrobe } from '../player/character.ts';
+import { loadCustomizeFile } from '../player/customizer.ts';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
 import { CharacterPreview } from './characterPreview.ts';
 import { distinctLabels, plainLabel } from './variableLabel.ts';
-import { CREATOR_TUNE, creatorTableNow, creatorView, hairNone, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ViewRow } from './creatorModel.ts';
+import { CREATOR_TUNE, bareName, catalogueName, creatorTableNow, creatorView, hairNone, itemSections, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ItemColour, type ItemSection, type PackColour, type ViewRow } from './creatorModel.ts';
 import { NO_HAIR, hairCells, withOursHair, type HairGrid, type HairItem } from './hairGrid.ts';
 import { hairOfSpecies } from '../core/inventory.ts';
 import { groupHtml, GroupState } from './catalogue.ts';
 import { giveCellHtml } from './giveModel.ts';
+import { DyePicker, allGarmentColours, countText, creatorPalettes, drawStrip, eyePalettes, garmentPalettes, pickKind, type PickerRow, type PickerSource, type PickerTab, type PickKind } from './dyePicker.ts';
+import { isRawColour } from '../player/texrender.ts';
+
+/** A row of the page that a strip, a scrub or the picker names by id: what a pick writes, and for a colour, what its picker shows. */
+interface PageRow {
+  id: string;
+  write(value: number): void;
+  current(values: Record<string, number>): number;
+  /** A colour's picker row; none for a choice among textures. */
+  colour?: PickerRow;
+}
 
 export class AppearanceUi {
   readonly root: HTMLElement;
@@ -85,9 +103,15 @@ export class AppearanceUi {
     this.root.addEventListener('click', (e) => {
       if (e.target === this.root) this.dismiss();
     });
-    // The hairstyles' cells, listened to once on the body, which every build fills again.
+    // The hairstyles' cells and the colour rows' strips, listened to once on the body, which every build fills again.
     this.body.addEventListener('click', (e) => {
-      const cell = (e.target as HTMLElement).closest<HTMLElement>('.hair-grid .bp-cell[data-id]');
+      const target = e.target as HTMLElement;
+      const strip = target.closest<HTMLElement>('canvas.dye-strip[data-pick]');
+      if (strip) {
+        this.togglePicker(strip.dataset.pick!);
+        return;
+      }
+      const cell = target.closest<HTMLElement>('.hair-grid .bp-cell[data-id]');
       if (cell) this.pickHair(cell);
     });
     this.body.addEventListener('keydown', (e) => {
@@ -140,11 +164,19 @@ export class AppearanceUi {
   private readonly hairGroups = new GroupState();
   /** The creator's own table, once it has arrived; null when it is not converted (the page then lays itself out as before). */
   private table: CreatorTable | null = null;
-  /** What the page drew last from the table, and its rows by name, which the swatches and sliders name. */
+  /** What the page drew last from the table, and its rows by name, which the strips and sliders name. */
   private view: CreatorView | null = null;
   private readonly rowsByName = new Map<string, ViewRow>();
   /** The last table row picked and every key it wrote, for the console. */
   private lastPick: { row: string; value: number; keys: string[]; followers: string[]; sets: string[] } | null = null;
+  /** The page's colour rows (and a worn piece's choices) by id, which the strips, the scrubs and the picker name. */
+  private readonly picks = new Map<string, PageRow>();
+  /** The picker open under a row, and that row's id: one at a time, made when its strip is clicked. */
+  private picker: DyePicker | null = null;
+  private pickerId: string | null = null;
+  /** The wardrobe's catalogue (the game's names for what is worn), and the palettes its recipes carry (the picker's Garments). */
+  private items: Wardrobe['items'] = [];
+  private wardrobePalettes: Record<string, number[][]> | null = null;
 
   /** Show a character: its sliders and colours, and the doll. */
   attach(character: Character, baseUrl = ''): void {
@@ -154,6 +186,9 @@ export class AppearanceUi {
       this.hairDir = null;
       this.hairBusy = null;
       this.hairGroups.clear();
+      this.items = [];
+      this.wardrobePalettes = null;
+      this.closePicker();
     }
     this.character = character;
     this.baseUrl = baseUrl;
@@ -162,15 +197,22 @@ export class AppearanceUi {
     if (sel.value !== this.speciesId && [...sel.options].some((o) => o.value === this.speciesId)) sel.value = this.speciesId;
     this.table = creatorTableNow(baseUrl) ?? null;
     this.build();
-    // The hairstyles come from the wardrobe, which loads on its own time; the section fills in when it lands.
+    // The hairstyles, the pieces' names and the garment palettes come from the wardrobe, which loads on its
+    // own time (its recipes are the customizer's own parse, already in hand); the page fills in when it lands.
     void character
       .catalogue(baseUrl)
-      .then((w) => w.items)
-      .catch(() => [] as HairItem[])
-      .then((items) => {
+      .then(async (w) => {
+        const dir = character.wardrobeDir;
+        const file = dir ? await loadCustomizeFile(dir) : null;
+        return { items: w.items, palettes: file?.palettes ?? null };
+      })
+      .catch(() => ({ items: [] as Wardrobe['items'], palettes: null }))
+      .then(({ items, palettes }) => {
         if (this.character !== character) return;
-        this.hair = hairOfSpecies(items, character.speciesName);
+        this.hair = hairOfSpecies(items as HairItem[], character.speciesName);
         this.hairDir = character.wardrobeDir;
+        this.items = items;
+        this.wardrobePalettes = palettes;
         this.build();
       });
     // The creator's table is fetched once a session; the page lays itself out again when it lands.
@@ -275,39 +317,61 @@ export class AppearanceUi {
   }
 
   /**
-   * The colours and choices the species' skin, hair and eyes take. The textures were baked with
-   * the pack's values by the converter, so a swatch is not applied live: picking one shows the
+   * The colours and choices the species' skin, hair and eyes take, then each worn piece's own. A colour
+   * no live recipe reads (a pack converted before the recipes) shows dimmed, and picking one shows the
    * command that bakes the pack again with it.
    */
   private colourRows(only?: (v: { key: string; private: boolean; mesh: string }) => boolean): string {
     const c = this.character;
     if (!c) return '';
-    const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
+    const values = this.valuesNow();
     // Which rows and in which section is `packColours` (creatorModel.ts), which the node test runs; with the
     // creator's table, `only` keeps what its rows did not take (a worn garment's own colours).
     const cz = c.customizer;
-    const { rows, shared, byMesh } = packColours({ live: cz?.variables() ?? [], manifest: c.manifest.variables ?? [], worn: c.wornMeshes(), isLinked: (k) => !!cz?.isLinked(k), morphs: Object.keys(c.morphValues()), only });
+    const { rows, shared } = packColours({ live: cz?.variables() ?? [], manifest: c.manifest.variables ?? [], worn: c.wornMeshes(), isLinked: (k) => !!cz?.isLinked(k), morphs: Object.keys(c.morphValues()), only });
     if (!rows.length) return '';
+    // A worn piece's colours in one section a piece, named by the game, a row a variable (`itemSections`).
+    const hairs = new Set(c.hairsWorn());
+    const parts = c.status().map((p) => ({ ...p, hair: hairs.has(p.name) }));
+    const { sections: pieces, loose } = itemSections(
+      rows.filter((v) => v.private),
+      parts,
+      (key) => catalogueName(this.items, key),
+    );
+    const sectionOf = new Map<string, ItemSection>(pieces.map((s) => [s.item, s]));
     // A palette colour is named for what it colours (`variableLabel.ts`): the head's `index_color_2`
     // reads its eyes' palette and is "Eye Color", where it used to be "Color 2". A choice among
     // textures keeps the name it always had.
-    const row = (v: (typeof rows)[number], named: string): string => {
+    const row = (v: PackColour | ItemColour, named: string): string => {
       const short = v.name.replace(/^.*\//, '');
       const current = values[v.key] ?? values[v.name] ?? values[short] ?? v.default;
       const dead = v.live ? '' : ' dead';
       const label = v.kind === 'palette' ? named : prettyMorph(short);
+      const piece = 'item' in v ? sectionOf.get(v.item) : undefined;
+      const keys = 'item' in v ? v.keys : [v.key];
+      const id = piece ? `item:${piece.item}:${bareName(v.name)}` : `var:${v.key}`;
+      const at = (vals: Record<string, number>) => vals[v.key] ?? vals[v.name] ?? vals[short] ?? v.default;
+      // A piece's colour writes every one of its meshes' keys; the owner's own writes its one, as it always did, and so
+      // does a colour no live recipe reads, which shows the command that bakes it instead.
+      const write = piece && v.live ? (x: number) => this.pickKeys(keys, x, label, v.colors) : (x: number) => this.pick(v.key, x);
       if (v.kind === 'palette' && v.colors?.length) {
-        const swatches = v.colors.map((rgb, i) => `<button class="swatch${i === current ? ' on' : ''}" data-var="${v.key}" data-value="${i}" style="background:rgb(${rgb[0]},${rgb[1]},${rgb[2]})" title="${short} = ${i}"></button>`).join('');
-        return `<div class="wardrobe-slot colour${dead}"><span class="slot-label">${label}</span><div class="palette"><div class="swatches">${swatches}</div><input type="range" class="scrub" min="0" max="${v.colors.length - 1}" step="1" value="${current}" data-var="${v.key}" /></div><span class="slot-count">${current + 1}/${v.colors.length}</span></div>`;
+        const kind = pickKind({ palette: v.palette, garment: !!piece && !piece.body && !piece.hair, hair: !!piece?.hair });
+        const layout = swatchLayout(v.palette, v.colors.length, this.table);
+        this.register({ id, write, current: at, colour: { label, kind, colors: v.colors, layout, defaultValue: v.default, current: () => at(this.valuesNow()), pick: write } });
+        return this.colourHtml(id, label, v.colors, current, kind, dead);
       }
       if ((v.count ?? 0) > 1) {
+        if (piece) {
+          this.register({ id, write, current: at });
+          return `<label class="wardrobe-slot colour${dead}" data-pick="${esc(id)}"><span class="slot-label">${label}</span><input type="range" class="choice" min="0" max="${(v.count ?? 1) - 1}" step="1" value="${current}" data-pick="${esc(id)}" /><span class="slot-count">${current + 1}/${v.count}</span></label>`;
+        }
         const height = /height/i.test(short);
         return `<label class="wardrobe-slot colour${dead}"><span class="slot-label">${label}</span><input type="range" class="choice" min="0" max="${(v.count ?? 1) - 1}" step="1" value="${current}" data-var="${v.key}"${height ? ' data-height="1"' : ''} /><span class="slot-count">${current + 1}/${v.count}</span></label>`;
       }
       return '';
     };
     // One section's rows, each palette colour named and a second of the same name numbered.
-    const drawn = (list: (typeof rows)[number][]): string[] => {
+    const drawn = (list: (PackColour | ItemColour)[]): string[] => {
       const colours = list.filter((v) => v.kind === 'palette' && v.colors?.length);
       const names = distinctLabels(colours);
       return list.map((v) => row(v, names[colours.indexOf(v)] ?? '')).filter(Boolean);
@@ -317,13 +381,97 @@ export class AppearanceUi {
     // drives (blend_fat and the fat morph are one thing in the game) is left to that slider.
     const sharedRows = drawn(shared);
     if (sharedRows.length) sections.push(`<h3 class="wardrobe-section">Skin, hair and eyes <span>${rows.some((v) => v.live) ? "rendered live from the game's own palettes and blueprints" : "this pack has no live recipes: run the converter's species command again"}</span></h3>${sharedRows.join('')}`);
-    // Each worn piece's own colours, in a section of its own.
+    // Each worn piece's own colours, in a section of its own under the game's name for it.
+    for (const s of pieces) {
+      const html = drawn(s.rows);
+      if (html.length) sections.push(`<h3 class="wardrobe-section">${esc(s.label ?? prettyMesh(s.mesh))} <span>its own colours</span></h3>${html.join('')}`);
+    }
+    // A colour of a mesh no worn piece draws, under its mesh, as every piece's used to be.
+    const byMesh = new Map<string, PackColour[]>();
+    for (const v of loose) if (v.private) (byMesh.get(v.mesh) ?? byMesh.set(v.mesh, []).get(v.mesh)!).push(v);
     for (const [mesh, list] of byMesh) {
       const html = drawn(list);
       if (html.length) sections.push(`<h3 class="wardrobe-section">${prettyMesh(mesh)} <span>its own colours</span></h3>${html.join('')}`);
     }
     if (!sections.length) return '';
     return `${sections.join('')}<div class="bake-hint"></div>`;
+  }
+
+  /** The values in force: the pack's, with whatever has been set over them. */
+  private valuesNow(): Record<string, number> {
+    const c = this.character;
+    return c ? { ...(c.manifest.values ?? {}), ...c.variableValues() } : {};
+  }
+
+  /** A row the strips, scrubs and picker name. */
+  private register(row: PageRow): void {
+    this.picks.set(row.id, row);
+  }
+
+  /** A colour row: its strip, which opens the picker, a scrub through its own palette (not for a dye), and its count. */
+  private colourHtml(id: string, label: string, colors: number[][], current: number, kind: PickKind, dead: string): string {
+    const raw = isRawColour(current);
+    const scrub = kind !== 'dye' && colors.length > 1 ? `<input type="range" class="scrub" min="0" max="${colors.length - 1}" step="1" value="${raw ? 0 : current}" data-pick="${esc(id)}" />` : '';
+    const count = kind === 'dye' && !raw ? 'undyed' : countText(current, colors);
+    return `<div class="wardrobe-slot colour${dead}" data-pick="${esc(id)}"><span class="slot-label">${label}</span><div class="palette"><canvas class="dye-strip" data-pick="${esc(id)}" title="${esc(label)}: every colour it can take"></canvas>${scrub}</div><span class="slot-count">${count}</span></div>`;
+  }
+
+  /** A worn piece's colour or choice picked: every one of its meshes' keys, as the game kept a private colour on the object. */
+  private pickKeys(keys: readonly string[], value: number, label: string, colors?: number[][]): void {
+    const c = this.character;
+    if (!c) return;
+    let n = 0;
+    for (const k of keys) n += c.setVariable(k, value);
+    const hint = this.body.querySelector<HTMLElement>('.bake-hint');
+    if (hint) hint.textContent = `${label} ${colors ? countText(value, colors) : value + 1}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+    this.onChange();
+    this.syncRows();
+  }
+
+  /** Open the picker under a row, or close it when it is the one open. */
+  private togglePicker(id: string, tab?: PickerTab): void {
+    if (this.pickerId === id && !tab) {
+      this.closePicker();
+      return;
+    }
+    this.closePicker();
+    const r = this.picks.get(id);
+    const el = [...this.body.querySelectorAll<HTMLElement>('.wardrobe-slot[data-pick]')].find((x) => x.dataset.pick === id);
+    if (!r?.colour || !el) return;
+    const p = new DyePicker(r.colour, this.pickerSource());
+    p.onClose = () => this.closePicker();
+    p.mount(el);
+    if (tab && tab !== p.tab) p.show(tab);
+    el.classList.add('picking');
+    this.picker = p;
+    this.pickerId = id;
+  }
+
+  private closePicker(): void {
+    this.picker?.close();
+    this.picker = null;
+    this.pickerId = null;
+    for (const el of this.body.querySelectorAll('.wardrobe-slot.picking')) el.classList.remove('picking');
+  }
+
+  /** Every palette the picker offers beyond a row's own: the wardrobe's garment palettes, the creator's, every species' eyes, and the All grid. */
+  private pickerSource(): PickerSource {
+    const pals = this.wardrobePalettes;
+    const garments = garmentPalettes(pals);
+    return { garments, creator: creatorPalettes(this.table, pals), eyes: eyePalettes(this.table), all: pals ? allGarmentColours(garments, pals) : [] };
+  }
+
+  /** Every colour row's strip drawn from the value it holds now. */
+  private drawStrips(): void {
+    for (const cv of this.body.querySelectorAll<HTMLCanvasElement>('canvas.dye-strip[data-pick]')) {
+      const r = this.picks.get(cv.dataset.pick!);
+      if (r?.colour) drawStrip(cv, r.colour);
+    }
+  }
+
+  /** What the console's `__debug.dye()` reads of the page: the picker open, on which row and tab. */
+  pickerState(): { open: string | null; tab: PickerTab | null; rows: number } {
+    return { open: this.pickerId, tab: this.picker?.tab ?? null, rows: [...this.picks.values()].filter((r) => r.colour).length };
   }
 
   /** A colour or choice picked: rendered live when the pack has the recipe, else the bake command is shown. */
@@ -336,23 +484,26 @@ export class AppearanceUi {
       // Height scales the whole character; the game maps the variable's range onto a size band.
       c?.setHeight(value / Math.max(1, Number(heightInput.max)));
     }
+    const shown = isRawColour(value) ? countText(value, []) : String(value);
     if (c?.canCustomize(name) || heightInput) {
       const n = c?.setVariable(name, value) ?? 0;
-      if (hint) hint.textContent = heightInput ? `${prettyMorph(short)} ${value}` : `${prettyMorph(short)} ${value}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+      if (hint) hint.textContent = heightInput ? `${prettyMorph(short)} ${value}` : `${prettyMorph(short)} ${shown}: ${n} texture${n === 1 ? '' : 's'} rendering`;
       this.onChange();
     } else if (hint) {
       const id = c?.manifest.id ?? 'human_male';
-      hint.innerHTML = `Not live in this pack. <code>npm run swg -- species @SWG assets-private --retail-only --only=${id} --var=${short}=${value}</code> bakes ${id} with this ${prettyMorph(short).toLowerCase()}; a pack converted now carries the live recipes.`;
+      hint.innerHTML = isRawColour(value)
+        ? `Not live in this pack, and only a live recipe takes a colour from outside its palette: a pack converted now carries the live recipes.`
+        : `Not live in this pack. <code>npm run swg -- species @SWG assets-private --retail-only --only=${id} --var=${short}=${value}</code> bakes ${id} with this ${prettyMorph(short).toLowerCase()}; a pack converted now carries the live recipes.`;
     }
-    // The row's swatch, slider and count agree.
+    // A choice's slider and count agree; the colour rows are put in step with the values below.
     for (const row of this.body.querySelectorAll<HTMLElement>('.wardrobe-slot.colour')) {
       const input = row.querySelector<HTMLInputElement>('input[data-var]');
       if (!input || input.dataset.var !== name) continue;
       input.value = String(value);
-      for (const sw of row.querySelectorAll<HTMLElement>('.swatch')) sw.classList.toggle('on', Number(sw.dataset.value) === value);
       const count = row.querySelector<HTMLElement>('.slot-count');
       if (count) count.textContent = `${value + 1}/${Number(input.max) + 1}`;
     }
+    this.syncRows();
   }
 
   /**
@@ -364,6 +515,11 @@ export class AppearanceUi {
    */
   private build(): void {
     const c = this.character;
+    // A picker open across a rebuild opens again under the same row, on the same tab, if the row is still there.
+    const reopen = this.pickerId;
+    const reopenTab = this.picker?.tab;
+    this.closePicker();
+    this.picks.clear();
     const view = this.tableView();
     this.view = view;
     this.rowsByName.clear();
@@ -378,6 +534,8 @@ export class AppearanceUi {
     if (c) this.preview.refresh(c);
     this.wireShape();
     this.hairGroups.wire(this.body);
+    this.drawStrips();
+    if (reopen && this.picks.get(reopen)?.colour) this.togglePicker(reopen, reopenTab);
     const height = this.body.querySelector<HTMLInputElement>('input.height');
     height?.addEventListener('input', () => {
       const ch = this.character;
@@ -416,9 +574,6 @@ export class AppearanceUi {
         this.onChange();
       });
     }
-    for (const b of this.body.querySelectorAll<HTMLButtonElement>('.swatch[data-var]')) {
-      b.addEventListener('click', () => this.pick(b.dataset.var!, Number(b.dataset.value)));
-    }
     for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-var]')) {
       // A slider fires as it moves; the render waits for the value to settle for a moment.
       let timer = 0;
@@ -427,15 +582,20 @@ export class AppearanceUi {
         timer = window.setTimeout(() => this.pick(input.dataset.var!, Number(input.value)), 120);
       });
     }
-    // The table's rows, which name the row rather than a variable: a row may write several.
-    for (const b of this.body.querySelectorAll<HTMLButtonElement>('.swatch[data-row]')) {
-      b.addEventListener('click', () => this.pickRow(b.dataset.row!, Number(b.dataset.value)));
-    }
+    // The table's choices, which name the row rather than a variable: a row may write several.
     for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-row]')) {
       let timer = 0;
       input.addEventListener('input', () => {
         window.clearTimeout(timer);
         timer = window.setTimeout(() => this.pickRow(input.dataset.row!, Number(input.value)), 120);
+      });
+    }
+    // A colour row's scrub through its own palette, and a worn piece's choice: whatever the row writes.
+    for (const input of this.body.querySelectorAll<HTMLInputElement>('input[data-pick]')) {
+      let timer = 0;
+      input.addEventListener('input', () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => this.picks.get(input.dataset.pick!)?.write(Number(input.value)), 120);
       });
     }
   }
@@ -521,16 +681,14 @@ export class AppearanceUi {
     if (!s) return '';
     const current = this.currentOf(r, values);
     if (s.kind === 'palette' && s.colors?.length) {
-      const colours = s.colors;
-      const lay = swatchLayout(s.palette, colours.length, this.table);
-      const block = (from: number, to: number, cols: number): string => {
-        let html = '';
-        for (let i = from; i < to; i++) html += `<button class="swatch${i === current ? ' on' : ''}" data-row="${name}" data-value="${i}" style="background:rgb(${colours[i][0]},${colours[i][1]},${colours[i][2]})" title="${label} ${i + 1}"></button>`;
-        return `<div class="swatches ramp" style="--swatch-cols:${cols}">${html}</div>`;
-      };
-      // The colours the game's creator offered, in its own columns; then every other colour the palette has.
-      const more = lay.more ? `<div class="swatch-more">More colours</div>${block(lay.creation, colours.length, lay.moreColumns)}` : '';
-      return `<div class="wardrobe-slot colour" data-row="${name}"><span class="slot-label">${label}</span><div class="palette">${block(0, lay.creation, lay.columns)}${more}<input type="range" class="scrub" min="0" max="${colours.length - 1}" step="1" value="${current}" data-row="${name}" /></div><span class="slot-count">${current + 1}/${colours.length}</span></div>`;
+      // The strip opens the picker, whose Own tab holds the colours the game's creator offered in its own
+      // columns, then every other colour the palette has; a hair or an eye colour offers more (`pickKind`).
+      const id = `row:${r.name}`;
+      const kind = pickKind({ palette: s.palette, row: r.name });
+      const layout = swatchLayout(s.palette, s.colors.length, this.table);
+      const write = (v: number) => this.pickRow(r.name, v);
+      this.register({ id, write, current: (vals) => this.currentOf(r, vals), colour: { label: r.label, kind, colors: s.colors, layout, defaultValue: s.default, current: () => this.currentOf(r, this.valuesNow()), pick: write } });
+      return this.colourHtml(id, label, s.colors, current, kind, '');
     }
     if ((s.count ?? 0) > 1) {
       return `<label class="wardrobe-slot colour" data-row="${name}"><span class="slot-label">${label}</span><input type="range" class="choice" min="0" max="${s.count! - 1}" step="1" value="${current}" data-row="${name}" /><span class="slot-count">${current + 1}/${s.count}</span></label>`;
@@ -559,26 +717,38 @@ export class AppearanceUi {
     for (const k of pickWrites(r)) n += c.setVariable(k, value);
     this.lastPick = { row: name, value, keys: [...r.keys], followers: [...r.followers], sets: CREATOR_TUNE.linkSelf ? [...r.sets] : [] };
     const hint = this.body.querySelector<HTMLElement>('.bake-hint');
-    if (hint) hint.textContent = `${r.label} ${value + 1}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+    if (hint) hint.textContent = `${r.label} ${r.shows?.kind === 'palette' ? countText(value, r.shows.colors ?? []) : value + 1}: ${n} texture${n === 1 ? '' : 's'} rendering`;
     this.onChange();
     this.syncRows();
   }
 
-  /** Every table row's swatches, slider and count put back in step with the values (a pick sets others too). */
+  /** Every row's strip, slider and count put back in step with the values (a pick sets others too), and the picker's outline with them. */
   private syncRows(): void {
     const c = this.character;
     if (!c) return;
-    const values = { ...(c.manifest.values ?? {}), ...c.variableValues() };
+    const values = this.valuesNow();
     for (const el of this.body.querySelectorAll<HTMLElement>('.wardrobe-slot.colour[data-row]')) {
       const r = this.rowsByName.get(el.dataset.row!);
       if (!r) continue;
       const current = this.currentOf(r, values);
       const input = el.querySelector<HTMLInputElement>('input[data-row]');
       if (input) input.value = String(current);
-      for (const sw of el.querySelectorAll<HTMLElement>('.swatch')) sw.classList.toggle('on', Number(sw.dataset.value) === current);
       const count = el.querySelector<HTMLElement>('.slot-count');
       if (count && input) count.textContent = `${current + 1}/${Number(input.max) + 1}`;
     }
+    for (const el of this.body.querySelectorAll<HTMLElement>('.wardrobe-slot[data-pick]')) {
+      const r = this.picks.get(el.dataset.pick!);
+      if (!r) continue;
+      const current = r.current(values);
+      const raw = isRawColour(current);
+      const input = el.querySelector<HTMLInputElement>('input[data-pick]');
+      if (input && !raw) input.value = String(current);
+      const count = el.querySelector<HTMLElement>('.slot-count');
+      if (count) count.textContent = r.colour ? (r.colour.kind === 'dye' && !raw ? 'undyed' : countText(current, r.colour.colors)) : `${current + 1}/${Number(input?.max ?? 0) + 1}`;
+      const strip = el.querySelector<HTMLCanvasElement>('canvas.dye-strip');
+      if (strip && r.colour) drawStrip(strip, r.colour);
+    }
+    this.picker?.refresh();
   }
 
   /**
@@ -611,12 +781,15 @@ export class AppearanceUi {
     this.open = true;
     this.root.classList.remove('hidden');
     this.preview.start();
+    // A strip drawn while the page was hidden had no width to measure.
+    this.drawStrips();
   }
 
   hide(): void {
     this.open = false;
     this.root.classList.add('hidden');
     this.preview.stop();
+    this.closePicker();
   }
 
   toggle(): boolean {

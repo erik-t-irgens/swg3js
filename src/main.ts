@@ -308,8 +308,11 @@ import { peerBodies } from './net/remoteBodies.ts';
 import { recordFor, sweptByList, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, lookKeep, packLook, putBackLook } from './player/look';
-import { CREATOR_TUNE, creatorTableNow, loadCreatorTable, tuneCreator } from './ui/creatorModel.ts';
+import { CREATOR_TUNE, DYE_PALETTE, bareName, catalogueName, creatorTableNow, itemSections, loadCreatorTable, packColours, tuneCreator } from './ui/creatorModel.ts';
 import { HAIR_TUNE, defaultHair, hairCarryFor, hairCells, type HairItem } from './ui/hairGrid.ts';
+import { DYE_TUNE, countText, hexOf, rawFromHex, tuneDye, valueRgb } from './ui/dyePicker.ts';
+import { characterRender } from './player/recipeWorker.ts';
+import { isRawColour } from './player/texrender.ts';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
@@ -3867,6 +3870,28 @@ class App {
        * built for the character on the frames after the swap (`compiledOnSwap`, which must be 0).
        */
       hair: (id?: string | null) => (id === undefined ? this.hairReport() : this.debugHair(id)),
+      /**
+       * Every worn piece's colours (`src/ui/dyePicker.ts`, the customizer's per-mesh textures, the characters'
+       * worker): each piece's rows by bare name with the palette, the value and the colour it shows, then the
+       * renders in flight, the worker's state, the last render's time and how many textures are a mesh's own.
+       * `dye('robe_s32', 'index_color_dye', '#b02020')` colours a worn piece (every mesh of it) with a colour
+       * carried whole, a number with that index of its own palette, `'default'` back to the piece's own, and
+       * says `compiledOnSwap` (programs built for the character from the moment it is set until two frames after
+       * its last render lands, which must be 0); `dye({ worker: false })` renders on the main thread to compare, and `{ tune: {...} }` moves the
+       * picker's own numbers (`DYE_TUNE`).
+       */
+      dye: (a?: string | { worker?: boolean; tune?: Partial<typeof DYE_TUNE> }, variable?: string, value?: string | number) => {
+        if (a && typeof a === 'object') {
+          if (typeof a.worker === 'boolean') characterRender.here = !a.worker;
+          if (a.tune) {
+            tuneDye(a.tune);
+            if (this.appearanceUi.open) this.appearanceUi.refresh();
+          }
+          return this.dyeReport();
+        }
+        if (typeof a === 'string' && variable !== undefined && value !== undefined) return this.debugDye(a, variable, value);
+        return this.dyeReport();
+      },
       /** What a mesh's live textures are made of (`recipe('head')`): shader stages, texture choices, palettes, blueprint operations and the values in force. */
       recipe: (mesh = 'head') => {
         const c = this.player.rig?.character;
@@ -10291,11 +10316,29 @@ class App {
     const c = this.player.rig?.character;
     if (!c) return { error: 'no parts character' };
     const said = await this.wearHairPrepared(id);
+    const { made, frames } = await this.programsMadeFor(c.group);
+    if (this.appearanceUi.open) this.appearanceUi.refresh();
+    return { said, compiledOnSwap: made, frames, inWorld: this.inWorld, ...(await this.hairReport()) };
+  }
+
+  /** Every program three holds now: the baseline `programsMadeFor` counts against. */
+  private programsNow(): Set<unknown> {
+    return new Set<unknown>(this.renderer.info.programs ?? []);
+  }
+
+  /**
+   * How many programs three built for the materials under `root` since `known` was taken (`programsNow`), counted
+   * after two more frames: what `hair(id)` and `dye(...)` report as `compiledOnSwap`. Left out, the baseline is
+   * taken now, which is right only where the swap was one synchronous step just before (a hairstyle's). A change
+   * that lands over several tasks (a colour, a render at a time from the worker, frames drawn between them) takes
+   * its baseline before the first of them, or a program built on a frame between two landings is in the baseline
+   * and never counted.
+   */
+  private async programsMadeFor(root: THREE.Object3D, known: Set<unknown> = this.programsNow()): Promise<{ made: number; frames: number }> {
     const r = this.renderer;
-    const known = new Set<unknown>(r.info.programs ?? []);
     const frames = await this.waitFrames(2);
     const mats = new Set<THREE.Material>();
-    c.group.traverse((o) => {
+    root.traverse((o) => {
       const m = (o as THREE.Mesh).material;
       if (m) for (const x of Array.isArray(m) ? m : [m]) mats.add(x);
     });
@@ -10305,8 +10348,92 @@ class App {
       const programs = (r.properties.get(m) as { programs?: Map<string, unknown> }).programs;
       for (const p of programs?.values() ?? []) if (!known.has(p)) made.add(p);
     }
+    return { made: made.size, frames };
+  }
+
+  /**
+   * Every worn piece's colours as the appearance page groups them (`itemSections`): one section a piece,
+   * named by the game, a row a bare variable with every mesh's key it writes, the palette, the value and the
+   * colour it shows. The page's own picker comes from the same rows.
+   */
+  private async dyeSections(c: Character): Promise<ReturnType<typeof itemSections>['sections']> {
+    const cz = c.customizer;
+    if (!cz) return [];
+    const items = await c
+      .catalogue(import.meta.env.BASE_URL)
+      .then((w) => w.items)
+      .catch(() => [] as { id: string; name?: string | null; parts: { name: string }[] }[]);
+    const { rows } = packColours({ live: cz.variables(), manifest: [], worn: c.wornMeshes(), isLinked: (k) => cz.isLinked(k), morphs: [], only: (v) => v.private });
+    const hairs = new Set(c.hairsWorn());
+    const parts = c.status().map((p) => ({ ...p, hair: hairs.has(p.name) }));
+    return itemSections(rows, parts, (key) => catalogueName(items, key)).sections.filter((s) => !s.body);
+  }
+
+  /** What the console's `dye()` shows: every worn piece's rows, the renders in flight, the worker, the last render and the per-mesh textures. */
+  private async dyeReport(): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c) return { error: 'no parts character' };
+    const cz = c.customizer;
+    const values = c.variableValues();
+    const sections = await this.dyeSections(c);
+    const stats = cz?.stats() ?? null;
+    const worker = characterRender.status();
+    return {
+      items: sections.map((s) => ({
+        item: s.item,
+        name: s.label,
+        hair: s.hair,
+        rows: s.rows.map((r) => {
+          const value = values[r.key] ?? r.default;
+          const rgb = r.kind === 'palette' ? valueRgb(value, r.colors) : null;
+          return { variable: bareName(r.name), palette: r.palette ?? null, value, shows: r.kind === 'palette' ? countText(value, r.colors) : `${value + 1}/${r.count ?? 1}`, hex: rgb && (r.palette !== DYE_PALETTE || isRawColour(value)) ? hexOf(rgb) : null, raw: isRawColour(value), keys: r.keys };
+        }),
+      })),
+      inFlight: worker.inFlight + (stats?.queued ?? 0) + (stats?.running ? 1 : 0),
+      worker,
+      lastMs: stats?.lastMs ?? null,
+      perMeshTextures: stats?.perMesh ?? 0,
+      textures: stats?.textures ?? 0,
+      staleDropped: stats?.staleDropped ?? 0,
+      picker: this.appearanceUi.pickerState(),
+      tune: { ...DYE_TUNE, openOn: { ...DYE_TUNE.openOn } },
+    };
+  }
+
+  /**
+   * The console's `dye(item, variable, value)`: a worn piece's colour (every one of its meshes' keys for that
+   * bare variable) set to a colour carried whole (`'#rrggbb'`), an index of its own palette, or `'default'`,
+   * saved as a pick on the page is, then the colour waited for and the programs built for the character from the
+   * moment it was set until two frames after the last render landed (`compiledOnSwap`, which must be 0: a colour
+   * is a texture, never a program).
+   */
+  private async debugDye(item: string, variable: string, value: string | number): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c?.customizer) return { error: 'no live recipes on this character' };
+    const sections = await this.dyeSections(c);
+    const s = sections.find((x) => x.item === item) ?? sections.find((x) => x.label === item);
+    if (!s) return { error: `${item} is not worn, or takes no colour of its own`, worn: sections.map((x) => x.item) };
+    const bare = bareName(variable);
+    const r = s.rows.find((x) => bareName(x.name) === bare);
+    if (!r) return { error: `${item} has no ${bare}`, variables: s.rows.map((x) => bareName(x.name)) };
+    let v: number | null;
+    if (value === 'default') v = r.default;
+    else if (typeof value === 'number') v = Number.isInteger(value) && value >= 0 ? value : null;
+    else v = rawFromHex(value);
+    if (v === null) return { error: `a value is '#rrggbb', an index of its own palette from 0, or 'default': not ${String(value)}` };
+    if (r.kind !== 'palette' && isRawColour(v)) return { error: `${bare} is a choice among textures, which takes an index, never a colour` };
+    // The baseline before the first key moves: the renders land one at a time, with frames drawn between them.
+    const known = this.programsNow();
+    const t0 = performance.now();
+    let rendering = 0;
+    for (const k of r.keys) rendering += c.setVariable(k, v);
+    this.saveAppearance();
+    await c.customizer.settled();
+    const ms = performance.now() - t0;
+    const { made, frames } = await this.programsMadeFor(c.group, known);
     if (this.appearanceUi.open) this.appearanceUi.refresh();
-    return { said, compiledOnSwap: made.size, frames, inWorld: this.inWorld, ...(await this.hairReport()) };
+    const rgb = r.kind === 'palette' ? valueRgb(v, r.colors) : null;
+    return { item: s.item, name: s.label, variable: bare, value: v, hex: rgb ? hexOf(rgb) : null, keys: r.keys, rendering, settledMs: Number(ms.toFixed(1)), compiledOnSwap: made, frames, worker: characterRender.status() };
   }
 
   /**

@@ -121,8 +121,42 @@ export function valueOf(values: Values, name: string, def: number, priv = false,
   return def;
 }
 
-/** A palette's colour for an index, as ARGB; white when the palette is unknown or empty. */
+/**
+ * The least a palette value may be: a colour carried whole, `-(0xRRGGBB + 1)`, runs from -1 (black) down to
+ * this (white). Ours, not the game's: the game's own picks are indices into a palette, from nought up, and a
+ * value below nought never came out of it, so the two can never be taken for each other. A raw colour is
+ * only ever a palette's value -- a choice among textures clamps anything under nought to its first -- and is
+ * never offered for a ship's paint, whose values the relay keeps to 0..255 (server/shipWire.mjs).
+ */
+export const RAW_COLOUR_MIN = -16777216;
+
+/** A colour carried whole as a palette value. */
+export function rawColour(r: number, g: number, b: number): number {
+  const x = ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+  return -(x + 1);
+}
+
+/** Whether a value is a colour carried whole rather than an index into a palette. */
+export function isRawColour(v: number): boolean {
+  return Number.isInteger(v) && v <= -1 && v >= RAW_COLOUR_MIN;
+}
+
+/** A raw colour's red, green and blue, 0..255. */
+export function rawRgb(v: number): [number, number, number] {
+  const x = -Math.round(v) - 1;
+  return [(x >>> 16) & 255, (x >>> 8) & 255, x & 255];
+}
+
+/**
+ * A palette's colour for an index, as ARGB; white when the palette is unknown or empty. A value below
+ * nought is a colour carried whole (`rawColour`), opaque, whatever the palette holds: which is also how our
+ * dye's palette, one entry with an alpha of nought, dyes nothing at any index and dyes whole under a colour.
+ */
 export function paletteColor(palettes: Record<string, number[][]>, file: string, index: number): number {
+  if (index <= -1 && index >= RAW_COLOUR_MIN) {
+    const [r, g, b] = rawRgb(index);
+    return argb(r, g, b, 255);
+  }
   const pal = palettes[file];
   if (!pal || !pal.length) return WHITE;
   const e = pal[Math.min(Math.max(index, 0), pal.length - 1)];

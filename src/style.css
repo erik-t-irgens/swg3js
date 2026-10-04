@@ -44,10 +44,6 @@
      the same number through `HudCanvas.setScale`. */
   --hud-scale: 1;
 
-  /* The columns of a block of swatches on the appearance page: the game's own creator laid each palette
-     out in a count of its own, which each block sets on itself; this is the count for one that does not. */
-  --swatch-cols: 16;
-
   /* How wide a hairstyle's cell is on the appearance page: the backpack's own, `HAIR_TUNE.cell` in
      hairGrid.ts, which the node test holds this to. */
   --hair-cell: 76px;
@@ -250,11 +246,24 @@ b { color: var(--accent); font-weight: 600; }
 .wardrobe-header .species { flex: none; max-width: 190px; padding: 4px 6px; font-size: 11px; background: color-mix(in srgb, var(--void) 45%, transparent); color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
 .wardrobe-slot.shape input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
 .wardrobe-slot.colour .swatches { flex: 1; display: flex; flex-wrap: wrap; gap: 2px; }
-/* The creator's own ramps: its creation colours in its own columns (--swatch-cols, set per block), then the
-   rest under a hairline. A swatch takes its cell, so a narrow window shrinks the grid rather than breaking it. */
-.wardrobe-slot.colour .swatches.ramp { flex: none; display: grid; grid-template-columns: repeat(var(--swatch-cols), minmax(6px, 14px)); }
-.wardrobe-slot.colour .swatches.ramp .swatch { width: 100%; height: auto; aspect-ratio: 1; }
-.wardrobe-slot.colour .swatch-more { font-size: 10px; color: var(--muted); border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); padding-top: 2px; margin-top: 3px; }
+/* A colour row on the appearance page is a strip (the colour now, then the colours its species was offered)
+   that opens the picker under the row (dyePicker.ts): tabs of palettes, a Default chip and the count, then
+   canvases of swatches, the game's own creator columns first on the Own tab. The swatches' colours are the
+   game's and are drawn on the canvases; everything round them is the palette's. */
+.wardrobe-slot.colour .dye-strip { display: block; width: 100%; height: 14px; cursor: pointer; border-radius: 2px; }
+.wardrobe-slot.colour.picking .dye-strip { outline: 1px solid var(--accent); outline-offset: 2px; }
+.wardrobe-slot.colour .slot-count { width: 52px; }
+.dye-picker { margin: 2px 0 8px 106px; padding: 6px 8px 8px; background: var(--panel); border: 1px solid var(--edge); border-radius: 4px; }
+.dye-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+.dye-tabs { display: flex; flex: 1; flex-wrap: wrap; gap: 2px; min-width: 0; }
+.dye-tab, .dye-chip, .dye-close { padding: 3px 8px; font-size: 11px; font-family: inherit; color: var(--muted); background: transparent; border: 1px solid var(--rule); border-radius: 3px; cursor: pointer; }
+.dye-tab:hover, .dye-chip:hover, .dye-close:hover { color: var(--ink); border-color: var(--edge); }
+.dye-tab.on { color: var(--accent); border-color: var(--accent); cursor: default; }
+.dye-count { min-width: 52px; font-size: 10px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.dye-body { overflow-y: auto; }
+.dye-label { margin: 6px 0 2px; font-size: 10px; letter-spacing: 0.04em; color: var(--muted); }
+.dye-label span { margin-left: 4px; color: color-mix(in srgb, var(--muted) 70%, transparent); }
+.dye-grid { display: block; cursor: crosshair; }
 .swatch { width: 14px; height: 14px; padding: 0; border: 1px solid color-mix(in srgb, var(--void) 60%, transparent); border-radius: 2px; cursor: pointer; }
 .swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 .bake-hint { font-size: 11px; color: var(--muted); padding: 4px 0 8px; line-height: 1.5; }

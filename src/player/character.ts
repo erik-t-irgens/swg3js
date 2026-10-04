@@ -7,7 +7,8 @@
 
 import * as THREE from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Customizer, type RenderShare } from './customizer.ts';
+import { Customizer, isRecipeMesh, recipeMeshOf, type RecipeRender, type RenderShare } from './customizer.ts';
+import { characterRender } from './recipeWorker.ts';
 import { recordPartSources, type LookSources, type PartFile, type PartSources } from '../world/mobiles/lookShare.ts';
 import { markActor } from '../world/portalRender.ts';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
@@ -149,6 +150,12 @@ export interface CharacterOptions {
    * the finished look can be put on the shared pieces (`lookSources`, src/world/mobiles/lookShare.ts).
    */
   share?: RenderShare;
+  /**
+   * Where the colour recipes render: left out, the worker every character shares (`characterRender`,
+   * recipeWorker.ts), so a recolour never stops the frame; null on this thread, between frames. A look built
+   * to `share` always renders here, through its share.
+   */
+  renderOff?: RecipeRender | null;
 }
 
 /** Re-point a skinned mesh's joint indices from its own skeleton's order to `target`'s, by joint name; a joint the target lacks goes to its root. */
@@ -339,10 +346,13 @@ export class Character {
     for (const def of wanted) await character.addPart(def.name, [def], true);
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
-    const customizer = new Customizer();
+    // A look built to share renders here, through its share; every other character in the worker the
+    // characters share (`characterRender`), which also hands back the normal map and splits a glowing piece.
+    const off = opts.share ? null : opts.renderOff === undefined ? characterRender : opts.renderOff;
+    const customizer = new Customizer(off, { putsGlow: !!off });
     customizer.share = opts.share ?? null;
     customizer.normalScale.copy(Character.normalScale);
-    customizer.materialsFor = (name) => character.materialsNamed(name);
+    customizer.materialsFor = (name, mesh) => character.materialsNamed(name, mesh);
     // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
     for (const [k, v] of Object.entries(manifest.values ?? {})) customizer.values.set(k, v);
     if (await customizer.addSource(dir)) character.customizer = customizer;
@@ -918,9 +928,9 @@ export class Character {
       if (!p.worn) continue;
       for (const m of p.meshes) {
         out.add(m.name);
-        // A mesh with several materials loads as several meshes, the second onwards suffixed
-        // (body_m_l0, body_m_l0_1): the recipes name the converter's mesh, without the suffix.
-        out.add(m.name.replace(/_\d+$/, ''));
+        // A mesh with several materials loads as several meshes, suffixed (body_m_l0_1): the recipes
+        // name the converter's mesh, without the suffix (`recipeMeshOf`).
+        out.add(recipeMeshOf(m.name));
       }
     }
     return out;
@@ -969,11 +979,17 @@ export class Character {
     return (await this.wear(id)) || this.wearItem(id, baseUrl);
   }
 
-  /** Every material of the given name across the parts (the recipes name materials by the converter's shader key). */
-  materialsNamed(name: string): THREE.Material[] {
+  /**
+   * Every material of the given name across the parts (the recipes name materials by the converter's shader
+   * key); with a mesh, only on the meshes of that name, which a recipe whose colour is its mesh's own asks
+   * for. A mesh with several materials loads as several meshes, suffixed (`_1`, `_2`), and the recipes name the
+   * converter's mesh without the suffix (`isRecipeMesh`); no recipe's mesh ends in one of its own.
+   */
+  materialsNamed(name: string, mesh?: string): THREE.Material[] {
     const out: THREE.Material[] = [];
     for (const part of this.parts.values()) {
       for (const m of part.meshes) {
+        if (mesh !== undefined && !isRecipeMesh(m.name, mesh)) continue;
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         for (const mat of mats) if (mat.name === name && !out.includes(mat)) out.push(mat);
       }

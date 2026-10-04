@@ -169,7 +169,7 @@ const rowOf = (view: CreatorView, name: string) => view.groups.flatMap((g) => g.
   ok(kept.rows.length === 1 && !kept.shared.length && kept.byMesh.get('shirt')?.length === 1, '`only` keeps a subset, which is how the table\'s page shows what its rows left');
   const robe = v('robe|/private/index_color_dye', '/private/index_color_dye', true, 'robe', { palette: DYE_PALETTE, colors: [[255, 255, 255, 0]] });
   const dyed = packColours({ live: [...live, robe], manifest, worn: new Set(['head', 'shirt', 'robe']), isLinked, morphs: [] });
-  ok(!dyed.rows.some((r) => r.palette === DYE_PALETTE) && !dyed.byMesh.has('robe'), "a garment's dye of ours has no row until a picker can set it (no swatch of its palette dyes)");
+  ok(dyed.rows.some((r) => r.palette === DYE_PALETTE) && dyed.byMesh.get('robe')?.[0]?.key === 'robe|/private/index_color_dye', "a garment's dye of ours is a row like any other, now that the picker under it can give it a colour carried whole");
 }
 
 // ---------------------------------------------------------------- every species converted on this machine

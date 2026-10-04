@@ -498,9 +498,9 @@ export interface PackManifestVariable {
  */
 export function packColours(input: { live: readonly CreatorVariable[]; manifest: readonly PackManifestVariable[]; worn: ReadonlySet<string>; isLinked: (key: string) => boolean; morphs: Iterable<string>; only?: (v: PackColour) => boolean }): { rows: PackColour[]; shared: PackColour[]; byMesh: Map<string, PackColour[]> } {
   const short = (n: string) => n.replace(/^.*\//, '');
-  // A garment's dye of ours reads a palette whose one entry dyes nothing: only a colour carried whole does,
-  // which no swatch here can give, so its row waits for the picker that can.
-  const live = input.live.filter((v) => (!v.private || input.worn.has(v.mesh)) && !input.isLinked(v.key) && v.palette !== DYE_PALETTE);
+  // A garment's dye of ours is a row like any other: its palette's one entry dyes nothing, and the picker
+  // under the row (dyePicker.ts) is what gives it a colour carried whole.
+  const live = input.live.filter((v) => (!v.private || input.worn.has(v.mesh)) && !input.isLinked(v.key));
   const rows: PackColour[] = [];
   // The palette and the slot it tints go with each row, because they are what names it: the live row's
   // are the customizer's own, read off that mesh's recipe, and the manifest's merged list is the fallback
@@ -523,6 +523,93 @@ export function packColours(input: { live: readonly CreatorVariable[]; manifest:
   const byMesh = new Map<string, PackColour[]>();
   for (const v of kept) if (v.private) (byMesh.get(v.mesh) ?? byMesh.set(v.mesh, []).get(v.mesh)!).push(v);
   return { rows: kept, shared, byMesh };
+}
+
+/** A worn piece's colour as the page draws it: one row for a bare variable however many of the piece's meshes read it. */
+export interface ItemColour extends PackColour {
+  /** The piece it belongs to (a catalogue id, or a pack part's name). */
+  item: string;
+  /** Every mesh's key of this variable on the piece: a pick writes them all. */
+  keys: string[];
+}
+
+/** One worn piece's own colours. */
+export interface ItemSection {
+  item: string;
+  /** The game's name for the piece, from the wardrobe's catalogue; null where it has none (the page names the mesh). */
+  label: string | null;
+  /** The first mesh the piece is drawn with, which names it where the catalogue does not. */
+  mesh: string;
+  body: boolean;
+  hair: boolean;
+  rows: ItemColour[];
+}
+
+/** A worn part as the character lists it (`Character.status()`), with whether it is a hairstyle. */
+export interface WornPart {
+  name: string;
+  meshNames: readonly string[];
+  worn: boolean;
+  body: boolean;
+  hair?: boolean;
+}
+
+/**
+ * The game's name for what is worn under a key: the catalogue item of that id, else the one a pack part of
+ * that name is (the species pack's own shirt, `shirt_s03_m_l0`, is the catalogue's `shirt_s03`). Null when
+ * the catalogue has neither, or has no name for it.
+ */
+export function catalogueName(items: readonly { id: string; name?: string | null; parts: readonly { name: string }[] }[] | null | undefined, key: string): string | null {
+  if (!items) return null;
+  const item = items.find((i) => i.id === key) ?? items.find((i) => i.parts.some((p) => p.name === key));
+  return item?.name ?? null;
+}
+
+/**
+ * A worn piece's own colours, one section a piece rather than one a mesh: in the game a private variable
+ * belongs to the object, not to one of its meshes, so a piece drawn with three meshes that each read their
+ * `index_color_1` has one Main Color, and a pick writes all three. The pieces come in the order the
+ * character lists them, each row in the order its variable was first met, and a mesh two worn pieces share
+ * is the first's. A colour of a mesh no worn piece draws is left over (`loose`), for the page to show as it
+ * did, under its mesh.
+ */
+export function itemSections(colours: readonly PackColour[], parts: readonly WornPart[], nameOf: (key: string) => string | null | undefined): { sections: ItemSection[]; loose: PackColour[] } {
+  const owner = new Map<string, WornPart>();
+  for (const p of parts) {
+    if (!p.worn) continue;
+    for (const m of p.meshNames) {
+      for (const n of [m, m.replace(/_\d+$/, '')]) if (!owner.has(n)) owner.set(n, p);
+    }
+  }
+  const sections = new Map<WornPart, ItemSection>();
+  const byBare = new Map<ItemSection, Map<string, ItemColour>>();
+  const loose: PackColour[] = [];
+  for (const v of colours) {
+    const p = v.private ? owner.get(v.mesh) : undefined;
+    if (!p) {
+      loose.push(v);
+      continue;
+    }
+    let s = sections.get(p);
+    if (!s) {
+      s = { item: p.name, label: nameOf(p.name) ?? null, mesh: p.meshNames[0]?.replace(/_\d+$/, '') ?? p.name, body: p.body, hair: !!p.hair, rows: [] };
+      sections.set(p, s);
+      byBare.set(s, new Map());
+    }
+    const rows = byBare.get(s)!;
+    const bare = bareName(v.name);
+    const row = rows.get(bare);
+    if (row) {
+      if (!row.keys.includes(v.key)) row.keys.push(v.key);
+      continue;
+    }
+    const fresh: ItemColour = { ...v, item: p.name, keys: [v.key] };
+    rows.set(bare, fresh);
+    s.rows.push(fresh);
+  }
+  // In the character's own order of its parts, not the order their colours were met.
+  const ordered = parts.map((p) => sections.get(p)).filter((s): s is ItemSection => !!s);
+  return { sections: ordered, loose };
 }
 
 /** How a palette's swatches are laid out: the creation block in its own columns, then the rest. */

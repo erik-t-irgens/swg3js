@@ -49,7 +49,7 @@
     "test:combat": "npm run test:blade && npm run test:clash && npm run test:blades && npm run test:marks && npm run test:scars && npm run test:footprints && npm run test:look && npm run test:ragdoll && npm run test:physics && npm run test:moods && npm run test:burn && npm run test:breath && npm run test:stance && npm run test:posture && npm run test:difficulty && npm run test:npcsaber",
     "test:cloning": "node tools/swg/tests/cloning.test.ts && node tools/swg/tests/sceneCapture.test.ts && node tools/swg/tests/scenes.test.ts && node tools/swg/tests/scenePlaces.test.ts && node tools/swg/tests/scenebake.test.ts && node tools/swg/tests/sceneglb.test.ts && node tools/swg/tests/sceneView.test.ts && node tools/swg/tests/placeClock.test.ts && node tools/swg/tests/clouds.test.ts",
     "test:gates": "node tools/swg/tests/gates.test.ts",
-    "test:inventory": "node tools/swg/tests/inventory.test.ts && node tools/swg/tests/equipment.test.ts && node tools/swg/tests/creatorModel.test.ts && node tools/swg/tests/lookValues.test.ts && node tools/swg/tests/hairGrid.test.ts",
+    "test:inventory": "node tools/swg/tests/inventory.test.ts && node tools/swg/tests/equipment.test.ts && node tools/swg/tests/creatorModel.test.ts && node tools/swg/tests/lookValues.test.ts && node tools/swg/tests/hairGrid.test.ts && node tools/swg/tests/dyeRender.test.ts",
     "test:wings": "node tools/swg/tests/shipparts.test.ts && node tools/swg/tests/wings.test.ts",
     "test:landing": "node tools/swg/tests/landing.test.ts && node tools/swg/tests/surfaceRoom.test.ts && node tools/swg/tests/vehicleWire.test.ts",
     "test:docking": "node tools/swg/tests/docking.test.ts && node tools/swg/tests/spots.test.ts",
