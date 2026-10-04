@@ -1,0 +1,12 @@
+// Repeats: taken again only two minutes after it ended, and its standing capped at 30 a real day, so the
+// second run in a day pays 10 of its 20 and the third none.
+{
+  "id": "repeat",
+  "title": "TEST: again and again",
+  "repeat": { "every": "cooldown", "cooldown": { "seconds": 120 }, "standingPerRealDay": 30 },
+  "givers": [{ "kind": "debug" }],
+  "start": ["pay"],
+  "steps": {
+    "pay": { "type": "reward", "reward": { "standing": [{ "track": "freelance", "add": 20 }] }, "ends": "done" },
+  },
+}

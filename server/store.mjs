@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { applyItems } from './ledger.mjs';
 import { applyHomes } from './homes.mjs';
 import { applyPurse } from './purse.mjs';
-import { applyStory } from './stories.mjs';
+import { applyStory, readStories } from './stories.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -154,6 +154,9 @@ export class Store {
       // The tables are rebuilt rather than taken as they are: `JSON.parse` hands back plain objects,
       // and the keys in them came from a browser (see `table`).
       this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive) };
+      // A story book's own tables are keyed by a browser too, a level further down: they are rebuilt
+      // before the log is played back onto them, so a replayed change meets the book a live one did.
+      readStories(this.data);
       this.say(`world.json read: ${Object.keys(this.data.players).length} players, ${Object.keys(this.data.characters).length} characters, up to change ${this.data.seq}`);
     }
     let knownEpoch = !!loaded && Number.isFinite(loaded.epoch);

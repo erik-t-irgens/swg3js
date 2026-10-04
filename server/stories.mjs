@@ -124,6 +124,29 @@ export function applyStory(data, rec) {
   return true;
 }
 
+/**
+ * The books of a world just read back from its file, rebuilt as the rules expect them. `JSON.parse` hands
+ * back plain objects all the way down, and a book's own tables (its flags, quests, steps and rewards) are
+ * keyed by what a browser chose: left as they are, `toString` would read as a flag the server's copy has
+ * set and the browser's copy has not. So every book, and every book put away, goes through the same
+ * `cleanBook` a book handed up does, held only to the backstop caps (a server run with caps of its own,
+ * then started without them, must never cut what it wrote down). A book that will not clean -- one written
+ * by a newer server -- is kept exactly as it was. Runs before the log is played back and again when the
+ * stories take the world, so whichever reads it first, nothing reads it raw.
+ */
+export function readStories(data) {
+  const books = Object.create(null);
+  for (const id of Object.keys(data.stories ?? {})) books[id] = cleanBook(data.stories[id], BACKSTOP_LIMITS) ?? data.stories[id];
+  const archive = Object.create(null);
+  for (const id of Object.keys(data.storyArchive ?? {})) {
+    const list = data.storyArchive[id];
+    archive[id] = Array.isArray(list) ? list.map((b) => cleanBook(b, BACKSTOP_LIMITS) ?? b) : list;
+  }
+  data.stories = books;
+  data.storyArchive = archive;
+  return data;
+}
+
 export class Stories {
   /**
    * @param {{ tuning?: Record<string, number>, write?: (rec: object) => void, now?: () => number }} options
@@ -148,10 +171,9 @@ export class Stories {
     this.refusals = 0;
   }
 
-  /** Take the world the store read back. The books are its own, read and written in place. */
+  /** Take the world the store read back, its books rebuilt as the rules expect them. They are its own, read and written in place. */
   load(data) {
-    data.stories ??= Object.create(null);
-    data.storyArchive ??= Object.create(null);
+    readStories(data);
     this.data = data;
     return this;
   }

@@ -1,0 +1,12 @@
+// expect: rule 4
+// Never loaded as part of the set: the checker must fail it. A condition calls a function the vocabulary does not have.
+{
+  "id": "broken-unknownFn",
+  "title": "TEST: a word nobody knows",
+  "givers": [{ "kind": "debug" }],
+  "needs": "questDone(test:goto) && frobnicate(test:goto)",
+  "start": ["only"],
+  "steps": {
+    "only": { "type": "signal", "signal": "debug:test-only", "objective": "TEST: the only step", "ends": "done" },
+  },
+}

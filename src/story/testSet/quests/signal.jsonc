@@ -1,0 +1,16 @@
+// Signals from three raisers at once: E on the test terminal (`used:`), stepping into the test square
+// (`entered:`), and the console's `__debug.signal('debug:test-ping')` sent three times (a counted step).
+// The three run side by side and a join waits on all of them.
+{
+  "id": "signal",
+  "title": "TEST: three kinds of signal",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["poke", "square", "ping"],
+  "steps": {
+    "poke": { "type": "signal", "signal": "used:obj/test-terminal", "objective": "TEST: use the test terminal", "next": ["meet"] },
+    "square": { "type": "signal", "signal": "entered:area/test-square", "objective": "TEST: step into the test square", "next": ["meet"] },
+    "ping": { "type": "signal", "signal": "debug:test-ping", "n": 3, "objective": "TEST: send the test ping three times", "next": ["meet"] },
+    "meet": { "type": "join", "after": ["poke", "square", "ping"], "ends": "done" },
+  },
+}

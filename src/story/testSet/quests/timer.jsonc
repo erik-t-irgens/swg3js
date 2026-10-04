@@ -1,0 +1,25 @@
+// Clocks: a 30 second timer on the world clock, a one game-hour wait (30 real seconds), and a goto with a
+// 60 second limit that fails into its onFail step, which ends the quest as a named failure.
+{
+  "id": "timer",
+  "title": "TEST: clocks",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["tick"],
+  "steps": {
+    "tick": { "type": "timer", "for": { "seconds": 30 }, "objective": "TEST: wait thirty seconds", "next": ["later"] },
+    "later": { "type": "wait", "for": { "gameHours": 1 }, "next": ["race"] },
+    "race": {
+      "type": "goto",
+      "objective": "TEST: reach the marker in a minute",
+      "at": { "rel": "start", "dx": 0, "dz": 40 },
+      "radius": 5,
+      "timeLimit": { "seconds": 60 },
+      "next": ["fast"],
+      "onFail": ["slow"],
+    },
+    "fast": { "type": "end", "outcome": "done" },
+    "slow": { "type": "end", "outcome": "late" },
+  },
+  "outcomes": { "late": { "failure": true } },
+}

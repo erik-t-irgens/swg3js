@@ -102,6 +102,7 @@ export function distFiles(dist, tracked, root = null) {
   const manifestFile = join(dist, '.vite', 'manifest.json');
   if (!existsSync(join(dist, 'index.html'))) return { files: [], problems: [`${dist} holds no built game (index.html)`] };
   if (existsSync(join(dist, 'assets-private'))) return { files: [], problems: [`${dist} holds an assets-private folder: the pack builds the game itself with the private content's copy off`] };
+  if (existsSync(join(dist, 'story-private'))) return { files: [], problems: [`${dist} holds a story-private folder: the owner's own story never goes into a release`] };
   if (!existsSync(manifestFile)) return { files: [], problems: [`${dist} has no Vite manifest (.vite/manifest.json), so what the build made cannot be told from what else is there`] };
   const all = walk(dist).filter((rel) => rel !== '.vite/manifest.json');
   const present = new Set(all);
@@ -151,6 +152,7 @@ export function distFiles(dist, tracked, root = null) {
 export function refusal(rel) {
   const parts = rel.split(/[\\/]/);
   if (parts.some((p) => p.toLowerCase() === 'assets-private')) return 'is under assets-private';
+  if (parts.some((p) => p.toLowerCase() === 'story-private')) return 'is under story-private, the owner\'s own story';
   if (parts.some((p) => p === '..' || p === '' || p === '.')) return 'is not a plain relative path';
   if (FORBIDDEN_KINDS.has(extname(rel).toLowerCase())) return 'is a game archive or a game file format';
   if (basename(rel).toLowerCase() === '.env') return 'is a machine\'s own settings';

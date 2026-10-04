@@ -346,6 +346,8 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
 {
   ok(refusal('dist/assets-private/x.json') && refusal('Assets-Private/a.png') && refusal('dist/data.tre') && refusal('x/y.PK3') && refusal('tools/.env'), 'converted content, archives and a machine\'s .env are refused');
   ok(refusal('dist/assets/index-abc.js') === null && refusal('tools/swg/cli.mjs') === null, 'the game\'s own files are not');
+  ok(refusal('story-private/quests/a.jsonc') && refusal('dist/story-private/index.json') && refusal('Story-Private/story.jsonc'), 'and neither is the owner\'s own story, wherever a path runs through story-private');
+  ok(refusal('src/story/testSet/quests/goto.jsonc') === null, 'while the committed test set is not');
   // A build folder as Vite leaves it: index.html, the manifest, its chunks, a worker only a chunk names,
   // and a tracked public file.
   const fake = join(scratch, 'fakeroot');
@@ -381,6 +383,9 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   mkdirSync(join(dist, 'assets-private', 'tatooine'), { recursive: true });
   ok(/assets-private/.test(distFiles(dist, tracked).problems.join()), 'a build folder holding assets-private stops the pack');
   rmSync(join(dist, 'assets-private'), { recursive: true });
+  mkdirSync(join(dist, 'story-private', 'quests'), { recursive: true });
+  ok(/story-private/.test(distFiles(dist, tracked).problems.join()), 'and so does one holding the owner\'s story-private');
+  rmSync(join(dist, 'story-private'), { recursive: true });
   rmSync(join(dist, '.vite'), { recursive: true });
   ok(/no Vite manifest/.test(distFiles(dist, tracked).problems.join()), 'and one with no manifest, since nothing then says what the build made');
   // Outside the build, only what git knows.
@@ -433,9 +438,12 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   // The server runs the story's rules from `src/story/` as they are, which is a folder rule rather than a
   // name in a list: this pins it, so a rules file nobody imports yet ships as surely as one somebody does,
   // and so does the one file outside the folder those rules may import.
-  const storyFiles = readdirSync(join(root, 'src', 'story')).filter((f) => f.endsWith('.ts')).map((f) => `src/story/${f}`);
+  // The test set goes too, at any depth, so a released relay started with --story-tests has it.
+  const storyWalk = (dir, prefix) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? storyWalk(join(dir, e.name), `${prefix}${e.name}/`) : [`${prefix}${e.name}`]));
+  const storyFiles = storyWalk(join(root, 'src', 'story'), 'src/story/').filter((f) => f.endsWith('.ts') || f.startsWith('src/story/testSet/'));
   const storyLost = [...storyFiles, 'src/net/hash.ts'].filter((f) => !packedPaths.has(f));
-  ok(storyFiles.length > 0 && !storyLost.length, `the release carries the story's rules and the hashing they may use (${storyFiles.length} files${storyLost.length ? `; missing ${storyLost.join(', ')}` : ''})`);
+  ok(storyFiles.length > 0 && storyFiles.some((f) => f.startsWith('src/story/testSet/quests/')) && !storyLost.length, `the release carries the story's rules, its test set and the hashing they may use (${storyFiles.length} files${storyLost.length ? `; missing ${storyLost.join(', ')}` : ''})`);
+  ok(!packed.some((f) => /(^|\/)story-private(\/|$)/i.test(f.path)), 'and nothing of story-private');
   const lib = join(scratch, 'importer');
   mkdirSync(join(lib, 'tools'), { recursive: true });
   writeFileSync(join(lib, 'tools', 'a.mjs'), "import './b.mjs';\nconst x = await import('../src/c.ts');\nnew URL('./d.json', import.meta.url);\nimport './gone.mjs';");

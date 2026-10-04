@@ -1,0 +1,13 @@
+// expect: rule 4
+// Never loaded as part of the set: the checker must fail it. A step type and an action kept for a later
+// pass: neither is built in this one.
+{
+  "id": "broken-reserved",
+  "title": "TEST: not built yet",
+  "givers": [{ "kind": "debug" }],
+  "start": ["fetch"],
+  "steps": {
+    "fetch": { "type": "collect", "objective": "TEST: collect something", "next": ["seize"] },
+    "seize": { "type": "nothing", "do": { "done": ["impound(test-speeder)"] }, "ends": "done" },
+  },
+}

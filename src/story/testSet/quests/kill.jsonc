@@ -1,0 +1,15 @@
+// Kills: three of one creature by its catalogue id, and two of a social group, side by side. Both are
+// what Tatooine's spawns stand around Mos Eisley (its easy newbie area's kreetle herds and womp rat
+// lairs): `kreetle` is the catalogue's own id, and `rat` the social group both womp rats carry.
+{
+  "id": "kill",
+  "title": "TEST: kill some creatures",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["mites", "rats"],
+  "steps": {
+    "mites": { "type": "kill", "who": ["kreetle"], "n": 3, "objective": "TEST: kill three of the test creature", "next": ["tally"] },
+    "rats": { "type": "kill", "social": "rat", "n": 2, "objective": "TEST: kill two of the test group", "next": ["tally"] },
+    "tally": { "type": "join", "after": ["mites", "rats"], "ends": "done" },
+  },
+}

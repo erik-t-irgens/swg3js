@@ -115,8 +115,12 @@ export const FORBIDDEN_KEYS: readonly string[] = ['__proto__', 'constructor', 'p
 
 /** A personal waypoint's id: `w` and the host's own counter. Never a browser's choice while a server holds the book. */
 const WAYPOINT_ID = /^w[0-9]{1,9}$/;
-/** A quest's waypoint is never stored: it is `q:<quest>#<step>`, worked out from the quest it belongs to. */
-const QUEST_WAYPOINT = /^q:[A-Za-z0-9_:./-]{1,96}#[A-Za-z0-9_.-]{1,48}$/;
+/**
+ * A quest's waypoint is never stored: it is `q:<quest>#<step>`, worked out from the quest it belongs to. The
+ * quest part is as long as the longest quest id the book takes (a prefix of 24, its colon and a name of 96),
+ * or a quest with a long name would have a waypoint nobody could switch off or track.
+ */
+const QUEST_WAYPOINT = /^q:[A-Za-z0-9_:./-]{1,121}#[A-Za-z0-9_.-]{1,48}$/;
 /** A cell's name, as the models write them (`cantina`, `elevator_e3_up`, `foyer1`). */
 const CELL_NAME = /^[A-Za-z0-9_ .-]{1,64}$/;
 /** A building's template: a path of plain characters. */

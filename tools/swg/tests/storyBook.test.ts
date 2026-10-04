@@ -13,8 +13,13 @@
 //
 // Everything is synthetic: no browser, no socket, nothing read from the game's own files.
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
-import { BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, cleanChange, emptyBook, markPaidBy, whyNot } from '../../../src/story/book.ts';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BOOK_LIMITS, applyChanges, bookIsEmpty, bookSummary, cleanBook, cleanChange, emptyBook, markPaidBy, whyNot, type StoryBook } from '../../../src/story/book.ts';
+import { evalCond } from '../../../src/story/quests.ts';
+import { Stories, applyStory } from '../../../server/stories.mjs';
+import { openStore } from '../../../server/store.mjs';
 import { WAYPOINT_COLOURS, WAYPOINT_TUNE, cleanWaypoint, cleanWaypointAsk, gameToRaw, gameToRawX, gameToRawZ, rawToGame, rawToGameX, rawToGameZ, waypointName, type Waypoint } from '../../../src/story/waypoints.ts';
 import { ASIDE_KEPT, asideBook, asides, loadBook, saveBook, setAside, type StoryStorage } from '../../../src/story/storyStore.ts';
 import { BookClient, STORY_TUNE, type StoryLine } from '../../../src/story/bookClient.ts';
@@ -33,21 +38,7 @@ const ok = (cond: boolean, what: string) => {
 const ask = (over: Record<string, unknown> = {}) => ({ name: 'Cantina', world: 'tatooine', f: 'raw', p: [3407.2, -4587.1, null], ...over });
 const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWaypoint({ id, made: 5, ...ask(), ...over })!;
 
-// ---- the rules' own folder: nothing outside it but the hashing ---------------------------------------
-{
-  const dir = new URL('../../../src/story/', import.meta.url);
-  const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
-  const outside: string[] = [];
-  for (const f of files) {
-    const text = readFileSync(new URL(f, dir), 'utf8');
-    for (const m of text.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)) {
-      const from = m[1];
-      const fine = (from.startsWith('./') && from.endsWith('.ts') && !from.slice(2).includes('/')) || from === '../net/hash.ts';
-      if (!fine) outside.push(`${f}: ${from}`);
-    }
-  }
-  ok(files.length >= 5 && outside.length === 0, `src/story imports only its own folder and src/net/hash.ts, each with its extension (${files.length} files${outside.length ? `; ${outside.join(', ')}` : ''})`);
-}
+// The rules' own folder importing nothing outside it but the hashing is `storyImports.test.ts`'s.
 
 // ---- the colours --------------------------------------------------------------------------------------
 {
@@ -152,6 +143,31 @@ const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWa
   ok(markPaidBy(emptyBook('x'), 'browser') === 0, 'and a book with none is left as it is');
 }
 {
+  // The jobs' sections: typed, capped, keyed with no prototype, and read back in the order they were written.
+  const raw = JSON.parse(
+    '{"v":1,"char":"char-1","rev":3,"waypoints":[],"nextWp":1,"wpOff":[],"trackWp":null,"tracked":[],' +
+      '"flags":{"test.a":1,"__proto__":{"admin":true},"bad name!":2,"test.b":"open"},' +
+      '"quests":{"test:goto":{"state":"active","run":2,"steps":{"outdoor":{"state":"active","n":1,"at":5,"place":[1,2]},"__proto__":{"state":"done"}},"history":[{"run":1,"outcome":"done","at":4}]},"nonsense":{"state":"active"},"test:x":{"state":"lost"}},' +
+      '"xp":12,"tracks":{"freelance":{"standing":30,"trust":1,"rank":"r1"},"jedi":{"standing":5}},"closed":["test:old","test:old","nope"]}',
+  );
+  const c = cleanBook(raw)!;
+  ok(c.flags?.['test.a'] === 1 && c.flags['test.b'] === 'open' && Object.keys(c.flags).length === 2 && Object.getPrototypeOf(c.flags) === null, 'flags keep their numbers and words, refuse a bad name and the language\'s keys, and are a table with no prototype');
+  const g = c.quests?.['test:goto'];
+  ok(!!g && g.run === 2 && g.steps.outdoor.n === 1 && g.steps.outdoor.place?.[1] === 2 && Object.keys(g.steps).length === 1 && Object.keys(c.quests!).length === 1, 'a quest\'s record is rebuilt with its steps; a key that is not a quest id, a state that is not one and a step called __proto__ are dropped');
+  ok(c.xp === 12 && c.tracks?.freelance?.standing === 30 && c.tracks.freelance.rank === 'r1' && !('jedi' in (c.tracks as object)) && c.closed?.length === 1, 'experience, the three tracks (what a later wave adds to a track kept) and the closed list are read and cleaned');
+  ok(Object.keys(c).slice(-5).join(',') === 'flags,quests,xp,tracks,closed', 'and the sections stay in the order the book had them, so a book read back is the book written');
+  const b = emptyBook('char-1');
+  const qs = { state: 'active', run: 1, at: 0, completions: 0, defRev: 1, defHash: '0123456789abcdef', steps: {}, history: [] };
+  const lim = { ...BOOK_LIMITS, quests: 1, steps: 1, flags: 1 };
+  ok(applyChanges(b, [{ k: 'qState', quest: 'test:a', rec: qs }], lim).applied.length === 1 && applyChanges(b, [{ k: 'qState', quest: 'test:b', rec: qs }], lim).refused[0]?.why === 'a character keeps a record of 1 jobs', 'a new quest past the cap is refused, in words');
+  ok(applyChanges(b, [{ k: 'step', quest: 'test:a', step: 's', rec: { state: 'active', n: 0, at: 1 } }], lim).applied.length === 1 && /keeps 1 steps/.test(applyChanges(b, [{ k: 'step', quest: 'test:a', step: 't', rec: { state: 'active', n: 0, at: 1 } }], lim).refused[0]?.why ?? '') && applyChanges(b, [{ k: 'step', quest: 'test:z', step: 's', rec: { state: 'active', n: 0, at: 1 } }]).refused[0]?.why === 'there is no such job in this book', 'so is a step past a quest\'s cap, and a step of a quest the book does not have');
+  ok(applyChanges(b, [{ k: 'flag', name: 'a', value: 1 }, { k: 'flag', name: 'b', value: 1 }], lim).refused.length === 1 && applyChanges(b, [{ k: 'flag', name: 'a', value: null }], lim).applied.length === 1 && b.flags?.a === undefined, 'a flag past the cap is refused, and unsetting one frees its place');
+  ok(applyChanges(b, [{ k: 'paid', key: 'test:a#1#s', at: 1, by: 'browser' }, { k: 'paid', key: 'test:a#1#s', at: 2, by: 'server' }]).refused[0]?.why === 'that reward is already paid' && b.paid?.['test:a#1#s']?.by === 'browser', 'a reward is recorded once, and the second record of it refused');
+  ok(applyChanges(b, [{ k: 'xp', add: 5 }, { k: 'xp', add: 2.5 }, { k: 'trackAdd', track: 'empire', standing: -4 }, { k: 'trackAdd', track: 'jedi', standing: 1 }, { k: 'closed', quest: 'test:a' }, { k: 'closed', quest: 'test:a' }]).applied.length === 3 && b.xp === 5 && b.tracks?.empire?.standing === -4 && b.closed?.length === 1, 'the counters only add, a fraction of experience and a track that is not one are refused, and a quest is closed once');
+  ok(cleanChange({ k: 'qState', quest: 'test:a', rec: { state: 'flying' } }) === null && cleanChange({ k: 'flag', name: '__proto__', value: 1 }) === null && cleanChange({ k: 'paid', key: 'x#1', at: 1 }) === null, 'a change carrying a state that is not one, a forbidden name or nobody paying is not a change');
+  ok(!bookIsEmpty(b) && bookSummary(b)!.quests === 1 && bookSummary(b)!.active === 1 && bookSummary(b)!.xp === 5, 'and a book with jobs in it is not empty, and says how many');
+}
+{
   // A book read from a file whose own top level names the language's keys: they are never carried, and the
   // cleaned book is a plain object whatever the text said its prototype was.
   const text = `{"v":1,"char":"char-1","rev":2,"waypoints":[],"nextWp":1,"wpOff":[],"trackWp":null,"tracked":[],"__proto__":{"x":1,"admin":true},"constructor":{"y":2},"prototype":{"z":3},"quests":{"own:a":{"state":"active"}}}`;
@@ -163,6 +179,96 @@ const wp = (id: string, over: Record<string, unknown> = {}): Waypoint => cleanWa
   const big = cleanBook({ ...emptyBook('char-1'), journal: Array.from({ length: 60 }, (_, i) => i) }, limits)!;
   const small = cleanBook({ ...emptyBook('char-1'), journal: Array.from({ length: 40 }, (_, i) => i) }, limits)!;
   ok(big.journal === undefined && Array.isArray(small.journal) && (small.journal as number[]).length === 40, `a later wave's section with more values than the book allows (${limits.sectionNodes}) is dropped whole, and one within it kept`);
+}
+{
+  // A section named for something every object already has. Looked up in a plain table of cleaners, these
+  // found the language's own methods and called them, which threw out of the relay and took it down.
+  const names = ['valueOf', 'hasOwnProperty', 'toString', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString', '__defineGetter__', '__lookupGetter__'];
+  const raw = JSON.parse(`{"v":1,"char":"char-1","rev":4,"waypoints":[],"nextWp":1,"wpOff":[],"trackWp":null,"tracked":[],${names.map((n) => `"${n}":1`).join(',')},"journal":[1,2]}`);
+  let c: Record<string, unknown> | null = null;
+  let threw = '';
+  try {
+    c = cleanBook(raw) as Record<string, unknown> | null;
+  } catch (e) {
+    threw = String(e);
+  }
+  ok(!threw && !!c && c.rev === 4 && Array.isArray(c.journal), `a book with sections named valueOf, hasOwnProperty, toString and the rest is cleaned, not thrown on (${threw || 'read'})`);
+  ok(!!c && names.every((n) => !Object.prototype.hasOwnProperty.call(c, n)) && typeof c.toString === 'function' && typeof c.valueOf === 'function', 'and none of them is kept: the book still answers the language\'s own names with the language\'s own methods');
+  ok(!!c && `${c}` === '[object Object]', 'so it can still be turned into words like any object');
+  // The history a quest keeps, cut to its length as it is read.
+  const long = cleanBook({ ...emptyBook('char-1'), quests: { 'own:a': { state: 'done', history: Array.from({ length: 12 }, (_, i) => ({ run: i + 1, outcome: 'done', at: i })) } } })!;
+  const hist = long.quests!['own:a'].history;
+  ok(hist.length === BOOK_LIMITS.history && hist[0].run === 5 && hist.at(-1)?.run === 12, `a quest's history read in keeps its last ${BOOK_LIMITS.history} runs`);
+  // A quest's waypoint switched both ways, and read back.
+  const b = emptyBook('char-1');
+  const key = 'q:own:courier#deliver';
+  applyChanges(b, [{ k: 'qwpOn', key, on: true }]);
+  ok(b.qwpOn?.length === 1 && b.wpOff.length === 0, 'a quest\'s waypoint switched on by the player is remembered as switched on');
+  applyChanges(b, [{ k: 'qwpOn', key, on: false }]);
+  ok(b.qwpOn?.length === 0 && b.wpOff.length === 1, 'and switched off again, as switched off, the key never in both lists');
+  applyChanges(b, [{ k: 'qwpOn', key, on: true }]);
+  const back = cleanBook(JSON.parse(bookText(b)))!;
+  ok(back.qwpOn?.[0] === key && back.wpOff.length === 0 && cleanBook({ ...emptyBook('x'), qwpOn: [key, key, 'nonsense'] })!.qwpOn?.length === 1, 'and read back as it was written, deduplicated and checked');
+}
+{
+  // The server: a book offered with such sections is taken without them, and the server answers rather than falling over.
+  const stories = new Stories({ write: (rec: object) => applyStory(stories.data, rec), now: () => 1000 });
+  const line = { id: 7, character: 'c-proto', keep: 'browser' };
+  const asked = stories.hear(line, { t: 'story', do: 'sync', has: 1, base: 0, local: 1, known: 0 });
+  ok(asked.ok && asked.tell[0]?.msg.do === 'want', 'a browser whose book the server has never seen is asked for it');
+  const offered = { ...emptyBook('c-proto'), local: 1, valueOf: 1, hasOwnProperty: 1, toString: 1, isPrototypeOf: 1, waypoints: [wp('w1')], nextWp: 2 };
+  let answer: { ok: boolean; take?: string; tell: { msg: Record<string, unknown> }[] } | null = null;
+  let threw = '';
+  try {
+    answer = stories.hear(line, { t: 'story', do: 'offer', id: 1, n: 0, of: 1, part: bookText(offered), known: 0 });
+  } catch (e) {
+    threw = String(e);
+  }
+  const kept = stories.bookOf('c-proto') as Record<string, unknown> | null;
+  ok(!threw && !!answer && answer.ok && answer.take === 'browser' && !!kept && (kept.waypoints as unknown[]).length === 1, `an offered book carrying valueOf, hasOwnProperty, toString and isPrototypeOf is taken, not thrown on (${threw || answer?.take})`);
+  ok(!!kept && ['valueOf', 'hasOwnProperty', 'toString', 'isPrototypeOf'].every((n) => !Object.prototype.hasOwnProperty.call(kept, n)), 'and is written down without them');
+}
+{
+  // A world read back from its file: the books' own tables come back with no prototype, as a live one has.
+  const dir = mkdtempSync(join(tmpdir(), 'swg-story-readback-'));
+  try {
+    const quiet = { saveEvery: 0, log: () => {} };
+    const a = openStore({ dir, epoch: 1000, ...quiet });
+    const book = {
+      ...emptyBook('c-back'),
+      flags: { 'test.a': 1 },
+      paid: { 'test:a#1#s': { at: 5, by: 'server' } },
+      quests: { 'test:a': { state: 'active', run: 1, at: 1, completions: 0, defRev: 1, defHash: '', steps: { s: { state: 'active', n: 0, at: 1 } }, history: [] } },
+    };
+    a.change({ t: 'storyBook', id: 'c-back', book });
+    a.saveNow();
+    a.close();
+    // An older server wrote a book with such a section into its log, which this one must still start from.
+    appendFileSync(join(dir, 'world.log'), `${JSON.stringify({ t: 'storyBook', id: 'c-old', book: { ...emptyBook('c-old'), valueOf: 1, toString: 'x' }, q: 999999, at: 6 })}\n`);
+    let threw = '';
+    let b: ReturnType<typeof openStore> | null = null;
+    try {
+      b = openStore({ dir, epoch: 9999, ...quiet });
+    } catch (e) {
+      threw = String(e);
+    }
+    ok(!threw && !!b, `a server starts from a log holding a book an older server wrote with a section named valueOf (${threw || 'started'})`);
+    const back = b!.data.stories['c-back'] as StoryBook;
+    ok(Object.getPrototypeOf(back.flags) === null && Object.getPrototypeOf(back.paid) === null && Object.getPrototypeOf(back.quests) === null && Object.getPrototypeOf(back.quests!['test:a'].steps) === null, 'a book read back from the snapshot has its flags, rewards, quests and steps as tables with no prototype');
+    const ctx = { now: 0, char: 'c-back', payer: 'server' as const };
+    ok(!evalCond({ flag: 'toString', set: true }, back, ctx) && evalCond({ flag: 'test.a', set: true }, back, ctx) && !evalCond({ step: ['test:a', 'toString'], is: 'active' }, back, ctx), 'so a flag called toString reads unset on the server\'s copy, as it does on the browser\'s');
+    const raw = JSON.parse(JSON.stringify(book)) as StoryBook;
+    ok(!evalCond({ flag: 'toString', set: true }, raw, ctx) && whyNot(raw, { k: 'paid', key: 'toString', at: 1, by: 'server' }) === null, 'and even a book nobody cleaned answers the rules only from its own keys');
+    ok(!Object.prototype.hasOwnProperty.call(b!.data.stories['c-old'], 'valueOf'), 'and the older server\'s odd section is dropped as the book is read');
+    b!.close();
+    // The stories take a world handed to them the same way, whoever read it.
+    const handed = new Stories().load({ stories: JSON.parse(JSON.stringify({ 'c-back': book })), storyArchive: JSON.parse(JSON.stringify({ 'c-back': [book] })) });
+    const mine = handed.bookOf('c-back') as StoryBook;
+    const put = handed.data.storyArchive['c-back'][0] as StoryBook;
+    ok(Object.getPrototypeOf(mine.flags) === null && Object.getPrototypeOf(mine.quests!['test:a'].steps) === null && Object.getPrototypeOf(put.paid) === null, 'and so does the stories\' own copy of a world handed to them, archive and all');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // ---- the change counter's mark --------------------------------------------------------------------------

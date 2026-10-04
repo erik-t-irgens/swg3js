@@ -1,0 +1,10 @@
+// The mission terminal the snapshot already places in that square (raw 3475.7, -4694.1): a story object
+// is a thing the world stands, picked by its template nearest a point, and never a model loaded for it.
+{
+  "id": "test-terminal",
+  "world": "tatooine",
+  "template": "object/tangible/terminal/shared_terminal_mission.iff",
+  "near": [3476, -4694],
+  "reach": 3,
+  "label": "TEST TERMINAL",
+}

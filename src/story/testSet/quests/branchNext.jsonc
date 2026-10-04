@@ -1,0 +1,23 @@
+// Branching by a flag: when the signal comes, `next` follows every edge whose condition holds, so the
+// quest ends `high` with the flag at 2 or more and `low` below it.
+{
+  "id": "branchNext",
+  "title": "TEST: a fork in the road",
+  "repeat": { "every": "always" },
+  "givers": [{ "kind": "debug" }],
+  "start": ["fork"],
+  "steps": {
+    "fork": {
+      "type": "signal",
+      "signal": "debug:test-branch",
+      "objective": "TEST: take the fork",
+      "next": [
+        { "to": "high", "when": "flag(test.branch) >= 2" },
+        { "to": "low", "when": "!flag(test.branch) || flag(test.branch) < 2" },
+      ],
+    },
+    "high": { "type": "end", "outcome": "high" },
+    "low": { "type": "end", "outcome": "low" },
+  },
+  "outcomes": { "high": {}, "low": {} },
+}

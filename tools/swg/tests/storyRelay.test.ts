@@ -294,6 +294,20 @@ if (typeof WebSocket === 'undefined') {
     await paidBy.offer({ ...aBook('c-paid', ['Paid']), paid: { 'own:a#1#done': { at: 5 }, 'own:b#1#done': { at: 6, by: 'server' }, 'own:c#1#done': { at: 7, by: 'browser' } } }, 24000);
     const paidRows = (paidBy.book()?.book.paid ?? {}) as Record<string, { by?: string }>;
     ok(paidBy.book()?.take === 'browser' && paidRows['own:a#1#done']?.by === 'browser' && paidRows['own:c#1#done']?.by === 'browser' && paidRows['own:b#1#done']?.by === 'server', 'a taken book\'s rewards the browser paid are marked as the browser\'s, and one the server paid keeps saying so');
+    // A book carrying sections named for what every object already has: looked up among the cleaners, these
+    // once found the language's own methods, called them, and threw out of the relay for everybody.
+    const odd = await open('Bossk', 'c-odd');
+    odd.sync(1, 1);
+    await settle();
+    await odd.offer({ ...aBook('c-odd', ['Odd']), valueOf: 1, hasOwnProperty: 1, toString: 1, isPrototypeOf: 1 }, 24000);
+    const oddBook = odd.book();
+    let up = false;
+    try {
+      up = typeof (await status()).stories.books === 'number';
+    } catch {
+      up = false;
+    }
+    ok(up && oddBook?.take === 'browser' && oddBook.book.waypoints.length === 1 && !['valueOf', 'hasOwnProperty', 'toString', 'isPrototypeOf'].some((n) => Object.prototype.hasOwnProperty.call(oddBook.book, n)), 'a book offered with sections called valueOf, hasOwnProperty, toString and isPrototypeOf is taken without them, and the relay is still there');
 
     // ---- only a line that holds the character speaks for it ---------------------------------------------------
     const stranger = await open('Greedo', '', { claim: false });

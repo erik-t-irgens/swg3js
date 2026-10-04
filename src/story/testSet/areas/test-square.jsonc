@@ -1,0 +1,8 @@
+// A small circle of open street in Mos Eisley, round the mission terminal the snapshot places at raw
+// (3475.7, -4694.1). Raw frame, as every planet place in a story is.
+{
+  "id": "test-square",
+  "world": "tatooine",
+  "shape": { "kind": "circle", "c": [3476, -4694], "r": 12 },
+  "label": "TEST SQUARE",
+}
