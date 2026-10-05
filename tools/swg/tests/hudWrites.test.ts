@@ -8,7 +8,8 @@
 //
 // What is pinned here: a frame in which nothing has changed writes nothing at all; a bar moves by a
 // transform and never by a width; the prompt and the weather note are compared against what was
-// written and never read back off the element; a rebuild of the slot row counts exactly as many
+// written and never read back off the element; the nearby line is written when its name changes and
+// never on a clock; a rebuild of the slot row counts exactly as many
 // writes as it makes; the invented steps take only the names they know; and each class keeps one
 // slot array for its life, refilled when the loadout is set.
 //
@@ -251,6 +252,53 @@ count.transform = 0;
   });
   ok(note === 2, `the weather note is written once, text and hidden (wrote ${note})`);
   ok(count.readText === 0, `and its element is never read back either (${count.readText} reads)`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The nearby line, which has a line of its own at the foot of the corner now that the coordinates sit
+// over the minimap: written when the name changes and at no other time, not on the clock that writes
+// `/loc` four times a second; and `/loc` itself, which no longer carries the name. A display of its own,
+// on a clock of the test's own (`performance.now` stood in for), so the four-times-a-second line comes
+// exactly when the test says and never in the middle of a count; and its root kept, so what each line
+// says can be read as well as how often it was written.
+{
+  let root: any = null;
+  const parent = makeEl();
+  parent.appendChild = (k: any) => {
+    root = k;
+    return k;
+  };
+  const realNow = performance.now;
+  let t = realNow.call(performance);
+  Object.defineProperty(performance, 'now', { value: () => t, configurable: true, writable: true });
+  try {
+    const h2 = new Hud(parent);
+    h2.setKit(kit);
+    const nearbyEl = root.querySelector('.hud-nearby');
+    const locEl = root.querySelector('.loc');
+    /** One frame, the clock held where it is unless told to move. */
+    const step = (name: string, ms = 0) => {
+      t += ms;
+      h2.update(0.016, 1234.4, -5.6, 7.2, kit, 98.799, 100, '12:00', name, false);
+    };
+    // Settled first, the clock running: the first frames write the bars, the ghosts ease, the line clock fires.
+    for (let i = 0; i < 120; i++) step('none', 16);
+    step('none', 300);
+    const quiet = writes(() => { for (let i = 0; i < 30; i++) step('none'); });
+    ok(quiet === 0, `held still, the display writes nothing (${quiet})`);
+    const before = h2.stats().writesNow;
+    ok(writes(() => step('Bantha')) === 1 && nearbyEl.textContent === 'nearby: Bantha', `a new name nearby is one write, and the line says it (${nearbyEl.textContent})`);
+    ok(h2.stats().writesNow - before === 1, "and the display counts it, which is the figure `__debug.hud()` reads");
+    ok(writes(() => { for (let i = 0; i < 30; i++) step('Bantha'); }) === 0, 'and the same name again is none');
+    // The line clock comes round with a name nearby: `/loc` is the place and nothing else.
+    step('Bantha', 300);
+    ok(locEl.textContent === '/loc 1234, -6, 7', `and the /loc line says where you are and carries no name (${locEl.textContent})`);
+    const before2 = h2.stats().writesNow;
+    ok(writes(() => step('')) === 1 && nearbyEl.textContent === '', 'and the plate over a head taking over empties the line with one write');
+    ok(h2.stats().writesNow - before2 === 1, 'counted by the display as well');
+  } finally {
+    Object.defineProperty(performance, 'now', { value: realNow, configurable: true, writable: true });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

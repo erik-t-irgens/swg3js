@@ -14,6 +14,7 @@ import type { Physics } from '../core/physics';
 import type { Garage, VehicleDef } from '../vehicles/garage';
 import type { ResolvedFit } from '../vehicles/shipFit';
 import type { Vehicle } from '../vehicles/vehicle';
+import { WING_AUTO } from '../vehicles/wings.ts';
 import type { FormationName, NpcTypeDef } from './combatData';
 import { ShipContact, type ShipContacts } from './contacts';
 import type { ShipFaction } from './factions';
@@ -315,6 +316,9 @@ export class NpcShipManager {
       v.setGhost(false);
       v.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
       v.group.quaternion.copy(q);
+      // Its pilot's hand on the wings before the launch snaps them, so a patrol arrives with them shut (the brain, made
+      // just after, opens them when it takes a target); under the 'flight' rule the flight rule has them, as before.
+      v.wings.brain = WING_AUTO.npc === 'target' ? false : null;
       v.launch(LAUNCH_SHARE * v.spec.maxSpeed * (this.deps.space ? 2 : 1));
       const ship: NpcShip = { vehicle: v, contact, brain: null as unknown as NpcBrain, type, group, slot: group.members.length, ready: true, paused: !this.simulating };
       ship.brain = new NpcBrain(ship, rng);

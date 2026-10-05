@@ -198,6 +198,45 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
 }
 
 // ---------------------------------------------------------------------------------------------
+// The top-left corner. Its plate and the planet's tagline are gone everywhere, in space too, and what
+// stands there now -- the minimap's face, the world's name and the coordinates laid over its circle, the
+// nearby line, the bare name and `/loc` line with their halo -- is held to the palette like every panel:
+// `hud.css` as a whole still carries one literal of its own elsewhere, so the minimap's section of it is
+// what is read here, together with the rules `style.css` gives the corner's lines.
+{
+  const hudTs = readFileSync(new URL('../../../src/ui/hud.ts', import.meta.url), 'utf8');
+  const style = readFileSync(new URL('../../../src/style.css', import.meta.url), 'utf8');
+  ok(!/planet-tag|planetTag|\.tagline/.test(hudTs) && !/\.planet-tag\b/.test(style), "the corner no longer carries the planet's tagline, as an element, a field or a rule");
+  const hudCss = readFileSync(new URL('../../../src/ui/hud.css', import.meta.url), 'utf8');
+  const from = hudCss.indexOf('/* --- the minimap');
+  const section = from < 0 ? '' : hudCss.slice(from, hudCss.indexOf('/* ---', from + 10)).replace(/\/\*[\s\S]*?\*\//g, '');
+  ok(section.includes('.hud-mm-name') && section.includes('.hud-mm-loc') && section.includes('.hud-nearby') && section.includes('#hud .top-left'), "the minimap's section of hud.css holds the corner's new rules");
+  const css = style.replace(/\/\*[\s\S]*?\*\//g, '');
+  const open = css.indexOf(':root');
+  const declared = new Set([...css.slice(open, css.indexOf('}', open)).matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  const anywhere = new Set([...`${css}\n${hudCss}`.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  const [nameBlock, locBlock] = ['.planet-name', '.loc'].map((s) => new RegExp(`(?:^|\\n)${s.replace('.', '\\.')}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? '');
+  const rules = `${section}\n${nameBlock}\n${locBlock}`;
+  const typed = [...rules.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g)].map((m) => m[0]);
+  const strays = [...new Set([...rules.matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/g)].map((m) => m[1]).filter((n) => !declared.has(n) && !anywhere.has(n)))];
+  const colours = [...rules.matchAll(/(?:^|[;{\s])(?:color|background|text-shadow|border(?:-[a-z]+)?)\s*:\s*([^;{}]+)/g)].flatMap((m) => [...m[1].matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/g)].map((v) => v[1]));
+  const offPalette = [...new Set(colours.filter((n) => !declared.has(n)))];
+  ok(typed.length === 0 && strays.length === 0 && offPalette.length === 0, `and those rules, and the bare name's and /loc line's, wear the palette's names alone${typed.length ? `: typed ${typed.join(', ')}` : ''}${strays.length ? `: reads ${strays.join(', ')}` : ''}${offPalette.length ? `: colours from ${offPalette.join(', ')}` : ''}`);
+  const halo = (block: string) => /text-shadow\s*:[^;]*var\(--void\)/.test(block);
+  ok(halo(nameBlock) && halo(locBlock), "and the bare name and /loc line stand on a halo of the palette's darkest, with no plate behind them");
+  // The lines over the circle and the nearby line under it stand on the same halo: over a noon dune or a
+  // pale map picture a line with none cannot be read.
+  const ruleOf = (text: string, selector: string) => new RegExp(`(?:^|\\n)${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`).exec(text)?.[1] ?? '';
+  const bare = ['.hud-mm-name', '.hud-mm-loc', '.hud-nearby'].filter((s) => !halo(ruleOf(section, s)));
+  ok(bare.length === 0, `and so do the name and coordinates over the circle and the nearby line${bare.length ? `: no halo on ${bare.join(', ')}` : ''}`);
+  // The lines over the circle paint over it because they come after it in the tree, and for no other
+  // reason: a z-index on any of them, or on the canvas, would move them into another stacking order with
+  // nothing on the screen to say so, which the overlay's own rule forbids everywhere.
+  const stacked = /z-index/.test(rules);
+  ok(!stacked, "and nothing in the minimap's rules or the corner's lines carries a z-index");
+}
+
+// ---------------------------------------------------------------------------------------------
 // The stylesheets the TypeScript files inject. The group's panel, the trade window, the chat line, the
 // space map, the galaxy and the roster each carry their rules as a string and put them in a <style>
 // of their own, which the block above never reads -- and the group's panel had hand-typed `rgba()`
@@ -263,7 +302,17 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
   ok(sheetFiles.has('ui/debugMenu.ts'), "the debug menu's stylesheet is among them");
   ok(failures.length === 0, `and every one is held to the stylesheet's own rule${failures.length ? `: ${failures.join(' || ')}` : ''}`);
   const group = readFileSync(new URL('ui/groupUi.ts', src), 'utf8');
-  ok(!/rgba?\(|#[0-9a-fA-F]{6}\b/.test(/const CSS = `([\s\S]*?)`;/.exec(group)?.[1] ?? 'rgba('), "the group's panel, whose hand-typed colours started this check, has none left");
+  const groupSheet = /const CSS = `([\s\S]*?)`;/.exec(group)?.[1] ?? null;
+  ok(!/rgba?\(|#[0-9a-fA-F]{6}\b/.test(groupSheet ?? 'rgba('), "the group's panel, whose hand-typed colours started this check, has none left");
+  // The roster and the waypoints are pages of the map window now, laid out in its list body: neither may
+  // carry a place, a backing of its own or a stacking order (the roster's `z-index: 6` went with its own
+  // window), or it would stand over the map's other tabs instead of in its own. The question and the
+  // chevrons, which stay over the world, are not the roster's and keep theirs.
+  const rosterRules = [...(groupSheet ?? '').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => /\.group-(panel|row)\b/.test(m[1]));
+  const placed = rosterRules.filter((m) => /z-index|position\s*:/.test(m[2])).map((m) => m[1].trim());
+  ok(groupSheet !== null && rosterRules.length >= 5 && placed.length === 0, `the roster's rules carry no z-index and no position of their own${placed.length ? `: ${placed.join(', ')}` : ''}`);
+  const waypointSheet = /const WAYPOINTS_CSS = `([\s\S]*?)`;/.exec(readFileSync(new URL('ui/waypointsUi.ts', src), 'utf8'))?.[1] ?? null;
+  ok(waypointSheet !== null && !/z-index|position\s*:\s*(absolute|fixed)/.test(waypointSheet), 'nor do the waypoints page\'s');
 }
 
 console.log(`\n${checks} checks passed`);

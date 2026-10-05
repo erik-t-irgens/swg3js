@@ -149,8 +149,16 @@ export const HUD_SIZES = {
   capW: 22,
   capH: 18,
   // --- the world's own places ---------------------------------------------------------------------
-  /** The minimap's circle, across, at the top left over the planet's name. */
+  /** The minimap's circle, across, at the top left. */
   minimap: 168,
+  /**
+   * The world's name over the top of the circle stands this far down from the canvas's top: under the
+   * mark for north, whose tip is on the rim three pixels in (`MINIMAP_TUNE.rimInsetPx`) and whose base is
+   * `northPx` (6) under that, with three to spare. Ours.
+   */
+  minimapNameTop: 12,
+  /** The coordinates over the foot of the circle stand this far up from the canvas's bottom. Ours. */
+  minimapLocBottom: 8,
   /** A waypoint's mark in the world: this far from its middle to each of its points. */
   waypointMark: 7,
   // --- the blocks --------------------------------------------------------------------------------
@@ -416,12 +424,15 @@ export function makeSpeedArc(): SpeedArc {
 /**
  * `speed`, `top` and `boostTop` in the same unit (the game's metres a second); `wingFactor` is the
  * chassis's `wing_open_speed_factor`, 1 where there is none. `boostTop` at or under `top` means no
- * booster, which is the case on most hulls.
+ * booster, which is the case on most hulls. `whole` is what the arc's end stands for: the hull's
+ * fastest whole and outside every nebula, so a top a nebula or a downed part has lowered sits below
+ * the end and the tick shows it; nought (or anything under the hull's own numbers) scales the arc to
+ * `top` and `boostTop` as they are now.
  */
-export function speedArc(speed: number, top: number, boostTop: number, wingFactor: number, out: SpeedArc): SpeedArc {
+export function speedArc(speed: number, top: number, boostTop: number, wingFactor: number, out: SpeedArc, whole = 0): SpeedArc {
   const from = HUD_SIZES.speedFrom;
   const to = HUD_SIZES.speedTo;
-  const full = Math.max(top, boostTop, 1e-6);
+  const full = Math.max(top, boostTop, whole > 0 ? whole : 0, 1e-6);
   const wing = wingFactor > 0 && wingFactor < 1 ? wingFactor : 1;
   out.share = clamp01(speed / full);
   out.from = from;
@@ -434,7 +445,8 @@ export function speedArc(speed: number, top: number, boostTop: number, wingFacto
   out.wingTo = out.topAngle;
   out.hasBoost = boostTop > top * HUD_SIZES.boostEpsilon;
   out.boostFrom = out.topAngle;
-  out.boostTo = to;
+  // To the end of the arc, unless the boost top too has been lowered under what the end stands for.
+  out.boostTo = boostTop >= full ? to : along(from, to, boostTop / full);
   return out;
 }
 

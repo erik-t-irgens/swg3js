@@ -304,6 +304,15 @@ function killHits(target: ReturnType<typeof statsFor>, damage: number): number {
   regenerate(c4, stats, false, true, 60);
   regenerate(c4, stats, true, false, 60);
   ok(c4.shield[0] === low4, 'regenerate: nothing with the generator or the reactor down');
+  const c4b = createCondition(stats);
+  const c4c = createCondition(stats);
+  for (const c of [c4b, c4c]) {
+    c.shield[0] = 0;
+    c.sinceHit = stats.shieldDelay;
+  }
+  regenerate(c4b, stats, true, true, 1);
+  regenerate(c4c, stats, true, true, 1, 0.5);
+  ok(c4b.shield[0] > 0 && near(c4c.shield[0], c4b.shield[0] * 0.5, 1e-9), "regenerate: a factor scales the rate (a nebula's hold on the shields)");
 
   // A refit keeps the shares.
   const c5 = createCondition(stats);
@@ -506,6 +515,63 @@ const boltAt = (damage: number, dir = new THREE.Vector3(0, 0, -1)) => ({ damage,
     const grew = process.memoryUsage().heapUsed - start;
     ok(grew < 64 * 1024, `1000 takeBolt calls leave the heap within 64 KB (${grew} bytes)`);
   } else console.log('skip 1000 takeBolt calls allocate nothing: run with node --expose-gc to measure');
+}
+
+// ---------------------------------------------------------------------------------------------
+// A nebula's hold on a ship: the spec written once on the way in and put back exactly on the way
+// out, the shields' recharge and the guns' refire slowed by it, and nothing at all outside one.
+{
+  const input = inputFor(tieFit, 'jedi_starfighter', 2, stockOf(tieFit));
+  const hull = stubHull();
+  // Count every write of the spec, field by field.
+  let writes = 0;
+  const raw = hull.spec;
+  hull.spec = new Proxy(raw, {
+    set(target, key, value) {
+      writes++;
+      (target as Record<string | symbol, unknown>)[key] = value;
+      return true;
+    },
+  });
+  const sc = new ShipCombat(hull, contactStub, input, null, null, null);
+  const fields = ['maxSpeed', 'boostSpeed', 'accel', 'brake', 'turnRate', 'inertia'] as const;
+  const plain = Object.fromEntries(fields.map((f) => [f, raw[f]]));
+  const plainInterval = sc.interval();
+  const fastest = Math.max(plain.maxSpeed, plain.boostSpeed);
+  ok(sc.fullSpeed === fastest, 'ShipCombat.fullSpeed: a whole hull outside every nebula is exactly as fast as its spec says, so the speed arc is what it always was');
+  const half = { engine: -0.05, reactor: -0.1, shields: -0.25 };
+  writes = 0;
+  ok(sc.setNebula(half) && writes > 0, 'ShipCombat.setNebula: a ship flying into a nebula has its spec written');
+  ok(sc.fullSpeed === fastest && raw.boostSpeed < fastest && raw.maxSpeed < plain.maxSpeed, "ShipCombat.fullSpeed: inside one the arc's end stays the whole hull's, so the lowered top shows as the tick moving down");
+  ok(near(sc.nebula.engine, 0.95) && near(sc.nebula.reactor, 0.81) && near(sc.nebula.shields, 0.5625), 'ShipCombat.setNebula: at a density of a half its engines, reactor and shields take 0.95, 0.81 and 0.5625');
+  const power = 1 - (1 - 0.8) * (1 - 0.81);
+  ok(near(raw.maxSpeed, plain.maxSpeed * 0.95 * power) && near(raw.turnRate, plain.turnRate * 0.95) && near(raw.accel, plain.accel * 0.95), "ShipCombat.setNebula: the engines' share takes every speed and turn, the reactor's the top speed too");
+  ok(near(sc.interval(), plainInterval * (1 - (1 - 1.6) * (1 - 0.81))), "ShipCombat.interval: the guns slow by the reactor's share of a reactor-down's slowing");
+  const once = writes;
+  ok(!sc.setNebula({ ...half }) && writes === once, 'ShipCombat.setNebula: the same nebula again writes nothing, so a ship staying in one costs nothing a step');
+  ok(!sc.setNebula({ engine: -0.05 + 1e-6, reactor: -0.1, shields: -0.25 }) && writes === once, 'ShipCombat.setNebula: nor does a change too small to matter');
+  ok(sc.setNebula({ engine: 0, reactor: 0, shields: 0 }), 'ShipCombat.setNebula: flying out writes it again');
+  ok(fields.every((f) => raw[f] === plain[f]) && sc.interval() === plainInterval, 'ShipCombat.setNebula: and every field of the spec, and the refire, are exactly what they were, to the bit');
+  ok(sc.nebula.engine === 1 && sc.nebula.reactor === 1 && sc.nebula.shields === 1, 'ShipCombat.setNebula: outside every nebula each factor is exactly one');
+  // The recharge: the reactor's share times the shields'.
+  const a = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  const b = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  b.setNebula(half);
+  for (const s of [a, b]) {
+    s.cond.shield[0] = 0;
+    s.cond.sinceHit = 1e9;
+    s.update(1, 0);
+  }
+  ok(a.cond.shield[0] > 0 && near(b.cond.shield[0], a.cond.shield[0] * 0.81 * 0.5625, 1e-9), "ShipCombat.update: inside a nebula the shields come back at the reactor's share times the shields' own");
+  // An engine down and a nebula together: both take their share.
+  const d = new ShipCombat(stubHull(), contactStub, input, null, null, null);
+  d.forceHit('engine', 1);
+  const downTop = d.hull.spec.maxSpeed;
+  ok(d.fullSpeed === fastest && downTop < fastest, 'ShipCombat.fullSpeed: an engine knocked down lowers the top and not what the arc is scaled to');
+  d.setNebula(half);
+  ok(near(d.hull.spec.maxSpeed, downTop * 0.95 * power), 'ShipCombat.setNebula: a ship with its engine down inside a nebula takes both');
+  d.setNebula({ engine: 0, reactor: 0, shields: 0 });
+  ok(d.hull.spec.maxSpeed === downTop, 'ShipCombat.setNebula: and out of it is back to its engine-down speed exactly');
 }
 
 // ---------------------------------------------------------------------------------------------

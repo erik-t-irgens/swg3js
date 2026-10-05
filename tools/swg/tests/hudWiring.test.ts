@@ -74,6 +74,36 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(main.includes('this.actions.setBindings(this.input.bindings)'), 'the action bar is given the bindings');
 }
 
+// --- the corner says where you are in the map's own frame -----------------------------------------
+// On a planet the `/loc` line and the coordinates over the minimap are the pair the map window reads
+// out: its point (the hull's place while you ride, fly or stand aboard, `mapPlace`, which the map's own
+// source reads too) in its raw frame about the layout centre. In space `/loc` is the game's frame and the
+// figure's own place, as it always was, which is what a story's place and a waypoint take there. What is
+// pinned is the call and the shape of each branch, not words somewhere before it: handed the game's
+// frame again, or with the two branches swapped, the line says the wrong numbers with no error anywhere.
+// The world's name over the circle is written wherever the corner's own is, or a travel would leave the
+// last world's name over the new map; and the minimap is handed the clock its coordinates keep their rate
+// on, or they freeze at the first pair they wrote.
+{
+  const calls = [...main.matchAll(/this\.hud\.update\(/g)].length;
+  ok(calls === 1, `the corner is updated from one place (${calls})`);
+  ok(/this\.hud\.update\(dt,\s*locX,\s*locAt\.y,\s*locZ,/.test(main), "the corner's /loc is handed the worked-out pair and that point's height, not the game's frame");
+  ok(/const locSpace = !!this\.world\.planet\?\.space;/.test(main), 'the branch is whether the world is a space zone');
+  ok(/const locAt = locSpace \? at : this\.mapPlace\(\);/.test(main), "on a planet the line reads the map's own point, in space the figure's");
+  ok(/const locX = locSpace \? locAt\.x : gameToRawX\(locC \? locC\.x : 0, locAt\.x\);/.test(main), "x: the game's frame in space, the planet's raw frame through the map's own function");
+  ok(/const locZ = locSpace \? locAt\.z : gameToRawZ\(locC \? locC\.z : 0, locAt\.z\);/.test(main), 'z: the same two branches');
+  const place = /private mapPlace\(\): THREE\.Vector3 \{([\s\S]*?)\n  \}/.exec(main)?.[1] ?? '';
+  ok(/const v = p\.mounted \?\? p\.piloting \?\? p\.aboard\?\.vehicle \?\? null;/.test(place) && /return v \? v\.pos : p\.worldPos;/.test(place), "the map's point is the hull's place while you ride, fly or stand aboard, the figure's otherwise");
+  const source = /\n\s+player: \(\) => \{([\s\S]*?)\n\s+\},/.exec(main.slice(main.indexOf('this.map = new MapUi(')))?.[1] ?? '';
+  ok(/const at = this\.mapPlace\(\);/.test(source), "and the map window's own arrow and line read that very point");
+  const step = /private stepMinimap\(\): void \{([\s\S]*?)this\.minimap\.update\(v\);/.exec(main)?.[1] ?? '';
+  ok(/const at = this\.mapPlace\(\);/.test(step) && /v\.x = gameToRawX\(c \? c\.x : 0, at\.x\);/.test(step) && /v\.z = gameToRawZ\(c \? c\.z : 0, at\.z\);/.test(step), "the minimap's middle, and its coordinates, are the same point in the same frame");
+  ok(/\n\s+v\.now = performance\.now\(\) \/ 1000;/.test(step), 'and the minimap is handed the clock its coordinates keep their rate on');
+  const planets = [...main.matchAll(/this\.hud\.setPlanet\(/g)].length;
+  const named = [...main.matchAll(/this\.hud\.setPlanet\(planet\);\s*this\.minimap\.setName\(planet\.name\);/g)].length;
+  ok(planets >= 2 && named === planets, `the minimap is told the world's name beside every setPlanet (${named} of ${planets})`);
+}
+
 // --- the two walks are off the frame path ---------------------------------------------------------
 // Both of these used to run on every frame for a readout written a few times a second. Each is now
 // behind a clock of its own; the shape checked is the clock, because that is what a later edit would
@@ -141,7 +171,7 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
 {
   const hud = pkg.scripts['test:hud'] ?? '';
   ok(hud.length > 0, 'there is a test:hud script');
-  for (const name of ['palette', 'hudMath', 'messages', 'shipStatus', 'hudWrites', 'hudSettings', 'promptRules', 'hudIcons', 'hudFeedback', 'hudPage', 'hudWiring']) {
+  for (const name of ['palette', 'hudMath', 'messages', 'shipStatus', 'hudWrites', 'hudSettings', 'promptRules', 'hudIcons', 'hudFeedback', 'hudPage', 'hudWiring', 'input', 'mapTabs']) {
     ok(hud.includes(`tests/${name}.test.ts`), `test:hud runs ${name}.test.ts`);
   }
   ok((pkg.scripts['test:all'] ?? '').includes('test:hud'), 'test:all runs test:hud');
@@ -211,9 +241,9 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
 {
   const { fillActions, newPromptActions, newPromptState, resetPromptState } = await import('../../../src/ui/promptRules.ts');
   const { keyLabel } = await import('../../../src/ui/hud.ts');
-  // The bindings, read out of the source: `src/core/input.ts` declares a class with a parameter
-  // property, which node will not strip, so it cannot be imported. A binding renamed there and not
-  // here leaves the bar with a cap it cannot resolve, and this is what fails instead of the screen.
+  // The bindings, read out of the source, as the rest of this file reads the game (`input.test.ts`
+  // imports the file itself and drives what it does with them). A binding renamed there and not here
+  // leaves the bar with a cap it cannot resolve, and this is what fails instead of the screen.
   const BINDINGS: Record<string, string[]> = (() => {
     const src = read('src/core/input.ts');
     const body = /export const DEFAULT_BINDINGS[^{]*\{([\s\S]*?)\n\};/.exec(src);
@@ -320,11 +350,13 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
 }
 
 // --- no default binding shares a panel's own raw key ----------------------------------------------
-// Two panels listen for a raw key code of their own, outside the bindings table and so outside the
-// Controls page: the group's panel and the trade window. A default binding on the same code opens two
-// things on one press, which is exactly what Y did the day the Waypoints window took it while the group
-// panel still listened for it. Both sides are read as text, the bindings because `src/core/input.ts`
-// declares a parameter property node will not strip, the tunes so nothing of the net layer is loaded.
+// One panel listens for a raw key code of its own, outside the bindings table and so outside the
+// Controls page: the trade window. A default binding on the same code opens two things on one press,
+// which is exactly what Y did the day the Waypoints window took it while the group's panel still
+// listened for it. The group's panel was the other such panel until its roster became a tab of the map:
+// its full stop is now the game's own `group` binding, and nothing else may hold it, nor may the roster
+// listen for any key of its own again. Both sides are read as text, as the rest of this file reads the
+// game, and the tunes so nothing of the net layer is loaded.
 {
   const src = read('src/core/input.ts');
   const body = /export const DEFAULT_BINDINGS[^{]*\{([\s\S]*?)\n\};/.exec(src);
@@ -335,21 +367,38 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
       byCode.set(code, [...(byCode.get(code) ?? []), m[1]]);
     }
   }
-  const rawKey = (file: string, tune: string): string => {
-    const m = new RegExp(`export const ${tune} = \\{[\\s\\S]*?\\n\\s*panelKey: '([A-Za-z0-9]+)'`).exec(read(file));
-    assert.ok(m, `${tune}.panelKey was found in ${file}`);
-    return m[1];
-  };
-  const group = rawKey('src/ui/groupUi.ts', 'GROUP_UI_TUNE');
-  const trade = rawKey('src/ui/tradeUi.ts', 'TRADE_UI_TUNE');
-  ok(!byCode.has(group), `the group panel's raw key (${group}) is no default binding${byCode.has(group) ? `: ${byCode.get(group)!.join(', ')} take it` : ''}`);
+  const group = read('src/ui/groupUi.ts');
+  const groupCode = group.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  ok(!/panelKey/.test(groupCode) && !/'Period'/.test(groupCode) && !/addEventListener\??\.?\(\s*'keydown'/.test(groupCode), "the group's roster listens for no raw key of its own: no panel key, no full stop, no keydown");
+  ok((byCode.get('Period') ?? []).join() === 'group', `the full stop is the group binding's and nobody else's (${(byCode.get('Period') ?? []).join(', ') || 'nobody'})`);
+  const tradeKey = new RegExp(`export const TRADE_UI_TUNE = \\{[\\s\\S]*?\\n\\s*panelKey: '([A-Za-z0-9]+)'`).exec(read('src/ui/tradeUi.ts'));
+  assert.ok(tradeKey, 'TRADE_UI_TUNE.panelKey was found in src/ui/tradeUi.ts');
+  const trade = tradeKey[1];
   // The one pair that stands on purpose, from before this check: T fast-forwards the day and also brings
   // back a trade window left open. Fast-forward is the developer's (it runs only while play simulates)
   // and the trade's T acts only while a trade stands, so the two have shared it since the trade was
   // built. Anything else on the trade's key fails.
   const tradeTakers = (byCode.get(trade) ?? []).filter((a) => !(trade === 'KeyT' && a === 'fastForward'));
   ok(tradeTakers.length === 0, `the trade window's raw key (${trade}) is no default binding but the day's fast-forward, which has always shared it${tradeTakers.length ? `: ${tradeTakers.join(', ')} take it` : ''}`);
-  ok(group !== trade, 'and the two panels do not share one');
+}
+
+// --- J and O, and the raw keys at a ship's controls ------------------------------------------------
+// At a ship's controls J is the engine cut's raw key (and the set-down's in space) and O the ultra
+// cruise's, read with `justPressed` outside the bindings table. The journal (J) and the pick-up (O) are
+// bindings on the same two keys, so both must stand aside there, or every cruise press would also try to
+// pick a prop up and say there is nothing of yours near enough. Both gates are read here, last in their
+// conditions, and the two raw keys are read from the files they live in.
+{
+  ok(/export const CRUISE_KEY = 'KeyO'/.test(read('src/space/cruise.ts')) && /export const CUT_ENGINES_KEY = 'KeyJ'/.test(read('src/vehicles/landing.ts')), 'O is the ultra cruise\'s raw key and J the engine cut\'s, at a ship\'s controls');
+  const atControlsAt = main.indexOf('const atControls = !!(player.mounted ?? player.piloting)?.spec.ship;');
+  ok(atControlsAt > 0, 'whether the player is at a ship\'s controls is worked out once in the key block');
+  const journal = /if \(input\.pressedAction\('journal'\)[^\n]*&& !atControls\) this\.toggleJournal\(\);/.exec(main);
+  ok(!!journal && journal.index > atControlsAt, 'the journal stands aside at a ship\'s controls');
+  const take = /else if \(takeKey && !this\.placing[^\n]*&& !atControls\) this\.takeNearestProp\(\);/.exec(main);
+  ok(!!take && take.index > atControlsAt, 'and so does the pick-up, after the controls are known');
+  // Nor with the map up: the Waypoints window that used to stand in the way was a panel, and is a tab of
+  // the map now, so the pick-up asks for the map itself or it takes a prop into hand behind it.
+  ok(!!take && /!this\.anyPanelOpen\(\) && !this\.map\.open/.test(take[0]), 'and the pick-up stands aside with the map open, on any of its tabs');
 }
 
 console.log(`\n${checks} checks passed`);

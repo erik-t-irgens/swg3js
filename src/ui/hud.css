@@ -609,9 +609,18 @@
 .hud-trk-line.done { color: var(--muted); text-decoration: line-through; }
 
 /* --- the minimap -----------------------------------------------------------------------------------
- * A circle of the planet's own picture, first in the top-left panel and over the planet's name, with the
- * name of a city fading in under it. Its canvas is drawn only when what it shows has moved; the city's
- * fade is one animation the browser runs itself, written into its own sheet from `CITY_TUNE`. */
+ * A circle of the planet's own picture, first in the top-left block, with the world's name over the top
+ * of the circle, your coordinates over its foot and the name of a city fading in under it. Its canvas is
+ * drawn only when what it shows has moved; the city's fade is one animation the browser runs itself,
+ * written into its own sheet from `CITY_TUNE`.
+ *
+ * The block itself wears no plate, here or in space: the panel's background, border, padding and blur
+ * come off it, and every line in it stands on the same halo of the palette's darkest that the city's
+ * name wears. While the minimap shows, the block's own name and `/loc` lines stand aside for the ones
+ * over the circle; the nearby line stays, under the circle. */
+#hud .top-left { background: none; border: 0; padding: 0; backdrop-filter: none; }
+#hud.minimap-on .planet-name,
+#hud.minimap-on .loc { display: none; }
 .hud-minimap-wrap {
   display: flex;
   flex-direction: column;
@@ -619,11 +628,60 @@
   margin-bottom: calc(6px * var(--hud-scale));
 }
 .hud-minimap-wrap[hidden] { display: none; }
+/* The circle's face: the canvas, and the two lines over it. They come after the canvas and carry no
+ * z-index, so they paint over it in tree order; the canvas never draws a word. */
+.hud-minimap-face { position: relative; }
 .hud-minimap {
   display: block;
   width: calc(168px * var(--hud-scale));
   height: calc(168px * var(--hud-scale));
   border-radius: 50%;
+}
+/* The world's name, under the mark for north (`HUD_SIZES.minimapNameTop`), and the coordinates, the map
+ * window's own pair, over the foot (`HUD_SIZES.minimapLocBottom`). */
+.hud-mm-name {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(12px * var(--hud-scale));
+  text-align: center;
+  white-space: nowrap;
+  font-family: var(--hud-font);
+  font-stretch: var(--hud-stretch);
+  font-size: calc(12px * var(--hud-scale));
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  color: var(--accent);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+.hud-mm-loc {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(8px * var(--hud-scale));
+  text-align: center;
+  white-space: nowrap;
+  font-family: var(--hud-font);
+  font-variant-numeric: tabular-nums;
+  font-size: calc(11px * var(--hud-scale));
+  line-height: 1.2;
+  color: var(--ink);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
+}
+/* The nearest living thing's name while the plate over a head is off: the block's last line, of fixed
+ * height whether it holds a name or not, so a name coming and going never moves the help block. Its gap
+ * above is padding, not margin: a margin would collapse into the minimap's wrap's own and the sum the
+ * help block is placed by would be three pixels out. */
+.hud-nearby {
+  height: 1.45em;
+  line-height: 1.45em;
+  white-space: nowrap;
+  padding-top: calc(3px * var(--hud-scale));
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: calc(10px * var(--hud-scale));
+  color: var(--ink);
+  text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
 }
 /* One line of fixed height, so a name coming and going never moves the panel, and the help block below
  * can be placed by arithmetic: 1.3em of 13px is 16.9px at scale 1. */
@@ -640,11 +698,12 @@
   text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void);
   opacity: 0;
 }
-/* The help block stands under the panel, which the minimap has made taller by the whole of its wrap, all
- * of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`), the name's margin (3) and line (16.9),
- * and the wrap's own margin (6), 193.9 rounded up to 194. 92px is where the help block stands without it
- * (`.help` in style.css), and `hudMath.test.ts` adds these up again from this file. */
-#hud.minimap-on .help { top: calc(92px + 194px * var(--hud-scale)); }
+/* With the minimap up the help block stands under the top-left block's top (12, `.top-left` in style.css)
+ * and everything the block then holds, all of it on the HUD scale: the circle (168, `HUD_SIZES.minimap`),
+ * the city name's margin (3) and line (16.9), the wrap's own margin (6), and the nearby line's padding (3)
+ * and line (14.5), 211.4 rounded up to 212. The block's own name and `/loc` lines are hidden then and take
+ * no room. `hudMath.test.ts` adds these up again from both files. */
+#hud.minimap-on .help { top: calc(12px + 212px * var(--hud-scale)); }
 
 /* --- a rising damage number (a setting, off by default) -------------------------------------------- */
 .hud-dmg {

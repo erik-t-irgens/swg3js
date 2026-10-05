@@ -1,18 +1,27 @@
-// The minimap: the planet's own map picture in a circle at the top left, centred on you, with your arrow
-// and every waypoint that is switched on as a point in its own colour, and under it the name of a city
-// as you walk into one.
+// The minimap: the planet's own map picture in a circle at the top left, centred on you, with your arrow,
+// every waypoint that is switched on as a point in its own colour and a mark for north on its rim; the
+// world's name over the top of the circle and your coordinates over its foot; and under it the name of a
+// city as you walk into one.
 //
-// It is a small 2D canvas of its own, the first child of the display's top-left panel, above the
-// planet's name. Not the overlay: the overlay is the first child of the interface layer and every panel
-// paints over it, the top-left one included; and not WebGL: nothing here may compile anything. The
-// picture is the map window's (`mapImages.ts`), decoded once per pack and shared, which the rules allow:
-// it is the client's map of the world, not its interface art. At the default reach it is blurry -- the
-// pictures are sixteen metres to the pixel -- and that is what the picture is.
+// It is a small 2D canvas of its own, the first child of the display's top-left block, and while it shows
+// it stands in for that block's own name and `/loc` lines, which the stylesheet hides. Not the overlay:
+// the overlay is the first child of the interface layer and every panel paints over it, the top-left one
+// included; and not WebGL: nothing here may compile anything. The picture is the map window's
+// (`mapImages.ts`), decoded once per pack and shared, which the rules allow: it is the client's map of
+// the world, not its interface art. At the default reach it is blurry -- the pictures are sixteen metres
+// to the pixel -- and that is what the picture is.
+//
+// The name and the coordinates are words, so they are the page's and never the canvas's: two elements
+// after the canvas in one box (`.hud-minimap-face`), placed over it by the stylesheet with no `z-index`,
+// which paint over it because they come later in the tree. The coordinates are the map window's own pair
+// (the snapshot's frame, which is the frame the minimap is handed), rounded, and are written only when
+// that rounded pair has changed and at most `locHz` times a second.
 //
 // It is drawn only when something it shows has changed: you have moved `movePx` of a pixel across it or
 // turned `turnDeg`, the waypoints have changed, the reach or which way is up has changed, or the picture
-// has arrived. A still player costs it nothing at all, and `__debug.minimap().redraws` is how that is
-// checked. North is up unless the setting turns it with you, in which case your arrow is what is up.
+// has arrived. A still player costs it nothing at all, neither a drawing nor a write, and
+// `__debug.minimap().redraws` and `writes` are how that is checked. North is up unless the setting turns
+// it with you, in which case your arrow is what is up and the mark for north goes round the rim.
 //
 // It stands aside in space, in the dungeon copies and on any world whose pack has no picture; indoors it
 // keeps the planet's picture, which is still where you are. The city name is part of it and goes with it.
@@ -43,14 +52,26 @@ export const MINIMAP_TUNE = {
   turnDeg: 1,
   /** The picture's edge stands this far inside the canvas, and an out-of-reach waypoint is clamped to it. */
   rimInsetPx: 3,
+  /**
+   * The coordinates over the foot of the circle are written at most this many times a second, and only
+   * when the rounded pair has moved: a walk changes it nearly every frame, and a line that cannot be read
+   * that fast is not worth the writes. `/loc` in the corner has always gone at four.
+   */
+  locHz: 4,
+  /** The mark for north: from its tip on the rim to its base, and half its base across, in pixels at scale 1. */
+  northPx: 6,
+  northHalfPx: 4,
 };
+
+/** The coordinates' rate is never let under this, so a rate tried at nought cannot stop them for good. */
+const LOC_HZ_FLOOR = 0.5;
 
 /** Move any of those, each held to something that makes sense; the answer is the table as it stands. */
 export function tuneMinimap(o: Partial<typeof MINIMAP_TUNE>): typeof MINIMAP_TUNE {
   const t = MINIMAP_TUNE as Record<string, number>;
   for (const k of Object.keys(MINIMAP_TUNE) as (keyof typeof MINIMAP_TUNE)[]) {
     const v = o[k];
-    if (typeof v === 'number' && Number.isFinite(v)) t[k] = Math.max(0, v);
+    if (typeof v === 'number' && Number.isFinite(v)) t[k] = Math.max(k === 'locHz' ? LOC_HZ_FLOOR : 0, v);
   }
   return MINIMAP_TUNE;
 }
@@ -189,6 +210,8 @@ export interface MinimapView {
   /** Metres from the middle to the rim, and whether north is up. */
   range: number;
   northUp: boolean;
+  /** Seconds on a clock that only goes forward, which the coordinates' rate is kept on. */
+  now: number;
 }
 
 /** A picture as `mapImages.ts` keeps it. */
@@ -201,6 +224,9 @@ export class Minimap {
   readonly root: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D | null;
+  /** The world's name over the top of the circle, and the coordinates over its foot: page text, not canvas text. */
+  private readonly nameEl: HTMLElement;
+  private readonly locEl: HTMLElement;
   private readonly city: HTMLElement;
   private readonly hud: HTMLElement;
   private readonly sheet: HTMLStyleElement | null;
@@ -221,17 +247,32 @@ export class Minimap {
   private cityClass: 'a' | 'b' = 'b';
   /** Whether the label wears a fade (and a name) just now, or is back to its plain, unseen self. */
   private cityOn = false;
+  /** The world's name as last written, which the console reads too. */
+  nameShown = '';
+  /**
+   * The coordinates as last written, rounded (NaN: nothing yet), and when, in the view's seconds. They
+   * are compared as numbers, so a frame whose rounded pair has not moved builds no string at all.
+   */
+  private locX = Number.NaN;
+  private locZ = Number.NaN;
+  private locAt = Number.NEGATIVE_INFINITY;
   /** Counts, for the console: redraws since it was made, and DOM writes this second and the last. */
   redraws = 0;
   dots = 0;
   private writes = 0;
   private lastWrites = 0;
+  /** The coordinates' own writes, this second and the last: a share of `writes`, counted apart for the console. */
+  private locWrites = 0;
+  private lastLocWrites = 0;
   private windowStart = Date.now();
   cityShown = '';
+  /** The coordinates as they stand over the foot of the circle, for the console. */
+  locShown = '';
 
   /**
-   * `panel` is the display's top-left panel, which the minimap goes into first; `hud` is the display's
-   * root, which wears `minimap-on` while it shows so the help block below can move out of its way.
+   * `panel` is the display's top-left block, which the minimap goes into first; `hud` is the display's
+   * root, which wears `minimap-on` while it shows, so the block's own name and `/loc` lines stand aside
+   * for the ones over the circle and the help block below can move out of its way.
    */
   constructor(panel: HTMLElement, hud: HTMLElement, picture: (pack: string) => MinimapPicture | null | undefined) {
     this.hud = hud;
@@ -239,11 +280,22 @@ export class Minimap {
     this.root = document.createElement('div');
     this.root.className = 'hud-minimap-wrap';
     this.root.hidden = true;
+    // The circle's face: the canvas, then the two lines laid over it. They come after it in the tree and
+    // carry no z-index, so they paint over it; the canvas never draws a word.
+    const face = document.createElement('div');
+    face.className = 'hud-minimap-face';
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'hud-minimap';
+    this.nameEl = document.createElement('div');
+    this.nameEl.className = 'hud-mm-name';
+    this.locEl = document.createElement('div');
+    this.locEl.className = 'hud-mm-loc';
+    face.appendChild(this.canvas);
+    face.appendChild(this.nameEl);
+    face.appendChild(this.locEl);
     this.city = document.createElement('div');
     this.city.className = 'hud-city';
-    this.root.appendChild(this.canvas);
+    this.root.appendChild(face);
     this.root.appendChild(this.city);
     panel.insertBefore(this.root, panel.firstChild);
     this.ctx = this.canvas.getContext('2d');
@@ -278,6 +330,17 @@ export class Minimap {
   /** Forget the last drawing, so the next frame draws it (a new world, a tune moved). */
   redraw(): void {
     this.clock.reset();
+  }
+
+  /**
+   * The world's name over the top of the circle, told wherever the corner's own name is told (a world
+   * arrived in, a jump carried across). One write, and none for the name already there.
+   */
+  setName(name: string): void {
+    if (name === this.nameShown) return;
+    this.nameShown = name;
+    this.nameEl.textContent = name;
+    this.writes++;
   }
 
   /** A city walked into: its name under the circle, in and held and out. Two writes, and nothing after. */
@@ -328,6 +391,12 @@ export class Minimap {
     return this.lastWrites;
   }
 
+  /** The coordinates' own writes in the last full second: none standing still, at most `locHz` walking. */
+  get locWritesLastSecond(): number {
+    this.roll();
+    return this.lastLocWrites;
+  }
+
   /** Whether it is showing now. */
   get showing(): boolean {
     return this.shown;
@@ -351,6 +420,7 @@ export class Minimap {
       else this.clearCity();
     }
     if (!show || !pic) return;
+    this.writeLoc(v);
     const inset = MINIMAP_TUNE.rimInsetPx * this.scale;
     const k = minimapScale(this.size, v.range, inset);
     const facing = facingAngle(v.heading);
@@ -359,6 +429,27 @@ export class Minimap {
     this.clock.took(v.x, v.z, facing, this.version, k, v.northUp, this.size);
     this.drawnWith = pic;
     this.draw(pic, v, k, facing, inset);
+  }
+
+  /**
+   * The coordinates over the foot of the circle: the map's own pair, rounded, written when that pair has
+   * moved and no sooner than `1 / locHz` seconds after the last write. A pair that moved too soon is not
+   * lost: the first frame after the wait writes whatever the pair is by then, still or not, so the last
+   * words written are always where you stopped.
+   */
+  private writeLoc(v: MinimapView): void {
+    const x = Math.round(v.x);
+    const z = Math.round(v.z);
+    if (x === this.locX && z === this.locZ) return;
+    if (v.now - this.locAt < 1 / Math.max(LOC_HZ_FLOOR, MINIMAP_TUNE.locHz)) return;
+    this.locX = x;
+    this.locZ = z;
+    this.locAt = v.now;
+    // `Math.round` of a small negative is negative nought, which a template writes as plain "0".
+    this.locShown = `${x}, ${z}`;
+    this.locEl.textContent = this.locShown;
+    this.writes++;
+    this.locWrites++;
   }
 
   private draw(pic: MinimapPicture, v: MinimapView, k: number, facing: number, inset: number): void {
@@ -425,6 +516,26 @@ export class Minimap {
         this.dots++;
       }
     }
+    // North: a small triangle in `accent` over a `void` halo, its tip on the rim where north is -- the top,
+    // or wherever the turned picture has carried it, which is the picture's own turn. It is drawn before
+    // your arrow, so the arrow is always over it and is the last thing turned.
+    const nLen = MINIMAP_TUNE.northPx * this.scale;
+    const nHalf = MINIMAP_TUNE.northHalfPx * this.scale;
+    c.save();
+    c.translate(half, half);
+    c.rotate((turn * Math.PI) / 180);
+    c.beginPath();
+    c.moveTo(0, -rim);
+    c.lineTo(nHalf, -rim + nLen);
+    c.lineTo(-nHalf, -rim + nLen);
+    c.closePath();
+    c.lineJoin = 'round';
+    c.lineWidth = 2 * this.scale;
+    c.strokeStyle = colourOf(COL.void);
+    c.stroke();
+    c.fillStyle = colourOf(COL.accent);
+    c.fill();
+    c.restore();
     // You: an arrow in `ink` over a `void` halo, turned the way you face, or straight up when the map
     // turns with you.
     const a = ((v.northUp ? facing : 0) * Math.PI) / 180;
@@ -461,6 +572,8 @@ export class Minimap {
     if (now - this.windowStart < 1000) return;
     this.lastWrites = this.writes;
     this.writes = 0;
+    this.lastLocWrites = this.locWrites;
+    this.locWrites = 0;
     this.windowStart = now;
   }
 }

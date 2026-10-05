@@ -1,4 +1,4 @@
-// The journal window (O): five tabs. **Jobs** -- what is to read (documents handed over and calls waiting, each
+// The journal window (J): five tabs. **Jobs** -- what is to read (documents handed over and calls waiting, each
 // opened from here and never by itself), the jobs offered (their card to read, Accept and Decline), the jobs
 // running with their objective lines (Track, Drop and Restart where the job allows them), and the jobs ended
 // with how they ended, as facts and never as narrative. **Journal** -- what the character witnessed, in order:

@@ -243,6 +243,9 @@ function fakeWorld(vehicles: unknown[], physics: unknown = null) {
   ok(ship.ghosted, '6: ghosted from the moment it comes alongside, so nothing rams a hull that cannot move');
   ok(docking.docked(ship as never), '6: and it reads as docked, so the jump and both crossings refuse');
   ok(docking.docked(carrier as never), '6: the hull carrying it is refused the same, since nothing carries two ships across a zone change');
+  // The wings: the carried hull's are held shut from the moment it comes alongside; the carrier's are left as they are,
+  // as the game left a ship that was being docked onto.
+  ok(docking.holdsWings(ship as never) && !docking.holdsWings(carrier as never), "6: the carried hull's wings are held shut, and the carrier's are left alone");
 
   // The carrier flies: straight on at a hundred metres a second, turning as it goes.
   carrier.vel.set(0, 0, 100);
@@ -316,6 +319,7 @@ function fakeWorld(vehicles: unknown[], physics: unknown = null) {
   ok(!ship.holding && ship.ghosted, `6: letting go hands the hull back but leaves it ghosted while it is still on the carrier (${left})`);
   ok(ship.vel.length() > 100, '6: flying on at what the carrier was doing, and pushed off it');
   ok(!docking.docked(ship as never) && !docking.docked(carrier as never), '6: and both hulls are their pilots\' again, so a jump is allowed');
+  ok(!docking.holdsWings(ship as never), "6: and the wings go back to the pilot's choice or the flight rule as it is let go");
   for (let i = 0; i < 600 && ship.ghosted; i++) {
     docking.step(null, dt, null);
     carrier.fly(dt);

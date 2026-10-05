@@ -184,12 +184,15 @@ const row = (over: Partial<StandingRow> = {}): StandingRow => ({ who: 'somebody'
   ok(bodies[0].inside === true, 'stood as inside, which is what the ground check and the colliders follow');
   ok(bodies[0].y === 24.5, "and at the height the converter carried out of that room's own frame, not the terrain under the building");
 
-  // Outdoors the height is the manager's to find, for the reason the wildlife learned the hard way.
+  // Outdoors the row's height is handed over as well. The manager's own ground lookup outdoors is the
+  // terrain alone and never a platform, so a person the data put on a bridge, a balcony or an Ewok
+  // village was stood on the ground under it; with the row's height the manager holds the body perched
+  // there until what it stands on is solid (`perch.ts`).
   const out = new StandingPeople();
-  out.adopt([row({ x: 3, z: 3 })]);
+  out.adopt([row({ x: 3, y: 31, z: 3 })]);
   const g2 = game();
   out.step(1, 1, new THREE.Vector3(3, 0, 3), g2.deps);
-  ok(g2.bodies.length === 1 && g2.bodies[0].y === undefined, 'while outdoors no height is given at all, so the manager finds whatever is standing on that ground');
+  ok(g2.bodies.length === 1 && g2.bodies[0].y === 31 && !g2.bodies[0].inside, 'while outdoors the row\'s own height is given too, so somebody standing on something is not stood on the ground under it');
 }
 
 // ------------------------------------------------------------------ killed, and back on the server's own clock
@@ -950,7 +953,8 @@ function memory(own: Record<string, number>, sharers: string[] = [], piece = 0) 
   const mobile = src('world/mobiles/mobile.ts');
   const manager = src('world/mobiles/manager.ts');
   const worldSrc = src('world/world.ts');
-  ok(/m\.setAirless\(held\.cell !== null && !\(this\.deps\.cellSolid\?\.\(held\.cell\) \?\? true\)\);/.test(manager), "the manager asks every frame whether a body's room has collision under it");
+  // A body perched on something raised outdoors is held by the same line (`perch.ts`), which is written every frame.
+  ok(/m\.setAirless\(m\.perched \|\| \(held\.cell !== null && !\(this\.deps\.cellSolid\?\.\(held\.cell\) \?\? true\)\)\);/.test(manager), "the manager asks every frame whether a body's room has collision under it, or it is held perched");
   // The mobiles' deps are the ones whose room falls back on nothing; the fighters' still fall back on
   // the player's, since a fighter is stood beside the player.
   ok(/cellAt: \(p, room\) => \(room !== undefined \? this\.layoutStream\?\.buildingWithRoom\(p, room\) : null\) \?\? this\.layoutStream\?\.buildingAt\(p\) \?\? null,[\s\S]{0,700}cellSolid: \(state\) => this\.layoutStream\?\.cellsSolid\(state\) \?\? true,/.test(worldSrc), "the world answers it from the streamer's own colliders, a body stood with the data's own room takes that room, and one stood where no room holds it is in no room, never in the player's");

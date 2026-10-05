@@ -174,3 +174,125 @@ export function regionRange(ownRange: number, indoorReach: number, roomRange: nu
   const floor = roomRange + indoorReach;
   return floor > ownRange ? floor : ownRange;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Whether the ground under a point is all built (`LayoutStreamer.builtAt`).
+//
+// What a body held perched on something raised asks (`mobiles/perch.ts`) once its own probe has found
+// nothing under its feet: may it be let down onto the terrain, or is the thing it stands on still to come?
+// The question is asked of the objects that could be under the point and not of whole regions. Asked of
+// regions -- every tier in reach of the point loaded -- it waited on regions the body is not standing in
+// and, measured from the player instead, it let a body down through a platform whose tier the player was
+// simply too far off to load yet, at the menu's least object reach. An object answers for itself: either
+// its collision is in (and the world has stepped since, or a query cannot see it), or the streamer wants it
+// now and it is on its way, or the player stands too far off for the streamer to want it at all.
+
+/**
+ * How far from its origin on the ground any part of a model can reach as it stands: the farthest corner of
+ * its box (the corners taken componentwise) on the ground plane, and as much of its height as its tilt can
+ * swing out over the ground -- for a rotation that tips the up axis by an angle whose sine is `tiltSin`, a
+ * corner's reach on the ground is at most its own reach there plus its height times that sine (the yaw keeps
+ * the one, the tip about a level axis adds at most the other). Never more than the corner's whole distance.
+ * Read as the whole distance whatever the turn, a ship model hung 2.2 km over Tatooine reached over the whole
+ * town. `tiltSin` 1 is the bound for any turn at all. 0 with no usable box -- a particle effect, a model the
+ * pack does not carry -- which is under nothing, as it is in the way of nothing (`objectsNear`).
+ */
+export function footprintOf(bounds: PlacedBounds | null | undefined, tiltSin = 1): number {
+  const min = bounds?.min;
+  const max = bounds?.max;
+  if (!min || !max || min.length < 3 || max.length < 3) return 0;
+  const x = Math.max(Math.abs(min[0]), Math.abs(max[0]));
+  const y = Math.max(Math.abs(min[1]), Math.abs(max[1]));
+  const z = Math.max(Math.abs(min[2]), Math.abs(max[2]));
+  const s = tiltSin > 0 ? (tiltSin < 1 ? tiltSin : 1) : 0;
+  const r = Math.min(Math.hypot(x, y, z), Math.hypot(x, z) + y * s);
+  return Number.isFinite(r) ? r : 0;
+}
+
+/**
+ * The sine of the angle a turn tips the up axis by, from its quaternion's x and z: the turned up axis's height
+ * is `1 - 2(x² + z²)`. 0 for a turn about the vertical alone, which is what nearly every placed object has.
+ */
+export function tiltSin(qx: number, qz: number): number {
+  const c = 1 - 2 * (qx * qx + qz * qz);
+  const s2 = 1 - c * c;
+  return s2 > 0 ? Math.sqrt(s2) : 0;
+}
+
+/**
+ * The streamer's answer for a point. `built`: nothing that could be under it is still to come, so a probe that
+ * found nothing found the truth. `coming`: something that could be under it is wanted now and its collision is
+ * not in yet (or has not been stepped). `far`: something that could be under it will not be made solid until
+ * the player comes nearer, so there is nothing to wait for and nothing to give up on either.
+ */
+export type FloorAnswer = 'built' | 'coming' | 'far';
+
+/** What `floorAt` needs of a placed object. */
+export interface FloorObject {
+  readonly x: number;
+  readonly z: number;
+  readonly contained: boolean;
+  /** `footprintOf` its model, 0 for none. */
+  readonly footprint: number;
+}
+
+/** What `floorAt` needs of a region. */
+export interface FloorRegion<O extends FloorObject> {
+  readonly cx: number;
+  readonly cz: number;
+  /** The largest footprint of anything filed in it out of doors: past that from its box, nothing in it reaches. */
+  readonly reach: number;
+  readonly objects: readonly (readonly O[])[];
+}
+
+/** What `floorAt` asks of the streamer: one kept object, whose methods make nothing. */
+export interface FloorAsk<O extends FloorObject, R extends FloorRegion<O>> {
+  /** The region at these two indices, or undefined. */
+  region(rx: number, rz: number): R | undefined;
+  /** Whether it is ever given collision: big enough for the sweep, or put down solid. */
+  collides(o: O): boolean;
+  /** Whether its collision is in now. */
+  solid(o: O): boolean;
+  /** Whether the world has stepped since the last collision was made (a query sees nothing newer). */
+  stepped(): boolean;
+  /** Whether the streamer wants its collision with the player where they stand: its tier in range, it in the sweep's reach. */
+  wanted(region: R, o: O): boolean;
+}
+
+/**
+ * The answer for a point (`FloorAnswer`): every object out of doors whose footprint holds the point, in the
+ * regions within `span` (the largest footprint there is) whose own reach comes to it. The first object still
+ * coming answers at once; otherwise any one the player is too far off for makes it `far`. Makes nothing.
+ */
+export function floorAt<O extends FloorObject, R extends FloorRegion<O>>(x: number, z: number, span: number, ask: FloorAsk<O, R>): FloorAnswer {
+  const s = span > 0 ? span : 0;
+  const rx0 = regionIndex(x - s);
+  const rx1 = regionIndex(x + s);
+  const rz0 = regionIndex(z - s);
+  const rz1 = regionIndex(z + s);
+  const stepped = ask.stepped();
+  let far = false;
+  for (let rz = rz0; rz <= rz1; rz++) {
+    for (let rx = rx0; rx <= rx1; rx++) {
+      const region = ask.region(rx, rz);
+      if (!region || boxDistance(x, z, region.cx, region.cz) > region.reach) continue;
+      const lists = region.objects;
+      for (let t = 0; t < lists.length; t++) {
+        const list = lists[t];
+        for (let i = 0; i < list.length; i++) {
+          const o = list[i];
+          const f = o.footprint;
+          if (o.contained || !(f > 0)) continue;
+          const dx = x - o.x;
+          const dz = z - o.z;
+          if (dx * dx + dz * dz > f * f || !ask.collides(o)) continue;
+          if (ask.solid(o)) {
+            if (!stepped) return 'coming';
+          } else if (ask.wanted(region, o)) return 'coming';
+          else far = true;
+        }
+      }
+    }
+  }
+  return far ? 'far' : 'built';
+}

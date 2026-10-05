@@ -16,6 +16,7 @@ import type { SpacePack } from './spaceData.ts';
 import type { Physics } from '../core/physics.ts';
 import type { DriveInput, Vehicle } from '../vehicles/vehicle.ts';
 import { probeSurface, type WalkableRoom } from '../vehicles/surfaceRoom.ts';
+import { WING_AUTO } from '../vehicles/wings.ts';
 import {
   CLAMP_TUNE,
   DOCK_FACE,
@@ -243,6 +244,18 @@ export class Docking {
   }
 
   /**
+   * Whether a dock keeps this hull's wings shut (`WingSet.dockHold`): from the first leg of the approach, through the
+   * settle, the repair and the stay, until the launch has flown it clear, and while it is clamped onto another hull. The
+   * game shut a docking ship's wings for the approach and opened them again only if they had been open; letting go here
+   * hands them back to the pilot's choice or the flight rule, which is that in our terms. The hull carrying one is held as
+   * it is, as the game held a ship being docked onto.
+   */
+  holdsWings(ship: Vehicle | null): boolean {
+    if (!ship) return false;
+    return (ship === this.ship && this.phase !== 'idle') || this.clamp.carrying(ship);
+  }
+
+  /**
    * Every hull in this zone with lanes, worked out once per pack. The count of what the zone has
    * placed is part of the key: the world sets its pack while it loads and builds the streamer
    * afterwards, so a list asked for in that window would otherwise cache an empty answer against the
@@ -349,6 +362,10 @@ export class Docking {
     this.ghostedByUs = true;
     ship.setGhost(true);
     this.holdAt(ship, target, this.dockPos, this.dockTurn);
+    // Its wings shut already, as a ship that flew the lane in would have them: the hold (`holdsWings`, written every frame)
+    // would otherwise fold them in front of the player as the loading screen lifts, the launch that brought the hull out
+    // having snapped them open by the flight rule.
+    if (WING_AUTO.dockCloses) ship.snapWings(false);
     this.note = `docked at ${target.label}`;
     return this.note;
   }

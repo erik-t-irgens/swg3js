@@ -97,7 +97,7 @@ export function noteWords(note: StoryNote, lib: StorySet, deps: NoteWordsDeps, g
     case 'say':
       return deps.text(note.text);
     case 'doc':
-      // Pointed to, never opened: the journal (O) is where it is read.
+      // Pointed to, never opened: the journal (J) is where it is read.
       return note.from ? `A call from ${note.fromName ? deps.text(note.fromName) : 'someone'}: ${deps.text(note.title)}` : `To read: ${deps.text(note.title)}`;
     case 'journal':
       return `Journal: ${deps.text(note.title)}`;

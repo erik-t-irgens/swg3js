@@ -1,16 +1,17 @@
-// The Waypoints window: every waypoint the character keeps, this world's first by distance and then every
-// other world's grouped under its name, each with its colour, whether it is switched on, whether it is
-// the one tracked, its name to change, the thirteen colours to pick from, a way to take it away and a
+// The map window's Waypoints tab: every waypoint the character keeps, this world's first by distance and
+// then every other world's grouped under its name, each with its colour, whether it is switched on, whether
+// it is the one tracked, its name to change, the thirteen colours to pick from, a way to take it away and a
 // way to see it on the map; and at the top, a way to mark where you stand.
 //
-// It is a panel: it frees the mouse and the game does not simulate while it is up, so nothing in it runs
-// on a frame and the distances it shows are the ones you had when it opened. What it shows is a model it
-// is handed and every change is asked of the game, which asks the story book, which applies it at once
-// when this browser holds the book and asks the server when a server does; the window is drawn again
-// from the book when the change has come back.
+// It is a page the map holds (`MapUi.adoptBody`), built before the map is and handed to it once the map
+// exists; the map shows and hides it and says so, and Y opens the map on it. While it shows the map has
+// the mouse and the game does not simulate, so nothing in it runs on a frame and the distances it shows
+// are the ones you had when it opened. What it shows is a model it is handed and every change is asked of
+// the game, which asks the story book, which applies it at once when this browser holds the book and asks
+// the server when a server does; the page is drawn again from the book when the change has come back.
 //
 // The name box keeps the chat line's rule for Escape: inside it, Escape puts the name back and is the
-// box's alone, so the same press does not also shut the window behind it. Enter keeps the new name.
+// box's alone, so the same press does not also shut the map behind it. Enter keeps the new name.
 //
 // Every colour on it is one of the eighteen, and the thirteen swatches are the waypoint colours by name.
 
@@ -50,9 +51,9 @@ export interface WaypointsModel {
 }
 
 /**
- * The rows in the order the window shows them: this world's first, nearest first, then every other
- * world's together, the worlds by name and each world's rows by name. A new array; the window is a
- * panel and builds this when it is drawn, never in a frame.
+ * The rows in the order the tab shows them: this world's first, nearest first, then every other
+ * world's together, the worlds by name and each world's rows by name. A new array; the tab builds this
+ * when it is drawn, never in a frame.
  */
 export function orderRows(rows: readonly WaypointRow[]): WaypointRow[] {
   return [...rows].sort((a, b) => {
@@ -62,10 +63,13 @@ export function orderRows(rows: readonly WaypointRow[]): WaypointRow[] {
   });
 }
 
+// The page scrolls in the map's own list body (`.map-body.list` in `style.css`), so the list has no
+// height of its own to keep.
 const WAYPOINTS_CSS = `
-#waypoints .waypoints-panel { width: min(640px, 94vw); }
-#waypoints .wp-list { max-height: min(58vh, 520px); overflow-y: auto; }
-#waypoints .waypoints-panel.win-sized .wp-list { max-height: none; }
+#waypoints .wp-top { display: flex; align-items: center; gap: 12px; margin: 0 0 10px; }
+#waypoints .wp-count { flex: 1 1 auto; font-size: 13px; color: var(--muted); }
+#waypoints .wp-top .mark { flex: none; padding: 4px 12px; font-size: 12px; color: var(--text); background: color-mix(in srgb, var(--pool) 30%, transparent); border: 1px solid var(--panel-border); border-radius: 4px; cursor: pointer; }
+#waypoints .wp-top .mark:hover:not(:disabled) { border-color: var(--accent); }
 #waypoints .wp-head { margin: 10px 0 4px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 #waypoints .wp-head:first-child { margin-top: 0; }
 #waypoints .wp-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid color-mix(in srgb, var(--ink) 5%, transparent); font-size: 12px; }
@@ -82,7 +86,7 @@ const WAYPOINTS_CSS = `
 #waypoints .wp-row button:disabled { opacity: 0.4; cursor: default; }
 #waypoints .wp-colours { display: flex; flex-wrap: wrap; gap: 9px; padding: 6px 4px 8px 22px; border-bottom: 1px solid color-mix(in srgb, var(--ink) 5%, transparent); }
 #waypoints .wp-colours .wp-sw.on, #waypoints .wp-row .wp-sw.on { outline: 1px solid var(--ink); outline-offset: 2px; }
-#waypoints .ship-header .mark:disabled { opacity: 0.45; cursor: default; }
+#waypoints .wp-top .mark:disabled { opacity: 0.45; cursor: default; }
 #waypoints .wp-empty { font-size: 12px; color: var(--muted); padding: 8px 0; }
 #waypoints .wp-sw.wp-sw-accent { background: var(--accent); }
 #waypoints .wp-sw.wp-sw-ink { background: var(--ink); }
@@ -114,8 +118,8 @@ function swatch(colour: string): string {
 }
 
 export class WaypointsUi {
+  /** The page, which the map's Waypoints tab holds; it stays out of the document until the map adopts it. */
   readonly root: HTMLElement;
-  onClose: () => void = () => {};
   onMark: () => void = () => {};
   onRename: (id: string, name: string) => void = () => {};
   onColour: (id: string, colour: string) => void = () => {};
@@ -128,7 +132,6 @@ export class WaypointsUi {
   private readonly title: HTMLElement;
   private readonly note: HTMLElement;
   private readonly markButton: HTMLButtonElement;
-  private readonly closeButton: HTMLButtonElement;
   private model: WaypointsModel = { rows: [], count: 0, max: 0, markWhy: '', note: '' };
   /** The row whose colours are open under it, and the row being renamed. */
   private picking = '';
@@ -136,49 +139,49 @@ export class WaypointsUi {
   /** A model that came while a name was being typed, drawn once the box is done with. */
   private waiting = false;
 
-  constructor(parent: HTMLElement) {
+  /**
+   * Built detached: the game makes this before the map, and the map takes the page into its Waypoints tab
+   * once it exists. The map's own header carries the close button and the key, so the page has neither.
+   */
+  constructor() {
     installStyle();
     this.root = document.createElement('div');
     this.root.id = 'waypoints';
-    this.root.className = 'overlay hidden';
+    this.root.className = 'hidden';
     this.root.innerHTML = `
-      <div class="ship-panel waypoints-panel">
-        <div class="ship-header">
-          <h2>Waypoints</h2>
-          <span class="ship-title"></span>
-          <button class="mark">Mark here</button>
-          <button class="close">Close</button>
-        </div>
-        <div class="ship-body">
-          <div class="wp-list"></div>
-          <p class="menu-hint wp-note"></p>
-        </div>
-      </div>`;
-    parent.appendChild(this.root);
+      <div class="wp-top">
+        <span class="wp-count"></span>
+        <button class="mark">Mark here</button>
+      </div>
+      <div class="wp-list"></div>
+      <p class="menu-hint wp-note"></p>`;
     this.list = this.root.querySelector('.wp-list')!;
-    this.title = this.root.querySelector('.ship-title')!;
+    this.title = this.root.querySelector('.wp-count')!;
     this.note = this.root.querySelector('.wp-note')!;
     this.markButton = this.root.querySelector('.mark')!;
-    this.closeButton = this.root.querySelector('.close')!;
-    this.closeButton.addEventListener('click', () => this.onClose());
     this.markButton.addEventListener('click', () => this.onMark());
-    this.root.addEventListener('click', (e) => {
-      if (e.target === this.root) this.onClose();
-    });
   }
 
+  /** Whether the map is open on this tab: the map shows and hides the page and says so. */
   get open(): boolean {
     return !this.root.classList.contains('hidden');
-  }
-
-  /** The key that opens and shuts it, as a cap (`keyLabel`), on the close button. Told again on a rebind. */
-  setKey(cap: string): void {
-    this.closeButton.textContent = `Close (${cap})`;
   }
 
   show(model: WaypointsModel): void {
     this.root.classList.remove('hidden');
     this.update(model);
+  }
+
+  /**
+   * What the map is handed to tell this page as its tab comes and goes (`MapUi.adoptBody`): drawn from
+   * `model` as it comes up, hidden as it goes. The game hands the map this and nothing of its own, so the
+   * page the node test sees the map show is the page the game's map shows.
+   */
+  shownFrom(model: () => WaypointsModel): (on: boolean) => void {
+    return (on) => {
+      if (on) this.show(model());
+      else this.hide();
+    };
   }
 
   /** A new model while it is open: drawn now, or once a name being typed is kept or given up. */

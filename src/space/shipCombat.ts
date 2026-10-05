@@ -4,8 +4,10 @@
 // the effects are the game's (ship_hit_effects.iff, the hull's client data).
 //
 // The constructor writes the vehicle's spec once from the stats (the spec object is the vehicle's own:
-// specFor makes a fresh one per spawn), and again only when a part goes down or comes back. The chassis
-// mirrors into `hull.hp`, so a destroyed ship is what it always was to the rest of the game.
+// specFor makes a fresh one per spawn), and again only when a part goes down or comes back, or the
+// ship flies into or out of a nebula (`setNebula`). The chassis mirrors into `hull.hp`, so a destroyed
+// ship is what it always was to the rest of the game. A nebula's lightning takes its own path
+// (`lightning`): one shield, nothing under it, and a rest between strikes, by the game's own rule.
 //
 // Imports `three`, the pure modules with `.ts`, and only types from the runtime, so node's tests load it.
 // Nothing here allocates per frame or per hit (a hit's effect handle is the particle system's own).
@@ -16,8 +18,9 @@ import type { Bolt } from '../combat/bolts';
 import type { CombatFile, CombatLayer, HullFx } from './combatData.ts';
 import { vehicleSounds } from '../audio/vehicleSounds.ts';
 import type { ShipContact } from './contacts';
-import { applyCollision, applyHit, applyShares, createCondition, isDown, newHitResult, regenerate, rescaleCondition, sharesOf, type ConditionShares, type HitResult, type ShipCondition } from './shipDamage.ts';
+import { applyCollision, applyHit, applyShares, applyShieldHit, createCondition, isDown, newHitResult, regenerate, rescaleCondition, sharesOf, type ConditionShares, type HitResult, type ShipCondition } from './shipDamage.ts';
 import { CLASS_BASE, COLLISION_BOUT, COLLISION_CAP_SHARE, statsFor, type Handling, type ShipStats, type StatInput, type WeaponStat } from './shipStats.ts';
+import { NEBULA_TUNE, systemFactors, type NebulaSystems, type SystemFactors } from './nebulaMath.ts';
 
 /** What a zone crossing carries of a ship's fight onto the hull spawned on the other side: its condition's shares and its boost's. */
 export interface CarriedCondition extends ConditionShares {
@@ -134,6 +137,16 @@ const hitN = new THREE.Vector3();
 const toHull = new THREE.Matrix4();
 const ONE = new THREE.Vector3(1, 1, 1);
 const UP = new THREE.Vector3(0, 1, 0);
+/** The factors a nebula's effects come to, worked out into this before they are compared with a ship's own. */
+const factorsScratch: SystemFactors = { engine: 1, reactor: 1, shields: 1 };
+/** How far a factor must move before the spec is written again: a rounding is not a change. */
+const FACTOR_EPSILON = 1e-4;
+
+/**
+ * `a` toward 1 by `t` (0 to 1), written so that `t` of exactly 1 gives exactly 1: everything at 1
+ * must leave a ship's numbers as they were to the last bit.
+ */
+const towardOne = (a: number, t: number): number => 1 - (1 - a) * (1 - t);
 
 /** One place on the hull where damage bands play (a hardpoint or a position): the band showing now and its effect. */
 interface BandPlace {
@@ -169,6 +182,13 @@ export class ShipCombat {
   shown = false;
   /** The chassis row this hull flies as, which is what the game keys its hit and power sounds on; null: the fallback row. Set by whoever adopts the combat, which is the only place the chassis is known. */
   soundChassis: string | null = null;
+  /**
+   * What the nebulae holding this ship do to it now (`setNebula`): the engines' factor, the reactor's
+   * and the shield recharge's, all 1 outside them. The spec and the refire read them; a kept object.
+   */
+  readonly nebula: SystemFactors = { engine: 1, reactor: 1, shields: 1 };
+  /** When lightning last struck this ship, on the fight's own clock (READ: each ship rests `NEBULA_TUNE.hitEvery` between strikes). */
+  private lightningAt = -Infinity;
   /** The handling as the vehicle had it before the combat wrote its spec: every restat starts from this. */
   private readonly base: Handling;
   private readonly fx: CombatFx | null;
@@ -252,13 +272,18 @@ export class ShipCombat {
     return slot !== null && !isDown(this.cond, slot);
   }
 
-  /** Seconds between shots now: the refire over how many guns can fire, the capacitor and the reactor. */
+  /**
+   * Seconds between shots now: the refire over how many guns can fire, the capacitor and the reactor,
+   * and a nebula's hold on the reactor, which slows the guns from none of a reactor-down's slowing at
+   * full power to all of it at none (OURS).
+   */
   interval(): number {
     let live = 0;
     for (let i = 0; i < this.hull.guns.length; i++) if (this.gunLive(i)) live++;
     let t = this.stats.refire / Math.min(2, Math.max(1, live / 2));
     if (isDown(this.cond, 'capacitor')) t *= DOWN_EFFECT.capacitorRefire;
     if (isDown(this.cond, 'reactor')) t *= DOWN_EFFECT.reactorRefire;
+    t *= towardOne(DOWN_EFFECT.reactorRefire, this.nebula.reactor);
     return t;
   }
 
@@ -318,6 +343,62 @@ export class ShipCombat {
     else hitN.set(0, 0, 1).applyQuaternion(this.hull.group.quaternion);
     if (hitN.lengthSq() < 1e-9) hitN.copy(UP);
     this.blow(amount, facing, source, hitP, hitN.normalize(), 1);
+  }
+
+  /**
+   * The fastest the hull goes whole and outside every nebula: its plain top, or its boost top where it
+   * has a booster at all. The flight display's speed arc is scaled to it, so a nebula's hold or a part
+   * knocked down moves the top tick down the arc instead of shrinking the arc with it.
+   */
+  get fullSpeed(): number {
+    const h = this.stats.handling;
+    return this.stats.boostSeconds > 0 ? Math.max(h.maxSpeed, h.boostSpeed) : h.maxSpeed;
+  }
+
+  /** Whether lightning may strike this ship now: it is whole enough to be struck and has rested since the last strike. */
+  get lightningReady(): boolean {
+    return this.cond.chassis > 0 && this.clock - this.lightningAt >= NEBULA_TUNE.hitEvery;
+  }
+
+  /**
+   * A nebula's bolt passed the ship, its nearest point at `at` (READ, the game's rule restated): the
+   * shield on the face toward that point takes `amount` and the rest of it is thrown away, the
+   * armour, the chassis and the parts untouched, and the ship rests `NEBULA_TUNE.hitEvery` seconds
+   * before the next strike can take it. The shield's own hit effect and sound play where the bolt
+   * passed, an empty shield's too, and nobody is blamed. False when it was refused (destroyed, or
+   * still resting), true when it was struck.
+   */
+  lightning(amount: number, at: THREE.Vector3): boolean {
+    if (!this.lightningReady) return false;
+    this.lightningAt = this.clock;
+    const facing = this.faceToward(at);
+    applyShieldHit(this.cond, this.stats, this.god ? 0 : amount, facing, this.last);
+    this.last.layer = 'shield';
+    this.tally.taken++;
+    hitP.copy(at);
+    hitN.copy(at).sub(this.hull.group.position);
+    if (hitN.lengthSq() < 1e-9) hitN.set(0, 0, 1).applyQuaternion(this.hull.group.quaternion);
+    this.effects(hitP, hitN.normalize(), this.last);
+    this.afterBlow();
+    this.hooks?.struck(this, null, this.last);
+    return true;
+  }
+
+  /**
+   * What the nebulae holding the ship do to it, as the summed effects (`nebulaSystemsAt`; all zero
+   * outside them): the three factors are worked out from them, and the spec is written again only
+   * when one of them has really moved, which is on the way into a nebula and on the way out, never
+   * on a frame in between. True when they moved.
+   */
+  setNebula(effects: Pick<NebulaSystems, 'engine' | 'reactor' | 'shields'>): boolean {
+    const f = systemFactors(effects, factorsScratch);
+    const n = this.nebula;
+    if (Math.abs(f.engine - n.engine) <= FACTOR_EPSILON && Math.abs(f.reactor - n.reactor) <= FACTOR_EPSILON && Math.abs(f.shields - n.shields) <= FACTOR_EPSILON) return false;
+    n.engine = f.engine;
+    n.reactor = f.reactor;
+    n.shields = f.shields;
+    this.writeSpec();
+    return true;
   }
 
   /**
@@ -445,7 +526,8 @@ export class ShipCombat {
       this.cond.shield[0] = 0;
       this.cond.shield[1] = 0;
     }
-    regenerate(this.cond, s, generatorUp, !isDown(this.cond, 'reactor'), dt);
+    // Inside a nebula the shields come back at the reactor's share times the shields' own.
+    regenerate(this.cond, s, generatorUp, !isDown(this.cond, 'reactor'), dt, this.nebula.reactor * this.nebula.shields);
     this.updateBands();
   }
 
@@ -500,16 +582,25 @@ export class ShipCombat {
     for (const p of this.cond.parts) if (p.down) this.downList.push(p.slot);
   }
 
-  /** The vehicle's spec from the stats and what is down. */
+  /**
+   * The vehicle's spec from the stats, what is down and the nebulae it is in. A nebula's hold on the
+   * engines scales every speed and turn (READ: the game's engine efficiency scaled them all), and its
+   * hold on the reactor takes the speeds from none of a reactor-down's slowing at full power toward
+   * all of it at none (OURS). With every factor at 1 this is the spec it always was, to the bit.
+   */
   private writeSpec(): void {
     const h = this.stats.handling;
     const spec = this.hull.spec;
     const c = this.cond;
-    let top = h.maxSpeed;
-    let boost = h.boostSpeed;
-    let accel = h.accel;
-    let brake = h.brake;
-    let turn = h.turnRate;
+    const engine = this.nebula.engine;
+    let top = h.maxSpeed * engine;
+    let boost = h.boostSpeed * engine;
+    let accel = h.accel * engine;
+    let brake = h.brake * engine;
+    let turn = h.turnRate * engine;
+    const power = towardOne(DOWN_EFFECT.reactorSpeed, this.nebula.reactor);
+    top *= power;
+    boost *= power;
     if (isDown(c, 'engine')) {
       top *= DOWN_EFFECT.engineSpeed;
       boost = top;
@@ -651,6 +742,8 @@ export class ShipCombat {
       speed: { top: n(this.hull.spec.maxSpeed), boost: n(this.hull.spec.boostSpeed), undamaged: n(s.handling.maxSpeed) },
       turn: n(this.hull.spec.turnRate * 100) / 100,
       tally: { ...this.tally },
+      // What the nebulae it is in do to it: 1 is untouched.
+      nebula: { engine: n(this.nebula.engine * 100) / 100, reactor: n(this.nebula.reactor * 100) / 100, shields: n(this.nebula.shields * 100) / 100 },
       lastSourceKey: this.lastSourceKey,
       god: this.god,
       bands: this.places.map((p) => (p.active >= 0 ? p.bands[p.active].particle : null)).filter(Boolean),

@@ -73,7 +73,7 @@ const ACTION_LABELS: Record<Action, string> = {
   mount: 'Mount, dismount, elevator',
   ship: 'Ship menu (in a ship)',
   switchClass: 'Switch class',
-  map: 'Galaxy map',
+  map: 'Map',
   help: 'Help',
   inventory: 'Inventory',
   spawner: 'Spawner',
@@ -107,8 +107,9 @@ const ACTION_LABELS: Record<Action, string> = {
   takeProp: 'Pick up a prop of yours (in hand: put it away; at your door: take the building down)',
   putAway: 'Put away a prop in hand',
   debugMenu: 'Debug menu',
-  waypoints: 'Waypoints',
+  waypoints: 'Waypoints (map tab)',
   journal: 'Journal (jobs, documents, the file)',
+  group: 'Group (map tab)',
 };
 
 /**
@@ -200,7 +201,7 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     // Space: scene content again, and nothing here recompiles a shader.
     title: 'Space',
     knobs: [
-      { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula takes shields and armour off the ship it hits, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
+      { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula drains the shield on the side of the ship it passes, never the armour or the hull, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
       { key: 'nebulaOpacity', label: 'Nebula opacity', kind: 'range', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, hint: 'How solid the nebulae are: their glowing and misty sheets seen from outside and the haze around you inside one, together, and how much a nebula you are in dims the sun\'s flare and rays. 100% is as they are drawn and 0% hides them; it starts at 10%. Their lightning still strikes.' },
     ],
   },
@@ -625,15 +626,10 @@ export class Menu {
     // third key) is kept behind them until the row is edited to two.
     const kept = [codes[0] ?? '', codes[1] ?? ''];
     kept[c.slot] = code ?? '';
-    // A key already on another action moves here rather than doing two things.
-    if (code) {
-      for (const a of Object.keys(DEFAULT_BINDINGS) as Action[]) {
-        if (a === c.action) continue;
-        const other = this.input.bindings[a];
-        if (other.includes(code)) this.input.bind(a, other.filter((x) => x !== code));
-      }
-    }
-    this.input.bind(c.action, kept.filter(Boolean));
+    // A key already on another action moves here rather than doing two things, except where two defaults
+    // share it on purpose; and Backspace on an action's last key takes the key off for good. The rules are
+    // the bindings' own (`Input.assignKey`), so a reload gives back exactly what this leaves.
+    this.input.assignKey(c.action, kept.filter(Boolean), code);
     // The key moved: the display's slot row and the action bar show the key you have bound, so they
     // are told once, here, rather than reading the bindings on the frame path.
     notifyBindingsChanged();

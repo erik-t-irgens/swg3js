@@ -101,6 +101,17 @@ export function markActor(o: THREE.Object3D): void {
   });
 }
 
+/**
+ * Which of the view passes see something with this layer mask, tested as `renderLayer` sets each
+ * pass's camera (the world: 0 and the actor layer; the rooms: 1 and the actor layer). For a light it
+ * is which passes light with it, since three leaves out a light whose layers the camera does not see.
+ */
+export function passesSeeing(mask: number): 'world and rooms' | 'world only' | 'rooms only' | 'neither' {
+  const world = (mask & (1 | (1 << ACTOR_LAYER))) !== 0;
+  const rooms = (mask & ((1 << INTERIOR_LAYER) | (1 << ACTOR_LAYER))) !== 0;
+  return world && rooms ? 'world and rooms' : world ? 'world only' : rooms ? 'rooms only' : 'neither';
+}
+
 const tmpS = new THREE.Sphere();
 const frustum = new THREE.Frustum();
 const projView = new THREE.Matrix4();
@@ -290,7 +301,11 @@ export class PortalRenderer {
     }
   }
 
-  constructor(private readonly renderer: THREE.WebGLRenderer) {
+  /** Written out rather than taken as a parameter property, so node's type stripping can load this file (`torch.test.ts`). */
+  private readonly renderer: THREE.WebGLRenderer;
+
+  constructor(renderer: THREE.WebGLRenderer) {
+    this.renderer = renderer;
     this.hookDraws();
     // A skeleton is worked out once a frame inside `render`, not once a pass (commit 3b, `skeletonOnce.ts`).
     installSkeletonOnce();

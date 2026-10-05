@@ -75,9 +75,15 @@ const ok = (cond: boolean, what: string) => {
   ok(wired.size >= 13 && loops >= 1 && wired.has('map') && wired.has('menu') && wired.has('backpack'), `the wired windows are read out of the code (${wired.size}: ${[...wired].sort().join(', ')})`);
   const missing = [...wired].filter((id) => !Object.hasOwn(WINDOW_MIN, id));
   ok(missing.length === 0, `every window the game wires has a minimum of its own${missing.length ? `: ${missing.join(', ')}` : ''}`);
-  // The group's panel and the trade window are wired where they are built, late in the game's
-  // constructor; they must be found there and have minimums of their own.
-  ok(wired.has('group') && wired.has('trade'), 'the group\'s panel and the trade window are wired too');
+  // The trade window is wired where it is built, late in the game's constructor; it must be found there
+  // and have a minimum of its own. The group's roster and the waypoints are tabs of the map now, so
+  // neither is a window: no `draggable` for them, and the table names neither.
+  ok(wired.has('trade'), 'the trade window is wired too');
+  ok(!wired.has('group') && !wired.has('waypoints'), "the group's roster and the waypoints are tabs of the map, not windows of their own");
+  ok(!Object.hasOwn(WINDOW_MIN, 'group') && !Object.hasOwn(WINDOW_MIN, 'waypoints'), 'and the table of minimums names neither');
+  // A waypoint's row -- a swatch, a name, where it is, two switches and three buttons -- is now laid out in
+  // the map, so the map's own minimum is the width that row wanted as a window of its own.
+  ok(WINDOW_MIN.map.w >= 600, `the map is at least as wide as a waypoint's row (${WINDOW_MIN.map.w} px)`);
   // The select screen is a whole screen, not a window: it is never moved or sized.
   ok(!wired.has('start') && !wired.has('select') && !calls.some((c) => /\bselect\b|#start/.test(c)), 'the select screen is never made a window');
 

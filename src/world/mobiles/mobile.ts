@@ -55,6 +55,7 @@ import { moveSpeeds, stepGait, type GaitStep } from './gait';
 import { BRAIN_TUNE, clampWander, decide, keepPost, type BrainSelf, type BrainTarget, type Decision, type Post } from './brain';
 import { LOD_TUNE, type LodTier } from './lod';
 import { gravityFor, holdAir } from './airless.ts';
+import { landTop, newPerchState, PERCH_TUNE, perchesAgain, resetPerchState, type PerchState } from './perch.ts';
 import { easeShare, onFeet, resetStepWalker, stepAhead, stepHeightOf, stepWalker, stoodStill, walkStep, type StepRay, type StepShape, type StepTrace, type StepWalker } from './stepUp.ts';
 import { rescaleBody, scaledByDifficulty } from '../difficulty.ts';
 import { NavAgent } from '../nav/navAgent.ts';
@@ -267,6 +268,11 @@ export interface MobileSpawn {
   overrides?: { hp?: number; damage?: number; aggression?: Aggression; level?: number; ranged?: { range: number; additive: boolean } | null };
   /** The name it goes by, where it is not its entry's (a story's person). */
   name?: string;
+  /**
+   * Stood on something raised that may not be solid yet (`perch.ts`): held in the air where it was put
+   * until the manager's probe finds what it stands on. The manager decides it; a flyer ignores it.
+   */
+  perch?: boolean;
 }
 
 /** What a mobile needs of the game. */
@@ -524,6 +530,20 @@ export class Mobile implements Living, NpcSubject {
    * stands on its own floor again the moment the colliders come back. The manager sets it.
    */
   private airless = false;
+  /**
+   * Stood on something raised that may not be solid yet (`perch.ts`): a bridge, a balcony, a hut, an
+   * Ewok village. Held in the air at the row's own height exactly as a body in a room with no floor is
+   * held (the manager writes it into the airless hold every frame), standing still, until the
+   * manager's probe finds what it stands on and sets it down, or lets it down onto the terrain.
+   */
+  perched = false;
+  /** The perch's own clock and the streamer's last answer, one kept record written in place. */
+  readonly perchState: PerchState = newPerchState();
+  /**
+   * What became of its last perch, for the console: null for a body that was never perched, `driven` for
+   * one whose perch ended when another browser took it over (its keeper's rows say where it stands).
+   */
+  perchOutcome: 'held' | 'landed' | 'fell' | 'timed out' | 'driven' | null = null;
   /** The model's meshes, whose shadow flag the manager sets. */
   meshes: THREE.Mesh[] = [];
   model: THREE.Object3D | null = null;
@@ -913,6 +933,55 @@ export class Mobile implements Living, NpcSubject {
     this.group.add(this.inner);
     this.group.name = `mobile:${e.id}`;
     markActor(this.group);
+    // Stood on something raised: held from the first step, before the manager has seen it once.
+    if (spawn.perch && !this.flyer) this.startPerch();
+  }
+
+  /**
+   * Perched from now on (`perch.ts`): held where it stands, the clock started afresh. The hold is the
+   * airless one, set here as well as by the manager's next write, so a gravity worked out in the same
+   * call (the change of hands) and a body still loading its model, which `update` returns from before
+   * its own hold, both stand still from this instant.
+   */
+  startPerch(): void {
+    this.perched = true;
+    resetPerchState(this.perchState);
+    this.perchOutcome = 'held';
+    this.airless = true;
+    if (!this.driven && !this.disposed && this.body.isValid()) holdAir(this.body);
+  }
+
+  /** Whether a perch still means anything for it: out of doors, not flying and not afloat. */
+  get canPerch(): boolean {
+    return !this.inside && !this.flyer && !this.swimming;
+  }
+
+  /**
+   * Set down on what the perch's probe found under it, as `liftToGround` sets a body down, and let go:
+   * the manager's airless write straight after gives it its gravity back on the surface it stands on.
+   */
+  perchLand(top: number): void {
+    if (!this.disposed && this.body.isValid()) {
+      const t = this.body.translation();
+      this.body.setTranslation({ x: t.x, y: landTop(top, this.plan.feet), z: t.z }, true);
+      const v = this.body.linvel();
+      this.body.setLinvel({ x: v.x, y: 0, z: v.z }, true);
+      this.pos.y = top;
+      this.grounded = true;
+    }
+    this.endPerch('landed');
+  }
+
+  /**
+   * No longer perched: the manager's next airless write gives it its gravity back. Null says nothing
+   * about how it ended. It is woken outright as well: a body held still for a second or two has gone to
+   * sleep, and the wake a gravity write carries lasts one step -- measured in a real world, the body was
+   * asleep again after it with no velocity, hanging in the air it had just been let go in.
+   */
+  endPerch(outcome: 'landed' | 'fell' | 'timed out' | 'driven' | null): void {
+    this.perched = false;
+    if (outcome) this.perchOutcome = outcome;
+    if (!this.driven && !this.disposed && this.body.isValid()) this.body.wakeUp();
   }
 
   private groupsFor(terrain: boolean): number {
@@ -2497,13 +2566,31 @@ export class Mobile implements Living, NpcSubject {
       this.dropTumble();
       this.setPosture('stand');
       this.tactics?.reset();
+      // And its perch (`perch.ts`): its keeper's rows say where it stands now, platform or not, and it is
+      // decided afresh from wherever it stands when it is this browser's again. Left on, the hold went on
+      // being written for as long as it was driven and came back with it whether or not it still stood
+      // on anything.
+      if (this.perched) this.endPerch('driven');
       // Out of the solver. A dynamic body nobody is steering would fall, drift and be shoved about
       // between the keeper's words; kinematic, it goes exactly where it is told and still stops a
       // bolt, holds a blade and blocks a walker.
       if (live) this.body.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
       return;
     }
-    // Ours again, from where it stands.
+    // Ours again, from where it stands, and its perch decided afresh before its gravity is given back
+    // (`perch.ts`). Out of doors and standing well over the ground its keeper left it on, it is perched: a
+    // body handed over on a platform this browser has not built yet is held there rather than dropped
+    // through it to the terrain. Otherwise it is not, whatever it was before it changed hands, or a body
+    // its keeper walked off a platform would come back held in the air over the open ground with nothing
+    // ever found under it. The rows on the wire carry its height, so where it stands is the keeper's.
+    const ground = !this.dead && this.canPerch ? groundUnder(this.pos.x, this.pos.z, this.deps.terrain, this.deps) : null;
+    if (perchesAgain(this.pos.y, ground, PERCH_TUNE)) this.startPerch();
+    else if (this.perched) {
+      this.endPerch(null);
+      // The hold went with the perch out of doors, so the gravity below is worked out without it (the
+      // manager's next write puts a room's hold back, which it writes every frame).
+      if (!this.inside) this.airless = false;
+    }
     if (live) {
       this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
       this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
@@ -3942,7 +4029,9 @@ export class Mobile implements Living, NpcSubject {
       if (corner) face = corner;
     }
     if (this.waterAhead && pace !== 'stand') pace = 'stand';
-    if (!tier.move || this.stunned > 0 || this.downPhase) pace = 'stand';
+    // Perched, it stands still: held in the air until what it stands on is found, a step off it would
+    // carry it over the edge of a platform nobody has built yet.
+    if (!tier.move || this.stunned > 0 || this.downPhase || this.perched) pace = 'stand';
     if (!tier.move) {
       this.body.setLinvel({ x: 0, y: this.body.linvel().y, z: 0 }, false);
       // Only a body standing on something sleeps: one put to sleep in the air hangs there for good.
@@ -4321,6 +4410,8 @@ export class Mobile implements Living, NpcSubject {
       room: this.room,
       // Its room has no collision built under it just now, so it is holding its height.
       airless: this.airless,
+      // Stood on something raised (`perch.ts`): held, or what became of it.
+      perch: this.perchOutcome,
       // The spot a standing person keeps to, and how far it is off it.
       post: this.post ? `${this.post.kind} ${Math.hypot(this.pos.x - this.homeX, this.pos.z - this.homeZ).toFixed(1)} m off` : null,
       // Following the player, and how far it is from its place behind them; being spoken to; its own tier.

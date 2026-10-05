@@ -1,6 +1,15 @@
 // A space zone's nebulae: the clouds of glowing and misty sheets the zone's own table places, the
-// haze that comes up around the camera inside one, the lightning that flickers in it, and what a
-// strike does to a ship.
+// haze that comes up around the camera inside one, the lightning that flickers in it, and whom a
+// strike touches.
+//
+// Lightning follows the game's own rule (restated in `nebulaMath.ts`): a strike is a bolt standing
+// between two points in the middle of the nebula for a second or two, and it touches every ship it
+// passes, the player's or anybody's, which almost never happens, since the bolt is short and the
+// nebula is large. A strike is kept apart from the bolt drawn for it: a pool of records sized from
+// the zone's own rows (`strikeRecords`) holds every strike standing whether or not anybody can see
+// it, and a ship far from the camera is struck all the same. The drawn bolts are a pool of `beams`
+// taken by the strikes near enough to be seen. How a strike hurts is the ship's own business
+// (`ShipCombat.lightning`: one shield, a rest between).
 //
 // What is drawn is two instanced sets for the whole zone, one per sheet look: the glow set added to
 // the picture, the mist set blended into it. A sheet is one quad; `facingPercent` of them turn to
@@ -24,6 +33,7 @@ import * as THREE from 'three';
 import type { Nebula, NebulaSheetLook, SpacePack } from './spaceData.ts';
 import {
   BUILD_ONLY_KEYS,
+  NEBULA_SYSTEMS,
   NEBULA_TUNE,
   beamCurves,
   beamEnvelope,
@@ -31,20 +41,27 @@ import {
   clampOpacity,
   deepestInside,
   dimInside,
+  newStrike,
+  rowStrikes,
   seedOfName,
   seenDepth,
+  segmentReach,
   shareSheets,
   sheetCount,
-  slotOf,
   sortFarToNear,
   strikeDamage,
-  strikeOfSlot,
+  strikeOfTick,
+  strikeRecords,
   strikesBetween,
+  tickOf,
   type InsideAt,
   type NebulaStrike,
   type NebulaTune,
+  type SegmentReach,
+  type SystemFactors,
 } from './nebulaMath.ts';
 import { setViewShake } from '../core/camera.ts';
+import { targetable } from './shipCombat.ts';
 
 /**
  * How many floats one sheet carries in a set's `source`: the fields in the order `makeSet` adds
@@ -53,17 +70,32 @@ import { setViewShake } from '../core/camera.ts';
  */
 const SHEET_FLOATS = 18;
 
-/** What a nebula set needs from the game: the effects, the pooled lights and the player's ship. */
+/**
+ * A ship as the lightning sees it: a ship contact in the game, a stub in the node test. Only what a
+ * strike reads: whether it may be struck at all, where it is and how big, and its fight.
+ */
+export interface NebulaShip {
+  readonly label: string;
+  readonly dead: boolean;
+  readonly vehicle: { readonly ghosted: boolean; readonly held: boolean; readonly pos: THREE.Vector3; readonly radius: number };
+  readonly combat: { readonly lightningReady: boolean; readonly nebula: SystemFactors; lightning(amount: number, at: THREE.Vector3): boolean } | null;
+  /** How many nebulae hold it, as its own record was last worked out. */
+  readonly nebula: { readonly inside: number };
+}
+
+/** What a nebula set needs from the game: the effects, the pooled lights and the ships. */
 export interface NebulaeDeps {
   /** Place one of the strike's own effects, transient, in the world's frame; null when it could not be. */
   place(file: string, matrix: THREE.Matrix4): unknown | null;
   remove(handle: unknown): void;
   /** Borrow one light from the pool for a strike. */
   flash(at: THREE.Vector3, colour: number, intensity: number, distance: number, seconds: number): void;
-  /** Where the player's ship is and how big it is (0: there is none to strike). */
-  shipAt(out: THREE.Vector3): number;
-  /** Strike the player's ship. */
-  hurtShip(amount: number, from: THREE.Vector3): void;
+  /** Every ship that fights in the world: the ones a strike may touch. */
+  ships(): readonly NebulaShip[];
+  /** A strike on a ship, its nearest point on the bolt at `at`: the ship's own path decides what it takes. False when it was refused (resting, or gone). */
+  strike(ship: NebulaShip, amount: number, at: THREE.Vector3): boolean;
+  /** The ship the player flies, or null: what `bendWithin` aims at, and what the console's strike goes through. */
+  playerShip(): NebulaShip | null;
   /** Whether nebula lightning may hurt a ship at all: the player's own setting. */
   damageEnabled(): boolean;
   /**
@@ -72,7 +104,10 @@ export interface NebulaeDeps {
    * Kept apart from `NEBULA_TUNE.alpha`, so the console's knob and the slider never overwrite each other.
    */
   opacity?(): number;
-  /** Wall-clock milliseconds. The strikes are timed on it, so two browsers see the same ones. */
+  /**
+   * Milliseconds on the clock the weather reads (the server's while one answers, this machine's wall
+   * clock with no server set). The strikes are timed on it, so two browsers see the same ones.
+   */
   now(): number;
   /** How a picture is loaded; the game leaves it out and three's own loader is used. A node check hands its own. */
   texture?: (url: string) => Promise<THREE.Texture | null>;
@@ -107,16 +142,50 @@ interface Beam {
   /** Seconds it has been alive, and how long it lives; `age >= seconds` means free. */
   age: number;
   seconds: number;
-  /** The effects placed at its two ends, and the slot it came from (so one strike is never started twice). */
+  /** The effects placed at its two ends. */
   startFx: unknown | null;
   endFx: unknown | null;
 }
 
+/** One strike standing in a nebula, drawn or not: made with the zone, written in place, never made in a frame. */
+interface LiveStrike {
+  /** The nebula it belongs to; -1 while the record is free. */
+  row: number;
+  /** Its two ends, in the world. */
+  readonly a: THREE.Vector3;
+  readonly b: THREE.Vector3;
+  /** The moment it is over, on the strike clock. */
+  until: number;
+  /** 0 to 1 across the row's damage band. */
+  roll: number;
+}
+
+/**
+ * What `strikeThrough` did with a strike: drawn, standing but not drawn (every bolt busy, or too far
+ * to see), or not placed at all (every record busy, and none it could take).
+ */
+export type StrikeOutcome = 'drawn' | 'busy' | 'far' | 'crowded';
+
 const tmpA = new THREE.Vector3();
 const tmpB = new THREE.Vector3();
-const tmpShip = new THREE.Vector3();
+const tmpAt = new THREE.Vector3();
 const tmpMatrix = new THREE.Matrix4();
 const tmpStrikes: NebulaStrike[] = [];
+/** The nearest point on a bolt to a ship, written in place for every test. */
+const tmpReach: SegmentReach = { x: 0, y: 0, z: 0, t: 0, distance: 0 };
+/** The console's strike, filled in place, and two axes to find a side of it with. */
+const forcedStrike = newStrike();
+const UP = new THREE.Vector3(0, 1, 0);
+const SIDE = new THREE.Vector3(1, 0, 0);
+
+/**
+ * Whether lightning may touch a ship at all: alive and not in a jump (`targetable`, which every
+ * target choice goes through) and not held where it is (a hull the jump holds, the NPC ships while
+ * play is paused), so a jump through a nebula is never struck.
+ */
+function strikable(s: NebulaShip): boolean {
+  return targetable(s) && !s.vehicle.held;
+}
 /** Where the camera stands in the nebulae, filled afresh every frame rather than made every frame. */
 const tmpInside: InsideAt = { index: -1, depth: 0 };
 
@@ -301,13 +370,22 @@ export class Nebulae {
   insideIndex = -1;
   /** Sheets drawn in the zone right now, after the cap shared them out. */
   sheets = 0;
-  /** Strikes started and bolts skipped because both were busy, for the console. */
-  readonly tally = { strikes: 0, skipped: 0, hits: 0, damage: 0 };
+  /**
+   * For the console: strikes started, bolts drawn for them, bolts skipped because every one was busy,
+   * strikes lost because every record was (`crowded`, which a pool sized from the zone's rows keeps at
+   * nought), records a strike near a ship took from one near nobody (`bumped`), the hits and the
+   * damage they did, and the hits by whose ship (`npc` is every ship but the player's: the NPCs', and
+   * any garage hull left standing).
+   */
+  readonly tally = { strikes: 0, drawn: 0, skipped: 0, crowded: 0, bumped: 0, hits: 0, damage: 0 };
+  readonly hitsByShip = { player: 0, npc: 0 };
 
   private readonly deps: NebulaeDeps;
   private readonly sets: SheetSet[] = [];
   private readonly shells: { mesh: THREE.Mesh; material: THREE.ShaderMaterial; look: 'glow' | 'mist' }[] = [];
   private readonly beams: Beam[] = [];
+  /** The strikes standing now, drawn or not: as many records as the zone's rows call for (`strikeRecords`), made with the zone. */
+  private readonly live: LiveStrike[] = [];
   private readonly textures: THREE.Texture[] = [];
   private readonly seeds: Int32Array;
   /** The last wall-clock moment the strikes were asked for, per nebula (0: never). */
@@ -327,6 +405,8 @@ export class Nebulae {
     for (let i = 0; i < rows.length; i++) this.seeds[i] = seedOfName(rows[i].name) | 0;
     this.group.name = 'nebulae';
     this.group.frustumCulled = false;
+    const records = strikeRecords(rows, NEBULA_TUNE);
+    for (let i = 0; i < records; i++) this.live.push({ row: -1, a: new THREE.Vector3(), b: new THREE.Vector3(), until: 0, roll: 0 });
   }
 
   /**
@@ -374,16 +454,22 @@ export class Nebulae {
   }
 
   /**
-   * Strike now, wherever the camera is: the nearest nebula that has lightning, on its next slot's
-   * bolt. For the console and for a scripted check, where the wall clock is not worth waiting on.
+   * Strike now, for the console and for a scripted check, where the strike clock is not worth waiting
+   * on. With the player flying a ship, one bolt of the nearest nebula that has lightning is placed
+   * through that ship, half its reach beside its middle, so the shield-only path can be watched; with none, the bolt
+   * stands where the nebula's next tick would put it, near `eye`. Either way it is an ordinary live
+   * strike, drawn when it can be and tested against every ship at once.
    */
   forceStrike(eye: THREE.Vector3): string {
+    const player = this.deps.playerShip();
+    const ship = player && strikable(player) ? player : null;
+    const from = ship ? ship.vehicle.pos : eye;
     let index = -1;
     let best = Infinity;
     for (let i = 0; i < this.rows.length; i++) {
       const row = this.rows[i];
-      if (!row.lightning || !(row.lightning.every > 0)) continue;
-      const away = Math.hypot(row.at[0] - eye.x, row.at[1] - eye.y, row.at[2] - eye.z) - row.radius;
+      if (!rowStrikes(row)) continue;
+      const away = Math.hypot(row.at[0] - from.x, row.at[1] - from.y, row.at[2] - from.z) - row.radius;
       if (away < best) {
         best = away;
         index = i;
@@ -392,18 +478,84 @@ export class Nebulae {
     if (index < 0) return 'no nebula here has lightning';
     const row = this.rows[index];
     const bolt = row.lightning!;
-    // A slot ahead of the one running, and a fresh one each time, so asking twice is two bolts.
-    const slot = slotOf(bolt.every, this.deps.now()) + 1 + this.forced++;
-    const what = this.startBeam(index, strikeOfSlot(this.seeds[index], slot, bolt.every, bolt.maxSeconds, row.radius, NEBULA_TUNE), eye);
-    if (what === 'busy') return `${row.name} skipped it: every bolt is busy`;
-    if (what === 'far') return `${row.name} struck too far off to be drawn (${Math.round(best)} m from its edge)`;
-    return `${row.name} struck, ${Math.round(best)} m from its edge`;
+    const now = this.deps.now();
+    // A tick ahead of the one running, and a fresh one each time, so asking twice is two bolts.
+    strikeOfTick(this.seeds[index], tickOf(now, NEBULA_TUNE) + 1 + this.forced++, bolt.every, bolt.maxSeconds, row.radius, NEBULA_TUNE, forcedStrike, true);
+    if (ship) {
+      // The bolt's own length and turn, its middle moved to half the ship's reach beside the ship's
+      // middle, on a side the tick picks: through the middle itself every strike would be on the
+      // front, and the point is to watch either shield take one.
+      const p = ship.vehicle.pos;
+      tmpB.set(forcedStrike.to[0] - forcedStrike.from[0], forcedStrike.to[1] - forcedStrike.from[1], forcedStrike.to[2] - forcedStrike.from[2]).multiplyScalar(0.5);
+      if (tmpB.lengthSq() < 1) tmpB.set(row.radius * NEBULA_TUNE.strikeCube, 0, 0);
+      tmpAt.copy(tmpB).cross(Math.abs(tmpB.y) < 0.9 * tmpB.length() ? UP : SIDE).normalize().multiplyScalar(ship.vehicle.radius * 0.5 * (forcedStrike.roll < 0.5 ? -1 : 1)).add(p);
+      tmpA.copy(tmpAt).sub(tmpB);
+      tmpB.add(tmpAt);
+    } else {
+      tmpA.set(row.at[0] + forcedStrike.from[0], row.at[1] + forcedStrike.from[1], row.at[2] + forcedStrike.from[2]);
+      tmpB.set(row.at[0] + forcedStrike.to[0], row.at[1] + forcedStrike.to[1], row.at[2] + forcedStrike.to[2]);
+    }
+    const hits = this.tally.hits;
+    const what = this.strikeThrough(index, tmpA, tmpB, forcedStrike.seconds, forcedStrike.roll, now, eye);
+    // Tested now rather than on the next frame, so the answer can say what it did.
+    this.testStrikes(now);
+    const where = ship ? `through ${ship.label}` : `${Math.round(best)} m from its edge`;
+    const drawn = what === 'drawn' ? 'drawn' : what === 'busy' ? 'not drawn: every bolt is busy' : what === 'far' ? 'too far off to be drawn' : 'skipped: every strike is busy';
+    const struck = this.tally.hits > hits ? 'and it struck' : ship ? (this.deps.damageEnabled() ? 'and the ship is resting from the last strike' : 'and lightning damage is switched off') : 'and nothing was under it';
+    return `${row.name} struck ${where}, ${drawn}, ${struck}`;
   }
 
-  /** How many strikes the console has asked for, so each one is a slot of its own. */
+  /** How many strikes the console has asked for, so each one is a tick of its own. */
   private forced = 0;
-  /** When a strike last ended on the player's ship (wall clock), so no nebula can take one apart. */
-  private lastHitAt = -Infinity;
+
+  /**
+   * Stand a strike of nebula `index` between `a` and `b` (in the world) from `at` (the strike clock's milliseconds) for
+   * `seconds`: a live strike, tested against every ship until it is over, and a bolt drawn for it
+   * when it is near enough to `eye` to be seen and a bolt of the pool is free. The bolt is drawn
+   * `now - at` into its life, so two browsers show a strike at the same point of its life.
+   */
+  strikeThrough(index: number, a: THREE.Vector3, b: THREE.Vector3, seconds: number, roll: number, at: number, eye: THREE.Vector3): StrikeOutcome {
+    const now = this.deps.now();
+    let rec: LiveStrike | null = null;
+    for (const s of this.live) {
+      if (s.row < 0 || s.until <= now) {
+        rec = s;
+        break;
+      }
+    }
+    if (!rec) {
+      // Every record standing: busier than the zone's rows promised. A strike in a nebula holding a
+      // ship that may be struck takes the record of one standing in a nebula that holds none, which
+      // only ever stood to be seen (its bolt, if it has one, burns on); any other is lost, and counted.
+      const ships = this.deps.ships();
+      if (holdsShip(this.rows[index], ships)) rec = this.recordNearNobody(ships);
+      if (!rec) {
+        this.tally.crowded++;
+        return 'crowded';
+      }
+      this.tally.bumped++;
+    }
+    rec.row = index;
+    rec.a.copy(a);
+    rec.b.copy(b);
+    rec.until = at + seconds * 1000;
+    rec.roll = roll;
+    this.tally.strikes++;
+    // Nothing is drawn for a strike too far off to be seen at all; it strikes all the same.
+    if (Math.min(a.distanceTo(eye), b.distanceTo(eye)) > NEBULA_TUNE.drawWithin) return 'far';
+    return this.startBeam(index, a, b, seconds, Math.max(0, (now - at) / 1000), roll, eye);
+  }
+
+  /** A standing strike whose nebula holds no ship that may be struck, which can give its record up; null when every one does. */
+  private recordNearNobody(ships: readonly NebulaShip[]): LiveStrike | null {
+    for (const s of this.live) if (s.row >= 0 && !holdsShip(this.rows[s.row], ships)) return s;
+    return null;
+  }
+
+  /** How many strike records the zone was given (`strikeRecords`). */
+  get records(): number {
+    return this.live.length;
+  }
 
   /**
    * One look's instanced set, empty. Its buffers are made for the zone's whole cap, so the sheet
@@ -788,9 +940,10 @@ export class Nebulae {
   }
 
   /**
-   * The strikes. Every nebula's clock is cut into slots on the wall clock and slot n's strike is a
-   * hash of the nebula's name and n, so two browsers see the same strikes at the same moments with
-   * nothing sent between them. A strike near the player's ship ends at the ship and hurts it.
+   * The strikes. Every nebula's clock is cut into ticks on the clock the weather reads and whether tick n strikes
+   * is a hash of the nebula's name and n, so two browsers see the same strikes at the same moments
+   * with nothing sent between them. A nebula is asked only while it is near enough to be seen or a
+   * ship that may be struck is inside it; every strike standing is then tested against every ship.
    */
   private updateStrikes(dt: number, eye: THREE.Vector3): void {
     for (const beam of this.beams) {
@@ -812,34 +965,108 @@ export class Nebulae {
       if (!live) this.endBeam(beam);
     }
     const now = this.deps.now();
-    if (!this.lastPoll) {
-      this.lastPoll = now;
-      return;
-    }
     const from = this.lastPoll;
     this.lastPoll = now;
-    if (now <= from) return;
-    for (let i = 0; i < this.rows.length; i++) {
-      const row = this.rows[i];
-      const bolt = row.lightning;
-      if (!bolt || !(bolt.every > 0)) continue;
-      // Only the nebulae near enough to be seen are asked: a strike 20 km away is nothing on screen.
-      const away = Math.hypot(row.at[0] - eye.x, row.at[1] - eye.y, row.at[2] - eye.z) - row.radius;
-      if (away > NEBULA_TUNE.strikeReach) continue;
-      const list = strikesBetween(this.seeds[i], bolt.every, bolt.maxSeconds, row.radius, from, now, tmpStrikes, NEBULA_TUNE);
-      for (const strike of list) this.startBeam(i, strike, eye);
+    if (from && now > from) {
+      const ships = this.deps.ships();
+      for (let i = 0; i < this.rows.length; i++) {
+        const row = this.rows[i];
+        if (!rowStrikes(row)) continue;
+        const bolt = row.lightning!;
+        // A nebula far from the camera with nobody in it is not asked: its strikes would touch nothing
+        // and show nothing. One holding a ship that may be struck is asked however far off it is.
+        const away = Math.hypot(row.at[0] - eye.x, row.at[1] - eye.y, row.at[2] - eye.z) - row.radius;
+        if (away > NEBULA_TUNE.strikeReach && !holdsShip(row, ships)) continue;
+        const list = strikesBetween(this.seeds[i], bolt.every, bolt.maxSeconds, row.radius, from, now, tmpStrikes, NEBULA_TUNE);
+        for (const strike of list) this.startStrike(i, strike, now, eye);
+      }
+    }
+    this.testStrikes(now);
+  }
+
+  /** One strike off the clock: its two ends in the world, bent onto the player's ship only while `bendWithin` asks, then stood. */
+  private startStrike(index: number, strike: NebulaStrike, now: number, eye: THREE.Vector3): void {
+    // One that was over before this frame (the end of a gap caught up with) has nothing left to do.
+    if (strike.at + strike.seconds * 1000 <= now) return;
+    const row = this.rows[index];
+    tmpA.set(row.at[0] + strike.from[0], row.at[1] + strike.from[1], row.at[2] + strike.from[2]);
+    tmpB.set(row.at[0] + strike.to[0], row.at[1] + strike.to[1], row.at[2] + strike.to[2]);
+    if (NEBULA_TUNE.bendWithin > 0) this.bend(row, tmpB);
+    this.strikeThrough(index, tmpA, tmpB, strike.seconds, strike.roll, strike.at, eye);
+  }
+
+  /**
+   * How this game aimed lightning before it took the game's rule, kept behind `bendWithin`: a strike
+   * whose far end falls that near the player's ship, with the ship inside the nebula and rested from
+   * the last strike, ends on the ship instead.
+   */
+  private bend(row: Nebula, b: THREE.Vector3): void {
+    const ship = this.deps.playerShip();
+    if (!ship || !strikable(ship) || !ship.combat?.lightningReady) return;
+    const p = ship.vehicle.pos;
+    if (p.distanceTo(b) >= NEBULA_TUNE.bendWithin || !insideOf(row, p)) return;
+    b.copy(p);
+  }
+
+  /**
+   * Every strike standing, against every ship that may be struck (READ: a bolt touches whatever it
+   * passes): a quick test of the bolt's box grown by the ship's reach, then the nearest point on the
+   * bolt to the ship's middle, which must be within `hitShare` of its radius. The ship's own path
+   * says whether it took the strike (it rests between strikes); the amount is the row's band at the
+   * strike's roll, at the owner's share, and nothing at all with the setting off. A strike that is
+   * over frees its record. Nothing is made.
+   */
+  private testStrikes(now: number): void {
+    const enabled = this.deps.damageEnabled();
+    let ships: readonly NebulaShip[] | null = null;
+    let player: NebulaShip | null = null;
+    for (const s of this.live) {
+      if (s.row < 0) continue;
+      if (s.until <= now) {
+        s.row = -1;
+        continue;
+      }
+      if (!enabled) continue;
+      const bolt = this.rows[s.row].lightning;
+      if (!bolt) continue;
+      const amount = strikeDamage(bolt.damage, s.roll, true, NEBULA_TUNE);
+      if (!(amount > 0)) continue;
+      if (!ships) {
+        ships = this.deps.ships();
+        player = this.deps.playerShip();
+      }
+      const a = s.a;
+      const b = s.b;
+      for (let k = 0; k < ships.length; k++) {
+        const ship = ships[k];
+        if (!strikable(ship) || !ship.combat?.lightningReady) continue;
+        const p = ship.vehicle.pos;
+        const r = Math.max(0, ship.vehicle.radius) * NEBULA_TUNE.hitShare;
+        if (p.x < Math.min(a.x, b.x) - r || p.x > Math.max(a.x, b.x) + r) continue;
+        if (p.y < Math.min(a.y, b.y) - r || p.y > Math.max(a.y, b.y) + r) continue;
+        if (p.z < Math.min(a.z, b.z) - r || p.z > Math.max(a.z, b.z) + r) continue;
+        if (segmentReach(a.x, a.y, a.z, b.x, b.y, b.z, p.x, p.y, p.z, tmpReach) > r) continue;
+        tmpAt.set(tmpReach.x, tmpReach.y, tmpReach.z);
+        if (!this.deps.strike(ship, amount, tmpAt)) continue;
+        this.tally.hits++;
+        this.tally.damage += amount;
+        if (ship === player) this.hitsByShip.player++;
+        else this.hitsByShip.npc++;
+      }
     }
   }
 
-  /** Put one strike on a free bolt of the pool; a strike that comes while every bolt is busy is skipped. */
-  private startBeam(index: number, strike: NebulaStrike, eye: THREE.Vector3): 'drawn' | 'busy' | 'far' | 'none' {
+  /**
+   * Put one strike on a free bolt of the pool, `age` seconds into its life; a strike that comes while
+   * every bolt is busy is not drawn (it still strikes).
+   */
+  private startBeam(index: number, a: THREE.Vector3, b: THREE.Vector3, seconds: number, age: number, roll: number, eye: THREE.Vector3): StrikeOutcome {
     const row = this.rows[index];
-    const bolt = row.lightning;
-    if (!bolt) return 'none';
+    const bolt = row.lightning!;
     let beam: Beam | null = null;
-    for (const b of this.beams) {
-      if (b.age >= b.seconds) {
-        beam = b;
+    for (const free of this.beams) {
+      if (free.age >= free.seconds) {
+        beam = free;
         break;
       }
     }
@@ -847,46 +1074,24 @@ export class Nebulae {
       this.tally.skipped++;
       return 'busy';
     }
-    tmpA.set(row.at[0] + strike.from[0], row.at[1] + strike.from[1], row.at[2] + strike.from[2]);
-    tmpB.set(row.at[0] + strike.to[0], row.at[1] + strike.to[1], row.at[2] + strike.to[2]);
-    // A strike whose far end is near the player's ship ends at the ship instead, and hurts it.
-    const radius = this.deps.shipAt(tmpShip);
-    const now = this.deps.now();
-    let hit = false;
-    // The roughest rows strike once a second, so a ship is taken at most every few seconds.
-    const rested = now - this.lastHitAt >= NEBULA_TUNE.hitEvery * 1000;
-    if (rested && radius > 0 && tmpShip.distanceTo(tmpB) < NEBULA_TUNE.hitWithin && insideOf(row, tmpShip)) {
-      tmpB.copy(tmpShip);
-      hit = true;
-    }
-    // Nothing is drawn for a strike too far off to be seen at all.
-    if (Math.min(tmpA.distanceTo(eye), tmpB.distanceTo(eye)) > NEBULA_TUNE.drawWithin && !hit) return 'far';
-    this.tally.strikes++;
-    beam.age = 0;
-    beam.seconds = strike.seconds;
+    this.tally.drawn++;
+    beam.age = Math.min(age, seconds);
+    beam.seconds = seconds;
     const u = beam.material.uniforms;
-    (u.uFrom.value as THREE.Vector3).copy(tmpA);
-    (u.uTo.value as THREE.Vector3).copy(tmpB);
-    u.uSeed.value = (strike.slot % 97) + strike.roll;
+    (u.uFrom.value as THREE.Vector3).copy(a);
+    (u.uTo.value as THREE.Vector3).copy(b);
+    // The bolt's wander, from the strike itself, so the same strike wanders the same way everywhere.
+    u.uSeed.value = (Math.abs(this.seeds[index]) % 97) + roll * 97;
     u.uAlpha.value = 0;
     (u.uColourA.value as THREE.Color).setRGB(bolt.colour[1], bolt.colour[2], bolt.colour[3]);
     (u.uColourB.value as THREE.Color).setRGB(bolt.ramp[1], bolt.ramp[2], bolt.ramp[3]);
     beam.mesh.visible = true;
     // One pooled light at the near end, in the bolt's own colour.
-    const near = tmpA.distanceTo(eye) < tmpB.distanceTo(eye) ? tmpA : tmpB;
+    const near = a.distanceTo(eye) < b.distanceTo(eye) ? a : b;
     this.deps.flash(near, colourOf(bolt.colour), NEBULA_TUNE.flashIntensity, NEBULA_TUNE.flashDistance, NEBULA_TUNE.flashSeconds);
     // The appearance's own start and end effects, transient, at the bolt's two ends.
-    if (this.lightning?.start) beam.startFx = this.deps.place(this.lightning.start, tmpMatrix.makeTranslation(tmpA.x, tmpA.y, tmpA.z));
-    if (this.lightning?.end) beam.endFx = this.deps.place(this.lightning.end, tmpMatrix.makeTranslation(tmpB.x, tmpB.y, tmpB.z));
-    if (hit) {
-      this.lastHitAt = now;
-      const amount = strikeDamage(bolt.damage, strike.roll, this.deps.damageEnabled(), NEBULA_TUNE);
-      if (amount > 0) {
-        this.tally.hits++;
-        this.tally.damage += amount;
-        this.deps.hurtShip(amount, tmpA);
-      }
-    }
+    if (this.lightning?.start) beam.startFx = this.deps.place(this.lightning.start, tmpMatrix.makeTranslation(a.x, a.y, a.z));
+    if (this.lightning?.end) beam.endFx = this.deps.place(this.lightning.end, tmpMatrix.makeTranslation(b.x, b.y, b.z));
     return 'drawn';
   }
 
@@ -948,8 +1153,21 @@ export class Nebulae {
     return dimInside(seenDepth(this.depthInside, this.opacity), NEBULA_TUNE.dimRays);
   }
 
-  /** What the console shows: the counts, where the camera is, and what the lightning has done. */
+  /** How many strikes stand right now, drawn or not. */
+  get liveCount(): number {
+    const now = this.deps.now();
+    let n = 0;
+    for (const s of this.live) if (s.row >= 0 && s.until > now) n++;
+    return n;
+  }
+
+  /**
+   * What the console shows: the counts, where the camera is, what the lightning has done, and what the
+   * nebulae are doing to every ship inside one (its engines', reactor's and shield recharge's factors).
+   */
   report(): Record<string, unknown> {
+    const player = this.deps.playerShip();
+    const r2 = (v: number): number => Math.round(v * 100) / 100;
     return {
       nebulae: this.rows.length,
       sheets: this.sheets,
@@ -959,9 +1177,17 @@ export class Nebulae {
       // The Graphics page's Nebula opacity, over the sheets, the haze and the two dims above.
       opacity: Number(this.opacity.toFixed(3)),
       haze: this.shells.map((s) => ({ look: s.look, drawn: s.mesh.visible, alpha: Number((s.material.uniforms.uAlpha.value as number).toFixed(3)) })),
-      lightning: { ...this.tally, live: this.beams.filter((b) => b.age < b.seconds).length, damage: Number(this.tally.damage.toFixed(1)) },
+      lightning: { ...this.tally, live: this.liveCount, beams: this.beams.filter((b) => b.age < b.seconds).length, damage: Number(this.tally.damage.toFixed(1)) },
+      hitsByShip: { ...this.hitsByShip },
+      live: this.liveCount,
+      records: this.live.length,
+      systems: this.deps
+        .ships()
+        .filter((s) => s.nebula.inside > 0 && !!s.combat)
+        .map((s) => ({ ship: s.label, yours: s === player, inside: s.nebula.inside, engine: r2(s.combat!.nebula.engine), reactor: r2(s.combat!.nebula.reactor), shields: r2(s.combat!.nebula.shields) })),
+      systemsTune: { ...NEBULA_SYSTEMS },
       shown: this.shown,
-      ours: 'how many sheets, how big, the pull-in, the haze and when lightning strikes are ours, not the game\'s',
+      ours: "how many sheets, how big, the pull-in, the haze, the strike clock's tick, how near a bolt must pass and how strongly a nebula weakens a ship are ours; when a nebula strikes, where its bolt stands, how long it lasts, whom it touches and what it takes are the game's rule",
     };
   }
 
@@ -990,6 +1216,7 @@ export class Nebulae {
     this.sets.length = 0;
     this.shells.length = 0;
     this.beams.length = 0;
+    for (const s of this.live) s.row = -1;
   }
 }
 
@@ -1012,12 +1239,16 @@ const ORDER_KEYS: readonly string[] = ['orderMist', 'orderGlow', 'orderHaze', 'o
  * `__debug.nebulae()` says what the zone has and where the camera is in it.
  * `__debug.nebulae({ density: 2 })` (and every other name in NEBULA_TUNE) moves a number live; the
  * ones that place the sheets refill them on the spot, the ones that order them put the meshes back
- * in order, the three that are spent when the bolt pool is made are answered with `atNextZone`, and
- * nothing ever compiles. `__debug.nebulae({ shellDepthTest: false })` draws the haze the way the
- * client's own near shader does, over everything; `{ strike: true }` fires a bolt without waiting
- * for the clock.
+ * in order, the ones that are spent when the bolt pool and the strike records are made are answered
+ * with `atNextZone`, and nothing ever compiles. `{ systems: { engine, reactor, shields } }` moves how
+ * strongly a nebula weakens a ship, per unit of its density (the ships take it on their next step).
+ * `__debug.nebulae({ shellDepthTest: false })` draws the haze the way the client's own near shader
+ * does, over everything; `{ strike: true }` stands a bolt through the player's ship (or, with none,
+ * near the camera) without waiting for the clock.
  */
-const nebulaeHook = (opts?: Partial<NebulaTune> & { shellDepthTest?: boolean; shown?: boolean; strike?: boolean; at?: [number, number, number] }): Record<string, unknown> | string => {
+const nebulaeHook = (
+  opts?: Partial<NebulaTune> & { shellDepthTest?: boolean; shown?: boolean; strike?: boolean; at?: [number, number, number]; systems?: Partial<typeof NEBULA_SYSTEMS> },
+): Record<string, unknown> | string => {
   const nebulae = current;
   // A knob may be moved anywhere, whether or not a zone with nebulae is up.
   let refill = false;
@@ -1031,6 +1262,13 @@ const nebulaeHook = (opts?: Partial<NebulaTune> & { shellDepthTest?: boolean; sh
       if (ORDER_KEYS.includes(key)) reorder = true;
       if (BUILD_ONLY_KEYS.includes(key)) later.push(key);
     }
+    const systems = opts.systems;
+    if (systems && typeof systems === 'object') {
+      for (const key of ['engine', 'reactor', 'shields'] as const) {
+        const v = systems[key];
+        if (typeof v === 'number' && Number.isFinite(v)) NEBULA_SYSTEMS[key] = v;
+      }
+    }
   }
   if (!nebulae) {
     const answer = 'no nebulae here: a space zone with a pack converted at version 3 or later has them';
@@ -1042,11 +1280,14 @@ const nebulaeHook = (opts?: Partial<NebulaTune> & { shellDepthTest?: boolean; sh
     if (refill) nebulae.fill();
     if (reorder) nebulae.applyOrders();
   }
-  const report = nebulae.report();
+  // The strike first, so the answer's tally already counts it.
+  let struck: string | null = null;
   if (opts?.strike) {
     const at = opts.at ? new THREE.Vector3(opts.at[0], opts.at[1], opts.at[2]) : nebulae.lastEye;
-    report.struck = nebulae.forceStrike(at);
+    struck = nebulae.forceStrike(at);
   }
+  const report = nebulae.report();
+  if (struck !== null) report.struck = struck;
   report.tune = { ...NEBULA_TUNE };
   // These are spent when the bolt pool is made, so they are the next zone's, not this one's.
   if (later.length) report.atNextZone = later.join(', ');
@@ -1070,6 +1311,20 @@ installNebulaDebug();
 /** A point is inside a nebula's sphere. */
 function insideOf(row: Nebula, p: THREE.Vector3): boolean {
   return Math.hypot(row.at[0] - p.x, row.at[1] - p.y, row.at[2] - p.z) < row.radius;
+}
+
+/** Whether any ship that may be struck is inside a nebula: an index loop over the world's own list, nothing made. */
+function holdsShip(row: Nebula, ships: readonly NebulaShip[]): boolean {
+  const r2 = row.radius * row.radius;
+  for (let k = 0; k < ships.length; k++) {
+    const s = ships[k];
+    const p = s.vehicle.pos;
+    const dx = row.at[0] - p.x;
+    const dy = row.at[1] - p.y;
+    const dz = row.at[2] - p.z;
+    if (dx * dx + dy * dy + dz * dz < r2 && strikable(s)) return true;
+  }
+  return false;
 }
 
 /** A table colour (alpha, red, green, blue) as one 0xrrggbb number, for a pooled light. */

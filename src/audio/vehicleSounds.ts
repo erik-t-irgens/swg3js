@@ -147,7 +147,8 @@ export interface SoundVehicle {
     fit?: { slots: readonly { slot: string; looks: readonly { parts: readonly { template: string }[] }[] }[] } | null;
   } | null;
   readonly fit: { looks: Record<string, number> } | null;
-  readonly wings: { readonly length: number; readonly target: boolean };
+  /** `progress` is the mean share open (0..1); a stand-in that leaves it out is taken to be moving whenever `target` turns. */
+  readonly wings: { readonly length: number; readonly target: boolean; readonly progress?: number };
 }
 
 export interface VehicleTune {
@@ -741,6 +742,10 @@ export class VehicleSounds {
     if (!wings.length) return;
     if (wings.target === rec.wingTarget) return;
     rec.wingTarget = wings.target;
+    // Already standing where they are going: snapped there (a hull a dock stands at its dock outright, one set down), not
+    // swung, so nothing moved that could be heard. A wing that turned this frame has stepped one frame's share off its end.
+    const at = wings.progress;
+    if (at !== undefined && (wings.target ? at >= 1 : at <= 0)) return;
     if (!rec.wing) return;
     this.counts.wings++;
     this.at(rec, wings.target ? 'wings open' : 'wings close', rec.wing, rec.wingShot);

@@ -3,13 +3,16 @@
 // pulled in to the rim when it is further than the reach, and the clock that decides whether it is
 // drawn again -- which a player standing still must never move. Then the minimap itself, on a stand-in
 // page and a 2D context that records what it is asked to draw, so the drawing and the clock are pinned
-// together and not only apart.
+// together and not only apart; and what lies over its circle: the world's name at the top, the map's
+// own pair of coordinates at the foot (written only when the rounded pair moves, and at most `locHz`
+// times a second), and the mark for north on the rim, drawn before your arrow.
 //
 // Everything here is synthetic: numbers chosen for this test, nothing read from the game's files.
 import assert from 'node:assert/strict';
 import { MINIMAP_TUNE, MinimapClock, cityFadeSheet, facingAngle, makeMinimapPoint, minimapPoint, minimapScale, minimapTurn, tuneMinimap } from '../../../src/ui/minimap.ts';
 import { CITY_TUNE } from '../../../src/story/cities.ts';
 import { HUD_SIZES } from '../../../src/ui/hudMath.ts';
+import { COL, colourOf } from '../../../src/core/palette.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -119,12 +122,24 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
     beginPath() {},
     clip() {},
     fillRect() {},
-    moveTo() {},
-    lineTo() {},
+    moveTo(x: number, y: number) {
+      ops.push({ op: 'moveTo', x, y });
+    },
+    lineTo(x: number, y: number) {
+      ops.push({ op: 'lineTo', x, y });
+    },
     closePath() {},
-    stroke() {},
-    fill() {},
-    translate() {},
+    // What each stroke and fill was laid in, and where each translate put the origin, so a mark drawn
+    // in a colour the palette has not got, or away from the circle's middle, is seen.
+    stroke() {
+      ops.push({ op: 'stroke', style: ctx.strokeStyle });
+    },
+    fill() {
+      ops.push({ op: 'fill', style: ctx.fillStyle });
+    },
+    translate(x: number, y: number) {
+      ops.push({ op: 'translate', x, y });
+    },
     arc(x: number, y: number, r: number) {
       ops.push({ op: 'arc', x, y, r });
     },
@@ -142,6 +157,8 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
     const classes = new Set<string>();
     const e: any = {
       tag,
+      /** How many times this element's text was written, so one line's writes can be told from the rest. */
+      sets: 0,
       children: [] as any[],
       style: {},
       width: 0,
@@ -166,7 +183,7 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
       getContext: () => (tag === 'canvas' ? ctx : null),
     };
     Object.defineProperty(e, 'hidden', { get: () => hidden, set: (v) => ((hidden = !!v), writes++) });
-    Object.defineProperty(e, 'textContent', { get: () => text, set: (v) => ((text = String(v)), writes++) });
+    Object.defineProperty(e, 'textContent', { get: () => text, set: (v) => ((text = String(v)), e.sets++, writes++) });
     Object.defineProperty(e, 'className', { get: () => cls, set: (v) => ((cls = String(v)), writes++) });
     return e;
   };
@@ -179,8 +196,18 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   const pic = { image: { width: 1024, height: 1024 }, frame: { width: 16384, x: 0, z: 0 } };
   let picture: typeof pic | null = pic;
   const mm = new Minimap(panel, hudRoot, () => picture as any);
-  const city = mm.root.children[1];
-  const view = { wanted: true, pack: 'p', x: 1000, z: 2000, heading: 0, range: 800, northUp: true };
+  // Found by its class, not by its place: the circle's face (the canvas, with the name and the
+  // coordinates laid over it) stands before it in the wrap.
+  const byClass = (root: any, cls: string): any => {
+    for (const k of root.children ?? []) {
+      if (String(k.className).split(' ').includes(cls)) return k;
+      const deeper = byClass(k, cls);
+      if (deeper) return deeper;
+    }
+    return null;
+  };
+  const city = byClass(mm.root, 'hud-city');
+  const view = { wanted: true, pack: 'p', x: 1000, z: 2000, heading: 0, range: 800, northUp: true, now: 100 };
   const half = HUD_SIZES.minimap / 2;
   const k = minimapScale(HUD_SIZES.minimap, view.range, MINIMAP_TUNE.rimInsetPx);
   const dots = () => ops.filter((o) => o.op === 'arc' && (o.r === MINIMAP_TUNE.dotPx || o.r === MINIMAP_TUNE.trackedDotPx));
@@ -249,7 +276,7 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   mm.update(view);
   ok(mm.showing && city.className === 'hud-city', 'back on a planet the minimap returns with no name waiting to fade in');
   mm.update(view);
-  ok(writes - w2 === 2, `coming back is the two writes of showing it, and nothing for the name (${writes - w2})`);
+  ok(writes - w2 === 2, `coming back is the two writes of showing it, and nothing for the name or for coordinates that have not moved (${writes - w2})`);
   mm.clearCity();
   ok(writes - w2 === 2, 'clearing a name that is not there writes nothing');
 
@@ -260,6 +287,169 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   picture = null;
   mm.update(view);
   ok(!mm.showing, 'and a world with no picture never brings it up');
+
+  // A second minimap, fresh, for what lies over the circle: the coordinates at its foot, the world's name
+  // at its top and the mark for north on its rim.
+  //
+  // Its own counters are what `__debug.minimap()` reports as `writes` and `locWrites`, and they roll over
+  // once a second on the wall clock, so that clock is a stand-in here, moved a frame at a time, and the
+  // test keeps a second of its own beside it from what the stand-in page saw written. Every frame, the
+  // minimap's last second must be the page's: a write that missed its counter would leave the console
+  // reading nought while the page was being written.
+  const realDateNow = Date.now;
+  let wall = 5_000_000;
+  Date.now = () => wall;
+  picture = pic;
+  const mm2 = new Minimap(el('div'), el('div'), () => picture as any);
+  const v2 = { wanted: true, pack: 'p', x: 2400.3, z: -812.6, heading: 0, range: 800, northUp: true, now: 50 };
+  const loc = byClass(mm2.root, 'hud-mm-loc');
+  const name = byClass(mm2.root, 'hud-mm-name');
+  const second = { start: wall, all: 0, loc: 0, lastAll: 0, lastLoc: 0, frames: 0, agreed: 0, busy: 0 };
+  /** Something done to the minimap, its writes laid into the test's own second. */
+  const act = (what: () => void) => {
+    const w = writes;
+    const s = loc.sets;
+    what();
+    second.all += writes - w;
+    second.loc += loc.sets - s;
+  };
+  /** One frame: the clocks on, the test's second rolled exactly as the minimap's is, then the update. */
+  const tick = (dt = 1 / 60) => {
+    wall += dt * 1000;
+    v2.now += dt;
+    if (wall - second.start >= 1000) {
+      second.lastAll = second.all;
+      second.lastLoc = second.loc;
+      second.all = 0;
+      second.loc = 0;
+      second.start = wall;
+    }
+    act(() => mm2.update(v2));
+    second.frames++;
+    if (mm2.writesLastSecond === second.lastAll && mm2.locWritesLastSecond === second.lastLoc) second.agreed++;
+    if (second.lastLoc > 0) second.busy++;
+  };
+  const still = (frames: number) => {
+    for (let f = 0; f < frames; f++) tick();
+  };
+  try {
+    tick();
+    ok(!!loc && loc.textContent === '2400, -813', `the coordinates over the foot of the circle are the map's own pair, rounded (${loc?.textContent})`);
+    ok(mm2.locShown === '2400, -813', 'and the console reads the same words');
+    {
+      const w = writes;
+      still(300);
+      ok(writes === w, `five seconds standing still write nothing at all, the coordinates included (${writes - w})`);
+      ok(mm2.writesLastSecond === 0 && mm2.locWritesLastSecond === 0, 'and the console says so: no writes in the last second, none of them the coordinates');
+    }
+    {
+      // Standing still is not holding perfectly still: a hull on its springs or a body settling moves a
+      // few tenths of a metre about a point, and the pair it rounds to has not moved, so nothing is written
+      // and nothing is drawn.
+      const s = loc.sets;
+      const r = mm2.redraws;
+      for (let f = 1; f <= 300; f++) {
+        v2.x = 2400.3 + 0.15 * Math.sin(f * 0.7);
+        v2.z = -812.8 + 0.15 * Math.cos(f * 0.9);
+        tick();
+      }
+      ok(loc.sets === s && mm2.redraws === r, `a few tenths of a metre about one spot write nothing and draw nothing (${loc.sets - s} writes, ${mm2.redraws - r} drawings)`);
+      v2.x = 2400.3;
+      v2.z = -812.6;
+      still(60);
+    }
+    {
+      // A pair that moves inside the wait is held back, and must not be lost: standing still after it,
+      // the first frame past the wait writes it, whatever the pair before it was.
+      v2.x = 2401.2;
+      tick();
+      ok(loc.textContent === '2401, -813', `a pair moved after a long still is written at once (${loc.textContent})`);
+      v2.x = 2402.2;
+      tick();
+      ok(loc.textContent === '2401, -813', 'one moved again inside the wait is held back');
+      still(Math.ceil(60 / MINIMAP_TUNE.locHz) + 2);
+      ok(loc.textContent === '2402, -813', `and written once the wait is over, though nothing moved since (${loc.textContent})`);
+    }
+    // Walks east in ten seconds at sixty frames, over distances that do not divide the write's own step:
+    // a new pair nearly every frame, written at most `locHz` times a second, and the last one written once
+    // the walk has ended is where it ended -- which a pair taken as written while it was held back would
+    // miss at some of these and not at others.
+    for (const metres of [93, 97, 100, 107]) {
+      const x0 = v2.x;
+      const before = loc.sets;
+      for (let f = 1; f <= 600; f++) {
+        v2.x = x0 + (metres * f) / 600;
+        tick();
+      }
+      const walked = loc.sets - before;
+      ok(walked > 1 && walked <= MINIMAP_TUNE.locHz * 10, `walking ${metres} metres in ten seconds writes the coordinates ${walked} times, no more than ${MINIMAP_TUNE.locHz * 10}`);
+      still(30);
+      ok(loc.textContent === `${Math.round(v2.x)}, ${Math.round(v2.z)}` && mm2.locShown === loc.textContent, `and the last pair written is where the walk ended (${loc.textContent})`);
+      const settled = loc.sets;
+      still(300);
+      ok(loc.sets === settled, 'and once you stop, nothing more');
+    }
+    {
+      const w = writes;
+      act(() => mm2.setName('Tatooine'));
+      ok(writes - w === 1 && !!name && name.textContent === 'Tatooine' && mm2.nameShown === 'Tatooine', "the world's name over the top of the circle is one write");
+      act(() => mm2.setName('Tatooine'));
+      ok(writes - w === 1, 'and the same name again is none');
+      still(70);
+    }
+    ok(second.busy > 0, `the coordinates were counted in the console's figures while the walks went on (${second.busy} frames)`);
+    ok(second.agreed === second.frames, `and every frame, the console's last second is the writes the page saw, the coordinates' among them (${second.agreed} of ${second.frames})`);
+  } finally {
+    Date.now = realDateNow;
+  }
+  {
+    // North: a triangle with its tip on the rim, drawn before your arrow so the arrow is the last thing
+    // turned. Facing east with the map turning with you, north is a quarter turn back, to your left.
+    const rim = half - MINIMAP_TUNE.rimInsetPx;
+    const rotates = () => ops.map((o, i) => ({ o, i })).filter((r) => r.o.op === 'rotate');
+    const tipAfter = (i: number) => ops.slice(i + 1).find((o) => o.op === 'moveTo');
+    ops.length = 0;
+    v2.heading = 0.4;
+    mm2.update(v2);
+    let rs = rotates();
+    let north = rs[rs.length - 2];
+    let tip = north ? tipAfter(north.i) : null;
+    ok(!!north && north.o.a === 0 && !!tip && near(tip.x, 0) && near(tip.y, -rim), `north up, the mark stands at the top with its tip on the rim (${tip ? `${tip.x.toFixed(2)}, ${tip.y.toFixed(2)}` : 'none'})`);
+    // Turned about the circle's own middle, and laid in the palette's own two: the accent over a halo of
+    // the darkest, as every mark on the display is.
+    // The origin is moved to the middle just before the turn: an earlier translate (the picture's, inside
+    // a save and restore of its own) is no place for the mark to stand.
+    const moved = north ? ops[north.i - 1] : null;
+    ok(!!moved && moved.op === 'translate' && near(moved.x, half) && near(moved.y, half), `the mark is turned about the middle of the circle (${moved ? `${moved.op} ${moved.x}, ${moved.y}` : 'nothing before it'})`);
+    const laid = north ? ops.slice(north.i + 1) : [];
+    const halo = laid.find((o) => o.op === 'stroke');
+    const body = laid.find((o) => o.op === 'fill');
+    ok(!!halo && halo.style === colourOf(COL.void) && !!body && body.style === colourOf(COL.accent), `in the accent over a halo of the darkest (${body?.style} over ${halo?.style})`);
+    ok(near(rs[rs.length - 1].o.a, (facingAngle(0.4) * Math.PI) / 180), 'and your arrow, turned the way you face, is still the last thing turned');
+    const east = -Math.PI / 2;
+    ok(near(facingAngle(east), 90, 1e-9), 'a heading of minus a quarter turn faces east on the map, which mirrors the game\'s x');
+    v2.northUp = false;
+    v2.heading = east;
+    ops.length = 0;
+    mm2.update(v2);
+    rs = rotates();
+    north = rs[rs.length - 2];
+    tip = north ? tipAfter(north.i) : null;
+    ok(!!north && near(north.o.a, -Math.PI / 2, 1e-9) && !!tip && near(tip.x, 0) && near(tip.y, -rim), `heading up and facing east, the north mark is turned back a quarter, to your left, its tip still on the rim (${north ? ((north.o.a * 180) / Math.PI).toFixed(1) : 'none'} degrees)`);
+    ok(rs[rs.length - 1].o.a === 0, 'and your arrow is still the last thing turned, straight up');
+    const base = (i: number) => ops.slice(i + 1).find((o) => o.op === 'lineTo');
+    const was = { northPx: MINIMAP_TUNE.northPx, northHalfPx: MINIMAP_TUNE.northHalfPx };
+    const b0 = base(north.i);
+    ok(!!b0 && near(b0.y, -rim + MINIMAP_TUNE.northPx) && near(Math.abs(b0.x), MINIMAP_TUNE.northHalfPx), `its base stands ${MINIMAP_TUNE.northPx} px in from the rim, ${2 * MINIMAP_TUNE.northHalfPx} px across`);
+    tuneMinimap({ northPx: 9, northHalfPx: 5 });
+    mm2.redraw();
+    ops.length = 0;
+    mm2.update(v2);
+    rs = rotates();
+    const b1 = base(rs[rs.length - 2].i);
+    tuneMinimap(was);
+    ok(!!b1 && near(b1.y, -rim + 9) && near(Math.abs(b1.x), 5), 'and the mark follows its tune');
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -269,6 +459,10 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps;
   tuneMinimap({ movePx: -3 });
   ok(MINIMAP_TUNE.movePx === 0, 'a negative step is held at nought');
   tuneMinimap({ movePx: was });
+  const hz = MINIMAP_TUNE.locHz;
+  tuneMinimap({ locHz: 0 });
+  ok(MINIMAP_TUNE.locHz > 0, `a rate of nought is held at ${MINIMAP_TUNE.locHz} a second, so the coordinates can never stop for good`);
+  tuneMinimap({ locHz: hz });
   const sheet = cityFadeSheet();
   const total = CITY_TUNE.fadeIn + CITY_TUNE.hold + CITY_TUNE.fadeOut;
   ok(sheet.includes(`${total.toFixed(2)}s`), `the fade runs ${total} s in all`);

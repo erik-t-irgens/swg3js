@@ -229,6 +229,12 @@ export interface FlightView {
   topSpeed: number;
   boostTop: number;
   wingFactor: number;
+  /**
+   * What the speed arc's end stands for: the hull's fastest whole and outside every nebula, so a top
+   * a nebula or a downed part has lowered shows as the tick moving down. Nought: the arc is scaled to
+   * the two tops as they are now.
+   */
+  fullSpeed: number;
   /** The booster is burning now. */
   boosting: boolean;
   /** The guns' refire clock 0..1 full, how many gun slots the fit has, and a bit per slot that is down. */
@@ -261,6 +267,7 @@ export function newFlightView(): FlightView {
     topSpeed: 0,
     boostTop: 0,
     wingFactor: 1,
+    fullSpeed: 0,
     boosting: false,
     gunReady: 1,
     gunSlots: 0,
@@ -866,6 +873,7 @@ export class ShipHud {
     v.topSpeed = view.topSpeed;
     v.boostTop = view.boostTop;
     v.wingFactor = view.wingFactor;
+    v.fullSpeed = view.fullSpeed;
     v.boosting = view.boosting;
     v.gunReady = view.gunReady;
     v.gunSlots = view.gunSlots;
@@ -1107,8 +1115,9 @@ export class ShipHud {
     const v = this.view;
     const r = this.place.arcR;
     const w = this.place.arcW;
-    // Speed, up the left, scaled to the boost top so the needle can never run off the end.
-    const a = speedArc(Math.abs(v.speed), v.topSpeed, v.boostTop, v.wingFactor, this.speed);
+    // Speed, up the left, scaled to the hull's fastest whole (else the boost top) so the needle can
+    // never run off the end, and a top a nebula or a downed part has lowered moves the tick down.
+    const a = speedArc(Math.abs(v.speed), v.topSpeed, v.boostTop, v.wingFactor, this.speed, v.fullSpeed);
     c.arc(cx, cy, r, a.from, a.to, w, col.rule, 1);
     this.op(1);
     // What open wings cost: the span between the open top and the plain top.

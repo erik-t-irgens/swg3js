@@ -16,10 +16,9 @@ const ok = (cond: boolean, what: string) => {
 };
 
 /**
- * The bindings the game has, read out of the source rather than imported: `src/core/input.ts` declares
- * a class with a parameter property, which node will not strip. The names are what matter here - a
- * binding renamed there and not here leaves the bar with a cap it cannot resolve, and this is what
- * fails instead of the screen.
+ * The bindings the game has, read out of the source as text (`input.test.ts` imports the file and drives
+ * what it does). The names are what matter here - a binding renamed there and not here leaves the bar
+ * with a cap it cannot resolve, and this is what fails instead of the screen.
  */
 const BINDINGS = (() => {
   const src = readFileSync(new URL('../../../src/core/input.ts', import.meta.url), 'utf8');
@@ -315,10 +314,18 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   ok(/this\.cam\.yaw \+=/.test(step), "and turns the view to the one spoken to with the body, so the player's own turning rules agree with it");
   ok(/DIGIT_CODES\[n - 1\]/.test(step) && !/consumeKey\(`Digit/.test(step), 'reading the number keys out of one table, with no string made a frame');
   // A window that opens from its own key listener must not open hidden behind a conversation.
-  for (const what of ['const chatUi = new ChatUi(', 'const groupUi = new GroupUi(', 'const tradeUi = new TradeUi(', 'this.debugMenu = new DebugMenu(']) {
+  for (const what of ['const chatUi = new ChatUi(', 'const tradeUi = new TradeUi(', 'this.debugMenu = new DebugMenu(']) {
     const at = main.indexOf(what);
     const can = /canOpen: \(\) => [^\n]*/.exec(main.slice(at))?.[0] ?? '';
     ok(at > 0 && /!this\.talkNow/.test(can), `${what.replace(/^(const |this\.)/, '').replace(/ = new .*/, '')} does not open over a conversation`);
+  }
+  // The group's roster opens from no key of its own any more (it is a tab of the map, and the map is
+  // opened by the game's keys, which a conversation holds): its `canOpen` now says only whether the
+  // chevrons over far members may be carried, and a conversation, which hides the display, stops them.
+  {
+    const at = main.indexOf('const groupUi = new GroupUi(');
+    const can = /canOpen: \(\) => [^\n]*/.exec(main.slice(at))?.[0] ?? '';
+    ok(at > 0 && /!this\.talkNow/.test(can) && /!this\.map\.open/.test(can), "the group's chevrons stand down under a conversation and under the map, whose tab the roster is");
   }
 }
 

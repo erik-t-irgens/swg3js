@@ -2,8 +2,9 @@
 // when the wings open, which muzzles are guns, how far open wings reach down, and the box a ship is
 // framed on. Synthetic models only; no pack is read.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
-import { WINGS_KEY, WING_HYSTERESIS, WING_ROOM_BAND, WING_RULE, WingSet, dropPilotChoices, easeWing, pilotWings, poseWing, wingTopFactor, wingsWanted, type Wing } from '../../../src/vehicles/wings.ts';
+import { WINGS_KEY, WING_AUTO, WING_HYSTERESIS, WING_ROOM_BAND, WING_RULE, WingSet, dropPilotChoices, easeWing, pilotWings, poseWing, wingTopFactor, wingWant, wingsWanted, type Wing } from '../../../src/vehicles/wings.ts';
 import {
   MAX_PILOT_GUNS,
   PLACE_SIGN,
@@ -255,6 +256,73 @@ const find = (root: THREE.Object3D, name: string) => anyHardpoint(root, name)!;
   ok(a.wings.pilot === null && c.wings.pilot === null && b.wings.pilot === false, "dropPilotChoices: every ship but the one flown loses the pilot's choice; the flown one keeps it");
   dropPilotChoices([a, b, c], null);
   ok(b.wings.pilot === null, 'dropPilotChoices with nobody flying: every choice dropped');
+}
+
+// 6c. Every hand on the wings, in one order: the console, a dock, the pilot, an NPC pilot, the flight rule. Each rung is
+// tried with every rung under it pulling the other way, so a rung that lost its place shows.
+{
+  const saved = { ...WING_AUTO };
+  const set = () => {
+    const w = new WingSet();
+    w.add({ pivot: new THREE.Object3D(), angle: 1, time: 1, open: 0, label: 'w' });
+    return w;
+  };
+  // In space, airborne, at speed: the flight rule says open, so every rung above it is tried toward shut and back.
+  const want = (w: WingSet) => wingWant(w, true, true, Infinity, 0, 100, 140, 0.95);
+  const w = set();
+  ok(want(w) === true && wingWant(w, false, false, 0, 0, 0, 140, 0.95) === false, 'with no hand on them the flight rule decides: open in flight in space, shut on the ground');
+  w.brain = false;
+  ok(want(w) === false, "an NPC pilot's hand is over the flight rule: shut on patrol, though the rule says open");
+  w.pilot = true;
+  ok(want(w) === true, "the pilot's own choice is over an NPC pilot's hand");
+  w.dockHold = true;
+  ok(want(w) === false, "a dock's hold is over the pilot's choice: an open choice is shut while the dock has the ship");
+  w.force = 'open';
+  ok(want(w) === true, "the console's hold is over everything, a dock's included");
+  w.force = 'closed';
+  w.dockHold = false;
+  ok(want(w) === false, "and holds them shut over a pilot's open as well");
+  w.force = null;
+  w.pilot = null;
+  w.brain = true;
+  ok(want(w) === true, "an NPC pilot's open opens them, under nothing else");
+  w.dockHold = true;
+  ok(want(w) === false, "and a dock's hold shuts an NPC pilot's open too (the game shut a docking AI ship's wings for the approach)");
+  // A planet: an NPC pilot's open goes through the pilot's own rule, so a wing that swings below the belly still waits.
+  const low = set();
+  low.brain = true;
+  ok(!wingWant(low, true, false, 15.9, 15, 100, 140, 0.95) && wingWant(low, true, false, 16.1, 15, 100, 140, 0.95), `an NPC pilot's open on a planet with a low wing waits for clearance + ${WING_ROOM_BAND} m, as the pilot's does`);
+  ok(!wingWant(low, false, false, 100, 15, 0, 140, 0.95), 'and on the ground it stays shut');
+  low.want = true;
+  ok(wingWant(low, true, false, 15.1, 15, 100, 140, 0.95) && !wingWant(low, true, false, 15.1, 15, 100, 140, 0.95, false), 'the band reads the last answer unless the caller says otherwise (a launch starts from shut)');
+  // dropPilotChoices runs over every ship nobody flies, every frame: an NPC pilot's hand and a dock's hold must survive it.
+  const npc = { wings: set() };
+  const mine = { wings: set() };
+  npc.wings.brain = false;
+  npc.wings.pilot = true;
+  mine.wings.dockHold = true;
+  dropPilotChoices([npc, mine], null);
+  ok(npc.wings.brain === false && npc.wings.pilot === null && mine.wings.dockHold, "dropPilotChoices takes the pilot's choice off a ship nobody flies and leaves an NPC pilot's hand and a dock's hold alone");
+  ok(WING_AUTO.npc === 'target' && WING_AUTO.closeAfter === 3 && WING_AUTO.dockCloses, 'by default NPC pilots put their hand on their wings, keep them open 3 s after a fight, and a dock shuts them');
+  Object.assign(WING_AUTO, saved);
+  // The vehicle asks the one rule in both places it decides the wings, and keeps no second copy of the order.
+  const vehicle = readFileSync(new URL('../../../src/vehicles/vehicle.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const updateWings = /private updateWings\(dt: number\): void \{([\s\S]*?)\n {2}\}/.exec(vehicle)?.[1] ?? '';
+  const launch = /\n {2}launch\(speed: number\): void \{([\s\S]*?)\n {2}\}/.exec(vehicle)?.[1] ?? '';
+  ok(/w\.want = wingWant\(w, /.test(updateWings) && /w\.snap\(wingWant\(w, true, /.test(launch), "vehicle.ts's updateWings and launch both ask wingWant");
+  ok(!/pilotWings\(|wingsWanted\(/.test(vehicle), 'and neither weighs a hand on the wings of its own');
+  // The one line that makes a dock hold the player's wings: written over every hull, every frame, from the dock's own state
+  // after this frame's dock step and before each hull steps, outside anything that runs only while play is simulated, so
+  // no way out of a dock can leave the wings held. Nothing else in main.ts writes it.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const stepAt = main.indexOf('\n  private stepVehicles(dt: number, simulate: boolean): void {\n');
+  const stepBody = stepAt >= 0 ? main.slice(stepAt, main.indexOf('\n  }\n', stepAt + 1)) : '';
+  const dockStep = stepBody.indexOf('drive = this.docking.step(');
+  const loop = stepBody.indexOf('\n    for (const v of this.world.vehicles) {\n');
+  const holdLine = stepBody.indexOf('\n      v.wings.dockHold = WING_AUTO.dockCloses && this.docking.holdsWings(v);\n');
+  const hullStep = stepBody.indexOf('v.update(dt, this.physics, ', loop);
+  ok(dockStep > 0 && dockStep < loop && loop < holdLine && holdLine < hullStep, "main.ts's stepVehicles writes every hull's dock hold in its vehicle loop, after the dock's step and before the hull steps");
+  ok((main.match(/\.dockHold\s*=[^=]/g)?.length ?? 0) === 1, 'and that is the only place main.ts writes it');
 }
 
 // 7. Which muzzles are the pilot's guns (by the garage's own patterns).

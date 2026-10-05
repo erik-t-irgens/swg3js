@@ -5,7 +5,7 @@
 //
 // It is a panel, as the inventory is: it frees the mouse and the game does not simulate while it is up, so a
 // document is read in peace and nothing in it runs on a frame. It never opens by itself: the player opens it
-// from the journal (O), or the console does. What it shows is the page as the story's host read it out for this
+// from the journal (J), or the console does. What it shows is the page as the story's host read it out for this
 // character (`DocView`), frozen the first time it was read, so it is built once when it opens and again only
 // when its foot changes; and it says when its last page has been shown (`onEnd`), once, which is what reading a
 // document to its end is.
