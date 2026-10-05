@@ -372,7 +372,10 @@ export class SwgTerrain {
   /**
    * The colour map at a game-space point, packed 0xRRGGBB (white where nothing painted it), from a
    * cached block only: null when the block covering the point is not generated yet. Never generates,
-   * since an uncached block costs the main thread one to four milliseconds.
+   * since an uncached block costs the main thread two to four and a half milliseconds once the pack carries
+   * the colour ramps (the affectors then paint every pole; about half a millisecond of that). The ramps stay
+   * attached on this thread all the same: a block it generates is the one cached, and one made without them
+   * would answer here, and to the ground built from it, with colours the worker's blocks do not have.
    */
   colorIfCached(gx: number, gz: number): number | null {
     return this.sampler.colorAt(this.toSwgX(gx), this.toSwgZ(gz));

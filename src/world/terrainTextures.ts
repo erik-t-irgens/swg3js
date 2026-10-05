@@ -35,6 +35,17 @@ export interface ShaderFamilyDef {
   /** The client's shader and its main texture, as the converter read them: what `emptyGround` asks. */
   shader?: string;
   texture?: string;
+  /**
+   * From terrain shaders version 4 (`tools/swg/terrainShaders.mjs`): the family's place in the terrain's
+   * family list (the priority a border is ordered by), every child in that list's order with its weight
+   * and its own three pictures, and which child the fields above carry (`primary`, the heaviest: what the
+   * ground drew before alternates were written). Each child's gloss carries the bump map's height in
+   * green. The MATL's specular colour is black on the families that take no shine. Read by nothing yet.
+   */
+  priority?: number;
+  primary?: number;
+  specularColor?: [number, number, number] | null;
+  children?: { shader: string; weight: number; texture?: string; file: string | null; normal: string | null; specular: string | null; specularColor: [number, number, number] | null }[];
 }
 
 /**

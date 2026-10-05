@@ -4033,7 +4033,7 @@ class App {
           pattern: gen.snapFamilies && gen.familyLattice > 0 ? `families laid on the ${gen.familyLattice} m pattern, ties to the corner above` : 'families left where they were painted',
           alternates: `${TERRAIN_GROUND_TUNE.legacyChildren}: each pole's own choice, drawn from its place (the file says ${gen.legacy ? 'legacy' : 'not legacy'})`,
           colourAffectors: { constant: items.ACCN ?? 0, fractalRamp: items.ACRF ?? 0, heightRamp: items.ACRH ?? 0 },
-          ramps: { named: swg.ramps.named.length, carried: swg.ramps.loaded, from: COLOR_RAMP_FILE, note: swg.ramps.loaded < swg.ramps.named.length ? 'a ramp the pack does not carry does nothing, as in the client; until the terrain command writes them the colour map is the constants\' alone' : 'every ramp named is here' },
+          ramps: { named: swg.ramps.named.length, carried: swg.ramps.loaded, from: COLOR_RAMP_FILE, note: swg.ramps.loaded < swg.ramps.named.length ? 'a ramp the pack does not carry does nothing, as in the client; a pack the terrain command wrote before it wrote ramps (terrain shaders version 3 or older) carries none, and its colour map is the constants\' alone until that command runs again' : 'every ramp named is here' },
         };
         if (!opts.at) return rules;
         const p = this.player.worldPos;

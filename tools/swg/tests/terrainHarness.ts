@@ -1,6 +1,6 @@
 // What the terrain generator's tests share (terrainSnap.test.ts, colorMap.test.ts): a converted world's
 // own terrain file read off disk with the bitmaps the pack carries, the colour ramps it names read out
-// of the client's archives (until the terrain command writes them into the pack), the blocks sampled the
+// of the client's archives (not out of the pack's own file, which groundTextures.test.ts holds to these), the blocks sampled the
 // way the research that set this pass's figures sampled them, and the client's own baked flora map read
 // at its own tile points. Not a test itself.
 //

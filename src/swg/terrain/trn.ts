@@ -233,19 +233,50 @@ export function rampFromImage(width: number, rgba: Uint8Array, channels = 4): Co
 }
 
 /**
- * The pack's colour ramps (`terrain/colorramps.json`, the terrain command's to write): `ramps`, each
- * keyed name to `{ width, rgb }` with `rgb` three numbers a pixel. Anything else in the file is left
- * for its own reader. `colorRampFile` writes this shape and `readColorRampFile` reads it back, so the
- * converter and the game cannot drift apart; a pack without the file has no ramps, and a colour
- * affector with no ramp does nothing, as in the client.
+ * How bright a world's colour map runs, which a tint normalised for brightness divides by: what the
+ * terrain command measured over the whole map with this generator (`colorReference` in
+ * `tools/swg/terrainShaders.mjs`), every `step` metres, counting only the places that are not black,
+ * since a world can paint everything outside its play squares black (Kashyyyk's Rryatt trail). The
+ * medians are of the bytes as they stand, in the client's own gamma space: the Rec. 709 luminance and
+ * each channel apart, each 0..1. Ours as a measure; the colours it measures are the client's.
  */
-export function colorRampFile(ramps: Map<string, ColorRamp>): { ramps: Record<string, { width: number; rgb: number[] }> } {
+export interface ColorReference {
+  step: number;
+  /** How many places were sampled, and how many of them were not black (the only ones counted). */
+  points: number;
+  nonBlack: number;
+  luminance: number;
+  rgb: [number, number, number];
+}
+
+/**
+ * The pack's colour ramps (`terrain/colorramps.json`, the terrain command's to write): `ramps`, each
+ * keyed name to `{ width, rgb }` with `rgb` three numbers a pixel, and the world's `reference` when it
+ * was measured. Anything else in the file is left for its own reader. `colorRampFile` writes this
+ * shape and `readColorRampFile` and `readColorReference` read it back, so the converter and the game
+ * cannot drift apart; a pack without the file has no ramps, and a colour affector with no ramp does
+ * nothing, as in the client.
+ */
+export function colorRampFile(ramps: Map<string, ColorRamp>, reference?: ColorReference | null): { ramps: Record<string, { width: number; rgb: number[] }>; reference?: ColorReference | null } {
   const out: Record<string, { width: number; rgb: number[] }> = {};
   for (const key of [...ramps.keys()].sort()) {
     const r = ramps.get(key)!;
     out[rampKey(key)] = { width: r.width, rgb: [...r.rgb.subarray(0, r.width * 3)] };
   }
-  return { ramps: out };
+  return reference === undefined ? { ramps: out } : { ramps: out, reference };
+}
+
+/** The world's brightness reference out of the pack's colour ramp file; null for a file that has none, or one not of this shape. */
+export function readColorReference(json: unknown): ColorReference | null {
+  const r = (json as { reference?: unknown } | null)?.reference as Partial<ColorReference> | null | undefined;
+  if (!r || typeof r !== 'object') return null;
+  const unit = (v: unknown) => typeof v === 'number' && v >= 0 && v <= 1;
+  if (!unit(r.luminance) || !Array.isArray(r.rgb) || r.rgb.length !== 3 || !r.rgb.every(unit)) return null;
+  const step = Number(r.step);
+  const points = Number(r.points);
+  const nonBlack = Number(r.nonBlack);
+  if (!(step > 0) || !Number.isInteger(points) || !Number.isInteger(nonBlack) || nonBlack <= 0 || nonBlack > points) return null;
+  return { step, points, nonBlack, luminance: r.luminance as number, rgb: [r.rgb[0], r.rgb[1], r.rgb[2]] };
 }
 
 export function readColorRampFile(json: unknown): Map<string, ColorRamp> {

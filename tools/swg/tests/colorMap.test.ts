@@ -17,8 +17,8 @@
 //   3. what the main thread reads: a colour or a choice of a block not yet made is null and makes no
 //      block; the game's terrain takes its ramps from the pack's file; its far grids carry the colours
 //      and choices in the game's column order
-//   4. every converted world with the client's own ramps (the archives, until the terrain command writes
-//      them into the pack): a pole no colour affector reached is white and every other carries the last
+//   4. every converted world with the client's own ramps (decoded here from the archives, not read from the
+//      file the terrain command writes, which groundTextures.test.ts holds to the same TGAs): a pole no colour affector reached is white and every other carries the last
 //      colour written there, every write the engine's arithmetic (the worlds' own adds and subtracts under
 //      feathered amounts among them); a "multiply" of a real ramp value on white gives (v + 255) / 2,
 //      truncated; the fractal ramps' colours are the ramps' own pixels, decoded here from the archives;
