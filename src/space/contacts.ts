@@ -279,9 +279,12 @@ export class ShipContacts {
     };
   }
 
-  /** The chassis table row a hull flies as: an NPC's tier chassis, else the hull's own fit, else the player row named after it. */
+  /**
+   * The chassis table row a hull flies as: an NPC's tier chassis, else the hull's own fit's, else the player
+   * row named after it. A speeder's fit of its paint alone names no chassis (''), so it is named as before.
+   */
   private chassisNameOf(v: Vehicle, type: NpcTypeDef | null): string {
-    return type ? type.chassis : (v.def?.fit?.chassis ?? `player_${v.def?.id ?? v.spec.id}`);
+    return type ? type.chassis : (v.def?.fit?.chassis || `player_${v.def?.id ?? v.spec.id}`);
   }
 
   /** Stats again after a refit (World.refitVehicle calls it). */

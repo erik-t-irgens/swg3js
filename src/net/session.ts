@@ -22,10 +22,12 @@ import { fromBase32, hmacSha256, sha256, toBase32, toHex, utf8 } from './hash.ts
  * 3 is the seen creatures, a creature's blow on another player, the keeper turning a bolt away, how low
  * a body stands on the wire and the admin's day; 4 is the admin's `arm`, a weapon put in the hand of one
  * of the world's creatures already standing; 5 is the story book, whose words go only to a server whose
- * hail carries `story` (`storyVersion`) (`server/relay.mjs` says the same). None of those is ever sent to
- * a server that says less (`speaks`).
+ * hail carries `story` (`storyVersion`); 6 is a row per thing in the item ledger, two of one item handed
+ * up, a thing named in an `add` and its colours sent only to a server whose hail says `items: 2`
+ * (`itemsVersion`) (`server/relay.mjs` says the same). None of those is ever sent to a server that says
+ * less (`speaks`).
  */
-export const WIRE_VERSION = 5;
+export const WIRE_VERSION = 6;
 
 /**
  * The label mixed into the key to make the verifier the server keeps. It is the server's
@@ -81,6 +83,10 @@ export interface Hail {
   ff?: number;
   /** The story the server holds, by version; 0 or absent for a server that holds none (every one before the book). */
   story?: number;
+  /** How the server keeps what characters own: 2 is a row per thing; 0 or absent folds two of one item into one. */
+  items?: number;
+  /** How the server passes a ship's paint on: 2 passes its colours carried whole on; 0 or absent drops them. */
+  paint?: number;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -139,11 +145,16 @@ function stableJson(value: unknown): string {
  * (`story.local`, src/story/bookClient.ts), and only while there are any: a character whose story was
  * never played alone keeps exactly the mark it had before there was a story, so bringing a browser up to
  * date never moves anybody's counter, and an evening of waypoints set offline settles this browser's way.
+ *
+ * The things' colours are in it the same way: a digest of every colour a thing carries (`t:`), by what
+ * the thing is and never by its name (a list from the server renames things, and that is no change), and
+ * only while any thing carries one -- so every mark from before colours is the mark it was, and a colour
+ * set offline counts as a change.
  */
 export function characterMark(c: {
   name?: string;
   outfit?: readonly string[];
-  items?: readonly { kind: string; id: string }[];
+  items?: readonly { kind: string; id: string; tint?: Record<string, number> | null }[];
   held?: { right?: string; left?: string };
   ships?: Record<string, unknown>;
   powers?: readonly string[];
@@ -163,6 +174,11 @@ export function characterMark(c: {
   parts.push(`b:${c.saber?.color ?? ''}`);
   const local = Math.floor(Number(c.story?.local) || 0);
   if (local > 0) parts.push(`q:${local}`);
+  const tinted = (c.items ?? [])
+    .filter((o) => o.tint && Object.keys(o.tint).length)
+    .map((o) => `${o.kind}:${o.id}=${stableJson(o.tint)}`)
+    .sort();
+  if (tinted.length) parts.push(`t:${tinted.join(',')}`);
   return toHex(sha256(utf8(parts.join('|')))).slice(0, 16);
 }
 
@@ -281,6 +297,10 @@ export interface SessionStats {
   serverVersion: number;
   /** The story the far end's greeting said it holds; 0 for none, which is every far end before the book. */
   story: number;
+  /** How the far end's greeting said it keeps what characters own: 2 a row per thing, 0 one of each. */
+  items: number;
+  /** How the far end's greeting said it passes a ship's paint on: 2 a colour carried whole, 0 the palette's own. */
+  paint: number;
 }
 
 /**
@@ -322,7 +342,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -470,7 +490,7 @@ export class Session {
    * have changed: the counter goes up only when the record really moved, so starting the game twice is
    * not a change and an evening of trading is.
    */
-  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number } } | null, about?: CharacterAbout): void {
+  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string; tint?: Record<string, number> | null }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number } } | null, about?: CharacterAbout): void {
     if (about) this.about = { species: about.species, class: about.class, planet: about.planet, zone: about.zone ?? '' };
     // A different character with nothing said about where it is: whatever place the session is holding
     // belongs to the one played before it, and taking it for this one's would read as a journey the
@@ -549,6 +569,27 @@ export class Session {
     this.stat.counter = held.n;
   }
 
+  /**
+   * The record was written again in another shape with nothing about the character changed: its garment
+   * colours moved out of the look onto the things they colour, once (`moveTints`), which puts a `t:` in
+   * the mark where there was none. Counted, that would make this browser's copy the newer one at the next
+   * claim for nothing the player did, so the new mark is adopted without the counter moving -- but only
+   * when the mark held is exactly the record's before (`was`), as `noteSettled` asks, and for any
+   * character, since this happens behind the loading screen before the session has been told which
+   * character is in play.
+   */
+  noteRewritten(was: Parameters<Session['noteCharacter']>[0], now: Parameters<Session['noteCharacter']>[0]): void {
+    if (!was || !now || was.id !== now.id) return;
+    const counters = this.counters();
+    const held = counters[now.id];
+    if (!held || held.mark !== characterMark(was)) return;
+    const mark = characterMark(now);
+    if (held.mark === mark) return;
+    held.mark = mark;
+    this.saveCounters(counters);
+    if (now.id === this.charId) this.charMark = mark;
+  }
+
   /** The change counter this browser holds for a character. */
   counterOf(id: string): number {
     return this.counters()[id]?.n ?? 0;
@@ -624,6 +665,8 @@ export class Session {
     this.stat.admin = false;
     this.stat.serverVersion = 0;
     this.stat.story = 0;
+    this.stat.items = 0;
+    this.stat.paint = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -665,7 +708,7 @@ export class Session {
       // such a far end, so the line is put on the footing of the relay that came before rather than
       // left half way into a handshake that can never finish.
       this.stat.mode = 'relay';
-      this.onNote('the server’s greeting could not be read: places and poses only, nothing kept');
+      this.onNote('the serverâ€™s greeting could not be read: places and poses only, nothing kept');
       return false;
     }
     this.nonce = nonce;
@@ -673,6 +716,10 @@ export class Session {
     this.stat.serverVersion = Number(h.v) || 0;
     // Which story it holds: heard here, in force only once the server has us (`storyVersion`).
     this.stat.story = Number(h.story) > 0 ? Math.floor(Number(h.story)) : 0;
+    // How it keeps what characters own, the same way (`itemsVersion`).
+    this.stat.items = Number(h.items) > 0 ? Math.floor(Number(h.items)) : 0;
+    // And how it passes a ship's paint on (`paintVersion`).
+    this.stat.paint = Number(h.paint) > 0 ? Math.floor(Number(h.paint)) : 0;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -782,7 +829,7 @@ export class Session {
     }
     // Said as it is: the server keeps a name, a place and a change counter, and nothing here can put
     // its copy back into this browser until there is a ledger to put back.
-    this.onNote(take === 'browser' ? 'keeping this browser’s copy of the character: it is the one that stands from now on' : 'the server’s copy of this character stands; nothing of it can be put back into this browser yet');
+    this.onNote(take === 'browser' ? 'keeping this browserâ€™s copy of the character: it is the one that stands from now on' : 'the serverâ€™s copy of this character stands; nothing of it can be put back into this browser yet');
   }
 
   /** The server's copy stands (it was newer, or the question went unanswered). */
@@ -882,6 +929,27 @@ export class Session {
    */
   get storyVersion(): number {
     return this.stat.authority === 'server' ? this.stat.story : 0;
+  }
+
+  /**
+   * How the server holding the world keeps what characters own, as its greeting said: 2 is a row per
+   * thing, so two of one item may be handed up, a thing named and its colours sent; anything less folds
+   * two of one item into one, and this browser keeps to one of each against it (src/net/trade.ts). Nought
+   * with no server, against the relay that came before and on a line that has dropped.
+   */
+  get itemsVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.items : 0;
+  }
+
+  /**
+   * How the server holding the world passes a ship's paint on, as its greeting said: 2 passes a ship's or a
+   * speeder's colours carried whole on (a hello fit's `colours`); anything less drops them, and the others see
+   * the nearest colours of the hull's own palette the fit's paint carries beside them (src/vehicles/shipFit.ts
+   * `fitForWire`), which the player is told once. Nought with no server, against the relay that came before and
+   * on a line that has dropped.
+   */
+  get paintVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.paint : 0;
   }
 
   /**

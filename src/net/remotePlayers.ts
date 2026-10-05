@@ -8,7 +8,8 @@ import type { Hello, PeerState, PeerVehicle } from './net';
 import { easeInHull, MIN_GLIDE_SECONDS, peerAboard, placeInHull } from './aboardMath.ts';
 import type { Garage } from '../vehicles/garage';
 import type { WingSet } from '../vehicles/wings';
-import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicles/shipFit';
+import { stepPodPicture, type PodGait } from '../vehicles/podSeat.ts';
+import { changedSlots, fitFromWire, fitKey, type ResolvedFit, type WireFit } from '../vehicles/shipFit.ts';
 import type { ShipBuild } from '../vehicles/shipMounts';
 import type { ShipPaint } from '../vehicles/shipPaint';
 import { applyLookPrepared } from '../player/look';
@@ -17,6 +18,7 @@ import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/we
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
+import { hangHeld } from './peerHands.ts';
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -128,9 +130,15 @@ interface RemoteVehicle {
   build: ShipBuild | null;
   paint: ShipPaint | null;
   fit: ResolvedFit | null;
-  /** A refit of the picture under way, and the newest fit asked for meanwhile (the running pass takes it up when it ends). */
+  /** A refit of the picture under way, and the newest fit asked for meanwhile (as their hello carries it; the running pass takes it up when it ends). */
   busy: Promise<void> | null;
-  want: ShipFit | null;
+  want: WireFit | null;
+  /**
+   * A pod's own idle and run on the picture, stepped by its glided speed along its nose with the rule the
+   * rider's own game uses (`stepPodPicture`), so the pilot it seated in the cockpit sits in the cockpit drawn here; null
+   * for anything else, and before the picture is in.
+   */
+  gait: PodGait | null;
 }
 
 /**
@@ -546,8 +554,9 @@ export class RemotePlayers {
   }
 
   /**
-   * The weapons in the peer's hands, as their hello names them: each model prepared before it is hung on
-   * the hand bone (every time, as the player's own are). The rack not in yet: tried again by refreshHeld.
+   * The weapons in the peer's hands, as their hello names them (`hangHeld`): each model prepared before it
+   * is hung on the hand bone (every time, as the player's own are), and each hand its own, so two copies of
+   * one hilt are two blades. The rack not in yet: tried again by refreshHeld.
    */
   private async applyHeld(r: Remote): Promise<void> {
     const rig = r.rig;
@@ -564,23 +573,20 @@ export class RemotePlayers {
     for (const m of r.heldModels) m.node.removeFromParent();
     r.heldModels = [];
     if (!cat) return;
-    for (const [role, id] of [['rightHand', held?.r], ['leftHand', held?.l]] as const) {
-      if (!id) continue;
-      const def = cat.weapons.find((w) => w.id === id);
-      const bone = rig.boneFor(role);
-      if (!def || !bone) continue;
-      try {
-        const model = await cat.model(def);
-        const holder = weaponHolder(rig.root, bone, def, model);
-        await (this.prepare ?? noPrepare)(holder);
-        if (this.remotes.get(r.id) !== r || r.rig !== rig || r.heldApplied !== key) return;
-        bone.add(holder);
-        markActor(holder);
-        r.heldModels.push({ node: holder, def, hand: role === 'rightHand' ? 'right' : 'left' });
-      } catch (err) {
-        console.warn(`remote player ${r.hello.name}: their ${id} did not load`, err);
-      }
-    }
+    await hangHeld(held, {
+      find: (id) => cat.weapons.find((w) => w.id === id),
+      bone: (role) => rig.boneFor(role),
+      model: (def) => cat.model(def),
+      holder: (bone, def, model) => weaponHolder(rig.root, bone, def, model),
+      prepare: this.prepare ?? noPrepare,
+      alive: () => this.remotes.get(r.id) === r && r.rig === rig && r.heldApplied === key,
+      hang: (w, bone) => {
+        bone.add(w.node);
+        markActor(w.node);
+        r.heldModels.push(w);
+      },
+      warn: (id, err) => console.warn(`remote player ${r.hello.name}: their ${id} did not load`, err),
+    });
   }
 
   /** The weapons rack came in: every peer whose weapons were waiting for it is armed. */
@@ -610,11 +616,10 @@ export class RemotePlayers {
     // ship other than the one they ride now changes nothing yet; its fit applies when that ship appears.
     const rv = r.vehicle;
     if (rv && hello.ship && hello.ship.id === rv.id) void this.refitRemote(r, rv, hello.ship.fit);
-    (r.label.material as THREE.SpriteMaterial).map?.dispose();
-    r.group.remove(r.label);
-    r.label = makeLabel(hello.name);
-    r.label.position.y = 2.15;
-    r.group.add(r.label);
+    // The name over the head is written again only when it is another name, and into the label it already
+    // has. Every colour or slider a peer moves sends a hello, and a label made anew each time left its
+    // material in the world's material sets, which the portal renderer walks a dozen times a frame.
+    if (r.label.userData.labelText !== hello.name) relabel(r.label, hello.name);
     if (speciesChanged) {
       if (r.rig) r.group.remove(r.rig.root);
       r.rig = null;
@@ -706,7 +711,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -753,15 +758,17 @@ export class RemotePlayers {
         console.warn(`remote player ${r.hello.name} rides a ${rv.id} the garage does not know`);
         return;
       }
-      // Its fit, as their hello gives it (stock when the hello names another ship, or none).
+      // Its fit, as their hello gives it (stock when the hello names another ship, or none), with the colours
+      // carried whole that a server passing them on brought laid back over its paint.
       const asked = r.hello.ship?.id === def.id ? r.hello.ship.fit : null;
-      const fit = def.fit ? g.resolve(def, asked) : null;
+      const fit = def.fit ? g.resolve(def, fitFromWire(asked)) : null;
       // Prepared (and painted) before it is shown, so the first sight of it compiles nothing.
-      const { holder: obj, wings, build, paint } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
+      const { holder: obj, wings, build, paint, gait } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
       if (r.vehicle !== rv) {
         paint?.dispose();
         return;
       }
+      rv.gait = gait;
       rv.build = def.fit ? build : null;
       rv.paint = paint;
       rv.fit = fit;
@@ -806,7 +813,7 @@ export class RemotePlayers {
    * changes, else the new parts staged, prepared and painted, then swapped in one step (Garage.restage).
    * Coalesced: a fit asked for while one is going waits, and only the newest is done when it ends.
    */
-  private refitRemote(r: Remote, rv: RemoteVehicle, want: ShipFit): Promise<void> {
+  private refitRemote(r: Remote, rv: RemoteVehicle, want: WireFit): Promise<void> {
     rv.want = want;
     if (rv.busy) return rv.busy;
     const run = async () => {
@@ -817,7 +824,7 @@ export class RemotePlayers {
         this.garage ??= this.loadGarage();
         const g = await this.garage;
         const def = g.find(rv.id);
-        const next = def ? g.resolve(def, asked) : null;
+        const next = def ? g.resolve(def, fitFromWire(asked)) : null;
         if (!def?.fit || !next || fitKey(next) === fitKey(rv.fit)) continue;
         const slots = changedSlots(def.fit, rv.fit, next);
         if (!slots.length) await rv.paint?.apply(next.paint);
@@ -872,13 +879,24 @@ export class RemotePlayers {
     r.dance = isDanceClip(clip) || isMusicLoop(clip) ? clip : isFlourishClip(clip) ? r.dance : null;
   }
 
+  /**
+   * A name label let go: its material out of the world's sets and its picture freed. The material itself
+   * is not disposed, as it never was: that would let its program go with the last peer to leave, and the
+   * next peer's name would build it again on whatever frame it was first drawn.
+   */
+  private dropLabel(label: THREE.Sprite): void {
+    const mat = label.material as THREE.SpriteMaterial;
+    this.forget?.([mat]);
+    mat.map?.dispose();
+  }
+
   remove(id: number): void {
     const r = this.remotes.get(id);
     if (!r) return;
     this.remotes.delete(id);
     this.dropVehicle(r);
     this.scene.remove(r.group);
-    (r.label.material as THREE.SpriteMaterial).map?.dispose();
+    this.dropLabel(r.label);
     // Last, so whatever a watcher holds of them (a body in the physics, a blade) goes with them and
     // never outlives the peer or the world it was made in.
     for (const w of watchers) w.peerRemoved?.(id);
@@ -948,6 +966,11 @@ export class RemotePlayers {
             rv.box = measureBox(rv.obj) ?? rv.box;
           }
         }
+        // A pod's cockpit rises into its run and sinks into its idle as the rider's own does: their figure is
+        // placed where their game seated it, on that game's pod, so this picture has to stand the same way.
+        // Its speed is read along the nose as that game reads its own, or a slide or a fall would play the
+        // run here while the rider's game holds the idle, and the pilot would hang 4 m under the cockpit.
+        if (rv.gait) stepPodPicture(rv.gait, dt, rv.vel, rv.obj.quaternion, rv.landed);
       }
       const rig = r.rig;
       if (rig && r.down) {
@@ -1228,12 +1251,10 @@ export function aboardKnob(opts?: { carrier?: number; glideSeconds?: number }): 
 const noPrepare = (): Promise<void> => Promise.resolve();
 const noPrepareRoots = (_roots: THREE.Object3D[]): Promise<void> => Promise.resolve();
 
-/** A name over the head: text on a small canvas, as a sprite that faces the camera. */
-function makeLabel(name: string): THREE.Sprite {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 64;
+/** A name drawn onto a label's canvas, over whatever was there. */
+function drawLabel(canvas: HTMLCanvasElement, name: string): void {
   const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = '600 28px system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1244,10 +1265,30 @@ function makeLabel(name: string): THREE.Sprite {
   ctx.fill();
   ctx.fillStyle = '#dff1ff';
   ctx.fillText(name, 128, 33);
+}
+
+/** A name over the head: text on a small canvas, as a sprite that faces the camera. */
+function makeLabel(name: string): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  drawLabel(canvas, name);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
   sprite.scale.set(1.6, 0.4, 1);
   sprite.renderOrder = 10;
+  // The words it was made for, so a hello with the same name keeps it.
+  sprite.userData.labelText = name;
   return sprite;
+}
+
+/** Another name on a label already made: its canvas drawn again and uploaded, with no new material or texture. */
+function relabel(sprite: THREE.Sprite, name: string): void {
+  const tex = (sprite.material as THREE.SpriteMaterial).map as THREE.CanvasTexture | null;
+  const canvas = tex?.image as HTMLCanvasElement | undefined;
+  if (!tex || !canvas) return;
+  drawLabel(canvas, name);
+  tex.needsUpdate = true;
+  sprite.userData.labelText = name;
 }

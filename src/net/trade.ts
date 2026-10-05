@@ -20,14 +20,28 @@
 // up in the catalogues the game already has, never run, and every number is read as a number or
 // dropped. A row id is the server's and is only ever handed back to it.
 //
+// A row is one **thing**: two of one shirt are two rows, each with the name the browser minted when
+// it was got (`thing`) and its own colours, and the server's list is read by those names. A server
+// whose hail does not say `items: 2` is the one that came before, which folds two of one item into
+// one: against it this side hands up one of each, names nothing it can be told to name, sends no
+// colour, and reads that server's rows -- which name no thing -- by kind and catalogue id, the one row
+// of each it holds.
+//
 // The wire is the server's (the list at the top of server/relay.mjs, and server/ledger.mjs). This
-// side sends `{ t: 'items', do: 'list' | 'get' | 'add' | 'drop' | 'using' }` and
+// side sends `{ t: 'items', do: 'list' | 'get' | 'add' | 'drop' | 'using' | 'tint' }` and
 // `{ t: 'trade', do: 'ask' | 'accept' | 'decline' | 'offer' | 'ready' | 'unready' | 'cancel' }`; it
 // is sent `{ t: 'items', do: 'list' | 'added' | 'gone' | 'refused' }` and
 // `{ t: 'trade', do: 'asked' | 'sent' | 'state' | 'done' | 'off' | 'refused' }`.
 
+import { cleanTint, firstItems } from '../core/inventory.ts';
 import { GROUP_RANGE, cleanText, type PointOut } from './groups.ts';
 import type { Authority } from './session.ts';
+
+/** What a server that keeps a row per thing says in its hail (`ITEMS_VERSION` in server/ledger.mjs). */
+export const ITEMS_NAMED = 2;
+
+/** What the player is told when a server folds two of one item into one. */
+export const OLD_SERVER_WORDS = 'this server keeps one of each item and would fold two of one into one: restart it (npm run relay)';
 
 /**
  * Every number this side invents, in one place and live: `__debug.trade({ offerMax: 6 })` sets one
@@ -75,15 +89,20 @@ export function tuneTrade(o: Partial<typeof TRADE_TUNE>): typeof TRADE_TUNE {
 
 /**
  * One thing a character owns. `kind` and `id` are the backpack's own (`OwnedItem` in
- * src/core/inventory.ts, where `id` is the catalogue id the server calls `what`); `row` is the
- * server's id for that row, which is what an offer and a drop name and what this browser only ever
- * hands back. A list this browser hands up has no row ids in it: they are the server's to mint.
+ * src/core/inventory.ts, where `id` is the catalogue id the server calls `what`); `thing` is which one
+ * it is and `tint` its own colours (`null` once taken off, absent when it never had any), with when they
+ * were set; `row` is the server's id for that row, which is what an offer and a drop name and what this
+ * browser only ever hands back. A list this browser hands up has no row ids in it: they are the
+ * server's to mint. A row from a server built before things had names has no `thing`.
  */
 export interface TradeItem {
   kind: 'wear' | 'weapon';
   id: string;
   got: number;
   row?: string;
+  thing?: string;
+  tint?: Record<string, number> | null;
+  tintAt?: number;
 }
 
 /** Why an item cannot be put in: what it is doing instead. */
@@ -117,6 +136,8 @@ export interface TradeAsk {
 /** What the module is doing, filled in place so the console can read it between frames. */
 export interface TradeStats {
   active: boolean;
+  /** What the server's hail said of its items: 2 keeps a row per thing, 0 is the server that came before. */
+  itemsVersion: number;
   /** Whether the server has handed this browser a list at all, and how many rows were in it. */
   known: boolean;
   rows: number;
@@ -161,10 +182,12 @@ export class Trade {
   /** Where this player stands, and where another player's figure last was: the 8 m before asking. */
   meAt: (out: PointOut) => boolean = () => false;
   peerAt: (id: number, out: PointOut) => boolean = () => false;
-  /** Whether this character owns an item now (the backpack's own list). */
-  owns: (kind: 'wear' | 'weapon', id: string) => boolean = () => false;
-  /** What an item is doing instead of sitting in the backpack: worn, or in a hand. */
-  inUse: (kind: 'wear' | 'weapon', id: string) => ItemUse = () => null;
+  /** What the server's hail said of its items (`ITEMS_NAMED` for a row per thing, 0 for the one before). */
+  itemsVersion: () => number = () => 0;
+  /** Whether this character owns a thing now, by its name (the backpack's own list). */
+  owns: (thing: string) => boolean = () => false;
+  /** What a thing is doing instead of sitting in the backpack: worn, or in a hand. */
+  inUse: (thing: string) => ItemUse = () => null;
   /**
    * What this browser holds for the character in play, for the one moment it hands its list up (the
    * claim being answered). Null means there is nothing to say -- the select screen, the creator --
@@ -217,7 +240,10 @@ export class Trade {
 
   private live: TradeWindow | null = null;
   private question: TradeAsk | null = null;
-  /** The server's rows as they last stood, by `kind:id`, so an offer can name the row the server knows. */
+  /**
+   * The server's rows as they last stood, by the name of each thing (`rowKey`), so an offer can name the
+   * row the server knows; a server from before things had names keys them by kind and id instead.
+   */
   private readonly rows = new Map<string, TradeItem>();
   private take: 'browser' | 'server' | '' = '';
   private gotList = false;
@@ -232,7 +258,7 @@ export class Trade {
   private askCount = 0;
   private readonly scratchMe: PointOut = { x: 0, y: 0, z: 0 };
   private readonly scratchThem: PointOut = { x: 0, y: 0, z: 0 };
-  private readonly stat: TradeStats = { active: false, known: false, rows: 0, take: '', waiting: false, open: false, withName: '', mine: 0, theirs: 0, youReady: false, themReady: false, asked: '', done: 0, got: 0, gave: 0, sent: 0, refused: '', lastEnd: '' };
+  private readonly stat: TradeStats = { active: false, itemsVersion: 0, known: false, rows: 0, take: '', waiting: false, open: false, withName: '', mine: 0, theirs: 0, youReady: false, themReady: false, asked: '', done: 0, got: 0, gave: 0, sent: 0, refused: '', lastEnd: '' };
 
   /**
    * The clock the rate is read off, in seconds; a test hands in its own. It is assigned in the body
@@ -278,17 +304,37 @@ export class Trade {
     return [...this.rows.values()];
   }
 
-  /** Whether an item is in the trade standing now: what keeps it from being put in twice. */
-  offered(kind: 'wear' | 'weapon', id: string): boolean {
+  /**
+   * Whether a thing is in the trade standing now: what keeps it from being put in twice. It is asked by
+   * the server's row, which a pane's own rows carry and a backpack's thing is found by, so two of one
+   * shirt are told apart here exactly as the server tells them apart.
+   */
+  offered(item: { kind: 'wear' | 'weapon'; id: string; thing?: string; row?: string }): boolean {
     const w = this.live;
     if (!w) return false;
-    for (const o of w.mine) if (o.kind === kind && o.id === id) return true;
+    const row = item.row || this.rowOf(item);
+    if (!row) return false;
+    for (const o of w.mine) if (o.row === row) return true;
     return false;
   }
 
-  /** The server's row for one thing, or '' where the server has never written it down. */
-  rowOf(kind: 'wear' | 'weapon', id: string): string {
-    return this.rows.get(`${kind}:${id}`)?.row ?? '';
+  /**
+   * The server's row for one thing, or '' where the server has never written it down: found by its
+   * name, or -- on a server from before things had names, which holds one row of each kind and id --
+   * by what it is.
+   */
+  rowOf(item: { kind: 'wear' | 'weapon'; id: string; thing?: string }): string {
+    if (item.thing) {
+      const named = this.rows.get(item.thing)?.row;
+      if (named) return named;
+    }
+    return this.rows.get(unnamedKey(item.kind, item.id))?.row ?? '';
+  }
+
+  /** The thing a server row is, by the row's id: what a name the server gave is read back as. */
+  rowById(row: string): TradeItem | null {
+    for (const item of this.rows.values()) if (item.row === row) return item;
+    return null;
   }
 
   // ---- the asking ----------------------------------------------------------------------------------
@@ -333,15 +379,15 @@ export class Trade {
    * one of them again against its own rows and is what decides. Nothing about the window moves until
    * the server says so.
    */
-  putIn(kind: 'wear' | 'weapon', id: string): string {
+  putIn(item: { kind: 'wear' | 'weapon'; id: string; thing?: string }): string {
     const w = this.live;
     if (!this.active || !w) return 'there is no trade open';
-    if (!id) return 'there is nothing there';
-    if (this.offered(kind, id)) return 'that is in the trade already';
-    if (!this.owns(kind, id)) return 'you do not own that';
-    const use = this.inUse(kind, id);
+    if (!item?.id) return 'there is nothing there';
+    if (this.offered(item)) return 'that is in the trade already';
+    if (!item.thing || !this.owns(item.thing)) return 'you do not own that';
+    const use = this.inUse(item.thing);
     if (use) return use === 'worn' ? 'take it off first: you are wearing it' : `put it away first: it is in your ${use} hand`;
-    const row = this.rowOf(kind, id);
+    const row = this.rowOf(item);
     if (!row) return 'the server has not written that one down yet';
     if (w.mine.length >= TRADE_TUNE.offerMax) return `a trade takes ${TRADE_TUNE.offerMax} things at a time`;
     if (!this.mayAsk()) return 'that is faster than the server will take them';
@@ -351,13 +397,14 @@ export class Trade {
     return '';
   }
 
-  /** Take an item back out: the same message, one row shorter. */
-  takeOut(kind: 'wear' | 'weapon', id: string): string {
+  /** Take a thing back out -- one of this side's pane, or one of the backpack's -- with the same message, one row shorter. */
+  takeOut(item: { kind: 'wear' | 'weapon'; id: string; thing?: string; row?: string }): string {
     const w = this.live;
     if (!this.active || !w) return 'there is no trade open';
-    if (!this.offered(kind, id)) return 'that is not in the trade';
+    if (!this.offered(item)) return 'that is not in the trade';
     if (!this.mayAsk()) return 'that is faster than the server will take them';
-    this.post({ t: 'trade', do: 'offer', rows: w.mine.filter((o) => !(o.kind === kind && o.id === id)).map((o) => o.row ?? '').filter(Boolean) });
+    const row = item.row || this.rowOf(item);
+    this.post({ t: 'trade', do: 'offer', rows: w.mine.filter((o) => o.row !== row).map((o) => o.row ?? '').filter(Boolean) });
     return '';
   }
 
@@ -401,10 +448,27 @@ export class Trade {
     // under it is a browser whose storage was cleared, not a character that owns nothing, and the
     // one thing a cache may never do is be written back over the server.
     const mark = this.mark();
+    // Each thing goes up under its own name and without its colours. To a server that keeps a row per
+    // thing a row is the short array `[kind, what, got, thing]` (`wireRow` in server/ledger.mjs): the
+    // worst backpack there is -- four hundred copies of the longest catalogue id -- came to 66 KB written
+    // out as objects, past the 64 KB a server takes from one browser in a second, and is 56 KB this way.
+    // A server that does not keep two of one item is handed one of each, as the objects it always read,
+    // and the player is told why.
+    let list = mine.slice(0, TRADE_TUNE.rows);
+    const named = this.itemsVersion() >= ITEMS_NAMED;
+    if (!named) {
+      const once = firstItems(list);
+      if (once.length < list.length) this.onNote(OLD_SERVER_WORDS);
+      list = once;
+    }
     const msg: Record<string, unknown> = {
       t: 'items',
       do: 'list',
-      rows: mine.slice(0, TRADE_TUNE.rows).map((o) => ({ kind: o.kind, what: o.id, got: Math.max(0, Math.round(o.got) || 0) })),
+      rows: list.map((o) => {
+        const got = Math.max(0, Math.round(o.got) || 0);
+        if (named) return o.thing ? [o.kind, o.id, got, o.thing] : [o.kind, o.id, got];
+        return { kind: o.kind, what: o.id, got };
+      }),
     };
     if (mark?.known) {
       msg.known = 1;
@@ -458,26 +522,55 @@ export class Trade {
    * writes it down and answers with the row, so the two lists do not drift. It is never how an item
    * moves between two players: that is a trade, and only the server moves those.
    */
-  noteAdded(kind: 'wear' | 'weapon', id: string, got = 0): void {
-    if (!this.active || !id || !this.gotList) return;
-    if (this.rows.has(`${kind}:${id}`)) return;
+  noteAdded(item: TradeItem): void {
+    if (!this.active || !item?.id || !this.gotList) return;
+    // Known already: the server's own answer has come, or -- on a server from before things had
+    // names, which holds one of each -- it has one of these and would only say so.
+    if (this.rowOf(item)) return;
     if (!this.mayAsk()) return;
-    this.post({ t: 'items', do: 'add', kind, what: id, got: Math.max(0, Math.round(got) || 0) });
+    const msg: Record<string, unknown> = { t: 'items', do: 'add', kind: item.kind, what: item.id, got: Math.max(0, Math.round(item.got) || 0) };
+    // The thing's own name, which makes the word safe to say twice: the server takes a second `add`
+    // of a name it has as the same thing. A server from before names ignores it and makes sure there is one.
+    if (item.thing) msg.thing = item.thing;
+    this.post(msg);
   }
 
   /** One destroyed here. The server knows it by its row id, which this browser only ever hands back. */
-  noteDropped(kind: 'wear' | 'weapon', id: string): void {
-    if (!this.active || !id || !this.gotList) return;
-    const row = this.rowOf(kind, id);
+  noteDropped(item: TradeItem): void {
+    if (!this.active || !item?.id || !this.gotList) return;
+    const row = this.rowOf(item);
     if (!row) return;
     if (!this.mayAsk()) return;
     this.post({ t: 'items', do: 'drop', id: row });
   }
 
   /**
+   * One thing's colours, set here, by its row: `null` takes them off. Only to a server that keeps a row
+   * per thing -- the one before has nowhere to put a colour -- and only for a thing it has written
+   * down. True when the word went out. When it is sent, and how often, is the caller's business.
+   *
+   * `at` is when the colour was set, on the clock the server hands out (`serverNow`, which is what
+   * `OwnedItem.tintAt` is stamped with): the newest colour wins on the server, and a time from a clock
+   * that runs fast would win against everything after it. One set while no server answered was stamped
+   * with this machine's own, so a time past the server's clock goes up as now; the server holds it to
+   * the same rule.
+   */
+  noteTint(thing: string, tint: Record<string, number> | null, at: number): boolean {
+    if (!this.active || !thing || !this.gotList || this.itemsVersion() < ITEMS_NAMED) return false;
+    const row = this.rows.get(thing)?.row;
+    if (!row) return false;
+    if (!this.mayAsk()) return false;
+    const now = Math.round(this.serverNow());
+    const when = Math.round(at) > 0 ? Math.min(Math.round(at), now) : now;
+    this.post({ t: 'items', do: 'tint', id: row, tint: tint ? { ...tint } : null, at: Math.max(0, when) });
+    return true;
+  }
+
+  /**
    * What is on the body and in the hands, by row id and the whole of it each time: it is what the
    * server refuses an offer of something being worn with, and it is not written down anywhere, so it
-   * is said again on every line and whenever it moves. Nothing is sent when it has not moved.
+   * is said again on every line and whenever it moves. Nothing is sent when it has not moved. With two
+   * of one shirt it is the one worn that is named, so the other may still be traded.
    */
   tellUsing(): void {
     if (!this.active || !this.gotList) return;
@@ -486,7 +579,7 @@ export class Trade {
     const rowsOf = (list: readonly TradeItem[]) => {
       const out: string[] = [];
       for (const o of list) {
-        const row = this.rowOf(o.kind, o.id);
+        const row = this.rowOf(o);
         if (row && !out.includes(row)) out.push(row);
       }
       return out;
@@ -589,7 +682,7 @@ export class Trade {
       case 'list': {
         const items = readRows(msg.rows, TRADE_TUNE.rows);
         this.rows.clear();
-        for (const item of items) this.rows.set(`${item.kind}:${item.id}`, item);
+        for (const item of items) this.rows.set(rowKey(item), item);
         this.take = msg.take === 'browser' ? 'browser' : 'server';
         this.gotList = true;
         this.wanting = false;
@@ -609,7 +702,8 @@ export class Trade {
       case 'added': {
         const row = readRow(msg.row);
         if (!row) break;
-        this.rows.set(`${row.kind}:${row.id}`, row);
+        // The same word arriving twice -- a named `add` said again is answered again -- is one row.
+        this.rows.set(rowKey(row), row);
         this.onAdded(row);
         break;
       }
@@ -746,8 +840,19 @@ export class Trade {
   /** What the trade is doing, in the object it always answers with. */
   debug(): TradeStats {
     this.stat.active = this.active;
+    this.stat.itemsVersion = this.itemsVersion();
     return this.stat;
   }
+}
+
+/** The key a server row is held under here: the thing's name, or what it is when the server named none. */
+function rowKey(item: TradeItem): string {
+  return item.thing || unnamedKey(item.kind, item.id);
+}
+
+/** A row from a server before things had names, which holds one of each: by kind and catalogue id. `~` is in no thing's name. */
+function unnamedKey(kind: string, id: string): string {
+  return `~${kind}:${id}`;
 }
 
 /** What a finished trade reads as. The server says what changed hands; the words are ours. */
@@ -766,7 +871,12 @@ function side(x: unknown): { rows: unknown; ready: number } {
   return { rows: o.rows, ready: o.ready === 1 ? 1 : 0 };
 }
 
-/** A list of rows from the far end: anything that is not one is no row at all. */
+/**
+ * A list of rows from the far end: anything that is not one is no row at all. A row the list names
+ * twice -- by the server's own id for it, or, with no id, by the thing's name -- is one row, not two.
+ * Two of one shirt are two rows with two ids, and are both kept. A server from before things had
+ * names folds two of one item itself, and a list from it that named one twice is read as one.
+ */
 function readRows(x: unknown, cap = TRADE_TUNE.rows): TradeItem[] {
   if (!Array.isArray(x)) return [];
   const out: TradeItem[] = [];
@@ -774,17 +884,18 @@ function readRows(x: unknown, cap = TRADE_TUNE.rows): TradeItem[] {
   for (const raw of x.slice(0, cap)) {
     const item = readRow(raw);
     if (!item) continue;
-    const key = `${item.kind}:${item.id}`;
-    // A list naming one thing twice would be one thing, not two: the backpack holds one row per kind
-    // and catalogue id (`normalizeOwned`), and the server's own table holds one as well.
+    const key = item.row ? `#${item.row}` : rowKey(item);
     if (seen.has(key)) continue;
+    // A server that names no thing holds one of each: two of one item in a list from it are one.
+    if (!item.thing && seen.has(unnamedKey(item.kind, item.id))) continue;
     seen.add(key);
+    if (!item.thing) seen.add(unnamedKey(item.kind, item.id));
     out.push(item);
   }
   return out;
 }
 
-/** One row: the server's id for it, a kind, a catalogue id and when it was got. */
+/** One row: the server's id for it, a kind, a catalogue id, when it was got, and which thing it is with its colours. */
 function readRow(x: unknown): TradeItem | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
   const o = x as Record<string, unknown>;
@@ -796,14 +907,32 @@ function readRow(x: unknown): TradeItem | null {
   const row = readId(o.id);
   const item: TradeItem = { kind, id, got: Number.isFinite(got) && got > 0 ? got : 0 };
   if (row) item.row = row;
+  const thing = readThing(o.thing);
+  if (thing) item.thing = thing;
+  // Colours: `null` is a real answer (taken off), a set is cleaned to the customizer's own names and
+  // range, and anything else is no colour at all.
+  if (o.tint === null) item.tint = null;
+  else {
+    const tint = cleanTint(o.tint);
+    if (tint) item.tint = tint;
+  }
+  const at = Number(o.tintAt);
+  if (item.tint !== undefined && Number.isFinite(at) && at > 0) item.tintAt = at;
   return item;
 }
 
 /** An id: plain, and never anything that means something to an object. */
 function readId(x: unknown): string {
-  if (typeof x !== 'string' || !x || x.length > 64) return '';
+  if (typeof x !== 'string' || !x || x.length > 80) return '';
   if (x === '__proto__' || x === 'constructor' || x === 'prototype') return '';
   return /^[A-Za-z0-9_.:-]+$/.test(x) ? x : '';
+}
+
+/** A thing's name: an id that may also hold a `|`, which the browser's own names always do. */
+function readThing(x: unknown): string {
+  if (typeof x !== 'string' || !x || x.length > 80) return '';
+  if (x === '__proto__' || x === 'constructor' || x === 'prototype') return '';
+  return /^[A-Za-z0-9_.:|-]+$/.test(x) ? x : '';
 }
 
 /**

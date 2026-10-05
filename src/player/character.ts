@@ -7,11 +7,13 @@
 
 import * as THREE from 'three';
 import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Customizer, type RenderShare } from './customizer.ts';
+import { Customizer, isRecipeMesh, recipeMeshOf, type RecipeRender, type RenderShare } from './customizer.ts';
+import { characterRender } from './recipeWorker.ts';
 import { recordPartSources, type LookSources, type PartFile, type PartSources } from '../world/mobiles/lookShare.ts';
 import { markActor } from '../world/portalRender.ts';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
-import { fitFor, packPartOf, type ItemFit } from '../core/inventory.ts';
+import { fitFor, garmentMeshesOf, isHairKey, packPartOf, type ItemFit } from '../core/inventory.ts';
+import { garmentMeshesOn, pieceMeshes } from './pieceMeshes.ts';
 import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
 import { partsToLoad } from './partsShown.ts';
 
@@ -149,6 +151,12 @@ export interface CharacterOptions {
    * the finished look can be put on the shared pieces (`lookSources`, src/world/mobiles/lookShare.ts).
    */
   share?: RenderShare;
+  /**
+   * Where the colour recipes render: left out, the worker every character shares (`characterRender`,
+   * recipeWorker.ts), so a recolour never stops the frame; null on this thread, between frames. A look built
+   * to `share` always renders here, through its share.
+   */
+  renderOff?: RecipeRender | null;
 }
 
 /** Re-point a skinned mesh's joint indices from its own skeleton's order to `target`'s, by joint name; a joint the target lacks goes to its root. */
@@ -226,6 +234,19 @@ export interface Wardrobe {
     fit?: ItemFit;
     /** The appearance converted; null on a worn-unseen entry (no meshes). */
     sat?: string | null;
+    /**
+     * What it takes (tools/swg/dye.mjs): a colour of the game's (a palette or a texture choice a recipe reads), a
+     * dye of ours (`/private/index_color_dye`, for a piece the game gave no colour), or nothing; absent on a pack
+     * converted before the dye.
+     */
+    colour?: 'palette' | 'dye' | 'none';
+    /** For a dyed piece, how much of what is drawn of it the dye reaches, 0..1. */
+    dyeCover?: number;
+    /**
+     * The game's own colour variables its recipes read, with their palettes' colours (the converter's
+     * list; our dye is not on it): what the backpack's small swatch reads a palette index by.
+     */
+    variables?: { name: string; private: boolean; kind?: 'palette' | 'index'; default?: number; palette?: string; colors?: number[][] }[];
   }[];
 }
 
@@ -331,10 +352,13 @@ export class Character {
     for (const def of wanted) await character.addPart(def.name, [def], true);
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
-    const customizer = new Customizer();
+    // A look built to share renders here, through its share; every other character in the worker the
+    // characters share (`characterRender`), which also hands back the normal map and splits a glowing piece.
+    const off = opts.share ? null : opts.renderOff === undefined ? characterRender : opts.renderOff;
+    const customizer = new Customizer(off, { putsGlow: !!off });
     customizer.share = opts.share ?? null;
     customizer.normalScale.copy(Character.normalScale);
-    customizer.materialsFor = (name) => character.materialsNamed(name);
+    customizer.materialsFor = (name, mesh) => character.materialsNamed(name, mesh);
     // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
     for (const [k, v] of Object.entries(manifest.values ?? {})) customizer.values.set(k, v);
     if (await customizer.addSource(dir)) character.customizer = customizer;
@@ -509,7 +533,7 @@ export class Character {
       layer: outer?.occlusionLayer ?? 0,
       occludes: outer?.occludes ?? [],
       body: !!outer?.body,
-      meta: { kind: meta.kind ?? (/^hair_/.test(key) ? 'hair' : undefined), template: meta.template },
+      meta: { kind: meta.kind ?? (isHairKey(key) ? 'hair' : undefined), template: meta.template },
       head: null,
     });
     // Bare skin a garment leaves showing takes the wearer's own skin, which is the whole of why a
@@ -903,6 +927,27 @@ export class Character {
     this.applyOcclusion();
   }
 
+  /**
+   * The recipe meshes a part is drawn with, by the name it is worn under (`pieceMeshes`): its loaded meshes
+   * (less the loader's `_<n>`), else the species pack's own part of that name, else the catalogue item's
+   * parts. What a thing's colours are written over (`tintValues`), which works before the part is loaded.
+   */
+  meshesOf(key: string): string[] {
+    return pieceMeshes(this.parts.get(key)?.meshes, this.manifest.parts.find((p) => p.name === key)?.name, this.wardrobe?.items.find((i) => i.id === key)?.parts);
+  }
+
+  /**
+   * Every mesh a garment is drawn with, loaded or not (`garmentMeshesOn`): every piece of the wardrobe and
+   * the species pack that is not a hairstyle, and every loaded part that is neither the body nor hair. A
+   * garment's colours are its thing's and are never kept in the look -- a shirt's not yet loaded on this
+   * rig included, or a colour of one given away would stay in the look to colour the next one that came.
+   */
+  garmentMeshes(): Set<string> {
+    const parts: { body: boolean; hair: boolean; meshes: readonly { name: string }[] }[] = [];
+    for (const p of this.parts.values()) parts.push({ body: p.body, hair: this.isHair(p), meshes: p.meshes });
+    return garmentMeshesOn(parts, garmentMeshesOf(this.wardrobe, this.packParts));
+  }
+
   /** The meshes on show: the body's and every worn piece's, so colours are offered only for what is worn. */
   wornMeshes(): Set<string> {
     const out = new Set<string>();
@@ -910,38 +955,50 @@ export class Character {
       if (!p.worn) continue;
       for (const m of p.meshes) {
         out.add(m.name);
-        // A mesh with several materials loads as several meshes, the second onwards suffixed
-        // (body_m_l0, body_m_l0_1): the recipes name the converter's mesh, without the suffix.
-        out.add(m.name.replace(/_\d+$/, ''));
+        // A mesh with several materials loads as several meshes, suffixed (body_m_l0_1): the recipes
+        // name the converter's mesh, without the suffix (`recipeMeshOf`).
+        out.add(recipeMeshOf(m.name));
       }
     }
     return out;
   }
 
-  /** The hairstyles this species may wear, from the wardrobe: a species' hair suits both its genders. */
-  async hairOptions(baseUrl: string): Promise<{ id: string; label: string }[]> {
-    let w: Wardrobe;
-    try {
-      w = await this.catalogue(baseUrl);
-    } catch {
-      return [];
-    }
-    const species = (this.manifest.species ?? this.manifest.id.replace(/_(male|female)$/, '')).toLowerCase();
-    return w.items
-      .filter((i) => i.kind === 'hair' && (i.template.toLowerCase().includes(`/hair/${species}/`) || i.id.toLowerCase().includes(`hair_${species}_`)))
-      .map((i) => ({ id: i.id, label: i.id.replace(/^hair_[a-z]+_(male|female)_?/, '').replace(/_/g, ' ') || i.id }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+  /** The species without its gender, as the hair folders name it (`twilek`); its styles are `hairOfSpecies` over the catalogue. */
+  get speciesName(): string {
+    return (this.manifest.species ?? this.manifest.id.replace(/_(male|female)$/, '')).toLowerCase();
+  }
+
+  /** The gender the parts pack was made for. */
+  get genderName(): 'female' | 'male' {
+    return (this.manifest.gender ?? (/female/.test(this.manifest.id) ? 'female' : 'male')) === 'female' ? 'female' : 'male';
+  }
+
+  /** Whether a part is a hairstyle: what the catalogue said it was, else its name (a hairstyle id). */
+  private isHair(p: Part): boolean {
+    return !p.body && (p.meta.kind === 'hair' || isHairKey(p.key));
   }
 
   /** The hair worn now, by catalogue id, or null. */
   hairWorn(): string | null {
-    for (const p of this.parts.values()) if (p.worn && !p.body && /^hair_/.test(p.key)) return p.key;
+    for (const p of this.parts.values()) if (p.worn && this.isHair(p)) return p.key;
     return null;
   }
 
-  /** Put a hairstyle on (taking any other off), or none. */
+  /** Every hairstyle on now: one, ordinarily, but whatever is on has to come off when another goes on. */
+  hairsWorn(): string[] {
+    const out: string[] = [];
+    for (const p of this.parts.values()) if (p.worn && this.isHair(p)) out.push(p.key);
+    return out;
+  }
+
+  /**
+   * Put a hairstyle on (taking any other off), or none, at once: a style that has not been prepared shows
+   * on the frame it loads. The game puts hair on through `App.wearHairPrepared`, which loads it hidden,
+   * settles its colours and prepares it first; this is for a character no world draws (the console's
+   * `character()` copy).
+   */
   async wearHair(id: string | null, baseUrl: string): Promise<boolean> {
-    for (const p of [...this.parts.values()]) if (p.worn && !p.body && /^hair_/.test(p.key) && p.key !== id) this.remove(p.key);
+    for (const p of [...this.parts.values()]) if (p.worn && this.isHair(p) && p.key !== id) this.remove(p.key);
     if (!id) {
       this.applyOcclusion();
       return true;
@@ -949,11 +1006,17 @@ export class Character {
     return (await this.wear(id)) || this.wearItem(id, baseUrl);
   }
 
-  /** Every material of the given name across the parts (the recipes name materials by the converter's shader key). */
-  materialsNamed(name: string): THREE.Material[] {
+  /**
+   * Every material of the given name across the parts (the recipes name materials by the converter's shader
+   * key); with a mesh, only on the meshes of that name, which a recipe whose colour is its mesh's own asks
+   * for. A mesh with several materials loads as several meshes, suffixed (`_1`, `_2`), and the recipes name the
+   * converter's mesh without the suffix (`isRecipeMesh`); no recipe's mesh ends in one of its own.
+   */
+  materialsNamed(name: string, mesh?: string): THREE.Material[] {
     const out: THREE.Material[] = [];
     for (const part of this.parts.values()) {
       for (const m of part.meshes) {
+        if (mesh !== undefined && !isRecipeMesh(m.name, mesh)) continue;
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         for (const mat of mats) if (mat.name === name && !out.includes(mat)) out.push(mat);
       }

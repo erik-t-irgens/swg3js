@@ -893,6 +893,32 @@ export function skinData(skeleton, animations, { flipX = true, hardpoints = [] }
   return { joints, inverseBind, clips, hardpoints: skinHardpoints, droppedHardpoints };
 }
 
+/**
+ * The hardpoints a converted skeletal model keeps as hp:<name> nodes under their joints, for
+ * `skinData`'s `hardpoints`: the body's own meshes' (`{ mgn, body }` as the converter composes them;
+ * never what is worn over the body), then any handed in from elsewhere (a mount table's appearance
+ * adds its saddle where this one lacks it), the first of a name winning in any case. None at all
+ * unless `keep` asks for them: a mount and every skeletal vehicle of the gallery ask, a character
+ * does not.
+ */
+export function keptHardpoints(meshes, extra = [], keep = false) {
+  if (!keep) return [];
+  const out = [];
+  const seen = new Set();
+  for (const hp of [...meshes.filter((m) => m.body).flatMap((m) => m.mgn.hardpoints ?? []), ...extra]) {
+    const key = String(hp.name).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(hp);
+  }
+  return out;
+}
+
+/** What a conversion says it kept: each hardpoint `skinData` placed, by name and the joint it rides (a model's manifest entry lists the names). */
+export function hardpointsKept(skin) {
+  return skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
+}
+
 /** Vertex streams for one mesh generator's shader groups, as buildGlb primitives with skin data. */
 export function skinnedPrimitives(mgn, skeleton) {
   const jointIndex = new Map(skeleton.joints.map((j, i) => [j.name.toLowerCase(), i]));

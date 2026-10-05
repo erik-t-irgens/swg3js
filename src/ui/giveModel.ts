@@ -17,7 +17,7 @@
 // string is something a node test can read. No document is touched: no DOM, no three, and only the
 // inventory rules, the name maker and the escaper imported, all with their extensions, so a plain
 // node test loads this file as it stands.
-import { OTHER_GROUP, SLOT_GROUPS, fitFor, slotGroupOf, slotWords, speciesWords } from '../core/inventory.ts';
+import { OTHER_GROUP, SLOT_GROUPS, fitFor, isHairKey, slotGroupOf, slotWords, speciesWords } from '../core/inventory.ts';
 import type { Fit, ItemFit } from '../core/inventory.ts';
 import { escapeHtml, prettyName } from './catalogue.ts';
 
@@ -204,7 +204,7 @@ export function buildWardrobeView(items: readonly WardrobeRow[], opts: WardrobeO
   let blocked = 0;
   let listed = 0;
   for (const item of items) {
-    if (item.kind === 'hair' || /^hair_/.test(item.id)) continue;
+    if (item.kind === 'hair' || isHairKey(item.id)) continue;
     if (seen.has(item.id)) continue;
     seen.add(item.id);
     const on = opts.worn.has(item.id);

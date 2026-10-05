@@ -77,6 +77,11 @@ export interface TradeUiDeps {
   note: (text: string) => void;
   /** An item's name and the picture the converter baked for it, as the backpack shows them. */
   look: (kind: 'wear' | 'weapon', id: string) => { name: string; icon: string | null };
+  /**
+   * The thing's own first colour as `#rrggbb` for the small swatch in its cell, or null for none: the
+   * backpack's (`itemSwatch`), read from the colours a row carries, theirs as the server shows them.
+   */
+  swatch?: (item: TradeItem) => string | null;
   /** What this character owns now, and what each one is doing (worn, or in a hand). */
   owned: () => readonly { item: TradeItem; use: 'worn' | 'right' | 'left' | null }[];
   /** Where the eye is and which way it looks, for "the player you are looking at". Filled in place. */
@@ -103,8 +108,16 @@ interface Cell {
   readonly el: HTMLButtonElement;
   readonly pic: HTMLElement;
   readonly name: HTMLElement;
-  /** `kind:id`, which is what a click hands back. */
+  /** The thing's own colour in the corner, and the colour it was last written with ('' hidden). */
+  readonly swatch: HTMLElement;
+  swatchColour: string;
+  /**
+   * Which thing the cell shows: its name, or the server's row where a pane's row names none (a server
+   * from before things had names). Two of one shirt are two cells with two keys.
+   */
   key: string;
+  /** The thing itself, which is what a click hands back: the backpack's own row, or the pane's. */
+  item: TradeItem | null;
   kind: 'wear' | 'weapon';
   id: string;
   nameText: string;
@@ -167,6 +180,7 @@ const CSS = `
 .trade-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(64px * var(--hud-scale, 1)), 1fr)); gap: 4px; max-height: calc(220px * var(--hud-scale, 1)); overflow-y: auto; }
 .trade-cell {
   display: block;
+  position: relative;
   background: ${PLATE};
   border: 1px solid ${RULE};
   border-radius: 3px;
@@ -183,6 +197,8 @@ const CSS = `
 .trade-cell .pic img { max-width: 100%; max-height: 100%; vertical-align: middle; }
 .trade-cell .initials { color: ${MUTED}; font-weight: 600; }
 .trade-cell .name { display: block; font-size: calc(10px * var(--hud-scale, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trade-cell .swatch { position: absolute; top: 3px; right: 3px; width: 10px; height: 10px; box-sizing: border-box; border: 1px solid ${EDGE}; border-radius: 2px; pointer-events: none; }
+.trade-cell .swatch.hidden { display: none; }
 .trade-empty { color: ${MUTED}; font-size: calc(11px * var(--hud-scale, 1)); padding: 6px 2px; }
 .trade-foot { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .trade-state { color: ${MUTED}; }
@@ -385,13 +401,16 @@ export class TradeUi {
       const el = document.createElement('button');
       el.type = 'button';
       el.className = 'trade-cell hidden';
-      el.innerHTML = '<span class="pic"></span><span class="name"></span>';
+      el.innerHTML = '<span class="pic"></span><span class="name"></span><span class="swatch hidden"></span>';
       this.grids[pane].appendChild(el);
       const cell: Cell = {
         el,
         pic: el.querySelector<HTMLElement>('.pic')!,
         name: el.querySelector<HTMLElement>('.name')!,
+        swatch: el.querySelector<HTMLElement>('.swatch')!,
+        swatchColour: '',
         key: '',
+        item: null,
         kind: 'wear',
         id: '',
         nameText: '',
@@ -408,15 +427,15 @@ export class TradeUi {
   // ---- what the player presses ---------------------------------------------------------------------
 
   private clicked(pane: Pane, cell: Cell): void {
-    if (!cell.id) return;
+    if (!cell.id || !cell.item) return;
     const t = this.deps.trade;
     if (pane === 'pack') {
-      const why = t.putIn(cell.kind, cell.id);
+      const why = t.putIn(cell.item);
       if (why) this.deps.note(why);
       return;
     }
     if (pane === 'mine') {
-      const why = t.takeOut(cell.kind, cell.id);
+      const why = t.takeOut(cell.item);
       if (why) this.deps.note(why);
       return;
     }
@@ -595,15 +614,14 @@ export class TradeUi {
       this.title.textContent = title;
       this.stat.writes++;
     }
-    const offered = new Set(w.mine.map((o) => `${o.kind}:${o.id}`));
     const find = this.find.value.trim().toLowerCase();
     // The backpack pane: what is owned, less what is already in the trade. What is being worn or
     // held stays on it, dimmed, because a player looking for a shirt they are wearing must be told
-    // why it will not go in rather than left hunting for a cell that is not there.
+    // why it will not go in rather than left hunting for a cell that is not there. Two of one shirt
+    // are two cells, and the one in the trade is the one taken off this pane.
     const pack: { item: TradeItem; use: string }[] = [];
     for (const row of this.deps.owned()) {
-      const key = `${row.item.kind}:${row.item.id}`;
-      if (offered.has(key)) continue;
+      if (this.deps.trade.offered(row.item)) continue;
       if (find) {
         const name = this.deps.look(row.item.kind, row.item.id).name.toLowerCase();
         if (!name.includes(find) && !row.item.id.toLowerCase().includes(find)) continue;
@@ -667,6 +685,7 @@ export class TradeUi {
           cell.el.classList.add('hidden');
           cell.shown = false;
           cell.key = '';
+          cell.item = null;
           cell.id = '';
           this.stat.writes++;
         }
@@ -677,7 +696,10 @@ export class TradeUi {
         cell.shown = true;
         this.stat.writes++;
       }
-      const key = `${row.item.kind}:${row.item.id}`;
+      // The thing the cell is about is handed back on a click, so it is taken afresh whatever the
+      // picture does; the picture and the name are written only when the thing shown has changed.
+      cell.item = row.item;
+      const key = row.item.thing || (row.item.row ? `#${row.item.row}` : `${row.item.kind}:${row.item.id}`);
       if (key !== cell.key) {
         cell.key = key;
         cell.kind = row.item.kind;
@@ -703,6 +725,16 @@ export class TradeUi {
           } else cell.pic.appendChild(initials(look.name));
           this.stat.writes++;
         }
+      }
+      // The thing's own colour, which can change under the same thing (theirs coloured before they put it
+      // in), so it is read each time and written only when it moved.
+      const sw = this.deps.swatch?.(row.item) ?? '';
+      const colour = sw && /^#[0-9a-f]{6}$/i.test(sw) ? sw : '';
+      if (colour !== cell.swatchColour) {
+        cell.swatchColour = colour;
+        cell.swatch.style.background = colour;
+        cell.swatch.classList.toggle('hidden', !colour);
+        this.stat.writes++;
       }
       if (row.use !== cell.use) {
         cell.use = row.use;

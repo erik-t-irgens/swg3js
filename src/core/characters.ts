@@ -53,8 +53,32 @@ export interface SavedCharacter {
   items?: OwnedItem[];
   /** The weapons in hand when last played, by weapon id. */
   held?: { right?: string; left?: string };
+  /**
+   * Which copy of a worn piece is the one on the body, by catalogue id to the thing's name, where there
+   * are two of it and the one chosen is not the oldest. Absent means the oldest (`wornThingOf` in
+   * src/core/inventory.ts).
+   */
+  wornThings?: Record<string, string>;
+  /**
+   * Which thing is in each hand, where it is not the one the rule would take (`heldThingsOf`): a hand's
+   * and not an item's, since two copies of one hilt may be held one in each hand. A map from before this
+   * (catalogue id to thing) names no hand and is read as no choice.
+   */
+  heldThings?: { right?: string; left?: string };
   /** 1 once the record has been given its items (migrateInventory). */
   inv?: 1;
+  /**
+   * 1 once the record's items were brought into named things and any second copy the creator once made
+   * collapsed (`collapseOwned`). A mark of its own rather than `inv: 2`: a build from before this reads
+   * any `inv` that is not 1 as a record from before the backpack and would hand it the kit again.
+   */
+  named?: 1;
+  /**
+   * 1 once the garments' colours were moved out of the look and onto the things they colour (`moveTints`
+   * in src/core/inventory.ts): from then on `appearance.values` keeps the body's and the hair's colours
+   * and each thing its own `tint`. A mark of its own, and not `inv: 3`, for the reason `named` gives.
+   */
+  tints?: 1;
   /** The ships' fits by garage id (a component per chassis slot, paint values, the droid); a ship absent is stock. */
   ships?: Record<string, ShipFit>;
   /**

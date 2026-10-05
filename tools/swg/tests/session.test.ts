@@ -179,6 +179,32 @@ const claimOf = (sent: Record<string, unknown>[]) => sent.find((m) => m.t === 'c
 }
 
 {
+  // A record's garment colours moved off its look onto its things, once, behind the loading screen: a new
+  // shape of the same character, adopted without counting a change -- and only when nothing else moved.
+  const a = session();
+  const before = { id: 'char-2', name: 'Leia', outfit: ['shirt_s03'], items: [{ kind: 'wear', id: 'shirt_s03' }] };
+  a.it.noteCharacter(before, ABOUT);
+  const moved = { ...before, items: [{ kind: 'wear', id: 'shirt_s03', tint: { index_color_1: 4 } }] };
+  ok(characterMark(moved) !== characterMark(before), 'a colour on a thing is in the mark');
+  // A fresh session, as at the start of play: it has not been told which character is in play yet.
+  const play = session(a.store);
+  play.it.noteRewritten(before, moved);
+  play.it.noteCharacter(moved, ABOUT);
+  ok(play.it.counterOf('char-2') === 1, 'moved once, the colours are not a change: the counter stays where it was');
+  // A rewrite whose `was` is not the record the mark was taken from: something else moved meanwhile and was
+  // never noted. The very record it hands over is then noted, so had the rewrite been adopted, its mark would
+  // already be the one held and the change would go uncounted.
+  const stale = { ...moved, outfit: [] as string[] };
+  const after = { ...moved, outfit: [] as string[], items: [] };
+  ok(characterMark(stale) !== characterMark(moved), 'the record the rewrite names as before is not the one the mark was taken from');
+  play.it.noteRewritten(stale, after);
+  play.it.noteCharacter(after, ABOUT);
+  ok(play.it.counterOf('char-2') === 2, 'while a rewrite of a record whose mark has moved since is not adopted, and the change is counted');
+  play.it.noteCharacter({ ...moved, items: [{ kind: 'wear', id: 'shirt_s03', tint: { index_color_1: 9 } }] }, ABOUT);
+  ok(play.it.counterOf('char-2') === 3, 'and a colour set afterwards is a change like any other');
+}
+
+{
   // The claim, put to the server's own judge rather than agreed with on paper.
   const a = session();
   a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
@@ -419,6 +445,25 @@ const claimOf = (sent: Record<string, unknown>[]) => sent.find((m) => m.t === 'c
   const before = a.notes.length;
   a.it.hail({ v: 99, now: 2, nonce: NONCE });
   ok(a.notes.length === before, 'once per line, not once per greeting');
+}
+
+{
+  // How the far end keeps what characters own: heard in the greeting, in force once the server has us.
+  const a = session();
+  a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  a.it.opening();
+  a.it.hail({ v: 6, now: 1, nonce: NONCE, items: 2 });
+  ok(a.it.itemsVersion === 0 && a.it.debug().items === 2, 'a server that keeps a row per thing says so, and nothing rests on it until the claim is taken');
+  a.it.claimed({ character: 'char-1' }, 'same');
+  ok(a.it.itemsVersion === 2, 'once it is, two of one item may be handed up');
+  a.it.closed();
+  ok(a.it.itemsVersion === 0, 'and with the line gone, nothing is anybody\'s to keep but this browser\'s');
+  const b = session();
+  b.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  b.it.opening();
+  b.it.hail({ v: 5, now: 1, nonce: NONCE });
+  b.it.claimed({ character: 'char-1' }, 'same');
+  ok(b.it.itemsVersion === 0, 'a server whose greeting says nothing of it is one from before, which folds two of one item into one');
 }
 
 {

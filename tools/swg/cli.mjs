@@ -14,6 +14,8 @@
 //                                                                  recipes as customize.json (images in customize/), and the NPC ship types with
 //                                                                  their tier fits, formations, taunts and hit effects as combat.json (--verbose lists its notes)
 //   node tools/swg/cli.mjs species <swg-dir> <out-dir> [--only=human,twilek_female] [--var=...] [--no-moods]   every playable species and gender as parts, with characters/index.json for the character creator
+//   node tools/swg/cli.mjs customization <swg-dir> <out-dir>       the creator's own table: each species' tabs, rows, words, linked colours, bald rule,
+//                                                                  hairstyles and creation palettes, as characters/customization.json (seconds; no model)
 //   node tools/swg/cli.mjs ash <swg-dir> <appearance/x.sat | object/.../shared_x.iff> [--find=pistol]   the animation state hierarchy behind a skeletal appearance, with its strings
 //   node tools/swg/cli.mjs shader <swg-dir> <shader/x.sht>        list a shader's texture slots
 //   node tools/swg/cli.mjs materials <swg-dir> <appearance-path | object/x.iff> | --ship=<id>   every shader an appearance uses, with its effect, alpha and what the converter makes of it (diagnostic)
@@ -32,7 +34,7 @@
 //   node tools/swg/cli.mjs player <swg-dir> <out-dir> [--template=object/creature/player/shared_human_male.iff] [--wear=...|none] [--var=...] [--no-moods]   the player's character as <out-dir>/player/<id>.glb + manifest.json
 //                                                               [--jka=<Jedi Academy GameData or base dir>] [--jka-anims=BOTH_A1_T__B_,...]  adds Jedi Academy's saber attacks, jumps and rolls, retargeted
 //   node tools/swg/cli.mjs loading <swg-dir> <out-dir> [--match=ui_load] [--list]   the game's loading-screen pictures, one per planet, as <out-dir>/loading/<planet>.png
-//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons]   every wearable and hairstyle as parts, with names, slots, species rules and pictures
+//   node tools/swg/cli.mjs wardrobe <swg-dir> <out-dir> [--gender=male|female] [--kind=wearables,hair] [--match=...] [--limit=N] [--no-icons] [--no-dye]   every wearable and hairstyle as parts, with names, slots, species rules, pictures and colours
 //   node tools/swg/cli.mjs parts <swg-dir> <out-dir> [--template=...] [--wear=...] [--no-moods]   body, head and worn items as separate GLBs on one shared skeleton
 //   node tools/swg/cli.mjs clips-save <model.glb> <out.clips> [--only=BOTH_]   lift a model's animations into a bundle that survives re-conversion
 //   node tools/swg/cli.mjs clips-apply <model.glb> <in.clips> [--drop=BOTH_]   put a bundle's animations back onto a model, joints matched by name
@@ -41,7 +43,8 @@
 //   node tools/swg/cli.mjs gallery <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims,interiors] [--limit=N]
 //                                                                  a flat development world under <out-dir>/gallery: every player house, vehicle and
 //                                                                  weapon in rows, and every animation from both games on a grid of player models
-//                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
+//                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise); a vehicle
+//                                                                  whose shaders take colours is painted as a ship is (customize.json, its `paint`)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
@@ -185,7 +188,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { R, composeMeshes, hardpointsKept, keptHardpoints, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveAppearanceToMesh, resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle, parseParticleEffect } from './particle.mjs';
 import { exportSwoosh, swooshStatus } from './swoosh.mjs';
@@ -198,12 +201,14 @@ import { iconMeshes, renderThumbnail, thumbTexture } from './thumbnail.mjs';
 import { effectAlphaMode, shaderTextures } from './sht.mjs';
 import { bakeShader, describeShader, describeVariables, loadImage, loadShader, parseBlueprint, parsePalette, preparedShaders, renderBlueprint, renderContext, shaderNeedsBake } from './texrender.mjs';
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
+import { DYE_FORMAT, DYE_PALETTE, DYE_PALETTE_COLOURS, DYE_TUNE, EXTRA_GARMENT_PALETTES, colourOf, dyeBlock, dyeMesh, dyeSkip, readsVariable, wardrobeColourStatus } from './dye.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { MATERIAL_FORMAT, combineMasks, describeLines, describeSurface, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
+import { MATERIAL_FORMAT, combineMasks, describeLines, describeSurface, maskOf, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
+import { gallerySatOptions, galleryPaintStatus, podSeatStatus, skeletalModelEntry } from './gallery.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
 import {
@@ -235,9 +240,11 @@ import { nameLocomotion } from './clipnames.mjs';
 import { moodEntries } from './moods.mjs';
 import { CORE3_REF_DIR, core3SourceFor, writeCore3Reference } from './core3ref.mjs';
 import { conversationsStatus } from './conversations.mjs';
+import { CUSTOMIZATION_FILE, buildCustomization, customizationStatus } from './customization.mjs';
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
+import { paintRecipeMaker } from './paintrecipes.mjs';
 import { mapFrameOf } from './mapframe.mjs';
 import { floraCollisionFile, floraCollisionStatus } from './extent.mjs';
 import { DOORS_PACK_VERSION, doorModelId, doorsStale, packDoorTable, pobDoorReader, readDoorStyles } from './doors.mjs';
@@ -1773,9 +1780,15 @@ function convertWearableMesh(vfs, meshPath, { skeleton, skin, outDir, ctx, info,
     if (!recipeKeys.has(rkey)) {
       try {
         const shader = loadShader(vfs, g.shader, ctx);
-        if (shader?.effect && shaderNeedsBake(shader)) {
+        // The same rule as the GLB's own bake (`skinnedTexture`), so the recipe and the picture agree.
+        if (shader?.effect && shaderNeedsBake(shader, 'MAIN', { allPasses: !!ctx.everyPass })) {
           recipeKeys.add(rkey);
-          recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [] });
+          if (ctx.lateBakes && !shaderNeedsBake(shader)) ctx.lateBakes.add(rkey);
+          // A bake whose GLB carries its glow split out (skinnedTexture's `recipeGlow`) says how, in a ship paint
+          // recipe's shape, so a recolour is split the same way (src/vehicles/paintJob.ts); the mask's texture is
+          // among the shader's textures already, since every one of them is exported.
+          const glow = t?.recipeGlow ?? null;
+          recipes.push({ mesh: meshName, material: g.shader, kind: 'bake', baseTag: 'MAIN', shader: exportShader(shader, registry, (f) => loadImage(vfs, f, ctx.images)), slots: [], ...(glow ? { glow } : {}) });
         }
       } catch (err) {
         info.skipped.push(`${g.shader}: no live recipe (${err.message})`);
@@ -1862,13 +1875,19 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
     noteVariables(info, shader.variables, shaderPath, mesh);
   }
   info.shaderNotes.add(`${shaderPath}: ${describeShader(shader)}`);
+  // `ctx.paint` (the gallery's skinned vehicles: the walkers, the basilisk): a paint shader's texture is a
+  // ship's, baked at its defaults through every pass with its pattern's own alpha (`textureFor`'s `paint`), so
+  // a walker is painted exactly as a static speeder is and its recipe renders back to the same picture.
+  if (ctx.paint && !slots?.length && shader && isPaintShader(shader)) return textureFor(vfs, shaderPath, { paint: true });
   const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
-  if (!rendered && !(shader && shaderNeedsBake(shader))) return textureFor(vfs, shaderPath);
+  // `ctx.everyPass` (the wardrobe's) also bakes a shader whose palette is laid on after its first pass.
+  const allPasses = !!ctx.everyPass;
+  if (!rendered && !(shader && shaderNeedsBake(shader, 'MAIN', { allPasses }))) return textureFor(vfs, shaderPath);
   let image = rendered ? rendered.image : null;
   if (shader && shader.effect) {
     const s = { ...shader, textures: new Map(shader.textures) };
     for (const slot of slots ?? []) s.textures.set(slot.tag, slot.image);
-    if (!rendered || shaderNeedsBake(s, rendered.tag)) image = bakeShader(s, rendered ? rendered.tag : 'MAIN') ?? image;
+    if (!rendered || shaderNeedsBake(s, rendered.tag, { allPasses })) image = bakeShader(s, rendered ? rendered.tag : 'MAIN') ?? image;
   }
   if (!image) return textureFor(vfs, shaderPath);
   const pass = shader?.effect?.passes[0];
@@ -1884,6 +1903,13 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   // of itself discarded, and why no customizable wearable had a specular map at all. The image here
   // is the bake's; the rest is taken from the shader as it stands.
   const plain = textureFor(vfs, shaderPath);
+  // A shader baked only for a palette laid on after its first pass (the every-pass rule) was drawn by the
+  // plain path until now, its glow split out of its picture, and keeps that glow (two Ithorian helmets light
+  // their visors through a mask). Split out of the **bake**, by the same mask, so the base is the lit half:
+  // the plain path's glow laid over the whole bake lit the visor twice over by day, the fault the emismap
+  // lesson records. The recipe carries how it glows, so a recolour is split the same way. Every other bake
+  // stays as it was.
+  const late = allPasses && !rendered && plain?.emissive && !shaderNeedsBake(shader) ? bakeGlowSplit(vfs, shaderPath, shader, image, ctx) : null;
   const result = {
     path: `${shaderPath}#${rendered ? basename(rendered.file) : 'baked'}`,
     png: encodePng(image.width, image.height, image.rgba),
@@ -1895,9 +1921,39 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
     ...(plain?.noShadow ? { noShadow: true } : {}),
     ...(plain?.mr ? { mr: plain.mr, metallic: plain.metallic, roughness: plain.roughness, ...(plain.glossFrom ? { glossFrom: plain.glossFrom } : {}) } : {}),
   };
-  // The icon's copy of the baked texture, reduced (the item pictures never decode a PNG just encoded).
+  if (late) {
+    const mask = `${late.glow.maskTag}.${late.glow.channel}`;
+    result.lit = { path: `${result.path}#lit:${mask}`, png: encodePng(late.lit.width, late.lit.height, late.lit.rgba) };
+    result.emissive = { path: `${result.path}#emis:${mask}`, png: encodePng(late.emis.width, late.emis.height, late.emis.rgba) };
+    // For the recipe (convertWearableMesh), not the GLB: kept off the entry's own fields.
+    Object.defineProperty(result, 'recipeGlow', { value: late.glow, enumerable: false });
+  }
+  // The icon's copy of the baked texture, reduced (the item pictures never decode a PNG just encoded); the
+  // whole bake, glow and all, as the plain path's thumbnail is its unsplit picture.
   if (wantThumbs) Object.defineProperty(result, 'thumb', { value: thumbTexture(image.width, image.height, image.rgba), enumerable: false });
   return result;
+}
+
+/**
+ * The glow of a shader the wardrobe bakes only for a palette laid on after its first pass, split out of the
+ * bake: the mask is the texture the shader's glow names (describeSurface, read as a paint shader's is,
+ * `paintGlow`), sampled nearest at the bake's size, and the split is surface.mjs's own `splitGlow`, in linear
+ * light, so the lit half and the glow add up to the bake. The run's own recipe for the shader is split at run
+ * time by src/vehicles/paintJob.ts, which reads the mask from the recipe's texture of that tag and splits by
+ * the same arithmetic byte for byte; so the split is made at the bake's own size, not capped at `GLOW_MAX` as a
+ * plain texture's is, or the two would differ texel for texel. Null when the shader does not glow by a mask or
+ * the mask glows nowhere (under 8/255, as the plain path decides).
+ *  -> { lit, emis, glow: { maskTag, channel, keepAlpha } } | null
+ */
+function bakeGlowSplit(vfs, shaderPath, shader, image, ctx) {
+  const glow = paintGlow(describeSurface(vfs, shaderPath, surfaceCache));
+  if (!glow) return null;
+  const file = shader.textureFiles?.get(glow.maskTag) ?? null;
+  const mask = shader.textures?.get(glow.maskTag) ?? (file ? loadImage(vfs, file, ctx.images) : null);
+  const m = mask ? maskOf(image, mask, glow.channel) : null;
+  if (!m) return null;
+  const { lit, emis } = splitGlow(image, m, glow.keepAlpha);
+  return { lit, emis, glow };
 }
 
 /**
@@ -1908,8 +1964,10 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
  * against the same skeleton, keeps every triangle, and carries the occlusion zones through, so
  * the game can dress and undress a character at run time rather than the converter deciding once.
  * `animations: false` reads no animation table at all, for a model whose clips live in a shared pack.
+ * `paint` (the gallery's skinned vehicles) bakes a paint shader as a ship's is (skinnedTexture), and
+ * `info.shaders` names every shader the model kept, for the paint's recipes.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false, rigOnly = false } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false, rigOnly = false, paint = false } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -1924,7 +1982,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   // `moodsAsked` goes into the manifest so that `status` can tell a pack converted with
   // --no-moods, which is a choice the owner made, from one converted before the moods existed,
   // which is work still to do. Without it the two look the same and status asks for ever.
-  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set(), moodsAsked: moods === true };
+  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set(), shaders: new Set(), moodsAsked: moods === true };
   // Extra skeletons (the face rig) hang from a joint of the first.
   const extras = [];
   for (const k of sat.skeletons.slice(1)) {
@@ -1958,6 +2016,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }) : null;
   const textures = new Map();
   const ctx = renderContext(variables);
+  if (paint) ctx.paint = true;
   // Mesh generators of the body and of everything worn over it, composed the way the game does:
   // outer layers hide the zones of inner ones (a shirt hides the torso skin beneath it).
   const loaded = [];
@@ -2010,10 +2069,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }
   // In parts mode nothing is hidden at conversion time: the zones travel with the mesh instead.
   const composed = parts ? loaded.map((l) => ({ ...l, hiddenTriangles: 0 })) : composeMeshes(loaded);
-  // The body's hardpoints (a mount's saddle, the basilisk's rider point), for `hardpoints`.
-  const bodyHardpoints = [];
   for (const { mgn, file, body, hiddenTriangles } of composed) {
-    if (hardpoints && body) bodyHardpoints.push(...(mgn.hardpoints ?? []));
     const { groups, unknownTransforms, unknownNames } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
     for (const n of unknownNames) (info.unknownJoints ??= new Set()).add(n);
@@ -2060,6 +2116,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       if (!g.primitives[0].indices.length) return; // everything this shader drew is under clothing
       const slots = slotsByShader.get(i);
       const shaderPath = g.shader;
+      info.shaders.add(shaderPath);
       const t = skinnedTexture(vfs, g.shader, slots, ctx, info, meshName);
       if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
       if (t) textures.set(g.shader, t);
@@ -2212,19 +2269,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       console.warn(`   ${cut.length} wanted clips left out by the --max-anims cap of ${maxAnimations}: ${cut.slice(0, 8).join(', ')}${cut.length > 8 ? ', ...' : ''}; raise --max-anims to keep them`);
     }
   } else if (latFile) info.missing.push(latFile);
-  // The body's hardpoints ride their joints as hp:<name> nodes; the mount tables' own appearance
-  // adds its saddle when this one lacks it (`extraHardpoints`). The first of a name wins.
-  const wantedHardpoints = [];
-  if (hardpoints) {
-    const seen = new Set();
-    for (const hp of [...bodyHardpoints, ...extraHardpoints]) {
-      const key = String(hp.name).toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      wantedHardpoints.push(hp);
-    }
-  }
-  const skin = skinData(skeleton, clips, { flipX: true, hardpoints: wantedHardpoints });
+  // The body's hardpoints (a mount's saddle, the basilisk's rider point, a pod racer's seat) ride their
+  // joints as hp:<name> nodes; the mount tables' own appearance adds its saddle when this one lacks it
+  // (`extraHardpoints`). The first of a name wins.
+  const skin = skinData(skeleton, clips, { flipX: true, hardpoints: keptHardpoints(composed, extraHardpoints, hardpoints) });
   // A one-frame pose is written twice a frame apart. `skinData` gives such a clip a duration of
   // zero, three finishes a zero-length action on its first update, and a repeating one divides by
   // that length and poses the bones at NaN — which is what a still pose played as a state does.
@@ -2234,7 +2282,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   // Each clip's own length in seconds, as the game will play it: a landing is timed by it.
   info.clipSeconds = Object.fromEntries(skin.clips.map((c) => [c.name, Math.round((c.times[c.times.length - 1] ?? 0) * 1e4) / 1e4]));
   if (hardpoints) {
-    info.hardpoints = skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
+    info.hardpoints = hardpointsKept(skin);
     for (const name of skin.droppedHardpoints) info.skipped.push(`hardpoint ${name}: its joint is not in the skeleton`);
   }
   if (extraClips) {
@@ -2979,12 +3027,20 @@ function packStatus(dir) {
       }
       if (!wardrobe) continue;
       const items = itemPackStatus(wardrobe.items);
-      console.log(`  wardrobe ${folder}: ${items.items} items (${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${items.fitted} with species rules, ${items.unseen} worn unseen)`);
+      const list = Array.isArray(wardrobe.items) ? wardrobe.items : [];
+      const dyedPieces = list.filter((i) => i?.colour === 'dye').length;
+      const hairPictured = list.filter((i) => i?.kind === 'hair' && i.icon).length;
+      console.log(`  wardrobe ${folder}: ${items.items} items (${items.named} named, ${items.slotted} with slots, ${items.iconed} icons, ${items.fitted} with species rules, ${items.unseen} worn unseen, ${dyedPieces} dyed, ${hairPictured} hairstyles pictured)`);
       if (items.missingKeys && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} has no item names, slots or icons (the backpack needs them)`);
       // A wardrobe converted before a baked shader carried its surface fields has no gloss maps and
       // draws its glass as a cut-out. It stamped nothing at all until now, so an old one reads as
       // format 1 and is asked for once.
       else if ((wardrobe.materialFormat ?? 1) < MATERIAL_FORMAT && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} was converted before a baked shader carried its gloss and its glass`);
+      // The colours and the hair pictures (dye.mjs), each reason its own ask and none chained to the ones
+      // above, so a stamp an earlier check is satisfied by can never hide them: the dye's stamp, a dyed
+      // garment the run must have made (a stamp from a broken run cannot pass for one), and the hairstyles'
+      // pictures. `need` gathers every reason under the folder's one command.
+      if (folder in M.WARDROBE_RUNS) for (const why of wardrobeColourStatus(wardrobe)) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} ${why}`);
     }
   }
   const speciesIndex = readJson(join(dir, 'characters/index.json'));
@@ -3026,6 +3082,13 @@ function packStatus(dir) {
       need(`player <swg-dir> ${dir} --retail-only --jka=<jka-dir> && parts <swg-dir> ${dir} --retail-only && clips-save ${join(dir, 'player', 'human_male.glb')} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', 'human_male', 'rig.glb')} ${join(dir, 'player', 'jka.clips')} && species <swg-dir> ${dir} --retail-only`, `${withoutAimed.length} of the ${speciesIndex.species.length} species rigs have no aimed blaster pose (a body with a gun up freezes on a transition instead): ${names}${withoutAimed.length > 4 ? ' and more' : ''}`);
     }
   } else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
+  // The creator's own table, beside the index: its own `if`, so nothing above can hide it. It carries a
+  // format stamp and a named row, which is the check `player`, `parts` and `species` never had.
+  if (speciesIndex?.species?.length) {
+    const creator = customizationStatus(readJson(join(dir, ...CUSTOMIZATION_FILE.split('/'))));
+    console.log(`  ${creator.line}`);
+    if (creator.why) need(`customization <swg-dir> ${dir} --retail-only`, creator.why);
+  }
   const ships = readJson(join(dir, 'ships/manifest.json'));
   if (!ships) need(`ships <swg-dir> ${dir} --retail-only`, 'no ships converted for the garage (B in game, at the bottom)');
   else {
@@ -3075,6 +3138,18 @@ function packStatus(dir) {
   if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
   else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
   else if ((gallery.lodFormat ?? 0) < LOD_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, (gallery.lodFormat ?? 0) < 1 ? "the gallery's models were converted before the client's own detail levels" : "the gallery's models carry detail levels the game can never draw or that stand somewhere else than the model");
+  else {
+    // A named product rather than a format: every skinned pod racer's mesh carries the game's own seat point, so a
+    // gallery whose pods list none was converted before the hardpoints were kept, and each pilot sits on the joint.
+    const pods = podSeatStatus(gallery.categories?.layout);
+    const podsStale = pods.pods && !pods.seated;
+    if (podsStale) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's ${pods.pods} skinned pod racers were converted without the game's own seat point (player, on the cockpit's joint), so each pilot sits on the cockpit's joint instead`);
+    // The vehicles' paint (a speeder's colours): its own `if`, asking for the vehicles alone unless the whole
+    // gallery is asked for above, which builds them too.
+    const vehiclePaint = galleryPaintStatus(gallery, readJson(join(dir, 'gallery/gallery.json')));
+    console.log(`  gallery: ${vehiclePaint.vehicles} vehicles, ${vehiclePaint.painted} models whose colours a player can change${vehiclePaint.stale ? ' (converted before a speeder could be painted)' : ''}`);
+    if (vehiclePaint.stale) need(podsStale ? `gallery <swg-dir> ${dir} --retail-only` : `gallery <swg-dir> ${dir} --only=vehicles --retail-only`, vehiclePaint.why);
+  }
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
   // gallery's models, so it is asked for after the gallery and never before one exists. What each
@@ -4457,6 +4532,17 @@ switch (cmd) {
 
     const templates = [...vfs.list()].filter((n) => kinds.some((k) => new RegExp(`^object/tangible/${k}/.*/shared_.*\\.iff$`).test(n))).sort();
     const ctx = renderContext(customizationValues(options.var));
+    // A palette laid on in any pass makes a live recipe, not one in the first pass alone (shaderNeedsBake's
+    // `allPasses`): the GLB's own bake and the recipe's test both read this, so a piece's picture and its
+    // recipe agree. The mobiles' wearables share convertWearableMesh and leave it unset.
+    ctx.everyPass = true;
+    // The recipes made by that rule alone, for the summary.
+    ctx.lateBakes = new Set();
+    // The dye of ours for the pieces that carry no colour of the game's (dye.mjs); --no-dye leaves it out.
+    const dyeOn = !flags.has('--no-dye');
+    const dyed = { recipes: 0, materials: new Set(), capped: [], skipped: new Map() };
+    // Each mesh once dyed, with how much of it the dye covers: a mesh two items share is dyed once.
+    const dyedMeshes = new Map();
     const catalogue = [];
     const failed = [];
     // The live recipes for the items whose look a colour changes (a shirt's palette factors, a
@@ -4476,6 +4562,11 @@ switch (cmd) {
     if (appearanceTable.size && !column) console.log(`   the appearance table has no column for ${speciesId}: every item is worn as its template says`);
     const has = (p) => vfs.has(p);
     const icons = !flags.has('--no-icons');
+    // How each picture is drawn (thumbnail.mjs): a garment a little turned from the front, as it always was;
+    // a hairstyle, the wig alone, turned further (ours: 40 degrees, since front on hides a braid and from
+    // behind hides the face it frames).
+    const WEAR_ICON = { view: 'wear' };
+    const HAIR_ICON = { view: 'wear', yawDeg: 40 };
     // The texture entries carry a reduced copy of their picture only while pictures are drawn.
     wantThumbs = icons;
     if (icons) mkdirSync(join(outDir, 'icons'), { recursive: true });
@@ -4498,7 +4589,8 @@ switch (cmd) {
         // The gender swap below, as the template alone would have had it: what "took the table's appearance" counts against.
         const ownWanted = satPath.replace(/_[fm](\.sat)$/i, `_${gender}$1`);
         const ownChoice = ownWanted !== satPath && vfs.has(ownWanted) ? ownWanted : satPath;
-        const wantIcon = icons && kind !== 'hair' && !seenIds.has(id);
+        // Hair has its picture too now: the Appearance tab lays the styles out as a grid of them.
+        const wantIcon = icons && !seenIds.has(id);
         // One appearance converted for this folder: the gender swap, the skeleton test, every mesh.
         const wearFrom = (path) => {
           let satPath = path;
@@ -4514,18 +4606,22 @@ switch (cmd) {
           const entries = [];
           // The item's variables (a shirt's colour 1 and 2), noted per mesh as its shaders are read.
           const info = { missing: [], skipped: [], customization: new Set(), variables: new Map(), textureRenderers: [], shaderNotes: new Set() };
-          // Every mesh's groups and textures, for the picture; hair gets none (it is chosen on the Appearance tab).
+          // Every mesh's groups and textures, for the picture (hair's as much as a garment's), and each mesh's
+          // own with the texture entries its GLB was built from, for the dye.
           const drawn = { groups: [], textures: new Map() };
-          const onMesh = wantIcon ? (_name, kept, textures) => {
+          const meshes = [];
+          const onMesh = (name, kept, textures) => {
+            meshes.push({ name, kept, textures });
+            if (!wantIcon) return;
             drawn.groups.push(...kept);
             for (const [shader, t] of textures) drawn.textures.set(shader, t);
-          } : undefined;
+          };
           for (const name of sat.meshes) {
             const entry = convertWearableMesh(vfs, name, { skeleton, skin, outDir, ctx, info, recipes, recipeKeys, registry, onMesh });
             if (entry) entries.push(entry);
           }
           if (!entries.length) throw new Error('no mesh survived');
-          return { satPath, usedOtherGender, entries, info, drawn };
+          return { satPath, usedOtherGender, entries, info, drawn, meshes };
         };
         // The table's verdict for this folder's own column (items.mjs wardrobeChoice): a species' own cut wins over the
         // template (the men's bracelets, the Ithorian pieces); a path the archives lack, or misspelt, is the template's
@@ -4536,7 +4632,7 @@ switch (cmd) {
         if (choice.unseen) {
           // Worn unseen: this species takes the item's slots and nothing is drawn (the Ithorians' 172, built for the
           // humanoid skeleton), so the entry is written with no meshes rather than left out.
-          catalogue.push({ id, template: tpl, kind, sat: null, gender, name: desc.name, description: desc.description, slots: desc.slots, icon: null, fit: { hide: [speciesId] }, parts: [], variables: [] });
+          catalogue.push({ id, template: tpl, kind, sat: null, gender, name: desc.name, description: desc.description, slots: desc.slots, icon: null, fit: { hide: [speciesId] }, parts: [], variables: [], colour: 'none' });
           if (seenIds.has(id)) duplicates++;
           seenIds.add(id);
           unseen++;
@@ -4550,12 +4646,43 @@ switch (cmd) {
         if (choice.took) took++;
         const { entries, info, drawn, usedOtherGender } = made;
         satPath = made.satPath;
+        // What the piece takes: a colour of the game's wherever a recipe on it reads one; failing that, a dye of
+        // ours on every material that can take one (dye.mjs), worked out from the images its GLBs embed. Hair
+        // takes none: the four styles the game gave no colour (the Singing Mountain Clan's) are left as they are.
+        const meshNames = new Set(entries.map((e) => e.name));
+        if (dyeOn && kind !== 'hair' && !recipes.some((r) => meshNames.has(r.mesh) && readsVariable(r))) {
+          for (const m of made.meshes) {
+            if (dyedMeshes.has(m.name)) continue;
+            const targets = [];
+            for (const material of new Set(m.kept.map((g) => g.shader))) {
+              const tex = m.textures.get(material) ?? null;
+              const skip = dyeSkip(material, tex);
+              if (skip) {
+                dyed.skipped.set(skip, (dyed.skipped.get(skip) ?? 0) + 1);
+                continue;
+              }
+              targets.push({ material, tex, recipe: recipes.find((r) => r.mesh === m.name && r.material === material) ?? null });
+            }
+            const result = targets.length ? dyeMesh(m.name, targets, registry, DYE_TUNE) : null;
+            let shown = 0, covered = 0;
+            for (const x of result?.made ?? []) {
+              if (x.replaces) recipes[recipes.indexOf(x.replaces)] = x.recipe;
+              else recipes.push(x.recipe);
+              dyed.recipes++;
+              dyed.materials.add(x.material.toLowerCase());
+              shown += x.shown;
+              covered += x.covered;
+            }
+            if (result?.capped) dyed.capped.push(`${id} ${m.name} (wanted ${result.wanted.toFixed(1)})`);
+            dyedMeshes.set(m.name, { shown, covered });
+          }
+        }
         // One picture per id: a repeated id (five templates are appearance_invisible_s01) keeps the first entry's.
         let icon = null;
         if (seenIds.has(id)) duplicates++;
         else if (wantIcon) {
           try {
-            const pic = renderThumbnail(iconMeshes(drawn.groups, drawn.textures), { view: 'wear' });
+            const pic = renderThumbnail(iconMeshes(drawn.groups, drawn.textures), kind === 'hair' ? HAIR_ICON : WEAR_ICON);
             if (pic) {
               writeFileSync(join(outDir, 'icons', `${id}.png`), encodePng(pic.width, pic.height, pic.rgba));
               icon = `icons/${id}.png`;
@@ -4567,6 +4694,7 @@ switch (cmd) {
         seenIds.add(id);
         // The rest of the gender's species; this folder's own wears the entry's `sat`, whatever its cell names.
         const fit = wardrobeFit(row, gender, satPath, has, speciesId);
+        // `colour` (and `dyeCover`) are written once every piece is converted, from the recipes the run ends with.
         catalogue.push({ id, template: tpl, kind, sat: satPath, gender: usedOtherGender ? (gender === 'm' ? 'f' : 'm') : gender, name: desc.name, description: desc.description, slots: desc.slots, icon, ...(fit ? { fit } : {}), parts: entries, variables: customizationList(vfs, info) });
         done++;
         if (done % 50 === 0) console.log(`  ${done} converted...`);
@@ -4575,16 +4703,60 @@ switch (cmd) {
       }
     }
     const bytes = catalogue.reduce((a, c) => a + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
+    // What each piece takes (dye.mjs colourOf), from the recipes the run ends with rather than the ones there were
+    // when the piece was met: a mesh two templates wear is dyed by whichever reaches it first (the two
+    // `appearance_invisible` bracelets wear the bracelets' own meshes). `dyeCover`, for a dyed piece, is how much
+    // of what is drawn of it the dye reaches, counted from the dye images as written.
+    {
+      const byMesh = new Map();
+      for (const r of recipes) (byMesh.get(r.mesh) ?? byMesh.set(r.mesh, []).get(r.mesh)).push(r);
+      for (const c of catalogue) {
+        if (!c.parts.length) continue;
+        c.colour = colourOf(c.parts.flatMap((p) => byMesh.get(p.name) ?? []));
+        if (c.colour !== 'dye') continue;
+        const share = c.parts.reduce((a, p) => ({ shown: a.shown + (dyedMeshes.get(p.name)?.shown ?? 0), covered: a.covered + (dyedMeshes.get(p.name)?.covered ?? 0) }), { shown: 0, covered: 0 });
+        if (share.shown) c.dyeCover = Math.round((share.covered / share.shown) * 1e4) / 1e4;
+      }
+    }
     // Stamped, so `status` can tell a wardrobe converted before a change to how a surface is read
     // from one converted after it. **This is the write the `wardrobe` command makes**; the other
     // one, in the parts path, writes a folder of its own, and stamping only that one left the owner
     // running the wardrobe four times over and being asked for it again each time.
-    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, items: catalogue }, null, 2));
+    // `dyeFormat` says the dye ran (dye.mjs, which `status` asks for again below it); `noDye` that it was left
+    // out on purpose with --no-dye, which is the owner's choice and not asked for again.
+    writeFileSync(join(outDir, 'wardrobe.json'), JSON.stringify({ species: speciesId, gender, skeleton: baseSkeletonFile, materialFormat: MATERIAL_FORMAT, ...(dyeOn ? { dyeFormat: DYE_FORMAT } : { noDye: true }), items: catalogue }, null, 2));
     if (recipes.length) {
-      const palettes = exportPalettes(vfs, recipes.flatMap((r) => palettesOf(r)));
-      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes }, null, 1));
+      // The palettes the recipes name, and the three garment palettes no piece names, kept for a picker. Ours is
+      // set after: `exportPalettes` writes `[]` for a palette the archives have not got, and an empty palette
+      // decodes as opaque white, which would dye every dyed piece white.
+      const palettes = exportPalettes(vfs, [...recipes.flatMap((r) => palettesOf(r)), ...EXTRA_GARMENT_PALETTES]);
+      for (const p of EXTRA_GARMENT_PALETTES) if (!palettes[p]?.length) console.log(`   the archives have no ${p}`);
+      if (dyed.recipes) palettes[DYE_PALETTE] = DYE_PALETTE_COLOURS.map((c) => [...c]);
+      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes, palettes, ...(dyeOn ? { dye: dyeBlock(DYE_TUNE) } : {}) }, null, 1));
+      // The folder keeps only the images this customize.json names. The registry numbers its files in the order it
+      // meets them, so a run that meets one image more early on renames every file after it, and every earlier
+      // run's copies stayed on disk unread: 1,839 files and about 165 MB in one human folder when this first ran.
+      const named = new Set(registry.ids.values());
+      let stale = 0;
+      for (const f of readdirSync(join(outDir, 'customize'))) {
+        if (!f.endsWith('.png') || named.has(f)) continue;
+        rmSync(join(outDir, 'customize', f), { force: true });
+        stale++;
+      }
+      if (stale) console.log(`   ${stale} images an earlier run left in customize/ removed`);
     }
     console.log(`-> ${outDir}: ${catalogue.length} items, ${catalogue.reduce((a, c) => a + c.parts.length, 0)} meshes, ${(bytes / 1e6).toFixed(1)} MB${recipes.length ? `; ${recipes.length} live colour recipes over ${registry.ids.size} images` : ''}`);
+    {
+      // The colours: the dye of ours, the palettes the every-pass rule kept, and the hairstyles' pictures.
+      const covers = catalogue.filter((c) => c.colour === 'dye').map((c) => c.dyeCover ?? 0);
+      const pct = (x) => `${Math.round(x * 100)}%`;
+      const late = catalogue.filter((c) => c.parts.some((p) => [...ctx.lateBakes].some((k) => k.endsWith(`|${p.name}`)))).length;
+      const hairPictures = catalogue.filter((c) => c.kind === 'hair' && c.icon).length;
+      const dyeLine = dyeOn ? `${dyed.recipes} recipes over ${dyed.materials.size} materials on ${covers.length} pieces, coverage mean ${covers.length ? pct(covers.reduce((a, b) => a + b, 0) / covers.length) : '-'}, min ${covers.length ? pct(Math.min(...covers)) : '-'}` : 'left out (--no-dye)';
+      console.log(`   dye: ${dyeLine}; every-pass palettes: ${late} pieces (${ctx.lateBakes.size} recipes); hair pictures: ${hairPictures}`);
+      if (dyed.skipped.size) console.log(`   left undyed: ${[...dyed.skipped].map(([why, n]) => `${n} ${why}`).join(', ')}`);
+      if (dyed.capped.length) console.log(`   dye brightness capped at ${DYE_TUNE.gainMax}x on ${dyed.capped.length}: ${dyed.capped.join('; ')}`);
+    }
     const withMorphs = catalogue.filter((c) => c.parts.some((p) => p.morphs.length)).length;
     const otherGender = catalogue.filter((c) => c.gender !== gender).length;
     console.log(`   ${withMorphs} carry body-shape morphs; ${otherGender} exist only in the other gender's mesh`);
@@ -4660,6 +4832,45 @@ switch (cmd) {
     const index = writeSpeciesIndex(pos[2]);
     console.log(`\n-> ${join(pos[2], 'characters', 'index.json')}: ${index.species.length} characters (${done.length} converted now${failed.length ? `, ${failed.length} failed: ${failed.join('; ')}` : ''})`);
     for (const sp of index.species) console.log(`   ${sp.id.padEnd(22)} ${sp.parts} parts, ${sp.morphs.length} shape sliders, ${sp.variables.filter((v) => v.kind === 'palette').length} colour palettes, ${sp.variables.filter((v) => v.kind === 'index').length} choices, ${sp.jkaClips} Jedi Academy clips${sp.wardrobe ? `, wardrobe ${sp.wardrobe}` : ''}`);
+    break;
+  }
+
+  case 'customization': {
+    // <swg-dir> <out-dir>: the character creator's own table (tools/swg/customization.mjs), as one small
+    // file beside the species index. It reads six retail files and converts no model, so it takes
+    // seconds and needs nothing else converted first; the appearance page falls back on the packs' own
+    // variables, as it always did, while the file is not there.
+    if (!pos[2]) usage();
+    const t0 = Date.now();
+    const vfs = mount(pos[1]);
+    const read = {
+      table: (p) => (vfs.has(p) ? parseDatatable(parseIff(vfs.read(p))) : null),
+      strings: (p) => (vfs.has(p) ? parseStringTable(vfs.read(p)) : null),
+      palette: (p) => {
+        if (!vfs.has(p)) return null;
+        try {
+          return parsePalette(vfs.read(p));
+        } catch {
+          return null;
+        }
+      },
+      has: (p) => vfs.has(p),
+    };
+    let built;
+    try {
+      built = buildCustomization(read);
+    } catch (err) {
+      console.error(`customization: ${err.message}`);
+      process.exitCode = 1;
+      break;
+    }
+    const { file, counts } = built;
+    const target = join(pos[2], ...CUSTOMIZATION_FILE.split('/'));
+    mkdirSync(dirname(target), { recursive: true });
+    const text = JSON.stringify(file);
+    writeFileSync(target, text);
+    console.log(`customization: ${Object.keys(file.species).length} species, ${counts.rows} rows (${counts.words} with the client's words), ${counts.hair} hairstyles (${counts.hairMissing} the archives have not got), ${counts.palettes} palettes (${counts.colours} creator colours)${counts.skipped.length ? `, ${counts.skipped.length} interface palette${counts.skipped.length === 1 ? '' : 's'} left unread by rule` : ''}`);
+    console.log(`  ${(text.length / 1024).toFixed(0)} KB in ${((Date.now() - t0) / 1000).toFixed(1)} s -> ${target}`);
     break;
   }
 
@@ -5231,91 +5442,18 @@ switch (cmd) {
       for (const s of slots) s.stock = pickStock(s, components, /^weapon_/.test(s.slot) ? { tokens, preferName, preferProjectile, weaponOf: projectileOf } : { tokens });
       return slots;
     };
-    // The paint recipes (customize.json), one per paint shader, with their images under customize/.
-    const recipes = new Map();
-    const paintShaders = new Map();
-    // Each paint shader's variables, kept from its first load: paintContext is emptied after every
-    // ship's fit, so the images the bakes decoded are not held for the whole run.
-    const paintVariables = new Map();
-    const customizeDir = join(outDir, 'customize');
-    const paint = { images: 0, bytes: 0, registry: null };
-    const NO_IMAGE = {};
-    /** An image for the recipes' registry: read afresh (never kept), or nothing when the registry has written it already. */
-    const imageLoad = (file) => (paint.registry?.ids.has(file.toLowerCase()) ? NO_IMAGE : loadImage(vfs, file, new Map()));
-    const registryFor = () => {
-      if (paint.registry) return paint.registry;
-      mkdirSync(customizeDir, { recursive: true });
-      paint.registry = new ImageRegistry((file, bytes) => {
-        writeFileSync(join(customizeDir, file), bytes);
-        paint.images++;
-        paint.bytes += bytes.length;
-      });
-      // A --match run adds to the recipes already there: its images are numbered past every one those
-      // name, so none of theirs is overwritten.
-      if (options.match) {
-        let highest = -1;
-        try {
-          const old = JSON.parse(readFileSync(join(outDir, 'customize.json'), 'utf8'));
-          for (const f of recipeImages(old.recipes)) highest = Math.max(highest, Number(/_(\d+)\.png$/.exec(f)?.[1] ?? -1));
-        } catch {
-          /* no recipes yet */
-        }
-        for (let i = 0; i <= highest; i++) paint.registry.ids.set(`\0kept:${i}`, null);
-      }
-      return paint.registry;
-    };
-    /** The static shader's own MAIN under a customizable one: the look before customization, kept for the game to show on request. */
-    const staticMainOf = (shaderPath) => {
-      try {
-        const v = parseIff(vfs.read(shaderPath.replace(/\\/g, '/'))).children.find(isForm);
-        const base = v?.children.find((c) => (isForm(c) ? c.type === 'SSHT' : c.tag === 'NAME'));
-        if (!base) return null;
-        return loadShader(vfs, isForm(base) ? base : readCString(base.data).value.replace(/\\/g, '/'), paintContext)?.textureFiles.get('MAIN') ?? null;
-      } catch {
-        return null;
-      }
-    };
-    /**
-     * Whether a model's shader is ship paint; the first time one is, its recipe: the shader trimmed to
-     * the textures its passes read (and a glow's mask), every pattern and palette its variables choose
-     * from, the static MAIN, and how it glows (describeSurface), so a repaint splits the glow from the
-     * painted colour. A glow is written only when the converted material glows (its mask is not too
-     * faint to split): the game puts a repaint's glow on the material's own emissive map, and a
-     * material without one would need a new program. A shader whose recipe cannot be written is not
-     * counted as paint.
-     */
-    const isPaint = (shaderPath) => {
-      if (paintShaders.has(shaderPath)) return paintShaders.get(shaderPath);
-      let yes = false;
-      try {
-        const loaded = isCustomizableShader(vfs, shaderPath) ? loadShader(vfs, shaderPath, paintContext) : null;
-        if (isPaintShader(loaded)) {
-          const glow = textureFor(vfs, shaderPath, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, shaderPath, surfaceCache)) : null;
-          const t = trimPaintShader(loaded, { staticMain: staticMainOf(shaderPath), keep: glow ? [glow.maskTag] : [] });
-          const registry = registryFor();
-          recipes.set(shaderPath, { mesh: 'ship', material: shaderPath, kind: 'bake', baseTag: 'MAIN', shader: exportShader(t.shader, registry, imageLoad), slots: [], staticMain: t.staticMain ? registry.idFor(t.staticMain, imageLoad(t.staticMain)) : null, ...(glow ? { glow } : {}) });
-          paintVariables.set(shaderPath, loaded.variables);
-          yes = true;
-        }
-      } catch (err) {
-        console.error(`  paint recipe for ${shaderPath} not written: ${err.message}`);
-      }
-      paintShaders.set(shaderPath, yes);
-      return yes;
-    };
-    const paletteSizes = new Map();
-    const paletteSize = (p) => {
-      if (!paletteSizes.has(p)) {
-        let n = 0;
-        try {
-          n = vfs.has(p) ? parsePalette(vfs.read(p)).length : 0;
-        } catch {
-          n = 0;
-        }
-        paletteSizes.set(p, n);
-      }
-      return paletteSizes.get(p);
-    };
+    // The paint recipes (customize.json), one per paint shader, with their images under customize/
+    // (paintrecipes.mjs, which the gallery's speeders share). A glow is written only when the converted
+    // material glows (its mask is not too faint to split): the game puts a repaint's glow on the
+    // material's own emissive map, and a material without one would need a new program.
+    const paintMaker = paintRecipeMaker(vfs, outDir, {
+      ctx: paintContext,
+      isCustomizable: (p) => isCustomizableShader(vfs, p),
+      glowOf: (p) => (textureFor(vfs, p, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, p, surfaceCache)) : null),
+      match: !!options.match,
+    });
+    const { isPaint, recipes } = paintMaker;
+    const paint = paintMaker.stats;
     /**
      * A fit's slots from buildSlots' slots (with their stock): each look's parts converted with
      * `children`, the part's own subtree (expandPart: parents relative to the part, and by name what the
@@ -5389,7 +5527,7 @@ switch (cmd) {
       for (const f of files) for (const sh of modelShaders.get(f) ?? []) if (!shaders.includes(sh) && isPaint(sh)) shaders.push(sh);
       let painted = null;
       if (shaders.length) {
-        const merged = mergePaintVariables(shaders.map((p) => ({ path: p, variables: paintVariables.get(p) ?? [] })), paletteSize);
+        const merged = paintMaker.variablesOf(shaders);
         for (const n of merged.notes) note(`paint: ${n}`);
         painted = { shaders, variables: merged.variables };
       }
@@ -5600,7 +5738,7 @@ switch (cmd) {
           /* no recipes yet */
         }
       }
-      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes: list, palettes: exportPalettes(vfs, list.flatMap((r) => palettesOf(r))) }, null, 1));
+      paintMaker.write(list);
     }
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}) };
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
@@ -5743,15 +5881,36 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const outDir = join(pos[2], 'gallery');
     mkdirSync(outDir, { recursive: true });
-    const { buildGallery, galleryTemplates, interiorLayouts, labelOf, GALLERY_SECTIONS } = await import('./gallery.mjs');
+    const { buildGallery, galleryTemplates, interiorLayouts, labelOf, vehiclePaint, GALLERY_PAINT_FORMAT, GALLERY_SECTIONS } = await import('./gallery.mjs');
     const { parsePob } = await import('./pob.mjs');
     const models = new Map();
     const cache = new Map();
     const only = options.only ? options.only.split(',').map((s) => s.trim()) : GALLERY_SECTIONS;
     const limit = options.limit ? Number(options.limit) : Infinity;
+    // A vehicle whose shaders take colours (a speeder's or a walker's paint) is baked at its defaults through every
+    // pass, as a ship is, its recipes go into the gallery's own customize.json and its paint onto its model's entry
+    // (`paint: { shaders, variables }`, the ships pack's shape), so the game paints it as it paints a ship. Only
+    // when this run builds the vehicles: a run of other sections keeps the last run's recipes and stamp.
+    const paintMaker = only.includes('vehicles')
+      ? paintRecipeMaker(vfs, outDir, {
+          ctx: paintContext,
+          isCustomizable: (p) => isCustomizableShader(vfs, p),
+          glowOf: (p) => (textureFor(vfs, p, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, p, surfaceCache)) : null),
+        })
+      : null;
+    const paintNotes = new Set();
+    /** A vehicle model's paint from the shaders it kept, or null (gallery.mjs vehiclePaint); the bakes' images let go after each. */
+    const paintOf = (shaders) => {
+      const r = vehiclePaint(shaders, paintMaker);
+      for (const n of r.notes) paintNotes.add(n);
+      paintContext.images.clear();
+      paintContext.shaders.clear();
+      return r.paint;
+    };
     // One template into the pack's models, as the snapshot does it (static, portal building, or a skeletal thing at its bind pose).
     // With `appearance`, that file rather than the template's own: a station's portal layout, where the template names the hull.
     const convert = (template, appearance = null) => {
+      const vehicle = !!paintMaker && /^object\/mobile\/vehicle\//.test(template ?? '');
       let r = appearance ? resolveAppearanceToMesh(vfs, appearance) : resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
       // A rideable vehicle's skeletal appearance (pv_<name>.sat) is a two-joint placeholder with a
@@ -5786,9 +5945,15 @@ switch (cmd) {
         if (r.skeletal) {
           id = familyOf(r.skeletal);
           if (!models.has(id)) {
-            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { animations: animated ? CREATURE_CLIPS : 'none' });
-            const tris = info.meshes.reduce((a, m) => a + m.triangles, 0);
-            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: tris, skeletal: true, ...(animated ? { clips: info.animations, clipSpeeds: info.clipSpeeds ?? {} } : {}), ...(tris ? {} : { failed: `no triangles (${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes'})` }) });
+            // Its hardpoints kept under their joints: a pod racer's pilot sits on its own `player` point.
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), gallerySatOptions(animated, CREATURE_CLIPS, vehicle));
+            // The names it kept go in its entry, which is how `status` tells a gallery converted before they were kept.
+            const entry = skeletalModelEntry(id, r.skeletal, info, animated);
+            const tris = entry.triangles;
+            models.set(id, entry);
+            // Its paint, when its shaders take colours (gallery.mjs vehiclePaint).
+            const paint = vehicle ? paintOf([...info.shaders]) : null;
+            if (paint) entry.paint = paint;
             if (!tris) console.log(`  ${template}: ${r.skeletal} converted with no triangles: ${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes in it'}`);
             else if (animated) console.log(`  ${template}: walks with its own clips (${info.animations.join(', ')})`);
           }
@@ -5797,11 +5962,12 @@ switch (cmd) {
           id = familyOf(single ? r.parts[0].mesh : r.appearance);
           if (!models.has(id)) {
             // With the client's own lower detail levels (step 7): the gallery is a world the streamer places too.
-            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { lods: r.appearance ?? true });
+            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { lods: r.appearance ?? true, ...(vehicle ? { paint: true } : {}) });
             const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
             const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
             const effects = attachedEffects(vfs, conv.effects, outDir);
-            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.lods ? { lods: conv.lods } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+            const paint = vehicle ? paintOf(conv.shaders) : null;
+            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.lods ? { lods: conv.lods } : {}), ...(paint ? { paint } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
             if (!conv.tris) console.log(`  ${template}: converted with no triangles`);
           }
         }
@@ -5877,18 +6043,30 @@ switch (cmd) {
     let galleryFormat = MATERIAL_FORMAT;
     // And its detail levels' stamp, the same way (step 7).
     let galleryLods = LOD_FORMAT;
+    // And the vehicles' paint stamp, which only a run that built the vehicles writes.
+    let galleryPaint = paintMaker ? GALLERY_PAINT_FORMAT : 0;
     if (options.only) {
       try {
         const was = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
         galleryFormat = was.materialFormat ?? 1;
         galleryLods = was.lodFormat ?? 0;
+        if (!paintMaker) galleryPaint = was.paintFormat ?? 0;
       } catch {
         galleryFormat = 1;
         galleryLods = 0;
       }
     }
+    // The vehicles' paint recipes beside the manifest, and only the images they name left in customize/.
+    if (paintMaker) {
+      const list = [...paintMaker.recipes.values()];
+      paintMaker.write(list);
+      const stale = paintMaker.sweep();
+      const painted = [...models.values()].filter((m) => m?.paint);
+      console.log(`  paint: ${painted.length} vehicle models take colours (${painted.map((m) => m.id).join(', ') || 'none'}), ${list.length} recipes, ${paintMaker.stats.images} images (${(paintMaker.stats.bytes / 1e6).toFixed(1)} MB)${stale ? `; ${stale} images an earlier run left removed` : ''}`);
+      for (const n of paintNotes) console.log(`   paint: ${n}`);
+    }
     const galleryModels = [...models.values()].filter((m) => m && !m.failed);
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, categories: { layout: galleryModels } }, null, 2));
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, ...(galleryPaint ? { paintFormat: galleryPaint } : {}), categories: { layout: galleryModels } }, null, 2));
     console.log(lodSummaryLine('gallery', galleryModels));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
     writeFloors(outDir, galleryModels.map((m) => m.id));

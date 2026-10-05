@@ -22,8 +22,10 @@
 //   { t: 'ping', c }                                        the browser's clock, to work the offset out
 //   { t: 'hello', name, species, class, planet, zone, look, held, ship }   who, where and how they look (shape,
 //                                                          height, colours, outfit), the weapons in hand
-//                                                          { r, l } by id, and the ship they fly
-//                                                          { id, fit: { components, paint, droid } } (shipWire.mjs);
+//                                                          { r, l } by id, and the ship (or painted speeder) they
+//                                                          fly { id, fit: { components, paint, colours?, droid } }
+//                                                          (shipWire.mjs: `colours` the colours carried whole,
+//                                                          `paint` the nearest of the hull's own palette);
 //                                                          sent on joining, on travel and on a change
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? | in? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
@@ -102,14 +104,22 @@
 //                                                          stood that very creature (`Ownership.mayStrike`)
 //   { t: 'day', ms }                                       the admin changing how long a day is, for everybody: the day
 //                                                          is anchored where it stands so nobody's sun moves
-//   { t: 'items', do: list|get|add|drop|using, rows?, kind?, what?, id?, worn?, held? }
+//   { t: 'items', do: list|get|add|drop|using|tint, rows?, kind?, what?, thing?, id?, worn?, held?, tint?, at? }
 //                                                          what this character owns (ledger.mjs). `list` is the
 //                                                          backpack handed up on a first claim; after that the
 //                                                          server's list is the truth and this is answered with it.
 //                                                          `add` and `drop` are the game's own changes (the starting
 //                                                          kit, the give tab, destroying something), and `using` says
 //                                                          what is on the body and in the hands, which may not be
-//                                                          put up in a trade
+//                                                          put up in a trade. (items 2) A row, in a list or an `add`,
+//                                                          names the thing it is (`thing`, the browser's own name,
+//                                                          minted when it was got) and may carry its colours (`tint`,
+//                                                          `tintAt`); a list's row may also be the short array
+//                                                          `[kind, what, got, thing]`, which is how a full backpack
+//                                                          fits the second's allowance; `tint` sets one thing's
+//                                                          colours by its row id, `null` for none, and a time later
+//                                                          than this server's clock is taken as now. A browser speaks
+//                                                          of things only to a server whose hail says `items: 2`
 //   { t: 'trade', do: ask|accept|decline|offer|ready|unready|cancel, to?, rows? }
 //                                                          handing something over at the game's own 8 m: who to ask
 //                                                          is the connection id the browser already knows them by,
@@ -164,9 +174,15 @@
 //   { t: 'story', do: 'texts', id, n, of, part }             (story 4) the journal's words the server asked for, in pieces
 //   { t: 'story', do: 'mine', ref, text }                    (story 4) a note of the player's own on a journal entry
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story }   sent the instant the socket opens, before anything is
-//                                                          said; `story` is { v, sets, tests }, the story this server
-//                                                          holds, which a browser built before it never reads
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint }   sent the instant the socket opens, before
+//                                                          anything is said; `story` is { v, sets, tests }, the story this
+//                                                          server holds, which a browser built before it never reads; `items`
+//                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
+//                                                          ITEMS_VERSION), so two of one item are two rows; `paint` is 2 on a
+//                                                          server that passes a ship's or a speeder's colours carried whole
+//                                                          on (a hello `ship`'s `colours`, shipWire.mjs's PAINT_VERSION); any
+//                                                          other drops them, and the others see the nearest colour of the
+//                                                          hull's own palette the fit's `paint` carries beside them
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -213,10 +229,15 @@
 //   { t: 'npcBlow', id, i, a, at, w? }   (a creature kept at that browser struck you; you, and nobody else, take it off)
 //   { t: 'day', dayMs, dayAt?, dayFrom? }   (how long a day is now and where it was anchored, to everybody connected)
 //   { t: 'day', do: 'refused', why }   (to whoever asked, and to nobody else)
-//   { t: 'items', do: 'list', take: browser|server, rows: [{ id, kind, what, got }] }   (the settled list, sent back
-//                                                          in answer to a list or a get: the first one a character
-//                                                          hands up is written down, and after that this is the truth)
+//   { t: 'items', do: 'list', take: browser|server, rows: [{ id, kind, what, got, thing, tint?, tintAt? }] }   (the settled
+//                                                          list, sent back in answer to a list or a get: the first one
+//                                                          a character hands up is written down, and after that this is
+//                                                          the truth; every row names the thing it is, a row the server
+//                                                          made itself or wrote before things had names by
+//                                                          `<world epoch>.<row id>`, and a browser built before reads
+//                                                          the first four fields and nothing else)
 //   { t: 'items', do: 'added', row }   { t: 'items', do: 'gone', id }   { t: 'items', do: 'refused', why }
+//                                                          (a colour is answered only when it is refused)
 //   { t: 'trade', do: 'asked', id, from, name, until }   { t: 'trade', do: 'sent', id, to, name, until }
 //   { t: 'trade', do: 'state', id, with, name, yours: { rows, ready }, theirs: { rows, ready } }
 //                                                          (the whole trade from each side's own end, so neither
@@ -260,6 +281,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { cleanAsk } from './vehicleWire.mjs';
+import { PAINT_VERSION } from './shipWire.mjs';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, cleanState } from './wire.mjs';
 import { Rooms, roomKey, roomLabel } from './rooms.mjs';
 import { WorldClock, DAY_MS, DAY_LIMITS, cleanDay } from './clock.mjs';
@@ -271,7 +293,7 @@ import { cleanCross, mayCross } from './crossWire.mjs';
 import { cleanUnlock, mayOpen } from './copyWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
 import { NpcPlaces, cleanNpcBatch, cleanNpcBlow, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
-import { LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
+import { ITEMS_VERSION, LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
@@ -288,9 +310,20 @@ import { storyWorlds } from './storyWorlds.mjs';
  * `arm`, a weapon put in the hand of one of the world's creatures already standing, which a server that
  * says 3 would drop in silence. 5 is the story book: a hail that says which story this server holds,
  * and the `story` words. A browser speaks them only to a server whose hail carries `story`, so one
- * built for 5 against a server that says 4 keeps its book itself.
+ * built for 5 against a server that says 4 keeps its book itself. 6 is a row per thing in the item
+ * ledger: a hail that says `items: 2`, rows that name the thing they are and carry its colours, and the
+ * `tint` word. A browser hands up two of one item, names a thing or sends a colour only to a server
+ * whose hail says it, so one built for 6 against a server that says 5 keeps to one of each.
  */
-const WIRE_VERSION = 5;
+const WIRE_VERSION = 6;
+/**
+ * The first wire whose browsers name their things. A line that says less in its hello (`c.v`, already the
+ * lesser of its version and this server's) folds two of one item into one and keeps one, so the ledger is
+ * told, and never hands it a second copy in a trade (`Ledger.namesThings`).
+ */
+const NAMED_FROM = 6;
+/** Whether the browser on a line names its things, by the version its hello said. */
+const namesThings = (c) => (Number(c.v) || 0) >= NAMED_FROM;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
@@ -450,8 +483,9 @@ const npcPlaces = new NpcPlaces();
 // What every connected character owns, and the trades that move a row from one to another
 // (ledger.mjs). Unlike the groups and the creatures this *is* written to disk: it is the one thing
 // here the world remembers, and the reason a character no longer lives or dies with one browser's
-// local storage. Every change goes out through the store, so the log has it before anybody is told.
-const ledger = new Ledger({ tuning: LEDGER_TUNING, write: (rec) => store.change(rec) });
+// local storage. Every change goes out through the store, so the log has it before anybody is told; a
+// colour goes in lazily, in its place in the log and flushed with the next change that is not.
+const ledger = new Ledger({ tuning: LEDGER_TUNING, write: (rec, lazy) => store.change(rec, { lazy: !!lazy }), epoch: store.data.epoch });
 ledger.load(store.data);
 // The places two people can both want: a station's dock lane, and the spot on a hull that one ship
 // rides another on (spots.mjs). Held by connection and never written down -- a claim means "a ship is
@@ -846,8 +880,9 @@ function onClaim(c, msg) {
   markPresent(c);
   // And the ledger has it too, which is what lets a trade name a character rather than a line: the
   // same character opened in a second browser is the newer one's from this instant, and whatever
-  // trade the older line had open is broken off with the items where they started.
-  deliverTo(ledger.here(c.character, { session: c.id, name: claim.name }));
+  // trade the older line had open is broken off with the items where they started. Whether that browser
+  // names its things goes with it, as far as its hello has said; a hello after the claim says it again.
+  deliverTo(ledger.here(c.character, { session: c.id, name: claim.name, named: namesThings(c) }));
   const back = groups.groupOf(c.member);
   if (back) console.log(`  ${c.id} "${claim.name}" is in ${back.id} again (${back.members.size} in it)`);
 }
@@ -920,6 +955,9 @@ function onMessage(c, text, trimmed = false) {
     // everything it can.
     const v = Number(msg.v);
     if (Number.isInteger(v) && v > 0) c.v = Math.min(WIRE_VERSION, v);
+    // The ledger is told whether this browser names its things, which a claim made before this hello
+    // could not say: one that does not is never handed a second of something it has.
+    if (c.character) ledger.naming(c.id, namesThings(c));
     const key = roomKey(hello.planet, hello.zone);
     const move = rooms.set(c.id, key);
     // A group's roster says what world each member is on, so it is told here and nowhere else; this
@@ -1389,8 +1427,11 @@ function onMessage(c, text, trimmed = false) {
   } else if (msg.t === 'items') {
     // What this character owns. It is the character's and not the line's, so a browser that has not
     // said which character it is playing has nothing here: with no claim the game is exactly what it
-    // was, its backpack in its own local storage and the server never asked.
+    // was, its backpack in its own local storage and the server never asked. A line that has just been
+    // taken over by a newer browser no longer speaks for that character, in the moment before it is
+    // closed: a drop, an add, a colour or a list from it would land on the backpack the newer one holds.
     if (!c.hello || !c.character) return;
+    if (sessions.holder(c.character) !== c.id) return;
     const ask = cleanItems(msg, LEDGER_TUNING);
     if (!ask) return;
     c.owning ??= { at: 0, lines: 0 };
@@ -1420,12 +1461,21 @@ function onMessage(c, text, trimmed = false) {
       return;
     }
     if (ask.do === 'add') {
-      const made = ledger.add(c.character, ask.kind, ask.what, ask.got);
+      const made = ledger.add(c.character, ask.kind, ask.what, ask.got, { thing: ask.thing, tint: ask.tint, tintAt: ask.tintAt });
       if (!made.ok) {
         send(c, { t: 'items', do: 'refused', why: made.why });
         return;
       }
-      if (!made.already) send(c, { t: 'items', do: 'added', row: made.row });
+      // A named thing said twice is the same thing, and the answer goes again: the first one may be
+      // what was lost. Unnamed, a second of something already owned is not news.
+      if (!made.already || made.same) send(c, { t: 'items', do: 'added', row: made.row });
+      return;
+    }
+    if (ask.do === 'tint') {
+      // One thing's colours. Nothing is said back when they are taken -- the browser already shows
+      // them -- and a refusal is said, since a colour put on a thing up in a trade did not stay on it.
+      const coloured = ledger.tint(c.character, ask.id, ask.tint, ask.at);
+      if (!coloured.ok) send(c, { t: 'items', do: 'refused', why: coloured.why });
       return;
     }
     const off = ledger.drop(c.character, ask.id);
@@ -1438,7 +1488,9 @@ function onMessage(c, text, trimmed = false) {
     // Handing something over. The rules are in ledger.mjs, which knows nothing about sockets; all
     // that happens here is that the two players are named, how far apart they are standing is
     // measured -- this being the only place that knows -- and whatever the rules decided is sent out.
+    // Nothing from a line a newer browser has taken over, as with the items above.
     if (!c.hello || !c.character) return;
+    if (sessions.holder(c.character) !== c.id) return;
     const step = cleanTrade(msg, LEDGER_TUNING);
     if (!step) return;
     c.owning ??= { at: 0, lines: 0 };
@@ -1652,7 +1704,9 @@ server.on('upgrade', (req, socket) => {
   // `story` says which story this server holds; a browser built before it reads nothing of it, and one
   // built for it keeps its book itself against any far end whose hail does not carry it. `v` 2 is the jobs
   // run here; the sets are the story sets read, by name and hash; `tests` is whether the test set is on.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail() });
+  // `items` says this server keeps a row per thing, so a browser built for it may hand up two of one item;
+  // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');

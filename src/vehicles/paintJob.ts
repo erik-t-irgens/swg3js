@@ -1,8 +1,11 @@
 // One paint render: a ship paint recipe (customize.json) run for a set of values, and for a shader
 // that glows through a mask, split into its lit colour and its glow (glowSplit.ts) with the mask read
 // from the texture the values chose (for a MAIN mask, the chosen pattern's own MAIN, not the coloured
-// render). Shared by the paint worker and its main-thread fallback (paintRender.ts). Pure.
-import { liveShader, renderRecipe, valueOf, type Img, type Recipe, type Values } from '../player/texrender.ts';
+// render). Shared by the recipe workers and their main-thread fallback (src/player/recipeWorker.ts), and by
+// a character's customizer for the worn pieces whose recipes carry a glow (the wardrobe's,
+// src/player/customizer.ts). A character's job (`runRecipeJob`) also makes the normal map the values pick,
+// as the customizer does on this thread. Pure.
+import { liveShader, recipeNormal, renderRecipe, valueOf, type Img, type Recipe, type Values } from '../player/texrender.ts';
 import { maskOf, splitGlow } from './glowSplit.ts';
 
 /** How a paint shader glows: the texture holding the mask, its channel, and whether the lit colour keeps the main's alpha. */
@@ -11,6 +14,21 @@ export interface PaintGlow { maskTag: 'EMIS' | 'MAIN' | 'NRML' | 'SPEC'; channel
 export interface PaintRecipe extends Recipe { glow?: PaintGlow; staticMain?: string }
 /** A render: the colour for `map` (the lit half when there is a glow), and the glow for `emissiveMap` when there is one. */
 export interface PaintImg extends Img { emis?: Img }
+/** A render as a worker hands it back: the colour (and its glow), and the normal map the values pick when it was asked for. */
+export interface JobImg extends PaintImg { normal?: Img }
+
+/**
+ * One recipe's render as a worker makes it: the colour (split into its lit half and its glow when the recipe
+ * carries one, `runPaintJob`), then -- for a character, `withNormal` -- the lighting detail the values pick
+ * (the head's age wrinkles, a bumped garment), exactly the `recipeNormal` the customizer runs on this thread.
+ * No normal is made when the colour came to nothing, as on this thread. Null when nothing renders.
+ */
+export function runRecipeJob(r: PaintRecipe, values: Values, palettes: Record<string, number[][]>, image: (file: string | null) => Img | null, withNormal: boolean): JobImg | null {
+  const img = runPaintJob(r, values, palettes, image);
+  if (!img || !withNormal) return img;
+  const normal = recipeNormal(r, values, palettes, image);
+  return normal ? { ...img, normal } : img;
+}
 
 /** Every image a recipe reads for these values: each shader's fixed textures, and each choice at the value chosen only. */
 export function paintFiles(r: PaintRecipe, values: Values): string[] {

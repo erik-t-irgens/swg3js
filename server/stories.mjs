@@ -288,6 +288,23 @@ export function nearShape(shape, x, z, slack = 0) {
  */
 export function applyStory(data, rec) {
   if (!rec || typeof rec !== 'object') return false;
+  if (rec.t === 'storyOwed') {
+    // A thing a job paid while the ledger did not yet hold the character's backpack: kept until it is
+    // handed over, under a key of the server's own (`o<n>`), and the counter carried past it so a restart
+    // never mints a key that is still owed.
+    const owed = cleanOwed(rec.key, rec.owed);
+    if (!owed) return false;
+    data.storyOwed ??= Object.create(null);
+    data.storyOwed[rec.key] = owed;
+    const next = Number(rec.key.slice(1)) + 1;
+    if (!(Number(data.storyOwedSeq) >= next)) data.storyOwedSeq = next;
+    return true;
+  }
+  if (rec.t === 'storyOwedGone') {
+    if (typeof rec.key !== 'string' || !OWED_KEY.test(rec.key)) return false;
+    if (data.storyOwed) delete data.storyOwed[rec.key];
+    return true;
+  }
   if (rec.t === 'storyText') {
     // A journal's words, kept once for everybody by their hash: only words that are what their hash says.
     if (!isTextHash(rec.h) || typeof rec.text !== 'string' || rec.text.length > STORY_WIRE.textMax || textHash(rec.text) !== rec.h) return false;
@@ -318,6 +335,26 @@ export function applyStory(data, rec) {
   return true;
 }
 
+/** The key a thing owed is kept under: the server's own, `o` and a number, never anything a browser chose. */
+const OWED_KEY = /^o[1-9][0-9]{0,11}$/;
+/** How many things may be owed at once, over every character, so the table cannot grow without bound. Ours. */
+const OWED_MAX = 1000;
+/** What a thing owed may be, as the ledger knows it: a pack and a catalogue id (ledger.mjs's own `KINDS` and `ID`). */
+const OWED_KINDS = ['wear', 'weapon'];
+const OWED_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
+
+/**
+ * One thing owed, as it is written down and read back: whose it is, what it is and when it was owed, or
+ * null when it is not one. The character is a key a browser chose, so it is held to the book's own rule.
+ */
+function cleanOwed(key, o) {
+  if (typeof key !== 'string' || !OWED_KEY.test(key) || !o || typeof o !== 'object') return null;
+  if (!isCharacterId(o.character) || !OWED_KINDS.includes(o.kind)) return null;
+  if (typeof o.id !== 'string' || !OWED_ID.test(o.id) || o.id === '__proto__' || o.id === 'constructor' || o.id === 'prototype') return null;
+  const at = Number(o.at);
+  return { character: o.character, kind: o.kind, id: o.id, at: Number.isFinite(at) && at > 0 ? Math.floor(at) : 0 };
+}
+
 /**
  * The books of a world just read back from its file, rebuilt as the rules expect them. `JSON.parse` hands
  * back plain objects all the way down, and a book's own tables (its flags, quests, steps and rewards) are
@@ -345,6 +382,18 @@ export function readStories(data) {
     if (isTextHash(h) && typeof t === 'string') texts[h] = t;
   }
   data.storyTexts = texts;
+  // The things owed into a backpack the ledger did not yet hold: rebuilt with no prototype, only rows that
+  // read, and the counter carried past every key that is still there.
+  const owed = Object.create(null);
+  let seq = Number(data.storyOwedSeq) >= 1 ? Math.floor(Number(data.storyOwedSeq)) : 1;
+  for (const key of Object.keys(data.storyOwed ?? {})) {
+    const o = cleanOwed(key, data.storyOwed[key]);
+    if (!o) continue;
+    owed[key] = o;
+    seq = Math.max(seq, Number(key.slice(1)) + 1);
+  }
+  data.storyOwed = owed;
+  data.storyOwedSeq = seq;
   return data;
 }
 
@@ -365,7 +414,7 @@ export class Stories {
    *   flush?: () => boolean | void,
    *   now?: () => number,
    *   purses?: { give(character: string, n: number, session: number): { ok: boolean, tell: object[] }, of(character: string): number } | null,
-   *   ledger?: { add(character: string, kind: string, what: string): { ok: boolean, already?: boolean, row?: object, why?: string }, holds(character: string): boolean, rowFor(character: string, kind: string, what: string): object | null } | null,
+   *   ledger?: { add(character: string, kind: string, what: string): { ok: boolean, already?: boolean, row?: object, why?: string }, holds(character: string): boolean, countOf(character: string, kind: string, what: string): number, sessionOf?(character: string): number } | null,
    *   worlds?: { worldOf(planet: string, zone: string): string | null, kindOf(world: string): string, centreOf(world: string): { x: number, z: number } | null, hourOf?(world: string): number | null, describe(): object },
    *   read?: () => { test: { path: string, text: string }[] | null, own: { path: string, text: string }[] | null, refused?: string[] },
    *   admin?: (c: object) => boolean,
@@ -417,8 +466,6 @@ export class Stories {
     this.deaths = new Map();
     /** @type {{ session: number, character: string, ev: object, at: number }[]} reports of a kill that came before the death */
     this.parked = [];
-    /** @type {{ character: string, kind: string, id: string, at: number }[]} things owed while the ledger does not yet hold a character's backpack */
-    this.owed = [];
     this.lastSweep = 0;
     this.lastFlush = 0;
     this.bookId = 1;
@@ -952,7 +999,8 @@ export class Stories {
       species: c?.hello?.species ?? null,
       name: typeof c?.hello?.name === 'string' ? c.hello.name : null,
       credits: this.purses ? this.purses.of(character) : null,
-      has: this.ledger ? (kind, id) => (this.ledger.rowFor(character, kind, id) ? 1 : 0) : null,
+      // How many of one item the character holds, counted as the browser counts them: two of one shirt are two.
+      has: this.ledger ? (kind, id) => this.ledger.countOf(character, kind, id) : null,
       away: !line.entered,
     };
   }
@@ -1480,15 +1528,23 @@ export class Stories {
 
   /**
    * A thing handed over through the ledger's own `add`, which the browser is told of as the ledger tells it
-   * of anything (`items added`), and never through the browser's word that it has something. A character
-   * holds one of each, so one owned already is said rather than given twice. While the ledger does not yet
+   * of anything (`items added`), and never through the browser's word that it has something. A reward
+   * still gives one of each -- it names no thing, so the ledger makes sure there is one -- and one owned
+   * already is said rather than given twice. While the ledger does not yet
    * hold the character's backpack -- it is about to be handed up, and the first one handed up replaces
    * whatever is there -- the thing is owed and handed over the moment it does (`held`, and the sweep).
+   *
+   * What is owed is written down through the store like every other change (`storyOwed`), because the book
+   * has already recorded the reward as paid: kept only in memory, a restart before the backpack came up
+   * lost it for good. It is flushed with the batch that pays it, before anybody is told.
    */
   giveItem(character, session, kind, id, tell) {
     if (!this.ledger) return false;
     if (!this.ledger.holds(character)) {
-      if (this.owed.length < 1000) this.owed.push({ character, kind, id, at: Date.now() });
+      const owed = this.owedTable();
+      if (Object.keys(owed).length >= OWED_MAX) return true;
+      const key = `o${Math.max(1, Math.floor(Number(this.data.storyOwedSeq) || 1))}`;
+      this.write({ t: 'storyOwed', key, owed: { character, kind, id, at: Date.now() } });
       return true;
     }
     const made = this.ledger.add(character, kind, id);
@@ -1497,21 +1553,31 @@ export class Stories {
     return true;
   }
 
-  /** The ledger holds a character's backpack now: whatever was owed it is handed over. */
+  /** The things owed into backpacks the ledger does not hold yet, by their keys: the world's own table. */
+  owedTable() {
+    return this.data.storyOwed ?? (this.data.storyOwed = Object.create(null));
+  }
+
+  /**
+   * The ledger holds a character's backpack now: whatever was owed it is handed over, each thing through the
+   * ledger and then struck off, in that order and each written down. A reward's `add` only makes sure there
+   * is one, so a stop between the two leaves a thing still owed that the next try finds already there, and
+   * pays nothing twice; struck off first, the same stop would have lost it.
+   */
   held(character) {
     const tell = [];
-    if (!this.ledger || !this.owed.length) return { ok: true, tell };
-    const keep = [];
-    for (const o of this.owed) {
-      if (o.character !== character || !this.ledger.holds(character)) {
-        keep.push(o);
-        continue;
-      }
+    const owed = this.data.storyOwed;
+    if (!this.ledger || !owed || !this.ledger.holds(character)) return { ok: true, tell };
+    for (const key of Object.keys(owed)) {
+      const o = owed[key];
+      if (o.character !== character) continue;
       const made = this.ledger.add(o.character, o.kind, o.id);
-      const session = this.sessionOf(o.character);
+      this.write({ t: 'storyOwedGone', key });
+      // Told on the line the backpack came up on, which is the ledger's to know: a browser that has handed
+      // its backpack up need not have settled its book yet, and the story's own lines know only those that have.
+      const session = this.ledger.sessionOf?.(o.character) || this.sessionOf(o.character);
       if (made.ok && !made.already && session) tell.push({ to: session, msg: { t: 'items', do: 'added', row: made.row } });
     }
-    this.owed = keep;
     return { ok: true, tell };
   }
 
@@ -1595,9 +1661,11 @@ export class Stories {
       }
     }
     for (const [npc, d] of this.deaths) if (now - d.at > this.tuning.deathGrace) this.deaths.delete(npc);
-    if (this.owed.length && this.ledger) {
-      const ready = new Set(this.owed.filter((o) => this.ledger.holds(o.character)).map((o) => o.character));
-      for (const character of ready) tell.push(...this.held(character).tell);
+    const owed = this.data.storyOwed;
+    if (owed && this.ledger) {
+      let ready = null;
+      for (const key of Object.keys(owed)) if (this.ledger.holds(owed[key].character)) (ready ??= new Set()).add(owed[key].character);
+      for (const character of ready ?? []) tell.push(...this.held(character).tell);
     }
     if (now - this.lastSweep >= this.tuning.sweep) {
       this.lastSweep = now;
@@ -1681,7 +1749,7 @@ export class Stories {
       sweep: { every: this.tuning.sweep, sweeps: this.stats.sweeps, lastMs: this.stats.sweepMs },
       parked: this.parked.length,
       deaths: this.deaths.size,
-      owed: this.owed.length,
+      owed: Object.keys(this.data.storyOwed ?? {}).length,
       refusedBy: { ...this.refusedBy },
       stats: { ...this.stats },
       worlds: this.worlds.describe(),

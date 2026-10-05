@@ -23,7 +23,7 @@ export class VehiclesUi {
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
-  /** A ship's edit button: the game opens its edit page (components, droid and paint). */
+  /** A ship's edit button (or a painted speeder's paint button): the game opens its edit page (components, droid and paint; a speeder's paint alone). */
   onEdit: (def: VehicleDef) => void = () => {};
 
   /**
@@ -100,8 +100,9 @@ export class VehiclesUi {
       const items = list.map((v) => {
         const other = KINDS.filter((o) => o.id !== v.kind).map((o) => `<option value="${o.id}">as ${escapeHtml(o.label.toLowerCase())}</option>`).join('');
         const tags = [v.source === 'ship' ? '' : v.source, v.inferred ? '' : 'kind guessed'].filter(Boolean).join(' · ');
-        // A ship the pack gave a fit has an edit page; one converted before shows the spawn button only.
-        const edit = v.kind === 'ship' && v.fit ? `<button data-edit="${v.id}" title="components, droid and paint">edit</button>` : '';
+        // A ship the pack gave a fit has an edit page; one converted before shows the spawn button only. A
+        // speeder whose shaders take colours has the same page with its paint alone.
+        const edit = v.kind === 'ship' && v.fit ? `<button data-edit="${v.id}" title="components, droid and paint">edit</button>` : v.fit?.paint ? `<button data-edit="${v.id}" title="its colours">paint</button>` : '';
         return `<div class="cat-item" title="${escapeHtml(v.id)}"><span class="cat-name">${escapeHtml(v.label)}${tags ? ` <small>${escapeHtml(tags)}</small>` : ''}</span><span class="cat-hands">${edit}<button data-id="${v.id}" title="stand one beside you">spawn</button><select data-id="${v.id}" title="try it as another kind"><option value="">as…</option>${other}</select></span></div>`;
       });
       html.push(groupHtml(k.id, k.label, list.length, k.blurb, this.groups.isOpen(k.id, !!find), items.join('')));

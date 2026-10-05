@@ -132,7 +132,9 @@ export const STEP_FACTS = {
   // the one large piece of work that runs four ways at once. They stand first because the
   // character's own index waits for them, not because the converter's list has them there: the
   // README runs them later and then says to run the species again after.
-  wardrobe: { order: 20, lock: 'wardrobe', needs: [], seconds: 90, bytes: 1.25 * GB, measured: 'human_male, 1,340 items: 81.8 s, 943 MB' },
+  // Measured again with the hairstyles' pictures, the every-pass palettes and the dye: alone, and four side by side
+  // (human 116 s and Ithorian 42 s each, 3.2 GB drawn from the machine for all four).
+  wardrobe: { order: 20, lock: 'wardrobe', needs: [], seconds: 90, bytes: 1.25 * GB, measured: 'human_male, 1,340 items, with hair pictures and the dye: 87.2 s, 1,061 MB' },
   // The creatures and the character. `parts` and `species` both write characters/index.json, and
   // that index names each species' wardrobe folder from what is on disk when it is written
   // (writeSpeciesIndex in cli.mjs), so both wait for the wardrobes: a species indexed before its
@@ -153,6 +155,10 @@ export const STEP_FACTS = {
   // `species` behind it. Without the bundle `species` says so and carries on, so the cost of
   // getting this wrong was silent.
   species: { order: 26, lock: 'characters', needs: ['parts', 'clips-save', 'clips-apply', 'wardrobe'], seconds: 150, bytes: 2.6 * GB, measured: 'every playable species: 118.4 s, 2,015 MB, 199 MB written' },
+  // The creator's own table: six small retail files joined into one file of its own beside the index.
+  // It reads nothing any other step writes and writes nothing another reads at conversion, so it waits
+  // for nothing and holds a lock of its own rather than the characters' one.
+  customization: { order: 26.5, lock: 'customization', needs: [], seconds: 5, bytes: 0.35 * GB, measured: 'twenty species, 418 rows, 36 palettes: 1.4 s, 305 MB, 200 KB written' },
   loading: { order: 27, lock: 'loading', needs: [], seconds: 5, bytes: 0.4 * GB, measured: '2.4 s, 315 MB, 10 pictures' },
   // The mobiles read characters/index.json and every wardrobe's wardrobe.json to dress their NPCs.
   // The catalogue over all 5,067 entries is built whatever the run converts, so what was measured on

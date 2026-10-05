@@ -41,6 +41,8 @@ const NAMED: Record<string, string> = {
   tat: 'Tattoo Color',
   pattern: 'Pattern Color',
   patterns: 'Pattern Color',
+  // Ours: the dye a piece the game gave no colour takes (tools/swg/dye.mjs, `/private/index_color_dye`).
+  dye: 'Dye',
 };
 
 /** A palette's own file name, without its folder or `.pal`. */

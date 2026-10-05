@@ -3,6 +3,7 @@
 // "(empty)" last), what a pick keeps (the stock component and the shader's own default are kept as
 // absent: absent is stock), and the words beside each row. Pure: no three, no DOM.
 import { HIDDEN_COMPONENT, patternLabel, slotLabel, type ComponentDef, type FitDef, type FitSlot, type PaintVariable, type ShipFit } from '../vehicles/shipFit.ts';
+import { isRawColour, rawRgb } from '../player/texrender.ts';
 
 /** One entry of a slot's select. */
 export interface SlotOption {
@@ -91,10 +92,14 @@ export function pickComponent(fit: ShipFit, fd: FitDef, slot: string, value: str
   return true;
 }
 
-/** A paint value picked on a fit, in place: the shader's own default is kept as absent. False for a variable the hull does not have. */
+/**
+ * A paint value picked on a fit, in place: the shader's own default is kept as absent. False for a variable the
+ * hull does not have, and for a colour carried whole on a choice of pattern, which only ever takes an index.
+ */
 export function pickPaintValue(fit: ShipFit, fd: FitDef, name: string, value: number): boolean {
   const v = fd.paint?.variables.find((x) => x.name === name);
   if (!v) return false;
+  if (v.kind !== 'palette' && isRawColour(value)) return false;
   if (value === v.default) delete fit.paint[name];
   else fit.paint[name] = value;
   return true;
@@ -110,9 +115,10 @@ export function slotCountText(s: FitSlot, name: string | null, look: number): st
   return `${where}${stock}`;
 }
 
-/** The words beside a paint row: a pattern's own label, or a colour's place in its palette. */
+/** The words beside a paint row: a pattern's own label, a colour's place in its palette, or a colour carried whole as `#rrggbb`. */
 export function paintCountText(v: PaintVariable, value: number, colours?: number): string {
   if (v.kind === 'index') return patternLabel(v, value);
+  if (isRawColour(value)) return `#${rawRgb(value).map((x) => x.toString(16).padStart(2, '0')).join('')}`;
   return `${value + 1}/${colours ?? v.size ?? 1}`;
 }
 

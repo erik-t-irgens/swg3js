@@ -134,9 +134,9 @@ import { WardrobeUi } from './ui/wardrobeUi';
 import { WeaponsUi } from './ui/weaponsUi';
 import { GIVE_TUNE } from './ui/giveModel.ts';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
-import { Equipment } from './player/equipment';
-import { itemInfo, WEAPON_ORDER, type ItemContext } from './player/items';
-import { OFF_HAND_CLASSES, normalizeOwned, slotRank, slotWords, speciesWords } from './core/inventory';
+import { Equipment, ITEMS_TUNE, tuneItems } from './player/equipment';
+import { itemInfo, itemSwatch, WEAPON_ORDER, type ItemContext } from './player/items';
+import { OFF_HAND_CLASSES, firstItems, lookWithoutGarments, normalizeOwned, outfitTints, pickedTint, slotRank, slotWords, speciesWords } from './core/inventory';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS, forceFxReport, type ForceFxTune } from './combat/forcePowers';
 import { setForceBeamLook } from './combat/forceLightning.ts';
@@ -248,7 +248,7 @@ import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from 
 import { Nameplates, PLATE_TUNE, pickPlate } from './ui/nameplate';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
-import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
+import { DROID_SHOWN, DROID_SHOWN_BY_HULL, PAINT_CARRIED_WHOLE, droidShown, droidSink, fitForWire, fitKey, isColourKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit, type WireFit } from './vehicles/shipFit.ts';
 import { NpcUi } from './ui/npcUi';
 import { CATALOGUE_COMMAND } from './world/mobiles/catalogue';
 import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spawning';
@@ -290,7 +290,7 @@ import { hourOfDay } from './world/dayPhase.ts';
 import { sharedClock } from './world/sharedClock.ts';
 import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
-import { TRADE_TUNE, Trade, tuneTrade, type TradeItem } from './net/trade.ts';
+import { ITEMS_NAMED, OLD_SERVER_WORDS, TRADE_TUNE, Trade, tradeNow, tuneTrade, type TradeItem } from './net/trade.ts';
 import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
 import { DebugMenu } from './ui/debugMenu.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
@@ -307,7 +307,13 @@ import { peerBodies } from './net/remoteBodies.ts';
 // One creature stood by hand, as everything that talks about it says it.
 import { recordFor, sweptByList, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
-import { applyAppearance, dress, packLook } from './player/look';
+import { applyAppearance, dress, lookKeep, packLook, putBackLook } from './player/look';
+import { CREATOR_TUNE, DYE_PALETTE, bareName, catalogueName, creatorTableNow, hairNone, itemSections, keptFromBald, loadCreatorTable, packColours, tuneCreator, type CreatorTable } from './ui/creatorModel.ts';
+import { HAIR_TUNE, defaultHair, hairCarryFor, hairCells, type HairItem } from './ui/hairGrid.ts';
+import { DYE_TUNE, countText, hexOf, rawFromHex, tuneDye, valueRgb } from './ui/dyePicker.ts';
+import { characterRender } from './player/recipeWorker.ts';
+import { isRawColour } from './player/texrender.ts';
+import { customizeFileNow, loadCustomizeFile } from './player/customizer.ts';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
@@ -319,6 +325,7 @@ import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from 
 import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn, type WalkableRoom } from './vehicles/surfaceRoom';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
+import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { World } from './world/world';
 import { REFLECTIONS, reflectiveCount, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
@@ -755,7 +762,7 @@ class App {
    * when there is a server to tell; until then, and for ever in a game played alone, it is null and
    * the backpack is local storage exactly as it always was.
    */
-  private tradeLedger: ((what: 'add' | 'drop', kind: 'wear' | 'weapon', id: string) => void) | null = null;
+  private tradeLedger: ((what: 'add' | 'drop', item: TradeItem) => void) | null = null;
   /** Where "this is what I am wearing and holding" goes, for the same reason and by the same wiring. */
   private tradeUsing: (() => void) | null = null;
   /** Where the group roster's Trade button goes; the trade wiring fills it in. */
@@ -764,6 +771,8 @@ class App {
   private weaponsLoaded!: Promise<WeaponCatalogue | null>;
   /** The hello resend after a change of clothes or weapon, debounced so several pieces send one. */
   private helloTimer = 0;
+  /** Said once: a server that keeps a ship's colours to the palettes is sent the nearest of them (`helloShip`). */
+  private saidPaintNearer = false;
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
@@ -1689,7 +1698,22 @@ class App {
       // An item this browser gave itself or destroyed goes to the server's ledger as well, so its
       // rows and this cache do not drift. It is set by the trade wiring and is null until then, and
       // with no server it stays quiet: a game played alone writes to local storage and nowhere else.
-      ledger: (what, kind, id) => this.tradeLedger?.(what, kind, id),
+      ledger: (what, item) => this.tradeLedger?.(what, { kind: item.kind, id: item.id, got: item.got, thing: item.thing }),
+      // A second of an item is refused only where a server holds this character and is one from
+      // before things had names: it would fold the second into the first and the copy would be lost.
+      refuseAnother: () => (this.net.session.authority === 'server' && this.net.session.itemsVersion < ITEMS_NAMED ? OLD_SERVER_WORDS : ''),
+      // A thing's colours go to the server that holds them, paced by the equipment; a server from before
+      // things had colours has nowhere to put one, and `Trade.noteTint` says so by sending nothing.
+      noteTint: (thing, tint, at) => tradeNow()?.noteTint(thing, tint, at) ?? false,
+      tintsLive: () => {
+        const t = tradeNow();
+        return !!t && t.active && t.known && this.net.session.itemsVersion >= ITEMS_NAMED;
+      },
+      // Colours are stamped on the clock the server hands out, as `OwnedItem.tintAt` says they must be.
+      now: () => sharedClock.now(),
+      // The garments' colours moved onto their things once, behind the loading screen: a new shape of the
+      // same record, which the session adopts without counting a change.
+      rewritten: (was, now) => this.net.session.noteRewritten(this.storyMarked(was), this.storyMarked(now)),
       baseUrl: import.meta.env.BASE_URL,
     });
     // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
@@ -1720,9 +1744,15 @@ class App {
       closed: (def) => void this.refitSpawned(def),
       // The preview's compile of a garage material the world set up for its shadow cascades must not take the cascades' record from the world's program.
       keepShadows: (mats) => this.world.keepShadowRecords(mats),
+      // What a colour's picker offers beyond the hull's own palette: the player's wardrobe's garment palettes and the creator's (the appearance page's own).
+      pickerPalettes: () => this.pickerPalettes(),
     });
     // Each component's stats on the edit page (invented numbers, shipStats.ts); pure, read when the page draws.
     this.shipEdit.statsFor = (slot, c) => componentLine(slot, c);
+    // What a server passes on of a ship's colours carried whole is known only once it has answered: a hello
+    // carries them whatever the server is, so nothing is said again; the player is only told, once, when the
+    // others see the nearest colours of the hull's own palette instead.
+    this.net.session.onClaimed(() => this.sayPaintNearer(this.helloShipDef()));
     this.vehiclesUi.onEdit = (def) => this.openShipEdit(def);
     this.shipEdit.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     // A fit changed in the last 300 ms is written before the page goes.
@@ -2152,6 +2182,17 @@ class App {
     this.npcUi = new NpcUi(this.ui);
     this.appearanceUi = new AppearanceUi(this.ui, () => this.saveAppearance());
     this.appearanceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
+    // A hairstyle goes on the way every worn piece does: loaded hidden, coloured, compiled, then shown.
+    this.appearanceUi.onHair = (id) => this.wearHairPrepared(id);
+    // A garment's colour is the worn copy's own, saved on the thing and told to the server: the part it
+    // is worn under is read back as the item, and the copy worn is the one coloured. In the creator there
+    // is no record yet, and the colour stays on the meshes until the character is made.
+    this.appearanceUi.onItemColour = (part, bare, value) => {
+      if (!this.current || this.creating) return;
+      const id = this.equipment.itemIdOf(part);
+      const thing = id ? this.equipment.thingInUse('wear', id) : null;
+      if (thing) this.equipment.setTint(thing, { [bare]: value });
+    };
     // Every panel that closes because the player asked hands the mouse back. Nine of them had no way
     // to say so: their X button and their backdrop called `hide()`, nothing cleared the input's
     // `captured`, and the game went on simulating with every key and the mouse dead -- the only way
@@ -2165,6 +2206,8 @@ class App {
     // The Clothes (give) tab dresses through the equipment: the game's slots, the compile before the
     // piece shows, and in the world the piece given. In the creator nothing is given (no record).
     this.wardrobe.onWear = (id) => this.equipment.wear(id, { give: true, force: true }).then((note) => !/cannot|not in|no wardrobe|single model|dropped|could not/.test(note));
+    // The give tab's "Give another": a second copy of the piece into the backpack, a thing of its own.
+    this.wardrobe.onGiveAnother = (id) => this.equipment.giveAnother('wear', id) || 'another is in the backpack';
     this.wardrobe.onRemove = (parts) => this.equipment.takeOffParts(parts);
     this.weaponsUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.forceUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
@@ -3836,6 +3879,63 @@ class App {
         if (!c) return 'no parts character';
         return { live: !!c.customizer, variables: (c.customizer?.variables() ?? []).map((v) => `${v.key}: ${v.kind}${v.colors ? ` ${v.colors.length} colours` : v.count ? ` ${v.count} choices` : ''}${v.private ? ` (private to ${v.mesh})` : ''} default ${v.default}`), manifest: (c.manifest.variables ?? []).map((v) => `${v.private ? 'private ' : ''}${v.name}: ${v.kind} ${v.colors?.length ?? v.count ?? '?'} from ${v.sources.join(', ')}${v.meshes?.length ? ` on ${v.meshes.join(', ')}` : ''}`), morphs: c.morphValues(), values: c.variableValues(), height: c.height };
       },
+      /**
+       * The creator's own table (`characters/customization.json`) and how the appearance page is laid out
+       * from it for the player's character: whether it is loaded, each group with its row count, the rows
+       * that found nothing, what is hidden and why, the rows following others and the colours that set
+       * others, and the last pick with every key it wrote. `creator({ linkSelf: false })` stops a colour
+       * setting the ones the table links to it (a female's skin her lips); every knob is ours.
+       */
+      creator: (o?: Partial<typeof CREATOR_TUNE>) => {
+        if (o) {
+          tuneCreator(o);
+          if (this.appearanceUi.open) this.appearanceUi.refresh();
+        }
+        return this.appearanceUi.report(this.player.rig?.character ?? null, creatorTableNow(import.meta.env.BASE_URL));
+      },
+      /**
+       * The hairstyles' grid for the player's character (`src/ui/hairGrid.ts`): what is worn, each group with
+       * its cells and pictures, the style a new character of the species starts in, the remembered hair
+       * colours (`hair|<name>`) and the last change with the colours it carried. `hair('<id>')` puts a style on
+       * through the prepared path (`hair(null)` none), unsaved as `wear` is, and says how many programs were
+       * built for the character on the frames after the swap (`compiledOnSwap`, which must be 0).
+       */
+      hair: (id?: string | null) => (id === undefined ? this.hairReport() : this.debugHair(id)),
+      /**
+       * Every worn piece's colours (`src/ui/dyePicker.ts`, the customizer's per-mesh textures, the characters'
+       * worker): each piece's rows by bare name with the palette, the value and the colour it shows, then the
+       * renders in flight, the worker's state, the last render's time and how many textures are a mesh's own.
+       * `dye('robe_s32', 'index_color_dye', '#b02020')` colours a worn piece (every mesh of it) with a colour
+       * carried whole, a number with that index of its own palette, `'default'` back to the piece's own, and
+       * says `compiledOnSwap` (programs built for the character from the moment it is set until two frames after
+       * its last render lands, which must be 0); a garment's colour is written through its worn copy (`setTint`),
+       * as a pick on the page is. `dye({ worker: false })` renders on the main thread to compare, and `{ tune: {...} }` moves the
+       * picker's own numbers (`DYE_TUNE`).
+       */
+      dye: (a?: string | { worker?: boolean; tune?: Partial<typeof DYE_TUNE> }, variable?: string, value?: string | number) => {
+        if (a && typeof a === 'object') {
+          if (typeof a.worker === 'boolean') characterRender.here = !a.worker;
+          if (a.tune) {
+            tuneDye(a.tune);
+            if (this.appearanceUi.open) this.appearanceUi.refresh();
+          }
+          return this.dyeReport();
+        }
+        if (typeof a === 'string' && variable !== undefined && value !== undefined) return this.debugDye(a, variable, value);
+        return this.dyeReport();
+      },
+      /**
+       * The things' own colours (`src/player/equipment.ts`): every owned thing that carries one, by its name, with
+       * what it is, its colours by bare name, when they were set and whether it is the copy worn or in a hand;
+       * the copy worn of each piece and the thing in each hand; the colours waiting to be told to the server and
+       * how often each has been tried, how many went and were given up; whether a server is there to take them
+       * (`live`), the last piece drawn in a thing's colours and how many values moved, and the record's `tints`
+       * mark. `tint({ tune: { tintSettleMs: 800, tintsPerSecond: 6, tintTries: 5 } })` moves the pacing (`ITEMS_TUNE`).
+       */
+      tint: (o?: { tune?: Partial<typeof ITEMS_TUNE> }) => {
+        if (o?.tune) tuneItems(o.tune);
+        return { ...this.equipment.tintReport(), tune: { ...ITEMS_TUNE } };
+      },
       /** What a mesh's live textures are made of (`recipe('head')`): shader stages, texture choices, palettes, blueprint operations and the values in force. */
       recipe: (mesh = 'head') => {
         const c = this.player.rig?.character;
@@ -5483,13 +5583,28 @@ class App {
       /**
        * Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose
        * playing and its root offset, for finding a seat by eye. In a ship seated by its cockpit eye the body moves under the eye
-       * and the view stays put; `paste` is the line for COCKPIT_BODY_NUDGE in cockpitSeat.ts.
+       * and the view stays put; `paste` is the line for COCKPIT_BODY_NUDGE in cockpitSeat.ts. On a pod the seat rides the
+       * cockpit's joint and the nudge goes through it (podSeat.ts): `pelvis` is in the pod's frame as its idle's first frame
+       * stands it, `rule` says which rule placed it, and `paste` is the line for POD_SEAT. An object instead of numbers
+       * (`{ run, idle, fade }`) sets when every pod's own clips change over (POD_GAIT) and nudges nothing.
        */
-      seat: (dx = 0, dy = 0, dz = 0) => {
+      seat: (dx: number | { run?: number; idle?: number; fade?: number } = 0, dy = 0, dz = 0) => {
+        const tune = typeof dx === 'object' && dx !== null ? dx : null;
+        if (tune) {
+          for (const k of ['run', 'idle', 'fade'] as const) {
+            const n = tune[k];
+            if (typeof n === 'number' && Number.isFinite(n) && n >= 0) POD_GAIT[k] = n;
+          }
+          // The band the right way round, or a speed between the two would change clips every frame.
+          POD_GAIT.idle = Math.min(POD_GAIT.idle, POD_GAIT.run);
+          dy = 0;
+          dz = 0;
+        }
+        const nx = typeof dx === 'number' ? dx : 0;
         const v = this.player.mounted;
-        if (!v) return 'not riding anything';
+        if (!v) return tune ? { gait: { ...POD_GAIT } } : 'not riding anything';
         if (v.eyeSeat) {
-          v.bodyNudge[0] += dx;
+          v.bodyNudge[0] += nx;
           v.bodyNudge[1] += dy;
           v.bodyNudge[2] += dz;
           this.player.syncMount();
@@ -5499,12 +5614,18 @@ class App {
           const n3 = (n: number) => Number(n.toFixed(3));
           return { vehicle: v.spec.id, frame: frame || null, eye: eye ? eye.toArray().map(n3) : null, eyeSource: v.eyeSource, bodyNudge: v.bodyNudge.map(n3), seatDrop: v.seatDrop === null ? null : n3(v.seatDrop), lift: n3(r.lift), riderPose: v.riderPose, clip: r.clip, paste: `'${frame}': [${v.bodyNudge.map((n) => n3(n)).join(', ')}],` };
         }
-        v.seat.position.x += dx;
-        v.seat.position.y += dy;
-        v.seat.position.z += dz;
+        // In the vehicle's frame whatever the seat hangs on: a pod's goes through the joint it rides.
+        nudgeSeat(v.seat, v.seatBind, nx, dy, dz);
         const clip = this.player.rig?.currentClip ?? null;
         const root = clip ? this.player.rig?.rootOffset(clip, tmp) : null;
-        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map((n) => Number(n.toFixed(2))), seatIsPelvis: v.seatPelvis, riderPose: v.riderPose, seatFrom: v.seatFrom, saddle: !!v.saddle, clip, clipRoot: root ? root.toArray().map((n) => Number(n.toFixed(2))) : null };
+        const n2 = (n: number) => Number(n.toFixed(2));
+        // Where the pelvis goes, in the vehicle's frame: a pod's as its idle's first frame stands it (through the joint's
+        // place then), a seat on the vehicle where it is, one on a creature's bone where the gait has it now; a seat that
+        // is the rider's origin has the riding clip's root added.
+        const pelvis = v.seatBind || v.seat.parent === v.group ? seatInVehicle(v.seat, v.seatBind, new THREE.Vector3()) : v.group.worldToLocal(v.seat.getWorldPosition(new THREE.Vector3()));
+        if (!v.seatPelvis && root) pelvis.add(root);
+        const p = pelvis.toArray().map(n2);
+        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map(n2), seatIsPelvis: v.seatPelvis, pelvis: p, rule: v.seatRule, joint: v.seatBind ? v.seat.parent?.name || null : null, riderPose: v.riderPose, seatFrom: v.seatFrom, saddle: !!v.saddle, clip, clipRoot: root ? root.toArray().map(n2) : null, ...(v.seatRule ? { gait: { ...POD_GAIT }, paste: `'${v.spec.id}': [${p.join(', ')}],` } : {}) };
       },
       /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
       vehicles: (find?: string) => {
@@ -5878,11 +5999,12 @@ class App {
        */
       refit: (slot: string, component: string) => this.debugRefit(slot, component),
       /**
-       * Repaint the ship ridden (else the nearest): `paint({ index_color_1: 20, index_texture_1: 2 })`, kept with the character;
+       * Repaint the ship ridden (else the nearest), or the painted speeder ridden: `paint({ index_color_1: 20, index_texture_1: 2 })`,
+       * `paint({ index_color_1: '#c03020' })` (a colour carried whole, on a colour and never on a pattern), kept with the character;
        * `paint('static')` shows each shader's own texture from before customization, `paint('custom')` goes back. Returns the
        * same shape as `refit`.
        */
-      paint: (values: Record<string, number> | 'static' | 'custom') => this.debugPaint(values),
+      paint: (values: Record<string, number | string> | 'static' | 'custom') => this.debugPaint(values),
       /** Open a ship's edit page: `shipEdit('xwing')`; `shipEdit()` reports what the page shows. */
       shipEdit: async (id?: string) => {
         if (!id) return this.shipEdit.report();
@@ -5903,43 +6025,80 @@ class App {
         const def = this.weapons?.find(name);
         return def ? this.equip(def, hand) : `no weapon matches ${name}`;
       },
-      /** The backpack's state: what is owned (with the game's name, where it is and the species' verdict), worn and held, what is being put on, the record's `inv`. */
+      /**
+       * The backpack's state: every owned thing by its own name (`thing`) with the game's name, where it
+       * is and the species' verdict -- of two of one shirt only the copy on the body reads `worn` -- what
+       * is worn and held and which thing each is, the record's choices of copy, what is being put on, the
+       * record's `inv` and `named`, and what the server's hail said of its items (`itemsVersion`: 2 keeps a
+       * row per thing, 0 is none or one from before, which folds two of one item into one).
+       */
       items: () => {
         const snap = this.equipment.snapshot();
         const ctx = this.equipment.lastContext;
-        const where = (kind: 'wear' | 'weapon', id: string) => (kind === 'weapon' ? (snap.held.right === id ? 'right' : snap.held.left === id ? 'left' : 'pack') : id in snap.worn ? 'worn' : 'pack');
+        const where = (o: { kind: 'wear' | 'weapon'; id: string; thing?: string }) =>
+          o.kind === 'weapon'
+            ? snap.held.right === o.id && snap.heldThing.right === o.thing
+              ? 'right'
+              : snap.held.left === o.id && snap.heldThing.left === o.thing
+                ? 'left'
+                : 'pack'
+            : o.id in snap.worn && snap.wornThing[o.id] === o.thing
+              ? 'worn'
+              : 'pack';
         return {
           inv: snap.inv,
+          named: snap.named,
+          tints: snap.tints,
+          itemsVersion: this.net.session.itemsVersion,
           record: snap.record,
           species: snap.species,
           wardrobe: snap.wardrobe,
           weapons: snap.weapons,
           owned: snap.owned.map((o) => {
             const info = ctx ? itemInfo(o.kind, o.id, ctx) : null;
-            return { id: o.id, kind: o.kind, name: info?.name ?? o.id, where: where(o.kind, o.id), fit: info?.fit ?? null, missing: info?.missing ?? null };
+            return { thing: o.thing ?? '', id: o.id, kind: o.kind, name: info?.name ?? o.id, where: where(o), got: o.got, fit: info?.fit ?? null, missing: info?.missing ?? null, tint: o.tint ?? null };
           }),
           worn: snap.worn,
           held: snap.held,
+          wornThing: snap.wornThing,
+          heldThing: snap.heldThing,
+          chosen: snap.chosen,
           busy: snap.busy,
         };
       },
-      /** Give an item: `give('wear', 'jacket_s02')`, `give('weapon', 'baton_stun')`. It goes in the backpack, not on. */
-      give: async (kind: 'wear' | 'weapon', id: string) => {
+      /**
+       * Give an item: `give('wear', 'jacket_s02')`, `give('weapon', 'baton_stun')`. It goes in the backpack,
+       * not on, one of each; `give('wear', 'shirt_s03', { another: true })` gives a second copy, a thing of
+       * its own, whether or not one is owned (refused on a server from before things had names).
+       */
+      give: async (kind: 'wear' | 'weapon', id: string, opts?: { another?: boolean }) => {
         if (kind !== 'wear' && kind !== 'weapon') return "kind is 'wear' or 'weapon'";
         const ctx = await this.equipment.itemContext();
         const info = itemInfo(kind, id, ctx);
         if (info.missing) return kind === 'wear' ? `${id} is not in this character's wardrobe` : `${id} is not on the weapons rack`;
         if (!this.current || this.creating) return 'no character is being played';
+        if (opts?.another) {
+          const why = this.equipment.giveAnother(kind, id);
+          return why || `another ${info.name} is in the backpack`;
+        }
         return this.equipment.give(kind, id) ? `${info.name} is in the backpack` : `${info.name} is owned already`;
       },
-      /** Use an item as a double-click does (on or off, in hand or put away); `use('sword_lightsaber_training', 'left')` for the left hand. */
+      /**
+       * Use an item as a double-click does (on or off, in hand or put away); `use('sword_lightsaber_training', 'left')`
+       * for the left hand. A thing's own name (`items().owned[i].thing`) uses that copy: the other of two
+       * worn shirts becomes the one worn.
+       */
       use: async (id: string, hand?: 'left') => {
+        const thing = this.equipment.itemOf(id);
+        if (thing?.thing) return this.useItem(thing.thing, hand);
         const kind = await this.kindOf(id);
         if (!kind) return `${id} is neither on the rack nor in the wardrobe`;
         return this.useItem(`${kind}:${id}`, hand);
       },
-      /** Destroy an owned item (taken off or put away first). */
+      /** Destroy an owned item (taken off or put away first): by a thing's own name, that one; by its id, the copy in use or the oldest. */
       destroy: async (id: string) => {
+        const thing = this.equipment.itemOf(id);
+        if (thing?.thing) return this.destroyItem(thing.thing);
         const owned = this.equipment.owned().find((o) => o.id === id);
         if (!owned) return `${id} is not owned`;
         return this.destroyItem(`${owned.kind}:${id}`);
@@ -8184,16 +8343,20 @@ class App {
     // the group's own 90 m is measured from; the server measures it again and is what decides.
     trade.meAt = (out) => groups.meAt(out);
     trade.peerAt = (id, out) => groups.peerAt(id, out);
-    trade.owns = (kind, id) => this.equipment.owns(kind, id);
-    trade.inUse = (kind, id) => this.equipment.inUse(kind, id);
+    // How the server keeps what characters own: a server that keeps a row per thing says so in its
+    // hail, and against one that does not this side keeps to one of each.
+    trade.itemsVersion = () => this.net.session.itemsVersion;
+    trade.owns = (thing) => this.equipment.owns(thing);
+    trade.inUse = (thing) => this.equipment.inUse(thing);
     // What this browser holds for the character in play, for the one moment it hands its list up.
     // The first time a character is handed up this is what the server writes down; after that its
-    // own rows stand and this browser is told them instead of being merged with.
+    // own rows stand and this browser is told them instead of being merged with. Each thing goes up
+    // under its own name, so the server keeps two of one shirt as two.
     trade.mine = () => {
       const rec = this.creating ? null : this.current;
       if (!rec) return null;
       const items: TradeItem[] = [];
-      for (const o of rec.items ?? []) items.push({ kind: o.kind, id: o.id, got: o.got });
+      for (const o of rec.items ?? []) items.push({ kind: o.kind, id: o.id, got: o.got, thing: o.thing });
       return items;
     };
     // What the record says about itself, which goes up with the list: "a server has taken this
@@ -8208,12 +8371,14 @@ class App {
     };
     // What is on the body and in the hands, which is what the server refuses an offer of a worn
     // shirt with. The whole of it each time, and only when it has moved.
+    // Of two of one shirt it is the one on the body that is named, so the other may still be offered.
     trade.using = () => {
       const snap = this.equipment.snapshot();
       const worn: TradeItem[] = [];
-      for (const id of Object.keys(snap.worn)) worn.push({ kind: 'wear', id, got: 0 });
+      for (const id of Object.keys(snap.worn)) worn.push({ kind: 'wear', id, got: 0, thing: snap.wornThing[id] });
       const held: TradeItem[] = [];
-      for (const id of [snap.held.right, snap.held.left]) if (id) held.push({ kind: 'weapon', id, got: 0 });
+      if (snap.held.right) held.push({ kind: 'weapon', id: snap.held.right, got: 0, thing: snap.heldThing.right ?? undefined });
+      if (snap.held.left) held.push({ kind: 'weapon', id: snap.held.left, got: 0, thing: snap.heldThing.left ?? undefined });
       return { worn, held };
     };
     // The server's list, which stands: the record is marked as the server's, and the equipment
@@ -8226,7 +8391,8 @@ class App {
       const wasKnown = knownToServer(rec);
       markKnownToServer(rec, this.net.session.counterOf(rec.id));
       if (take === 'server' && !wasKnown) this.messages.system('this server holds its own list of what this character owns, and it is the one that stands');
-      void this.equipment.reconcile(items).then((note) => {
+      // The server's clock as the list arrives: a colour stamped here by a clock running fast is held to it.
+      void this.equipment.reconcile(items, sharedClock.now()).then((note) => {
         if (note !== 'dropped' && note !== 'nothing in the backpack changed') this.messages.system(note);
         if (this.backpack.open) void this.refreshBackpack();
         // What is worn and held goes up after the list, because it is named by the server's own row
@@ -8236,21 +8402,25 @@ class App {
     };
     trade.onNote = (text) => this.messages.system(text);
     // A thing the server handed over on its own -- a job's reward, which a server running the jobs pays
-    // through its ledger and never through this browser's word -- goes in the backpack here. The row is
-    // known already, so putting it there does not tell the server again; one this browser gave itself is
-    // owned already and changes nothing. The message line's word of it is the job's own note.
+    // through its ledger and never through this browser's word -- goes in the backpack here, under the
+    // name the server gave it. The row is known already, so putting it there does not tell the server
+    // again; one this browser gave itself is owned already, under the same name, and changes nothing.
+    // The message line's word of it is the job's own note.
     trade.onAdded = (item) => {
       const rec = this.creating ? null : this.current;
-      if (!rec || this.equipment.owned().some((o) => o.kind === item.kind && o.id === item.id)) return;
-      if (this.equipment.give(item.kind, item.id) && this.backpack.open) void this.refreshBackpack();
+      if (!rec) return;
+      // In the equipment's queue, behind any list still waiting to be laid over the backpack.
+      void this.equipment.receive(item).then((came) => {
+        if (came && this.backpack.open) void this.refreshBackpack();
+      });
     };
     // An item given or destroyed here goes to the ledger as well, and what is on the body and in the
     // hands is said whenever it moves, since that is what the server refuses an offer of a worn
     // shirt with. Neither is how an item moves between two players: that is a trade, and only the
     // server moves those.
-    this.tradeLedger = (what, kind, id) => {
-      if (what === 'add') trade.noteAdded(kind, id, Date.now());
-      else trade.noteDropped(kind, id);
+    this.tradeLedger = (what, item) => {
+      if (what === 'add') trade.noteAdded(item);
+      else trade.noteDropped(item);
     };
     this.tradeUsing = () => trade.tellUsing();
     // The moment the server has taken this browser's claim, its list goes up: a character the server
@@ -8265,9 +8435,11 @@ class App {
         const info = itemInfo(kind, id, ctx);
         return { name: info.name, icon: info.icon };
       },
+      // A thing's own colour, as the backpack shows it: theirs read from the colours the server's row carries.
+      swatch: (item) => itemSwatch(item.kind, item.id, item.tint, this.equipment.lastContext),
       owned: () => {
         const rows: { item: TradeItem; use: 'worn' | 'right' | 'left' | null }[] = [];
-        for (const o of this.equipment.owned()) rows.push({ item: { kind: o.kind, id: o.id, got: o.got }, use: this.equipment.inUse(o.kind, o.id) });
+        for (const o of this.equipment.owned()) rows.push({ item: { kind: o.kind, id: o.id, got: o.got, thing: o.thing, ...(o.tint ? { tint: o.tint } : {}) }, use: o.thing ? this.equipment.inUse(o.thing) : null });
         return rows;
       },
       view: (eye, dir) => {
@@ -8382,23 +8554,30 @@ class App {
         if (o?.ui) tuneTradeUi(o.ui);
         if (o) tuneTrade(o);
         let answer = '';
-        const split = (key: string): ['wear' | 'weapon', string] | null => {
+        // An item named as a thing's own name, or as `wear:` or `weapon:` and its id: the copy put in is
+        // the first of it that is free (not in the trade, not worn, not in a hand), and the copy taken
+        // out the first of it that is in.
+        const pick = (key: string, inTrade: boolean): TradeItem | null => {
+          const owned = this.equipment.owned();
+          const named = owned.find((it) => it.thing === key);
           const i = key.indexOf(':');
           const kind = key.slice(0, i);
-          if (kind !== 'wear' && kind !== 'weapon') return null;
-          return [kind, key.slice(i + 1)];
+          const id = key.slice(i + 1);
+          const list = named ? [named] : kind === 'wear' || kind === 'weapon' ? owned.filter((it) => it.kind === kind && it.id === id) : [];
+          const items = list.map((it) => ({ kind: it.kind, id: it.id, got: it.got, thing: it.thing }) as TradeItem);
+          return items.find((it) => trade.offered(it) === inTrade && (inTrade || !this.equipment.inUse(it.thing ?? ''))) ?? items[0] ?? null;
         };
         if (typeof o?.ask === 'number') answer = trade.askTrade(o.ask) || `asked ${o.ask} to trade`;
         else if (o?.ask === true) answer = tradeUi.askLookedAt();
         if (o?.accept === true) trade.accept();
         if (o?.decline === true) trade.decline();
         if (typeof o?.put === 'string') {
-          const at = split(o.put);
-          answer = at ? trade.putIn(at[0], at[1]) || `${o.put} is in the trade` : `no item ${o.put}`;
+          const at = pick(o.put, false);
+          answer = at ? trade.putIn(at) || `${o.put} is in the trade` : `no item ${o.put}`;
         }
         if (typeof o?.take === 'string') {
-          const at = split(o.take);
-          answer = at ? trade.takeOut(at[0], at[1]) || `${o.take} is out of the trade` : `no item ${o.take}`;
+          const at = pick(o.take, true);
+          answer = at ? trade.takeOut(at) || `${o.take} is out of the trade` : `no item ${o.take}`;
         }
         if (typeof o?.ready === 'boolean') answer = trade.setReady(o.ready) || (o.ready ? 'you are happy with it' : 'you took that back');
         if (o?.cancel === true) trade.cancel();
@@ -8660,19 +8839,9 @@ class App {
       figureTurn = run.catch(() => undefined);
       return run;
     };
-    // `applyAppearance` sets only the colours that differ from the pack's own, which is right on a
-    // fresh rig and wrong on one that another character of the same species has just worn: the first
-    // one's hair would stay on the second wherever the second kept the default. So every colour the
-    // rig holds is put back to what this record asks, or to the pack's own where it asks nothing.
-    const putBackLook = (character: Character, a: SavedCharacter['appearance'] | undefined) => {
-      const want = a?.values ?? {};
-      const back: Record<string, number> = {};
-      for (const [k, v] of Object.entries(character.variableValues())) {
-        const target = k in want ? want[k] : (character.manifest.values?.[k] ?? character.manifest.values?.[k.replace(/^.*\//, '')]);
-        if (typeof target === 'number' && target !== v && character.canCustomize(k)) back[k] = target;
-      }
-      if (Object.keys(back).length) character.customizer?.setAll(back);
-    };
+    // The rig may be the one another character of the same species has just worn: `putBackLook` (look.ts)
+    // puts every colour it holds back to what this record asks, or to the pack's own where it asks nothing,
+    // before this record's look goes on.
     this.select.loadFigure = (c, alive) =>
       inTurn(async () => {
         if (!alive()) return null;
@@ -8683,8 +8852,11 @@ class App {
         const character = await this.useSpecies(c.species);
         if (!character || character.manifest.id !== c.species) return missing;
         if (!alive()) return null;
-        putBackLook(character, c.appearance);
-        this.applyAppearance(character, c.appearance);
+        // The things' own colours are the look's as well, so the last figure's are put back where this one has none.
+        const look = await this.recordLook(c, character);
+        if (!alive()) return null;
+        putBackLook(character, look);
+        this.applyAppearance(character, look);
         await this.dress(character, c.outfit ?? []);
         if (!alive()) return null;
         // The colour renders finish before the clone is taken, so the figure fades in finished.
@@ -8704,7 +8876,7 @@ class App {
       void inTurn(async () => {
         // Enter pressed before the figure was asked for finds the rig still in the last character's colours.
         const worn = this.player.rig?.character;
-        if (worn && worn.manifest.id === c.species) putBackLook(worn, c.appearance);
+        if (worn && worn.manifest.id === c.species) putBackLook(worn, await this.recordLook(c, worn));
         await this.play(c);
       }).catch((err) => console.warn('could not enter the world', err));
     this.select.onCreate = () => void inTurn(() => this.openCreator()).catch((err) => console.warn('creator', err));
@@ -8829,6 +9001,8 @@ class App {
 
     // Nothing loads until a character is chosen: the select screen first, the creator or the
     // world after. The species list is small and feeds both the creator and the console.
+    // The creator's own table is small (about 200 KB) and the appearance page and the console both read it.
+    void loadCreatorTable(import.meta.env.BASE_URL);
     void loadSpeciesIndex(import.meta.env.BASE_URL).then((list) => {
       this.speciesList = list;
       this.world.npcDeps.species = list.map((s) => s.id);
@@ -9233,6 +9407,8 @@ class App {
     this.closePanels();
     // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
     this.equipment.reset();
+    // And a hairstyle still loading is dropped with them, or it would land on the next one's head.
+    this.dropHairChanges();
     // A new character has a purse of its own; the last one's number must not be read as this one's.
     purse.reset();
     // Nobody's music carries to the next character.
@@ -10046,18 +10222,330 @@ class App {
   /** The space the player's own feet and voice belong to while aboard a hull; a kept record. */
   private readonly footSpace: SoundSpace = { building: OUTSIDE.building, cell: OUTSIDE.cell };
 
-  /** The look of the character as it is now. */
-  private appearanceOf(c: Character): Appearance {
-    return { morphs: c.morphValues(), values: c.variableValues(), height: c.height };
+  /**
+   * The look of the character as it is now: its shape, its height, and the colours of its body and hair.
+   * A garment's colours are its thing's (`OwnedItem.tint`), so with `garments` false every value scoped to
+   * a garment's mesh is left out (`lookWithoutGarments`) -- every garment the wardrobe and the species pack
+   * hold, loaded on this rig or not, so a colour the customizer still holds for a piece given away is never
+   * saved back; a record whose colours have not yet been moved onto its things (`tints`) keeps them in the
+   * look until its first load moves them, or they would be lost.
+   */
+  private appearanceOf(c: Character, garments = true): Appearance {
+    const all = c.variableValues();
+    const values = garments ? all : lookWithoutGarments(all, c.garmentMeshes());
+    return { morphs: c.morphValues(), values, height: c.height };
+  }
+
+  /**
+   * A record's look as a rig should be drawn in it: its own look, with the colours of the things it wears
+   * laid over (`Equipment.tintLook`), which is where a garment's colours are kept once the record's have
+   * been moved there. A record from before keeps them in its look and is handed back as it is.
+   */
+  private async recordLook(c: SavedCharacter, character: Character): Promise<Appearance> {
+    if (c.tints !== 1) return c.appearance;
+    const tints = await this.equipment.tintLook(c, character).catch(() => ({}) as Record<string, number>);
+    return { ...c.appearance, values: { ...(c.appearance?.values ?? {}), ...tints } };
   }
 
   /** The sliders and colours changed on the appearance tab: written into the character's record while one is being played. */
   private saveAppearance(): void {
     const c = this.player.rig?.character;
     if (!c || !this.current || this.creating) return;
-    this.current.appearance = this.appearanceOf(c);
+    this.current.appearance = this.appearanceOf(c, this.current.tints !== 1);
     this.current.outfit = this.outfitOf(c);
     upsertCharacter(this.current);
+    // A colour or a slider changed is a change of look, which the others hear about as a change of
+    // clothes is: in a hello, a moment after the last change (`queueHello` waits 400 ms for the next).
+    this.queueHello();
+  }
+
+  /** The last change of hairstyle, for `__debug.hair()`: what went on and came off, the colours it carried and what it said. */
+  private hairChange: { on: string | null; off: string[]; carried: Record<string, number>; said: string } | null = null;
+  /**
+   * Counted up by every change of hairstyle, so one overtaken by the next puts nothing on, and by every
+   * change of who is being dressed (`dropHairChanges`).
+   */
+  private hairTurn = 0;
+
+  /**
+   * Whatever change of hairstyle is still loading puts nothing on: the character it was asked for has
+   * gone (to the select screen, into or out of the creator, or another record played). The rig itself
+   * outlives it whenever the next character is of the same species (`useSpecies` keeps it), so the
+   * character object alone cannot tell, exactly as it cannot for the equipment, whose own epoch is reset
+   * at the same moments.
+   */
+  private dropHairChanges(): void {
+    this.hairTurn++;
+  }
+
+  /**
+   * Put a hairstyle on, or none, in the one order that compiles before it shows, as every worn piece goes
+   * on: loaded hidden (`Character.loadPiece`), its colour carried over from the style it replaces, the
+   * colours settled, each new mesh prepared, the colour asked for again, and then in one synchronous step
+   * the old style off and the new one on (`Character.putOn`). Asked again after every wait whether the
+   * character is still the one, no later change has overtaken it and `still` (the caller's own condition)
+   * holds; if not, nothing is changed. The answer is what to say. Nothing is saved: the appearance page
+   * saves after it, and the console's `hair()` does not.
+   */
+  private async wearHairPrepared(id: string | null, still: () => boolean = () => true): Promise<string> {
+    const c = this.player.rig?.character;
+    if (!c) return 'this character is a single model';
+    const turn = ++this.hairTurn;
+    const alive = () => this.player.rig?.character === c && this.hairTurn === turn && still();
+    const overtaken = 'overtaken by another change';
+    if (!id) {
+      const off = c.hairsWorn();
+      c.putOn([], off);
+      this.hairChange = { on: null, off, carried: {}, said: off.length ? 'hair off' : 'no hair was on' };
+      return this.hairChange.said;
+    }
+    const wornNow = c.hairsWorn();
+    if (wornNow.length === 1 && wornNow[0] === id) return `${id} is on already`;
+    let got: { found: boolean; meshes: THREE.Object3D[] };
+    try {
+      got = await c.loadPiece(id, import.meta.env.BASE_URL);
+    } catch (err) {
+      return `could not put on ${id}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (!alive()) return overtaken;
+    if (!got.found) return `${id} is not in this wardrobe`;
+    // The new style's own colours, from the hair colour last picked, else from the style it replaces.
+    let carried = this.hairColourFor(c, id);
+    if (Object.keys(carried).length) c.customizer?.setAll(carried);
+    await c.customizer?.settled();
+    if (!alive()) return overtaken;
+    for (const m of got.meshes) {
+      await this.prepareRoot(m);
+      if (!alive()) return overtaken;
+    }
+    // The page's colour rows stay live while a style loads, and a hair colour picked meanwhile wrote the
+    // remembered `hair|` key and the worn style's keys, never this hidden one's: the carry is asked again
+    // right before the swap, and whatever it now says differently goes on and is settled first, or the
+    // style would show in the colour from before the pick. A colour only changes a texture, never a
+    // program, so what was prepared stands. Someone still scrubbing after a few rounds is not waited for:
+    // the last colour lands a moment after the style shows.
+    const cz = c.customizer;
+    for (let round = 0; cz; round++) {
+      const want = this.hairColourFor(c, id);
+      const moved: Record<string, number> = {};
+      for (const [k, v] of Object.entries(want)) if (cz.values.get(k) !== v) moved[k] = v;
+      if (!Object.keys(moved).length) break;
+      carried = { ...carried, ...moved };
+      cz.setAll(moved);
+      if (round >= HAIR_TUNE.recarryRounds) break;
+      await cz.settled();
+      if (!alive()) return overtaken;
+    }
+    const off = c.hairsWorn().filter((k) => k !== id);
+    c.putOn([id], off);
+    this.hairChange = { on: id, off, carried, said: `${id} on` };
+    return this.hairChange.said;
+  }
+
+  /**
+   * The colours a hairstyle loaded hidden takes before it is shown (`hairCarryFor`, then `carryHairColour`):
+   * each of its private palette colours from the remembered `hair|<name>`, else from the worn style's own
+   * key of that name.
+   */
+  private hairColourFor(c: Character, id: string): Record<string, number> {
+    const cz = c.customizer;
+    if (!cz) return {};
+    return hairCarryFor(c.status(), c.hairsWorn(), id, cz.values, cz.variables());
+  }
+
+  /**
+   * A new character of a species the game kept from going bald starts in the table's first creation style: a
+   * new Twi'lek has lekku, a Zabrak horns and a Trandoshan ridges, and may take them off on the page like
+   * anybody (no hair is offered to every species). Only in the creator, only while nothing is
+   * worn, and put on as any style is (`wearHairPrepared`); an existing character is left as it is. A style
+   * picked on the page while the table and the wardrobe are still being read, or the creator left or
+   * opened again, has the say: the turn is taken now and asked again before anything is put on, and the
+   * put-on itself is dropped the moment the creator is left.
+   */
+  private async wearDefaultHair(c: Character): Promise<void> {
+    const turn = this.hairTurn;
+    const base = import.meta.env.BASE_URL;
+    const [table, items] = await Promise.all([loadCreatorTable(base), c.catalogue(base).then((w) => w.items as HairItem[]).catch(() => [] as HairItem[])]);
+    if (!this.creating || this.hairTurn !== turn || this.player.rig?.character !== c || c.hairWorn()) return;
+    const id = defaultHair(table, items, c.speciesName, c.genderName);
+    if (!id) return;
+    await this.wearHairPrepared(id, () => this.creating);
+    if (this.appearanceUi.open && this.player.rig?.character === c) this.appearanceUi.refresh();
+  }
+
+  /** What the console's `hair()` shows: what is worn, the grid's groups and cells, the remembered colours and the last change. */
+  private async hairReport(): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c) return { error: 'no parts character' };
+    const base = import.meta.env.BASE_URL;
+    const table = await loadCreatorTable(base);
+    const items = await c
+      .catalogue(base)
+      .then((w) => w.items as HairItem[])
+      .catch(() => [] as HairItem[]);
+    const grid = hairCells(table, items, c.speciesName, c.genderName, c.hairWorn(), c.wardrobeDir);
+    const remembered: Record<string, number> = {};
+    for (const [k, v] of c.customizer?.values ?? []) if (k.startsWith('hair|')) remembered[k] = v;
+    return {
+      species: c.manifest.id,
+      worn: c.hairWorn(),
+      fromTable: grid.fromTable,
+      none: grid.none,
+      // What the game's own table said of this species going bald, and every species it kept from it: no hair is offered all the same.
+      gameBald: hairNone(table?.species[c.manifest.id], grid.styles > 0).game,
+      keptFromBald: keptFromBald(table),
+      styles: grid.styles,
+      groups: grid.groups.map((g) => ({ id: g.id, label: g.label, cells: g.cells.length, pictures: g.cells.filter((x) => x.picture === 'icon').length, worn: g.cells.find((x) => x.on)?.label ?? null })),
+      startsIn: defaultHair(table, items, c.speciesName, c.genderName),
+      remembered,
+      last: this.hairChange,
+    };
+  }
+
+  /**
+   * The console's `hair(id)`: a style put on (null for none) through the prepared path, and the programs
+   * built for the character's materials on the two frames after the swap (`compiledOnSwap`, which must be 0:
+   * every program is built before the style shows). Not saved, as the console's `wear` is not: a pick on the
+   * appearance page is what writes the record.
+   */
+  private async debugHair(id: string | null): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c) return { error: 'no parts character' };
+    const said = await this.wearHairPrepared(id);
+    const { made, frames } = await this.programsMadeFor(c.group);
+    if (this.appearanceUi.open) this.appearanceUi.refresh();
+    return { said, compiledOnSwap: made, frames, inWorld: this.inWorld, ...(await this.hairReport()) };
+  }
+
+  /** Every program three holds now: the baseline `programsMadeFor` counts against. */
+  private programsNow(): Set<unknown> {
+    return new Set<unknown>(this.renderer.info.programs ?? []);
+  }
+
+  /**
+   * How many programs three built for the materials under `root` since `known` was taken (`programsNow`), counted
+   * after two more frames: what `hair(id)` and `dye(...)` report as `compiledOnSwap`. Left out, the baseline is
+   * taken now, which is right only where the swap was one synchronous step just before (a hairstyle's). A change
+   * that lands over several tasks (a colour, a render at a time from the worker, frames drawn between them) takes
+   * its baseline before the first of them, or a program built on a frame between two landings is in the baseline
+   * and never counted.
+   */
+  private async programsMadeFor(root: THREE.Object3D, known: Set<unknown> = this.programsNow()): Promise<{ made: number; frames: number }> {
+    const r = this.renderer;
+    const frames = await this.waitFrames(2);
+    const mats = new Set<THREE.Material>();
+    root.traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (m) for (const x of Array.isArray(m) ? m : [m]) mats.add(x);
+    });
+    const made = new Set<unknown>();
+    for (const m of mats) {
+      if (!r.properties.has(m)) continue;
+      const programs = (r.properties.get(m) as { programs?: Map<string, unknown> }).programs;
+      for (const p of programs?.values() ?? []) if (!known.has(p)) made.add(p);
+    }
+    return { made: made.size, frames };
+  }
+
+  /**
+   * Every worn piece's colours as the appearance page groups them (`itemSections`): one section a piece,
+   * named by the game, a row a bare variable with every mesh's key it writes, the palette, the value and the
+   * colour it shows. The page's own picker comes from the same rows.
+   */
+  private async dyeSections(c: Character): Promise<ReturnType<typeof itemSections>['sections']> {
+    const cz = c.customizer;
+    if (!cz) return [];
+    const items = await c
+      .catalogue(import.meta.env.BASE_URL)
+      .then((w) => w.items)
+      .catch(() => [] as { id: string; name?: string | null; parts: { name: string }[] }[]);
+    const { rows } = packColours({ live: cz.variables(), manifest: [], worn: c.wornMeshes(), isLinked: (k) => cz.isLinked(k), morphs: [], only: (v) => v.private });
+    const hairs = new Set(c.hairsWorn());
+    const parts = c.status().map((p) => ({ ...p, hair: hairs.has(p.name) }));
+    return itemSections(rows, parts, (key) => catalogueName(items, key)).sections.filter((s) => !s.body);
+  }
+
+  /** What the console's `dye()` shows: every worn piece's rows, the renders in flight, the worker, the last render and the per-mesh textures. */
+  private async dyeReport(): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c) return { error: 'no parts character' };
+    const cz = c.customizer;
+    const values = c.variableValues();
+    const sections = await this.dyeSections(c);
+    const stats = cz?.stats() ?? null;
+    const worker = characterRender.status();
+    return {
+      items: sections.map((s) => ({
+        item: s.item,
+        name: s.label,
+        hair: s.hair,
+        rows: s.rows.map((r) => {
+          const value = values[r.key] ?? r.default;
+          const rgb = r.kind === 'palette' ? valueRgb(value, r.colors) : null;
+          return { variable: bareName(r.name), palette: r.palette ?? null, value, shows: r.kind === 'palette' ? countText(value, r.colors) : `${value + 1}/${r.count ?? 1}`, hex: rgb && (r.palette !== DYE_PALETTE || isRawColour(value)) ? hexOf(rgb) : null, raw: isRawColour(value), keys: r.keys };
+        }),
+      })),
+      inFlight: worker.inFlight + (stats?.queued ?? 0) + (stats?.running ? 1 : 0),
+      worker,
+      lastMs: stats?.lastMs ?? null,
+      perMeshTextures: stats?.perMesh ?? 0,
+      textures: stats?.textures ?? 0,
+      staleDropped: stats?.staleDropped ?? 0,
+      picker: this.appearanceUi.pickerState(),
+      tune: { ...DYE_TUNE, openOn: { ...DYE_TUNE.openOn } },
+    };
+  }
+
+  /**
+   * The console's `dye(item, variable, value)`: a worn piece's colour (every one of its meshes' keys for that
+   * bare variable) set to a colour carried whole (`'#rrggbb'`), an index of its own palette, or `'default'`,
+   * saved as a pick on the page is, then the colour waited for and the programs built for the character from the
+   * moment it was set until two frames after the last render landed (`compiledOnSwap`, which must be 0: a colour
+   * is a texture, never a program).
+   */
+  private async debugDye(item: string, variable: string, value: string | number): Promise<Record<string, unknown>> {
+    const c = this.player.rig?.character;
+    if (!c?.customizer) return { error: 'no live recipes on this character' };
+    const sections = await this.dyeSections(c);
+    const s = sections.find((x) => x.item === item) ?? sections.find((x) => x.label === item);
+    if (!s) return { error: `${item} is not worn, or takes no colour of its own`, worn: sections.map((x) => x.item) };
+    const bare = bareName(variable);
+    const r = s.rows.find((x) => bareName(x.name) === bare);
+    if (!r) return { error: `${item} has no ${bare}`, variables: s.rows.map((x) => bareName(x.name)) };
+    let v: number | null;
+    if (value === 'default') v = r.default;
+    else if (typeof value === 'number') v = Number.isInteger(value) && value >= 0 ? value : null;
+    else v = rawFromHex(value);
+    if (v === null) return { error: `a value is '#rrggbb', an index of its own palette from 0, or 'default': not ${String(value)}` };
+    if (r.kind !== 'palette' && isRawColour(v)) return { error: `${bare} is a choice among textures, which takes an index, never a colour` };
+    // The baseline before the first key moves: the renders land one at a time, with frames drawn between them.
+    const known = this.programsNow();
+    const t0 = performance.now();
+    let rendering = 0;
+    // A garment's colour is its worn copy's own, so it is written through the thing (`setTint`), which
+    // draws it, saves it and tells the server, exactly as a pick on the page does; a hairstyle's, anything
+    // in the creator and a record whose colours are still in its look stay on the meshes.
+    const id = !s.hair && this.current?.tints === 1 && !this.creating ? this.equipment.itemIdOf(s.item) : null;
+    const thing = id ? this.equipment.thingInUse('wear', id) : null;
+    // `'default'` is the piece's own colour back, each mesh at its own default (the meshes of one piece may
+    // rest at different ones); a value is the thing's own unless it is every mesh's default (`pickedTint`).
+    const rest = new Map(c.customizer.variables().map((x) => [x.key, x.default]));
+    if (thing) {
+      const said = this.equipment.setTint(thing, { [bare]: value === 'default' ? null : pickedTint(v, r.keys.map((k) => rest.get(k) ?? r.default)) });
+      if (said) return { error: said };
+      const shown = this.equipment.lastColouring;
+      rendering = shown?.thing === thing ? shown.moved : 0;
+      this.saveAppearance();
+    } else {
+      for (const k of r.keys) rendering += c.setVariable(k, value === 'default' ? (rest.get(k) ?? v) : v);
+      this.saveAppearance();
+    }
+    await c.customizer.settled();
+    const ms = performance.now() - t0;
+    const { made, frames } = await this.programsMadeFor(c.group, known);
+    if (this.appearanceUi.open) this.appearanceUi.refresh();
+    const rgb = r.kind === 'palette' ? valueRgb(v, r.colors) : null;
+    return { item: s.item, name: s.label, variable: bare, value: v, hex: rgb ? hexOf(rgb) : null, keys: r.keys, thing, rendering, settledMs: Number(ms.toFixed(1)), compiledOnSwap: made, frames, worker: characterRender.status() };
   }
 
   /**
@@ -10138,7 +10626,15 @@ class App {
     // The ship this player flies (or last flew or stood out), with its components, droid and paint.
     const ship = this.helloShip();
     if (ship) this.helloShipId = ship.id;
-    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c ? packLook(c.appearance, c.outfit ?? []) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
+    // Only the colours on show go out: every shared one, and a mesh's own while that mesh is worn. The
+    // record keeps the rest, and the wire holds only so many numbers (`lookKeep`). They are read off the
+    // live character rather than the record, because a garment's colours are its thing's now and the
+    // record's look no longer holds them: what the body is drawn in already carries every thing's colour,
+    // so the others need no new field to see it.
+    const rig = this.player.rig?.character;
+    const keep = rig ? lookKeep(rig.wornMeshes()) : undefined;
+    const drawn = c && rig ? { ...c.appearance, values: rig.variableValues() } : c?.appearance;
+    const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c && drawn ? packLook(drawn, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
     this.net.session.noteCharacter(this.storyMarked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
@@ -11645,11 +12141,14 @@ class App {
 
   /**
    * Compile something of the player's (or a peer's) before it is shown: the world's actor preparation,
-   * then the motion blur's. Outside the world nothing is drawn by the main renderer, and arriving
-   * compiles the whole scene behind the loading screen, so there is nothing to do.
+   * then the motion blur's. In play, and in the creator while it stands the figure in one of the captured
+   * places: that is a world loaded and drawn by the main renderer every frame (`stepScene`), so a style or
+   * a garment put on there would otherwise build its program on the frame it first shows. Anywhere else
+   * nothing is drawn by the main renderer (the creator's dark stage is the doll's own context), and both
+   * arriving and a place being stood compile the whole scene before it is shown, so there is nothing to do.
    */
   private async prepareRoot(root: THREE.Object3D): Promise<void> {
-    if (!this.inWorld) return;
+    if (!this.inWorld && !this.scene3d) return;
     await this.world.prepareActor(root);
     await this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]);
   }
@@ -11678,25 +12177,34 @@ class App {
     return null;
   }
 
-  /** The backpack's double-click (or Enter, or the console): on or off, in hand or put away; a weapon may switch the kit. */
-  private async useItem(key: string, hand?: 'left'): Promise<string> {
+  /**
+   * A backpack cell's key read back as an item: an owned thing's own name, which says which copy, or
+   * -- for something worn or held that is not owned, which has no name -- `wear:` or `weapon:` and its id.
+   */
+  private itemOfKey(key: string): { kind: 'wear' | 'weapon'; id: string; thing?: string } | null {
+    const owned = this.equipment.itemOf(key);
+    if (owned) return { kind: owned.kind, id: owned.id, thing: owned.thing };
     const i = key.indexOf(':');
     const kind = key.slice(0, i);
-    const id = key.slice(i + 1);
-    if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
-    const r = await this.equipment.use(kind, id, hand);
+    if (kind !== 'wear' && kind !== 'weapon') return null;
+    return { kind, id: key.slice(i + 1) };
+  }
+
+  /** The backpack's double-click (or Enter, or the console): on or off, in hand or put away; a weapon may switch the kit. */
+  private async useItem(key: string, hand?: 'left'): Promise<string> {
+    const it = this.itemOfKey(key);
+    if (!it) return `no item ${key}`;
+    const r = await this.equipment.use(it.kind, it.id, hand, it.thing);
     if (r.wants && r.wants !== this.kit.id && this.inWorld) this.setClass(r.wants);
     if (r.note !== 'dropped') this.messages.note(r.note);
     return r.note;
   }
 
-  /** Destroy an owned item for good. */
+  /** Destroy an owned item for good: the one thing the cell was, and no other copy of it. */
   private async destroyItem(key: string): Promise<string> {
-    const i = key.indexOf(':');
-    const kind = key.slice(0, i);
-    const id = key.slice(i + 1);
-    if (kind !== 'wear' && kind !== 'weapon') return `no item ${key}`;
-    const note = await this.equipment.destroy(kind, id);
+    const it = this.itemOfKey(key);
+    if (!it) return `no item ${key}`;
+    const note = await this.equipment.destroy(it.kind, it.id, it.thing);
     if (note !== 'dropped') this.messages.note(note);
     return note;
   }
@@ -11718,9 +12226,22 @@ class App {
     const busy = new Set(snap.busy);
     const newest = snap.owned.reduce((m, o) => Math.max(m, o.got), 0);
     const character = this.player.rig?.character ?? null;
-    const cell = (kind: 'wear' | 'weapon', id: string, got: number): BackpackCell => {
+    // A cell is one thing, keyed by its own name, so two of one shirt are two cells and only the copy
+    // on the body reads as worn; something worn or held that is not owned has no name and is keyed by
+    // what it is.
+    const cell = (kind: 'wear' | 'weapon', id: string, got: number, thing?: string, tint?: Record<string, number>): BackpackCell => {
       const info = itemInfo(kind, id, ctx);
-      const where: BackpackCell['where'] = kind === 'weapon' ? (snap.held.right === id ? 'right' : snap.held.left === id ? 'left' : 'pack') : id in snap.worn ? 'worn' : 'pack';
+      const mine = (on: string | null | undefined) => !thing || on === thing;
+      const where: BackpackCell['where'] =
+        kind === 'weapon'
+          ? snap.held.right === id && mine(snap.heldThing.right)
+            ? 'right'
+            : snap.held.left === id && mine(snap.heldThing.left)
+              ? 'left'
+              : 'pack'
+          : id in snap.worn && mine(snap.wornThing[id])
+            ? 'worn'
+            : 'pack';
       const first = info.slots?.[0];
       const slotsText = kind === 'weapon' ? (first ? slotWords(first) : '') : info.slots?.length ? `takes: ${info.slots.map((a) => slotWords(a)).join(' or ')}` : '';
       const classRank = info.cls ? WEAPON_ORDER.indexOf(info.cls) : WEAPON_ORDER.length;
@@ -11735,7 +12256,7 @@ class App {
             ? `worn unseen on ${speciesWords(ctx.species, false)}`
             : undefined;
       return {
-        key: info.key,
+        key: thing || info.key,
         kind,
         id,
         name: info.name,
@@ -11752,9 +12273,15 @@ class App {
         canLeft: kind === 'weapon' && !!info.cls && OFF_HAND_CLASSES.has(info.cls),
         order,
         fitNote,
+        // The thing's own colour in the corner, so two of one shirt in two colours are told apart at a glance.
+        swatch: itemSwatch(kind, id, tint, ctx),
       };
     };
-    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got));
+    // A hairstyle is the appearance page's and never an item, but a Sullustan played before that was so
+    // still owns the style it wore (`sul_hair_*`, which a hair test spelt `^hair_` took for a garment). The
+    // row is kept, since nothing an owned list holds is ever lost, and not shown: here it would read as a
+    // style in the backpack that could be put on beside the one worn.
+    const cells = snap.owned.map((o) => cell(o.kind, o.id, o.got, o.thing, o.tint)).filter((c) => !(c.kind === 'wear' && c.kindText === 'Hair'));
     // Anything worn or held that is not owned (it should not happen once a record is played) is shown all the same, so the panel matches the body.
     for (const id of Object.keys(snap.worn)) if (!cells.some((c) => c.kind === 'wear' && c.id === id)) cells.push(cell('wear', id, 0));
     for (const id of [snap.held.right, snap.held.left]) if (id && !cells.some((c) => c.kind === 'weapon' && c.id === id)) cells.push(cell('weapon', id, 0));
@@ -11913,10 +12440,14 @@ class App {
     if (!character || character.manifest.id !== id) return `no parts pack for ${id}: run the converter's species command`;
     if (this.creating) {
       // A fresh start for the species, with the look last tuned for it in this browser when there is one.
-      this.applyAppearance(character, this.legacyAppearance(id));
+      const legacy = this.legacyAppearance(id);
+      putBackLook(character, legacy);
+      this.applyAppearance(character, legacy);
+      // A species that may not go bald starts in the game's first style.
+      void this.wearDefaultHair(character);
     } else if (this.current) {
       this.current.species = id;
-      this.current.appearance = this.appearanceOf(character);
+      this.current.appearance = this.appearanceOf(character, this.current.tints !== 1);
       this.current.outfit = this.outfitOf(character);
       upsertCharacter(this.current);
     }
@@ -11944,6 +12475,8 @@ class App {
     this.select.hide();
     this.creating = true;
     this.current = null;
+    // Nobody's hairstyle still loading lands on the new character, whose rig may be the same one.
+    this.dropHairChanges();
     this.wardrobe.root.classList.add('creation');
     this.appearanceUi.root.classList.add('creation');
     this.creatorBar.show();
@@ -11952,7 +12485,16 @@ class App {
     // Whoever was played last leaves their weapons behind, even when the species is the same.
     this.equipment.reset();
     if (!this.creating) return;
-    if (character) this.applyAppearance(character, this.legacyAppearance(species));
+    if (character) {
+      // The rig is the last figure's when the species is the same, colours and all: those go back to the
+      // pack's own first, or the new character's first record carries the last one's skin, its garments'
+      // colours and its remembered hair colour.
+      const legacy = this.legacyAppearance(species);
+      putBackLook(character, legacy);
+      this.applyAppearance(character, legacy);
+      // The species the creator opens on goes through no species pick, and starts as one picked would.
+      void this.wearDefaultHair(character);
+    }
     this.showCreatorTab('appearance');
     // A place to stand in, if this install has any built. It is asked for after the panels are up
     // so the creator is usable the whole time the world is loading, and it answers false on a fresh
@@ -12037,6 +12579,8 @@ class App {
 
   private leaveCreator(): void {
     this.creating = false;
+    // A style still loading (the default one, or a cell clicked) is the unmade character's: it goes with the creator.
+    this.dropHairChanges();
     this.closePanels();
     this.creatorBar.hide();
     this.enterPlaceLayout(false);
@@ -12056,19 +12600,31 @@ class App {
     const kit = await this.equipment.kit(cls);
     const outfit = c ? this.outfitOf(c) : [];
     const worn = outfit.map((part) => this.equipment.itemIdOf(part)).filter((id): id is string => !!id).map((id) => ({ id, kind: 'wear' as const, got: Date.now() }));
+    // One of each: what the creator dressed the character in and the kit overlap (a kit shirt worn
+    // in the creator), and a new character owns that shirt once, not twice.
+    const items = normalizeOwned(firstItems([...worn, ...kit.items]));
+    // The colours the creator gave what it dressed the character in become those things' own, as a
+    // colour picked in play is: the look keeps the body's and the hair's. A garment's copy of a body
+    // colour (a Wookiee's shirt follows the fur) is the body's, and goes on no thing.
+    if (c) {
+      const cz = c.customizer;
+      outfitTints(items, outfit, c.variableValues(), (part) => this.equipment.itemIdOf(part), (part) => c.meshesOf(part), Math.round(sharedClock.now()), cz ? (key) => cz.isLinked(key) : undefined);
+    }
     const record: SavedCharacter = {
       id: newCharacterId(),
       name,
       species: this.characterId,
       class: cls,
-      appearance: c ? this.appearanceOf(c) : { morphs: {}, values: {}, height: 0.5 },
+      appearance: c ? this.appearanceOf(c, false) : { morphs: {}, values: {}, height: 0.5 },
       outfit,
       planet,
       created: Date.now(),
       played: 0,
-      items: normalizeOwned([...worn, ...kit.items]),
+      items,
       held: kit.held,
       inv: 1,
+      named: 1,
+      tints: 1,
     };
     if (!upsertCharacter(record)) {
       this.creatorBar.note('No room for another character: delete one first.');
@@ -12083,6 +12639,8 @@ class App {
   private async play(c: SavedCharacter): Promise<void> {
     this.select.hide();
     this.current = c;
+    // A hairstyle still loading for whoever stood here before is not this character's.
+    this.dropHairChanges();
     // Its story book, from this browser's storage, before anything notes the character: the counter the
     // claim carries reads how many changes the book holds that no server has seen.
     this.story.use(c.id);
@@ -12094,12 +12652,17 @@ class App {
     this.loadingScreen.show(planet, planet.name, `${c.name} is on the way`);
     const character = await this.useSpecies(c.species);
     if (character) {
-      this.applyAppearance(character, c.appearance);
+      // The look and the colours of the things worn, rendered behind the loading screen with the rest.
+      this.applyAppearance(character, await this.recordLook(c, character));
       await this.dress(character, c.outfit ?? []);
     }
     // What the character owns (a record from before the backpack is given what it wears and the kit),
     // with the hands emptied of whoever was played before; outside the `if`, so a single model gets its weapons too.
     await this.equipment.load(c);
+    // The body drawn in its things' own colours once the record has been read: what its look was dressed
+    // in agrees with them already, so this moves nothing, unless that look still held a colour the things
+    // do not (a record moved onto its things just now, behind this same loading screen).
+    this.equipment.colourWorn();
     // The character's Force powers and gadgets in the slots (the defaults for a character from before there was a choice).
     this.jediKit().setLoadout(c.powers?.length ? c.powers.map((p) => p || null) : [...DEFAULT_LOADOUT]);
     this.hunterKit().setLoadout(c.gadgets?.length ? c.gadgets.map((p) => p || null) : [...DEFAULT_GADGETS]);
@@ -18143,6 +18706,24 @@ class App {
     return g?.resolve(def, this.savedFit(def.id)) ?? null;
   }
 
+  /**
+   * What a ship's colour picker offers beyond the hull's own palette, as the appearance page's picker offers
+   * it: the garment palettes of the wardrobe the player's character dresses from (the human male's when no
+   * character is played) and the creator's table. Both are the parses the appearance page already shares.
+   */
+  private async pickerPalettes(): Promise<{ wardrobe: Record<string, number[][]> | null; table: CreatorTable | null }> {
+    const base = import.meta.env.BASE_URL;
+    const c = this.player.rig?.character ?? null;
+    const dir = c
+      ? await c
+          .catalogue(base)
+          .then(() => c.wardrobeDir)
+          .catch(() => null)
+      : null;
+    const [file, table] = await Promise.all([loadCustomizeFile(dir ?? `${base}assets-private/wardrobe/human_male/`), loadCreatorTable(base)]);
+    return { wardrobe: (file?.palettes as Record<string, number[][]> | undefined) ?? null, table: table ?? null };
+  }
+
   /** The garage's edit button: the page, over the world, with the mouse free. */
   private openShipEdit(def: VehicleDef): void {
     this.closePanels();
@@ -18199,13 +18780,41 @@ class App {
     return run;
   }
 
-  /** The ship this player is known by on the relay: the one ridden, flown or aboard, else the last fitted one stood out or flown, with its fit. */
-  private helloShip(): { id: string; fit: ShipFit } | undefined {
+  /** The ship this player is known by on the relay: the one ridden, flown or aboard (a painted speeder ridden among them), else the last fitted one stood out or flown. */
+  private helloShipDef(): VehicleDef | null {
     const p = this.player;
     const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-    const def = v?.def?.fit ? v.def : this.lastShipDef?.fit ? this.lastShipDef : null;
+    return v?.def?.fit ? v.def : this.lastShipDef?.fit ? this.lastShipDef : null;
+  }
+
+  /**
+   * That ship with its fit as a hello carries it (`fitForWire`): its colours carried whole beside its paint, and
+   * in the paint the nearest colours of the hull's own palette, so a relay or a browser built before shows the
+   * nearest colour rather than the palette's first, and a server whose hail says `paint: 2` passes the colours on.
+   */
+  private helloShip(): { id: string; fit: WireFit } | undefined {
+    const def = this.helloShipDef();
     if (!def) return undefined;
-    return { id: def.id, fit: packFit(this.savedFit(def.id) ?? stockFit()) };
+    const kept = packFit(this.savedFit(def.id) ?? stockFit());
+    const palettes = customizeFileNow(`${import.meta.env.BASE_URL}${def.paintDir ?? 'assets-private/ships/'}`)?.palettes as Record<string, number[][]> | undefined;
+    const { fit, nearer } = fitForWire(kept, def.fit?.paint, palettes);
+    if (nearer.length) this.sayPaintNearer(def);
+    return { id: def.id, fit };
+  }
+
+  /**
+   * Tell the player, once, that the server they are on drops a ship's colours carried whole, so the others see
+   * the nearest colours of the hull's own palette. Said only once a server has answered (or the relay that came
+   * before has been found), since before then nothing has said what it passes on, and only while the ship the
+   * hello names wears such a colour.
+   */
+  private sayPaintNearer(def: VehicleDef | null): void {
+    if (!def || this.saidPaintNearer || !this.net.online) return;
+    const s = this.net.session;
+    if (!(s.authority === 'server' || s.mode === 'relay') || s.paintVersion >= PAINT_CARRIED_WHOLE) return;
+    if (!Object.entries(this.savedFit(def.id)?.paint ?? {}).some(([k, x]) => isColourKey(k) && isRawColour(x))) return;
+    this.saidPaintNearer = true;
+    this.messages.system(`this server keeps a ship's colours to the game's own palettes, so the others see your ${def.label} in the nearest of them: restart it (npm run relay) to carry every colour`);
   }
 
   /** The ship ridden, flown or boarded, else the nearest ship spawned, for the console. */
@@ -18303,16 +18912,27 @@ class App {
     return { ...out, fitted: slot === 'droid' ? next.droid : (next.components[slot] ?? null), notes: next.notes };
   }
 
-  /** The console's repaint: paint values kept with the character (a repaint in place), or each shader's own texture ('static') and back ('custom'). */
-  private async debugPaint(values: Record<string, number> | 'static' | 'custom'): Promise<unknown> {
-    const v = this.nearShip();
+  /**
+   * The console's repaint: paint values kept with the character (a repaint in place), or each shader's own texture
+   * ('static') and back ('custom'). A value may be `'#rrggbb'`, a colour carried whole, which only a colour takes:
+   * on a pattern it is refused. The vehicle is the painted speeder ridden, else the ship `nearShip` finds.
+   */
+  private async debugPaint(values: Record<string, number | string> | 'static' | 'custom'): Promise<unknown> {
+    const ridden = this.player.mounted;
+    const v = ridden?.def?.fit?.paint && !ridden.spec.ship ? ridden : this.nearShip();
     const def = v?.def;
     if (!v || !def?.fit || !v.fit) return v ? `${v.spec.id} has no fit (a pack converted before ship customization)` : "no ship: spawn one (spawn('xwing')) or board one";
     if (!v.paint || !def.fit.paint) return `${def.id}'s paint is fixed in the game: its shaders take no colours`;
     const paint = v.paint;
     if (values === 'static' || values === 'custom') return this.queueRefit(v, () => this.measureSwap(v, () => paint.showStatic(values === 'static')));
     const fit = copyShipFit(this.savedFit(def.id) ?? stockFit());
-    for (const [k, n] of Object.entries(values)) fit.paint[k] = n;
+    for (const [k, n] of Object.entries(values)) {
+      const value = typeof n === 'string' ? rawFromHex(n) : n;
+      if (value === null || !Number.isFinite(value)) return `${k}: ${String(n)} is neither an index nor a #rrggbb colour`;
+      const pv = def.fit.paint.variables.find((x) => x.name === k);
+      if (pv && pv.kind !== 'palette' && isRawColour(value)) return `${k} is a choice of pattern, which takes an index and never a colour`;
+      fit.paint[k] = value;
+    }
     this.saveFit(def.id, fit);
     this.flushFits();
     const next = this.fitFor(def);
