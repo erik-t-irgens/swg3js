@@ -361,6 +361,8 @@ import { vehicleSounds, type SoundVehicle, type VehicleTables, type VehicleTune 
 import { sabers } from './audio/saberSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
+import { COLOR_RAMP_FILE } from './world/swgTerrain.ts';
+import { TERRAIN_GROUND_TUNE } from './swg/terrain/generator.ts';
 import { RoomAir, type RoomAirDebugOptions, type RoomAirInput } from './world/roomAir';
 import { UnderwaterSpecksPass, type UnderwaterSpeckDebugOptions } from './world/underwaterSpecks.ts';
 import type { LavaHarmTune } from './world/lavaHarmMath.ts';
@@ -2869,6 +2871,10 @@ class App {
               seen.add(m);
               if (want && !m.name.toLowerCase().includes(want)) continue;
               const s = m as THREE.MeshStandardMaterial;
+              // What the converter read off the shader's own program and MATL (material format 6): the
+              // highlight the client drew -- its mode, colour and power -- where its mask comes from, and
+              // whether the shader has a reflection cube at all. A pack from before carries neither.
+              const spec = m.userData.swgSpec as { mode?: string; color?: number[]; power?: number; mask?: string; squared?: boolean } | undefined;
               rows.push({
                 where,
                 name: m.name || '(unnamed)',
@@ -2876,6 +2882,13 @@ class App {
                 roughness: s.isMeshStandardMaterial ? Number(s.roughness.toFixed(3)) : null,
                 metalnessMap: !!s.metalnessMap,
                 roughnessMap: !!s.roughnessMap,
+                normalMap: !!s.normalMap,
+                normalChannel: s.normalMap ? s.normalMap.channel : null,
+                mode: spec?.mode ?? null,
+                color: spec?.color ?? null,
+                power: spec?.power ?? null,
+                mask: spec ? `${spec.mask ?? '?'}${spec.squared ? ' squared' : ''}` : null,
+                cube: typeof m.userData.swgCube === 'boolean' ? m.userData.swgCube : null,
                 envMap: !!s.envMap,
                 envMapIntensity: s.isMeshStandardMaterial ? Number((s.envMapIntensity ?? 1).toFixed(3)) : null,
                 // What `isReflective` in envmap.ts asks, which is what decides whether it gets one.
@@ -4000,6 +4013,45 @@ class App {
        * this reads, and it is a uniform the material already holds, so nothing recompiles.
        */
       gloss: (x?: number) => this.world.setGroundGloss(x) ?? 'this world has no ground textures',
+      /**
+       * What the terrain generator lays on the ground: `ground()` says the rules in force (the 8 m
+       * pattern the families are laid on, how a pole's alternate is chosen, the colour affectors and
+       * how many of the ramps they name the pack carried); `ground({ at: true })` adds the pole under
+       * the player's feet, worked out afresh on this thread (two blocks, 15 to 40 ms; never in a frame):
+       * its family as laid on the pattern and as it was painted, its choice byte and the alternate
+       * that picks, its colour, and every colour affector that wrote there, in order, beside what the
+       * cached blocks the game reads hold there.
+       */
+      ground: (opts: { at?: boolean } = {}) => {
+        const swg = this.world.terrain.swg;
+        if (!swg) return 'this world has no converted terrain';
+        const gen = swg.template.generator;
+        const items = gen.summary();
+        const hex = (c: number | null) => (c === null ? null : `#${c.toString(16).padStart(6, '0')}`);
+        const operations = ['replace', 'add', 'subtract', 'multiply'];
+        const rules = {
+          pattern: gen.snapFamilies && gen.familyLattice > 0 ? `families laid on the ${gen.familyLattice} m pattern, ties to the corner above` : 'families left where they were painted',
+          alternates: `${TERRAIN_GROUND_TUNE.legacyChildren}: each pole's own choice, drawn from its place (the file says ${gen.legacy ? 'legacy' : 'not legacy'})`,
+          colourAffectors: { constant: items.ACCN ?? 0, fractalRamp: items.ACRF ?? 0, heightRamp: items.ACRH ?? 0 },
+          ramps: { named: swg.ramps.named.length, carried: swg.ramps.loaded, from: COLOR_RAMP_FILE, note: swg.ramps.loaded < swg.ramps.named.length ? 'a ramp the pack does not carry does nothing, as in the client; a pack the terrain command wrote before it wrote ramps (terrain shaders version 3 or older) carries none, and its colour map is the constants\' alone until that command runs again' : 'every ramp named is here' },
+        };
+        if (!opts.at) return rules;
+        const p = this.player.worldPos;
+        const probe = swg.probe(p.x, p.z);
+        const family = (id: number) => `${id} ${gen.shaderGroup.families.get(id)?.name ?? '(none)'}`;
+        return {
+          ...rules,
+          at: {
+            pole: [Number(swg.toGameX(probe.pole.x).toFixed(1)), Number(swg.toGameZ(probe.pole.z).toFixed(1))],
+            family: family(probe.family),
+            painted: family(probe.painted),
+            child: { choice: probe.choice, child: probe.child, of: gen.shaderGroup.families.get(probe.family)?.children.length ?? 0, shader: probe.childShader },
+            colour: hex(probe.color),
+            writes: probe.writes.map((w) => ({ affector: `${w.tag} ${w.name}`, operation: operations[w.operation] ?? `op ${w.operation}`, ramp: w.ramp, asked: hex(w.desired), amount: Number(w.amount.toFixed(3)), before: hex(w.before), after: hex(w.after) })),
+            cached: { family: this.world.terrain.familyAt(p.x, p.z), child: swg.childIfCached(p.x, p.z), colour: hex(swg.colorIfCached(p.x, p.z)) },
+          },
+        };
+      },
       /**
        * Where shiny surfaces and water get their reflection from: `reflections()` says, `reflections({
        * source: 'game' })` goes back to the planet's own cube maps out of the client's files (the old

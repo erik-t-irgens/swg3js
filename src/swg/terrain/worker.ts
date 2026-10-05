@@ -1,50 +1,14 @@
-// Web Worker: owns a TerrainSampler and generates pole grids off the main thread.
-// Messages in: { type: 'init', trn, layers: [{ bytes, x, z, yaw }] } | { type: 'generate', id, startX, startZ, n, step }
-// Messages out: { type: 'ready', info } | { type: 'grid', id, heights, shaders, excluded, floraCollidable, floraNonCollidable, environments, seasonal } | { type: 'error', message }
+// Web Worker: owns a TerrainSampler and generates pole grids off the main thread. What it does with
+// each message is `TerrainWorkerCore` (workerCore.ts), where the messages' shapes are written down;
+// this file only joins it to the worker's own port.
 
-import { attachBitmap, parseLayerFile, parseTerrainTemplate, TerrainSampler } from './trn.ts';
-
-interface InitMessage {
-  type: 'init';
-  trn: ArrayBuffer;
-  layers: { bytes: ArrayBuffer; x: number; z: number; yaw: number }[];
-  bitmaps: { familyId: number; bytes: ArrayBuffer }[];
-}
-
-interface GenerateMessage {
-  type: 'generate';
-  id: number;
-  startX: number;
-  startZ: number;
-  n: number;
-  step: number;
-}
+import { TerrainWorkerCore, type TerrainGenerateMessage, type TerrainInitMessage } from './workerCore.ts';
 
 const ctx = self as unknown as { postMessage(message: unknown, transfer?: Transferable[]): void; onmessage: ((e: MessageEvent) => void) | null };
 
-let sampler: TerrainSampler | null = null;
+const core = new TerrainWorkerCore();
 
-ctx.onmessage = (e: MessageEvent<InitMessage | GenerateMessage>) => {
-  const msg = e.data;
-  try {
-    if (msg.type === 'init') {
-      const template = parseTerrainTemplate(new Uint8Array(msg.trn));
-      for (const b of msg.bitmaps ?? []) attachBitmap(template, b.familyId, new Uint8Array(b.bytes));
-      sampler = new TerrainSampler(template);
-      let applied = 0;
-      for (const l of msg.layers) {
-        const layer = parseLayerFile(new Uint8Array(l.bytes), template.generator);
-        if (!layer) continue;
-        sampler.addBuildingLayer(layer, l.x, l.z, l.yaw);
-        applied++;
-      }
-      ctx.postMessage({ type: 'ready', info: { name: template.name, layers: applied, items: template.generator.summary() } });
-    } else if (msg.type === 'generate') {
-      if (!sampler) throw new Error('terrain worker: generate before init');
-      const g = sampler.generate(msg.startX, msg.startZ, msg.n, msg.step);
-      ctx.postMessage({ type: 'grid', id: msg.id, heights: g.heights, shaders: g.shaders, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, environments: g.environments, seasonal: g.seasonal }, [g.heights.buffer, g.shaders.buffer, g.excluded.buffer, g.floraCollidable.buffer, g.floraNonCollidable.buffer, g.environments.buffer, g.seasonal.buffer]);
-    }
-  } catch (err) {
-    ctx.postMessage({ type: 'error', message: err instanceof Error ? err.message : String(err) });
-  }
+ctx.onmessage = (e: MessageEvent<TerrainInitMessage | TerrainGenerateMessage>) => {
+  const reply = core.handle(e.data);
+  ctx.postMessage(reply.message, reply.transfer);
 };

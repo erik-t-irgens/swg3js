@@ -66,10 +66,26 @@ export function glbImages(tex) {
   if (!tex || tex.invisible) return null;
   return {
     base: tex.lit ?? tex.rgb ?? tex,
-    mr: tex.mr ? { path: `${tex.path}#mr`, png: tex.mr.png } : null,
+    // Named for the masks it was made from as well as the colour texture: two shaders on one colour
+    // texture whose programs read their shine from two places are two images, and one name for both
+    // would embed the first and hand it to the second.
+    mr: tex.mr ? { path: `${tex.path}#mr${tex.mr.key ? `:${tex.mr.key}` : ''}`, png: tex.mr.png } : null,
     emissive: tex.emissive ?? null,
     normal: tex.normal ? { path: tex.normal.path, png: tex.normal.png } : null,
   };
+}
+
+/**
+ * Whether a GLB's JSON says it was written at material format 6 or later: null when it has no textured
+ * material to say anything with, else whether any of them carries `extras.swgSpec`, which every textured
+ * material written since does (`none` included). This is how `status` tells an old `player`, `parts` or
+ * `species` conversion from a new one by a thing only the new one makes, as it already does for the saber
+ * clips and the aimed poses, rather than by a stamp alone: read from the JSON chunk, no image decoded.
+ */
+export function glbSpecStamped(json) {
+  const textured = (json?.materials ?? []).filter((m) => m?.pbrMetallicRoughness?.baseColorTexture);
+  if (!textured.length) return null;
+  return textured.some((m) => m.extras?.swgSpec && typeof m.extras.swgSpec.mode === 'string');
 }
 
 /**
@@ -110,6 +126,11 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
   const ownShaders = new Set();
   for (const mesh of meshes) for (const g of mesh.groups) ownShaders.add(g.shader);
   for (const mesh of lods) for (const g of mesh.groups) for (const p of g.primitives) if (p.uvs2 && !ownShaders.has(g.shader)) detailed.add(g.shader);
+  // What reads the second set: the detail map, and a normal map the shader's own TCSS puts on set 1
+  // (`surfaceTexture` marks it `set: 1`). The same rule as the detail map's: written only where some
+  // primitive of the shader carries the set, and a primitive with none takes the plain copy, which reads
+  // its normal map on the first set as every pack before this did.
+  const secondSet = (shader) => !!(textures.get(shader)?.detail || textures.get(shader)?.normal?.set === 1);
   // The lower levels' root nodes, for the `lods` scene.
   const lodRoots = [];
   const lodSet = new Set(lods);
@@ -192,8 +213,19 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         mat.pbrMetallicRoughness.baseColorTexture = { index: baseColor };
         if (tex.metallic !== undefined) mat.pbrMetallicRoughness.metallicFactor = tex.metallic;
         if (tex.roughness !== undefined) mat.pbrMetallicRoughness.roughnessFactor = tex.roughness;
+        // A shader with no reflection cube is no metal, whatever an older rule thought of its name.
+        if (tex.cube === false) mat.pbrMetallicRoughness.metallicFactor = 0;
         if (embedded.mr) mat.pbrMetallicRoughness.metallicRoughnessTexture = { index: imageFor(embedded.mr) };
-        if (embedded.normal) mat.normalTexture = { index: imageFor(embedded.normal) };
+        // On the second coordinate set where the shader reads it there and this primitive carries it
+        // (GLTFLoader makes that the texture's channel 1: a setting known at load, never on a live frame).
+        if (embedded.normal) mat.normalTexture = { index: imageFor(embedded.normal), ...(tex.normal.set === 1 && key === shader && detailed.has(shader) ? { texCoord: 1 } : {}) };
+        // The highlight the client drew and whether the shader reflects, read off its own program and MATL,
+        // for the runtime: under keys of their own and never under `swg`, since a transparent material with
+        // `userData.swg` is drawn after the water and the surfaces plugin walks every material of a model
+        // as soon as one carries `extras.swg`. Every textured material says it, `none` included, so `status`
+        // can tell a pack converted at format 6 from any one of its materials.
+        if (tex.spec) mat.extras = { ...(mat.extras ?? {}), swgSpec: { mode: tex.spec.mode, color: tex.spec.color.map(round4), power: round4(tex.spec.power), mask: tex.spec.mask, ...(tex.spec.squared ? { squared: true } : {}) } };
+        if (tex.cube !== undefined) mat.extras = { ...(mat.extras ?? {}), swgCube: !!tex.cube };
         // Unlit screens and additive glows: GLTFLoader makes them MeshBasicMaterial, and
         // `userData.unlit` keeps them out of the shadow cascades.
         if (tex.unlit) {
@@ -293,7 +325,7 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
         // and on the model's own meshes alike: a few dozen of the worlds' own models mix the two under
         // one shader, and those primitives sampled one texel of the detail map over their whole surface.
         const plain = !p.uvs2;
-        if (p.uvs2 && textures.get(g.shader)?.detail && detailed.has(g.shader)) attributes.TEXCOORD_1 = pushAccessor(p.uvs2, 'VEC2', 5126, 34962);
+        if (p.uvs2 && secondSet(g.shader) && detailed.has(g.shader)) attributes.TEXCOORD_1 = pushAccessor(p.uvs2, 'VEC2', 5126, 34962);
         if (p.colors) attributes.COLOR_0 = pushAccessor(p.colors, 'VEC4', 5121, 34962, { normalized: true });
         if (p.joints) attributes.JOINTS_0 = pushAccessor(p.joints, 'VEC4', 5123, 34962);
         if (p.weights) attributes.WEIGHTS_0 = pushAccessor(p.weights, 'VEC4', 5126, 34962);

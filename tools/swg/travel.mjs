@@ -79,6 +79,30 @@ export const TRAVEL_MODELS = [
 export const TRAVEL_OWN_MODELS = new Set(TRAVEL_MODELS.map(([id]) => id));
 
 /**
+ * Which of this command's own models one world's run converts, out of the world's layout entries and the
+ * models its rows name: every one the layout lacks, and, when the world's last travel file stood for models
+ * older than the current material format (`stale`, `materialStale` in surface.mjs), every one of its own the
+ * layout already has (an entry with no `source`), taken out so it is written afresh -- kept because its file
+ * is there, an old model would go on standing under a new stamp, and nothing would ever ask for it again.
+ * A world's own model of the same id (a snapshot's entry, which carries a `source`) is the snapshot's to redo.
+ *  -> { convert: [[id, appearance]], layout: the entries kept, in their order }
+ */
+export function travelModelsToConvert(layout, rowModels, stale) {
+  const convert = [];
+  let kept = layout ?? [];
+  for (const [id, appearance] of TRAVEL_MODELS) {
+    if (!rowModels.has(id)) continue;
+    const had = kept.find((d) => d.id === id);
+    if (had) {
+      if (!stale || had.source) continue;
+      kept = kept.filter((d) => d !== had);
+    }
+    convert.push([id, appearance]);
+  }
+  return { convert, layout: kept };
+}
+
+/**
  * Whether a pack's rows name a model that should be in its layout category and is not -- which is how
  * `status` tells a world that was converted again after these rows were written, since a snapshot
  * rewrites that category outright and silently takes them out.

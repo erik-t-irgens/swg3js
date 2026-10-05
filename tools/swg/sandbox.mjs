@@ -18,6 +18,7 @@
 // metres, so the game can grow it as the ship closes on it instead of hanging it on the sky. A
 // reader that does not know `place` still sees `direction` and `size` and draws it as a picture.
 import { SPACE_BODY_FRAME, SPACE_PACK_VERSION, seeded } from './space.mjs';
+import { MATERIAL_FORMAT } from './surface.mjs';
 
 /** The zone's id: a pack directory and a PLANETS entry, never a scene in the archives. */
 export const SANDBOX_ZONE = 'space_sandbox';
@@ -227,6 +228,8 @@ export function sandboxArrival(points) {
 export function sandboxPack({ planets, points, fields, hyperspace, skyZone, seed, tune = SANDBOX_TUNE }) {
   return {
     version: SPACE_PACK_VERSION,
+    // The asteroids' models are converted with it, and carried no material stamp before format 6.
+    materialFormat: MATERIAL_FORMAT,
     zone: SANDBOX_ZONE,
     planet: null,
     title: SANDBOX_TITLE,
@@ -250,6 +253,7 @@ export function sandboxPack({ planets, points, fields, hyperspace, skyZone, seed
 export function sandboxStatus(pack) {
   if (!pack || pack.zone !== SANDBOX_ZONE) return { line: `${SANDBOX_ZONE}: not converted (a made-up system to fly in)`, stale: true };
   if ((pack.version ?? 0) < SPACE_PACK_VERSION) return { line: `${SANDBOX_ZONE}: older than version ${SPACE_PACK_VERSION}`, stale: true };
+  if ((pack.materialFormat ?? 1) < MATERIAL_FORMAT) return { line: `${SANDBOX_ZONE}: its models were converted before the material format ${MATERIAL_FORMAT}`, stale: true };
   const worlds = (pack.planets ?? []).filter((p) => p.place === 'world').length;
   const edge = Math.round((pack.sandbox?.edge ?? SANDBOX_TUNE.edge) / 1000);
   return { line: `${SANDBOX_ZONE}: ${worlds} planets, ${(pack.fields ?? []).length} fields, ${(pack.hyperspace?.points ?? []).length} jump points, ${edge} km across (all invented)`, stale: false };

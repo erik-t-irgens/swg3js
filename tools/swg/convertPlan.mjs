@@ -103,7 +103,7 @@ export const STEP_FACTS = {
   // The planet figures were measured on tatooine, which is a middling planet; corellia and naboo
   // place more. `seconds` is that times the eighteen planets with something over for the bigger ones.
   snapshot: { order: 10, lock: 'pack', needs: [], seconds: 900, each: 33, bytes: 0.8 * GB, measured: 'tatooine: 34.8 s, 597 MB' },
-  terrain: { order: 11, lock: 'pack', needs: ['snapshot'], seconds: 30, each: 1, bytes: 0.5 * GB, measured: 'tatooine: 2.8 s, 330 MB' },
+  terrain: { order: 11, lock: 'pack', needs: ['snapshot'], seconds: 45, each: 2, bytes: 0.5 * GB, measured: 'tatooine: 3.6 s, 353 MB (the alternates, masks and colour ramps of all nineteen worlds alone: 29 s)' },
   sky: { order: 12, lock: 'pack', needs: ['snapshot'], seconds: 30, each: 1, bytes: 0.5 * GB, measured: 'tatooine: 2.4 s, 293 MB' },
   water: { order: 13, lock: 'pack', needs: ['snapshot'], seconds: 30, each: 1, bytes: 0.5 * GB, measured: 'tatooine: 2.4 s, 325 MB' },
   pois: { order: 14, lock: 'pack', needs: ['snapshot'], seconds: 30, each: 1, bytes: 0.5 * GB, measured: 'tatooine: 2.2 s, 308 MB' },

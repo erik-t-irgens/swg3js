@@ -38,6 +38,46 @@ export function spawnsStale(formats, manifestFormat) {
 }
 
 /**
+ * The nest models a run writes, one per template a spawn area can reach, through the converter's own calls
+ * handed in: `resolve(template)` -> `{ id, source }` (null, or a throw, where it will not convert), `exists(id)`
+ * (its file is on disk already) and `convert(id, source)` -> `{ bounds, triangles }` (a throw where it will not).
+ *
+ * A model whose file is already there is kept as it stands **only while the last run's manifest stood for
+ * models at the current material format** (`stale` false, `materialStale` in surface.mjs). Kept because its
+ * file was there, a run the stamp asked for would write the stamp over the very models it was asked to redo,
+ * and nothing would ever ask for them again. One file is converted once a run however many templates share it.
+ *  -> { nests: { [template]: { id, file, bounds?, triangles? } }, made, failed }
+ */
+export function nestModels(wanted, { resolve, exists, convert, stale }) {
+  const nests = {};
+  const byId = new Map();
+  let made = 0;
+  let failed = 0;
+  for (const template of wanted) {
+    if (nests[template]) continue;
+    try {
+      const r = resolve(template);
+      if (!r) {
+        failed++;
+        continue;
+      }
+      let entry = byId.get(r.id);
+      if (!entry) {
+        const file = `nests/${r.id}.glb`;
+        entry = !stale && exists(r.id) ? { id: r.id, file } : { id: r.id, file, ...convert(r.id, r.source) };
+        byId.set(r.id, entry);
+      }
+      // A copy each: a template's own effects are hung on its entry afterwards.
+      nests[template] = { ...entry };
+      made++;
+    } catch {
+      failed++;
+    }
+  }
+  return { nests, made, failed };
+}
+
+/**
  * Every room of a world's buildings by the id the server named it with: `{ cellIndex, q, pos }`,
  * the room's index in its building and the building's own world transform, from a snapshot with the
  * world's buildouts already merged into it (`mergeBuildouts`).

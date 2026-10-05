@@ -14,7 +14,7 @@ import { buildGlb } from '../glb.mjs';
 import { readFileSync } from 'node:fs';
 import {
   MATERIAL_FORMAT, alphaModeFor as surfaceAlphaModeFor, alphaAsGrey, combineMasks, describeLines, describeSurface, emissiveOf, fitRgba, isSplitAlpha, maskOf, passState, rgbOnly,
-  scrollSets, shaderPathOf, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture, timingOf,
+  roughnessOfMask, scrollSets, shaderPathOf, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture, timingOf,
 } from '../surface.mjs';
 
 let passed = 0;
@@ -488,7 +488,7 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   // The line grew the gloss counts when the converter started reading a shader's own specular map
   // instead of guessing from the diffuse alpha; these fixtures name none, so both are nought.
   ok(c.glossy === 0 && c.glossMaps === 0, 'and no gloss map, since none of these fixtures names one');
-  ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\), 0 with the shader's own gloss map \(0 maps\), 0 with a detail map \(0 maps, 0\.0 MB\), 0 reflective \(0 whose mirror mask is not the colour texture's alpha\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
+  ok(/^surfaces: 2 flip-books, 1 scrolling, 1 unlit, 1 additive, 2 glowing \(\d+\.\d MB of glow images\), 0 with the shader's own gloss map \(0 maps\), 0 with a detail map \(0 maps, 0\.0 MB\), 0 reflective \(0 whose mirror mask is not the colour texture's alpha\), 0 with a normal map on the second coordinate set, 0 reading a mask or a normal map on a set the models do not carry, \d+ whose program could not be read \(shine by the old rule\)$/.test(surfaceCountsLine(c)), 'and the snapshot line reads as designed');
   const line = surfaceLine(T('shader/whitewater.sht'), describeSurface(vfs, 'shader/whitewater.sht'));
   ok(line === 'translucent, alpha test 6/255, no depth write, no shadow; scrolls colour (-0.25,-0.6)/s, alpha (0.6,0)/s, split alpha', `the materials line for the whitewater (${line})`);
   ok(surfaceLine(T('shader/anim_screen.sht'), describeSurface(vfs, 'shader/anim_screen.sht')) === 'flip-book 4 frames, 0.1 s each; unlit', 'the materials line for an unlit flip-book');
@@ -499,8 +499,10 @@ const T = (shader: string, d: any = deps) => surfaceTexture(vfs, shader, d);
   // surface fields it was getting none of, and glass blends rather than being cut out. 4 is the
   // detail maps, with the second coordinate set the meshes have always carried. 5 is 4 mended: a 4
   // gave a roughness of nought to every shader with a specular texture of its own, so every pack
-  // written at 4 is a pack of mirrors and must be asked for again.
-  ok(MATERIAL_FORMAT === 5, 'the material format is 5');
+  // written at 4 is a pack of mirrors and must be asked for again. 6 decodes a normal map by its slot,
+  // reads the shine's mask off the program into the metal-rough image's red, and writes what highlight
+  // the client drew (`extras.swgSpec`) and whether the shader has a cube (`extras.swgCube`).
+  ok(MATERIAL_FORMAT === 6, 'the material format is 6');
   // eff.mjs imports surface.mjs; surface.mjs must not import eff.mjs back (a cycle breaks the first
   // time either module reads the other's binding while it evaluates).
   const surfaceSource = readFileSync(new URL('../surface.mjs', import.meta.url), 'utf8');
@@ -559,12 +561,22 @@ const modelOf = (shaders: string[]) => {
   const green = (img: { w: number; h: number; rgba: Uint8Array }, i = 0) => img.rgba[i * 4 + 1];
   const blue = (img: { w: number; h: number; rgba: Uint8Array }, i = 0) => img.rgba[i * 4 + 2];
 
+  const red = (img: { w: number; h: number; rgba: Uint8Array }, i = 0) => img.rgba[i * 4];
   const g = combineMasks({ gloss: flat(64, 32, 200) });
   ok(g.w === 64 && g.h === 32, 'the image is the size of the mask it was made from, not one pixel');
   ok(g.rgba.length === 64 * 32 * 4, 'and it has that many pixels in it');
+  // The three channels (material format 6): red the client's own mask as its program reads it, green the
+  // roughness worked out from that mask by this converter's own 0.85 slope (reflections and the rain's wet
+  // look read it), blue the mirror mask.
+  ok(red(g) === 200, "the client's specular mask goes into red as it stands");
   ok(green(g) === 255 - Math.round(200 * 0.85), 'a glossy mask writes a low roughness into green');
   ok(blue(g) === 0, 'and nothing into blue, since a shader with no reflection is not metal');
   ok([...g.rgba].every((v, i) => i % 4 !== 1 || v === green(g)), 'a flat mask gives one roughness over the whole image');
+  // A mask of one over the whole surface (an unmasked program, a full-white mask) with a mirror mask that
+  // varies: the mask is one byte everywhere and the roughness the slope gives it.
+  const lv = combineMasks({ level: 255, env: flat(8, 8, 90), reflective: true });
+  ok(red(lv) === 255 && green(lv) === 255 - Math.round(255 * 0.85) && blue(lv) === 90, 'a constant mask of one writes 255 in red and its roughness in green beside the mirror mask');
+  ok(Math.abs(roughnessOfMask(255) - (255 - 217) / 255) < 1e-9 && roughnessOfMask(0) === 1, 'and the flat roughness a constant mask gives is the same slope');
 
   // The failure that shipped: a reader whose size is read through a field it does not carry.
   const noSize = { width: 64, height: 32, read: () => 200 } as unknown as { w: number; h: number; read: () => number };
@@ -583,7 +595,7 @@ const modelOf = (shaders: string[]) => {
   ok(green(both) === 255 - Math.round(100 * 0.85) && blue(both) === 240, 'each channel still comes from its own mask');
 
   const envOnly = combineMasks({ env: flat(8, 8, 255), reflective: true });
-  ok(envOnly.w === 8 && green(envOnly) === 77 && blue(envOnly) === 255, 'a reflective shader with no gloss keeps the flat roughness it always had');
+  ok(envOnly.w === 8 && green(envOnly) === 77 && blue(envOnly) === 255 && red(envOnly) === 0, 'a reflective shader that draws no highlight keeps the flat roughness it always had, and a mask of nought');
   ok(combineMasks({ env: flat(8, 8, 0) }).rgba[1] === 115, 'and an unreflective one keeps its own');
 
   let empty = '';

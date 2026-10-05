@@ -2,12 +2,12 @@
 // reproduces the client's chunk layout: poles every half tile, chunks padded by two poles
 // on each side, and ground made of eight-triangle fans around each tile's centre pole.
 
-import { BoundaryPolygon, BoundaryRectangle, Layer, ShaderGroup, TerrainGenerator, createChunkData, parseHeightmapFile, remapShaderFamilies, type Bitmap, type ChunkData } from './generator.ts';
+import { BoundaryPolygon, BoundaryRectangle, Layer, ShaderGroup, TerrainGenerator, childIndexOf, colourAffectorInfo, createChunkData, parseHeightmapFile, rampKey, remapShaderFamilies, type Affector, type Bitmap, type ChunkData, type ColorRamp } from './generator.ts';
 import { PackedFixedPointMap, PackedIntegerMap } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, parseIff, parseIffRoots, type IffForm } from './iff.ts';
 import { shaderKey } from './shaderKey.ts';
 
-export { shaderKey };
+export { shaderKey, rampKey, type ColorRamp };
 
 export interface TerrainTemplate {
   name: string;
@@ -169,6 +169,9 @@ export function parseTerrainTemplate(bytes: Uint8Array): TerrainTemplate {
   if (!tgen) throw new Error('terrain: missing TGEN');
   const generator = new TerrainGenerator();
   generator.load(tgen);
+  // The engine lays families on every fourth pole from a chunk's corner: two tiles, 8 m on every world.
+  generator.familyLattice = 2 * t.tileWidthInMeters;
+  generator.legacy = flora.legacyMap;
   t.generator = generator;
   const pimp = formChild(v, 'PIMP');
   const pfpm = formChild(v, 'PFPM');
@@ -201,6 +204,92 @@ export function attachBitmap(template: TerrainTemplate, familyId: number, bytes:
   if (!image) return false;
   template.generator.bitmapGroup.setImage(familyId, image);
   return true;
+}
+
+/** Every colour ramp a template's colour affectors name, keyed (`colorramp/tatooine_dirt.tga`). */
+export function rampNames(template: TerrainTemplate): string[] {
+  return template.generator.rampNames();
+}
+
+/**
+ * Attach a colour ramp to its name, as `attachBitmap` attaches a bitmap: the affectors naming it
+ * read it from the next block generated. Returns false for a ramp with no pixels.
+ */
+export function attachRamp(template: TerrainTemplate, name: string, ramp: ColorRamp): boolean {
+  if (!(ramp.width > 0) || ramp.rgb.length < ramp.width * 3) return false;
+  template.generator.rampGroup.set(name, ramp);
+  return true;
+}
+
+/** A ramp from a decoded image: its first row, as the engine reads it, three bytes a pixel. */
+export function rampFromImage(width: number, rgba: Uint8Array, channels = 4): ColorRamp {
+  const rgb = new Uint8Array(width * 3);
+  for (let i = 0; i < width; i++) {
+    rgb[i * 3] = rgba[i * channels];
+    rgb[i * 3 + 1] = rgba[i * channels + 1];
+    rgb[i * 3 + 2] = rgba[i * channels + 2];
+  }
+  return { width, rgb };
+}
+
+/**
+ * How bright a world's colour map runs, which a tint normalised for brightness divides by: what the
+ * terrain command measured over the whole map with this generator (`colorReference` in
+ * `tools/swg/terrainShaders.mjs`), every `step` metres, counting only the places that are not black,
+ * since a world can paint everything outside its play squares black (Kashyyyk's Rryatt trail). The
+ * medians are of the bytes as they stand, in the client's own gamma space: the Rec. 709 luminance and
+ * each channel apart, each 0..1. Ours as a measure; the colours it measures are the client's.
+ */
+export interface ColorReference {
+  step: number;
+  /** How many places were sampled, and how many of them were not black (the only ones counted). */
+  points: number;
+  nonBlack: number;
+  luminance: number;
+  rgb: [number, number, number];
+}
+
+/**
+ * The pack's colour ramps (`terrain/colorramps.json`, the terrain command's to write): `ramps`, each
+ * keyed name to `{ width, rgb }` with `rgb` three numbers a pixel, and the world's `reference` when it
+ * was measured. Anything else in the file is left for its own reader. `colorRampFile` writes this
+ * shape and `readColorRampFile` and `readColorReference` read it back, so the converter and the game
+ * cannot drift apart; a pack without the file has no ramps, and a colour affector with no ramp does
+ * nothing, as in the client.
+ */
+export function colorRampFile(ramps: Map<string, ColorRamp>, reference?: ColorReference | null): { ramps: Record<string, { width: number; rgb: number[] }>; reference?: ColorReference | null } {
+  const out: Record<string, { width: number; rgb: number[] }> = {};
+  for (const key of [...ramps.keys()].sort()) {
+    const r = ramps.get(key)!;
+    out[rampKey(key)] = { width: r.width, rgb: [...r.rgb.subarray(0, r.width * 3)] };
+  }
+  return reference === undefined ? { ramps: out } : { ramps: out, reference };
+}
+
+/** The world's brightness reference out of the pack's colour ramp file; null for a file that has none, or one not of this shape. */
+export function readColorReference(json: unknown): ColorReference | null {
+  const r = (json as { reference?: unknown } | null)?.reference as Partial<ColorReference> | null | undefined;
+  if (!r || typeof r !== 'object') return null;
+  const unit = (v: unknown) => typeof v === 'number' && v >= 0 && v <= 1;
+  if (!unit(r.luminance) || !Array.isArray(r.rgb) || r.rgb.length !== 3 || !r.rgb.every(unit)) return null;
+  const step = Number(r.step);
+  const points = Number(r.points);
+  const nonBlack = Number(r.nonBlack);
+  if (!(step > 0) || !Number.isInteger(points) || !Number.isInteger(nonBlack) || nonBlack <= 0 || nonBlack > points) return null;
+  return { step, points, nonBlack, luminance: r.luminance as number, rgb: [r.rgb[0], r.rgb[1], r.rgb[2]] };
+}
+
+export function readColorRampFile(json: unknown): Map<string, ColorRamp> {
+  const out = new Map<string, ColorRamp>();
+  const ramps = (json as { ramps?: unknown } | null)?.ramps;
+  if (!ramps || typeof ramps !== 'object') return out;
+  for (const [key, raw] of Object.entries(ramps as Record<string, unknown>)) {
+    const r = raw as { width?: unknown; rgb?: unknown };
+    const width = Number(r?.width);
+    if (!Number.isInteger(width) || width <= 0 || !Array.isArray(r.rgb) || r.rgb.length < width * 3) continue;
+    out.set(rampKey(key), { width, rgb: Uint8Array.from(r.rgb.slice(0, width * 3) as number[]) });
+  }
+  return out;
 }
 
 /** A building's terrain-modification layer file (.lay): group forms followed by one LAYR root. */
@@ -239,6 +328,9 @@ export interface HeightGrid {
   step: number;
   heights: Float32Array;
   shaders: Int32Array;
+  /** Each pole's choice among its family's alternates (a byte) and the colour map, three bytes a pole. */
+  children: Uint8Array;
+  colors: Uint8Array;
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
@@ -247,11 +339,31 @@ export interface HeightGrid {
   seasonal: Uint8Array;
 }
 
+/** What `TerrainSampler.probe` says about one pole (SWG coordinates; colours packed 0xRRGGBB). */
+export interface GroundProbe {
+  pole: { x: number; z: number };
+  /** The family as laid on the 8 m pattern, and as it was painted before the pattern took it. */
+  family: number;
+  familyName: string | null;
+  painted: number;
+  /** The pole's choice byte, the child it picks and that child's shader. */
+  choice: number;
+  child: number;
+  childShader: string | null;
+  color: number;
+  /** Every colour a colour affector wrote at the pole, in the order they ran. */
+  writes: { tag: string; name: string; operation: number; ramp: string | null; desired: number; amount: number; before: number; after: number }[];
+}
+
 /** A cached block of poles: heights plus the per-pole maps flora placement reads. */
 export interface PoleBlock {
   heights: Float32Array;
-  /** Shader family id at each pole (0 = none), the ground texture the client paints there. */
+  /** Shader family id at each pole (0 = none), the ground texture the client paints there, laid on the 8 m pattern. */
   shaders: Int32Array;
+  /** Each pole's choice among its family's alternates, a byte (`childIndexOf` turns it into a child). */
+  children: Uint8Array;
+  /** The colour map the client tinted the ground with, three bytes a pole, white where nothing painted it. */
+  colors: Uint8Array;
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
@@ -294,9 +406,69 @@ export class TerrainSampler {
 
   /** Run the generator over an arbitrary pole grid (used for blocks and coarse far tiles). */
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
-    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup, this.generator.floraGroup, this.generator.environmentGroup);
+    const d = this.chunkData(startX, startZ, n, step);
     this.generator.generateChunk(d);
-    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, environments: d.environmentMap, seasonal: d.seasonalMap };
+    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, children: d.shaderChild, colors: d.colorMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, environments: d.environmentMap, seasonal: d.seasonalMap };
+  }
+
+  /** A grid's maps made ready for this terrain's generator (its groups and its ramps), for a caller that runs the generator itself. */
+  chunkData(startX: number, startZ: number, n: number, step: number): ChunkData {
+    const g = this.generator;
+    return createChunkData(startX, startZ, n, step, g.fractalGroup, g.shaderGroup, g.bitmapGroup, g.floraGroup, g.environmentGroup, g.rampGroup);
+  }
+
+  /**
+   * Everything the generator says about the pole a world point maps to, worked out afresh (the
+   * covering block generated again, on whatever thread asks, with nothing cached): its family as laid
+   * on the 8 m pattern and as painted, its child choice and the child that picks, its colour, and
+   * every colour a colour affector wrote there, in order. For the console.
+   */
+  probe(x: number, z: number): GroundProbe {
+    const bw = this.blockWidth;
+    const bx = Math.floor(x / bw);
+    const bz = Math.floor(z / bw);
+    const max = 2 * this.tilesPerBlock;
+    const px = ORIGIN_OFFSET + Math.min(max, Math.max(0, Math.floor((x - bx * bw) / this.poleStep)));
+    const pz = ORIGIN_OFFSET + Math.min(max, Math.max(0, Math.floor((z - bz * bw) / this.poleStep)));
+    const n = this.numberOfPoles;
+    const index = pz * n + px;
+    const s = this.blockStart(bx, bz);
+    const writes: GroundProbe['writes'] = [];
+    const d = this.chunkData(s.x, s.z, n, this.poleStep);
+    d.colorTrace = (by: Affector, i: number, desired: number, amount: number, before: number, after: number) => {
+      if (i !== index) return;
+      const what = colourAffectorInfo(by);
+      writes.push({ tag: by.tag, name: by.name, operation: what?.operation ?? 0, ramp: what?.ramp ?? null, desired, amount, before, after });
+    };
+    this.generator.generateChunk(d);
+    const painted = this.generator.snapFamilies ? this.paintedFamily(s.x, s.z, n, index) : d.shaderMap[index];
+    const family = d.shaderMap[index];
+    const choice = d.shaderChild[index];
+    const fam = this.generator.shaderGroup.families.get(family);
+    const k = index * 3;
+    return {
+      pole: { x: s.x + px * this.poleStep, z: s.z + pz * this.poleStep },
+      family,
+      familyName: fam?.name ?? null,
+      painted,
+      choice,
+      child: childIndexOf(fam, choice),
+      childShader: fam?.children[childIndexOf(fam, choice)]?.name ?? null,
+      color: (d.colorMap[k] << 16) | (d.colorMap[k + 1] << 8) | d.colorMap[k + 2],
+      writes,
+    };
+  }
+
+  /** The family a pole was painted with before the pattern took it: the block generated once more with the snap off. */
+  private paintedFamily(startX: number, startZ: number, n: number, index: number): number {
+    this.generator.snapFamilies = false;
+    try {
+      const d = this.chunkData(startX, startZ, n, this.poleStep);
+      this.generator.generateChunk(d);
+      return d.shaderMap[index];
+    } finally {
+      this.generator.snapFamilies = true;
+    }
   }
 
   /**
@@ -309,7 +481,7 @@ export class TerrainSampler {
     const n = 2 * half + 1;
     const startX = x - half * step;
     const startZ = z - half * step;
-    const d: ChunkData = createChunkData(startX, startZ, n, step, this.generator.fractalGroup, this.generator.shaderGroup, this.generator.bitmapGroup, this.generator.floraGroup);
+    const d = this.chunkData(startX, startZ, n, step);
     d.probeIndex = half * n + half;
     const lines: string[] = [];
     let last = 0;
@@ -341,7 +513,7 @@ export class TerrainSampler {
     if (!b) {
       const s = this.blockStart(blockX, blockZ);
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
-      b = { heights: g.heights, shaders: g.shaders, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, environments: g.environments, seasonal: g.seasonal };
+      b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, environments: g.environments, seasonal: g.seasonal };
       this.blocks.set(key, b);
     }
     return b;
@@ -361,10 +533,40 @@ export class TerrainSampler {
     const bx = Math.floor(x / bw);
     const bz = Math.floor(z / bw);
     const block = this.generateBlock(bx, bz);
+    return { block, index: this.indexInBlock(x, z, bx, bz) };
+  }
+
+  private indexInBlock(x: number, z: number, bx: number, bz: number): number {
+    const bw = this.blockWidth;
     const max = 2 * this.tilesPerBlock;
     const px = ORIGIN_OFFSET + Math.min(max, Math.max(0, Math.floor((x - bx * bw) / this.poleStep)));
     const pz = ORIGIN_OFFSET + Math.min(max, Math.max(0, Math.floor((z - bz * bw) / this.poleStep)));
-    return { block, index: pz * this.numberOfPoles + px };
+    return pz * this.numberOfPoles + px;
+  }
+
+  /** The cached block a world point lies in, and its pole there, or null when the block is not generated. Never generates. */
+  private cachedPole(x: number, z: number): { block: PoleBlock; index: number } | null {
+    const bw = this.blockWidth;
+    const bx = Math.floor(x / bw);
+    const bz = Math.floor(z / bw);
+    const block = this.blocks.get(`${bx},${bz}`);
+    return block ? { block, index: this.indexInBlock(x, z, bx, bz) } : null;
+  }
+
+  /** The child choice (a byte) at the pole a world point maps to, from a cached block only: null when it is not generated. */
+  childAt(x: number, z: number): number | null {
+    const p = this.cachedPole(x, z);
+    return p ? (p.block.children?.[p.index] ?? 0) : null;
+  }
+
+  /** The colour map at the pole a world point maps to, packed 0xRRGGBB, from a cached block only: null when it is not generated. */
+  colorAt(x: number, z: number): number | null {
+    const p = this.cachedPole(x, z);
+    const c = p?.block.colors;
+    if (!p) return null;
+    if (!c) return 0xffffff;
+    const k = p.index * 3;
+    return (c[k] << 16) | (c[k + 1] << 8) | c[k + 2];
   }
 
   /** Static flora family at a world point (0 = none) and its child choice in [0, 1]. */
