@@ -237,8 +237,10 @@ function writes(what: () => void): number {
 }
 
 const { Groups } = await import('../../../src/net/groups.ts');
-const { GroupUi, GROUP_UI_TUNE, tuneGroupUi } = await import('../../../src/ui/groupUi.ts');
+const { GroupUi, tuneGroupUi } = await import('../../../src/ui/groupUi.ts');
 const { ChatUi, CHAT_TUNE, tuneChat } = await import('../../../src/ui/chatUi.ts');
+const { tabKey } = await import('../../../src/ui/mapTabs.ts');
+const { readFileSync } = await import('node:fs');
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -281,8 +283,8 @@ const project = (x: number, y: number, z: number, out: { x: number; y: number })
   return true;
 };
 
-/** What the game was asked for: the keyboard standing aside, the mouse freed, the pointer asked back. */
-const asked = { typing: false, relocks: 0, freed: 0, held: 0 };
+/** What the game was asked for: the keyboard standing aside, the pointer asked back. */
+const asked = { typing: false, relocks: 0 };
 let canOpen = true;
 
 const parent = makeEl();
@@ -316,10 +318,6 @@ const panel = new GroupUi(parent as never, {
   },
   peersHere: () => 0,
   canOpen: () => canOpen,
-  freeMouse: (free) => {
-    if (free) asked.freed++;
-    else asked.held++;
-  },
 });
 
 // --- the chat line's bubbles ---------------------------------------------------------------------------
@@ -433,26 +431,35 @@ const panel = new GroupUi(parent as never, {
   pass(500, 2);
   pass(16);
   ok(panel.debug().chevrons === 0, 'and it goes when they are near enough to see');
-  // The group ending takes the panel and the chevrons with it.
+  // The group ending takes the chevrons with it. The roster is the map's Group tab, which the map shows
+  // or not, so it stays where it is and says there is nobody.
   groups.handle({ t: 'group', do: 'none', why: 'left' });
   pass(16);
-  ok(!panel.open && panel.debug().chevrons === 0, 'the group ending shuts the panel and takes the chevrons away');
+  ok(panel.open && panel.debug().chevrons === 0 && panel.debug().rows === 0, 'the group ending takes the chevrons away and leaves the tab saying there is nobody');
+  const ticksWas = panel.debug().ticks;
   const after = writes(() => pass(1000, 60));
   ok(after === 0, 'and with no group there is nothing to write at all');
+  ok(panel.debug().ticks === ticksWas, `nor any slow step to run: the roster showing is no reason of its own to keep one going (${panel.debug().ticks - ticksWas} ran)`);
+  panel.hide();
 }
 
 // --- the keys, and the rule the wave turns on: with no server they do nothing --------------------------------
+//
+// The roster is the map's Group tab, opened by the full stop, which is the game's own `group` binding and
+// goes through the map's one rule for a tab's key (`tabKey`, src/ui/mapTabs.ts): the page listens for no
+// key of its own. With no server holding a group the tab is not on offer and the key does nothing at all.
 
 {
   authority = 'me';
   groups.clear();
   const quiet = writes(() => {
-    press(GROUP_UI_TUNE.panelKey);
+    press('Period');
     press('Enter');
     pass(1000, 30);
   });
   ok(!groups.active, 'with no server the group is not active');
-  ok(!panel.open && !chat.open, 'and neither key opens anything at all: a game played alone is the game it was');
+  ok(tabKey(false, 'here', 'group', groups.active) === 'none', 'and the full stop does nothing at all: with no group held the map offers no Group tab');
+  ok(!panel.open && !chat.open, 'and neither key opens anything here: a game played alone is the game it was');
   ok(quiet === 0, `nothing is written to the page either (${quiet} writes)`);
   ok(groups.type('hello there') !== '', 'a line typed says plainly that nobody heard it');
   authority = 'server';
@@ -462,14 +469,25 @@ const panel = new GroupUi(parent as never, {
 
 {
   press('Enter', { tagName: 'INPUT' });
-  press(GROUP_UI_TUNE.panelKey, { tagName: 'INPUT' });
+  press('Period', { tagName: 'INPUT' });
   ok(!chat.open && !panel.open, 'a key pressed into a field somewhere else is never ours');
-  const freedWas = asked.freed;
-  const heldWas = asked.held;
-  press(GROUP_UI_TUNE.panelKey);
-  ok(panel.open && asked.freed === freedWas + 1, 'with a server the key opens the panel and asks for the mouse');
+  press('Period');
+  ok(!panel.open, 'the page listens for no key of its own: the full stop is the game\'s binding, read where the map is opened');
+  ok(tabKey(false, 'here', 'group', groups.active) === 'open', 'with a server holding a group the full stop opens the map on the Group tab');
+  ok(tabKey(true, 'here', 'group', groups.active) === 'switch' && tabKey(true, 'group', 'group', groups.active) === 'close', 'switches to it from another tab, and shuts the map pressed on its own tab');
+  // The map shows the tab through the page's own `shown`, which is all the game hands it (mapTabs.test.ts
+  // reads that, and drives the real window with the real roster).
+  panel.shown(true);
+  ok(panel.open, 'told by the map that its tab is showing, the roster comes up');
   press('Escape');
-  ok(!panel.open && asked.held === heldWas + 1, 'Escape shuts it and gives the mouse back, before the game can open its menu');
+  ok(panel.open, 'and takes no Escape: that is the map\'s, which shuts the window and the tab with it');
+  panel.shown(false);
+  ok(!panel.open, 'told that the tab has gone, it goes');
+  // Nothing about the roster can take the mouse or give it back: it is handed no way to, and the map has it.
+  const src = readFileSync(new URL('../../../src/ui/groupUi.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const deps = /export interface GroupUiDeps \{([\s\S]*?)\n\}/.exec(src)?.[1] ?? null;
+  ok(deps !== null && /canOpen: \(\) => boolean;/.test(deps) && !/freeMouse|releaseLock|requestLock/.test(deps), "the roster's dependencies offer it no way to take the mouse or give it back");
+  ok(!/freeMouse|releaseLock|requestLock|pointerLockElement/.test(src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')), 'and nothing in its code reaches for the mouse or the pointer lock');
   press('Enter');
   ok(chat.open && asked.typing, 'Enter opens the chat line and the game stands its own keys aside');
 }
@@ -488,15 +506,29 @@ const panel = new GroupUi(parent as never, {
   ok(!asked.typing, 'and a moment later the game has its keys back');
 }
 
-// --- the panel standing down when the pointer goes back to the game ----------------------------------------------
-
+// --- the pointer going back to the game is the map's business, not the roster's ------------------------------------
+//
+// The roster stood down on its own when the pointer lock went back to the game, because it held the mouse
+// itself. As a tab of the map it holds nothing: the map does, and play does not run under it. So it hangs
+// nothing on the pointer lock at all, and a lock changing leaves it as the map left it.
 {
-  press(GROUP_UI_TUNE.panelKey);
-  ok(panel.open, 'the panel is open again');
-  const heldWas = asked.held;
+  ok(lockHandlers.length === 0, 'the roster listens for no pointer lock change');
+  panel.show();
   setLock(true);
-  ok(!panel.open && asked.held === heldWas + 1, 'clicking the world takes the pointer back, and the panel stands down rather than freezing the player');
+  ok(panel.open, 'and the pointer going back to the game leaves the tab as the map has it');
   setLock(false);
+  panel.hide();
+}
+
+// --- Trade shuts the map first -------------------------------------------------------------------------------------
+//
+// A trade's window waits for the map to be gone before it comes up, and the roster is a tab of the map, so the
+// game shuts the map before it asks. main.ts cannot be loaded here, so what it hands the roster is read.
+{
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const at = main.indexOf('const groupUi = new GroupUi(');
+  const wiring = at < 0 ? '' : main.slice(at, main.indexOf('\n    });', at));
+  ok(/trade: \(id, name\) => \{\s*if \(this\.map\.open\) this\.toggleMap\(\);\s*return this\.tradeAsk\?\.\(id, name\)/.test(wiring), "the roster's Trade shuts the map, then asks");
 }
 
 // --- and what that rule became when the moods arrived ------------------------------------------------

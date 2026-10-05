@@ -106,8 +106,8 @@ function placeAt(p: HTMLElement, x: number, y: number): void {
   setStyle(p, 'position', 'fixed');
   setStyle(p, 'left', `${Math.round(x)}px`);
   setStyle(p, 'top', `${Math.round(y)}px`);
-  // A panel the layout placed with an offset of its own (the trade window is centred by a transform,
-  // the group's panel hangs from the right) is placed by its corner alone once it has been moved.
+  // A panel the layout placed with an offset of its own (the trade window is centred by a transform)
+  // is placed by its corner alone once it has been moved.
   setStyle(p, 'right', 'auto');
   setStyle(p, 'bottom', 'auto');
   setStyle(p, 'transform', 'none');
@@ -130,7 +130,7 @@ function remember(win: Win): void {
 /**
  * The click that ends a drag belongs to the drag. Without this, a drag let go over the clear overlay
  * would close the panel (every panel shuts on a click on its own backdrop), and one let go over the
- * world outside a panel that has no overlay (the group's, the trade window) would reach the canvas,
+ * world outside a panel that has no overlay (the trade window) would reach the canvas,
  * whose click takes the mouse back into the game. The click is dispatched in the same task as the
  * pointer's release, so a listener that stands for exactly that task catches it and nothing later.
  */

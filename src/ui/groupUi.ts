@@ -1,15 +1,20 @@
-// The group's panel: who is with you, how far off and how they are doing, and the asking -- invite the
-// player you are looking at, take someone in or turn them down, hand the lead over, put someone out,
-// leave. The wording and the distances are the game's own radial menu (an invitation reaches 90 m);
-// the panel and everything about how it looks are ours.
+// The group: who is with you, how far off and how they are doing, and the asking -- invite the player
+// you are looking at, take someone in or turn them down, hand the lead over, put someone out, leave. The
+// wording and the distances are the game's own radial menu (an invitation reaches 90 m); the page and
+// everything about how it looks are ours.
+//
+// The roster is a page of the map window, its Group tab (`MapUi.adoptBody`), opened by the full stop,
+// which is the game's `group` binding: the map shows and hides it, holds the mouse while it is up and
+// stops play under it, as it does for every tab. What stays on the screen over the world is the
+// question when somebody asks you in (or a leader offers a trip) and the chevrons over members far off.
 //
 // It is DOM, and it keeps the display's habits: a fixed pool of rows made once, a row written only
 // when what it shows has changed, and no work at all while there is no group and nobody asking. The
 // chevrons over distant members follow the camera, so they run on a loop of their own that starts when
 // the first one is needed and stops when the last one goes.
 //
-// Nothing here decides anything: the server holds the group and this panel shows what it was handed
-// and asks for what the player pressed. With no server it never opens and its key does nothing.
+// Nothing here decides anything: the server holds the group and this page shows what it was handed
+// and asks for what the player pressed. With no server the map offers no Group tab at all.
 
 import { GROUP_RANGE, GROUP_TUNE, Groups, type GroupInvite, type GroupMember, type GroupRoster, type GroupTrip, type LookCandidate, type PointOut, pickLookedAt } from '../net/groups.ts';
 
@@ -20,16 +25,11 @@ export interface GroupScreenPoint {
 }
 
 /**
- * What this panel invents, live through `__debug.group({ ui: { ... } })`. The distances it shows are
- * not here: they are the game's, in `GROUP_RANGE`.
+ * What this page invents, live through `__debug.group({ ui: { ... } })`. The distances it shows are
+ * not here: they are the game's, in `GROUP_RANGE`. Its key is not here either: it is the game's `group`
+ * binding, on the Controls page with every other.
  */
 export const GROUP_UI_TUNE = {
-  /**
-   * Invented: the key that opens the panel. It is a raw code, not one of the game's bindings. It was Y
-   * until the Waypoints window took Y as a binding of its own, and with a group standing one press then
-   * opened both; the full stop is a key nothing else in the game uses.
-   */
-  panelKey: 'Period',
   /** Invented: whether a chevron is drawn over a member who is far off. */
   chevrons: true,
   /** Invented: how high over a member's feet their chevron hangs, in metres. */
@@ -52,7 +52,6 @@ const LIVE: Set<GroupUi> = new Set();
  * than left for someone to find by setting one and seeing nothing happen.
  */
 export function tuneGroupUi(o: Partial<typeof GROUP_UI_TUNE>): typeof GROUP_UI_TUNE {
-  if (typeof o.panelKey === 'string' && /^[A-Za-z0-9]+$/.test(o.panelKey)) GROUP_UI_TUNE.panelKey = o.panelKey;
   if (typeof o.chevrons === 'boolean') GROUP_UI_TUNE.chevrons = o.chevrons;
   if (typeof o.chevronLift === 'number') GROUP_UI_TUNE.chevronLift = Math.max(0, Math.min(20, o.chevronLift));
   if (typeof o.hz === 'number') {
@@ -87,14 +86,17 @@ export interface GroupUiDeps {
   view: (eye: PointOut, dir: PointOut) => boolean;
   /** The players on this world, filled into the list; the answer is how many were filled. */
   peersHere: (out: LookCandidate[]) => number;
-  /** Whether the key should work here: in the world, no other panel up, not travelling. */
+  /**
+   * Whether the world is what is on the screen: in it, no panel or map up, not travelling, no
+   * conversation. The chevrons are carried only then. (The roster itself is opened by the map, which
+   * asks nothing of this.)
+   */
   canOpen: () => boolean;
-  /** The panel wants the mouse (and gives it back): the game's own free-the-mouse. */
-  freeMouse: (free: boolean) => void;
   /**
    * Ask a member of the group to trade, by the connection they are on. It is handed in rather than
-   * imported because the ledger is wired after this panel is built; the answer is what to tell the
-   * player, and '' when the asking went out.
+   * imported because the ledger is wired after this page is built; the answer is what to tell the
+   * player, and '' when the asking went out. The game shuts the map first, since a trade's window waits
+   * for the map to be gone.
    */
   trade?: (id: number, name: string) => string;
 }
@@ -132,31 +134,19 @@ interface Chevron {
 
 // Every colour is one of the palette's eighteen names (`src/style.css`, `src/core/palette.ts`), as a
 // name or as that name at an alpha, and never a value typed here: `hudPage.test.ts` reads this string
-// out of the file and holds it to the same rule as the stylesheet. The panel's backing was a near-black
-// at 0.78 and is `void` at 78%; the buttons' fill was a blue-grey at 0.9 and is `plate`, as the trade
-// window's buttons already are; the health bar's track was white at 0.12 and is `ink` at 12%.
+// out of the file and holds it to the same rule as the stylesheet. The buttons' fill was a blue-grey at
+// 0.9 and is `plate`, as the trade window's buttons already are; the health bar's track was white at
+// 0.12 and is `ink` at 12%.
 //
-// A window somebody has sized (`win-sized`, from `src/ui/drag.ts`) lays its rows out down the frame
-// and scrolls them, the header and the foot keeping their room.
+// The roster is a page of the map window, so it has no place, backing, frame or stacking of its own: the
+// map's list body (`.map-body.list` in `style.css`) is its frame and scrolls it.
 const CSS = `
 .group-panel {
-  position: absolute;
-  right: calc(14px * var(--hud-scale, 1));
-  top: calc(120px * var(--hud-scale, 1));
-  width: calc(260px * var(--hud-scale, 1));
-  padding: calc(8px * var(--hud-scale, 1));
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--void) 78%, transparent);
-  border: 1px solid var(--rule);
+  max-width: 640px;
   font: 500 calc(12px * var(--hud-scale, 1))/1.4 system-ui, sans-serif;
   color: var(--ink);
-  pointer-events: auto;
-  z-index: 6;
 }
 .group-panel.hidden { display: none; }
-.group-panel.win-sized:not(.hidden) { display: flex; flex-direction: column; }
-.group-panel.win-sized .rows { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.group-panel.win-sized .foot, .group-panel.win-sized .hint, .group-panel.win-sized h3 { flex: none; }
 .group-panel h3 { margin: 0 0 6px; font-size: calc(13px * var(--hud-scale, 1)); color: var(--accent); }
 .group-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 6px; padding: 4px 0; border-top: 1px solid var(--rule); }
 .group-row.hidden { display: none; }
@@ -220,8 +210,10 @@ const CSS = `
 `;
 
 export class GroupUi {
+  /** What stays over the world: the chevrons and the question. */
   readonly root: HTMLElement;
-  private readonly panel: HTMLElement;
+  /** The roster, which the map's Group tab holds; out of the document until the map adopts it. */
+  readonly panel: HTMLElement;
   private readonly title: HTMLElement;
   private readonly list: HTMLElement;
   private readonly hint: HTMLElement;
@@ -253,8 +245,6 @@ export class GroupUi {
   /** Whether anybody is far enough off to need a chevron: worked out by the slow step, read by the frame. */
   private chevronsWanted = false;
   private readonly stat: GroupUiStats = { open: false, rows: 0, chevrons: 0, writes: 0, ticks: 0, frames: 0 };
-  private readonly onKey: (e: KeyboardEvent) => void;
-  private readonly onLock: () => void;
   /**
    * The chevron loop's callback, made once and used for every frame: a fresh closure per frame is an
    * allocation per frame, which is the one thing nothing in this game is allowed to do.
@@ -301,7 +291,7 @@ export class GroupUi {
         <button type="button" class="disband hidden">Disband</button>
       </div>
       <p class="hint"></p>`;
-    this.root.appendChild(this.panel);
+    // Not put in the page here: the map takes it into its Group tab.
     this.title = this.panel.querySelector<HTMLElement>('h3')!;
     this.list = this.panel.querySelector<HTMLElement>('.rows')!;
     this.hint = this.panel.querySelector<HTMLElement>('.hint')!;
@@ -393,20 +383,9 @@ export class GroupUi {
     deps.groups.onInvite = this.mineInvite;
     deps.groups.onTrip = this.mineTrip;
 
-    this.onKey = (e) => this.key(e);
-    window.addEventListener('keydown', this.onKey);
-    // Clicking the world asks for the pointer back, and this panel holds the mouse while it is open:
-    // with the lock taken the cursor is gone and the game's own input is still standing aside, which
-    // reads as the game having half-hung. A click on the world means "I want to play", so the panel
-    // shuts and gives the keys back. The slow step checks the same thing, in case nothing listens.
-    this.onLock = () => this.lockTaken();
-    document.addEventListener?.('pointerlockchange', this.onLock);
+    // No key, no Escape and no pointer lock of its own: the roster is the map's tab, and the map has all
+    // three (the full stop is the game's `group` binding, which opens the map on this tab).
     LIVE.add(this);
-  }
-
-  /** The pointer lock went to something else while this panel was up: stand down and let play go on. */
-  private lockTaken(): void {
-    if (this.open && typeof document !== 'undefined' && document.pointerLockElement) this.hide();
   }
 
   /** Arm the slow step again at whatever `GROUP_UI_TUNE.hz` now says, if it is running. */
@@ -417,59 +396,37 @@ export class GroupUi {
     this.wake();
   }
 
-  // ---- the panel -----------------------------------------------------------------------------------
+  // ---- the roster ----------------------------------------------------------------------------------
 
+  /** Whether the map is showing the Group tab: the map shows and hides the roster and says so. */
   get open(): boolean {
     return !this.panel.classList.contains('hidden');
   }
 
-  private key(e: KeyboardEvent): void {
-    const t = e.target as HTMLElement | null;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-    // Escape shuts this panel and nothing else: the game's own Escape would open the menu instead,
-    // and it is listening on the same window, so the press has to stop here. This panel is built
-    // before that listener is put on, so this one is asked first.
-    if (e.code === 'Escape') {
-      if (!this.open) return;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      this.hide();
-      return;
-    }
-    if (e.code !== GROUP_UI_TUNE.panelKey) return;
-    if (this.open) {
-      this.hide();
-      return;
-    }
-    // With no server there is no group to keep, and a game played alone must be the game it was: the
-    // key does nothing at all rather than opening a panel to say so. The console can still open it.
-    if (!this.deps.groups.active) return;
-    if (!this.deps.canOpen()) return;
-    this.show();
-  }
-
+  /** The map has come to the Group tab: the roster is drawn as it stands and kept up while it shows. */
   show(): void {
     if (this.open) return;
     this.panel.classList.remove('hidden');
     this.stat.open = true;
-    this.deps.freeMouse(true);
     this.draw();
     this.wake();
   }
 
-  hide(): void {
-    this.shut(true);
-  }
-
   /**
-   * Shut the panel. The mouse goes back to the game only when this panel is what was holding it: a
-   * panel that has stood aside because another one opened must not take the mouse off it.
+   * What the map is handed to tell the roster as its Group tab comes and goes (`MapUi.adoptBody`). Made
+   * once with the page; the game hands the map this and nothing of its own, so the roster the node test
+   * sees the map show is the one the game's map shows.
    */
-  private shut(giveBackMouse: boolean): void {
+  readonly shown = (on: boolean): void => {
+    if (on) this.show();
+    else this.hide();
+  };
+
+  /** The map has left the Group tab, or shut. The mouse is the map's, and so is giving it back. */
+  hide(): void {
     if (!this.open) return;
     this.panel.classList.add('hidden');
     this.stat.open = false;
-    if (giveBackMouse) this.deps.freeMouse(false);
   }
 
   /** Ask in whoever is in the middle of the view, within the game's own 90 m. */
@@ -506,10 +463,9 @@ export class GroupUi {
   // ---- what the server said ------------------------------------------------------------------------
 
   private roster(g: GroupRoster | null): void {
-    if (!g) {
-      this.hide();
-      this.dropChevrons();
-    }
+    // The group ending takes the chevrons; the roster stays where the map has it, saying there is nobody,
+    // since the tab is the map's to show or not and a server that holds no group still offers it.
+    if (!g) this.dropChevrons();
     this.draw();
     this.wake();
   }
@@ -552,7 +508,7 @@ export class GroupUi {
     }
   }
 
-  /** The panel's rows, written only where what they show has changed. */
+  /** The roster's rows, written only where what they show has changed. */
   private draw(): void {
     const g = this.deps.groups.roster;
     const leading = this.deps.groups.leading;
@@ -624,9 +580,10 @@ export class GroupUi {
       }
     }
     this.stat.rows = members ? members.length : 0;
+    // The chat line does not open over the map, so the words that are typed say to shut it first.
     const hint = g
-      ? `An invitation reaches ${GROUP_RANGE.invite} m, which is the game's own. Type /g to talk to the group.`
-      : `Nobody yet. Look at a player within ${GROUP_RANGE.invite} m and ask them in, or type /invite <name>.`;
+      ? `An invitation reaches ${GROUP_RANGE.invite} m, which is the game's own. Shut the map and type /g to talk to the group.`
+      : `Nobody yet. Look at a player within ${GROUP_RANGE.invite} m and ask them in, or shut the map and type /invite <name>.`;
     if (hint !== this.hintText) {
       this.hintText = hint;
       this.hint.textContent = hint;
@@ -659,8 +616,8 @@ export class GroupUi {
   /** Start the slow step when there is something to keep up with, and stop it when there is not. */
   private wake(): void {
     const g = this.deps.groups;
-    // The panel being open counts: it is what notices that something else has taken the screen.
-    const wanted = !!g.roster || !!g.invite || !!g.trip || this.open;
+    // The roster showing is no reason of its own: with nobody in it and nobody asking, nothing moves.
+    const wanted = !!g.roster || !!g.invite || !!g.trip;
     if (!wanted) {
       if (this.timer) {
         window.clearInterval(this.timer);
@@ -679,11 +636,6 @@ export class GroupUi {
     const dt = Math.min(2, Math.max(0, (now - this.lastTick) / 1000));
     this.lastTick = now;
     this.stat.ticks++;
-    // The menu, the map or another panel has taken the screen: this one stands aside without taking
-    // the mouse back off whatever took it. It is noticed here because nothing tells a panel directly.
-    if (this.open && !this.deps.canOpen()) this.shut(false);
-    // The backstop for the pointer going back to the game without a word being sent about it.
-    this.lockTaken();
     const moved = this.deps.groups.step(dt);
     if (moved && this.open) this.draw();
     // The countdown on an invitation, written once a second's worth of steps.
@@ -694,11 +646,11 @@ export class GroupUi {
     // Whether a frame loop is worth running at all: not "there is a group", which would run one for
     // as long as anybody was in one and draw nothing, but "somebody is far enough off to need a
     // chevron, and the world is what is on the screen". The distances were all just worked out, so
-    // this costs nothing. The menu, the map or another panel having the screen stops it; this panel
-    // having it does not, and that is what `this.open` is doing in the test.
+    // this costs nothing. The menu, another panel or the map having the screen stops it, and the
+    // roster is one of the map's tabs, so it stops it too.
     const g2 = this.deps.groups.roster;
     let wanted = false;
-    if (GROUP_UI_TUNE.chevrons && g2 && (this.deps.canOpen() || this.open)) {
+    if (GROUP_UI_TUNE.chevrons && g2 && this.deps.canOpen()) {
       for (const m of g2.members) {
         if (!m.me && m.here && m.distance > GROUP_TUNE.chevron) {
           wanted = true;
@@ -781,7 +733,7 @@ export class GroupUi {
     this.stat.chevrons = 0;
   }
 
-  /** Everything down: the panel shut, the question gone, the chevrons taken away. */
+  /** Everything down: the roster hidden, the question gone, the chevrons taken away. */
   clearAll(): void {
     this.hide();
     this.showAsk('');
@@ -798,8 +750,6 @@ export class GroupUi {
   }
 
   dispose(): void {
-    window.removeEventListener('keydown', this.onKey);
-    document.removeEventListener?.('pointerlockchange', this.onLock);
     const g = this.deps.groups;
     if (g.onRoster === this.mineRoster) g.onRoster = this.hadRoster;
     if (g.onInvite === this.mineInvite) g.onInvite = this.hadInvite;
@@ -807,5 +757,6 @@ export class GroupUi {
     LIVE.delete(this);
     this.clearAll();
     this.root.remove();
+    this.panel.remove();
   }
 }

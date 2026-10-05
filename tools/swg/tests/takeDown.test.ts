@@ -167,7 +167,7 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
 
   // Props.
   ok(/putAway: \['Delete'\]/.test(input) && /putAway:/.test(menu), 'Delete puts a prop in hand away, and the Controls page names it');
-  ok(/if \(takeKey \|\| input\.pressedAction\('putAway'\)\) this\.stopPlacingProp\('away'\)/.test(main), 'J again, or Delete, puts a prop in hand away');
+  ok(/if \(takeKey \|\| input\.pressedAction\('putAway'\)\) this\.stopPlacingProp\('away'\)/.test(main), 'the pick-up key (O) again, or Delete, puts a prop in hand away');
   ok(/else if \(takeKey && !this\.placing/.test(main), 'and the same press does not then pick the next one up');
   ok(/this\.placingBar\.onPutAway = \(\) => this\.stopPlacingProp\('away'\)/.test(main) && /onPutAway/.test(bar) && /Put away/.test(bar), "the placing bar's Put away does the same");
   ok(/Put back \(Esc\)/.test(bar), 'and its Escape says it puts the prop back, which it does');

@@ -4,7 +4,14 @@
 // rocks, stations and ships round your own, turned, slid and zoomed with the mouse, its stations,
 // hyperspace points, launch point, asteroid fields and nebulae drawn as layers that can be switched
 // on and off, each with the client's own zone-map icon where the pack has it. The galaxy, to
-// travel, is the window's other tab.
+// travel, is the window's second tab.
+//
+// Its other two tabs are lists rather than pictures (`mapTabs.ts`): the character's waypoints (Y) and
+// the group (the full stop, and only while a server holds a group for this browser). Their pages are made
+// by their own files (`waypointsUi.ts`, `groupUi.ts`) and handed to the window (`adoptBody`), which shows
+// and hides them and says so. A list tab never touches the window's one WebGL canvas: it is not moved,
+// sized or drawn into, and no frame loop runs while a list shows, so going to a list and back costs the
+// pictures nothing. The window opens on whichever tab was used last, kept in local storage.
 //
 // The people you are grouped with are a layer of their own on both maps, switched on and off like the
 // zone's own layers: a diamond and a name where each of them stands, the leader's larger and ringed.
@@ -30,6 +37,7 @@ import type { GalaxyMap, Poi } from './galaxyMap';
 import { distanceText, drawnAsLine, drawnAsShell, GROUP_MAP_TUNE, GroupLabels, GroupList, groupMapFeed, hasLayer, LABEL_MOVE, LABEL_TEXT, LAYERS, mapFrame, mapFromGameX, mapFromGameZ, mapFromScreenX, mapFromScreenY, MapView, marksOf, ObjectList, Pool, poolWants, screenFromMapX, screenFromMapY, ShipList, VIEW_TUNE, WAYPOINT_MAP_TUNE, WaypointList, waypointMapFeed, type GroupMark, type LayerId, type MapFrame, type MapMark, type MapPack, type ShipMark, type WaypointMark } from './spaceMapLayers.ts';
 import { WAYPOINT_COLOURS } from '../story/waypoints.ts';
 import { mapPicture } from './mapImages.ts';
+import { isListTab, recallTab, rememberTab, tabShown, type MapTab } from './mapTabs.ts';
 
 /** Where the player is and what is round them, read fresh every time the map draws. */
 export interface MapSource {
@@ -71,6 +79,11 @@ export interface MapSource {
    * with nothing here a right-click does nothing.
    */
   onMark?(x: number, z: number, near: string | null, metres: number): void;
+  /**
+   * Whether the Group tab is on offer: a server holds a group for this browser. Asked whenever the window
+   * opens and whenever a tab is shown. Optional: with nothing here the tab is never offered.
+   */
+  groupTab?(): boolean;
 }
 
 interface MapImage {
@@ -85,7 +98,13 @@ const NO_PICTURE: MapFrame = mapFrame(null);
 /** Ours: metres to the pixel the planet's map opens at when it is asked to show a point (`showAt`). */
 const FOCUS_SCALE = 4;
 
-type Tab = 'here' | 'galaxy';
+type Tab = MapTab;
+
+/** A list tab's page, handed in from outside, and what it is told as it is shown and hidden. */
+interface ListPage {
+  readonly body: HTMLElement;
+  shown: (on: boolean) => void;
+}
 
 /** A label from the pool, with the pixels it was last placed at: a mark that has not moved writes nothing. */
 type LabelEl = HTMLElement & { placedX?: number; placedY?: number };
@@ -208,8 +227,20 @@ const SPACE_MAP_CSS = `
 
 export class MapUi {
   readonly root: HTMLElement;
+  /** The galaxy tab's view, and where the player is: written out rather than as parameter properties, so a node test can build the window. */
+  readonly galaxy: GalaxyMap;
+  private readonly source: MapSource;
   private tab: Tab = 'here';
+  /** The tab used last, which a plain opening opens on; read from storage when the window is built. */
+  private lastTab: Tab = 'here';
   private readonly hereBody: HTMLElement;
+  /** The two list tabs' bodies, and the page each holds once one has been handed in. */
+  private readonly listBodies: Record<'waypoints' | 'group', HTMLElement>;
+  private readonly lists: Partial<Record<'waypoints' | 'group', ListPage>> = {};
+  /** The list tab whose page has been told it is showing, or null: told once each way, never twice. */
+  private listOn: 'waypoints' | 'group' | null = null;
+  private readonly groupButton: HTMLElement;
+  private readonly closeButton: HTMLElement;
   private readonly readout: HTMLElement;
   private readonly canvas2d = document.createElement('canvas');
   private readonly canvas3d = document.createElement('canvas');
@@ -327,28 +358,34 @@ export class MapUi {
   /** What the space view's readout last said, part by part, so a frame that says the same writes nothing. */
   private readonly said = { name: '', x: 0, y: 0, z: 0, heading: 0, objects: -1, follow: false };
 
-  constructor(
-    parent: HTMLElement,
-    readonly galaxy: GalaxyMap,
-    private readonly source: MapSource,
-  ) {
+  constructor(parent: HTMLElement, galaxy: GalaxyMap, source: MapSource) {
+    this.galaxy = galaxy;
+    this.source = source;
     this.root = document.createElement('div');
     this.root.id = 'worldmap';
     this.root.className = 'overlay hidden';
+    // The Group button is hidden until a group is on offer. The close button's key and each tab's title
+    // are written from the bindings (`setKeys`), so a rebind reaches them.
     this.root.innerHTML = `
       <div class="map-panel">
         <div class="map-header">
           <h2>Map</h2>
-          <div class="tabs"><button class="tab on" data-tab="here">Here</button><button class="tab" data-tab="galaxy">Galaxy</button></div>
+          <div class="tabs"><button class="tab on" data-tab="here">Here</button><button class="tab" data-tab="galaxy">Galaxy</button><button class="tab" data-tab="waypoints">Waypoints</button><button class="tab" data-tab="group" hidden>Group</button></div>
           <span class="map-readout"></span>
           <button class="close">Close (M)</button>
         </div>
         <div class="map-body here"></div>
+        <div class="map-body list waypoints" hidden></div>
+        <div class="map-body list group" hidden></div>
       </div>`;
     parent.appendChild(this.root);
     const panel = this.root.querySelector<HTMLElement>('.map-panel')!;
     this.hereBody = this.root.querySelector<HTMLElement>('.map-body.here')!;
+    this.listBodies = { waypoints: this.root.querySelector<HTMLElement>('.map-body.list.waypoints')!, group: this.root.querySelector<HTMLElement>('.map-body.list.group')! };
+    this.groupButton = this.root.querySelector<HTMLElement>('.tabs .tab[data-tab="group"]')!;
+    this.closeButton = this.root.querySelector<HTMLElement>('.close')!;
     this.readout = this.root.querySelector<HTMLElement>('.map-readout')!;
+    this.lastTab = recallTab() ?? 'here';
     this.canvas2d.className = 'map2d';
     this.canvas3d.className = 'map3d';
     this.tip.className = 'map-tip';
@@ -369,7 +406,7 @@ export class MapUi {
     galaxy.root.remove();
     panel.appendChild(galaxy.root);
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.tabs .tab')) b.addEventListener('click', () => this.showTab(b.dataset.tab as Tab));
-    this.root.querySelector('.close')!.addEventListener('click', () => this.onClose());
+    this.closeButton.addEventListener('click', () => this.onClose());
     this.bind2d();
     this.bind3d();
     const drop = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
@@ -453,7 +490,9 @@ export class MapUi {
    */
   private loadIcon(layer: LayerId, name: string): Promise<void> {
     return new Promise<void>((resolve) => {
-      const url = `${import.meta.env.BASE_URL}assets-private/space_ui/${name}.png`;
+      // The page's own base, which the builder rewrites; read so that a node test, which has no `env`, can build the window.
+      const env = (import.meta as unknown as { env?: { BASE_URL?: string } }).env;
+      const url = `${env?.BASE_URL ?? '/'}assets-private/space_ui/${name}.png`;
       const img = new Image();
       img.onload = () => {
         this.icons.set(layer, `url("${url}")`);
@@ -611,7 +650,51 @@ export class MapUi {
     return !this.root.classList.contains('hidden');
   }
 
-  show(tab: Tab = 'here'): void {
+  /** The tab the window is on (or was on when it was shut). */
+  get tabNow(): Tab {
+    return this.tab;
+  }
+
+  /**
+   * A list tab's page, made by its own file and handed in once: it goes in that tab's body, and `shown`
+   * is told true as the tab comes up with the window open and false as it goes, whether by another tab,
+   * by the window shutting or by anything else hiding it. The page is told nothing else; what it draws is
+   * its own.
+   */
+  adoptBody(tab: 'waypoints' | 'group', el: HTMLElement, shown: (on: boolean) => void): void {
+    this.listBodies[tab].appendChild(el);
+    this.lists[tab] = { body: el, shown };
+  }
+
+  /**
+   * The keys on the window, as caps (`keyLabel`): the close button names the map's own key, and each tab's
+   * title the key that opens the window on it -- the map's for the two pictures, which M opens on whichever
+   * tab was used last. Written when the window is built and again on every rebind, never in a frame.
+   */
+  setKeys(map: string, waypoints: string, group: string): void {
+    const close = `Close (${map})`;
+    if (this.closeButton.textContent !== close) this.closeButton.textContent = close;
+    const keyOf: Record<Tab, string> = { here: map, galaxy: map, waypoints, group };
+    for (const b of this.root.querySelectorAll<HTMLElement>('.tabs .tab')) {
+      const tab = b.dataset.tab as Tab;
+      const key = keyOf[tab];
+      const title = key ? `${b.textContent ?? ''} (${key})` : (b.textContent ?? '');
+      if (b.title !== title) b.title = title;
+    }
+  }
+
+  /** Whether the Group tab is on offer now, its button shown or hidden to match: written only when that has changed. */
+  private groupOffered(): boolean {
+    const on = !!this.source.groupTab?.();
+    if (this.groupButton.hidden === on) this.groupButton.hidden = !on;
+    return on;
+  }
+
+  /**
+   * Open the window. With no tab named it opens on the tab used last, kept across a reload; the Group tab
+   * with no group held opens Here instead.
+   */
+  show(tab?: Tab): void {
     this.root.classList.remove('hidden');
     this.followed = false;
     // Opened the ordinary way, it opens on you: a point asked for by an earlier "Show on map" that never
@@ -619,7 +702,7 @@ export class MapUi {
     this.focus = null;
     this.view.followShip();
     this.attachDebug();
-    this.showTab(tab);
+    this.showTab(tab ?? this.lastTab);
   }
 
   /**
@@ -739,16 +822,49 @@ export class MapUi {
     // The galaxy tab reads the jump's refusals on a clock of its own while it shows: closing the
     // window on that tab stops it, and opening it again starts it.
     this.galaxy.hide();
+    // A list's page is told it is no longer showing, so the group's roster stops stepping for it.
+    this.listShown(null);
+  }
+
+  /** Tell the list pages which of them is showing now (null: none), each told once as it comes and once as it goes. */
+  private listShown(tab: 'waypoints' | 'group' | null): void {
+    if (this.listOn === tab) return;
+    const was = this.listOn;
+    this.listOn = tab;
+    if (was) this.lists[was]?.shown(false);
+    if (tab) this.lists[tab]?.shown(true);
   }
 
   setCurrent(id: string, zone?: string): void {
     this.galaxy.setCurrent(id, zone);
   }
 
-  private showTab(tab: Tab): void {
+  /**
+   * Show one tab of the open window (the game's keys switch tabs through this as well as the clicks). A list
+   * tab never touches the shared canvas -- no `attachCanvas`, no size, no pixel ratio, no move -- and runs no
+   * frame loop: the canvas waits, its context intact, in whichever picture's body had it last, which is
+   * hidden, and the pictures' own draws already skip a canvas with no size. Group with no group held shows
+   * Here. Whatever is shown becomes the tab the window next opens on.
+   */
+  showTab(want: Tab): void {
+    const tab = tabShown(want, this.groupOffered());
     this.tab = tab;
+    this.lastTab = tab;
+    rememberTab(tab);
     for (const b of this.root.querySelectorAll<HTMLButtonElement>('.tabs .tab')) b.classList.toggle('on', b.dataset.tab === tab);
     this.hereBody.hidden = tab !== 'here';
+    this.listBodies.waypoints.hidden = tab !== 'waypoints';
+    this.listBodies.group.hidden = tab !== 'group';
+    if (isListTab(tab)) {
+      cancelAnimationFrame(this.raf);
+      this.raf = 0;
+      this.galaxy.hide();
+      this.readout.textContent = '';
+      this.said.objects = -1;
+      this.listShown(this.open ? (tab as 'waypoints' | 'group') : null);
+      return;
+    }
+    this.listShown(null);
     if (tab === 'galaxy') {
       // The one 3D canvas goes to whichever tab is drawing. It keeps its context across the move, and
       // the renderer is sized from whatever holds it on the next frame.
@@ -923,7 +1039,7 @@ export class MapUi {
 
   /**
    * Open on the planet's map with a point of its own frame in the middle, at a scale the ground can be
-   * read at: the Waypoints window's "Show on map". The point is kept until the picture has answered and
+   * read at: the Waypoints tab's "Show on map". The point is kept until the picture has answered and
    * fitted, so a world whose picture is still on its way opens on the waypoint and not on the player.
    *
    * It is not fitted here but on the next draw, which first finds out which world's picture it draws: just

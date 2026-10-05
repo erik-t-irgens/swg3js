@@ -41,7 +41,9 @@ export interface Saved {
  * would be worse than one that is not met.
  */
 export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freeze({
-  map: { w: 520, h: 320 },
+  // The map's Waypoints tab holds rows of a swatch, a name, where it is, two switches and three buttons,
+  // so the map wants that width; its Group tab's roster fits inside it.
+  map: { w: 600, h: 320 },
   ship: { w: 420, h: 220 },
   hyperspace: { w: 620, h: 320 },
   // The inventory's five tabs alone are 647 px wide at the default text size (measured), and a tab
@@ -67,15 +69,11 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   // The travel terminal carries a world's map beside a list of its ports, so it wants both a width
   // and a height a picture can be read at.
   terminal: { w: 640, h: 420 },
-  group: { w: 220, h: 150 },
   trade: { w: 520, h: 320 },
   // The debug menu: its list of helpers beside an arguments box and an answer that can still be read.
   debug: { w: 560, h: 360 },
-  // The Waypoints window: a row is a swatch, a name, where it is, two switches and three buttons, so it
-  // wants that width, and the height of the header and a few rows.
-  waypoints: { w: 600, h: 260 },
   // The journal: a job's row carries its name, how it stands and three buttons, and a page of the journal
-  // three filters and a pager over it, so it wants the waypoints' width and a little more height.
+  // three filters and a pager over it, so it wants the map's width and a little more.
   journal: { w: 620, h: 300 },
   // A document: a page of paper that can still be read, its pager and its foot.
   document: { w: 420, h: 320 },

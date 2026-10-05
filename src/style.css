@@ -101,8 +101,8 @@ b { color: var(--accent); font-weight: 600; }
    corner, drawn in `muted` and lit `accent` under the pointer; the right and bottom edges are bare
    strips a few pixels wide that show only a resize cursor. They are the last children of the panel, so
    they are drawn over its contents in tree order and carry no z-index. A panel the overlay centres is
-   made their containing block here; a panel that is already absolute (the group's, the trade window)
-   keeps its own position. */
+   made their containing block here; a panel that is already absolute (the trade window) keeps its own
+   position. */
 .overlay > .win { position: relative; }
 .win-grip, .win-edge { position: absolute; touch-action: none; user-select: none; }
 .win-grip {
@@ -134,11 +134,16 @@ b { color: var(--accent); font-weight: 600; }
 .map-header h2 { margin: 0; font-size: 22px; letter-spacing: 0.12em; color: var(--accent); }
 .map-header span { flex: 1; color: var(--muted); font-size: 13px; }
 .planets { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; padding: 16px 22px; overflow-y: auto; }
-/* The map window: the world here (the planet's map, or the zone in three axes) and the galaxy, as tabs. */
+/* The map window: the world here (the planet's map, or the zone in three axes), the galaxy, and the
+   waypoints and the group as lists, as tabs. */
 .map-header .tabs { flex: none; }
 .map-header .map-readout { flex: 1; font-size: 11px; color: var(--muted); }
 .map-body.here { position: relative; width: 100%; height: min(620px, 72vh); background: var(--void); }
 .map-body.here[hidden] { display: none; }
+/* The two list tabs (Waypoints, Group): pages of the window's own, as tall as the picture's body so the
+   window keeps its size from tab to tab, scrolling inside it. */
+.map-body.list { box-sizing: border-box; width: 100%; height: min(620px, 72vh); overflow-y: auto; padding: 14px 22px; }
+.map-body.list[hidden] { display: none; }
 .map2d, .map3d { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .map2d[hidden], .map3d[hidden] { display: none; }
 .map-tip { position: absolute; padding: 3px 8px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--void) 90%, transparent); border: 1px solid var(--panel-border); border-radius: 4px; pointer-events: none; white-space: nowrap; }
@@ -826,14 +831,15 @@ b { color: var(--accent); font-weight: 600; }
    same everywhere: the part of the window that holds a list, a grid, a map or a preview takes the
    height the header and the foot leave (`flex: 1`, `min-height: 0`), the caps in the height of the
    screen (`vh`) give way to the frame, and whatever does not fit scrolls inside, never sideways. The
-   group's panel and the trade window carry their own in the stylesheets their files inject. */
+   trade window carries its own in the stylesheet its file injects. */
 
 /* A header that runs out of room wraps its tabs and buttons onto a second line rather than losing its close button. */
 .map-panel.win-sized .map-header, .wardrobe-panel.win-sized .wardrobe-header, .ship-panel.win-sized .ship-header { flex-wrap: wrap; row-gap: 6px; }
 
-/* The map: the planet's map or the space view below the header, and the galaxy the same way. The
-   canvases are sized from their holder on every frame they draw, so they follow with nothing else to do. */
-.map-panel.win-sized > .map-body.here { flex: 1 1 auto; height: auto; min-height: 0; }
+/* The map: the planet's map or the space view below the header, the galaxy and the two lists the same
+   way. The canvases are sized from their holder on every frame they draw, so they follow with nothing
+   else to do; a list scrolls in its body. */
+.map-panel.win-sized > .map-body.here, .map-panel.win-sized > .map-body.list { flex: 1 1 auto; height: auto; min-height: 0; }
 .map-panel.win-sized > .galaxy-body { flex: 1 1 auto; max-height: none; min-height: 0; }
 .map-panel.win-sized .galaxy-view { min-height: 0; }
 .map-panel.win-sized .galaxy-info { width: clamp(200px, 32%, 380px); }

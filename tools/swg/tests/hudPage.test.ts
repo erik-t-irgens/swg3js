@@ -302,7 +302,17 @@ const knobs: Knob[] = INTERFACE.flatMap((g) => g.knobs as unknown as Knob[]);
   ok(sheetFiles.has('ui/debugMenu.ts'), "the debug menu's stylesheet is among them");
   ok(failures.length === 0, `and every one is held to the stylesheet's own rule${failures.length ? `: ${failures.join(' || ')}` : ''}`);
   const group = readFileSync(new URL('ui/groupUi.ts', src), 'utf8');
-  ok(!/rgba?\(|#[0-9a-fA-F]{6}\b/.test(/const CSS = `([\s\S]*?)`;/.exec(group)?.[1] ?? 'rgba('), "the group's panel, whose hand-typed colours started this check, has none left");
+  const groupSheet = /const CSS = `([\s\S]*?)`;/.exec(group)?.[1] ?? null;
+  ok(!/rgba?\(|#[0-9a-fA-F]{6}\b/.test(groupSheet ?? 'rgba('), "the group's panel, whose hand-typed colours started this check, has none left");
+  // The roster and the waypoints are pages of the map window now, laid out in its list body: neither may
+  // carry a place, a backing of its own or a stacking order (the roster's `z-index: 6` went with its own
+  // window), or it would stand over the map's other tabs instead of in its own. The question and the
+  // chevrons, which stay over the world, are not the roster's and keep theirs.
+  const rosterRules = [...(groupSheet ?? '').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => /\.group-(panel|row)\b/.test(m[1]));
+  const placed = rosterRules.filter((m) => /z-index|position\s*:/.test(m[2])).map((m) => m[1].trim());
+  ok(groupSheet !== null && rosterRules.length >= 5 && placed.length === 0, `the roster's rules carry no z-index and no position of their own${placed.length ? `: ${placed.join(', ')}` : ''}`);
+  const waypointSheet = /const WAYPOINTS_CSS = `([\s\S]*?)`;/.exec(readFileSync(new URL('ui/waypointsUi.ts', src), 'utf8'))?.[1] ?? null;
+  ok(waypointSheet !== null && !/z-index|position\s*:\s*(absolute|fixed)/.test(waypointSheet), 'nor do the waypoints page\'s');
 }
 
 console.log(`\n${checks} checks passed`);

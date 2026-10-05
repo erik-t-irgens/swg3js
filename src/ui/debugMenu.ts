@@ -15,7 +15,7 @@
 // on, which stops when the call does. The README is fetched the first time the window opens, as a
 // chunk of its own, so the game's own bundle does not carry it.
 //
-// It does not pause the game. Like the group's panel it frees the mouse without joining
+// It does not pause the game. Like the trade window it frees the mouse without joining
 // `anyPanelOpen`, so the world goes on simulating and `__debug.perf()` measures with it open; a click
 // on the world takes the pointer back and the window stands down. While one of its boxes has the
 // keyboard the game's `Input` stands aside, as it does for every field, and nothing pressed inside the
@@ -367,7 +367,7 @@ export class DebugMenu {
 
     // Keys pressed inside the window are the window's: Escape shuts it, the menu's own key shuts it
     // (from a typed line only when it types nothing), and nothing else is let through to the game's
-    // other listeners -- the chat line's Enter, the group's key, the Escape that would open the menu.
+    // other listeners -- the chat line's Enter, the game's own bindings, the Escape that would open the menu.
     this.onPanelKey = (e) => this.panelKey(e);
     this.panel.addEventListener('keydown', this.onPanelKey);
     // Escape with the keyboard nowhere in particular (the page itself has it) still shuts this

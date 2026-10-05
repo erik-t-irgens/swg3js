@@ -538,9 +538,12 @@ const report = () => menu.report() as { picked: string | null; args: string; bus
   };
   const handBack = /freeMouse: \(free\) => \(free \? this\.freeMouse\(true\) : this\.handBackMouse\(\)\)/;
   ok(handBack.test(block('this.debugMenu = new DebugMenu(')), 'the debug menu gives the mouse back through handBackMouse, never straight to the pointer lock');
-  ok(handBack.test(block('const groupUi = new GroupUi(')), "and so does the group's panel, so shutting it under the debug menu or the trade window leaves them the mouse");
+  // The group's roster is a tab of the map now: the map holds the mouse over it, so it is handed no way to
+  // take the mouse or give it back, and it is not one of the windows that hold it without being a panel.
+  const roster = block('const groupUi = new GroupUi(');
+  ok(/canOpen: \(\) =>/.test(roster) && !/freeMouse/.test(roster), "the group's roster, a tab of the map, takes and gives back no mouse of its own");
   ok(/elseHasMouse: \(\) => this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)/.test(block('const tradeUi = new TradeUi(')), 'the trade window counts the windows that hold the mouse without being panels before handing it back');
-  ok(/this\.mouseHeldElsewhere = \(\) => groupUi\.open \|\| tradeUi\.open \|\| this\.debugMenu\.open \|\| this\.talkNow !== null;/.test(main), 'and the debug menu is one of them, and so is a conversation');
+  ok(/this\.mouseHeldElsewhere = \(\) => tradeUi\.open \|\| this\.debugMenu\.open \|\| this\.talkNow !== null;/.test(main), 'and the debug menu is one of them, and so is a conversation; the group roster no longer is');
   const hb = /private handBackMouse\(\): void \{\n\s*if \(this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)\) return;\n\s*this\.freeMouse\(false\);/;
   ok(hb.test(main), 'handBackMouse leaves the mouse where it is while a panel, the map or one of those windows is up');
 }

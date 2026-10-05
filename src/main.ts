@@ -93,6 +93,7 @@ import { LOOK, lookReport, packPitch, wrapAngle } from './player/lookAt.ts';
 import { Character, loadSpeciesIndex, type SpeciesEntry } from './player/character';
 import { GalaxyMap, type Poi } from './ui/galaxyMap';
 import { MapUi } from './ui/mapUi';
+import { isMapTab, pressTabKey, type MapTab } from './ui/mapTabs.ts';
 import { groupMapFeed, mapFrame, waypointMapFeed, WaypointList, type MapFrame } from './ui/spaceMapLayers.ts';
 import { mapMeta, mapPictureNow } from './ui/mapImages.ts';
 import { Minimap, MINIMAP_TUNE, tuneMinimap } from './ui/minimap.ts';
@@ -786,7 +787,7 @@ class App {
   private readonly menu: Menu;
   /**
    * The debug menu: every `__debug` helper run from a window. It holds the mouse without joining
-   * `anyPanelOpen`, as the group's panel does, so the world goes on simulating while it is up.
+   * `anyPanelOpen`, as the trade window does, so the world goes on simulating while it is up.
    */
   private readonly debugMenu: DebugMenu;
   /** The timer that gives the game its keys back after Escape has shut the debug menu; 0 when none is out. */
@@ -1158,9 +1159,11 @@ class App {
   /** The city walked into, for the name under the minimap, and the world its memory is of. */
   private readonly cityWatch = new CityWatch();
   private cityPack = '';
-  /** The Waypoints window (Y). */
+  /** The map's Waypoints tab (Y): a page the map holds. */
   private waypointsUi!: WaypointsUi;
-  /** The journal (O): the jobs, what the character witnessed, the documents to read and the ISB's file. */
+  /** Whether a server holds a group for this browser, which is when the map offers its Group tab (the full stop). Set where the group is wired. */
+  private groupHeld: () => boolean = () => false;
+  /** The journal (J): the jobs, what the character witnessed, the documents to read and the ISB's file. */
   private journalUi!: JournalUi;
   /** The document window: a page handed over, read on paper; opened from the journal, never by itself. */
   private documentUi!: DocumentUi;
@@ -2205,7 +2208,7 @@ class App {
     // `captured`, and the game went on simulating with every key and the mouse dead -- the only way
     // out being to open and close some other panel with its own key, which works only because a key
     // press is still read while captured. It is wired here rather than in each panel because the
-    // guard is the game's to make: the group panel and the trade window hold the mouse without
+    // guard is the game's to make: the trade window and the debug menu hold the mouse without
     // joining `anyPanelOpen`, so a panel closing under one of those must leave the pointer alone.
     for (const panel of [this.backpack, this.wardrobe, this.appearanceUi, this.weaponsUi, this.forceUi, this.vehiclesUi, this.npcUi, this.shipEdit, this.housingUi, this.propsUi]) panel.onClose = () => this.handBackMouse();
     // The tabs: a click on the other tab of a panel swaps to it, the key toggles whichever was last open.
@@ -2338,8 +2341,21 @@ class App {
       onTeleport: (poi) => void this.teleport(this.world.planet, poi, this.zone),
       // A right-click on the planet's map sets a waypoint where it fell; a left-click still travels.
       onMark: (x, z, near, metres) => this.markOnMap(x, z, near, metres),
+      // The Group tab, while a server holds a group for this browser; with none the tab is not there.
+      groupTab: () => this.groupHeld(),
     });
     this.map.onClose = () => this.toggleMap();
+    // The Waypoints tab's page, built before the map was (`wireWaypoints`): the map shows it, and it is
+    // drawn from the book as it comes up. The group's page is handed over where the group is wired.
+    this.map.adoptBody('waypoints', this.waypointsUi.root, this.waypointsUi.shownFrom(() => this.waypointsModel()));
+    // The keys on the window: the close button names the map's own, each tab's title the key that opens
+    // it. Told again on a rebind, never read in a frame.
+    const mapKeys = () => {
+      const b = this.input.bindings;
+      this.map.setKeys(keyLabel(b.map[0] ?? ''), keyLabel(b.waypoints[0] ?? ''), keyLabel(b.group[0] ?? ''));
+    };
+    mapKeys();
+    onBindingsChanged(mapKeys);
     // Every window moves by its header and sizes by its corner and far edges, and stays as it was left;
     // the overlay round it is clear, so the world shows behind. The group's and the trade window are
     // wired where they are built, further down.
@@ -2759,7 +2775,7 @@ class App {
        * three times, `{ axis: 'x' }` picks which way, `{ lift: -4 }` lowers it four presses,
        * `{ reach: 5 }` holds it five metres out, `{ drop: true }` puts it down, `{ take: true }`
        * picks the nearest one of yours back up, `{ cancel: true }` gives it up (one picked back up
-       * goes back where it stood), `{ away: true }` puts it away for good, as J again, Delete or the
+       * goes back where it stood), `{ away: true }` puts it away for good, as O again, Delete or the
        * bar's Put away do, and `{ tune: { … } }` moves the numbers, every one of which is ours.
        *
        * `find` searches the catalogue by name or id, which is the only way to learn an id from a
@@ -2826,7 +2842,7 @@ class App {
           ok: p.ok,
           why: p.why,
           keys: this.placeKeys(),
-          // Picked back up out of the world: Escape puts it back, J, Delete or `{ away: true }` throw it away.
+          // Picked back up out of the world: Escape puts it back, O, Delete or `{ away: true }` throw it away.
           pickedUp: !!p.from,
           standing: mine.length,
           tune: { ...PROP_TUNE },
@@ -5008,12 +5024,17 @@ class App {
         const ms = (performance.now() - t0) / n;
         return { effects: !!this.postfx, msPerFrame: Number(ms.toFixed(2)), fps: Math.round(1000 / ms), calls: this.frameCalls, passes: this.portals.passes };
       },
-      /** Open or close the map window (M), on its `'here'` or `'galaxy'` tab. */
-      map: (tab?: 'here' | 'galaxy') => {
-        if (this.map.open && !tab) this.toggleMap();
-        else if (!this.map.open) this.toggleMap();
-        if (tab && this.map.open) this.map.show(tab);
-        return this.map.open ? `map open on ${tab ?? 'here'}` : 'map closed';
+      /**
+       * Open or close the map window (M): with no tab it shuts an open window and opens a shut one on the tab
+       * used last; with `'here'`, `'galaxy'`, `'waypoints'` or `'group'` it opens on that tab or switches to
+       * it. The Group tab with no group held shows Here, which the answer says.
+       */
+      map: (tab?: MapTab) => {
+        const want = isMapTab(tab) ? tab : undefined;
+        if (this.map.open && !want) this.toggleMap();
+        else if (!this.map.open) this.toggleMap(want);
+        else if (want) this.map.showTab(want);
+        return this.map.open ? `map open on ${this.map.tabNow}` : 'map closed';
       },
       /** The converted sky's parts (the dome, the skybox faces, the stars, space dust, the sun and star sprites) and its lighting now; `sky('skybox')` and the like toggle a part to see what it contributes. */
       sky: (toggle?: 'dome' | 'skybox' | 'stars' | 'dust' | 'sprites') => this.world.swgSky?.describe(toggle) ?? 'no converted sky on this world',
@@ -7685,7 +7706,7 @@ class App {
       this.questHost.useCore3(conversationPack.set);
       for (const p of conversationPack.problems) console.warn(`conversations: ${p}`);
     });
-    // And a waypoint a story named with the client's words, shown as `[…]` in the Waypoints window or on the
+    // And a waypoint a story named with the client's words, shown as `[…]` in the map's Waypoints tab or on the
     // minimap before them (both are built when the book changes and never in a frame), is shown again in them.
     this.strings.onLoad((table) => {
       this.refreshTalkWords(table);
@@ -7757,7 +7778,7 @@ class App {
       // ready to paste into a quest, an area or an object.
       debugRoot.storyHere = () => this.storyHere();
       // `__debug.waypoints(...)`: set, list, change and take away the character's own waypoints from the
-      // console, exactly as the map and (later) the Waypoints window do -- applied at once when this browser
+      // console, exactly as the map and its Waypoints tab do -- applied at once when this browser
       // holds the book, asked of the server when it does.
       debugRoot.waypoints = (o?: { add?: 'here' | { name?: string; x: number; z: number; y?: number; world?: string; f?: 'raw' | 'game'; cell?: string; template?: string }; list?: boolean; clear?: boolean; colour?: string; id?: string; name?: string; on?: boolean; remove?: string; track?: string | null; marks?: boolean; tune?: Parameters<typeof tuneWaypointView>[0] }) => this.debugWaypoints(o ?? { list: true });
       // `__debug.minimap(...)`: the minimap at the top left and the city name under it -- whether it is
@@ -8276,9 +8297,13 @@ class App {
     const groupUi = new GroupUi(this.ui, {
       groups,
       note: (text) => this.messages.system(text),
-      // The trade wiring is built after this panel, so the ledger is reached through the holder it
-      // fills in rather than captured here; with none there is no button at all.
-      trade: (id, name) => this.tradeAsk?.(id, name) ?? 'trading is not wired here',
+      // The trade wiring is built after this page, so the ledger is reached through the holder it
+      // fills in rather than captured here; with none there is no button at all. The map is shut first:
+      // the roster is one of its tabs, and a trade's window waits for the map to be gone before it comes up.
+      trade: (id, name) => {
+        if (this.map.open) this.toggleMap();
+        return this.tradeAsk?.(id, name) ?? 'trading is not wired here';
+      },
       project: (x, y, z, out) => this.projectToScreen(x, y, z, out),
       anchor: peerAnchor,
       // Where the eye is and which way it looks, out of the camera's own matrix: column 3 is where it
@@ -8308,17 +8333,17 @@ class App {
         }
         return n;
       },
-      // Nor over a conversation, which hides it (and which it would shut by taking Escape first).
+      // Whether the world is what is on the screen, for the chevrons over members far off: not over the
+      // map (whose Group tab is the roster), a panel, the menu or a conversation, which hides them.
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.menu.open && !this.map.open && !this.anyPanelOpen() && !this.talkNow,
-      // Given back through the game's own check, so the panel shutting under the trade window or the
-      // debug menu leaves the mouse with them rather than locking it (and shutting them with it).
-      freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
     });
-    // The group's panel moves by its title and sizes by its corner, as every other window does.
-    draggable(groupUi.root, '.group-panel', 'h3', 'group');
+    // The roster is the map's Group tab, offered while a server holds a group for this browser: the map
+    // shows it, holds the mouse over it and stops play under it, as it does for every tab.
+    this.groupHeld = () => groups.active;
+    this.map.adoptBody('group', groupUi.panel, groupUi.shown);
     if (debugRoot) {
       // `__debug.group()` reads what the group is doing and `__debug.group({ chevron: 60 })` sets one
-      // of this side's own numbers; `{ ui: { panelKey: 'Comma' } }` sets the panel's. The distances an
+      // of this side's own numbers; `{ ui: { chevrons: false } }` sets the page's. The distances an
       // invitation, a trade and a duel reach are the game's own table's and are printed, not settable.
       debugRoot.group = (o?: Partial<typeof GROUP_TUNE> & { ui?: Partial<typeof GROUP_UI_TUNE> }) => {
         if (o?.ui) tuneGroupUi(o.ui);
@@ -8504,9 +8529,8 @@ class App {
       // the backpack (that is where its own Trade button is), so the panel asks before it hands the
       // mouse back -- and, the other way round, it knows that nobody will hand it back for it when
       // what refused the window was a travel, a death or a jump rather than another panel. The
-      // windows that hold the mouse without being panels count too (the group's, whose roster has a
-      // Trade button of its own, and the debug menu), or a trade ending under one locks the pointer
-      // and that window stands down with it.
+      // windows that hold the mouse without being panels count too (the debug menu, a conversation),
+      // or a trade ending under one locks the pointer and that window stands down with it.
       elseHasMouse: () => this.anyPanelOpen() || this.map.open || this.mouseHeldElsewhere(),
     });
     // The trade window moves by its head (its find field still takes a click) and sizes by its corner.
@@ -8537,13 +8561,14 @@ class App {
     // The windows that hold the mouse without joining `anyPanelOpen`, told to the one place that
     // hands it back, so a panel closing under any of them leaves the pointer where it is.
     // A conversation holds the mouse the same way: it is no panel, since the world goes on round it.
-    this.mouseHeldElsewhere = () => groupUi.open || tradeUi.open || this.debugMenu.open || this.talkNow !== null;
+    // The group's roster is not one of them: it is a tab of the map, which holds the mouse itself.
+    this.mouseHeldElsewhere = () => tradeUi.open || this.debugMenu.open || this.talkNow !== null;
     // The backpack's own Trade button: ask whoever this player is standing by and looking at. It is
     // the same rule the chat line's /trade comes to, and the ledger is what refuses it when there is
     // no server, nobody there, or they are past the game's own 8 m.
     this.backpack.onTrade = () => this.messages.system(tradeUi.askLookedAt());
     // The group roster's own Trade button, which names a member by the connection they are on rather
-    // than by who is being looked at: the panel was built before this block, so it reaches the
+    // than by who is being looked at: the roster was built before this block, so it reaches the
     // ledger through the holder it fills in here.
     this.tradeAsk = (id, name) => trade.askTrade(id, name);
     // The window's names and pictures are the backpack's own, so the catalogues are read once when a
@@ -10838,7 +10863,7 @@ class App {
     };
   }
 
-  // ---- Waypoints in the world, the minimap and the Waypoints window. ----
+  // ---- Waypoints in the world, the minimap and the map's Waypoints tab. ----
 
   /** What `__debug.minimap` does: the three settings as the page sets them, the two tunes, and a report. */
   private debugMinimap(o: { range?: number; northUp?: boolean; on?: boolean; tune?: Partial<typeof MINIMAP_TUNE>; city?: Partial<typeof CITY_TUNE> }): Record<string, unknown> {
@@ -10916,11 +10941,13 @@ class App {
   /** A waypoint of your own reached: said once per approach, the one thing about a waypoint the message line says. */
   private readonly onWaypointReached = (m: { name: string }): void => this.messages.note(`Waypoint reached: ${m.name}`);
 
-  /** The Waypoints window, what the marks ask of the world, and the book's changes reaching both. Once, in the constructor. */
+  /**
+   * The Waypoints tab's page, what the marks ask of the world, and the book's changes reaching both. Once, in
+   * the constructor, before the map is built: the page is made detached and the map takes it when it is.
+   */
   private wireWaypoints(): void {
-    const ui = new WaypointsUi(this.ui);
+    const ui = new WaypointsUi();
     this.waypointsUi = ui;
-    ui.onClose = () => this.toggleWaypoints(false);
     ui.onMark = () => this.markHere();
     ui.onRename = (id, name) => this.waypointSaid(this.story.renameWaypoint(id, name));
     ui.onColour = (id, colour) => this.waypointSaid(this.story.recolourWaypoint(id, colour));
@@ -10933,11 +10960,6 @@ class App {
     };
     ui.onRemove = (id) => this.waypointSaid(this.story.removeWaypoint(id));
     ui.onShowOnMap = (id) => this.showWaypointOnMap(id);
-    draggable(ui.root, '.ship-panel', '.ship-header', 'waypoints');
-    // The key on its close button is the one bound now, and follows a rebind.
-    const key = () => ui.setKey(keyLabel(this.input.bindings.waypoints[0] ?? ''));
-    key();
-    onBindingsChanged(key);
     this.placeDeps = {
       space: () => !!this.world.planet?.space,
       groundCached: (x, z) => this.world.groundIfCached(x, z),
@@ -10946,7 +10968,7 @@ class App {
       room: (cell, template, x, z, out) => this.roomOfWaypoint(cell, template, x, z, out),
     };
     // The book changed (a waypoint set, renamed, recoloured, switched, tracked, taken away, or a book read
-    // in or settled): the minimap draws again, the window shows it and the marks are gathered afresh.
+    // in or settled): the minimap draws again, the tab shows it and the marks are gathered afresh.
     this.story.onChange(() => this.waypointsChanged());
   }
 
@@ -11137,24 +11159,22 @@ class App {
     }
   }
 
-  /** Y: the Waypoints window, open or shut. It closes every other panel to open, as the spawner does. */
-  private toggleWaypoints(open = !this.waypointsUi.open): void {
-    if (!open) {
-      if (!this.waypointsUi.open) return;
-      this.waypointsUi.hide();
-      this.audio.ui.play('panelClose');
-      this.handBackMouse();
-      return;
-    }
-    if (!this.started || !this.inWorld || this.traveling) return;
-    this.closePanels();
-    this.map.hide();
-    this.waypointsUi.show(this.waypointsModel());
-    this.audio.ui.play('panelOpen');
-    this.freeMouse(true);
+  /**
+   * Y and the full stop: the map open on the Waypoints or the Group tab (`pressTabKey`, whose rule is
+   * `tabKey`). Shut, the map opens on that tab, closing every other panel first as the Waypoints window did;
+   * open on another tab, it switches to this one; already showing it, the map shuts and the game has its
+   * mouse back. The Group tab is on offer only while a server holds a group for this browser, and with none
+   * its key opens nothing, as the group panel's own key never did with no server.
+   */
+  private toggleMapTab(tab: 'waypoints' | 'group'): void {
+    pressTabKey(this.map, tab, tab !== 'group' || this.groupHeld(), () => this.toggleMap(), (on) => {
+      if (!this.started || !this.inWorld || this.traveling) return;
+      this.closePanels();
+      this.toggleMap(on);
+    });
   }
 
-  /** What the Waypoints window shows: built when it opens and when the book changes, never in a frame. */
+  /** What the Waypoints tab shows: built when it comes up and when the book changes, never in a frame. */
   private waypointsModel(): WaypointsModel {
     const book = this.story.book;
     const planet = this.world.planet;
@@ -11207,7 +11227,10 @@ class App {
     this.messages.system(out.ok ? `Waypoint set: ${name}` : `No waypoint: ${out.why}`);
   }
 
-  /** "Show on map": the map window opened on the waypoint, on this world. */
+  /**
+   * "Show on map": the map's Here tab at the waypoint, on this world. The button is on the map's own
+   * Waypoints tab, so the window is open already and only its tab changes; the mouse is the map's still.
+   */
   private showWaypointOnMap(id: string): void {
     const w = this.story.book?.waypoints.find((x) => x.id === id);
     const planet = this.world.planet;
@@ -11216,11 +11239,10 @@ class App {
       this.messages.system('That waypoint is on another world.');
       return;
     }
-    this.waypointsUi.hide();
     // A planet's waypoint is kept in the map's own frame, so it is the point the map opens on; in space
     // the map is the zone's own view and follows the ship as it always does.
     if (w.f === 'raw') this.map.showAt(w.p[0], w.p[1]);
-    else this.map.show();
+    else this.map.show('here');
     this.input.captured = true;
     this.input.releaseLock();
   }
@@ -11232,7 +11254,7 @@ class App {
 
   // ---- The journal and the documents: what was witnessed, what is to read, and the ISB's file. ----
 
-  /** The journal window (O) and the document window, and what the story hands either of them. Once, in the constructor. */
+  /** The journal window (J) and the document window, and what the story hands either of them. Once, in the constructor. */
   private wireJournal(): void {
     const j = new JournalUi(this.ui);
     this.journalUi = j;
@@ -11305,7 +11327,7 @@ class App {
     if (!out.ok && out.why) this.messages.system(out.why);
   }
 
-  /** O: the journal, open or shut. It closes every other panel to open, as the Waypoints window does. */
+  /** J: the journal, open or shut. It closes every other panel to open, as the map's tab keys do. */
   private toggleJournal(open = !this.journalUi.open, tab?: 'jobs' | 'journal' | 'file' | 'people' | 'standing'): void {
     if (!open) {
       if (!this.journalUi.open) return;
@@ -17340,7 +17362,7 @@ class App {
 
   /** The panels' open state moved to the tabs: closing one panel of a pair and opening the other keeps the mouse free. */
   private anyPanelOpen(): boolean {
-    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.waypointsUi.open || this.journalUi.open || this.documentUi.open || this.menu.open;
+    return this.backpack.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open || this.vehiclesUi.open || this.shipEdit.open || this.npcUi.open || this.shipMenu.open || this.hyperspaceUi.open || this.liftMenu.open || this.shuttleMenu.open || this.terminalUi.open || this.housingUi.open || this.propsUi.open || this.journalUi.open || this.documentUi.open || this.menu.open;
   }
 
   private jediKit(): JediKit {
@@ -18095,7 +18117,7 @@ class App {
     if (this.hyperspaceUi.open) this.hyperspaceUi.hide();
     if (this.housingUi.open) this.housingUi.hide();
     if (this.propsUi.open) this.propsUi.hide();
-    if (this.waypointsUi.open) this.waypointsUi.hide();
+    // The waypoints and the group are tabs of the map, which goes with `map.hide()` where that is wanted.
     if (this.journalUi.open) this.journalUi.hide();
     if (this.documentUi.open) {
       this.documentUi.hide();
@@ -18291,17 +18313,17 @@ class App {
    * Give the mouse back, unless something else on the screen still wants it.
    *
    * What a panel knows is that it has closed; whether the pointer goes back to the game is the
-   * game's to say, because two windows hold the mouse without being panels in the tab sense -- the
-   * group's roster and the trade window, both of which are deliberately allowed to stand over a
-   * panel. This is the same question `TradeUi` asks through its own `elseHasMouse`, asked from the
-   * other side.
+   * game's to say, because some windows hold the mouse without being panels in the tab sense -- the
+   * trade window and the debug menu, both of which are deliberately allowed to stand over a panel,
+   * and a conversation. This is the same question `TradeUi` asks through its own `elseHasMouse`,
+   * asked from the other side. (The group's roster was one of them until it became a tab of the map.)
    */
   private handBackMouse(): void {
     if (this.anyPanelOpen() || this.map.open || this.mouseHeldElsewhere()) return;
     this.freeMouse(false);
   }
 
-  /** Whether one of the windows that hold the mouse without joining `anyPanelOpen` (the group's, the trade window, the debug menu) has it. */
+  /** Whether one of the windows that hold the mouse without joining `anyPanelOpen` (the trade window, the debug menu, a conversation) has it. */
   private mouseHeldElsewhere: () => boolean = () => false;
 
   /** B: the spawner, the garage or the NPCs tab; the key toggles the last tab used, a tab click swaps. */
@@ -18309,6 +18331,9 @@ class App {
     const want = tab ?? this.spawnerTab;
     const wasOpen = tab === undefined && (this.vehiclesUi.open || this.npcUi.open || this.shipEdit.open);
     this.closePanels();
+    // The map goes too, on whichever tab it shows, as it does for the journal and the ship menu: left up,
+    // the spawner opened over it, and B again then took the pointer with the map still on the screen.
+    this.map.hide();
     this.audio.ui.play(wasOpen ? 'panelClose' : tab !== undefined ? 'select' : 'panelOpen');
     if (wasOpen) {
       this.freeMouse(false);
@@ -19060,6 +19085,9 @@ class App {
     const want = tab ?? this.inventoryTab;
     const wasOpen = tab === undefined && (this.backpack.open || this.housingUi.open || this.propsUi.open || this.wardrobe.open || this.appearanceUi.open || this.weaponsUi.open || this.forceUi.open);
     this.closePanels();
+    // The map goes too, on whichever tab it shows, as it does for the journal and the ship menu: left up,
+    // the backpack opened over it, and I again then took the pointer with the map still on the screen.
+    this.map.hide();
     // The backpack's own open and close, from the game's interface table.
     this.audio.ui.play(wasOpen ? 'panelClose' : tab !== undefined ? 'select' : 'panelOpen');
     if (wasOpen) {
@@ -19092,7 +19120,8 @@ class App {
   }
 
 
-  private toggleMap(): void {
+  /** M: the map, open or shut; it opens on the tab used last, or on `tab` when one is named. */
+  private toggleMap(tab?: MapTab): void {
     // The galaxy is one view and the terminal may be holding it. It should never happen -- both ways
     // into the terminal close the map first, and M is not read while a panel is up -- but opening the
     // window onto a box whose canvas is somewhere else would be a blank tab and no way to say why.
@@ -19105,7 +19134,7 @@ class App {
       this.input.captured = false;
       this.input.requestLock();
     } else {
-      this.map.show();
+      this.map.show(tab);
       this.input.captured = true;
       this.input.releaseLock();
     }
@@ -21132,11 +21161,13 @@ class App {
         if (input.pressedAction('spawner') && !jumpBusy) this.toggleSpawner();
         if (input.pressedAction('ship')) this.toggleShipMenu();
         if (input.pressedAction('help')) this.hud.toggleHelp();
-        // The Waypoints window, held back while a jump has the controls or a shuttle has the passenger,
-        // as the map is: its "Show on map" opens the map, whose teleport would end either.
-        if (input.pressedAction('waypoints') && !this.hyperspace.locksControls && !riding) this.toggleWaypoints();
-        // The journal, held back as the Waypoints window is, and not at a ship's controls, where O is the
-        // ultra cruise's own key.
+        // The map's Waypoints and Group tabs, held back while a jump has the controls or a shuttle has the
+        // passenger, as the map is: the map's teleport would end either. Group does nothing while no
+        // server holds a group for this browser.
+        if (input.pressedAction('waypoints') && !this.hyperspace.locksControls && !riding) this.toggleMapTab('waypoints');
+        if (input.pressedAction('group') && !this.hyperspace.locksControls && !riding) this.toggleMapTab('group');
+        // The journal, held back as the map's tabs are, and not at a ship's controls, where J is the
+        // engine cut's own key (and the set-down's in space).
         const atControls = !!(player.mounted ?? player.piloting)?.spec.ship;
         if (input.pressedAction('journal') && !this.hyperspace.locksControls && !riding && !atControls) this.toggleJournal();
         // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
@@ -21172,8 +21203,11 @@ class App {
         }
         // Pick the nearest thing you have put down back up, so a weapon in a case can be taken out
         // and used again (or, with nothing of yours near, take down a building of yours at its door).
-        // Never while something is already in hand, which would swap one for another.
-        else if (takeKey && !this.placing && !this.anyPanelOpen() && !riding) this.takeNearestProp();
+        // Never while something is already in hand, which would swap one for another; never with the map
+        // up, on any of its tabs, since play stands still under it and the ghost would be taken in hand
+        // behind it; and never at a ship's controls, where O is the ultra cruise's own key and every run
+        // would also say there is nothing of yours near enough to pick up.
+        else if (takeKey && !this.placing && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) this.takeNearestProp();
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
@@ -21211,7 +21245,7 @@ class App {
           if (input.justPressed(CUT_ENGINES_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && this.world.planet.space) wingsOf.askSetDown();
           // The ultra cruise: the same key starts a run and lets go of one. It says for itself where
           // it may run at all, so the only thing asked here is that a jump is not flying the hull.
-          // At a ship's controls only: O is the journal everywhere else.
+          // At a ship's controls only: O is the pick-up everywhere else.
           if (input.justPressed(CRUISE_KEY) && wingsOf?.spec.ship && !this.hyperspace.locksControls && !riding) this.ultraCruise.toggle();
           dropPilotChoices(this.world.vehicles, wingsOf);
           // The emote wheel: held open, the mouse picks, the key's release plays; the arrows play the first four outright.
