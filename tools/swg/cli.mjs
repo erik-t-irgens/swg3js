@@ -174,14 +174,14 @@
 //        --core3=<dir> (travel, fittings, deeds, spawns, snapshot, mobiles, conversations: read SWGEmu's MMOCoreORB/bin/scripts
 //                       live instead of the Core3 reference in tools/swg/core3ref/; --core3=none reads neither)
 //        --no-flip (keep left-handed coordinates)  --no-textures (skip DDS decoding)
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { detailLevels, exteriorAppearance, resolveParts } from './appearance.mjs';
 import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
 import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
-import { buildGlb } from './glb.mjs';
+import { buildGlb, glbSpecStamped } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
@@ -203,7 +203,7 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { DYE_FORMAT, DYE_PALETTE, DYE_PALETTE_COLOURS, DYE_TUNE, EXTRA_GARMENT_PALETTES, colourOf, dyeBlock, dyeMesh, dyeSkip, readsVariable, wardrobeColourStatus } from './dye.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { MATERIAL_FORMAT, combineMasks, describeLines, describeSurface, maskOf, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceTexture } from './surface.mjs';
+import { MATERIAL_FORMAT, describeLines, describeSurface, maskOf, materialStale, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
@@ -378,7 +378,7 @@ function surfaceDeps(vfs) {
     encodePng,
     alphaFromEffect: (effect, fallback) => alphaFromEffect(vfs, effect, fallback),
     surfaceFor: (effect, slots, dds, alphaMode, opts) => surfaceFor(vfs, effect, slots, dds, alphaMode, opts),
-    normalFor: (path) => normalFor(vfs, path),
+    normalFor: (path, slot) => normalFor(vfs, path, slot),
     detailFor: (slots) => detailFor(vfs, slots),
     // Glass by name is drawn as its effect says (a name told nothing about transparency: a
     // fuselage texture called cockpit blended at a fixed share looked like a ghost ship), only
@@ -458,50 +458,40 @@ function textureFor(vfs, shaderPath, opts = {}) {
   return result;
 }
 
-const normalCache = new Map();
+/**
+ * The run's readers of a shader's normal map and shine (surface.mjs `surfaceReaders`), one per mounted
+ * archive set: what each reads is cached for the run, and the node tests make the very same readers.
+ */
+const surfaceReaderSets = new WeakMap();
+function readersOf(vfs) {
+  let r = surfaceReaderSets.get(vfs);
+  if (!r) {
+    r = surfaceReaders(vfs, { decodeDds, encodePng, loadEffect, log: (message) => console.error(`  ${message}`) });
+    surfaceReaderSets.set(vfs, r);
+  }
+  return r;
+}
 
 /**
- * A shader's normal map as tangent-space RGB. The game's compressed normal maps ("cn"
- * textures, the CNRM slot) keep x in the alpha and y in the green channel with z left to be
- * rebuilt, told from an ordinary RGB map by the alpha carrying the detail and the red none.
- * The channels go into the GLB exactly as the game has them; which way up the green is read is the
- * game's own business and not the converter's (`__debug.normals`), so nothing here changes with it.
+ * A shader's normal map as tangent-space RGB, decoded by the slot it sits in: CNRM is the game's
+ * compressed layout (x in the alpha, y in the green, z rebuilt), NRML plain signed RGB, which is how
+ * every one of the client's own programs reads them (`src/swg/normalDecode.ts`). It used to be guessed
+ * from the picture -- an alpha that varied far more than the red was taken for x -- and a plain map
+ * keeps the height it was made from in its alpha, so 1,157 of the shaders the game uses were lit about
+ * 33 degrees off. The channels go into the GLB as the game reads them; which way up the green is read is
+ * the game's own business and not the converter's (`__debug.normals`), so nothing here changes with it.
  */
-function normalFor(vfs, file) {
-  const key = file.replace(/\\/g, '/').toLowerCase();
-  if (normalCache.has(key)) return normalCache.get(key);
-  let out = null;
+function normalFor(vfs, file, slot) {
+  return readersOf(vfs).normalFor(file, slot);
+}
+
+/** A JSON record a command wrote last time (a manifest, a travel.json), read back; null when absent or unreadable. */
+function recordAt(file) {
   try {
-    if (vfs.has(key)) {
-      const dds = decodeDds(vfs.read(key));
-      const n = dds.width * dds.height;
-      const src = dds.rgba;
-      let sumA = 0, sumR = 0, sqA = 0, sqR = 0, count = 0;
-      const step = Math.max(1, Math.floor(n / 4096));
-      for (let i = 0; i < n; i += step) {
-        const r8 = src[i * 4], a8 = src[i * 4 + 3];
-        sumR += r8; sqR += r8 * r8; sumA += a8; sqA += a8 * a8; count++;
-      }
-      const varA = sqA / count - (sumA / count) ** 2;
-      const varR = sqR / count - (sumR / count) ** 2;
-      const swizzled = varA > 4 && varA > varR * 4;
-      const rgba = new Uint8Array(n * 4);
-      for (let i = 0; i < n; i++) {
-        const x = (swizzled ? src[i * 4 + 3] : src[i * 4]) / 127.5 - 1;
-        const y = src[i * 4 + 1] / 127.5 - 1;
-        const z = swizzled ? Math.sqrt(Math.max(0, 1 - x * x - y * y)) : src[i * 4 + 2] / 127.5 - 1;
-        rgba[i * 4] = Math.round((x * 0.5 + 0.5) * 255);
-        rgba[i * 4 + 1] = Math.round((y * 0.5 + 0.5) * 255);
-        rgba[i * 4 + 2] = Math.round((z * 0.5 + 0.5) * 255);
-        rgba[i * 4 + 3] = 255;
-      }
-      out = { path: key, png: encodePng(dds.width, dds.height, rgba), swizzled };
-    }
-  } catch (err) {
-    console.error(`  normal map ${file} skipped: ${err.message}`);
+    return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
+  } catch {
+    return null;
   }
-  normalCache.set(key, out);
-  return out;
 }
 
 /** Detail maps already read this run, by path: 281 images are shared by 1,369 shaders. */
@@ -548,151 +538,24 @@ function detailFor(vfs, slots) {
   return out;
 }
 
-const surfaceEffects = new Map();
-
 /**
- * How shiny a shader's surface is, from its effect and texture slots.
+ * How shiny a shader's surface is: the mask its own pixel program multiplies its specular by, the
+ * highlight its MATL says it drew, and how much of it is a mirror (surface.mjs `surfaceReaders`, where
+ * the reading lives so a node test runs the converter's very code).
  *
- * Most of the game's shaders keep the specular and reflection mask in the **alpha of the diffuse
- * map** (when the effect does not use alpha for transparency): bright alpha means glossy metal or
- * glass. Reflective shaders carry an environment cube map (slot ENVM) that the scene's own
- * environment replaces. Returns glTF metallic/roughness factors and, where a mask exists, a
- * metallicRoughness image.
- *
- * **But 1,695 shaders name a gloss map of their own** and reading the diffuse alpha on those was
- * reading the wrong channel of the wrong file. Measured over all 22,322 shaders in the archives:
- * 4,844 carry a SPEC slot, and on 3,149 of them it names the very same file as MAIN -- which is why
- * the alpha rule works as well as it does and why it is kept for those. On the other 1,695 it names
- * a separate texture (`*_spec.dds`, `*_ref.dds`), and that is what is read now. A third of them are
- * grey and the rest carry colour, so what is taken is the luminance: glTF's roughness is one number
- * and a coloured specular has no place to go in it.
- *
- * **And how much of a surface is a mirror is a second mask, in its own place.** The client's line is
- * `result.rgb = lerp(diffuseLitSurface, envColor, envMask) + specular`, so `envMask` is metalness in
- * three's terms with the scene's environment behind it -- and `envMaskOf` reads which texture and
- * channel it is out of the shader's own program, because it is not always the main texture's alpha.
- * Measured over the 1,400 retail shaders with an environment cube: 981 use the main's alpha, 378 use
- * the MASK slot's, 25 the SPEC slot's and 16 are unreadable and fall back on the main's. Taken from
- * the gloss map instead, as it was, a hull's shine stood in for its chrome; taken from the main's
- * alpha on the whole hue family, the *hue* mask did -- which is a two-tone shape mask and has
- * nothing at all to do with reflection, so a customizable armour piece was mirror-bright wherever
- * its second colour happened to fall.
+ * The mask is read off the program (`specMaskOf`) and no longer guessed: the effect's name decided
+ * whether a surface shone at all, a gloss file was read as its luminance where the program reads its
+ * alpha (815 shaders), and the two-tone cloth read the colour texture's alpha -- the hue mask -- where
+ * its program reads the normal map's (445), which is why shirts glinted in stripes. It goes into the
+ * metal-rough image's red, which three never reads; green is still the roughness worked out from it by
+ * the slope this converter always used, because reflections and the rain's wet look still read green;
+ * blue is the mirror mask, which `envMaskOf` reads out of the same program (981 of the 1,400 cube
+ * shaders use the main's alpha, 378 the MASK slot's, 25 the SPEC slot's). A program that cannot be read
+ * keeps the old rule, and is logged and counted.
  */
-function surfaceFor(vfs, effect, slots, dds, alphaMode, { alphaIsEmissive = false, envMask = null } = {}) {
-  const name = (effect ?? '').toLowerCase();
-  let tags = surfaceEffects.get(name);
-  if (!tags) {
-    tags = new Set();
-    try {
-      const eff = effect ? loadEffect(vfs, effect.replace(/\\/g, '/')) : null;
-      for (const pass of eff?.passes ?? []) for (const st of pass.stageList ?? []) if (st.textureTag) tags.add(st.textureTag);
-    } catch {
-      /* effects the renderer cannot parse just get no shine */
-    }
-    surfaceEffects.set(name, tags);
-  }
-  const slotTags = new Set((slots ?? []).map((s) => s.slot));
-  // IRID is an environment cube under another name: the fourteen iridescent shaders (the chitin
-  // armour set) name their cube IRID and are then drawn by the very same program the envmask family
-  // uses, with that slot bound to its `envMap` sampler. Left out of this test they were the one
-  // reflective family in the game with no reflection at all.
-  const reflective = slotTags.has('ENVM') || slotTags.has('IRID') || tags.has('ENVM') || tags.has('IRID') || /env|chrome|mirror|refl|irid/.test(name);
-  const specular = reflective || slotTags.has('SPEC') || tags.has('SPEC') || /spec|gloss|shin|metal|glass/.test(name);
-  if (!specular) return {};
-  // The shader's own gloss map, where it names one that is not simply the diffuse again.
-  const own = glossMap(vfs, slots, dds);
-  // A glowing texture's alpha is its glow mask, not a gloss mask.
-  const masked = dds.hasAlpha && alphaMode === 'OPAQUE' && !alphaIsEmissive;
-  // And how much of it is a mirror, out of whichever texture the shader's own program named.
-  const env = reflective ? envSource(vfs, slots, dds, envMask) : null;
-  if (!own && !masked && !env) return { metallic: reflective ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
-  // Roughness in green, metalness in blue, out of whichever masks this shader has. The arithmetic is
-  // `combineMasks` in surface.mjs, where a node test can reach it: written out here it read the
-  // gloss reader's size through a field the reader does not carry, and a one-pixel image of NaN is a
-  // mirror on every surface in the game with a gloss map of its own.
-  const gloss = own ? { w: own.w, h: own.h, read: own.read } : masked ? { w: dds.width, h: dds.height, read: (x, y) => dds.rgba[(y * dds.width + x) * 4 + 3] } : null;
-  const { w, h, rgba: mr } = combineMasks({ gloss, env, reflective });
-  return { metallic: 1, roughness: 1, mr: { png: encodePng(w, h, mr) }, ...(own ? { glossFrom: own.path } : {}), ...(env ? { envFrom: `${env.slot}.${env.channel}` } : {}) };
-
-  /**
-   * How glossy a shader's own SPEC texture says it is, as a reader over its pixels, or null where it
-   * names none worth reading. Cached per file: one gloss map is shared by dozens of shaders.
-   *
-   * A reader rather than a finished image, because the roughness and the metalness now come from two
-   * different textures on the 603 shaders whose gloss is a file of its own and whose environment
-   * mask is the main's alpha, and one of them has to be sampled into the other's size.
-   */
-  function glossMap(vfsIn, slotList, main) {
-    const spec = (slotList ?? []).find((s) => s.slot === 'SPEC');
-    if (!spec?.path) return null;
-    const path = String(spec.path).replace(/\\/g, '/');
-    // The same file as the diffuse: its alpha is the mask, which is the branch above. 3,149 of the
-    // 4,844 are this, and reading it here as a colour map would turn every one of them to mud. The
-    // main's path is taken from the slot list rather than from the decoded image, which carries
-    // pixels and no name.
-    const mainPath = String((slotList ?? []).find((s) => s.slot === 'MAIN')?.path ?? '').replace(/\\/g, '/');
-    if (path.toLowerCase() === mainPath.toLowerCase()) return null;
-    void main;
-    const had = glossCache.get(path);
-    if (had !== undefined) return had;
-    let out = null;
-    try {
-      if (vfsIn.has(path)) {
-        const img = decodeDds(vfsIn.read(path));
-        // Luminance: a third of these maps are grey and the rest carry a coloured specular, which
-        // glTF's one roughness number has nowhere to keep.
-        out = {
-          path,
-          w: img.width,
-          h: img.height,
-          read: (x, y) => {
-            const i = (y * img.width + x) * 4;
-            return Math.round(img.rgba[i] * 0.2126 + img.rgba[i + 1] * 0.7152 + img.rgba[i + 2] * 0.0722);
-          },
-        };
-      }
-    } catch (err) {
-      console.error(`  gloss map ${path} skipped: ${err.message}`);
-    }
-    glossCache.set(path, out);
-    return out;
-  }
+function surfaceFor(vfs, effect, slots, dds, alphaMode, opts = {}) {
+  return readersOf(vfs).surfaceFor(effect, slots, dds, alphaMode, opts);
 }
-
-/** Environment-mask textures already read this run, by path. */
-const envMaskCache = new Map();
-
-/**
- * How much of a surface is a mirror, as a reader over whichever texture the shader's program named.
- *
- * `envMaskOf` has read the slot and the channel out of the pixel program; this is only the reading.
- * A shader with no environment cube never gets here, and one whose program could not be read falls
- * back on the main texture's alpha, which is what 981 of the 1,400 really use.
- */
-function envSource(vfs, slots, dds, envMask) {
-  const slot = envMask?.slot ?? 'MAIN';
-  const channel = envMask?.channel ?? 'a';
-  const pick = channel === 'a' ? 3 : 1;
-  const mainOf = (img) => ({ slot, channel, w: img.width, h: img.height, read: (x, y) => img.rgba[(y * img.width + x) * 4 + pick] });
-  if (slot === 'MAIN') return dds.hasAlpha || channel !== 'a' ? mainOf(dds) : null;
-  const named = (slots ?? []).find((s) => s.slot === slot);
-  if (!named?.path) return null;
-  const path = String(named.path).replace(/\\/g, '/');
-  const key = `${path}|${channel}`;
-  const had = envMaskCache.get(key);
-  if (had !== undefined) return had ? { ...had, slot, channel } : null;
-  let out = null;
-  try {
-    if (vfs.has(path)) out = mainOf(decodeDds(vfs.read(path)));
-  } catch (err) {
-    console.error(`  environment mask ${path} skipped: ${err.message}`);
-  }
-  envMaskCache.set(key, out);
-  return out;
-}
-
-/** Gloss maps already read this run, by path: one is shared by dozens of shaders. */
-const glossCache = new Map();
 
 /** Apply a row-major 3x4 transform to a parsed mesh's positions and normals in place. */
 function transformMesh(mesh, m) {
@@ -1658,6 +1521,8 @@ function convertParts(vfs, outRoot, template, { wear = DEFAULT_WEAR, variables =
     species: id.replace(/_(male|female)$/, ''),
     gender: gender === 'f' ? 'female' : 'male',
     template,
+    // The stamp a parts pack never had (`clips-apply` rewrites this file and keeps it).
+    materialFormat: MATERIAL_FORMAT,
     skeleton: info.skeleton,
     rig: info.rig,
     joints: info.joints,
@@ -1736,6 +1601,7 @@ function writeSpeciesIndex(outRoot) {
         species: m.species ?? id.replace(/_(male|female)$/, ''),
         gender,
         template: m.template,
+        materialFormat: m.materialFormat ?? 1,
         skeleton: m.skeleton,
         parts: m.parts?.length ?? 0,
         morphs: [...new Set((m.parts ?? []).flatMap((p) => p.morphs ?? []))],
@@ -1745,7 +1611,9 @@ function writeSpeciesIndex(outRoot) {
       });
     }
   }
-  const index = { species };
+  // The index's own stamp is its oldest pack's: it is written by `parts` as well as `species`, and a
+  // run over one species must not make the rest read as new.
+  const index = { materialFormat: species.length ? Math.min(...species.map((s) => s.materialFormat)) : MATERIAL_FORMAT, species };
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'index.json'), JSON.stringify(index, null, 2));
   return index;
@@ -1894,15 +1762,28 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
   const alphaMode = pass?.alphaTest ? 'MASK' : pass?.alphaBlend ? 'BLEND' : 'OPAQUE';
   let hasAlpha = image.hasAlpha ?? false;
   if (image.hasAlpha === undefined) for (let i = 3; i < image.rgba.length; i += 4) if (image.rgba[i] !== 255) { hasAlpha = true; break; }
-  const normalFile = shader?.textureFiles?.get('CNRM') ?? shader?.textureFiles?.get('NRML') ?? shader?.textureFiles?.get('DOT3') ?? null;
-  const normal = normalFile ? normalFor(vfs, normalFile) : null;
   // Everything about the surface that is not the picture -- whether it is glass, whether it blends
-  // rather than being cut out, and its gloss map -- is `surfaceTexture`'s to read, and a shader that
-  // is **baked** was getting none of it: this path built its own entry from the baked image and
-  // stopped there. That is why the goggles' lens came out as a cut-out at a half threshold with most
-  // of itself discarded, and why no customizable wearable had a specular map at all. The image here
-  // is the bake's; the rest is taken from the shader as it stands.
+  // rather than being cut out, its gloss map, its normal map and the highlight it draws -- is
+  // `surfaceTexture`'s to read, and a shader that is **baked** was getting none of it: this path built
+  // its own entry from the baked image and stopped there. That is why the goggles' lens came out as a
+  // cut-out at a half threshold with most of itself discarded, and why no customizable wearable had a
+  // specular map at all. The image here is the bake's; the rest is taken from the shader as it stands.
   const plain = textureFor(vfs, shaderPath);
+  // The normal map the program reads: **which slot** is the plain path's to say (none where the program
+  // reads none, the second coordinate set where the shader puts it there), but **which file** is the one
+  // this run's values chose, since a customizable face picks its bump with its colour (22 retail shaders
+  // choose their CNRM or NRML by a variable, `hum_m_face` and the other species' faces among them) and the
+  // plain path describes the shader at its defaults. A shader the plain path could not describe at all
+  // takes the first one it names, in that slot's own layout.
+  let normal = null;
+  if (plain?.normal) {
+    const chosen = shader?.textureFiles?.get(plain.normal.slot) ?? null;
+    const own = chosen ? normalFor(vfs, chosen, plain.normal.slot) : null;
+    normal = own ? { ...own, ...(plain.normal.set === 1 ? { set: 1 } : {}) } : plain.normal;
+  } else if (!plain) {
+    const slot = ['CNRM', 'NRML', 'DOT3'].find((tag) => shader?.textureFiles?.get(tag)) ?? null;
+    normal = slot ? normalFor(vfs, shader.textureFiles.get(slot), slot) : null;
+  }
   // A shader baked only for a palette laid on after its first pass (the every-pass rule) was drawn by the
   // plain path until now, its glow split out of its picture, and keeps that glow (two Ithorian helmets light
   // their visors through a mask). Split out of the **bake**, by the same mask, so the base is the lit half:
@@ -1919,7 +1800,15 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
     ...(plain?.glass ? { glass: true } : {}),
     ...(plain?.translucent ? { translucent: true, ...(plain.alphaTest !== undefined ? { alphaTest: plain.alphaTest } : {}) } : {}),
     ...(plain?.noShadow ? { noShadow: true } : {}),
-    ...(plain?.mr ? { mr: plain.mr, metallic: plain.metallic, roughness: plain.roughness, ...(plain.glossFrom ? { glossFrom: plain.glossFrom } : {}) } : {}),
+    ...(plain?.mr ? { mr: plain.mr, ...(plain.glossFrom ? { glossFrom: plain.glossFrom } : {}) } : {}),
+    // The factors as the plain path worked them out from the program's own mask (a flat shine where the
+    // mask is one all over), and what highlight the client drew and whether there is a cube.
+    ...(plain?.metallic !== undefined ? { metallic: plain.metallic } : {}),
+    ...(plain?.roughness !== undefined ? { roughness: plain.roughness } : {}),
+    ...(plain?.envFrom ? { envFrom: plain.envFrom } : {}),
+    ...(plain?.spec ? { spec: plain.spec } : {}),
+    ...(plain?.cube !== undefined ? { cube: plain.cube } : {}),
+    ...(plain?.sets ? { sets: plain.sets } : {}),
   };
   if (late) {
     const mask = `${late.glow.maskTag}.${late.glow.channel}`;
@@ -2649,6 +2538,42 @@ function objEffectsStale(packDir, sources) {
   return null;
 }
 
+/** Why a pack whose models are older than the material format is asked for again: what the format last changed. */
+const MATERIAL_WHY = `converted before material format ${MATERIAL_FORMAT}: their normal maps decoded by the slot they sit in, their shine read from each shader's own program, and the highlight each draws`;
+
+/** A GLB file's JSON chunk, read without the rest of the file (no buffer, no image); null when it is not a GLB. */
+function glbJsonOnly(file) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+    const head = Buffer.alloc(20);
+    if (readSync(fd, head, 0, 20, 0) < 20 || head.toString('latin1', 0, 4) !== 'glTF' || head.toString('latin1', 16, 20) !== 'JSON') return null;
+    const body = Buffer.alloc(head.readUInt32LE(12));
+    if (readSync(fd, body, 0, body.length, 20) < body.length) return null;
+    return JSON.parse(body.toString('utf8'));
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * Whether the GLBs a pack lists were written at the current material format, by a thing only that format
+ * writes (`glbSpecStamped`, every textured material's `extras.swgSpec`): the first of them that has a
+ * textured material decides; null when none of the first few can be read or has one. `player`, `parts`
+ * and `species` stamped nothing for years, so a stamp alone could be one a later command copied forward;
+ * a named product cannot.
+ */
+function glbsCurrent(files) {
+  for (const f of files.slice(0, 6)) {
+    if (!existsSync(f)) continue;
+    const said = glbSpecStamped(glbJsonOnly(f));
+    if (said !== null) return said;
+  }
+  return null;
+}
+
 function packStatus(dir) {
   // A file that is there but will not parse (a conversion stopped or a machine that lost power in
   // the middle of writing it) is taken as missing, so the step that writes it is asked for again,
@@ -2675,7 +2600,11 @@ function packStatus(dir) {
   };
   console.log(`packs under ${dir}:`);
   let planets = 0;
+  /** What the worlds' own counts say the reading of the programs could not do (`surfaceCounts` in each manifest). */
+  const surfaceNotes = { worlds: 0, otherSets: 0, unread: 0, second: 0 };
   let wantTravel = false;
+  /** The worlds whose travel terminals and shuttles are models older than the material format. */
+  const travelMaterials = [];
   let wantFittings = false;
   let wantObjEffects = false;
   /** The worlds whose trees and rocks still stand on guessed cylinders, each with why. */
@@ -2824,7 +2753,18 @@ function packStatus(dir) {
     // A world whose layout carries gates between its zones but no gates.json was converted before the
     // join was written: those gates stand there doing nothing and nothing else would say so.
     if (!gates && layout && layout.objects.some((o) => isZoneGate(o.template))) need(`pois <swg-dir> all ${dir} --retail-only`, `${planet}'s zone gates have no destinations`);
-    if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were converted before animated and glowing surfaces`);
+    // What the reading of the programs could not do on this world, summed below (a pack from before
+    // format 6 carries no count). Tallied here, ahead of the snapshot's own chain of asks and never
+    // inside it: an `if` of its own between the material format's ask and the `else if` after it would
+    // take that `else` for itself, and every world converted from format 6 on would then never be asked
+    // for its detail levels again.
+    if (manifest.surfaceCounts) {
+      surfaceNotes.worlds++;
+      surfaceNotes.otherSets += manifest.surfaceCounts.otherSets ?? 0;
+      surfaceNotes.unread += manifest.surfaceCounts.shineUnread ?? 0;
+      surfaceNotes.second += manifest.surfaceCounts.normalSecondSet ?? 0;
+    }
+    if (objects && (manifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, `${planet}'s models were ${MATERIAL_WHY}`);
     // The client's own lower detail levels and each indoor object's room (step 7): a pack without them draws
     // every placed thing and plant at its finest at every distance, and finds a room's furniture by its boxes.
     else if (objects && (manifest.lodFormat ?? 0) < LOD_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, (manifest.lodFormat ?? 0) < 1 ? `${planet}'s placed models and flora were converted before the client's own detail levels (every one drawn at its finest at any distance)` : `${planet}'s placed models and flora carry detail levels the game can never draw or that stand somewhere else than the model, and a few surfaces a detail map with no coordinates for it`);
@@ -2837,6 +2777,10 @@ function packStatus(dir) {
     // The rigs live in one folder every world shares, so a world's file can be current while the
     // pieces it names have gone.
     else if (travel && Object.values(travel.rigs ?? {}).some((r) => !existsSync(join(dir, r.file)) || (r.parts ?? []).some((p) => !existsSync(join(dir, p.file))) || Object.values(r.events ?? {}).some((e) => (e.particles ?? []).some((p) => !existsSync(join(dir, p.file)))))) wantTravel = true;
+    // Its terminals and shuttles are models it converts, which carried no material stamp before 6: asked for
+    // with a reason of its own, since none of the others is true of such a world. A run converts them again
+    // (`travelModelsToConvert` in travel.mjs) rather than keeping them because their files are there.
+    if (travel && materialStale(travel)) travelMaterials.push(planet);
     // The fires, sprays, flames and glows the objects' client data hangs on them (`objeffects`),
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
@@ -2854,9 +2798,14 @@ function packStatus(dir) {
     if (travel && rowsLost(travel.rows, layoutIds, TRAVEL_OWN_MODELS)) wantTravel = true;
     if (fittings && rowsLost(fittings.rows, layoutIds)) wantFittings = true;
   }
+  // Counted, not asked for: a rerun cannot change either. A mask or a normal map on a coordinate set the
+  // models do not carry is drawn on the main's set, and a shader whose program could not be read keeps
+  // the old guess at its shine (`materials` and `shader` name each one).
+  if (surfaceNotes.worlds) console.log(`  materials on ${surfaceNotes.worlds} world${surfaceNotes.worlds === 1 ? '' : 's'}: ${surfaceNotes.second} surfaces with a normal map on the second coordinate set (drawn on it), ${surfaceNotes.otherSets} reading a mask or a normal map on a set the models do not carry (drawn on the main's), ${surfaceNotes.unread} whose program could not be read (shine by the old rule)`);
   // Both must run **after** any snapshot, since a snapshot rewrites the layout category they append
   // to; `convert` reads the order from here, so naming them after the worlds is what keeps it right.
   if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
+  if (travelMaterials.length) need(`travel <swg-dir> ${dir} --retail-only`, `the travel terminals and shuttles on ${travelMaterials.slice(0, 4).join(', ')}${travelMaterials.length > 4 ? ', ...' : ''} were ${MATERIAL_WHY}`);
   if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world or its fittings");
   // One run writes every world's file, and needs no model converted again.
   if (wantFloraCollision.length) need(`floracollision <swg-dir> ${dir} --retail-only`, `the trees and rocks on ${wantFloraCollision.length} world${wantFloraCollision.length === 1 ? '' : 's'} are guessed cylinders, a wide tree solid across most of its canopy, instead of the trunks and rocks the client collided with (${wantFloraCollision.slice(0, 3).join(', ')}${wantFloraCollision.length > 3 ? ', ...' : ''})`);
@@ -2870,6 +2819,8 @@ function packStatus(dir) {
     const missing = Object.keys(CREATURES).filter((id) => !have.has(id));
     console.log(`  creatures: ${have.size} (${[...have].join(', ')})${missing.length ? `; missing ${missing.join(', ')}` : ''}`);
     if (missing.length) need(`creatures <swg-dir> ${dir} --retail-only`, `creatures missing: ${missing.join(', ')}`);
+    // Its own `if`: the creatures carried no material stamp before format 6, so an absent one reads as old.
+    if ((creatures.materialFormat ?? 1) < MATERIAL_FORMAT) need(`creatures <swg-dir> ${dir} --retail-only`, `the creatures' models were ${MATERIAL_WHY}`);
     // The mounts' saddles: hung on the creature's own saddle hardpoint, on the back where it is guessed, on its own rider point, or none in the tables.
     const saddles = saddleStatus(creatures.creatures, (f) => existsSync(join(dir, f)));
     console.log(`  saddles: ${saddles.onHardpoint} on the creature's own hardpoint, ${saddles.guessed} where the back is guessed, ${saddles.rider} on its own rider point, ${saddles.none} with none in the tables`);
@@ -2924,6 +2875,10 @@ function packStatus(dir) {
     else if (!swims) need(`player <swg-dir> ${dir} --retail-only`, 'the player lacks the swimming clips');
     else if (playerLacks.length) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, `the player lacks the ${playerLacks.join(', ')} clips`);
     else if (!playerMoods.length && !playerNoMoods) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, 'the player has no mood branches: converted before the moods');
+    // Its own `if`, and two ways: the entry's stamp, which `player` never wrote before format 6 (so an
+    // absent one reads as old), and a thing only the new conversion makes, read off the model itself --
+    // the hole that left the saber clips and the aimed poses unconverted for months.
+    if ((p.materialFormat ?? 1) < MATERIAL_FORMAT || glbsCurrent([join(dir, p.file)]) === false) need(`player <swg-dir> ${dir} --retail-only${p.jkaClips ? ' --jka=<jka-dir>' : ''}`, `the player's model was ${MATERIAL_WHY}`);
     // The parts pack the game prefers: it must carry the named locomotion clips, and the Jedi Academy clips travel to it by bundle.
     const partsFile = join(dir, 'characters', p.id, 'parts.json');
     const partsManifest = readJson(partsFile);
@@ -2935,6 +2890,9 @@ function packStatus(dir) {
       console.log(`  parts: ${partsManifest.parts?.length ?? 0} parts, rig ${partsManifest.rig?.clips ?? '?'} clips${walks ? '' : ', NO WALK/RUN/IDLE CLIPS (the game falls back to the single model)'}${jkaCount ? `, ${jkaCount} Jedi Academy clips` : ''}`);
       if (!walks && !partsManifest.clips) console.log('  (an older parts.json does not list its clips; re-run parts to be sure)');
       if (!walks) need(`parts <swg-dir> ${dir} --retail-only`, 'the parts rig lacks the named idle, walk and run clips');
+      // The stamp parts.json never had, and the thing only the new conversion makes, as for the player.
+      const partFiles = (partsManifest.parts ?? []).map((x) => join(dir, 'characters', p.id, x.file));
+      if ((partsManifest.materialFormat ?? 1) < MATERIAL_FORMAT || glbsCurrent(partFiles) === false) need(`parts <swg-dir> ${dir} --retail-only`, `the parts pack's models were ${MATERIAL_WHY}`);
       const partsLacks = lacking([...clipNames]);
       if (partsLacks.length) {
         console.log(`  parts clips missing: ${partsLacks.join(', ')} (the game plays the parts rig, so the player's clips do not reach it until parts is rerun)`);
@@ -2960,7 +2918,7 @@ function packStatus(dir) {
     const P = propCountsOf(propsPack);
     console.log(`  props: ${P.props} in ${P.models} models over ${P.groups} groups (${P.named} named, ${P.iconed} with a picture)`);
     if ((propsPack.version ?? 0) !== PROPS_PACK_VERSION) need(`props <swg-dir> ${dir} --retail-only`, 'the props pack is an older shape than this build reads');
-    else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, "the props' models were converted before the gloss maps their own shaders name");
+    else if ((propsPack.materialFormat ?? 1) < MATERIAL_FORMAT) need(`props <swg-dir> ${dir} --retail-only`, `the props' models were ${MATERIAL_WHY}`);
     if (objEffectsStale(join(dir, 'props'), ['manifest.json'])) need(`objeffects <swg-dir> ${dir} --retail-only`, 'a brazier or a fountain put down from the Props tab has no fire or spray (props/objeffects.json)');
   }
   // The only music in this game is the music players make, and it is the one pack that was reported
@@ -2980,7 +2938,7 @@ function packStatus(dir) {
     console.log('  weapons: none (the placeholder saber and rifle are used)');
     need(`weapons <swg-dir> ${dir} --retail-only`, 'no weapons converted for the rack (I in game, the Weapons tab)');
   } else {
-    if ((weapons.materialFormat ?? 1) < MATERIAL_FORMAT) need(`weapons <swg-dir> ${dir} --retail-only`, "the rack's models were converted before the gloss maps their own shaders name");
+    if ((weapons.materialFormat ?? 1) < MATERIAL_FORMAT) need(`weapons <swg-dir> ${dir} --retail-only`, `the rack's models were ${MATERIAL_WHY}`);
     const items = itemPackStatus(weapons.weapons);
     // A weapon effect's sounds: the older packs kept one sound for the muzzle and one for a hit on a
     // creature, and nothing for the other four surfaces, the eight misses or the ricochet. A pack that
@@ -3035,7 +2993,7 @@ function packStatus(dir) {
       // A wardrobe converted before a baked shader carried its surface fields has no gloss maps and
       // draws its glass as a cut-out. It stamped nothing at all until now, so an old one reads as
       // format 1 and is asked for once.
-      else if ((wardrobe.materialFormat ?? 1) < MATERIAL_FORMAT && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} was converted before a baked shader carried its gloss and its glass`);
+      else if ((wardrobe.materialFormat ?? 1) < MATERIAL_FORMAT && folder in M.WARDROBE_RUNS) need(`wardrobe <swg-dir> ${dir} --retail-only${M.WARDROBE_RUNS[folder]}`, `wardrobe/${folder} was ${MATERIAL_WHY}`);
       // The colours and the hair pictures (dye.mjs), each reason its own ask and none chained to the ones
       // above, so a stamp an earlier check is satisfied by can never hide them: the dye's stamp, a dyed
       // garment the run must have made (a stamp from a broken run cannot pass for one), and the hairstyles'
@@ -3076,6 +3034,16 @@ function packStatus(dir) {
       const names = [...(m?.clips ?? []), ...Object.keys(m?.clipSpeeds ?? {})];
       return names.some((c) => /^loop_\w*combat_standing_aimed(:|$)/.test(c));
     };
+    // And the material format, which `species` never stamped either: every rig's own parts.json and the
+    // first of its models with a textured material, each read off the pack itself, plus the index.
+    const oldMaterials = speciesIndex.species.filter((sp) => {
+      const m = readJson(join(dir, 'characters', sp.id, 'parts.json'));
+      return !m || (m.materialFormat ?? 1) < MATERIAL_FORMAT || glbsCurrent((m.parts ?? []).map((x) => join(dir, 'characters', sp.id, x.file))) === false;
+    });
+    if (oldMaterials.length || (speciesIndex.materialFormat ?? 1) < MATERIAL_FORMAT) {
+      const names = oldMaterials.slice(0, 4).map((sp) => sp.id).join(', ');
+      need(`species <swg-dir> ${dir} --retail-only`, `${oldMaterials.length || speciesIndex.species.length} of the ${speciesIndex.species.length} species packs' models were ${MATERIAL_WHY}${names ? ` (${names}${oldMaterials.length > 4 ? ' and more' : ''})` : ''}`);
+    }
     const withoutAimed = speciesIndex.species.filter((sp) => !aimedStanding(readJson(join(dir, 'characters', sp.id, 'parts.json'))));
     if (withoutAimed.length) {
       const names = withoutAimed.slice(0, 4).map((sp) => sp.id).join(', ');
@@ -3130,13 +3098,13 @@ function packStatus(dir) {
     if (roomy.length && floored < roomy.length) need(`ships <swg-dir> ${dir} --retail-only`, `${roomy.length - floored} hull(s) with rooms have no walkable floors`);
     else if (roomy.length && shipGraphOnly) need(`ships <swg-dir> ${dir} --retail-only`, "the ships' rooms were converted with --floors-graph-only: path graphs, no walkable meshes");
   }
-  if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, "ships' models were converted before animated and glowing surfaces");
+  if (ships && (ships.materialFormat ?? 1) < MATERIAL_FORMAT) need(`ships <swg-dir> ${dir} --retail-only`, `ships' models were ${MATERIAL_WHY}`);
   const gallery = readJson(join(dir, 'gallery/manifest.json'));
   // The gallery was the development world and was never asked for, which left every launcher with an
   // empty Housing tab: the buildings a player puts down are the gallery's models, and the deeds below
   // are asked for only once it exists. So it is asked for like any other pack now (the owner's call).
   if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
-  else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
+  else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's models were ${MATERIAL_WHY}`);
   else if ((gallery.lodFormat ?? 0) < LOD_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, (gallery.lodFormat ?? 0) < 1 ? "the gallery's models were converted before the client's own detail levels" : "the gallery's models carry detail levels the game can never draw or that stand somewhere else than the model");
   else {
     // A named product rather than a format: every skinned pod racer's mesh carries the game's own seat point, so a
@@ -3193,7 +3161,7 @@ function packStatus(dir) {
     if (doorPacks) console.log(`  doors: ${doorCount} over ${doorPacks} packs, ${doorIds.size} door models`);
     // The door models are models like any other: converted before the current material format, they are
     // asked for again, as the snapshot's, the props', the weapons' and the ships' are.
-    if (doorModels && (doorModels.materialFormat ?? 1) < MATERIAL_FORMAT) need(`doors <swg-dir> ${dir} --retail-only`, 'the door models were converted before the current material format');
+    if (doorModels && (doorModels.materialFormat ?? 1) < MATERIAL_FORMAT) need(`doors <swg-dir> ${dir} --retail-only`, `the door models were ${MATERIAL_WHY}`);
     else if (stale.length) need(`doors <swg-dir> ${dir} --retail-only`, `the buildings on ${stale.length} pack${stale.length === 1 ? '' : 's'} have no doors in their doorways, or were converted again after their doors were written (${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ', ...' : ''})`);
   }
   const readQuiet = (file) => {
@@ -3206,12 +3174,15 @@ function packStatus(dir) {
   // The space zones, one line each (stations, scenery, objects, hyperspace points, arrival), and one to-do for
   // every zone missing or converted before hyperspace.
   const staleSpace = [];
+  /** The zones whose only fault is that their models are older than the material format, said apart. */
+  const materialSpace = [];
   for (const zone of Object.keys(SPACE_ZONES)) {
     const s = spaceZoneStatus(zone, readQuiet(join(dir, zone, 'space.json')), readQuiet(join(dir, zone, 'layout.json'))?.objects?.length ?? 0);
     console.log(`  ${s.line}`);
-    if (s.stale) staleSpace.push(zone);
+    if (s.stale) (/material format/.test(s.line) ? materialSpace : staleSpace).push(zone);
   }
   if (staleSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `space zones missing, or converted before the nebulae, the fields and the docking lanes (${staleSpace.join(', ')})`);
+  if (materialSpace.length) need(`space <swg-dir> all ${dir} --retail-only`, `the space zones' models were ${MATERIAL_WHY} (${materialSpace.join(', ')})`);
   // The made-up system, if there is one: it is optional, so it is listed rather than asked for.
   const sandboxLine = sandboxStatus(readQuiet(join(dir, SANDBOX_ZONE, 'space.json')));
   console.log(`  ${sandboxLine.line}${sandboxLine.stale ? ` (sandbox <swg-dir> ${dir} --retail-only builds one)` : ''}`);
@@ -3319,6 +3290,9 @@ function packStatus(dir) {
     if (nonRetail) need(rerun, `${nonRetail} mobile units came from archives outside the retail set`);
     if (toDo && partial) need(rerun, `the last mobiles run converted only ${partial}; this converts the other ${toDo} units and keeps the rest`);
     else if (toDo) need(rerun, `${toDo} mobile models, packs or wearable folders missing or out of date`);
+    // Its own `if`: a catalogue planned before the material format holds signatures its units still match, so
+    // nothing above can see it. A run plans them again and redoes the models, variants and wearables alone.
+    if ((mobiles.materialFormat ?? 1) < MATERIAL_FORMAT) need(rerun, `the mobile models, their colour variants and the NPCs' own wearables were ${MATERIAL_WHY}`);
     // A humanoid pack baked before the two-handed sword, the polearm and the standing dodges were asked
     // for, which its own record cannot show (`bakedBefore` says why): named by a clip it must carry.
     const unasked = M.packsBakedBefore(units, M.CURATED_WITNESS);
@@ -3347,6 +3321,8 @@ function packStatus(dir) {
       if (stale.stale) {
         need(`spawns ${dir} --swg=<swg-dir> --retail-only`, `the standing people on ${stale.older.length ? stale.older.join(', ') : 'every world'} are from an older converter (format ${SPAWNS_FORMAT} reads the towns' people, guards and patrols, stands the people the data stacks on one spot apart, faces people indoors through their building's turn, and gives every creature its own numbers and every camp its pieces)`);
       } else console.log(`  spawns: ${spawnWorlds.length} worlds with the creatures and standing people the server placed`);
+      // The camps' and nests' pieces are models, which the fleet's manifest never stamped before format 6.
+      if ((spawnManifest.materialFormat ?? 1) < MATERIAL_FORMAT) need(`spawns ${dir} --swg=<swg-dir> --retail-only`, `the camps' and nests' pieces were ${MATERIAL_WHY}`);
     }
     // The instances: the corvette's crew in every copy of the ship, the crew of ours on the Star
     // Destroyer, and the ticket takers' word for which copy they send a player to (`instances.mjs`).
@@ -3745,6 +3721,9 @@ async function snapshotPlanet(vfs, planet, outDir) {
     const flora = lastTemplate ? convertFlora(vfs, lastTemplate, outDir, manifest) : { models: 0, missing: 0, families: 0 };
     console.log(lodSummaryLine('layout', manifest.categories.layout));
     console.log(lodSummaryLine('flora', manifest.categories.flora ?? []));
+    // The `surfaces:` counts kept with the pack, so `status` can say what the reading of the programs could
+    // not do (a normal map or a mask on a set the models do not carry, a program it could not read).
+    manifest.surfaceCounts = surfaceCounts(surfaceUse);
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`flora: ${flora.models} models for ${flora.families} families${flora.missing ? `, ${flora.missing} appearances missing` : ''}${flora.particles ? `, ${flora.particles} particle effects skipped` : ''}`);
     writePois(vfs, planet, snap, entries, cx, cz, outDir);
@@ -3771,7 +3750,7 @@ async function snapshotPlanet(vfs, planet, outDir) {
 
 /** What the mobiles units' conversion code is, so a record written by other code is noticed. */
 function mobilesCodeStamp() {
-  const modules = ['mobiles.mjs', 'mobilescan.mjs', 'skeletal.mjs', 'glb.mjs', 'texrender.mjs', 'customize.mjs', 'sht.mjs', 'dds.mjs', 'tga.mjs', 'png.mjs', 'eff.mjs', 'iff.mjs', 'objtemplate.mjs', 'mounts.mjs'];
+  const modules = ['mobiles.mjs', 'mobilescan.mjs', 'skeletal.mjs', 'glb.mjs', 'texrender.mjs', 'customize.mjs', 'sht.mjs', 'dds.mjs', 'tga.mjs', 'png.mjs', 'eff.mjs', 'iff.mjs', 'objtemplate.mjs', 'mounts.mjs', 'surface.mjs', '../../src/swg/normalDecode.ts'];
   const texts = modules.map((f) => readFileSync(new URL(`./${f}`, import.meta.url), 'utf8'));
   // cli.mjs changes for every command, so only the functions a unit runs are taken from it.
   for (const fn of [convertSat, skinnedTexture, textureFor, normalFor, surfaceFor, alphaFromEffect, noteVariables, customizationList, convertWearableMesh]) texts.push(String(fn));
@@ -3908,7 +3887,8 @@ function mobilesConvert(vfs, outRoot) {
     clearCaches() {
       textureCache.clear();
       surfaceCache.clear();
-      normalCache.clear();
+      // The normal maps and masks read so far go with the readers that hold them.
+      surfaceReaderSets.delete(vfs);
     },
   };
 }
@@ -4156,7 +4136,13 @@ switch (cmd) {
         const decided = invisible ? 'invisible (collision only)' : `${byEffect}${GLASS_NAMED.test(`${shader} ${main ?? ''}`) ? ' (glass by name: casts no shadow, clears while someone is aboard)' : ''}`;
         line += `\n      effect ${effect ?? (described.inline ? '(inline)' : '(none)')}  texture ${main ?? '(none)'}${hasAlpha === null ? '' : hasAlpha ? ' with alpha' : ' no alpha'}  -> ${decided}`;
         // A ship's paint shaders are drawn as the ships command bakes them: every pass at the shader's defaults.
-        if (!invisible) line += `\n      surface: ${surfaceLine(textureFor(vfs, shader, { paint: !!options.ship }), described)}`;
+        if (!invisible) {
+          const entry = textureFor(vfs, shader, { paint: !!options.ship });
+          line += `\n      surface: ${surfaceLine(entry, described)}`;
+          // The normal map's decode by slot, the shine's source, the MATL's colour and power, and the cube.
+          const shine = shineLine(entry, described);
+          if (shine) line += `\n      ${shine}`;
+        }
         const painted = options.ship && isCustomizableShader(vfs, shader) ? loadShader(vfs, shader, paintContext) : null;
         // One line per variable: a pattern's TX1D operations (MAIN and HUEB) each name the same one.
         if (isPaintShader(painted)) line += `\n      paint: baked at its defaults (${painted.textureFiles.get('MAIN')}), ${[...new Set(describeVariables(painted.variables))].join('; ')}`;
@@ -4184,6 +4170,8 @@ switch (cmd) {
     for (const l of describeLines(described)) console.log(l);
     const entry = textureFor(vfs, pos[2]);
     console.log(`decision: ${entry ? `${entry.alphaMode}; ${surfaceLine(entry, described)}` : 'no texture: drawn untextured'}`);
+    const shine = shineLine(entry, described);
+    if (shine) console.log(`          ${shine}`);
     break;
   }
   case 'loading': {
@@ -4368,7 +4356,11 @@ switch (cmd) {
         console.warn(`${id}: ${err.message}`);
       }
     }
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ creatures: list }, null, 2));
+    // Stamped, so `status` can tell creatures converted before a change to how a surface is read: they
+    // carried none, and nothing would ever have asked for them again. A matched run keeps the rest of the
+    // list as it was converted, so it keeps the stamp the list had.
+    const creaturesFormat = match ? Math.min(MATERIAL_FORMAT, (existsSync(join(outDir, 'manifest.json')) ? JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).materialFormat : null) ?? 1) : MATERIAL_FORMAT;
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ materialFormat: creaturesFormat, creatures: list }, null, 2));
     console.log(`creatures: ${list.length} (${list.filter((c) => c.mount).length} mounts) -> ${join(outDir, 'manifest.json')}`);
     printEffectSummary();
     break;
@@ -4493,7 +4485,10 @@ switch (cmd) {
       if (lacking.length) console.log(`  the animation table in these archives lacks ${lacking.join(', ')}: the blaster's combat stances and aimed shots the state hierarchy names. Without them the player and the fighters hold the last frame of a transition instead of a real aimed pose.`);
     }
     // `moods: false` is --no-moods, a size baseline the owner chose; status must not ask again for it.
-    const entry = { id, file: `player/${id}.glb`, template, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, moods: info.moodsAsked === true,...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
+    // `materialFormat`: the stamp `player`, `parts` and `species` never had, so that `status` can ask for
+    // them again when what a surface carries changes (the clip-carrying commands that rewrite this entry
+    // keep it, since they change only the fields they name).
+    const entry = { id, file: `player/${id}.glb`, template, materialFormat: MATERIAL_FORMAT, wear, variables: Object.fromEntries(customizationValues(options.var)), clips: info.animations, clipSpeeds: info.clipSpeeds ?? {}, moods: info.moodsAsked === true,...(info.partialClips ? { partialClips: info.partialClips } : {}), ...(info.variants ? { variants: info.variants } : {}), bounds: info.bounds, scale: 1, ...(info.jkaClips ? { jkaClips: info.jkaClips } : {}), ...(info.jkaGrip ? { jkaGrip: info.jkaGrip } : {}) };
     if (!info.jkaClips && existsSync(join(outDir, 'manifest.json'))) {
       const before = (JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')).players ?? []).find((e) => e.id === id);
       const had = Object.keys(before?.jkaClips ?? {}).length;
@@ -6620,7 +6615,8 @@ switch (cmd) {
         messages: { alreadyAtPoint: cleanText(refusals.get('already_at_point') ?? '') || null },
         frameCheck,
       };
-      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, null, 2));
+      // `materialFormat`: the zone's models (stations, asteroids) are converted here, and carried no stamp.
+      writeFileSync(join(outDir, 'space.json'), JSON.stringify({ version: SPACE_PACK_VERSION, materialFormat: MATERIAL_FORMAT, zone, planet: SPACE_ZONES[zone] ?? null, title, stations, scenery, planets, arrival, hyperspace, nebulae, nebulaLook: look, lightning, fields, lanes, dockEffects: dockFx }, null, 2));
       const zoneModels = [...models.values()].filter((m) => !m.failed);
       writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: zone, categories: { layout: zoneModels } }, null, 2));
       writeFileSync(join(outDir, 'layout.json'), JSON.stringify({ planet: zone, center: { x: 0, z: 0 }, radius: null, objects, skipped: [] }));
@@ -7046,9 +7042,14 @@ switch (cmd) {
       const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet: layout.planet ?? dir.name, categories: {} };
       manifest.categories ??= {};
       manifest.categories.layout ??= [];
-      for (const [id, appearance] of T.TRAVEL_MODELS) {
-        if (!rows.some((r) => r.model === id)) continue;
-        if (manifest.categories.layout.some((d) => d.id === id)) continue;
+      // A model this command wrote under a file from before the current material format (or with no file
+      // to say) was converted then too, so it is converted again rather than kept because it is there.
+      // Only its own (the snapshot's entries carry a `source`, these an `appearance`): a world's own
+      // terminal is the snapshot's to redo. `travelModelsToConvert` in travel.mjs is the rule, node-tested.
+      const oldTravel = recordAt(join(out, dir.name, 'travel.json'));
+      const plan = T.travelModelsToConvert(manifest.categories.layout, new Set(rows.map((r) => r.model)), materialStale(oldTravel));
+      manifest.categories.layout = plan.layout;
+      for (const [id, appearance] of plan.convert) {
         if (!vfs.has(appearance)) {
           console.warn(`  ${dir.name}: ${id} has no appearance in the archives`);
           continue;
@@ -7085,7 +7086,8 @@ switch (cmd) {
       }
       writeFileSync(
         join(out, dir.name, 'travel.json'),
-        JSON.stringify({ version: TRAVEL_PACK_VERSION, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rigs: used, rows }, null, 1),
+        // `materialFormat`: the terminals and the shuttles' pieces are models converted here, unstamped before 6.
+        JSON.stringify({ version: TRAVEL_PACK_VERSION, materialFormat: MATERIAL_FORMAT, planet: layout.planet ?? dir.name, source: { core3: true, note: "the children of each starport and shuttleport building, joined to where this world's own snapshot places them" }, counts, rigs: used, rows }, null, 1),
       );
       worlds++;
       things += rows.length;
@@ -7829,30 +7831,27 @@ switch (cmd) {
           }
         }
       }
-      let made = 0;
-      let failed = 0;
-      for (const template of wanted) {
-        try {
+      // A nest whose model is already on disk is kept only while the last run's manifest stood for models at
+      // this material format; otherwise it is converted again (`nestModels` in spawnpack.mjs says why).
+      const modelsStale = materialStale(recordAt(join(dir, 'manifest.json')));
+      const { nests: madeNests, made, failed } = sp.nestModels(wanted, {
+        resolve: (template) => {
           const r = resolveTemplateMesh(spawnVfs, template, cache);
-          if (r.skip || !r.parts?.length) {
-            failed++;
-            continue;
-          }
+          if (r.skip || !r.parts?.length) return null;
           const single = r.parts.length === 1 && !r.parts[0].transform && !r.effects?.length && !r.parts[0].hardpoints?.length;
-          const id = familyOf(single ? r.parts[0].mesh : r.appearance);
-          if (!nests[template]) {
-            if (!existsSync(join(nestDir, `${id}.glb`))) {
-              const conv = convertOne(spawnVfs, single ? r.parts[0].mesh : r.appearance, join(nestDir, `${id}.glb`));
-              const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
-              nests[template] = { id, file: `nests/${id}.glb`, bounds: conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b, triangles: conv.tris };
-            } else nests[template] = { id, file: `nests/${id}.glb` };
-            made++;
-          }
-        } catch {
-          failed++;
-        }
-      }
-      console.log(`spawns: ${made} nest models written${failed ? `, ${failed} that would not convert` : ''}`);
+          const source = single ? r.parts[0].mesh : r.appearance;
+          return { id: familyOf(source), source };
+        },
+        exists: (id) => existsSync(join(nestDir, `${id}.glb`)),
+        convert: (id, source) => {
+          const conv = convertOne(spawnVfs, source, join(nestDir, `${id}.glb`));
+          const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
+          return { bounds: conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b, triangles: conv.tris };
+        },
+        stale: modelsStale,
+      });
+      Object.assign(nests, madeNests);
+      console.log(`spawns: ${made} nest models written${modelsStale ? ' (every one converted again: the last run stood for an older material format)' : ''}${failed ? `, ${failed} that would not convert` : ''}`);
 
       // What each nest's client data hangs on it, which is where a camp really is. A camp's own
       // appearance is a marker the size of a pebble; its tents, cots, stools, terminals and banners
@@ -7928,6 +7927,10 @@ switch (cmd) {
       JSON.stringify(
         {
           format: sp.SPAWNS_FORMAT,
+          // The camps' and nests' pieces are models converted here, which carried no material stamp. Written
+          // only by a run that made them (one with the archives): a run without them makes no model, and a
+          // stamp from it would stand for nothing and stop `status` asking for the run that does.
+          ...(options.swg ? { materialFormat: MATERIAL_FORMAT } : {}),
           source: 'core3',
           converted: new Date().toISOString(),
           counts: {

@@ -12,10 +12,15 @@ import { createHash } from 'node:crypto';
 import { childOf, childrenOf, isForm, readCString } from './iff.mjs';
 import { DIRECTION, R, skinData } from './skeletal.mjs';
 import { buildGlb, everyKeyEquals } from './glb.mjs';
+import { MATERIAL_FORMAT } from './surface.mjs';
 
 /**
  * Bump whenever the conversion changes what **any** unit holds: every record then reads
  * `oldFormat` and the whole of `mobiles/` is rebuilt, models and wearables included.
+ *
+ * Not for a change to what a surface carries: the material format (`MATERIAL_FORMAT`, surface.mjs) is in
+ * the model's and the wearable folder's own signatures (`m`) and in no pack's, so those units go stale
+ * and the 153 animation packs, which hold no material, stay current.
  */
 export const MOBILES_FORMAT = 1;
 
@@ -1551,6 +1556,10 @@ export function assembleCatalogue(plan, { records = new Map(), sizeOf = () => nu
   for (const kind of KINDS) counts[kind] = entries.filter((e) => e.kind === kind).length;
   return {
     format: MOBILES_FORMAT,
+    // The material format the units' signatures were planned at: a catalogue planned before it holds the
+    // old signatures, which its units' records match, so `status` reads this to know a run would find them
+    // stale (a run plans afresh and redoes the models, variants and wearables, never the packs).
+    materialFormat: MATERIAL_FORMAT,
     converted: new Date().toISOString(),
     options: { ...options, source: plan.source },
     counts, appearances, packs, wearables: wearableOut, wardrobes,
@@ -1667,8 +1676,8 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
     if (dropped.length) log(`  ${id}: ${dropped.length} colour combinations over the cap of ${options.maxVariants ?? 32}, shown in the base colours`);
     const file = form === 'parts' ? `mobiles/models/${id}/parts.json` : form === 'glb' ? `mobiles/models/${id}.glb` : null;
     const sig = form ? signatureOf(form === 'glb'
-      ? { f: MOBILES_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values, variants: chosen.variants.map((v) => [v.id, v.values]) }
-      : { f: MOBILES_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values }) : null;
+      ? { f: MOBILES_FORMAT, m: MATERIAL_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values, variants: chosen.variants.map((v) => [v.id, v.values]) }
+      : { f: MOBILES_FORMAT, m: MATERIAL_FORMAT, source: source.key, sat: s.sat, form, base: chosen.base.values }) : null;
     appearances.set(id, {
       id, sat: s.sat, form, file, record: form ? `mobiles/models/${id}.json` : null, sig,
       pack: null, skeletons: s.skeletons, joints: s.joints, bounds: s.bounds,
@@ -1765,7 +1774,7 @@ export function planMobiles({ vfs, scan, io, options = {}, source, core3Stats = 
     wearables.set(folder, {
       folder, dir: `mobiles/wearables/${folder}`, record: `mobiles/wearables/${folder}.json`,
       gender: w.gender, skeletons, skeleton: skeletons[0]?.file ?? '', meshes,
-      sig: signatureOf({ f: MOBILES_FORMAT, source: source.key, folder, skeletons: skeletons.map((s) => `${s.file}@${s.attachTo}`), meshes: meshes.map((m) => m.lmg).sort() }),
+      sig: signatureOf({ f: MOBILES_FORMAT, m: MATERIAL_FORMAT, source: source.key, folder, skeletons: skeletons.map((s) => `${s.file}@${s.attachTo}`), meshes: meshes.map((m) => m.lmg).sort() }),
     });
   }
 

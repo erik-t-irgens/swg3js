@@ -7,6 +7,7 @@
 // as PLAN forms, the planet appearance then eight floats and a byte; each body's radius is its
 // planet appearance's). The pure parts live here, for the tests.
 import { findAll, readCString } from './iff.mjs';
+import { MATERIAL_FORMAT } from './surface.mjs';
 
 /**
  * The space zones the game flies, and the planet each is the sky of. The last three are systems of
@@ -946,6 +947,8 @@ export function spaceZoneStatus(zone, pack, objects) {
   const counts = `${stations} station${stations === 1 ? '' : 's'}${pack.scenery?.length ? `, ${pack.scenery.length} scenery` : ''}, ${objects ?? 0} objects`;
   if ((pack.version ?? 1) < 2 || !pack.hyperspace?.points) return { line: `${zone}: ${counts}, converted before hyperspace`, stale: true };
   if ((pack.version ?? 1) < SPACE_PACK_VERSION) return { line: `${zone}: ${counts}, converted before the nebulae, the fields and the docking lanes`, stale: true };
+  // The zone's models carried no material stamp before format 6, so an absent one reads as old.
+  if ((pack.materialFormat ?? 1) < MATERIAL_FORMAT) return { line: `${zone}: ${counts}, models converted before the material format ${MATERIAL_FORMAT}`, stale: true };
   // A body with no `radius` at all (null is an appearance that names none) was sized from the halo's scale.
   if ((pack.planets ?? []).some((p) => p && p.radius === undefined)) return { line: `${zone}: ${counts}, planets converted before their sizes were read`, stale: true };
   const points = pack.hyperspace.points;

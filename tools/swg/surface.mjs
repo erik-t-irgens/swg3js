@@ -7,6 +7,7 @@
 // eff.mjs imports this module and re-exports `alphaModeFor` from it; nothing here imports eff.mjs.
 import { childOf, childrenOf, findAll, find, isForm, parseIff, readCString } from './iff.mjs';
 import { shaderTextures } from './sht.mjs';
+import { decodeNormalMap, normalLayoutOf } from '../../src/swg/normalDecode.ts';
 
 /**
  * Manifests written by this code carry it; `status` asks for a run when a pack's is older.
@@ -23,8 +24,27 @@ import { shaderTextures } from './sht.mjs';
  *    are written into took its size from a field the gloss reader does not carry and came out one
  *    pixel of NaN. Nothing else about a 4 is wrong, but a pack cannot be mended in place, so the
  *    number moves and `status` asks for every one of them again.
+ * 6: a normal map is decoded by the slot it sits in, as the client's own programs decode it, and is
+ *    written only where the program reads one; the shine is the mask the program itself multiplies its
+ *    specular by (`specMaskOf`), carried in the metal-rough image's red with the roughness worked out
+ *    from it, and every textured material says what highlight the client drew (`extras.swgSpec`: the
+ *    MATL's specular colour and power and whether the program bends it into a band) and whether its
+ *    shader has a reflection cube at all (`extras.swgCube`), a material without one being no metal; a
+ *    normal map on the second coordinate set is drawn on it. The commands that wrote materials and no
+ *    stamp (space, sandbox, creatures, player, parts, species, spawns, travel) carry this from 6 on.
+ *    Every pass of an effect is read for the shine and the normal map, not only its first.
  */
-export const MATERIAL_FORMAT = 5;
+export const MATERIAL_FORMAT = 6;
+
+/**
+ * Whether the models a file's record stands for are older than this material format: the record a command
+ * wrote beside them last time (a manifest, a travel.json), read back. No record, or one carrying no stamp,
+ * is older. A command that keeps a model because its file is already there must ask this first, or a run
+ * the stamp asked for writes the stamp over the very models it was asked to redo, and nothing asks again.
+ */
+export function materialStale(record) {
+  return !(Number(record?.materialFormat ?? 1) >= MATERIAL_FORMAT);
+}
 
 /** The glTF alpha mode an effect's pass state gives (a cut-out effect by name is a MASK too). */
 export function alphaModeFor({ alphaBlend, alphaTest }, effectName = '') {
@@ -131,29 +151,8 @@ function readPass(passForm) {
   };
 }
 
-/**
- * The first implementation's first pass, read at the offsets for its version (the implementations are
- * listed best first, so this is the one a modern client runs), plus whether any implementation's first
- * pass blends or tests (the rule `effectAlpha` has always used). Null when no implementation has a pass.
- *  -> { version, zWrite, alphaBlend, blendOp, blendSrc, blendDst, alphaTest, alphaRefTag, additive,
- *       anyBlend, anyTest, lastVersion, vertexProgram, pixelProgram, samplers: { [register]: tag } }
- */
-export function passState(efctRoot) {
-  if (!isForm(efctRoot) || efctRoot.type !== 'EFCT') throw new Error(`Not an effect (got ${efctRoot?.type ?? efctRoot?.tag})`);
-  let first = null;
-  let anyBlend = false;
-  let anyTest = false;
-  let lastVersion = null;
-  for (const impl of findAll(efctRoot, 'IMPL')) {
-    const p = readPass(find(impl, 'PASS'));
-    if (!p) continue;
-    first ??= p;
-    lastVersion = String(p.pv.type);
-    if (p.alphaBlend) anyBlend = true;
-    if (p.alphaTest) anyTest = true;
-  }
-  if (!first) return null;
-  const { pv, ...state } = first;
+/** A pass's programs and the texture tag each sampler register carries (its own PTXM records). */
+function passPrograms(pv) {
   const pvsh = childOf(pv, 'PVSH');
   const vchunk = pvsh?.children.find((c) => !isForm(c));
   const vertexProgram = vchunk ? slashes(readCString(vchunk.data).value).toLowerCase() || null : null;
@@ -169,8 +168,51 @@ export function passState(efctRoot) {
       if (c && c.length >= 5) samplers[c[0]] = tagAt(c, 1);
     }
   }
+  return { vertexProgram, pixelProgram, samplers };
+}
+
+/**
+ * The first implementation's first pass, read at the offsets for its version (the implementations are
+ * listed best first, so this is the one a modern client runs), plus whether any implementation's first
+ * pass blends or tests (the rule `effectAlpha` has always used). Null when no implementation has a pass.
+ *
+ * `passes` is every pass of that same implementation, the first included, each with its own programs and
+ * its own samplers: a blended surface is often drawn twice, its colour first and its highlight in a second
+ * pass added over it (the long hair, the glass, the lenses: `h_alpha_specmap_aniso`'s second pass is
+ * `specmap_aniso_light_pass_ps20`), and the second pass's samplers are its own -- one light-pass program
+ * reads its mask from SPEC under one effect and from MASK under another.
+ *  -> { version, zWrite, alphaBlend, blendOp, blendSrc, blendDst, alphaTest, alphaRefTag, additive,
+ *       anyBlend, anyTest, lastVersion, vertexProgram, pixelProgram, samplers: { [register]: tag },
+ *       passes: [{ vertexProgram, pixelProgram, samplers }] }
+ */
+export function passState(efctRoot) {
+  if (!isForm(efctRoot) || efctRoot.type !== 'EFCT') throw new Error(`Not an effect (got ${efctRoot?.type ?? efctRoot?.tag})`);
+  let first = null;
+  let firstImpl = null;
+  let anyBlend = false;
+  let anyTest = false;
+  let lastVersion = null;
+  for (const impl of findAll(efctRoot, 'IMPL')) {
+    const p = readPass(find(impl, 'PASS'));
+    if (!p) continue;
+    if (!first) {
+      first = p;
+      firstImpl = impl;
+    }
+    lastVersion = String(p.pv.type);
+    if (p.alphaBlend) anyBlend = true;
+    if (p.alphaTest) anyTest = true;
+  }
+  if (!first) return null;
+  const { pv, ...state } = first;
+  const own = passPrograms(pv);
+  const passes = [own];
+  for (const form of findAll(firstImpl, 'PASS').slice(1)) {
+    const later = form.children.find(isForm);
+    if (later) passes.push(passPrograms(later));
+  }
   // Additive: destination One under the add operation (0); e_particle_subtract (operation 2) darkens instead.
-  return { ...state, additive: state.alphaBlend && state.blendDst === 1 && state.blendOp === 0, anyBlend, anyTest, lastVersion, vertexProgram, pixelProgram, samplers };
+  return { ...state, additive: state.alphaBlend && state.blendDst === 1 && state.blendOp === 0, anyBlend, anyTest, lastVersion, ...own, passes };
 }
 
 /**
@@ -333,6 +375,196 @@ export function envMaskOf(pixelText, samplers) {
   return null;
 }
 
+/** Whether a program's own source is the HLSL kind (its first line says `//hlsl`) rather than ps.1.x assembly. */
+const isHlsl = (source) => /^\s*\/\/\s*hlsl\b/i.test(source ?? '');
+const isAsm = (source) => /^\s*ps\.\d/i.test((source ?? '').replace(/^(\s*\/\/[^\n]*\n)*/, ''));
+
+/** HLSL sampler variables to the slots their registers carry, as the glow's and the mirror's readers map them. */
+function samplerSlots(text, samplers) {
+  const out = new Map();
+  for (const m of text.matchAll(/sampler\w*\s+(\w+)\s*:\s*register\s*\(\s*s(\d+)\s*\)/g)) {
+    const tag = samplers?.[Number(m[2])];
+    if (tag) out.set(m[1], tag);
+  }
+  return out;
+}
+
+/** The sampler the nearest read of `local` before `at` took (a program may reuse one local name block by block). */
+function nearestRead(text, local, at) {
+  const reads = [...text.slice(0, at).matchAll(new RegExp(`\\b${local}\\s*=\\s*tex2D\\w*\\s*\\(\\s*(\\w+)`, 'g'))];
+  return reads.length ? reads[reads.length - 1][1] : null;
+}
+
+/** A swizzle as the channel a scalar takes: `.a`/`.w` the alpha; `.rgb`, `.r` or a bare register the first component. */
+const channelOf = (swizzle) => (/^[aw]$/.test(swizzle ?? '') ? 'a' : /^[gy]$/.test(swizzle ?? '') ? 'g' : /^[bz]$/.test(swizzle ?? '') ? 'b' : 'r');
+
+/**
+ * Which texture and channel a pixel program multiplies its specular by -- the shine's mask -- read the way
+ * `envMaskOf` reads the mirror's and `emissiveOf` the glow's:
+ *
+ *   null                                   the program cannot be read (none named, not in the archives, or
+ *                                          a shape this does not know), so the old rule stands for it
+ *   { kind: 'none' }                       the program draws no specular at all
+ *   { kind: 'unmasked', aniso }            a specular with nothing over it: the mask is one
+ *   { kind: 'mask', slot, channel, aniso, squared }
+ *
+ * Why it is read rather than guessed from names and alphas: measured over the shaders the game uses, the
+ * mask is SPEC's alpha on 2,428 (not its luminance, which is what was read), MAIN's alpha on 1,473, NRML's
+ * alpha on 445 -- the whole two-tone cloth family, whose MAIN alpha is the hue mask -- MASK's red on 173,
+ * MASK's alpha on 9 and DTLA's on 7; 196 are unmasked and 6,089 have no specular term at all. 2,099 of them
+ * read another file or channel than the converter took, which is why shirts glinted in stripes.
+ *
+ * HLSL: the last `specularMask = ...` and the sampler it reads, directly or through the nearest read of the
+ * local it names (a float set from `.rgb` keeps the first component, so those read red). `aniso` where the
+ * program calls the client's band function; `squared` where the mask is in the specular already and the
+ * result multiplies it in again (`allSpecularLight * specularMask`). Assembly: the vertex specular (`v1`)
+ * or the specular constants followed through the registers to the first texture they are multiplied by,
+ * a lookup (a `texm3x*tex` result or an LKUP table) being part of the specular and never its mask.
+ */
+export function specMaskOf(source, samplers) {
+  if (typeof source !== 'string') return null;
+  const text = source.replace(/\/\/[^\n]*/g, '');
+  if (isHlsl(source)) {
+    if (!/\ballSpecularLight\w*\b|\bmaterialSpecularPower\b|calculateFakeAnisotropicSpecularLighting/.test(text)) return { kind: 'none' };
+    const aniso = /calculateFakeAnisotropicSpecularLighting\s*\(/.test(text);
+    const assigns = [...text.matchAll(/\bspecularMask\s*=\s*([^;]+);/g)];
+    if (!assigns.length) return /\ballSpecularLight\w*\s*=/.test(text) ? { kind: 'unmasked', aniso } : null;
+    const assign = assigns[assigns.length - 1];
+    const maskedInside = /\ballSpecularLight\w*\s*=[^;]*\bspecularMask\b/.test(text);
+    const maskedAgain = /\ballSpecularLight\s*\*\s*specularMask\b/.test(text);
+    const squared = maskedInside && maskedAgain;
+    const slots = samplerSlots(text, samplers);
+    const slotOf = (v) => slots.get(v) ?? slotByVariable(v);
+    const rhs = assign[1];
+    const direct = /tex2D\w*\s*\(\s*(\w+)[^)]*\)\s*\.\s*(\w+)/.exec(rhs);
+    if (direct) return { kind: 'mask', slot: slotOf(direct[1]), channel: channelOf(direct[2]), aniso, squared };
+    const via = /\b(\w+)\s*\.\s*(\w+)\b/.exec(rhs);
+    const from = via ? nearestRead(text, via[1], assign.index) : null;
+    if (from) return { kind: 'mask', slot: slotOf(from), channel: channelOf(via[2]), aniso, squared };
+    return null;
+  }
+  if (!isAsm(text)) return null;
+  // Assembly. A texture register that is a lookup holds part of the lighting and is never a mask.
+  // A co-issued instruction is written on a line of its own after a `+`, or after it on the same line.
+  const lines = text.split(/\r?\n/).map((l) => l.replace(/;.*$/, '').replace(/^\s*\+\s*/, '').trim()).filter(Boolean);
+  const lookups = new Set();
+  for (const l of lines) {
+    const m = /^texm3x[23](?:tex|spec|vspec)\s+t(\d+)/i.exec(l);
+    if (m) lookups.add(Number(m[1]));
+  }
+  for (const [r, tag] of Object.entries(samplers ?? {})) if (tag === 'LKUP') lookups.add(Number(r));
+  const specRegs = new Set();
+  const regOf = (s) => s.replace(/^-/, '').replace(/_bx2|_bias|_x2/g, '').split('.')[0];
+  const specish = (s) => {
+    const r = regOf(s);
+    if (r === 'v1' || /^c\[(dot3LightSpecularColor|materialSpecularColor)\]$/.test(r)) return true;
+    if (specRegs.has(r)) return true;
+    const t = /^t(\d+)$/.exec(r);
+    return !!t && lookups.has(Number(t[1])) && /\.[aw]$/.test(s);
+  };
+  const candidate = (s) => {
+    const t = /^t(\d+)$/.exec(regOf(s));
+    if (!t || lookups.has(Number(t[1]))) return null;
+    return { register: Number(t[1]), channel: channelOf(s.split('.')[1]) };
+  };
+  let any = false;
+  let mask = null;
+  for (const l of lines) {
+    const m = /^([a-z0-9_]+)\s+([^,\s]+)\s*,\s*(.+)$/i.exec(l);
+    if (!m) continue;
+    const op = m[1].toLowerCase().replace(/_(sat|x2|x4|d2)$/, '');
+    if (!['mul', 'mad', 'add', 'sub', 'mov', 'lrp'].includes(op)) continue;
+    const dst = regOf(m[2]);
+    const src = m[3].split(',').map((s) => s.trim());
+    const hot = src.map(specish);
+    if (!hot.some(Boolean)) {
+      specRegs.delete(dst);
+      continue;
+    }
+    any = true;
+    if (!mask && (op === 'mul' || op === 'mad')) {
+      const [a, b] = [src[0], src[1]];
+      const other = hot[0] && !hot[1] ? candidate(b) : hot[1] && !hot[0] ? candidate(a) : null;
+      if (other) mask = other;
+    }
+    if (op !== 'lrp' || hot[1] || hot[2]) specRegs.add(dst);
+  }
+  if (!any) return { kind: 'none' };
+  if (!mask) return { kind: 'unmasked', aniso: false };
+  return { kind: 'mask', slot: samplers?.[mask.register] ?? null, channel: mask.channel, aniso: false, squared: false };
+}
+
+/**
+ * Which slot a pixel program reads a normal map from, and how: null when it cannot be read (the old rule
+ * stands), `{ kind: 'none' }` when it reads none, `{ kind: 'read', slot, layout }` otherwise. `layout` is
+ * what the program does to it (`tex2DDxt5CompressedNormal` compressed, `signAndBias` or `_bx2` plain), which
+ * over the retail archives is always what the slot says (`normalLayoutOf`); the converter decodes by the
+ * slot and the test holds the two to each other. One program, one pass: `describeStatic` asks it of every
+ * pass of the implementation (`firstPassThat`). 533 retail shaders name a normal map no pass reads, nearly
+ * all of them the ground's dot3 shaders, whose program samples the map and never uses it; those carry none.
+ */
+export function normalReadOf(source, samplers) {
+  if (typeof source !== 'string') return null;
+  const text = source.replace(/\/\/[^\n]*/g, '');
+  if (isHlsl(source)) {
+    const slots = samplerSlots(text, samplers);
+    const slotOf = (v) => slots.get(v) ?? slotByVariable(v);
+    let m = /tex2DDxt5CompressedNormal\w*\s*\(\s*(\w+)/.exec(text);
+    if (m) return { kind: 'read', slot: slotOf(m[1]), layout: 'compressed' };
+    m = /signAndBias\s*\(\s*tex2D\w*\s*\(\s*(\w+)/.exec(text);
+    if (m) return { kind: 'read', slot: slotOf(m[1]), layout: 'plain' };
+    m = /signAndBias\s*\(\s*(\w+)\s*\.\s*(?:rgb|xyz)\s*\)/.exec(text);
+    if (m) {
+      const from = nearestRead(text, m[1], m.index);
+      if (from) return { kind: 'read', slot: slotOf(from), layout: 'plain' };
+    }
+    return { kind: 'none' };
+  }
+  if (!isAsm(text)) return null;
+  const m = /\btexm3x[23](?:pad|tex)\s+t\d+\s*,\s*t(\d+)_bx2/i.exec(text) ?? /\bdp3\w*\s+r\d+\s*,\s*t(\d+)_bx2\s*,\s*(?!t\1_bx2)/i.exec(text);
+  return m ? { kind: 'read', slot: samplers?.[Number(m[1])] ?? null, layout: 'plain' } : { kind: 'none' };
+}
+
+/**
+ * A shader's material (FORM MATS > version > TAG + MATL, the MAIN-tagged one, else the first): its
+ * specular colour, the fourth of the MATL's four ARGB groups read as RGB, and its power, the seventeenth
+ * float. The client's programs draw the highlight as that colour times the mask times (N·H) to that power
+ * (`materialSpecularColor`, `materialSpecularPower`); 4,723 of the 4,726 the game uses have that group's
+ * alpha at one. Null when the shader has none (five screens the game uses).
+ */
+export function materialOf(root) {
+  const tagOf = (data) => (data && data.length >= 4 ? Buffer.from(data.subarray(0, 4)).reverse().toString('latin1') : null);
+  let first = null;
+  for (const mats of findAll(root, 'MATS')) {
+    const v = mats.children.find(isForm) ?? mats;
+    const tags = findAll(v, 'TAG ');
+    const list = findAll(v, 'MATL');
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i].data;
+      if (!b || b.length < 68) continue;
+      const f = (n) => Math.round(b.readFloatLE(n * 4) * 1e4) / 1e4;
+      const got = { color: [f(13), f(14), f(15)], power: f(16) };
+      if (!got.color.every(Number.isFinite) || !Number.isFinite(got.power)) continue;
+      if (tagOf(tags[i]?.data) === 'MAIN') return got;
+      first ??= got;
+    }
+  }
+  return first;
+}
+
+/** A program file's own source: its PSRC chunk where it is an IFF (every retail .psh is), else the file as text. */
+export function programSource(bytes) {
+  if (!bytes) return null;
+  try {
+    const root = parseIff(bytes);
+    const c = findAll(root, 'PSRC')[0] ?? findAll(root, 'VSRC')[0];
+    if (c) return Buffer.from(c.data).toString('latin1').replace(/\0+$/, '');
+  } catch {
+    // Not an IFF: the file is the text.
+  }
+  return Buffer.from(bytes).toString('latin1');
+}
+
 /** Records of a shader's TSNS / ARVS / TCSS form: tag -> values. */
 function records(v, formName, size, read) {
   const out = new Map();
@@ -358,6 +590,11 @@ const blank = (shader) => ({
   split: false,
   emissive: null,
   envMask: null,
+  // What the pixel program does with a specular mask and a normal map (`specMaskOf`, `normalReadOf`; null
+  // where there is no program to read or it could not be read), and the shader's MATL (`materialOf`).
+  specMask: null,
+  normalRead: null,
+  material: null,
   anim: null,
   timing: null,
   flip: null,
@@ -372,6 +609,27 @@ function programText(vfs, path, cache) {
   const key = `\0program:${path}`;
   if (!cache.has(key)) cache.set(key, vfs.has(path) ? vfs.read(path).toString('latin1') : null);
   return cache.get(key);
+}
+
+/** A program's own source (its PSRC chunk), read once per cache; null when there is no such file. */
+function programSourceOf(vfs, path, cache) {
+  if (!path) return null;
+  const key = `\0source:${path}`;
+  if (!cache.has(key)) cache.set(key, vfs.has(path) ? programSource(vfs.read(path)) : null);
+  return cache.get(key);
+}
+
+/**
+ * What the passes of one implementation say together, out of what each says alone (`specMaskOf` or
+ * `normalReadOf` per pass, in order): the first pass that draws the thing, read through its own samplers;
+ * failing that, nothing, but only when every pass could be read -- a pass whose program cannot be read may be
+ * the one that draws it, so the answer is then null and the old rule stands, as it does for a first pass
+ * that cannot be read.
+ */
+export function firstPassThat(perPass, draws) {
+  const hit = perPass.find((r) => r && draws(r));
+  if (hit) return hit;
+  return perPass.every(Boolean) ? perPass[0] ?? null : null;
 }
 
 /** An effect file's pass state, read once per cache. */
@@ -418,6 +676,7 @@ function describeStatic(vfs, ssht, out, cache) {
   const coordSets = records(v, 'TCSS', 5, (d, o) => d[o]);
   out.records = { scroll: Object.fromEntries(scrolls), alphaRefs: Object.fromEntries(refs), texcoordSets: Object.fromEntries(coordSets) };
   out.alphaRef = out.pass?.alphaRefTag ? (refs.get(out.pass.alphaRefTag) ?? 0) : 0;
+  out.material = materialOf(ssht);
   const pass = out.pass;
   if (!pass) return out;
   out.programs = { vertex: pass.vertexProgram, pixel: pass.pixelProgram };
@@ -426,6 +685,20 @@ function describeStatic(vfs, ssht, out, cache) {
   out.split = isSplitAlpha(pass.pixelProgram, psh, pass.samplers);
   out.emissive = emissiveOf(out.effect ?? (out.inline ? '' : pass.pixelProgram), psh, pass.samplers);
   out.envMask = envMaskOf(psh, pass.samplers);
+  // Read from the program's own source rather than the file's bytes, since whether it is HLSL is in its
+  // first line. A fixed-function pass names no program and is left to the old rules.
+  //
+  // **Every pass of the implementation, not only the first**, each through its own samplers: 83 of the
+  // shaders the packs use are drawn in two passes, and on about 77 of them the highlight is the second
+  // pass's alone (most of the long hairstyles, the glass, the lenses, the bacta gels), the first drawing the
+  // blended colour and the second adding the light over it; one membrane reads its normal map only in its
+  // second. Read off the first pass alone, all of those were written as drawing no highlight at all.
+  const reads = (pass.passes ?? [pass]).map((p) => {
+    const source = programSourceOf(vfs, p.pixelProgram, cache);
+    return { spec: specMaskOf(source, p.samplers), normal: normalReadOf(source, p.samplers) };
+  });
+  out.specMask = firstPassThat(reads.map((r) => r.spec), (s) => s.kind !== 'none');
+  out.normalRead = firstPassThat(reads.map((r) => r.normal), (n) => n.kind === 'read');
   const sets = scrollSets(vsh);
   const rates = scrolls.get(out.mainSlot ?? 'MAIN') ?? scrolls.get('MAIN');
   if (rates && sets.set0 === 'xy') {
@@ -472,7 +745,7 @@ export function describeSurface(vfs, shaderPath, cache = new Map(), depth = 0) {
 
 /** Copy a described base into a flip-book's own description, arrays included. */
 function adopt(out, base) {
-  for (const k of ['effect', 'inline', 'main', 'mainSlot', 'pass', 'alphaRef', 'scroll', 'split', 'emissive', 'programs', 'records']) out[k] = base[k];
+  for (const k of ['effect', 'inline', 'main', 'mainSlot', 'pass', 'alphaRef', 'scroll', 'split', 'emissive', 'envMask', 'specMask', 'normalRead', 'material', 'programs', 'records']) out[k] = base[k];
   out.textures = base.textures.map((t) => ({ ...t }));
   out.notes.push(...base.notes);
 }
@@ -675,9 +948,15 @@ export function fitRgba(img, max) {
 export const GLOW_MAX = 512;
 
 /**
- * The one metalness-roughness image, out of the two masks that feed it: roughness in green from the
- * gloss, metalness in blue from the environment mask. On 603 of the retail shaders those are two
- * different textures of two different sizes, so each is sampled into the larger of the two.
+ * The one metalness-roughness image, out of the masks that feed it: **red is the client's own specular
+ * mask** (what its program multiplies its highlight by; three never reads the red channel, so it costs
+ * the look nothing until the runtime asks for it), green the roughness worked out from that mask, and
+ * blue the environment mask, metalness. On 603 of the retail shaders the gloss and the mirror come from
+ * two different textures of two different sizes, so each is sampled into the larger of the two.
+ *
+ * `gloss` is the mask texel by texel; `level` stands in for it as one byte over the whole image where the
+ * mask is constant (one, for an unmasked program, or a full-white mask) and only the mirror varies; with
+ * neither the shader has no specular at all and green is the flat roughness the image always carried.
  *
  * A source is `{ w, h, read(x, y) }` over 0..255, and **its size is checked rather than trusted**.
  * This lives here, out of the command that used to hold it inline, for one reason: read through a
@@ -687,7 +966,7 @@ export const GLOW_MAX = 512;
  * of the retail shaders. Nothing caught it because the tests pinned what the converter *decided* and
  * never what it *drew*, so the decision was right and the picture was a mirror.
  */
-export function combineMasks({ gloss = null, env = null, reflective = false }) {
+export function combineMasks({ gloss = null, level = null, env = null, reflective = false }) {
   const sized = (src, what) => {
     if (!src) return null;
     if (!(src.w > 0) || !(src.h > 0) || typeof src.read !== 'function') throw new Error(`the ${what} mask has no readable size (w=${src.w}, h=${src.h})`);
@@ -702,20 +981,217 @@ export function combineMasks({ gloss = null, env = null, reflective = false }) {
   // Nearest: the two masks are usually the same size, and where they are not this is a roughness
   // map, not a photograph.
   const at = (src, x, y) => src.read(Math.min(src.w - 1, Math.floor((x * src.w) / w)), Math.min(src.h - 1, Math.floor((y * src.h) / h)));
+  const flat = typeof level === 'number' ? Math.min(255, Math.max(0, Math.round(level))) : null;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const v = g ? at(g, x, y) : 0;
-      rgba[i] = 0;
-      // With no gloss map at all (a reflective shader whose colour alpha is real transparency), the
-      // roughness is the flat one this returned before the mask was read: 0.3 for something
-      // reflective, 0.45 otherwise, written as a byte so the one image carries both channels.
-      rgba[i + 1] = g ? 255 - Math.round(v * 0.85) : reflective ? 77 : 115;
+      const v = g ? at(g, x, y) : flat;
+      rgba[i] = v ?? 0;
+      // With no mask at all (a reflective shader that draws no highlight, or whose colour alpha is real
+      // transparency), the roughness is the flat one this returned before the mask was read: 0.3 for
+      // something reflective, 0.45 otherwise, written as a byte so the one image carries every channel.
+      rgba[i + 1] = v !== null ? 255 - Math.round(v * 0.85) : reflective ? 77 : 115;
       rgba[i + 2] = e ? at(e, x, y) : reflective && g ? v : 0;
       rgba[i + 3] = 255;
     }
   }
   return { w, h, rgba };
+}
+
+/** The roughness a constant mask byte gives, as `combineMasks` writes it into green: today's 0.85 slope, ours. */
+export const roughnessOfMask = (level) => (255 - Math.round(level * 0.85)) / 255;
+
+/**
+ * The converter's readers of what a shader's surface is beyond its colour: its normal map and its shine,
+ * each read the way the shader's own pixel program reads it (`normalReadOf`, `specMaskOf`). Made once per
+ * run with the converter's own decoders, so the command and the node tests run the very same code; the
+ * decoded masks and the written normal maps are kept for the run, since one is shared by dozens of shaders.
+ *
+ *   normalFor(path, slot)  -> { path, png, slot, layout } | null: the map decoded by its slot
+ *                            (`src/swg/normalDecode.ts`, which the game's recolour runs too) and written as
+ *                            plain tangent-space RGB, keyed on the path **and** the slot, since 21 files are
+ *                            named in both slots by different shaders and are two different maps
+ *   surfaceFor(effect, slots, main, alphaMode, opts) -> the factors, the metal-rough image and `spec` and
+ *                            `cube` (glb.mjs writes those as `extras.swgSpec` and `extras.swgCube`)
+ *   unread                   the shaders whose program could not be read and kept the old guess
+ *
+ * deps: { decodeDds, encodePng, loadEffect?(vfs, path) (texrender.mjs, for the stages' texture tags), log? }
+ */
+export function surfaceReaders(vfs, { decodeDds, encodePng, loadEffect = null, log = () => {} }) {
+  const norm = (p) => String(p ?? '').replace(/\\/g, '/').toLowerCase();
+  const tagCache = new Map();
+  /** The texture tags an effect's stages read (an effect reads ENVM even when its shader names no cube file). */
+  const effectTags = (effect) => {
+    const name = String(effect ?? '').toLowerCase();
+    let tags = tagCache.get(name);
+    if (!tags) {
+      tags = new Set();
+      try {
+        const eff = effect && loadEffect ? loadEffect(vfs, effect.replace(/\\/g, '/')) : null;
+        for (const pass of eff?.passes ?? []) for (const st of pass.stageList ?? []) if (st.textureTag) tags.add(st.textureTag);
+      } catch {
+        /* an effect the renderer cannot parse just reads no tags */
+      }
+      tagCache.set(name, tags);
+    }
+    return tags;
+  };
+
+  const planes = new Map();
+  /**
+   * One channel of a texture as a mask plane, `{ path, w, h, read, white }`, cached by file, channel and
+   * squaring: 'a' the alpha, 'r' the red (a float set from `.rgb`), 'lum' the luminance (the old rule's
+   * own gloss file). `white` where every texel is 255, which is a mask of one and needs no image.
+   * Undefined when the file is missing or will not decode.
+   */
+  const planeOf = (path, channel, squared = false, img = null) => {
+    const key = img ? null : `${norm(path)}|${channel}|${squared ? 2 : 1}`;
+    if (key && planes.has(key)) return planes.get(key);
+    let out;
+    try {
+      const src = img ?? (vfs.has(norm(path)) ? decodeDds(vfs.read(norm(path))) : null);
+      if (src) {
+        const n = src.width * src.height;
+        const plane = new Uint8Array(n);
+        let white = true;
+        for (let i = 0; i < n; i++) {
+          const p = src.rgba;
+          let v = channel === 'a' ? p[i * 4 + 3] : channel === 'g' ? p[i * 4 + 1] : channel === 'b' ? p[i * 4 + 2] : channel === 'lum' ? Math.round(p[i * 4] * 0.2126 + p[i * 4 + 1] * 0.7152 + p[i * 4 + 2] * 0.0722) : p[i * 4];
+          if (squared) v = Math.round((v * v) / 255);
+          plane[i] = v;
+          if (v !== 255) white = false;
+        }
+        const w = src.width;
+        out = { path, w, h: src.height, read: (x, y) => plane[y * w + x], white };
+      }
+    } catch (err) {
+      log(`mask ${path} skipped: ${err.message}`);
+    }
+    if (key) planes.set(key, out);
+    return out;
+  };
+
+  /**
+   * How much of a surface is a mirror, as a reader over whichever texture the shader's program named.
+   * `envMaskOf` has read the slot and the channel out of the pixel program; this is only the reading.
+   * A shader with no environment cube never gets here, and one whose program could not be read falls
+   * back on the main texture's alpha, which is what 981 of the 1,400 really use.
+   */
+  const envSource = (slots, main, mainPath, envMask) => {
+    const slot = envMask?.slot ?? 'MAIN';
+    const channel = envMask?.channel ?? 'a';
+    const pick = channel === 'a' ? 'a' : 'g';
+    if (slot === 'MAIN') {
+      const p = main.hasAlpha || channel !== 'a' ? planeOf(mainPath, pick, false, main) : null;
+      return p ? { ...p, slot, channel } : null;
+    }
+    const named = (slots ?? []).find((s) => s.slot === slot);
+    if (!named?.path) return null;
+    const p = planeOf(named.path, pick);
+    return p ? { ...p, slot, channel } : null;
+  };
+
+  const normals = new Map();
+  const normalFor = (path, slot) => {
+    const layout = normalLayoutOf(slot);
+    if (!layout || !path) return null;
+    const file = norm(path);
+    const key = `${file}|${slot}`;
+    if (normals.has(key)) return normals.get(key);
+    let out = null;
+    try {
+      if (vfs.has(file)) {
+        const dds = decodeDds(vfs.read(file));
+        const rgba = decodeNormalMap(dds.rgba, dds.width, dds.height, layout);
+        out = { path: `${file}#${slot.toLowerCase()}`, png: encodePng(dds.width, dds.height, rgba), slot, layout };
+      }
+    } catch (err) {
+      log(`normal map ${path} skipped: ${err.message}`);
+    }
+    normals.set(key, out);
+    return out;
+  };
+
+  const unread = new Set();
+  const surfaceFor = (effect, slots, main, alphaMode, { alphaIsEmissive = false, envMask = null, described = null, shader = null, mainPath = null } = {}) => {
+    const tags = effectTags(effect);
+    const slotTags = new Set((slots ?? []).map((s) => s.slot));
+    // IRID is an environment cube under another name: the fourteen iridescent shaders (the chitin armour
+    // set) name their cube IRID and are then drawn by the very same program the envmask family uses, with
+    // that slot bound to its `envMap` sampler. Left out of this test they were the one reflective family
+    // in the game with no reflection at all.
+    const cube = !!envMask || ['ENVM', 'IRID'].some((t) => slotTags.has(t) || tags.has(t));
+    const material = described?.material ?? null;
+    const mainFile = mainPath ?? described?.main ?? null;
+    const mainSlot = described?.mainSlot ?? 'MAIN';
+    const specOf = (mode, mask, extra = {}) => ({ mode, color: material ? [...material.color] : [0, 0, 0], power: material?.power ?? 0, mask, ...extra });
+    const sm = described?.specMask ?? null;
+    const env = cube ? envSource(slots, main, mainFile, envMask) : null;
+    const envFrom = env ? `${env.slot}.${env.channel}` : null;
+    const image = (gloss, level, maskKey) => {
+      const { w, h, rgba } = combineMasks({ gloss, level, env, reflective: cube });
+      return { png: encodePng(w, h, rgba), key: `${maskKey}|${env ? `${envFrom}:${norm(env.path)}` : 'no mirror'}` };
+    };
+    if (!sm) {
+      // A program that cannot be read (none named, a fixed-function pass, not in the archives, or a shape
+      // the reader does not know): the rule this converter used before it read programs, kept as it was,
+      // logged and counted. The guess from the effect's name is part of that rule and goes with it.
+      if (shader && !unread.has(shader)) {
+        unread.add(shader);
+        log(`shine of ${shader}: its pixel program (${described?.programs?.pixel ?? 'none'}) cannot be read, so the old rule stands`);
+      }
+      const name = String(effect ?? '').toLowerCase();
+      const reflective = cube || /env|chrome|mirror|refl|irid/.test(name);
+      const specular = reflective || slotTags.has('SPEC') || tags.has('SPEC') || /spec|gloss|shin|metal|glass/.test(name);
+      const spec = specOf(specular ? 'phong' : 'none', 'unread');
+      if (!specular) return { spec, cube };
+      const specSlot = (slots ?? []).find((s) => s.slot === 'SPEC');
+      const own = specSlot?.path && norm(specSlot.path) !== norm((slots ?? []).find((s) => s.slot === 'MAIN')?.path) ? planeOf(specSlot.path, 'lum') : null;
+      const masked = main.hasAlpha && alphaMode === 'OPAQUE' && !alphaIsEmissive;
+      const fallbackEnv = reflective && !env ? envSource(slots, main, mainFile, envMask) : env;
+      if (!own && !masked && !fallbackEnv) return { spec, cube, metallic: cube ? 0.6 : 0, roughness: reflective ? 0.3 : 0.45 };
+      const gloss = own ?? (masked ? planeOf(mainFile, 'a', false, main) : null);
+      const { w, h, rgba } = combineMasks({ gloss, env: fallbackEnv, reflective });
+      return { spec, cube, metallic: cube ? 1 : 0, roughness: 1, mr: { png: encodePng(w, h, rgba), key: `unread:${own ? norm(own.path) : masked ? 'MAIN.a' : 'flat'}|${fallbackEnv ? `${fallbackEnv.slot}.${fallbackEnv.channel}` : 'no mirror'}` }, ...(own ? { glossFrom: own.path } : {}), ...(fallbackEnv ? { envFrom: `${fallbackEnv.slot}.${fallbackEnv.channel}` } : {}) };
+    }
+    if (sm.kind === 'none') {
+      // No highlight at all. A shader with a cube still reflects, by its mirror mask, at the flat roughness
+      // a reflective surface always had; one without is a matt surface and carries nothing.
+      const spec = specOf('none', 'none');
+      if (!cube) return { spec, cube };
+      if (!env) return { spec, cube, metallic: 0.6, roughness: 0.3 };
+      return { spec, cube, metallic: 1, roughness: 1, mr: image(null, null, 'none'), envFrom };
+    }
+    const mode = sm.aniso ? 'aniso' : 'phong';
+    let gloss = null;
+    let maskName = sm.kind === 'mask' ? `${sm.slot}.${sm.channel}` : 'unmasked';
+    if (sm.kind === 'mask') {
+      // The texture the program names, in the channel it reads: the colour texture's own picture (painted,
+      // where a ship's paint stands in for it), else that slot's file, read before anything is made of it
+      // (NRML's alpha is the gloss of the two-tone cloth, whatever the normal map written from it becomes).
+      const named = (slots ?? []).find((s) => s.slot === sm.slot);
+      const isMain = sm.slot === mainSlot || (named?.path && mainFile && norm(named.path) === norm(described?.main));
+      const plane = isMain ? planeOf(mainFile, sm.channel, sm.squared, main) : named?.path ? planeOf(named.path, sm.channel, sm.squared) : undefined;
+      if (!plane) {
+        log(`shine of ${shader ?? effect}: its mask ${maskName} names no texture the archives hold, so it is drawn unmasked`);
+        maskName = `${maskName} (missing)`;
+      } else if (!plane.white) gloss = plane;
+    }
+    const spec = specOf(mode, maskName, sm.squared ? { squared: true } : {});
+    // A mask of one over the whole surface (no mask, or a full-white one) needs no image of its own.
+    if (!gloss && !env) return cube ? { spec, cube, metallic: 0.6, roughness: roughnessOfMask(255) } : { spec, cube, metallic: 0, roughness: roughnessOfMask(255) };
+    return {
+      spec,
+      cube,
+      metallic: cube ? 1 : 0,
+      roughness: 1,
+      mr: image(gloss, gloss ? null : 255, `${maskName}${sm.squared ? '^2' : ''}${gloss ? `:${norm(gloss.path)}` : ''}`),
+      ...(gloss && gloss.path && norm(gloss.path) !== norm(mainFile) ? { glossFrom: gloss.path } : {}),
+      ...(env ? { envFrom } : {}),
+    };
+  };
+
+  return { surfaceFor, normalFor, effectTags, unread };
 }
 
 /** A main image handed in by deps.mainImage, as decodeDds gives one: `hasAlpha` from the answer, else read from its pixels. */
@@ -735,8 +1211,9 @@ function paintedImage(img) {
 
 /**
  * The whole texture entry for one shader: what textureFor returned before, plus the new fields.
- * deps: { cache, decodeDds, encodePng, alphaFromEffect(effect, fallback), surfaceFor(effect, slots, dds, alphaMode, { alphaIsEmissive }),
- *         normalFor(path), detailFor?(slots), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba),
+ * deps: { cache, decodeDds, encodePng, alphaFromEffect(effect, fallback),
+ *         surfaceFor(effect, slots, dds, alphaMode, { alphaIsEmissive, envMask, described, shader, mainPath }),
+ *         normalFor(path, slot), detailFor?(slots), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba),
  *         mainImage?(shaderPath) -> { path, width, height, rgba, hasAlpha? } | null }.
  * With `thumb`, the entry carries a non-enumerable `thumb` made from the unsplit main image.
  * With `mainImage` answering (a customizable shader baked at its defaults, the ships command's paint),
@@ -823,13 +1300,39 @@ export function surfaceTexture(vfs, shaderPath, deps) {
     // A flip-book glows in every frame or in none, so no frame ever takes the glow map away.
     if (Math.max(...masks.map((x) => x.max)) < 8 / 255) masks = null;
   }
-  // The main's alpha is a glow mask, not a gloss mask, only when it is split into a glow. The
-  // environment mask is handed over as the shader's own program named it, rather than being guessed
-  // at: on 378 of the 1,400 shaders that have one it is not in the main texture at all.
-  Object.assign(result, deps.surfaceFor(d.effect, d.textures, main, alphaMode, { alphaIsEmissive: !!masks && !glow.keepAlpha, envMask: d.envMask }));
-  const normalSlot = d.textures.find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot));
-  const normal = normalSlot ? deps.normalFor(normalSlot.path) : null;
-  if (normal) result.normal = normal;
+  // The main's alpha is a glow mask, not a gloss mask, only when it is split into a glow (which matters
+  // only to the old rule, kept for a program that cannot be read: a program that can be says itself which
+  // texture it multiplies its specular by). The environment mask is handed over as the shader's own
+  // program named it, rather than being guessed at: on 378 of the 1,400 shaders that have one it is not
+  // in the main texture at all.
+  Object.assign(result, deps.surfaceFor(d.effect, d.textures, main, alphaMode, { alphaIsEmissive: !!masks && !glow.keepAlpha, envMask: d.envMask, described: d, shader: shaderPath, mainPath }));
+  // The normal map the program reads (in any of its passes), decoded by the slot it sits in; none where no
+  // pass reads one (533 retail shaders name a map no pass samples, nearly all the ground's), and the first
+  // one named where the program cannot be read, as before.
+  const read = d.normalRead;
+  const normalSlot = read ? (read.kind === 'read' ? d.textures.find((s) => s.slot === read.slot) ?? null : null) : d.textures.find((s) => /^(CNRM|NRML|DOT3)$/.test(s.slot)) ?? null;
+  const normal = normalSlot ? deps.normalFor(normalSlot.path, normalSlot.slot) : null;
+  // Which coordinate set each of these reads (the shader's TCSS). A normal map on the second set, where
+  // the main is on the first, is drawn on it: the meshes carry it, and on 139 of the 324 vertex arrays
+  // that draw such a shader it is not the first set scaled. Every other slot on a set the models do not
+  // carry is drawn on the main's and said so (`sets`), counted by `status` and printed by `materials`.
+  const sets = d.records?.texcoordSets ?? {};
+  const mainSet = sets[d.mainSlot ?? 'MAIN'] ?? 0;
+  const other = [];
+  if (normal) {
+    const set = sets[normalSlot.slot];
+    if (set === 1 && mainSet === 0) result.normal = { ...normal, set: 1 };
+    else {
+      result.normal = normal;
+      if (set !== undefined && set !== mainSet) other.push(`${normalSlot.slot} on set ${set}`);
+    }
+  }
+  const sm = d.specMask;
+  for (const slot of new Set([sm?.kind === 'mask' ? sm.slot : null, d.envMask?.slot ?? null].filter((s) => s && s !== (d.mainSlot ?? 'MAIN')))) {
+    const set = sets[slot];
+    if (set !== undefined && set !== mainSet) other.push(`${slot} on set ${set}`);
+  }
+  if (other.length) result.sets = other;
   // The detail map, which the client multiplies the diffuse texture by before lighting.
   //
   // Not a second diffuse and not a decal: every one of the detail effects' pixel programs is the
@@ -926,10 +1429,21 @@ export function describeLines(d) {
   if (p) {
     lines.push(`  pass: version ${p.version}, z-write ${p.zWrite ? 'on' : 'off'}, blend ${p.alphaBlend ? `on (${p.blendSrc}/${p.blendDst}${p.blendOp ? `, operation ${p.blendOp}` : ''}${p.additive ? ', additive' : ''})` : 'off'}, alpha test ${p.alphaTest ? 'on' : 'off'}, reference ${p.alphaRefTag ?? '-'} = ${d.alphaRef}; any implementation blends ${p.anyBlend ? 'yes' : 'no'}, tests ${p.anyTest ? 'yes' : 'no'}`);
     lines.push(`  programs: vertex ${p.vertexProgram ?? '(fixed function)'}, pixel ${p.pixelProgram ?? '(fixed function)'}${Object.keys(p.samplers).length ? `, samplers ${Object.entries(p.samplers).map(([r, t]) => `s${r}=${t}`).join(' ')}` : ''}`);
+    // The implementation's later passes, each read for the shine and the normal map with its own samplers.
+    (p.passes ?? []).slice(1).forEach((q, i) => lines.push(`  pass ${i + 2}: pixel ${q.pixelProgram ?? '(fixed function)'}${Object.keys(q.samplers).length ? `, samplers ${Object.entries(q.samplers).map(([r, t]) => `s${r}=${t}`).join(' ')}` : ''}`));
   } else lines.push('  pass: none read');
   lines.push(`  scroll: ${d.scroll ? `colour (${d.scroll.map.map(num).join(',')})/s${d.scroll.alpha ? `, alpha (${d.scroll.alpha.map(num).join(',')})/s` : ''}` : 'none'}; split alpha ${d.split ? 'yes' : 'no'}`);
   const em = d.emissive;
   lines.push(`  emissive: ${!em ? 'none' : em.kind === 'mask' ? `mask ${em.slot}.${em.channel}` : em.kind === 'add' ? 'additive' : 'full (unlit)'}`);
+  // What the program does with a specular mask and a normal map, read as `specMaskOf` and `normalReadOf`
+  // read them, and the MATL the highlight is drawn with.
+  const sm = d.specMask;
+  lines.push(`  specular: ${!sm ? 'program not read (the old rule stands)' : sm.kind === 'none' ? 'none in the program' : sm.kind === 'unmasked' ? `unmasked${sm.aniso ? ', the band' : ''}` : `mask ${sm.slot}.${sm.channel}${sm.squared ? ' squared' : ''}${sm.aniso ? ', the band' : ''}`}`);
+  const nr = d.normalRead;
+  lines.push(`  normal map: ${!nr ? 'program not read (the first one named)' : nr.kind === 'none' ? 'none read' : `${nr.slot} read ${nr.layout}, decoded by the slot ${normalLayoutOf(nr.slot) ?? '(not a normal slot)'}`}`);
+  lines.push(`  material: ${d.material ? `specular ${d.material.color.join(',')} power ${d.material.power}` : 'no MATL'}; envmask ${d.envMask ? `${d.envMask.slot}.${d.envMask.channel}` : 'none'}`);
+  const sets = Object.entries(d.records?.texcoordSets ?? {});
+  if (sets.length) lines.push(`  coordinate sets: ${sets.map(([t, s]) => `${t} ${s}`).join(', ')}`);
   lines.push(`  main: ${d.main ?? '(none)'}${d.mainSlot ? ` (${d.mainSlot})` : ''}`);
   for (const n of d.notes) lines.push(`  note: ${n}`);
   return lines;
@@ -959,7 +1473,7 @@ function paneLike(img) {
 }
 
 export function surfaceCounts(entries) {
-  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0, detailed: 0, detailMaps: 0, detailBytes: 0, mirrored: 0, mirrorElsewhere: 0 };
+  const c = { flipBooks: 0, scrolling: 0, unlit: 0, additive: 0, glowing: 0, glowBytes: 0, glossy: 0, glossMaps: 0, detailed: 0, detailMaps: 0, detailBytes: 0, mirrored: 0, mirrorElsewhere: 0, shineUnread: 0, otherSets: 0, normalSecondSet: 0 };
   const glow = new Map();
   const gloss = new Set();
   const detail = new Map();
@@ -984,6 +1498,12 @@ export function surfaceCounts(entries) {
       c.mirrored++;
       if (t.envFrom !== 'MAIN.a') c.mirrorElsewhere++;
     }
+    // What the reading of the programs could not do: a shader whose program could not be read keeps the
+    // old guess at its shine, and a mask or a normal map on a coordinate set the models do not carry is
+    // drawn on the main's. A normal map on the second set is drawn on it.
+    if (t.spec?.mask === 'unread') c.shineUnread++;
+    if (t.sets?.length) c.otherSets++;
+    if (t.normal?.set === 1) c.normalSecondSet++;
     if (t.emissive) {
       c.glowing++;
       glow.set(t.emissive.path, t.emissive.png.length);
@@ -998,5 +1518,28 @@ export function surfaceCounts(entries) {
 }
 
 export function surfaceCountsLine(c) {
-  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps), ${c.detailed} with a detail map (${c.detailMaps} maps, ${(c.detailBytes / 1e6).toFixed(1)} MB), ${c.mirrored} reflective (${c.mirrorElsewhere} whose mirror mask is not the colour texture's alpha)`;
+  return `surfaces: ${c.flipBooks} flip-books, ${c.scrolling} scrolling, ${c.unlit} unlit, ${c.additive} additive, ${c.glowing} glowing (${(c.glowBytes / 1e6).toFixed(1)} MB of glow images), ${c.glossy} with the shader's own gloss map (${c.glossMaps} maps), ${c.detailed} with a detail map (${c.detailMaps} maps, ${(c.detailBytes / 1e6).toFixed(1)} MB), ${c.mirrored} reflective (${c.mirrorElsewhere} whose mirror mask is not the colour texture's alpha), ${c.normalSecondSet ?? 0} with a normal map on the second coordinate set, ${c.otherSets ?? 0} reading a mask or a normal map on a set the models do not carry, ${c.shineUnread ?? 0} whose program could not be read (shine by the old rule)`;
+}
+
+/**
+ * What a texture entry says about its shine and its relief, for `shader` and `materials`: where the mask
+ * comes from, the highlight the client drew (the MATL's colour and power, and a band where the program
+ * bends it into one), whether there is a cube, and how the normal map is decoded and on which set.
+ */
+export function shineLine(entry, described = null) {
+  if (!entry || entry.invisible) return null;
+  const s = entry.spec;
+  const num4 = (v) => String(Math.round(v * 1e4) / 1e4);
+  const parts = [];
+  if (!s) parts.push('shine: none written');
+  else if (s.mode === 'none') parts.push(`shine: none (the program draws no highlight${s.mask === 'unread' ? '; program not read' : ''})`);
+  else parts.push(`shine: ${s.mask === 'unread' ? 'mask by the old guess (program not read)' : s.mask === 'unmasked' ? 'unmasked (a mask of one)' : `mask ${s.mask}${s.squared ? ' squared' : ''}`}, ${s.mode === 'aniso' ? 'the band' : 'phong'}, colour ${s.color.map(num4).join(',')} power ${num4(s.power)}${described && !described.material ? ' (no MATL)' : ''}`);
+  parts.push(entry.cube ? `cube (mirror mask ${entry.envFrom ?? 'flat'})` : 'no cube (no metal)');
+  parts.push(entry.mr ? `metal-rough image, factors ${num4(entry.metallic ?? 0)}/${num4(entry.roughness ?? 0)}` : entry.roughness !== undefined ? `flat metal ${num4(entry.metallic ?? 0)} rough ${num4(entry.roughness)}` : 'no metal-rough');
+  const read = described?.normalRead;
+  if (entry.normal) parts.push(`normal map ${entry.normal.slot} decoded ${entry.normal.layout}${entry.normal.set === 1 ? ' on set 1' : ''}`);
+  else if (read?.kind === 'read') parts.push(`normal map ${read.slot}: not in the archives`);
+  else if (read?.kind === 'none' && described?.textures?.some((t) => /^(CNRM|NRML|DOT3)$/.test(t.slot))) parts.push('normal map named but never read by the program: not written');
+  if (entry.sets?.length) parts.push(`drawn on the main set: ${entry.sets.join(', ')}`);
+  return parts.join('; ');
 }

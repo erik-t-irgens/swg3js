@@ -6,6 +6,7 @@ import {
   scatterField, seeded, SPACE_BODY_FRAME, spaceBody, spaceZoneStatus, stationTemplate, ZONE_MAP_ICONS, zoneIconPaths,
 } from '../space.mjs';
 import { parseIff } from '../iff.mjs';
+import { MATERIAL_FORMAT } from '../surface.mjs';
 import { chunk, encode, form, W } from './iffWriter.ts';
 
 let checks = 0;
@@ -81,7 +82,7 @@ const constant = (name: string) => Number(new RegExp(`const ${name} = ([\\d.]+);
 ok(constant('SPACE_BODY_DISTANCE') === SPACE_BODY_FRAME.distance && constant('SPACE_BODY_SIZE') === SPACE_BODY_FRAME.radius, 'SPACE_BODY_FRAME is the frame the game draws the bodies in');
 
 // A pack whose bodies were sized from the halo's scale asks for the space command again.
-const packOf = (planets: object[]) => ({ version: 3, zone: 'space_test', title: 'Test', stations: [], planets, hyperspace: { points: [] } });
+const packOf = (planets: object[]) => ({ version: 3, materialFormat: MATERIAL_FORMAT, zone: 'space_test', title: 'Test', stations: [], planets, hyperspace: { points: [] } });
 ok(spaceZoneStatus('space_test', packOf([{ appearance: 'a.pln', direction: [0, -1, 0], size: 0 }]), 0).stale, 'bodies with no radius: converted before the sizes were read');
 ok(!spaceZoneStatus('space_test', packOf([tat, lost]), 0).stale && !spaceZoneStatus('space_test', packOf([]), 0).stale, 'bodies with a radius, or with a null one, or none at all: up to date');
 
@@ -249,7 +250,7 @@ ok(galaxyStatus(null).stale && galaxyStatus({ version: 0, routes: [] }).stale, '
 
 // A zone converted before the nebulae asks for the space command again; one with them says what it has.
 const full = {
-  version: 3, zone: 'space_test', title: 'Test System', stations: [{ name: 's' }], scenery: [], planets: [], arrival: { kind: 'launch' },
+  version: 3, materialFormat: MATERIAL_FORMAT, zone: 'space_test', title: 'Test System', stations: [{ name: 's' }], scenery: [], planets: [], arrival: { kind: 'launch' },
   nebulae: [{ shader: 'glow', lightning: {} }, { shader: 'mist', lightning: null }],
   fields: [{}, {}, {}],
   lanes: { m: { lanes: [{ lane: 'a' }, { lane: 'b' }], drydocks: [], bays: [] } },
@@ -259,5 +260,8 @@ const v3 = spaceZoneStatus('space_test', full, 40);
 ok(!v3.stale && v3.line.includes('2 nebulae (1 with lightning), 3 fields, 2 docking lanes'), `the status line says what version 3 added (${v3.line})`);
 ok(spaceZoneStatus('space_test', { ...full, version: 2 }, 40).stale, 'a pack at version 2 wants the space command again');
 ok(spaceZoneStatus('space_test', { version: 1, zone: 'z', stations: [] }, 0).line.includes('before hyperspace'), 'a pack older still says so in its own words');
+// Its models carried no material stamp before format 6, so a pack without one is asked for again.
+const { materialFormat: _stamp, ...unstamped } = full;
+ok(spaceZoneStatus('space_test', unstamped, 40).stale && spaceZoneStatus('space_test', { ...full, materialFormat: MATERIAL_FORMAT - 1 }, 40).line.includes('material format'), 'a pack with no material stamp, or an older one, wants the space command again');
 
 console.log(`${checks} checks passed`);

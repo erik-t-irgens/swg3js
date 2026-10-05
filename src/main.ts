@@ -2869,6 +2869,10 @@ class App {
               seen.add(m);
               if (want && !m.name.toLowerCase().includes(want)) continue;
               const s = m as THREE.MeshStandardMaterial;
+              // What the converter read off the shader's own program and MATL (material format 6): the
+              // highlight the client drew -- its mode, colour and power -- where its mask comes from, and
+              // whether the shader has a reflection cube at all. A pack from before carries neither.
+              const spec = m.userData.swgSpec as { mode?: string; color?: number[]; power?: number; mask?: string; squared?: boolean } | undefined;
               rows.push({
                 where,
                 name: m.name || '(unnamed)',
@@ -2876,6 +2880,13 @@ class App {
                 roughness: s.isMeshStandardMaterial ? Number(s.roughness.toFixed(3)) : null,
                 metalnessMap: !!s.metalnessMap,
                 roughnessMap: !!s.roughnessMap,
+                normalMap: !!s.normalMap,
+                normalChannel: s.normalMap ? s.normalMap.channel : null,
+                mode: spec?.mode ?? null,
+                color: spec?.color ?? null,
+                power: spec?.power ?? null,
+                mask: spec ? `${spec.mask ?? '?'}${spec.squared ? ' squared' : ''}` : null,
+                cube: typeof m.userData.swgCube === 'boolean' ? m.userData.swgCube : null,
                 envMap: !!s.envMap,
                 envMapIntensity: s.isMeshStandardMaterial ? Number((s.envMapIntensity ?? 1).toFixed(3)) : null,
                 // What `isReflective` in envmap.ts asks, which is what decides whether it gets one.
