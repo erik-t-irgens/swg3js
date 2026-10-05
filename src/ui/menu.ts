@@ -201,7 +201,7 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
     // Space: scene content again, and nothing here recompiles a shader.
     title: 'Space',
     knobs: [
-      { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula takes shields and armour off the ship it hits, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
+      { key: 'nebulaLightningDamage', label: 'Nebula lightning damages ships', kind: 'toggle', hint: 'A strike inside a nebula drains the shield on the side of the ship it passes, never the armour or the hull, at a quarter of the numbers the game\'s own tables carry. Off, lightning only flashes.' },
       { key: 'nebulaOpacity', label: 'Nebula opacity', kind: 'range', min: 0, max: 1, step: 0.05, format: (v) => `${Math.round(v * 100)}%`, hint: 'How solid the nebulae are: their glowing and misty sheets seen from outside and the haze around you inside one, together, and how much a nebula you are in dims the sun\'s flare and rays. 100% is as they are drawn and 0% hides them; it starts at 10%. Their lightning still strikes.' },
     ],
   },

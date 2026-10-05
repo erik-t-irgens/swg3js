@@ -424,12 +424,15 @@ export function makeSpeedArc(): SpeedArc {
 /**
  * `speed`, `top` and `boostTop` in the same unit (the game's metres a second); `wingFactor` is the
  * chassis's `wing_open_speed_factor`, 1 where there is none. `boostTop` at or under `top` means no
- * booster, which is the case on most hulls.
+ * booster, which is the case on most hulls. `whole` is what the arc's end stands for: the hull's
+ * fastest whole and outside every nebula, so a top a nebula or a downed part has lowered sits below
+ * the end and the tick shows it; nought (or anything under the hull's own numbers) scales the arc to
+ * `top` and `boostTop` as they are now.
  */
-export function speedArc(speed: number, top: number, boostTop: number, wingFactor: number, out: SpeedArc): SpeedArc {
+export function speedArc(speed: number, top: number, boostTop: number, wingFactor: number, out: SpeedArc, whole = 0): SpeedArc {
   const from = HUD_SIZES.speedFrom;
   const to = HUD_SIZES.speedTo;
-  const full = Math.max(top, boostTop, 1e-6);
+  const full = Math.max(top, boostTop, whole > 0 ? whole : 0, 1e-6);
   const wing = wingFactor > 0 && wingFactor < 1 ? wingFactor : 1;
   out.share = clamp01(speed / full);
   out.from = from;
@@ -442,7 +445,8 @@ export function speedArc(speed: number, top: number, boostTop: number, wingFacto
   out.wingTo = out.topAngle;
   out.hasBoost = boostTop > top * HUD_SIZES.boostEpsilon;
   out.boostFrom = out.topAngle;
-  out.boostTo = to;
+  // To the end of the arc, unless the boost top too has been lowered under what the end stands for.
+  out.boostTo = boostTop >= full ? to : along(from, to, boostTop / full);
   return out;
 }
 

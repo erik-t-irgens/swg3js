@@ -110,10 +110,10 @@ export type NebulaColour = [number, number, number, number];
 export interface NebulaLightningRow {
   /** The .ltn the row names; the pack converts one of them into `SpacePack.lightning`. */
   appearance: string;
-  /** The table's `lightningFrequency`. Read as strikes a second, which is OUR reading. */
+  /** The table's `lightningFrequency`: strikes a second, as the game's own rule reads it (its chance in a moment is the moment's length times this). */
   every: number;
   maxSeconds: number;
-  /** The table's damage band, [min, max]. What it does to a ship here is the game's decision, not the table's. */
+  /** The table's damage band, [min, max]. A strike drains one shield by a roll in it (the game's rule), at the owner's share of it here. */
   damage: [number, number];
   colour: NebulaColour;
   ramp: NebulaColour;

@@ -1,7 +1,8 @@
 // How a ship takes a blow, layer by layer: the shield on the face that was struck, then that face's
 // armour, then the chassis, with a chance that a component takes it too. The layering, the leak and
-// every share here are INVENTED (the server's rules did not ship); the game's own part is only which
-// hit effect each layer plays (ship_hit_effects.iff).
+// every share here are INVENTED (the server's rules did not ship); the game's own part is which hit
+// effect each layer plays (ship_hit_effects.iff), and the one rule read from its server: a nebula's
+// lightning drains a single shield and nothing under it (`applyShieldHit`).
 //
 // Pure: no three, no rapier; node's tests import it straight from source. Nothing allocates per hit:
 // the caller's HitResult is filled.
@@ -226,6 +227,36 @@ export function applyHit(c: ShipCondition, stats: ShipStats, amount: number, fac
   return out;
 }
 
+/**
+ * A blow that only a shield can take (a nebula's lightning): it comes off the shield on that face and
+ * the rest of it is thrown away, never reaching the armour, the chassis or a part (READ: the game's
+ * rule for lightning, restated). It counts as a hit, so the shield waits its delay before it comes
+ * back, as it does after any other blow (OURS). The layer is always the shield, an empty
+ * shield included, so the shield's own hit effect plays; `shieldDown` only when this blow emptied
+ * it. A ship already destroyed takes nothing. Fills `out`.
+ */
+export function applyShieldHit(c: ShipCondition, stats: ShipStats, amount: number, facing: 0 | 1, out: HitResult): HitResult {
+  reset(out, facing);
+  if (c.chassis <= 0) {
+    out.layer = 'chassis';
+    return out;
+  }
+  if (!(amount > 0)) return out;
+  c.sinceHit = 0;
+  const sh = c.shield[facing];
+  if (sh > 0) {
+    const take = Math.min(sh, amount);
+    c.shield[facing] = sh - take;
+    out.dealt = take;
+    if (c.shield[facing] <= 1e-6) {
+      c.shield[facing] = 0;
+      out.shieldDown = true;
+    }
+  }
+  out.weight = weightOf(out.dealt, stats);
+  return out;
+}
+
 /** A collision: skips the shield, onto the armour of the face that hit, then the chassis. Fills `out`. */
 export function applyCollision(c: ShipCondition, stats: ShipStats, amount: number, facing: 0 | 1, out: HitResult): HitResult {
   reset(out, facing);
@@ -247,12 +278,15 @@ export function partnerLoss(lost: number, mass: number, otherMass: number): numb
   return (lost * mass) / Math.max(1e-6, otherMass);
 }
 
-/** Shields back after a quiet spell; nothing while the generator or the reactor is down. */
-export function regenerate(c: ShipCondition, stats: ShipStats, generatorUp: boolean, reactorUp: boolean, dt: number): void {
+/**
+ * Shields back after a quiet spell; nothing while the generator or the reactor is down. `factor`
+ * scales the rate (a nebula's hold on the reactor and the shields: 1 outside them all).
+ */
+export function regenerate(c: ShipCondition, stats: ShipStats, generatorUp: boolean, reactorUp: boolean, dt: number, factor = 1): void {
   c.sinceHit = Math.min(LONG_AGO, c.sinceHit + dt);
   if (!generatorUp || !reactorUp || c.chassis <= 0 || c.sinceHit < stats.shieldDelay) return;
   // Unrolled: this runs every frame for every ship, and a loop over a literal would allocate it.
-  const step = stats.shieldRegen * dt;
+  const step = stats.shieldRegen * factor * dt;
   if (c.shield[0] < stats.shieldMax[0]) c.shield[0] = Math.min(stats.shieldMax[0], c.shield[0] + step);
   if (c.shield[1] < stats.shieldMax[1]) c.shield[1] = Math.min(stats.shieldMax[1], c.shield[1] + step);
 }

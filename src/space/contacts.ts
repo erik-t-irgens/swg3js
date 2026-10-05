@@ -18,6 +18,11 @@ import type { HitResult } from './shipDamage.ts';
 import { familyOf, hullClassOf, type Handling, type StatInput } from './shipStats.ts';
 import { TauntGate, fillTaunt, pickLine, type TauntEvent } from './taunts.ts';
 import { vehicleSounds } from '../audio/vehicleSounds.ts';
+import { NEBULA_SYSTEMS, NebulaNote, newNebulaSystems, shipSystemsAt, type NebulaSystems } from './nebulaMath.ts';
+import type { Nebula } from './spaceData.ts';
+
+/** No nebulae: what a world with none hands the contacts, made once. */
+const NO_NEBULAE: readonly Nebula[] = [];
 
 /** The slots a ship is given when neither its fit nor combat.json says (an older pack): a fighter's systems, each weighing 10. */
 const DEFAULT_SLOTS: StatInput['slots'] = {
@@ -44,6 +49,8 @@ export class ShipContact implements Living {
   /** Who hurt it last and when (retaliation memory), by key; PLAYER_KEY for the player in any form. */
   lastAttacker = NOBODY;
   lastAttackedAt = -Infinity;
+  /** The summed effects of the nebulae it is in, worked out each step into this one record. */
+  readonly nebula: NebulaSystems = newNebulaSystems();
 
   constructor(vehicle: Vehicle, faction: ShipFaction, type: NpcTypeDef | null) {
     this.vehicle = vehicle;
@@ -111,6 +118,12 @@ export class ShipContacts {
   playerTarget: Living | null = null;
   /** The taunts' own random numbers (the chances, the lines). */
   rng: () => number = Math.random;
+  /** Set by the world: the zone's nebulae, which weaken a ship inside one. None off a space zone. */
+  nebulaRows: () => readonly Nebula[] = () => NO_NEBULAE;
+  /** Set by the world: a line for the message line (the player's ship flying into a nebula). Null in a test. */
+  onNote: ((text: string) => void) | null = null;
+  /** The message line's word as the player's ship flies into a nebula: said once on the way in. */
+  private readonly nebulaNote = new NebulaNote();
   private readonly byVehicle = new Map<Vehicle, ShipContact>();
   /** The handling each vehicle had before a combat first wrote its spec: a re-adopt starts from it. */
   private readonly bases = new WeakMap<Vehicle, Handling>();
@@ -344,11 +357,31 @@ export class ShipContacts {
     return n;
   }
 
-  /** Every combat's update; nothing regenerates or cools down while paused. */
+  /**
+   * Every combat's update; nothing regenerates or cools down while paused. First, what the nebulae
+   * holding each ship do to it: summed into the contact's own record and handed to its combat, which
+   * writes the spec only when that changes. A hull in a jump or held where it is (a jump, a pause
+   * holding the NPC ships) is in no nebula, so a jump through one does nothing to it.
+   */
   update(dt: number, now: number, simulating: boolean): void {
     this.now = now;
     if (!simulating) return;
-    for (const c of this.list) c.combat?.update(dt, now, c.vehicle.boosting);
+    const rows = this.nebulaRows();
+    for (const c of this.list) {
+      const combat = c.combat;
+      if (!combat) continue;
+      // Nothing for a hull in a jump or held where it is (`shipSystemsAt`).
+      shipSystemsAt(rows, c.vehicle, c.nebula, NEBULA_SYSTEMS);
+      combat.setNebula(c.nebula);
+      if (c === this.playerShip) {
+        // One line on the message line as the player's ship comes in, and nothing as it stays or leaves.
+        const said = this.nebulaNote.player(combat.nebula);
+        if (said) this.onNote?.(said);
+      }
+      combat.update(dt, now, c.vehicle.boosting);
+    }
+    // Out of the seat, the next ship flown into a nebula says so again.
+    this.nebulaNote.endStep();
   }
 
   /** A world unload: every contact dropped (their vehicles are the world's to dispose). */
@@ -357,6 +390,7 @@ export class ShipContacts {
     this.list.length = 0;
     this.byVehicle.clear();
     this.playerShip = null;
+    this.nebulaNote.clear();
     this.gate.clear();
   }
 }

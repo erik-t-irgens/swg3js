@@ -278,6 +278,22 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   ok(a.hasWing && !a.hasBoost, 'wings without a booster: one span, two ticks');
   speedArc(0, 0, 0, 1, a);
   ok(Number.isFinite(a.angle) && a.share === 0, 'a hull with no speed at all does not divide by nothing');
+
+  // Scaled to the hull whole and outside every nebula: a top a nebula (or a downed part) has lowered
+  // moves the ticks down the arc, and the arc comes back exactly when the hull is whole again.
+  const whole = makeSpeedArc();
+  speedArc(top, top, boost, wing, whole, boost);
+  const plain = makeSpeedArc();
+  speedArc(top, top, boost, wing, plain);
+  ok(near(whole.topAngle, plain.topAngle) && near(whole.openAngle, plain.openAngle) && near(whole.boostTo, to) && near(whole.angle, plain.angle), 'a whole hull scaled to its own fastest draws the arc it always drew');
+  const slowed = makeSpeedArc();
+  speedArc(top * 0.8, top * 0.8, boost * 0.8, wing, slowed, boost);
+  ok(slowed.topAngle < plain.topAngle && slowed.openAngle < plain.openAngle && near(slowed.topAngle, along(from, to, (top * 0.8) / boost)), 'a top a nebula has lowered moves the top tick down the arc');
+  ok(slowed.hasBoost && slowed.boostTo < to && near(slowed.boostTo, along(from, to, 0.8)), 'and the boost span ends where the lowered boost top is, short of the end');
+  ok(near(slowed.angle, slowed.topAngle), 'with the needle on the lowered tick at the lowered top');
+  const noScale = makeSpeedArc();
+  speedArc(top * 0.8, top * 0.8, boost * 0.8, wing, noScale);
+  ok(near(noScale.topAngle, plain.topAngle), 'where nothing says what whole is, the arc is scaled to the tops as they are, as before');
 }
 
 // ---------------------------------------------------------------------------------------------

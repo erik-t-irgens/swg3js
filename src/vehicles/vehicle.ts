@@ -337,6 +337,13 @@ export class Vehicle {
   onWater = false;
   /** A ship: the speed the throttle has built (m/s), and its attitude in flight (free to roll and loop). */
   cruise = 0;
+  /**
+   * A ship: the plain top (m/s, space's doubling in) at its last step in flight, and the top it stood
+   * at before its own numbers last lowered it (a nebula's hold on the engines, a part knocked down),
+   * kept until the cruise is down to the new top: a cruise in between eases down at the brake.
+   */
+  private lastPlainTop = 0;
+  private easeFrom = 0;
   readonly attitude = new THREE.Quaternion();
   /** The virtual stick the mouse moves (-1 to 1, self-centring) and the turning rates it has built (rad/s). */
   readonly stick = new THREE.Vector2();
@@ -2124,19 +2131,32 @@ export class Vehicle {
     this.commandedValid = false;
     // Space has the room for twice the speed the ground shows.
     // With the wings open, a chassis with a wing_open_speed_factor pays it off the top (eased in as they open).
-    const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * (this.space ? 2 : 1) * wingTopFactor(this.wingOpenFactor, this.wings.progress);
+    const over = this.space ? 2 : 1;
+    const top = (drive?.boost ? s.boostSpeed : s.maxSpeed) * over * wingTopFactor(this.wingOpenFactor, this.wings.progress);
     this.boosting = !!drive?.boost && throttle > 0;
+    // The hull's own numbers lowering its top (a nebula's hold on the engines, a part knocked down: the
+    // spec is written again in one step) leave a cruise between the new top and the old one to ease
+    // down at the brake, with W held or not, rather than cut to the new top in one step with W held and
+    // kept above it for good with W up. A boost's coast above the old top is left as it always was.
+    const plainTop = s.maxSpeed * over;
+    if (plainTop < this.lastPlainTop) this.easeFrom = Math.max(this.easeFrom, this.lastPlainTop);
+    this.lastPlainTop = plainTop;
+    const lowered = !drive?.boost && this.cruise > top && this.cruise <= this.easeFrom;
     if (drive?.cruise !== undefined) {
       // An autopilot asks for a speed: the cruise eases toward it at the engines' own rates, within the top speed.
       const want = Math.max(0, Math.min(top, drive.cruise));
       this.cruise = this.cruise < want ? Math.min(want, this.cruise + s.accel * dt) : Math.max(want, this.cruise - s.brake * dt);
-    } else if (throttle > 0) this.cruise = Math.min(top, this.cruise + s.accel * dt);
+    } else if (throttle > 0) this.cruise = lowered ? Math.max(top, this.cruise - s.brake * dt) : Math.min(top, this.cruise + s.accel * dt);
     else if (throttle < 0) this.cruise = Math.max(0, this.cruise - s.brake * dt);
     else if (!drive) this.cruise = Math.max(0, this.cruise - s.brake * 0.5 * dt);
     // Open wings cost their share of the top speed with W up as well (a ship launched at full speed, its wings then
     // opening): a cruise between the open top and the closed one eases down at the brake. A coast above the closed
-    // top after a boost is left as it always was.
-    if (throttle === 0 && drive && !drive.boost && this.wingOpenFactor < 1 && this.cruise > top && this.cruise <= s.maxSpeed * (this.space ? 2 : 1)) this.cruise = Math.max(top, this.cruise - s.brake * dt);
+    // top after a boost is left as it always was. A pilot's coast above a lowered top eases down the same way (an
+    // autopilot's own cruise already eases toward what it asks for).
+    if (throttle === 0 && drive && !drive.boost && this.wingOpenFactor < 1 && this.cruise > top && this.cruise <= plainTop) this.cruise = Math.max(top, this.cruise - s.brake * dt);
+    else if (throttle === 0 && drive && drive.cruise === undefined && lowered) this.cruise = Math.max(top, this.cruise - s.brake * dt);
+    // Down to the top: nothing left to ease.
+    if (this.cruise <= top) this.easeFrom = 0;
     // A jump's cruise over all of that: not clamped to the ship's top speed, not bled by the idle brake.
     if (this.jumpCruise !== null) this.cruise = this.jumpCruise;
     this.speed = this.cruise;

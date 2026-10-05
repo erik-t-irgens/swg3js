@@ -14508,6 +14508,9 @@ class App {
     fv.wingFactor = v.wings.length ? v.wingOpenFactor : 1;
     fv.boosting = v.boosting;
     const c = v.combat;
+    // The arc's end is the hull whole and outside every nebula, so a nebula's hold or a downed part
+    // shows as the top tick moving down; a hull with no fight is scaled to its own two tops.
+    fv.fullSpeed = c ? c.fullSpeed * over : 0;
     fv.gunSlots = Math.min(HUD_WIRING.gunBits, v.guns.length);
     // The arc drains on a shot and fills again on the refire: the fight's own clock where there is
     // one (its capacitor's and its live guns'), else the plain interval the hull fires on.

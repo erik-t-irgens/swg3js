@@ -74,8 +74,8 @@ import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../au
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
 import { FOOT_TUNE, type FootGround } from '../audio/footsteps.ts';
 import type { LoopHost } from '../audio/emitters.ts';
-import { loadSpacePack, type SpacePack } from '../space/spaceData.ts';
-import { Nebulae, installNebulaDebug } from '../space/nebulae.ts';
+import { loadSpacePack, type Nebula, type SpacePack } from '../space/spaceData.ts';
+import { Nebulae, installNebulaDebug, type NebulaShip } from '../space/nebulae.ts';
 import { dropForceLightning, loadForceLightning, stepForceLightning } from '../combat/forceLightning.ts';
 import { dropLooseProps, loadLooseProps, loosePropAt, stepLooseProps } from './looseProps.ts';
 import { prepareForceEffects } from '../combat/forcePowers.ts';
@@ -129,6 +129,8 @@ const footNormal = new THREE.Vector3();
 const roomProbe = new THREE.Vector3();
 const lumOf = (c: THREE.Color): number => luminance(c.r, c.g, c.b);
 const tmpM = new THREE.Matrix4();
+/** No nebulae: what the ship contacts are handed off a space zone, made once. */
+const NO_NEBULA_ROWS: readonly Nebula[] = [];
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
 const SPACE_REACH = 3;
 const SPACE_BODY_DISTANCE = 2600;
@@ -825,6 +827,9 @@ export class World {
     // it exists), and the garage is read when a combat is made, not now.
     this.ships = new ShipContacts(this.shipFx, this.bolts, () => this.npcDeps.effects ?? null, () => this.garage ?? null);
     this.ships.onShipDown = (v) => this.npcShips?.destroyed(v, this.simTime);
+    // The zone's nebulae weaken every ship inside one; the player's says so on the message line.
+    this.ships.nebulaRows = () => this.nebulae?.rows ?? NO_NEBULA_ROWS;
+    this.ships.onNote = (text) => this.onNote?.(text);
     void this.ships.load(import.meta.env.BASE_URL);
     // The rooms of a hull another player flies are bound to this world now rather than on the first
     // ask: binding is what lets go of the rooms built in the world before this one (their bodies are
@@ -2326,8 +2331,9 @@ export class World {
 
   /**
    * What the nebulae need of the world: the effects a strike plays, a pooled light for its flash,
-   * where the player's ship is and how to hurt it, and whether the player lets lightning hurt a
-   * ship at all. One kept record, so a load allocates nothing and a strike allocates nothing.
+   * the ships a strike may touch and how to strike one, the player's ship, and whether the player
+   * lets lightning hurt a ship at all. One kept record, so a load allocates nothing and a strike
+   * allocates nothing.
    */
   private readonly nebulaDeps = {
     place: (file: string, matrix: THREE.Matrix4): unknown | null => this.particles?.place(file, matrix, false, true) ?? null,
@@ -2335,24 +2341,18 @@ export class World {
     flash: (at: THREE.Vector3, colour: number, intensity: number, distance: number, seconds: number): void => {
       this.npcDeps.effects?.flash(at, colour, intensity, distance, seconds);
     },
-    shipAt: (out: THREE.Vector3): number => {
-      const contact = this.ships.playerShip;
-      const v = contact?.vehicle;
-      // A ship in a jump is ghosted and nothing may strike it, as nothing else may.
-      if (!contact || !v || contact.dead || contact.ghosted) return 0;
-      out.copy(v.pos);
-      return Math.max(1, v.radius);
-    },
-    hurtShip: (amount: number, from: THREE.Vector3): void => {
-      const contact = this.ships.playerShip;
-      if (!contact || contact.dead || contact.ghosted) return;
-      // The ship's own damage path, so the layers, the game's hit effect and the retaliation memory
-      // are the same as for a bolt; nobody struck, so nothing is blamed for it.
-      contact.combat?.take(amount, from, null);
-    },
+    // Every ship that fights, the player's and the NPCs' alike: the game's lightning touched any ship.
+    ships: (): readonly NebulaShip[] => this.ships.list,
+    // The ship's own lightning path: one shield and a rest between strikes. Nobody struck, so nothing is blamed.
+    strike: (ship: NebulaShip, amount: number, at: THREE.Vector3): boolean => ship.combat?.lightning(amount, at) ?? false,
+    playerShip: (): NebulaShip | null => this.ships.playerShip,
     damageEnabled: (): boolean => liveSettings().nebulaLightningDamage,
     opacity: (): number => liveSettings().nebulaOpacity,
-    now: (): number => Date.now(),
+    // The clock the weather reads, in milliseconds: the server's while one answers, walked rather than
+    // stepped when it is put right (so a correction does not run it backwards and strike a tick twice,
+    // short of one past half a minute, which the weather takes at once as well), and exactly this
+    // machine's wall clock with no server set.
+    now: (): number => sharedClock.now() - sharedClock.lagNow(),
   };
 
   /**
