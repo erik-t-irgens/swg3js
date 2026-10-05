@@ -74,6 +74,36 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(main.includes('this.actions.setBindings(this.input.bindings)'), 'the action bar is given the bindings');
 }
 
+// --- the corner says where you are in the map's own frame -----------------------------------------
+// On a planet the `/loc` line and the coordinates over the minimap are the pair the map window reads
+// out: its point (the hull's place while you ride, fly or stand aboard, `mapPlace`, which the map's own
+// source reads too) in its raw frame about the layout centre. In space `/loc` is the game's frame and the
+// figure's own place, as it always was, which is what a story's place and a waypoint take there. What is
+// pinned is the call and the shape of each branch, not words somewhere before it: handed the game's
+// frame again, or with the two branches swapped, the line says the wrong numbers with no error anywhere.
+// The world's name over the circle is written wherever the corner's own is, or a travel would leave the
+// last world's name over the new map; and the minimap is handed the clock its coordinates keep their rate
+// on, or they freeze at the first pair they wrote.
+{
+  const calls = [...main.matchAll(/this\.hud\.update\(/g)].length;
+  ok(calls === 1, `the corner is updated from one place (${calls})`);
+  ok(/this\.hud\.update\(dt,\s*locX,\s*locAt\.y,\s*locZ,/.test(main), "the corner's /loc is handed the worked-out pair and that point's height, not the game's frame");
+  ok(/const locSpace = !!this\.world\.planet\?\.space;/.test(main), 'the branch is whether the world is a space zone');
+  ok(/const locAt = locSpace \? at : this\.mapPlace\(\);/.test(main), "on a planet the line reads the map's own point, in space the figure's");
+  ok(/const locX = locSpace \? locAt\.x : gameToRawX\(locC \? locC\.x : 0, locAt\.x\);/.test(main), "x: the game's frame in space, the planet's raw frame through the map's own function");
+  ok(/const locZ = locSpace \? locAt\.z : gameToRawZ\(locC \? locC\.z : 0, locAt\.z\);/.test(main), 'z: the same two branches');
+  const place = /private mapPlace\(\): THREE\.Vector3 \{([\s\S]*?)\n  \}/.exec(main)?.[1] ?? '';
+  ok(/const v = p\.mounted \?\? p\.piloting \?\? p\.aboard\?\.vehicle \?\? null;/.test(place) && /return v \? v\.pos : p\.worldPos;/.test(place), "the map's point is the hull's place while you ride, fly or stand aboard, the figure's otherwise");
+  const source = /\n\s+player: \(\) => \{([\s\S]*?)\n\s+\},/.exec(main.slice(main.indexOf('this.map = new MapUi(')))?.[1] ?? '';
+  ok(/const at = this\.mapPlace\(\);/.test(source), "and the map window's own arrow and line read that very point");
+  const step = /private stepMinimap\(\): void \{([\s\S]*?)this\.minimap\.update\(v\);/.exec(main)?.[1] ?? '';
+  ok(/const at = this\.mapPlace\(\);/.test(step) && /v\.x = gameToRawX\(c \? c\.x : 0, at\.x\);/.test(step) && /v\.z = gameToRawZ\(c \? c\.z : 0, at\.z\);/.test(step), "the minimap's middle, and its coordinates, are the same point in the same frame");
+  ok(/\n\s+v\.now = performance\.now\(\) \/ 1000;/.test(step), 'and the minimap is handed the clock its coordinates keep their rate on');
+  const planets = [...main.matchAll(/this\.hud\.setPlanet\(/g)].length;
+  const named = [...main.matchAll(/this\.hud\.setPlanet\(planet\);\s*this\.minimap\.setName\(planet\.name\);/g)].length;
+  ok(planets >= 2 && named === planets, `the minimap is told the world's name beside every setPlanet (${named} of ${planets})`);
+}
+
 // --- the two walks are off the frame path ---------------------------------------------------------
 // Both of these used to run on every frame for a readout written a few times a second. Each is now
 // behind a clock of its own; the shape checked is the clock, because that is what a later edit would

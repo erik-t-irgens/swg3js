@@ -2278,7 +2278,7 @@ class App {
       player: () => {
         const p = this.player;
         const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-        const at = v ? v.pos : p.worldPos;
+        const at = this.mapPlace();
         const flying = !!v?.spec.ship && v.airborne && !this.world.planet.space;
         return { x: at.x, y: at.y, z: at.z, heading: v ? v.heading : p.heading, altitude: flying ? at.y - this.world.terrain.heightAt(at.x, at.z) : null };
       },
@@ -2361,7 +2361,12 @@ class App {
        * sizes one as a drag would (no w/h: its own size), `{ reset: true }` forgets them all, `{ reset: 'map' }` one.
        */
       windows: (o?: Parameters<typeof windowsDebug>[0]) => windowsDebug(o),
-      /** Put the player at x, z on the ground (or at `y`); a point inside a building's room, once that building's interior is built, counts as being in it. Returns the cell. */
+      /**
+       * Put the player at x, z on the ground (or at `y`); a point inside a building's room, once that building's
+       * interior is built, counts as being in it. Returns the cell. x, z are the game's own frame, which on a
+       * planet is not the pair the corner's `/loc`, the minimap and the map window read out: that pair is the
+       * client's, and goes through `teleportSwg`. In space `/loc` is this frame and pastes straight in.
+       */
       teleport: (x: number, z: number, yaw?: number, y?: number) => {
         const at = new THREE.Vector3(x, y ?? this.world.terrain.heightAt(x, z) + 0.3, z);
         this.player.reset(at);
@@ -3231,7 +3236,10 @@ class App {
           tune: { ...HOUSING_TUNE },
         };
       },
-      /** Teleport to a point in the original game's coordinates (the inverse of `swg()`); null when no layout is loaded. */
+      /**
+       * Teleport to a point in the original game's coordinates (the inverse of `swg()`), which on a planet is the
+       * pair the corner's `/loc`, the minimap and the map window read out; null when no layout is loaded.
+       */
       teleportSwg: (x: number, z: number, yaw?: number) => {
         const c = this.world.layoutCenter;
         if (!c) return null;
@@ -10872,6 +10880,11 @@ class App {
       redraws: this.minimap.redraws,
       dots: this.minimap.dots,
       writes: this.minimap.writesLastSecond,
+      // What stands over the circle: the world's name, and the coordinates with their own writes of the
+      // last second, which a still player keeps at nought and a walk at no more than `tune.locHz`.
+      name: this.minimap.nameShown,
+      loc: this.minimap.locShown,
+      locWrites: this.minimap.locWritesLastSecond,
       city: { here: this.cityWatch.here, shown: this.minimap.cityShown, said: this.cityWatch.said, quiet: this.cityWatch.quiet },
       tune: { ...MINIMAP_TUNE },
       cityTune: { ...CITY_TUNE },
@@ -10881,7 +10894,7 @@ class App {
   /** What a waypoint's mark asks of the world: the ground already built, the ground made, a room's floor, a room. */
   private placeDeps!: PlaceDeps;
   /** What the minimap is handed each frame: one object, refilled. */
-  private readonly minimapView = { wanted: false, pack: '', x: 0, z: 0, heading: 0, range: 800, northUp: true };
+  private readonly minimapView = { wanted: false, pack: '', x: 0, z: 0, heading: 0, range: 800, northUp: true, now: 0 };
   /** The pack of the world in play, worked out again only when the planet or the zone has changed. */
   private readonly packMemo: { planet: PlanetDef | null; zone: string | undefined; pack: string } = { planet: null, zone: undefined, pack: '' };
 
@@ -11024,6 +11037,18 @@ class App {
     if (said) this.minimap.showCity(said);
   }
 
+  /**
+   * Where the map says you are: the hull's own place while you ride it, fly it or stand in its rooms, the
+   * figure's otherwise. The map window draws its arrow and reads out its line from this, and the minimap
+   * and the corner's `/loc` on a planet read the same point, so the three say the same two numbers whatever
+   * you are sitting in. A kept vector, so a frame that asks makes nothing.
+   */
+  private mapPlace(): THREE.Vector3 {
+    const p = this.player;
+    const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
+    return v ? v.pos : p.worldPos;
+  }
+
   /** The minimap, once a frame: up or aside as the world and the setting say, and drawn only when it must be. */
   private stepMinimap(): void {
     const S = this.settings;
@@ -11032,9 +11057,11 @@ class App {
     v.wanted = S.hudMinimap && this.inWorld && !!planet && !planet.space && !planet.instances;
     if (v.wanted && planet) {
       const p = this.player;
-      // Riding or flying low, the hull's heading is the way you face, as the map window's arrow has it.
+      // Riding or flying low, the hull's heading is the way you face and its place is where you are, as
+      // the map window's arrow has them: the circle's middle and the coordinates over its foot are the
+      // map's own point.
       const hull = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-      const at = p.worldPos;
+      const at = this.mapPlace();
       const c = this.world.layoutCenter;
       v.pack = this.packHere(planet);
       v.x = gameToRawX(c ? c.x : 0, at.x);
@@ -11043,6 +11070,8 @@ class App {
       v.range = Math.max(HUD_MINIMAP_RANGE.min, Math.min(HUD_MINIMAP_RANGE.max, S.hudMinimapRange));
       v.northUp = S.hudMinimapNorthUp;
     }
+    // The clock the coordinates over the circle keep their rate on.
+    v.now = performance.now() / 1000;
     this.minimap.update(v);
   }
 
@@ -13033,6 +13062,7 @@ class App {
     this.physics.stepOnce();
     this.cam.yaw = Math.PI;
     this.hud.setPlanet(planet);
+    this.minimap.setName(planet.name);
     this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
     this.remotes.setWorld(planet.id, this.zone);
@@ -13558,6 +13588,7 @@ class App {
     this.world.warmUp(pose.pos);
     this.physics.stepOnce();
     this.hud.setPlanet(planet);
+    this.minimap.setName(planet.name);
     this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
     this.remotes.setWorld(planet.id, this.zone);
@@ -21553,9 +21584,21 @@ class App {
         this.nearbyClock = 1 / Math.max(1, HUD_WIRING.nearbyHz);
         this.nearbyName = this.nearbyLabel(at);
       }
+      // The corner's `/loc`. On a planet it is the map window's own point in the map window's own frame --
+      // the hull's place while you ride, fly or stand in its rooms (`mapPlace`), as the client's pair about
+      // the layout centre, with that point's height -- so the line, the minimap and the map say the same
+      // two numbers. In space it is the game's frame and the figure's own place, as it always was: that is
+      // the frame a story's place, a waypoint and `teleport` take out there, and the hull the gravity boots
+      // name may be nowhere near the walker. The space map's line mirrors x, so it and this differ there in
+      // that sign alone. Three numbers, nothing made.
+      const locSpace = !!this.world.planet?.space;
+      const locAt = locSpace ? at : this.mapPlace();
+      const locC = this.world.layoutCenter;
+      const locX = locSpace ? locAt.x : gameToRawX(locC ? locC.x : 0, locAt.x);
+      const locZ = locSpace ? locAt.z : gameToRawZ(locC ? locC.z : 0, locAt.z);
       // The breath goes last: it is null on dry land and with a full lungful, and the row is not on
       // the page at all while it is, so an ordinary frame writes nothing for it.
-      this.hud.update(dt, at.x, at.y, at.z, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
+      this.hud.update(dt, locX, locAt.y, locZ, this.kit, player.hp, player.maxHp, this.world.day.clock(), this.nearbyName, player.saberOn, player.breath);
       // The minimap: drawn only when you have moved or turned enough to show, which a still frame has not.
       this.stepMinimap();
       // The tighter crosshair while a shot is aimed, and the plate over whatever it rests on. The

@@ -212,8 +212,15 @@ interface BodyBar {
 export class Hud {
   private readonly root: HTMLElement;
   private readonly planetName: HTMLElement;
-  private readonly planetTag: HTMLElement;
   private readonly loc: HTMLElement;
+  /**
+   * The nearest living thing's name, a line of its own at the foot of the top-left block: the `/loc`
+   * line's tail once, until the coordinates went over the minimap and a name could no longer ride
+   * them. Empty while the plate over a head says the same thing better. Written when the name changes,
+   * and kept here rather than read back off the element.
+   */
+  private readonly nearby: HTMLElement;
+  private nearbyText = '';
   private readonly fps: HTMLElement;
   /** A quiet line under the frame rate while the weather is not the shared schedule's. */
   private readonly weatherNote: HTMLElement;
@@ -341,8 +348,8 @@ export class Hud {
       <div class="hurt"></div>
       <div class="panel top-left">
         <div class="planet-name"></div>
-        <div class="planet-tag"></div>
         <div class="loc"></div>
+        <div class="hud-nearby"></div>
       </div>
       <div class="panel help hidden"></div>
       <div class="panel top-right">
@@ -382,8 +389,8 @@ export class Hud {
     parent.appendChild(this.root);
     const q = (sel: string) => this.root.querySelector<HTMLElement>(sel)!;
     this.planetName = q('.planet-name');
-    this.planetTag = q('.planet-tag');
     this.loc = q('.loc');
+    this.nearby = q('.hud-nearby');
     this.fps = q('.fps');
     this.weatherNote = q('.weather-note');
     this.clock = q('.clock');
@@ -483,10 +490,10 @@ export class Hud {
     this.writes += 2;
   }
 
+  /** The world's name in the corner. The minimap's own line over its circle is told beside this (`Minimap.setName`). */
   setPlanet(p: PlanetDef): void {
     this.planetName.textContent = p.name;
-    this.planetTag.textContent = p.tagline;
-    this.byDesign += 2;
+    this.byDesign++;
   }
 
   /**
@@ -734,9 +741,12 @@ export class Hud {
   // The frame.
 
   /**
-   * One frame of the slow half. `breath` is the player's own breath if they have any to show, and
-   * nothing at all otherwise — which is what dry land hands over, and what every caller written
-   * before there was breath hands over by leaving the argument off.
+   * One frame of the slow half. `x, y, z` are where the corner's `/loc` line says you are, in whatever
+   * frame the caller has chosen for it: on a planet the game hands over the map window's own pair
+   * (`main.ts` works it out before the call), so the line and the map say the same two numbers, and in
+   * space the game's own frame, which a story's place and a waypoint take there. `breath` is the player's
+   * own breath if they have any to show, and nothing at all otherwise — which is what dry land hands
+   * over, and what every caller written before there was breath hands over by leaving the argument off.
    */
   update(dt: number, x: number, y: number, z: number, kit: Kit, hp: number, maxHp: number, clock: string, creatureName: string, saberOn: boolean, breath?: BarReadout | null): void {
     this.frames++;
@@ -745,9 +755,7 @@ export class Hud {
     if (acc >= 0.25) {
       this.lastFps = now;
       this.fps.textContent = `${Math.round(this.frames / acc)} fps`;
-      // The nameplate over a creature's head says what you are looking at; with one, the corner says
-      // where you are and nothing else. An empty name is how the game asks for that.
-      this.loc.textContent = creatureName ? `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)} · nearby: ${creatureName}` : `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`;
+      this.loc.textContent = `/loc ${x.toFixed(0)}, ${y.toFixed(0)}, ${z.toFixed(0)}`;
       this.clock.textContent = clock;
       this.frames = 0;
       this.byDesign += 3;
@@ -763,6 +771,14 @@ export class Hud {
       this.writes = 0;
       this.byDesign = 0;
       this.windowStart = now;
+    }
+    // The nameplate over a creature's head says what you are looking at; with one, the corner says
+    // where you are and nothing else, and an empty name is how the game asks for that. The name is
+    // asked for at its own rate (`HUD_WIRING.nearbyHz`), so this compares and almost never writes.
+    if (creatureName !== this.nearbyText) {
+      this.nearbyText = creatureName;
+      this.nearby.textContent = creatureName ? `nearby: ${creatureName}` : '';
+      this.writes++;
     }
     // A bar is written only when its share has moved by a pixel of the bar's own length, and its
     // number only when the number itself has changed.

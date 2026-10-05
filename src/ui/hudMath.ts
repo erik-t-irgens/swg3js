@@ -149,8 +149,16 @@ export const HUD_SIZES = {
   capW: 22,
   capH: 18,
   // --- the world's own places ---------------------------------------------------------------------
-  /** The minimap's circle, across, at the top left over the planet's name. */
+  /** The minimap's circle, across, at the top left. */
   minimap: 168,
+  /**
+   * The world's name over the top of the circle stands this far down from the canvas's top: under the
+   * mark for north, whose tip is on the rim three pixels in (`MINIMAP_TUNE.rimInsetPx`) and whose base is
+   * `northPx` (6) under that, with three to spare. Ours.
+   */
+  minimapNameTop: 12,
+  /** The coordinates over the foot of the circle stand this far up from the canvas's bottom. Ours. */
+  minimapLocBottom: 8,
   /** A waypoint's mark in the world: this far from its middle to each of its points. */
   waypointMark: 7,
   // --- the blocks --------------------------------------------------------------------------------

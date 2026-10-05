@@ -69,14 +69,19 @@ b { color: var(--accent); font-weight: 600; }
   font-size: 11px;
   line-height: 1.45;
 }
+/* The top-left block wears no plate (`#hud .top-left` in hud.css takes the panel's off it): its lines
+   stand bare over the world on a halo of the palette's darkest, as the city's name always has. */
 .top-left { top: 12px; left: 12px; min-width: 170px; }
 .top-right { top: 12px; right: 12px; text-align: right; }
-.planet-name { font-size: 16px; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); }
-.planet-tag { color: var(--muted); font-style: italic; }
-.loc { margin-top: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 10px; }
+.planet-name { font-size: 16px; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
+.loc { margin-top: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 10px; text-shadow: 1px 0 0 var(--void), -1px 0 0 var(--void), 0 1px 0 var(--void), 0 -1px 0 var(--void); }
 .fps { font-family: ui-monospace, Menlo, monospace; }
 .hint { color: var(--muted); }
-.help { top: 92px; left: 12px; color: var(--muted); font-size: 10px; max-width: 320px; }
+/* The help block stands under the top-left block: its top (12), the planet's name (16 on the panel's
+   line height of 1.45, 23.2) and the `/loc` line (3 and 14.5), 52.7 rounded up to 53; then the nearby
+   line on the HUD scale (3 of padding and 1.45em of 10, 17.5). With the minimap up the rule in hud.css takes over.
+   `hudMath.test.ts` adds these up again from both files. */
+.help { top: calc(53px + 17.5px * var(--hud-scale)); left: 12px; color: var(--muted); font-size: 10px; max-width: 320px; }
 
 .bottom { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .force-bar { position: relative; width: 240px; height: 12px; background: color-mix(in srgb, var(--void) 55%, transparent); border: 1px solid var(--panel-border); border-radius: 8px; overflow: hidden; }
