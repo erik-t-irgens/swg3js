@@ -3,8 +3,8 @@ import * as THREE from 'three';
 // Heights are sampled on the main thread from cached pole grids; grids are produced
 // ahead of time by a worker so streaming never stalls on generation.
 
-import { Layer, type EnvironmentFamily } from '../swg/terrain/generator';
-import { attachBitmap, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, TerrainSampler, UPPER_PAD, waterTables, type PoleBlock, type TerrainTemplate, type WaterTable } from '../swg/terrain/trn';
+import type { EnvironmentFamily, Layer } from '../swg/terrain/generator.ts';
+import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type GroundProbe, type PoleBlock, type TerrainTemplate } from '../swg/terrain/trn.ts';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -14,11 +14,33 @@ export interface BuildingLayerSource {
   yaw: number;
 }
 
-/** Coarse samples for a far tile: heights and shader family per sample. */
+/**
+ * Coarse samples for a far tile: heights, shader family, child choice and colour per sample (colour
+ * three bytes a sample), in the game's column order, each the generator's answer at the sample's own
+ * place on a grid of its own 16 m apart. That is not the near ground's answer there, and nothing
+ * drawn from these may assume it is:
+ *   - the families are what a 16 m grid paints, and the slope and shader filters read that coarse
+ *     grid, so they differ from the near ground's at the same place on 25% of Tatooine's samples,
+ *     whose far samples all sit on 8 m pattern corners;
+ *   - the pattern cannot lay them on its corners where the layout centre puts the samples off them
+ *     (every world but Tatooine: Naboo's centre is 7 m along the pattern, Talus's 5 m, Kashyyyk's 2 m),
+ *     which costs about 1 to 8 points more: a far family differs from the near ground's family at the
+ *     sample's nearest corner at 2.1% of Naboo's samples and 13.5% of Talus's, where it differs from a
+ *     2 m grid's at its own place at 1.2% and 5.4%;
+ *   - each child choice is drawn from the sample's own place, which on those worlds is a place no
+ *     near pole has: the same spread of alternates, not the same alternate.
+ * A far tile drawn the client's way must sample on the corners itself, which moving the mesh by the
+ * centre's remainder mod 2 does not do (that puts the samples on poles, not on corners).
+ */
 export interface FarGrid {
   heights: Float32Array;
   shaders: Int32Array;
+  children: Uint8Array;
+  colors: Uint8Array;
 }
+
+/** Where the pack keeps the colour ramps the colour affectors read (the terrain command's to write, `colorRampFile`'s shape). */
+export const COLOR_RAMP_FILE = 'terrain/colorramps.json';
 
 interface Pending {
   key: string;
@@ -62,10 +84,20 @@ export class SwgTerrain {
   syncGenerations = 0;
   /** Lakes, pools and lava flows in game coordinates. */
   readonly waterTables: SwgWaterTable[] = [];
+  /** The colour ramps the terrain's colour affectors name, and which of them the pack carried. */
+  readonly ramps: { named: string[]; loaded: number };
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], centerX: number, centerZ: number) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number) {
     this.template = parseTerrainTemplate(new Uint8Array(trn));
     for (const b of bitmaps) attachBitmap(this.template, b.familyId, new Uint8Array(b.bytes));
+    const named = rampNames(this.template);
+    const sent: { name: string; width: number; rgb: ArrayBuffer }[] = [];
+    for (const name of named) {
+      const ramp = ramps.get(name);
+      if (!ramp || !attachRamp(this.template, name, ramp)) continue;
+      sent.push({ name, width: ramp.width, rgb: ramp.rgb.slice().buffer });
+    }
+    this.ramps = { named, loaded: sent.length };
     this.sampler = new TerrainSampler(this.template);
     this.centerX = centerX;
     this.centerZ = centerZ;
@@ -92,12 +124,16 @@ export class SwgTerrain {
         this.worker = new Worker(new URL('../swg/terrain/worker.ts', import.meta.url), { type: 'module' });
         this.worker.onmessage = (e: MessageEvent) => this.onMessage(e.data);
         this.worker.onerror = (e) => console.warn('terrain worker error', e.message);
-        this.worker.postMessage({
-          type: 'init',
-          trn: trn.slice(0),
-          layers: layers.map((l) => ({ bytes: l.bytes.slice(0), x: l.x, z: l.z, yaw: l.yaw })),
-          bitmaps: bitmaps.map((b) => ({ familyId: b.familyId, bytes: b.bytes.slice(0) })),
-        });
+        this.worker.postMessage(
+          {
+            type: 'init',
+            trn: trn.slice(0),
+            layers: layers.map((l) => ({ bytes: l.bytes.slice(0), x: l.x, z: l.z, yaw: l.yaw })),
+            bitmaps: bitmaps.map((b) => ({ familyId: b.familyId, bytes: b.bytes.slice(0) })),
+            ramps: sent,
+          },
+          sent.map((r) => r.rgb),
+        );
       } catch (err) {
         console.warn('terrain worker unavailable, generating on the main thread', err);
         this.worker = null;
@@ -107,7 +143,8 @@ export class SwgTerrain {
 
   /**
    * Build the terrain: parses the template once to learn which bitmap files it needs, fetches
-   * them through `fetchBytes` (pack-relative paths), then starts the worker.
+   * them through `fetchBytes` (pack-relative paths), and the colour ramps when the pack carries
+   * them, then starts the worker.
    */
   static async create(trn: ArrayBuffer, layers: BuildingLayerSource[], centerX: number, centerZ: number, fetchBytes: (file: string) => Promise<ArrayBuffer | null>): Promise<SwgTerrain> {
     const probe = parseTerrainTemplate(new Uint8Array(trn));
@@ -117,7 +154,20 @@ export class SwgTerrain {
       if (bytes) bitmaps.push({ familyId: b.familyId, bytes });
       else console.warn(`terrain: bitmap ${b.file} (${b.name}) missing; its filter passes everywhere`);
     }
-    return new SwgTerrain(trn, layers, bitmaps, centerX, centerZ);
+    // A pack converted before the ramps were written has none, and every ramp affector then does
+    // nothing, as the client's does for an image it cannot load: the colour map is the constants'.
+    let ramps = new Map<string, ColorRamp>();
+    if (rampNames(probe).length) {
+      const bytes = await fetchBytes(COLOR_RAMP_FILE);
+      if (bytes) {
+        try {
+          ramps = readColorRampFile(JSON.parse(new TextDecoder().decode(bytes)));
+        } catch (err) {
+          console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
+        }
+      }
+    }
+    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ);
   }
 
   get waterLevel(): number {
@@ -259,12 +309,18 @@ export class SwgTerrain {
     const n = res + 3;
     const startX = this.toSwgX(gx0 + (res + 1) * step);
     const startZ = this.toSwgZ(gz0 - step);
-    const finish = (heights: Float32Array, shaders: Int32Array) => {
-      const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n) };
+    const finish = (g: { heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array }) => {
+      const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n), children: new Uint8Array(n * n), colors: new Uint8Array(n * n * 3) };
       for (let j = 0; j < n; j++) {
         for (let i = 0; i < n; i++) {
-          out.heights[j * n + i] = heights[j * n + (n - 1 - i)];
-          out.shaders[j * n + i] = shaders[j * n + (n - 1 - i)] ?? 0;
+          const to = j * n + i;
+          const from = j * n + (n - 1 - i);
+          out.heights[to] = g.heights[from];
+          out.shaders[to] = g.shaders[from] ?? 0;
+          out.children[to] = g.children[from] ?? 0;
+          out.colors[to * 3] = g.colors[from * 3] ?? 255;
+          out.colors[to * 3 + 1] = g.colors[from * 3 + 1] ?? 255;
+          out.colors[to * 3 + 2] = g.colors[from * 3 + 2] ?? 255;
         }
       }
       this.farGrids.set(key, out);
@@ -272,12 +328,11 @@ export class SwgTerrain {
     };
     if (sync || !this.worker || !this.workerReady) {
       this.syncGenerations++;
-      const g = this.sampler.generate(startX, startZ, n, step);
-      return finish(g.heights, g.shaders);
+      return finish(this.sampler.generate(startX, startZ, n, step));
     }
     if (!this.requested.has(key)) {
       this.requested.add(key);
-      this.request(key, startX, startZ, n, step, (block) => void finish(block.heights, block.shaders));
+      this.request(key, startX, startZ, n, step, (block) => void finish(block));
     }
     return null;
   }
@@ -312,6 +367,25 @@ export class SwgTerrain {
     const bw = this.sampler.blockWidth;
     if (!this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) return null;
     return this.sampler.environmentAt(x, z, season);
+  }
+
+  /**
+   * The colour map at a game-space point, packed 0xRRGGBB (white where nothing painted it), from a
+   * cached block only: null when the block covering the point is not generated yet. Never generates,
+   * since an uncached block costs the main thread one to four milliseconds.
+   */
+  colorIfCached(gx: number, gz: number): number | null {
+    return this.sampler.colorAt(this.toSwgX(gx), this.toSwgZ(gz));
+  }
+
+  /** The child choice (a byte) at a game-space point, from a cached block only (null when it is not generated). */
+  childIfCached(gx: number, gz: number): number | null {
+    return this.sampler.childAt(this.toSwgX(gx), this.toSwgZ(gz));
+  }
+
+  /** Everything the generator says about the pole under a game-space point, worked out afresh on this thread. For the console. */
+  probe(gx: number, gz: number): GroundProbe {
+    return this.sampler.probe(this.toSwgX(gx), this.toSwgZ(gz));
   }
 
   /**
@@ -353,7 +427,7 @@ export class SwgTerrain {
     this.worker!.postMessage({ type: 'generate', id, startX, startZ, n, step });
   }
 
-  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; environments?: Uint8Array; seasonal?: Uint8Array; info?: unknown; message?: string }): void {
+  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; children?: Uint8Array; colors?: Uint8Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; environments?: Uint8Array; seasonal?: Uint8Array; info?: unknown; message?: string }): void {
     if (msg.type === 'ready') {
       this.workerReady = true;
       console.info('terrain worker ready', msg.info);
@@ -363,7 +437,7 @@ export class SwgTerrain {
         this.pending.delete(msg.id);
         this.requested.delete(p.key);
         const n = msg.heights.length;
-        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) });
+        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), children: msg.children ?? new Uint8Array(n), colors: msg.colors ?? new Uint8Array(n * 3).fill(255), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) });
       }
     } else if (msg.type === 'error') {
       console.warn('terrain worker:', msg.message);

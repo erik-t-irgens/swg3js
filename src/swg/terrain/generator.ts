@@ -1,7 +1,9 @@
 // Port of the engine's TerrainGenerator (sharedTerrain): layers of boundaries, filters and
-// affectors that build a chunk's height, shader and exclude maps from a .trn's TGEN block.
-// Only height-relevant behaviour is reproduced in full; colour, flora and environment
-// affectors are parsed and kept as inert layer items so layer bookkeeping stays identical.
+// affectors that build a chunk's height, shader, colour, flora, environment and exclude maps from
+// a .trn's TGEN block. The shader map is laid on the client's 8 m pattern (`snapFamilies`), each
+// painted pole keeps its own choice among its family's alternates, and the colour affectors paint
+// the colour map the client tinted the ground with. The affectors still kept inert (flora radials,
+// ribbons, passability and the like) are parsed so layer bookkeeping stays identical.
 
 import { MultiFractal } from './fractal.ts';
 import { FastRandomGenerator, FloraGroup, hashTuple } from './flora.ts';
@@ -270,6 +272,72 @@ export class ShaderGroup {
   }
 }
 
+/** One generator reseeded for every draw, so a block's thousands of choices make no object each. */
+const choiceDraw = new FastRandomGenerator();
+
+/**
+ * The byte a shader affector stores as a pole's choice among its family's alternates: the first
+ * float of the engine's fast random generator seeded with the coordinate hash of the pole's world
+ * position, times 255 in single precision and truncated. It depends on nothing but the place, so
+ * every affector that paints a pole gives it the same choice and every browser the same ground.
+ */
+export function childChoiceAt(worldX: number, worldZ: number): number {
+  choiceDraw.setSeed(hashTuple(worldX, worldZ));
+  return Math.trunc(Math.fround(choiceDraw.randomFloat() * 255));
+}
+
+/**
+ * Which of a family's children a stored choice picks (ShaderGroup::Family::createShader): the choice
+ * scaled by the sum of the weights, then the children walked in order, the first whose weight covers
+ * what is left taking it, "less than or equal" as the engine has it; the first child when none does.
+ * Worked in single precision as the engine works it. A child of weight nought is never picked except
+ * by a choice of nought landing on it first.
+ */
+export function childIndexOf(family: ShaderFamily | undefined, choice: number): number {
+  const children = family?.children;
+  if (!children || children.length < 2) return 0;
+  let sum = 0;
+  for (const c of children) sum = Math.fround(sum + c.weight);
+  let left = Math.fround(Math.fround(choice / 255) * sum);
+  for (let i = 0; i < children.length; i++) {
+    const w = Math.fround(children[i].weight);
+    if (left <= w) return i;
+    left = Math.fround(left - w);
+  }
+  return 0;
+}
+
+/** A colour ramp an affector looks colours up in: one row of pixels, three bytes each. */
+export interface ColorRamp {
+  width: number;
+  rgb: Uint8Array;
+}
+
+/** How a colour affector's ramp name is keyed everywhere (`colorramp/tatooine_dirt.tga`). */
+export function rampKey(name: string): string {
+  return name.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+}
+
+/**
+ * The colour ramps the colour affectors read, by key. The images are not in the terrain file: they
+ * arrive afterwards, as the bitmap filters' do, and a ramp that never arrives makes its affector do
+ * nothing, which is the engine's own rule for an image it cannot load.
+ */
+export class ColorRampGroup {
+  readonly ramps = new Map<string, ColorRamp>();
+  /** Moves whenever a ramp is set, so an affector knows to look its own up again. */
+  version = 0;
+
+  set(key: string, ramp: ColorRamp): void {
+    this.ramps.set(rampKey(key), ramp);
+    this.version++;
+  }
+
+  get(key: string): ColorRamp | null {
+    return this.ramps.get(key) ?? null;
+  }
+}
+
 export interface EnvironmentFamily {
   id: number;
   name: string;
@@ -386,6 +454,29 @@ export interface ChunkData {
   extent: Rect;
   heightMap: Float32Array;
   shaderMap: Int32Array;
+  /**
+   * Each pole's choice among its family's alternates, a byte (`childChoiceAt`), set wherever a
+   * shader affector paints the pole and kept by a replace. The 8 m snap moves families and never these.
+   */
+  shaderChild: Uint8Array;
+  /** The colour map, three bytes a pole, white until a colour affector paints it. */
+  colorMap: Uint8Array;
+  /** Whether a shader affector has run since the families were last laid on the 8 m pattern. */
+  shaderDirty: boolean;
+  /** The pattern's spacing in metres for this run (0: the families are left where they were painted). */
+  familyLattice: number;
+  /** Per column and per row, the index of the pattern corner nearest each pole (-1 where it is not in the grid); made on the first snap. */
+  snapX: Int32Array | null;
+  snapZ: Int32Array | null;
+  /**
+   * Each fractal family's value at each pole, worked out once a run however many layer items read it
+   * (`fractalAt`, the engine's own per-pole value cache): the colour ramps read a handful of families
+   * from dozens of affectors (24 of Tatooine's 47 read one), most of them the very families the
+   * fractal filters and height fractals read. Made on first use.
+   */
+  fractalValues: Map<number, Float64Array> | null;
+  /** Diagnostics: told of every colour a colour affector writes, packed 0xRRGGBB. */
+  colorTrace?: ColorTrace;
   excludeMap: Uint8Array;
   /** Static flora per pole: family id and child choice (0..255) pairs; collidable (trees, rocks) and not (plants). */
   floraCollidable: Uint8Array;
@@ -401,9 +492,16 @@ export interface ChunkData {
   bitmapGroup: BitmapGroup;
   floraGroup: FloraGroup;
   environmentGroup: EnvironmentGroup;
+  rampGroup: ColorRampGroup;
 }
 
-export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup(), environmentGroup: EnvironmentGroup = new EnvironmentGroup()): ChunkData {
+/**
+ * One colour a colour affector wrote at pole `index`: the colour it asked for and the amount it
+ * asked with, and the pole's colour before and after (each packed 0xRRGGBB).
+ */
+export type ColorTrace = (by: Affector, index: number, desired: number, amount: number, before: number, after: number) => void;
+
+export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup(), environmentGroup: EnvironmentGroup = new EnvironmentGroup(), rampGroup: ColorRampGroup = new ColorRampGroup()): ChunkData {
   const n = numberOfPoles * numberOfPoles;
   const size = (numberOfPoles - 1) * distanceBetweenPoles;
   return {
@@ -414,6 +512,13 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     extent: { x0: startX, y0: startZ, x1: startX + size, y1: startZ + size },
     heightMap: new Float32Array(n),
     shaderMap: new Int32Array(n),
+    shaderChild: new Uint8Array(n),
+    colorMap: new Uint8Array(n * 3).fill(255),
+    shaderDirty: true,
+    familyLattice: 0,
+    snapX: null,
+    snapZ: null,
+    fractalValues: null,
     excludeMap: new Uint8Array(n),
     floraCollidable: new Uint8Array(n * 2),
     floraNonCollidable: new Uint8Array(n * 2),
@@ -426,7 +531,69 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     bitmapGroup,
     floraGroup,
     environmentGroup,
+    rampGroup,
   };
+}
+
+/**
+ * A fractal family's value at pole `i` (whose world place is `wx`, `wz`), worked out once a run however
+ * many layer items read it (MultiFractal::getValueCache). The value is the fractal's own, so a height
+ * read through here is the very number read without it.
+ */
+function fractalAt(d: ChunkData, familyId: number, fractal: MultiFractal, wx: number, wz: number, i: number): number {
+  const all = d.fractalValues ?? (d.fractalValues = new Map());
+  let values = all.get(familyId);
+  if (!values) all.set(familyId, (values = new Float64Array(d.numberOfPoles * d.numberOfPoles).fill(Number.NaN)));
+  let v = values[i];
+  if (v !== v) v = values[i] = fractal.value2(wx, wz);
+  return v;
+}
+
+/**
+ * For each pole along one axis of a grid, the index of the pattern corner nearest it, a tie going to
+ * the corner above; -1 where that corner is not a pole of this grid (a coarse grid off the pattern,
+ * which is then left as painted).
+ */
+function cornerIndices(start: number, step: number, n: number, lattice: number): Int32Array {
+  const out = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const corner = Math.floor((start + i * step) / lattice + 0.5) * lattice;
+    const j = (corner - start) / step;
+    const r = Math.round(j);
+    out[i] = Math.abs(j - r) < 1e-6 && r >= 0 && r < n ? r : -1;
+  }
+  return out;
+}
+
+/**
+ * TerrainGenerator::synchronizeShaders: every pole takes the family of the 8 m pattern corner nearest
+ * it (a tie going to the corner above, in both axes) and keeps its own child choice. In a block of
+ * ours, which starts two poles before a corner, that is pole i taking the family of pole
+ * (i & ~3) + 2, exactly as the engine does inside each of its chunks; worked from world positions
+ * here, so any grid on the pole lattice is laid the same way and one off it is left alone. The
+ * corners are never written (each is its own nearest), so the copy can be made in place.
+ */
+export function snapFamilies(d: ChunkData): void {
+  const lattice = d.familyLattice;
+  if (!(lattice > 0)) return;
+  const n = d.numberOfPoles;
+  if (!d.snapX || !d.snapZ) {
+    d.snapX = cornerIndices(d.startX, d.distanceBetweenPoles, n, lattice);
+    d.snapZ = cornerIndices(d.startZ, d.distanceBetweenPoles, n, lattice);
+  }
+  const sx = d.snapX;
+  const sz = d.snapZ;
+  const m = d.shaderMap;
+  for (let z = 0; z < n; z++) {
+    const cz = sz[z];
+    if (cz < 0) continue;
+    const row = z * n;
+    const from = cz * n;
+    for (let x = 0; x < n; x++) {
+      const cx = sx[x];
+      if (cx >= 0) m[row + x] = m[from + cx];
+    }
+  }
 }
 
 /** TerrainGenerator::generatePlaneAndVertexNormals: face normals accumulated onto poles. */
@@ -1037,12 +1204,12 @@ export class FilterFractal extends Filter {
     super('FFRA');
   }
 
-  isWithin(wx: number, wz: number, _x: number, _z: number, d: ChunkData): number {
+  isWithin(wx: number, wz: number, x: number, z: number, d: ChunkData): number {
     if (this.cachedFamilyId !== this.familyId) {
       this.cachedFamilyId = this.familyId;
       this.fractal = d.fractalGroup.get(this.familyId) ?? null;
     }
-    const v = this.scaleY * (this.fractal ? this.fractal.value2(wx, wz) : 0);
+    const v = this.scaleY * (this.fractal ? fractalAt(d, this.familyId, this.fractal, wx, wz, z * d.numberOfPoles + x) : 0);
     return featheredInterpolant(this.low, v, this.high, this.featherDistance);
   }
 
@@ -1429,8 +1596,8 @@ export class AffectorHeightFractal extends Affector {
         this.cachedFamilyId = this.familyId;
         this.fractal = d.fractalGroup.get(this.familyId) ?? null;
       }
-      const value = this.scaleY * (this.fractal ? this.fractal.value2(wx, wz) : 0);
       const i = z * d.numberOfPoles + x;
+      const value = this.scaleY * (this.fractal ? fractalAt(d, this.familyId, this.fractal, wx, wz, i) : 0);
       d.heightMap[i] = applyOperation(this.operation, d.heightMap[i], value, amount);
     }
   }
@@ -1523,10 +1690,14 @@ export class AffectorShaderConstant extends Affector {
     return true;
   }
 
-  affect(_wx: number, _wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+  affect(wx: number, wz: number, x: number, z: number, amount: number, d: ChunkData): void {
     if (amount > 0) {
       const fc = this.useFeatherClampOverride ? this.featherClampOverride : d.shaderGroup.featherClamp(this.familyId);
-      if (amount >= fc) d.shaderMap[z * d.numberOfPoles + x] = this.familyId;
+      if (amount >= fc) {
+        const i = z * d.numberOfPoles + x;
+        d.shaderMap[i] = this.familyId;
+        d.shaderChild[i] = childChoiceAt(wx, wz);
+      }
     }
   }
 
@@ -1556,6 +1727,7 @@ export class AffectorShaderReplace extends Affector {
     return true;
   }
 
+  /** Keeps the choice the pole already has, as the engine does: only the family is replaced. */
   affect(_wx: number, _wz: number, x: number, z: number, amount: number, d: ChunkData): void {
     if (amount > 0) {
       const i = z * d.numberOfPoles + x;
@@ -1624,6 +1796,207 @@ export class AffectorEnvironment extends Affector {
       this.featherClampOverride = r.float();
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Colour affectors (AffectorColor): the colour map the client tinted its ground with
+// ---------------------------------------------------------------------------
+
+const packRgb = (r: number, g: number, b: number) => (r << 16) | (g << 8) | b;
+
+/**
+ * Write a colour into pole `i` of the colour map the way the engine combines it (computeColor), every
+ * step in single precision and every result truncated to a byte:
+ *   - under a full amount the colour asked for is first scaled by the amount, and that scaled colour
+ *     is all add and subtract use;
+ *   - replace fades from the old colour to the new one by the amount;
+ *   - add and subtract add or take away the scaled colour, clamped to a byte;
+ *   - "multiply" is not a multiply: it fades from the old colour toward the average of the old and
+ *     the new by the amount, so a value v laid on white at full amount gives (v + 255) / 2.
+ */
+function paintColour(d: ChunkData, i: number, r: number, g: number, b: number, op: number, amountIn: number, by: Affector): void {
+  const cm = d.colorMap;
+  const k = i * 3;
+  const or = cm[k];
+  const og = cm[k + 1];
+  const ob = cm[k + 2];
+  const f = Math.fround;
+  const amount = f(amountIn);
+  const rest = f(1 - amount);
+  let nr = r;
+  let ng = g;
+  let nb = b;
+  if (amount < 1) {
+    nr = Math.trunc(f(r * amount));
+    ng = Math.trunc(f(g * amount));
+    nb = Math.trunc(f(b * amount));
+  }
+  switch (op) {
+    case Operation.add:
+      nr = Math.min(or + nr, 255);
+      ng = Math.min(og + ng, 255);
+      nb = Math.min(ob + nb, 255);
+      break;
+    case Operation.subtract:
+      nr = Math.max(or - nr, 0);
+      ng = Math.max(og - ng, 0);
+      nb = Math.max(ob - nb, 0);
+      break;
+    case Operation.multiply:
+      nr = Math.trunc(f(f(amount * f(f(0.5 * r) + f(0.5 * or))) + f(rest * or)));
+      ng = Math.trunc(f(f(amount * f(f(0.5 * g) + f(0.5 * og))) + f(rest * og)));
+      nb = Math.trunc(f(f(amount * f(f(0.5 * b) + f(0.5 * ob))) + f(rest * ob)));
+      break;
+    default:
+      nr = Math.trunc(f(f(amount * r) + f(rest * or)));
+      ng = Math.trunc(f(f(amount * g) + f(rest * og)));
+      nb = Math.trunc(f(f(amount * b) + f(rest * ob)));
+  }
+  cm[k] = nr;
+  cm[k + 1] = ng;
+  cm[k + 2] = nb;
+  if (d.colorTrace) d.colorTrace(by, i, packRgb(r, g, b), amount, packRgb(or, og, ob), packRgb(nr, ng, nb));
+}
+
+/** ACCN: one colour laid over the layer's area. */
+export class AffectorColorConstant extends Affector {
+  operation = Operation.replace as number;
+  r = 255;
+  g = 255;
+  b = 255;
+
+  constructor() {
+    super('ACCN');
+  }
+
+  affect(_wx: number, _wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+    if (amount > 0) paintColour(d, z * d.numberOfPoles + x, this.r, this.g, this.b, this.operation, amount, this);
+  }
+
+  load(form: IffForm): void {
+    const v = form.children[0] as IffForm;
+    this.loadHeader(v);
+    const r = new ChunkReader(chunkChild(v, 'DATA')!.data);
+    this.operation = r.int32();
+    this.r = r.uint8();
+    this.g = r.uint8();
+    this.b = r.uint8();
+  }
+}
+
+/** What the two ramp affectors share: the ramp they read, looked up again only when a ramp arrives. */
+abstract class AffectorColorRamp extends Affector {
+  operation = Operation.replace as number;
+  /** The ramp as the file names it, and keyed (`rampKey`). */
+  rampName = '';
+  ramp = '';
+  private seenGroup: ColorRampGroup | null = null;
+  private seenVersion = -1;
+  private image: ColorRamp | null = null;
+
+  protected rampIn(d: ChunkData): ColorRamp | null {
+    const g = d.rampGroup;
+    if (g !== this.seenGroup || g.version !== this.seenVersion) {
+      this.seenGroup = g;
+      this.seenVersion = g.version;
+      this.image = g.get(this.ramp);
+    }
+    return this.image;
+  }
+
+  protected setRamp(name: string): void {
+    this.rampName = name;
+    this.ramp = rampKey(name);
+  }
+
+  /** The ramp's pixel at `t` of its width (truncated, as the engine casts it), black off either end. */
+  protected paintAt(d: ChunkData, i: number, img: ColorRamp, t: number, amount: number): void {
+    const px = Math.trunc(Math.fround(t * (img.width - 1)));
+    if (px >= 0 && px < img.width) paintColour(d, i, img.rgb[px * 3], img.rgb[px * 3 + 1], img.rgb[px * 3 + 2], this.operation, amount, this);
+    else paintColour(d, i, 0, 0, 0, this.operation, amount, this);
+  }
+}
+
+/**
+ * ACRH: a ramp read by the ground's height inside an inclusive range, the height as it stands when the
+ * affector runs (so a height layer after it changes nothing it painted, and one before it does).
+ */
+export class AffectorColorRampHeight extends AffectorColorRamp {
+  low = 0;
+  high = 0;
+
+  constructor() {
+    super('ACRH');
+  }
+
+  affect(_wx: number, _wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+    if (amount <= 0) return;
+    const img = this.rampIn(d);
+    if (!img) return;
+    const i = z * d.numberOfPoles + x;
+    const h = d.heightMap[i];
+    if (!(this.low <= h && h <= this.high)) return;
+    const t = Math.fround(Math.fround(h - this.low) / Math.fround(this.high - this.low));
+    this.paintAt(d, i, img, t, amount);
+  }
+
+  load(form: IffForm): void {
+    const v = form.children[0] as IffForm;
+    this.loadHeader(v);
+    const r = new ChunkReader(chunkChild(v, 'DATA')!.data);
+    this.operation = r.int32();
+    this.low = r.float();
+    this.high = r.float();
+    this.setRamp(r.string());
+  }
+}
+
+/** ACRF: a ramp read at the whole-number position a fractal's value gives it, at each pole's world place. */
+export class AffectorColorRampFractal extends AffectorColorRamp {
+  familyId = 0;
+  private fractal: MultiFractal | null = null;
+  private cachedFamilyId = -1;
+
+  constructor() {
+    super('ACRF');
+  }
+
+  affect(wx: number, wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+    if (amount <= 0) return;
+    const img = this.rampIn(d);
+    if (!img) return;
+    if (this.cachedFamilyId !== this.familyId) {
+      this.cachedFamilyId = this.familyId;
+      this.fractal = d.fractalGroup.get(this.familyId) ?? null;
+    }
+    if (!this.fractal) return;
+    const i = z * d.numberOfPoles + x;
+    this.paintAt(d, i, img, fractalAt(d, this.familyId, this.fractal, wx, wz, i), amount);
+  }
+
+  /** Version 0000 carries its own fractal, made a family of the group as the engine makes it; 0001 names one. */
+  load(form: IffForm, group: FractalGroup): void {
+    const v = form.children[0] as IffForm;
+    this.loadHeader(v);
+    const data = formChild(v, 'DATA')!;
+    const r = new ChunkReader(chunkChild(data, 'PARM')!.data);
+    if (v.type === '0000') {
+      const mf = new MultiFractal();
+      loadMultiFractal(formChild(data, 'MFRC'), mf);
+      this.familyId = group.createFamily(mf, this.name);
+    } else {
+      this.familyId = r.int32();
+    }
+    this.operation = r.int32();
+    this.setRamp(r.string());
+  }
+}
+
+/** A colour affector's operation and the ramp it reads (null for a constant), or null for any other item. For the console. */
+export function colourAffectorInfo(a: LayerItem): { operation: number; ramp: string | null } | null {
+  if (a instanceof AffectorColorConstant) return { operation: a.operation, ramp: null };
+  if (a instanceof AffectorColorRamp) return { operation: a.operation, ramp: a.rampName };
+  return null;
 }
 
 /** Baked road/river centre-line heights (HeightData): one list of points per polyline segment. */
@@ -1811,7 +2184,10 @@ export class AffectorRoad extends AffectorBoundaryPoly {
       const t = dist / width2;
       d.heightMap[i] = this.hasFixedHeights ? this.rampedHeight(wx, wz, original) : lerp(desired, original, t);
     }
-    if (dist >= 0 && dist <= width2 * (1 - this.featherDistanceShader)) d.shaderMap[i] = this.familyId;
+    if (dist >= 0 && dist <= width2 * (1 - this.featherDistanceShader)) {
+      d.shaderMap[i] = this.familyId;
+      d.shaderChild[i] = childChoiceAt(wx, wz);
+    }
   }
 
   private rampedHeight(wx: number, wz: number, terrainHeight: number): number {
@@ -1951,10 +2327,12 @@ export class AffectorRiver extends AffectorBoundaryPoly {
     if (dist <= f) {
       d.heightMap[i] = desired;
       d.shaderMap[i] = this.bottomFamilyId;
+      d.shaderChild[i] = childChoiceAt(wx, wz);
     } else if (dist <= subWidth) {
       const t = dist / subWidth;
       d.heightMap[i] = lerp(desired, original, t * t);
       d.shaderMap[i] = this.bankFamilyId;
+      d.shaderChild[i] = childChoiceAt(wx, wz);
     }
   }
 
@@ -2009,6 +2387,14 @@ export class Layer extends LayerItem {
   private hasActiveLayers = false;
   private hasUnprunedAffectors = false;
   private hasUnprunedLayers = false;
+  /** An active affector of this layer paints shader families, so running it leaves them to be laid on the pattern again. */
+  private paintsShaders = false;
+  /**
+   * The layer reads the family map through an active shader filter and has affectors of its own, so
+   * the families are laid on the pattern before it reads them, as the engine lays them (the engine
+   * asks for affectors here, and a filter over sub-layers alone reads the map as painted).
+   */
+  private readsShaders = false;
 
   constructor() {
     super('LAYR');
@@ -2023,6 +2409,8 @@ export class Layer extends LayerItem {
     for (const a of this.affectors) if (a.active) (this.hasActiveAffectors = true), a.prepare();
     this.hasActiveLayers = false;
     for (const l of this.layers) if (l.active) (this.hasActiveLayers = true), l.prepare();
+    this.paintsShaders = this.affectors.some((a) => a.active && a.affectsShader());
+    this.readsShaders = this.hasActiveFilters && this.hasActiveAffectors && this.filters.some((f) => f.active && f.needsShaders());
   }
 
   calculateExtent(): void {
@@ -2122,6 +2510,10 @@ export class Layer extends LayerItem {
         }
       }
     }
+    if (this.readsShaders && d.shaderDirty && d.familyLattice > 0) {
+      snapFamilies(d);
+      d.shaderDirty = false;
+    }
     const onlyHasSubLayers = !this.hasActiveBoundaries && !this.hasActiveFilters && !this.hasActiveAffectors;
     const n = d.numberOfPoles;
     let amountMap: Float32Array | null = null;
@@ -2166,6 +2558,7 @@ export class Layer extends LayerItem {
                   a.affect(worldX, worldZ, x, z, fuzzyTest * previousAmount, d);
                   if (a.affectsHeight()) d.normalsDirty = true;
                 }
+                if (this.paintsShaders) d.shaderDirty = true;
               }
             }
           }
@@ -2251,7 +2644,7 @@ export class Layer extends LayerItem {
   }
 }
 
-const INERT_AFFECTORS = new Set(['ACCN', 'ACRH', 'ACRF', 'AFCN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
+const INERT_AFFECTORS = new Set(['AFCN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
 const SKIPPED = new Set(['BALL', 'BSPL', 'AHSM', 'AHBM', 'ACBM', 'ASBM', 'AFBM']);
 
 /** TerrainGeneratorLoader::loadLayerItem */
@@ -2328,6 +2721,18 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
       item = new AffectorExclude();
       (item as AffectorExclude).load(form);
       break;
+    case 'ACCN':
+      item = new AffectorColorConstant();
+      (item as AffectorColorConstant).load(form);
+      break;
+    case 'ACRH':
+      item = new AffectorColorRampHeight();
+      (item as AffectorColorRampHeight).load(form);
+      break;
+    case 'ACRF':
+      item = new AffectorColorRampFractal();
+      (item as AffectorColorRampFractal).load(form, group);
+      break;
     case 'AFSC':
     case 'AFSN':
       item = new AffectorFloraStatic(t);
@@ -2361,15 +2766,37 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
 // Generator
 // ---------------------------------------------------------------------------
 
+/**
+ * The generator's choices that are ours. `legacyChildren`: how a pole's alternate is chosen on a
+ * terrain whose file says legacy, which is every retail world but Mustafar. There the client drew the
+ * choice from a generator seeded once per 8 m chunk and stepped in the order the affectors were
+ * called; reproducing that means generating every chunk on its own, about five times the poles. The
+ * one rule built is `'hash'`, the engine's rule for every other terrain (the first float of a
+ * generator seeded with the pole's coordinate hash): exactly the client's on Mustafar, the same
+ * spread of alternates everywhere else, and the rule the flora already follows.
+ */
+export const TERRAIN_GROUND_TUNE = { legacyChildren: 'hash' as const };
+
 export class TerrainGenerator {
   readonly shaderGroup = new ShaderGroup();
   readonly fractalGroup = new FractalGroup();
   readonly bitmapGroup = new BitmapGroup();
   readonly floraGroup = new FloraGroup();
   readonly environmentGroup = new EnvironmentGroup();
+  readonly rampGroup = new ColorRampGroup();
   layers: Layer[] = [];
   /** Names of layer item tags that were not understood, for diagnostics. */
   readonly unknownTags = new Map<string, number>();
+  /**
+   * The spacing of the pattern the families are laid on, in metres: two tiles, four poles, 8 m on
+   * every retail world. Set from the terrain's header (`parseTerrainTemplate`); nought leaves the
+   * families where they were painted, as a generator with no header does.
+   */
+  familyLattice = 0;
+  /** Off, the families stay where they were painted: the generator as it was before the pattern, for comparing. */
+  snapFamilies = true;
+  /** Whether the terrain's file says legacy (every retail world but Mustafar); read for the console only. */
+  legacy = false;
 
   /** FORM TGEN > FORM 0000 > groups + LYRS */
   load(tgen: IffForm): void {
@@ -2440,21 +2867,48 @@ export class TerrainGenerator {
     if (i >= 0) this.layers.splice(i, 1);
   }
 
-  /** TerrainGenerator::generateChunk + affect: fills the chunk's maps. */
+  /**
+   * TerrainGenerator::generateChunk + affect: fills the chunk's maps. The families are laid on the
+   * 8 m pattern before every layer that reads them through a shader filter (`Layer.affect`) and once
+   * more at the end, each time only when a shader affector has run since the last time; heights never
+   * depend on it.
+   */
   generateChunk(d: ChunkData): void {
     d.heightMap.fill(0);
     d.shaderMap.fill(0);
+    d.shaderChild.fill(0);
+    d.colorMap.fill(255);
     d.floraCollidable.fill(0);
     d.floraNonCollidable.fill(0);
     d.excludeMap.fill(0);
     d.environmentMap.fill(0);
     d.seasonalMap.fill(0);
     d.normalsDirty = true;
+    d.shaderDirty = true;
+    d.familyLattice = this.snapFamilies ? this.familyLattice : 0;
+    d.snapX = null;
+    d.snapZ = null;
+    d.fractalValues = null;
     const n = d.numberOfPoles;
     const amountMap = new Float32Array(n * n).fill(1);
     for (let i = this.layers.length - 1; i >= 0; i--) this.layers[i].prune(d.extent);
     d.traceDepth = 0;
     for (const l of this.layers) if (!l.pruned) l.affect(amountMap, d);
+    if (d.familyLattice > 0 && d.shaderDirty) {
+      snapFamilies(d);
+      d.shaderDirty = false;
+    }
+  }
+
+  /** Every colour ramp the colour affectors name, keyed, building layers included. */
+  rampNames(): string[] {
+    const keys = new Set<string>();
+    const walk = (l: Layer) => {
+      for (const a of l.affectors) if (a instanceof AffectorColorRampFractal || a instanceof AffectorColorRampHeight) if (a.ramp) keys.add(a.ramp);
+      for (const s of l.layers) walk(s);
+    };
+    for (const l of this.layers) walk(l);
+    return [...keys].sort();
   }
 
   /** One line per layer item with its key parameters, for diagnostics. */
@@ -2484,6 +2938,9 @@ export class TerrainGenerator {
       }
       if (it instanceof AffectorShaderConstant) return `ASCN ${it.name}${on} family ${it.familyId}`;
       if (it instanceof AffectorShaderReplace) return `ASRP ${it.name}${on} ${it.sourceFamilyId} -> ${it.destinationFamilyId}`;
+      if (it instanceof AffectorColorConstant) return `ACCN ${it.name}${on} op ${it.operation} colour ${it.r},${it.g},${it.b}`;
+      if (it instanceof AffectorColorRampHeight) return `ACRH ${it.name}${on} op ${it.operation} ${num(it.low)}..${num(it.high)} ramp ${it.rampName}${this.rampGroup.get(it.ramp) ? '' : ' (missing: does nothing)'}`;
+      if (it instanceof AffectorColorRampFractal) return `ACRF ${it.name}${on} op ${it.operation} family ${it.familyId} ramp ${it.rampName}${this.rampGroup.get(it.ramp) ? '' : ' (missing: does nothing)'}`;
       return `${it.tag} ${it.name}${on}`;
     };
     const walk = (l: Layer, depth: number) => {
