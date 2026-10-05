@@ -13,7 +13,8 @@
 // - All garment colours: the Garments tab's colours in one grid, near-duplicates folded, greys first,
 //   then by hue, then by lightness.
 //
-// A pick anywhere but Own writes the colour whole. Which rows offer which tabs is `pickerTabs`, and the
+// A pick anywhere but Own writes the colour whole. The ship edit page opens the same picker under a ship's
+// or a speeder's colours, whose Own tab is the hull's own palette. Which rows offer which tabs is `pickerTabs`, and the
 // palettes are only ever the recipes' own palette lists and the creator's table: never a sweep of the
 // game's palette folder, which holds the client's interface palettes too.
 //
@@ -25,8 +26,8 @@ import { isRawColour, rawColour, rawRgb } from '../player/texrender.ts';
 import { CREATOR_TUNE, DYE_PALETTE, type CreatorTable, type SwatchLayout } from './creatorModel.ts';
 import { paletteFamily, paletteStem, plainLabel } from './variableLabel.ts';
 
-/** What kind of colour a row is, which decides the tabs it offers. */
-export type PickKind = 'body' | 'eyes' | 'hair' | 'garment' | 'dye';
+/** What kind of colour a row is, which decides the tabs it offers (`paint`: a ship's or a speeder's, on its edit page). */
+export type PickKind = 'body' | 'eyes' | 'hair' | 'garment' | 'dye' | 'paint';
 export type PickerTab = 'own' | 'garments' | 'creator' | 'eyes' | 'all';
 
 /** Every number and name here is ours. */
@@ -86,14 +87,15 @@ export function pickKind(o: { palette?: string; garment?: boolean; hair?: boolea
 }
 
 /**
- * The tabs a row offers: a garment's or a hairstyle's colour every colour there is; a body colour its own
- * palette alone, with the creator's colours first; an eye colour its own palette and every species' eyes
- * (the owner's call: every race may take every eye colour). Our dye has no palette of its own to offer --
- * its one entry is "undyed", which the Default chip already is.
+ * The tabs a row offers: a garment's, a hairstyle's, a ship's or a speeder's colour every colour there is
+ * (the owner's call for the machines too); a body colour its own palette alone, with the creator's colours
+ * first; an eye colour its own palette and every species' eyes (the owner's call: every race may take every
+ * eye colour). Our dye has no palette of its own to offer -- its one entry is "undyed", which the Default
+ * chip already is.
  */
 export function pickerTabs(kind: PickKind): PickerTab[] {
   if (kind === 'dye') return ['garments', 'creator', 'all'];
-  if (kind === 'garment' || kind === 'hair') return ['own', 'garments', 'creator', 'all'];
+  if (kind === 'garment' || kind === 'hair' || kind === 'paint') return ['own', 'garments', 'creator', 'all'];
   if (kind === 'eyes') return ['own', 'eyes'];
   return ['own'];
 }
@@ -551,7 +553,7 @@ export class DyePicker {
     chip.type = 'button';
     chip.className = 'dye-chip';
     chip.textContent = 'Default';
-    chip.title = "Back to the piece's own colour";
+    chip.title = row.kind === 'paint' ? "Back to the hull's own colour" : "Back to the piece's own colour";
     this.count = document.createElement('span');
     this.count.className = 'dye-count';
     const close = document.createElement('button');

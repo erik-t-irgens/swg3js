@@ -443,7 +443,8 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
   ok(/if \(hardpoints\) \{\s*info\.hardpoints = hardpointsKept\(skin\);/.test(sat), 'and says it kept what hardpointsKept lists');
   const at = cli.indexOf("case 'gallery': {");
   const block = cli.slice(at, cli.indexOf("case 'jka-extract'", at));
-  ok(at > 0 && /convertSat\(vfs, r\.skeletal, [^\n]*gallerySatOptions\(animated, CREATURE_CLIPS\)\)/.test(block), "the gallery's own call to convertSat takes its options from gallerySatOptions");
+  ok(at > 0 && /convertSat\(vfs, r\.skeletal, [^\n]*gallerySatOptions\(animated, CREATURE_CLIPS, vehicle\)\)/.test(block), "the gallery's own call to convertSat takes its options from gallerySatOptions, a vehicle's paint with them");
+  ok(gallerySatOptions(false, 'none', true).paint === true && !('paint' in gallerySatOptions(false, 'none')), "and a vehicle's paint is asked for through it, and nothing else's");
   ok(/const entry = skeletalModelEntry\(id, r\.skeletal, info, animated\);[\s\S]{0,120}models\.set\(id, entry\);/.test(block), 'and files the entry skeletalModelEntry makes of what it said');
 }
 

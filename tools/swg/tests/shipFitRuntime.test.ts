@@ -134,7 +134,9 @@ const droids: DroidDef[] = [
   const f = resolveFit(def, components, index, droids, { components: {}, paint: { index_texture_1: 99, index_color_1: 70, index_color_2: -3, bogus: 5 } });
   ok(f.paint.index_texture_1 === 7, '4: an index value 99 with count 8 clamps to 7');
   ok(f.paint.index_color_1 === 63, '4: a palette value 70 with size 64 clamps to 63');
-  ok(f.paint.index_color_2 === 0, '4: a negative value clamps to 0');
+  // A negative value on a colour is a colour carried whole since ships take every colour (wave 7); on a pattern it is still the first.
+  ok(f.paint.index_color_2 === -3, '4: a negative value on a colour is kept, a colour carried whole');
+  ok(resolveFit(def, components, index, droids, { components: {}, paint: { index_texture_1: -3 } }).paint.index_texture_1 === 0, '4: a negative value on a pattern clamps to 0');
   ok(!('bogus' in f.paint) && f.notes.some((n) => n.includes('bogus')), '4: an unknown variable is dropped');
   ok(f.painted, '4: any value off its default sets painted');
   const g = resolveFit(def, components, index, droids, { components: {}, paint: { index_color_1: 40.4 } });

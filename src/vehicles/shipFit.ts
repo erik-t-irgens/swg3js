@@ -4,7 +4,15 @@
 // stock). A saved fit is resolved against the hull before anything is built from it, so a name the
 // pack no longer has, a component the slot does not take or a value out of range falls back to
 // stock with a note rather than breaking the ship. Pure: no three, no DOM, loadable by the node tests.
+//
+// A colour (a palette variable, `index_color_<n>`) may hold a colour carried whole (`rawColour`,
+// texrender.ts) as well as an index of the hull's own palette, the owner's call: a ship takes every colour
+// a garment can. A choice of pattern (`index_texture_<n>`) never does. On the wire a colour carried whole
+// goes beside the paint and never in it (`fitForWire`, `fitFromWire`): the paint carries the nearest colour
+// of the hull's own palette, which every browser and relay built before reads as it always has, and only a
+// server whose hail says `paint: 2` passes the colour itself on.
 import type { AttachmentDef } from './shipAssembly.ts';
+import { isRawColour, rawRgb } from '../player/texrender.ts';
 
 export interface ComponentWeapon { projectile: number; speed: number; range: number; missile?: 1; countermeasure?: 1; tractor?: 1; beam?: 1; mining?: 1 }
 /** One row of the game's component table (components.json; its index there is what a look lists). */
@@ -23,10 +31,23 @@ export interface FitPaint { shaders: string[]; variables: PaintVariable[] }
 export interface FitDef { chassis: string; openSpeedFactor?: number; droid: 'astromech' | 'computer'; slots: FitSlot[]; paint: FitPaint | null }
 /** What a character keeps per ship id: a component per slot ('' = left empty), paint values, and the droid; anything absent is stock. */
 export interface ShipFit { components: Record<string, string>; paint: Record<string, number>; droid?: string }
+/**
+ * A fit as a hello carries it (`fitForWire`): its paint values all of the hull's own palettes, and beside them
+ * `colours`, each colour carried whole by its variable, which a server whose hail says `paint: 2` passes on and
+ * a browser built for it lays over the paint (`fitFromWire`). Absent when the fit has none.
+ */
+export interface WireFit extends ShipFit { colours?: Record<string, number> }
 /** A fit checked against the hull: every slot filled in (null = empty), its look (-1 = no model), every paint variable, the droid. */
 export interface ResolvedFit { components: Record<string, string | null>; looks: Record<string, number>; paint: Record<string, number>; painted: boolean; droid: string | null; notes: string[] }
 /** A part to hang: its GLB under assets-private/, its hardpoint ('' = the model's origin), its slot, whether it is skinned (a droid), and its own children (files under assets-private/ too). */
 export interface PlacedPart { slot: string; path: string; hardpoint: string; template: string; skinned?: true; children?: AttachmentDef[] }
+
+/**
+ * What a server's hail says of paint when it passes a fit's colours carried whole on (`PAINT_VERSION` in
+ * server/shipWire.mjs, which a node test holds this to): a server that says less drops them, and the others
+ * see the nearest colour of the hull's own palette the fit's paint carries beside them (`fitForWire`).
+ */
+export const PAINT_CARRIED_WHOLE = 2;
 
 /** The most a saved fit (and the relay's copy of it) carries: slots, the length of a component name, paint values, the length of a droid id. */
 export const FIT_LIMITS = { slots: 24, name: 64, paint: 8, droid: 32 };
@@ -65,11 +86,85 @@ function refusal(name: string, slot: FitSlot, components: ComponentDef[], index:
   return null;
 }
 
-/** A value within a variable's range: a whole number, clamped (an index to its choices, a palette to its colours). */
-function clampVariable(v: PaintVariable, value: number): number {
+/**
+ * A value within a variable's range: a whole number, clamped (an index to its choices, a palette to its
+ * colours), or on a colour a colour carried whole, kept as it is. A pattern's choice is never one: anything
+ * under nought is its first.
+ */
+export function clampVariable(v: PaintVariable, value: number): number {
   const n = Math.round(value);
+  if (v.kind === 'palette' && isRawColour(n)) return n;
   const top = v.kind === 'index' ? Math.max(1, v.count ?? 1) - 1 : Math.max(1, v.size ?? 256) - 1;
   return n < 0 ? 0 : n > top ? top : n;
+}
+
+/**
+ * Whether a paint value's key is a colour (`index_color_1`, `/private/index_color_2`), which may hold a
+ * colour carried whole, rather than a choice of pattern (`index_texture_1`). The relay asks the same of a
+ * key it cannot look up on a hull (server/shipWire.mjs `isColourKey`, the same expression).
+ */
+export function isColourKey(k: string): boolean {
+  return /(^|\/)index_color_\d+$/.test(k);
+}
+
+/** The index of the colour of a palette nearest an RGB colour (squared distance over the three channels; the first on a tie). */
+export function nearestIndex(rgb: readonly number[], colors: readonly (readonly number[])[]): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < colors.length; i++) {
+    const c = colors[i];
+    const d = (c[0] - rgb[0]) ** 2 + (c[1] - rgb[1]) ** 2 + (c[2] - rgb[2]) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * A fit as a hello carries it: every colour carried whole in its paint taken out into `colours` and its place
+ * in the paint given to the nearest colour of that variable's own palette (`palettes`, the pack's
+ * customize.json), or to its default (kept as absent, as everywhere a fit is kept) when that palette is not to
+ * hand. So a relay and a browser built before -- which keep every paint value to 0..255 and know nothing of
+ * `colours` -- show the ship as near as its own palette comes rather than in the palette's first colour, and a
+ * relay whose hail says `paint: 2` passes the colours on for a browser built for them to lay back over the paint
+ * (`fitFromWire`). A fit with no colour carried whole goes as it is. `nearer` names the colours carried whole.
+ */
+export function fitForWire(fit: ShipFit, paint: FitPaint | null | undefined, palettes: Readonly<Record<string, number[][]>> | null | undefined): { fit: WireFit; nearer: string[] } {
+  const nearer: string[] = [];
+  if (!Object.values(fit.paint ?? {}).some((v) => isRawColour(v))) return { fit, nearer };
+  const colours: Record<string, number> = {};
+  const out: WireFit = { components: { ...fit.components }, paint: { ...fit.paint }, ...(fit.droid ? { droid: fit.droid } : {}) };
+  for (const [k, value] of Object.entries(fit.paint)) {
+    if (!isRawColour(value)) continue;
+    delete out.paint[k];
+    // A colour carried whole on anything but a colour is never one: it goes as nothing, which is the default.
+    if (!isColourKey(k)) continue;
+    colours[k] = value;
+    nearer.push(k);
+    const v = paint?.variables.find((x) => x.name === k);
+    const colors = v?.palette ? palettes?.[v.palette] : undefined;
+    if (!colors?.length) continue;
+    const i = nearestIndex(rawRgb(value), colors);
+    if (!v || i !== v.default) out.paint[k] = i;
+  }
+  if (nearer.length) out.colours = colours;
+  return { fit: out, nearer };
+}
+
+/**
+ * A fit out of another player's hello: its colours carried whole (`colours`, which a relay whose hail says
+ * `paint: 2` passes on) laid over its paint, each only on a colour and only as a colour carried whole, so a
+ * fit from any build reads as the fit its player keeps. Null for none.
+ */
+export function fitFromWire(fit: WireFit | null | undefined): ShipFit | null {
+  if (!fit) return null;
+  const whole = fit.colours && typeof fit.colours === 'object' ? fit.colours : null;
+  if (!whole) return fit;
+  const out: ShipFit = { components: fit.components ?? {}, paint: { ...(fit.paint ?? {}) }, ...(fit.droid ? { droid: fit.droid } : {}) };
+  for (const [k, v] of Object.entries(whole)) if (isColourKey(k) && typeof v === 'number' && Number.isInteger(v) && isRawColour(v)) out.paint[k] = v;
+  return out;
 }
 
 /**
@@ -119,6 +214,17 @@ export function resolveFit(def: FitDef, components: ComponentDef[], index: Map<s
 /** The fit a ship has before anyone changes it: everything stock. */
 export function stockFit(): ShipFit {
   return { components: {}, paint: {} };
+}
+
+/**
+ * A speeder's fit of its paint alone, from the paint the gallery writes on its model (`{ shaders, variables }`,
+ * as a ship's): no chassis, no slots, and a flight computer it never shows, so the edit page, the kept fit,
+ * the refit and the hello take it as they take a ship's. Null with nothing to paint (a gallery converted
+ * before speeders took paint, or a vehicle whose shaders take no colours).
+ */
+export function paintOnlyFit(paint: FitPaint | null | undefined): FitDef | null {
+  if (!paint?.shaders?.length || !paint.variables?.length) return null;
+  return { chassis: '', droid: 'computer', slots: [], paint };
 }
 
 /** Which look of a slot a component shows (-1 when none: no model on this hull, an unknown component, or no such slot). */
@@ -253,6 +359,24 @@ export function gunWeapon(components: ComponentDef[], index: Map<string, number>
   return { ...w, name };
 }
 
+/**
+ * A hull's guns armed as `Garage.fitGuns` arms them. On a ship with chassis slots (`fitted`), each gun fires
+ * what its slot's component fires (a gun on the hull, the first bolt slot's: `gunWeapon`) and a gun whose slot
+ * fires nothing is left out. Anything else keeps every gun as it is, firing the ship's one weapon: an unfitted
+ * vehicle, and a fit of paint alone (a speeder's, `paintOnlyFit`), which has no slot any gun could fire from --
+ * read as a fit of no weapons, a painted walker spawned as a ship lost every gun it had.
+ */
+export function armGuns<G extends { slot?: string | null }>(def: FitDef | null | undefined, fit: ResolvedFit | null, components: ComponentDef[], index: Map<string, number>, guns: G[]): { guns: (G & { weapon?: (ComponentWeapon & { name: string }) | null })[]; fitted: boolean } {
+  if (!fit || !def?.slots.length) return { guns, fitted: false };
+  const fallback = boltSlotOf(components, index, fit);
+  const out: (G & { weapon: ComponentWeapon & { name: string } })[] = [];
+  for (const g of guns) {
+    const weapon = gunWeapon(components, index, fit, g.slot ?? null, fallback);
+    if (weapon) out.push({ ...g, weapon });
+  }
+  return { guns: out, fitted: true };
+}
+
 const SLOT_WORDS: Record<string, string> = {
   reactor: 'Reactor',
   engine: 'Engine',
@@ -292,7 +416,10 @@ export function patternLabel(v: PaintVariable, value: number): string {
   return `Pattern ${clampVariable(v, value) + 1} of ${count}${fewer}`;
 }
 
-/** A saved fit within FIT_LIMITS: names that are names, whole paint values 0..255, and a droid id; what the relay's cleanShip accepts. */
+/**
+ * A saved fit within FIT_LIMITS: names that are names, whole paint values 0..255 (on a colour, a colour
+ * carried whole as well), and a droid id. `fitForWire` of it is what the relay's cleanShip accepts.
+ */
 export function packFit(fit: ShipFit): ShipFit {
   const components: Record<string, string> = {};
   let n = 0;
@@ -309,7 +436,8 @@ export function packFit(fit: ShipFit): ShipFit {
     if (n >= FIT_LIMITS.paint) break;
     if (typeof k !== 'string' || k.length > PAINT_KEY_MAX || !PAINT_KEY.test(k)) continue;
     if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-    paint[k] = Math.min(255, Math.max(0, Math.round(v)));
+    const r = Math.round(v);
+    paint[k] = isColourKey(k) && isRawColour(r) ? r : Math.min(255, Math.max(0, r));
     n++;
   }
   const out: ShipFit = { components, paint };

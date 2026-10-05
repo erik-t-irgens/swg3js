@@ -421,15 +421,29 @@ export function ownSection(view: Pick<CreatorView, 'taken' | 'body'>, v: { key: 
   return v.private && !view.body.has(v.mesh) && !view.taken.has(v.key);
 }
 
+/** What the game's own table said of a species going bald: it may, it may not, or the table says nothing. */
+export type GameBald = 'may' | 'may not' | 'says nothing';
+
 /**
- * Whether no hair at all is offered among the styles (the table's bald rule): `offer` where the species may go
- * bald or the table says nothing (no table, no row for it, or no hairstyles to pick between); `shown` where
- * it may not but nothing is worn (an existing character is left as it is); `left out` where it may not and
- * a style is on. The grid of styles (hairGrid.ts) draws a cell for no hair on `offer` alone.
+ * Whether no hair at all is offered among the styles: always, for every species, by the owner's call (he
+ * looked, and taking the hair off leaves no hole in any base head). The table's own rule (`allow_bald`) is
+ * still read and is said beside it, for the reports: `game` is `may` where the game let the species go
+ * bald, `may not` where it kept the species from it (a Twi'lek always had lekku, a Zabrak horns, a
+ * Trandoshan ridges), and `says nothing` where there is no table, no row for the species or no hairstyles
+ * to pick between. What the game kept from going bald still starts in its first creation style
+ * (`defaultHair`, hairGrid.ts); an existing character is left as it is.
  */
-export function hairNone(entry: Pick<CreatorSpecies, 'bald'> | null | undefined, hasHairObjects: boolean, wearing: boolean): 'offer' | 'shown' | 'left out' {
-  if (entry?.bald !== false || !hasHairObjects) return 'offer';
-  return wearing ? 'left out' : 'shown';
+export function hairNone(entry: Pick<CreatorSpecies, 'bald'> | null | undefined, hasHairObjects: boolean): { offer: true; game: GameBald } {
+  const game: GameBald = !entry || !hasHairObjects || entry.bald === undefined ? 'says nothing' : entry.bald === false ? 'may not' : 'may';
+  return { offer: true, game };
+}
+
+/** The species (`twilek_female`) the game's own table kept from going bald, which this game offers no hair all the same. */
+export function keptFromBald(table: CreatorTable | null | undefined): string[] {
+  return Object.entries(table?.species ?? {})
+    .filter(([, s]) => s.bald === false)
+    .map(([id]) => id)
+    .sort();
 }
 
 // ---- the page without the table ----------------------------------------------------------------

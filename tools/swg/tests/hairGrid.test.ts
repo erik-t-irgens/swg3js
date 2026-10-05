@@ -100,10 +100,10 @@ const ids = (cells: { id: string }[]) => cells.map((c) => c.id).join();
 }
 {
   const g = hairCells(TABLE, ITEMS, 'newt', 'female', 'hair_newt_female_s01');
-  ok(!g.none && !g.groups.some((x) => x.cells.some((c) => c.id === NO_HAIR)), 'a species that may not go bald is offered no cell for no hair');
+  ok(g.none && g.groups[0].cells[0].id === NO_HAIR && !g.groups[0].cells[0].on, "a species the game kept from going bald is offered no hair all the same, leading its own styles (the owner's call)");
   const bare = hairCells(TABLE, ITEMS, 'newt', 'female', null);
-  ok(!bare.none, 'not even while it wears none (an existing character is left as it is)');
-  ok(ids(g.groups[0].cells) === 'hair_newt_female_s02,hair_newt_female_s01', "its own styles: the creation one ahead of the image designer's, the one the wardrobe lacks skipped");
+  ok(bare.none && bare.groups[0].cells[0].on, 'and with none on, no hair is the worn cell');
+  ok(ids(g.groups[0].cells) === `${NO_HAIR},hair_newt_female_s02,hair_newt_female_s01`, "its own styles after it: the creation one ahead of the image designer's, the one the wardrobe lacks skipped");
   ok(defaultHair(TABLE, ITEMS, 'newt', 'female') === 'hair_newt_female_s02', "a new character of a species that may not go bald starts in the table's first creation style the wardrobe has, not the table's first row (an image designer's) nor a creation style the wardrobe lacks");
   ok(defaultHair(TABLE, ITEMS, 'fox', 'female') === null && defaultHair(null, ITEMS, 'newt', 'female') === null, 'one that may go bald starts in none, and without a table nothing is chosen');
 }
@@ -231,7 +231,7 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     const want = (entry?.hair ?? []).filter((h) => h.inArchives);
     const wantOrder = [...want.filter((h) => h.creation), ...want.filter((h) => !h.creation)].map((h) => h.id);
     ok((own ? own.cells.filter((c) => c.id !== NO_HAIR).map((c) => c.id) : []).join() === wantOrder.join(), `${sp.id}: this gender's styles are the table's, creation first (${wantOrder.length})`);
-    ok(g.none === (entry?.bald !== false), `${sp.id}: no hair is offered exactly where the table lets it go bald (${g.none})`);
+    ok(g.none && g.groups[0].cells[0].id === NO_HAIR, `${sp.id}: no hair is offered, leading the grid, whatever the table says (it says ${entry?.bald === false ? 'may not' : 'may'})`);
     ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || /^Style \d+$/.test(c.label))), `${sp.id}: every cell reads "Style N"`);
     ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || c.picture === 'icon')), `${sp.id}: every style has its picture`);
     const seen = g.groups.flatMap((x) => x.cells.map((c) => c.id)).filter((x) => x !== NO_HAIR);
@@ -247,7 +247,7 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
   }
   for (const id of ['twilek_female', 'twilek_male', 'zabrak_female', 'zabrak_male', 'trandoshan_female', 'trandoshan_male']) {
     const g = gridOf(id)!;
-    ok(!g.none && !g.groups.some((x) => x.cells.some((c) => c.id === NO_HAIR)), `${id} is never offered no hair`);
+    ok(g.none && g.groups[0].cells[0].id === NO_HAIR, `${id}, which the game kept from going bald, is offered no hair (the owner's call)`);
     const first = defaultHair(table, wardrobe(index.species.find((s) => s.id === id)!.wardrobe!).items, id.replace(/_(fe)?male$/, ''), id.endsWith('_female') ? 'female' : 'male');
     ok(!!first && first === table.species[id].hair!.find((h) => h.creation && h.inArchives)!.id, `and a new one starts in the table's first creation style (${first})`);
   }

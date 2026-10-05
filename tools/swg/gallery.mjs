@@ -146,10 +146,11 @@ export const GALLERY_SECTIONS = ['houses', 'vehicles', 'weapons', 'anims', 'inte
  * list the creatures keep), and its body mesh's hardpoints kept as hp:<name> nodes under their
  * joints, as the creatures command keeps a mount's. Every skinned pod racer's mesh carries the game's
  * own seat point, `player`, on its cockpit joint `body`, and the garage seats its pilot there
- * (src/vehicles/podSeat.ts); a gallery converted before this dropped it.
+ * (src/vehicles/podSeat.ts); a gallery converted before this dropped it. `paint` (a vehicle's, when the
+ * run builds the vehicles) bakes a paint shader as a ship's is, for a walker whose shaders take colours.
  */
-export function gallerySatOptions(animated, clips) {
-  return { animations: animated ? clips : 'none', hardpoints: true };
+export function gallerySatOptions(animated, clips, paint = false) {
+  return { animations: animated ? clips : 'none', hardpoints: true, ...(paint ? { paint: true } : {}) };
 }
 
 /**
@@ -183,6 +184,43 @@ export function podSeatStatus(models) {
   const pods = (models ?? []).filter((m) => m?.skeletal && /pod_?racer|podracer/i.test(String(m.id ?? '')));
   const seated = pods.filter((m) => Array.isArray(m.hardpoints) && m.hardpoints.some((h) => String(h).toLowerCase() === 'player'));
   return { pods: pods.length, seated: seated.length };
+}
+
+/**
+ * The shape of a gallery's vehicle paint, stamped on its manifest (`paintFormat`) when a run built the
+ * vehicles: each vehicle model whose shaders take colours carries `paint: { shaders, variables }` (the ships
+ * pack's own shape for a hull's paint) and the gallery's customize.json carries their recipes. 1: the first.
+ */
+export const GALLERY_PAINT_FORMAT = 1;
+
+/**
+ * A vehicle model's paint from the shaders its conversion kept, in their order: the ones `maker.isPaint` says
+ * are paint (which writes each one's recipe the first time it meets it), with one variable list over them
+ * (`maker.variablesOf`, mergePaintVariables). Null when none is: most of the gallery's vehicles take no colour
+ * (measured over the retail archives: 24 of the 57 vehicle templates, on 21 models, do).
+ *  -> { paint: { shaders, variables } | null, notes }
+ */
+export function vehiclePaint(shaders, maker) {
+  const own = [];
+  for (const sh of shaders ?? []) if (sh && !own.includes(sh) && maker.isPaint(sh)) own.push(sh);
+  if (!own.length) return { paint: null, notes: [] };
+  const merged = maker.variablesOf(own);
+  if (!merged.variables.length) return { paint: null, notes: merged.notes };
+  return { paint: { shaders: own, variables: merged.variables }, notes: merged.notes };
+}
+
+/**
+ * Whether a gallery's vehicles carry their paint, as `status` reads it: a gallery with vehicles whose manifest
+ * has no `paintFormat` (or an older one) was converted before a speeder could be painted, so every speeder and
+ * walker whose shaders take colours shows its uncoloured main texture and has no paint page. A gallery that has
+ * no vehicles section asks for nothing.
+ *  -> { vehicles, painted, stale, why }
+ */
+export function galleryPaintStatus(manifest, index) {
+  const vehicles = (index?.sections ?? []).find((s) => s?.id === 'vehicles')?.items?.length ?? 0;
+  const painted = (manifest?.categories?.layout ?? []).filter((m) => m?.paint?.variables?.length).length;
+  const stale = vehicles > 0 && (Number(manifest?.paintFormat) || 0) < GALLERY_PAINT_FORMAT;
+  return { vehicles, painted, stale, why: stale ? `the gallery's ${vehicles} vehicles were converted before a speeder could be painted: the ones whose shaders take colours show their uncoloured texture and have no paint page` : '' };
 }
 
 /**

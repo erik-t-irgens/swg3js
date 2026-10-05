@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { CREATOR_TUNE, CUSTOMIZATION_FORMAT, DYE_PALETTE, UNTABLED_GROUP, bareName, creatorView, hairNone, oneColour, ownSection, packColours, packSliders, pickWrites, readableTable, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorVariable, type CreatorView } from '../../../src/ui/creatorModel.ts';
+import { CREATOR_TUNE, CUSTOMIZATION_FORMAT, DYE_PALETTE, UNTABLED_GROUP, bareName, creatorView, hairNone, keptFromBald, oneColour, ownSection, packColours, packSliders, pickWrites, readableTable, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorVariable, type CreatorView } from '../../../src/ui/creatorModel.ts';
 import { CUSTOMIZATION_FORMAT as CONVERTER_FORMAT } from '../customization.mjs';
 import { Customizer } from '../../../src/player/customizer.ts';
 
@@ -140,10 +140,11 @@ const rowOf = (view: CreatorView, name: string) => view.groups.flatMap((g) => g.
 // ---------------------------------------------------------------- the bald rule
 
 {
-  ok(hairNone({ bald: true }, true, false) === 'offer' && hairNone({ bald: true }, true, true) === 'offer', 'a species that may go bald is offered no hair');
-  ok(hairNone({ bald: false }, true, true) === 'left out', 'one that may not, wearing a style, is not');
-  ok(hairNone({ bald: false }, true, false) === 'shown', 'and one already wearing none is told so without being offered it');
-  ok(hairNone(null, true, true) === 'offer' && hairNone({}, true, true) === 'offer' && hairNone({ bald: false }, false, false) === 'offer', 'no table, no rule for the species, or no styles to pick between: none is offered, as before');
+  // The owner's call: no hair is offered to every species, and what the game's table said is reported beside it.
+  ok(hairNone({ bald: true }, true).offer && hairNone({ bald: true }, true).game === 'may', 'a species the game let go bald is offered no hair');
+  ok(hairNone({ bald: false }, true).offer && hairNone({ bald: false }, true).game === 'may not', 'and so is one the game kept from going bald, which the report names');
+  ok([hairNone(null, true), hairNone({}, true), hairNone({ bald: false }, false)].every((n) => n.offer && n.game === 'says nothing'), 'no table, no rule for the species, or no styles to pick between: none is offered, and the table says nothing');
+  ok(keptFromBald({ format: 1, source: '', palettes: {}, species: { b: { bald: false, groups: [], rows: [] }, a: { bald: false, groups: [], rows: [] }, c: { bald: true, groups: [], rows: [] }, d: { groups: [], rows: [] } } }).join() === 'a,b', 'the species the table kept from going bald are listed, in order');
 }
 
 // ---------------------------------------------------------------- the page without the table
@@ -257,7 +258,8 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     ok(!!r && !view.duplicates.includes(row) && group?.id === tab && r.keys.some((k) => hairMeshes.some((m) => k.startsWith(`${m}|`))) && r.keys.includes('hair|index_color_2') && r.label === labelOf(id, row), `${id}'s ${row} shows under its own tab and writes the hair's key (${r?.keys.join(', ') ?? 'not shown'})`);
     ok(!rowOf(view, 'color_eyes')!.keys.some((k) => hairMeshes.some((m) => k.startsWith(`${m}|`))), `and ${id}'s eyes write nothing of the hair's`);
   }
-  ok(['zabrak_male', 'twilek_female', 'trandoshan_male'].every((id) => hairNone(table.species[id], true, true) === 'left out') && hairNone(table.species.human_male, true, true) === 'offer', "the style picker offers no hair to a human and leaves it out for a Zabrak, a Twi'lek and a Trandoshan wearing a style");
+  ok(Object.values(table.species).every((s) => hairNone(s, true).offer), 'the style picker offers no hair to every species in the table');
+  ok(['zabrak_male', 'twilek_female', 'trandoshan_male'].every((id) => hairNone(table.species[id], true).game === 'may not' && keptFromBald(table).includes(id)) && hairNone(table.species.human_male, true).game === 'may', "and says the game kept a Zabrak, a Twi'lek and a Trandoshan from going bald, and let a human");
   {
     const id = 'human_female';
     const { state: s } = await stateFor(id, firstHair(id));

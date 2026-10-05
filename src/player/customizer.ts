@@ -129,6 +129,8 @@ function renderTexture(img: Img, normal: boolean): THREE.DataTexture {
  * not kept, so a later character tries again.
  */
 const customizeFiles = new Map<string, Promise<CustomizeFile | null>>();
+/** The same parses once they have landed, for a caller that may not wait (`customizeFileNow`). */
+const customizeLanded = new Map<string, CustomizeFile>();
 export function loadCustomizeFile(dir: string): Promise<CustomizeFile | null> {
   let p = customizeFiles.get(dir);
   if (!p) {
@@ -138,9 +140,15 @@ export function loadCustomizeFile(dir: string): Promise<CustomizeFile | null> {
     customizeFiles.set(dir, p);
     void p.then((file) => {
       if (!file) customizeFiles.delete(dir);
+      else customizeLanded.set(dir, file);
     });
   }
   return p;
+}
+
+/** A folder's recipes if their parse has landed, without waiting (null before, or with none); the parse is `loadCustomizeFile`'s own. */
+export function customizeFileNow(dir: string): CustomizeFile | null {
+  return customizeLanded.get(dir) ?? null;
 }
 
 export class Customizer {

@@ -125,8 +125,9 @@ export function valueOf(values: Values, name: string, def: number, priv = false,
  * The least a palette value may be: a colour carried whole, `-(0xRRGGBB + 1)`, runs from -1 (black) down to
  * this (white). Ours, not the game's: the game's own picks are indices into a palette, from nought up, and a
  * value below nought never came out of it, so the two can never be taken for each other. A raw colour is
- * only ever a palette's value -- a choice among textures clamps anything under nought to its first -- and is
- * never offered for a ship's paint, whose values the relay keeps to 0..255 (server/shipWire.mjs).
+ * only ever a palette's value -- a choice among textures clamps anything under nought to its first. A ship's
+ * or a speeder's paint takes one on its colours (`index_color_<n>`) and never on its pattern, and on the wire
+ * it rides beside the paint, which only a relay whose hail says `paint: 2` passes on (server/shipWire.mjs).
  */
 export const RAW_COLOUR_MIN = -16777216;
 

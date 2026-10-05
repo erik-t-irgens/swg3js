@@ -43,7 +43,8 @@
 //   node tools/swg/cli.mjs gallery <swg-dir> <out-dir> [--jka=<dir>] [--only=houses,vehicles,weapons,anims,interiors] [--limit=N]
 //                                                                  a flat development world under <out-dir>/gallery: every player house, vehicle and
 //                                                                  weapon in rows, and every animation from both games on a grid of player models
-//                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise)
+//                                                                  (dressed in a shirt, trousers and shoes unless --wear says otherwise); a vehicle
+//                                                                  whose shaders take colours is painted as a ship is (customize.json, its `paint`)
 //                                                                  convert a skeletal appearance (creature, character) with skeleton and animations
 //   node tools/swg/cli.mjs flora <swg-dir> <planet>|all <out-dir>   (re)convert just the flora models for packs converted already
 //   node tools/swg/cli.mjs snapshot <swg-dir> <planet>|all <out-dir> [--center=x,z|auto] --radius=r|all [--max=n]
@@ -207,7 +208,7 @@ import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
-import { gallerySatOptions, podSeatStatus, skeletalModelEntry } from './gallery.mjs';
+import { gallerySatOptions, galleryPaintStatus, podSeatStatus, skeletalModelEntry } from './gallery.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
 import {
@@ -243,6 +244,7 @@ import { CUSTOMIZATION_FILE, buildCustomization, customizationStatus } from './c
 import { instanceSpawnsWhy } from './instances.mjs';
 import { SPAWNS_FORMAT, spawnsStale } from './spawnpack.mjs';
 import { OBJECT_EFFECTS_VERSION, readClientChildren } from './clientfx.mjs';
+import { paintRecipeMaker } from './paintrecipes.mjs';
 import { mapFrameOf } from './mapframe.mjs';
 import { floraCollisionFile, floraCollisionStatus } from './extent.mjs';
 import { DOORS_PACK_VERSION, doorModelId, doorsStale, packDoorTable, pobDoorReader, readDoorStyles } from './doors.mjs';
@@ -1873,6 +1875,10 @@ function skinnedTexture(vfs, shaderPath, slots, ctx, info, mesh = null) {
     noteVariables(info, shader.variables, shaderPath, mesh);
   }
   info.shaderNotes.add(`${shaderPath}: ${describeShader(shader)}`);
+  // `ctx.paint` (the gallery's skinned vehicles: the walkers, the basilisk): a paint shader's texture is a
+  // ship's, baked at its defaults through every pass with its pattern's own alpha (`textureFor`'s `paint`), so
+  // a walker is painted exactly as a static speeder is and its recipe renders back to the same picture.
+  if (ctx.paint && !slots?.length && shader && isPaintShader(shader)) return textureFor(vfs, shaderPath, { paint: true });
   const rendered = slots?.find((s) => s.tag === 'MAIN') ?? slots?.[0];
   // `ctx.everyPass` (the wardrobe's) also bakes a shader whose palette is laid on after its first pass.
   const allPasses = !!ctx.everyPass;
@@ -1958,8 +1964,10 @@ function bakeGlowSplit(vfs, shaderPath, shader, image, ctx) {
  * against the same skeleton, keeps every triangle, and carries the occlusion zones through, so
  * the game can dress and undress a character at run time rather than the converter deciding once.
  * `animations: false` reads no animation table at all, for a model whose clips live in a shared pack.
+ * `paint` (the gallery's skinned vehicles) bakes a paint shader as a ship's is (skinnedTexture), and
+ * `info.shaders` names every shader the model kept, for the paint's recipes.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false, rigOnly = false } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false, rigOnly = false, paint = false } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -1974,7 +1982,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   // `moodsAsked` goes into the manifest so that `status` can tell a pack converted with
   // --no-moods, which is a choice the owner made, from one converted before the moods existed,
   // which is work still to do. Without it the two look the same and status asks for ever.
-  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set(), moodsAsked: moods === true };
+  const info = { sat: satPath, skeleton: skeletonFile, joints: 0, meshes: [], animations: [], missing: [], unknownTransforms: 0, skipped: [], textureRenderers: [], customization: new Set(), variables: new Map(), attached: [], shaderNotes: new Set(), shaders: new Set(), moodsAsked: moods === true };
   // Extra skeletons (the face rig) hang from a joint of the first.
   const extras = [];
   for (const k of sat.skeletons.slice(1)) {
@@ -2008,6 +2016,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }) : null;
   const textures = new Map();
   const ctx = renderContext(variables);
+  if (paint) ctx.paint = true;
   // Mesh generators of the body and of everything worn over it, composed the way the game does:
   // outer layers hide the zones of inner ones (a shirt hides the torso skin beneath it).
   const loaded = [];
@@ -2107,6 +2116,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       if (!g.primitives[0].indices.length) return; // everything this shader drew is under clothing
       const slots = slotsByShader.get(i);
       const shaderPath = g.shader;
+      info.shaders.add(shaderPath);
       const t = skinnedTexture(vfs, g.shader, slots, ctx, info, meshName);
       if (slots) g.shader = `${g.shader}@${meshName}`; // its own material: the rendered texture is this mesh's
       if (t) textures.set(g.shader, t);
@@ -3132,7 +3142,13 @@ function packStatus(dir) {
     // A named product rather than a format: every skinned pod racer's mesh carries the game's own seat point, so a
     // gallery whose pods list none was converted before the hardpoints were kept, and each pilot sits on the joint.
     const pods = podSeatStatus(gallery.categories?.layout);
-    if (pods.pods && !pods.seated) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's ${pods.pods} skinned pod racers were converted without the game's own seat point (player, on the cockpit's joint), so each pilot sits on the cockpit's joint instead`);
+    const podsStale = pods.pods && !pods.seated;
+    if (podsStale) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's ${pods.pods} skinned pod racers were converted without the game's own seat point (player, on the cockpit's joint), so each pilot sits on the cockpit's joint instead`);
+    // The vehicles' paint (a speeder's colours): its own `if`, asking for the vehicles alone unless the whole
+    // gallery is asked for above, which builds them too.
+    const vehiclePaint = galleryPaintStatus(gallery, readJson(join(dir, 'gallery/gallery.json')));
+    console.log(`  gallery: ${vehiclePaint.vehicles} vehicles, ${vehiclePaint.painted} models whose colours a player can change${vehiclePaint.stale ? ' (converted before a speeder could be painted)' : ''}`);
+    if (vehiclePaint.stale) need(podsStale ? `gallery <swg-dir> ${dir} --retail-only` : `gallery <swg-dir> ${dir} --only=vehicles --retail-only`, vehiclePaint.why);
   }
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
@@ -5426,91 +5442,18 @@ switch (cmd) {
       for (const s of slots) s.stock = pickStock(s, components, /^weapon_/.test(s.slot) ? { tokens, preferName, preferProjectile, weaponOf: projectileOf } : { tokens });
       return slots;
     };
-    // The paint recipes (customize.json), one per paint shader, with their images under customize/.
-    const recipes = new Map();
-    const paintShaders = new Map();
-    // Each paint shader's variables, kept from its first load: paintContext is emptied after every
-    // ship's fit, so the images the bakes decoded are not held for the whole run.
-    const paintVariables = new Map();
-    const customizeDir = join(outDir, 'customize');
-    const paint = { images: 0, bytes: 0, registry: null };
-    const NO_IMAGE = {};
-    /** An image for the recipes' registry: read afresh (never kept), or nothing when the registry has written it already. */
-    const imageLoad = (file) => (paint.registry?.ids.has(file.toLowerCase()) ? NO_IMAGE : loadImage(vfs, file, new Map()));
-    const registryFor = () => {
-      if (paint.registry) return paint.registry;
-      mkdirSync(customizeDir, { recursive: true });
-      paint.registry = new ImageRegistry((file, bytes) => {
-        writeFileSync(join(customizeDir, file), bytes);
-        paint.images++;
-        paint.bytes += bytes.length;
-      });
-      // A --match run adds to the recipes already there: its images are numbered past every one those
-      // name, so none of theirs is overwritten.
-      if (options.match) {
-        let highest = -1;
-        try {
-          const old = JSON.parse(readFileSync(join(outDir, 'customize.json'), 'utf8'));
-          for (const f of recipeImages(old.recipes)) highest = Math.max(highest, Number(/_(\d+)\.png$/.exec(f)?.[1] ?? -1));
-        } catch {
-          /* no recipes yet */
-        }
-        for (let i = 0; i <= highest; i++) paint.registry.ids.set(`\0kept:${i}`, null);
-      }
-      return paint.registry;
-    };
-    /** The static shader's own MAIN under a customizable one: the look before customization, kept for the game to show on request. */
-    const staticMainOf = (shaderPath) => {
-      try {
-        const v = parseIff(vfs.read(shaderPath.replace(/\\/g, '/'))).children.find(isForm);
-        const base = v?.children.find((c) => (isForm(c) ? c.type === 'SSHT' : c.tag === 'NAME'));
-        if (!base) return null;
-        return loadShader(vfs, isForm(base) ? base : readCString(base.data).value.replace(/\\/g, '/'), paintContext)?.textureFiles.get('MAIN') ?? null;
-      } catch {
-        return null;
-      }
-    };
-    /**
-     * Whether a model's shader is ship paint; the first time one is, its recipe: the shader trimmed to
-     * the textures its passes read (and a glow's mask), every pattern and palette its variables choose
-     * from, the static MAIN, and how it glows (describeSurface), so a repaint splits the glow from the
-     * painted colour. A glow is written only when the converted material glows (its mask is not too
-     * faint to split): the game puts a repaint's glow on the material's own emissive map, and a
-     * material without one would need a new program. A shader whose recipe cannot be written is not
-     * counted as paint.
-     */
-    const isPaint = (shaderPath) => {
-      if (paintShaders.has(shaderPath)) return paintShaders.get(shaderPath);
-      let yes = false;
-      try {
-        const loaded = isCustomizableShader(vfs, shaderPath) ? loadShader(vfs, shaderPath, paintContext) : null;
-        if (isPaintShader(loaded)) {
-          const glow = textureFor(vfs, shaderPath, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, shaderPath, surfaceCache)) : null;
-          const t = trimPaintShader(loaded, { staticMain: staticMainOf(shaderPath), keep: glow ? [glow.maskTag] : [] });
-          const registry = registryFor();
-          recipes.set(shaderPath, { mesh: 'ship', material: shaderPath, kind: 'bake', baseTag: 'MAIN', shader: exportShader(t.shader, registry, imageLoad), slots: [], staticMain: t.staticMain ? registry.idFor(t.staticMain, imageLoad(t.staticMain)) : null, ...(glow ? { glow } : {}) });
-          paintVariables.set(shaderPath, loaded.variables);
-          yes = true;
-        }
-      } catch (err) {
-        console.error(`  paint recipe for ${shaderPath} not written: ${err.message}`);
-      }
-      paintShaders.set(shaderPath, yes);
-      return yes;
-    };
-    const paletteSizes = new Map();
-    const paletteSize = (p) => {
-      if (!paletteSizes.has(p)) {
-        let n = 0;
-        try {
-          n = vfs.has(p) ? parsePalette(vfs.read(p)).length : 0;
-        } catch {
-          n = 0;
-        }
-        paletteSizes.set(p, n);
-      }
-      return paletteSizes.get(p);
-    };
+    // The paint recipes (customize.json), one per paint shader, with their images under customize/
+    // (paintrecipes.mjs, which the gallery's speeders share). A glow is written only when the converted
+    // material glows (its mask is not too faint to split): the game puts a repaint's glow on the
+    // material's own emissive map, and a material without one would need a new program.
+    const paintMaker = paintRecipeMaker(vfs, outDir, {
+      ctx: paintContext,
+      isCustomizable: (p) => isCustomizableShader(vfs, p),
+      glowOf: (p) => (textureFor(vfs, p, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, p, surfaceCache)) : null),
+      match: !!options.match,
+    });
+    const { isPaint, recipes } = paintMaker;
+    const paint = paintMaker.stats;
     /**
      * A fit's slots from buildSlots' slots (with their stock): each look's parts converted with
      * `children`, the part's own subtree (expandPart: parents relative to the part, and by name what the
@@ -5584,7 +5527,7 @@ switch (cmd) {
       for (const f of files) for (const sh of modelShaders.get(f) ?? []) if (!shaders.includes(sh) && isPaint(sh)) shaders.push(sh);
       let painted = null;
       if (shaders.length) {
-        const merged = mergePaintVariables(shaders.map((p) => ({ path: p, variables: paintVariables.get(p) ?? [] })), paletteSize);
+        const merged = paintMaker.variablesOf(shaders);
         for (const n of merged.notes) note(`paint: ${n}`);
         painted = { shaders, variables: merged.variables };
       }
@@ -5795,7 +5738,7 @@ switch (cmd) {
           /* no recipes yet */
         }
       }
-      writeFileSync(join(outDir, 'customize.json'), JSON.stringify({ images: 'customize/', recipes: list, palettes: exportPalettes(vfs, list.flatMap((r) => palettesOf(r))) }, null, 1));
+      paintMaker.write(list);
     }
     const manifest = { classes: SHIP_CLASSES, ships, skipped, models: [...models.values()].filter((m) => !m.failed), materialFormat: MATERIAL_FORMAT, assembly: SHIP_ASSEMBLY_FORMAT, ...(components ? { fitFormat: SHIP_FIT_FORMAT } : {}) };
     if (projectiles.length) writeFileSync(join(outDir, 'projectiles.json'), JSON.stringify({ projectiles, weapons }, null, 2));
@@ -5938,15 +5881,36 @@ switch (cmd) {
     const vfs = mount(pos[1]);
     const outDir = join(pos[2], 'gallery');
     mkdirSync(outDir, { recursive: true });
-    const { buildGallery, galleryTemplates, interiorLayouts, labelOf, GALLERY_SECTIONS } = await import('./gallery.mjs');
+    const { buildGallery, galleryTemplates, interiorLayouts, labelOf, vehiclePaint, GALLERY_PAINT_FORMAT, GALLERY_SECTIONS } = await import('./gallery.mjs');
     const { parsePob } = await import('./pob.mjs');
     const models = new Map();
     const cache = new Map();
     const only = options.only ? options.only.split(',').map((s) => s.trim()) : GALLERY_SECTIONS;
     const limit = options.limit ? Number(options.limit) : Infinity;
+    // A vehicle whose shaders take colours (a speeder's or a walker's paint) is baked at its defaults through every
+    // pass, as a ship is, its recipes go into the gallery's own customize.json and its paint onto its model's entry
+    // (`paint: { shaders, variables }`, the ships pack's shape), so the game paints it as it paints a ship. Only
+    // when this run builds the vehicles: a run of other sections keeps the last run's recipes and stamp.
+    const paintMaker = only.includes('vehicles')
+      ? paintRecipeMaker(vfs, outDir, {
+          ctx: paintContext,
+          isCustomizable: (p) => isCustomizableShader(vfs, p),
+          glowOf: (p) => (textureFor(vfs, p, { paint: true })?.emissive ? paintGlow(describeSurface(vfs, p, surfaceCache)) : null),
+        })
+      : null;
+    const paintNotes = new Set();
+    /** A vehicle model's paint from the shaders it kept, or null (gallery.mjs vehiclePaint); the bakes' images let go after each. */
+    const paintOf = (shaders) => {
+      const r = vehiclePaint(shaders, paintMaker);
+      for (const n of r.notes) paintNotes.add(n);
+      paintContext.images.clear();
+      paintContext.shaders.clear();
+      return r.paint;
+    };
     // One template into the pack's models, as the snapshot does it (static, portal building, or a skeletal thing at its bind pose).
     // With `appearance`, that file rather than the template's own: a station's portal layout, where the template names the hull.
     const convert = (template, appearance = null) => {
+      const vehicle = !!paintMaker && /^object\/mobile\/vehicle\//.test(template ?? '');
       let r = appearance ? resolveAppearanceToMesh(vfs, appearance) : resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
       // A rideable vehicle's skeletal appearance (pv_<name>.sat) is a two-joint placeholder with a
@@ -5982,11 +5946,14 @@ switch (cmd) {
           id = familyOf(r.skeletal);
           if (!models.has(id)) {
             // Its hardpoints kept under their joints: a pod racer's pilot sits on its own `player` point.
-            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), gallerySatOptions(animated, CREATURE_CLIPS));
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), gallerySatOptions(animated, CREATURE_CLIPS, vehicle));
             // The names it kept go in its entry, which is how `status` tells a gallery converted before they were kept.
             const entry = skeletalModelEntry(id, r.skeletal, info, animated);
             const tris = entry.triangles;
             models.set(id, entry);
+            // Its paint, when its shaders take colours (gallery.mjs vehiclePaint).
+            const paint = vehicle ? paintOf([...info.shaders]) : null;
+            if (paint) entry.paint = paint;
             if (!tris) console.log(`  ${template}: ${r.skeletal} converted with no triangles: ${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes in it'}`);
             else if (animated) console.log(`  ${template}: walks with its own clips (${info.animations.join(', ')})`);
           }
@@ -5995,11 +5962,12 @@ switch (cmd) {
           id = familyOf(single ? r.parts[0].mesh : r.appearance);
           if (!models.has(id)) {
             // With the client's own lower detail levels (step 7): the gallery is a world the streamer places too.
-            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { lods: r.appearance ?? true });
+            const conv = convertOne(vfs, single ? r.parts[0].mesh : r.appearance, join(outDir, `${id}.glb`), { lods: r.appearance ?? true, ...(vehicle ? { paint: true } : {}) });
             const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
             const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
             const effects = attachedEffects(vfs, conv.effects, outDir);
-            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.lods ? { lods: conv.lods } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
+            const paint = vehicle ? paintOf(conv.shaders) : null;
+            models.set(id, { id, source: r.source ?? r.appearance, file: `${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, parts: conv.partCount, ...(conv.cells ? { cells: conv.cells, portals: conv.portals ?? [] } : {}), ...(effects.length ? { effects } : {}), ...(conv.lods ? { lods: conv.lods } : {}), ...(paint ? { paint } : {}), ...(conv.tris ? {} : { failed: 'no triangles' }) });
             if (!conv.tris) console.log(`  ${template}: converted with no triangles`);
           }
         }
@@ -6075,18 +6043,30 @@ switch (cmd) {
     let galleryFormat = MATERIAL_FORMAT;
     // And its detail levels' stamp, the same way (step 7).
     let galleryLods = LOD_FORMAT;
+    // And the vehicles' paint stamp, which only a run that built the vehicles writes.
+    let galleryPaint = paintMaker ? GALLERY_PAINT_FORMAT : 0;
     if (options.only) {
       try {
         const was = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'));
         galleryFormat = was.materialFormat ?? 1;
         galleryLods = was.lodFormat ?? 0;
+        if (!paintMaker) galleryPaint = was.paintFormat ?? 0;
       } catch {
         galleryFormat = 1;
         galleryLods = 0;
       }
     }
+    // The vehicles' paint recipes beside the manifest, and only the images they name left in customize/.
+    if (paintMaker) {
+      const list = [...paintMaker.recipes.values()];
+      paintMaker.write(list);
+      const stale = paintMaker.sweep();
+      const painted = [...models.values()].filter((m) => m?.paint);
+      console.log(`  paint: ${painted.length} vehicle models take colours (${painted.map((m) => m.id).join(', ') || 'none'}), ${list.length} recipes, ${paintMaker.stats.images} images (${(paintMaker.stats.bytes / 1e6).toFixed(1)} MB)${stale ? `; ${stale} images an earlier run left removed` : ''}`);
+      for (const n of paintNotes) console.log(`   paint: ${n}`);
+    }
     const galleryModels = [...models.values()].filter((m) => m && !m.failed);
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, categories: { layout: galleryModels } }, null, 2));
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: galleryFormat, lodFormat: galleryLods, ...(galleryPaint ? { paintFormat: galleryPaint } : {}), categories: { layout: galleryModels } }, null, 2));
     console.log(lodSummaryLine('gallery', galleryModels));
     writeFileSync(join(outDir, 'gallery.json'), JSON.stringify({ sections: g.sections, anims: g.anims }));
     writeFloors(outDir, galleryModels.map((m) => m.id));

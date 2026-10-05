@@ -14,7 +14,7 @@ import * as THREE from 'three';
 import { Customizer, loadCustomizeFile, type RecipeRender } from '../player/customizer.ts';
 import type { Img, Recipe } from '../player/texrender.ts';
 import { decodePng } from '../player/png.ts';
-import { paintIsDefault, type FitPaint, type PaintVariable } from './shipFit.ts';
+import { clampVariable, paintIsDefault, type FitPaint, type PaintVariable } from './shipFit.ts';
 import type { PaintImg, PaintRecipe } from './paintJob.ts';
 
 export interface PaintHooks {
@@ -114,10 +114,10 @@ export class ShipPaint {
     return out;
   }
 
+  /** A value as `clampVariable` keeps it (a colour carried whole stays whole on a colour, never on a pattern), the default where none is given. */
   private static clamp(v: PaintVariable, x: number | undefined): number {
     if (typeof x !== 'number' || !Number.isFinite(x)) return v.default;
-    const top = v.kind === 'index' ? Math.max(1, v.count ?? 1) - 1 : Math.max(1, v.size ?? 256) - 1;
-    return Math.min(top, Math.max(0, Math.round(x)));
+    return clampVariable(v, x);
   }
 
   private isPaint(m: THREE.Material): boolean {

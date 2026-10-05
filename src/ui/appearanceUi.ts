@@ -237,9 +237,9 @@ export class AppearanceUi {
   /**
    * The grid of styles alone, which the table's hair tab opens with: a folding group each (this gender's,
    * the other's, what the game never offered), each cell a picture and "Style N", the worn one marked. No
-   * hair is a cell only where the game let the species go bald (`hairNone`): a Twi'lek, a Zabrak or a
-   * Trandoshan always has lekku, horns or ridges. A group opens on its own when it is the first or holds
-   * the worn style; one the player opened or shut stays so.
+   * hair is a cell for every species (`hairNone`), the Twi'lek, Zabrak and Trandoshan the game kept from
+   * going bald included. A group opens on its own when it is the first or holds the worn style; one the
+   * player opened or shut stays so.
    */
   private hairGridHtml(): string {
     const c = this.character;
@@ -781,8 +781,8 @@ export class AppearanceUi {
       species: c?.manifest.id ?? null,
       inTable: !!(c && table?.species[c.manifest.id]),
       laidOut: view ? 'table' : 'packs',
-      // The bald rule as the grid of styles takes it: a cell for no hair on `offer` alone.
-      hairNone: c ? hairNone(table?.species[c.manifest.id], c === this.character ? this.hair.length > 0 : !!table?.species[c.manifest.id]?.hair?.length, !!c.hairWorn()) : null,
+      // No hair is offered to every species; what the game's own table said of this one is beside it.
+      hairNone: c ? hairNone(table?.species[c.manifest.id], c === this.character ? this.hair.length > 0 : !!table?.species[c.manifest.id]?.hair?.length) : null,
       groups: view?.groups.map((g) => ({ id: g.id, label: g.label, rows: g.rows.length, ...(g.ours ? { ours: true } : {}) })) ?? [],
       unresolved: view?.unresolved ?? [],
       hidden: view?.hidden ?? [],

@@ -13,7 +13,7 @@ import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
 import { PART_LIMIT, applyPlace, findHardpoint, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
 import { WING_DROP_MIN, WING_TIP_ROOM, WingSet, type Wing } from './wings';
-import { boltSlotOf, changedSlots, componentIndex, droidShown, droidSink, gunWeapon, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit';
+import { armGuns, changedSlots, componentIndex, droidShown, droidSink, paintOnlyFit, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type FitPaint, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit.ts';
 import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
 import { ShipPaint } from './shipPaint';
 import { renderPaint } from './paintRender';
@@ -98,8 +98,15 @@ export interface VehicleDef {
   clipSpeeds?: Record<string, number>;
   /** A mount's saddle from the creatures pack: its model, the joint the creature's own hardpoint hangs it from, and its rider point. */
   saddle?: SaddleDef | null;
-  /** A ship's chassis slots with the components each takes and the parts each shows, its droid socket and its paint; absent on a pack converted before (or without components.json). */
+  /**
+   * A ship's chassis slots with the components each takes and the parts each shows, its droid socket and its
+   * paint; absent on a pack converted before (or without components.json). A speeder whose shaders take
+   * colours (the gallery's `paint` on its model) carries a fit of its paint alone: no slots, no droid, so
+   * everything a ship's paint goes through -- the edit page, the kept fit, the refit, the hello -- is its too.
+   */
   fit?: FitDef | null;
+  /** The pack folder its paint's recipes are in (`customize.json`), under the base: the ships' unless said (a speeder's, the gallery's). */
+  paintDir?: string;
   /** The manifest's class for a ship ('fighter', 'bomber', 'freighter', 'gunship', 'shuttle', 'other'). */
   class?: string;
 }
@@ -170,13 +177,15 @@ export class Garage {
       const [idx, man] = await Promise.all([fetch(`${baseUrl}assets-private/gallery/gallery.json`), fetch(`${baseUrl}assets-private/gallery/manifest.json`)]);
       if (idx.ok && man.ok) {
         const index = (await idx.json()) as GalleryIndex;
-        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number> }[] } };
+        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number>; paint?: FitPaint | null }[] } };
         const files = new Map(manifest.categories.layout.map((m) => [m.id, m]));
         for (const it of index.sections.find((s) => s.id === 'vehicles')?.items ?? []) {
           const m = files.get(it.model);
           if (!m) continue;
           const kind = vehicleKindOf(it.label) ?? vehicleKindOf(it.template) ?? vehicleKindOf(it.model);
-          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds });
+          // A speeder whose shaders take colours: a fit of its paint alone (`paintOnlyFit`), its recipes beside the gallery's manifest.
+          const fit = paintOnlyFit(m.paint);
+          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds, ...(fit ? { fit, paintDir: 'assets-private/gallery/' } : {}) });
         }
       }
     } catch (err) {
@@ -399,7 +408,8 @@ export class Garage {
     // The swap: one synchronous step, nothing awaited (glows off the parts, the swap, the mounts measured, the glows re-hung).
     const r = refitSwap(v, s.commit, v.build.root, thrusters, v.wings, v.spec.ship ? (sp) => ownTrail(v, sp) : null, spare);
     v.fit = next;
-    this.fitGuns(v, def, next, r.mounts);
+    // Guns only on what flies as a ship, as at the spawn: a painted speeder repainted on the ground gains none.
+    if (v.spec.ship) this.fitGuns(v, def, next, r.mounts);
     collectOnParts(v, v.build.root);
     const waiting = r.waiting.map((p) => `${p.label} waits for hardpoint ${p.hardpoint}`);
     for (const w of waiting) console.warn(`garage: ${def.id}: ${w}, which nothing on the model carries`);
@@ -409,28 +419,22 @@ export class Garage {
     return { slots: s.slots, parts: hung, waiting, repainted, weaponsChanged, ms: performance.now() - began };
   }
 
-  /** A ship's guns from its measured mounts: with a fit, each fires its slot's component (a gun on the hull, the first bolt slot's) and a gun whose slot fires nothing is left out; without, the ship's one weapon. */
+  /**
+   * A ship's guns from its measured mounts (`armGuns`): with chassis slots, each fires its slot's component (a
+   * gun on the hull, the first bolt slot's) and a gun whose slot fires nothing is left out; without (no fit, or a
+   * speeder's fit of its paint alone), every gun fires the ship's one weapon.
+   */
   private fitGuns(v: Vehicle, def: VehicleDef, fit: ResolvedFit | null, m: Mounts): void {
-    const fitted = !!def.fit && !!fit;
-    const fallback = fitted ? boltSlotOf(this.components, this.componentByName, fit!) : null;
-    v.guns = m.guns
-      .map((g) => ({
-        pos: g.pos,
-        dir: g.dir.z > 0.5 ? g.dir : new THREE.Vector3(0, 0, 1),
-        node: g.node,
-        hardpoint: g.hardpoint,
-        turret: g.turret,
-        slot: g.slot,
-        ...(fitted ? { weapon: gunWeapon(this.components, this.componentByName, fit!, g.slot, fallback) } : {}),
-      }))
-      .filter((g) => !fitted || g.weapon !== null);
-    v.weapon = fitted ? (v.guns[0]?.weapon ?? def.weapon ?? null) : (def.weapon ?? null);
+    const mounts = m.guns.map((g) => ({ pos: g.pos, dir: g.dir.z > 0.5 ? g.dir : new THREE.Vector3(0, 0, 1), node: g.node, hardpoint: g.hardpoint, turret: g.turret, slot: g.slot }));
+    const armed = armGuns(def.fit, fit, this.components, this.componentByName, mounts);
+    v.guns = armed.guns;
+    v.weapon = armed.fitted ? (v.guns[0]?.weapon ?? def.weapon ?? null) : (def.weapon ?? null);
   }
 
-  /** The paint a fitted hull wears (null for one with nothing to paint), rendered in the paint worker. */
+  /** The paint a fitted hull (or a painted speeder) wears (null for one with nothing to paint), rendered in the paint worker from its own pack's recipes. */
   private paintFor(def: VehicleDef, opts: BuildOptions): ShipPaint | null {
     if (!def.fit?.paint) return null;
-    return new ShipPaint(def.fit.paint, `${this.baseUrl}assets-private/ships/`, { prepare: opts.prepare ?? noPrepare, forget: opts.forget ?? noForget, render: renderPaint });
+    return new ShipPaint(def.fit.paint, `${this.baseUrl}${def.paintDir ?? 'assets-private/ships/'}`, { prepare: opts.prepare ?? noPrepare, forget: opts.forget ?? noForget, render: renderPaint });
   }
 
   /** A fitted part's model: loaded once per file, cloned (a skinned droid with its own skeleton), dry, and marked with its slot and hardpoint. */

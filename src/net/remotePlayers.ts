@@ -9,7 +9,7 @@ import { easeInHull, MIN_GLIDE_SECONDS, peerAboard, placeInHull } from './aboard
 import type { Garage } from '../vehicles/garage';
 import type { WingSet } from '../vehicles/wings';
 import { stepPodPicture, type PodGait } from '../vehicles/podSeat.ts';
-import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicles/shipFit';
+import { changedSlots, fitFromWire, fitKey, type ResolvedFit, type WireFit } from '../vehicles/shipFit.ts';
 import type { ShipBuild } from '../vehicles/shipMounts';
 import type { ShipPaint } from '../vehicles/shipPaint';
 import { applyLookPrepared } from '../player/look';
@@ -130,9 +130,9 @@ interface RemoteVehicle {
   build: ShipBuild | null;
   paint: ShipPaint | null;
   fit: ResolvedFit | null;
-  /** A refit of the picture under way, and the newest fit asked for meanwhile (the running pass takes it up when it ends). */
+  /** A refit of the picture under way, and the newest fit asked for meanwhile (as their hello carries it; the running pass takes it up when it ends). */
   busy: Promise<void> | null;
-  want: ShipFit | null;
+  want: WireFit | null;
   /**
    * A pod's own idle and run on the picture, stepped by its glided speed along its nose with the rule the
    * rider's own game uses (`stepPodPicture`), so the pilot it seated in the cockpit sits in the cockpit drawn here; null
@@ -758,9 +758,10 @@ export class RemotePlayers {
         console.warn(`remote player ${r.hello.name} rides a ${rv.id} the garage does not know`);
         return;
       }
-      // Its fit, as their hello gives it (stock when the hello names another ship, or none).
+      // Its fit, as their hello gives it (stock when the hello names another ship, or none), with the colours
+      // carried whole that a server passing them on brought laid back over its paint.
       const asked = r.hello.ship?.id === def.id ? r.hello.ship.fit : null;
-      const fit = def.fit ? g.resolve(def, asked) : null;
+      const fit = def.fit ? g.resolve(def, fitFromWire(asked)) : null;
       // Prepared (and painted) before it is shown, so the first sight of it compiles nothing.
       const { holder: obj, wings, build, paint, gait } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
       if (r.vehicle !== rv) {
@@ -812,7 +813,7 @@ export class RemotePlayers {
    * changes, else the new parts staged, prepared and painted, then swapped in one step (Garage.restage).
    * Coalesced: a fit asked for while one is going waits, and only the newest is done when it ends.
    */
-  private refitRemote(r: Remote, rv: RemoteVehicle, want: ShipFit): Promise<void> {
+  private refitRemote(r: Remote, rv: RemoteVehicle, want: WireFit): Promise<void> {
     rv.want = want;
     if (rv.busy) return rv.busy;
     const run = async () => {
@@ -823,7 +824,7 @@ export class RemotePlayers {
         this.garage ??= this.loadGarage();
         const g = await this.garage;
         const def = g.find(rv.id);
-        const next = def ? g.resolve(def, asked) : null;
+        const next = def ? g.resolve(def, fitFromWire(asked)) : null;
         if (!def?.fit || !next || fitKey(next) === fitKey(rv.fit)) continue;
         const slots = changedSlots(def.fit, rv.fit, next);
         if (!slots.length) await rv.paint?.apply(next.paint);

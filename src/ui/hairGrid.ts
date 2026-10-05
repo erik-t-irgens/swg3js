@@ -10,8 +10,9 @@
 // Then whatever the wardrobe converted that no row names, "Not in the game's creator": one Bothan male
 // style, four Trandoshan female ones, and the Sullustan's eighteen, which the game never offered at all
 // (each of those is two templates, `_f` and `_m`, wearing one mesh a wardrobe folder, so a style whose
-// meshes another cell already shows is not offered twice). A cell for no hair leads only where the game
-// let the species go bald, and only where the species has hairstyles at all.
+// meshes another cell already shows is not offered twice). A cell for no hair leads wherever the species
+// has hairstyles at all, the species the game kept from going bald included: the owner's call, since
+// taking the hair off leaves no hole in any base head (`hairNone`).
 //
 // Every hair template's own name is just "hair" (or "lekku", "ridges", "frills"), so a cell reads "Style N"
 // from the `_sNN` its id ends in, with the id and the template behind it in the tooltip. The pictures are
@@ -176,15 +177,16 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
   if (own.length) groups.push({ id: 'own', label: GENDER_WORDS[gender], note: `the game's own: ${creation} at creation${own.length > creation ? `, ${own.length - creation} through the image designer` : ''}`, cells: own.map((s) => cell(s.item, 'own', styleLabel(s.item.id), s.row)) });
   if (theirs.length) groups.push({ id: 'other', label: GENDER_WORDS[other], note: 'ours: the game kept each gender to its own', cells: theirs.map((s) => cell(s.item, 'other', styleLabel(s.item.id), s.row)) });
   if (loose.length) groups.push({ id: 'untabled', label: "Not in the game's creator", note: 'ours: converted, never offered', cells: loose.map((i) => cell(i, 'untabled', styleLabel(i.id))) });
-  const none = hairNone(entry, true, !!worn) === 'offer' && groups.length > 0;
+  const none = hairNone(entry, true).offer && groups.length > 0;
   if (none) groups[0].cells.unshift(cell(null, groups[0].id, 'None'));
   return { groups, none, worn, styles: own.length + theirs.length + loose.length, fromTable: true };
 }
 
 /**
- * Which style a new character starts in: the table's first creation style for a species that may not go
- * bald (a Twi'lek always has lekku, a Zabrak horns, a Trandoshan ridges), where the wardrobe has it; null
- * for every species that may, and without a table.
+ * Which style a new character starts in: the table's first creation style for a species the game kept from
+ * going bald (a Twi'lek always had lekku, a Zabrak horns, a Trandoshan ridges), where the wardrobe has it;
+ * null for every species it let go bald, and without a table. Only the start: no hair is offered to every
+ * species all the same (`hairNone`).
  */
 export function defaultHair(table: CreatorTable | null | undefined, items: readonly HairItem[], species: string, gender: 'female' | 'male'): string | null {
   const sp = species.toLowerCase();

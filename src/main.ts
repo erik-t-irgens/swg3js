@@ -248,7 +248,7 @@ import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from 
 import { Nameplates, PLATE_TUNE, pickPlate } from './ui/nameplate';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
-import { DROID_SHOWN, DROID_SHOWN_BY_HULL, droidShown, droidSink, fitKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit } from './vehicles/shipFit';
+import { DROID_SHOWN, DROID_SHOWN_BY_HULL, PAINT_CARRIED_WHOLE, droidShown, droidSink, fitForWire, fitKey, isColourKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit, type WireFit } from './vehicles/shipFit.ts';
 import { NpcUi } from './ui/npcUi';
 import { CATALOGUE_COMMAND } from './world/mobiles/catalogue';
 import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spawning';
@@ -308,11 +308,12 @@ import { peerBodies } from './net/remoteBodies.ts';
 import { recordFor, sweptByList, type SpawnRecord } from './world/spawnSeed.ts';
 import type { Bolt } from './combat/bolts';
 import { applyAppearance, dress, lookKeep, packLook, putBackLook } from './player/look';
-import { CREATOR_TUNE, DYE_PALETTE, bareName, catalogueName, creatorTableNow, itemSections, loadCreatorTable, packColours, tuneCreator } from './ui/creatorModel.ts';
+import { CREATOR_TUNE, DYE_PALETTE, bareName, catalogueName, creatorTableNow, hairNone, itemSections, keptFromBald, loadCreatorTable, packColours, tuneCreator, type CreatorTable } from './ui/creatorModel.ts';
 import { HAIR_TUNE, defaultHair, hairCarryFor, hairCells, type HairItem } from './ui/hairGrid.ts';
 import { DYE_TUNE, countText, hexOf, rawFromHex, tuneDye, valueRgb } from './ui/dyePicker.ts';
 import { characterRender } from './player/recipeWorker.ts';
 import { isRawColour } from './player/texrender.ts';
+import { customizeFileNow, loadCustomizeFile } from './player/customizer.ts';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
@@ -770,6 +771,8 @@ class App {
   private weaponsLoaded!: Promise<WeaponCatalogue | null>;
   /** The hello resend after a change of clothes or weapon, debounced so several pieces send one. */
   private helloTimer = 0;
+  /** Said once: a server that keeps a ship's colours to the palettes is sent the nearest of them (`helloShip`). */
+  private saidPaintNearer = false;
   private spawnerTab: 'garage' | 'npcs' = 'garage';
   private weapons: WeaponCatalogue | null = null;
   private readonly fade: HTMLElement;
@@ -1741,9 +1744,15 @@ class App {
       closed: (def) => void this.refitSpawned(def),
       // The preview's compile of a garage material the world set up for its shadow cascades must not take the cascades' record from the world's program.
       keepShadows: (mats) => this.world.keepShadowRecords(mats),
+      // What a colour's picker offers beyond the hull's own palette: the player's wardrobe's garment palettes and the creator's (the appearance page's own).
+      pickerPalettes: () => this.pickerPalettes(),
     });
     // Each component's stats on the edit page (invented numbers, shipStats.ts); pure, read when the page draws.
     this.shipEdit.statsFor = (slot, c) => componentLine(slot, c);
+    // What a server passes on of a ship's colours carried whole is known only once it has answered: a hello
+    // carries them whatever the server is, so nothing is said again; the player is only told, once, when the
+    // others see the nearest colours of the hull's own palette instead.
+    this.net.session.onClaimed(() => this.sayPaintNearer(this.helloShipDef()));
     this.vehiclesUi.onEdit = (def) => this.openShipEdit(def);
     this.shipEdit.onTab = (id) => this.toggleSpawner(id as 'garage' | 'npcs');
     // A fit changed in the last 300 ms is written before the page goes.
@@ -5990,11 +5999,12 @@ class App {
        */
       refit: (slot: string, component: string) => this.debugRefit(slot, component),
       /**
-       * Repaint the ship ridden (else the nearest): `paint({ index_color_1: 20, index_texture_1: 2 })`, kept with the character;
+       * Repaint the ship ridden (else the nearest), or the painted speeder ridden: `paint({ index_color_1: 20, index_texture_1: 2 })`,
+       * `paint({ index_color_1: '#c03020' })` (a colour carried whole, on a colour and never on a pattern), kept with the character;
        * `paint('static')` shows each shader's own texture from before customization, `paint('custom')` goes back. Returns the
        * same shape as `refit`.
        */
-      paint: (values: Record<string, number> | 'static' | 'custom') => this.debugPaint(values),
+      paint: (values: Record<string, number | string> | 'static' | 'custom') => this.debugPaint(values),
       /** Open a ship's edit page: `shipEdit('xwing')`; `shipEdit()` reports what the page shows. */
       shipEdit: async (id?: string) => {
         if (!id) return this.shipEdit.report();
@@ -10344,8 +10354,9 @@ class App {
   }
 
   /**
-   * A new character of a species that may not go bald starts in the table's first creation style: a new
-   * Twi'lek has lekku, a Zabrak horns and a Trandoshan ridges. Only in the creator, only while nothing is
+   * A new character of a species the game kept from going bald starts in the table's first creation style: a
+   * new Twi'lek has lekku, a Zabrak horns and a Trandoshan ridges, and may take them off on the page like
+   * anybody (no hair is offered to every species). Only in the creator, only while nothing is
    * worn, and put on as any style is (`wearHairPrepared`); an existing character is left as it is. A style
    * picked on the page while the table and the wardrobe are still being read, or the creator left or
    * opened again, has the say: the turn is taken now and asked again before anything is put on, and the
@@ -10380,6 +10391,9 @@ class App {
       worn: c.hairWorn(),
       fromTable: grid.fromTable,
       none: grid.none,
+      // What the game's own table said of this species going bald, and every species it kept from it: no hair is offered all the same.
+      gameBald: hairNone(table?.species[c.manifest.id], grid.styles > 0).game,
+      keptFromBald: keptFromBald(table),
       styles: grid.styles,
       groups: grid.groups.map((g) => ({ id: g.id, label: g.label, cells: g.cells.length, pictures: g.cells.filter((x) => x.picture === 'icon').length, worn: g.cells.find((x) => x.on)?.label ?? null })),
       startsIn: defaultHair(table, items, c.speciesName, c.genderName),
@@ -18692,6 +18706,24 @@ class App {
     return g?.resolve(def, this.savedFit(def.id)) ?? null;
   }
 
+  /**
+   * What a ship's colour picker offers beyond the hull's own palette, as the appearance page's picker offers
+   * it: the garment palettes of the wardrobe the player's character dresses from (the human male's when no
+   * character is played) and the creator's table. Both are the parses the appearance page already shares.
+   */
+  private async pickerPalettes(): Promise<{ wardrobe: Record<string, number[][]> | null; table: CreatorTable | null }> {
+    const base = import.meta.env.BASE_URL;
+    const c = this.player.rig?.character ?? null;
+    const dir = c
+      ? await c
+          .catalogue(base)
+          .then(() => c.wardrobeDir)
+          .catch(() => null)
+      : null;
+    const [file, table] = await Promise.all([loadCustomizeFile(dir ?? `${base}assets-private/wardrobe/human_male/`), loadCreatorTable(base)]);
+    return { wardrobe: (file?.palettes as Record<string, number[][]> | undefined) ?? null, table: table ?? null };
+  }
+
   /** The garage's edit button: the page, over the world, with the mouse free. */
   private openShipEdit(def: VehicleDef): void {
     this.closePanels();
@@ -18748,13 +18780,41 @@ class App {
     return run;
   }
 
-  /** The ship this player is known by on the relay: the one ridden, flown or aboard, else the last fitted one stood out or flown, with its fit. */
-  private helloShip(): { id: string; fit: ShipFit } | undefined {
+  /** The ship this player is known by on the relay: the one ridden, flown or aboard (a painted speeder ridden among them), else the last fitted one stood out or flown. */
+  private helloShipDef(): VehicleDef | null {
     const p = this.player;
     const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? null;
-    const def = v?.def?.fit ? v.def : this.lastShipDef?.fit ? this.lastShipDef : null;
+    return v?.def?.fit ? v.def : this.lastShipDef?.fit ? this.lastShipDef : null;
+  }
+
+  /**
+   * That ship with its fit as a hello carries it (`fitForWire`): its colours carried whole beside its paint, and
+   * in the paint the nearest colours of the hull's own palette, so a relay or a browser built before shows the
+   * nearest colour rather than the palette's first, and a server whose hail says `paint: 2` passes the colours on.
+   */
+  private helloShip(): { id: string; fit: WireFit } | undefined {
+    const def = this.helloShipDef();
     if (!def) return undefined;
-    return { id: def.id, fit: packFit(this.savedFit(def.id) ?? stockFit()) };
+    const kept = packFit(this.savedFit(def.id) ?? stockFit());
+    const palettes = customizeFileNow(`${import.meta.env.BASE_URL}${def.paintDir ?? 'assets-private/ships/'}`)?.palettes as Record<string, number[][]> | undefined;
+    const { fit, nearer } = fitForWire(kept, def.fit?.paint, palettes);
+    if (nearer.length) this.sayPaintNearer(def);
+    return { id: def.id, fit };
+  }
+
+  /**
+   * Tell the player, once, that the server they are on drops a ship's colours carried whole, so the others see
+   * the nearest colours of the hull's own palette. Said only once a server has answered (or the relay that came
+   * before has been found), since before then nothing has said what it passes on, and only while the ship the
+   * hello names wears such a colour.
+   */
+  private sayPaintNearer(def: VehicleDef | null): void {
+    if (!def || this.saidPaintNearer || !this.net.online) return;
+    const s = this.net.session;
+    if (!(s.authority === 'server' || s.mode === 'relay') || s.paintVersion >= PAINT_CARRIED_WHOLE) return;
+    if (!Object.entries(this.savedFit(def.id)?.paint ?? {}).some(([k, x]) => isColourKey(k) && isRawColour(x))) return;
+    this.saidPaintNearer = true;
+    this.messages.system(`this server keeps a ship's colours to the game's own palettes, so the others see your ${def.label} in the nearest of them: restart it (npm run relay) to carry every colour`);
   }
 
   /** The ship ridden, flown or boarded, else the nearest ship spawned, for the console. */
@@ -18852,16 +18912,27 @@ class App {
     return { ...out, fitted: slot === 'droid' ? next.droid : (next.components[slot] ?? null), notes: next.notes };
   }
 
-  /** The console's repaint: paint values kept with the character (a repaint in place), or each shader's own texture ('static') and back ('custom'). */
-  private async debugPaint(values: Record<string, number> | 'static' | 'custom'): Promise<unknown> {
-    const v = this.nearShip();
+  /**
+   * The console's repaint: paint values kept with the character (a repaint in place), or each shader's own texture
+   * ('static') and back ('custom'). A value may be `'#rrggbb'`, a colour carried whole, which only a colour takes:
+   * on a pattern it is refused. The vehicle is the painted speeder ridden, else the ship `nearShip` finds.
+   */
+  private async debugPaint(values: Record<string, number | string> | 'static' | 'custom'): Promise<unknown> {
+    const ridden = this.player.mounted;
+    const v = ridden?.def?.fit?.paint && !ridden.spec.ship ? ridden : this.nearShip();
     const def = v?.def;
     if (!v || !def?.fit || !v.fit) return v ? `${v.spec.id} has no fit (a pack converted before ship customization)` : "no ship: spawn one (spawn('xwing')) or board one";
     if (!v.paint || !def.fit.paint) return `${def.id}'s paint is fixed in the game: its shaders take no colours`;
     const paint = v.paint;
     if (values === 'static' || values === 'custom') return this.queueRefit(v, () => this.measureSwap(v, () => paint.showStatic(values === 'static')));
     const fit = copyShipFit(this.savedFit(def.id) ?? stockFit());
-    for (const [k, n] of Object.entries(values)) fit.paint[k] = n;
+    for (const [k, n] of Object.entries(values)) {
+      const value = typeof n === 'string' ? rawFromHex(n) : n;
+      if (value === null || !Number.isFinite(value)) return `${k}: ${String(n)} is neither an index nor a #rrggbb colour`;
+      const pv = def.fit.paint.variables.find((x) => x.name === k);
+      if (pv && pv.kind !== 'palette' && isRawColour(value)) return `${k} is a choice of pattern, which takes an index and never a colour`;
+      fit.paint[k] = value;
+    }
     this.saveFit(def.id, fit);
     this.flushFits();
     const next = this.fitFor(def);

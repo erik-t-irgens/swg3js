@@ -85,6 +85,8 @@ export interface Hail {
   story?: number;
   /** How the server keeps what characters own: 2 is a row per thing; 0 or absent folds two of one item into one. */
   items?: number;
+  /** How the server passes a ship's paint on: 2 passes its colours carried whole on; 0 or absent drops them. */
+  paint?: number;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -297,6 +299,8 @@ export interface SessionStats {
   story: number;
   /** How the far end's greeting said it keeps what characters own: 2 a row per thing, 0 one of each. */
   items: number;
+  /** How the far end's greeting said it passes a ship's paint on: 2 a colour carried whole, 0 the palette's own. */
+  paint: number;
 }
 
 /**
@@ -338,7 +342,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -662,6 +666,7 @@ export class Session {
     this.stat.serverVersion = 0;
     this.stat.story = 0;
     this.stat.items = 0;
+    this.stat.paint = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -713,6 +718,8 @@ export class Session {
     this.stat.story = Number(h.story) > 0 ? Math.floor(Number(h.story)) : 0;
     // How it keeps what characters own, the same way (`itemsVersion`).
     this.stat.items = Number(h.items) > 0 ? Math.floor(Number(h.items)) : 0;
+    // And how it passes a ship's paint on (`paintVersion`).
+    this.stat.paint = Number(h.paint) > 0 ? Math.floor(Number(h.paint)) : 0;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -932,6 +939,17 @@ export class Session {
    */
   get itemsVersion(): number {
     return this.stat.authority === 'server' ? this.stat.items : 0;
+  }
+
+  /**
+   * How the server holding the world passes a ship's paint on, as its greeting said: 2 passes a ship's or a
+   * speeder's colours carried whole on (a hello fit's `colours`); anything less drops them, and the others see
+   * the nearest colours of the hull's own palette the fit's paint carries beside them (src/vehicles/shipFit.ts
+   * `fitForWire`), which the player is told once. Nought with no server, against the relay that came before and
+   * on a line that has dropped.
+   */
+  get paintVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.paint : 0;
   }
 
   /**

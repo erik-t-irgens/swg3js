@@ -22,8 +22,10 @@
 //   { t: 'ping', c }                                        the browser's clock, to work the offset out
 //   { t: 'hello', name, species, class, planet, zone, look, held, ship }   who, where and how they look (shape,
 //                                                          height, colours, outfit), the weapons in hand
-//                                                          { r, l } by id, and the ship they fly
-//                                                          { id, fit: { components, paint, droid } } (shipWire.mjs);
+//                                                          { r, l } by id, and the ship (or painted speeder) they
+//                                                          fly { id, fit: { components, paint, colours?, droid } }
+//                                                          (shipWire.mjs: `colours` the colours carried whole,
+//                                                          `paint` the nearest of the hull's own palette);
 //                                                          sent on joining, on travel and on a change
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? | in? }   position, heading, rig state, speed, mounted, saber lit,
 //                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
@@ -172,11 +174,15 @@
 //   { t: 'story', do: 'texts', id, n, of, part }             (story 4) the journal's words the server asked for, in pieces
 //   { t: 'story', do: 'mine', ref, text }                    (story 4) a note of the player's own on a journal entry
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items }   sent the instant the socket opens, before anything is
-//                                                          said; `story` is { v, sets, tests }, the story this server
-//                                                          holds, which a browser built before it never reads; `items`
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint }   sent the instant the socket opens, before
+//                                                          anything is said; `story` is { v, sets, tests }, the story this
+//                                                          server holds, which a browser built before it never reads; `items`
 //                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
-//                                                          ITEMS_VERSION), so two of one item are two rows
+//                                                          ITEMS_VERSION), so two of one item are two rows; `paint` is 2 on a
+//                                                          server that passes a ship's or a speeder's colours carried whole
+//                                                          on (a hello `ship`'s `colours`, shipWire.mjs's PAINT_VERSION); any
+//                                                          other drops them, and the others see the nearest colour of the
+//                                                          hull's own palette the fit's `paint` carries beside them
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -275,6 +281,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { cleanAsk } from './vehicleWire.mjs';
+import { PAINT_VERSION } from './shipWire.mjs';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, cleanState } from './wire.mjs';
 import { Rooms, roomKey, roomLabel } from './rooms.mjs';
 import { WorldClock, DAY_MS, DAY_LIMITS, cleanDay } from './clock.mjs';
@@ -1697,8 +1704,9 @@ server.on('upgrade', (req, socket) => {
   // `story` says which story this server holds; a browser built before it reads nothing of it, and one
   // built for it keeps its book itself against any far end whose hail does not carry it. `v` 2 is the jobs
   // run here; the sets are the story sets read, by name and hash; `tests` is whether the test set is on.
-  // `items` says this server keeps a row per thing, so a browser built for it may hand up two of one item.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION });
+  // `items` says this server keeps a row per thing, so a browser built for it may hand up two of one item;
+  // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');

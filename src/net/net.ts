@@ -2,7 +2,7 @@
 // few times a second and brings back everyone else's, with a reconnect when the line drops.
 
 import type { Look } from '../player/look';
-import type { ShipFit } from '../vehicles/shipFit';
+import type { WireFit } from '../vehicles/shipFit.ts';
 import { sharedClock } from '../world/sharedClock.ts';
 import { SESSION, Session, type CharacterSummary, type Settlement } from './session.ts';
 import { rideFields, type PeerAboard } from './aboardMath.ts';
@@ -18,8 +18,11 @@ export interface Hello {
   look?: Look;
   /** The weapons in hand, by weapon id: right and left. */
   held?: { r?: string; l?: string };
-  /** The ship this player flies (or last flew), with its components, droid and paint (server/shipWire.mjs checks it). */
-  ship?: { id: string; fit: ShipFit };
+  /**
+   * The ship this player flies (or last flew), with its components, droid and paint (server/shipWire.mjs checks
+   * it); its colours carried whole ride beside the paint (`colours`), which `fitFromWire` lays back over it.
+   */
+  ship?: { id: string; fit: WireFit };
   /** The colour their lightsaber's blade is lit in, as hex; left out by a browser built before this. */
   saber?: number;
   /**
@@ -142,6 +145,8 @@ interface ServerWord {
   story?: unknown;
   /** How a server's hail says it keeps what characters own (2: a row per thing); a server before it says nothing. */
   items?: number;
+  /** How a server's hail says it passes a ship's paint on (2: a colour carried whole); a server before it says nothing. */
+  paint?: number;
 }
 
 /**
@@ -420,7 +425,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
