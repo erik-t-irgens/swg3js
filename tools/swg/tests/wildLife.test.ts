@@ -1040,12 +1040,15 @@ const recsOf = (x: WildLife): Rec[] => [...(x as unknown as { standing: Map<stri
 
   ok(/fromNest:/.test(world) && /fromEye:/.test(world), 'and the console says how far each body is from its nest and from the eye, so "never stood", "taken away" and "right behind you" are three different readings');
 
-  // **No height is passed to the manager**, which works one out itself that knows about whatever is
-  // built on that spot. The nest's and the camp's own ground lookup is a different thing and is
-  // allowed: they are placed by this code, while a creature is placed by the manager.
+  // **No height is passed to the manager**, which stands the creature on the terrain: outdoors its own
+  // lookup is the terrain alone and never a platform. That is right here because the spot was moved
+  // clear of the camp's own pieces first, so nothing built stands over it. The nest's and the camp's
+  // own ground lookup is a different thing and is allowed: they are placed by this code, while a
+  // creature is placed by the manager.
   const spawns = world.match(/deps\.spawn\(entry, \{[^}]*\}/g) ?? [];
   ok(spawns.length >= 1, `the one place that stands a creature was found (${spawns.length})`);
-  ok(spawns.every((s) => !/\by:/.test(s)), "no height is handed to the manager: its own answer knows what is standing on that ground and the terrain's does not");
+  ok(spawns.every((s) => !/\by:/.test(s)), "no height is handed to the manager, which stands a lair's creature on the terrain: its spot was moved clear of the camp's pieces, so nothing built stands over it");
+  ok(/off = clearOfPieces\(off\.x, off\.z, pieces\)/.test(world), 'and that spot is moved clear of the camp\'s pieces before it is stood, which is the reason the terrain is the right ground for it');
   ok(spawns.every((s) => /x: world\.x, z: world\.z, heading:/.test(s)), 'so a body is placed by its two ground numbers and its facing alone');
 
   ok(/if \(m\.dead && !m\.removed\) rec\.killed\+\+/.test(world), 'a kill is only counted while the body is still there, since disposing one marks it dead too');

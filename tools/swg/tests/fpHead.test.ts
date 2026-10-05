@@ -2,9 +2,10 @@
 // renderer's cameras, which bones and triangles are the head, the index partition a hooded robe
 // is drawn through, the rule that decides whole, split or nothing per worn item, the draw hooks,
 // the single-model hider, and the rule over the converted packs when they are on this machine.
-// Plain node over the pure module; portalRender.ts and world.ts are not importable here, but the
-// one layer test both make (markActor's skip, passesOf's actor) is the registry's isShadowOnly,
-// which case 1 calls. The cull Character.cull runs on a split mesh is headHide's cullIndex (case 4b).
+// Plain node over the pure module; world.ts is not importable here (portalRender.ts is now, and
+// torch.test.ts calls its markActor), but the one layer test both make (markActor's skip, passesOf's
+// actor) is the registry's isShadowOnly, which case 1 calls. The cull Character.cull runs on a split
+// mesh is headHide's cullIndex (case 4b).
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

@@ -34,6 +34,9 @@ import { GAIT_LIMITS, moveSpeeds, type GaitLimits } from './gait';
 import { LOD_TUNE, lodTier, type LodInput, type LodTier, type LodTune } from './lod';
 import { reachesCascades } from '../bodyCull.ts';
 import { STEP_STATS, STEP_TUNE, tuneStep, type StepTune } from './stepUp.ts';
+import { keepsSpot, PERCH_TUNE, perchesAgain, perchNear, perchSpawn, perchStep, perchSurface, perchTimedOut, tunePerch, type PerchTune } from './perch.ts';
+import type { FloorAnswer } from '../placedTiers.ts';
+import { groundUnder } from './groundProbe.ts';
 import { describeRoles, rolesFor } from './packClips';
 import type { BodyInput } from './shape';
 import type { MobileEntry } from './types';
@@ -174,6 +177,19 @@ export interface MobileManagerDeps {
    */
   cellSolid?(state: CellState | null): boolean;
   /**
+   * Whether everything that could be under a point is solid by now (`LayoutStreamer.builtAt`): asked of a
+   * perched body near the player whose probe has found nothing under it (`perch.ts`), which is let down at
+   * once on `built`, waits on `coming` with the safety net's clock running and on `far` with none. With no
+   * answer wired everything is built, and such a body is let down at once.
+   */
+  builtAt?(x: number, z: number): FloorAnswer;
+  /**
+   * Whether the world is behind a loading screen or a jump's closed tunnel just now (`World.playerWaiting`):
+   * a perched body's safety net does not count there, since tiers take as long as they take behind one.
+   * None wired, the clock always counts.
+   */
+  waiting?(): boolean;
+  /**
    * Follow a body through a building's portals, as the player is followed (`trackCell`): outside
    * until its path crosses a portal into a room, in that room until it crosses one out. Not by
    * the rooms' bounds: rooms are often larger than the hull, and a body on the street beside one
@@ -234,6 +250,11 @@ function addFight(row: Record<string, number>, tac: GroundTactics): void {
 
 /** Outside: everything, which is what the cover search's floor probe is filtered by, as a fighter's is. */
 const OUTSIDE_FILTER = groups(Group.all, Group.all);
+/**
+ * What a perched body's probe looks for (`perch.ts`): everything but the terrain, so a hit on the
+ * ground under a platform can never land a body that should be waiting for the platform.
+ */
+const PERCH_FILTER = groups(Group.all, Group.all & ~Group.terrain);
 /** What a spot's floor may be: only what stands still, never a body that walks off. */
 const staticOnly = (c: RAPIER.Collider): boolean => {
   const body = c.parent();
@@ -466,12 +487,24 @@ export class MobileManager {
     const pack = cat.packOf(entry);
     const inside = opts.inside ?? false;
     let y = at.y;
+    let perch = false;
     if (y === undefined) {
       const ground = this.deps.groundAt(at.x, this.deps.terrain.heightAt(at.x, at.z) + 3, at.z, inside);
       if (ground === null) {
         if (inside) return (this.lastNote = 'there is no floor under that spot');
         y = this.deps.terrain.heightAt(at.x, at.z);
       } else y = ground;
+    } else if (!inside) {
+      // A height handed over outdoors is a row's own (a standing person's, a server's record): never
+      // under the terrain, and over it by more than a step it stands on something raised, so it is
+      // held perched there until a probe finds what it stands on (`perch.ts`). The manager's own
+      // lookup outdoors is the terrain alone and would have stood it on the ground under the platform.
+      // One stood in the water is a swimmer and floats rather than perching. The ground is read where
+      // the world holds it and never made on the spot (`groundUnder`): a record stood a planet away is
+      // stood in a frame, and the terrain's own answer there generates a whole block to give it.
+      const placed = perchSpawn(y, groundUnder(at.x, at.z, this.deps.terrain, this.deps), this.deps.terrain.waterHeightAt(at.x, at.z));
+      y = placed.y;
+      perch = placed.perch;
     }
     const hierarchy: BodyInput['hierarchy'] = pack?.hierarchy === 'creature_base' || pack?.hierarchy === 'all_b' ? pack.hierarchy : 'other';
     // A seeded spawn rolls nothing: its heading and its size come out of the one number every browser
@@ -489,6 +522,7 @@ export class MobileManager {
       hierarchy,
       scale: opts.scale ?? (rolls ? scaleFrom(entry.size?.scale, rolls.scale) : undefined),
       overrides: opts.overrides,
+      perch,
       ...(opts.name ? { name: opts.name } : {}),
     };
     const m = new Mobile(spawn, {
@@ -1176,6 +1210,10 @@ export class MobileManager {
     this.shadowBoxes = shadows && this.deps.shadowBoxes ? this.deps.shadowBoxes() : null;
     const tune = LOD_TUNE;
     this.walled = 0;
+    this.perchCounts.held = 0;
+    this.perchCounts.far = 0;
+    // Behind a loading screen the perch's safety net does not count: the tiers take as long as they take.
+    this.perchPaused = this.deps.waiting?.() ?? false;
     for (let i = this.live.length - 1; i >= 0; i--) {
       const m = this.live[i];
       const held = this.held.get(m);
@@ -1199,10 +1237,13 @@ export class MobileManager {
         // Under the ground outside (the planet's heights came in after it was stood): back on top.
         if (m.liftToGround()) held.cellFrom.copy(m.pos);
       }
+      // Stood on something raised that may not be solid yet: one probe for it this frame (`perch.ts`).
+      if (m.perched) this.stepPerch(m, ctx, dt);
       // Whether that room has collision under it this instant, asked every frame and not on the
       // follow's quarter-second, as the fighters ask it: it is two lookups, and a quarter of a second
-      // of falling through a floor that has gone is half a metre nobody asked for.
-      m.setAirless(held.cell !== null && !(this.deps.cellSolid?.(held.cell) ?? true));
+      // of falling through a floor that has gone is half a metre nobody asked for. A perched body is
+      // held the same way, and this line writes the hold every frame, so the perch is part of it.
+      m.setAirless(m.perched || (held.cell !== null && !(this.deps.cellSolid?.(held.cell) ?? true)));
       const tier = this.tierOf(m, camera, ctx.playerPos, shadows, tune, held.tier);
       // The whole cull: a group that is not visible is in no pass at all.
       const visible = tier.visible || !!m.ragdoll;
@@ -1279,6 +1320,114 @@ export class MobileManager {
 
   /** The shadow cascades' light boxes, read once at the top of `update` for every body's tier; null with shadows off or none wired. */
   private shadowBoxes: readonly THREE.Frustum[] | null = null;
+
+  /**
+   * What the perched bodies have come to on this planet (`perch.ts`): how many are held this frame within
+   * `countWithin` of the player (`held`) and beyond it (`far`), and since the planet loaded how many were
+   * set down on what they stand on, let down because nothing was coming under them, let down because the
+   * wait ran out, and perched again where they stood when the thing under them lost its collision
+   * (`again`). Counted, never made.
+   */
+  readonly perchCounts = { held: 0, far: 0, landed: 0, fell: 0, timedOut: 0, again: 0 };
+  /** Whether the world is behind a screen this frame (`deps.waiting`), read once at the top of `update`. */
+  private perchPaused = false;
+
+  /**
+   * One frame of a perched body (`perch.ts`): one probe straight down among what stands still, the
+   * terrain left out; near the player, the streamer asked every `builtEvery` whether anything that could
+   * be under it is still to come; and the answer acted on. A driven body is not perched (its keeper's rows
+   * say where it stands, and it is decided afresh when it is this browser's again); one that has gone
+   * indoors, taken to the air or the water or fallen apart is not perched any more. Makes nothing.
+   */
+  private stepPerch(m: Mobile, ctx: MobileContext, dt: number): void {
+    if (m.isDriven) {
+      m.endPerch('driven');
+      return;
+    }
+    if (m.ragdoll || !m.canPerch) {
+      m.endPerch(null);
+      return;
+    }
+    const T = PERCH_TUNE;
+    const s = m.perchState;
+    const p = m.pos;
+    const found = this.deps.physics.topSurface(p.x, p.z, p.y + T.up, T.up + T.down, PERCH_FILTER, staticOnly);
+    // The ground under it, asked only once something is found (and never made on the spot past the
+    // physics' reach), to tell what it stands on from something buried under the terrain.
+    const ground = found !== null ? groundUnder(p.x, p.z, this.deps.terrain, this.deps) : null;
+    const hit = perchSurface(found, ground, T);
+    const near = perchNear(p.x - ctx.playerPos.x, p.z - ctx.playerPos.z, T);
+    s.asked += dt;
+    if (near && s.asked >= T.builtEvery) {
+      s.asked = 0;
+      s.built = this.deps.builtAt?.(p.x, p.z) ?? 'built';
+    }
+    const what = perchStep(s, hit, near, s.built, dt, T, this.perchPaused);
+    if (what === 'hold') {
+      if (near) this.perchCounts.held++;
+      else this.perchCounts.far++;
+      return;
+    }
+    if (what === 'land' && hit !== null) {
+      m.perchLand(hit);
+      this.perchCounts.landed++;
+      // On something raised a person keeps to its spot rather than stepping off the edge of it.
+      const post = m.post;
+      if (post && keepsSpot(post.kind, hit, ground, T)) post.kind = 'still';
+      return;
+    }
+    const timedOut = perchTimedOut(s, T);
+    m.endPerch(timedOut ? 'timed out' : 'fell');
+    if (timedOut) this.perchCounts.timedOut++;
+    else this.perchCounts.fell++;
+  }
+
+  /**
+   * A placed object out of doors has just lost its collision while the world goes on
+   * (`LayoutStreamer.onFloorGone`): the sweep dropped it as the player walked off, its tier unloaded (at a
+   * short object reach, before the people standing on it are put down), or it was picked up. Anybody of
+   * this browser's own standing within its footprint more than `lift` over the ground is perched again where
+   * they stand (`perchesAgain`), so they wait for it to come back rather than falling through to the terrain
+   * and having it built round them when the player returns; one standing on something else still solid is
+   * found by the next probe and set straight back down. Allocates nothing.
+   */
+  perchOver(x: number, z: number, footprint: number): void {
+    if (this.disposed) return;
+    const r2 = footprint * footprint;
+    for (let i = 0; i < this.live.length; i++) {
+      const m = this.live[i];
+      if (m.perched || m.isDriven || m.dead || m.removed || m.ragdoll || !m.canPerch) continue;
+      const dx = m.pos.x - x;
+      const dz = m.pos.z - z;
+      if (dx * dx + dz * dz > r2) continue;
+      if (!perchesAgain(m.pos.y, groundUnder(m.pos.x, m.pos.z, this.deps.terrain, this.deps), PERCH_TUNE)) continue;
+      m.startPerch();
+      this.perchCounts.again++;
+    }
+  }
+
+  /**
+   * For the console (`__debug.people({ perch: true })`): the perch's counts and its numbers, and the
+   * `n` bodies nearest `at` that were ever perched, each with how high it stands over the terrain now,
+   * what became of its perch, how long it waited and what the streamer last said.
+   */
+  perchReport(at: THREE.Vector3, n = 10): Record<string, unknown> {
+    const r1 = (v: number) => Number(v.toFixed(1));
+    const ever = this.live.filter((m) => m.perchOutcome !== null && !m.removed);
+    ever.sort((a, b) => a.pos.distanceToSquared(at) - b.pos.distanceToSquared(at));
+    const nearest = ever.slice(0, Math.max(0, n)).map((m) => ({
+      name: m.label,
+      id: m.entry.id,
+      at: [r1(m.pos.x), r1(m.pos.y), r1(m.pos.z)],
+      away: r1(m.pos.distanceTo(at)),
+      over: Number((m.pos.y - this.deps.terrain.heightAt(m.pos.x, m.pos.z)).toFixed(2)),
+      became: m.perchOutcome,
+      waited: r1(m.perchState.waited),
+      built: m.perchState.built,
+      post: m.post?.kind ?? null,
+    }));
+    return { ...this.perchCounts, ever: ever.length, nearest, tune: { ...PERCH_TUNE } };
+  }
 
   /**
    * How a body's own blade renderer lets its materials go before it is disposed, through the asset cache's
@@ -1521,14 +1670,16 @@ export class MobileManager {
 
   /**
    * For `__debug.mobileTune`: read, or change live, the brain's, the tiers' and the gaits' numbers,
-   * the step-up's (`step`, `stepUp.ts`) and the cache's budget; `cap` and `animRange` are this
-   * planet's settings. Returns them all, with what the step-up's probes have found since the session
-   * began and every walking body's stuck count summed.
+   * the step-up's (`step`, `stepUp.ts`), the perch's (`perch`, `perch.ts`) and the cache's budget;
+   * `cap` and `animRange` are this planet's settings. Returns them all, with what the step-up's probes
+   * have found since the session began, every walking body's stuck count summed, and what the perched
+   * bodies have come to on this planet.
    */
-  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number } & FightKnob): Record<string, unknown> {
+  tune(t?: { brain?: Partial<BrainTune>; lod?: Partial<Omit<LodTune, 'shadow'>> & { shadow?: Partial<LodTune['shadow']> }; gait?: Partial<GaitLimits>; step?: Partial<StepTune>; perch?: Partial<PerchTune>; budget?: number; concurrency?: number; failFor?: number; cap?: number; animRange?: number } & FightKnob): Record<string, unknown> {
     if (t) {
       this.tuneFight(t);
       if (t.step) tuneStep(t.step);
+      if (t.perch) tunePerch(t.perch);
       if (t.brain) Object.assign(BRAIN_TUNE, t.brain);
       if (t.lod) {
         const { shadow, ...rest } = t.lod;
@@ -1550,6 +1701,7 @@ export class MobileManager {
       lod: { ...LOD_TUNE, shadow: { ...LOD_TUNE.shadow } },
       gait: { ...GAIT_LIMITS },
       step: { ...STEP_TUNE, found: { ...STEP_STATS }, stuck },
+      perch: { ...PERCH_TUNE, counts: { ...this.perchCounts } },
       cache: { ...MOBILE_CACHE },
       cap: this.cap,
       animRange: this.animRange,

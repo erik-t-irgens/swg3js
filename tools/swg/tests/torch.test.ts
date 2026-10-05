@@ -7,10 +7,17 @@
 // the light. And at 260 candela with three's falloff, 1 / max(d^decay, 0.01), a wall at arm's length
 // took hundreds of times the sun's irradiance (2.4); capped by the distance to what it is aimed at, it
 // never takes more than `maxIrradiance`. Every number checked is ours; nothing is read from the game.
+//
+// And a third: on layer 0 alone the torch lit nothing indoors, because the portal renderer draws a
+// building's rooms through a camera that sees layers 1 and 31 and three leaves out any light whose
+// layers that camera does not see. It carries the actor layer now, as the flash pool does, set once
+// as it is made and never again.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import * as THREE from 'three';
 import { Group, Physics, RAPIER, groups } from '../../../src/core/physics.ts';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchVec } from '../../../src/player/torch.ts';
+import { ACTOR_LAYER, INTERIOR_LAYER, markActor, passesSeeing } from '../../../src/world/portalRender.ts';
 
 let passed = 0;
 const ok = (cond: boolean, what: string) => {
@@ -146,6 +153,47 @@ const offBeam = (source: TorchVec, target: TorchVec, p: TorchVec) => Math.acos(M
   ok(/torch\.position\.set\(pose\.source\.x, pose\.source\.y, pose\.source\.z\);/.test(step) && /torch\.target\.position\.set\(pose\.target\.x, pose\.target\.y, pose\.target\.z\);/.test(step), 'and the light stands and points where the pose says');
   const lights = readFileSync(new URL('../../../src/combat/bladeLights.ts', import.meta.url), 'utf8');
   ok(lights.includes('t.position.distanceTo(mid)'), "the blades' light ceiling measures the torch from where it is carried, not from the camera");
+
+  // The layers: marked once, where the light is made and put in the scene, and never in a frame.
+  ok(/this\.scene\.add\(this\.torch, this\.torch\.target\);\s*markActor\(this\.torch\);/.test(main), 'the torch is marked an actor as it is put in the scene, so the rooms pass lights with it');
+  ok((main.match(/markActor\(this\.torch\)/g) ?? []).length === 1, 'and only there: its layers are part of every room program\'s key and change once');
+  ok(!/layers/.test(step), 'the frame\'s step never touches its layers, which would rebuild every room program on a live frame');
+  const ctor = /constructor\(private readonly physics: Physics\) \{[\s\S]*?markActor\(this\.torch\);/.exec(main)?.[0] ?? '';
+  ok(ctor.length > 0 && !/\.compile(Async|All|AllAsync|Ready|Everything)?\(/.test(ctor), 'and nothing is compiled before it is marked, so no program is ever built without the spot in its key');
+}
+
+// ---------------------------------------------------------------------------------------------
+// The layers against the portal renderer's own cameras, set as `renderLayer` sets them.
+{
+  // The two places a pass's camera is given its layers: the portal renderer's draw, and the world's compile
+  // behind the loading screen. Both must see the actor layer, or the torch drops out of that pass's light
+  // set -- in the draw it lights nothing there, in the compile every room program is built without its spot
+  // and built again on the first live frame. Neither file's class can be made here (one wants a WebGL
+  // renderer, the other is the world), so their bodies are pinned, and `passCamera` below is the mirror.
+  const portal = readFileSync(new URL('../../../src/world/portalRender.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const renderLayer = /private renderLayer\(scene: THREE\.Scene, camera: THREE\.Camera, layer: number\): void \{([\s\S]*?)\n {2}\}/.exec(portal)?.[1] ?? '';
+  ok(/^\s*camera\.layers\.set\(layer\);\s*camera\.layers\.enable\(ACTOR_LAYER\);/.test(renderLayer), "the portal renderer's passes each see their own layer and the actor layer, whichever pass it is");
+  const worldSrc = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const withLayers = /private withLayers<T>\(camera: THREE\.Camera, layer: number, fn: \(\) => T\): T \{([\s\S]*?)\n {2}\}/.exec(worldSrc)?.[1] ?? '';
+  ok(/camera\.layers\.set\(layer\);\s*camera\.layers\.enable\(ACTOR_LAYER\);\s*try \{\s*return fn\(\);/.test(withLayers), "and so does the warm-up's compile camera, so every room program is built with the spot in its key behind the loading screen");
+  const mainSrc = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  ok(!/torch\.castShadow\s*=/.test(mainSrc), "the game's torch is never made to cast, so the shadow pass's light set is what it was");
+  const passCamera = (layer: number) => {
+    const c = new THREE.PerspectiveCamera();
+    c.layers.set(layer);
+    c.layers.enable(ACTOR_LAYER);
+    return c;
+  };
+  const worldCamera = passCamera(0);
+  const roomsCamera = passCamera(INTERIOR_LAYER);
+  const bare = new THREE.SpotLight(0xffffff, 1);
+  ok(bare.layers.test(worldCamera.layers) && !bare.layers.test(roomsCamera.layers), 'a spot light left on layer 0 is seen by the world pass and not by the rooms pass (the fault)');
+  ok(passesSeeing(bare.layers.mask) === 'world only', 'and the console says so');
+  const torch = new THREE.SpotLight(0xffffff, 1);
+  markActor(torch);
+  ok(torch.layers.test(worldCamera.layers) && torch.layers.test(roomsCamera.layers), 'marked an actor, both passes see it, so both light with it');
+  ok(passesSeeing(torch.layers.mask) === 'world and rooms', "and the console's answer is read off the light's own mask");
+  ok(torch.layers.isEnabled(0), 'it stays on layer 0 as well, so nothing about the world pass changes');
 }
 
 console.log(`\n${passed} checks passed`);

@@ -1,8 +1,9 @@
 // The frame's lights as the effects read them: every light that drew a pixel, split by which of the
 // portal renderer's passes saw it. The world pass (layer 0) lights with the sky's set: the
-// hemisphere, the fill, the sun through its cascades, and the torch. The interior pass (layer 1)
-// lights with the rooms' set: the lit cell's ambient, its parallel light and its lamps. The flash
-// pool is on the actor layer, so both passes see it.
+// hemisphere, the fill and the sun through its cascades. The interior pass (layer 1) lights with the
+// rooms' set: the lit cell's ambient, its parallel light and its lamps. The flash pool and the torch
+// are on the actor layer, so both passes see them; the torch is kept under `sky` all the same, which
+// is only where its record lives, not which pass it lights.
 //
 // One kept object in the game, refilled after the scene is drawn (the shadow matrices are then this
 // frame's), read by any effect that has to know how a surface was lit: the ambient occlusion takes
@@ -80,7 +81,7 @@ export interface FxSkyLights {
   /** The cascades' light (or the plain sun when there are no cascades). */
   readonly sun: FxDirectionalLight;
   readonly cascades: FxCascades;
-  /** The hand torch; luminance 0 while it is off. */
+  /** The hand torch; luminance 0 while it is off. On the actor layer, so the interior pass lights with it too. */
   readonly torch: FxSpotLight;
 }
 

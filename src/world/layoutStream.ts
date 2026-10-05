@@ -16,7 +16,7 @@ import { mirroredTransform, type EffectHandle, type ParticleEffects } from './pa
 import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces';
 import { marks } from './marks.ts';
 import { floraClearRadius, modelReach } from './floraClear.ts';
-import { boxDistance, gameX, gameZ, hostRadiusOf, hostReach, modelTier, PLACED_TIERS, PLACED_TUNE, REGION, regionCentre, regionIndex, regionRange, snapshotTier } from './placedTiers.ts';
+import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReach, modelTier, PLACED_TIERS, PLACED_TUNE, REGION, regionCentre, regionIndex, regionRange, snapshotTier, tiltSin, type FloorAnswer, type FloorAsk } from './placedTiers.ts';
 // Which room a name picks is a rule of its own, with a node test over it; this file calls it rather
 // than keeping a second copy.
 import { namedCellIndex } from './cloning.ts';
@@ -129,6 +129,12 @@ export interface PlacedObject {
   snapTier: number;
   /** Given collision whatever its size: a thing put down in play, never a snapshot's own prop. */
   solid?: boolean;
+  /**
+   * How far from its origin any part of its model can reach, however it is turned (`footprintOf`): what
+   * `builtAt` asks of it, never the snapshot's `radius`, which is a load distance. 0 with no box of its own,
+   * and 0 for a particle effect whatever its box says, since there is no model to stand on.
+   */
+  footprint: number;
   /** The object template whose client-data effects it carries, where `template` is a name of its own (a thing put down in play). */
   effectsOf?: string;
   /**
@@ -271,11 +277,24 @@ interface Region {
    * that keeps a room drawn through a door from being drawn empty (`regionRange`, step 6).
    */
   indoor: number[];
+  /**
+   * The largest footprint (`footprintOf`) of anything filed in it out of doors: past that from its box nothing
+   * in it can be under a point, so `builtAt` passes it by. Only ever raised; an upper bound is all it needs to be.
+   */
+  reach: number;
 }
 
 /** A region with nothing in it yet. */
 function newRegion(rx: number, rz: number): Region {
-  return { rx, rz, cx: regionCentre(rx), cz: regionCentre(rz), objects: TIERS.map(() => []), tiers: TIERS.map(() => null), indoor: TIERS.map(() => -1) };
+  return { rx, rz, cx: regionCentre(rx), cz: regionCentre(rz), objects: TIERS.map(() => []), tiers: TIERS.map(() => null), indoor: TIERS.map(() => -1), reach: 0 };
+}
+
+/**
+ * A region's two indices as one small integer, which a map takes as a key with nothing made: good for
+ * 4096 regions either way on each axis, a thousand kilometres, past anything the game has.
+ */
+function regionNumber(rx: number, rz: number): number {
+  return (rx + 4096) * 8192 + (rz + 4096);
 }
 
 const tmpM = new THREE.Matrix4();
@@ -348,6 +367,12 @@ export class LayoutStreamer {
   readonly buildings = new Set<Building>();
   readonly objects: PlacedObject[] = [];
   private readonly regions = new Map<string, Region>();
+  /**
+   * The same regions keyed by one small integer of their two indices (`regionNumber`), so a question
+   * asked per body four times a second (`builtAt`) finds its regions without making a string. Filled
+   * beside `regions` in the one place a region is made; a field initialiser, as `regions` is.
+   */
+  private readonly regionsByNumber = new Map<number, Region>();
   private readonly exclusionCells = new Map<string, Exclusion[]>();
   private readonly colliders = new Map<PlacedObject, R.Collider[]>();
   /**
@@ -410,6 +435,39 @@ export class LayoutStreamer {
   private largestRadius = 0;
   private lastColliderX = Number.NaN;
   private lastColliderZ = Number.NaN;
+  /**
+   * The physics' step count when a placed object's collision was last made (`Physics.steps`). A collider
+   * is invisible to every query until the world has stepped once after it was made, and the sweep runs in
+   * the world's update before the frame's step, so `builtAt` counts nothing solid until a step has followed.
+   */
+  private collidersMadeAt = -1;
+  /** Where the player stood at the last `update`, which is what the tiers load and drop by: what `builtAt` calls wanted. */
+  private updateX = Number.NaN;
+  private updateZ = Number.NaN;
+  /** The widest footprint of anything filed out of doors (capped), so `builtAt` knows how many regions to look in. */
+  private largestFootprint = 0;
+  /** The rooms' range for the `builtAt` under way, worked out once a call rather than once an object. */
+  private floorRoom = 0;
+  /**
+   * What `floorAt` asks of this streamer for `builtAt`: one object made with the streamer, whose methods
+   * make nothing, so a question asked per perched body four times a second allocates nothing.
+   */
+  private readonly floorAsk: FloorAsk<PlacedObject, Region> = {
+    region: (rx, rz) => this.regionsByNumber.get(regionNumber(rx, rz)),
+    // The sweep's own floor (`updateColliders`). A huge object is built with its tier a piece at a time and
+    // only in space, where nobody is stood, so it is left out rather than answered for piece by piece.
+    collides: (o) => !this.huge.has(o) && (o.radius >= COLLIDER_MIN_RADIUS || !!o.solid),
+    solid: (o) => this.colliders.has(o),
+    stepped: () => this.physics.steps > this.collidersMadeAt,
+    wanted: (region, o) => boxDistance(this.updateX, this.updateZ, region.cx, region.cz) <= this.rangeOf(region, o.tier, this.floorRoom) && !colliderFar(o, this.updateX, this.updateZ, 1),
+  };
+  /**
+   * Told when a placed object out of doors loses its collision while the world goes on (the sweep dropping
+   * it, its tier unloading, a pick-up), with where it stands and its footprint: whatever was standing on it
+   * would fall through the ground it leaves behind, so the mobiles hold anybody raised there (`perch.ts`)
+   * until it is solid again. Never told while the streamer is being disposed of.
+   */
+  onFloorGone: ((x: number, z: number, footprint: number) => void) | null = null;
   /** Where the last interior sweep ran, so a region loading in knows what is near. */
   private lastInteriorX = Number.NaN;
   private lastInteriorZ = Number.NaN;
@@ -581,7 +639,7 @@ export class LayoutStreamer {
       // before (step 6). Both answers are kept for the console's counts.
       const sizeTier = modelTier(o.radius, def?.bounds, !!def?.particle);
       const snapTier = snapshotTier(o.radius);
-      const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier };
+      const p: PlacedObject = { model: o.model, template: o.template, x: gx, y: o.y, z: gz, q: new THREE.Quaternion(o.q[1], -o.q[2], -o.q[3], o.q[0]), radius: o.radius, contained: !!o.contained, tier: this.filing === 'snapshot' ? snapTier : sizeTier, sizeTier, snapTier, footprint: 0 };
       // The building and the room the snapshot itself names (step 7): an index into this same list, which the
       // loop fills in the layout's own order.
       if (o.contained && typeof o.in === 'number' && typeof o.cell === 'number') {
@@ -591,6 +649,7 @@ export class LayoutStreamer {
       this.objects.push(p);
       const region = this.regionFor(gx, gz);
       region.objects[p.tier].push(p);
+      this.noteFootprint(region, p, def ?? null);
       // What this object keeps flora off: its own model's reach, never the snapshot's radius, which
       // is a load distance and on some worlds is kilometres. See `floraClear.ts` -- read as the
       // snapshot's, it left eight of the eighteen worlds with no procedural flora at all.
@@ -630,8 +689,23 @@ export class LayoutStreamer {
     if (!region) {
       region = newRegion(rx, rz);
       this.regions.set(key, region);
+      this.regionsByNumber.set(regionNumber(rx, rz), region);
     }
     return region;
+  }
+
+  /**
+   * An object just filed in a region: out of doors, its footprint raises the region's reach and the widest
+   * there is. Handed its model's entry (null for none), its footprint is measured first, from the model's own
+   * box as it is turned where it stands (`footprintOf`, `tiltSin`); a filing again hands none, since nothing
+   * about the object has changed.
+   */
+  private noteFootprint(region: Region, p: PlacedObject, def?: PackModelDef | null): void {
+    if (def !== undefined) p.footprint = def?.particle ? 0 : footprintOf(def?.bounds, tiltSin(p.q.x, p.q.z));
+    if (p.contained || !(p.footprint > 0)) return;
+    const f = Math.min(p.footprint, COLLIDER_RADIUS_CAP);
+    if (f > region.reach) region.reach = f;
+    if (f > this.largestFootprint) this.largestFootprint = f;
   }
 
   /**
@@ -771,6 +845,7 @@ export class LayoutStreamer {
       tier: this.filing === 'snapshot' ? snapTier : sizeTier,
       sizeTier,
       snapTier,
+      footprint: 0,
       ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}),
     };
     this.objects.push(placed);
@@ -795,6 +870,7 @@ export class LayoutStreamer {
     }
     const region = this.regionFor(p.x, p.z);
     region.objects[placed.tier].push(placed);
+    this.noteFootprint(region, placed, def ?? null);
     // A thing put down in a house's rooms loads whenever those rooms can be built, as the layout's own furniture does.
     if (placed.host) this.noteIndoor(placed, this.defOf(placed.host.model));
     if (p.clear && p.clear > 0) this.addExclusion({ x: p.x, z: p.z, r: p.clear });
@@ -993,6 +1069,8 @@ export class LayoutStreamer {
     if (this.disposed) return;
     const px = playerPos.x;
     const pz = playerPos.z;
+    this.updateX = px;
+    this.updateZ = pz;
     // 60 m of hysteresis between building and dropping, so this only needs to run as the
     // player moves, not every frame.
     if (Number.isNaN(this.lastInteriorX) || Math.hypot(px - this.lastInteriorX, pz - this.lastInteriorZ) > 8 || inside !== this.lastInside) {
@@ -1139,7 +1217,9 @@ export class LayoutStreamer {
     }
     for (const p of this.objects) {
       p.tier = rule === 'snapshot' ? p.snapTier : p.sizeTier;
-      this.regionFor(p.x, p.z).objects[p.tier].push(p);
+      const region = this.regionFor(p.x, p.z);
+      region.objects[p.tier].push(p);
+      this.noteFootprint(region, p);
     }
     // Each host's entry looked up once: `defOf` walks the pack's entries.
     const hostDefs = new Map<string, PackModelDef | undefined>();
@@ -1183,6 +1263,26 @@ export class LayoutStreamer {
       }
     }
     return true;
+  }
+
+  /**
+   * Whether everything that could be under a point is solid by now (`floorAt` in placedTiers.ts): what a
+   * perched body asks (`mobiles/perch.ts`) once its own probe has found nothing under its feet. `built`
+   * means nothing is coming and the body may be let down onto the terrain; `coming` that an object whose
+   * footprint holds the point is wanted now and its collision is not in yet, or not yet stepped (a collider
+   * is invisible to a query until the world has stepped once after it was made); `far` that one is there
+   * and the player stands too far off for the streamer to make it solid at all (a small object's tier at
+   * the menu's least object reach), which a body waits out with no clock running.
+   *
+   * Asked of the objects whose own footprints could reach the point, never of whole regions: a tier
+   * loading in a region the body is not standing in is nothing to wait for, and a tier the player is too
+   * far off to load may well hold the very platform the body stands on. It walks only the regions whose
+   * own reach comes to the point, makes nothing, and is asked per perched body four times a second.
+   */
+  builtAt(x: number, z: number): FloorAnswer {
+    if (this.disposed) return 'built';
+    this.floorRoom = this.roomRange();
+    return floorAt(x, z, this.largestFootprint, this.floorAsk);
   }
 
   /** Huge objects' collider pieces still to build (what the loading screen and a jump wait for). */
@@ -2022,6 +2122,8 @@ export class LayoutStreamer {
       this.colliderTemplate.set(col.handle, o.template);
     }
     this.colliders.set(o, cols);
+    // Invisible to a query until the world has stepped: `builtAt` counts nothing solid until then.
+    this.collidersMadeAt = this.physics.steps;
     this.noteBlocker(o);
   }
 
@@ -2038,6 +2140,8 @@ export class LayoutStreamer {
     }
     this.colliders.delete(o);
     this.forgetBlocker(o);
+    // Whoever was standing on it is held where they stand rather than dropped through to the terrain.
+    if (!this.disposed && cols.length && !o.contained && o.footprint > 0) this.onFloorGone?.(o.x, o.z, o.footprint);
   }
 
   /**

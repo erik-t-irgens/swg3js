@@ -85,9 +85,10 @@ const MASK_A_NAMES = ['instancing', 'instancingColor', 'instancingMorph', 'matca
 const MASK_B_NAMES = ['fog', 'useFog', 'flatShading', 'logarithmicDepth', 'reversedDepth', 'skinning', 'morphTargets', 'morphNormals', 'morphColors', 'premultipliedAlpha', 'shadowMapEnabled', 'doubleSided', 'flipSided', 'useDepthPacking', 'dithering', 'transmission', 'sheen', 'opaque', 'pointsUvs', 'decodeVideoTexture', 'decodeVideoTextureEmissive', 'alphaToCoverage', 'lightProbeGrids', 'hasPositionAttribute'];
 
 // The two light sets the game's own passes have: the world (the cascades, the fill, the flash
-// pool, a hemisphere and the torch) and a building's rooms (its parallel light and its lamps).
+// pool, a hemisphere and the torch) and a building's rooms (its parallel light, its lamps, the
+// flash pool and the torch, which carries the actor layer so that it lights rooms as well).
 const WORLD_LIGHTS: Partial<LightCounts> = { dir: 4, point: 4, spot: 1, hemi: 1, dirShadow: 3, spotShadow: 1 };
-const ROOM_LIGHTS: Partial<LightCounts> = { dir: 1, point: 12 };
+const ROOM_LIGHTS: Partial<LightCounts> = { dir: 1, point: 12, spot: 1 };
 // What a camera that sees every layer at once has: the two sets added together.
 const BOTH_LIGHTS: Partial<LightCounts> = { dir: 5, point: 12, spot: 1, hemi: 1, dirShadow: 3, spotShadow: 1 };
 
@@ -146,7 +147,7 @@ const HOOK_SOURCE = 'function wetObject(shader, renderer) { const a = "highp flo
   const shaderMaterial = readKey(makeKey({ customIds: [11, 12], lights: ROOM_LIGHTS }))!;
   ok(shaderMaterial.shaderId === 'custom', 'a shader material with no shader id reads as custom');
   ok(shaderMaterial.defines.length === 0, 'and its two ids are not mistaken for a define');
-  ok(lightSignature(shaderMaterial.lights) === '1 dir, 12 point', 'the light signature is the counts that are not nought');
+  ok(lightSignature(shaderMaterial.lights) === '1 dir, 12 point, 1 spot', 'the light signature is the counts that are not nought');
   ok(lightSignature(readKey(makeKey({ shaderId: 'sprite' }))!.lights) === 'no lights', 'a pass with no lights says so');
 }
 

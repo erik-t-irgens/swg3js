@@ -22,7 +22,7 @@ import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext, Living } from './combat/kit';
 import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
-import { PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
+import { markActor, passesSeeing, PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
 import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
 import { FURNITURE_TUNE, type FurnitureTune } from './world/furnitureHost.ts';
@@ -1430,8 +1430,15 @@ class App {
     // crosshair's point, and no brighter on what it is aimed at than TORCH_TUNE allows. F toggles it.
     // Always in the scene and visible, turned up and down: a light that comes and goes changes the
     // light count, and that recompiles every shader in the world.
+    // It carries the actor layer as the flash pool does, so the rooms pass (layers 1 and 31) lights
+    // with it as well as the world pass: three leaves out a light whose layers the camera does not
+    // see, when it draws and when it compiles, and on layer 0 alone the torch lit nothing indoors.
+    // Marked here, once, before anything has been compiled: the spot is then in every room program's
+    // key from the first loading screen on, where marking it later (or changing its layers in play)
+    // would rebuild every room program on a live frame.
     this.torch = new THREE.SpotLight(0xfff1d6, 0, TORCH_TUNE.distance, TORCH_TUNE.angle, TORCH_TUNE.penumbra, TORCH_TUNE.decay);
     this.scene.add(this.torch, this.torch.target);
+    markActor(this.torch);
     this.portals = new PortalRenderer(this.renderer);
     // The frame report (`__debug.perf()`) times each pass on the GPU through this context when asked,
     // and can put the portal renderer's matrix walk side by side with its old behaviour. (The shadow
@@ -2437,8 +2444,17 @@ class App {
        * thing from the bodies above: what the journal's People tab shows (the named people met, by the name the
        * character knows, last seen where and when, gone once it is known), and beside it the truth the tab never
        * shows -- every record's own Standing, Trust, access and life -- with what is owed and the companion's record.
+       *
+       * `{ perch: true }` answers for the bodies stood on something raised outdoors (`src/world/mobiles/perch.ts`):
+       * how many are held in the air this frame near you (`held`) and farther off (`far`), how many were `landed`
+       * on what they stand on, `fell` because nothing was coming under them, `timedOut` waiting, and were perched
+       * `again` when the thing under them lost its collision, and the ten nearest that were ever perched, each
+       * with how high it stands over the terrain now, what became of it and the streamer's last answer (`built`,
+       * `coming` or `far`). A few seconds after arriving, `held` should be 0. Its numbers move with
+       * `__debug.mobileTune({ perch })`.
        */
-      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean; story?: boolean }) => {
+      people: (opts?: { go?: boolean; near?: number; tune?: Record<string, unknown>; respawn?: boolean; where?: string; mood?: boolean; gcw?: GcwSide; restand?: boolean; story?: boolean; perch?: boolean }) => {
+        if (opts?.perch) return this.world.mobiles ? this.world.mobiles.perchReport(this.player.worldPos) : 'no world loaded';
         if (opts?.story) {
           const book = this.story.book;
           return {
@@ -2470,7 +2486,10 @@ class App {
           const p = near[0];
           // Indoors on the row's own floor, which is metres off the terrain under the building; the
           // room is entered as a teleport enters one, so the rooms and their lights come on round it.
-          const to = new THREE.Vector3(p.x, p.indoors ? p.y + 0.3 : this.world.terrain.heightAt(p.x, p.z) + 0.3, p.z);
+          // Outdoors at the row's own height too where that is over the ground, as the body is stood
+          // (`perch.ts`), so a go to somebody on a platform lands on the platform beside them.
+          const ground = this.world.terrain.heightAt(p.x, p.z);
+          const to = new THREE.Vector3(p.x, (p.indoors ? p.y : Math.max(p.y, ground)) + 0.3, p.z);
           this.player.reset(to);
           const cell = p.indoors ? this.world.enterCellAt(to) : 0;
           return { went: p, cell, note: p.indoors ? 'indoors: they stand once the building around them is built' : 'they stand on the next pass' };
@@ -6250,7 +6269,9 @@ class App {
        * the ray found something, how far off what it is aimed at is, its intensity, and the irradiance
        * that puts there (the sun gives about 2.4). Any `TORCH_TUNE` number moves live (`maxIrradiance`,
        * `ahead`, `side`, `rise`, `minAhead`, `intensity`, `distance`, `angle`, `penumbra`, `decay`), and
-       * `tune` in the answer is what to bake; `on: true` or `false` switches it as F does.
+       * `tune` in the answer is what to bake; `on: true` or `false` switches it as F does. `layers` is
+       * which of the portal renderer's passes light with it, read off the light's own layer mask: it
+       * should say 'world and rooms', or it lights nothing indoors.
        */
       torch: (opts?: { on?: boolean } & Partial<TorchTune>) => {
         if (opts) {
@@ -6272,6 +6293,7 @@ class App {
         const intensity = this.torch.intensity;
         return {
           on: this.torchOn,
+          layers: passesSeeing(this.torch.layers.mask),
           carried: this.torchFirstPerson ? 'at the eye (first person)' : 'at the head (third person)',
           source: at(p.source),
           target: at(p.target),
@@ -6963,7 +6985,7 @@ class App {
           packs: s.packs,
         };
       },
-      /** Read or change live the brain's, the tiers' and the gaits' numbers, the cache budget (`{ budget: 260e6 }`), the cap and the animation range; `{ passMatrices: 'every' }` puts the portal renderer's scene walk back to once a pass, to measure what `'once'` saves. */
+      /** Read or change live the brain's, the tiers' and the gaits' numbers, the cache budget (`{ budget: 260e6 }`), the cap and the animation range, and the perch's (`{ perch: { wait: 10, lift: 0.5 } }`, `perch.ts`), whose answer carries what the perched bodies have come to; `{ passMatrices: 'every' }` puts the portal renderer's scene walk back to once a pass, to measure what `'once'` saves. */
       mobileTune: (tune?: Parameters<import('./world/mobiles/manager').MobileManager['tune']>[0] & { passMatrices?: 'once' | 'every' }) => {
         if (tune?.passMatrices) this.portals.matrixOnce = tune.passMatrices === 'once';
         const mobiles = this.world.mobiles;
@@ -15194,7 +15216,7 @@ class App {
       f.orbitDistance = this.cam.orbitDistance;
       f.waterInView = this.world.waterBodies.inView;
       // The lights the frame was just drawn with (the shadow matrices are this frame's): the world's
-      // two sets, the flash pool on the actor layer, and the torch.
+      // two sets, and the flash pool and the torch, both on the actor layer and so lighting both passes.
       const L = this.fxLights;
       this.world.fillFxLights(L);
       const pool = this.effects.lightPool;

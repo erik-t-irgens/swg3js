@@ -32,6 +32,7 @@ import {
 } from '../../../src/core/fx/ssaoMath.ts';
 import { addPointLight, createFxLights, fillCascades, FX_MAX_CASCADES, luminanceOf, resetFxLights, setDirectional, setSpotLight } from '../../../src/core/fx/lights.ts';
 import { FX_DEFAULTS, FX_KNOBS, fxPassDef } from '../../../src/core/fxRegistry.ts';
+import { glslFunction, glslVariant, redeclared } from './glslScan.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -248,6 +249,33 @@ ok(luminanceOf(new THREE.Color(1, 1, 1), 2) === 2 && near(luminance(1, 1, 1), 1,
   ok(near(L.sky.torch.luminance, 260, 1e-6) && L.sky.torch.distance === 70 && L.sky.torch.decay === 1.6, 'the torch\'s brightness, reach and decay');
   setSpotLight(L.sky.torch, null);
   ok(L.sky.torch.luminance === 0, 'no torch: luminance 0');
+}
+
+{
+  // The torch carries the actor layer, so the rooms pass lights with it as the world pass does: the
+  // occlusion counts it as direct light in either set, after the region has chosen which, or a room
+  // the torch lights would have that light taken for ambient and darkened.
+  const src = readFileSync(new URL('../../../src/core/fx/ssao.ts', import.meta.url), 'utf8');
+  const sky = /void skyLight\([^)]*\) \{([\s\S]*?)\n {2}\}/.exec(src)?.[1] ?? '';
+  ok(sky.length > 0 && !sky.includes('uSpot'), 'the sky set no longer holds the torch');
+  const spot = /float spotDirect\(vec3 pw, vec3 nw\) \{([\s\S]*?)\n {2}\}/.exec(src)?.[1] ?? '';
+  ok(['uSpotPos', 'uSpotDir', 'uSpotCone', 'lightFalloff('].every((s) => spot.includes(s)), 'the torch is a function of its own, with its cone and its falloff');
+  const main = /void main\(\) \{([\s\S]*?)float total = indirect \+ direct;/.exec(src)?.[1] ?? '';
+  const chose = main.indexOf('else skyLight(');
+  const added = main.indexOf('direct += spotDirect(pw, nw);');
+  ok(chose >= 0 && added > chose, 'and the occlusion adds it after the region choice, whichever set lit the pixel');
+
+  // Node compiles no GLSL, so the words above say nothing of whether the program links. The fragment is
+  // scanned, in both of its variants, for the one fault a compiler refuses that nothing here would see: a
+  // name declared twice in one scope. The scanner is tried first on that very fault, planted in spotDirect.
+  const frag = /export const SSAO_GTAO_FRAG = \/\* glsl \*\/ `([\s\S]*?)`;/.exec(src.replace(/\r\n/g, '\n'))?.[1] ?? '';
+  ok(glslFunction(frag, 'spotDirect').includes('uSpotDir') && glslFunction(frag, 'main').includes('spotDirect(pw, nw)'), 'the ambient occlusion fragment is read off its own file');
+  const planted = frag.replace('float c = dot(nw, ld);', 'float c = dot(nw, ld);\n    float d = 1.0;');
+  ok(planted !== frag && redeclared(glslVariant(planted, new Set())).includes('spotDirect: d'), 'the scope scan finds a name declared twice in spotDirect when one is planted there');
+  for (const variant of [new Set<string>(), new Set(['AO_FULL'])]) {
+    const twice = redeclared(glslVariant(frag, variant));
+    ok(twice.length === 0, `no name in the fragment${variant.size ? ' at full resolution' : ' at half resolution'} is declared twice in one scope${twice.length ? `: ${twice.join(', ')}` : ''}`);
+  }
 }
 
 {

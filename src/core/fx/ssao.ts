@@ -9,9 +9,10 @@
 //
 // What gets darkened. At each surface the pass works out the lights that drew it, as luminances: the
 // sky's set outdoors (the hemisphere and the fill as ambient; the sun through its cascades, one
-// shadow tap, and the torch as direct), the rooms' set where the portal renderer's stencil says the
-// interior pass drew (the cell's ambient as ambient; its parallel light and lamps as direct), and the
-// flash lights in both. For a diffuse surface `colour x mix(1, ao, ambient / (ambient + direct))` is
+// shadow tap, as direct), the rooms' set where the portal renderer's stencil says the interior pass
+// drew (the cell's ambient as ambient; its parallel light and lamps as direct), and the flash lights
+// and the torch as direct in both, since both carry the actor layer and both passes light with them.
+// For a diffuse surface `colour x mix(1, ao, ambient / (ambient + direct))` is
 // exactly occlusion applied to the ambient term alone, so sunlit and lamp-lit surfaces keep their
 // light. A pixel brighter than any surface lit that way could be (a glow, a blade, a bolt, lava, a
 // highlight) is left alone in proportion; fog is taken out before darkening and put back after; the
@@ -204,20 +205,23 @@ export const SSAO_GTAO_FRAG = /* glsl */ `
     float s = i == 0 ? textureLod(tShadow0, sc.xyz, 0.0) : (i == 1 ? textureLod(tShadow1, sc.xyz, 0.0) : textureLod(tShadow2, sc.xyz, 0.0));
     return mix(1.0, s, uShadowParams[i].z * keep);
   }
-  // The world pass's lights at a surface, split into what occlusion takes (sky, fill) and what it does not (sun, torch).
+  // The world pass's lights at a surface, split into what occlusion takes (sky, fill) and what it does not (sun).
   void skyLight(vec3 pw, vec3 nw, float viewZ, out float indirect, out float direct) {
     indirect = mix(uHemi.y, uHemi.x, 0.5 * nw.y + 0.5) + uFill.w * max(dot(nw, uFill.xyz), 0.0);
     direct = 0.0;
     float ndl = dot(nw, uSun.xyz);
     if (uSun.w > 0.0 && ndl > 0.0) direct += uSun.w * ndl * sunShadow(pw, nw, viewZ);
-    if (uSpotDir.w > 0.0) {
-      vec3 l = uSpotPos.xyz - pw;
-      float d = length(l);
-      vec3 ld = l / max(d, 1e-4);
-      float c = dot(nw, ld);
-      float cone = smoothstep(uSpotCone.x, uSpotCone.y, dot(ld, uSpotDir.xyz));
-      if (c > 0.0 && cone > 0.0) direct += uSpotDir.w * c * cone * lightFalloff(d, uSpotPos.w, uSpotCone.z);
-    }
+  }
+  // The torch, as direct light in either set: it carries the actor layer, so the world pass and the
+  // rooms pass both draw with it, and a room it lights is not taken for ambient and darkened.
+  float spotDirect(vec3 pw, vec3 nw) {
+    if (uSpotDir.w <= 0.0) return 0.0;
+    vec3 l = uSpotPos.xyz - pw;
+    float d = length(l);
+    vec3 ld = l / max(d, 1e-4);
+    float c = dot(nw, ld);
+    float cone = smoothstep(uSpotCone.x, uSpotCone.y, dot(ld, uSpotDir.xyz));
+    return c > 0.0 && cone > 0.0 ? uSpotDir.w * c * cone * lightFalloff(d, uSpotPos.w, uSpotCone.z) : 0.0;
   }
   // The interior pass's lights: the cell's ambient, its parallel light and its lamps.
   void roomLight(vec3 pw, vec3 nw, out float indirect, out float direct) {
@@ -238,6 +242,7 @@ export const SSAO_GTAO_FRAG = /* glsl */ `
     if (uRegion == 1 && texelFetch(tRegion, fullTexel(t), 0).r > 0.5) roomLight(pw, nw, indirect, direct);
     else skyLight(pw, nw, z, indirect, direct);
     direct += pointsDirect(pw, nw, 0, uFlashCount);
+    direct += spotDirect(pw, nw);
     float total = indirect + direct;
     float fraction = total > 1e-4 ? indirect / total : 0.0;
     float ceilingEnc = clamp((log2(max(total / PI, 1e-6)) - CEILING_LOG_MIN) / CEILING_LOG_SPAN, 0.0, 1.0);

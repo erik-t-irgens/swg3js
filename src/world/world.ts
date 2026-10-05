@@ -1429,6 +1429,11 @@ export class World {
       // And whether that room has collision under it this instant, as the fighters ask below: a body
       // in a building the player has walked away from holds its height rather than falling through.
       cellSolid: (state) => this.layoutStream?.cellsSolid(state) ?? true,
+      // And, for somebody stood on something raised outdoors (`perch.ts`), whether anything that could be
+      // under them is still to come: their probe found nothing, and this says whether to wait for it.
+      builtAt: (x, z) => this.layoutStream?.builtAt(x, z) ?? 'built',
+      // Whether a loading screen or a jump's tunnel is up, behind which a perch's safety net does not count.
+      waiting: () => this.playerWaiting(),
       spawnSpot: (from, forward, distance, inside) => this.spawnSpot(from, forward, distance, inside),
       refuse: () => (this.planet?.space ? 'nothing can be stood in space' : (this.refuseMobiles?.() ?? null)),
       shadows: () => this.renderer?.shadowMap.enabled ?? false,
@@ -1677,6 +1682,9 @@ export class World {
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
       // The doors in its buildings' doorways, stood with each building's rooms (`doors.ts`).
       this.layoutStream.doorHost = this.doors;
+      // A placed object losing its collision while the world goes on: anybody standing raised on it is
+      // held where they stand until it is solid again, rather than dropped through it (`perch.ts`).
+      this.layoutStream.onFloorGone = (x, z, footprint) => this.mobiles?.perchOver(x, z, footprint);
       // The models the old rule would have loaded round the arrival start loading now, behind the screen, so
       // the sweep there builds their programs (step 6): the loading screen's `settle` asks again for where
       // the player really stands.

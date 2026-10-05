@@ -682,12 +682,14 @@ export class WildLife {
       const at = rec.at;
       world = nudgeSite(world.x, world.z, (x, z) => walk(x, z) !== false && !inPieces(x - at.x, z - at.z, pieces), spreadOf(rec.def)) ?? { x: at.x, z: at.z };
     }
-    // **No height is given on purpose.** The manager works one out itself when it is not told one
-    // (`manager.ts:279`), and its answer is the real ground: what is standing there, a floor, a
-    // platform, a rock. Handing it the raw terrain height instead puts a body under the floor of
-    // anything built on that spot -- a camp's own hut, say -- and the physics then ejects it
-    // downward, out of the world, where the manager takes it away as spent. Which looks, from
-    // outside, exactly like a lair that stood and then vanished.
+    // **No height is given, and the manager stands it on the terrain.** Outdoors the manager's own
+    // lookup (`World.groundAt`) is the terrain alone and never a platform, so this is the ground under
+    // the spot. That is right for a lair because of where the spot is: it was just moved clear of the
+    // camp's own pieces (`clearOfPieces`) and onto walkable ground, so nothing built stands over it.
+    // A raw terrain height under something built would put a body under its floor and the physics
+    // would eject it downward, out of the world, which is what the pieces' clearance is for. The
+    // standing people are the other case: their rows stand on bridges and platforms, so they hand
+    // their row's height over and the manager holds them perched until it is solid (`perch.ts`).
     const m = deps.spawn(entry, { x: world.x, z: world.z, heading: -spot.heading }, {
       seed: site.seed ^ i,
       id,

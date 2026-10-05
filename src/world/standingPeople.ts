@@ -896,10 +896,13 @@ export class StandingPeople {
         // room now, and nobody more is put down for it.
         if (makeRoom >= 0 && (!this.up.has(makeRoom) || (essential ? liveKept : liveFought) < cap)) makeRoom = -1;
       }
-      // Indoors the height is the floor's and is given, because the converter worked it out from the
-      // room's own frame and the manager's own ground lookup would find the terrain under the
-      // building instead. Outdoors no height is given, for the reason the wildlife learned.
-      const spot = inside ? { x: st.x, z: st.z, y: st.y, heading: r.heading } : { x: st.x, z: st.z, heading: r.heading };
+      // The row's height is given indoors and out. Indoors it is the floor's, which the converter worked
+      // out from the room's own frame; the manager's own ground lookup would find the terrain under the
+      // building instead. Outdoors that lookup is the terrain alone and never a platform, so a person the
+      // data put on a bridge, a balcony, a hut or an Ewok village was stood on the ground under it: the
+      // row's height is handed over as well, and the manager holds the body perched there until what it
+      // stands on is solid (`mobiles/perch.ts`), or lets it down when nothing is built there.
+      const spot = { x: st.x, z: st.z, y: st.y, heading: r.heading };
       const room = inside ? st.room : undefined;
       // Its own creature's numbers, weapons and mood go with it, since the body's are some other
       // creature's (a level-8 child for every Tusken there is).
