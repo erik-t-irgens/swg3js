@@ -12,7 +12,8 @@ import { characterRender } from './recipeWorker.ts';
 import { recordPartSources, type LookSources, type PartFile, type PartSources } from '../world/mobiles/lookShare.ts';
 import { markActor } from '../world/portalRender.ts';
 import { HeadSplitView, SHADOW_ONLY_MASK, countSet, cullIndex, headBoneFlags, headRule, headTriangleFlags, partitionHead, splitsMesh, type HeadRule, type HeadStatusRow } from './headHide.ts';
-import { fitFor, isHairKey, packPartOf, type ItemFit } from '../core/inventory.ts';
+import { fitFor, garmentMeshesOf, isHairKey, packPartOf, type ItemFit } from '../core/inventory.ts';
+import { garmentMeshesOn, pieceMeshes } from './pieceMeshes.ts';
 import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
 import { partsToLoad } from './partsShown.ts';
 
@@ -241,6 +242,11 @@ export interface Wardrobe {
     colour?: 'palette' | 'dye' | 'none';
     /** For a dyed piece, how much of what is drawn of it the dye reaches, 0..1. */
     dyeCover?: number;
+    /**
+     * The game's own colour variables its recipes read, with their palettes' colours (the converter's
+     * list; our dye is not on it): what the backpack's small swatch reads a palette index by.
+     */
+    variables?: { name: string; private: boolean; kind?: 'palette' | 'index'; default?: number; palette?: string; colors?: number[][] }[];
   }[];
 }
 
@@ -919,6 +925,27 @@ export class Character {
       if (part) part.worn = true;
     }
     this.applyOcclusion();
+  }
+
+  /**
+   * The recipe meshes a part is drawn with, by the name it is worn under (`pieceMeshes`): its loaded meshes
+   * (less the loader's `_<n>`), else the species pack's own part of that name, else the catalogue item's
+   * parts. What a thing's colours are written over (`tintValues`), which works before the part is loaded.
+   */
+  meshesOf(key: string): string[] {
+    return pieceMeshes(this.parts.get(key)?.meshes, this.manifest.parts.find((p) => p.name === key)?.name, this.wardrobe?.items.find((i) => i.id === key)?.parts);
+  }
+
+  /**
+   * Every mesh a garment is drawn with, loaded or not (`garmentMeshesOn`): every piece of the wardrobe and
+   * the species pack that is not a hairstyle, and every loaded part that is neither the body nor hair. A
+   * garment's colours are its thing's and are never kept in the look -- a shirt's not yet loaded on this
+   * rig included, or a colour of one given away would stay in the look to colour the next one that came.
+   */
+  garmentMeshes(): Set<string> {
+    const parts: { body: boolean; hair: boolean; meshes: readonly { name: string }[] }[] = [];
+    for (const p of this.parts.values()) parts.push({ body: p.body, hair: this.isHair(p), meshes: p.meshes });
+    return garmentMeshesOn(parts, garmentMeshesOf(this.wardrobe, this.packParts));
   }
 
   /** The meshes on show: the body's and every worn piece's, so colours are offered only for what is worn. */

@@ -143,11 +143,16 @@ function stableJson(value: unknown): string {
  * (`story.local`, src/story/bookClient.ts), and only while there are any: a character whose story was
  * never played alone keeps exactly the mark it had before there was a story, so bringing a browser up to
  * date never moves anybody's counter, and an evening of waypoints set offline settles this browser's way.
+ *
+ * The things' colours are in it the same way: a digest of every colour a thing carries (`t:`), by what
+ * the thing is and never by its name (a list from the server renames things, and that is no change), and
+ * only while any thing carries one -- so every mark from before colours is the mark it was, and a colour
+ * set offline counts as a change.
  */
 export function characterMark(c: {
   name?: string;
   outfit?: readonly string[];
-  items?: readonly { kind: string; id: string }[];
+  items?: readonly { kind: string; id: string; tint?: Record<string, number> | null }[];
   held?: { right?: string; left?: string };
   ships?: Record<string, unknown>;
   powers?: readonly string[];
@@ -167,6 +172,11 @@ export function characterMark(c: {
   parts.push(`b:${c.saber?.color ?? ''}`);
   const local = Math.floor(Number(c.story?.local) || 0);
   if (local > 0) parts.push(`q:${local}`);
+  const tinted = (c.items ?? [])
+    .filter((o) => o.tint && Object.keys(o.tint).length)
+    .map((o) => `${o.kind}:${o.id}=${stableJson(o.tint)}`)
+    .sort();
+  if (tinted.length) parts.push(`t:${tinted.join(',')}`);
   return toHex(sha256(utf8(parts.join('|')))).slice(0, 16);
 }
 
@@ -476,7 +486,7 @@ export class Session {
    * have changed: the counter goes up only when the record really moved, so starting the game twice is
    * not a change and an evening of trading is.
    */
-  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number } } | null, about?: CharacterAbout): void {
+  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string; tint?: Record<string, number> | null }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number } } | null, about?: CharacterAbout): void {
     if (about) this.about = { species: about.species, class: about.class, planet: about.planet, zone: about.zone ?? '' };
     // A different character with nothing said about where it is: whatever place the session is holding
     // belongs to the one played before it, and taking it for this one's would read as a journey the
@@ -553,6 +563,27 @@ export class Session {
     }
     this.charMark = mark;
     this.stat.counter = held.n;
+  }
+
+  /**
+   * The record was written again in another shape with nothing about the character changed: its garment
+   * colours moved out of the look onto the things they colour, once (`moveTints`), which puts a `t:` in
+   * the mark where there was none. Counted, that would make this browser's copy the newer one at the next
+   * claim for nothing the player did, so the new mark is adopted without the counter moving -- but only
+   * when the mark held is exactly the record's before (`was`), as `noteSettled` asks, and for any
+   * character, since this happens behind the loading screen before the session has been told which
+   * character is in play.
+   */
+  noteRewritten(was: Parameters<Session['noteCharacter']>[0], now: Parameters<Session['noteCharacter']>[0]): void {
+    if (!was || !now || was.id !== now.id) return;
+    const counters = this.counters();
+    const held = counters[now.id];
+    if (!held || held.mark !== characterMark(was)) return;
+    const mark = characterMark(now);
+    if (held.mark === mark) return;
+    held.mark = mark;
+    this.saveCounters(counters);
+    if (now.id === this.charId) this.charMark = mark;
   }
 
   /** The change counter this browser holds for a character. */
@@ -672,7 +703,7 @@ export class Session {
       // such a far end, so the line is put on the footing of the relay that came before rather than
       // left half way into a handshake that can never finish.
       this.stat.mode = 'relay';
-      this.onNote('the server’s greeting could not be read: places and poses only, nothing kept');
+      this.onNote('the serverâ€™s greeting could not be read: places and poses only, nothing kept');
       return false;
     }
     this.nonce = nonce;
@@ -791,7 +822,7 @@ export class Session {
     }
     // Said as it is: the server keeps a name, a place and a change counter, and nothing here can put
     // its copy back into this browser until there is a ledger to put back.
-    this.onNote(take === 'browser' ? 'keeping this browser’s copy of the character: it is the one that stands from now on' : 'the server’s copy of this character stands; nothing of it can be put back into this browser yet');
+    this.onNote(take === 'browser' ? 'keeping this browserâ€™s copy of the character: it is the one that stands from now on' : 'the serverâ€™s copy of this character stands; nothing of it can be put back into this browser yet');
   }
 
   /** The server's copy stands (it was newer, or the question went unanswered). */

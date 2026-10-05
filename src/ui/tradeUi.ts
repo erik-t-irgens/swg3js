@@ -77,6 +77,11 @@ export interface TradeUiDeps {
   note: (text: string) => void;
   /** An item's name and the picture the converter baked for it, as the backpack shows them. */
   look: (kind: 'wear' | 'weapon', id: string) => { name: string; icon: string | null };
+  /**
+   * The thing's own first colour as `#rrggbb` for the small swatch in its cell, or null for none: the
+   * backpack's (`itemSwatch`), read from the colours a row carries, theirs as the server shows them.
+   */
+  swatch?: (item: TradeItem) => string | null;
   /** What this character owns now, and what each one is doing (worn, or in a hand). */
   owned: () => readonly { item: TradeItem; use: 'worn' | 'right' | 'left' | null }[];
   /** Where the eye is and which way it looks, for "the player you are looking at". Filled in place. */
@@ -103,6 +108,9 @@ interface Cell {
   readonly el: HTMLButtonElement;
   readonly pic: HTMLElement;
   readonly name: HTMLElement;
+  /** The thing's own colour in the corner, and the colour it was last written with ('' hidden). */
+  readonly swatch: HTMLElement;
+  swatchColour: string;
   /**
    * Which thing the cell shows: its name, or the server's row where a pane's row names none (a server
    * from before things had names). Two of one shirt are two cells with two keys.
@@ -172,6 +180,7 @@ const CSS = `
 .trade-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(64px * var(--hud-scale, 1)), 1fr)); gap: 4px; max-height: calc(220px * var(--hud-scale, 1)); overflow-y: auto; }
 .trade-cell {
   display: block;
+  position: relative;
   background: ${PLATE};
   border: 1px solid ${RULE};
   border-radius: 3px;
@@ -188,6 +197,8 @@ const CSS = `
 .trade-cell .pic img { max-width: 100%; max-height: 100%; vertical-align: middle; }
 .trade-cell .initials { color: ${MUTED}; font-weight: 600; }
 .trade-cell .name { display: block; font-size: calc(10px * var(--hud-scale, 1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trade-cell .swatch { position: absolute; top: 3px; right: 3px; width: 10px; height: 10px; box-sizing: border-box; border: 1px solid ${EDGE}; border-radius: 2px; pointer-events: none; }
+.trade-cell .swatch.hidden { display: none; }
 .trade-empty { color: ${MUTED}; font-size: calc(11px * var(--hud-scale, 1)); padding: 6px 2px; }
 .trade-foot { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .trade-state { color: ${MUTED}; }
@@ -390,12 +401,14 @@ export class TradeUi {
       const el = document.createElement('button');
       el.type = 'button';
       el.className = 'trade-cell hidden';
-      el.innerHTML = '<span class="pic"></span><span class="name"></span>';
+      el.innerHTML = '<span class="pic"></span><span class="name"></span><span class="swatch hidden"></span>';
       this.grids[pane].appendChild(el);
       const cell: Cell = {
         el,
         pic: el.querySelector<HTMLElement>('.pic')!,
         name: el.querySelector<HTMLElement>('.name')!,
+        swatch: el.querySelector<HTMLElement>('.swatch')!,
+        swatchColour: '',
         key: '',
         item: null,
         kind: 'wear',
@@ -712,6 +725,16 @@ export class TradeUi {
           } else cell.pic.appendChild(initials(look.name));
           this.stat.writes++;
         }
+      }
+      // The thing's own colour, which can change under the same thing (theirs coloured before they put it
+      // in), so it is read each time and written only when it moved.
+      const sw = this.deps.swatch?.(row.item) ?? '';
+      const colour = sw && /^#[0-9a-f]{6}$/i.test(sw) ? sw : '';
+      if (colour !== cell.swatchColour) {
+        cell.swatchColour = colour;
+        cell.swatch.style.background = colour;
+        cell.swatch.classList.toggle('hidden', !colour);
+        this.stat.writes++;
       }
       if (row.use !== cell.use) {
         cell.use = row.use;

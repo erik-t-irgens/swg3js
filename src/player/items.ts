@@ -85,6 +85,37 @@ function clean(s: string | null | undefined): string | null {
   return t ? t : null;
 }
 
+/**
+ * The colour a thing's first colour shows, as `#rrggbb`, for the backpack's and the trade window's small
+ * swatch; null where it shows none. First is the game's own variables in the catalogue's order, then any
+ * other the thing carries (our dye). A colour carried whole (below nought) is itself; a palette index is
+ * that palette's entry where the catalogue lists the palette's colours (a weapon has none, and our dye's
+ * one entry is no colour at all, so an index on it shows nothing). These are game colours shown as what
+ * they are, the way the appearance page's own swatches are, and never the interface's.
+ */
+export function itemSwatch(kind: 'wear' | 'weapon', id: string, tint: Readonly<Record<string, number>> | null | undefined, ctx: ItemContext | null): string | null {
+  if (!tint) return null;
+  const vars = kind === 'wear' && ctx?.wardrobe ? (wardrobeIndex(ctx.wardrobe).get(id)?.variables ?? []) : [];
+  const bare = (n: string) => n.replace(/^.*\|/, '').replace(/^.*\//, '');
+  const order: string[] = [];
+  for (const v of vars) if (v.private && !order.includes(bare(v.name))) order.push(bare(v.name));
+  for (const k of Object.keys(tint)) if (!order.includes(k)) order.push(k);
+  const hex = (r: number, g: number, b: number) => `#${[r, g, b].map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('')}`;
+  for (const k of order) {
+    if (!Object.prototype.hasOwnProperty.call(tint, k)) continue;
+    const v = tint[k];
+    if (!Number.isFinite(v)) continue;
+    if (v < 0) {
+      const x = -Math.round(v) - 1;
+      return hex((x >>> 16) & 255, (x >>> 8) & 255, x & 255);
+    }
+    const def = vars.find((d) => bare(d.name) === k && d.kind !== 'index');
+    const c = def?.colors?.[Math.round(v)];
+    if (c) return hex(c[0], c[1], c[2]);
+  }
+  return null;
+}
+
 export function itemInfo(kind: 'wear' | 'weapon', id: string, ctx: ItemContext): ItemInfo {
   const key = `${kind}:${id}`;
   if (kind === 'weapon') {

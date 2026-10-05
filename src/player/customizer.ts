@@ -270,6 +270,27 @@ export class Customizer {
     return this.variableCache;
   }
 
+  /**
+   * Every variable the recipes of these meshes read, whether or not the piece is loaded or on: a thing's
+   * colours are worked out for a piece before it shows (`tintValues` in src/core/inventory.ts), and the
+   * select screen works them out before the piece is even loaded, so this never asks `active`. Each once
+   * per key, in the recipes' own order.
+   */
+  variablesOn(meshes: ReadonlySet<string>): { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index' }[] {
+    const out: { key: string; name: string; private: boolean; mesh: string; default: number; kind: 'palette' | 'index' }[] = [];
+    const seen = new Set<string>();
+    for (const r of this.recipes) {
+      if (!meshes.has(r.mesh)) continue;
+      for (const d of recipeVariableDefs(r)) {
+        const key = variableKey(d.name, d.private, r.mesh);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ key, name: d.name, private: d.private, mesh: r.mesh, default: d.default, kind: d.kind });
+      }
+    }
+    return out;
+  }
+
   /** The keys a change to `key` also sets: a shared variable reaches the private copies of the same name on every mesh (the head's own skin colour follows the owner's). */
   private linked(key: string): string[] {
     if (key.includes('|')) return [];
@@ -281,9 +302,32 @@ export class Customizer {
 
   /** Whether a private variable is a copy of a shared one (and so follows it rather than showing on its own). */
   isLinked(key: string): boolean {
-    if (!key.includes('|')) return false;
+    return !!this.followed(key);
+  }
+
+  /**
+   * The shared colour a private copy follows (`linked`, by name): the head's own skin follows the owner's,
+   * and on a Wookiee, whose fur is a shared `index_color_1`, so does every garment's `index_color_1`. Null
+   * for a shared key and for a mesh's own colour that follows nothing. Asked of what the character has on,
+   * as `linked` is, and the body is always on.
+   */
+  followed(key: string): { key: string; default: number } | null {
+    if (!key.includes('|')) return null;
     const short = key.replace(/^.*\|/, '').replace(/^.*\//, '');
-    return this.variables().some((v) => !v.private && v.name.replace(/^.*\//, '') === short);
+    for (const v of this.variables()) if (!v.private && v.name.replace(/^.*\//, '') === short) return { key: v.key, default: v.default };
+    return null;
+  }
+
+  /**
+   * The value a private copy that follows a shared colour takes now: that colour as held, under either
+   * spelling, else its default. Undefined for a key that follows nothing. What a garment's copy of the fur
+   * is drawn at when the garment goes on, so it is the fur's colour whatever order the two came in.
+   */
+  followedValue(key: string): number | undefined {
+    const s = this.followed(key);
+    if (!s) return undefined;
+    const [a, b] = Customizer.spellings(s.key);
+    return this.values.get(a) ?? this.values.get(b) ?? s.default;
   }
 
   /** The two spellings a key may be read under: as given, and with the variable's path dropped (the mesh scope kept). */

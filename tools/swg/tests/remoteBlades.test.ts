@@ -229,6 +229,75 @@ function frame(blades: InstanceType<typeof RemoteBlades>, peers: { id: number }[
   blades.dispose();
 }
 
+// ---- 4b. Two copies of one hilt, one in each hand, from the hello to the blades ----
+{
+  // The owner's call: two of the same saber are two things and can be held one in each hand, so a hello
+  // can name one hilt in both (`held: { r, l }` with the same id). The peers hang what it names with
+  // `hangHeld`, the very loop `RemotePlayers.applyHeld` runs: each hand a model of its own on its own bone,
+  // which is what the blades then draw a blade out of, one a hand.
+  const { hangHeld } = await import('../../../src/net/peerHands.ts');
+  const a = makePeer(1, 0);
+  const rightBone = new THREE.Bone();
+  rightBone.position.set(0.3, 1.2, 0);
+  const leftBone = new THREE.Bone();
+  leftBone.position.set(-0.3, 1.2, 0);
+  a.group.add(rightBone, leftBone);
+  const hilt = { ...SABER, id: 'sword_lightsaber_training' };
+  // The rack's model, as the real one hands it out: a fresh copy of the one it loaded, every time it is asked.
+  const loaded = new THREE.Group();
+  loaded.add(new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.28, 0.05), new THREE.MeshBasicMaterial()));
+  let asked = 0;
+  type Hung = { node: THREE.Object3D; def: typeof hilt; hand: 'right' | 'left' };
+  const deps = (hung: Hung[], alive = () => true) => ({
+    find: (id: string) => (id === hilt.id ? hilt : undefined),
+    bone: (role: 'rightHand' | 'leftHand') => (role === 'rightHand' ? rightBone : leftBone),
+    model: async () => {
+      asked++;
+      return loaded.clone();
+    },
+    holder: (_bone: THREE.Bone, _def: unknown, model: THREE.Object3D) => {
+      const h = new THREE.Group();
+      h.add(model);
+      return h;
+    },
+    prepare: async () => {},
+    alive,
+    hang: (w: Hung, bone: THREE.Bone) => {
+      bone.add(w.node);
+      hung.push(w);
+    },
+    warn: () => {},
+  });
+  const hung: Hung[] = [];
+  await hangHeld({ r: hilt.id, l: hilt.id }, deps(hung) as never);
+  ok(hung.length === 2 && asked === 2 && hung[0].node !== hung[1].node && hung.map((h) => h.hand).join() === 'right,left', 'the same hilt named for both hands is two models, one asked of the rack for each hand');
+  ok(hung[0].node.parent === rightBone && hung[1].node.parent === leftBone, 'each hung on its own hand bone, so neither is taken off the other');
+  const blades = new RemoteBlades();
+  a.p.hands = hung as never;
+  blades.peerAdded(a.p as never);
+  const PEERS = [a.p];
+  a.scene.updateMatrixWorld(true);
+  frame(blades, PEERS, null, 30);
+  const both = blades.holders(undefined);
+  const xs = both.map((h) => h.saber!.drawnBase.x).sort((p, q) => p - q);
+  ok(both.length === 2 && near(xs[0], -0.3, 1e-6) && near(xs[1], 0.3, 1e-6) && both.every((h) => h.saber!.glowing), 'and a peer seen holding two copies of one hilt draws two lit blades, one out of each hand');
+  a.p.saberThrown = { x: 3, y: 1.4, z: -8, spin: 0.7 };
+  frame(blades, PEERS);
+  ok(!hung[0].node.visible && hung[1].node.visible, "throwing the right's copy takes that hilt out of the hand and leaves the left's where it is");
+  a.p.saberThrown = null;
+  frame(blades, PEERS, null, 30);
+  ok(blades.holders(undefined).length === 2 && hung[0].node.visible, 'caught again, both hands hold a lit blade');
+  blades.dispose();
+  // A hand whose weapon this build's rack lacks stays empty and the other is hung all the same; and a peer who
+  // changed what they hold while a model loaded has nothing more hung for the hello that went stale.
+  const one: Hung[] = [];
+  await hangHeld({ r: 'not_on_this_rack', l: hilt.id }, deps(one) as never);
+  ok(one.length === 1 && one[0].hand === 'left', 'a weapon this rack lacks leaves its hand empty and the other hand is still hung');
+  const none: Hung[] = [];
+  await hangHeld({ r: hilt.id, l: hilt.id }, deps(none, () => false) as never);
+  ok(none.length === 0, 'and nothing is hung once the hello it was for has gone stale');
+}
+
 // ---- 5. A blade thrown ----
 {
   const a = makePeer(1, 0);

@@ -29,6 +29,11 @@ export interface BackpackCell {
   order: number;
   /** What the examine pane says about the species' rule or a missing item ("Wookiees cannot wear this"). */
   fitNote?: string;
+  /**
+   * The thing's own first colour as `#rrggbb` (`itemSwatch`), drawn as a small swatch in the picture's
+   * corner so two of one shirt in two colours can be told apart at a glance; absent for a thing with none.
+   */
+  swatch?: string | null;
 }
 
 export interface BackpackModel {
@@ -283,8 +288,10 @@ export class BackpackUi {
     const cls = ['bp-cell', c.where === 'worn' ? 'worn' : '', c.where === 'right' || c.where === 'left' ? 'held' : '', c.fit === 'block' ? 'block' : '', c.fit === 'hide' || c.unseen ? 'hide' : '', c.missing ? 'missing' : '', c.busy ? 'busy' : '', c.isNew ? 'new' : '', c.key === this.selected ? 'sel' : ''].filter(Boolean).join(' ');
     const pic = c.icon ? `<img src="${escapeHtml(c.icon)}" loading="lazy" decoding="async" alt="">` : initials(c.name).outerHTML;
     const busy = c.busy ? `<span class="bp-busy">${c.kind === 'weapon' ? 'taking up...' : 'putting on...'}</span>` : '';
+    // The thing's own colour, a game colour shown as what it is (the appearance page's swatches are too).
+    const swatch = c.swatch && /^#[0-9a-f]{6}$/i.test(c.swatch) ? `<span class="bp-swatch" style="background:${c.swatch}"></span>` : '';
     const title = `${c.name}${c.fitNote ? ` · ${c.fitNote}` : ''}`;
-    return `<button class="${cls}" data-key="${escapeHtml(c.key)}" data-name="${escapeHtml(c.name)}" title="${escapeHtml(title)}"><span class="bp-pic">${pic}${busy}</span><span class="bp-name">${label ? `<small>${label}</small><br>` : ''}${escapeHtml(c.name)}</span></button>`;
+    return `<button class="${cls}" data-key="${escapeHtml(c.key)}" data-name="${escapeHtml(c.name)}" title="${escapeHtml(title)}"><span class="bp-pic">${pic}${swatch}${busy}</span><span class="bp-name">${label ? `<small>${label}</small><br>` : ''}${escapeHtml(c.name)}</span></button>`;
   }
 
   private markSelected(): void {

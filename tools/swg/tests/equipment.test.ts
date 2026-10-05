@@ -6,7 +6,7 @@
 // a Sullustan's hair, which is no item however its id is spelt.
 // Plain node; the module is node-loadable (type-only imports apart from the rules and the item facts).
 import assert from 'node:assert/strict';
-import { Equipment, HAIR_ELSEWHERE, type EquipmentDeps } from '../../../src/player/equipment.ts';
+import { Equipment, HAIR_ELSEWHERE, ITEMS_TUNE, tuneItems, type EquipmentDeps } from '../../../src/player/equipment.ts';
 import { dressPrepared } from '../../../src/player/look.ts';
 import { ITEMS_MOST } from '../../../src/core/inventory.ts';
 import { Trade } from '../../../src/net/trade.ts';
@@ -46,22 +46,33 @@ interface World {
   prepareGate: { hold: Promise<void> | null };
 }
 
-function setup(opts: { species?: string; wardrobe?: Item[] | null; worn?: string[]; packParts?: string[]; record?: boolean; classId?: 'jedi' | 'bounty_hunter' } = {}): World {
+function setup(opts: { species?: string; wardrobe?: Item[] | null; worn?: string[]; packParts?: string[]; record?: boolean; classId?: 'jedi' | 'bounty_hunter'; recipes?: Record<string, { name: string; default: number; kind?: 'palette' | 'index' }[]> } = {}): World {
   const log: string[] = [];
   const worn = new Map<string, boolean>();
   for (const w of opts.worn ?? []) worn.set(w, true);
   const packParts = opts.packParts ?? [];
   const wardrobe = opts.wardrobe === null ? null : { species: 'human', gender: 'male', items: opts.wardrobe ?? WARDROBE };
+  // The recipes' variables by mesh, for a piece's colours: none unless a test hands some in.
+  const recipes = opts.recipes ?? {};
+  const values = new Map<string, number>();
   const character = {
-    manifest: { id: opts.species ?? 'human_male' },
+    manifest: { id: opts.species ?? 'human_male', parts: [] as unknown[] },
     wardrobeDir: 'http://x/wardrobe/human_male/',
     packParts,
     customizer: {
+      values,
       settled: () => {
         log.push('settled');
         return Promise.resolve();
       },
+      setAll: (v: Record<string, number>) => {
+        log.push(`setAll(${Object.entries(v).map(([k, x]) => `${k}=${x}`).join(',')})`);
+        for (const [k, x] of Object.entries(v)) values.set(k, x);
+      },
+      variablesOn: (meshes: Set<string>) => [...meshes].flatMap((m) => (recipes[m] ?? []).map((d) => ({ key: `${m}|${d.name}`, name: d.name, private: true, mesh: m, default: d.default, kind: d.kind ?? 'palette' }))),
     },
+    // A part's meshes are the catalogue's part names, as the converter writes them.
+    meshesOf: (key: string) => wardrobe?.items.find((i) => i.id === key)?.parts.map((p) => p.name) ?? [key],
     status: () => [{ name: 'body', worn: true, body: true }, ...[...worn].map(([name, on]) => ({ name, worn: on, body: false }))],
     catalogue: async () => {
       if (!wardrobe) throw new Error('no wardrobe for this species');
@@ -465,12 +476,12 @@ function setup(opts: { species?: string; wardrobe?: Item[] | null; worn?: string
   const rec = { id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: [], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1, items: [{ id: 'baton_stun', kind: 'weapon', got: 1, thing: 'b1' }, { id: 'baton_stun', kind: 'weapon', got: 2, thing: 'b2' }], held: {} } as Record<string, unknown>;
   w.setRecord(rec);
   await w.eq.use('weapon', 'baton_stun', undefined, 'b2');
-  ok(w.player.equipped.right?.id === 'baton_stun' && (rec.heldThings as Record<string, string>)?.baton_stun === 'b2' && w.eq.inUse('b2') === 'right', 'the copy taken up is the one in the hand');
+  ok(w.player.equipped.right?.id === 'baton_stun' && (rec.heldThings as Record<string, string>)?.right === 'b2' && w.eq.inUse('b2') === 'right', 'the copy taken up is the one in the hand, and the record says which, by hand');
   w.eq.reset();
   await w.eq.restoreHeld();
-  ok(w.eq.inUse('b2') === 'right' && (rec.heldThings as Record<string, string>)?.baton_stun === 'b2', 'and the same copy is back in the hand when the character is played again');
+  ok(w.eq.inUse('b2') === 'right' && (rec.heldThings as Record<string, string>)?.right === 'b2', 'and the same copy is back in the hand when the character is played again');
   await w.eq.use('weapon', 'baton_stun', undefined, 'b1');
-  ok(w.eq.inUse('b1') === 'right' && rec.heldThings === undefined && w.player.equipped.right?.id === 'baton_stun', 'double-clicking the other copy switches which one is held, and the oldest needs no line');
+  ok(w.eq.inUse('b1') === 'right' && rec.heldThings === undefined && w.player.equipped.right?.id === 'baton_stun' && w.player.equipped.left === null, 'double-clicking the other copy switches which one is held, and the oldest needs no line');
   await w.eq.use('weapon', 'baton_stun', undefined, 'b1');
   ok(w.player.equipped.right === null && rec.heldThings === undefined, 'and the one in hand double-clicked is put away');
 }
@@ -505,12 +516,95 @@ function setup(opts: { species?: string; wardrobe?: Item[] | null; worn?: string
   await w.eq.use('weapon', 'baton_stun', 'right', 'b2');
   await w.eq.use('weapon', 'sword_lightsaber_training', 'left', 's2');
   const chosen = rec.heldThings as Record<string, string> | undefined;
-  ok(w.player.equipped.right?.id === 'baton_stun' && w.player.equipped.left?.id === 'sword_lightsaber_training' && chosen?.baton_stun === 'b2' && chosen?.sword_lightsaber_training === 's2', 'the newer copy of each is taken up, one in each hand, and the record says which');
+  ok(w.player.equipped.right?.id === 'baton_stun' && w.player.equipped.left?.id === 'sword_lightsaber_training' && chosen?.right === 'b2' && chosen?.left === 's2', 'the newer copy of each is taken up, one in each hand, and the record says which');
   ok(w.eq.inUse('b2') === 'right' && w.eq.inUse('s2') === 'left' && w.eq.inUse('b1') === null && w.eq.inUse('s1') === null, 'and those are the copies in use');
   w.eq.reset();
   await w.eq.restoreHeld();
   ok(w.eq.inUse('b2') === 'right', 'played again, the right hand holds the same copy');
-  ok(w.eq.inUse('s2') === 'left' && (rec.heldThings as Record<string, string> | undefined)?.sword_lightsaber_training === 's2', "and so does the left, whose choice the right hand's save would have let go of");
+  ok(w.eq.inUse('s2') === 'left' && (rec.heldThings as Record<string, string> | undefined)?.left === 's2', "and so does the left, whose choice the right hand's save would have let go of");
+}
+
+// --- 17c: two copies of one hilt, one in each hand (the owner's call) ----------------------------------------------
+{
+  const w = setup();
+  const told: string[] = [];
+  (w.deps as { ledger?: unknown }).ledger = (what: string, item: { thing?: string }) => told.push(`${what}:${item.thing}`);
+  const rec = {
+    id: 'r',
+    name: 'R',
+    species: 'human_male',
+    class: 'jedi',
+    outfit: [],
+    appearance: { morphs: {}, values: {}, height: 0.5 },
+    planet: 'tatooine',
+    created: 0,
+    played: 0,
+    inv: 1,
+    named: 1,
+    items: [
+      { id: 'sword_lightsaber_training', kind: 'weapon', got: 1, thing: 's1' },
+      { id: 'sword_lightsaber_training', kind: 'weapon', got: 2, thing: 's2' },
+    ],
+    held: {},
+  } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.use('weapon', 'sword_lightsaber_training', undefined, 's1');
+  await w.eq.use('weapon', 'sword_lightsaber_training', 'left', 's2');
+  const e = w.player.equipped;
+  ok(e.right?.id === 'sword_lightsaber_training' && e.left?.id === 'sword_lightsaber_training', 'the same hilt twice: one in each hand');
+  const snap = w.eq.snapshot();
+  ok(snap.heldThing.right === 's1' && snap.heldThing.left === 's2' && w.eq.inUse('s1') === 'right' && w.eq.inUse('s2') === 'left', 'each hand holds its own thing, and both are in use (neither can be traded)');
+  ok(rec.heldThings === undefined && (rec.held as { right?: string; left?: string }).left === 'sword_lightsaber_training', 'the record keeps both hands, and needs no line for what the rule would take anyway');
+  w.eq.reset();
+  await w.eq.restoreHeld();
+  ok(w.eq.inUse('s1') === 'right' && w.eq.inUse('s2') === 'left', 'played again, both copies come back, one in each hand');
+  // The rack (no thing named) asks for the hilt in the left while the right holds one: the other copy goes.
+  w.eq.stow('left');
+  await w.eq.hold({ id: 'sword_lightsaber_training', class: 'lightsaber', slots: [['hold_r', 'hold_l']] } as never, 'left');
+  ok(w.eq.inUse('s1') === 'right' && w.eq.inUse('s2') === 'left', 'taken up from the rack for the left hand, the copy not already in the right is the one that goes in');
+  const gone = await w.eq.destroy('weapon', 'sword_lightsaber_training', 's2');
+  ok(/destroyed/.test(gone) && e.right?.id === 'sword_lightsaber_training' && e.left === null && told.join() === 'drop:s2', `destroying the left's copy empties the left hand alone (${gone})`);
+  // One copy cannot be in both hands: asked for the left, the right's own copy moves across.
+  await w.eq.use('weapon', 'sword_lightsaber_training', 'left', 's1');
+  ok(e.right === null && e.left?.id === 'sword_lightsaber_training' && w.eq.inUse('s1') === 'left', 'a single copy asked for the other hand moves across: it is never in both');
+  await w.eq.hold({ id: 'sword_lightsaber_training', class: 'lightsaber', slots: [['hold_r', 'hold_l']] } as never, 'right');
+  ok(e.left === null && e.right?.id === 'sword_lightsaber_training', 'and asked back for the right from the rack, with no second copy, it moves back');
+}
+
+// --- 17d: a list from the server takes one of two copies held: that hand lets go, the other keeps its own ------------
+{
+  const w = setup();
+  const rec = {
+    id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: [], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1,
+    items: [
+      { id: 'sword_lightsaber_training', kind: 'weapon', got: 1, thing: 's1' },
+      { id: 'sword_lightsaber_training', kind: 'weapon', got: 2, thing: 's2' },
+    ],
+    held: {},
+  } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.use('weapon', 'sword_lightsaber_training', undefined, 's1');
+  await w.eq.use('weapon', 'sword_lightsaber_training', 'left', 's2');
+  await w.eq.reconcile([{ id: 'sword_lightsaber_training', kind: 'weapon', got: 1, thing: 's1' }]);
+  ok(w.player.equipped.right?.id === 'sword_lightsaber_training' && w.player.equipped.left === null && w.eq.inUse('s1') === 'right', 'the copy that went leaves its hand empty and the other stays in its own');
+}
+
+// --- 17e: one hilt saved in both hands with one copy left: the right takes it back, the left stays empty -------------
+{
+  // The second of two copies went while the character was away (traded from another browser, a server's
+  // list). The record still names the hilt in both hands; taking the one copy left into the left as well
+  // would move it out of the right, so the character would come back holding it in the wrong hand.
+  const w = setup();
+  const rec = {
+    id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: [], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1,
+    items: [{ id: 'sword_lightsaber_training', kind: 'weapon', got: 1, thing: 's1' }],
+    held: { right: 'sword_lightsaber_training', left: 'sword_lightsaber_training' },
+  } as Record<string, unknown>;
+  w.setRecord(rec);
+  w.eq.reset();
+  await w.eq.restoreHeld();
+  ok(w.player.equipped.right?.id === 'sword_lightsaber_training' && w.player.equipped.left === null && w.eq.inUse('s1') === 'right', 'the one copy left comes back to the right hand, and the left, whose copy went, stays empty');
+  ok((rec.held as { right?: string; left?: string }).left === undefined && (rec.held as { right?: string }).right === 'sword_lightsaber_training', 'and the record lets the empty hand go');
 }
 
 // --- 18: a reward that arrives while an older list waits its turn stays in the backpack -----------------------------
@@ -558,6 +652,199 @@ function setup(opts: { species?: string; wardrobe?: Item[] | null; worn?: string
   ok(w.eq.giveAnother('wear', 'hat_s04') === '' && (rec.items as unknown[]).length === ITEMS_MOST, 'one short of it, another goes in');
   const refused = w.eq.giveAnother('wear', 'hat_s04');
   ok(refused === `a character carries ${ITEMS_MOST} things` && (rec.items as unknown[]).length === ITEMS_MOST, `and at it, another is refused in words and nothing goes in (${refused})`);
+}
+
+// --- 20: a thing's colours: drawn before it shows, switched with the copy, set, saved and told once ---------------
+{
+  const was = { ...ITEMS_TUNE };
+  tuneItems({ tintSettleMs: 15 });
+  const SHIRT = [{ name: '/private/index_color_1', default: 11 }, { name: '/private/index_color_dye', default: 0 }];
+  const w = setup({ recipes: { shirt_s03: SHIRT } });
+  const sent: { thing: string; tint: Record<string, number> | null; at: number }[] = [];
+  let live = true;
+  const deps = w.deps as { noteTint?: unknown; tintsLive?: unknown; now?: unknown };
+  deps.noteTint = (thing: string, tint: Record<string, number> | null, at: number) => {
+    sent.push({ thing, tint, at });
+    return true;
+  };
+  deps.tintsLive = () => live;
+  deps.now = () => 1234;
+  const rec = { id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: [], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1, tints: 1, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'a1', tint: { index_color_1: 5 }, tintAt: 10 }, { id: 'shirt_s03', kind: 'wear', got: 2, thing: 'a2' }] } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.use('wear', 'shirt_s03', undefined, 'a1');
+  const order = w.log.filter((l) => l !== 'persist');
+  ok(order.join(' ') === 'loadPiece(shirt_s03) setAll(shirt_s03|/private/index_color_1=5) settled prepare(shirt_s03_mesh) putOn([shirt_s03],[])', `the copy put on is drawn in its own colour before the settle the piece waits on to show (${order.join(' ')})`);
+  w.log.length = 0;
+  await w.eq.use('wear', 'shirt_s03', undefined, 'a2');
+  ok(w.log.includes('setAll(shirt_s03|/private/index_color_1=11)') && !w.log.some((l) => l.startsWith('loadPiece(') || l.startsWith('putOn(')), `switching to the other copy, which has no colour, draws the piece back in the game's own and takes nothing off (${w.log.filter((l) => l.startsWith('setAll')).join(' ')})`);
+  w.log.length = 0;
+  await w.eq.use('wear', 'shirt_s03', undefined, 'a1');
+  ok(w.log.includes('setAll(shirt_s03|/private/index_color_1=5)'), 'and switching back draws it in the first copy\'s colour again');
+  w.log.length = 0;
+  ok(w.eq.setTint('a1', { index_color_1: 7 }) === '', 'a colour set on the copy worn is taken');
+  const a1 = (rec.items as { thing: string; tint?: Record<string, number>; tintAt?: number }[]).find((o) => o.thing === 'a1')!;
+  ok(a1.tint?.index_color_1 === 7 && a1.tintAt === 1234 && w.log.includes('persist'), 'saved on the thing at once, stamped with the clock the server hands out');
+  ok(w.log.includes('setAll(shirt_s03|/private/index_color_1=7)'), 'and drawn on the piece, since it is the copy worn');
+  w.eq.setTint('a1', { index_color_1: 8 });
+  w.eq.setTint('a1', { index_color_dye: -100 });
+  ok(sent.length === 0, 'nothing goes to the server while the colour is still moving');
+  await new Promise((r) => setTimeout(r, 60));
+  ok(sent.length === 1 && sent[0].thing === 'a1' && JSON.stringify(sent[0].tint) === JSON.stringify({ index_color_1: 8, index_color_dye: -100 }) && sent[0].at === 1234, `once it has been still a moment, one word says the colours as they stand (${JSON.stringify(sent)})`);
+  w.log.length = 0;
+  w.eq.setTint('a2', { index_color_1: 3 });
+  ok(!w.log.some((l) => l.startsWith('setAll(')), 'the copy not worn is coloured without the piece on the body changing');
+  w.eq.setTint('a1', { index_color_1: null, index_color_dye: null });
+  ok(a1.tint === undefined && a1.tintAt === 1234 && w.log.includes('setAll(shirt_s03|/private/index_color_1=11,shirt_s03|/private/index_color_dye=0)'), 'and every colour taken off puts the piece back to the game\'s own, the moment it is taken off still stamped');
+  ok(w.eq.setTint('nope', { index_color_1: 1 }) === 'not owned', 'a thing not owned is refused in words');
+  await new Promise((r) => setTimeout(r, 60));
+  ok(sent.length === 3 && sent.some((s) => s.thing === 'a2') && sent.some((s) => s.thing === 'a1' && s.tint === null), `each thing changed is told once, a colour taken off as none (${sent.length} words)`);
+  live = false;
+  w.eq.setTint('a2', { index_color_1: 4 });
+  await new Promise((r) => setTimeout(r, 60));
+  ok(sent.length === 3 && (w.eq.tintReport().waiting.length === 0), 'with no server to keep colours nothing is sent and nothing is left waiting: the next list carries it');
+  const report = w.eq.tintReport();
+  ok(report.tinted.some((t) => t.thing === 'a2' && t.inUse === null) && report.worn.shirt_s03 === 'a1' && report.marked === 1, 'the console sees the coloured things, the copy worn and the mark');
+  tuneItems(was);
+}
+
+// --- 21: a list from the server: newest wins, a colour kept here goes back up, the piece worn follows -------------
+{
+  const was = { ...ITEMS_TUNE };
+  tuneItems({ tintSettleMs: 10 });
+  const w = setup({ recipes: { shirt_s03: [{ name: '/private/index_color_1', default: 11 }] }, worn: ['shirt_s03'] });
+  const sent: { thing: string; tint: Record<string, number> | null; at: number }[] = [];
+  const deps = w.deps as { noteTint?: unknown; tintsLive?: unknown };
+  deps.noteTint = (thing: string, tint: Record<string, number> | null, at: number) => {
+    sent.push({ thing, tint, at });
+    return true;
+  };
+  deps.tintsLive = () => true;
+  const rec = { id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: ['shirt_s03'], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1, tints: 1, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'x', tint: { index_color_1: 4 }, tintAt: 500 }] } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.itemContext();
+  // Set offline at 500; the server holds one from 400.
+  await w.eq.reconcile([{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'x', tint: { index_color_1: 2 }, tintAt: 400 }]);
+  await new Promise((r) => setTimeout(r, 40));
+  ok(sent.length === 1 && sent[0].thing === 'x' && sent[0].tint?.index_color_1 === 4 && sent[0].at === 500, 'a colour set while no server answered, newer than the server\'s, is kept and sent up after the list');
+  // Somebody else's browser coloured it since, at 600: the server's wins and nothing goes back.
+  w.log.length = 0;
+  await w.eq.reconcile([{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'x', tint: { index_color_1: 9 }, tintAt: 600 }]);
+  await new Promise((r) => setTimeout(r, 40));
+  const x = (rec.items as { thing: string; tint?: Record<string, number> }[])[0];
+  ok(x.tint?.index_color_1 === 9 && sent.length === 1, 'an older one here is replaced by the server\'s, and nothing is said back');
+  ok(w.log.includes('setAll(shirt_s03|/private/index_color_1=9)'), 'and the piece on the body is drawn in it');
+  tuneItems(was);
+}
+
+// --- 22: a saved record's garment colours move onto its things, once, and the look is drawn from them ---------------
+{
+  const w = setup({ recipes: { shirt_s03: [{ name: '/private/index_color_1', default: 11 }, { name: '/private/index_color_2', default: 3 }] }, worn: ['shirt_s03'] });
+  const rewrites: { was: { items?: { tint?: unknown }[] }; now: { items?: { tint?: unknown }[] } }[] = [];
+  (w.deps as { rewritten?: unknown }).rewritten = (was: never, now: never) => rewrites.push({ was, now });
+  // A jacket coloured long ago and since given away: its colour must not wait in the look for the next jacket.
+  const values = { 'shirt_s03|/private/index_color_1': 33, 'hum_m_head_l0|/private/index_color_2': 6, index_color_skin: 2, 'hair|index_color_1': 4, 'jacket_s02|/private/index_color_1': 7 };
+  const rec = { id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: ['shirt_s03'], appearance: { morphs: {}, values: { ...values }, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 't1' }] } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.load(rec as never);
+  const t1 = (rec.items as { tint?: Record<string, number> }[])[0];
+  ok(rec.tints === 1 && t1.tint?.index_color_1 === 33, 'loaded once, the shirt\'s colour is the thing\'s own and the record is marked');
+  const look = (rec.appearance as { values: Record<string, number> }).values;
+  ok(!('shirt_s03|/private/index_color_1' in look) && look.index_color_skin === 2 && look['hair|index_color_1'] === 4 && look['hum_m_head_l0|/private/index_color_2'] === 6, 'and it left the look, which keeps the body\'s and the hair\'s');
+  ok(!('jacket_s02|/private/index_color_1' in look), 'and so did the colour of a jacket no longer owned, which a jacket given later would otherwise have come out in');
+  ok(rewrites.length === 1 && !rewrites[0].was.items?.[0]?.tint && !!rewrites[0].now.items?.[0]?.tint, 'the session is told the record was only written again, with the record as it was');
+  const drawn = await w.eq.tintLook(rec as never, w.deps.character() as never);
+  ok(JSON.stringify(drawn) === JSON.stringify({ 'shirt_s03|/private/index_color_1': 33 }), `the record's look is drawn with the thing's colour laid over it, and nothing for what stays the game's own (${JSON.stringify(drawn)})`);
+  w.log.length = 0;
+  await w.eq.load(rec as never);
+  ok(rewrites.length === 1 && !w.log.includes('persist'), 'a second load moves nothing and saves nothing');
+}
+
+// --- 22b: a piece given and put on in one step goes on in the game's own colours, not the last copy's ----------------
+{
+  // The give tab's wear gives the thing only once the piece is on, so while it goes on no copy is owned. A
+  // copy coloured and destroyed earlier this session left its colour on the meshes, which the new one, with
+  // no colour of its own, must not come out in.
+  const w = setup({ recipes: { hat_s04: [{ name: '/private/index_color_1', default: 11 }] } });
+  const rec = { id: 'r', name: 'R', species: 'human_male', class: 'jedi', outfit: [], appearance: { morphs: {}, values: {}, height: 0.5 }, planet: 'tatooine', created: 0, played: 0, inv: 1, named: 1, tints: 1, items: [{ id: 'hat_s04', kind: 'wear', got: 1, thing: 'h1', tint: { index_color_1: 5 } }] } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.use('wear', 'hat_s04', undefined, 'h1');
+  ok(w.log.includes('setAll(hat_s04|/private/index_color_1=5)'), 'the dyed hat goes on in its colour');
+  await w.eq.destroy('wear', 'hat_s04', 'h1');
+  w.log.length = 0;
+  await w.eq.wear('hat_s04', { give: true, force: true });
+  const given = (rec.items as { id: string; tint?: unknown }[]).filter((o) => o.id === 'hat_s04');
+  ok(given.length === 1 && !given[0].tint && w.log.includes('setAll(hat_s04|/private/index_color_1=11)'), `given and put on in one step, the new hat, which has no colour, goes on in the game's own (${w.log.filter((l) => l.startsWith('setAll')).join(' ') || 'nothing set'})`);
+  const set = w.log.indexOf('setAll(hat_s04|/private/index_color_1=11)');
+  ok(set >= 0 && set < w.log.indexOf('settled'), 'and before the settle the piece waits on to show');
+}
+
+// --- 23: a Wookiee: a garment's copy of the fur colour follows the fur, never the thing -----------------------------
+{
+  // The game's own customizer and two recipes the shape of the Wookiee pack's: the body reads the fur as a shared
+  // `index_color_1`, and the shirt reads a private `index_color_1` of its own -- which the customizer links to the
+  // fur by name, hides on the appearance page, and sets whenever the fur is set. A thing's colours must agree with
+  // that rule on every path, or the shirt changes colour depending on which path drew it last.
+  const { Customizer } = await import('../../../src/player/customizer.ts');
+  const PAL = 'palette/test.pal';
+  const fill = { effect: null, passes: [{ alphaBlend: false, blendOp: 0, blendSrc: 0, blendDst: 0, alphaTest: false, alphaRefTag: null, alphaFunc: 0, writeMask: 15, tfactorTag: 'TFAC', stages: [{ colorOp: 2, colorArgs: [[0, 0, 0], [0, 0, 0], [5, 0, 0]], alphaOp: 2, alphaArgs: [[0, 0, 0], [0, 0, 0], [5, 0, 0]], result: 0, textureTag: 'NONE', coordSetTag: 'NONE' }] }], textures: {}, addresses: {}, coordSets: {}, tfactors: {}, alphaRefs: {}, choices: [], palettes: [] };
+  const recipe = (mesh: string, material: string, variables: { name: string; private: boolean; default: number }[]) => ({
+    mesh,
+    material,
+    kind: 'render',
+    baseTag: 'MAIN',
+    shader: null,
+    slots: [{ tag: 'MAIN', file: `${mesh}.trt`, blueprint: { width: 4, height: 4, camera: 4, shaders: [fill], textures: [], vertexBuffers: [[[0, 0, 0xffffffff, 0, 0], [4, 0, 0xffffffff, 1, 0], [4, 4, 0xffffffff, 1, 1], [0, 4, 0xffffffff, 0, 1]]], uvSets: [1], indexBuffers: [], commands: [{ kind: 'draw', shader: 0, primitives: [{ kind: 'fan', vb: 0 }] }], prepare: [{ kind: 'palette', shader: 0, tag: 'TFAC', palette: PAL, variable: 0 }], variables: variables.map((v) => ({ ...v, kind: 'palette', palette: PAL })) } }],
+  });
+  const BODY = recipe('wke_m_body_l0', 'shader/wke_body.sht', [{ name: 'index_color_1', private: false, default: 0 }]);
+  const SHIRT = recipe('shirt_s03', 'shader/shirt.sht', [
+    { name: '/private/index_color_1', private: true, default: 2 },
+    { name: '/private/index_color_dye', private: true, default: 0 },
+  ]);
+  const realFetch = globalThis.fetch;
+  (globalThis as unknown as { fetch: unknown }).fetch = async (url: string) =>
+    url === 'test://wookiee/customize.json' ? new Response(JSON.stringify({ images: 'customize/', recipes: [BODY, SHIRT], palettes: { [PAL]: [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]] } }), { headers: { 'content-type': 'application/json' } }) : new Response('', { status: 404 });
+  const THREE = await import('three');
+  const cz = new Customizer();
+  const mats: Record<string, InstanceType<typeof THREE.MeshStandardMaterial>> = { 'shader/wke_body.sht': new THREE.MeshStandardMaterial(), 'shader/shirt.sht': new THREE.MeshStandardMaterial() };
+  cz.materialsFor = (name: string) => (mats[name] ? [mats[name]] : []);
+  ok(await cz.addSource('test://wookiee/'), "the Wookiee-shaped recipes join the game's own customizer");
+  (globalThis as unknown as { fetch: unknown }).fetch = realFetch;
+  const COPY = 'shirt_s03|/private/index_color_1';
+  const DYE = 'shirt_s03|/private/index_color_dye';
+  ok(cz.isLinked(COPY) && cz.followed(COPY)?.key === 'index_color_1' && !cz.isLinked(DYE), "the shirt's index_color_1 follows the fur, and its dye is its own");
+
+  const w = setup({ worn: ['shirt_s03'], species: 'wookiee_male' });
+  (w.deps.character() as { customizer: unknown }).customizer = cz;
+  const rec = { id: 'r', name: 'Chewie', species: 'wookiee_male', class: 'jedi', outfit: ['shirt_s03'], appearance: { morphs: {}, values: { index_color_1: 1 }, height: 0.5 }, planet: 'kashyyyk', created: 0, played: 0, inv: 1, named: 1, tints: 1, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 't1' }] } as Record<string, unknown>;
+  w.setRecord(rec);
+  await w.eq.itemContext();
+  // The fur set as play sets it: the customizer's link carries it onto the shirt's copy.
+  cz.setAll({ index_color_1: 1 });
+  await cz.settled();
+  ok(cz.followedValue(COPY) === 1 && cz.values.get(COPY) === 1, "the fur set, the shirt's copy of it follows");
+  // A list from the server, a species switch or play drawing the body from its things: the shirt has no colour
+  // of its own, which must put its own colours back and leave the fur's copy on the fur.
+  w.eq.colourWorn();
+  ok(cz.values.get(COPY) === 1, `drawn from a thing with no colour, the shirt keeps the fur's colour rather than going to its own default (${cz.values.get(COPY)})`);
+  // The fur changes, then the shirt is dyed: the copy follows the fur still, and the dye is the thing's.
+  cz.setAll({ index_color_1: 0 });
+  ok(w.eq.setTint('t1', { index_color_dye: -6 }) === '' && cz.values.get(COPY) === 0 && cz.values.get(DYE) === -6, `dyed, the shirt's dye is the thing's and its copy of the fur is still the fur's (${cz.values.get(COPY)}, ${cz.values.get(DYE)})`);
+  // A shirt that came from a human carries an index_color_1 of its own: on a Wookiee the fur still wins, and the
+  // thing keeps it for whoever wears it next.
+  w.eq.setTint('t1', { index_color_1: 2 });
+  const t1 = (rec.items as { thing: string; tint?: Record<string, number> }[])[0];
+  ok(cz.values.get(COPY) === 0 && t1.tint?.index_color_1 === 2, "a colour the thing carries under that name is kept on the thing and not drawn over the fur's");
+  // The select screen works the record out from its look, not from what the rig holds now (the last character's).
+  cz.setAll({ index_color_1: 2 });
+  const drawn = await w.eq.tintLook(rec as never, w.deps.character() as never);
+  ok(drawn[COPY] === 1 && drawn[DYE] === -6, `worked out for the select screen, the shirt's copy takes the fur this record's look gives, and the dye is the thing's (${JSON.stringify(drawn)})`);
+  // And a saved look's copy of the fur is the body's: moved onto no thing, and out of the look.
+  const old = { id: 'o', name: 'Old', species: 'wookiee_male', class: 'jedi', outfit: ['shirt_s03'], appearance: { morphs: {}, values: { index_color_1: 1, [COPY]: 1, [DYE]: -9 }, height: 0.5 }, planet: 'kashyyyk', created: 0, played: 0, inv: 1, named: 1, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'o1' }] } as Record<string, unknown>;
+  w.setRecord(old);
+  await w.eq.load(old as never);
+  const o1 = (old.items as { tint?: Record<string, number> }[])[0];
+  const kept = (old.appearance as { values: Record<string, number> }).values;
+  ok(JSON.stringify(o1.tint) === JSON.stringify({ index_color_dye: -9 }) && !(COPY in kept) && !(DYE in kept) && kept.index_color_1 === 1, `moved onto its things, the shirt's dye is the thing's and its copy of the fur left the look with nowhere to go (${JSON.stringify(o1.tint)}; ${Object.keys(kept).join(', ')})`);
 }
 
 console.log(`${checks} checks passed`);

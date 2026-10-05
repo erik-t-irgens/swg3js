@@ -3,8 +3,9 @@
 // character into owned items, the starting kit, the species' verdict with the species packs' own
 // pieces, the words for slots, and a repeated id in a wardrobe. Plain node, no game files needed.
 import assert from 'node:assert/strict';
-import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, migrateInventory, mintThing, normalizeOwned, occupancy, packPartOf, pairOwned, partToItemId, planHold, pruneThings, resolveKit, slotWords, speciesWords, thingOf, wornThingOf, type Fit, type HeldRef, type OwnedItem } from '../../../src/core/inventory.ts';
-import { itemInfo, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
+import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, garmentMeshesOf, heldThingsOf, lookWithoutGarments, migrateInventory, mintThing, moveTints, normalizeOwned, occupancy, outfitTints, packPartOf, pairOwned, partToItemId, pickedTint, planHold, pruneHeld, pruneThings, resolveKit, sameTint, slotWords, speciesWords, thingOf, tintFromValues, tintValues, wornThingOf, type Fit, type HeldRef, type OwnedItem, type TintVariable } from '../../../src/core/inventory.ts';
+import { itemInfo, itemSwatch, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
+import { characterMark } from '../../../src/net/session.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -302,8 +303,9 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
       { id: 'pistol', kind: 'weapon', got: 4, thing: 'p2' },
       { id: 'hat', kind: 'wear', got: 5, thing: 'h1' },
     ] as OwnedItem[],
-    heldThings: { pistol: 'p2' },
-  } as { items: OwnedItem[]; named?: 1; heldThings?: Record<string, string> };
+    held: { right: 'pistol' },
+    heldThings: { right: 'p2' },
+  } as { items: OwnedItem[]; named?: 1; held?: { right?: string; left?: string }; heldThings?: { right?: string; left?: string } };
   collapseOwned(rec);
   ok(rec.named === 1, 'the record is marked, so the collapse runs once');
   ok(same(rec.items.map((o) => o.thing), ['s1', 'p2', 'h1']), `one of each is kept, and of a held weapon the copy in the hand (${rec.items.map((o) => o.thing).join(',')})`);
@@ -359,6 +361,306 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
   const plain = pairOwned(had.slice(0, 3), [{ id: 'shirt', kind: 'wear', got: 5 }, { id: 'hat', kind: 'wear', got: 30 }], () => `m${minted++}`);
   ok(plain.items.map((o) => o.thing).join(',') === 'w-local-1,h-same' && minted === 0, 'a server from before names keeps the names already here, the oldest shirt with its one row');
   ok(plain.gone.length === 1 && plain.gone[0].thing === 'w-local-2', 'and a second shirt it never held is not one it holds');
+}
+
+// ---------------------------------------------------------------- a colour is a thing's, and a hand holds a thing
+//
+// A garment's colour moved off the look and onto the thing it colours, by bare variable name, so a shirt
+// keeps it when it is taken off, traded or worn by another gender; putting on a copy writes every variable
+// the piece reads, its own colour or the recipe's default. And two copies of one hilt are two things, held
+// one in each hand.
+
+{
+  // The shirt's two meshes as the customizer lists them: the full spelling of each key, the defaults the
+  // recipes carry, a shared skin variable on the same mesh (the body's, never a thing's) and a texture choice.
+  const defs = (g: 'm' | 'f'): TintVariable[] => [
+    { key: `shirt_${g}_l0|/private/index_color_1`, name: '/private/index_color_1', private: true, default: 11, kind: 'palette' },
+    { key: `shirt_${g}_l0|/private/index_color_2`, name: '/private/index_color_2', private: true, default: 4, kind: 'palette' },
+    { key: `shirt_${g}_l0|/private/index_texture_1`, name: '/private/index_texture_1', private: true, default: 0, kind: 'index' },
+    { key: '/shared_owner/index_color_skin', name: '/shared_owner/index_color_skin', private: false, default: 2, kind: 'palette' },
+    { key: `cuff_${g}_l0|/private/index_color_1`, name: '/private/index_color_1', private: true, default: 11, kind: 'palette' },
+  ];
+  const v = tintValues({ index_color_1: 30 }, defs('m'));
+  ok(v['shirt_m_l0|/private/index_color_1'] === 30 && v['cuff_m_l0|/private/index_color_1'] === 30, 'a thing\'s colour reaches every mesh of the piece that reads it');
+  ok(v['shirt_m_l0|/private/index_color_2'] === 4 && v['shirt_m_l0|/private/index_texture_1'] === 0, 'and every variable it does not set is written at the recipe\'s default, so an undyed copy really puts the piece back');
+  ok(!('/shared_owner/index_color_skin' in v), 'a shared variable is the body\'s and never a thing\'s');
+  ok(Object.keys(tintValues(undefined, defs('m'))).length === 4 && Object.values(tintValues(null, defs('m'))).join() === '11,4,0,11', 'a thing with no colour at all writes the defaults, every one of them');
+  ok(tintValues({ index_texture_1: -5000 }, defs('m'))['shirt_m_l0|/private/index_texture_1'] === 0, 'a colour carried whole never lands on a texture choice');
+  ok(tintValues({ index_color_2: -1 }, defs('m'))['shirt_m_l0|/private/index_color_2'] === -1, 'while a palette takes it as itself');
+  // The same shirt worn by a woman: other meshes, the same bare names, the same colour.
+  const female = tintValues({ index_color_1: 30, index_color_2: 7 }, defs('f'));
+  ok(female['shirt_f_l0|/private/index_color_1'] === 30 && female['shirt_f_l0|/private/index_color_2'] === 7, 'a tint kept by bare name colours the other gender\'s meshes the same, so a shirt traded between them keeps its colour');
+}
+
+{
+  // A piece's colours read back as a tint: the full spelling wins over the short, the first mesh over a later one.
+  const values = { 'shirt_m_l0|index_color_1': 3, 'shirt_m_l0|/private/index_color_1': 9, 'cuff_m_l0|/private/index_color_1': 12, 'cuff_m_l0|/private/index_color_dye': -200, 'hum_m_head_l0|/private/index_color_2': 5, index_color_skin: 1 };
+  const t = tintFromValues(values, ['shirt_m_l0', 'cuff_m_l0']);
+  ok(same(t, { index_color_1: 9, index_color_dye: -200 }), `the values held under a piece's meshes are its tint by bare name, the full spelling first (${JSON.stringify(t)})`);
+  ok(tintFromValues(values, ['boots_m_l0']) === undefined, 'a piece with nothing held has no tint');
+  ok(sameTint(undefined, null) && sameTint({ a: 1 }, { a: 1 }) && !sameTint({ a: 1 }, { a: 2 }) && !sameTint({ a: 1 }, null), 'two colour sets alike: none and null are one answer');
+}
+
+{
+  // The one move of a record's garment colours onto its things. Two shirts, the second worn; a hat with
+  // nothing coloured; the body's own colours and the hair's, which stay in the look.
+  const rec = {
+    appearance: {
+      morphs: {},
+      height: 0.5,
+      values: {
+        index_color_skin: 4,
+        'hum_m_head_l0|/private/index_color_2': 6,
+        'hair_human_male_s01|/private/index_color_1': 2,
+        'hair|index_color_1': 2,
+        'shirt_s03_m_l0|/private/index_color_1': 33,
+        'shirt_s03_m_l0|/private/index_color_dye': -1000,
+        'jacket_s02_m_l0|/private/index_color_1': 7,
+      } as Record<string, number>,
+    },
+    items: [
+      { id: 'shirt_s03', kind: 'wear', got: 1, thing: 's1' },
+      { id: 'shirt_s03', kind: 'wear', got: 2, thing: 's2' },
+      { id: 'hat_s04', kind: 'wear', got: 3, thing: 'h1' },
+      { id: 'pistol', kind: 'weapon', got: 4, thing: 'p1' },
+    ] as OwnedItem[],
+    wornThings: { shirt_s03: 's2' },
+  } as { appearance: { morphs: Record<string, number>; height: number; values: Record<string, number> }; items: OwnedItem[]; wornThings: Record<string, string>; tints?: 1 };
+  const meshes: Record<string, string[]> = { shirt_s03: ['shirt_s03_m_l0'], hat_s04: ['hat_s04_m_l0'] };
+  const shirtDefs: TintVariable[] = [
+    { key: 'shirt_s03_m_l0|/private/index_color_1', name: '/private/index_color_1', private: true, default: 11 },
+    { key: 'shirt_s03_m_l0|/private/index_color_dye', name: '/private/index_color_dye', private: true, default: 0 },
+  ];
+  const before = Object.fromEntries(shirtDefs.map((d) => [d.key, rec.appearance.values[d.key] ?? d.default]));
+  const moved = moveTints(rec, (id) => meshes[id] ?? []);
+  ok(moved === 1 && rec.tints === 1, `one thing took a colour and the record is marked (${moved})`);
+  ok(same(thingOf(rec.items, 's2')?.tint, { index_color_1: 33, index_color_dye: -1000 }) && !thingOf(rec.items, 's1')?.tint, 'the colours went onto the copy worn, by bare name, and the other copy has none');
+  const after = tintValues(thingOf(rec.items, 's2')?.tint, shirtDefs);
+  ok(same(after, before), `and drawn from the thing the shirt is exactly the colour it was (${JSON.stringify(after)})`);
+  ok(same(Object.keys(rec.appearance.values).sort(), ['hair_human_male_s01|/private/index_color_1', 'hair|index_color_1', 'hum_m_head_l0|/private/index_color_2', 'index_color_skin', 'jacket_s02_m_l0|/private/index_color_1']), 'exactly the owned piece\'s keys left the look: the body\'s, the hair\'s, and a piece not owned stay');
+  const again = moveTints(rec, () => ['jacket_s02_m_l0']);
+  ok(again === 0 && 'jacket_s02_m_l0|/private/index_color_1' in rec.appearance.values, 'a record already moved is left alone');
+  // An old record with only one copy, never chosen: the oldest takes it.
+  const lone = { appearance: { values: { 'shirt_s03_m_l0|index_color_1': 5 } as Record<string, number> }, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'a' }] as OwnedItem[] } as { appearance: { values: Record<string, number> }; items: OwnedItem[]; tints?: 1 };
+  moveTints(lone, () => ['shirt_s03_m_l0']);
+  ok(thingOf(lone.items, 'a')?.tint?.index_color_1 === 5 && Object.keys(lone.appearance.values).length === 0, 'a lone copy takes its colour, short spelling and all');
+  // A colour the thing already carries is kept over the look's, and the look's other names are added.
+  const both = { appearance: { values: { 'shirt_s03_m_l0|/private/index_color_1': 5, 'shirt_s03_m_l0|/private/index_color_dye': -77 } as Record<string, number> }, items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 'a', tint: { index_color_1: 9 } }] as OwnedItem[] } as { appearance: { values: Record<string, number> }; items: OwnedItem[]; tints?: 1 };
+  moveTints(both, () => ['shirt_s03_m_l0']);
+  ok(same(thingOf(both.items, 'a')?.tint, { index_color_1: 9, index_color_dye: -77 }), `a colour the thing already carries wins over the look's, and the look's other colours join it (${JSON.stringify(thingOf(both.items, 'a')?.tint)})`);
+}
+
+{
+  // A Wookiee's record: the fur is the body's shared `index_color_1`, and the shirt's own `index_color_1` is a
+  // copy of it (the customizer's link by name), so it is the body's and never the thing's. And the old look
+  // held the colours of a jacket long since given away, which must not wait there for the next jacket.
+  const rec = {
+    appearance: {
+      values: {
+        index_color_1: 5,
+        'wke_m_body_l0|/private/index_color_2': 1,
+        'hair|index_color_1': 3,
+        'shirt_s03_m_l0|/private/index_color_1': 5,
+        'shirt_s03_m_l0|/private/index_color_dye': -300,
+        'jacket_s02_m_l0|/private/index_color_2': 8,
+        'jacket_s02_m_l0|/private/index_color_dye': -9,
+      } as Record<string, number>,
+    },
+    items: [{ id: 'shirt_s03', kind: 'wear', got: 1, thing: 's1' }] as OwnedItem[],
+  } as { appearance: { values: Record<string, number> }; items: OwnedItem[]; tints?: 1 };
+  const follows = (k: string) => k.endsWith('|/private/index_color_1');
+  const garments = new Set(['shirt_s03_m_l0', 'jacket_s02_m_l0', 'pants_s01_m_l0']);
+  moveTints(rec, () => ['shirt_s03_m_l0'], { follows, garment: (m) => garments.has(m) });
+  ok(same(thingOf(rec.items, 's1')?.tint, { index_color_dye: -300 }), `the shirt's own colour goes on the thing, and its copy of the fur does not (${JSON.stringify(thingOf(rec.items, 's1')?.tint)})`);
+  ok(same(Object.keys(rec.appearance.values).sort(), ['hair|index_color_1', 'index_color_1', 'wke_m_body_l0|/private/index_color_2']), `and every garment's key leaves the look, the copy of the fur and a jacket not owned among them, while the body's and the hair's stay (${Object.keys(rec.appearance.values).join(', ')})`);
+  // Drawn, the copy of the fur takes the fur, never the thing's colour and never its own default.
+  const defs: TintVariable[] = [
+    { key: 'shirt_s03_m_l0|/private/index_color_1', name: '/private/index_color_1', private: true, default: 11, kind: 'palette' },
+    { key: 'shirt_s03_m_l0|/private/index_color_dye', name: '/private/index_color_dye', private: true, default: 0, kind: 'palette' },
+  ];
+  const drawn = tintValues({ index_color_1: 2, index_color_dye: -300 }, defs, (k) => (follows(k) ? 5 : undefined));
+  ok(drawn['shirt_s03_m_l0|/private/index_color_1'] === 5 && drawn['shirt_s03_m_l0|/private/index_color_dye'] === -300, 'drawn, a copy of a body colour is at the body\'s colour whatever the thing carries under that name, and the rest is the thing\'s');
+  ok(tintValues(undefined, defs, () => undefined)['shirt_s03_m_l0|/private/index_color_1'] === 11, 'and with nothing followed it is the piece\'s own, as before');
+  ok(same(tintFromValues({ 'shirt_s03_m_l0|/private/index_color_1': 5, 'shirt_s03_m_l0|/private/index_color_dye': 4 }, ['shirt_s03_m_l0'], follows), { index_color_dye: 4 }), 'read back as a tint, a copy of a body colour is passed over');
+}
+
+{
+  // The look a record keeps, the garments' meshes, the creator's colours onto its things, and a pick's default.
+  const values = { index_color_skin: 2, 'hum_m_head_l0|/private/index_color_2': 6, 'hair|index_color_1': 1, 'hair_human_male_s01|/private/index_color_1': 1, 'shirt_s03_m_l0|/private/index_color_1': 4, 'robe_s32_m_l0|/private/index_color_dye': -5 };
+  const garments = garmentMeshesOf(
+    {
+      items: [
+        { id: 'robe_s32', kind: 'wearables', parts: [{ name: 'robe_s32_m_l0' }] },
+        { id: 'hair_human_male_s01', kind: 'hair', parts: [{ name: 'hair_human_male_s01' }] },
+        { id: 'sul_hair_s01_m', kind: 'wearables', parts: [{ name: 'sul_hair_s01_m' }] },
+      ],
+    },
+    ['shirt_s03_m_l0'],
+  );
+  ok(garments.has('robe_s32_m_l0') && garments.has('shirt_s03_m_l0') && !garments.has('hair_human_male_s01') && !garments.has('sul_hair_s01_m'), 'a garment\'s meshes are the wardrobe\'s and the pack\'s own pieces, never a hairstyle\'s however its id is spelt');
+  const kept = lookWithoutGarments(values, garments);
+  ok(same(Object.keys(kept).sort(), ['hair_human_male_s01|/private/index_color_1', 'hair|index_color_1', 'hum_m_head_l0|/private/index_color_2', 'index_color_skin']), `a record's look keeps the body's and the hair's and none of a garment's, loaded or not (${Object.keys(kept).join(', ')})`);
+  ok('shirt_s03_m_l0|/private/index_color_1' in values, 'and the values handed in are not touched');
+  // The creator: a shirt and a robe worn, the shirt's copy of a body colour left out, the hair never an item.
+  const items = [
+    { id: 'shirt_s03', kind: 'wear', got: 1, thing: 's1' },
+    { id: 'robe_s32', kind: 'wear', got: 2, thing: 'r1' },
+  ] as OwnedItem[];
+  const made = outfitTints(items, ['shirt_s03_m_l0', 'robe_s32', 'hair_human_male_s01'], { ...values, 'shirt_s03_m_l0|/private/index_color_2': 3 }, (p) => (p === 'shirt_s03_m_l0' ? 'shirt_s03' : p === 'robe_s32' ? 'robe_s32' : null), (p) => [p === 'robe_s32' ? 'robe_s32_m_l0' : p], 777, (k) => k.endsWith('index_color_1'));
+  ok(made === 2 && same(thingOf(items, 's1')?.tint, { index_color_2: 3 }) && thingOf(items, 's1')?.tintAt === 777 && same(thingOf(items, 'r1')?.tint, { index_color_dye: -5 }), `the creator's colours go on the new character's things, stamped, a copy of a body colour left on the body (${JSON.stringify(items)})`);
+  // A pick on a piece whose two meshes rest at different defaults (a dress's bodice and skirt).
+  ok(pickedTint(245, [245, 44]) === 245 && pickedTint(44, [245, 44]) === 44, 'a value that is one mesh\'s default and not the other\'s is the thing\'s own colour');
+  ok(pickedTint(11, [11, 11]) === null && pickedTint(3, [11]) === 3, 'and only the default of every mesh is no colour at all');
+}
+
+{
+  // Which recipe meshes a worn part is drawn with, and which are a garment's, as the character asks them.
+  const { pieceMeshes, garmentMeshesOn } = await import('../../../src/player/pieceMeshes.ts');
+  ok(same(pieceMeshes([{ name: 'robe_s32_m_l0_1' }, { name: 'robe_s32_m_l0_2' }, { name: 'belt_m_l0' }], 'robe_s32_m_l0', [{ name: 'x' }]), ['robe_s32_m_l0', 'belt_m_l0']), 'a loaded part is its recipe meshes, the loader\'s `_<n>` taken off, each once');
+  ok(same(pieceMeshes(null, 'shirt_s03_m_l0', [{ name: 'shirt_s03_m_l0' }]), ['shirt_s03_m_l0']) && same(pieceMeshes(undefined, null, [{ name: 'a_m_l0' }, { name: 'b_m_l0' }]), ['a_m_l0', 'b_m_l0']) && pieceMeshes(null, null, null).length === 0, 'not loaded, it is the pack\'s own part, else the catalogue item\'s parts, else nothing');
+  const on = garmentMeshesOn(
+    [
+      { body: true, hair: false, meshes: [{ name: 'hum_m_body_l0' }] },
+      { body: false, hair: true, meshes: [{ name: 'hair_human_male_s01' }] },
+      { body: false, hair: false, meshes: [{ name: 'jacket_s02_m_l0_1' }] },
+    ],
+    new Set(['robe_s32_m_l0']),
+  );
+  ok(on.has('jacket_s02_m_l0') && on.has('jacket_s02_m_l0_1') && on.has('robe_s32_m_l0') && !on.has('hum_m_body_l0') && !on.has('hair_human_male_s01'), 'the garments on a character are its loaded pieces under both spellings and every garment it could put on, never the body or the hair');
+}
+
+{
+  // The character's mark: unchanged for a character with no colour anywhere, a change for a colour set,
+  // and blind to the names of things, which a server's list may change.
+  const base = { name: 'Han', outfit: ['shirt_s03'], items: [{ kind: 'wear', id: 'shirt_s03', thing: 'a' }], held: {} };
+  const plain = characterMark(base);
+  ok(plain === characterMark({ ...base, items: [{ kind: 'wear', id: 'shirt_s03' }] }) && plain === characterMark({ ...base, items: [{ kind: 'wear', id: 'shirt_s03', tint: null }] }), 'with no colour on any thing the mark is the one it always was');
+  const dyed = characterMark({ ...base, items: [{ kind: 'wear', id: 'shirt_s03', tint: { index_color_1: 3 } }] });
+  ok(dyed !== plain, 'a colour on a thing is a change of the character');
+  ok(dyed === characterMark({ ...base, items: [{ kind: 'wear', id: 'shirt_s03', thing: 'renamed', tint: { index_color_1: 3 } }] }), 'and the thing\'s name is no part of it');
+  ok(dyed !== characterMark({ ...base, items: [{ kind: 'wear', id: 'shirt_s03', tint: { index_color_1: 4 } }] }), 'while another colour is another mark');
+}
+
+{
+  // Newest wins both ways: what this browser kept over the server's goes back up.
+  const local = [
+    { id: 'shirt', kind: 'wear', got: 1, thing: 'n', tint: { index_color_1: 9 }, tintAt: 500 },
+    { id: 'shirt', kind: 'wear', got: 2, thing: 'o', tint: { index_color_1: 2 }, tintAt: 100 },
+    { id: 'hat', kind: 'wear', got: 3, thing: 'm', tint: { index_color_1: 6 } },
+    { id: 'boots', kind: 'wear', got: 4, thing: 'c', tintAt: 700 },
+    { id: 'belt', kind: 'wear', got: 5, thing: 'e', tint: { index_color_1: 1 }, tintAt: 300 },
+  ] as OwnedItem[];
+  const server = [
+    { id: 'shirt', kind: 'wear' as const, got: 1, thing: 'n', tint: { index_color_1: 1 }, tintAt: 400 },
+    { id: 'shirt', kind: 'wear' as const, got: 2, thing: 'o', tint: { index_color_1: 5 }, tintAt: 200 },
+    { id: 'hat', kind: 'wear' as const, got: 3, thing: 'm' },
+    { id: 'boots', kind: 'wear' as const, got: 4, thing: 'c', tint: { index_color_1: 8 }, tintAt: 600 },
+    { id: 'belt', kind: 'wear' as const, got: 5, thing: 'e', tint: { index_color_1: 1 }, tintAt: 200 },
+  ];
+  const r = pairOwned(local, server);
+  ok(r.items.find((o) => o.thing === 'n')?.tint?.index_color_1 === 9 && r.items.find((o) => o.thing === 'o')?.tint?.index_color_1 === 5, 'a colour set here later than the server\'s stays; one set earlier is replaced by the server\'s');
+  ok(same([...r.resend].sort(), ['c', 'm', 'n']), `and what is kept over the server's and differs from it goes back up: the newer colour, one the server never had, one taken off since (${r.resend.join(',')})`);
+  ok(r.items.find((o) => o.thing === 'c')?.tint === undefined && r.items.find((o) => o.thing === 'c')?.tintAt === 700, 'a colour taken off here after the server\'s stays off');
+  ok(!r.resend.includes('e'), 'and the same colour on both sides is not said again');
+}
+
+{
+  // Two copies of one hilt: two things, one in each hand. One copy still cannot be in both.
+  const a1: HeldRef = { id: 'saber', cls: 'lightsaber', slots: HOLD_BOTH, thing: 'a1' };
+  const a2: HeldRef = { id: 'saber', cls: 'lightsaber', slots: HOLD_BOTH, thing: 'a2' };
+  let p = planHold({ right: a1, left: null }, a2, 'left');
+  ok(p.hand === 'left' && p.stow.length === 0, 'the second copy of a hilt goes in the left hand beside the first');
+  p = planHold({ right: a1, left: null }, a1, 'left');
+  ok(p.hand === 'left' && same(p.stow, ['right']), 'the very same copy asked for the left moves across and empties the right');
+  p = planHold({ right: null, left: a2 }, a1, 'right');
+  ok(p.hand === 'right' && p.stow.length === 0, 'and the right takes the first beside a second in the left');
+  const nameless: HeldRef = { id: 'saber', cls: 'lightsaber', slots: HOLD_BOTH };
+  p = planHold({ right: nameless, left: null }, a2, 'left');
+  ok(same(p.stow, ['right']), 'a weapon in hand nobody owns is still told by its id');
+  const gun1: HeldRef = { id: 'pistol', cls: 'pistol', slots: HOLD_R, thing: 'g1' };
+  const gun2: HeldRef = { id: 'pistol', cls: 'pistol', slots: HOLD_R, thing: 'g2' };
+  p = planHold({ right: gun1, left: null }, gun2, 'left');
+  ok(p.hand === 'right' && same(p.stow, ['right']), 'a second pistol has no off hand to go to: it takes the right');
+
+  const items = [
+    { id: 'saber', kind: 'weapon', got: 1, thing: 'a1' },
+    { id: 'saber', kind: 'weapon', got: 2, thing: 'a2' },
+    { id: 'saber', kind: 'weapon', got: 3, thing: 'a3' },
+    { id: 'baton', kind: 'weapon', got: 4, thing: 'b1' },
+  ] as OwnedItem[];
+  const both = { right: 'saber', left: 'saber' };
+  ok(same(heldThingsOf(items, both, null), { right: 'a1', left: 'a2' }), 'both hands holding one hilt, with no choice: the oldest in the right and the next in the left');
+  ok(same(heldThingsOf(items, both, { left: 'a1' }), { right: 'a2', left: 'a1' }), 'a choice for the left alone: the right takes the oldest the left does not hold');
+  ok(same(heldThingsOf(items, both, { right: 'a3', left: 'a3' }), { right: 'a3', left: 'a1' }), 'one thing named for both hands is the right\'s');
+  ok(same(heldThingsOf(items.slice(0, 1), both, null), { right: 'a1', left: null }), 'one copy held twice over leaves the left with none');
+  ok(same(heldThingsOf(items, { right: 'baton' }, { saber: 'a2' } as never), { right: 'b1', left: null }), 'a choice map of the shape before (catalogue id to thing) names no hand');
+  ok(pruneHeld({ right: 'a1', left: 'a2' }, items, both) === undefined, 'the rule\'s own answer needs no line in the record');
+  ok(same(pruneHeld({ right: 'a3' }, items, both), { right: 'a3' }), 'a choice the rule would not make is kept');
+  ok(same(pruneHeld({ right: 'a1', left: 'a3' }, items, both), { left: 'a3' }) && pruneHeld({ left: 'a3' }, items, { right: 'saber' }) === undefined, 'and only for a hand that holds it');
+  ok(pruneHeld({ right: 'gone' }, items, both) === undefined, 'a thing no longer owned is let go of');
+}
+
+{
+  // The backpack's swatch: a colour carried whole as itself, an index by the catalogue's palette, our dye's
+  // index as no colour at all.
+  const wardrobe = { species: 'human', gender: 'male', items: [{ id: 'shirt', kind: 'wearables', gender: 'm', template: 't', parts: [], variables: [{ name: 'index_color_1', private: true, kind: 'palette' as const, colors: [[10, 20, 30], [200, 100, 50]] }, { name: 'index_texture_1', private: true, kind: 'index' as const }] }] };
+  const ctx = { wardrobe, wardrobeDir: '', weapons: null, species: 'human_male', packParts: [] } as unknown as ItemContext;
+  ok(itemSwatch('wear', 'shirt', { index_color_1: 1 }, ctx) === '#c86432', 'an index is its palette\'s colour');
+  ok(itemSwatch('wear', 'shirt', { index_color_dye: -(0x123456 + 1) }, ctx) === '#123456', 'a colour carried whole is itself');
+  ok(itemSwatch('wear', 'shirt', { index_color_dye: 0 }, ctx) === null && itemSwatch('wear', 'shirt', { index_texture_1: 1 }, ctx) === null, 'our dye undyed and a texture choice show nothing');
+  ok(itemSwatch('wear', 'shirt', { index_color_dye: -1, index_color_1: 0 }, ctx) === '#0a141e', 'the game\'s own colour comes first');
+  ok(itemSwatch('weapon', 'saber', { index_color_1: 1 }, ctx) === null && itemSwatch('wear', 'shirt', undefined, ctx) === null, 'a weapon and a thing with no colour show none');
+}
+
+// The converted wardrobes, when they are here: a tint by bare name colours the same piece the same way on
+// the other gender's meshes, which is what lets a shirt traded between a man and a woman keep its colour.
+{
+  const { existsSync, readFileSync } = await import('node:fs');
+  const { Customizer } = await import('../../../src/player/customizer.ts');
+  const root = new URL('../../../assets-private/wardrobe/', import.meta.url);
+  const at = (f: string) => new URL(`${f}/`, root);
+  if (!existsSync(new URL('wardrobe.json', at('human_male'))) || !existsSync(new URL('wardrobe.json', at('human_female')))) {
+    console.log('     the human wardrobes are not converted here: the gender check over real pieces was skipped');
+  } else {
+    // The game's own customizer, fed each wardrobe's own customize.json through a stand-in for `fetch`, so the
+    // variables a piece is coloured by are the ones `Customizer.variablesOn` lists in play, keys and all.
+    const realFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: unknown }).fetch = async (url: string) => {
+      const m = /^test:\/\/wardrobe\/([a-z_]+)\/customize\.json$/.exec(url);
+      return m ? new Response(readFileSync(new URL('customize.json', at(m[1]))), { headers: { 'content-type': 'application/json' } }) : new Response('', { status: 404 });
+    };
+    type Pack = { w: { items: { id: string; kind: string; parts: { name: string }[] }[] }; cz: InstanceType<typeof Customizer> };
+    const load = async (f: string): Promise<Pack> => {
+      const cz = new Customizer();
+      ok(await cz.addSource(`test://wardrobe/${f}/`), `the ${f} wardrobe's recipes join a customizer as they do in play`);
+      return { w: JSON.parse(readFileSync(new URL('wardrobe.json', at(f)), 'utf8')), cz };
+    };
+    const male = await load('human_male');
+    const female = await load('human_female');
+    (globalThis as unknown as { fetch: unknown }).fetch = realFetch;
+    const defsOf = (p: Pack, item: { parts: { name: string }[] }): TintVariable[] => p.cz.variablesOn(new Set(item.parts.map((x) => x.name)));
+    {
+      // `variablesOn` keys a mesh's own colour exactly as the values the customizer holds and a render reads.
+      const shirt = male.w.items.find((i) => i.id === 'shirt_s03') ?? male.w.items.find((i) => i.parts.length && i.kind !== 'hair')!;
+      const vars = defsOf(male, shirt);
+      ok(vars.length > 0 && vars.every((d) => !d.private || d.key === `${(d as { mesh?: string }).mesh}|${d.name}`) && new Set(vars.map((d) => d.key)).size === vars.length, `a piece's variables are listed once a key, a private one under its mesh (${shirt.id}: ${vars.map((d) => d.key).join(', ')})`);
+    }
+    const her = new Map(female.w.items.map((i) => [i.id, i]));
+    let both = 0;
+    let kept = 0;
+    for (const it of male.w.items) {
+      const f = her.get(it.id);
+      if (it.kind === 'hair' || !f || !it.parts.length || !f.parts.length) continue;
+      both++;
+      // A colour for every variable the piece reads on him, read back off her meshes.
+      const tint: Record<string, number> = {};
+      for (const d of defsOf(male, it)) if (d.private) tint[d.name.replace(/^.*\//, '')] = d.kind === 'index' ? 0 : -(0x334455 + 1);
+      const onHer = tintValues(tint, defsOf(female, f));
+      const back = tintFromValues(onHer, f.parts.map((x) => x.name)) ?? {};
+      if (Object.keys(tint).every((k) => back[k] === tint[k])) kept++;
+    }
+    ok(both > 1000 && kept / both >= 0.99, `a colour on every variable of a piece he wears is the same piece's colour on her, by bare name (${kept} of ${both} pieces in both wardrobes)`);
+  }
 }
 
 console.log(`${checks} checks passed`);

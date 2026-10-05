@@ -311,9 +311,12 @@ const look = (values: Record<string, number>) => ({ morphs: {}, values, height: 
   ok(/import \{[^}]*\bputBackLook\b[^}]*\} from '\.\/player\/look/.test(main), 'the game takes putBackLook from look.ts, where this test runs it');
   ok(/this\.queueHello\(\)/.test(method('private saveAppearance(): void {')), 'a colour or a slider changed sends a hello (saveAppearance queues one)');
   const hello = method('private helloNow(): Hello {');
-  ok(/lookKeep\(\s*rig\.wornMeshes\(\)\s*\)/.test(hello) && /packLook\(\s*c\.appearance,\s*c\.outfit \?\? \[\],\s*keep\s*\)/.test(hello), 'the hello carries only the shared colours and those of what is worn');
+  ok(/lookKeep\(\s*rig\.wornMeshes\(\)\s*\)/.test(hello) && /packLook\(\s*drawn,\s*c\.outfit \?\? \[\],\s*keep\s*\)/.test(hello), 'the hello carries only the shared colours and those of what is worn');
+  // A garment's colour is its thing's and no longer in the record's look, so what goes out is read off
+  // the live character, which already carries every thing's colour.
+  ok(/values:\s*rig\.variableValues\(\)/.test(hello), "and those colours are read off the character as it is drawn, not the record's look");
   const figure = main.slice(main.indexOf('this.select.loadFigure ='), main.indexOf('this.select.weaponName ='));
-  ok(/putBackLook\(character, c\.appearance\);\s*this\.applyAppearance\(character, c\.appearance\)/.test(figure), "the select screen puts the rig back before this record's look goes on");
+  ok(/const look = await this\.recordLook\(c, character\);[\s\S]*putBackLook\(character, look\);\s*this\.applyAppearance\(character, look\)/.test(figure), "the select screen puts the rig back before this record's look goes on, its things' colours laid over it");
   const creator = method('private async openCreator(): Promise<void> {');
   ok(/putBackLook\(character, legacy\);\s*this\.applyAppearance\(character, legacy\)/.test(creator), 'and so does the creator, which reuses the last figure\'s rig when the species is the same');
 }

@@ -417,6 +417,9 @@ b { color: var(--accent); font-weight: 600; }
 .bp-cell.missing { opacity: 0.45; filter: grayscale(1); }
 .bp-cell.busy .bp-pic img, .bp-cell.busy .bp-initials { opacity: 0.35; }
 .bp-busy { position: absolute; inset: auto 0 2px 0; font-size: 9px; color: var(--accent); letter-spacing: 0.04em; }
+/* A thing's own first colour, in the picture's corner: the colour itself is the game's and is set on the
+   element by the backpack, as the appearance page's swatches are; only its frame is the interface's. */
+.bp-swatch { position: absolute; top: 3px; right: 3px; width: 10px; height: 10px; box-sizing: border-box; border: 1px solid var(--edge); border-radius: 2px; pointer-events: none; }
 .bp-cell.new { animation: bp-new 2s ease-out 1; }
 @keyframes bp-new { from { box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 90%, transparent); border-color: var(--accent); } to { box-shadow: none; } }
 .bp-hand.empty { cursor: default; border-style: dashed; }

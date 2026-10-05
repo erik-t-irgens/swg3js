@@ -17,6 +17,7 @@ import { weaponHolder, type WeaponCatalogue, type WeaponDef } from '../player/we
 import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
+import { hangHeld } from './peerHands.ts';
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -546,8 +547,9 @@ export class RemotePlayers {
   }
 
   /**
-   * The weapons in the peer's hands, as their hello names them: each model prepared before it is hung on
-   * the hand bone (every time, as the player's own are). The rack not in yet: tried again by refreshHeld.
+   * The weapons in the peer's hands, as their hello names them (`hangHeld`): each model prepared before it
+   * is hung on the hand bone (every time, as the player's own are), and each hand its own, so two copies of
+   * one hilt are two blades. The rack not in yet: tried again by refreshHeld.
    */
   private async applyHeld(r: Remote): Promise<void> {
     const rig = r.rig;
@@ -564,23 +566,20 @@ export class RemotePlayers {
     for (const m of r.heldModels) m.node.removeFromParent();
     r.heldModels = [];
     if (!cat) return;
-    for (const [role, id] of [['rightHand', held?.r], ['leftHand', held?.l]] as const) {
-      if (!id) continue;
-      const def = cat.weapons.find((w) => w.id === id);
-      const bone = rig.boneFor(role);
-      if (!def || !bone) continue;
-      try {
-        const model = await cat.model(def);
-        const holder = weaponHolder(rig.root, bone, def, model);
-        await (this.prepare ?? noPrepare)(holder);
-        if (this.remotes.get(r.id) !== r || r.rig !== rig || r.heldApplied !== key) return;
-        bone.add(holder);
-        markActor(holder);
-        r.heldModels.push({ node: holder, def, hand: role === 'rightHand' ? 'right' : 'left' });
-      } catch (err) {
-        console.warn(`remote player ${r.hello.name}: their ${id} did not load`, err);
-      }
-    }
+    await hangHeld(held, {
+      find: (id) => cat.weapons.find((w) => w.id === id),
+      bone: (role) => rig.boneFor(role),
+      model: (def) => cat.model(def),
+      holder: (bone, def, model) => weaponHolder(rig.root, bone, def, model),
+      prepare: this.prepare ?? noPrepare,
+      alive: () => this.remotes.get(r.id) === r && r.rig === rig && r.heldApplied === key,
+      hang: (w, bone) => {
+        bone.add(w.node);
+        markActor(w.node);
+        r.heldModels.push(w);
+      },
+      warn: (id, err) => console.warn(`remote player ${r.hello.name}: their ${id} did not load`, err),
+    });
   }
 
   /** The weapons rack came in: every peer whose weapons were waiting for it is armed. */

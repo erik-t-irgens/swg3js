@@ -30,9 +30,11 @@ export interface OwnedItem {
    */
   thing?: string;
   /**
-   * This one thing's own colours, by the customizer's own variable names, or absent for the item's
-   * defaults. It is per **thing** and not per kind, which is the whole point: two of one shirt may
-   * be two colours.
+   * This one thing's own colours, by **bare** variable name (`index_color_1`, `index_color_dye`), or
+   * absent for the item's defaults. It is per **thing** and not per kind, which is the whole point: two
+   * of one shirt may be two colours. A bare name and never a mesh's key, because the meshes are a
+   * gender's (`_m_l0`, `_f_l0`) and a shirt traded between two characters keeps its colour; the piece
+   * is drawn in it by `tintValues`, over every mesh it is worn under.
    */
   tint?: Record<string, number>;
   /**
@@ -200,11 +202,24 @@ export function chooseArrangement(arrangements: readonly (readonly string[])[] |
   return { slots: [...first], displaced };
 }
 
-/** A weapon in or for a hand: its id, its class and its arrangements. */
+/**
+ * A weapon in or for a hand: its id, its class and its arrangements, and which owned thing it is where
+ * that is known (absent for a weapon nobody owns, and on the developer's give tab before it is given).
+ */
 export interface HeldRef {
   id: string;
   cls: string;
   slots: string[][] | null;
+  thing?: string;
+}
+
+/**
+ * Whether the weapon in a hand is the very one being taken up: the same thing where both are named,
+ * else the same catalogue id. Two copies of one hilt are two things and may be held one in each hand
+ * (the owner's call); one copy cannot be in both, and a weapon nobody owns is still told by its id.
+ */
+function sameHeld(a: HeldRef, b: HeldRef): boolean {
+  return a.thing && b.thing ? a.thing === b.thing : a.id === b.id;
 }
 
 /**
@@ -214,7 +229,8 @@ export interface HeldRef {
  * the double-bladed saber). The class alone decides it: the game's arrangement is not read, since every
  * lightsaber's names both hands and an off-hand class keeps the left all the same, while a class with no
  * off-hand use empties it whatever its arrangement says. Left: the old left comes out, and the right when
- * it holds a class with no off-hand use. Moving an item from one hand to the other empties the one it leaves.
+ * it holds a class with no off-hand use. Moving a thing from one hand to the other empties the one it
+ * leaves; a second copy of the same item is another thing, and goes in the other hand beside the first.
  */
 export function planHold(cur: { right: HeldRef | null; left: HeldRef | null }, w: HeldRef, want: Hand): { hand: Hand; stow: Hand[]; refused?: string } {
   if (w.cls === 'thrown') return { hand: want, stow: [], refused: 'a grenade is thrown from the Skills slots, not held' };
@@ -226,7 +242,8 @@ export function planHold(cur: { right: HeldRef | null; left: HeldRef | null }, w
     if (!stow.includes(h)) stow.push(h);
   };
   if (cur[hand]) add(hand);
-  if (cur[other]?.id === w.id) add(other);
+  const there = cur[other];
+  if (there && sameHeld(there, w)) add(other);
   if (hand === 'right') {
     // A class with no off-hand use takes both hands whatever its arrangement says; an off-hand class
     // keeps the left even when the game's arrangement names both (every lightsaber is hold_both).
@@ -334,11 +351,11 @@ export function firstItems<T extends { id: string; kind: string }>(items: readon
 }
 
 /**
- * Which of a character's copies of one item is the one on the body or in a hand: the one the record
- * names (`wornThings` for a worn piece, `heldThings` for a weapon, catalogue id to thing) while it is
- * still owned, else the oldest copy, the first in the list on a tie. Null when none is owned. The one
- * answer the backpack, the trade window and what the server is told is worn all read, so the three can
- * never point at different shirts.
+ * Which of a character's copies of one item is the one on the body: the one the record names
+ * (`wornThings`, catalogue id to thing) while it is still owned, else the oldest copy, the first in the
+ * list on a tie. Null when none is owned. The one answer the backpack, the trade window and what the
+ * server is told is worn all read, so the three can never point at different shirts. A weapon is a
+ * hand's, not an item's (`heldThingsOf`): two copies of one hilt can be held one in each hand.
  */
 export function wornThingOf(items: readonly OwnedItem[], kind: string, id: string, chosen?: Readonly<Record<string, string>> | null): string | null {
   const want = chosen && Object.prototype.hasOwnProperty.call(chosen, id) ? chosen[id] : '';
@@ -370,6 +387,54 @@ export function pruneThings(chosen: Readonly<Record<string, string>> | undefined
   return out;
 }
 
+/** Which thing is in each hand, by its name, or null for an empty hand or a weapon not owned. */
+export interface HandThings {
+  right: string | null;
+  left: string | null;
+}
+
+/**
+ * Which owned thing is in each hand, from the catalogue ids the hands hold and the record's own choice
+ * per hand (`heldThings`). A hand takes the thing the record names for it while that is still owned and
+ * is a copy of what the hand holds; else the oldest copy not already in the other hand. One thing is in
+ * one hand at most -- named for both, the right keeps it -- so two copies of one hilt held one in each
+ * hand are two things, and a single copy held twice over leaves the left with none. A choice map of the
+ * shape before this (catalogue id to thing) names neither hand and is read as no choice at all.
+ */
+export function heldThingsOf(items: readonly OwnedItem[], held: { right?: string | null; left?: string | null }, chosen?: Readonly<{ right?: string; left?: string }> | null): HandThings {
+  const owns = (id: string, thing: string | undefined): thing is string => !!thing && items.some((o) => o.kind === 'weapon' && o.id === id && o.thing === thing);
+  const oldest = (id: string, not: string | null): string | null => {
+    let best: OwnedItem | null = null;
+    for (const o of items) {
+      if (o.kind !== 'weapon' || o.id !== id || !o.thing || o.thing === not) continue;
+      if (!best || o.got < best.got) best = o;
+    }
+    return best?.thing ?? null;
+  };
+  const r = held.right || null;
+  const l = held.left || null;
+  let right = r && owns(r, chosen?.right) ? chosen!.right! : null;
+  let left = l && owns(l, chosen?.left) ? chosen!.left! : null;
+  if (left && left === right) left = null;
+  if (r && !right) right = oldest(r, l === r ? left : null);
+  if (l && !left) left = oldest(l, l === r ? right : null);
+  return { right, left };
+}
+
+/**
+ * The record's choice of which copy is in each hand, written down only where it is not what the rule
+ * would take anyway (`heldThingsOf` with no choice for the right, and with the right's for the left) and
+ * only while that hand holds it: the map never names a thing that is not in a hand.
+ */
+export function pruneHeld(chosen: Readonly<{ right?: string; left?: string }> | undefined, items: readonly OwnedItem[], held: { right?: string | null; left?: string | null }): { right?: string; left?: string } | undefined {
+  if (!chosen) return undefined;
+  const now = heldThingsOf(items, held, chosen);
+  const out: { right?: string; left?: string } = {};
+  if (now.right && now.right !== heldThingsOf(items, held, null).right) out.right = now.right;
+  if (now.left && now.left !== heldThingsOf(items, held, out).left) out.left = now.left;
+  return out.right || out.left ? out : undefined;
+}
+
 /**
  * One row of what a server says a character owns: what it is, which one (`thing`, absent from a server
  * built before things had names), and its colours (`null` once taken off, absent when it never had any).
@@ -399,13 +464,19 @@ export interface ListedItem {
  * stamped by a clock running fast, while no server answered, and is read -- and kept -- as set now: it
  * still wins against what the server held before it, and stops winning against what comes after, which
  * left alone it would have done for as long as the clock was ahead.
+ *
+ * `resend` names every thing (by the name it ends with) whose colour this browser kept over the server's
+ * and which the server does not hold: a colour set while no server answered, one a server that had none
+ * has never been told of, one taken off here since. Newest wins both ways, so those go up after the list
+ * (`Equipment.reconcile`), and a colour set offline survives connecting.
  */
-export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem[], mint: (kind: string, id: string, got: number) => string = mintThing, now = Infinity): { items: OwnedItem[]; renamed: Map<string, string>; came: number; gone: OwnedItem[] } {
+export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem[], mint: (kind: string, id: string, got: number) => string = mintThing, now = Infinity): { items: OwnedItem[]; renamed: Map<string, string>; came: number; gone: OwnedItem[]; resend: string[] } {
   const byThing = new Map<string, OwnedItem>();
   for (const o of had) if (o.thing) byThing.set(o.thing, o);
   const used = new Set<OwnedItem>();
   const out: (OwnedItem | null)[] = new Array(server.length).fill(null);
   const renamed = new Map<string, string>();
+  const resend: string[] = [];
   let came = 0;
   const cap = Number.isFinite(now) ? now : Infinity;
   const merge = (local: OwnedItem, s: ListedItem): OwnedItem => {
@@ -419,6 +490,7 @@ export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem
     const at = theirs ? s.tintAt : localAt;
     if (tint) row.tint = { ...tint };
     if (at && at > 0) row.tintAt = at;
+    if (!theirs && !sameTint(local.tint, s.tint)) resend.push(thing);
     return row;
   };
   // By name first.
@@ -453,7 +525,16 @@ export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem
     }
   }
   const gone = had.filter((o) => !used.has(o));
-  return { items: normalizeOwned(out.filter((o): o is OwnedItem => !!o)), renamed, came, gone };
+  return { items: normalizeOwned(out.filter((o): o is OwnedItem => !!o)), renamed, came, gone, resend };
+}
+
+/** Two colour sets alike: no colour and `null` are one answer, and a set is its names and numbers. */
+export function sameTint(a: Readonly<Record<string, number>> | null | undefined, b: Readonly<Record<string, number>> | null | undefined): boolean {
+  const ka = a ? Object.keys(a) : [];
+  const kb = b ? Object.keys(b) : [];
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) if (!b || !Object.prototype.hasOwnProperty.call(b, k) || b[k] !== a![k]) return false;
+  return true;
 }
 
 /**
@@ -464,12 +545,14 @@ export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem
  * A record already marked comes back untouched. It runs before a server is first handed the list, or
  * a server that keeps two of one item would keep the duplicate for ever.
  */
-export function collapseOwned<T extends { items?: OwnedItem[]; named?: 1; wornThings?: Record<string, string>; heldThings?: Record<string, string> }>(c: T): T {
+export function collapseOwned<T extends { items?: OwnedItem[]; named?: 1; wornThings?: Record<string, string>; held?: { right?: string; left?: string }; heldThings?: { right?: string; left?: string } }>(c: T): T {
   if (c.named === 1) return c;
   const items = normalizeOwned(c.items);
   const keep = new Set<string>();
+  const hands = heldThingsOf(items, c.held ?? {}, c.heldThings);
   for (const o of firstItems(items)) {
-    const thing = wornThingOf(items, o.kind, o.id, o.kind === 'wear' ? c.wornThings : c.heldThings);
+    const inHand = o.kind === 'weapon' ? (c.held?.right === o.id ? hands.right : null) ?? (c.held?.left === o.id ? hands.left : null) : null;
+    const thing = inHand ?? wornThingOf(items, o.kind, o.id, o.kind === 'wear' ? c.wornThings : null);
     if (thing) keep.add(thing);
   }
   c.items = items.filter((o) => !!o.thing && keep.has(o.thing));
@@ -490,6 +573,203 @@ export function countOf(items: readonly OwnedItem[], kind: string, id: string): 
 /** One thing by its own name, or null. */
 export function thingOf(items: readonly OwnedItem[], thing: string): OwnedItem | null {
   return items.find((o) => o.thing === thing) ?? null;
+}
+
+/** A variable's own name, without the mesh it is read on or its path: `shirt_s03_m_l0|/private/index_color_1` is `index_color_1`. */
+export function bareVariable(name: string): string {
+  return name.replace(/^.*\|/, '').replace(/^.*\//, '');
+}
+
+/**
+ * One variable a piece's recipes read on one of its meshes, as the customizer lists it
+ * (`Customizer.variablesOn`): its key (a private one scoped to its mesh), its name, whether it is the
+ * mesh's own, its resting value and whether it picks a palette's colour or a texture.
+ */
+export interface TintVariable {
+  key: string;
+  name: string;
+  private: boolean;
+  default: number;
+  kind?: 'palette' | 'index';
+}
+
+/**
+ * A thing's colours as the values its piece is drawn with: **every** variable the piece's recipes read on
+ * the meshes it is worn under (`defs`, gathered by the caller from the part as it is worn -- the pack's own
+ * mesh for the species' shirt, the catalogue's for the rest), set to the thing's own colour by bare name,
+ * or to the recipe's default where it has none. Writing the defaults too is what makes putting on a copy
+ * with no colour put the piece back to the game's own, rather than leaving the last copy's colour standing
+ * on the shared mesh. Only a mesh's own variables: a shared one (the skin a garment's bare midriff wears)
+ * is the body's and never a thing's. A colour carried whole (below nought) never lands on a texture
+ * choice, which takes the default instead.
+ *
+ * A private copy that follows one of the body's own colours (`follows`, the customizer's link by name: on
+ * a Wookiee every garment's `index_color_1` follows the fur) is the body's too, and is written at the
+ * colour it follows, never at the thing's and never at its own default. `follows` answers the value such a
+ * key takes, or undefined for a key that is the piece's own; left out, nothing follows anything.
+ */
+export function tintValues(tint: Readonly<Record<string, number>> | null | undefined, defs: readonly TintVariable[], follows?: (key: string) => number | undefined): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const d of defs) {
+    if (!d.private) continue;
+    const body = follows?.(d.key);
+    if (typeof body === 'number' && Number.isFinite(body)) {
+      out[d.key] = body;
+      continue;
+    }
+    const bare = bareVariable(d.name);
+    const v = tint && Object.prototype.hasOwnProperty.call(tint, bare) ? tint[bare] : undefined;
+    out[d.key] = typeof v === 'number' && Number.isFinite(v) && !(d.kind === 'index' && v < 0) ? v : d.default;
+  }
+  return out;
+}
+
+/**
+ * A piece's colours read back as a thing's tint: every value held under one of its meshes' own keys, by
+ * bare name. The full spelling of a key (`mesh|/private/index_color_1`) is what a render reads first, so it
+ * wins over the short one; a mesh listed first wins over a later one, since the appearance page writes one
+ * colour over every mesh of a piece. A key that follows one of the body's colours (`follows`) is the
+ * body's and never the thing's, and is passed over. Undefined when nothing is held for any of them.
+ */
+export function tintFromValues(values: Readonly<Record<string, number>> | null | undefined, meshes: readonly string[], follows?: (key: string) => boolean): Record<string, number> | undefined {
+  if (!values) return undefined;
+  const out: Record<string, number> = {};
+  let any = false;
+  for (const mesh of meshes) {
+    const scope = `${mesh}|`;
+    const keys = Object.keys(values).filter((k) => k.startsWith(scope) && !follows?.(k));
+    // The full spelling first: it is what `valueOf` reads first.
+    keys.sort((a, b) => Number(!a.includes('/')) - Number(!b.includes('/')));
+    for (const k of keys) {
+      const v = values[k];
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      const bare = bareVariable(k);
+      if (!bare || Object.prototype.hasOwnProperty.call(out, bare)) continue;
+      out[bare] = v;
+      any = true;
+    }
+  }
+  return any ? cleanTint(out) : undefined;
+}
+
+/**
+ * Bring a record's garment colours onto the things they colour, once and in place, and mark it `tints: 1`.
+ * Until colour was a thing's, a worn piece's colours were kept in the look (`appearance.values`) under its
+ * meshes' keys; now they are the thing's own. For each wardrobe item the record owns, the values held under
+ * its meshes' keys (`meshesOf`, the catalogue's and the pack's own) go into the tint of the copy worn, else
+ * the oldest (`wornThingOf`), by bare name -- a colour the thing already carries is kept over them -- and
+ * come out of the look. A mesh two owned items share colours both. No time is stamped on what moved: it
+ * was set at no time anybody knows, so a server's colour, which has one, wins over it. Hair stays in the
+ * look, since a hairstyle is never a thing. A record already marked is left alone. How many things took a
+ * colour.
+ *
+ * Two kinds of key leave the look and go nowhere. A copy that follows one of the body's colours
+ * (`opts.follows`: on a Wookiee a garment's `index_color_1` follows the fur) is the body's, and is drawn
+ * from the body's colour wherever the piece is (`tintValues`). And every key of a garment's mesh the record
+ * does not own (`opts.garment`, every garment the wardrobe and the species pack hold): the old look kept
+ * the colours of every piece ever coloured, kept or traded away, and left there they would come back on the
+ * day another of that piece arrived, which has no colour of its own.
+ */
+export function moveTints<T extends { items?: OwnedItem[]; appearance?: { values?: Record<string, number> }; wornThings?: Record<string, string>; tints?: 1 }>(c: T, meshesOf: (id: string) => readonly string[], opts: { follows?: (key: string) => boolean; garment?: (mesh: string) => boolean } = {}): number {
+  if (c.tints === 1) return 0;
+  const items = c.items ?? [];
+  const values = c.appearance?.values;
+  const moved = new Set<string>();
+  let n = 0;
+  if (values) {
+    for (const o of firstItems(items)) {
+      if (o.kind !== 'wear' || isHairKey(o.id)) continue;
+      const meshes = meshesOf(o.id);
+      if (!meshes.length) continue;
+      const tint = tintFromValues(values, meshes, opts.follows);
+      const thing = wornThingOf(items, 'wear', o.id, c.wornThings);
+      const row = thing ? thingOf(items, thing) : null;
+      if (!row) continue;
+      if (tint) {
+        row.tint = { ...tint, ...(row.tint ?? {}) };
+        n++;
+      }
+      for (const mesh of meshes) for (const k of Object.keys(values)) if (k.startsWith(`${mesh}|`)) moved.add(k);
+    }
+    for (const k of moved) delete values[k];
+    if (opts.garment) {
+      const kept = lookWithoutGarments(values, opts.garment);
+      for (const k of Object.keys(values)) if (!Object.prototype.hasOwnProperty.call(kept, k)) delete values[k];
+    }
+  }
+  c.tints = 1;
+  return n;
+}
+
+/**
+ * A look's values less every one scoped to a garment's mesh (`garment`: a set of mesh names, or a test of
+ * one): what a record keeps once a garment's colours are its thing's. Shared values, the body's own meshes'
+ * and the hair's (its meshes and the remembered `hair|`) stay. A new object; the one given is not touched.
+ */
+export function lookWithoutGarments(values: Readonly<Record<string, number>>, garment: ReadonlySet<string> | ((mesh: string) => boolean)): Record<string, number> {
+  const isGarment = typeof garment === 'function' ? garment : (mesh: string) => garment.has(mesh);
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(values)) {
+    const bar = k.indexOf('|');
+    if (bar > 0 && isGarment(k.slice(0, bar))) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/** Every catalogue's garment meshes, worked out once per wardrobe (a wardrobe is one object for the session). */
+const garmentMeshCache = new WeakMap<object, ReadonlySet<string>>();
+
+/**
+ * Every mesh a garment is drawn with: every wardrobe item that is not a hairstyle, by its parts' names (the
+ * converter's mesh names, which the recipes key a private colour by), and the species pack's own pieces
+ * (`packParts`, its shirt, trousers and shoes). Neither the body's meshes nor any hair's are among them. A
+ * new set each call, which the caller may add to.
+ */
+export function garmentMeshesOf(wardrobe: { items: readonly { id: string; kind: string; parts: readonly { name: string }[] }[] } | null | undefined, packParts: readonly string[] = []): Set<string> {
+  let base = wardrobe ? garmentMeshCache.get(wardrobe.items) : undefined;
+  if (wardrobe && !base) {
+    const made = new Set<string>();
+    for (const it of wardrobe.items) if (it.kind !== 'hair' && !isHairKey(it.id)) for (const p of it.parts) made.add(p.name);
+    garmentMeshCache.set(wardrobe.items, made);
+    base = made;
+  }
+  const out = new Set<string>(base ?? []);
+  for (const p of packParts) if (!isHairKey(p)) out.add(p);
+  return out;
+}
+
+/**
+ * The colours the creator dressed a new character in, made the things' own: for each piece of the outfit
+ * that is an item the character owns (`itemIdOf`), the values held under its meshes (`tintFromValues`, a
+ * copy that follows a body colour left out) become the oldest copy's tint, stamped `at` -- a colour picked in
+ * the creator is set as one picked in play is. In place; how many things took a colour.
+ */
+export function outfitTints(items: OwnedItem[], outfit: readonly string[], values: Readonly<Record<string, number>>, itemIdOf: (part: string) => string | null, meshesOf: (part: string) => readonly string[], at: number, follows?: (key: string) => boolean): number {
+  let n = 0;
+  for (const part of outfit) {
+    if (isHairKey(part)) continue;
+    const id = itemIdOf(part);
+    const thing = id ? wornThingOf(items, 'wear', id, null) : null;
+    const row = thing ? thingOf(items, thing) : null;
+    const tint = row ? tintFromValues(values, meshesOf(part), follows) : undefined;
+    if (!row || !tint) continue;
+    row.tint = tint;
+    row.tintAt = at;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * What a colour picked on a worn piece's row is to its thing: `null` -- no colour of its own, each mesh at
+ * its own default -- only when the value is the default of every mesh the row wrote (`defaults`, one a key),
+ * else the value itself. A piece whose meshes rest at different defaults (a dress's bodice and skirt) keeps
+ * the value picked: taken as no colour, the other mesh would go back to its own default under a colour the
+ * page had just written over the whole piece.
+ */
+export function pickedTint(value: number, defaults: readonly number[]): number | null {
+  return defaults.length > 0 && defaults.every((d) => d === value) ? null : value;
 }
 
 /**

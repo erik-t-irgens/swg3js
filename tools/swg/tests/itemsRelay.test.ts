@@ -18,6 +18,7 @@ import { copyFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { TradeItem } from '../../../src/net/trade.ts';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string): void => {
@@ -411,6 +412,154 @@ if (typeof WebSocket === 'undefined') {
     ok(key(biggs2.list()) === biggsBefore && await held() === before8d, 'and nothing it says lands: nothing dropped, nothing added, no colour put on, the server holding as many things as before');
     ok(porkins.got.filter((m) => m.t === 'trade' && m.do === 'asked').length === askedBefore, 'nobody is asked to trade by it');
     ok(!biggs.got.slice(heardFrom).some((m) => m.t === 'items'), 'and it is answered nothing about the backpack it no longer holds');
+
+    // ---- 8e: colours set with nobody answering, through the browser's own ledger and equipment ---------
+    //
+    // A colour is a thing's own and newest wins both ways. The hand-up carries no colours, so a whole
+    // backpack of four hundred, forty of them coloured while no server answered, goes up as names alone and
+    // the forty follow as paced `tint` words once the list has been laid over it -- and never, in any second,
+    // past what a server takes from one browser. Then a colour set here later than the server's is sent up,
+    // and one set earlier is replaced by the server's.
+    const { Equipment, ITEMS_TUNE } = await import('../../../src/player/equipment.ts');
+    const ITEMS_SETTLE = ITEMS_TUNE.tintSettleMs;
+    /** A browser's own ledger and equipment for one character, on one socket, with every word it sends timed and sized. */
+    const shop = (b: Browser, rec: Record<string, unknown>) => {
+      const t = new Trade();
+      t.authority = () => 'server';
+      t.itemsVersion = () => 2;
+      t.serverNow = () => Date.now();
+      const words: { at: number; bytes: number; msg: Msg }[] = [];
+      t.send = (msg) => {
+        const text = JSON.stringify(msg);
+        // The text and the most a browser's frame adds to it: two bytes, eight of length and a mask of four.
+        words.push({ at: Date.now(), bytes: Buffer.byteLength(text) + 14, msg });
+        b.raw.send(text);
+      };
+      b.listen((m) => void t.handle(m));
+      const player = { equipped: { right: null, left: null }, saberOn: false, unequip() {}, toggleSaber() {}, equip: () => null };
+      const eq = new Equipment({
+        character: () => null,
+        player: player as never,
+        weaponsLoaded: async () => null,
+        prepare: async () => {},
+        record: () => rec as never,
+        persist: () => {},
+        changed: () => {},
+        ledger: (what, item) => (what === 'add' ? t.noteAdded(item) : t.noteDropped(item)),
+        noteTint: (thing, tint, at) => t.noteTint(thing, tint, at),
+        tintsLive: () => t.active && t.known,
+        now: () => Date.now(),
+        baseUrl: '',
+      });
+      // The stored rows as they stand, colours and all: what goes up is the ledger's own choice (`Trade.tell`),
+      // never a copy this test has already stripped.
+      t.mine = () => (rec.items ?? []) as TradeItem[];
+      const lists: Promise<string>[] = [];
+      t.onList = (items) => void lists.push(eq.reconcile(items, Date.now()));
+      return { t, eq, words, lists };
+    };
+    /** The most a browser sent in any one second, by its own clock: what a server's allowance is measured against. */
+    const worstSecond = (words: { at: number; bytes: number }[]) => {
+      let most = 0;
+      for (let i = 0; i < words.length; i++) {
+        let sum = 0;
+        for (let j = i; j < words.length && words[j].at - words[i].at < 1000; j++) sum += words[j].bytes;
+        most = Math.max(most, sum);
+      }
+      return most;
+    };
+    const until = async (cond: () => boolean, ms: number) => {
+      const t0 = Date.now();
+      while (!cond() && Date.now() - t0 < ms) await wait(50);
+      return cond();
+    };
+    {
+      const leia = await open('Leia', 'c-tint', { x: 60 });
+      await wait(1100);
+      const longest = longestId();
+      const t0 = Date.now();
+      // Four hundred things, forty coloured an hour ago while nobody answered.
+      const items = Array.from({ length: 400 }, (_, i) => {
+        const got = t0 + i;
+        const row: Record<string, unknown> = { kind: 'weapon', id: longest, got, thing: mintThing('weapon', longest, got) };
+        if (i % 10 === 0) {
+          row.tint = { index_color_1: (i / 10) % 200, index_color_dye: -(0x10203 * (i / 10) + 1) };
+          row.tintAt = t0 - 3_600_000;
+        }
+        return row;
+      });
+      const rec: Record<string, unknown> = { id: 'c-tint', name: 'Leia', inv: 1, named: 1, tints: 1, items, outfit: [], appearance: { morphs: {}, values: {}, height: 0.5 } };
+      const s = shop(leia, rec);
+      s.t.tell();
+      const handUp = s.words[0];
+      const upRows = (handUp?.msg.rows ?? []) as unknown[];
+      ok(!!handUp && handUp.msg.do === 'list' && upRows.length === 400 && upRows.every((r) => Array.isArray(r) && r.length === 4 && r.every((x) => typeof x !== 'object')) && !JSON.stringify(handUp.msg).includes('tint'), 'the backpack goes up by name alone: four fields a row and not one colour, although the rows it was handed carry forty');
+      const told = () => s.words.filter((w) => w.msg.do === 'tint').length;
+      ok(await until(() => told() >= 40, 12000), `the forty colours follow the list as words of their own (${told()} sent)`);
+      await Promise.all(s.lists);
+      const most = worstSecond(s.words);
+      ok(most < 65536, `four hundred things and forty colours never come to more than a server takes from one browser in a second (at most ${most} bytes in any one second, hand-up ${handUp.bytes})`);
+      const tintTimes = s.words.filter((w) => w.msg.do === 'tint').map((w) => w.at);
+      ok(tintTimes[0] - handUp.at >= ITEMS_SETTLE - 50, `and the first of them waits the settle after the list (${tintTimes[0] - handUp.at} ms after the hand-up)`);
+      // The last second's words are the server's eight: the question waits for the next one, or it is dropped.
+      await wait(1100);
+      leia.send({ t: 'items', do: 'get' });
+      await settle();
+      const coloured = leia.list().filter((r) => r.tint && typeof r.tint === 'object');
+      ok(coloured.length === 40 && coloured.every((r) => (r.tintAt ?? 0) >= t0 - 3_600_000 - 5 && (r.tintAt ?? 0) <= Date.now()), `the server holds all forty, each at the time it was set (${coloured.length})`);
+      ok(leia.isOpen(), 'and the line was never closed for sending too much');
+      leia.close();
+      await settle();
+    }
+    {
+      // One character, two things handed up plain and then coloured on the server by another browser, one
+      // long ago and one a moment ago; this browser coloured both while offline, in between.
+      const keyH = new Uint8Array(randomBytes(32));
+      const now = Date.now();
+      const hA = await open('Han2', 'c-tint2', { key: keyH, x: 70 });
+      const T = mintThing('wear', 'shirt_s03', now);
+      const U = mintThing('wear', 'jacket_s02', now + 1);
+      hA.send({ t: 'items', do: 'list', rows: [[ 'wear', 'shirt_s03', now, T ], [ 'wear', 'jacket_s02', now + 1, U ]] });
+      await settle();
+      const rows = hA.list();
+      const rowT = rows.find((r) => r.thing === T)!.id;
+      const rowU = rows.find((r) => r.thing === U)!.id;
+      hA.send({ t: 'items', do: 'tint', id: rowT, tint: { index_color_1: 2 }, at: now - 60_000 });
+      hA.send({ t: 'items', do: 'tint', id: rowU, tint: { index_color_1: 5 }, at: now - 1_000 });
+      await settle();
+      hA.close();
+      await settle();
+      const hB = await open('Han2', 'c-tint2', { key: keyH, x: 70 });
+      await wait(1100);
+      const rec: Record<string, unknown> = {
+        id: 'c-tint2',
+        name: 'Han2',
+        inv: 1,
+        named: 1,
+        tints: 1,
+        outfit: [],
+        appearance: { morphs: {}, values: {}, height: 0.5 },
+        items: [
+          { id: 'shirt_s03', kind: 'wear', got: now, thing: T, tint: { index_color_1: 7 }, tintAt: now - 30_000 },
+          { id: 'jacket_s02', kind: 'wear', got: now + 1, thing: U, tint: { index_color_1: 3 }, tintAt: now - 120_000 },
+        ],
+      };
+      const s = shop(hB, rec);
+      s.t.tell();
+      await until(() => s.lists.length > 0, 3000);
+      await Promise.all(s.lists);
+      ok(await until(() => s.words.some((w) => w.msg.do === 'tint'), 3000), 'an offline colour newer than the server\'s is sent after the list');
+      await wait(300);
+      const tints = s.words.filter((w) => w.msg.do === 'tint');
+      ok(tints.length === 1 && tints[0].msg.id === rowT, `and only that one: the older is not said back (${tints.length} sent)`);
+      const mine = rec.items as { thing: string; tint?: Record<string, number> }[];
+      ok(mine.find((o) => o.thing === U)?.tint?.index_color_1 === 5 && mine.find((o) => o.thing === T)?.tint?.index_color_1 === 7, 'the older one here took the server\'s colour, and the newer stayed');
+      hB.send({ t: 'items', do: 'get' });
+      await settle();
+      ok(hB.list().find((r) => r.thing === T)?.tint?.index_color_1 === 7 && hB.list().find((r) => r.thing === U)?.tint?.index_color_1 === 5, 'and the server now holds the newer of each');
+      hB.close();
+      await settle();
+    }
 
     // ---- 9: a server started again from what this one wrote down -----------------------------------
     const live = { a: key(a2.list()), b: key(b2.list()), old: key(oldRows), e: key(e.list()) };

@@ -25,7 +25,7 @@ import { CharacterPreview } from './characterPreview.ts';
 import { distinctLabels, plainLabel } from './variableLabel.ts';
 import { CREATOR_TUNE, bareName, catalogueName, creatorTableNow, creatorView, hairNone, itemSections, loadCreatorTable, ownSection, packColours, packSliders, pickWrites, swatchLayout, type CreatorSpecies, type CreatorState, type CreatorTable, type CreatorView, type ItemColour, type ItemSection, type PackColour, type ViewRow } from './creatorModel.ts';
 import { NO_HAIR, hairCells, withOursHair, type HairGrid, type HairItem } from './hairGrid.ts';
-import { hairOfSpecies } from '../core/inventory.ts';
+import { hairOfSpecies, pickedTint } from '../core/inventory.ts';
 import { groupHtml, GroupState } from './catalogue.ts';
 import { giveCellHtml } from './giveModel.ts';
 import { DyePicker, allGarmentColours, countText, creatorPalettes, drawStrip, eyePalettes, garmentPalettes, pickKind, type PickerRow, type PickerSource, type PickerTab, type PickKind } from './dyePicker.ts';
@@ -329,6 +329,8 @@ export class AppearanceUi {
     // creator's table, `only` keeps what its rows did not take (a worn garment's own colours).
     const cz = c.customizer;
     const { rows, shared } = packColours({ live: cz?.variables() ?? [], manifest: c.manifest.variables ?? [], worn: c.wornMeshes(), isLinked: (k) => !!cz?.isLinked(k), morphs: Object.keys(c.morphValues()), only });
+    // Each key's own resting value, for what a garment's pick is to its thing.
+    const restOf = new Map((cz?.variables() ?? []).map((x) => [x.key, x.default]));
     if (!rows.length) return '';
     // A worn piece's colours in one section a piece, named by the game, a row a variable (`itemSections`).
     const hairs = new Set(c.hairsWorn());
@@ -352,8 +354,11 @@ export class AppearanceUi {
       const id = piece ? `item:${piece.item}:${bareName(v.name)}` : `var:${v.key}`;
       const at = (vals: Record<string, number>) => vals[v.key] ?? vals[v.name] ?? vals[short] ?? v.default;
       // A piece's colour writes every one of its meshes' keys; the owner's own writes its one, as it always did, and so
-      // does a colour no live recipe reads, which shows the command that bakes it instead.
-      const write = piece && v.live ? (x: number) => this.pickKeys(keys, x, label, v.colors) : (x: number) => this.pick(v.key, x);
+      // does a colour no live recipe reads, which shows the command that bakes it instead. A garment's colour is
+      // also the thing's own (`onItemColour`): the default of every mesh it writes given back is no colour of the
+      // thing's at all, each mesh's own default -- the meshes of one piece may rest at different ones.
+      const thing = piece && !piece.body && !piece.hair ? { part: piece.item, bare: bareName(v.name), defaults: keys.map((k) => restOf.get(k) ?? v.default) } : undefined;
+      const write = piece && v.live ? (x: number) => this.pickKeys(keys, x, label, v.colors, thing) : (x: number) => this.pick(v.key, x);
       if (v.kind === 'palette' && v.colors?.length) {
         const kind = pickKind({ palette: v.palette, garment: !!piece && !piece.body && !piece.hair, hair: !!piece?.hair });
         const layout = swatchLayout(v.palette, v.colors.length, this.table);
@@ -416,17 +421,29 @@ export class AppearanceUi {
     return `<div class="wardrobe-slot colour${dead}" data-pick="${esc(id)}"><span class="slot-label">${label}</span><div class="palette"><canvas class="dye-strip" data-pick="${esc(id)}" title="${esc(label)}: every colour it can take"></canvas>${scrub}</div><span class="slot-count">${count}</span></div>`;
   }
 
-  /** A worn piece's colour or choice picked: every one of its meshes' keys, as the game kept a private colour on the object. */
-  private pickKeys(keys: readonly string[], value: number, label: string, colors?: number[][]): void {
+  /**
+   * A worn piece's colour or choice picked: every one of its meshes' keys, as the game kept a private colour on
+   * the object, and for a garment the thing's own colour as well (`onItemColour`), which is where it is kept.
+   */
+  private pickKeys(keys: readonly string[], value: number, label: string, colors?: number[][], thing?: { part: string; bare: string; defaults: number[] }): void {
     const c = this.character;
     if (!c) return;
     let n = 0;
     for (const k of keys) n += c.setVariable(k, value);
     const hint = this.body.querySelector<HTMLElement>('.bake-hint');
     if (hint) hint.textContent = `${label} ${colors ? countText(value, colors) : value + 1}: ${n} texture${n === 1 ? '' : 's'} rendering`;
+    if (thing) this.onItemColour?.(thing.part, thing.bare, pickedTint(value, thing.defaults));
     this.onChange();
     this.syncRows();
   }
+
+  /**
+   * A worn garment's colour picked: the part it is worn under, the variable's bare name and the value, or
+   * null for its own colour back. The game makes it the worn copy's own (`Equipment.setTint`); unset, or
+   * with no character played (the creator, whose colours go onto the new character's things when it is
+   * made), the colour lives on the meshes alone.
+   */
+  onItemColour: ((part: string, bare: string, value: number | null) => void) | null = null;
 
   /** Open the picker under a row, or close it when it is the one open. */
   private togglePicker(id: string, tab?: PickerTab): void {

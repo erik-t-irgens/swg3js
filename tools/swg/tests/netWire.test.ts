@@ -46,6 +46,10 @@ const claim = (extra: Record<string, unknown> = {}) => ({ t: 'claim', player: 'a
   const hands = cleanHello(hello({ held: { r: 'a_saber', l: 5 } })) as { held: { r: string; l?: string } };
   ok(hands.held.r === 'a_saber' && hands.held.l === undefined, '2: a weapon in hand is kept and a hand holding nonsense is empty');
   ok(cleanHello(hello({ held: {} }))?.held === undefined, '2: empty hands are not sent at all');
+  // Two copies of one hilt are two things, held one in each hand: the same id in both hands goes out
+  // whole, which is what the others hang a hilt and light a blade on each hand from.
+  const both = cleanHello(hello({ held: { r: 'sword_lightsaber_training', l: 'sword_lightsaber_training' } })) as { held: { r: string; l: string } };
+  ok(both.held.r === 'sword_lightsaber_training' && both.held.l === 'sword_lightsaber_training', '2: the same hilt in both hands is kept for both');
   const ship = cleanHello(hello({ ship: { id: 'xwing', fit: { components: { engine: 'a_part' }, paint: { 'a/b': 3 } } } })) as { ship: { id: string } };
   ok(ship.ship.id === 'xwing', '2: the ship is kept through the checker it already had');
   ok(cleanHello(hello({ ship: { id: '<script>' } }))?.ship === undefined, '2: a ship id that is not a name is dropped');
