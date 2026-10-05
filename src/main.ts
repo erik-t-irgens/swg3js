@@ -324,6 +324,7 @@ import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from 
 import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn, type WalkableRoom } from './vehicles/surfaceRoom';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
+import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { World } from './world/world';
 import { REFLECTIONS, reflectiveCount, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
@@ -5573,13 +5574,28 @@ class App {
       /**
        * Nudge the ridden vehicle's seat by metres in its own frame (right, up, forward) and report where it now is, with the pose
        * playing and its root offset, for finding a seat by eye. In a ship seated by its cockpit eye the body moves under the eye
-       * and the view stays put; `paste` is the line for COCKPIT_BODY_NUDGE in cockpitSeat.ts.
+       * and the view stays put; `paste` is the line for COCKPIT_BODY_NUDGE in cockpitSeat.ts. On a pod the seat rides the
+       * cockpit's joint and the nudge goes through it (podSeat.ts): `pelvis` is in the pod's frame as its idle's first frame
+       * stands it, `rule` says which rule placed it, and `paste` is the line for POD_SEAT. An object instead of numbers
+       * (`{ run, idle, fade }`) sets when every pod's own clips change over (POD_GAIT) and nudges nothing.
        */
-      seat: (dx = 0, dy = 0, dz = 0) => {
+      seat: (dx: number | { run?: number; idle?: number; fade?: number } = 0, dy = 0, dz = 0) => {
+        const tune = typeof dx === 'object' && dx !== null ? dx : null;
+        if (tune) {
+          for (const k of ['run', 'idle', 'fade'] as const) {
+            const n = tune[k];
+            if (typeof n === 'number' && Number.isFinite(n) && n >= 0) POD_GAIT[k] = n;
+          }
+          // The band the right way round, or a speed between the two would change clips every frame.
+          POD_GAIT.idle = Math.min(POD_GAIT.idle, POD_GAIT.run);
+          dy = 0;
+          dz = 0;
+        }
+        const nx = typeof dx === 'number' ? dx : 0;
         const v = this.player.mounted;
-        if (!v) return 'not riding anything';
+        if (!v) return tune ? { gait: { ...POD_GAIT } } : 'not riding anything';
         if (v.eyeSeat) {
-          v.bodyNudge[0] += dx;
+          v.bodyNudge[0] += nx;
           v.bodyNudge[1] += dy;
           v.bodyNudge[2] += dz;
           this.player.syncMount();
@@ -5589,12 +5605,18 @@ class App {
           const n3 = (n: number) => Number(n.toFixed(3));
           return { vehicle: v.spec.id, frame: frame || null, eye: eye ? eye.toArray().map(n3) : null, eyeSource: v.eyeSource, bodyNudge: v.bodyNudge.map(n3), seatDrop: v.seatDrop === null ? null : n3(v.seatDrop), lift: n3(r.lift), riderPose: v.riderPose, clip: r.clip, paste: `'${frame}': [${v.bodyNudge.map((n) => n3(n)).join(', ')}],` };
         }
-        v.seat.position.x += dx;
-        v.seat.position.y += dy;
-        v.seat.position.z += dz;
+        // In the vehicle's frame whatever the seat hangs on: a pod's goes through the joint it rides.
+        nudgeSeat(v.seat, v.seatBind, nx, dy, dz);
         const clip = this.player.rig?.currentClip ?? null;
         const root = clip ? this.player.rig?.rootOffset(clip, tmp) : null;
-        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map((n) => Number(n.toFixed(2))), seatIsPelvis: v.seatPelvis, riderPose: v.riderPose, seatFrom: v.seatFrom, saddle: !!v.saddle, clip, clipRoot: root ? root.toArray().map((n) => Number(n.toFixed(2))) : null };
+        const n2 = (n: number) => Number(n.toFixed(2));
+        // Where the pelvis goes, in the vehicle's frame: a pod's as its idle's first frame stands it (through the joint's
+        // place then), a seat on the vehicle where it is, one on a creature's bone where the gait has it now; a seat that
+        // is the rider's origin has the riding clip's root added.
+        const pelvis = v.seatBind || v.seat.parent === v.group ? seatInVehicle(v.seat, v.seatBind, new THREE.Vector3()) : v.group.worldToLocal(v.seat.getWorldPosition(new THREE.Vector3()));
+        if (!v.seatPelvis && root) pelvis.add(root);
+        const p = pelvis.toArray().map(n2);
+        return { vehicle: v.spec.id, seat: v.seat.position.toArray().map(n2), seatIsPelvis: v.seatPelvis, pelvis: p, rule: v.seatRule, joint: v.seatBind ? v.seat.parent?.name || null : null, riderPose: v.riderPose, seatFrom: v.seatFrom, saddle: !!v.saddle, clip, clipRoot: root ? root.toArray().map(n2) : null, ...(v.seatRule ? { gait: { ...POD_GAIT }, paste: `'${v.spec.id}': [${p.join(', ')}],` } : {}) };
       },
       /** The garage: `vehicles('speeder')` lists what can be spawned; `spawn('speeder_ab1')` or `spawn('bantha', 'ground')` stands one in front of you; `vehicles.clear` is the panel's Remove all. */
       vehicles: (find?: string) => {

@@ -141,6 +141,51 @@ export function interiorLayouts(templates, { pobOf, cellsOf = () => [], withHous
 export const GALLERY_SECTIONS = ['houses', 'vehicles', 'weapons', 'anims', 'interiors'];
 
 /**
+ * How the gallery converts a skeletal model (every one it has is a vehicle: the walkers, the
+ * basilisk, the jetpacks and the pod racers): its own clips when it walks with them (`clips`, the
+ * list the creatures keep), and its body mesh's hardpoints kept as hp:<name> nodes under their
+ * joints, as the creatures command keeps a mount's. Every skinned pod racer's mesh carries the game's
+ * own seat point, `player`, on its cockpit joint `body`, and the garage seats its pilot there
+ * (src/vehicles/podSeat.ts); a gallery converted before this dropped it.
+ */
+export function gallerySatOptions(animated, clips) {
+  return { animations: animated ? clips : 'none', hardpoints: true };
+}
+
+/**
+ * A skeletal model's entry in the gallery's manifest, from what `convertSat` said of it (`info`): its
+ * box, its triangle count, the names of the hardpoints its conversion kept (which is how `status` tells
+ * a gallery converted before they were kept), its clips when it walks with them, and why it failed when
+ * no triangle survived.
+ */
+export function skeletalModelEntry(id, source, info, animated) {
+  const triangles = (info.meshes ?? []).reduce((a, m) => a + m.triangles, 0);
+  return {
+    id,
+    source,
+    file: `${id}.glb`,
+    bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] },
+    triangles,
+    skeletal: true,
+    hardpoints: (info.hardpoints ?? []).map((h) => h.name),
+    ...(animated ? { clips: info.animations, clipSpeeds: info.clipSpeeds ?? {} } : {}),
+    ...(triangles ? {} : { failed: `no triangles (${[...(info.missing ?? []), ...(info.skipped ?? [])].slice(0, 3).join('; ') || 'no meshes'})` }),
+  };
+}
+
+/**
+ * Whether a gallery's skinned pod racers carry the game's own seat point: how many of a manifest's
+ * models are skeletal pods (named for a pod, as the garage names a pod's kind) and how many of those
+ * list `player` among the hardpoints their conversion kept. A gallery converted before the hardpoints
+ * were kept lists none on any of them, which is what `status` asks for the gallery again over.
+ */
+export function podSeatStatus(models) {
+  const pods = (models ?? []).filter((m) => m?.skeletal && /pod_?racer|podracer/i.test(String(m.id ?? '')));
+  const seated = pods.filter((m) => Array.isArray(m.hardpoints) && m.hardpoints.some((h) => String(h).toLowerCase() === 'player'));
+  return { pods: pods.length, seated: seated.length };
+}
+
+/**
  * Build the gallery pack. `deps.convert(template, appearance?)` converts one template into the
  * pack's models (from the given appearance file rather than the template's own when one is
  * named), returning { model, radius, height } or { skip }; `deps.convertAnims(file, source)`

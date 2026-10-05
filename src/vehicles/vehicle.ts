@@ -345,10 +345,6 @@ export class Vehicle {
   airborne = false;
   /** A ship that just flew into the ground: the speed it hit at, read once by the game for the damage. */
   crashed = 0;
-  /** A pod racer's cockpit as guessed from its mesh, where the pilot's pelvis goes when the game's own seat lands outside the pod. */
-  podSeat: [number, number, number] | null = null;
-  /** Whether the seat has been checked against the box once (the rider logs what it found). */
-  seatChecked = false;
   /** On its back now, and for long enough that the rider is thrown. */
   upsideDown = false;
   flipped = false;
@@ -499,6 +495,14 @@ export class Vehicle {
   seatPelvis = false;
   /** The seat rides a bone of the model's skeleton (an animal's back), so the rider moves with its gait; its world turn is then the rider's. */
   seatFollows = false;
+  /**
+   * A pod's seat riding its cockpit joint: that joint's place in the vehicle's frame when the seat was
+   * hung (the idle's first frame), through which `__debug.seat` nudges and reads it in the vehicle's
+   * frame (`nudgeSeat`, `seatInVehicle` in podSeat.ts). Null for every other seat.
+   */
+  seatBind: THREE.Matrix4 | null = null;
+  /** Which rule placed a pod's seat (the owner's table, the game's player point, the cockpit joint, the mesh guess); null for anything else. */
+  seatRule: import('./podSeat').PodSeatRule | null = null;
   /** A mount's saddle model, hung on the creature (hidden by the world until its shaders are ready). */
   saddle: THREE.Object3D | null = null;
   /** How the rider's seat was found (a creature's): its saddle hardpoint, its own rider point, a guessed saddle, or the back alone. */

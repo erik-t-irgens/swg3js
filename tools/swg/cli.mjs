@@ -187,7 +187,7 @@ import { parseMesh } from './msh.mjs';
 import { buildPack, familyOf } from './pack.mjs';
 import { parseSnapshot, flattenWithWorldTransforms } from './ws.mjs';
 import { loadBuildouts, mergeBuildouts } from './buildout.mjs';
-import { R, composeMeshes, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
+import { R, composeMeshes, hardpointsKept, keptHardpoints, mergeSkeletons, parseAnimation, parseLat, parseLmg, parseMgn, parseSat, parseSkeleton, poseAtFrame, readIff, skinData, skinnedPrimitives } from './skeletal.mjs';
 import { resolveAppearanceToMesh, resolveTemplateMesh, resolveTemplateString } from './objtemplate.mjs';
 import { exportParticle, parseParticleEffect } from './particle.mjs';
 import { exportSwoosh, swooshStatus } from './swoosh.mjs';
@@ -207,6 +207,7 @@ import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
+import { gallerySatOptions, podSeatStatus, skeletalModelEntry } from './gallery.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
 import {
@@ -2059,10 +2060,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }
   // In parts mode nothing is hidden at conversion time: the zones travel with the mesh instead.
   const composed = parts ? loaded.map((l) => ({ ...l, hiddenTriangles: 0 })) : composeMeshes(loaded);
-  // The body's hardpoints (a mount's saddle, the basilisk's rider point), for `hardpoints`.
-  const bodyHardpoints = [];
   for (const { mgn, file, body, hiddenTriangles } of composed) {
-    if (hardpoints && body) bodyHardpoints.push(...(mgn.hardpoints ?? []));
     const { groups, unknownTransforms, unknownNames } = skinnedPrimitives(mgn, skeleton);
     info.unknownTransforms += unknownTransforms;
     for (const n of unknownNames) (info.unknownJoints ??= new Set()).add(n);
@@ -2261,19 +2259,10 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
       console.warn(`   ${cut.length} wanted clips left out by the --max-anims cap of ${maxAnimations}: ${cut.slice(0, 8).join(', ')}${cut.length > 8 ? ', ...' : ''}; raise --max-anims to keep them`);
     }
   } else if (latFile) info.missing.push(latFile);
-  // The body's hardpoints ride their joints as hp:<name> nodes; the mount tables' own appearance
-  // adds its saddle when this one lacks it (`extraHardpoints`). The first of a name wins.
-  const wantedHardpoints = [];
-  if (hardpoints) {
-    const seen = new Set();
-    for (const hp of [...bodyHardpoints, ...extraHardpoints]) {
-      const key = String(hp.name).toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      wantedHardpoints.push(hp);
-    }
-  }
-  const skin = skinData(skeleton, clips, { flipX: true, hardpoints: wantedHardpoints });
+  // The body's hardpoints (a mount's saddle, the basilisk's rider point, a pod racer's seat) ride their
+  // joints as hp:<name> nodes; the mount tables' own appearance adds its saddle when this one lacks it
+  // (`extraHardpoints`). The first of a name wins.
+  const skin = skinData(skeleton, clips, { flipX: true, hardpoints: keptHardpoints(composed, extraHardpoints, hardpoints) });
   // A one-frame pose is written twice a frame apart. `skinData` gives such a clip a duration of
   // zero, three finishes a zero-length action on its first update, and a repeating one divides by
   // that length and poses the bones at NaN — which is what a still pose played as a state does.
@@ -2283,7 +2272,7 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   // Each clip's own length in seconds, as the game will play it: a landing is timed by it.
   info.clipSeconds = Object.fromEntries(skin.clips.map((c) => [c.name, Math.round((c.times[c.times.length - 1] ?? 0) * 1e4) / 1e4]));
   if (hardpoints) {
-    info.hardpoints = skin.hardpoints.map((h) => ({ name: h.name, joint: skin.joints[h.joint].name }));
+    info.hardpoints = hardpointsKept(skin);
     for (const name of skin.droppedHardpoints) info.skipped.push(`hardpoint ${name}: its joint is not in the skeleton`);
   }
   if (extraClips) {
@@ -3139,6 +3128,12 @@ function packStatus(dir) {
   if (!gallery) need(`gallery <swg-dir> ${dir} --retail-only`, 'no gallery pack: the Housing tab has no buildings to put down, since every house is one of its models');
   else if ((gallery.materialFormat ?? 1) < MATERIAL_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, "the gallery's models were converted before animated and glowing surfaces");
   else if ((gallery.lodFormat ?? 0) < LOD_FORMAT) need(`gallery <swg-dir> ${dir} --retail-only`, (gallery.lodFormat ?? 0) < 1 ? "the gallery's models were converted before the client's own detail levels" : "the gallery's models carry detail levels the game can never draw or that stand somewhere else than the model");
+  else {
+    // A named product rather than a format: every skinned pod racer's mesh carries the game's own seat point, so a
+    // gallery whose pods list none was converted before the hardpoints were kept, and each pilot sits on the joint.
+    const pods = podSeatStatus(gallery.categories?.layout);
+    if (pods.pods && !pods.seated) need(`gallery <swg-dir> ${dir} --retail-only`, `the gallery's ${pods.pods} skinned pod racers were converted without the game's own seat point (player, on the cockpit's joint), so each pilot sits on the cockpit's joint instead`);
+  }
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
   // gallery's models, so it is asked for after the gallery and never before one exists. What each
@@ -5986,9 +5981,12 @@ switch (cmd) {
         if (r.skeletal) {
           id = familyOf(r.skeletal);
           if (!models.has(id)) {
-            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { animations: animated ? CREATURE_CLIPS : 'none' });
-            const tris = info.meshes.reduce((a, m) => a + m.triangles, 0);
-            models.set(id, { id, source: r.skeletal, file: `${id}.glb`, bounds: info.bounds ?? { min: [-1, 0, -1], max: [1, 2, 1] }, triangles: tris, skeletal: true, ...(animated ? { clips: info.animations, clipSpeeds: info.clipSpeeds ?? {} } : {}), ...(tris ? {} : { failed: `no triangles (${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes'})` }) });
+            // Its hardpoints kept under their joints: a pod racer's pilot sits on its own `player` point.
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), gallerySatOptions(animated, CREATURE_CLIPS));
+            // The names it kept go in its entry, which is how `status` tells a gallery converted before they were kept.
+            const entry = skeletalModelEntry(id, r.skeletal, info, animated);
+            const tris = entry.triangles;
+            models.set(id, entry);
             if (!tris) console.log(`  ${template}: ${r.skeletal} converted with no triangles: ${[...info.missing, ...info.skipped].slice(0, 3).join('; ') || 'no meshes in it'}`);
             else if (animated) console.log(`  ${template}: walks with its own clips (${info.animations.join(', ')})`);
           }

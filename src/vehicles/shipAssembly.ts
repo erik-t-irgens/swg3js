@@ -53,6 +53,16 @@ export function hardpointName(o: THREE.Object3D): string | null {
   return m ? m[1] : null;
 }
 
+/** The node of a model's hardpoint by name (any case), or null: the first met in traverse order. */
+export function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | null {
+  let found: THREE.Object3D | null = null;
+  const want = name.toLowerCase();
+  model.traverse((o) => {
+    if (!found && hardpointName(o)?.toLowerCase() === want) found = o;
+  });
+  return found;
+}
+
 /** Signs taking the client's yaw and roll into three's mirrored frame (the V-wing's yaw and the B-wing's roll are the only uses). */
 export const PLACE_SIGN = { yaw: -1, roll: -1 };
 

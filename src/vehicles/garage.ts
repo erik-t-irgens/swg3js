@@ -11,7 +11,7 @@ import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHard
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
-import { PART_LIMIT, applyPlace, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
+import { PART_LIMIT, applyPlace, findHardpoint, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
 import { WING_DROP_MIN, WING_TIP_ROOM, WingSet, type Wing } from './wings';
 import { boltSlotOf, changedSlots, componentIndex, droidShown, droidSink, gunWeapon, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit';
 import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
@@ -19,6 +19,7 @@ import { ShipPaint } from './shipPaint';
 import { renderPaint } from './paintRender';
 import { lavaImmuneTemplate, setImmunityCatalogue } from '../world/lavaImmunity';
 import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf, pieceVolumes } from './rigHull.ts';
+import { POD_COCKPIT_JOINT, isPod, podGait, seatPod, type PodGait } from './podSeat.ts';
 import type { TravelRig } from '../world/travelTerminal.ts';
 
 // Moved to shipAssembly.ts (node-testable); every existing import from here keeps working.
@@ -758,7 +759,7 @@ export class Garage {
    * Prepared (`opts.prepare`) and painted (`opts.fit`'s paint, waited for up to `opts.paintWait`) before
    * it is handed back, so it compiles nothing once shown.
    */
-  async visualParts(def: VehicleDef, opts: BuildOptions = {}): Promise<{ holder: THREE.Object3D; wings: WingSet; unresolved: string[]; build: ShipBuild; paint: ShipPaint | null; fit: ResolvedFit | null }> {
+  async visualParts(def: VehicleDef, opts: BuildOptions = {}): Promise<{ holder: THREE.Object3D; wings: WingSet; unresolved: string[]; build: ShipBuild; paint: ShipPaint | null; fit: ResolvedFit | null; gait: PodGait | null }> {
     const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
     let skinned = false;
     loaded.scene.traverse((o) => {
@@ -801,6 +802,9 @@ export class Garage {
       });
       hangSaddle(model, planSeat(hardpoints, def.saddle), saddle, findHardpoint, holder, null);
     }
+    // A pod plays its own idle and run on the picture too, by its glided speed (`RemotePlayers` steps it), so the
+    // pilot its rider's own game seated in the cockpit sits in the cockpit drawn here; posed in the idle to start.
+    const gait = isPod(def) && loaded.animations.length ? podGait(model, loaded.animations, def.clipSpeeds) : null;
     // Compiled before it is shown, saddle and parts included (the holder carries everything).
     try {
       if (opts.prepare) await opts.prepare([holder]);
@@ -809,7 +813,7 @@ export class Garage {
       paint?.dispose();
       throw err;
     }
-    return { holder, wings: a.wings, unresolved: a.unresolved, build: a.build, paint, fit };
+    return { holder, wings: a.wings, unresolved: a.unresolved, build: a.build, paint, fit, gait };
   }
 
   /**
@@ -1198,19 +1202,6 @@ export class Garage {
     }
     v.hardpoints = hardpoints;
     v.riderPose = def.riderPose ?? null;
-    if (kind === 'podracer') {
-      // A pod's cockpit, from the mesh, for the pods whose authored origin is nowhere near it
-      // (some were left unfinished): the pod hangs at the end its origin leans to, and the pilot
-      // sits half a metre under the mesh's top there. The rider takes it when the game's own seat
-      // lands outside the pod.
-      const L = bounds.max[2] - bounds.min[2];
-      const h = bounds.max[1] - bounds.min[1];
-      const end = model.position.z < -0.5 ? -1 : 1;
-      const z = end * Math.max(0, L / 2 - Math.min(2.5, L * 0.16));
-      const top = backHeight(model, bounds, z);
-      v.podSeat = [0, THREE.MathUtils.clamp((top ?? h * 0.6) - 0.55, 0.3, h * 0.9), z];
-      console.info(`garage: ${def.id} cockpit guessed at ${v.podSeat.map((n) => n.toFixed(2)).join(',')} from the mesh (its origin sits at ${model.position.toArray().map((n) => n.toFixed(2)).join(',')} in its box)`);
-    }
     v.def = def;
     // Whether a flow can hurt this hull, joined once here and never looked up again: the client's
     // own terrain table names the templates that take none, and the pack the planet loaded is what
@@ -1260,7 +1251,15 @@ export class Garage {
     }
     if (def.source !== 'creature') collectPanes(v);
     if (def.source === 'creature' && !animations.length) seatRider(def, v, model, hardpoints, saddle);
-    if (animations.length) {
+    // A pod plays its own clips and seats its pilot by rules of its own (src/vehicles/podSeat.ts), decided by what
+    // it is rather than the kind it is tried as: a walker tried as a pod keeps its walk and its seat.
+    const pod = isPod(def);
+    if (pod) {
+      const { pelvis, rule, joint, gait } = seatPod(v, { id: def.id, model, clips: animations, speeds: def.clipSpeeds, find: findHardpoint, guess: () => guessCockpit(model, bounds) });
+      const why = { table: "the owner's own place for it", hardpoint: "the game's own player point", joint: `its ${POD_COCKPIT_JOINT} joint's origin (a gallery converted before the player point was kept)`, guess: 'the cockpit guessed from the mesh' }[rule];
+      console.info(`garage: ${def.id} seats its pilot's pelvis at ${pelvis.map((n) => n.toFixed(2)).join(',')} from ${why}${joint ? `, riding its ${joint.name || 'unnamed'} joint${gait ? ' through its own clips' : ''}` : ', fixed to the pod'}`);
+    }
+    if (animations.length && !pod) {
       // Its own idle, walk and run, picked by speed: an animal's, or a walker's from its animation table.
       const mixer = new THREE.AnimationMixer(model);
       const clips = new Map(animations.map((a) => [a.name, a]));
@@ -1315,6 +1314,19 @@ function seatRider(def: VehicleDef, v: Vehicle, model: THREE.Object3D, hardpoint
   console.info(`garage: ${def.id}: ${describeSeat(v, hung, plan)}`);
 }
 
+/**
+ * A pod's cockpit from its mesh, for a pod with no cockpit joint, the last of the rules: the end its
+ * authored origin leans to, half a metre under the mesh's top there.
+ */
+function guessCockpit(model: THREE.Object3D, bounds: VehicleSpec['bounds']): Vec3 {
+  const L = bounds.max[2] - bounds.min[2];
+  const h = bounds.max[1] - bounds.min[1];
+  const end = model.position.z < -0.5 ? -1 : 1;
+  const z = end * Math.max(0, L / 2 - Math.min(2.5, L * 0.16));
+  const top = backHeight(model, bounds, z);
+  return [0, THREE.MathUtils.clamp((top ?? h * 0.6) - 0.55, 0.3, h * 0.9), z];
+}
+
 /** What the log says of how a mount's rider was seated. */
 function describeSeat(v: Vehicle, hung: { node: THREE.Object3D; from: string } | null, plan: SeatPlan): string {
   const boneOf = (o: THREE.Object3D | null | undefined) => o?.name || 'unnamed';
@@ -1355,16 +1367,6 @@ function backHeight(model: THREE.Object3D, bounds: VehicleSpec['bounds'], z: num
     }
   });
   return Number.isFinite(top) ? top : null;
-}
-
-/** The node of a model's hardpoint by name, or null. */
-function findHardpoint(model: THREE.Object3D, name: string): THREE.Object3D | null {
-  let found: THREE.Object3D | null = null;
-  const want = name.toLowerCase();
-  model.traverse((o) => {
-    if (!found && hardpointName(o)?.toLowerCase() === want) found = o;
-  });
-  return found;
 }
 
 /**

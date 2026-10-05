@@ -8,6 +8,7 @@ import type { Hello, PeerState, PeerVehicle } from './net';
 import { easeInHull, MIN_GLIDE_SECONDS, peerAboard, placeInHull } from './aboardMath.ts';
 import type { Garage } from '../vehicles/garage';
 import type { WingSet } from '../vehicles/wings';
+import { stepPodPicture, type PodGait } from '../vehicles/podSeat.ts';
 import { changedSlots, fitKey, type ResolvedFit, type ShipFit } from '../vehicles/shipFit';
 import type { ShipBuild } from '../vehicles/shipMounts';
 import type { ShipPaint } from '../vehicles/shipPaint';
@@ -132,6 +133,12 @@ interface RemoteVehicle {
   /** A refit of the picture under way, and the newest fit asked for meanwhile (the running pass takes it up when it ends). */
   busy: Promise<void> | null;
   want: ShipFit | null;
+  /**
+   * A pod's own idle and run on the picture, stepped by its glided speed along its nose with the rule the
+   * rider's own game uses (`stepPodPicture`), so the pilot it seated in the cockpit sits in the cockpit drawn here; null
+   * for anything else, and before the picture is in.
+   */
+  gait: PodGait | null;
 }
 
 /**
@@ -704,7 +711,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -755,11 +762,12 @@ export class RemotePlayers {
       const asked = r.hello.ship?.id === def.id ? r.hello.ship.fit : null;
       const fit = def.fit ? g.resolve(def, asked) : null;
       // Prepared (and painted) before it is shown, so the first sight of it compiles nothing.
-      const { holder: obj, wings, build, paint } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
+      const { holder: obj, wings, build, paint, gait } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
       if (r.vehicle !== rv) {
         paint?.dispose();
         return;
       }
+      rv.gait = gait;
       rv.build = def.fit ? build : null;
       rv.paint = paint;
       rv.fit = fit;
@@ -957,6 +965,11 @@ export class RemotePlayers {
             rv.box = measureBox(rv.obj) ?? rv.box;
           }
         }
+        // A pod's cockpit rises into its run and sinks into its idle as the rider's own does: their figure is
+        // placed where their game seated it, on that game's pod, so this picture has to stand the same way.
+        // Its speed is read along the nose as that game reads its own, or a slide or a fall would play the
+        // run here while the rider's game holds the idle, and the pilot would hang 4 m under the cockpit.
+        if (rv.gait) stepPodPicture(rv.gait, dt, rv.vel, rv.obj.quaternion, rv.landed);
       }
       const rig = r.rig;
       if (rig && r.down) {
