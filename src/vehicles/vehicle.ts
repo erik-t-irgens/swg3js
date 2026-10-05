@@ -5,7 +5,7 @@
 // and airspeeders as aircraft) climb and sink on Space and Ctrl and hold their height over the ground.
 import * as THREE from 'three';
 import { cleanTrimesh, Group, groups, RAPIER, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
-import { WING_RULE, WingSet, easeWing, pilotWings, wingTopFactor, wingsWanted } from './wings.ts';
+import { WING_RULE, WingSet, easeWing, wingTopFactor, wingWant } from './wings.ts';
 import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly.ts';
 import { partnerLoss } from '../space/shipDamage.ts';
 import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane, type LandingLiquid } from './landing.ts';
@@ -1353,18 +1353,28 @@ export class Vehicle {
 
   /**
    * The wings open in flight with room under them and close on the ground (the flight rule,
-   * `wingsWanted`, on last step's height), each turned about its own Z over its own time, the way
-   * the client turns the wing objects it hangs on the hull. Positional, nothing allocated.
+   * `wingsWanted`, on last step's height) unless a hand over the rule says otherwise (`wingWant`),
+   * each turned about its own Z over its own time, the way the client turns the wing objects it
+   * hangs on the hull. Positional, nothing allocated.
    */
   private updateWings(dt: number): void {
     if (!this.wings.length) return;
     const w = this.wings;
-    // The pilot's choice from the wings key, while there is one; else the flight rule.
-    w.want =
-      w.pilot !== null
-        ? pilotWings(w.pilot, this.airborne, this.space, this.aboveGround, this.wingClearance, w.want)
-        : wingsWanted(this.airborne, this.space, this.aboveGround, this.wingClearance, Math.abs(this.speed), this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, w.want);
+    // Every hand on the wings, in the one order `wingWant` keeps: the console, a dock, the pilot, an NPC pilot, the flight rule.
+    w.want = wingWant(w, this.airborne, this.space, this.aboveGround, this.wingClearance, Math.abs(this.speed), this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor);
     if (w.step(dt)) this.followWings();
+  }
+
+  /**
+   * Every wing straight to open or shut, with the colliders that ride them: what a dock does to a hull it stands where it
+   * is outright (`Docking.park`), so the ship comes back to its dock with them already shut instead of folding them in
+   * front of the player as the loading screen lifts. A snap moves nothing that can be seen, so the wings' sound takes no
+   * note of it. Nothing allocated.
+   */
+  snapWings(open: boolean): void {
+    if (!this.wings.length) return;
+    this.wings.snap(open);
+    this.followWings();
   }
 
   /** The hull colliders under a wing's pivot, moved to where their meshes now stand in the vehicle's frame. */
@@ -1454,6 +1464,8 @@ export class Vehicle {
       target: this.wings.target,
       forced: this.wings.force,
       pilot: this.wings.pilot,
+      brain: this.wings.brain,
+      dockHold: this.wings.dockHold,
       wings,
       colliders,
       guns,
@@ -1528,9 +1540,10 @@ export class Vehicle {
     this.cruise = speed;
     this.speed = speed;
     this.airborne = true;
-    // Arriving in flight, the wings already stand as the pilot's choice or the flight rule has them (the ground is not read yet: all the room in the world).
+    // Arriving in flight, the wings already stand as `wingWant` has them (the ground is not read yet: all the room in the
+    // world), from shut: an NPC patrol, whose pilot's hand is shut from the start, arrives with them shut.
     const w = this.wings;
-    w.snap(w.pilot !== null ? pilotWings(w.pilot, true, this.space, Infinity, this.wingClearance, false) : wingsWanted(true, this.space, Infinity, this.wingClearance, speed, this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, false));
+    w.snap(wingWant(w, true, this.space, Infinity, this.wingClearance, speed, this.spec.maxSpeed * (this.space ? 2 : 1), this.wingOpenFactor, false));
     this.followWings();
     this.body.setGravityScale(0, true);
     this.quaternion(this.attitude);
@@ -1713,6 +1726,10 @@ export class Vehicle {
     if (this.holdOn) {
       // Something else holds the hull at a pose of its own: written before the step, so nothing lags a frame.
       this.writeHold();
+      // A dock that holds the hull (at a station, or clamped onto another's back) holds its wings shut, and they fold
+      // while it holds it: a hull parked straight at a dock, or brought alongside a carrier with them open, would
+      // otherwise keep them as they stood. Any other hold leaves the wings where they are, as it always has.
+      if (this.wings.dockHold) this.updateWings(dt);
       this.justHit = kept;
       this.onUpdate?.(dt, this, drive);
       return;

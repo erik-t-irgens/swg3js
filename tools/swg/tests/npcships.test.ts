@@ -239,6 +239,18 @@ const here = dirname(fileURLToPath(import.meta.url));
   );
 }
 
+// A patrol arrives with its wings shut: its pilot's hand is put on them before the launch snaps them (the launch asks
+// `wingWant`, whose order wings.test.ts pins), and only under the 'flight' rule is it left to the flight rule, which
+// in space has them open. npcShips.ts cannot be loaded by node, so what it says is read.
+{
+  const ships = readFileSync(join(here, '..', '..', '..', 'src/space/npcShips.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const hand = ships.indexOf("v.wings.brain = WING_AUTO.npc === 'target' ? false : null;");
+  const launch = ships.indexOf('v.launch(LAUNCH_SHARE');
+  const brain = ships.indexOf('ship.brain = new NpcBrain(ship, rng);');
+  ok(hand > 0 && hand < launch && launch < brain, "a spawned NPC ship's wings are given its pilot's hand, shut, before the launch snaps them and before the brain exists");
+  ok((ships.match(/v\.launch\(/g)?.length ?? 0) === 1, 'and that launch is the only one an NPC ship is given');
+}
+
 // The owner's pack, when converted with combat.json.
 const packFile = join(here, '..', '..', '..', 'assets-private', 'ships', 'combat.json');
 if (!existsSync(packFile)) console.log('skip the ships pack has no combat.json yet (the ships command writes it)');

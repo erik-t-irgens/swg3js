@@ -5,7 +5,9 @@
 // Before, holding W cut the cruise to the new top in a single step (ninety metres a second off a
 // fighter in space as it crossed a nebula's edge), and letting go of W kept the old speed for good,
 // inside a nebula whose whole point is that the ship is slower in it. A boost's coast, which is above
-// the old top, is left exactly as it always was, and so is everything when nothing is lowered.
+// the old top, is left exactly as it always was, and so is everything when nothing is lowered. And a
+// winged fighter whose NPC pilot opens its wings to fight pays the chassis's share of its top while
+// they are open and has it back when they shut.
 //
 // The game's own Vehicle class, over a Rapier world with nothing in it, out in space. Nothing here is
 // game data: a box of a fighter's size and round numbers.
@@ -13,6 +15,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { Physics } from '../../../src/core/physics.ts';
 import { Vehicle, specFor, type DriveInput } from '../../../src/vehicles/vehicle.ts';
+import { VehicleSounds } from '../../../src/audio/vehicleSounds.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -116,6 +119,92 @@ function done(f: { v: Vehicle; physics: Physics; scene: THREE.Scene }): void {
   const coast = steps(f.v, f.physics, f.input, 120);
   ok(coast.every((c) => c === boosted), "4: let go, the boost's coast above the plain top is kept, as it always was");
   done(f);
+}
+
+// --- 5: a winged fighter whose pilot's hand opens and shuts its wings -------------------------------------
+// An NPC pilot's hand (`WingSet.brain`) over the flight rule, which in space has the wings open the whole time: shut, the
+// hull reaches its full top; open, the top times the chassis's factor; and the wings' sound is asked for once each time
+// they turn round, through the real VehicleSounds with no mixer behind it (it counts what it would have played).
+{
+  /** A winged fighter standing still out in space, launched into flight as an NPC ship is, with its pilot's hand as given. */
+  const launched = async (brain: boolean | null) => {
+    const physics = await Physics.create();
+    const spec = specFor('ship', 'test', 'a made up winged fighter', { min: [-4, 0, -6], max: [4, 2, 6] });
+    const scene = new THREE.Scene();
+    const v = new Vehicle(spec, new THREE.Group(), physics, scene, 0, 2000, 0, 0);
+    v.space = true;
+    physics.stepOnce();
+    for (let i = 0; i < 2; i++) v.wings.add({ pivot: new THREE.Object3D(), angle: 0.25, time: 1.5, open: 0, label: `foil${i}` });
+    v.wingOpenFactor = 0.95;
+    (v as { def: unknown }).def = { id: 'test', attachments: [{ kind: 'wing', sound: 'sound/test_wings_open.snd' }] };
+    v.wings.brain = brain;
+    v.launch(spec.maxSpeed);
+    const input: DriveInput = { throttle: 1, steer: 0, heading: null, boost: false, hop: false, up: false, down: false, vertical: 0 };
+    return { v, physics, scene, input };
+  };
+  const f = await launched(false);
+  const v = f.v;
+  const sounds = new VehicleSounds();
+  const fly = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      v.update(DT, f.physics, f.input);
+      f.physics.step(DT);
+      sounds.update(DT, [v], null, null);
+    }
+  };
+  const top = v.spec.maxSpeed * 2;
+  // A patrol: launched with its pilot's hand shut, it arrives with the wings shut, where the flight rule would open them.
+  ok(v.wings.progress === 0 && !v.wings.target, '5: launched with its pilot\'s hand shut, a patrol arrives with its wings shut');
+  fly(60 * 15);
+  ok(v.wings.progress === 0 && near(v.cruise, top, 1e-9), `5: and flies at its full top with them shut (${v.cruise.toFixed(1)} of ${top.toFixed(1)} m/s)`);
+  const before = sounds.counts.wings;
+  v.wings.brain = true;
+  fly(60 * 10);
+  ok(v.wings.progress === 1 && near(v.cruise, top * 0.95, 1e-9), `5: opened to fight, at the top times the chassis's factor (${v.cruise.toFixed(1)} m/s)`);
+  ok(sounds.counts.wings === before + 1, `5: the wings' sound is asked for once as they open (${sounds.counts.wings - before})`);
+  v.wings.brain = false;
+  fly(60 * 10);
+  ok(v.wings.progress === 0 && near(v.cruise, top, 1e-9), '5: shut again three seconds after the fight, it climbs back to its full top');
+  ok(sounds.counts.wings === before + 2, '5: and the sound once more as they shut, and not on any frame between');
+  // Snapped shut where they stand open (what a dock does to a ship it stands at its dock outright): nothing swung, so
+  // nothing is heard, and the next time they really move the sound comes again.
+  v.wings.brain = true;
+  fly(60 * 10);
+  ok(v.wings.progress === 1 && sounds.counts.wings === before + 3, '5: opened again, with its sound');
+  v.wings.brain = false;
+  v.snapWings(false);
+  sounds.update(DT, [v], null, null);
+  fly(60);
+  ok(v.wings.progress === 0 && !v.wings.target && sounds.counts.wings === before + 3, `5: snapped shut, the wings are shut at once and no sound is asked for (${sounds.counts.wings - before - 3} asked)`);
+  v.wings.brain = true;
+  fly(60 * 10);
+  ok(v.wings.progress === 1 && sounds.counts.wings === before + 4, '5: and swung open after it, the sound is asked for as ever');
+  ok(!v.destroyed && v.airborne, '5: flown the whole time, never struck by anything');
+  done(f);
+  // The same hull with nobody's hand on it: the flight rule's, open in space the whole time.
+  const g = await launched(null);
+  ok(g.v.wings.progress === 1 && g.v.wings.target, '5: with no hand on them, a launch into space opens them, as the flight rule always did');
+  // Held where it is by a dock (parked straight at one, or carried on another hull's back): the dock's hold folds them
+  // while it holds the hull, which no other hold does, and letting go gives them back to the flight rule.
+  const at = g.v.pos.clone();
+  const turn = g.v.quaternion(new THREE.Quaternion());
+  g.v.hold(null, at, turn);
+  const step = (n: number) => {
+    for (let i = 0; i < n; i++) {
+      g.v.update(DT, g.physics, null);
+      g.physics.step(DT);
+    }
+  };
+  step(60 * 3);
+  ok(g.v.wings.progress === 1, '5: a hull some other hold has keeps its wings as they stand');
+  g.v.wings.dockHold = true;
+  step(60 * 3);
+  ok(g.v.wings.progress === 0 && !g.v.wings.target, "5: a dock's hold folds them while the hull is held");
+  g.v.wings.dockHold = false;
+  g.v.release();
+  step(60 * 3);
+  ok(g.v.wings.progress === 1, '5: and let go, they open again under the flight rule, as the game reopened a docking ship\'s wings that had been open');
+  done(g);
 }
 
 console.log(`\n${checks} checks passed`);

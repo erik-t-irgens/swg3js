@@ -12,6 +12,7 @@ import type { Bolts, ProjectileVisual } from '../combat/bolts';
 import type { Effects } from '../combat/effects';
 import { RAPIER, type Physics } from '../core/physics';
 import type { DriveInput } from '../vehicles/vehicle';
+import { NpcWingHand, npcFighting } from '../vehicles/wings.ts';
 import { ShipContact, type ShipContacts } from './contacts';
 import { shipHostile } from './factions';
 import { AVOID_TUNE, PILOT_SKILL, aimPoint, formationPoint, pushApart, skillOfTier, skillStick, slotCruise, steerToward, toLocal, type PilotSkill, type Stick } from './pilot';
@@ -135,6 +136,8 @@ export class NpcBrain {
   readonly drive: DriveInput = { throttle: 0, steer: 0, heading: null, boost: false, hop: false, up: false, down: false, stickX: 0, stickY: 0, cruise: 0 };
   /** Shots fired, for the console. */
   shots = 0;
+  /** Its hand on the wings: when it last fought, and what that makes of them now. */
+  readonly wingHand = new NpcWingHand();
   private readonly skill: PilotSkill;
   /** The stick the pilot wants (steerToward's), and the one its hand holds (capped and eased by its skill). */
   private readonly stick: Stick = { x: 0, y: 0, roll: 0 };
@@ -345,6 +348,9 @@ export class NpcBrain {
         want.copy(group.route[group.waypoint] ?? home).sub(pos);
         speed = top * TUNE.patrolShare;
     }
+    // The wings, with the state settled: open while it fights a target it holds, shut a few seconds after its last fight
+    // (the game's pilots opened them on taking a target and shut them in everything else).
+    v.wings.brain = this.wingHand.want(npcFighting(this.state, this.target !== null), now);
     if (want.lengthSq() < 1e-6) want.copy(nose);
     want.normalize();
 

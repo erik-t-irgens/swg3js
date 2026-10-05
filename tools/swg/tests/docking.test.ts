@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { Docking } from '../../../src/space/docking.ts';
+import { WING_AUTO } from '../../../src/vehicles/wings.ts';
 import {
   DOCK_FACE,
   DOCK_TUNE,
@@ -349,13 +350,22 @@ const run: LaneRun = { lane: '', points: [], out: false, blocked: false };
   };
   // The fake world and the fake ship carry only what docking reads of them, so each is cast in.
   const docking = new Docking(world as any);
+  // Another hull in the zone, which no dock has: its wings are never the dock's to shut.
+  const other = { spec: { id: 'other' }, pos: new THREE.Vector3(0, 0, 0) };
+  /** Every phase of the dock in which the wings' hold said the wrong thing, for the ship or for the other hull. */
+  const wrongHold: string[] = [];
+  const holdRight = (phase: string) => {
+    if (docking.holdsWings(ship as any) !== (phase !== 'idle') || docking.holdsWings(other as any)) wrongHold.push(phase);
+  };
   ship.landed = true;
   ok(docking.dock(ship as any) === 'lift off first' && docking.report().phase === 'idle', '9: a ship set down on something is not flown off it by the dock');
+  ok(!docking.holdsWings(ship as any) && !docking.holdsWings(null), "9: with no dock under way the dock holds nobody's wings");
   ship.landed = false;
   const said = docking.dock(ship as any);
   ok(docking.report().phase === 'approach', `9: asking for a dock starts the approach (${said})`);
   ok((docking.report().at as string) === 'Test Station', '9: and names the station from the pack');
   ok(docking.flying(ship as any) && !docking.docked(ship as any), '9: the autopilot has the ship');
+  ok(docking.holdsWings(ship as any) && !docking.holdsWings(other as any), "9: and holds its wings shut from the first leg of the approach, and nobody else's");
 
   const dt = 1 / 60;
   const nose = new THREE.Vector3();
@@ -368,6 +378,7 @@ const run: LaneRun = { lane: '', points: [], out: false, blocked: false };
     const drive = docking.step(ship as any, dt, null);
     const phase = docking.report().phase as string;
     if (!phases.endsWith(phase)) phases += (phases ? ' → ' : '') + phase;
+    holdRight(phase);
     if (drive && !ship.holding) {
       // flyShip's own senses, with no inertia: yaw about the hull's Y, pitch about its X, and on along the nose.
       attitude.multiply(spin.setFromAxisAngle(Y, -(drive.stickX ?? 0) * 1.5 * dt));
@@ -389,6 +400,7 @@ const run: LaneRun = { lane: '', points: [], out: false, blocked: false };
   seconds = 0;
   while (seconds < 90 && docking.report().phase !== 'idle') {
     const drive = docking.step(ship as any, dt, null);
+    holdRight(docking.report().phase as string);
     if (drive && !ship.holding) {
       attitude.multiply(spin.setFromAxisAngle(Y, -(drive.stickX ?? 0) * 1.5 * dt));
       attitude.multiply(spin.setFromAxisAngle(X, (drive.stickY ?? 0) * 1.5 * dt));
@@ -398,6 +410,9 @@ const run: LaneRun = { lane: '', points: [], out: false, blocked: false };
     seconds += dt;
   }
   ok(docking.report().phase === 'idle' && !ship.ghosted, `9: the way out ends with the hull back in the pilot's hands (${seconds.toFixed(1)} s)`);
+  ok(!docking.holdsWings(ship as any), '9: and its wings with it, back to the pilot\'s choice or the flight rule');
+  const holdPhases = new Set(phases.split(' → '));
+  ok(wrongHold.length === 0 && ['approach', 'settle', 'repair', 'docked'].every((p) => holdPhases.has(p)), `9: through every phase of the dock (${phases} → launch) the wings were held shut, and only the docking ship's${wrongHold.length ? `; wrong in ${[...new Set(wrongHold)].join(', ')}` : ''}`);
   ok(ship.pos.x > 2000 + 300 && ship.pos.z < -100, `9: out where the lane's own exit points lead (${ship.pos.toArray().map((n) => n.toFixed(0)).join(', ')})`);
   ok((docking.report().claims as number) === 0, '9: and the lane is given back');
 
@@ -412,6 +427,28 @@ const run: LaneRun = { lane: '', points: [], out: false, blocked: false };
   ok(again.report().phase === 'approach', '9: the approach runs while the pilot keeps his hands off');
   again.step(ship as any, dt, { throttle: 1, steer: 0, boost: false, hop: false, up: false, down: false });
   ok(again.report().phase === 'idle' && !ship.ghosted, `9: and a hand on the throttle breaks it off (${again.report().note})`);
+  ok(!again.holdsWings(ship as any), '9: a break-off lets go of the wings in the same step');
+
+  // Stood at its dock outright (`park`: a crew come back across a loading screen to the ship they left docked at the hull
+  // they went aboard). The launch that brought the hull out snapped its wings open by the flight rule, and the dock's hold
+  // would fold them in front of the player as the screen lifts, so the dock snaps them shut there and then.
+  const snapped: boolean[] = [];
+  const parkedShip = { ...ship, pos: new THREE.Vector3(2000 + 560, 0, 120), holding: false, ghosted: false, snapWings: (open: boolean) => void snapped.push(open) };
+  parkedShip.hold = (frame: THREE.Matrix4 | null, p: THREE.Vector3) => {
+    parkedShip.holding = true;
+    parkedShip.pos.copy(p).applyMatrix4(frame ?? new THREE.Matrix4());
+  };
+  parkedShip.setGhost = (on: boolean) => void (parkedShip.ghosted = on);
+  const parked = new Docking(world as any);
+  const back = parked.park(parkedShip as any, 'hull@2000,0,0', 'a');
+  ok(back !== null && parked.report().phase === 'docked' && parkedShip.holding && parked.holdsWings(parkedShip as any), `9: a ship stood at its dock outright is docked, held, and its wings are the dock's (${back})`);
+  ok(snapped.length === 1 && snapped[0] === false, `9: and they are snapped shut there and then rather than left to fold in view (${snapped.join(', ') || 'never snapped'})`);
+  const savedAuto = { ...WING_AUTO };
+  WING_AUTO.dockCloses = false;
+  snapped.length = 0;
+  const leftAlone = new Docking(world as any);
+  ok(leftAlone.park(parkedShip as any, 'hull@2000,0,0', 'a') !== null && snapped.length === 0, "9: with `dockCloses` off a dock stands the ship as it is and leaves its wings alone");
+  Object.assign(WING_AUTO, savedAuto);
 }
 
 // --- 10: corridors filed under a neighbour's letter -------------------------------------------------

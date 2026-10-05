@@ -154,4 +154,57 @@ function ok(cond: boolean, what: string): void {
   ok(!/TUNE\.(separation|dodgeLook|dodgeMargin|collideSeconds|rayEvery|rayAhead|rayMin|avoidSeconds)/.test(brain.replace(/AVOID_TUNE/g, '')), 'and none of the moved numbers is left in its own table');
 }
 
+// ------------------------------------------------------------------ a ship pilot's hand on its wings
+// The game's AI ships opened their wings the frame they took a target to attack and shut them in every other behaviour.
+// Ours fly shut on patrol, open on the think that takes a target, and shut `closeAfter` seconds after the last fight. The
+// brain cannot be loaded here (above), so its hand (`NpcWingHand`, `npcFighting` in wings.ts) is driven through the
+// states a think leaves it in, one think a tenth of a second, and the brain is read for where it writes the answer.
+{
+  const { NpcWingHand, WING_AUTO, npcFighting } = await import('../../../src/vehicles/wings.ts');
+  const saved = { ...WING_AUTO };
+  WING_AUTO.npc = 'target';
+  WING_AUTO.closeAfter = 3;
+  const hand = new NpcWingHand();
+  /** One think: the state and the target it settled on, and what it writes into `WingSet.brain`. */
+  const think = (state: string, target: boolean, now: number) => hand.want(npcFighting(state, target), now);
+  let now = 0;
+  // Every think's answer is kept and every one is asked about, the first included: a hand that started out open would
+  // show only there, since it would have shut again long before the last.
+  const patrol: (boolean | null)[] = [];
+  for (let i = 0; i < 50; i++, now += 0.1) patrol.push(think(i % 2 ? 'formation' : 'patrol', false, now));
+  ok(patrol.length === 50 && patrol.every((b) => b === false), `a patrol, leader and wingman alike, leaves every think with its wings shut, the very first included (${patrol.filter((b) => b !== false).length} not shut)`);
+  // A target is picked at the top of a think and the state goes to engage in the same think.
+  ok(think('engage', true, now) === true, 'the think that takes a target opens them');
+  // Each fighting state on its own for longer than the hold, so the hold cannot cover a state the rule has dropped: a
+  // fighter fleeing for its twelve seconds would otherwise fold its wings three seconds into the flight.
+  for (const state of ['breakoff', 'evade', 'flee', 'engage']) {
+    const run: (boolean | null)[] = [];
+    for (let i = 0; i < 50; i++) run.push(think(state, true, (now += 0.1)));
+    ok(run.every((b) => b === true), `and they stay open through 5 s of ${state} while it holds a target, every think of it (${run.filter((b) => b !== true).length} not open)`);
+  }
+  const lost = now;
+  const seen: (boolean | null)[] = [];
+  for (now = lost + 0.1; now < lost + 5; now += 0.1) seen.push(think('formation', false, now));
+  const shutAt = lost + 0.1 + 0.1 * seen.indexOf(false);
+  ok(seen.indexOf(false) > 0 && seen.slice(0, seen.indexOf(false)).every((b) => b === true) && seen.slice(seen.indexOf(false)).every((b) => b === false), 'with the target lost they stay open for a while and then shut, once, for good');
+  ok(Math.abs(shutAt - lost - WING_AUTO.closeAfter) < 0.15, `and they shut ${WING_AUTO.closeAfter} s after the last fight (${(shutAt - lost).toFixed(1)} s)`);
+  ok(think('engage', false, now) === false && think('return', false, now) === false, 'a state of fighting with nothing held to fight is not a fight');
+  // A hold of nought is the game's own rule: open on the think that fights, shut on the first that does not, and never
+  // shut for good (a fight is open outright, not "fought within the hold", which with nought would be never).
+  WING_AUTO.closeAfter = 0;
+  const quick = new NpcWingHand();
+  ok(quick.want(false, 10) === false && quick.want(true, 10.1) === true && quick.want(true, 10.2) === true && quick.want(false, 10.3) === false && quick.want(true, 10.4) === true, 'with `closeAfter` at nought they open on every think that fights and shut on the first that does not, as the game did');
+  WING_AUTO.closeAfter = 3;
+  WING_AUTO.npc = 'flight';
+  ok(think('engage', true, now) === null && think('patrol', false, now) === null, "under the 'flight' rule the brain writes null, and the flight rule has the wings as before");
+  Object.assign(WING_AUTO, saved);
+
+  const brainSrc = readFileSync(new URL('../../../src/space/npcBrain.ts', import.meta.url), 'utf8');
+  const write = brainSrc.indexOf('v.wings.brain = this.wingHand.want(npcFighting(this.state, this.target !== null), now);');
+  const settled = brainSrc.indexOf('switch (this.state) {');
+  const stick = brainSrc.indexOf('steerToward(local, ');
+  ok(write > 0 && write > settled && write < stick, "the brain writes its hand into the wings once a think, after the state is settled (the switch's own moves included) and before the stick");
+  ok(/readonly wingHand = new NpcWingHand\(\);/.test(brainSrc), 'with a hand of its own, kept for its life, so nothing is made a think');
+}
+
 console.log(`\n${passed} checks passed`);

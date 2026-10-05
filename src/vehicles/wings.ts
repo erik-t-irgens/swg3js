@@ -40,10 +40,24 @@ export function poseWing(w: Wing, open: number): void {
   w.pivot.quaternion.setFromAxisAngle(Z, w.angle * easeWing(w.open));
 }
 
+/**
+ * Who else may put a hand on the wings, all ours and live through `__debug.wings({ auto: { … } })`. The game's AI ships
+ * opened their wings the frame they had a target to attack and shut them in every other behaviour, and a ship that docked
+ * shut them for the approach and opened them again only if they had been open (read); the shapes are the game's and the
+ * numbers ours.
+ * - `npc`: 'target' gives an NPC pilot its hand (`WingSet.brain`: shut on patrol, open to fight); 'flight' leaves its wings
+ *   to the flight rule, as before the pilots had a hand (open the whole time in space).
+ * - `closeAfter`: seconds a pilot keeps them open after its last moment of fighting (the game's was nought), so a fighter
+ *   between two targets does not fold and spread them each time.
+ * - `dockCloses`: a dock flying a hull in or out, holding it at the dock or carrying it on another's back keeps its wings
+ *   shut (`WingSet.dockHold`).
+ */
+export const WING_AUTO: { npc: 'target' | 'flight'; closeAfter: number; dockCloses: boolean } = { npc: 'target', closeAfter: 3, dockCloses: true };
+
 /** A ship's wings, stepped together, each at its own pace. */
 export class WingSet {
   readonly list: Wing[] = [];
-  /** The last answer of the flight rule, or of the pilot's choice while there is one (true: open), kept for the rule's hysteresis. Never the forced value. */
+  /** The last answer of `wingWant` (true: open), kept for the rule's hysteresis and the room's band. */
   want = false;
   /** Held by the console: 'open', 'closed', or null for the flight rule. */
   force: 'open' | 'closed' | null = null;
@@ -53,6 +67,14 @@ export class WingSet {
    * the belly (`pilotWings`), so landing folds it.
    */
   pilot: boolean | null = null;
+  /**
+   * An NPC pilot's hand (true: open, false: shut), written by its brain on every thought (`NpcWingHand`), or null: the flight
+   * rule decides. Below the pilot's own choice, and never cleared by `dropPilotChoices`, which runs over every ship nobody
+   * flies and would otherwise take it off every NPC hull every frame. Never sent: NPC ships do not cross the relay.
+   */
+  brain: boolean | null = null;
+  /** Shut while a dock has the hull (`Docking.holdsWings`): written every frame from the dock's own state, so nothing can leave it held. */
+  dockHold = false;
   /** The goal of the last step, and whether every wing stood at it then (nothing to do until the goal changes). */
   private goal = 0;
   private settled = true;
@@ -176,12 +198,51 @@ export function pilotWings(open: boolean, airborne: boolean, space: boolean, abo
   return wasOpen ? aboveGround >= clearance : aboveGround > clearance + WING_ROOM_BAND;
 }
 
+/**
+ * Whether a ship's wings should stand open, with every hand on them in one order, and nowhere else (positional, so a
+ * per-frame call allocates nothing): the console's hold; a dock's hold, which is shut; the pilot's own choice and then an
+ * NPC pilot's, both through `pilotWings`, so a wing that swings below the belly on a planet still waits for room; and then
+ * the flight rule. `wasOpen` is the last answer (`w.want`) unless the caller says otherwise: a ship launched into flight
+ * starts from shut, as it always did.
+ */
+export function wingWant(w: WingSet, airborne: boolean, space: boolean, aboveGround: number, clearance: number, speed: number, top: number, factor: number, wasOpen: boolean = w.want): boolean {
+  if (w.force) return w.force === 'open';
+  if (w.dockHold) return false;
+  if (w.pilot !== null) return pilotWings(w.pilot, airborne, space, aboveGround, clearance, wasOpen);
+  if (w.brain !== null) return pilotWings(w.brain, airborne, space, aboveGround, clearance, wasOpen);
+  return wingsWanted(airborne, space, aboveGround, clearance, speed, top, factor, wasOpen);
+}
+
+/** The NPC pilots' states in which a target held is a fight (the rest -- patrol, formation, return -- fly with the wings shut). */
+export function npcFighting(state: string, hasTarget: boolean): boolean {
+  return hasTarget && (state === 'engage' || state === 'breakoff' || state === 'evade' || state === 'flee');
+}
+
+/**
+ * An NPC pilot's hand on its wings, one per brain: open while it fights and for `WING_AUTO.closeAfter` seconds after its
+ * last moment of fighting, shut otherwise, and null (the flight rule's) while `WING_AUTO.npc` is 'flight'. A plain class
+ * with its field written out, so the node tests can load it.
+ */
+export class NpcWingHand {
+  /** The last moment (the brain's clock) it was fighting; never, to begin with. */
+  foughtAt = -Infinity;
+
+  /** What the brain writes into `WingSet.brain` for this thought. */
+  want(fighting: boolean, now: number): boolean | null {
+    if (fighting) this.foughtAt = now;
+    if (WING_AUTO.npc === 'flight') return null;
+    // Fighting is open outright, so a hold of nought is the game's own rule rather than shut for good.
+    return fighting || now - this.foughtAt < WING_AUTO.closeAfter;
+  }
+}
+
 /** The key that opens and closes the wings of the ship flown (KeyboardEvent.code): U, bound to nothing else. */
 export const WINGS_KEY = 'KeyU';
 
 /**
  * The pilot's choice lasts only while they fly that ship: every set but the flown ship's goes back to the flight rule
- * (a pilot who left the seat, a ship nobody flies). Allocation-free, run each frame the keys are read.
+ * (a pilot who left the seat, a ship nobody flies). Allocation-free, run each frame the keys are read. An NPC pilot's
+ * hand (`brain`) and a dock's hold are not the pilot's choice and are left alone.
  */
 export function dropPilotChoices(list: readonly { readonly wings: WingSet }[], flown: unknown): void {
   for (let i = 0; i < list.length; i++) {

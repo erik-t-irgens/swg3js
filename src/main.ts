@@ -321,7 +321,7 @@ import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlouri
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
 import { FRAME_NUDGE, Garage, type VehicleDef } from './vehicles/garage';
-import { WINGS_KEY, WING_RULE, dropPilotChoices } from './vehicles/wings';
+import { WINGS_KEY, WING_AUTO, WING_RULE, dropPilotChoices } from './vehicles/wings';
 import { CUT_ENGINES_KEY, LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING } from './vehicles/landing';
 import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, roomTurn, type WalkableRoom } from './vehicles/surfaceRoom';
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
@@ -398,8 +398,8 @@ function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string =
     // Stopped in the air the ship holds its height, so the way down belongs on the flight line too.
     const flight = `<b>W</b>/<b>S</b> throttle up and down · mouse: in the circle aims the guns, out of it keeps turning the ship · <b>A/D</b> roll · <b>Space</b>/<b>X</b> pitch${v.powered ? '' : ' · <b>ENGINES CUT</b>'}${v.space ? setDown : Math.abs(v.speed) < 2 ? down : ''}`;
     // A ship whose wings open: the wings key and which way a press would take the pilot's choice; an open chosen while a
-    // low wing waits for room says so.
-    const wings = v.wings.length ? ` · <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? ' (they open with room under them)' : ''}` : '';
+    // low wing waits for room says so, and one a dock is holding shut says that instead.
+    const wings = v.wings.length ? ` · <b>${keyName(wingsKey)}</b> ${v.wings.chosen ? 'close' : 'open'} the wings${v.wings.pilot && !v.wings.target ? (v.wings.dockHold ? ' (they open once the dock lets go)' : ' (they open with room under them)') : ''}` : '';
     return `<b>E</b> leave · ${v.airborne ? flight : hover} · <b>wheel</b> zoom, all the way in for the cockpit · <b>Alt</b> look around${v.guns.length ? ' · <b>click</b> fires · <b>Tab</b> next target' : ''}${wings} · <b>Shift</b> burn · ${v.airborne ? 'flying' : 'hovering'} · ${Math.round(Math.abs(v.speed) * 3.6)} km/h${v.hp < v.maxHp ? ` · hull ${Math.round((v.hp / v.maxHp) * 100)}%` : ''}${v.landNote ? ` · ${v.landNote}` : ''}`;
   }
   const turn = k === 'ground' ? 'mouse or <b>A/D</b> turn' : 'mouse or <b>A/D</b> steer';
@@ -5754,12 +5754,29 @@ class App {
        * them back to the flight rule (the console's hold and the pilot's choice both dropped), `wings('multiplier')` /
        * `wings('threshold')` picks how every ship reads its chassis's speed factor. Returns the report: the rule, the top
        * speed now, the drop and the clearance, each wing's share open and the hull hardpoint its mount stands on, each
-       * moving collider's distance from its mesh, the guns and what was left off.
+       * moving collider's distance from its mesh, the guns and what was left off. `wings({ auto: { npc: 'flight' } })`
+       * sets the other hands on the wings (WING_AUTO: `npc` 'target' or 'flight', `closeAfter` seconds, `dockCloses`), and
+       * the report's `auto` and `npc` say what they are and, for every NPC hull with wings, its type, its pilot's state,
+       * its hand (`brain`) and where its wings are going (`target`).
        */
-      wings: (mode?: 'open' | 'closed' | 'toggle' | 'auto' | 'multiplier' | 'threshold') => {
+      wings: (mode?: 'open' | 'closed' | 'toggle' | 'auto' | 'multiplier' | 'threshold' | { auto?: Partial<typeof WING_AUTO> }) => {
         const p = this.player;
+        const auto = typeof mode === 'object' && mode !== null ? mode.auto : undefined;
+        if (typeof mode === 'object' && mode !== null) {
+          if (auto?.npc !== undefined) {
+            if (auto.npc !== 'target' && auto.npc !== 'flight') return `wings: npc '${String(auto.npc)}' is neither 'target' nor 'flight'`;
+            WING_AUTO.npc = auto.npc;
+          }
+          if (auto?.closeAfter !== undefined && Number.isFinite(auto.closeAfter)) WING_AUTO.closeAfter = Math.max(0, auto.closeAfter);
+          if (auto?.dockCloses !== undefined) WING_AUTO.dockCloses = !!auto.dockCloses;
+          mode = undefined;
+        }
+        // Every NPC hull with wings, and what its pilot has made of them (console only, so it allocates).
+        const npc = (this.world.npcShips?.ships ?? [])
+          .filter((s) => s.vehicle.wings.length && !s.vehicle.disposed)
+          .map((s) => ({ type: s.type.id, state: s.brain.state, brain: s.vehicle.wings.brain, target: s.vehicle.wings.target, open: Number(s.vehicle.wings.progress.toFixed(2)) }));
         const v = p.mounted ?? p.piloting ?? p.aboard?.vehicle ?? [...this.world.vehicles].filter((o) => o.spec.ship && !o.autopilot).sort((a, b) => a.pos.distanceTo(p.pos) - b.pos.distanceTo(p.pos))[0];
-        if (!v) return 'no ship: spawn one (spawn(\'xwing\')) or board one';
+        if (!v) return { auto: { ...WING_AUTO }, npc, ship: 'no ship: spawn one (spawn(\'xwing\')) or board one' };
         if (mode === 'open' || mode === 'closed') v.wings.force = mode;
         else if (mode === 'toggle') v.wings.toggle();
         else if (mode === 'auto') {
@@ -5768,7 +5785,7 @@ class App {
         } else if (mode === 'multiplier' || mode === 'threshold') WING_RULE.speed = mode;
         else if (mode !== undefined) return `wings: '${String(mode)}' is none of open, closed, toggle, auto, multiplier, threshold`;
         if (mode === 'open' && !v.airborne && v.wingDrop > 0) console.warn(`wings: forced open on the ground: they reach ${v.wingDrop.toFixed(1)} m under the belly and may stand in the terrain (the game never opens them there)`);
-        return v.wingReport();
+        return { ...v.wingReport(), auto: { ...WING_AUTO }, npc };
       },
       /**
        * How the ship ridden, piloted or nearest stands on the ground: `landing()` reports it, `landing({ gap: 0.1 })`
@@ -14211,6 +14228,10 @@ class App {
       // Which building room the ship stands in, followed through the portals before it steps: in one, its
       // floor is the room's and its hull ignores the terrain and the shells.
       this.world.trackVehicleRoom(v, dt);
+      // A dock shuts the wings of the hull it has, from the dock's own state as it stands after this frame's step, and
+      // writes it again every frame over every hull, so no way out of a dock (a launch, a break-off, a hull lost, a
+      // travel) can leave them held.
+      v.wings.dockHold = WING_AUTO.dockCloses && this.docking.holdsWings(v);
       // An NPC ship flies on its brain's drive while play runs (held, it goes nowhere anyway); a hull
       // whose autopilot says it flies on with play paused (a shuttle keeping its timetable) is given its
       // drive with a panel open too. The seventh is the swell-aware sea reader, which only the hover
@@ -14532,9 +14553,9 @@ class App {
       fv.boostShare = v.spec.boost === 'none' ? 0 : v.spec.boost === 'heat' && HUD_WIRING.heatIsHeadroom ? 1 - v.meter : v.meter;
       fv.hasBooster = v.spec.boost !== 'none';
     }
-    // Closed, opening, open, or held shut because a low wing has no room under it yet.
+    // Closed, opening, open, or held shut because a low wing has no room under it yet (a dock holding them shut is not that).
     if (!v.wings.length) fv.wings = WING_NONE;
-    else if (v.wings.pilot && !v.wings.target) fv.wings = WING_HELD;
+    else if (v.wings.pilot && !v.wings.target && !v.wings.dockHold) fv.wings = WING_HELD;
     else {
       const open = v.wingsOpen;
       fv.wings = open >= 0.999 ? WING_OPEN : open <= 0.001 ? WING_CLOSED : WING_OPENING;
