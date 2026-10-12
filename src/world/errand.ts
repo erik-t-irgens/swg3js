@@ -20,10 +20,11 @@
 // file beside those three writes is the account of what happened.
 //
 // The account is the point. The running game builds placed-object colliders only within 170 m of
-// the player (`COLLIDER_RANGE`, `layoutStream.ts`; and not even there for a prop under the
-// streamer's own radius floor, or for anything a building contains, which are never solid at any
-// distance -- so "inside the bubble" means the buildings, the rocks and the larger crates were real,
-// not that nothing could be walked through) and terrain collision only within three 64 m
+// the player (`COLLIDER_RANGE`, `layoutStream.ts`; what a building contains only within a nearer
+// range of its own; and not even there for one of the snapshot's own props under the streamer's
+// radius floor, which is never solid at any distance -- so "inside the bubble" means the buildings,
+// the rocks, the larger crates and whatever was put down in play were real, not that nothing could
+// be walked through) and terrain collision only within three 64 m
 // chunks of it (`PHYSICS_RADIUS`, `world.ts`), and outdoors a fighter's last floor is the planet's
 // height, which clamps it *up* and never sideways. **So a body walking alone is stopped by nothing
 // at all**: it walks through mesas and through buildings and arrives having proved nothing, and
@@ -60,9 +61,12 @@ export interface ErrandTune {
   /**
    * How far the player's placed-object colliders reach, metres. `COLLIDER_RANGE` in
    * `src/world/layoutStream.ts`. **Not ours.** Within this the body is stopped by what stops the
-   * player -- which is not everything that is drawn: the same loop skips anything whose radius is
-   * under `COLLIDER_MIN_RADIUS`, at every distance. So this is the range within which the buildings,
-   * the rocks and the larger crates are solid, and the small props are never solid anywhere. What a
+   * player -- which is not everything that is drawn: the same loop skips a snapshot object whose
+   * radius is under `COLLIDER_MIN_RADIUS`, at every distance (`collidesByRule`). So this is the range
+   * within which the buildings, the rocks and the larger crates are solid, and the snapshot's own
+   * small props are never solid anywhere. A thing put down in play solid -- a house, a travel
+   * terminal, a fitting, a prop a player put down -- is solid within it whatever its size, so a body
+   * stopping at a starport's terminal is the game working; our seats and tables never are. What a
    * building **contains** is solid too now, within its own nearer range (`COLLIDER_INDOOR_RANGE`),
    * which is why a route that runs through a town's rooms meets the furniture.
    */
@@ -651,7 +655,7 @@ export class Errand {
         'under this order the body takes no target and will not fight back: rule 1 outranks the attacker memory and clears it',
         'a fighter has no side-step at all, so a body that wedges leans until the clock ends the order',
         'a fighter has no water sense: it walks the lake bed, so the first long walk belongs on a dry world',
-        "small props (under the streamer's own metre-and-a-half radius floor) are never given collision at any distance, so walking through one of those is the game as it stands and not a steering failure",
+        "the snapshot's own small props (under the streamer's metre-and-a-half radius floor) are never given collision at any distance, so walking through one of those is the game as it stands and not a steering failure; things put down in play solid (a house, a travel terminal, a fitting, a player's prop) are solid at any size, so a body stopped at one of those is the game working too",
       ],
       tune: { ...ERRAND_TUNE },
       ours: 'the order is the brain\'s own first rule with the home moved and the return state held; every number of the account but objectsWithin and terrainWithin is invented',

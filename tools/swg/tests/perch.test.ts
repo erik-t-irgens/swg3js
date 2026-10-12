@@ -398,7 +398,8 @@ const T: PerchTune = { ...PERCH_TUNE };
 
 // ---------------------------------------------------------------------------------------------
 // The game's wiring, read off the files node cannot load (manager.ts and mobile.ts import without
-// extensions; world.ts and layoutStream.ts carry parameter properties).
+// extensions; world.ts carries parameter properties). The streamer itself loads in node now and is run
+// for real in placedColliders.test.ts; its wiring is still read here beside the rest.
 {
   const src = (f: string) => readFileSync(new URL(`../../../src/${f}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const people = src('world/standingPeople.ts');
@@ -454,7 +455,7 @@ const T: PerchTune = { ...PERCH_TUNE };
   const built = /builtAt\(x: number, z: number\): FloorAnswer \{([\s\S]*?)\n {2}\}/.exec(stream)?.[1] ?? '';
   ok(/return floorAt\(x, z, this\.largestFootprint, this\.floorAsk\);/.test(built) && !/`/.test(built), 'the streamer answers through `floorAt`, making no string');
   ok(/stepped: \(\) => this\.physics\.steps > this\.collidersMadeAt,/.test(stream) && /this\.colliders\.set\(o, cols\);\s*\/\/[^\n]*\n\s*this\.collidersMadeAt = this\.physics\.steps;/.test(stream), 'nothing counts as solid until the world has stepped since the last collision was made, since a query cannot see it before');
-  ok(/collides: \(o\) => !this\.huge\.has\(o\) && \(o\.radius >= COLLIDER_MIN_RADIUS \|\| !!o\.solid\),/.test(stream) && /if \(\(o\.radius < COLLIDER_MIN_RADIUS && !o\.solid\) \|\| this\.colliders\.has\(o\) \|\| this\.huge\.has\(o\)\) continue;/.test(stream), 'what it counts as ever solid is the collider sweep\'s own floor');
+  ok(/collides: \(o\) => !this\.huge\.has\(o\) && collidesByRule\(o\),/.test(stream) && /if \(!collidesByRule\(o\) \|\| this\.colliders\.has\(o\) \|\| this\.huge\.has\(o\)\) continue;/.test(stream), 'what it counts as ever solid is the collider sweep\'s own rule (`collidesByRule`, which placedColliders.test.ts runs)');
   ok(/wanted: \(region, o\) => boxDistance\(this\.updateX, this\.updateZ, region\.cx, region\.cz\) <= this\.rangeOf\(region, o\.tier, this\.floorRoom\) && !colliderFar\(o, this\.updateX, this\.updateZ, 1\),/.test(stream), 'and what it calls wanted is the tier loading and the sweep reaching, both from where the player stood at the last update');
   ok(/this\.updateX = px;\s*this\.updateZ = pz;/.test(stream), 'which the update keeps');
   ok(/if \(def !== undefined\) p\.footprint = def\?\.particle \? 0 : footprintOf\(def\?\.bounds, tiltSin\(p\.q\.x, p\.q\.z\)\);/.test(stream), "an object's footprint is measured from its own model's box as it is turned where it stands");

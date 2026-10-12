@@ -3788,6 +3788,10 @@ export class World {
       // region the player is standing in is within its own range of them.
       radius: loaded.radius,
       clear,
+      // Solid whatever its size: a house is the one thing put down that must be walked into and stood
+      // in, and by the size rule its collision would hang on its radius (a pack whose box corners were
+      // swapped once read every radius as negative).
+      solid: true,
     });
     return { ok: true, why: verdict.ok ? null : `stood anyway: ${verdict.why}`, key, x: at.x, z: at.z, y, yaw, rise: verdict.rise, sink: verdict.sink, slope: verdict.slope, clear, building };
   }
@@ -5545,6 +5549,11 @@ export class World {
   /** Placed objects around a point with their streaming state, for the console. */
   objectsNear(x: number, z: number, r: number): ReturnType<LayoutStreamer['describeNear']> {
     return this.layoutStream?.describeNear(x, z, r) ?? [];
+  }
+
+  /** Where a thing put down in play under `key` stands in the streamer and how many colliders it has, for the console; null for none. */
+  placedState(key: string): ReturnType<LayoutStreamer['placedState']> {
+    return this.layoutStream?.placedState(key) ?? null;
   }
 
   particlesNear(x: number, z: number, r: number): ReturnType<ParticleEffects['describeNear']> {

@@ -170,7 +170,7 @@ import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
-import { homes } from './net/homes.ts';
+import { homeKey, homes } from './net/homes.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
@@ -2672,7 +2672,9 @@ class App {
         // that tier. Worth saying apart, or it reads exactly like a building that has no rooms.
         const rooms = (pack.find(model)?.cells?.length ?? 0) > 1;
         const stood = out.building ? 'placed, with rooms' : rooms ? 'placed; its rooms come with its size tier' : 'placed, no rooms';
-        return { ...out, building: out.ok ? stood : null, tune: { ...HOUSE_TUNE } };
+        // Where it stands in the streamer as it stands now: the collider sweep makes it solid on the next
+        // update (and a query sees that after the next step), so `colliders` here is usually still 0.
+        return { ...out, building: out.ok ? stood : null, state: this.world.placedState(key), tune: { ...HOUSE_TUNE } };
       },
       /**
        * The shuttles: every port on this world, which one you are standing at, and where a shuttle
@@ -2818,7 +2820,8 @@ class App {
           return { dropped: !!was?.ok, why: was?.why ?? placedProps.note ?? null, standing: placedProps.all.length };
         }
         const p = this.propPlacing;
-        const mine = placedProps.all.map((r) => ({ thing: r.thing, id: r.id, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], inside: !!r.inside }));
+        // `solid`: how many colliders it has this instant (0 until its tier has loaded and the sweep has run).
+        const mine = placedProps.all.map((r) => ({ thing: r.thing, id: r.id, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], inside: !!r.inside, solid: this.world.placedState(`prop:${r.thing}`)?.colliders ?? -1 }));
         if (!p) {
           return {
             placing: null,
@@ -3244,8 +3247,10 @@ class App {
       /**
        * What is built on the world you are standing on, whose each one is, and what the server last
        * said; `yours` is the Housing tab's own list (the server's that are yours and the ones this
-       * browser put down itself), `atDoor` the one whose doorstep you are standing at, and
-       * `{ tune: { armMs, doorReach, standApart } }` moves `HOUSING_TUNE`.
+       * browser put down itself), each with `solid`, how many colliders it has this instant (0 until
+       * its size tier has loaded and the sweep has run, -1 for one the streamer does not hold),
+       * `atDoor` the one whose doorstep you are standing at, and `{ tune: { armMs, doorReach,
+       * standApart } }` moves `HOUSING_TUNE`.
        */
       homes: (opts: { tune?: Partial<typeof HOUSING_TUNE> } = {}) => {
         if (opts.tune) {
@@ -3259,7 +3264,7 @@ class App {
           shared: this.net.session.authority === 'server',
           mine: homes.mine(me, { x: p.x, z: p.z }).map((r) => r.id),
           local: this.localHomes.all.map((r) => ({ key: r.key, model: r.model, name: r.name, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)] })),
-          yours: yours.map((b) => ({ id: b.id, name: b.name, away: Math.round(b.away), shared: b.shared })),
+          yours: yours.map((b) => ({ id: b.id, name: b.name, away: Math.round(b.away), shared: b.shared, solid: this.world.placedState(b.shared ? homeKey(b.id) : b.id)?.colliders ?? -1 })),
           atDoor: atDoorOf(yours, { x: p.x, z: p.z }, HOUSING_TUNE.doorReach)?.id ?? null,
           asking: this.housingUi.askingAbout,
           tune: { ...HOUSING_TUNE },
@@ -4636,12 +4641,15 @@ class App {
           mask: mask && fx ? { allocated: mask.allocated, drawn: mask.drawn, idleSeconds: Number(mask.idleFor(fx.ctx).toFixed(1)) } : null,
         };
       },
-      /** Placed objects within r metres of the player: model, distance, tier, and whether the model and its region are loaded. */
+      /**
+       * Placed objects within r metres of the player: model, distance, tier, whether the model and its region are
+       * loaded, and how many colliders each has this instant (`objects`, the nearest sixty, carries the key and the count).
+       */
       near: (r = 150) => {
         const list = this.world.objectsNear(this.player.pos.x, this.player.pos.z, r);
-        const summary = { total: list.length, notInManifest: list.filter((o) => !o.inManifest).length, notLoaded: list.filter((o) => o.inManifest && !o.loaded).length, regionsNotLoaded: [...new Set(list.filter((o) => o.regionState !== 'loaded').map((o) => `${o.region}/tier${o.tier}:${o.regionState}`))] };
+        const summary = { total: list.length, solid: list.filter((o) => o.colliders > 0).length, notInManifest: list.filter((o) => !o.inManifest).length, notLoaded: list.filter((o) => o.inManifest && !o.loaded).length, regionsNotLoaded: [...new Set(list.filter((o) => o.regionState !== 'loaded').map((o) => `${o.region}/tier${o.tier}:${o.regionState}`))] };
         console.table(list.slice(0, 60));
-        return summary;
+        return { ...summary, objects: list.slice(0, 60).map((o) => ({ template: o.template, d: o.d, tier: o.tier, regionState: o.regionState, colliders: o.colliders })) };
       },
       /** Movement rules: 'jka' (Jedi Academy's, the default on this branch) or 'swg' (the original numbers). Reports the current one. */
       profile: (name?: 'jka' | 'swg') => {

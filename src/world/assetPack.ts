@@ -493,7 +493,10 @@ export class AssetPack {
           def,
           scene: gltf.scene,
           primitives,
-          radius: Math.max(max[0] - min[0], max[2] - min[2]) / 2,
+          // The corners taken as an extent, never by which is called min (the BOX lesson: a pack converted
+          // before the box chunk was read properly carries them swapped, which read as a negative radius --
+          // and this radius files a placed thing's tier, sizes a building's room range and decides a shadow).
+          radius: Math.max(Math.abs(max[0] - min[0]), Math.abs(max[2] - min[2])) / 2,
           height: max[1] - Math.min(0, min[1]),
           interiorBoxes,
           bounds: new THREE.Box3(new THREE.Vector3(min[0], min[1], min[2]), new THREE.Vector3(max[0], max[1], max[2])),

@@ -418,6 +418,8 @@ function walk(e: Errand, b: Walker, w: FakeWorld, opts: { to: { x: number; z: nu
 // ---------------------------------------------------------------------------
 // 7. Water is counted, because nothing in `npcs.ts` knows what it is.
 // ---------------------------------------------------------------------------
+// The caveat about what is never solid, kept for the check after this block, which holds it to the streamer.
+let smallPropsCaveat = '';
 {
   const b = new Walker();
   const w = fakeWorld();
@@ -431,15 +433,25 @@ function walk(e: Errand, b: Walker, w: FakeWorld, opts: { to: { x: number; z: nu
   ok((e.report().caveats as string[]).some((c) => /side-step/.test(c)), 'and that it has no side-step');
   ok((e.report().caveats as string[]).some((c) => /fight back/.test(c)), 'and that it will not fight back');
   // The one that keeps the next wave readable: "inside the bubble" is not "everything was solid".
-  ok((e.report().caveats as string[]).some((c) => /small props/.test(c)), 'and that small props are never solid at any distance');
+  smallPropsCaveat = (e.report().caveats as string[]).find((c) => /small props/.test(c)) ?? '';
+  ok(/the snapshot's own small props/.test(smallPropsCaveat) && /never given collision at any distance/.test(smallPropsCaveat), "and that the snapshot's own small props are never solid at any distance");
 }
 {
   // And that caveat is a claim about the running game, so it is read off it rather than asserted.
   // What a building contains **is** solid now, within a range of its own; what is still never solid
-  // is anything under the streamer's own minimum radius.
+  // is a snapshot object under the streamer's own minimum radius. A thing put down in play solid is
+  // the exception, and the caveat must name it, or an errand at a starport would call a body stopped
+  // by a travel terminal impossible when it is the game working: the claim and the rule move together.
   const stream = src('../../../src/world/layoutStream.ts');
   ok(/const COLLIDER_MIN_RADIUS = /.test(stream), 'the streamer still has a minimum radius below which nothing is given collision');
-  ok(/o\.radius < COLLIDER_MIN_RADIUS/.test(stream), 'and still skips that, whatever the distance');
+  ok(
+    /o\.solid !== false && o\.radius >= COLLIDER_MIN_RADIUS/.test(stream) && /if \(!collidesByRule\(o\) \|\| this\.colliders\.has\(o\)/.test(stream),
+    'and still skips that, whatever the distance, for everything not put down solid',
+  );
+  ok(
+    /return o\.solid === true \|\| \(/.test(stream) && /put down in play solid/.test(smallPropsCaveat) && /travel terminal/.test(smallPropsCaveat) && /solid at any size/.test(smallPropsCaveat),
+    'while a thing put down in play solid is given collision at any size, and the caveat names that exception',
+  );
   ok(/const COLLIDER_INDOOR_RANGE = /.test(stream), 'while a thing inside a building has a range of its own');
   ok(/o\.contained \? d > COLLIDER_INDOOR_RANGE/.test(stream), "measured to the thing itself, since a snapshot's radius is a load distance and not a size");
 }

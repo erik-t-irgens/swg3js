@@ -4,16 +4,16 @@
 
 import * as THREE from 'three';
 import { relativeRoot } from './packPath.ts';
-import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics';
+import { cleanTrimesh, Group, groups, RAPIER as R, TRIMESH_FLAGS, type Physics } from '../core/physics.ts';
 import { splitTrimesh } from './trimeshPieces.ts';
 import type { AssetPack, Layout, LoadedModel, PackEffect, PackModelDef } from './assetPack';
-import { CHUNK_SIZE } from './terrain';
+import { CHUNK_SIZE } from './terrain.ts';
 import type { Exclusion } from './props';
-import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender';
+import { ACTOR_LAYER, INTERIOR_LAYER, crossing } from './portalRender.ts';
 import { INTERIOR_LEAD, PORTAL_RANGE, interiorBuildRange, interiorBuildRangeMax, isQuarantined, markNarrowRoot } from './portalVis.ts';
 import { FURNITURE_ROLE, FURNITURE_TUNE, FurnitureIndex, HOST_FLAG, furnitureDraw, furnitureHosts, furnitureOn, markFurniture, splitCopies, type FurnitureDraw, type FurnitureGroup, type HostAnswer } from './furnitureHost.ts';
-import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles';
-import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces';
+import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles.ts';
+import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces.ts';
 import { marks } from './marks.ts';
 import { floraClearRadius, modelReach } from './floraClear.ts';
 import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReach, modelTier, PLACED_TIERS, PLACED_TUNE, REGION, regionCentre, regionIndex, regionRange, snapshotTier, tiltSin, type FloorAnswer, type FloorAsk } from './placedTiers.ts';
@@ -60,7 +60,8 @@ const UNLOAD_SLACK = 1.15;
 const INTERIOR_RANGE = PORTAL_RANGE + INTERIOR_LEAD;
 const INTERIOR_DROP = 220;
 const COLLIDER_RANGE = 170;
-const COLLIDER_MIN_RADIUS = 1.5;
+/** The size under which a snapshot object is never given collision, by its radius: the size rule of `collidesByRule`. */
+export const COLLIDER_MIN_RADIUS = 1.5;
 /**
  * How near the furniture inside a building is made solid, metres. Invented.
  *
@@ -87,6 +88,15 @@ function colliderFar(o: PlacedObject, px: number, pz: number, slack: number): bo
   const d = Math.hypot(o.x - px, o.z - pz);
   return o.contained ? d > COLLIDER_INDOOR_RANGE * slack : d - o.radius > COLLIDER_RANGE * slack;
 }
+/**
+ * Whether the collider sweep ever gives an object collision, whatever its distance: `solid` true always, false
+ * never, and absent by its size (`COLLIDER_MIN_RADIUS`), which is every snapshot object's rule. One function,
+ * because the sweep and the perch's question of what could ever be under a body (`floorAsk.collides`) must agree.
+ */
+export function collidesByRule(o: PlacedObject): boolean {
+  return o.solid === true || (o.solid !== false && o.radius >= COLLIDER_MIN_RADIUS);
+}
+
 /**
  * The widest radius the collider sweep reaches for. An object wider than this (the Star Destroyer,
  * whose radius counts from a model origin that is not its middle) is "huge": its collision is built
@@ -127,7 +137,12 @@ export interface PlacedObject {
   /** The tier each rule would file it in, for the console's counts (step 6): by its model's own size, and by the snapshot's radius. */
   sizeTier: number;
   snapTier: number;
-  /** Given collision whatever its size: a thing put down in play, never a snapshot's own prop. */
+  /**
+   * Whether it is given collision, three ways (`collidesByRule`). `true`: solid whatever its size -- a house,
+   * a travel terminal, a fitting, a prop a player put down. `false`: never solid -- our seats and tables under
+   * the people of ours sitting at them (`seatProps.ts`), which a collider would push off their chairs.
+   * Absent: the size rule, `COLLIDER_MIN_RADIUS`, which is every snapshot object's.
+   */
   solid?: boolean;
   /**
    * How far from its origin any part of its model can reach, however it is turned (`footprintOf`): what
@@ -171,12 +186,14 @@ export interface RuntimePlacement {
   /** How much ground round it the procedural flora keeps off, metres. Zero leaves the flora alone. */
   clear?: number;
   /**
-   * Solid whatever its size.
+   * `true`: solid whatever its size. `false`: never solid. Absent: solid by its size, as a snapshot object is.
    *
    * The collider sweep has a floor under which nothing is given collision, because a snapshot places
    * tens of thousands of small props and a collider apiece is not worth it. A thing the game itself
    * puts down in play is not one of those: a travel terminal is 1.6 m across, well under the floor,
-   * and it is the very thing a player walks up to and presses.
+   * and it is the very thing a player walks up to and presses. A house passes `true` too, so that its
+   * collision never hangs on the sign of a radius. Our seats pass `false`: a table of ours big enough
+   * for the floor would push the person sitting at it off their chair.
    */
   solid?: boolean;
   /**
@@ -253,6 +270,12 @@ interface LoadedTier {
   furniture: { g: FurnitureGroup; host: PlacedObject | null }[];
   /** Its models' outdoor copies drawn at the client's own detail levels (step 7), whose meshes are among `meshes`. */
   levels: LevelGroup[];
+  /**
+   * The instances it has made and still holds: the bulk's, and one for each placement `addToTier` built in it,
+   * less those taken back out. What an unload gives back to `loadedInstances`, never `objects.length`: the list
+   * is the region's own and holds placements whose build was skipped or never reached.
+   */
+  instances: number;
 }
 
 /**
@@ -456,7 +479,7 @@ export class LayoutStreamer {
     region: (rx, rz) => this.regionsByNumber.get(regionNumber(rx, rz)),
     // The sweep's own floor (`updateColliders`). A huge object is built with its tier a piece at a time and
     // only in space, where nobody is stood, so it is left out rather than answered for piece by piece.
-    collides: (o) => !this.huge.has(o) && (o.radius >= COLLIDER_MIN_RADIUS || !!o.solid),
+    collides: (o) => !this.huge.has(o) && collidesByRule(o),
     solid: (o) => this.colliders.has(o),
     stepped: () => this.physics.steps > this.collidersMadeAt,
     wanted: (region, o) => boxDistance(this.updateX, this.updateZ, region.cx, region.cz) <= this.rangeOf(region, o.tier, this.floorRoom) && !colliderFar(o, this.updateX, this.updateZ, 1),
@@ -612,14 +635,18 @@ export class LayoutStreamer {
     return file;
   }
 
-  constructor(
-    private readonly scene: THREE.Scene,
-    private readonly physics: Physics,
-    private readonly pack: AssetPack,
-    layout: Layout,
-    private readonly effects: ParticleEffects | null = null,
-    options: { reach?: number; hugeColliders?: boolean } = {},
-  ) {
+  // Written out rather than parameter properties, so node's type stripping can load the streamer for
+  // its tests (`placedColliders.test.ts` runs the real one against the real physics).
+  private readonly scene: THREE.Scene;
+  private readonly physics: Physics;
+  private readonly pack: AssetPack;
+  private readonly effects: ParticleEffects | null;
+
+  constructor(scene: THREE.Scene, physics: Physics, pack: AssetPack, layout: Layout, effects: ParticleEffects | null = null, options: { reach?: number; hugeColliders?: boolean } = {}) {
+    this.scene = scene;
+    this.physics = physics;
+    this.pack = pack;
+    this.effects = effects;
     this.ranges = TIERS.map((t) => t.range * (options.reach ?? 1));
     // Only a space pack's radii are the models' own (the space command measures them): a planet's
     // snapshot gives thousands of ordinary objects a radius of 1024 m or more, which must not all be
@@ -841,7 +868,8 @@ export class LayoutStreamer {
       q: p.q,
       radius: p.radius,
       contained: !!p.inside,
-      solid: !!p.solid,
+      // Three ways, as it was handed: `false` is our seats' "never", which `!!` would fold into "by size".
+      solid: p.solid,
       tier: this.filing === 'snapshot' ? snapTier : sizeTier,
       sizeTier,
       snapTier,
@@ -1038,8 +1066,11 @@ export class LayoutStreamer {
   }
 
   /** Load what is in range, drop what is not, keep collision around the player. */
-  /** What the layout places within `r` metres of a point, and whether each is drawable right now. */
-  describeNear(x: number, z: number, r: number): { template: string; model: string; d: number; radius: number; size: string; tier: number; contained: boolean; inManifest: boolean; loaded: boolean; region: string; regionState: string }[] {
+  /**
+   * What the layout places within `r` metres of a point, whether each is drawable right now, and how many
+   * colliders it has this instant (0 for anything the sweep has not made solid, or never will).
+   */
+  describeNear(x: number, z: number, r: number): { template: string; model: string; d: number; radius: number; size: string; tier: number; contained: boolean; inManifest: boolean; loaded: boolean; region: string; regionState: string; colliders: number }[] {
     const out = [];
     for (const o of this.objects) {
       const d = Math.hypot(o.x - x, o.z - z);
@@ -1060,9 +1091,22 @@ export class LayoutStreamer {
         const v = box.getSize(new THREE.Vector3());
         size = `${v.x.toFixed(2)}x${v.y.toFixed(2)}x${v.z.toFixed(2)} (${loaded.primitives.length} prims)`;
       }
-      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, size, tier: o.tier, contained: o.contained, inManifest: !!this.defOf(o.model), loaded: !!this.loadedOf(o.model), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region' });
+      out.push({ template: o.template, model: o.model, d: Math.round(d), radius: o.radius, size, tier: o.tier, contained: o.contained, inManifest: !!this.defOf(o.model), loaded: !!this.loadedOf(o.model), region: `${rx},${rz}`, regionState: state === null ? 'not loaded' : state === 'loading' ? 'loading' : state ? 'loaded' : 'no region', colliders: this.colliders.get(o)?.length ?? 0 });
     }
     return out.sort((a, b) => a.d - b.d);
+  }
+
+  /**
+   * Where one thing put down in play stands in the streamer, for the console: the size tier it is filed in,
+   * whether that tier of its region is loaded, how many colliders it has this instant, and whether it stands
+   * in a room. Null for a key nothing was put down under. The sweep makes a placement solid on the update
+   * after its tier loads, and a query sees it only once the world has stepped after that.
+   */
+  placedState(key: string): { tier: number; tierLoaded: boolean; colliders: number; contained: boolean } | null {
+    const o = this.placedByKey.get(key);
+    if (!o) return null;
+    const state = this.regions.get(`${regionIndex(o.x)},${regionIndex(o.z)}`)?.tiers[o.tier];
+    return { tier: o.tier, tierLoaded: !!state && state !== 'loading', colliders: this.colliders.get(o)?.length ?? 0, contained: o.contained };
   }
 
   update(playerPos: THREE.Vector3, inside: Building | null = null): void {
@@ -1453,8 +1497,20 @@ export class LayoutStreamer {
       const runtimePlaced = objects.filter((o) => this.placedByKey.get(o.template) === o);
       const bulk = runtimePlaced.length ? objects.filter((o) => this.placedByKey.get(o.template) !== o) : objects;
       const loaded = this.instance(bulk, models);
+      // The tier's list is the region's own array, runtime placements and all; only the instanced meshes are
+      // the bulk's. `place` pushes into it and `unplace` splices out of it, and the collider sweep and
+      // `unloadTier` walk it. Left as the bulk's copy, every placement in this tier -- a house, a travel
+      // terminal, a fitting, a saved prop -- was drawn and never made solid, since the sweep walks only this.
+      loaded.objects = objects;
       region.tiers[tier] = loaded;
-      for (const o of runtimePlaced) await this.addToTier(loaded, o);
+      for (const o of runtimePlaced) {
+        // The tier unloaded while an earlier placement was being compiled: nothing more goes into it.
+        if (region.tiers[tier] !== loaded) return null;
+        // Taken away (`unplace`) while an earlier one was being compiled: it is no longer anybody's to build,
+        // and meshes made for it now would stand with no key that can reach them.
+        if (this.placedByKey.get(o.template) !== o) continue;
+        await this.addToTier(loaded, o);
+      }
       if (region.tiers[tier] !== loaded) return null;
       // A huge object's collision comes with its tier, a few pieces an update, never keyed on the player's distance.
       for (const o of objects) if (this.huge.has(o) && !this.colliders.has(o)) this.queueHuge(o);
@@ -1580,7 +1636,7 @@ export class LayoutStreamer {
     }
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
-    return { meshes, buildings, objects, effects, waters, furniture, levels };
+    return { meshes, buildings, objects, effects, waters, furniture, levels, instances: objects.length };
   }
 
   /** Whether a model's outdoor copies are drawn at its levels: it carries more than one, and no piece of it is a basin's water the water system takes. */
@@ -1761,6 +1817,7 @@ export class LayoutStreamer {
     const rec: RuntimeRec = { tier: loaded, meshes: [], building: null, effects: [], waters: [], furniture: [] };
     this.runtime.set(p, rec);
     this.loadedInstances++;
+    loaded.instances++;
     const def = this.defOf(p.model);
     if (def?.particle) {
       if (this.effects) {
@@ -1889,6 +1946,7 @@ export class LayoutStreamer {
       }
     }
     this.loadedInstances--;
+    rec.tier.instances--;
   }
 
   /**
@@ -2044,7 +2102,9 @@ export class LayoutStreamer {
     }
     if (this.effects) for (const h of t.effects) this.effects.remove(h);
     for (const w of t.waters) w.remove();
-    this.loadedInstances -= t.objects.length;
+    // What the tier itself made, not the length of its list: the list is the region's own and can hold a
+    // placement the runtime loop skipped or had not reached, which would take the count below nought.
+    this.loadedInstances -= t.instances;
     region.tiers[tier] = null;
   }
 
@@ -2073,8 +2133,9 @@ export class LayoutStreamer {
           for (const o of t.objects) {
             // The size floor is about the snapshot's tens of thousands of small props. A thing put
             // down in play is a handful of deliberate things, and the one the player walks up to and
-            // presses -- a travel terminal, 0.78 m of radius -- is well under it.
-            if ((o.radius < COLLIDER_MIN_RADIUS && !o.solid) || this.colliders.has(o) || this.huge.has(o)) continue;
+            // presses -- a travel terminal, 0.78 m of radius -- is well under it; a seat of ours is
+            // never solid, whatever its size.
+            if (!collidesByRule(o) || this.colliders.has(o) || this.huge.has(o)) continue;
             if (colliderFar(o, px, pz, 1)) continue;
             this.addColliders(o);
           }
