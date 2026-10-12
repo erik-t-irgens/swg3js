@@ -45,8 +45,24 @@ export const HOUSE = { id: 'house', file: 'house.glb', bounds: { min: [-10, -16,
 export const CRATE = { id: 'crate', file: 'crate.glb', bounds: { min: [-0.5, 0, -0.5], max: [0.5, 1, 0.5] }, triangles: 12 };
 /** The world's own rock, 26 m across and 30 m high (tier 0). */
 export const ROCK = { id: 'rock', file: 'rock.glb', bounds: { min: [-13, 0, -13], max: [13, 30, 13] }, triangles: 12 };
+/**
+ * The house again, as a building that can host what is put down in it: its shell cell 0 and its one room cell 1
+ * in the manifest, with a doorway in its +Z wall between the two, which is what furniture hosting reads (a model
+ * with rooms and portals). The loaded model keeps no portals, so its room is drawn and made solid with the rest.
+ */
+export const HALL = {
+  id: 'hall',
+  file: 'hall.glb',
+  bounds: { min: [-10, -16, -10], max: [10, 8, 10] },
+  triangles: 24,
+  cells: [
+    { index: 0, name: 'r0', bounds: { min: [-10, -16, -10], max: [10, 8, 10] }, portals: [{ geometry: 0, target: 1, passable: true }] },
+    { index: 1, name: 'r1', bounds: { min: [-9, 0, -9], max: [9, 7.5, 9] }, portals: [{ geometry: 0, target: 0, passable: true }] },
+  ],
+  portals: [{ v: [[-1, 0, 10], [1, 0, 10], [1, 2, 10], [-1, 2, 10]], i: [0, 1, 2, 0, 2, 3] }],
+};
 
-type Def = typeof HOUSE;
+type Def = { id: string; file: string; bounds: { min: number[]; max: number[] }; triangles: number };
 
 function loadedOf(def: Def, prims: { geometry: THREE.BufferGeometry; cell: number }[], rooms: THREE.Box3[] = []) {
   const bounds = new THREE.Box3(new THREE.Vector3(def.bounds.min[0], def.bounds.min[1], def.bounds.min[2]), new THREE.Vector3(def.bounds.max[0], def.bounds.max[1], def.bounds.max[2]));
@@ -127,15 +143,14 @@ export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS):
     rock: loadedOf(ROCK, [{ geometry: boxGeo(26, 30, 26, 0), cell: -1 }]),
     crate: loadedOf(CRATE, [{ geometry: boxGeo(1, 1, 1, 0), cell: -1 }]),
   });
-  const gallery = fakePack('gallery', [HOUSE, CRATE], {
-    house: loadedOf(
-      HOUSE,
-      [
-        { geometry: boxGeo(20, 8, 20, 0), cell: 0 },
-        { geometry: boxGeo(18, 0.3, 18, 0), cell: 1 },
-      ],
-      [new THREE.Box3(new THREE.Vector3(-9, 0, -9), new THREE.Vector3(9, 7.5, 9))],
-    ),
+  const room = (): THREE.Box3[] => [new THREE.Box3(new THREE.Vector3(-9, 0, -9), new THREE.Vector3(9, 7.5, 9))];
+  const shell = () => [
+    { geometry: boxGeo(20, 8, 20, 0), cell: 0 },
+    { geometry: boxGeo(18, 0.3, 18, 0), cell: 1 },
+  ];
+  const gallery = fakePack('gallery', [HOUSE, HALL, CRATE], {
+    house: loadedOf(HOUSE, shell(), room()),
+    hall: loadedOf(HALL, shell(), room()),
     crate: loadedOf(CRATE, [{ geometry: boxGeo(1, 1, 1, 0), cell: -1 }]),
   });
   const layout = { planet: 'tatooine', center: { x: 0, z: 0 }, radius: 10000, objects };

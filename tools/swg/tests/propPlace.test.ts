@@ -186,6 +186,37 @@ const noWorld = { floorAt: () => null, solidAt: () => false };
   ok('and it is refused for the wall, not for being buried', propVerdict(BOX, { x: 0, y: 1, z: 0 }, NO_TURN, all).why === 'it is inside a wall');
 }
 
+// ---- Part of the world -------------------------------------------------------------------------------
+
+{
+  // A permanent placement's guard (`PermanentLayer.guardedAt`): asked with the spot and the thing's own reach.
+  const asked: number[] = [];
+  const guarded = {
+    floorAt: () => 0,
+    solidAt: () => false,
+    reserved: (x: number, z: number, r: number) => {
+      asked.push(r);
+      return Math.hypot(x - 10, z) < 2 + r ? 'Locker' : null;
+    },
+  };
+  const v = propVerdict(BOX, { x: 10.5, y: 0, z: 0 }, NO_TURN, guarded);
+  ok('a thing put down on something of the world\'s own is refused in its words', !v.ok && v.why === 'that is part of this world (Locker)', v.why ?? 'stood');
+  ok('and the guard is asked with the thing\'s own reach on the ground', asked[0] === 0.5, `${asked[0]}`);
+  ok('a thing clear of it stands', propVerdict(BOX, { x: 20, y: 0, z: 0 }, NO_TURN, guarded).ok);
+  const said: PropVerdict = { ok: true, why: null, inside: 0, of: 0, clearance: 0 };
+  const a = propVerdict(BOX, { x: 10, y: 0, z: 0 }, NO_TURN, guarded, PROP_TUNE, said).why;
+  const b = propVerdict(BOX, { x: 10.2, y: 0, z: 0 }, NO_TURN, guarded, PROP_TUNE, said).why;
+  // Two frames over one row say the same words. (That they are made once a name and not once a frame is the
+  // function's own keeping, `partOfWorld`; a string compares by its letters, so nothing here can see it.)
+  ok('and held over it frame after frame, it says the same words', a === b && a === 'that is part of this world (Locker)', a ?? 'stood');
+  // No guard at all: exactly what it judged before.
+  const plain = { floorAt: () => 0, solidAt: () => false };
+  const withNone = { ...plain, reserved: () => null };
+  const p1 = propVerdict(BOX, { x: 0, y: -0.5, z: 0 }, NO_TURN, plain);
+  const p2 = propVerdict(BOX, { x: 0, y: -0.5, z: 0 }, NO_TURN, withNone);
+  ok('no reserved dep, or one that names nothing, changes nothing', p1.ok === p2.ok && p1.why === p2.why && p1.inside === p2.inside && p1.clearance === p2.clearance);
+}
+
 // ---- The wheel and the height keys ---------------------------------------------------------------
 
 {

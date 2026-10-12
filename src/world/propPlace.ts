@@ -79,6 +79,12 @@ export interface PropDeps {
   floorAt(x: number, y: number, z: number): number | null;
   /** Whether a point is inside something solid. */
   solidAt(x: number, y: number, z: number): boolean;
+  /**
+   * What of the world's own a circle of `r` metres about (x, z) would stand on, by name, or null: a
+   * permanent placement round which a player's own thing may not stand (`PermanentLayer.guardedAt`). Absent,
+   * nothing is guarded, which is a permanent layer's own editing.
+   */
+  reserved?(x: number, z: number, r: number): string | null;
 }
 
 /** Where a prop would stand and whether it may. */
@@ -225,6 +231,10 @@ function pointAt(out: { x: number; y: number; z: number }[], i: number, q: PropT
  */
 export function propVerdict(box: PropBox | null, at: { x: number; y: number; z: number }, q: PropTurn, deps: PropDeps, tune = PROP_TUNE, out?: PropVerdict): PropVerdict {
   const points = propPoints(box, at, q, POINTS);
+  // Part of the world first: whatever else is true of the spot, a thing of the world's own is under it, and
+  // that is what the player needs to be told. The circle is the thing's own reach on the ground.
+  const taken = deps.reserved?.(at.x, at.z, box ? Math.max(Math.abs(box.max[0] - box.min[0]), Math.abs(box.max[2] - box.min[2])) / 2 : 0) ?? null;
+  if (taken !== null) return said(out, false, partOfWorld(taken), 0, points.length, 0);
   let inside = 0;
   for (const p of points) if (deps.solidAt(p.x, p.y, p.z)) inside++;
   // How far the lowest point is above whatever is under it. Only the points the world can answer
@@ -253,6 +263,19 @@ export function propVerdict(box: PropBox | null, at: { x: number; y: number; z: 
 
 /** The points `propVerdict` judges by, kept: it reads them into numbers before it hands anything back. */
 const POINTS: { x: number; y: number; z: number }[] = [];
+
+/** The last refusal for something of the world's own, kept so a thing held over one makes no new words a frame. */
+let partName = '';
+let partWhy = '';
+
+/** "that is part of this world (<name>)", made once a name rather than once a frame. */
+function partOfWorld(name: string): string {
+  if (name !== partName) {
+    partName = name;
+    partWhy = `that is part of this world (${name})`;
+  }
+  return partWhy;
+}
 
 /** `propVerdict`'s answer, written into `out` when the caller keeps one (the frame does), else a new record. */
 function said(out: PropVerdict | undefined, ok: boolean, why: string | null, inside: number, of: number, clearance: number): PropVerdict {

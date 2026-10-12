@@ -3,11 +3,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
+import { placementFileOf } from './src/story/placementPath.ts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
 /** The owner's own story set, beside the checkout and git-ignored like the converted content. */
 const STORY_DIR = path.resolve(ROOT, 'story-private');
+/** The permanent placements' two layers (`src/story/placements.ts`): tracked files that ship with the build. */
+const PLACEMENTS_DIR = path.resolve(ROOT, 'public', 'placements');
 
 /** The list of the owner's story files, as `/story-private/index.json` hands it to the browser. */
 function storyIndex(): string {
@@ -76,6 +79,41 @@ function privateStory(): Plugin {
 }
 
 /**
+ * Tells the page when one of the permanent placements' files changes (`placements:changed`, a custom HMR
+ * event naming the layer and the world), so an edit by hand, or the editor's own write, is stood without a
+ * reload. Vite serves and builds `public/` itself, and no module imports these files, so a save reloads
+ * nothing on its own; this is the only word the page gets. A file in a dot folder or under a dot name says
+ * nothing, and neither does anything that is not `<layer>/<world>.json` (`placementFileOf`).
+ */
+function placementFiles(): Plugin {
+  return {
+    name: 'placement-files',
+    configureServer(server) {
+      server.watcher.add(PLACEMENTS_DIR);
+      const timers = new Map<string, ReturnType<typeof setTimeout>>();
+      const changed = (file: string): void => {
+        const abs = path.resolve(file);
+        if (!abs.startsWith(PLACEMENTS_DIR + path.sep)) return;
+        const word = placementFileOf(path.relative(PLACEMENTS_DIR, abs));
+        if (!word) return;
+        // An editor saving a file touches it more than once: one word for the lot, per file.
+        const key = `${word.layer}/${word.world}`;
+        const was = timers.get(key);
+        if (was) clearTimeout(was);
+        timers.set(
+          key,
+          setTimeout(() => {
+            timers.delete(key);
+            server.ws.send('placements:changed', word);
+          }, 150),
+        );
+      };
+      for (const ev of ['add', 'change', 'unlink'] as const) server.watcher.on(ev, changed);
+    },
+  };
+}
+
+/**
  * Serves the git-ignored assets-private/ folder (converted SWG content) at
  * /assets-private/ in dev and copies it into dist/ on build. The Pages
  * workflow builds from a clean checkout, so nothing private ever deploys.
@@ -109,7 +147,7 @@ function privateAssets(): Plugin {
 
 export default defineConfig({
   base: './',
-  plugins: [privateAssets(), privateStory()],
+  plugins: [privateAssets(), privateStory(), placementFiles()],
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.

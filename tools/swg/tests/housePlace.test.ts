@@ -450,6 +450,7 @@ const flat = (probes: readonly { x: number; z: number }[], h = 10): number[] => 
 {
   ok(blockerName('object/building/general/shared_cantina_tatooine.iff') === 'cantina tatooine', 'a refusal says what is in the way in words, out of the template');
   ok(blockerName(undefined) === 'something' && blockerName('') === 'something', 'and says something rather than nothing when it cannot');
+  ok(blockerName('place/eisley-bay22_locker') === 'eisley bay22 locker', 'a permanent placement in the way is named by its id, in words');
 }
 
 // ---------------------------------------------------------------- the real buildings

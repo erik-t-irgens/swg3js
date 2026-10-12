@@ -457,7 +457,7 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   const wheelAt = main.indexOf('this.wheelPlacing(-input.wheel);');
   ok(camAt > 0 && ghostAt > camAt && wheelAt > 0 && wheelAt < camAt, 'the ghost is placed after the camera, reading this frame\'s view, and the wheel is taken before the camera zooms with it');
   // A prop picked back up is anchored where it stood, and let go once the player walks or looks away.
-  const take = bodyOf(main, 'private async takeNearestProp(): Promise<void>');
+  const take = bodyOf(main, 'private async takeNearestProp(): Promise<string | null>');
   ok(/a\.on = true;\s*a\.x = row\.x;\s*a\.y = row\.y;\s*a\.z = row\.z;\s*a\.px = at\.x;\s*a\.pz = at\.z;\s*a\.yaw = this\.viewHeading\(\);/.test(take), 'a prop picked back up is anchored at its own place, from where the player stands and looks');
   ok(/p\.lift = Math\.min\(PROP_TUNE\.most, Math\.max\(-PROP_TUNE\.most, row\.y - \(floor \?\? at\.y\)\)\);/.test(take) && /p\.reach = [^\n]*Math\.hypot\(row\.x - at\.x, row\.z - at\.z\)/.test(take), 'with its lift the height it stood at over the floor, and its reach how far off it is');
   ok(/if \(a\.on && anchorReleased\(a, me, heading, PLACE_HOLD_TUNE\)\) a\.on = false;/.test(propStep) && /if \(a\.on\) \{\s*spot\.x = a\.x;\s*spot\.y = me\.y;\s*spot\.z = a\.z;\s*\} else propSpot/.test(propStep), 'it stands exactly there until `anchorReleased` lets it go');

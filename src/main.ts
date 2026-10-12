@@ -217,7 +217,7 @@ import type { Building, PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
-import { patchOfFootprint, type Footprint, type Patch } from './world/housePlace.ts';
+import { clearRadius, patchOfBounds, patchOfFootprint, type Footprint, type Patch } from './world/housePlace.ts';
 import { NO_KEY, PlacingBar, placingView, type PlacingKeys } from './ui/placingBar.ts';
 import { PLACE_HOLD_TUNE, anchorReleased, applyHold, holdGain, holdKindOf, holdState, liftDelta, placeAnchor, stepToGrid, tumbleAxes, tumbleBy, tumbleDeltas, turnDelta, wheelDir, type HoldKind, type ViewAxes } from './world/placeHold.ts';
 import { HousingUi } from './ui/housingUi.ts';
@@ -226,6 +226,8 @@ import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
 import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, type PropTurn, type PropVerdict } from './world/propPlace.ts';
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
 import { HOUSING_TUNE, LocalHomes, atDoorOf, houseName, isLocalHome, myBuildings, type MyBuilding } from './world/myBuildings.ts';
+import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, type StandAnswer, type WorldKind } from './world/permanent.ts';
+import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -2849,8 +2851,8 @@ class App {
           return { found: hits.length, first: hits.slice(0, 40).map((p) => ({ id: p.id, name: p.name ?? null, group: p.group, size: p.size })) };
         }
         if (opts.take) {
-          await this.takeNearestProp();
-          if (!this.propPlacing) return { standing: placedProps.all.length };
+          const said = await this.takeNearestProp();
+          if (!this.propPlacing) return { standing: placedProps.all.length, said };
         }
         if (id) {
           const why = await this.startPlacingProp(id);
@@ -2917,6 +2919,79 @@ class App {
           pickedUp: !!p.from,
           standing: mine.length,
           tune: { ...PROP_TUNE },
+        };
+      },
+      /**
+       * What this world stands for good: its permanent placements (`src/world/permanent.ts`), out of the two
+       * files that ship with the build, `public/placements/story/<world>.json` and `public/placements/world/<world>.json`.
+       *
+       * `__debug.placements()` reports each layer (`source` `file` or `none`, its rows, how many stand and why the
+       * rest do not: `badRow`, `clash`, `noPack`, `noModel`, `copies`, `space`) and every row with its key, its
+       * place in the file's frame and, standing, how many colliders it has this instant and whether its tier is
+       * loaded. `{ reload: true }` reads both files again and stands what moved; `{ go: '<id>' }` puts you beside
+       * a row; `{ snippet: '<id>' }` prints a story object and an area naming a row, ready to paste into a story;
+       * `{ snippet: 'example' }` prints a ready-made world-edit file round where you stand, to save as the file
+       * it names; and `{ tune: { … } }` moves `DRESSING_TUNE`, every number of which is ours.
+       */
+      placements: async (opts: { reload?: boolean; go?: string; snippet?: string; tune?: Partial<typeof DRESSING_TUNE> } = {}) => {
+        if (opts.tune) Object.assign(DRESSING_TUNE, opts.tune);
+        const here = packIdOf(this.world.planet, this.zone);
+        if (opts.snippet === 'example') {
+          const ex = await this.exampleDressing();
+          if ('text' in ex) console.log(`${ex.file}:\n${ex.text}`);
+          return ex;
+        }
+        if (opts.reload) await this.reloadDressing(here);
+        const r = this.permanent.report();
+        const frame = r.frame;
+        const centre = this.world.layoutCenter;
+        if (opts.snippet || opts.go) {
+          const id = opts.snippet ?? opts.go ?? '';
+          const s = this.permanent.rowOf(placementKey(id));
+          if (!s) return { error: `no permanent row ${id} stands on ${here}`, rows: r.rows.map((x) => x.id) };
+          if (opts.go) {
+            // A step off its edge, on its own height. One standing in a room is walked into through the door, as
+            // the fittings' are: the player is put on the doorstep of the permanent building it stands in (a
+            // house's origin is its doorstep), so the rooms are followed from the door as they always are.
+            const home = s.row.inside ? this.permanent.nearest(s, 80, 'building') : null;
+            const off = Math.max(1, s.radius + 1);
+            const to = home ? new THREE.Vector3(home.x, home.y + 0.3, home.z) : new THREE.Vector3(s.x + off, (s.row.inside ? this.world.terrain.heightAt(s.x + off, s.z) : s.y) + 0.3, s.z);
+            this.player.reset(to);
+            return { went: id, at: { x: Math.round(s.x), y: Number(s.y.toFixed(1)), z: Math.round(s.z) }, note: s.row.inside ? `it stands in a room: walk in through the door${home ? ` of ${home.label}` : ''}` : '' };
+          }
+          const object = storyObjectSnippet(s.row, here, s.label.toUpperCase());
+          const area = storyAreaSnippet(s.row, here, Math.max(6, Math.ceil(s.radius + 4)), s.label.toUpperCase());
+          console.log(`objects/${s.row.id}.jsonc:\n${object}\nareas/${s.row.id}-area.jsonc:\n${area}`);
+          return { object, area, note: frame === 'raw' ? 'near and the area are raw, as a story is written on a planet' : 'in a space zone a story is written in the game\'s own frame' };
+        }
+        const rows = r.rows.map((x) => {
+          const s = this.permanent.rowOf(x.key);
+          const state = x.stood ? this.world.placedState(x.key) : null;
+          return {
+            id: x.id,
+            layer: x.layer,
+            kind: x.kind,
+            name: x.label,
+            key: x.key,
+            ...(s ? { at: [Number(s.row.x.toFixed(2)), Number(s.row.y.toFixed(2)), Number(s.row.z.toFixed(2))] } : {}),
+            ...(x.stood ? { solid: state?.colliders ?? -1, tierLoaded: state?.tierLoaded ?? false } : { why: x.why }),
+          };
+        });
+        const layer = (l: PlacementLayer) => ({ file: `public/${placementsPath(l, here)}`, ...r.layers[l] });
+        return {
+          world: here,
+          // Whether what follows is this world's: false between a world arriving and its rows being stood, or
+          // where an arrival stood none (its pack failed), when the layer still speaks of the last world.
+          current: r.current && r.world === here,
+          frame,
+          kind: r.kind,
+          centre: centre ? { x: centre.x, z: centre.z } : null,
+          layers: { story: layer('story'), world: layer('world') },
+          standing: this.permanent.count,
+          rows: rows.slice(0, 60),
+          refused: r.refused,
+          note: r.layers.story.source === 'none' && r.layers.world.source === 'none' ? `no permanent placements on ${here}: { snippet: 'example' } prints a file to try` : '',
+          tune: { ...DRESSING_TUNE },
         };
       },
       /**
@@ -7891,6 +7966,17 @@ class App {
     this.remoteJobs.onView(() => this.waypointsChanged());
     void this.reloadStory();
     if (import.meta.hot) import.meta.hot.on('story:changed', () => void this.reloadStory());
+    // The permanent placements' files edited while the dev server runs: the one layer read again and what
+    // stands brought to it, in the world it is for and only while a world is being played (a travel brings
+    // its own; the creator's places stand none).
+    if (import.meta.hot) {
+      import.meta.hot.on('placements:changed', (d: { layer?: string; world?: string }) => {
+        if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
+        const here = packIdOf(this.world.planet, this.zone);
+        if (d?.world !== here || (d.layer !== 'story' && d.layer !== 'world')) return;
+        void this.reloadDressing(here, d.layer);
+      });
+    }
     // The game's own people's words (src/world/conversationPack.ts): the server's conversations the heralds and
     // whoever else is adopted speak, folded once a session and joined to whatever story this browser holds; a
     // world's load waits a moment for them, since the heralds stand beside its people. And a line shown before
@@ -13046,6 +13132,22 @@ class App {
     // of a passenger coming down onto it. A world stood already (a respawn, a teleport) waits for nothing.
     this.loadingScreen.setWhat('the shuttles');
     await Promise.race([this.travelStanding, new Promise((r) => setTimeout(r, Math.max(0, Math.min(TRAVEL_STAND_WAIT, timeoutMs - (performance.now() - t0)))))]);
+    // What this world stands for good, filed behind the screen and the rows filed into tiers already standing
+    // built (one bound for both), and then the world asked again whether it has settled: a row filed after the
+    // first loop let go is in a tier that loop never waited for, or is being built into one it did, which the
+    // tiers' own state cannot say, and built after the screen lifts its programs would be built on the first
+    // frames shown.
+    this.loadingScreen.setWhat('what stands here');
+    const dressingUntil = performance.now() + Math.max(0, Math.min(DRESSING_TUNE.standWaitMs, timeoutMs - (performance.now() - t0)));
+    await Promise.race([this.dressingStanding, new Promise((r) => setTimeout(r, Math.max(0, dressingUntil - performance.now())))]);
+    await Promise.race([this.dressingBuilt, new Promise((r) => setTimeout(r, Math.max(0, dressingUntil - performance.now())))]);
+    while (performance.now() - t0 < timeoutMs) {
+      if (this.world.settled(this.player.worldPos)) break;
+      const { total, stage } = this.world.progress(this.player.worldPos);
+      this.loadingScreen.setProgress(0.04 + total * 0.92);
+      this.loadingScreen.setWhat(`loading ${stage}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
     // How dear a shader program is on this machine, measured once a session and only here, behind a
     // screen the player is already waiting at. It decides nothing about how the game looks: only how
     // hard it paces itself afterwards, and what this screen admits to while the wait is long.
@@ -13315,7 +13417,18 @@ class App {
     // The shuttles this world stands, once its pack is in: a loading screen waits for them (`settle`),
     // so their programs are built behind it rather than on the first frames the world is shown.
     let standing: Promise<void> = Promise.resolve();
-    const packIn = this.world.loadPack(stand).then((clearSpawn) => {
+    // And what it stands for good (`src/world/permanent.ts`): both layers' files fetched beside the pack, so
+    // the circles their rows keep the plants off are in before the ground is first built, and the rows filed
+    // once the pack is in, which the loading screen and the seats wait on too.
+    const dressingPack = packIdOf(planet, this.zone);
+    const dressingKind = this.worldKindOf(planet);
+    const dressingFiles = this.fetchDressing(dressingPack, dressingKind);
+    // The world this arrival loaded (`load` moved the generation on above): a pack that comes in after a later
+    // arrival has loaded the next world stands nothing of this one's into it.
+    const dressingGen = this.world.generation;
+    this.dressingBuilt = Promise.resolve();
+    let dressing: Promise<void> = Promise.resolve();
+    const packIn = this.world.loadPack(stand, { keepOff: dressingFiles.then((f) => keepOffOf(f.story, f.world, dressingKind)) }).then((clearSpawn) => {
       // The hello with this world went out before the pack did: anything the server has already
       // said is built here was refused for having nowhere to go, and this is where it is tried
       // again. A world with nothing built on it does nothing at all.
@@ -13326,9 +13439,14 @@ class App {
       void this.loadFittings(packIdOf(planet, this.zone));
       // And whatever this player has put down here themselves, which is kept per world.
       void this.enterPlaced(packIdOf(planet, this.zone));
-      // And the chairs and tables of ours under the people the data sits down. After `enterPlaced`, which
-      // lets the last world's copy of the props pack go before anything of this world's is stood from it.
-      void this.standSeats(packIdOf(planet, this.zone));
+      // What this world stands for every player, after `enterPlaced`, which lets the last world's copy of
+      // the props pack go before anything of this world's is stood from it.
+      dressing = this.standDressing(dressingPack, dressingGen);
+      // And the chairs and tables of ours under the people the data sits down, once the dressing is filed
+      // (bounded), since the seats are planned round what stands and a permanent chair is a chair.
+      void this.dressingFiled(dressing).then(() => {
+        if (this.world.generation === dressingGen && packIdOf(this.world.planet, this.zone) === dressingPack) void this.standSeats(dressingPack);
+      });
       // What this character has to spend: asked for on arriving, so the shuttle panel has a number
       // to show rather than a blank the first time it is opened.
       purse.ask();
@@ -13354,10 +13472,18 @@ class App {
       () => standing,
       () => undefined,
     );
+    this.dressingStanding = packIn.then(
+      () => dressing,
+      () => undefined,
+    );
   }
 
   /** This world's shuttles being stood, from its arrival: done once they all stand (or the world's pack failed). */
   private travelStanding: Promise<void> = Promise.resolve();
+  /** This world's permanent placements being filed, from its arrival: done once both layers are filed (or there are none). */
+  private dressingStanding: Promise<void> = Promise.resolve();
+  /** And the rows filed into tiers already standing being built, from the filing on (`standDressing`). */
+  private dressingBuilt: Promise<void> = Promise.resolve();
   /** The arrival under way is a room's, which the arrival's own lift to the ground must leave alone. */
   private arriveIndoors = false;
 
@@ -13842,6 +13968,13 @@ class App {
     // said is built here is tried again now that there is a world to build it in.
     homes.ready();
     if (this.world.planet !== planet || !this.world.vehicles.includes(hull)) return null;
+    // And what the walking arrival does after the pack: the props this player put down in this system (and
+    // the store told which world it is, or a prop put down here would be kept under the last zone's name),
+    // and what this system stands for good.
+    const pack = packIdOf(planet, this.zone);
+    void this.enterPlaced(pack);
+    this.dressingBuilt = Promise.resolve();
+    this.dressingStanding = this.standDressing(pack);
     this.savePlace(true);
     return hull;
   }
@@ -16915,6 +17048,252 @@ class App {
     await placedProps.enter(pack, this.placedStore(), this.placedDeps());
   }
 
+  // ---- What a world stands for good: the permanent placements (`src/world/permanent.ts`). ----
+
+  /**
+   * This world's permanent placements and what of them stands: stood through the world's own placement,
+   * taken down the way a house is (whoever stands in its rooms stood on its doorstep first), its packs asked
+   * for in `dressingPacks` before anything is stood.
+   */
+  private readonly permanent: PermanentLayer = new PermanentLayer({
+    stand: (row, g, key) => this.standDressingRow(row, g, key),
+    unstand: (key) => {
+      this.standOutOf(key);
+      this.world.unplaceBuilding(key);
+    },
+    packReady: (pack) => (pack === 'props' ? !!this.props.pack : pack === 'gallery' ? !!this.dressingGallery : !!this.world.layoutCenter),
+    generation: () => this.world.generation,
+    label: (row) => this.dressingLabel(row),
+  });
+  /** The run of `standDressing` in force, and how many there have been: the record is the run's token. */
+  private dressingRun = { pack: '', run: 0 };
+  private dressingRuns = 0;
+  /** The same for a reload (the dev server's word that a file changed, the console's `reload`). */
+  private dressingReload = { pack: '', run: 0 };
+  /** The gallery pack this world's dressing stands its buildings out of, once a row asks for one. */
+  private dressingGallery: AssetPack | null = null;
+  /** Both layers' files for one world, fetched once an arrival. */
+  private dressingFiles: { pack: string; done: Promise<{ story: PlacementRead | null; world: PlacementRead | null }> } | null = null;
+
+  /** What kind of world a planet's is, for its permanent placements. */
+  private worldKindOf(planet: PlanetDef): WorldKind {
+    return planet.instances ? 'copies' : planet.space ? 'space' : 'ground';
+  }
+
+  /** Both layers' files for a world, fetched now and kept for that world's stand. */
+  private fetchDressing(pack: string, kind: WorldKind): Promise<{ story: PlacementRead | null; world: PlacementRead | null }> {
+    const frame = kind === 'space' ? 'space' : 'ground';
+    const done = Promise.all([this.fetchPlacements('story', pack, frame), this.fetchPlacements('world', pack, frame)]).then(([story, world]) => ({ story, world }));
+    this.dressingFiles = { pack, done };
+    return done;
+  }
+
+  /** The files fetched for this world, or fetched now (a jump between systems has no arrival to fetch them). */
+  private dressingFor(pack: string, kind: WorldKind): Promise<{ story: PlacementRead | null; world: PlacementRead | null }> {
+    return this.dressingFiles?.pack === pack ? this.dressingFiles.done : this.fetchDressing(pack, kind);
+  }
+
+  /**
+   * One layer's file for a world, read, or null for none. Both ship with the build (`public/placements/`)
+   * and are asked for fresh every time, since the dev server's are edited live. A file that is not there is
+   * answered by the dev server with the page itself and a 200, which is why the kind of answer is asked as
+   * well as whether there was one, as the fittings' fetch asks.
+   */
+  private async fetchPlacements(layer: PlacementLayer, pack: string, frame: 'ground' | 'space'): Promise<PlacementRead | null> {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}${placementsPath(layer, pack)}`, { cache: 'no-store' });
+      const type = res.headers.get('content-type') ?? '';
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
+      const read = readPlacementsFile(await res.text(), pack, frame);
+      const file = `public/${placementsPath(layer, pack)}`;
+      if (read.problem) console.warn(`placements: ${file} is not read: ${read.problem}`);
+      for (const s of read.skipped) console.warn(`placements: ${file}: ${s.id} is skipped: ${s.why}`);
+      if (read.unknown.length) console.warn(`placements: ${file}: fields this build does not read: ${read.unknown.join(', ')}`);
+      return read;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The packs a world's rows stand out of, in hand before any is stood: the gallery's, the props pack and what its client data hangs on things. */
+  private async dressingPacks(rows: readonly PlacementRow[]): Promise<void> {
+    if (rows.some((r) => r.pack === 'gallery')) this.dressingGallery = await this.world.housesPack();
+    if (rows.some((r) => r.pack === 'props')) {
+      try {
+        await this.props.load();
+      } catch {
+        /* no props pack: its rows are skipped as noPack */
+      }
+      const pk = this.props.pack;
+      if (pk) await pk.loadObjectEffects();
+    }
+  }
+
+  /**
+   * Stand what this world stands for good, once its pack is in: both layers fetched (at the arrival, beside
+   * the pack), their packs in hand, then every row filed in one synchronous pass with nothing awaited between
+   * the check that this is still its world and the filing, so a key is never filed twice. One run per world:
+   * the record is its token, with the world's generation beside it, so a run a later one replaced, or a world
+   * left meanwhile, stands nothing. Deliberately not awaited by the arrival; the loading screen waits on it,
+   * bounded, and then on the rows filed into tiers already standing being built (`dressingBuilt`).
+   *
+   * `gen` is the world it was asked for, read where the world was loaded: an arrival's pack can come in after a
+   * later arrival has already loaded the next world (a superseded load answers null, and its callback still
+   * runs), and a call for a world that is not the one up touches nothing at all -- not the run in force, not
+   * the gallery, not what the layer knows stands -- or it would cancel the live world's own stand, or forget
+   * rows still filed in its streamer.
+   */
+  private async standDressing(pack: string, gen = this.world.generation): Promise<void> {
+    if (this.world.generation !== gen || packIdOf(this.world.planet, this.zone) !== pack) return;
+    const run = { pack, run: ++this.dressingRuns };
+    this.dressingRun = run;
+    this.dressingBuilt = Promise.resolve();
+    const planet = this.world.planet;
+    const kind = this.worldKindOf(planet);
+    const centre = this.world.layoutCenter;
+    this.dressingGallery = null;
+    this.permanent.enter(pack, centre, kind, gen);
+    // A world with no layout has no streamer to stand anything in.
+    if (!centre) return;
+    const current = () => this.dressingRun === run && this.world.generation === gen && packIdOf(this.world.planet, this.zone) === pack;
+    try {
+      const files = await this.dressingFor(pack, kind);
+      if (!current()) return;
+      await this.dressingPacks([...(files.story?.rows ?? []), ...(files.world?.rows ?? [])]);
+      if (!current()) return;
+      const builds = this.permanent.setLayers(files.story, files.world);
+      // A row filed into a tier already standing is built by the streamer on its own, which the loading
+      // screen's question of whether the tiers round the player stand cannot see: it waits on these as well.
+      this.dressingBuilt = this.dressingWait(builds);
+      this.noteDressing();
+      // A story object looked for before its row was filed was remembered as not found for a while.
+      this.storyStands.clear();
+    } catch (err) {
+      console.warn('placements: this world\'s permanent placements could not be stood', err);
+    }
+  }
+
+  /**
+   * One layer read again, or both, and what stands brought to it by difference (the dev server's word that a
+   * file changed, the console's `reload`): only rows that moved come down and go up again. Then the story
+   * objects are looked for afresh and the seats planned again round what stands now.
+   */
+  private async reloadDressing(pack: string, layer?: PlacementLayer): Promise<void> {
+    const run = { pack, run: ++this.dressingRuns };
+    this.dressingReload = run;
+    const gen = this.world.generation;
+    const current = () => this.dressingReload === run && this.world.generation === gen && packIdOf(this.world.planet, this.zone) === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
+    const frame = this.world.planet.space ? 'space' : 'ground';
+    const layers = layer ? [layer] : PLACEMENT_LAYERS;
+    const reads = await Promise.all(layers.map((l) => this.fetchPlacements(l, pack, frame)));
+    if (!current()) return;
+    await this.dressingPacks(reads.flatMap((r) => r?.rows ?? []));
+    if (!current()) return;
+    // Built in play, as anything put down in play is, hidden until its programs exist; nothing waits on it.
+    void this.dressingWait(layer ? this.permanent.setLayer(layer, reads[0]) : this.permanent.setLayers(reads[0], reads[1]));
+    this.noteDressing();
+    this.storyStands.clear();
+    void this.standSeats(pack);
+  }
+
+  /** What could not be stood, said once a sync on the console, so a row that never shows is not a mystery. */
+  private noteDressing(): void {
+    const r = this.permanent.report();
+    const out = r.rows.filter((row) => !row.stood);
+    if (out.length) console.info(`placements: ${r.world}: ${out.map((row) => `${row.id} (${row.layer}) not stood: ${row.why}`).join('; ')}`);
+  }
+
+  /** A run of the dressing, waited on for at most `DRESSING_TUNE.standWaitMs`. */
+  private dressingFiled(p: Promise<void>): Promise<void> {
+    return Promise.race([p, new Promise<void>((r) => setTimeout(r, DRESSING_TUNE.standWaitMs))]);
+  }
+
+  /** What a sync stood being built: settled once every one is, whichever way each went (one that failed has said so). */
+  private dressingWait(builds: readonly Promise<unknown>[]): Promise<void> {
+    if (!builds.length) return Promise.resolve();
+    return Promise.all(
+      builds.map((b) =>
+        b.catch((err) => {
+          console.warn('placements: a permanent placement could not be built', err);
+        }),
+      ),
+    ).then(() => undefined);
+  }
+
+  /**
+   * One row stood through the world's own placement, at once, in its own pack, as `dressingStandOf` says it
+   * stands: a props row as the props catalogue draws its thing (with the thing's template, so its client data's
+   * fire and the surface it is made of come with it, and never solid where it is a seat or a table, which the
+   * seated people the data puts on it would be pushed off), a gallery or world row as its model. Its model's box
+   * and what to wait on for it to be built, or null.
+   */
+  private standDressingRow(row: PlacementRow, g: GamePlace, key: string): StandAnswer | null {
+    const s = dressingStandOf(row, g, key, (thing) => this.props.find(thing), (template) => isSeat(template) || isTableTemplate(template));
+    if (!s) return null;
+    if (row.pack === 'props') return this.props.pack ? this.world.standPlacement(s, this.props.pack) : null;
+    if (row.pack === 'gallery') return this.dressingGallery ? this.world.standPlacement(s, this.dressingGallery) : null;
+    return this.world.standPlacement(s, null);
+  }
+
+  /** What a permanent thing is called in words: the props catalogue's name for it, else the row's own, else a building's deed's, else its id. */
+  private dressingLabel(row: PlacementRow): string {
+    const def = row.pack === 'props' && row.thing ? this.props.find(row.thing) : null;
+    if (def?.name) return def.name;
+    if (row.name) return row.name;
+    if (row.kind === 'building' && row.model) return houseName(row.model, allDeeds());
+    return row.id;
+  }
+
+  /**
+   * A ready-made world-edit file for the world you stand in, round where you stand: a gallery house a little
+   * way ahead, turned to face you, and a crate standing in its first room (out in the open beside you in space,
+   * where no building is stood). Every number is the file's own frame, ready to save as it is.
+   */
+  private async exampleDressing(): Promise<{ file: string; text: string } | { error: string }> {
+    const here = packIdOf(this.world.planet, this.zone);
+    const centre = this.world.layoutCenter;
+    if (!centre) return { error: 'this world has no layout to stand anything in' };
+    const frame = this.world.planet.space ? 'game' : 'raw';
+    await this.props.load().catch(() => null);
+    const crate = this.props.all.find((p) => /^crate\b/i.test(p.name ?? '')) ?? this.props.all.find((p) => /crate/.test(p.id)) ?? this.props.all[0] ?? null;
+    if (!crate) return { error: this.props.note || 'no props pack, so there is nothing to put in an example' };
+    const me = this.player.worldPos;
+    const heading = this.viewHeading();
+    const rows: PlacementRow[] = [];
+    const turnOf = (yaw: number): GamePlace['q'] => [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
+    // To the centimetre, and the turn to five places, which is what a file written by hand would hold.
+    const rounded = (p: Pick<PlacementRow, 'x' | 'y' | 'z' | 'q'>): Pick<PlacementRow, 'x' | 'y' | 'z' | 'q'> => ({ x: Math.round(p.x * 100) / 100, y: Math.round(p.y * 100) / 100, z: Math.round(p.z * 100) / 100, q: p.q.map((n) => Math.round(n * 1e5) / 1e5 || 0) as PlacementRow['q'] });
+    const gallery = this.world.planet.space ? null : await this.world.housesPack();
+    // A small player house where the gallery has one, else the first building players bought with rooms.
+    const walkIn = gallery?.category('layout').filter((d) => /^ply_/.test(d.id) && (d.cells?.length ?? 0) > 1) ?? [];
+    const house = walkIn.find((d) => /_house_sm_/.test(d.id)) ?? walkIn[0] ?? null;
+    if (house) {
+      const ahead = 25 + radiusOfBounds(house.bounds);
+      const x = me.x + Math.sin(heading) * ahead;
+      const z = me.z + Math.cos(heading) * ahead;
+      const y = this.world.terrain.heightAt(x, z);
+      // Its door toward you: the heading back the way you look.
+      const yaw = heading + Math.PI;
+      const hq = turnOf(yaw);
+      const h = fromGame({ x, y, z, q: hq }, centre, frame);
+      rows.push({ id: 'example-house', kind: 'building', pack: 'gallery', model: house.id, ...rounded(h), clear: Math.round(clearRadius(patchOfBounds(house.bounds)) * 10) / 10, name: houseName(house.id, allDeeds()), note: 'an example: delete this file to take it down' });
+      // The crate on the floor of its first room, carried out of the house's own frame by its turn.
+      const room = house.cells?.find((c) => c.index > 0 && c.bounds);
+      const mid = room ? new THREE.Vector3((room.bounds.min[0] + room.bounds.max[0]) / 2, Math.min(room.bounds.min[1], room.bounds.max[1]), (room.bounds.min[2] + room.bounds.max[2]) / 2) : new THREE.Vector3(0, 0, 0);
+      mid.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+      const c = fromGame({ x: x + mid.x, y: y + mid.y, z: z + mid.z, q: hq }, centre, frame);
+      rows.push({ id: 'example-crate', kind: 'prop', pack: 'props', thing: crate.id, ...rounded(c), inside: true, name: crate.name ?? undefined, note: 'an example: standing in the house' });
+    } else {
+      const x = me.x + Math.sin(heading) * 4;
+      const z = me.z + Math.cos(heading) * 4;
+      const y = this.world.planet.space ? me.y : this.world.terrain.heightAt(x, z);
+      const c = fromGame({ x, y, z, q: turnOf(heading) }, centre, frame);
+      rows.push({ id: 'example-crate', kind: 'prop', pack: 'props', thing: crate.id, ...rounded(c), name: crate.name ?? undefined, note: 'an example' });
+    }
+    for (const r of rows) if (r.name === undefined) delete r.name;
+    return { file: `public/${placementsPath('world', here)}`, text: placementsFileText(here, frame, rows) };
+  }
+
   /**
    * The travel terminal or ticket collector the player is standing at, or null.
    *
@@ -17954,6 +18333,9 @@ class App {
   private readonly propDeps = {
     floorAt: (x: number, y: number, z: number) => this.world.groundAt(x, y + 0.5, z, this.propInside),
     solidAt: (x: number, y: number, z: number) => this.world.solidAt(x, y, z),
+    // A player's own thing is never stood within a permanent placement's guard: a quest's yard stays as its
+    // story dressed it. The name is the row's own, kept, so asking makes nothing.
+    reserved: (x: number, z: number, r: number) => this.permanent.guardedAt(x, z, r)?.label ?? null,
   };
 
   /**
@@ -18279,8 +18661,10 @@ class App {
    * with a count, and a prop is a thing with an identity of its own; dropping one in there would be
    * the very duplication that file exists to prevent. Holding it is the honest answer until the
    * ledger keeps things rather than kinds.
+   *
+   * Answers what it said when nothing came into hand (the console reads it), else null.
    */
-  private async takeNearestProp(): Promise<void> {
+  private async takeNearestProp(): Promise<string | null> {
     const me = this.player.worldPos;
     const row = placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far);
     if (!row) {
@@ -18291,25 +18675,30 @@ class App {
       if (home) {
         this.toggleInventory('housing');
         this.housingUi.ask(home.id);
-        this.messages.system(`take ${home.name} down from the Housing tab, or close it to keep it standing`);
-        return;
+        const said = `take ${home.name} down from the Housing tab, or close it to keep it standing`;
+        this.messages.system(said);
+        return said;
       }
-      this.messages.system('nothing of yours is standing near enough to pick up');
-      return;
+      // Nothing of yours, but something the world stands for good: said so, which is the one way a player
+      // tells the world's own things from theirs at a glance. Nothing in play picks one up.
+      const fixed = this.permanent.nearest({ x: me.x, y: me.y, z: me.z }, DRESSING_TUNE.nearReach);
+      const said = fixed ? `the ${fixed.label} is part of this world` : 'nothing of yours is standing near enough to pick up';
+      this.messages.system(said);
+      return said;
     }
     const def = this.props.find(row.id);
     placedProps.take(row.thing, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
     this.messages.system(`${def?.name || row.id} picked up`);
     // Back in hand, turned as it stood, so a nudge is one press and a click puts it back. The row it
     // came from is kept with it, so giving up returns it rather than losing it.
-    if (!def) return;
+    if (!def) return null;
     const why = await this.startPlacingProp(def.id);
     if (why) {
       this.messages.system(why);
-      return;
+      return why;
     }
     const p = this.propPlacing;
-    if (!p) return;
+    if (!p) return null;
     p.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
     p.from = row;
     // And anchored exactly where it stood -- its lift the height it stood at over the floor there, its
@@ -18327,6 +18716,7 @@ class App {
     a.px = at.x;
     a.pz = at.z;
     a.yaw = this.viewHeading();
+    return null;
   }
 
   // ---- The band: an instrument in hand, its own track of a song, and everybody else's. ----

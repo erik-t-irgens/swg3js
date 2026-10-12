@@ -383,10 +383,13 @@ export function blockedBy(p: Patch, at: { x: number; z: number }, yaw: number, s
  *
  * Templates are paths (`object/building/general/shared_cantina.iff`), so this is the last part of
  * one with its wrapping taken off and its underscores turned back into spaces. It is for a line of
- * words a player reads and for nothing else; nothing is ever keyed on it.
+ * words a player reads and for nothing else; nothing is ever keyed on it. A permanent placement is
+ * filed under `place/<id>` and is named by its id, in words.
  */
 export function blockerName(template: string | undefined): string {
-  const leaf = String(template ?? '')
+  const t = String(template ?? '');
+  if (t.startsWith('place/')) return t.slice('place/'.length).replace(/[-_]+/g, ' ').trim() || 'something';
+  const leaf = t
     .split('/')
     .pop();
   if (!leaf) return 'something';

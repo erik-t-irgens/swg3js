@@ -24,6 +24,8 @@ import { buildingWithRoomIn } from './roomOf.ts';
 import { LevelGroup } from './levelGroup.ts';
 import { LOD_LEVEL_TUNE, sweepDue } from './lodLevels.ts';
 import type { BuildingDoors, DoorsFile } from './doorMath.ts';
+import type { DressingStand, StandAnswer } from './permanent.ts';
+import { radiusOfBounds } from '../story/placements.ts';
 
 /**
  * What stands the doors in a building's doorways when its rooms are built and takes them down with
@@ -879,11 +881,13 @@ export class LayoutStreamer {
     this.objects.push(placed);
     this.placedByKey.set(p.template, placed);
     // A house can host what is put down in it, and a thing put down in a room is drawn with that room.
+    let hosts = false;
     if (!placed.contained) {
       const id = this.hostObjects.length;
       if (this.furnitureIndex.add(id, placed, def)) {
         this.hostObjects.push(placed);
         this.hostIds.set(placed, id);
+        hosts = true;
       }
     } else {
       const a = this.furnitureIndex.assign(placed, def, this.hostAnswer);
@@ -906,11 +910,36 @@ export class LayoutStreamer {
     // The collider pass only re-sweeps once the player has moved twelve metres; a house put down at
     // their feet has to be solid before that, so the memory of where it last swept is thrown away.
     this.lastColliderX = NaN;
+    // What was put down in its rooms before it stood is drawn with them from now on, as it would have been
+    // had the building come first. Filed first; the build below waits on nothing it does.
+    if (hosts) this.rehostAround(placed);
     const loaded = region.tiers[placed.tier];
     // Not loaded yet, or still loading: the ordinary pass will build it with everything else, which
     // is exactly right and needs nothing here.
     if (!loaded || loaded === 'loading') return null;
     return this.addToTier(loaded, placed);
+  }
+
+  /**
+   * A building just put down in play takes what was already standing in its rooms with no host: a thing is
+   * given its host only as it is placed, so a prop filed before its building -- a story layer's prop in a
+   * world edit's house, a building the editor moves back over its own furniture, a house and a prop whose
+   * stands race -- would otherwise be drawn on the actor layer in every pass for as long as it stood, which
+   * is through the walls from outside. Each one the index now puts in this building is filed again from its
+   * own fields (taken up, then put down), so it is hosted the one way a placement ever is. Things put down
+   * in play are the only ones looked at: the layout's own furniture was hosted when the world was read. No
+   * recursion, since nothing contained ever hosts.
+   */
+  private rehostAround(building: PlacedObject): void {
+    const homeless: PlacedObject[] = [];
+    for (const p of this.placedByKey.values()) if (p.contained && !p.host) homeless.push(p);
+    for (const p of homeless) {
+      const a = this.furnitureIndex.assign(p, this.defOf(p.model), this.hostAnswer);
+      // A thing in the doorway stands partly outside and keeps no host, so filing it again would change nothing.
+      if (a.host < 0 || this.hostObjects[a.host] !== building || a.flags & HOST_FLAG.doorway) continue;
+      this.unplace(p.template);
+      void this.place({ model: p.model, template: p.template, x: p.x, y: p.y, z: p.z, q: p.q, radius: p.radius, inside: true, solid: p.solid, ...(p.effectsOf ? { effectsOf: p.effectsOf } : {}) });
+    }
   }
 
   /**
@@ -1002,8 +1031,8 @@ export class LayoutStreamer {
    * thousands of these and this is asked on a keypress, not on a frame. Objects inside a building
    * are left out, since the building around them is standing in the same place and says so itself.
    */
-  objectsNear(x: number, z: number, reach: number): { x: number; z: number; radius: number; template: string; model: string }[] {
-    const out: { x: number; z: number; radius: number; template: string; model: string }[] = [];
+  objectsNear(x: number, z: number, reach: number): { x: number; z: number; radius: number; template: string; model: string; effectsOf?: string }[] {
+    const out: { x: number; z: number; radius: number; template: string; model: string; effectsOf?: string }[] = [];
     const span = reach + Math.min(this.largestRadius, COLLIDER_RADIUS_CAP);
     const rx0 = Math.floor((x - span) / REGION);
     const rx1 = Math.floor((x + span) / REGION);
@@ -1022,12 +1051,63 @@ export class LayoutStreamer {
             if (!(radius > 0)) continue;
             const want = radius + reach;
             if ((o.x - x) ** 2 + (o.z - z) ** 2 > want * want) continue;
-            out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model });
+            // What a thing put down in play really is rides beside the name it is filed under, so whoever
+            // asks what kind of thing stands here (the seats of ours) can tell a permanent chair from a crate.
+            out.push({ x: o.x, z: o.z, radius, template: o.template, model: o.model, ...(o.effectsOf ? { effectsOf: o.effectsOf } : {}) });
           }
         }
       }
     }
     return out;
+  }
+
+  /** The circles `keepFloraOff` has registered, so the same one asked for twice is kept once. */
+  private readonly keptOff = new Set<string>();
+
+  /**
+   * Keep the procedural flora off a circle of the game's frame, as a placed object's own footprint does: what
+   * a permanent placement's `clear` asks for, registered before the ground is built so a house in a wood
+   * stands in its clearing on the first visit. The same circle asked for again (a row stood again unmoved) is
+   * kept once. Like every exclusion it reaches only chunks built after it.
+   */
+  keepFloraOff(x: number, z: number, r: number): void {
+    if (!(r > 0) || !Number.isFinite(x) || !Number.isFinite(z)) return;
+    const key = `${x},${z},${r}`;
+    if (this.keptOff.has(key)) return;
+    this.keptOff.add(key);
+    this.addExclusion({ x, z, r });
+  }
+
+  /**
+   * Stand one of the world's permanent placements (`src/world/permanent.ts`) out of `from`, filed under its
+   * own key at once: whatever stood under the key is taken down first, the pack is stood behind the world when
+   * it is not the world's own, its flora circle kept, and it is placed with its model's own box as its radius
+   * (`radiusOfBounds`) and its solidity exactly as the row's stand says, three ways (`dressingStandOf` decides
+   * it). Synchronous on purpose: `place` files before its first await, so a world's rows are filed in one loop
+   * with nothing awaited between the caller's check that this is still its world and the filing, and a key is
+   * never filed twice (the seats' lesson). The model loads after, hidden until its programs exist like
+   * everything else, and `built` settles once it has (at once where its tier is still to load, whose own build
+   * does it). Null when the pack has no such model.
+   */
+  standPermanent(row: DressingStand, from: AssetPack): StandAnswer | null {
+    const def = from.find(row.model);
+    if (!def) return null;
+    this.unplace(row.key);
+    if (from !== this.pack) this.useGuestPack(from);
+    if (row.clear && row.clear > 0) this.keepFloraOff(row.x, row.z, row.clear);
+    const built = this.place({
+      model: row.model,
+      template: row.key,
+      x: row.x,
+      y: row.y,
+      z: row.z,
+      q: new THREE.Quaternion(row.q[0], row.q[1], row.q[2], row.q[3]),
+      radius: radiusOfBounds(def.bounds),
+      inside: row.inside,
+      ...(row.solid !== undefined ? { solid: row.solid } : {}),
+      ...(row.effectsOf ? { effectsOf: row.effectsOf } : {}),
+    });
+    return { bounds: def.bounds ?? null, built };
   }
 
   private addExclusion(e: Exclusion): void {
@@ -2180,7 +2260,10 @@ export class LayoutStreamer {
       else if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
       const col = this.physics.world.createCollider(desc);
       cols.push(col);
-      this.colliderTemplate.set(col.handle, o.template);
+      // The template it really is, which is what its surface is looked up by: a thing put down in play is
+      // filed under a name of its own and carries its template beside it, so a permanent crate, a saved prop
+      // and a fitting are heard as what they are.
+      this.colliderTemplate.set(col.handle, o.effectsOf ?? o.template);
     }
     this.colliders.set(o, cols);
     // Invisible to a query until the world has stepped: `builtAt` counts nothing solid until then.

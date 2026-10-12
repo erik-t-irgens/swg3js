@@ -303,7 +303,8 @@ const PREFIX = /^[a-z][a-z0-9_-]{0,23}$/;
 const NAME = /^[A-Za-z0-9_./-]{1,96}$/;
 const REF_NAME = /^[A-Za-z0-9_.-]{1,96}$/;
 const SIGNAL_NAME = /^[A-Za-z0-9_./-]{1,64}$/;
-const TEMPLATE = /^[A-Za-z0-9_./-]{1,160}$/;
+/** A story object's template: the game's own path, or a permanent placement's key (`place/<id>`, `placements.ts`). */
+export const TEMPLATE = /^[A-Za-z0-9_./-]{1,160}$/;
 /** The keys rule 10 refuses anywhere: nothing marks a version of anything as the true one. */
 const CANONICAL = /^(canonical|iscanonical|true|truth|istrue|genuine|thetruth)$/i;
 

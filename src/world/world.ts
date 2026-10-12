@@ -43,6 +43,9 @@ import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
+import { DRESSING_TUNE, type DressingStand, type StandAnswer } from './permanent.ts';
+import { PLACEMENT_KEY_PREFIX } from '../story/placements.ts';
+import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 import { Doors, type DoorView } from './doors.ts';
@@ -1535,8 +1538,16 @@ export class World {
     this.applyLighting();
   }
 
-  /** Load converted SWG content for this planet, if the private pack exists. */
-  async loadPack(spawn: THREE.Vector3): Promise<THREE.Vector3 | null> {
+  /**
+   * Load converted SWG content for this planet, if the private pack exists.
+   *
+   * `keepOff` is circles the procedural flora is kept off before the ground is first built: the permanent
+   * placements' `clear` (`src/world/permanent.ts`), `raw` in the snapshot's frame and `game` in the world's. It
+   * is converted here, about the layout's centre, because nothing has a centre until this pack is in; it is
+   * waited on for at most `DRESSING_TUNE.floraWaitMs`, and the small file it comes from has nearly always
+   * landed long before the pack.
+   */
+  async loadPack(spawn: THREE.Vector3, opts: { keepOff?: Promise<{ raw: { x: number; z: number; r: number }[]; game: { x: number; z: number; r: number }[] } | null> } = {}): Promise<THREE.Vector3 | null> {
     const token = this.loadToken;
     const planet = this.planet;
     this.packStatus = 'loading';
@@ -1713,6 +1724,18 @@ export class World {
       // kilometres tall under every asteroid.
       if (!this.terrain.swg && !planet.space) {
         for (const p of this.layoutStream.objects) if (p.radius >= 2 && !p.contained) this.terrain.addAnchor({ x: p.x, z: p.z, y: p.y, r: p.radius });
+      }
+      // The ground the permanent placements stand on kept clear of plants before the first chunk is built,
+      // so a building in a wood stands in a clearing on the first visit as the game's own do.
+      if (opts.keepOff) {
+        const stream = this.layoutStream;
+        const circles = await Promise.race([opts.keepOff.catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), DRESSING_TUNE.floraWaitMs))]);
+        if (token !== this.loadToken) return null;
+        if (circles && stream === this.layoutStream) {
+          const c = layout.center;
+          for (const k of circles.raw) stream.keepFloraOff(rawToGameX(c.x, k.x), rawToGameZ(c.z, k.z), k.r);
+          for (const k of circles.game) stream.keepFloraOff(k.x, k.z, k.r);
+        }
       }
     }
     // The Force's own beams: a small pool built into the scene here, hidden, so the warm-up
@@ -3926,6 +3949,21 @@ export class World {
   }
 
   /**
+   * Stand one of the world's permanent placements (`src/world/permanent.ts`), filed under its own key at once,
+   * as its row's stand says (`dressingStandOf`: the model, the place, the solidity): the streamer's own
+   * `standPermanent`, which the node test runs as it is. `pack` is the one the model is in, null for this
+   * world's own; it stands behind the world for as long as the world is up, as a house's gallery does.
+   * Synchronous, so a world's rows are filed in one loop. Answers the model's box and what to wait on for it to
+   * be built, or null with no world or when the pack has no such model.
+   */
+  standPlacement(row: DressingStand, pack: AssetPack | null): StandAnswer | null {
+    const stream = this.layoutStream;
+    const from = pack ?? this.pack;
+    if (!stream || !from) return null;
+    return stream.standPermanent(row, from);
+  }
+
+  /**
    * What the world already has standing near a point: each one's place and its own size on the
    * ground. Empty with no world, which reads as "nothing is in the way" and is right: a placement
    * with no world loaded has already been refused for having no world.
@@ -3975,10 +4013,28 @@ export class World {
     if (!stream) return false;
     const inside = this.furnitureScratch;
     stream.containedNear(x, z, reach, inside);
-    for (const o of inside) if (o.template.startsWith('object/') && Math.abs(o.y - y) <= level && test(o.template)) return true;
+    for (const o of inside) {
+      const t = World.dataTemplate(o.template, o.effectsOf);
+      if (t && Math.abs(o.y - y) <= level && test(t)) return true;
+    }
     inside.length = 0;
-    for (const o of stream.objectsNear(x, z, reach)) if (o.template.startsWith('object/') && Math.hypot(o.x - x, o.z - z) <= reach && test(o.template)) return true;
+    for (const o of stream.objectsNear(x, z, reach)) {
+      const t = World.dataTemplate(o.template, o.effectsOf);
+      if (t && Math.hypot(o.x - x, o.z - z) <= reach && test(t)) return true;
+    }
     return false;
+  }
+
+  /**
+   * The template a placed object counts by as the world's own data, or null for one that does not count: a
+   * snapshot object by its own, and a permanent placement (`place/<id>`) by the template it really is, since
+   * it is the world's for every player as much as the snapshot is -- a permanent chair under a seated person
+   * is a chair, and a second of ours on it would be one too many. A thing a player put down is not data.
+   */
+  private static dataTemplate(template: string, effectsOf: string | undefined): string | null {
+    if (template.startsWith('object/')) return template;
+    if (template.startsWith(PLACEMENT_KEY_PREFIX) && effectsOf) return effectsOf;
+    return null;
   }
 
   /** Materials whose shaders have been asked for ahead of their first draw. */
