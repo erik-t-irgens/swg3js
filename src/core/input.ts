@@ -46,12 +46,10 @@ export type Action =
   | 'rollRight'
   // A ship whose wings open: the pilot opens and closes them.
   | 'wings'
-  // A building in hand: turning it and nudging it up or down. They have keys of their own rather
-  // than borrowing the strafe keys, so that the player can walk while they place.
-  | 'placeLeft'
-  | 'placeRight'
-  | 'placeUp'
-  | 'placeDown'
+  // A building or a prop in hand: held, the mouse turns it (`placeTurn`) or raises and lowers it
+  // (`placeLift`). Keys of their own rather than the strafe keys, so the player can walk while placing.
+  | 'placeTurn'
+  | 'placeLift'
   // A prop of yours standing near: pick it back up.
   | 'takeProp'
   // A prop in hand that was picked back up: throw it away rather than put it back.
@@ -117,13 +115,13 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   rollLeft: ['KeyZ'],
   rollRight: ['KeyV'],
   wings: ['KeyU'],
-  // A building in hand. Q and E are the other trigger and the use key, and R and F the saber throw
-  // and the torch: none of the four can be reached with a deed out, so they are borrowed rather
-  // than spent, and all four can be rebound from the Controls page like anything else.
-  placeLeft: ['KeyQ'],
-  placeRight: ['KeyE'],
-  placeUp: ['KeyR'],
-  placeDown: ['KeyF'],
+  // A building or a prop in hand: R held turns it and F held raises and lowers it, with the mouse. R is
+  // the saber throw's and F the torch's, borrowed rather than spent: the throw is muted with the rest of
+  // the fight while something is in hand (`FIGHT_ACTIONS`), and the torch is not read at all while
+  // placing. Both can be rebound from the Controls page like anything else. (They were four step keys,
+  // Q, E, R and F; a choice kept for one of those four names nothing now and is dropped on load.)
+  placeTurn: ['KeyR'],
+  placeLift: ['KeyF'],
   // Picking one of your own props back up. It is a key of its own rather than the use key, which is
   // already the doorway, the lift, the shuttle and the mount and would have to lose to all four. It is O,
   // which the ultra cruise reads as a key of its own at a ship's controls only, where the pick-up does
@@ -150,6 +148,16 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
 const STORAGE_KEY = 'swg3js.bindings';
 
 /**
+ * Everything that fights: the click and the other triggers, the block, the saber's throw and its style,
+ * and the six ability keys both kits read (`SLOT_ACTIONS`). While a building or a prop is in hand these
+ * are muted for the whole frame after the placing keys are read (`Input.mute`), so the click that puts
+ * a thing down does not also fire or swing, a held R turns it without throwing a lit saber, and 1 with
+ * a crate in hand uses no power; and when the hand empties, any of them still held stays muted until
+ * its key is let go (`Input.muteUntilUp`). A test holds this to the kits' own slot list.
+ */
+export const FIGHT_ACTIONS: readonly Action[] = ['attack', 'altAttack', 'altFire', 'block', 'saberThrow', 'saberStyle', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6'];
+
+/**
  * What a player chose, out of what was saved or asked for: every entry that is an action with a list of key
  * names (an empty list included, a key taken off an action on purpose) and that is not simply that action's
  * own default. Anything else is ignored, entry by entry. A choice that is the default is no choice at all:
@@ -174,7 +182,7 @@ export function chosenBindings(saved: unknown): Partial<Record<Action, string[]>
  * always wins over a default that later moved onto it, so one press never answers twice. Such an action may
  * be left with no key at all, and the Controls page shows it blank; it is not a choice and is never kept as
  * one, so it has its key back the moment nobody's choice holds it. Keys two defaults share on purpose (the
- * placing keys borrow Q, E, R and F, and right mouse is both the other attack and the block) are left as
+ * placing keys borrow R and F, and right mouse is both the other attack and the block) are left as
  * they are, because the chosen action held that key by default too.
  *
  * `saved` is read through `chosenBindings`, so anything in it that is not an action with a list of key
@@ -214,7 +222,7 @@ export function bindingsToKeep(chosen: Readonly<Partial<Record<Action, readonly 
 /**
  * Whether taking `code` for `action` must take it off `other` as well. Not when both have it by default:
  * those two share it on purpose and are never pressed in the same place (the alt attack and the block on
- * right mouse, the placing keys on Q, E, R and F), so a key put back on its own default stays shared with
+ * right mouse, the placing keys on R and F), so a key put back on its own default stays shared with
  * the other default that has it.
  */
 export function takesKeyFrom(action: Action, other: Action, code: string): boolean {
@@ -318,24 +326,61 @@ export class Input {
     } else this.down.delete(code);
   }
 
+  /** A raw key held. Never muted: a mute is of an action (`mute`), and a raw read is nobody's action. */
   isDown(code: string): boolean {
     return !this.captured && this.down.has(code);
   }
 
+  /** A raw key pressed this frame. Never muted, for the same reason. */
   justPressed(code: string): boolean {
     return this.pressed.has(code);
   }
 
-  /** Whether any key bound to the action is held. */
+  /** Whether any key bound to the action is held, and the action is not muted. */
   held(action: Action): boolean {
-    if (this.captured) return false;
+    if (this.captured || this.muted(action)) return false;
     for (const code of this.bindings[action]) if (this.down.has(code)) return true;
     return false;
   }
 
-  /** Whether any key bound to the action was pressed this frame. */
+  /** Whether any key bound to the action was pressed this frame, and the action is not muted. */
   pressedAction(action: Action): boolean {
+    if (this.muted(action)) return false;
     for (const code of this.bindings[action]) if (this.pressed.has(code)) return true;
+    return false;
+  }
+
+  /** Actions muted for the rest of this frame (`mute`), and those muted until every key bound to them is up (`muteUntilUp`). */
+  private readonly mutedNow: Action[] = [];
+  private readonly mutedTillUp: Action[] = [];
+
+  /**
+   * Mute these actions for the rest of this frame: `held` and `pressedAction` answer false for them
+   * until `endFrame`. By **action**, not by key -- R is both the placing turn and the saber throw, and the
+   * first must still read as held while the second is muted. A list rather than a spread, so a frame that
+   * mutes the same list every time makes nothing.
+   */
+  mute(actions: readonly Action[]): void {
+    for (let i = 0; i < actions.length; i++) if (!this.mutedNow.includes(actions[i])) this.mutedNow.push(actions[i]);
+  }
+
+  /**
+   * Mute these actions until every key bound to each is up: a key still down when a hand lets go of
+   * what it held cannot start a throw, a block or a power on the next frame. An action with no key down
+   * at the end of this frame is let go of then.
+   */
+  muteUntilUp(actions: readonly Action[]): void {
+    for (let i = 0; i < actions.length; i++) if (!this.mutedTillUp.includes(actions[i])) this.mutedTillUp.push(actions[i]);
+  }
+
+  /** Whether an action is muted just now, by either kind of mute. */
+  muted(action: Action): boolean {
+    return this.mutedNow.includes(action) || this.mutedTillUp.includes(action);
+  }
+
+  /** Whether any key bound to the action is down, muted or not, captured or not. */
+  private anyDown(action: Action): boolean {
+    for (const code of this.bindings[action]) if (this.down.has(code)) return true;
     return false;
   }
 
@@ -424,5 +469,12 @@ export class Input {
     this.mouseDX = 0;
     this.mouseDY = 0;
     this.wheel = 0;
+    // This frame's mutes end with it; one held till its keys are up ends once they all are.
+    this.mutedNow.length = 0;
+    for (let i = this.mutedTillUp.length - 1; i >= 0; i--) {
+      if (this.anyDown(this.mutedTillUp[i])) continue;
+      this.mutedTillUp[i] = this.mutedTillUp[this.mutedTillUp.length - 1];
+      this.mutedTillUp.length--;
+    }
   }
 }

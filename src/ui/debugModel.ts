@@ -42,11 +42,12 @@ export const DEBUG_MENU_TUNE = {
  * The knobs: the helpers that set a number or a switch the owner turns while playing, rather than
  * report or do something once -- how far the world is drawn and in how much detail, which plants block,
  * god mode and the fights' difficulty, the hour, the day's length and the fog, the lightsaber glow and
- * the flashlight, the speeders' hover, the nebulae, a weapon for a body already standing, and the seats
- * under the seated people. Listed first, in a group of their own, so every one is in one place and a new
- * one is a line here; the pins of these are the ones a tick runs again at start (`startCalls`).
+ * the flashlight, the speeders' hover, the nebulae, a weapon for a body already standing, the seats
+ * under the seated people, and how a held key turns and raises a thing in hand. Listed first, in a group
+ * of their own, so every one is in one place and a new one is a line here; the pins of these are the ones
+ * a tick runs again at start (`startCalls`).
  */
-export const TUNING_HELPERS: readonly string[] = ['reach', 'lod', 'flora', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats'];
+export const TUNING_HELPERS: readonly string[] = ['reach', 'lod', 'flora', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
 
 /**
  * Where each helper is listed. A helper named in no group is listed under "Other", so one added to

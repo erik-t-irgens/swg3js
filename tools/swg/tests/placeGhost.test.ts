@@ -11,8 +11,9 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, outlineCells, turnBy, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
+import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo, outlineCells, turnTo, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
 import { HOUSE_TUNE, doorNote, patchOfFootprint, type Footprint } from '../../../src/world/housePlace.ts';
+import { PLACE_HOLD_TUNE, stepToGrid } from '../../../src/world/placeHold.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -63,16 +64,21 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
 }
 
 {
-  const one = turnBy(0, 1);
-  ok(Math.abs(one - (GHOST_TUNE.turn * Math.PI) / 180) < 1e-9, 'a press of a turn button turns it by the step');
-  ok(Math.abs(turnBy(0, -1) - (Math.PI * 2 - (GHOST_TUNE.turn * Math.PI) / 180)) < 1e-9, 'and the other way round the other way');
-  ok(turnBy(0, 360 / GHOST_TUNE.turn) < 1e-9, 'a whole turn comes back to where it started');
+  // A held key turns it by any amount at all; what is kept is that amount inside one turn.
+  const notch = (PLACE_HOLD_TUNE.gridTurn * Math.PI) / 180;
+  ok(Math.abs(turnTo(0.123) - 0.123) < 1e-12, 'a turn inside one turn is kept exactly, however fine');
+  ok(Math.abs(turnTo(-notch) - (Math.PI * 2 - notch)) < 1e-9, 'and one below nought comes round from the top');
+  ok(turnTo(Math.PI * 2) === 0 && turnTo(Math.PI * 4) < 1e-9, 'a whole turn comes back to where it started');
+  // The wheel with the turn key held steps along the grid (degrees, so the building's radians are read as degrees first).
+  let yaw = 0;
+  for (let i = 0; i < 360 / PLACE_HOLD_TUNE.gridTurn; i++) yaw = turnTo((stepToGrid((yaw * 180) / Math.PI, PLACE_HOLD_TUNE.gridTurn, 1) * Math.PI) / 180);
+  ok(yaw < 1e-9, 'a whole turn of notches of the grid comes back to nought');
   for (let i = -40; i < 40; i++) {
-    const y = turnBy(0, i);
-    assert.ok(y >= 0 && y < Math.PI * 2, `a turn of ${i} presses stays inside one turn`);
+    const y = turnTo(i * 0.7);
+    assert.ok(y >= 0 && y < Math.PI * 2, `a turn of ${(i * 0.7).toFixed(1)} rad stays inside one turn`);
   }
   passed++;
-  console.log('ok   and it is never outside one turn, however many presses');
+  console.log('ok   and it is never outside one turn, however far it is turned');
 }
 
 // ---------------------------------------------------------------- whether it may stand there
@@ -82,6 +88,17 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
   ok(v.ok && v.why === null, 'level ground with nothing on it takes a house');
   ok(v.y === 10, 'and the ghost stands at the ground');
   ok(v.clear > 0, 'and says how much ground it keeps to itself');
+}
+
+{
+  // The frame keeps one state and one spot and hands them over: they are written into, not made anew.
+  const kept = ghostVerdict(patchOfFootprint(HOUSE), { x: 0, z: 0 }, 0, flat());
+  const spot = { x: 0, z: 0 };
+  const at = ghostSpot({ x: 1, z: 2 }, 0, 5, spot);
+  const again = ghostVerdict(patchOfFootprint(HOUSE), at, 0.4, flat(), 0.5, kept);
+  ok(at === spot && spot.z === 7 && again === kept && kept.x === 1 && kept.z === 7 && kept.yaw === 0.4 && kept.lift === 0.5 && kept.ok, 'a kept spot and a kept state are written into and handed back, every field of them');
+  const wet = ghostVerdict(patchOfFootprint(HOUSE), at, 0.4, { heightAt: () => 10, waterAt: () => 12, standing: () => [] }, 0, kept);
+  ok(wet === kept && !kept.ok && kept.why === 'that is under water' && kept.lift === 0, 'and a refusal written into the same record replaces what it said before');
 }
 
 {
@@ -126,17 +143,27 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
 // ---------------------------------------------------------------- the player's own lift
 
 {
-  ok(liftBy(0, 1) === GHOST_TUNE.rise, 'a press raises it by a step');
-  ok(Math.abs(liftBy(0, -1) + GHOST_TUNE.rise) < 1e-9, 'and the other key lowers it by one');
-  ok(liftBy(0, 10_000) === GHOST_TUNE.most, 'however long it is held it never goes past the cap');
-  ok(liftBy(0, -10_000) === -GHOST_TUNE.most, 'nor past it downward');
+  // A held key lifts it by however far the hand moved; what is kept is that, to the centimetre, inside the cap.
+  ok(liftTo(0.374) === 0.37 && liftTo(-0.376) === -0.38, 'a lift is kept to the centimetre, either way');
+  ok(liftTo(10_000) === GHOST_TUNE.most, 'however far it is moved it never goes past the cap');
+  ok(liftTo(-10_000) === -GHOST_TUNE.most, 'nor past it downward');
+  ok(liftTo(20, GHOST_TUNE.mostPermanent) === 20, "and a permanent layer's editor hands over its own, wider cap");
+  // The wheel with the height key held steps it along the grid.
+  const grid = PLACE_HOLD_TUNE.gridLiftHouse;
+  let l = 0.1;
+  l = liftTo(stepToGrid(l, grid, 1));
+  ok(l === 0.25, 'a notch up from 0.1 m lands on the next line of the grid, 0.25 m');
+  l = liftTo(stepToGrid(l, grid, 1));
+  ok(l === 0.5, 'and the next notch on the line after it');
+  ok(liftTo(stepToGrid(0.5, grid, -1)) === 0.25 && liftTo(stepToGrid(-0.1, grid, -1)) === -0.25, 'and down the same way, under nought too');
   for (let i = -60; i < 60; i++) {
-    const l = liftBy(0, i);
-    assert.ok(Math.abs(l) <= GHOST_TUNE.most + 1e-9, `${i} presses stays within the cap`);
-    assert.ok(Math.abs(l / GHOST_TUNE.rise - Math.round(l / GHOST_TUNE.rise)) < 1e-9, `${i} presses lands on a whole step`);
+    let v = 0;
+    for (let k = 0; k < Math.abs(i); k++) v = liftTo(stepToGrid(v, grid, Math.sign(i)));
+    assert.ok(Math.abs(v) <= GHOST_TUNE.most + 1e-9, `${i} notches stays within the cap`);
+    assert.ok(Math.abs(v / grid - Math.round(v / grid)) < 1e-9, `${i} notches lands on a whole step`);
   }
   passed++;
-  console.log('ok   and every number of presses lands on a whole step inside the cap');
+  console.log('ok   and every number of notches lands on a whole step inside the cap');
 }
 
 {
@@ -278,6 +305,9 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
     id = '';
     innerHTML = '';
     private readonly found = new Map<string, StandIn>();
+    /** What the bar hung on this element, so a test can press its buttons as a pointer would. */
+    private readonly heard = new Map<string, ((e: unknown) => void)[]>();
+    captured = -1;
     appendChild<T>(child: T): T {
       return child;
     }
@@ -289,36 +319,187 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
       }
       return el;
     }
-    addEventListener(): void {}
+    addEventListener(type: string, f: (e: unknown) => void): void {
+      const list = this.heard.get(type) ?? [];
+      list.push(f);
+      this.heard.set(type, list);
+    }
+    setPointerCapture(id: number): void {
+      this.captured = id;
+    }
+    /** A pointer event of `type` on this element, with whatever fields it carries (`pointerId`, `button`, `movementX`, ...). */
+    fire(type: string, fields: Record<string, unknown> = {}): void {
+      for (const f of this.heard.get(type) ?? []) f({ type, preventDefault() {}, ...fields });
+    }
   }
   const page = globalThis as unknown as { document?: unknown };
   const had = page.document;
   page.document = { createElement: () => new StandIn(), head: new StandIn() };
   try {
-    const { PlacingBar } = await import('../../../src/ui/placingBar.ts');
+    const { NO_KEY, PlacingBar, placingView, placingHint } = await import('../../../src/ui/placingBar.ts');
     const parent = new StandIn();
     const bar = new PlacingBar(parent as unknown as HTMLElement);
-    const why = (bar.root as unknown as StandIn).querySelector('.why');
-    const keys = { left: 'Q', right: 'E', up: 'R', down: 'F' };
+    const root = bar.root as unknown as StandIn;
+    const why = root.querySelector('.why');
+    const hint = root.querySelector('.hint');
+    const turnText = root.querySelector('.turn');
+    const liftText = root.querySelector('.lift');
     const jump = doorNote(0.75)!;
     const reach = doorNote(1.5)!;
+    // One record, written into and handed over every frame as the game does.
+    const v = placingView();
+    v.name = 'Medium House';
+    v.keys = { turn: 'R', lift: 'F', del: 'Del' };
+    v.kind = 'house';
+    const say = (ok: boolean, w: string | null, lift: number, note: string | null) => {
+      v.ok = ok;
+      v.why = w;
+      v.lift = lift;
+      v.note = note;
+      bar.show(v);
+    };
 
-    bar.show('Medium House', true, null, keys, 0.75, null, jump);
+    say(true, null, 0.75, jump);
     ok(why.textContent === jump && why.className === 'why note', 'an allowed spot with a note says the note, in the accent');
     const after = bar.writes;
-    bar.show('Medium House', true, null, keys, 0.75, null, jump);
+    say(true, null, 0.75, jump);
     ok(bar.writes === after, 'and the same frame again writes nothing');
-    bar.show('Medium House', true, null, keys, 0.75, null, reach);
+    say(true, null, 0.75, reach);
     ok(bar.writes === after + 1 && why.textContent === reach, 'a note that changes is written, once');
 
-    bar.show('Medium House', false, 'that is under water', keys, 0.75, null, jump);
+    say(false, 'that is under water', 0.75, jump);
     ok(why.textContent === 'that is under water' && why.className === 'why bad', 'a refused spot says only why, never the note');
     const refused = bar.writes;
-    bar.show('Medium House', false, 'that is under water', keys, 0.75, null, reach);
+    say(false, 'that is under water', 0.75, reach);
     ok(bar.writes === refused, 'and a note moving under a refusal, which is not shown, writes nothing');
 
-    bar.show('Medium House', true, null, keys, 0, null, null);
+    say(true, null, 0, null);
     ok(why.textContent === 'the ground will take it' && why.className === 'why good', 'an allowed spot with nothing to say is the plain green');
+
+    // The readouts: degrees to a tenth and metres to the centimetre, written only when what they show moves.
+    v.turn = 37.04;
+    say(true, null, 0.374, null);
+    ok(turnText.textContent === '37.0°' && liftText.textContent === '+0.37 m', `the turn reads to a tenth of a degree and the lift to the centimetre (${turnText.textContent}, ${liftText.textContent})`);
+    const steady = bar.writes;
+    v.turn = 37.01;
+    say(true, null, 0.3711, null);
+    ok(bar.writes === steady, 'a hand that moves it less than the readouts show writes nothing');
+    v.turn = 37.06;
+    say(true, null, 0.3711, null);
+    ok(bar.writes === steady + 1 && turnText.textContent === '37.1°', 'and one that moves the tenth writes once');
+    v.kind = 'prop';
+    v.tipped = 30.2;
+    say(true, null, 0.3711, null);
+    ok(turnText.textContent === '37.1° · tipped 30°' && why.textContent === 'it will stand there', `a prop says how far it is tipped, and an allowed one "it will stand there" (${turnText.textContent}; ${why.textContent})`);
+    v.kind = 'house';
+    v.tipped = 0;
+
+    // The hint, in the keys handed over: never a letter typed into the bar.
+    v.holding = null;
+    v.locked = true;
+    say(true, null, 0, null);
+    ok(hint.textContent === placingHint(v) && hint.textContent.startsWith('hold R ⟲ turn · hold F ↕ height') && hint.textContent.includes('Del give it up'), `idle, the hint names the keys bound now (${hint.textContent})`);
+    v.keys = { turn: 'T', lift: 'G', del: 'Del' };
+    say(true, null, 0, null);
+    ok(hint.textContent.startsWith('hold T ⟲ turn · hold G ↕ height') && root.querySelector('.cap-turn').textContent === 'T', 'rebound, the hint and the button caps follow');
+    v.holding = 'turn';
+    say(true, null, 0, null);
+    ok(hint.textContent === `move the mouse to turn it · wheel: ${PLACE_HOLD_TUNE.gridTurn}° steps`, 'turning a building, the hint says what the mouse and the wheel do, and no tip');
+    v.kind = 'prop';
+    say(true, null, 0, null);
+    ok(hint.textContent.includes('shift: tip and roll'), 'turning a prop it offers the tip and roll');
+    v.holding = 'lift';
+    say(true, null, 0, null);
+    ok(hint.textContent === `move the mouse up or down · wheel: ${Math.round(PLACE_HOLD_TUNE.gridLiftProp * 100)} cm steps`, 'raising a prop, its own grid');
+    v.kind = 'house';
+    say(true, null, 0, null);
+    ok(hint.textContent.includes(`${Math.round(PLACE_HOLD_TUNE.gridLiftHouse * 100)} cm steps`), "and a building's");
+    v.locked = false;
+    say(true, null, 0, null);
+    ok(hint.textContent.startsWith('click the world to take the mouse back'), 'with the pointer free it says how to take it back, since no key can move it then');
+    v.locked = true;
+    v.kind = 'prop';
+    v.holding = 'tumble';
+    say(true, null, 0, null);
+    ok(hint.textContent === `up and down tip it, left and right roll it · wheel: ${PLACE_HOLD_TUNE.gridTurn}° steps`, 'tumbling a prop, the hint says which way of the mouse tips and which rolls');
+
+    // One key rebound alone moves its own cap and hint and nothing else.
+    v.holding = null;
+    v.kind = 'house';
+    v.keys = { turn: 'R', lift: 'F', del: 'Del' };
+    say(true, null, 0, null);
+    ok(root.querySelector('.cap-turn').textContent === 'R' && root.querySelector('.cap-lift').textContent === 'F', 'the two buttons carry the caps of the two keys');
+    v.keys = { turn: 'R', lift: 'G', del: 'Del' };
+    say(true, null, 0, null);
+    ok(root.querySelector('.cap-lift').textContent === 'G' && root.querySelector('.cap-turn').textContent === 'R' && hint.textContent.startsWith('hold R ⟲ turn · hold G ↕ height'), 'the height key rebound alone moves the height button\'s cap and the hint, and the turn\'s stays');
+    v.keys = { turn: 'T', lift: 'G', del: 'Del' };
+    say(true, null, 0, null);
+    ok(root.querySelector('.cap-turn').textContent === 'T' && root.querySelector('.cap-lift').textContent === 'G', 'and the turn key rebound alone moves the turn button\'s');
+
+    // How it is let go of. Escape gives up a deed or a prop taken fresh, and so does Delete; a prop picked
+    // back up out of the world goes back where it stood on Escape, while Delete and the pick-up key throw
+    // it away for good, so the two are never offered as one for it.
+    v.keys = { turn: 'R', lift: 'F', del: 'Del' };
+    v.away = null;
+    say(true, null, 0, null);
+    ok(hint.textContent.endsWith('click put it down · Esc or Del give it up'), `a deed or a fresh prop: Escape or Delete gives it up (${hint.textContent})`);
+    v.kind = 'prop';
+    v.away = 'O';
+    say(true, null, 0, null);
+    ok(hint.textContent.endsWith('Esc put it back · O or Del put it away') && !hint.textContent.includes('give it up'), `a prop picked back up: Escape puts it back and Delete or O throws it away (${hint.textContent})`);
+    v.keys = { turn: 'R', lift: 'F', del: NO_KEY };
+    say(true, null, 0, null);
+    ok(hint.textContent.endsWith('Esc put it back · O put it away'), 'with Delete unbound only the key that is bound is named');
+    v.away = null;
+    say(true, null, 0, null);
+    ok(hint.textContent.endsWith('click put it down · Esc give it up'), 'and a fresh one says only Escape');
+    v.kind = 'house';
+    v.keys = { turn: 'R', lift: 'F', del: 'Del' };
+
+    // The two press-and-drag buttons, pressed as a pointer would press them.
+    const turnBtn = root.querySelector('.hold-turn');
+    const liftBtn = root.querySelector('.hold-lift');
+    const steps: string[] = [];
+    const drags: string[] = [];
+    const holds: string[] = [];
+    bar.onStep = (w, d) => steps.push(`${w} ${d}`);
+    bar.onDrag = (w, dx, dy, s) => drags.push(`${w} ${dx} ${dy}${s ? ' shift' : ''}`);
+    bar.onHold = (w, s) => holds.push(`${w}${s ? ' shift' : ''}`);
+    const clear = () => {
+      steps.length = 0;
+      drags.length = 0;
+      holds.length = 0;
+    };
+    turnBtn.fire('pointerdown', { pointerId: 1, button: 0 });
+    turnBtn.fire('pointerup', { pointerId: 1 });
+    ok(steps.join() === 'turn 1' && !drags.length && holds.join() === 'turn,null' && turnBtn.captured === 1, `a still click on ⟲ is one notch, and a hold for as long as it was down (${steps.join()}; ${holds.join()})`);
+    clear();
+    liftBtn.fire('pointerdown', { pointerId: 2, button: 2 });
+    liftBtn.fire('pointerup', { pointerId: 2 });
+    ok(steps.join() === 'lift -1' && !drags.length, 'a right click on ↕ is one notch back');
+    clear();
+    turnBtn.fire('pointerdown', { pointerId: 3, button: 0 });
+    turnBtn.fire('pointermove', { pointerId: 3, movementX: 1, movementY: 1 });
+    turnBtn.fire('pointerup', { pointerId: 3 });
+    ok(steps.join() === 'turn 1' && !drags.length, `a click that wobbles ${2} px is still a click, and moves nothing`);
+    clear();
+    turnBtn.fire('pointerdown', { pointerId: 4, button: 0, shiftKey: true });
+    turnBtn.fire('pointermove', { pointerId: 4, movementX: 0, movementY: -2 });
+    ok(!drags.length && holds.join() === 'turn shift', 'a drag under the threshold is held back, and the hold is said as the button goes down');
+    turnBtn.fire('pointermove', { pointerId: 4, movementX: 1, movementY: -3, shiftKey: true });
+    turnBtn.fire('pointermove', { pointerId: 9, movementX: 0, movementY: -50 });
+    turnBtn.fire('pointermove', { pointerId: 4, movementX: 0, movementY: -1 });
+    turnBtn.fire('pointerup', { pointerId: 4 });
+    turnBtn.fire('lostpointercapture', { pointerId: 4 });
+    ok(drags.join() === 'turn 1 -5 shift,turn 0 -1' && !steps.length, `past ${PLACE_HOLD_TUNE.barClickPx} px it is a drag, the first movement carrying what was held back, another pointer ignored, and no notch on the let-go (${drags.join()})`);
+    ok(holds.join() === 'turn shift,null', 'and the let-go is said once, however many of the three ends the browser sends');
+    clear();
+    liftBtn.fire('pointerdown', { pointerId: 5, button: 0 });
+    liftBtn.fire('pointercancel', { pointerId: 5 });
+    ok(!steps.length && holds.join() === 'lift,null', 'a press the browser cancels ends the hold with no notch');
+    let prevented = false;
+    liftBtn.fire('contextmenu', { preventDefault: () => (prevented = true) });
+    ok(prevented, "and a right click never brings up the browser's own menu");
   } finally {
     if (had === undefined) delete page.document;
     else page.document = had;

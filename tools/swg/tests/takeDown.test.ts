@@ -167,11 +167,18 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
 
   // Props.
   ok(/putAway: \['Delete'\]/.test(input) && /putAway:/.test(menu), 'Delete puts a prop in hand away, and the Controls page names it');
-  ok(/if \(takeKey \|\| input\.pressedAction\('putAway'\)\) this\.stopPlacingProp\('away'\)/.test(main), 'the pick-up key (O) again, or Delete, puts a prop in hand away');
-  ok(/else if \(takeKey && !this\.placing/.test(main), 'and the same press does not then pick the next one up');
+  // The one placing block for both kinds (`stepPlacingKeys`): with a prop in hand O or Delete puts it away,
+  // and it answers that something was in hand, which the pick-up below it reads.
+  const placingKeys = bodyOf(main, 'private stepPlacingKeys(dt: number');
+  ok(/if \(this\.propPlacing\) \{[\s\S]*?if \(takeKey \|\| input\.pressedAction\('putAway'\)\) this\.stopPlacingProp\('away'\)/.test(placingKeys), 'the pick-up key (O) again, or Delete, puts a prop in hand away');
+  ok(/const hadInHand = this\.stepPlacingKeys\(dt, takeKey\);/.test(main) && /if \(takeKey && !hadInHand/.test(main) && /return true;\s*\}$/.test(placingKeys), 'and the same press does not then pick the next one up');
   ok(/this\.placingBar\.onPutAway = \(\) => this\.stopPlacingProp\('away'\)/.test(main) && /onPutAway/.test(bar) && /Put away/.test(bar), "the placing bar's Put away does the same");
   ok(/Put back \(Esc\)/.test(bar), 'and its Escape says it puts the prop back, which it does');
-  ok(/window\.addEventListener\('keydown'[\s\S]{0,700}this\.stopPlacingProp\(\);/.test(main), 'plain Escape still puts it back where it stood');
+  // Escape in the key's own listener gives up what is in hand, and giving it up is the plain Escape: a
+  // prop picked back up goes back where it stood (`stopPlacingProp()` with no fate is `back`).
+  const escape = /window\.addEventListener\('keydown', \(e\) => \{\s*\/\/ A held Escape autorepeats[\s\S]*?\n    \}\);/.exec(main)?.[0] ?? '';
+  const giveUp = bodyOf(main, 'private giveUpHand(): void');
+  ok(/this\.giveUpHand\(\);/.test(escape) && /this\.stopPlacingProp\(\);/.test(giveUp), 'plain Escape still puts it back where it stood');
   const travel = /private async travel\([\s\S]{0,2500}/.exec(main)?.[0] ?? '';
   ok(/this\.stopPlacingProp\('keep'\)/.test(travel), 'a travel writes a prop in hand back into the store before the world goes');
   const toSelect = /private switchToSelect\(\): void \{[\s\S]{0,3000}/.exec(main)?.[0] ?? '';

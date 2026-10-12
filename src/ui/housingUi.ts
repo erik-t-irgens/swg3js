@@ -73,6 +73,15 @@ export class HousingUi {
   /** Whether the answer that takes it down has been opened yet. */
   private armed = false;
   private armTimer = 0;
+  /** The turn and height keys bound now, for the examine pane's words (`setKeys`). */
+  private keys = { turn: 'R', lift: 'F' };
+
+  /** The keys bound now, handed over by the game when it starts and whenever the Controls page moves one. */
+  setKeys(turn: string, lift: string): void {
+    if (turn === this.keys.turn && lift === this.keys.lift) return;
+    this.keys = { turn, lift };
+    if (this.open) this.draw();
+  }
 
   /**
    * A close the player asked for -- the X button, or a click on the backdrop.
@@ -236,7 +245,7 @@ export class HousingUi {
       ? `<h3>${escapeHtml(p.name)}</h3><p class="housing-line">${escapeHtml(p.line)}</p><p>${escapeHtml(p.desc || 'The game says nothing more about it.')}</p>` +
         `<p class="why">${escapeHtml(p.why)}</p>` +
         `<div class="ship-action"><button class="place"${p.why ? ' disabled' : ''}>Place it</button></div>` +
-        `<p class="menu-hint">Double-click a deed to take it in hand. The wheel pushes it out and in, the two buttons under the world turn it, a click puts it down and Escape gives it up. A building of yours comes down from the list above, or from its own doorstep with the key that picks a prop back up.</p>`
+        `<p class="menu-hint">Double-click a deed to take it in hand. The wheel pushes it out and in, holding ${escapeHtml(this.keys.turn)} and moving the mouse turns it, holding ${escapeHtml(this.keys.lift)} raises and lowers it, a click puts it down and Escape gives it up. A building of yours comes down from the list above, or from its own doorstep with the key that picks a prop back up.</p>`
       : '';
     this.examine.querySelector('.place')?.addEventListener('click', () => {
       if (p && !p.why) this.onPlace(p.id);

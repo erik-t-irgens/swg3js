@@ -7,7 +7,8 @@
 // and the hard border round them another -- and the model itself over it, see-through.
 //
 // **Everything about it is ours** except the grid: how far ahead it starts, how far the wheel moves
-// it, how fast the buttons turn it, and the two colours. They are `GHOST_TUNE` and live.
+// it, how far it may be lifted, and the two colours. They are `GHOST_TUNE` and live; how a held key
+// turns and lifts it is `PLACE_HOLD_TUNE`'s (`placeHold.ts`).
 //
 // Two things about it are not obvious. The model is the gallery pack's own and is **shared**, never
 // cloned deep: a house is thousands of triangles and the ghost swaps every mesh's material for one
@@ -19,6 +20,7 @@
 import * as THREE from 'three';
 import { colourHex } from '../core/palette.ts';
 import { HOUSE_TUNE, clearRadius, groundVerdict, patchMiddle, patchOfFootprint, patchProbes, turnLocal, type Footprint, type GroundVerdict, type Patch } from './housePlace.ts';
+import { keepLift, turnTo } from './placeHold.ts';
 
 /** Every number of the ghost, all of them ours. Live through `__debug.deed(undefined, { tune })`. */
 export const GHOST_TUNE = {
@@ -27,12 +29,11 @@ export const GHOST_TUNE = {
   /** The closest and furthest the wheel will push it, metres. */
   near: 6,
   far: 60,
-  /** How far one notch of the wheel moves it, metres. */
+  /**
+   * How far one notch of the wheel moves it, metres. How far a held key turns or lifts it, and the grid
+   * the wheel steps to while one is held, are `PLACE_HOLD_TUNE`'s (`placeHold.ts`).
+   */
   step: 2,
-  /** How far one press of a turn key turns it, degrees. */
-  turn: 15,
-  /** How far one press of a height key lifts or drops it, metres. */
-  rise: 0.25,
   /**
    * The most it may be lifted or dropped off the ground either way, metres. The ground rules judge
    * the lift at the floor (`groundVerdict`), so on level ground the fall's own six metres refuses a
@@ -100,10 +101,18 @@ const MIDDLE = { x: 0, z: 0 };
  * quarter turn apart in neither: they are exactly opposite, so reading one as the other puts the
  * ghost behind the player's back, which is what it did. The patch's own offset is **not** taken off
  * here, unlike `spotAhead`, because the player is moving the building by eye and what they are
- * pointing at is where its origin goes.
+ * pointing at is where its origin goes. The game hands it the heading of the camera's own direction
+ * in the world, so the ghost goes where the player looks rather than where the body happens to face.
+ *
+ * Written into `out` when one is handed over: the frame keeps one.
  */
-export function ghostSpot(from: { x: number; z: number }, yaw: number, reach: number): { x: number; z: number } {
-  return { x: from.x + Math.sin(yaw) * reach, z: from.z + Math.cos(yaw) * reach };
+export function ghostSpot(from: { x: number; z: number }, yaw: number, reach: number, out?: { x: number; z: number }): { x: number; z: number } {
+  const o = out ?? { x: 0, z: 0 };
+  const x = from.x + Math.sin(yaw) * reach;
+  const z = from.z + Math.cos(yaw) * reach;
+  o.x = x;
+  o.z = z;
+  return o;
 }
 
 /**
@@ -120,17 +129,27 @@ export function ghostSpot(from: { x: number; z: number }, yaw: number, reach: nu
  * ground falling away under it. The slope, the water and what is in the way do not move with it.
  * How far the door then stands off the ground is the state's `note` and is never a refusal.
  *
- * The answer is the one record it makes: the caller keeps it as the placement's state. The probes,
- * their heights, the ground's verdict and the middle are kept here and written over every call.
+ * The answer is written into `out`, the placement's own state, which a caller asking every frame keeps
+ * (without one a record is made). The probes, their heights, the ground's verdict and the middle are
+ * kept here and written over every call.
  */
-export function ghostVerdict(patch: Patch, at: { x: number; z: number }, yaw: number, deps: GhostDeps, lift = 0): GhostState {
+export function ghostVerdict(patch: Patch, at: { x: number; z: number }, yaw: number, deps: GhostDeps, lift = 0, out?: GhostState): GhostState {
   const probes = patchProbes(patch, at, yaw, HOUSE_TUNE.margin, PROBES);
   HEIGHTS.length = probes.length;
   for (let i = 0; i < probes.length; i++) HEIGHTS[i] = deps.heightAt(probes[i].x, probes[i].z);
   const v = groundVerdict(probes, HEIGHTS, HOUSE_TUNE, lift, VERDICT);
   const clear = clearRadius(patch);
   // The verdict's height has the lift in it already, so it is not added here a second time.
-  const state: GhostState = { x: at.x, z: at.z, y: v.y, yaw, ok: false, why: v.why, clear, lift, note: v.note };
+  const state: GhostState = out ?? { x: 0, z: 0, y: 0, yaw: 0, ok: false, why: null, clear: 0, lift: 0, note: null };
+  state.x = at.x;
+  state.z = at.z;
+  state.y = v.y;
+  state.yaw = yaw;
+  state.ok = false;
+  state.why = v.why;
+  state.clear = clear;
+  state.lift = lift;
+  state.note = v.note;
   if (!v.ok) return state;
   // The sea is drawn over the ground rather than instead of it, so the ground test passes perfectly
   // well on a lake bed and this is what keeps a house out of one.
@@ -160,24 +179,24 @@ export function wheelReach(reach: number, notches: number, tune = GHOST_TUNE): n
   return Math.min(tune.far, Math.max(tune.near, reach + notches * tune.step));
 }
 
-/** A turn key: one press, kept in one turn. */
-export function turnBy(yaw: number, presses: number, tune = GHOST_TUNE): number {
-  const turn = Math.PI * 2;
-  const next = yaw + (presses * tune.turn * Math.PI) / 180;
-  return ((next % turn) + turn) % turn;
-}
+/**
+ * A building turned to `yaw` radians, kept inside one turn, [0, 2π). It lives beside the hold that turns
+ * it (`placeHold.ts`, which a frame of a held key runs through) and is named here as it always was.
+ */
+export { turnTo };
 
 /**
- * A height key: one press up or down, kept within `most` of the ground either way.
+ * A building lifted or dropped to `value` metres off the ground, kept within `most` either way and to
+ * the centimetre -- what a server keeps of a house's height.
  *
  * It is here for the one case the ground test cannot help with -- a doorstep the ground laps over,
- * which is within everything `groundVerdict` allows and still leaves a door half buried -- and it
- * is bounded both ways by the hand's reach. Whether the house may stand where the lift leaves it is
- * the ground test's, which measures the rise and the fall from the floor.
+ * which is within everything `groundVerdict` allows and still leaves a door half buried -- and it is
+ * bounded both ways by the hand's reach (`GHOST_TUNE.most`; a permanent layer's editor hands over
+ * `mostPermanent`). Whether the house may stand where the lift leaves it is the ground test's, which
+ * measures the rise and the fall from the floor.
  */
-export function liftBy(lift: number, presses: number, tune = GHOST_TUNE): number {
-  const next = lift + presses * tune.rise;
-  return Math.min(tune.most, Math.max(-tune.most, Math.round(next / tune.rise) * tune.rise));
+export function liftTo(value: number, most = GHOST_TUNE.most): number {
+  return keepLift(value, most);
 }
 
 /** One cell of a footprint's grid: its four corners and whether the file marks it a hard edge. */

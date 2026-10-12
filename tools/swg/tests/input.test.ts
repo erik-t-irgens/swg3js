@@ -31,7 +31,7 @@ const listeners = { add() {}, remove() {} };
 g.window = { addEventListener: listeners.add, removeEventListener: listeners.remove, setTimeout: () => 0, clearTimeout: () => {} };
 g.document = { addEventListener: listeners.add, removeEventListener: listeners.remove, pointerLockElement: null, exitPointerLock() {} };
 
-const { DEFAULT_BINDINGS, Input, bindingsToKeep, chosenBindings, loadedBindings } = await import('../../../src/core/input.ts');
+const { DEFAULT_BINDINGS, FIGHT_ACTIONS, Input, bindingsToKeep, chosenBindings, loadedBindings } = await import('../../../src/core/input.ts');
 type Action = keyof typeof DEFAULT_BINDINGS;
 const canvas = {} as HTMLCanvasElement;
 const KEY = 'swg3js.bindings';
@@ -64,10 +64,10 @@ const KEY = 'swg3js.bindings';
   const onO = loadedBindings({ journal: ['KeyO'] });
   ok(onO.journal.join() === 'KeyO' && onO.takeProp.length === 0, 'a journal saved on O keeps O and the pick-up, on its default, gives O up');
   // A saved binding that kept its own default key leaves a default that shares it on purpose alone: the
-  // placing keys borrow E and F, and adding a second key to the use key must not take E off placing.
-  const shared = loadedBindings({ mount: ['KeyE', 'KeyG'] });
-  ok(shared.placeRight.includes('KeyE'), 'a key two defaults share on purpose is left shared when one of them is saved with it');
-  ok(!shared.emoteWheel.includes('KeyG'), 'while the key the player added to the use key is taken off the emote wheel, as the Controls page would have');
+  // placing keys borrow R and F, and adding a second key to the torch must not take F off placing.
+  const shared = loadedBindings({ flashlight: ['KeyF', 'KeyG'] });
+  ok(shared.placeLift.includes('KeyF'), 'a key two defaults share on purpose is left shared when one of them is saved with it');
+  ok(!shared.emoteWheel.includes('KeyG'), 'while the key the player added to the torch is taken off the emote wheel, as the Controls page would have');
   // Rubbish in storage is ignored, entry by entry.
   const junk = loadedBindings(JSON.parse('{"nothing": ["KeyQ"], "jump": "Space", "crouch": [1, 2], "walk": [""], "__proto__": {"map": ["KeyX"]}}'));
   ok(junk.jump.join() === 'Space' && junk.crouch.join() === DEFAULT_BINDINGS.crouch.join() && junk.walk.join() === DEFAULT_BINDINGS.walk.join() && junk.map.join() === 'KeyM', 'an entry that is not an action with a list of key names is ignored');
@@ -156,8 +156,8 @@ const KEY = 'swg3js.bindings';
   shared.assignKey('block', ['Mouse2'], 'Mouse2');
   ok(shared.bindings.altAttack.join() === 'Mouse2,KeyG' && shared.bindings.block.join() === 'Mouse2', 'a chosen other attack keeps right mouse when the block is put on it: the two share it by default');
   ok(new Input(canvas).bindings.altAttack.join() === 'Mouse2,KeyG', 'and keeps it across a reload');
-  shared.assignKey('placeRight', ['KeyE'], 'KeyE');
-  ok(shared.bindings.mount.join() === 'KeyE', 'the placing key put back on E leaves the use key on E');
+  shared.assignKey('placeTurn', ['KeyR'], 'KeyR');
+  ok(shared.bindings.saberThrow.join() === 'KeyR', 'the placing turn put back on R leaves the saber throw on R');
   // A key two defaults share, put on a third action, comes off both.
   shared.assignKey('emote3', ['Mouse2'], 'Mouse2');
   ok(shared.bindings.emote3.join() === 'Mouse2' && !shared.bindings.altAttack.includes('Mouse2') && !shared.bindings.block.includes('Mouse2'), 'right mouse put on an emote comes off both the other attack and the block');
@@ -167,6 +167,93 @@ const KEY = 'swg3js.bindings';
   const assign = /private assign\(code: string \| null\): void \{([\s\S]*?)\n  \}/.exec(menu)?.[1] ?? '';
   ok(/this\.input\.assignKey\(c\.action, kept\.filter\(Boolean\), code\);/.test(assign) && !/this\.input\.bind\(/.test(assign), 'the Controls page rebinds through Input.assignKey and nothing else');
   ok(/group: 'Group \(map tab\)'/.test(menu) && /map: 'Map'/.test(menu), 'the Controls page names the Group tab\'s key, and the map is the map, not the galaxy map');
+}
+
+// --- the placing keys, and the mutes that keep the fight out of a hand -------------------------------------
+// Holding R turns a thing in hand and holding F raises it (the four step keys Q, E, R and F are gone); R is
+// also the saber throw's and F the torch's, on purpose. While something is in hand the game mutes everything
+// that fights by action, never by key -- R must still read as the placing turn while the throw is muted --
+// and the frame the hand empties it mutes them until their keys are up. Raw reads are never muted.
+{
+  store.clear();
+  ok(DEFAULT_BINDINGS.placeTurn.join() === 'KeyR' && DEFAULT_BINDINGS.placeLift.join() === 'KeyF', 'R holds the placing turn and F the placing height');
+  ok(DEFAULT_BINDINGS.saberThrow.join() === 'KeyR' && DEFAULT_BINDINGS.flashlight.join() === 'KeyF', 'shared on purpose with the saber throw and the torch');
+  ok(!Object.hasOwn(DEFAULT_BINDINGS, 'placeLeft') && !Object.hasOwn(DEFAULT_BINDINGS, 'placeUp'), 'the four step keys are gone');
+  // A choice saved for one of the four old step keys names nothing now, and is dropped without a word.
+  store.set(KEY, JSON.stringify({ placeLeft: ['KeyZ'], placeDown: ['KeyX'], jump: ['KeyK'] }));
+  const old = new Input(canvas);
+  ok(old.bindings.jump.join() === 'KeyK' && !Object.hasOwn(old.bindings, 'placeLeft') && old.bindings.placeTurn.join() === 'KeyR', 'a saved placeLeft is dropped silently, and the rest of what was saved stands');
+  ok(old.bindings.prone.join() === 'KeyZ' && old.bindings.crouch.includes('KeyX'), 'and takes nothing off the keys it once named');
+
+  // Driven through the class's own key handling, as the page's events would.
+  store.clear();
+  const handlers = new Map<string, (e: unknown) => void>();
+  const prevWindow = g.window;
+  g.window = { addEventListener: (t: string, f: (e: unknown) => void) => handlers.set(t, f), removeEventListener() {}, setTimeout: () => 0, clearTimeout: () => {} };
+  const input = new Input(canvas);
+  g.window = prevWindow;
+  const down = (code: string) => handlers.get('keydown')!({ code, repeat: false, target: null, preventDefault() {} });
+  const up = (code: string) => handlers.get('keyup')!({ code });
+
+  down('KeyR');
+  ok(input.held('placeTurn') && input.held('saberThrow') && input.pressedAction('saberThrow'), 'R down reads as both the placing turn and the throw');
+  input.mute(FIGHT_ACTIONS);
+  ok(input.held('placeTurn') && !input.held('saberThrow') && !input.pressedAction('saberThrow'), 'muted, the throw reads as neither held nor pressed, while the placing turn still reads as held');
+  ok(input.isDown('KeyR') && input.justPressed('KeyR'), 'and the raw reads are not muted');
+  input.endFrame();
+  ok(input.held('saberThrow'), 'a mute for the frame ends with the frame');
+
+  // muteUntilUp: held while any key of the action is down, let go once all are up.
+  input.muteUntilUp(FIGHT_ACTIONS);
+  input.endFrame();
+  ok(!input.held('saberThrow'), 'muted until up, the throw stays muted across frames while R is still down');
+  ok(input.held('placeTurn'), 'and the placing turn, never muted, still reads as held');
+  ok(!input.muted('attack') && !input.muted('slot1'), 'while an action with no key down was let go of at the end of the frame it was muted in');
+  up('KeyR');
+  ok(input.muted('saberThrow'), 'let go of the key, the mute stands until the frame ends');
+  input.endFrame();
+  ok(!input.muted('saberThrow'), 'and is gone after it');
+  down('KeyR');
+  ok(input.held('saberThrow') && input.pressedAction('saberThrow'), 'a fresh press after that throws again');
+  up('KeyR');
+  input.endFrame();
+
+  // Every key of an action has to be up: the slots are one key each, the attack is a mouse button.
+  down('Digit1');
+  input.muteUntilUp(FIGHT_ACTIONS);
+  input.endFrame();
+  ok(!input.pressedAction('slot1') && !input.held('slot1'), 'a power key still down when the hand emptied uses nothing');
+  up('Digit1');
+  input.endFrame();
+  down('Digit1');
+  ok(input.pressedAction('slot1'), 'and pressed again once let go, it does');
+  up('Digit1');
+  input.endFrame();
+  // An action of two keys: the other trigger is the middle button and Q. Held by its second
+  // key alone it stays muted, and with both down it stays muted until the last of them is up.
+  ok(DEFAULT_BINDINGS.altFire.length === 2 && DEFAULT_BINDINGS.altFire[1] === 'KeyQ', 'the other trigger has two keys, Q the second');
+  down('KeyQ');
+  input.muteUntilUp(FIGHT_ACTIONS);
+  input.endFrame();
+  ok(!input.held('altFire') && input.muted('altFire'), 'held by its second key alone when the hand emptied, it stays muted');
+  input.force('Mouse1', true);
+  input.endFrame();
+  up('KeyQ');
+  input.endFrame();
+  ok(input.muted('altFire') && !input.held('altFire'), 'with one of its two keys let go and the other still down, still muted');
+  input.force('Mouse1', false);
+  input.endFrame();
+  ok(!input.muted('altFire'), 'and let go once the last of them is up');
+  input.force('Mouse1', true);
+  ok(input.held('altFire') && input.pressedAction('altFire'), 'after which it fires again');
+  input.force('Mouse1', false);
+  input.endFrame();
+
+  // The kits' own slots and the style key, which both kits read every frame something is in hand.
+  const { SLOT_ACTIONS } = await import('../../../src/combat/forcePowers.ts');
+  ok((SLOT_ACTIONS as readonly string[]).every((a) => (FIGHT_ACTIONS as readonly string[]).includes(a)), 'everything that fights includes every slot the kits read');
+  ok(['attack', 'altAttack', 'altFire', 'block', 'saberThrow', 'saberStyle'].every((a) => (FIGHT_ACTIONS as readonly string[]).includes(a)), 'and the triggers, the block, the throw and the saber style');
+  ok(!(FIGHT_ACTIONS as readonly string[]).includes('placeTurn') && !(FIGHT_ACTIONS as readonly string[]).includes('placeLift') && !(FIGHT_ACTIONS as readonly string[]).includes('forward'), 'and never the placing keys or the walk');
 }
 
 // --- the console's bind -------------------------------------------------------------------------------------

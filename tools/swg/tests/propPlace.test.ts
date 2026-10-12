@@ -19,7 +19,8 @@
 //  - **A minted id is never reused**, which is the one thing in the store that could quietly cost a
 //    player a chair: two rows claiming one thing is a row overwritten.
 
-import { NO_TURN, PROP_TUNE, applyTurn, liftBy, propPoints, propSpot, propVerdict, pushBy, turnBy, type PropBox, type PropTurn } from '../../../src/world/propPlace.ts';
+import { NO_TURN, PROP_TUNE, applyTurn, liftTo, propPoints, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, turnBy, type PropBox, type PropTurn, type PropVerdict } from '../../../src/world/propPlace.ts';
+import { PLACE_HOLD_TUNE, stepToGrid } from '../../../src/world/placeHold.ts';
 import { PLACED_TUNE, PlacedProps, letGoOf, mintThing, placedTally, propsKey, readRow, type PlacedProp } from '../../../src/world/propsPlaced.ts';
 
 let checks = 0;
@@ -75,8 +76,43 @@ const RAD = Math.PI / 180;
   let q = NO_TURN;
   for (let i = 0; i < 24; i++) q = turnBy(q, 'z', 15 * RAD);
   const back = applyTurn(q, { x: 1, y: 2, z: 3 });
-  ok('twenty-four presses of fifteen degrees is a full turn', near(back.x, 1, 1e-6) && near(back.y, 2, 1e-6) && near(back.z, 3, 1e-6), `${back.x.toFixed(4)}, ${back.y.toFixed(4)}, ${back.z.toFixed(4)}`);
-  ok('a turn key is fifteen degrees', PROP_TUNE.turn === 15);
+  ok('twenty-four notches of fifteen degrees is a full turn', near(back.x, 1, 1e-6) && near(back.y, 2, 1e-6) && near(back.z, 3, 1e-6), `${back.x.toFixed(4)}, ${back.y.toFixed(4)}, ${back.z.toFixed(4)}`);
+  ok("the wheel's notch with the turn key held is fifteen degrees", PLACE_HOLD_TUNE.gridTurn === 15);
+
+  // About any axis at all, not only the world's three: the view's own across and along axes, which is
+  // what a tip and a roll are turned about. A turn about (1, 0, 0) is exactly a turn about the world's x.
+  const viaAxis = turnAbout(NO_TURN, 1, 0, 0, 0.7);
+  const viaName = turnBy(NO_TURN, 'x', 0.7);
+  ok('a turn about an axis given as numbers is the same turn as about that axis by name', near(viaAxis.x, viaName.x, 1e-12) && near(viaAxis.w, viaName.w, 1e-12));
+  // Written into the record it is handed, which may be the very turn it starts from: the frame turns a prop in place.
+  const inPlace: PropTurn = { ...tipped };
+  const same = turnAbout(inPlace, 0, 1, 0, 90 * RAD, inPlace);
+  const fresh = turnBy(tipped, 'y', 90 * RAD);
+  ok('turned in place, the answer is the record it was handed and the same turn as a fresh one', same === inPlace && near(inPlace.x, fresh.x, 1e-12) && near(inPlace.y, fresh.y, 1e-12) && near(inPlace.z, fresh.z, 1e-12) && near(inPlace.w, fresh.w, 1e-12));
+  // A diagonal axis: a quarter turn about (1, 0, 1)/√2 takes its own axis nowhere.
+  const s = Math.SQRT1_2;
+  const diag = applyTurn(turnAbout(NO_TURN, s, 0, s, 90 * RAD), { x: 1, y: 0, z: 1 });
+  ok('a turn about a level axis between x and z leaves that axis where it is', near(diag.x, 1, 1e-9) && near(diag.y, 0, 1e-9) && near(diag.z, 1, 1e-9));
+
+  // The spin and the tilt the bar reads out, and what the wheel steps the spin along.
+  ok('an unturned thing faces nought and stands upright', near(spinOf(NO_TURN), 0, 1e-12) && near(tiltOf(NO_TURN), 0, 1e-6));
+  ok('a yaw of 40 degrees reads as a spin of 40', near(spinOf(turnBy(NO_TURN, 'y', 40 * RAD)), 40 * RAD, 1e-9));
+  ok('a tip of 30 degrees reads as tipped 30, and leaves the spin', near(tiltOf(turnBy(NO_TURN, 'x', 30 * RAD)), 30 * RAD, 1e-9) && near(spinOf(turnBy(NO_TURN, 'x', 30 * RAD)), 0, 1e-9));
+  // Laid with its own +Z straight up, the spin is read off its +X instead, and a turn about up still moves it by exactly that turn.
+  const onEnd = turnBy(NO_TURN, 'x', -90 * RAD);
+  const turned = turnBy(onEnd, 'y', 25 * RAD);
+  ok('laid on its end, a turn about up still moves the spin by exactly that turn', near(spinOf(turned) - spinOf(onEnd), 25 * RAD, 1e-9));
+  // And reads what it read just short of on its end, so the bar's readout neither sits a quarter turn off
+  // nor jumps as a thing is tipped through upright: the +X reading is the +Z one, less its quarter turn.
+  ok('laid on its end it still faces nought', near(spinOf(onEnd), 0, 1e-9));
+  ok('and a hair short of on its end reads the same', near(spinOf(turnBy(NO_TURN, 'x', -89.9 * RAD)), spinOf(onEnd), 1 * RAD));
+  const nearlyTurned = turnBy(turnBy(NO_TURN, 'x', -89.9 * RAD), 'y', 25 * RAD);
+  ok('turned 25 degrees about up, on its end and a hair short of it read alike', near(spinOf(turned), 25 * RAD, 1e-9) && near(spinOf(nearlyTurned), spinOf(turned), 1 * RAD));
+  // The wheel's step onto the grid: from 40 degrees the next line up is 45, however it lies.
+  const at40 = turnBy(turnBy(NO_TURN, 'x', 20 * RAD), 'y', 40 * RAD);
+  const spin = spinOf(at40) / RAD;
+  const stepped = turnAbout(at40, 0, 1, 0, (stepToGrid(spin, PLACE_HOLD_TUNE.gridTurn, 1) - spin) * RAD);
+  ok('a notch of the spin lands it on the next line of the grid, tipped or not', near(spinOf(stepped) / RAD, 45, 1e-6) && near(tiltOf(stepped), tiltOf(at40), 1e-9));
 }
 
 // ---- The points -------------------------------------------------------------------------------
@@ -89,6 +125,22 @@ const BOX: PropBox = { min: [-0.5, 0, -0.25], max: [0.5, 1, 0.25] };
   ok('the points are where the thing stands', Math.min(...xs) === 9.5 && Math.max(...xs) === 10.5, `x ${Math.min(...xs)}..${Math.max(...xs)}`);
   const none = propPoints(null, { x: 1, y: 2, z: 3 }, NO_TURN);
   ok('a prop with no box is judged by its own point alone', none.length === 1 && none[0].x === 1);
+  // A kept list is written into: its records are made the first time and written over after that.
+  const kept: { x: number; y: number; z: number }[] = [];
+  propPoints(BOX, { x: 10, y: 5, z: -3 }, NO_TURN, kept);
+  const first = kept[3];
+  const yawed = turnBy(NO_TURN, 'y', 0.5);
+  propPoints(BOX, { x: 0, y: 0, z: 0 }, yawed, kept);
+  const fresh = propPoints(BOX, { x: 0, y: 0, z: 0 }, yawed);
+  ok('a kept list of points is written over, record for record', kept.length === 9 && kept[3] === first && fresh.every((p, i) => near(p.x, kept[i].x, 1e-12) && near(p.y, kept[i].y, 1e-12) && near(p.z, kept[i].z, 1e-12)));
+  propPoints(null, { x: 4, y: 0, z: 0 }, NO_TURN, kept);
+  ok('and cut to one for a prop with no box', kept.length === 1 && kept[0].x === 4);
+}
+{
+  // The verdict written into a kept record, as the frame keeps one.
+  const said: PropVerdict = { ok: false, why: 'x', inside: 0, of: 0, clearance: 0 };
+  const v = propVerdict(BOX, { x: 0, y: 0, z: 0 }, NO_TURN, { floorAt: () => 0, solidAt: () => false }, PROP_TUNE, said);
+  ok('a kept verdict is written into and handed back', v === said && said.ok && said.why === null && said.of === 9);
 }
 
 // ---- The two rules ------------------------------------------------------------------------------
@@ -140,9 +192,12 @@ const noWorld = { floorAt: () => null, solidAt: () => false };
   ok('the wheel pushes it out a quarter metre a notch', near(pushBy(3, 1), 3.25));
   ok('and stops at the far end', near(pushBy(PROP_TUNE.far, 10), PROP_TUNE.far));
   ok('and at the near end', near(pushBy(PROP_TUNE.near, -10), PROP_TUNE.near));
-  ok('a height key is a tenth of a metre', near(liftBy(0, 1), PROP_TUNE.rise));
-  ok('and it is kept on the step', near(liftBy(0, 3), 0.3, 1e-9), `${liftBy(0, 3)}`);
-  ok('and within thirty metres either way', near(liftBy(0, 100000), PROP_TUNE.most) && near(liftBy(0, -100000), -PROP_TUNE.most));
+  ok('a lift is kept to the centimetre', liftTo(0.374) === 0.37 && liftTo(-1.236) === -1.24, `${liftTo(0.374)}, ${liftTo(-1.236)}`);
+  ok('a notch of the wheel with the height key held is a tenth of a metre', near(liftTo(stepToGrid(0, PLACE_HOLD_TUNE.gridLiftProp, 1)), 0.1, 1e-12));
+  let l = 0;
+  for (let i = 0; i < 3; i++) l = liftTo(stepToGrid(l, PLACE_HOLD_TUNE.gridLiftProp, 1));
+  ok('and three of them are three tenths, on the grid', l === 0.3, `${l}`);
+  ok('and within thirty metres either way', near(liftTo(100000), PROP_TUNE.most) && near(liftTo(-100000), -PROP_TUNE.most));
   ok('the owner asked to be able to raise it quite far', PROP_TUNE.most >= 10);
 }
 {

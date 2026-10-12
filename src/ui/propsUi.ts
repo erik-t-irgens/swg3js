@@ -23,6 +23,7 @@ export class PropsUi {
   private readonly count: HTMLElement;
   private readonly find: HTMLInputElement;
   private readonly examine: HTMLElement;
+  private readonly hint: HTMLElement;
   private catalogue: PropCatalogue | null = null;
   private readonly groups = new GroupState();
   private lastFind = '';
@@ -58,9 +59,11 @@ export class PropsUi {
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body props-body give-body"></div></div>
         <div class="bp-examine"></div>
-        <div class="bp-hint">double-click to take one in hand · then the wheel moves it, the turn keys turn it and a click puts it down</div>
+        <div class="bp-hint"></div>
       </div>`;
     parent.appendChild(this.root);
+    this.hint = this.root.querySelector('.bp-hint')!;
+    this.setKeys('R', 'F');
     this.body = this.root.querySelector('.props-body')!;
     this.count = this.root.querySelector('.count')!;
     this.find = this.root.querySelector('.find')!;
@@ -129,6 +132,14 @@ export class PropsUi {
       },
       true,
     );
+  }
+
+  /**
+   * The foot's hint, in the keys bound now: the game hands them over when the panel is made and again
+   * whenever the Controls page moves one, so the words never name a key that no longer does it.
+   */
+  setKeys(turn: string, lift: string): void {
+    this.hint.textContent = `double-click to take one in hand · then the wheel moves it, hold ${turn} and move the mouse to turn it (shift to tip and roll), hold ${lift} to raise it, and a click puts it down`;
   }
 
   attach(catalogue: PropCatalogue | null): void {

@@ -15,6 +15,7 @@ const HELP_LINES: readonly { text: string; actions: readonly string[]; move?: bo
   { text: 'move · mouse look · wheel zoom · %s jump · %s walk', actions: ['jump', 'walk'], move: true },
   { text: '%s mount and dismount · %s switch class · %s fast-forward time', actions: ['mount', 'switchClass', 'fastForward'] },
   { text: '%s map · %s inventory · %s spawner · %s help · %s noclip · %s debug menu · Esc frees the mouse', actions: ['map', 'inventory', 'spawner', 'help', 'noclip', 'debugMenu'] },
+  { text: 'placing a building or a prop: hold %s and move the mouse to turn it, hold %s to raise it', actions: ['placeTurn', 'placeLift'] },
   { text: 'Esc → Controls rebinds every one of these, and the display follows at once', actions: [] },
 ];
 

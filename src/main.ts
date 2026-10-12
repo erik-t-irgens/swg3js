@@ -38,7 +38,7 @@ import { LOD_LEVEL_DEFAULTS, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, type LodLevelTune, t
 import { PLACED_TUNE } from './world/placedTiers.ts';
 import { legacyCount as legacyStencilCount, PORTAL_REF } from './world/stencilRef.ts';
 import { SCAN_TUNE } from './world/sceneAdds.ts';
-import { Input, type Action } from './core/input';
+import { FIGHT_ACTIONS, Input, type Action } from './core/input';
 import { Group as ColliderGroup, PHYSICS_RECOVERY, Physics, groups as colliderGroups, isEngineFault } from './core/physics';
 import { PLANETS, packIdOf, planetBelow, planetById, spaceZoneOf, type PlanetDef } from './data/planets';
 import { DEFAULT_SABER_COLOR, Player } from './player/player';
@@ -216,13 +216,14 @@ import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTrips
 import type { Building, PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
-import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, turnBy as houseTurnBy, wheelReach, type GhostState } from './world/placeGhost.ts';
-import { patchOfFootprint } from './world/housePlace.ts';
-import { PlacingBar } from './ui/placingBar.ts';
+import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
+import { patchOfFootprint, type Footprint, type Patch } from './world/housePlace.ts';
+import { NO_KEY, PlacingBar, placingView, type PlacingKeys } from './ui/placingBar.ts';
+import { PLACE_HOLD_TUNE, anchorReleased, applyHold, holdGain, holdKindOf, holdState, liftDelta, placeAnchor, stepToGrid, tumbleAxes, tumbleBy, tumbleDeltas, turnDelta, wheelDir, type HoldKind, type ViewAxes } from './world/placeHold.ts';
 import { HousingUi } from './ui/housingUi.ts';
 import { PropsUi } from './ui/propsUi.ts';
 import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
-import { PROP_TUNE, NO_TURN, liftBy as propLiftBy, propSpot, propVerdict, pushBy, turnBy, type PropTurn } from './world/propPlace.ts';
+import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, type PropTurn, type PropVerdict } from './world/propPlace.ts';
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
 import { HOUSING_TUNE, LocalHomes, atDoorOf, houseName, isLocalHome, myBuildings, type MyBuilding } from './world/myBuildings.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
@@ -535,6 +536,8 @@ const FIGHTER_GLOW_RANGE = 25;
 const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), color: 0, d2: 0 }));
 /** The way the camera looks, written each frame into the world's record of the player's aim. */
 const aimLook = new THREE.Vector3();
+/** A deed's footprint rows when it carries none, so the frame that draws its grid hands over no new list. */
+const NO_ROWS: readonly string[] = [];
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
 /**
@@ -2128,12 +2131,33 @@ class App {
     // hand could be neither put down nor given up from the bar -- and giving one up is the only way
     // out of a prop picked back up, so it had to be placed again wherever the ghost happened to be.
     this.placingBar = new PlacingBar(this.ui);
-    this.placingBar.onTurn = (n) => this.turnPlacing(n);
-    this.placingBar.onLift = (n) => this.liftPlacing(n);
+    // Its two buttons, for a pointer that is free: a press holds as a held key does, for as long as the
+    // button is down, and a drag is gathered for the next frame and moves the thing by the very arithmetic
+    // a held key does (`stepHold`); a click is a notch of the grid, the way the glyph says (⟲ anticlockwise,
+    // ↕ up), a right click one back.
+    this.placingBar.onHold = (which, shift) => {
+      const d = this.barDrag;
+      d.which = which;
+      d.dx = 0;
+      d.dy = 0;
+      d.shift = shift;
+    };
+    this.placingBar.onDrag = (which, dx, dy, shift) => {
+      const d = this.barDrag;
+      if (d.which !== which) return;
+      d.dx += dx;
+      d.dy += dy;
+      d.shift = shift;
+    };
+    this.placingBar.onStep = (which, dir) => this.stepPlacingGrid(which === 'lift' ? 'lift' : 'turn', dir);
     this.placingBar.onPlace = () => void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
     this.placingBar.onCancel = () => (this.propPlacing ? this.stopPlacingProp() : this.stopPlacing());
     // A prop picked back up: thrown away, where Cancel puts it back.
     this.placingBar.onPutAway = () => this.stopPlacingProp('away');
+    // The placing keys' caps, spelled once here and again whenever the Controls page moves one, never
+    // in a frame: the bar, its hint, the Props tab's foot and the Housing tab's words all read them.
+    this.refreshPlaceKeys();
+    onBindingsChanged(() => this.refreshPlaceKeys());
     // The creator's hour: play lets the day run at its own rate from wherever it stands, and a drag
     // that has rested takes the reflections again at once rather than on their four-second clock.
     this.placeBar.onPlay = (playing) => {
@@ -2722,15 +2746,17 @@ class App {
        * The deeds a character can put a building down with, and the ghost that puts one down.
        *
        * `__debug.deed()` lists what there is; `__debug.deed('corellia_house_medium_deed')` takes
-       * that deed in hand, which is what the Housing tab's double-click does; `{ turn: 2 }` and
-       * `{ reach: 30 }` move the ghost as the keys and the wheel do, `{ lift: 4 }` raises it four
-       * presses (and -4 lowers it); `{ drop: true }` puts it down; `{ cancel: true }` gives it up;
-       * and `{ tune: { … } }` moves the ghost's own numbers (`mostPermanent` among them). The report's
-       * `note` is what the door's height off the ground will mean, which never refuses a spot, and
-       * `barWrites` is how many times the placing bar has written the page, which a steady hand leaves
-       * where it was.
+       * that deed in hand, which is what the Housing tab's double-click does; `{ turn: 2 }` steps the
+       * turn two lines of the grid (the wheel's 15 degrees with the turn key held; -2 the other way),
+       * `{ lift: 4 }` four lines of the height's (0.25 m), `{ turnDeg: 7.5 }` turns it by exactly
+       * that and `{ liftM: 0.37 }` sets the lift to exactly that, as a held key and the mouse can;
+       * `{ reach: 30 }` holds it that far out; `{ drop: true }` puts it down; `{ cancel: true }` gives
+       * it up; and `{ tune: { … } }` moves the ghost's own numbers (`mostPermanent` among them). The
+       * report's `note` is what the door's height off the ground will mean, which never refuses a
+       * spot, and `barWrites` is how many times the placing bar has written the page, which a steady
+       * hand leaves where it was.
        */
-      deed: async (deed?: string, opts: { turn?: number; lift?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
+      deed: async (deed?: string, opts: { turn?: number; lift?: number; turnDeg?: number; liftM?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
         if (opts.tune) Object.assign(GHOST_TUNE, opts.tune);
         if (opts.cancel) {
           this.stopPlacing();
@@ -2740,8 +2766,13 @@ class App {
           const why = await this.startPlacing(deed);
           if (why) return { error: why };
         }
-        if (typeof opts.turn === 'number') this.turnPlacing(opts.turn);
-        if (typeof opts.lift === 'number') this.liftPlacing(opts.lift);
+        const p0 = this.placing;
+        if (p0) {
+          if (typeof opts.turn === 'number') for (let i = 0; i < Math.abs(opts.turn); i++) this.stepPlacingGrid('turn', Math.sign(opts.turn));
+          if (typeof opts.lift === 'number') for (let i = 0; i < Math.abs(opts.lift); i++) this.stepPlacingGrid('lift', Math.sign(opts.lift));
+          if (typeof opts.turnDeg === 'number') p0.yaw = turnTo(p0.yaw + (opts.turnDeg * Math.PI) / 180);
+          if (typeof opts.liftM === 'number') p0.lift = houseLiftTo(opts.liftM);
+        }
         if (typeof opts.reach === 'number' && this.placing) this.placing.reach = opts.reach;
         if (this.placing) this.stepPlacing();
         if (opts.drop) {
@@ -2764,9 +2795,11 @@ class App {
           placing: p.deed.id,
           name: p.deed.name,
           reach: Math.round(p.reach),
-          yaw: Number(((p.yaw * 180) / Math.PI).toFixed(0)),
+          yaw: Number(((p.yaw * 180) / Math.PI).toFixed(1)),
           lift: Number(p.lift.toFixed(2)),
-          keys: this.placeKeys(),
+          keys: { ...this.placeKeysNow },
+          // What a held key is doing to it now (`turn`, `lift`), or null.
+          hold: this.placeHold.which,
           at: p.state ? { x: Math.round(p.state.x), z: Math.round(p.state.z), y: Number(p.state.y.toFixed(1)) } : null,
           ok: p.state?.ok ?? false,
           why: p.state?.why ?? null,
@@ -2784,17 +2817,21 @@ class App {
        *
        * `__debug.prop()` reports what is in hand, what it would do where it is, and everything this
        * player has put down here. `__debug.prop('chair_s01')` takes one in hand (and loads the
-       * catalogue if this session has not opened the panel); `{ turn: 3 }` presses the turn key
-       * three times, `{ axis: 'x' }` picks which way, `{ lift: -4 }` lowers it four presses,
-       * `{ reach: 5 }` holds it five metres out, `{ drop: true }` puts it down, `{ take: true }`
-       * picks the nearest one of yours back up, `{ cancel: true }` gives it up (one picked back up
-       * goes back where it stood), `{ away: true }` puts it away for good, as O again, Delete or the
-       * bar's Put away do, and `{ tune: { … } }` moves the numbers, every one of which is ours.
+       * catalogue if this session has not opened the panel); `{ turn: 3 }` steps it three notches of
+       * the turn's grid (15 degrees, as the wheel does with the turn key held), `{ axis }` picks which
+       * way -- `'spin'` about up (the default, stepped onto the grid), `'tip'` about the view's own
+       * across axis, `'roll'` about its along axis -- `{ turnDeg: 7.5, axis }` turns it by exactly
+       * that, `{ lift: -4 }` steps it four notches down (0.1 m), `{ liftM: 1.37 }` sets the lift to
+       * exactly that, `{ reach: 5 }` holds it five metres out, `{ drop: true }` puts it down,
+       * `{ take: true }` picks the nearest one of yours back up (anchored where it stood, which the
+       * report's `anchored` says), `{ cancel: true }` gives it up (one picked back up goes back where
+       * it stood), `{ away: true }` puts it away for good, as O again, Delete or the bar's Put away
+       * do, and `{ tune: { … } }` moves the numbers, every one of which is ours.
        *
        * `find` searches the catalogue by name or id, which is the only way to learn an id from a
        * driven tab: the panel's list cannot be read from here.
        */
-      prop: async (id?: string, opts: { turn?: number; axis?: 'x' | 'y' | 'z'; lift?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; away?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE> } = {}) => {
+      prop: async (id?: string, opts: { turn?: number; axis?: 'spin' | 'tip' | 'roll'; turnDeg?: number; lift?: number; liftM?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; away?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE> } = {}) => {
         if (opts.tune) Object.assign(PROP_TUNE, opts.tune);
         if (opts.cancel) {
           this.stopPlacingProp();
@@ -2812,16 +2849,30 @@ class App {
           return { found: hits.length, first: hits.slice(0, 40).map((p) => ({ id: p.id, name: p.name ?? null, group: p.group, size: p.size })) };
         }
         if (opts.take) {
-          this.takeNearestProp();
-          return { standing: placedProps.all.length };
+          await this.takeNearestProp();
+          if (!this.propPlacing) return { standing: placedProps.all.length };
         }
         if (id) {
           const why = await this.startPlacingProp(id);
           if (why) return { error: why, note: this.props.note || undefined };
         }
-        if (typeof opts.reach === 'number' && this.propPlacing) this.propPlacing.reach = opts.reach;
-        if (typeof opts.turn === 'number') this.turnPlacing(opts.turn, opts.axis ?? 'y');
-        if (typeof opts.lift === 'number') this.liftPlacing(opts.lift);
+        const q0 = this.propPlacing;
+        if (q0) {
+          if (typeof opts.reach === 'number') {
+            q0.reach = opts.reach;
+            this.propAnchor.on = false;
+          }
+          const axis = opts.axis ?? 'spin';
+          const kind: HoldKind = axis === 'spin' ? 'turn' : 'tumble';
+          if (typeof opts.turn === 'number') for (let i = 0; i < Math.abs(opts.turn); i++) this.stepPlacingGrid(kind, Math.sign(opts.turn), axis === 'roll');
+          if (typeof opts.turnDeg === 'number') {
+            const rad = (opts.turnDeg * Math.PI) / 180;
+            if (axis === 'spin') turnAbout(q0.turn, 0, 1, 0, rad, q0.turn);
+            else this.tumbleProp(q0, axis === 'tip' ? rad : 0, axis === 'roll' ? rad : 0);
+          }
+          if (typeof opts.lift === 'number') for (let i = 0; i < Math.abs(opts.lift); i++) this.stepPlacingGrid('lift', Math.sign(opts.lift));
+          if (typeof opts.liftM === 'number') q0.lift = propLiftTo(opts.liftM);
+        }
         if (this.propPlacing) this.stepPlacingProp();
         if (opts.drop) {
           const was = this.propPlacing;
@@ -2852,15 +2903,68 @@ class App {
           reach: Number(p.reach.toFixed(2)),
           lift: Number(p.lift.toFixed(2)),
           turn: { x: Number(p.turn.x.toFixed(3)), y: Number(p.turn.y.toFixed(3)), z: Number(p.turn.z.toFixed(3)), w: Number(p.turn.w.toFixed(3)) },
+          // Its spin about up and how far its own up is off the world's, in degrees, as the bar reads them out.
+          spin: Number(((((spinOf(p.turn) * 180) / Math.PI) % 360 + 360) % 360).toFixed(1)),
+          tipped: Number(((tiltOf(p.turn) * 180) / Math.PI).toFixed(1)),
           at: { x: Number(this.ghost.group.position.x.toFixed(2)), y: Number(this.ghost.group.position.y.toFixed(2)), z: Number(this.ghost.group.position.z.toFixed(2)) },
+          // Still standing exactly where it was picked up from: until the player walks or looks away (`PLACE_HOLD_TUNE.anchorMove`, `anchorTurn`) or rolls the wheel.
+          anchored: this.propAnchor.on,
+          hold: this.placeHold.which,
           ok: p.ok,
           why: p.why,
-          keys: this.placeKeys(),
+          keys: { ...this.placeKeysNow },
           // Picked back up out of the world: Escape puts it back, O, Delete or `{ away: true }` throw it away.
           pickedUp: !!p.from,
           standing: mine.length,
           tune: { ...PROP_TUNE },
         };
+      },
+      /**
+       * Holding a key to turn or raise a thing in hand (`PLACE_HOLD_TUNE`, every number ours).
+       *
+       * `__debug.placeHold()` reports the numbers, what a held key is doing now (`hold`: `turn`,
+       * `tumble` or `lift`, or null) and the gain the last frame of it ran at; `{ tune: { … } }` moves
+       * the numbers (`sideways`, `flipTurn` and `flipLift` among them); `{ drag: { which, dy, dx, ms,
+       * shift, kind } }` runs the arithmetic alone over a drag of `dy` (and `dx`) pixels spread over `ms`
+       * milliseconds of frames a sixtieth of a second long, and says how far it would turn, tip, roll
+       * or lift a `kind` of thing (`'house'` or `'prop'`). That is the arithmetic only: the real path
+       * is a key held through `advance(t, ['KeyR'], true)` with `mouse(0, dy)` fed a little a frame.
+       */
+      placeHold: (opts: { tune?: Partial<typeof PLACE_HOLD_TUNE>; drag?: { which?: 'turn' | 'lift'; dy?: number; dx?: number; ms?: number; shift?: boolean; kind?: 'house' | 'prop' } } = {}) => {
+        if (opts.tune) Object.assign(PLACE_HOLD_TUNE, opts.tune);
+        let drag: Record<string, number | string> | null = null;
+        if (opts.drag) {
+          const d = opts.drag;
+          const dt = 1 / 60;
+          const frames = Math.max(1, Math.round(((d.ms ?? 1000) / 1000) * 60));
+          const dy = (d.dy ?? 0) / frames;
+          const dx = (d.dx ?? 0) / frames;
+          const sens = this.cam.sensitivity;
+          const kind = d.kind ?? (this.propPlacing ? 'prop' : 'house');
+          let turn = 0;
+          let lift = 0;
+          const tumble = { tip: 0, roll: 0 };
+          let tip = 0;
+          let roll = 0;
+          let gain = 1;
+          for (let i = 0; i < frames; i++) {
+            if ((d.which ?? 'turn') === 'lift') {
+              lift += liftDelta(dy, dt, sens, kind, PLACE_HOLD_TUNE);
+              gain = holdGain(dy, dt, PLACE_HOLD_TUNE);
+            } else if (d.shift && kind === 'prop') {
+              tumbleDeltas(dx, dy, dt, sens, PLACE_HOLD_TUNE, tumble);
+              tip += tumble.tip;
+              roll += tumble.roll;
+              gain = holdGain(Math.hypot(dx, dy), dt, PLACE_HOLD_TUNE);
+            } else {
+              turn += turnDelta(dy, dx, dt, sens, PLACE_HOLD_TUNE);
+              gain = holdGain(PLACE_HOLD_TUNE.sideways ? Math.hypot(dx, dy) : dy, dt, PLACE_HOLD_TUNE);
+            }
+          }
+          const deg = (r: number) => Number(((r * 180) / Math.PI).toFixed(2));
+          drag = { frames, pxPerSecond: Math.round(Math.hypot(dx, dy) * 60), gain: Number(gain.toFixed(3)), turnDeg: deg(turn), tipDeg: deg(tip), rollDeg: deg(roll), liftM: Number(lift.toFixed(3)), kind, sensitivity: sens };
+        }
+        return { tune: { ...PLACE_HOLD_TUNE }, hold: this.placeHold.which, lastGain: Number(this.placeHold.gain.toFixed(3)), anchored: this.propAnchor.on, drag };
       },
       /**
        * How shiny the things the player is wearing and holding really are, in numbers.
@@ -4942,6 +5046,9 @@ class App {
             if (this.talkNow) this.stepTalk(dt);
             // And the hold that gets the companion up, while the use key is held down.
             this.stepRevive(dt);
+            // A building or a prop in hand takes its keys, the click and a held key's mouse first, and mutes
+            // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
+            this.stepPlacingKeys(dt);
             this.stepEmoteKeys();
             this.stepEmoteEnd();
             this.player.update(dt, this.input, this.cam, this.world);
@@ -9074,13 +9181,11 @@ class App {
       // A held Escape autorepeats, and every other keydown listener in the game already says so.
       if (e.repeat) return;
       if (e.code !== 'Escape' || !this.inWorld || !this.started || this.traveling) return;
-      // A building or a prop in hand is given up before anything else: it is the thing on the screen.
-      if (this.isPlacing && !this.menu.open) {
-        this.stopPlacing();
-        return;
-      }
-      if (this.isPlacingProp && !this.menu.open) {
-        this.stopPlacingProp();
+      // A building or a prop in hand is given up before anything else: it is the thing on the screen,
+      // and the menu does not open on the same press (`giveUpHand`, which the lock's own listener below
+      // calls too, whichever of the two the browser sends first).
+      if ((this.isPlacing || this.isPlacingProp) && !this.menu.open) {
+        this.giveUpHand();
         return;
       }
       // A conversation is left, and that is all the press does; so is a call.
@@ -9108,8 +9213,16 @@ class App {
     // for arriving and for dying, not for every Escape.
     document.addEventListener('pointerlockchange', () => {
       if (!this.started || this.traveling) return;
-      // The lock went without a panel asking for it: Escape, or a click away. The menu, not a bare cursor.
-      if (!this.input.locked && !this.input.captured && this.inWorld && !this.map.open && !this.anyPanelOpen()) this.openMenu();
+      // The lock went without a panel asking for it: Escape, or a click away. The menu, not a bare cursor --
+      // except with something in hand, where that Escape gives it up and nothing more (`giveUpHand`): the
+      // browser sends this and the key in either order, and whichever comes second finds the hand empty and
+      // the menu refusing for a moment. Gone with the page out of focus (another window), what is in hand
+      // is kept and the cursor stays free until the world is clicked, as the placing bar's hint says.
+      const lost = !this.input.locked && !this.input.captured && this.inWorld && !this.map.open && !this.anyPanelOpen();
+      const inHand = this.isPlacing || this.isPlacingProp;
+      if (lost && inHand && document.hasFocus()) this.giveUpHand();
+      else if (lost && !inHand && performance.now() - this.handGivenUpAt < 300) this.handBackMouse();
+      else if (lost && !inHand) this.openMenu();
       this.hud.setMouseFree(!this.input.locked && !this.map.open && !this.anyPanelOpen());
     });
     this.canvas.addEventListener('click', () => {
@@ -9292,6 +9405,29 @@ class App {
     this.menuClosedAt = performance.now();
     this.menu.hide();
     this.freeMouse(false);
+  }
+
+  /** When Escape last gave up what was in hand, so the lock going after it asks for the lock back rather than opening the menu. */
+  private handGivenUpAt = 0;
+
+  /**
+   * Escape with something in hand: it is given up (a prop picked back up goes back where it stood) and
+   * that is all the press does. The browser drops the pointer lock on the same press and sends the key
+   * and the lock's change in either order, so this is reached from both; whichever comes second finds
+   * the hand empty and `openMenu` refusing for its 300 ms. The lock is asked for again, as the chat line
+   * does after its own Escape -- but only through `handBackMouse`, so never while a panel, the map or a
+   * window that holds the mouse is still on the screen (a deed or a prop stays in hand with the backpack
+   * or the map open, and that Escape gives it up and leaves the window and its cursor where they are);
+   * a browser may refuse it until the world is clicked, and the hud's hint that the mouse is free stands
+   * until then. Nothing promises the relock.
+   */
+  private giveUpHand(): void {
+    this.stopPlacing();
+    this.stopPlacingProp();
+    const now = performance.now();
+    this.menuClosedAt = now;
+    this.handGivenUpAt = now;
+    this.handBackMouse();
   }
 
   /** Whether the pointer has been wired to the world behind a place; done once and then kept. */
@@ -13996,17 +14132,14 @@ class App {
     }
     this.cam.release();
     // A building in hand takes the wheel before the camera does: while it is out the wheel pushes
-    // the ghost away and pulls it back, which is the one thing the wheel does that is not a zoom.
-    // The camera zeroes what it reads, so this has to be first or the two would fight over it.
+    // the ghost away and pulls it back, which is the one thing the wheel does that is not a zoom,
+    // and with the turn or the height key held it steps the turn or the height to the next line of
+    // the grid instead (`wheelPlacing`). The camera zeroes what it reads, so this has to be first or
+    // the two would fight over it.
     if ((this.placing || this.propPlacing) && input.wheel) {
       this.wheelPlacing(-input.wheel);
       input.wheel = 0;
     }
-    // The ghost of a building being put down: where it stands and whether it may, worked out after
-    // the camera so it reads the heading this very frame. A prop in hand is the same thing with its
-    // own rules, and only ever one of the two is out.
-    if (this.placing) this.stepPlacing();
-    else if (this.propPlacing) this.stepPlacingProp();
     // An instrument in hand: its own row under the world, and its part kept at the player's place.
     this.stepBand();
     // Mounted or piloted, a ship out of the cockpit and the chase is always drawn.
@@ -14016,6 +14149,11 @@ class App {
     // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
     const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
     this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);
+    // The ghost of a building being put down: where it stands and whether it may, worked out after
+    // the camera, since it goes where the camera looks and so reads this very frame's view. A prop in
+    // hand is the same thing with its own rules, and only ever one of the two is out.
+    if (this.placing) this.stepPlacing();
+    else if (this.propPlacing) this.stepPlacingProp();
     // A conversation takes the view over the shoulder, eased from the orbit just placed and back to it.
     if (this.talkNow || this.talkCam.blend > 0) this.talkCamera(blocked, dt);
     // The frame on which the wheel has just brought the orbit in is drawn as the cockpit, not from the orbit's tilt.
@@ -17478,9 +17616,46 @@ class App {
     }
   }
 
-  /** A placement in hand: the deed, the ghost's distance and turn, and what it last said. */
-  private placing: { deed: DeedRow; reach: number; yaw: number; lift: number; state: GhostState | null } | null = null;
+  /**
+   * A placement in hand: the deed, its footprint and the patch it asks for (worked out once, as the
+   * deed is taken in hand, not every frame), the ghost's distance, turn and lift, and what it last said
+   * (`ghostState`, kept, or null before its first frame).
+   */
+  private placing: { deed: DeedRow; foot: Footprint; patch: Patch; reach: number; yaw: number; lift: number; state: GhostState | null } | null = null;
   private readonly ghost = new PlacementGhost();
+  /** The ghost's state, written into every frame a building is in hand: one record for every placement. */
+  private readonly ghostState: GhostState = { x: 0, z: 0, y: 0, yaw: 0, ok: false, why: null, clear: 0, lift: 0, note: null };
+  /** Where the ghost would go this frame, kept. */
+  private readonly ghostAt = { x: 0, z: 0 };
+  /** What the ghost asks of the world, made once: the world it asks is whichever one stands when asked. */
+  private readonly ghostDeps: GhostDeps = {
+    heightAt: (x, z) => this.world.terrain.heightAt(x, z),
+    waterAt: (x, z) => this.world.terrain.waterHeightAt(x, z),
+    standing: (x, z, reach) => this.world.standingNear(x, z, reach),
+  };
+  /** The ground for the grid's corners, made once for the same reason. */
+  private readonly ghostHeight = (x: number, z: number): number => this.world.terrain.heightAt(x, z);
+  /** What the placing bar says, one record written into every frame (`PlacingView`). */
+  private readonly placingSays = placingView();
+  /** The placing keys' caps as they are bound now, spelled when they change (`refreshPlaceKeys`) and never in a frame. */
+  private readonly placeKeysNow: PlacingKeys = { turn: '', lift: '', del: '' };
+  /** The cap of the key that puts a picked-up prop away, spelled with the rest. */
+  private awayCap = '';
+
+  /** A held placing key (or a pressed bar button), and what it is doing (`HoldState`, which `applyHold` writes). */
+  private readonly placeHold = holdState();
+  /** Whether something was in hand on the last frame the placing keys were read: the frame it empties mutes the fight till its keys are up. */
+  private handWas = false;
+  /**
+   * The bar's own two buttons, for a pointer that is free: which one is pressed (`PlacingBar.onHold`, for
+   * as long as it is down) and the drag gathered since the last frame (`onDrag`).
+   */
+  private readonly barDrag: { which: 'turn' | 'lift' | null; dx: number; dy: number; shift: boolean } = { which: null, dx: 0, dy: 0, shift: false };
+  /** Where a prop picked back up stood, holding the ghost there until the player walks or looks away. */
+  private readonly propAnchor = placeAnchor();
+  /** The camera's direction in the world, and the view's level axes, kept for the frame that asks. */
+  private readonly viewDir = new THREE.Vector3();
+  private readonly viewAxesNow: ViewAxes = { fx: 0, fz: 1, rx: -1, rz: 0 };
 
   /** Whether the player is placing a building, which takes the wheel and the click. */
   get isPlacing(): boolean {
@@ -17514,13 +17689,22 @@ class App {
     // rather than as a shell; it is one shared scene, never a copy.
     const shown = model.scene;
     await this.world.prepareActor(shown);
+    const foot = footprintOf(deed);
+    if (!foot) return 'the archives have no footprint for that building';
     this.closePanelsForPlacing();
+    // Anything already in hand is given up first, as taking a prop does: only ever one is out.
+    this.stopPlacing();
+    this.stopPlacingProp();
     this.ghost.hold(shown);
     this.hangGhost();
-    this.placing = { deed, reach: GHOST_TUNE.reach, yaw: this.player.heading, lift: 0, state: null };
-    this.placingBar.show(deed.name, false, 'move it where you want it', this.placeKeys(), 0);
-    const k = this.placeKeys();
-    this.messages.system(`placing ${deed.name}: the wheel moves it, ${k.left} and ${k.right} turn it, ${k.up} and ${k.down} raise and lower it, a click puts it down`);
+    // It starts facing the way the view looks, which is the way it is pushed out, so its doorstep is
+    // toward the player and the house reaches away.
+    this.placing = { deed, foot, patch: patchOfFootprint(foot), reach: GHOST_TUNE.reach, yaw: turnTo(this.viewHeading()), lift: 0, state: null };
+    this.refreshPlaceKeys();
+    const s = this.placingSays;
+    this.sayPlacing(deed.name, false, 'move it where you want it', null, 'house', (this.placing.yaw * 180) / Math.PI, 0, 0, null);
+    this.placingBar.show(s);
+    this.messages.system(`placing ${deed.name}: ${this.placingWords(false)}`);
     return null;
   }
 
@@ -17538,10 +17722,59 @@ class App {
     this.world.adoptNow(this.ghost.group);
   }
 
-  /** What the four placing keys are called just now, for the bar and the line that explains them. */
-  private placeKeys(): { left: string; right: string; up: string; down: string } {
-    const cap = (a: 'placeLeft' | 'placeRight' | 'placeUp' | 'placeDown') => keyLabel(this.input.bindings[a][0] ?? '');
-    return { left: cap('placeLeft'), right: cap('placeRight'), up: cap('placeUp'), down: cap('placeDown') };
+  /**
+   * The placing keys' caps as they are bound now, into `placeKeysNow`, and the words of the two tabs
+   * that name them: called as the game starts, whenever a binding moves (`onBindingsChanged`) and as a
+   * thing is taken in hand, and never in a frame. A key with nothing bound reads as the way to bind one.
+   */
+  private refreshPlaceKeys(): void {
+    const cap = (a: Action) => {
+      const code = this.input.bindings[a][0];
+      return code ? keyLabel(code) : NO_KEY;
+    };
+    const k = this.placeKeysNow;
+    k.turn = cap('placeTurn');
+    k.lift = cap('placeLift');
+    k.del = cap('putAway');
+    this.awayCap = keyLabel(this.input.bindings.takeProp[0] ?? this.input.bindings.putAway[0] ?? '');
+    this.housingUi?.setKeys(k.turn, k.lift);
+    this.propsUi?.setKeys(k.turn, k.lift);
+  }
+
+  /** How to move a thing in hand, in the keys bound now, for the line that explains it as it is taken up. */
+  private placingWords(prop: boolean): string {
+    const k = this.placeKeysNow;
+    return `hold ${k.turn} and move the mouse to turn it, hold ${k.lift} to raise it, the wheel moves it nearer or further, a click puts it down${prop ? `, shift with ${k.turn} tips and rolls it` : ''}`;
+  }
+
+  /** The placing bar's record written for this frame: nothing in it is made here, only its fields written. */
+  private sayPlacing(name: string, ok: boolean, why: string | null, note: string | null, kind: 'house' | 'prop', turnDeg: number, tipDeg: number, lift: number, away: string | null): void {
+    const s = this.placingSays;
+    s.name = name;
+    s.ok = ok;
+    s.why = why;
+    s.note = note;
+    s.kind = kind;
+    // Shown inside one turn, nought to under 360.
+    s.turn = ((turnDeg % 360) + 360) % 360;
+    s.tipped = tipDeg;
+    s.lift = lift;
+    s.away = away;
+    s.keys = this.placeKeysNow;
+    s.locked = this.input.locked;
+    s.holding = this.placeHold.which;
+  }
+
+  /**
+   * Which way the view looks, as a body's heading (forward `(sin, cos)`): where a ghost is pushed out
+   * and which way a building starts facing. The camera's own direction in the world, not the body's
+   * heading -- standing still the body lags the view by up to 45 degrees under Jedi Academy's clips, so
+   * a ghost along the body went somewhere other than where the player looked -- and in the world's frame,
+   * so it is right aboard a hull too. Held still while a placing key holds the camera still.
+   */
+  private viewHeading(): number {
+    const d = this.cam.camera.getWorldDirection(this.viewDir);
+    return Math.abs(d.x) + Math.abs(d.z) > 1e-6 ? Math.atan2(d.x, d.z) : this.player.heading;
   }
 
   /** Give the deed back and put the model away exactly as it was found. */
@@ -17563,25 +17796,15 @@ class App {
   private stepPlacing(): void {
     const p = this.placing;
     if (!p) return;
-    const foot = footprintOf(p.deed);
-    if (!foot) return;
-    const me = this.player.worldPos;
-    const at = ghostSpot({ x: me.x, z: me.z }, this.player.heading, p.reach);
-    const state = ghostVerdict(
-      patchOfFootprint(foot),
-      at,
-      p.yaw,
-      {
-        heightAt: (x, z) => this.world.terrain.heightAt(x, z),
-        waterAt: (x, z) => this.world.terrain.waterHeightAt(x, z),
-        standing: (x, z, reach) => this.world.standingNear(x, z, reach),
-      },
-      p.lift,
-    );
+    // Out where the view looks, from where the player stands; the footprint, its patch, the deps and
+    // the state are all kept, so a frame of it makes nothing of its own.
+    const at = ghostSpot(this.player.worldPos, this.viewHeading(), p.reach, this.ghostAt);
+    const state = ghostVerdict(p.patch, at, p.yaw, this.ghostDeps, p.lift, this.ghostState);
     p.state = state;
-    this.ghost.place(state, foot, p.deed.foot?.rows ?? [], (x, z) => this.world.terrain.heightAt(x, z));
+    this.ghost.place(state, p.foot, p.deed.foot?.rows ?? NO_ROWS, this.ghostHeight);
     // A door standing over a step or a jump is said beside an allowed spot and never refuses it.
-    this.placingBar.show(p.deed.name, state.ok, state.why, this.placeKeys(), state.lift, null, state.note);
+    this.sayPlacing(p.deed.name, state.ok, state.why, state.note, 'house', (p.yaw * 180) / Math.PI, 0, state.lift, null);
+    this.placingBar.show(this.placingSays);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -17633,9 +17856,10 @@ class App {
     this.ghost.hold(model);
     this.hangGhost();
     this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null, from: null };
-    const k = this.placeKeys();
-    this.placingBar.show(def.name || def.id, true, 'move it where you want it', k, 0);
-    this.messages.system(`placing ${def.name || def.id}: the wheel moves it, ${k.left} and ${k.right} turn it, ${k.up} and ${k.down} raise and lower it, shift with a turn key tips it, a click puts it down`);
+    this.refreshPlaceKeys();
+    this.sayPlacing(def.name || def.id, true, 'move it where you want it', null, 'prop', 0, 0, 0, null);
+    this.placingBar.show(this.placingSays);
+    this.messages.system(`placing ${def.name || def.id}: ${this.placingWords(true)}`);
     return null;
   }
 
@@ -17662,6 +17886,7 @@ class App {
     const mine = this.ghost.release();
     if (mine.length) this.world.forgetMaterials(mine);
     this.propPlacing = null;
+    this.propAnchor.on = false;
     this.placingBar.hide();
     const name = p.def.name || p.def.id;
     const from = p.from;
@@ -17691,25 +17916,63 @@ class App {
     if (!p) return;
     const me = this.player.worldPos;
     const inside = !!this.player.inside;
-    const spot = propSpot({ x: me.x, y: me.y, z: me.z }, this.player.heading, p.reach);
+    const heading = this.viewHeading();
+    // A thing picked back up stays exactly where it stood until the player walks or looks away (the
+    // wheel lets go of it too, `wheelPlacing`), so a small turn of one already standing is a small turn;
+    // let go, it is the ordinary ghost, out where the view looks at the reach it had.
+    const a = this.propAnchor;
+    if (a.on && anchorReleased(a, me, heading, PLACE_HOLD_TUNE)) a.on = false;
+    const spot = this.propSpotAt;
+    if (a.on) {
+      spot.x = a.x;
+      spot.y = me.y;
+      spot.z = a.z;
+    } else propSpot(me, heading, p.reach, spot);
     // The thing sits on whatever is under the spot, plus however far the player has lifted it.
     const floor = this.world.groundAt(spot.x, me.y + 1.6, spot.z, inside);
-    const at = { x: spot.x, y: (floor ?? me.y) + p.lift, z: spot.z };
-    const v = propVerdict(p.def.bounds, at, p.turn, {
-      floorAt: (x, y, z) => this.world.groundAt(x, y + 0.5, z, inside),
-      solidAt: (x, y, z) => this.world.solidAt(x, y, z),
-    });
+    const at = this.propAt;
+    at.x = spot.x;
+    at.y = (floor ?? me.y) + p.lift;
+    at.z = spot.z;
+    this.propInside = inside;
+    const v = propVerdict(p.def.bounds, at, p.turn, this.propDeps, PROP_TUNE, this.propSaid);
     p.ok = v.ok;
     p.why = v.why;
     this.ghost.placeProp(at, p.turn, v.ok);
     // A prop picked back up out of the world can be put away for good; the cap is the pick-up key's.
-    const away = p.from ? keyLabel(this.input.bindings.takeProp[0] ?? this.input.bindings.putAway[0] ?? '') : null;
-    this.placingBar.show(p.def.name || p.def.id, v.ok, v.why, this.placeKeys(), p.lift, away);
+    const away = p.from ? this.awayCap : null;
+    this.sayPlacing(p.def.name || p.def.id, v.ok, v.why, null, 'prop', (spinOf(p.turn) * 180) / Math.PI, (tiltOf(p.turn) * 180) / Math.PI, p.lift, away);
+    this.placingBar.show(this.placingSays);
   }
 
-  /** The wheel while placing: push the ghost out or pull it in. */
+  /** A prop's spot, where it stands and what was said of it, kept for its frame; and whether the player stands indoors, for its deps. */
+  private readonly propSpotAt = { x: 0, y: 0, z: 0 };
+  private readonly propAt = { x: 0, y: 0, z: 0 };
+  private readonly propSaid: PropVerdict = { ok: true, why: null, inside: 0, of: 0, clearance: 0 };
+  private propInside = false;
+  /** What judging a prop asks of the world, made once. */
+  private readonly propDeps = {
+    floorAt: (x: number, y: number, z: number) => this.world.groundAt(x, y + 0.5, z, this.propInside),
+    solidAt: (x: number, y: number, z: number) => this.world.solidAt(x, y, z),
+  };
+
+  /**
+   * The wheel while placing: with the turn or the height key held, a notch steps the turn or the height
+   * to the next line of the grid that way (the wheel rolled up as the mouse moved up: clockwise, and
+   * up); with neither, it pushes the ghost out or pulls it in, which also lets go of a thing picked
+   * back up where it stood.
+   */
   private wheelPlacing(notches: number): void {
+    const h = this.placeHold.which;
+    if (h) {
+      // Up on the wheel is up on the mouse: a turn clockwise (a negative yaw, unless flipped), a tip away,
+      // a lift up (unless flipped). `stepPlacingGrid` takes the value's own direction, which `wheelDir` gives.
+      const dir = wheelDir(h, Math.sign(notches), PLACE_HOLD_TUNE);
+      for (let i = 0; i < Math.abs(notches); i++) this.stepPlacingGrid(h, dir);
+      return;
+    }
     if (this.propPlacing) {
+      this.propAnchor.on = false;
       this.propPlacing.reach = pushBy(this.propPlacing.reach, notches);
       return;
     }
@@ -17717,28 +17980,133 @@ class App {
   }
 
   /**
-   * A turn key, or a turn button on the bar.
-   *
-   * A building spins about the world's up and nothing else, which is all a building can do. A prop
-   * turns about all three: the plain key about up, shift about the axis across the player's view and
-   * control about the one along it, so "tip it away from me" and "roll it" are each one key.
+   * One notch of the grid, the way `dir` takes the value (+1 a larger yaw, which is anticlockwise seen
+   * from above, or a higher lift): the wheel with a key held, a click on one of the bar's two buttons
+   * (a right click the other way), and the console's press counts. A building's turn and any lift step
+   * to the next line of `PLACE_HOLD_TUNE`'s grid; a prop's spin steps its heading onto the turn's grid
+   * (`spinOf`), however it lies; a prop's tip, or with `roll` its roll, turns a whole notch about the
+   * view's own axis, since a tumble has no grid to land on.
    */
-  private turnPlacing(presses: number, axis: 'x' | 'y' | 'z' = 'y'): void {
-    const p = this.propPlacing;
-    if (p) {
-      p.turn = turnBy(p.turn, axis, (presses * PROP_TUNE.turn * Math.PI) / 180);
+  private stepPlacingGrid(kind: HoldKind, dir: number, roll = false): void {
+    if (!dir) return;
+    const t = PLACE_HOLD_TUNE;
+    const prop = this.propPlacing;
+    const house = this.placing;
+    if (kind === 'lift') {
+      if (prop) prop.lift = propLiftTo(stepToGrid(prop.lift, t.gridLiftProp, dir));
+      else if (house) house.lift = houseLiftTo(stepToGrid(house.lift, t.gridLiftHouse, dir));
+      this.placeHold.raw = prop ? prop.lift : house ? house.lift : 0;
       return;
     }
-    if (this.placing) this.placing.yaw = houseTurnBy(this.placing.yaw, presses);
+    const notch = (t.gridTurn * Math.PI) / 180;
+    if (kind === 'tumble' && prop) {
+      this.tumbleProp(prop, roll ? 0 : dir * notch, roll ? dir * notch : 0);
+      return;
+    }
+    if (prop) {
+      const spin = (spinOf(prop.turn) * 180) / Math.PI;
+      const next = stepToGrid(spin, t.gridTurn, dir);
+      turnAbout(prop.turn, 0, 1, 0, ((next - spin) * Math.PI) / 180, prop.turn);
+      return;
+    }
+    if (house) house.yaw = turnTo((stepToGrid((house.yaw * 180) / Math.PI, t.gridTurn, dir) * Math.PI) / 180);
   }
 
-  /** A height key, or a height button on the bar: the nudge for a doorstep the ground laps over. */
-  private liftPlacing(presses: number): void {
-    if (this.propPlacing) {
-      this.propPlacing.lift = propLiftBy(this.propPlacing.lift, presses);
-      return;
+  /**
+   * A prop tipped about the view's across axis and rolled about its along axis, by radians: the axes are
+   * the camera's in the world's frame, laid flat (right is `forward x up`), never `cam.right()` or
+   * `cam.forward()`, which aboard a hull are the hull's frame. Composed in the world's frame (`r * q`).
+   */
+  private tumbleProp(p: { turn: PropTurn }, tip: number, roll: number): void {
+    tumbleBy(p.turn, this.tumbleAxesNow(), tip, roll);
+  }
+
+  /**
+   * The view's own level axes this frame, out of the camera's direction in the world (`getWorldDirection`),
+   * kept: what a prop tumbles about. Looking straight up or down, the body's heading stands in for the
+   * view's along (`tumbleAxes`).
+   */
+  private tumbleAxesNow(): ViewAxes {
+    const d = this.cam.camera.getWorldDirection(this.viewDir);
+    return tumbleAxes(d.x, d.z, this.player.heading, this.viewAxesNow);
+  }
+
+  /**
+   * The placing keys, the click and a held key's mouse, for whatever is in hand: one block for a building
+   * and a prop alike, run by the frame loop and by `__debug.advance` before anything that fights reads
+   * the keys. Answers whether something was in hand as it began.
+   *
+   * - The frame the hand empties, for any reason (a drop, Escape, Delete, O, a travel), the fight is muted
+   *   until its keys are up (`muteUntilUp`), so a key still down cannot start a throw, a block or a power.
+   * - In hand, a click puts it down; R held (`placeTurn`) turns it with the mouse, shift with it tips and
+   *   rolls a prop, and F held (`placeLift`) raises and lowers it -- R winning when both are held -- and
+   *   while either is held the mouse is the thing's and not the camera's, so the view holds still. With
+   *   neither held, a drag on the bar's own buttons (a free pointer) does the same.
+   * - Delete gives a deed up and puts a prop away; the pick-up key puts a prop away too.
+   * - And for the rest of the frame everything that fights is muted (`FIGHT_ACTIONS`), so the click that
+   *   puts it down does not also swing or fire, and R does not throw a lit saber.
+   */
+  private stepPlacingKeys(dt: number, takeKey = this.input.pressedAction('takeProp')): boolean {
+    const input = this.input;
+    const inHand = !!(this.placing || this.propPlacing);
+    if (!inHand && this.handWas) input.muteUntilUp(FIGHT_ACTIONS);
+    this.handWas = inHand;
+    if (!inHand) {
+      this.placeHold.which = null;
+      this.barDrag.which = null;
+      return false;
     }
-    if (this.placing) this.placing.lift = liftBy(this.placing.lift, presses);
+    if (input.pressedAction('attack')) {
+      // The frame of the click: a key still held keeps the mouse from the camera all the same, so the view
+      // does not swing (nor let go of a thing picked back up) under a refused drop; and nothing moves the
+      // thing on the frame it is put down, which goes down as it was judged.
+      if (input.held('placeTurn') || input.held('placeLift')) {
+        input.mouseDX = 0;
+        input.mouseDY = 0;
+      }
+      void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
+    } else this.stepHold(dt);
+    if (this.propPlacing) {
+      // The pick-up key again, or Delete: thrown away for good rather than put back, which Escape does.
+      if (takeKey || input.pressedAction('putAway')) this.stopPlacingProp('away');
+    } else if (this.placing && input.pressedAction('putAway')) this.stopPlacing();
+    input.mute(FIGHT_ACTIONS);
+    return true;
+  }
+
+  /**
+   * One frame of a held placing key (or of a pressed bar button), into the thing in hand: which hold the
+   * keys make (`holdKindOf`) and how far the mouse moved, handed to `applyHold`, which does the rest. A
+   * key held takes the mouse's movement and leaves the camera none. A bar button held holds for as long
+   * as it is down, whether or not the pointer moved this frame, and a key held wins over it. Shift is
+   * read raw, as a modifier and not an action (it is also the walk, which goes on walking slowly while a
+   * prop is tipped): rebinding the walk does not move it.
+   */
+  private stepHold(dt: number): void {
+    const input = this.input;
+    const prop = this.propPlacing;
+    const d = this.barDrag;
+    const shift = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
+    let which: HoldKind | null = holdKindOf(input.held('placeTurn'), input.held('placeLift'), shift, !!prop);
+    let dx = 0;
+    let dy = 0;
+    if (which) {
+      dx = input.mouseDX;
+      dy = input.mouseDY;
+      input.mouseDX = 0;
+      input.mouseDY = 0;
+    } else if (d.which) {
+      // The bar's button, pressed: the drag gathered since the last frame, the same arithmetic on the
+      // pointer's own movement.
+      which = holdKindOf(d.which === 'turn', d.which === 'lift', d.shift, !!prop);
+      dx = d.dx;
+      dy = d.dy;
+    }
+    // The bar's drag is spent either way: a key held wins over it.
+    d.dx = 0;
+    d.dy = 0;
+    const axes = which === 'tumble' ? this.tumbleAxesNow() : this.viewAxesNow;
+    applyHold(this.placeHold, which, dx, dy, dt, this.cam.sensitivity, axes, prop, this.placing, GHOST_TUNE.most, performance.now(), PLACE_HOLD_TUNE);
   }
 
   /** Put it down, if the ground will take it. */
@@ -17912,7 +18280,7 @@ class App {
    * the very duplication that file exists to prevent. Holding it is the honest answer until the
    * ledger keeps things rather than kinds.
    */
-  private takeNearestProp(): void {
+  private async takeNearestProp(): Promise<void> {
     const me = this.player.worldPos;
     const row = placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far);
     if (!row) {
@@ -17935,13 +18303,30 @@ class App {
     // Back in hand, turned as it stood, so a nudge is one press and a click puts it back. The row it
     // came from is kept with it, so giving up returns it rather than losing it.
     if (!def) return;
-    void this.startPlacingProp(def.id).then((why) => {
-      if (why) this.messages.system(why);
-      else if (this.propPlacing) {
-        this.propPlacing.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
-        this.propPlacing.from = row;
-      }
-    });
+    const why = await this.startPlacingProp(def.id);
+    if (why) {
+      this.messages.system(why);
+      return;
+    }
+    const p = this.propPlacing;
+    if (!p) return;
+    p.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
+    p.from = row;
+    // And anchored exactly where it stood -- its lift the height it stood at over the floor there, its
+    // reach how far off it is -- until the player walks or looks away or rolls the wheel, so "pick it up
+    // and turn it two degrees" is two degrees and not a move to wherever the view points.
+    const at = this.player.worldPos;
+    const floor = this.world.groundAt(row.x, at.y + 1.6, row.z, !!this.player.inside);
+    p.lift = Math.min(PROP_TUNE.most, Math.max(-PROP_TUNE.most, row.y - (floor ?? at.y)));
+    p.reach = Math.min(PROP_TUNE.far, Math.max(PROP_TUNE.near, Math.hypot(row.x - at.x, row.z - at.z)));
+    const a = this.propAnchor;
+    a.on = true;
+    a.x = row.x;
+    a.y = row.y;
+    a.z = row.z;
+    a.px = at.x;
+    a.pz = at.z;
+    a.yaw = this.viewHeading();
   }
 
   // ---- The band: an instrument in hand, its own track of a song, and everybody else's. ----
@@ -21267,41 +21652,24 @@ class App {
         // The debug menu's key, with the keyboard on the world. Pressed inside the menu the menu hears
         // it itself, and from one of its boxes it types a character and Escape is the way out.
         if (input.pressedAction('debugMenu')) this.debugMenu.toggle();
-        // A building in hand takes the click and its own four keys before anything else does: a
-        // click puts it down, two keys turn it and two raise and lower it. They are keys of their
-        // own rather than the strafe keys, so a player can still walk the building to where they
-        // want it; the buttons on the bar do the same, for a pointer that is not locked to the
-        // game. Escape gives it up, which is handled where every other Escape is.
-        if (this.placing) {
-          if (input.pressedAction('attack')) void this.dropPlacing();
-          if (input.pressedAction('placeLeft')) this.turnPlacing(-1);
-          if (input.pressedAction('placeRight')) this.turnPlacing(1);
-          if (input.pressedAction('placeUp')) this.liftPlacing(1);
-          if (input.pressedAction('placeDown')) this.liftPlacing(-1);
-        }
-        // A prop in hand takes the same four keys and the same click, and the two shift keys pick
-        // which axis a turn is about: plain about up, shift about the axis across the view (tip it
-        // away), control about the one along it (roll it). The owner asked for three dimensions.
+        // A building or a prop in hand takes the click and its own two keys before anything else does,
+        // one block for both (`stepPlacingKeys`): a click puts it down, R held turns it and F held raises
+        // it with the mouse (shift with R tips and rolls a prop), Delete gives it up or puts it away, and
+        // everything that fights is muted for the rest of the frame -- and, the frame the hand empties,
+        // until its keys are up. They are keys of their own rather than the strafe keys, so a player can
+        // still walk it to where they want it; the bar's buttons do the same for a free pointer. Escape
+        // gives it up, which is handled where every other Escape is.
         // The pick-up key is read once: with a prop in hand it puts that prop away, and the same press
-        // must not then pick the next one up in the lines below.
+        // must not then pick the next one up in the line below.
         const takeKey = input.pressedAction('takeProp');
-        if (this.propPlacing) {
-          if (input.pressedAction('attack')) void this.dropPlacingProp();
-          const axis = input.isDown('ShiftLeft') || input.isDown('ShiftRight') ? 'x' : input.isDown('ControlLeft') || input.isDown('ControlRight') ? 'z' : 'y';
-          if (input.pressedAction('placeLeft')) this.turnPlacing(-1, axis);
-          if (input.pressedAction('placeRight')) this.turnPlacing(1, axis);
-          if (input.pressedAction('placeUp')) this.liftPlacing(1);
-          if (input.pressedAction('placeDown')) this.liftPlacing(-1);
-          // The pick-up key again, or Delete: thrown away for good rather than put back, which Escape does.
-          if (takeKey || input.pressedAction('putAway')) this.stopPlacingProp('away');
-        }
+        const hadInHand = this.stepPlacingKeys(dt, takeKey);
         // Pick the nearest thing you have put down back up, so a weapon in a case can be taken out
         // and used again (or, with nothing of yours near, take down a building of yours at its door).
         // Never while something is already in hand, which would swap one for another; never with the map
         // up, on any of its tabs, since play stands still under it and the ghost would be taken in hand
         // behind it; and never at a ship's controls, where O is the ultra cruise's own key and every run
         // would also say there is nothing of yours near enough to pick up.
-        else if (takeKey && !this.placing && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) this.takeNearestProp();
+        if (takeKey && !hadInHand && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) void this.takeNearestProp();
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');

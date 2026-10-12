@@ -394,11 +394,101 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(atControlsAt > 0, 'whether the player is at a ship\'s controls is worked out once in the key block');
   const journal = /if \(input\.pressedAction\('journal'\)[^\n]*&& !atControls\) this\.toggleJournal\(\);/.exec(main);
   ok(!!journal && journal.index > atControlsAt, 'the journal stands aside at a ship\'s controls');
-  const take = /else if \(takeKey && !this\.placing[^\n]*&& !atControls\) this\.takeNearestProp\(\);/.exec(main);
-  ok(!!take && take.index > atControlsAt, 'and so does the pick-up, after the controls are known');
+  // The pick-up comes after the one placing block, which answers whether something was in hand: never
+  // a swap of one thing in hand for another.
+  const take = /const hadInHand = this\.stepPlacingKeys\(dt, takeKey\);[\s\S]{0,900}?if \(takeKey && !hadInHand[^\n]*&& !atControls\) void this\.takeNearestProp\(\);/.exec(main);
+  ok(!!take && take.index > atControlsAt, 'and so does the pick-up, after the controls are known, and never with something already in hand');
   // Nor with the map up: the Waypoints window that used to stand in the way was a panel, and is a tab of
   // the map now, so the pick-up asks for the map itself or it takes a prop into hand behind it.
   ok(!!take && /!this\.anyPanelOpen\(\) && !this\.map\.open/.test(take[0]), 'and the pick-up stands aside with the map open, on any of its tabs');
+}
+
+// --- a thing in hand keeps the fight out, and Escape gives it up -----------------------------------
+// While a building or a prop is in hand, the click that puts it down, R held to turn it and 1 with a crate
+// in hand must not also swing, fire, throw or use a power: the one placing block mutes everything that
+// fights for the rest of the frame, and the frame the hand empties mutes it until its keys are up. The
+// block is run by `__debug.advance` too, so a hold can be driven from a tab. The wheel steps to the grid
+// while a key is held; and Escape gives up what is in hand by either of its two routes without opening
+// the menu.
+{
+  const bodyOf = (text: string, signature: string): string => {
+    const at = text.indexOf(signature);
+    if (at < 0) return '';
+    let depth = 0;
+    for (let i = text.indexOf('{', at + signature.length - 1); i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}' && --depth === 0) return text.slice(at, i + 1);
+    }
+    return '';
+  };
+  const keys = bodyOf(main, 'private stepPlacingKeys(dt: number');
+  ok(/if \(!inHand && this\.handWas\) input\.muteUntilUp\(FIGHT_ACTIONS\);\s*this\.handWas = inHand;/.test(keys), 'the frame the hand empties, everything that fights is muted until its keys are up');
+  const muteAt = keys.lastIndexOf('input.mute(FIGHT_ACTIONS);');
+  const dropAt = keys.indexOf("input.pressedAction('attack')");
+  ok(muteAt > 0 && dropAt > 0 && muteAt > dropAt && /input\.mute\(FIGHT_ACTIONS\);\s*return true;/.test(keys), 'while it is in hand the click is read to put it down and then everything that fights is muted for the rest of the frame');
+  ok(/stepHold\(dt\)/.test(keys) && /input\.pressedAction\('putAway'\)\) this\.stopPlacing\(\)/.test(keys), 'the held keys are read there, and Delete gives up a deed as it puts a prop away');
+  // The click frame: a key still held keeps the mouse from the camera there too, so a refused drop never
+  // swings the view (nor lets go of a thing picked back up), and nothing moves the thing as it goes down.
+  ok(/if \(input\.pressedAction\('attack'\)\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(input\.held\('placeTurn'\) \|\| input\.held\('placeLift'\)\) \{\s*input\.mouseDX = 0;\s*input\.mouseDY = 0;\s*\}\s*void \(this\.propPlacing \? this\.dropPlacingProp\(\) : this\.dropPlacing\(\)\);\s*\} else this\.stepHold\(dt\);/.test(keys), 'on the frame of the click a held key still takes the mouse from the camera, and the hold is not stepped');
+  // What a hold does is `applyHold`'s (placeHold.test.ts runs it): the game hands it which hold the keys
+  // make, through the one gate (shift read raw, a prop only), the mouse it took from the camera, the
+  // camera's own axes for a tumble, and the two things in hand.
+  const hold = bodyOf(main, 'private stepHold(dt: number): void');
+  ok(/const shift = input\.isDown\('ShiftLeft'\) \|\| input\.isDown\('ShiftRight'\);/.test(hold) && /let which: HoldKind \| null = holdKindOf\(input\.held\('placeTurn'\), input\.held\('placeLift'\), shift, !!prop\);/.test(hold), 'which hold the keys make is `holdKindOf` of the two keys, shift read raw, and whether a prop is in hand');
+  ok(/if \(which\) \{\s*dx = input\.mouseDX;\s*dy = input\.mouseDY;\s*input\.mouseDX = 0;\s*input\.mouseDY = 0;/.test(hold), 'a held key takes the mouse from the camera');
+  ok(/\} else if \(d\.which\) \{[\s\S]*?which = holdKindOf\(d\.which === 'turn', d\.which === 'lift', d\.shift, !!prop\);\s*dx = d\.dx;\s*dy = d\.dy;/.test(hold), "a bar button pressed holds by the same gate, whether or not the pointer moved this frame");
+  ok(/const axes = which === 'tumble' \? this\.tumbleAxesNow\(\) : this\.viewAxesNow;\s*applyHold\(this\.placeHold, which, dx, dy, dt, this\.cam\.sensitivity, axes, prop, this\.placing, GHOST_TUNE\.most, performance\.now\(\), PLACE_HOLD_TUNE\);/.test(hold), 'and the frame of the hold is `applyHold`, with the camera\'s own axes for a tumble and the mouse sensitivity');
+  const axesNow = bodyOf(main, 'private tumbleAxesNow(): ViewAxes');
+  ok(/const d = this\.cam\.camera\.getWorldDirection\(this\.viewDir\);\s*return tumbleAxes\(d\.x, d\.z, this\.player\.heading, this\.viewAxesNow\);/.test(axesNow), "a prop tumbles about the camera's own direction in the world, never `cam.forward()`, which aboard a hull is the hull's frame");
+  ok(/tumbleBy\(p\.turn, this\.tumbleAxesNow\(\), tip, roll\);/.test(bodyOf(main, 'private tumbleProp(p: { turn: PropTurn }')), 'and so does a notch of the tumble (the wheel, the console)');
+  // The bar's two buttons: a press holds until it is let go, a drag moves the held one only, a click is a
+  // notch the way the glyph says.
+  ok(/this\.placingBar\.onHold = \(which, shift\) => \{\s*const d = this\.barDrag;\s*d\.which = which;/.test(main) && /this\.placingBar\.onDrag = \(which, dx, dy, shift\) => \{\s*const d = this\.barDrag;\s*if \(d\.which !== which\) return;/.test(main), "the bar's press and let-go hold the hold, and its drag moves only the button held");
+  ok(/this\.placingBar\.onStep = \(which, dir\) => this\.stepPlacingGrid\(which === 'lift' \? 'lift' : 'turn', dir\);/.test(main), "a click on the bar's ⟲ is a notch anticlockwise (+1, a larger yaw) and on its ↕ a notch up, a right click one back");
+  // The ghost goes where the camera looks, in the world's frame, and a building starts facing that way.
+  const heading = bodyOf(main, 'private viewHeading(): number');
+  ok(/const d = this\.cam\.camera\.getWorldDirection\(this\.viewDir\);/.test(heading) && /Math\.atan2\(d\.x, d\.z\)/.test(heading), "the ghost's heading is the camera's own direction in the world, as a body's heading");
+  ok(/ghostSpot\(this\.player\.worldPos, this\.viewHeading\(\), p\.reach, this\.ghostAt\)/.test(bodyOf(main, 'private stepPlacing(): void')), 'a building is pushed out where the camera looks');
+  const propStep = bodyOf(main, 'private stepPlacingProp(): void');
+  ok(/const heading = this\.viewHeading\(\);/.test(propStep) && /else propSpot\(me, heading, p\.reach, spot\);/.test(propStep), 'and so is a prop');
+  ok(/yaw: turnTo\(this\.viewHeading\(\)\)/.test(bodyOf(main, 'private async startPlacing(deedId: string)')), 'a building taken in hand starts facing the way the view looks');
+  const camAt = main.indexOf('this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);');
+  const ghostAt = main.search(/if \(this\.placing\) this\.stepPlacing\(\);\s*else if \(this\.propPlacing\) this\.stepPlacingProp\(\);/);
+  const wheelAt = main.indexOf('this.wheelPlacing(-input.wheel);');
+  ok(camAt > 0 && ghostAt > camAt && wheelAt > 0 && wheelAt < camAt, 'the ghost is placed after the camera, reading this frame\'s view, and the wheel is taken before the camera zooms with it');
+  // A prop picked back up is anchored where it stood, and let go once the player walks or looks away.
+  const take = bodyOf(main, 'private async takeNearestProp(): Promise<void>');
+  ok(/a\.on = true;\s*a\.x = row\.x;\s*a\.y = row\.y;\s*a\.z = row\.z;\s*a\.px = at\.x;\s*a\.pz = at\.z;\s*a\.yaw = this\.viewHeading\(\);/.test(take), 'a prop picked back up is anchored at its own place, from where the player stands and looks');
+  ok(/p\.lift = Math\.min\(PROP_TUNE\.most, Math\.max\(-PROP_TUNE\.most, row\.y - \(floor \?\? at\.y\)\)\);/.test(take) && /p\.reach = [^\n]*Math\.hypot\(row\.x - at\.x, row\.z - at\.z\)/.test(take), 'with its lift the height it stood at over the floor, and its reach how far off it is');
+  ok(/if \(a\.on && anchorReleased\(a, me, heading, PLACE_HOLD_TUNE\)\) a\.on = false;/.test(propStep) && /if \(a\.on\) \{\s*spot\.x = a\.x;\s*spot\.y = me\.y;\s*spot\.z = a\.z;\s*\} else propSpot/.test(propStep), 'it stands exactly there until `anchorReleased` lets it go');
+  const frame = main.indexOf('const hadInHand = this.stepPlacingKeys(dt, takeKey);');
+  const update = main.indexOf('player.update(dt, input, this.cam, this.world);', frame);
+  ok(frame > 0 && update > frame, 'the frame loop reads the placing keys before the player and the kits read anything');
+  const advance = bodyOf(main, 'advance: (seconds: number');
+  ok(advance.indexOf('this.stepPlacingKeys(dt);') > 0 && advance.indexOf('this.stepPlacingKeys(dt);') < advance.indexOf('this.player.update(dt, this.input, this.cam, this.world);'), 'and so does `__debug.advance`, so a hold and a click can be driven from a driven tab');
+  const wheel = bodyOf(main, 'private wheelPlacing(notches: number): void');
+  ok(/const h = this\.placeHold\.which;\s*if \(h\) \{[\s\S]*?this\.stepPlacingGrid\(h, dir\)[\s\S]*?return;/.test(wheel) && /this\.propAnchor\.on = false;\s*this\.propPlacing\.reach = pushBy/.test(wheel), 'the wheel steps to the grid while a key is held, and otherwise pushes and pulls, letting go of an anchor');
+  ok(/const dir = wheelDir\(h, Math\.sign\(notches\), PLACE_HOLD_TUNE\);/.test(wheel) && /this\.wheelPlacing\(-input\.wheel\);/.test(main), 'a notch rolled up goes the way mouse up does (`wheelDir`, whose senses placeHold.test.ts pins)');
+  // Escape: the key's own listener and the lock's both give up what is in hand, and neither opens the menu then.
+  const escape = /if \(\(this\.isPlacing \|\| this\.isPlacingProp\) && !this\.menu\.open\) \{\s*this\.giveUpHand\(\);\s*return;\s*\}/.exec(main);
+  ok(!!escape, 'Escape with something in hand gives it up and returns before anything else it would do');
+  const lock = /document\.addEventListener\('pointerlockchange', \(\) => \{([\s\S]*?)\n    \}\);/.exec(main)?.[1] ?? '';
+  const giveAt = lock.indexOf('this.giveUpHand()');
+  const menuAt = lock.indexOf('this.openMenu()');
+  ok(giveAt > 0 && menuAt > giveAt && /else if \(lost && !inHand\) this\.openMenu\(\);/.test(lock), "the lock's own listener gives up a thing in hand before it would open the menu, and opens it only with nothing in hand");
+  ok(/const lost = !this\.input\.locked && !this\.input\.captured && this\.inWorld && !this\.map\.open && !this\.anyPanelOpen\(\);/.test(lock) && /if \(lost && inHand && document\.hasFocus\(\)\) this\.giveUpHand\(\);/.test(lock), 'it gives up what is in hand on a lock lost to Escape alone: not to a panel or the map, and not to another window');
+  ok(/else if \(lost && !inHand && performance\.now\(\) - this\.handGivenUpAt < 300\) this\.handBackMouse\(\);/.test(lock), "and the lock going just after Escape gave a thing up asks for it back rather than opening the menu");
+  const give = bodyOf(main, 'private giveUpHand(): void');
+  ok(/this\.stopPlacing\(\);\s*this\.stopPlacingProp\(\);/.test(give) && /this\.menuClosedAt = now;/.test(give) && /this\.handGivenUpAt = now;/.test(give), 'giving it up shuts the menu out for a moment');
+  // A deed or a prop stays in hand with the backpack or the map up, and Escape there gives it up: the lock is
+  // asked back only through `handBackMouse`, never while a panel, the map or a window holding the mouse is up.
+  ok(/this\.handBackMouse\(\);/.test(give) && !/requestLock|freeMouse/.test(give), 'and asks for the lock back only through `handBackMouse`');
+  ok(/if \(this\.anyPanelOpen\(\) \|\| this\.map\.open \|\| this\.mouseHeldElsewhere\(\)\) return;\s*this\.freeMouse\(false\);/.test(bodyOf(main, 'private handBackMouse(): void')), 'which never takes the lock while a panel, the map or a window holding the mouse is on the screen');
+  // Every key the placing words show is read from the bindings, and spelled again when one moves.
+  ok(/onBindingsChanged\(\(\) => this\.refreshPlaceKeys\(\)\);/.test(main), 'the placing keys are spelled again whenever a binding moves');
+  const refresh = bodyOf(main, 'private refreshPlaceKeys(): void');
+  ok(/const code = this\.input\.bindings\[a\]\[0\];\s*return code \? keyLabel\(code\) : NO_KEY;/.test(refresh) && /k\.turn = cap\('placeTurn'\);\s*k\.lift = cap\('placeLift'\);\s*k\.del = cap\('putAway'\);/.test(refresh), 'from the bindings as they stand, through `keyLabel`, a key with none bound named as the way to bind one');
+  ok(/export const NO_KEY = 'no key: Esc → Controls';/.test(read('src/ui/placingBar.ts')), 'which is "no key: Esc → Controls"');
 }
 
 console.log(`\n${checks} checks passed`);
