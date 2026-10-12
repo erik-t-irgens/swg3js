@@ -3,9 +3,11 @@
 // There are two kinds and the tab shows them as one list. A house put down with a server is the
 // server's (`src/net/homes.ts` keeps the rows, `server/homes.mjs` decides), and taking one down is a
 // word sent to it: it comes down when the server answers, for everybody at once. A house put down
-// with no server -- or with `__debug.house(.., { local: true })` while connected -- is this browser's
-// alone and lasts as long as the world it stands in, so it is kept here, by the key it was filed
-// under in the streamer, and taking it down is done on the spot.
+// with no server -- or with `__debug.house(.., { local: true })` while connected -- is this machine's
+// alone, kept here per world in the browser's own storage and shared by every character played on it,
+// as its props are (`propsPlaced.ts`), so it is still standing the next time anybody comes back with
+// no server; taking it down is done on the spot. While a server keeps the player's houses, the ones
+// this machine keeps wait, not standing (`App.homesKeeper`), for a game with no server.
 //
 // The one slot this replaces held only the last house put down, so a second house left the first one
 // standing with nothing that could ever name it again, and every house filed under the model's own
@@ -16,9 +18,13 @@
 // or a follower's still names it is the dangerous case, and a house is placed with its own origin on
 // the ground at its doorstep (`housePlace.ts`), so that is where everybody is put.
 //
-// Pure of three, of the DOM and of fetching, so a node test can be the game.
+// Pure of three, of the DOM and of fetching, so a node test can be the game. Rule for this file (node
+// runs it with type stripping for the tests): every import with its `.ts` extension, no constructor
+// parameter properties.
 
-/** One house standing here that this browser put down itself. */
+import { mintThing } from './propsPlaced.ts';
+
+/** One house this machine put down itself, in the world it stands in. */
 export interface LocalHome {
   /** What it is filed under in the streamer, which is also how it is named everywhere else here. */
   key: string;
@@ -30,6 +36,29 @@ export interface LocalHome {
   z: number;
   /** Its heading, radians. */
   yaw: number;
+  /** How much ground it keeps clear of plants, metres: its patch's own reach as it was put down. */
+  r?: number;
+}
+
+/** Where this machine keeps the houses it put down itself. One key a world, as the props' is. */
+export function homesKey(world: string): string {
+  return `swg.homes.${world}`;
+}
+
+/** A house read back from storage, or null when it is not one. Nothing trusts what it finds there. */
+export function readHome(raw: unknown): LocalHome | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (typeof r.key !== 'string' || !r.key.startsWith(LOCAL_HOME_PREFIX) || typeof r.model !== 'string' || !r.model) return null;
+  if (!num(r.x) || !num(r.y) || !num(r.z) || !num(r.yaw)) return null;
+  return { key: r.key, model: r.model, name: typeof r.name === 'string' && r.name ? r.name : r.model, x: r.x, y: r.y, z: r.z, yaw: r.yaw, ...(num(r.r) && r.r > 0 ? { r: r.r } : {}) };
+}
+
+/** The browser's own small store, as the props' is handed it: either half may throw, or answer nothing. */
+export interface HomeStore {
+  get(key: string): string | null;
+  set(key: string, value: string): void;
 }
 
 /** Every number here is ours. */
@@ -62,47 +91,198 @@ export function isLocalHome(id: string): boolean {
 }
 
 /**
- * The houses this browser has put down in the world it is in.
+ * The houses this machine has put down in the world it is in, read from its storage on every arrival
+ * (`enter`) and written back on every change, so they are standing again the next time anybody comes
+ * back with no server.
  *
- * Forgotten on every arrival: a world unloading takes every building with it, and these are not
- * written down anywhere to be put back. The keys are never reused within a session, so a house taken
- * down and another put up cannot be confused for one another.
+ * Which of them stand is kept here too (`setStanding`), because they stand only while this machine keeps
+ * the player's houses: with a server that does, they wait. A key is the moment and a little randomness
+ * (`mintThing`), so it outlasts a reload and is never handed out again, by this list or by another.
  */
 export class LocalHomes {
   private rows: LocalHome[] = [];
-  private seq = 0;
+  private readonly up = new Set<string>();
+  private worldId = '';
+  private store: HomeStore | null = null;
+  /** Which run of standing is in force (`beginStand`): taking every house down moves it on. */
+  private round = 0;
+  /**
+   * Houses still going up, by key, each under a number of its own (`beginPlace`): a run that meets one already
+   * on its way leaves it to that one rather than placing its key a second time, which would file the key twice
+   * in the streamer and leave a copy no take-down can reach. An arrival lets go of the lot, and a number keeps a
+   * placing begun before it from letting go of one begun after it under the same key.
+   */
+  private readonly placing = new Map<string, number>();
+  private ticket = 0;
+  /** Why the last write did not reach the storage, for the console: kept for the session instead. */
+  note = '';
 
   get all(): readonly LocalHome[] {
     return this.rows;
   }
 
-  /** A key nothing else has had this session. */
-  mint(): string {
-    this.seq++;
-    return `${LOCAL_HOME_PREFIX}${this.seq}`;
+  /** Which world these are, or '' before any. */
+  get world(): string {
+    return this.worldId;
+  }
+
+  /**
+   * Come to a world: what this machine keeps for it, read from its storage. Nothing stands yet: the world
+   * these were standing in went with the arrival, and the game stands them once the world is in and this
+   * machine keeps the player's houses. A storage that cannot be read gives none, and they are written into
+   * it from the first change on.
+   */
+  enter(world: string, store: HomeStore): void {
+    this.worldId = world;
+    this.store = store;
+    this.rows = [];
+    this.up.clear();
+    this.placing.clear();
+    this.round++;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(store.get(homesKey(world)) ?? '[]');
+    } catch {
+      raw = [];
+    }
+    for (const r of Array.isArray(raw) ? raw : []) {
+      const row = readHome(r);
+      if (row && !this.rows.some((o) => o.key === row.key)) this.rows.push(row);
+    }
+  }
+
+  /** A key nothing has had before and nothing will have again: the moment and a little randomness. */
+  mint(now = Date.now(), rnd: () => number = Math.random): string {
+    let key = '';
+    do key = `${LOCAL_HOME_PREFIX}${mintThing(now, rnd)}`;
+    while (this.rows.some((r) => r.key === key));
+    return key;
   }
 
   add(row: LocalHome): void {
     const i = this.rows.findIndex((r) => r.key === row.key);
     if (i >= 0) this.rows[i] = { ...row };
     else this.rows.push({ ...row });
+    this.save();
   }
 
   find(key: string): LocalHome | null {
     return this.rows.find((r) => r.key === key) ?? null;
   }
 
-  /** Take one off the list. Answers the row that went, or null. */
+  /** Take one off the list, and out of this machine's keeping. Answers the row that went, or null. */
   remove(key: string): LocalHome | null {
     const i = this.rows.findIndex((r) => r.key === key);
     if (i < 0) return null;
     const [row] = this.rows.splice(i, 1);
+    this.up.delete(key);
+    this.save();
     return row;
   }
 
-  /** The world went (an arrival, a respawn, the select screen): nothing of these is standing any more. */
+  /** Whether one stands in the world now. */
+  isStanding(key: string): boolean {
+    return this.up.has(key);
+  }
+
+  /** One stood, or taken down, by the game. */
+  setStanding(key: string, on: boolean): void {
+    if (on && this.rows.some((r) => r.key === key)) this.up.add(key);
+    else this.up.delete(key);
+  }
+
+  /** The keys standing now, for taking them all down. */
+  standingKeys(): string[] {
+    return [...this.up];
+  }
+
+  /** How many of this world's are kept here and not standing: waiting for a game with no server. */
+  get waiting(): number {
+    return this.rows.length - this.up.size;
+  }
+
+  /**
+   * A run of standing begins, or every house is taken down (`endStand`): which run is in force, so a stand
+   * still loading for a run since overtaken puts its house straight back down.
+   */
+  beginStand(): number {
+    return ++this.round;
+  }
+
+  /** Whether a run of standing is still the one in force. */
+  standing(round: number): boolean {
+    return round === this.round;
+  }
+
+  /** Every house is down (the game took them down): no run of standing is in force any more. */
+  endStand(): void {
+    this.round++;
+    this.up.clear();
+  }
+
+  /** A house begins going up: answers the number its landing hands back to `endPlace`. */
+  beginPlace(key: string): number {
+    const ticket = ++this.ticket;
+    this.placing.set(key, ticket);
+    return ticket;
+  }
+
+  /** A house has landed (or not): no longer going up, unless a later placing of the same key has begun since. */
+  endPlace(key: string, ticket: number): void {
+    if (this.placing.get(key) === ticket) this.placing.delete(key);
+  }
+
+  /** Whether one is still going up. */
+  isPlacing(key: string): boolean {
+    return this.placing.has(key);
+  }
+
+  /**
+   * A house begun with `beginPlace` has landed, `placed` whether it went up, `wanted` whether this machine keeps
+   * the player's houses now. Answers what the game does with it: `stands` (marked standing here), `down` (take it
+   * straight back down), or `none`. One whose placing an arrival let go of went with the world it went up in, and
+   * comes down only while nothing of this world stands or goes up under its key. Otherwise it stands while it is
+   * wanted and kept and not already standing -- whichever run began it, so one a run since overtaken left on its way
+   * (everything taken down and stood again while a model loaded) stands rather than being lost or filed twice.
+   */
+  land(key: string, ticket: number, placed: boolean, wanted: boolean): 'stands' | 'down' | 'none' {
+    const mine = this.placing.get(key) === ticket;
+    if (mine) this.placing.delete(key);
+    if (!placed) return 'none';
+    if (!mine) return this.up.has(key) || this.placing.has(key) ? 'none' : 'down';
+    if (wanted && !this.up.has(key) && this.rows.some((r) => r.key === key)) {
+      this.up.add(key);
+      return 'stands';
+    }
+    return 'down';
+  }
+
+  /** The circles this world's ground keeps plants off for them, game frame, before it is first built. */
+  circles(): { x: number; z: number; r: number }[] {
+    const out: { x: number; z: number; r: number }[] = [];
+    for (const h of this.rows) if (h.r && h.r > 0) out.push({ x: h.x, z: h.z, r: h.r });
+    return out;
+  }
+
+  /** The world went for good (the select screen): nothing of these is standing, and nothing is kept in hand. */
   clear(): void {
     this.rows = [];
+    this.up.clear();
+    this.placing.clear();
+    this.round++;
+    this.worldId = '';
+    this.store = null;
+  }
+
+  /** This world's rows into this machine's keeping; one that cannot be written is kept for the session, and said once. */
+  private save(): void {
+    if (!this.store || !this.worldId) return;
+    try {
+      this.store.set(homesKey(this.worldId), JSON.stringify(this.rows));
+      this.note = '';
+    } catch {
+      this.note = 'this browser will not keep them: they last as long as this session';
+    }
   }
 }
 
@@ -162,7 +342,7 @@ export function myBuildings(server: readonly ServerHome[], local: readonly Local
   }
   for (const r of local) {
     const away = Math.hypot(r.x - at.x, r.z - at.z);
-    out.push({ id: r.key, name: r.name, model: r.model, line: `${awayText(away)} · this session only`, x: r.x, z: r.z, away, shared: false });
+    out.push({ id: r.key, name: r.name, model: r.model, line: `${awayText(away)} · kept on this machine`, x: r.x, z: r.z, away, shared: false });
   }
   out.sort((a, b) => a.away - b.away || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return out;

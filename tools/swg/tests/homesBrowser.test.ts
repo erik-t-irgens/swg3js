@@ -26,12 +26,17 @@ function world() {
   const removed: string[] = [];
   const said: string[] = [];
   const sent: Record<string, unknown>[] = [];
-  let hold: (() => void) | null = null;
+  // The next placing is held open (`holdNext`), and only it: the ones after it go straight up.
+  let holding = false;
+  const held: (() => void)[] = [];
   let refuse = false;
   const deps = {
     place: async (model: string, o: { at: { x: number; z: number }; yaw: number; key: string; y: number }) => {
       placed.push({ model, key: o.key, y: o.y, x: o.at.x, z: o.at.z, yaw: o.yaw });
-      if (hold) await new Promise<void>((done) => (hold = done));
+      if (holding) {
+        holding = false;
+        await new Promise<void>((done) => void held.push(done));
+      }
       return refuse ? { ok: false, why: 'the ground would not take it' } : { ok: true, why: null };
     },
     unplace: (key: string) => {
@@ -51,12 +56,12 @@ function world() {
     sent,
     /** Hold the next placing open until `release` is called. */
     holdNext: () => {
-      hold = () => {};
+      holding = true;
     },
+    /** Let the oldest placing held open land. */
     release: () => {
-      const f = hold;
-      hold = null;
-      if (typeof f === 'function') f();
+      holding = false;
+      held.shift()?.();
     },
     refuseNext: () => (refuse = true),
     allowNext: () => (refuse = false),
@@ -222,6 +227,74 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
   w.h.ready();
   await settle();
   ok(w.placed.length === 1, 'and coming back to the same world builds nothing until the server says so again');
+}
+
+// ---------------------------------------------------------------- this machine keeps the player's houses (W6)
+
+{
+  // The line was put down, or the far end keeps none: the server's houses come down here and are held, what
+  // it says is still kept, and they stand again the moment the server keeps the player's houses again.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1'), row('h2', { x: 500 })] });
+  await settle();
+  w.holdNext();
+  w.h.word({ t: 'homeUp', home: row('h3', { x: 900 }) });
+  await settle();
+  w.h.takeDownAll();
+  w.release();
+  await settle();
+  ok(w.h.report().standing === 0 && w.h.report().held, 'taken down, none of the server\'s stands here and they are held');
+  ok(w.removed.includes(homeKey('h1')) && w.removed.includes(homeKey('h2')) && w.removed.includes(homeKey('h3')), 'every one comes down, one still going up included');
+  w.h.word({ t: 'homeUp', home: row('h4', { x: 1500 }) });
+  w.h.ready();
+  await settle();
+  ok(w.h.report().standing === 0 && w.h.report().rows.length === 4, 'and while held a word is kept and nothing stands, whoever asks');
+  const before = w.placed.length;
+  w.h.resume(false);
+  await settle();
+  ok(w.placed.length === before && !w.h.report().held, 'let go of at an arrival, nothing is stood until the world is ready');
+  w.h.resume();
+  await settle();
+  ok(w.h.report().standing === 4, 'and the server keeps them again: every one it said stands');
+  w.h.takeDownAll();
+  w.h.clear();
+  ok(!w.h.report().held, 'and the select screen lets go of the hold with everything else');
+}
+
+{
+  // Taken down and stood again while one is still going up (a Disconnect and a Connect inside one model load):
+  // the one on its way is the only placing of its key, and it stands as it lands rather than being lost.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.holdNext();
+  w.h.word({ t: 'homeUp', home: row('h1') });
+  await settle();
+  w.h.takeDownAll();
+  w.h.resume();
+  await settle();
+  ok(w.placed.length === 1, 'held and resumed while one is going up places nothing a second time');
+  w.release();
+  await settle();
+  ok(w.h.report().standing === 1 && !w.removed.includes(homeKey('h1')), 'and the one on its way stands as it lands, since the server keeps them again');
+}
+
+{
+  // A world come back to while a house is still going up into the one that went: the new world's own house under
+  // the same key is never taken down by the old one landing.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.holdNext();
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.enter('tatooine:');
+  // The old placing is held; the new world's goes straight up.
+  w.h.ready();
+  await settle();
+  ok(w.placed.length === 2 && w.h.report().standing === 1, "the world arriving again stands its own while the old one is still on its way");
+  w.release();
+  await settle();
+  ok(w.h.report().standing === 1 && !w.removed.includes(homeKey('h1')), "and the old one landing takes nothing down here, where the new world's house stands under the same key");
 }
 
 // ---------------------------------------------------------------- what it says and what it sends

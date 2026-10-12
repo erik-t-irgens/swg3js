@@ -137,6 +137,13 @@
 //                                                          with the place; the server decides how many there are,
 //                                                          whose they are, and that two are not in one spot
 //   { t: 'removeHome', id }                                  take one of yours back down
+//   { t: 'placeProp', prop, x, y, z, q, inside? }            put a prop down in the world you are standing on
+//                                                          (propsKept.mjs): the props catalogue's id, the place and
+//                                                          the whole turn [x, y, z, w], and whether it stands in a
+//                                                          room. Whether it may stand there is the placing browser's
+//                                                          answer; the server decides how many there are and whose
+//   { t: 'moveProp', id, x, y, z, q, inside? }               put one of yours down somewhere else on the same world
+//   { t: 'removeProp', id }                                  take one of yours away
 //   { t: 'purse', do: ask|spend|give, credits?, what? }       what a character has to spend (purse.mjs): a number on
 //                                                          the character and not a thing in a backpack. A spend is
 //                                                          asked for and never announced -- the answer is what the
@@ -174,7 +181,7 @@
 //   { t: 'story', do: 'texts', id, n, of, part }             (story 4) the journal's words the server asked for, in pieces
 //   { t: 'story', do: 'mine', ref, text }                    (story 4) a note of the player's own on a journal entry
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint }   sent the instant the socket opens, before
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props }   sent the instant the socket opens, before
 //                                                          anything is said; `story` is { v, sets, tests }, the story this
 //                                                          server holds, which a browser built before it never reads; `items`
 //                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
@@ -182,7 +189,10 @@
 //                                                          server that passes a ship's or a speeder's colours carried whole
 //                                                          on (a hello `ship`'s `colours`, shipWire.mjs's PAINT_VERSION); any
 //                                                          other drops them, and the others see the nearest colour of the
-//                                                          hull's own palette the fit's `paint` carries beside them
+//                                                          hull's own palette the fit's `paint` carries beside them;
+//                                                          `props` is 1 on a server that keeps a player's props
+//                                                          (propsKept.mjs's PROPS_VERSION), so a browser hands its props
+//                                                          to it, and keeps them itself against any other
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -249,6 +259,14 @@
 //   { t: 'homeUp', home }   { t: 'homeDown', id }   (to everybody on that world, the one who did it included, since
 //                                                          what they need to hear is the id the server gave it)
 //   { t: 'homeNo', why }   (to whoever asked, and to nobody else)
+//   { t: 'props', world, rows: [{ id, owner, prop, x, y, z, q, inside?, at }] }   (every player's props standing on this
+//                                                          world, sent on arriving, an empty list included: a browser
+//                                                          back after a dropped line forgets those taken away meanwhile)
+//   { t: 'propUp', prop }   { t: 'propMoved', prop }   { t: 'propDown', id }   (to everybody on that world, the one who did
+//                                                          it included)
+//   { t: 'propNo', why, id? }   (to whoever asked, and to nobody else; `id` names the row a refused move or removal was
+//                                                          about, which its browser stands again where it stood. Every
+//                                                          word about a prop not acted on is answered so, never dropped)
 //   { t: 'purse', credits?, spent?, given?, what?, why? }   (to whoever asked, and to nobody else)
 //   { t: 'story', do: 'book', id, n, of, part, take }   (the server's book, in pieces, and whose copy stands: `browser`
 //                                                          when the browser's was just taken, `server` otherwise)
@@ -296,6 +314,7 @@ import { NpcPlaces, cleanNpcBatch, cleanNpcBlow, cleanNpcDrop, cleanNpcHit } fro
 import { ITEMS_VERSION, LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOME_TUNING, Homes, cleanHome, cleanRemove, mayPlace } from './homes.mjs';
+import { PROPS_VERSION, PROP_SAYS, PROP_TUNING, PropsKept, cleanPropMove, cleanPropPlace, cleanPropRemove, mayProp } from './propsKept.mjs';
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
 import { STORY_TUNING, Stories } from './stories.mjs';
 import { readStorySet } from './storySet.mjs';
@@ -413,6 +432,7 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('item.') && has(LEDGER_TUNING, name.slice(5))) LEDGER_TUNING[name.slice(5)] = value;
   else if (name.startsWith('spot.') && has(SPOT_TUNING, name.slice(5))) SPOT_TUNING[name.slice(5)] = value;
   else if (name.startsWith('home.') && has(HOME_TUNING, name.slice(5))) HOME_TUNING[name.slice(5)] = value;
+  else if (name.startsWith('prop.') && has(PROP_TUNING, name.slice(5))) PROP_TUNING[name.slice(5)] = value;
   else if (name.startsWith('purse.') && has(PURSE_TUNING, name.slice(6))) PURSE_TUNING[name.slice(6)] = value;
   else if (name.startsWith('story.') && has(STORY_TUNING, name.slice(6))) STORY_TUNING[name.slice(6)] = value;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
@@ -496,6 +516,10 @@ const spots = new Spots({ tuning: SPOT_TUNING });
 // goes out through the store, so the log has it before anybody is told.
 const homes = new Homes({ tuning: HOME_TUNING, write: (rec) => store.change(rec) });
 homes.load(store.data);
+// The props players have put down (propsKept.mjs), written down beside the houses for the same reason:
+// a chair a friend saw you put down yesterday is still there today, for both of you.
+const propsKept = new PropsKept({ tuning: PROP_TUNING, write: (rec) => store.change(rec) });
+propsKept.load(store.data);
 // What each character has to spend (purse.mjs). A number and not a thing, written down like the
 // rest: a balance only in memory would be a different number after every restart.
 const purses = new Purses({ tuning: PURSE_TUNING, write: (rec) => store.change(rec) });
@@ -986,6 +1010,10 @@ function onMessage(c, text, trimmed = false) {
     if (first || move.from !== key) {
       const built = homes.forWorld(key);
       if (built.length) send(c, { t: 'homes', world: key, rows: built });
+      // And every player's props on it, sent whole even when there are none: unlike the houses this word is
+      // new, so a browser built before it drops it whatever it holds, and one built for it that comes back
+      // after its line dropped is told that the props taken away meanwhile are gone.
+      send(c, { t: 'props', world: key, rows: propsKept.forWorld(key) });
     }
     if (first) {
       tellRoomAbout(key, c);
@@ -1599,6 +1627,36 @@ function onMessage(c, text, trimmed = false) {
       if (!gone) return;
       deliverTo(homes.remove(c.character, c.id, gone.id, others, adminFor(store.data, ADMIN) === c.player));
     }
+  } else if (msg.t === 'placeProp' || msg.t === 'moveProp' || msg.t === 'removeProp') {
+    // A prop put down, moved or taken away in the world, the houses' way: written down, everybody on that
+    // world told, and everybody arriving later handed it. Whether it may stand where it was put is the
+    // placing browser's answer, as the ground under a house is; the server decides how many and whose.
+    //
+    // Unlike a house's word, none of these is dropped in silence: a move or a removal has already taken its
+    // prop down in the asking browser, which stands it again only on hearing back, so every word not acted on
+    // is answered to the asker alone (`PROP_SAYS`), the row named where there is one.
+    const world = c.hello ? rooms.keyOf(c.id) : null;
+    if (!world) {
+      deliverTo(propsKept.refuse(c.id, msg, PROP_SAYS.nowhere));
+      return;
+    }
+    c.propping ??= { at: 0, lines: 0 };
+    if (!mayProp(c.propping, Date.now(), PROP_TUNING)) {
+      deliverTo(propsKept.tooFast(c.id, msg, c.propping));
+      return;
+    }
+    const others = [...rooms.members(world)];
+    const admin = adminFor(store.data, ADMIN) === c.player;
+    if (msg.t === 'placeProp') {
+      const want = cleanPropPlace(msg);
+      deliverTo(want ? propsKept.place(c.character, c.id, world, want, others) : propsKept.refuse(c.id, msg, PROP_SAYS.unread));
+    } else if (msg.t === 'moveProp') {
+      const want = cleanPropMove(msg);
+      deliverTo(want ? propsKept.move(c.character, c.id, world, want.id, want, others, admin) : propsKept.refuse(c.id, msg, PROP_SAYS.unread));
+    } else {
+      const gone = cleanPropRemove(msg);
+      deliverTo(gone ? propsKept.remove(c.character, c.id, gone.id, others, admin) : propsKept.refuse(c.id, msg, PROP_SAYS.unread));
+    }
   }
 }
 
@@ -1634,6 +1692,7 @@ const server = createServer((req, res) => {
         items: ledger.describe(),
         spots: spots.describe(),
         homes: homes.describe(),
+        props: propsKept.describe(),
         purses: purses.describe(),
         stories: stories.describe(),
         joinWord: WORD ? 'set' : 'none',
@@ -1651,6 +1710,7 @@ const server = createServer((req, res) => {
         item: LEDGER_TUNING,
         spot: SPOT_TUNING,
         home: HOME_TUNING,
+        prop: PROP_TUNING,
         purse: PURSE_TUNING,
         story: STORY_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
@@ -1705,8 +1765,9 @@ server.on('upgrade', (req, socket) => {
   // built for it keeps its book itself against any far end whose hail does not carry it. `v` 2 is the jobs
   // run here; the sets are the story sets read, by name and hash; `tests` is whether the test set is on.
   // `items` says this server keeps a row per thing, so a browser built for it may hand up two of one item;
-  // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION });
+  // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them;
+  // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');

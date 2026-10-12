@@ -24,6 +24,8 @@ export class PropsUi {
   private readonly find: HTMLInputElement;
   private readonly examine: HTMLElement;
   private readonly hint: HTMLElement;
+  /** Who keeps the player's props here, in one line (`setKept`). */
+  private readonly kept: HTMLElement;
   private catalogue: PropCatalogue | null = null;
   private readonly groups = new GroupState();
   private lastFind = '';
@@ -59,10 +61,12 @@ export class PropsUi {
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body props-body give-body"></div></div>
         <div class="bp-examine"></div>
-        <div class="bp-hint"></div>
+        <div class="bp-hint bp-kept"></div>
+        <div class="bp-hint bp-keys"></div>
       </div>`;
     parent.appendChild(this.root);
-    this.hint = this.root.querySelector('.bp-hint')!;
+    this.hint = this.root.querySelector('.bp-keys')!;
+    this.kept = this.root.querySelector('.bp-kept')!;
     this.setKeys('R', 'F');
     this.body = this.root.querySelector('.props-body')!;
     this.count = this.root.querySelector('.count')!;
@@ -140,6 +144,14 @@ export class PropsUi {
    */
   setKeys(turn: string, lift: string): void {
     this.hint.textContent = `double-click to take one in hand · then the wheel moves it, hold ${turn} and move the mouse to turn it (shift to tip and roll), hold ${lift} to raise it, and a click puts it down`;
+  }
+
+  /**
+   * Who keeps the player's props here, in one line: the server (and everybody on the world sees them) or this
+   * machine, and how many wait on this machine for a game with no server. Written only when it changes.
+   */
+  setKept(text: string): void {
+    if (this.kept.textContent !== text) this.kept.textContent = text;
   }
 
   attach(catalogue: PropCatalogue | null): void {

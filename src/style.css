@@ -452,6 +452,9 @@ b { color: var(--accent); font-weight: 600; }
 .bp-actions button[disabled] { opacity: 0.45; cursor: default; }
 .bp-actions button.armed { background: color-mix(in srgb, var(--bad) 55%, transparent); border-color: var(--bad); }
 .bp-hint { padding: 6px 14px 10px; font-size: 10px; color: var(--muted); letter-spacing: 0.03em; }
+/* The Props tab's line saying who keeps the player's props, over its keys' line: nothing at all while it says nothing. */
+.bp-hint.bp-kept { padding-bottom: 0; color: var(--ink); }
+.bp-hint.bp-kept:empty { display: none; }
 .bp-note { color: var(--warn); }
 @media (max-width: 760px) { .backpack-main { grid-template-columns: minmax(0, 1fr); } }
 

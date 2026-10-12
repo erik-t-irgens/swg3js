@@ -25,6 +25,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { fromBase32, fromHex, hmacSha256, sha256, toBase32, toHex, utf8 } from '../../../src/net/hash.ts';
 import { SESSION, Session, characterMark, playerIdOf, proofOf, tuneSession, verifierOf, wordProofOf, type SessionStore } from '../../../src/net/session.ts';
 import { MULTIPLAYER_PARTS, multiplayerMarkup } from '../../../src/ui/multiplayerPage.ts';
+import { keeperOf, keeperState, type Keeper } from '../../../src/net/propsKept.ts';
 import { checkClaim, playerIdFor, verifierFor } from '../../../server/identity.mjs';
 import { cleanClaim } from '../../../server/wire.mjs';
 
@@ -464,6 +465,32 @@ const claimOf = (sent: Record<string, unknown>[]) => sent.find((m) => m.t === 'c
   b.it.hail({ v: 5, now: 1, nonce: NONCE });
   b.it.claimed({ character: 'char-1' }, 'same');
   ok(b.it.itemsVersion === 0, 'a server whose greeting says nothing of it is one from before, which folds two of one item into one');
+}
+
+{
+  // Whether the far end keeps a player's props: heard in the greeting, in force once the server has us, and
+  // nothing at all from a server whose greeting says nothing of it -- every relay from before props, which would
+  // drop a prop handed to it in silence. Put through the very rule the game asks with (`keeperState`, `keeperOf`).
+  const facts = { serverHolds: false, wanted: false, answering: false, sinceArrivalMs: 0 };
+  const keeper = (it: Session, prev: Keeper) => keeperOf(prev, keeperState(facts, it, true, true, false, 100));
+  const a = session();
+  a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  a.it.opening();
+  a.it.hail({ v: 6, now: 1, nonce: NONCE, props: 1 });
+  ok(a.it.propsVersion === 0 && a.it.debug().props === 1, 'a server that keeps props says so, and nothing rests on it until the claim is taken');
+  ok(keeper(a.it, 'pending') === 'pending' && keeper(a.it, 'server') === 'server', 'so nobody knows yet who keeps them, and a keeper that was the server stays it');
+  a.it.claimed({ character: 'char-1' }, 'same');
+  ok(a.it.propsVersion === 1 && keeper(a.it, 'pending') === 'server' && keeper(a.it, 'local') === 'server', 'once it is, the props are the server\'s');
+  a.it.closed();
+  ok(a.it.propsVersion === 0 && keeper(a.it, 'server') === 'server', 'with the line dropped and wanted back they stay the server\'s, standing, though nothing rests on the greeting');
+  const b = session();
+  b.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  b.it.opening();
+  b.it.hail({ v: 5, now: 1, nonce: NONCE, items: 2, paint: 2 });
+  b.it.claimed({ character: 'char-1' }, 'same');
+  ok(b.it.propsVersion === 0 && b.it.debug().props === 0, 'a server whose greeting says nothing of props keeps none');
+  ok(keeper(b.it, 'pending') === 'local' && keeper(b.it, 'server') === 'local', "so a player's props are this machine's against it, even coming back to it over a line that dropped from one that kept them");
+  ok(keeperOf('pending', keeperState(facts, b.it, false, true, false, 100)) === 'server', 'while its houses, which it does keep, are its own');
 }
 
 {

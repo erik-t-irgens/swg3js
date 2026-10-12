@@ -52,6 +52,11 @@ export interface HousingModel {
   mine: HousingBuilt[];
   /** What to say under the heading when there are none. */
   mineNote: string;
+  /**
+   * How many this machine keeps on this world that do not stand, because a server keeps the player's houses
+   * now: they wait for a game with no server, and are said as a count, never offered to be taken down.
+   */
+  waiting?: number;
 }
 
 export class HousingUi {
@@ -195,7 +200,8 @@ export class HousingUi {
         );
       })
       .join('');
-    return `<h3 class="housing-head">Your buildings <span>${m.mine.length ? `${m.mine.length} standing on this world` : escapeHtml(m.mineNote)}</span></h3>${rows}`;
+    const waiting = m.waiting ? ` · ${m.waiting} more wait on this machine for a game with no server` : '';
+    return `<h3 class="housing-head">Your buildings <span>${m.mine.length ? `${m.mine.length} standing on this world` : escapeHtml(m.mineNote)}${waiting}</span></h3>${rows}`;
   }
 
   private draw(): void {

@@ -71,7 +71,7 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   ok(list.length === 3, "the server's and this browser's own are one list");
   ok(list.map((b) => b.id).join(',') === 'h7,local:1,h3', 'nearest first, whoever keeps it');
   ok(list[0].shared && !list[1].shared, 'and each says who keeps it');
-  ok(list[0].line.includes('server') && list[1].line.includes('session'), 'in its line, where the player can read it');
+  ok(list[0].line.includes('server') && list[1].line.includes('this machine'), 'in its line, where the player can read it: the server, or this machine');
   ok(list[0].name === 'Medium Corellian House' && list[0].model === 'ply_corl_house_m_s01', "a server row is named from its model's deed");
   ok(myBuildings([], [], at, (m) => m).length === 0, 'nobody with nothing standing has an empty list, not an error');
 
@@ -118,7 +118,8 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   // Houses.
   ok(!/lastHouse/.test(main), 'the one slot that held only the last house is gone');
   ok(/this\.localHomes\.mint\(\)[\s\S]{0,200}placeBuilding\(model, \{ at: \{ x: state\.x, z: state\.z \}, yaw: state\.yaw, y: state\.y, key \}/.test(main), 'a house put down from a deed with no server is filed under a key of its own');
-  ok(/const key = this\.localHomes\.mint\(\);\s*const out = await this\.world\.placeBuilding\(model, \{ from:/.test(main), "and so is one the console's house helper puts down");
+  // The world it goes into is kept across the placing's wait, and a travel in it files nothing into the next world.
+  ok(/const key = this\.localHomes\.mint\(\);[\s\S]{0,300}?const world = this\.localHomes\.world;\s*const out = await this\.world\.placeBuilding\(model, \{ from:[^\n]*\n\s*if \(this\.localHomes\.world !== world\) \{\s*if \(out\.ok\) this\.world\.unplaceBuilding\(key\);\s*return \{ error:/.test(main), "and so is one the console's house helper puts down, never filed into a world it was not put down in");
   ok(/unplace: \(key\) => \{\s*this\.standOutOf\(key\);\s*return this\.world\.unplaceBuilding\(key\);/.test(main), "the server's word that takes a house down stands this browser's people out of it first");
   ok(/this\.standOutOf\(row\.key\);\s*this\.world\.unplaceBuilding\(row\.key\);/.test(main), 'and so does taking down one this browser put down itself');
   ok(/homes\.askDown\(id\)/.test(main) && /private takeDownHome\(id: string\): string/.test(main), "a server's house is asked for, and comes down when the server answers");
@@ -155,7 +156,11 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   ok(/held\.cell = null;\s*v\.setInRoom\(false\)/.test(world), 'and a ship stood in one of its rooms is outdoors from then on');
   ok(/if \(this\.cellState\?\.building !== b\) return null;\s*this\.cellState = null;/.test(world), "the player's room is let go of only when it is that building");
   const arrive = /private arrive\(planet: PlanetDef[\s\S]*?this\.placeNames = \[\];/.exec(main)?.[0] ?? '';
-  ok(/this\.world\.load\(planet/.test(arrive) && /this\.localHomes\.clear\(\);/.test(arrive), "an arrival forgets this browser's own houses, which went with the world");
+  // This machine keeps its own houses per world now (W6): an arrival hands them the world and its store, and
+  // never forgets them there; only the select screen clears the list, the rows staying in the storage.
+  ok(/this\.world\.load\(planet/.test(arrive) && /this\.localHomes\.enter\(placesFor, this\.homeStore\(\)\);/.test(arrive) && !/this\.localHomes\.clear\(\);/.test(arrive), "an arrival reads this machine's own houses for the world arriving from its storage, and forgets none of them");
+  const toSelectHomes = /private switchToSelect\(\): void \{[\s\S]{0,6000}/.exec(main)?.[0] ?? '';
+  ok(/homes\.clear\(\);\s*keptProps\.clear\(\);\s*this\.localHomes\.clear\(\);/.test(toSelectHomes), 'and the select screen lets go of the server\'s houses and props and this machine\'s list, which the next arrival reads again');
 
   // The tab.
   const uiCode = ui.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/housing-confirm/g, '');

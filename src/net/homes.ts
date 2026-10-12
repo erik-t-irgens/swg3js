@@ -56,8 +56,13 @@ export class Homes {
   private standing = new Set<string>();
   /** What each one is, for the console and for anything later that wants to know whose a house is. */
   readonly rows = new Map<string, HomeRow>();
-  /** Placings still going up, so two words about one id in the same breath cannot race each other. */
-  private busy = new Set<string>();
+  /**
+   * Placings still going up, by id, each under a number of its own: two words about one id in the same breath
+   * cannot race each other, and a placing begun before an arrival (whose `enter` lets go of the lot) can never
+   * let go of one begun after it under the same id, which would let a third placing file the key twice.
+   */
+  private busy = new Map<string, number>();
+  private ticket = 0;
   /** For the console: how many have been stood, how many refused, and the last thing the server said. */
   stood = 0;
   refused = 0;
@@ -103,7 +108,41 @@ export class Homes {
     this.standing.clear();
     this.rows.clear();
     this.busy.clear();
+    this.age++;
     this.world = '';
+    this.held = false;
+  }
+
+  /**
+   * Whether the server's houses are held down: this machine keeps the player's houses now (the line was put
+   * down, or the far end keeps none), so its own stand instead (`App.homesKeeper`). Held, what the server says
+   * is still kept, and nothing is stood until `resume`.
+   */
+  private held = false;
+
+  /**
+   * Take every house the server keeps down here, and hold them there until `resume`. One still going up comes
+   * straight back down as it lands while they are held, and stands after all if they were resumed first (`ready`
+   * leaves a house going up to the placing already on its way, rather than placing its key a second time).
+   */
+  takeDownAll(): void {
+    this.held = true;
+    for (const id of this.standing) this.deps?.unplace(homeKey(id));
+    this.standing.clear();
+  }
+
+  /**
+   * The server keeps the player's houses again: what it said stands -- now, or (`stand` false, an arrival whose
+   * world is still loading) at `ready`, once there is a world to stand it in.
+   */
+  resume(stand = true): void {
+    this.held = false;
+    if (stand) this.ready();
+  }
+
+  /** Whether the server's houses are held down (`takeDownAll`). */
+  get isHeld(): boolean {
+    return this.held;
   }
 
   /**
@@ -115,6 +154,7 @@ export class Homes {
    * would not take is kept rather than thrown away, and this is what tries them again.
    */
   ready(): void {
+    if (this.held) return;
     for (const row of this.rows.values()) if (!this.standing.has(row.id)) void this.up(row);
   }
 
@@ -159,26 +199,40 @@ export class Homes {
   }
 
   /** What `__debug.homes()` prints. */
-  report(): { standing: number; stood: number; refused: number; lastWhy: string; rows: HomeRow[] } {
-    return { standing: this.standing.size, stood: this.stood, refused: this.refused, lastWhy: this.lastWhy, rows: [...this.rows.values()] };
+  report(): { standing: number; held: boolean; stood: number; refused: number; lastWhy: string; rows: HomeRow[] } {
+    return { standing: this.standing.size, held: this.held, stood: this.stood, refused: this.refused, lastWhy: this.lastWhy, rows: [...this.rows.values()] };
   }
 
   private async up(row: HomeRow): Promise<void> {
     if (!row || typeof row.id !== 'string' || !row.id) return;
+    // Held down: the server's word is kept, and stood when the server keeps the player's houses again.
+    if (this.held) {
+      this.rows.set(row.id, row);
+      return;
+    }
     if (this.standing.has(row.id) || this.busy.has(row.id)) return;
     const deps = this.deps;
     if (!deps) return;
-    this.busy.add(row.id);
+    const ticket = ++this.ticket;
+    this.busy.set(row.id, ticket);
     this.rows.set(row.id, row);
     const age = this.age;
     try {
       // The server's own height, not one measured again here: the ground was tested once, by
       // whoever placed it, and a house has one height whatever browser is looking at it.
       const out = await deps.place(row.model, { at: { x: row.x, z: row.z }, yaw: row.h, key: homeKey(row.id), y: row.y });
-      // Taken down, or the world torn down, while it was going up. Both leave it not standing, and
-      // the second is why the age is checked at all: after a reload into the same world the rows
-      // are still there and wanting it is not the question.
-      if (age !== this.age || !this.rows.has(row.id)) {
+      // The world torn down while it was going up: after a reload into the same world the rows are
+      // still there and wanting it is not the question, which is why the age is checked at all. It
+      // went with the world it went up in, and comes down here only while nothing of this world
+      // stands or goes up under its key -- taken down regardless, it could take the next world's
+      // copy of the same house down instead.
+      if (age !== this.age) {
+        if (!this.standing.has(row.id) && !this.busy.has(row.id)) deps.unplace(homeKey(row.id));
+        return;
+      }
+      // Taken down, or held down, while it was going up: it comes straight back down. Held and then
+      // resumed in that time, it stands after all, since `ready` left it to this placing.
+      if (!this.rows.has(row.id) || this.held) {
         deps.unplace(homeKey(row.id));
         return;
       }
@@ -191,7 +245,7 @@ export class Homes {
         this.lastWhy = out.why ?? '';
       }
     } finally {
-      this.busy.delete(row.id);
+      if (this.busy.get(row.id) === ticket) this.busy.delete(row.id);
     }
   }
 

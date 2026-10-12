@@ -1,6 +1,7 @@
 // The truth the server keeps between runs: the players it knows, their characters, the things they
 // own (a row per item, whose shape is the ledger's: see ledger.mjs), the buildings they have put
-// down (a row per house, whose shape is homes.mjs's), each character's story book (whose shape is
+// down (a row per house, whose shape is homes.mjs's), the props they have put down (a row per prop,
+// whose shape is propsKept.mjs's), each character's story book (whose shape is
 // `src/story/book.ts`'s, through stories.mjs) and the switches it was started with. One file you can
 // read, plus a log of the changes since it was last written.
 //
@@ -29,6 +30,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { join } from 'node:path';
 import { applyItems } from './ledger.mjs';
 import { applyHomes } from './homes.mjs';
+import { applyProps } from './propsKept.mjs';
 import { applyPurse } from './purse.mjs';
 import { applyStory, readStories } from './stories.mjs';
 
@@ -63,7 +65,7 @@ function table(from = null) {
  * words of the journals by their hash (stories.mjs).
  */
 export function emptyWorld(epoch = Date.now()) {
-  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), settings: {} };
+  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), props: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), settings: {} };
 }
 
 /**
@@ -104,12 +106,12 @@ export function applyChange(data, rec) {
       return true;
     }
     default:
-      // What a character owns is the ledger's shape rather than this file's, and a building it has
-      // put down is `homes.mjs`'s, so a record about either goes there to be applied: one place
+      // What a character owns is the ledger's shape rather than this file's, a building it has put
+      // down is `homes.mjs`'s and a prop `propsKept.mjs`'s, so a record about any of them goes there to be applied: one place
       // decides what each row looks like on disk, and the same function runs when the thing happens
       // and when the log is replayed on start. Anything neither of them knows is a record from a
       // newer server: kept in the log, not understood here, and not an error.
-      return applyItems(data, rec) || applyHomes(data, rec) || applyPurse(data, rec) || applyStory(data, rec);
+      return applyItems(data, rec) || applyHomes(data, rec) || applyProps(data, rec) || applyPurse(data, rec) || applyStory(data, rec);
   }
 }
 
@@ -189,7 +191,7 @@ export class Store {
           texts = {};
         }
       }
-      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts) };
+      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), props: table(loaded.props), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts) };
       delete this.data.storyTextsFile;
       // A story book's own tables are keyed by a browser too, a level further down: they are rebuilt
       // before the log is played back onto them, so a replayed change meets the book a live one did.

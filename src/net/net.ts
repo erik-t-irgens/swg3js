@@ -147,6 +147,8 @@ interface ServerWord {
   items?: number;
   /** How a server's hail says it passes a ship's paint on (2: a colour carried whole); a server before it says nothing. */
   paint?: number;
+  /** Whether a server's hail says it keeps a player's props (1); a server before it says nothing. */
+  props?: number;
 }
 
 /**
@@ -174,7 +176,8 @@ export class Net {
   private hello: Hello | null = null;
   private retryTimer = 0;
   private retryDelay = 1000;
-  private wanted = false;
+  /** Whether a line is wanted: set by asking to connect, cleared by putting it down or being turned away (`wanted`). */
+  private wantedLine = false;
   /**
    * Who this browser is, and what the server on the other end holds. It is here rather than beside the
    * game because it is the socket that hears the words it answers; everything else in the game asks the
@@ -248,13 +251,23 @@ export class Net {
     return this.status === 'online';
   }
 
+  /**
+   * Whether a line is wanted: true from asking to connect until the line is put down on purpose or the
+   * far end turns this browser away or hands its character to another, and true through a line that has
+   * merely dropped and is being made again. What keeps a player's things the server's through a blip
+   * (`src/net/propsKept.ts`'s `keeperOf`), where `session.authority` alone would read a blip as no server.
+   */
+  get wanted(): boolean {
+    return this.wantedLine;
+  }
+
   /** Connect (or reconnect) to a relay and announce who this is; the hello is repeated on every reconnect. */
   connect(url: string, hello: Hello): void {
     this.url = url.trim();
     this.hello = hello;
     // `wanted` is what the reconnect hangs on, and being taken over or turned away clears it; asking to
     // connect is the one thing that sets it again, because this time the player asked for it.
-    this.wanted = !!this.url;
+    this.wantedLine = !!this.url;
     this.open();
   }
 
@@ -282,7 +295,7 @@ export class Net {
   }
 
   disconnect(): void {
-    this.wanted = false;
+    this.wantedLine = false;
     window.clearTimeout(this.retryTimer);
     this.stopTimers();
     this.socket?.close();
@@ -309,7 +322,7 @@ export class Net {
   }
 
   private open(): void {
-    if (!this.wanted || !this.url) return;
+    if (!this.wantedLine || !this.url) return;
     window.clearTimeout(this.retryTimer);
     this.stopTimers();
     this.socket?.close();
@@ -318,7 +331,7 @@ export class Net {
       ws = new WebSocket(this.url);
     } catch (err) {
       this.setStatus('off', `bad address: ${err instanceof Error ? err.message : String(err)}`);
-      this.wanted = false;
+      this.wantedLine = false;
       return;
     }
     this.socket = ws;
@@ -356,7 +369,7 @@ export class Net {
       // The line dropped rather than being put down: what the clock had estimated is kept and the day
       // carries on at its own rate, so nothing jumps while the line comes back.
       sharedClock.lost();
-      if (!this.wanted) return;
+      if (!this.wantedLine) return;
       this.setStatus('reconnecting', `in ${Math.round(this.retryDelay / 1000)} s`);
       this.retryTimer = window.setTimeout(() => this.open(), this.retryDelay);
       this.retryDelay = Math.min(15000, this.retryDelay * 2);
@@ -425,7 +438,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -480,7 +493,7 @@ export class Net {
       case 'denied':
         // The server will not have us and saying it again cannot change that, so the reconnect stops:
         // `wanted` false is what keeps a browser from asking for ever.
-        this.wanted = false;
+        this.wantedLine = false;
         this.session.denied(typeof server.why === 'string' ? server.why : '');
         // Turned away is not a line that dropped: this is a world this browser is not in, so the day
         // goes back to its own clock rather than keeping a stranger's offset for the life of the page.
@@ -492,7 +505,7 @@ export class Net {
       case 'taken':
         // The same character was opened in a newer browser (decision 8). This one stops wanting to
         // reconnect; without that the two would take the character off one another for ever.
-        this.wanted = false;
+        this.wantedLine = false;
         this.session.taken(typeof server.by === 'string' ? server.by : undefined);
         // The same as being turned away: this browser is out of that world, so it takes its own clock
         // back rather than keeping the server's offset with nothing to correct it.
@@ -611,6 +624,14 @@ export class Net {
       case 'homeUp':
       case 'homeDown':
       case 'homeNo':
+      // The props players have put down on this world, which a server whose hail says `props` keeps: the
+      // list handed over on arriving, and one going up, moving or coming down. What they mean belongs to
+      // src/net/propsKept.ts.
+      case 'props':
+      case 'propUp':
+      case 'propMoved':
+      case 'propDown':
+      case 'propNo':
       // What a character has to spend: the answer to asking, and the answer to a spend, which is the only
       // thing that lets a fare paid with a server go on to the ride. This case was missing for as long as
       // the purse has existed, so every spend with a server waited for ever and the balance read nought;

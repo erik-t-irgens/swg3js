@@ -171,6 +171,7 @@ import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, po
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { homeKey, homes } from './net/homes.ts';
+import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
@@ -225,7 +226,7 @@ import { PropsUi } from './ui/propsUi.ts';
 import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
 import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, type PropTurn, type PropVerdict } from './world/propPlace.ts';
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
-import { HOUSING_TUNE, LocalHomes, atDoorOf, awayText, houseName, isLocalHome, myBuildings, type MyBuilding } from './world/myBuildings.ts';
+import { HOUSING_TUNE, LocalHomes, atDoorOf, awayText, houseName, isLocalHome, myBuildings, type HomeStore, type MyBuilding } from './world/myBuildings.ts';
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
 import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
 import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, inHandText, keptText, nextDestination, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource } from './world/permanentEdit.ts';
@@ -2666,15 +2667,17 @@ class App {
        * `doorMost` move too, though they are the player's own step and jump and say only how a lifted
        * door will be reached; they never refuse a spot.
        *
-       * **With a server it is a real home** and with none it is a sketch. Connected, the placing
+       * **With a server it is a real home**, and with none it is this machine's. Connected, the placing
        * goes to the relay, the house appears when the server answers, everybody standing on that
-       * world sees it, and it is still there tomorrow. With no server set it stands here alone and
-       * is gone the moment you leave the world. `{ local: true }` forces the second even with a
+       * world sees it, and it is still there tomorrow. With no server set it stands here alone, kept
+       * on this machine for that world (every character played on it sees it), and stands again the
+       * next time anybody comes back with no server. `{ local: true }` forces the second even with a
        * server, which is how to try a spot without asking anybody.
        */
       house: async (model?: string, opts: { yaw?: number; force?: boolean; go?: boolean; remove?: boolean | string; local?: boolean; tune?: Partial<typeof HOUSE_TUNE> } = {}) => {
         if (opts.tune) Object.assign(HOUSE_TUNE, opts.tune);
-        const shared = !opts.local && this.net.session.authority === 'server';
+        // Asked of the server while it keeps the player's houses; otherwise this machine's.
+        const shared = !opts.local && this.homesKeeper === 'server';
         if (opts.remove) {
           // The one named, or the nearest of yours: the server's that are yours and the ones this
           // browser put down itself, as the Housing tab lists them, and taken down the way it does.
@@ -2697,6 +2700,10 @@ class App {
             tune: { ...HOUSE_TUNE },
           };
         }
+        // A server keeps the player's houses and is not answering, or nobody knows yet who keeps them: refused
+        // in the words the drop uses, unless a spot is being tried here alone.
+        const refusal = opts.local ? null : this.keptRefusal(this.homesKeeper);
+        if (refusal) return { error: refusal, keeper: this.homesKeeper };
         const yaw = opts.yaw ?? this.player.heading;
         const p = this.player.worldPos;
         // Connected, the ground is still tested here -- this browser is the only side with any
@@ -2712,8 +2719,20 @@ class App {
         // A key of its own, so a second house of the same model is a second house and not the first
         // one filed again over itself.
         const key = this.localHomes.mint();
+        // The world it is being put down in, kept across the placing's wait: the list writes into whatever world it
+        // was last handed, so a travel in that wait would file this world's house into the next one's keeping.
+        const world = this.localHomes.world;
         const out = await this.world.placeBuilding(model, { from: { x: p.x, z: p.z }, yaw, force: opts.force, key });
-        if (out.ok) this.localHomes.add({ key, model, name: houseName(model, allDeeds()), x: out.x, y: out.y, z: out.z, yaw: out.yaw });
+        if (this.localHomes.world !== world) {
+          if (out.ok) this.world.unplaceBuilding(key);
+          return { error: 'the world changed while it was going up', key };
+        }
+        // Kept on this machine and standing: `{ local: true }` with a server is a spot tried here alone, so it
+        // stands whoever keeps the player's houses, and is listed with them for as long as it does.
+        if (out.ok) {
+          this.localHomes.add({ key, model, name: houseName(model, allDeeds()), x: out.x, y: out.y, z: out.z, yaw: out.yaw, r: out.clear });
+          this.localHomes.setStanding(key, true);
+        }
         if (out.ok && opts.go) this.player.reset(new THREE.Vector3(out.x, out.y + 0.3, out.z));
         // A building whose rooms the pack knows about but which came back without one was placed
         // into a size tier this region has not loaded: it is standing, and its rooms arrive with
@@ -2878,19 +2897,29 @@ class App {
        *
        * `find` searches the catalogue by name or id, which is the only way to learn an id from a
        * driven tab: the panel's list cannot be read from here.
+       *
+       * Who keeps the player's props is `keeper` (`server`, `local` for this machine, `pending` while an
+       * arrival waits to hear) and `server` is what a server keeps on this world (every player's rows,
+       * the player's own in `yours`, and `hidden`, the player's own down here while in hand or asked
+       * about); with the keeper `server`, `{ drop: true }` answers `asked` and the prop stands when the
+       * server answers, and `{ take: true }` picks up the nearest of the server's that are yours.
+       * `{ keeperTune: { waitMs, everyMs } }` moves `PROPS_KEEPER_TUNE`.
        */
-      prop: async (id?: string, opts: { turn?: number; axis?: 'spin' | 'tip' | 'roll'; turnDeg?: number; lift?: number; liftM?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; away?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE> } = {}) => {
+      prop: async (id?: string, opts: { turn?: number; axis?: 'spin' | 'tip' | 'roll'; turnDeg?: number; lift?: number; liftM?: number; reach?: number; drop?: boolean; take?: boolean; cancel?: boolean; away?: boolean; find?: string; tune?: Partial<typeof PROP_TUNE>; keeperTune?: Partial<typeof PROPS_KEEPER_TUNE> } = {}) => {
         if (opts.tune) Object.assign(PROP_TUNE, opts.tune);
+        if (opts.keeperTune) {
+          for (const [k, v] of Object.entries(opts.keeperTune)) if (k in PROPS_KEEPER_TUNE && typeof v === 'number' && Number.isFinite(v)) (PROPS_KEEPER_TUNE as Record<string, number>)[k] = Math.max(0, v);
+        }
         if (opts.cancel) {
           this.stopPlacingProp();
-          return { placing: null, standing: placedProps.all.length };
+          return { placing: null, mineHere: placedProps.all.length };
         }
         if (opts.away) {
           const was = this.propPlacing;
           // A permanent row asks first, as the keys and the bar do: the question is `said`, and a second away answers it.
           if (was && !this.awayAsked()) return { placing: was.def.name || was.def.id, putAway: null, said: this.editArm?.words ?? null };
           this.stopPlacingProp('away');
-          return { placing: null, putAway: was ? (was.def.name || was.def.id) : null, wasPickedUp: !!was && was.from.kind !== 'fresh', standing: placedProps.all.length };
+          return { placing: null, putAway: was ? (was.def.name || was.def.id) : null, wasPickedUp: !!was && was.from.kind !== 'fresh', mineHere: placedProps.all.length };
         }
         if (!this.props.loaded) await this.props.load();
         if (opts.find !== undefined) {
@@ -2901,7 +2930,7 @@ class App {
         if (opts.take) {
           this.editLast = null;
           const said = await this.takeNearestProp();
-          if (!this.propPlacing) return { standing: placedProps.all.length, said, ...(this.placing ? { building: this.placing.name } : {}) };
+          if (!this.propPlacing) return { mineHere: placedProps.all.length, said, ...(this.placing ? { building: this.placing.name } : {}) };
         }
         if (id) {
           const why = await this.startPlacingProp(id);
@@ -2928,14 +2957,21 @@ class App {
         if (opts.drop) {
           const was = this.propPlacing;
           this.editLast = null;
+          // A drop the keeper refuses says so on the message line alone; the answer carries the same words.
+          const refused = was && was.dest === 'yours' ? this.keptRefusal(this.propsKeeper) : null;
           await this.dropPlacingProp();
           // Kept for good on the dev server: saved, or asking for its second click, which a second drop gives.
           if (import.meta.env.DEV && was && was.dest !== 'yours') return { dropped: !!this.lastEdit()?.saved, said: this.lastEdit()?.said ?? null, inHand: !!this.propPlacing, ok: was.ok, why: was.why };
-          return { dropped: !!was?.ok, why: was?.why ?? placedProps.note ?? null, standing: placedProps.all.length };
+          // With a server that keeps them, `asked`: it stands when the server answers (the answer is in `server`).
+          return { dropped: !!was?.ok && this.propPlacing !== was, inHand: !!this.propPlacing, keeper: this.propsKeeper, asked: !!was?.ok && this.propPlacing !== was && this.propsKeeper === 'server', why: refused ?? was?.why ?? placedProps.note ?? null, mineHere: placedProps.all.length };
         }
         const p = this.propPlacing;
         // `solid`: how many colliders it has this instant (0 until its tier has loaded and the sweep has run).
         const mine = placedProps.all.map((r) => ({ thing: r.thing, id: r.id, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], inside: !!r.inside, solid: this.world.placedState(`prop:${r.thing}`)?.colliders ?? -1 }));
+        // Who keeps the player's props now, and what a server keeps on this world: every player's rows, and the player's own.
+        const at0 = this.player.worldPos;
+        const kept = keptProps.report();
+        const server = { ...kept, version: this.net.session.propsVersion, yours: keptProps.mine(this.net.session.character, { x: at0.x, z: at0.z }).slice(0, 40).map((r) => ({ id: r.id, prop: r.prop, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], standing: keptProps.isStanding(r.id), solid: this.world.placedState(keptKey(r.id))?.colliders ?? -1 })) };
         if (!p) {
           return {
             placing: null,
@@ -2945,9 +2981,16 @@ class App {
             pack: this.props.pack ? 'minted' : 'not minted',
             groups: this.props.groups().length,
             note: this.props.all.length ? "pass an id to take one in hand; { find: 'chair' } searches" : this.props.note || 'no props pack',
-            standing: mine.length,
+            // `server`, `local` (this machine's own stand) or `pending` (an arrival waiting to hear), and what the Props tab says of it.
+            keeper: this.propsKeeper,
+            kept: this.keptPropsText(),
+            // How many rows this machine keeps here, and whether they stand (they wait while a server keeps the player's props).
+            mineHere: mine.length,
+            localStanding: placedProps.standingHere,
             mine: mine.slice(0, 40),
+            server,
             tune: { ...PROP_TUNE },
+            keeperTune: { ...PROPS_KEEPER_TUNE },
           };
         }
         return {
@@ -2969,13 +3012,17 @@ class App {
           keys: { ...this.placeKeysNow },
           // Picked back up out of the world: Escape puts it back, O, Delete or `{ away: true }` throw it away.
           pickedUp: p.from.kind !== 'fresh',
-          // Where it came from (`fresh`, `local` one of yours, or a `permanent` row the dev server's editor picked
-          // up, with its `layer`) and where it is kept when it is put down (`yours`, `story`, `world`).
+          // Where it came from (`fresh`, `local` one of yours this machine keeps, `server` one of yours a server
+          // keeps, with its `row`, or a `permanent` row the dev server's editor picked up, with its `layer`) and
+          // where it is kept when it is put down (`yours`, `story`, `world`).
           source: p.from.kind,
           ...(p.from.kind === 'permanent' ? { layer: p.from.layer, row: p.from.row.id } : {}),
+          ...(p.from.kind === 'server' ? { row: p.from.row.id } : {}),
           dest: p.dest,
+          keeper: this.propsKeeper,
           ...(import.meta.env.DEV && this.editLast ? { said: this.editLast.said } : {}),
-          standing: mine.length,
+          mineHere: mine.length,
+          server,
           tune: { ...PROP_TUNE },
         };
       },
@@ -3571,7 +3618,10 @@ class App {
        * browser put down itself), each with `solid`, how many colliders it has this instant (0 until
        * its size tier has loaded and the sweep has run, -1 for one the streamer does not hold),
        * `atDoor` the one whose doorstep you are standing at, and `{ tune: { armMs, doorReach,
-       * standApart } }` moves `HOUSING_TUNE`.
+       * standApart } }` moves `HOUSING_TUNE`. `keeper` is who keeps the player's houses now (the
+       * server, this machine, or `pending` while an arrival waits to hear), `local` this machine's own
+       * for this world with whether each stands, and `waiting` how many of them wait for a game with
+       * no server.
        */
       homes: (opts: { tune?: Partial<typeof HOUSING_TUNE> } = {}) => {
         if (opts.tune) {
@@ -3583,8 +3633,13 @@ class App {
         return {
           ...homes.report(),
           shared: this.net.session.authority === 'server',
+          // Who keeps the player's houses now: `server`, `local` (this machine) or `pending` (an arrival waiting to hear).
+          keeper: this.homesKeeper,
           mine: homes.mine(me, { x: p.x, z: p.z }).map((r) => r.id),
-          local: this.localHomes.all.map((r) => ({ key: r.key, model: r.model, name: r.name, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)] })),
+          // This machine's own for this world, kept in its storage, each standing or waiting for a game with no server.
+          local: this.localHomes.all.map((r) => ({ key: r.key, model: r.model, name: r.name, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], standing: this.localHomes.isStanding(r.key) })),
+          waiting: this.localHomes.waiting,
+          ...(this.localHomes.note ? { localNote: this.localHomes.note } : {}),
           yours: yours.map((b) => ({ id: b.id, name: b.name, away: Math.round(b.away), shared: b.shared, solid: this.world.placedState(b.shared ? homeKey(b.id) : b.id)?.colliders ?? -1 })),
           atDoor: atDoorOf(yours, { x: p.x, z: p.z }, HOUSING_TUNE.doorReach)?.id ?? null,
           asking: this.housingUi.askingAbout,
@@ -8018,6 +8073,9 @@ class App {
       say: (text) => this.messages.system(text),
       send: (msg) => this.net.sendWord(msg),
     });
+    // The props players have put down, when a server keeps them: stood here through the very stand a
+    // prop this machine keeps goes through, under the server's own id (`src/net/propsKept.ts`).
+    keptProps.attach(keptDepsOf(() => this.placedDeps(), (text) => this.messages.system(text), this.net));
     // What this character has to spend: the server's when there is one, the saved character's when
     // there is not. Nothing here ever takes money off while a server is answering.
     purse.attach({
@@ -8045,6 +8103,10 @@ class App {
         homes.word(msg);
         // The tab's list of your buildings follows what the server says while it is open.
         if (this.housingUi.open && msg.t !== 'homeNo') this.showHousing();
+      }
+      if (routePropWord(msg, keptProps)) {
+        // A row the catalogue cannot draw yet waits for it, and stands once it has landed.
+        if (msg?.t !== 'propNo' && this.propsKeeper === 'server' && !this.props.loaded && keptProps.rows.size) void this.standKeptProps();
       }
       if (msg?.t === 'purse') purse.word(msg);
     };
@@ -9929,9 +9991,15 @@ class App {
     this.inWorld = false;
     // Whatever was built on the world being left is forgotten outright, not merely taken down: the
     // next character may be a different player entirely, and the server tells a browser what is
-    // built where when it says hello. The ones this browser put down itself go with the world.
+    // built where when it says hello. The ones this machine keeps itself are in its storage, and are read
+    // again on the next arrival; and the props a server keeps go the way its houses do.
     homes.clear();
+    keptProps.clear();
     this.localHomes.clear();
+    // Who keeps the next character's things is not known until its world arrives.
+    this.propsKeeper = 'pending';
+    this.homesKeeper = 'pending';
+    this.relayAsked = false;
     // The world is going and the group with it: the strip comes down here, because the frame that
     // would notice stops being run the moment there is no world, and a roster left standing behind
     // the select screen is last night's group with last night's distances on it.
@@ -13197,6 +13265,9 @@ class App {
     this.loadingScreen.setProgress(0.04);
     // A character kept in a dungeon copy is in a room, which can lie below the ground: not lifted onto it.
     this.arriveIndoors = !!planet.instances;
+    // The server saved in this browser is connected to once the world is up (below): until then its line is
+    // wanted all the same, so who keeps this player's things waits for it rather than standing this machine's.
+    this.relayAsked = !!Net.savedUrl();
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     if (c.heading !== undefined) {
       this.player.heading = c.heading;
@@ -13221,6 +13292,10 @@ class App {
     this.remotes.setWorld(planet.id, this.zone);
     const relay = Net.savedUrl();
     if (relay) this.net.connect(relay, this.helloNow());
+    // Its line is the socket's to want from here on, and the wait for an answer begins now rather than at an
+    // arrival that has spent the loading screen waiting on its own.
+    this.relayAsked = false;
+    this.keeperSince = performance.now();
     await this.loadingScreen.hide();
     this.traveling = false;
     this.input.requestLock();
@@ -13499,14 +13574,22 @@ class App {
     // from the gather it would be the world left behind's gates, mirrored about the world left
     // behind's centre, for as long as it took a frame to reach the on-foot branch.
     this.zoneGates.use(import.meta.env.BASE_URL, placesFor);
+    // The props a server keeps go as the houses do (`Homes.enter`), and what this machine keeps stands no more
+    // either; then who keeps this player's own things here: the server when it keeps them, this machine when
+    // there is none, or not known yet while an address is wanted and nothing has answered (`keeperOf`).
+    keptProps.enter(`${planet.id}:${this.zone ?? ''}`);
+    placedProps.leave();
+    this.personalWorld = '';
+    this.arrivalKeepers();
     // The shuttles of the world left behind: in the scene and the physics that outlive it, so they go
     // now, whether or not the world arrived at has any of its own.
     this.shuttleRigs?.clear();
     // And the console's own shuttle trips and parked hull, whose hulls went with the world: their pads
     // are let go of now, once nothing of that world stands, so no hold is left waiting on it.
     this.endConsoleShuttles('the world changed');
-    // The houses this browser put down itself are not written down anywhere: they went with the world.
-    this.localHomes.clear();
+    // The houses this machine put down itself on the world arriving, read from its storage; they stand once
+    // the world is in, while this machine keeps the player's houses.
+    this.localHomes.enter(placesFor, this.homeStore());
     // The waypoints' marks and their grounds were the last world's, and so was the city walked into; the
     // minimap's points and the window are this world's from here (its planet and zone are set), and the
     // minimap draws again once its picture is in.
@@ -13563,7 +13646,18 @@ class App {
     const dressingGen = this.world.generation;
     this.dressingBuilt = Promise.resolve();
     let dressing: Promise<void> = Promise.resolve();
-    const packIn = this.world.loadPack(stand, { keepOff: dressingFiles.then((f) => keepOffOf(f.story, f.world, dressingKind)) }).then((clearSpawn) => {
+    // The houses this machine keeps here keep the plants off their ground too, known from its storage before
+    // the pack is -- but only once this machine is known to keep them (`arrivalCircles`): a session's first world
+    // with a server saved waits to hear, and a server that answers leaves them waiting, so clearing for them then
+    // would leave bare clearings with no house in them. Should the wait run out instead, each house stood keeps
+    // plants off the chunks built after it, as any house put down does.
+    const homeCircles = arrivalCircles(this.homesKeeper, this.localHomes.circles());
+    const keepOff = dressingFiles.then((f) => {
+      const k = keepOffOf(f.story, f.world, dressingKind);
+      k.game.push(...homeCircles);
+      return k;
+    });
+    const packIn = this.world.loadPack(stand, { keepOff }).then((clearSpawn) => {
       // The hello with this world went out before the pack did: anything the server has already
       // said is built here was refused for having nowhere to go, and this is where it is tried
       // again. A world with nothing built on it does nothing at all.
@@ -13572,8 +13666,14 @@ class App {
       // server stood on its other buildings.
       standing = this.loadTravel(packIdOf(planet, this.zone)).catch(() => undefined);
       void this.loadFittings(packIdOf(planet, this.zone));
-      // And whatever this player has put down here themselves, which is kept per world.
+      // And whatever this player has put down here themselves, which is kept per world: by the server while
+      // it keeps them, else by this machine (`enterPlaced` stands whichever keeps them now, and a change of
+      // keeper from here on stands the other).
       void this.enterPlaced(packIdOf(planet, this.zone));
+      if (packIdOf(this.world.planet, this.zone) === placesFor) {
+        this.personalWorld = placesFor;
+        if (this.homesKeeper === 'local') void this.standLocalHomes();
+      }
       // What this world stands for every player, after `enterPlaced`, which lets the last world's copy of
       // the props pack go before anything of this world's is stood from it.
       dressing = this.standDressing(dressingPack, dressingGen);
@@ -14098,6 +14198,12 @@ class App {
     this.map.setCurrent(planet.id, this.zone);
     this.updateUrl();
     this.remotes.setWorld(planet.id, this.zone);
+    // The props a server keeps, and what this machine keeps, are the last system's: as on the walking
+    // arrival, nothing of them stands any more, and this system's come once its pack is in.
+    keptProps.enter(`${planet.id}:${this.zone ?? ''}`);
+    placedProps.leave();
+    this.personalWorld = '';
+    this.localHomes.enter(packIdOf(planet, this.zone), this.homeStore());
     this.net.setHello(this.helloNow());
     await this.world.loadPack(pose.pos);
     // As on the walking arrival: the hello went out before the pack, so what the server has already
@@ -14109,6 +14215,7 @@ class App {
     // and what this system stands for good.
     const pack = packIdOf(planet, this.zone);
     void this.enterPlaced(pack);
+    this.personalWorld = pack;
     this.dressingBuilt = Promise.resolve();
     this.dressingStanding = this.standDressing(pack);
     this.savePlace(true);
@@ -17184,8 +17291,9 @@ class App {
     // The last world's copy of the props pack goes with the last world: its materials joined that
     // world's cascades and the portal renderer's set, and nothing but a dispose takes them out.
     this.props.release();
-    // The catalogue only where there is something to stand; the world always.
-    if (this.placedStore().get(propsKey(pack)) && !this.props.loaded) {
+    // The catalogue only where there is something to stand -- this machine's rows, or the server's -- and
+    // the world always.
+    if ((this.placedStore().get(propsKey(pack)) || keptProps.rows.size) && !this.props.loaded) {
       try {
         await this.props.load();
       } catch {
@@ -17193,7 +17301,197 @@ class App {
       }
     }
     if (packIdOf(this.world.planet, this.zone) !== pack) return;
-    await placedProps.enter(pack, this.placedStore(), this.placedDeps());
+    // This machine's rows are read always, and stood only while it keeps the player's things; the server's
+    // stand while it keeps them, out of this world's own copy of the pack, minted from here on.
+    const local = placedProps.enter(pack, this.placedStore(), this.placedDeps(), this.propsKeeper === 'local');
+    if (this.propsKeeper === 'server') keptProps.ready();
+    await local;
+  }
+
+  // ---- Who keeps this player's own things: a server, or this machine (`src/net/propsKept.ts`). ----
+
+  /** Who keeps the props this player puts down, and the houses: the server, this machine, or not known yet. */
+  private propsKeeper: Keeper = 'pending';
+  private homesKeeper: Keeper = 'pending';
+  /** When the keepers' wait for an answer began: the arrival, or the connect a session's first arrival makes after its loading screen. */
+  private keeperSince = 0;
+  /** How long since the frame last asked who keeps them, milliseconds. */
+  private keeperTick = 0;
+  /** What the keepers are asked with, written in place, so asking a few times a second makes nothing. */
+  private readonly keeperState: KeeperState = { serverHolds: false, wanted: false, answering: false, sinceArrivalMs: 0 };
+  /** A server saved in this browser that a session's first world will connect to once its loading screen is done. */
+  private relayAsked = false;
+  /**
+   * The world this player's own things may be stood in now, or '' while one is arriving: set once the arrival
+   * has let the last world's props pack go (`enterPlaced`), so nothing of the next is stood out of the last.
+   */
+  private personalWorld = '';
+
+  /** The frame's turn: who keeps them, asked every `everyMs`. */
+  private stepKeepers(dt: number): void {
+    this.keeperTick += dt * 1000;
+    if (this.keeperTick < PROPS_KEEPER_TUNE.everyMs) return;
+    this.keeperTick = 0;
+    const props = keeperOf(this.propsKeeper, this.keeperStateFor(true));
+    const houses = keeperOf(this.homesKeeper, this.keeperStateFor(false));
+    if (props === this.propsKeeper && houses === this.homesKeeper) return;
+    // Said once, and only for a change in the middle of a world (`keeperNews`).
+    const news = keeperNews(this.propsKeeper, props, this.homesKeeper, houses);
+    if (props !== this.propsKeeper) this.switchPropsKeeper(props);
+    if (houses !== this.homesKeeper) this.switchHomesKeeper(houses);
+    for (const line of news) this.messages.system(line);
+  }
+
+  /**
+   * What the keepers are asked with for one kind of thing, written into the kept state (`keeperState`): the
+   * session's word on the line, whether a line is wanted, and how long the arrival's wait has run. Makes nothing.
+   */
+  private keeperStateFor(props: boolean): KeeperState {
+    return keeperState(this.keeperState, this.net.session, props, this.net.wanted, this.relayAsked, performance.now() - this.keeperSince);
+  }
+
+  /**
+   * An arrival's keepers: still the server where it kept them (a travel on a line that is up, or dropped and
+   * wanted back), else not known until the far end answers or the wait runs out (`arrivalKeeper`). Nothing of
+   * the world arriving stands yet, so nothing is taken down; only whether the server's houses are held is set
+   * to match (`arrivalHolds`).
+   */
+  private arrivalKeepers(): void {
+    this.keeperSince = performance.now();
+    this.keeperTick = 0;
+    this.propsKeeper = arrivalKeeper(this.propsKeeper, this.keeperStateFor(true));
+    this.homesKeeper = arrivalKeeper(this.homesKeeper, this.keeperStateFor(false));
+    if (arrivalHolds(this.homesKeeper)) homes.takeDownAll();
+    else homes.resume(false);
+  }
+
+  /**
+   * The props' two sets, as a change of keeper takes them down and stands them (`switchSets`). The server's are
+   * stood once the world is in, and this machine's -- never through `enterPlaced`, whose first act is to free
+   * the props pack every prop in the world is drawn from.
+   */
+  private readonly propSets: KeptSets = {
+    downServer: () => keptProps.takeDownAll(),
+    downLocal: () => placedProps.takeDownAll(this.placedDeps()),
+    upServer: () => void this.standKeptProps(),
+    upLocal: () => void this.standLocalProps(),
+  };
+
+  /** The houses' two sets, the same: the server's and this machine's. */
+  private readonly homeSets: KeptSets = {
+    downServer: () => homes.takeDownAll(),
+    downLocal: () => this.takeDownLocalHomes(),
+    upServer: () => homes.resume(),
+    upLocal: () => void this.standLocalHomes(),
+  };
+
+  /**
+   * The props' keeper changes: whichever set stood is taken down, and the other stood (`switchSets`). One of the
+   * player's own in hand belongs to the keeper it came from, and is let go of first, as a travel lets go of it.
+   */
+  private switchPropsKeeper(to: Keeper): void {
+    this.propsKeeper = to;
+    const hand = this.propPlacing?.from.kind;
+    if (hand === 'local' || hand === 'server') this.stopPlacingProp('keep');
+    switchSets(to, this.propSets);
+    if (this.propsUi?.open) this.propsUi.setKept(this.keptPropsText());
+  }
+
+  /** The houses' keeper changes: the same, for the server's houses and this machine's. */
+  private switchHomesKeeper(to: Keeper): void {
+    this.homesKeeper = to;
+    switchSets(to, this.homeSets);
+    if (this.housingUi?.open) this.showHousing();
+  }
+
+  /** The server's props, stood: the catalogue fetched first where a row needs it, and only in a world that is in. */
+  private async standKeptProps(): Promise<void> {
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (this.personalWorld !== pack) return;
+    if (keptProps.rows.size && !this.props.loaded) {
+      try {
+        await this.props.load();
+      } catch {
+        /* no catalogue: the rows wait */
+      }
+    }
+    if (this.propsKeeper !== 'server' || this.personalWorld !== pack || packIdOf(this.world.planet, this.zone) !== pack) return;
+    keptProps.ready();
+  }
+
+  /** This machine's props, stood again: once the arrival has read them (`enterPlaced`), which stands them itself until then. */
+  private async standLocalProps(): Promise<void> {
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (placedProps.inWorld !== pack) return;
+    if (placedProps.all.length && !this.props.loaded) {
+      try {
+        await this.props.load();
+      } catch {
+        /* no catalogue: the rows wait */
+      }
+    }
+    if (this.propsKeeper !== 'local' || placedProps.inWorld !== pack) return;
+    await placedProps.standAll(this.placedDeps());
+  }
+
+  /**
+   * This machine's houses, stood where they were put down, at the height they were written at (the ground is
+   * not measured again, as a server's is not), one at a time. A run is its own (`LocalHomes.beginStand`): one
+   * overtaken by everything being taken down, a change of keeper or a new world puts its house straight back.
+   */
+  private async standLocalHomes(): Promise<void> {
+    const pack = packIdOf(this.world.planet, this.zone);
+    if (this.personalWorld !== pack || this.localHomes.world !== pack) return;
+    const round = this.localHomes.beginStand();
+    for (const row of [...this.localHomes.all]) {
+      if (!this.localHomes.standing(round)) return;
+      // One already going up is left to the placing on its way, which stands it as it lands if it is still
+      // wanted (`LocalHomes.land`): placed a second time, its key would be filed twice.
+      if (this.localHomes.isStanding(row.key) || this.localHomes.isPlacing(row.key)) continue;
+      const ticket = this.localHomes.beginPlace(row.key);
+      let placed = false;
+      try {
+        placed = (await this.world.placeBuilding(row.model, { at: { x: row.x, z: row.z }, yaw: row.yaw, y: row.y, key: row.key })).ok;
+      } finally {
+        if (this.localHomes.land(row.key, ticket, placed, this.homesKeeper === 'local') === 'down') this.world.unplaceBuilding(row.key);
+      }
+    }
+    if (this.housingUi?.open) this.showHousing();
+  }
+
+  /** Every house this machine keeps taken down here, whoever stands in one put on its doorstep first; all kept. */
+  private takeDownLocalHomes(): void {
+    for (const key of this.localHomes.standingKeys()) {
+      this.standOutOf(key);
+      this.world.unplaceBuilding(key);
+    }
+    this.localHomes.endStand();
+  }
+
+  /** Where this machine keeps the houses it put down itself: the browser's own small store, either half able to fail. */
+  private homeStore(): HomeStore {
+    return {
+      get: (key) => {
+        try {
+          return localStorage.getItem(key);
+        } catch {
+          return null;
+        }
+      },
+      set: (key, value) => localStorage.setItem(key, value),
+    };
+  }
+
+  /** What the Props tab says of who keeps the player's props here, and how many wait on this machine. */
+  private keptPropsText(): string {
+    const waiting = this.propsKeeper === 'local' ? 0 : placedProps.all.length;
+    const kept = this.propsKeeper === 'server' ? 'yours here are kept by the server, and everybody on this world sees them' : this.propsKeeper === 'local' ? 'yours here are kept on this machine' : 'waiting to hear whether a server keeps yours here';
+    return waiting ? `${kept} · ${waiting} more wait on this machine for a game with no server` : kept;
+  }
+
+  /** Why one of the player's own things cannot be put down or picked up now, or null: the keeper not known, or its server not answering. */
+  private keptRefusal(keeper: Keeper): string | null {
+    return keptRefusal(keeper, this.net.session.authority);
   }
 
   // ---- What a world stands for good: the permanent placements (`src/world/permanent.ts`). ----
@@ -18433,6 +18731,7 @@ class App {
   /** The Props tab, with the catalogue attached if it has landed. */
   private showProps(): void {
     this.propsUi.held = this.propPlacing?.def.id ?? null;
+    this.propsUi.setKept(this.keptPropsText());
     this.propsUi.show();
     if (import.meta.env.DEV) this.refreshEditPanels();
     this.propsUi.attach(this.props.loaded ? this.props : null);
@@ -18520,6 +18819,23 @@ class App {
         void placedProps.restore(from.row, this.placedDeps(), save).then((stood) => this.messages.system(stood ? `${name} put back where it was` : placedProps.note || `${name} is kept, and stands again the next time you come here`));
         return;
       }
+      case 'server':
+        // One the server keeps was only ever taken down here: put back, it stands again where the server has
+        // it; put away, the server is asked to take it away, and it goes for everybody when it answers; on a
+        // travel or the select screen nothing is asked, and it stands there for whoever comes.
+        if (how === 'back') {
+          keptProps.show(from.row.id);
+          this.messages.system(`${name} put back where it was`);
+        } else if (how === 'away') {
+          if (this.net.session.authority === 'server') {
+            keptProps.askDown(from.row.id);
+            this.messages.system(`${name}: asking the server to take it away`);
+          } else {
+            keptProps.show(from.row.id);
+            this.messages.system(`${SERVER_NOT_ANSWERING}; ${name} is back where it was`);
+          }
+        } else keptProps.unhide(from.row.id);
+        return;
       case 'permanent':
         if (import.meta.env.DEV) this.letGoPermanent(from, how, name);
         return;
@@ -18764,21 +19080,51 @@ class App {
     const state = p.state;
     const model = deed?.model;
     if (!state?.ok || !deed || !model) return;
+    // Who keeps the player's houses decides where it goes, as for a prop; neither while that is not known yet,
+    // or while the server that keeps them is not answering, when it stays in hand.
+    const keeper = this.homesKeeper;
+    const refusal = this.keptRefusal(keeper);
+    if (refusal) {
+      this.messages.system(refusal);
+      return;
+    }
     this.stopPlacing();
     // With a server the house goes up when the server answers, exactly as everybody else's does.
-    if (this.net.session.authority === 'server') {
+    if (keeper === 'server') {
       homes.ask(model, { x: state.x, z: state.z }, state.yaw, state.clear, state.y);
       this.messages.system(`${deed.name}: asking the server for the ground`);
       return;
     }
-    // A key of its own, so the Housing tab can name this one and take it down again.
+    // A key of its own, so the Housing tab can name this one and take it down again; kept on this machine for
+    // this world, so it is standing again the next time anybody comes back here with no server.
+    const world = this.localHomes.world;
     const key = this.localHomes.mint();
     const out = await this.world.placeBuilding(model, { at: { x: state.x, z: state.z }, yaw: state.yaw, y: state.y, key });
+    if (this.localHomes.world !== world) {
+      if (out.ok) this.world.unplaceBuilding(key);
+      this.messages.system('the world changed while it was going up');
+      return;
+    }
     if (out.ok) {
-      this.localHomes.add({ key, model, name: deed.name, x: out.x, y: out.y, z: out.z, yaw: out.yaw });
-      this.messages.system(`${deed.name} stands`);
+      this.localHomes.add({ key, model, name: deed.name, x: out.x, y: out.y, z: out.z, yaw: out.yaw, r: out.clear });
+      this.messages.system(this.keepLocalHome(key) ? `${deed.name} stands` : `${deed.name} is kept on this machine, and stands the next time you come back with no server`);
       if (this.housingUi.open) this.showHousing();
     } else this.messages.system(out.why ?? 'it would not go there');
+  }
+
+  /**
+   * A house this machine just put up, kept standing only while this machine keeps the player's houses: one that
+   * a server took over in the wait is written down and taken down again, to wait for a game with no server.
+   * Answers whether it stands.
+   */
+  private keepLocalHome(key: string): boolean {
+    if (this.homesKeeper === 'local') {
+      this.localHomes.setStanding(key, true);
+      return true;
+    }
+    this.standOutOf(key);
+    this.world.unplaceBuilding(key);
+    return false;
   }
 
   /**
@@ -18789,8 +19135,12 @@ class App {
     const p = this.player.worldPos;
     const at = { x: p.x, z: p.z };
     const deeds = allDeeds();
-    const server = this.net.session.authority === 'server' ? homes.mine(this.net.session.character ?? '', at) : [];
-    return myBuildings(server, this.localHomes.all, at, (model) => houseName(model, deeds));
+    // The server's that are the player's while it keeps their houses (standing through a dropped line, when a
+    // take-down is refused in words); this machine's while it keeps them, and otherwise only those standing --
+    // the rest wait for a game with no server, and are said as a count rather than offered to be taken down.
+    const server = this.homesKeeper === 'server' ? homes.mine(this.net.session.character ?? '', at) : [];
+    const local = this.homesKeeper === 'local' ? this.localHomes.all : this.localHomes.all.filter((r) => this.localHomes.isStanding(r.key));
+    return myBuildings(server, local, at, (model) => houseName(model, deeds));
   }
 
   /**
@@ -18842,8 +19192,8 @@ class App {
    *
    * The thing stands through the streamer exactly as a fitting and a travel terminal do -- instanced,
    * compiled before it shows, lit, shadowed and solid -- and the row goes into this browser's own
-   * storage for this world, so it is there next time. With a server it would be the server's row;
-   * that half is not wired yet and this file is written so it is the same rows sent.
+   * storage for this world, so it is there next time. With a server that keeps the player's props it is
+   * asked of the server instead (`keptProps`), and stands when the server answers, for everybody there.
    *
    * One the dev server's editor is putting down for good is saved to its file instead
    * (`savePermanentProp`), and a permanent row never comes down here as yours.
@@ -18865,6 +19215,21 @@ class App {
       this.messages.system(p.why ?? 'it will not go there');
       return;
     }
+    // Who keeps the player's things decides where it goes: asked of the server that keeps them, or kept on this
+    // machine; neither while that is not known yet, or while the server that keeps them is not answering, when
+    // it stays in hand. One of the keeper's that was before is let go of where it came from (the keeper's own
+    // change does that too; this is the press that lands in between).
+    const keeper = this.propsKeeper;
+    const refusal = this.keptRefusal(keeper);
+    if (refusal) {
+      this.messages.system(refusal);
+      return;
+    }
+    if ((keeper === 'server' && p.from.kind === 'local') || (keeper === 'local' && p.from.kind === 'server')) {
+      this.stopPlacingProp('keep');
+      this.messages.system(keeper === 'server' ? 'a server keeps your things here now: that one waits on this machine' : 'no server keeps your things now: that one stands where the server has it');
+      return;
+    }
     const at = { x: this.ghost.group.position.x, y: this.ghost.group.position.y, z: this.ghost.group.position.z };
     const q: [number, number, number, number] = [p.turn.x, p.turn.y, p.turn.z, p.turn.w];
     const name = p.def.name || p.def.id;
@@ -18875,6 +19240,14 @@ class App {
     const from = p.from;
     p.from = HAND_FRESH;
     this.stopPlacingProp();
+    if (keeper === 'server') {
+      // The server's: it appears (or moves) when the server answers, for everybody on the world at once, and
+      // never before; a refusal comes back in its own words, and one moved stands again where it stood.
+      if (from.kind === 'server') keptProps.askMove(from.row.id, at, q, inside);
+      else keptProps.ask(id, at, q, inside);
+      this.messages.system(`${name}: asking the server`);
+      return;
+    }
     const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
     // The world it is being put down in, kept across the stand's wait: a travel in that wait leaves the
     // store in another world, or none.
@@ -18896,6 +19269,11 @@ class App {
       case 'local':
         if (placedProps.inWorld === worldAt) void placedProps.restore(from.row, this.placedDeps(), save).then(() => this.messages.system(`${why}; ${name} is back where it stood`));
         else if (placedProps.keepIn(worldAt, from.row, this.placedStore(), save)) this.messages.system(`${why}; ${name} is kept where it stood, and stands there the next time you come back`);
+        return;
+      case 'server':
+        // Never here (one the server keeps went to it above): stood again where the server has it.
+        keptProps.show(from.row.id);
+        this.messages.system(why);
         return;
       default: {
         const never: never = from;
@@ -18954,6 +19332,9 @@ class App {
    * the very duplication that file exists to prevent. Holding it is the honest answer until the
    * ledger keeps things rather than kinds.
    *
+   * Your own are whoever keeps them now has (`propsKeeper`): this machine's rows, or -- with a server that
+   * keeps them -- the server's rows that are yours (`takeKept`), which nobody else can pick up.
+   *
    * On the dev server the permanent props within the same reach are as much to hand as your own, and
    * the nearer of the two is taken (`takePermanent`, which says which it took); with neither near, your
    * building's doorstep, then a permanent building's origin within the doorstep's reach. In a release
@@ -18963,11 +19344,18 @@ class App {
    */
   private async takeNearestProp(): Promise<string | null> {
     const me = this.player.worldPos;
-    const row = placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far);
+    // The nearest of the player's own, from whoever keeps them now: this machine's rows, or the server's rows
+    // that are theirs. Never both, and neither while that is not known: what the other keeps is not standing.
+    const keeper = this.propsKeeper;
+    const row = keeper === 'local' ? placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far) : null;
+    const kept = keeper === 'server' ? keptProps.mineNearest(this.net.session.character, { x: me.x, y: me.y, z: me.z }, PROP_TUNE.far) : null;
+    const own = row ?? kept;
     if (import.meta.env.DEV) {
+      // One rule across every source: the nearer of the player's own and the permanent props.
       const fixed = this.permanent.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far, 'prop');
-      if (fixed && (!row || Math.hypot(fixed.x - me.x, fixed.y - me.y, fixed.z - me.z) < Math.hypot(row.x - me.x, row.y - me.y, row.z - me.z))) return this.takePermanent(fixed);
+      if (fixed && (!own || Math.hypot(fixed.x - me.x, fixed.y - me.y, fixed.z - me.z) < Math.hypot(own.x - me.x, own.y - me.y, own.z - me.z))) return this.takePermanent(fixed);
     }
+    if (kept) return this.takeKept(kept);
     if (!row) {
       // Nothing of yours to pick up, but a building of yours whose doorstep this is: the same key
       // opens the Housing tab with its take-down already asked, which is still two answers away
@@ -19002,6 +19390,38 @@ class App {
     if (why) {
       // It came out of the store with the pick-up, so it goes back where it stood rather than being lost.
       void placedProps.restore(row, this.placedDeps(), save);
+      this.messages.system(why);
+      return why;
+    }
+    const p = this.propPlacing;
+    if (!p) return null;
+    this.anchorPicked(p, row, { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] });
+    return null;
+  }
+
+  /**
+   * One of the player's own a server keeps, taken in hand: down in this browser only -- everybody else goes on
+   * seeing it where it stands until the server says it moved -- turned and anchored exactly where it stood, so a
+   * nudge is a nudge. Refused in words while the server that keeps it is not answering. Answers why not, or null.
+   */
+  private async takeKept(row: KeptRow): Promise<string | null> {
+    const refusal = this.keptRefusal('server');
+    if (refusal) {
+      this.messages.system(refusal);
+      return refusal;
+    }
+    const def = this.props.find(row.prop);
+    if (!def) {
+      const why = `${row.prop} is not in the props catalogue`;
+      this.messages.system(why);
+      return why;
+    }
+    keptProps.hide(row.id);
+    this.messages.system(`${def.name || def.id} picked up`);
+    const why = await this.startPlacingProp(def.id, { from: { kind: 'server', row }, dest: 'yours' });
+    if (why) {
+      // Never let go of: it stands again where the server has it.
+      keptProps.show(row.id);
       this.messages.system(why);
       return why;
     }
@@ -19290,6 +19710,10 @@ class App {
     if (dest === 'yours' || this.editSaving) return;
     const refused = this.editRefusal(false);
     if (refused) return this.editSay(false, refused);
+    // One of yours a server keeps is taken away from the server as it is saved, or it would stand twice: so not
+    // while the server that keeps it is not answering, when the removal could not reach it.
+    const unkept = p.from.kind === 'server' ? this.keptRefusal('server') : null;
+    if (unkept) return this.editSay(false, unkept);
     if (!this.editClick(p.ok, p.why, dest, this.nextDestOf(p))) return;
     const pack = this.editWorld();
     const gen = this.world.generation;
@@ -19313,8 +19737,18 @@ class App {
     } else if (from.kind === 'local' && placedProps.all.some((r) => r.thing === from.row.thing)) {
       placedProps.take(from.row.thing, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
     }
+    // One a server kept is asked away from it: it is the world's now, and would otherwise stand twice. Its line
+    // dropped while the save was out, the removal cannot reach it: it stands again where the server has it, and
+    // the player is told to put it away once the server answers.
+    let still = '';
+    if (from.kind === 'server') {
+      if (this.keptRefusal('server')) {
+        keptProps.show(from.row.id);
+        still = `; your server still keeps its own ${p.def.name || p.def.id} there: pick it up and put it away once the server answers`;
+      } else keptProps.askDown(from.row.id);
+    }
     await this.landPlacements(reply, base ? placementKey(base.id) : null, pack, gen);
-    this.editSay(true, savedText(reply.file, reply.id), reply);
+    this.editSay(true, `${savedText(reply.file, reply.id)}${still}`, reply);
   }
 
   /** A building in hand going to a file, clicked down: saved there as a prop is. */
@@ -19887,7 +20321,8 @@ class App {
         : 'no deeds: run `npm run swg -- deeds @SWG assets-private --retail-only` with your emulator checkout, and reload',
       built: { now: mine.length, most: 0 },
       mine: mine.map((b) => ({ id: b.id, name: b.name, line: b.line })),
-      mineNote: this.net.session.authority === 'server' ? 'none of yours on this world' : 'none put down this session (with no server a building lasts as long as the world it stands in)',
+      mineNote: this.homesKeeper === 'server' ? 'none of yours on this world' : this.homesKeeper === 'local' ? 'none of yours on this world; with no server a building is kept on this machine' : 'waiting to hear whether a server keeps yours here',
+      waiting: this.homesKeeper === 'local' ? 0 : this.localHomes.waiting,
     });
     if (import.meta.env.DEV) this.refreshEditPanels();
   }
@@ -22927,6 +23362,9 @@ class App {
       perf.frameStart(tFrame);
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
+      // Who keeps this player's own things, asked a few times a second whatever the game is doing: a claim
+      // answered, a line put down or an arrival's wait running out stands one set and takes the other down.
+      this.stepKeepers(rawDt);
       // The jump's countdown (held still while the Escape menu is open) and its phases; during a crossing's travel it waits.
       if (!this.traveling) this.hyperspace.update(dt, rawDt, this.menu.open);
       // The lift menu takes the number keys while it is up, before the kit's slots see them.

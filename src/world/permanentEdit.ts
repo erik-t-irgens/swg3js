@@ -5,9 +5,9 @@
 // of permanent placements (`src/story/placements.ts`): the story's dressing or the world's own edits. The
 // Props and Housing tabs carry a switch, Yours or Permanent, that is never remembered across a reload, and a
 // thing taken in hand with it on Permanent goes to the session's destination; L in hand moves the hand's own
-// destination round (`nextDestination`). A thing of your own may become permanent; **a permanent thing never
-// becomes yours** -- its way out of a file is the delete key, never a click that copies it into this browser's
-// store while the file still stands it for everybody.
+// destination round (`nextDestination`). A thing of your own may become permanent (one a server keeps is then
+// asked away from it); **a permanent thing never becomes yours** -- its way out of a file is the delete key,
+// never a click that copies it into this browser's store while the file still stands it for everybody.
 //
 // **Where it came from** (`HandSource`) decides what letting go of it does, and every let-go in the game switches
 // on it, so the compiler names a kind of hand a branch forgot: a thing taken fresh from a tab has nowhere to go
@@ -22,6 +22,7 @@
 
 import { PLACEMENT_LIMITS, fromGame, placementsPath, type GamePlace, type PlacementFrame, type PlacementLayer, type PlacementRow } from '../story/placements.ts';
 import type { PlacedProp } from './propsPlaced.ts';
+import type { KeptRow } from '../net/propsKept.ts';
 
 /** Every number of the editor in the game, ours. Live through `__debug.placements({ edit: { … } })`. */
 export const PERMANENT_EDIT_TUNE = {
@@ -32,11 +33,15 @@ export const PERMANENT_EDIT_TUNE = {
 /** Where a thing in hand is kept when it is put down: yours, or one of the two files. */
 export type Destination = 'yours' | PlacementLayer;
 
-/** Where a thing in hand came from: taken fresh from a tab, one of your own picked up, or a permanent row picked up. */
-export type HandSource = { kind: 'fresh' } | { kind: 'local'; row: PlacedProp } | { kind: 'permanent'; layer: PlacementLayer; row: PlacementRow };
+/**
+ * Where a thing in hand came from: taken fresh from a tab, one of your own this machine keeps picked up, one of
+ * your own a server keeps picked up (down in this browser only until the server says where it went), or a
+ * permanent row picked up.
+ */
+export type HandSource = { kind: 'fresh' } | { kind: 'local'; row: PlacedProp } | { kind: 'server'; row: KeptRow } | { kind: 'permanent'; layer: PlacementLayer; row: PlacementRow };
 
 /** The same for a building, which is never one of your own props. */
-export type BuildingSource = Exclude<HandSource, { kind: 'local' }>;
+export type BuildingSource = Exclude<HandSource, { kind: 'local' | 'server' }>;
 
 /** A row as the editor writes it: its id absent for a thing never saved, which the endpoint names. */
 export type DraftRow = Omit<PlacementRow, 'id'> & { id?: string };
