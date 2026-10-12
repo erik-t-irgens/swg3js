@@ -1,5 +1,5 @@
-// Placing a building by hand: where the ghost stands, whether it may, the grid under it, and the
-// wheel and the turn buttons.
+// Placing a building by hand: where the ghost stands, whether it may, the grid under it, the wheel
+// and the turn buttons, and what the placing bar says about it.
 //
 // Everything here is pure -- the ghost's own three.js half is the drawing and decides nothing -- so
 // this runs the real rules. Where a world is converted it then runs them over the real ground and
@@ -10,8 +10,9 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GHOST_TUNE, ghostSpot, ghostVerdict, liftBy, outlineCells, turnBy, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
-import { HOUSE_TUNE, patchOfFootprint, type Footprint } from '../../../src/world/housePlace.ts';
+import * as THREE from 'three';
+import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftBy, outlineCells, turnBy, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
+import { HOUSE_TUNE, doorNote, patchOfFootprint, type Footprint } from '../../../src/world/housePlace.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -139,18 +140,41 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
 }
 
 {
-  // The lift moves where the building is put down and **not** what the ground is asked about: a
-  // doorstep the ground laps over can be lifted clear, and no amount of lifting turns a slope the
-  // ground refuses into a spot it allows.
+  // The lift is **inside** the ground test: the rise and the fall are measured from the floor it
+  // leaves, so a doorstep the ground laps over can be lifted clear, a house hung over level ground
+  // is refused for the ground falling away under it, and no amount of lifting turns a slope into a
+  // spot it allows. How far the door then stands off the ground is a note and never a refusal.
   const patch = patchOfFootprint(HOUSE);
   const level = ghostVerdict(patch, { x: 0, z: 0 }, 0, flat(), 1.5);
-  ok(level.ok && level.y === 11.5, 'a lift raises where it stands, and the ground still takes it');
+  ok(level.ok && level.y === 11.5, 'a lift raises where it stands, once and only once, and the ground still takes it');
   ok(level.lift === 1.5, 'and the state carries the lift, for whoever puts it down');
-  const sloped: GhostDeps = { heightAt: (x) => 10 + x * 0.5, waterAt: () => -Infinity, standing: () => [] };
-  const cheat = ghostVerdict(patch, { x: 0, z: 0 }, 0, sloped, 50);
-  ok(!cheat.ok, 'and a spot the ground refuses is refused however high it is lifted');
+  ok(level.note === doorNote(1.5) && !!level.note?.includes('out of reach of a plain jump'), 'and says the door is out of reach of a plain jump, without refusing it');
+  const step = ghostVerdict(patch, { x: 0, z: 0 }, 0, flat(), 0.75);
+  ok(step.ok && !!step.note?.includes('you will have to jump to get in'), 'three presses up is a jump to get in, and allowed');
+  ok(ghostVerdict(patch, { x: 0, z: 0 }, 0, flat(), 0.5).note === null, 'two presses up is a step the feet climb, and says nothing');
+  const hung = ghostVerdict(patch, { x: 0, z: 0 }, 0, flat(), 7);
+  ok(!hung.ok && !!hung.why?.includes('falls'), 'seven metres up over level ground is refused for the ground falling away under it');
+  // A doorstep the ground laps over: the far end of the patch stands over the rise at the ground,
+  // and lifting the house by the difference clears it.
+  const lapped: GhostDeps = { heightAt: (_x, z) => (z > 15 ? 10 + HOUSE_TUNE.rise + 0.3 : 10), waterAt: () => -Infinity, standing: () => [] };
+  ok(!ghostVerdict(patch, { x: 0, z: 0 }, 0, lapped).ok, 'ground rising over the rise at the far end refuses the spot on the ground');
+  ok(ghostVerdict(patch, { x: 0, z: 0 }, 0, lapped, 0.5).ok, 'and lifted clear of it the spot is allowed');
+  // A spot refused for its slope is refused however it is lifted. Asked with a shed's one cell on a
+  // long even ramp, which at each of these lifts stays within the rise and the fall of the floor, so
+  // the slope is the only test that can refuse it: the house's own patch on a ramp that steep would
+  // be refused for its rise first and say nothing about the slope.
+  const shed = patchOfFootprint({ width: 1, height: 1, pivotX: 0, pivotZ: 0, cellWidth: 4, cellHeight: 4 });
+  const ramp: GhostDeps = { heightAt: (x) => 10 + x * 0.3, waterAt: () => -Infinity, standing: () => [] };
+  const lifts = [0, 0.25, -0.25, 2, -1.2];
+  ok(
+    lifts.every((l) => {
+      const v = ghostVerdict(shed, { x: 0, z: 0 }, 0, ramp, l);
+      return !v.ok && !!v.why?.includes('slopes');
+    }),
+    `and a spot the ground refuses for its slope is refused for its slope however it is lifted (${lifts.join(', ')} m)`,
+  );
   const wet: GhostDeps = { heightAt: () => 10, waterAt: () => 12, standing: () => [] };
-  ok(!ghostVerdict(patch, { x: 0, z: 0 }, 0, wet, 20).ok, 'a lake is still a lake with the house held over it');
+  ok(!ghostVerdict(patch, { x: 0, z: 0 }, 0, wet, 3).ok, 'a lake is still a lake with the house held over it');
 }
 
 // ---------------------------------------------------------------- the grid
@@ -173,9 +197,132 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
 }
 
 {
+  // Turned the way three turns the building: its own +z comes round to +x at a quarter turn, so the
+  // long reach of 20 m past the origin lands on +x, as it does under the drawn house.
   const turned = outlineCells(HOUSE, HOUSE_ROWS, { x: 0, z: 0 }, Math.PI / 2);
   const xs = turned.flatMap((c) => c.corners.map((p) => p.x));
-  ok(Math.abs(Math.min(...xs) + 20) < 1e-6 && Math.abs(Math.max(...xs) - 12) < 1e-6, 'a quarter turn swaps which way the grid is long');
+  ok(Math.abs(Math.min(...xs) + 12) < 1e-6 && Math.abs(Math.max(...xs) - 20) < 1e-6, "a quarter turn swaps which way the grid is long, three's way round");
+}
+
+// ---------------------------------------------------------------- the ghost against three itself
+//
+// The ghost is drawn by three, turned by `rotation.set(0, yaw, 0)`; the ground under it and the
+// middle what is in the way is measured from must be where three puts the same points. At 0 and
+// 180 degrees the old, mirrored turn agreed with it, which is why this is asked at a quarter turn.
+{
+  const yaw = Math.PI / 2;
+  const at = { x: 30, z: -12 };
+  const patch = patchOfFootprint(HOUSE);
+  const ref = new THREE.Object3D();
+  ref.position.set(at.x, 0, at.z);
+  ref.rotation.set(0, yaw, 0);
+  ref.updateMatrixWorld(true);
+
+  const asked: { x: number; z: number }[] = [];
+  const spy: GhostDeps = {
+    heightAt: () => 10,
+    waterAt: () => -Infinity,
+    standing: (x, z) => {
+      asked.push({ x, z });
+      return [];
+    },
+  };
+  const state = ghostVerdict(patch, at, yaw, spy);
+  const middle = ref.localToWorld(new THREE.Vector3(patch.cx, 0, patch.cz));
+  ok(asked.length === 1 && Math.abs(asked[0].x - middle.x) < 1e-9 && Math.abs(asked[0].z - middle.z) < 1e-9, "at a quarter turn what is in the way is asked about at three's own middle of the building");
+
+  // The grid: every corner's ground is asked for where three draws that corner.
+  const heights: { x: number; z: number }[] = [];
+  const ghost = new PlacementGhost();
+  ghost.place(state, HOUSE, HOUSE_ROWS, (x, z) => {
+    heights.push({ x, z });
+    return 10 + x * 0.01;
+  });
+  const want = outlineCells(HOUSE, HOUSE_ROWS, { x: 0, z: 0 }, 0).flatMap((c) => c.corners.map((p) => ref.localToWorld(new THREE.Vector3(p.x, 0, p.z))));
+  ok(heights.length === want.length && want.length === 48, 'the grid asks the ground under every corner of every cell, once');
+  ok(
+    heights.every((h, i) => Math.abs(h.x - want[i].x) < 1e-9 && Math.abs(h.z - want[i].z) < 1e-9),
+    "and asks it where three draws that corner under the turned house, not at its mirror image",
+  );
+
+  // The cells are worked out once for a footprint and kept: the grid is drawn every frame.
+  const kept = ghost.outline;
+  ok(!!kept && kept.length === 12, 'the ghost keeps the footprint\'s cells');
+  ghost.place({ ...state, yaw: 0.3, x: 5 }, { ...HOUSE }, [...HOUSE_ROWS], () => 10);
+  ok(ghost.outline === kept, 'and a frame with the same footprint, handed over afresh as a deed does, works none of them out again');
+  // The same grid with other rows, which real deeds are: Corellia's small house is the medium's three
+  // by four of eight metres with a whole row of hard edge. Kept by its size alone, the small house's
+  // grid would be drawn with the medium's one hard cell.
+  ghost.place(state, { ...HOUSE }, ['HHH', 'FFF', 'FFF', 'FFF'], () => 10);
+  ok(ghost.outline !== kept && ghost.outline?.filter((c) => c.hard).length === 3, 'and the same grid with other rows works its own cells out');
+  const smallHouse = ghost.outline;
+  ghost.place(state, { ...HOUSE }, HOUSE_ROWS, () => 10);
+  ok(ghost.outline !== smallHouse && ghost.outline?.filter((c) => c.hard).length === 1, 'and so does going back to the first');
+  const dotted: Footprint = { width: 3, height: 1, pivotX: 1, pivotZ: 0, cellWidth: 8, cellHeight: 8 };
+  ghost.place(state, dotted, ['F.F'], () => 10);
+  ok(ghost.outline !== kept && ghost.outline?.length === 2, 'and another footprint works its own out');
+  ghost.dispose();
+}
+
+// ---------------------------------------------------------------- the bar's words
+//
+// The bar is on the page, so it is driven here against a stand-in for the little of the page it
+// touches. Its whole promise is two things: a note is said beside an allowed spot only, in the
+// accent, and a frame that changes nothing it says writes nothing -- the note included.
+{
+  class StandIn {
+    hidden = false;
+    textContent = '';
+    className = '';
+    disabled = false;
+    id = '';
+    innerHTML = '';
+    private readonly found = new Map<string, StandIn>();
+    appendChild<T>(child: T): T {
+      return child;
+    }
+    querySelector(selector: string): StandIn {
+      let el = this.found.get(selector);
+      if (!el) {
+        el = new StandIn();
+        this.found.set(selector, el);
+      }
+      return el;
+    }
+    addEventListener(): void {}
+  }
+  const page = globalThis as unknown as { document?: unknown };
+  const had = page.document;
+  page.document = { createElement: () => new StandIn(), head: new StandIn() };
+  try {
+    const { PlacingBar } = await import('../../../src/ui/placingBar.ts');
+    const parent = new StandIn();
+    const bar = new PlacingBar(parent as unknown as HTMLElement);
+    const why = (bar.root as unknown as StandIn).querySelector('.why');
+    const keys = { left: 'Q', right: 'E', up: 'R', down: 'F' };
+    const jump = doorNote(0.75)!;
+    const reach = doorNote(1.5)!;
+
+    bar.show('Medium House', true, null, keys, 0.75, null, jump);
+    ok(why.textContent === jump && why.className === 'why note', 'an allowed spot with a note says the note, in the accent');
+    const after = bar.writes;
+    bar.show('Medium House', true, null, keys, 0.75, null, jump);
+    ok(bar.writes === after, 'and the same frame again writes nothing');
+    bar.show('Medium House', true, null, keys, 0.75, null, reach);
+    ok(bar.writes === after + 1 && why.textContent === reach, 'a note that changes is written, once');
+
+    bar.show('Medium House', false, 'that is under water', keys, 0.75, null, jump);
+    ok(why.textContent === 'that is under water' && why.className === 'why bad', 'a refused spot says only why, never the note');
+    const refused = bar.writes;
+    bar.show('Medium House', false, 'that is under water', keys, 0.75, null, reach);
+    ok(bar.writes === refused, 'and a note moving under a refusal, which is not shown, writes nothing');
+
+    bar.show('Medium House', true, null, keys, 0, null, null);
+    ok(why.textContent === 'the ground will take it' && why.className === 'why good', 'an allowed spot with nothing to say is the plain green');
+  } finally {
+    if (had === undefined) delete page.document;
+    else page.document = had;
+  }
 }
 
 // ---------------------------------------------------------------- the real ground

@@ -2616,7 +2616,9 @@ class App {
        * `{ remove: '<id>' }` that one, as the Housing tab's own Take down does, with no question
        * asked), and `{ tune: { rise, sink, slope } }` moves the test itself, which is three invented numbers
        * and wants an eye on them: measured over four real worlds they take between a tenth and a
-       * half of the open ground, depending on the world and the size of the building.
+       * half of the open ground, depending on the world and the size of the building. `doorStep` and
+       * `doorMost` move too, though they are the player's own step and jump and say only how a lifted
+       * door will be reached; they never refuse a spot.
        *
        * **With a server it is a real home** and with none it is a sketch. Connected, the placing
        * goes to the relay, the house appears when the server answers, everybody standing on that
@@ -2719,11 +2721,14 @@ class App {
       /**
        * The deeds a character can put a building down with, and the ghost that puts one down.
        *
-       * `__debug.place()` lists what there is; `__debug.place('corellia_house_medium_deed')` takes
+       * `__debug.deed()` lists what there is; `__debug.deed('corellia_house_medium_deed')` takes
        * that deed in hand, which is what the Housing tab's double-click does; `{ turn: 2 }` and
        * `{ reach: 30 }` move the ghost as the keys and the wheel do, `{ lift: 4 }` raises it four
        * presses (and -4 lowers it); `{ drop: true }` puts it down; `{ cancel: true }` gives it up;
-       * and `{ tune: { … } }` moves the ghost's own numbers.
+       * and `{ tune: { … } }` moves the ghost's own numbers (`mostPermanent` among them). The report's
+       * `note` is what the door's height off the ground will mean, which never refuses a spot, and
+       * `barWrites` is how many times the placing bar has written the page, which a steady hand leaves
+       * where it was.
        */
       deed: async (deed?: string, opts: { turn?: number; lift?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
         if (opts.tune) Object.assign(GHOST_TUNE, opts.tune);
@@ -2765,6 +2770,10 @@ class App {
           at: p.state ? { x: Math.round(p.state.x), z: Math.round(p.state.z), y: Number(p.state.y.toFixed(1)) } : null,
           ok: p.state?.ok ?? false,
           why: p.state?.why ?? null,
+          note: p.state?.note ?? null,
+          // The placing bar's own lifetime count of writes to the page: steady while nothing it says
+          // has changed, which `__debug.hud().writes` does not count.
+          barWrites: this.placingBar.writes,
           foot: p.deed.foot ? `${p.deed.foot.w}x${p.deed.foot.h} cells of ${p.deed.foot.cw} m` : null,
           lots: p.deed.lots,
           tune: { ...GHOST_TUNE },
@@ -17571,7 +17580,8 @@ class App {
     );
     p.state = state;
     this.ghost.place(state, foot, p.deed.foot?.rows ?? [], (x, z) => this.world.terrain.heightAt(x, z));
-    this.placingBar.show(p.deed.name, state.ok, state.why, this.placeKeys(), state.lift);
+    // A door standing over a step or a jump is said beside an allowed spot and never refuses it.
+    this.placingBar.show(p.deed.name, state.ok, state.why, this.placeKeys(), state.lift, null, state.note);
   }
 
   // ---------------------------------------------------------------------------------------------

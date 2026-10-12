@@ -26,6 +26,7 @@ const PLACING_BAR_CSS = `
 #placing-bar .why { font-size: 11px; letter-spacing: 0.03em; color: var(--muted); min-height: 1.2em; text-align: center; pointer-events: none; }
 #placing-bar .why.bad { color: var(--bad); }
 #placing-bar .why.good { color: var(--good); }
+#placing-bar .why.note { color: var(--accent); }
 #placing-bar .lift { font-size: 11px; letter-spacing: 0.04em; color: var(--accent); min-width: 3.6em; text-align: center; }
 #placing-bar button { font: inherit; font-size: 11px; letter-spacing: 0.05em; color: var(--muted); background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; padding: 4px 9px; cursor: pointer; }
 #placing-bar button:hover { color: var(--ink); border-color: var(--edge); }
@@ -127,18 +128,23 @@ export class PlacingBar {
    * `away` is the cap of the key that puts a picked-up prop away, or null when what is in hand did
    * not come out of the world: then there is nothing to put away and no button for it, and Escape is
    * a plain cancel rather than "put it back".
+   *
+   * `note` is something worth knowing about a spot that is allowed -- a house's door standing over a
+   * step or a jump -- and is shown in place of "the ground will take it", in the accent rather than
+   * the green, because it is a warning and never a refusal. A refused spot shows only why.
    */
-  show(name: string, ok: boolean, why: string | null, keys?: PlacingKeys, lift = 0, away: string | null = null): void {
+  show(name: string, ok: boolean, why: string | null, keys?: PlacingKeys, lift = 0, away: string | null = null, note: string | null = null): void {
     this.root.hidden = false;
     const k = keys ?? { left: '', right: '', up: '', down: '' };
     const height = lift === 0 ? 'on the ground' : `${lift > 0 ? '+' : ''}${lift.toFixed(2)} m`;
-    const key = `${name}\0${ok}\0${why ?? ''}\0${k.left}${k.right}${k.up}${k.down}\0${height}\0${away ?? '\u0001'}`;
+    const said = ok ? note : null;
+    const key = `${name}\0${ok}\0${why ?? ''}\0${k.left}${k.right}${k.up}${k.down}\0${height}\0${away ?? '\u0001'}\0${said ?? ''}`;
     if (key === this.last) return;
     this.last = key;
     this.writes++;
     this.what.textContent = name;
-    this.why.textContent = ok ? 'the ground will take it' : (why ?? 'not here');
-    this.why.className = `why ${ok ? 'good' : 'bad'}`;
+    this.why.textContent = ok ? (said ?? 'the ground will take it') : (why ?? 'not here');
+    this.why.className = `why ${ok ? (said ? 'note' : 'good') : 'bad'}`;
     this.lift.textContent = height;
     for (const which of ['left', 'right', 'up', 'down'] as (keyof PlacingKeys)[]) this.caps[which].textContent = k[which];
     this.go.disabled = !ok;

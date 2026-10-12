@@ -42,7 +42,7 @@ import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
-import { blockedBy, blockerName, clearRadius, groundVerdict, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
+import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { outdoorNav } from './nav/outdoorNav.ts';
 import { cellOfLiving, doorwayNav } from './nav/doorway.ts';
 import { Doors, type DoorView } from './doors.ts';
@@ -3761,7 +3761,11 @@ export class World {
     // is: nothing in the archives marks a no-build zone, and the real server's were a table it
     // kept rather than anything the client shipped.
     if (!given && !opts.force) {
-      const blocker = blockedBy(patch, at, yaw, stream.objectsNear(at.x, at.z, clear));
+      // Asked about round the patch's own middle, which is what `blockedBy` measures from, as the
+      // ghost asks: asked round the doorstep, a thing within reach of the far side of a house whose
+      // origin stands metres off its middle was never handed over to be measured at all.
+      const mid = patchMiddle(patch, at, yaw, { x: 0, z: 0 });
+      const blocker = blockedBy(patch, at, yaw, stream.objectsNear(mid.x, mid.z, clear));
       if (blocker) {
         const why = `${blockerName(blocker.template)} is already standing there`;
         return { ...verdict, ok: false, key, x: at.x, z: at.z, yaw, clear, why, building: null };

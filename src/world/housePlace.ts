@@ -79,7 +79,41 @@ export const HOUSE_TUNE = {
   ahead: 14,
   /** How far above the ground the building's own origin is stood. */
   lift: 0,
+  /**
+   * How far the door may stand off the ground before getting in or out takes a jump, metres. Not
+   * ours: it is the step the player's own character controller climbs without one (`player.ts`'s
+   * `enableAutostep`), which the node test reads out of that call. Past it the bar says so; it never
+   * refuses anything, because how high a house stands is the player's to choose.
+   */
+  doorStep: 0.5,
+  /**
+   * How far the door may stand off the ground before a plain jump cannot reach it, metres. Not ours
+   * either: it is `JUMP_APEX`, the walk's own jump, which the node test holds it to. A note too and
+   * never a refusal -- a Jedi's leap clears eleven metres, and the house is the owner's.
+   */
+  doorMost: 0.8,
 };
+
+/**
+ * A point in a building's own frame carried round by its turn, **the way three turns it**: local
+ * `(x, z)` goes to `(x cos + z sin, -x sin + z cos)`, which is what `rotation.set(0, yaw, 0)` does to
+ * the ghost (`placeGhost.ts`, `PlacementGhost.place`) and `setFromAxisAngle(up, yaw)` to the house
+ * that stands (`world.ts`, `placeBuilding`). Every probe, middle and grid height about a house is
+ * turned through here and through nothing else.
+ *
+ * The ground tests once turned the other way, which agrees with the drawn house only at 0 and 180
+ * degrees: at a quarter turn the ground a house was judged on, the middle what was in the way was
+ * measured from and the heights its grid was drawn at were all the mirror image of where it stood.
+ *
+ * It writes into `out` and hands it back, so a frame that turns forty corners makes nothing.
+ */
+export function turnLocal(lx: number, lz: number, yaw: number, out: { x: number; z: number }): { x: number; z: number } {
+  const cos = Math.cos(yaw);
+  const sin = Math.sin(yaw);
+  out.x = lx * cos + lz * sin;
+  out.z = -lx * sin + lz * cos;
+  return out;
+}
 
 /**
  * The patch a model's own box asks for. `min` and `max` are taken componentwise: a mesh's BOX
@@ -113,18 +147,57 @@ export function patchSize(p: Patch): { x: number; z: number } {
  * anything this game knows -- nothing in the archives says which way a house's door faces. It is
  * last rather than first so that `groundVerdict` can take it by name without the corners' loop
  * having to skip an index.
+ *
+ * `out` is a list to write them into, kept by a caller that asks every frame (the ghost): its six
+ * records are made the first time and written over after that. Without one a new list is made.
  */
-export function patchProbes(p: Patch, at: { x: number; z: number }, yaw: number, margin = HOUSE_TUNE.margin): { x: number; z: number }[] {
+export function patchProbes(p: Patch, at: { x: number; z: number }, yaw: number, margin = HOUSE_TUNE.margin, out: { x: number; z: number }[] = []): { x: number; z: number }[] {
   const hx = p.hx + margin;
   const hz = p.hz + margin;
-  const cos = Math.cos(yaw);
-  const sin = Math.sin(yaw);
-  const at_ = (dx: number, dz: number) => {
-    const x = p.cx + dx;
-    const z = p.cz + dz;
-    return { x: at.x + x * cos - z * sin, z: at.z + x * sin + z * cos };
-  };
-  return [at_(-hx, -hz), at_(hx, -hz), at_(-hx, hz), at_(hx, hz), at_(0, 0), { x: at.x, z: at.z }];
+  probeAt(out, 0, p, at, yaw, -hx, -hz);
+  probeAt(out, 1, p, at, yaw, hx, -hz);
+  probeAt(out, 2, p, at, yaw, -hx, hz);
+  probeAt(out, 3, p, at, yaw, hx, hz);
+  probeAt(out, 4, p, at, yaw, 0, 0);
+  const door = out[5] ?? (out[5] = { x: 0, z: 0 });
+  door.x = at.x;
+  door.z = at.z;
+  out.length = 6;
+  return out;
+}
+
+/** One probe of `patchProbes`: a point of the patch's own frame, turned and carried into the world. */
+function probeAt(out: { x: number; z: number }[], i: number, p: Patch, at: { x: number; z: number }, yaw: number, dx: number, dz: number): void {
+  const q = turnLocal(p.cx + dx, p.cz + dz, yaw, out[i] ?? (out[i] = { x: 0, z: 0 }));
+  q.x += at.x;
+  q.z += at.z;
+}
+
+/**
+ * The middle of a building's patch in the world, for a building at `at` turned by `yaw`: where what
+ * is in the way is measured from, and so where the world must be asked what is standing, which is
+ * not the spot the building was asked for -- a medium house's origin stands metres off its middle.
+ * Written into `out`.
+ */
+export function patchMiddle(p: Patch, at: { x: number; z: number }, yaw: number, out: { x: number; z: number }): { x: number; z: number } {
+  turnLocal(p.cx, p.cz, yaw, out);
+  out.x += at.x;
+  out.z += at.z;
+  return out;
+}
+
+/** What `groundVerdict` says about a patch of ground. */
+export interface GroundVerdict {
+  ok: boolean;
+  /** Where to stand the building's origin: the floor, the player's lift in it. */
+  y: number;
+  rise: number;
+  sink: number;
+  slope: number;
+  /** Why not, in words, or null. */
+  why: string | null;
+  /** What the door's height off the ground will mean, or null; never a refusal. */
+  note: string | null;
 }
 
 /**
@@ -143,24 +216,39 @@ export function patchProbes(p: Patch, at: { x: number; z: number }, yaw: number,
  *
  * The slope is still its own test, over every pair of probes, because neither of the other two sees
  * a step between two corners that both happen to sit near the doorstep's height.
+ *
+ * **`lift` is the player's own raise or drop, and the rise and the fall are measured from the floor
+ * it leaves**, `door + lift`, not from the ground under the doorstep. So lifting a doorstep the
+ * ground laps over clears the rise -- which is what the nudge was always for -- lowering one adds to
+ * it, and a house lifted high over level ground is refused in the fall's own words, because a floor
+ * six metres up has ground falling six metres away under it whatever the ground itself is doing.
+ * The slope does not move with the lift and neither does anything else.
+ *
+ * **How far the door then stands off the ground is a `note`, never a refusal**: past `doorStep` the
+ * player will have to jump to get in (or out, lowered), past `doorMost` a plain jump will not reach.
+ * Both numbers are the player's own; how high a house stands is the player's to choose.
+ *
+ * `out` is a record to write the answer into, kept by a caller that asks every frame; without one a
+ * new record is made.
  */
-export function groundVerdict(
-  probes: readonly { x: number; z: number }[],
-  heights: readonly number[],
-  tune = HOUSE_TUNE,
-): { ok: boolean; y: number; rise: number; sink: number; slope: number; why: string | null } {
-  const good = heights.filter((h) => Number.isFinite(h));
-  if (good.length < probes.length || good.length < 3) {
-    return { ok: false, y: 0, rise: 0, sink: 0, slope: 0, why: 'the ground there is not known yet' };
-  }
+export function groundVerdict(probes: readonly { x: number; z: number }[], heights: readonly number[], tune = HOUSE_TUNE, lift = 0, out?: GroundVerdict): GroundVerdict {
+  const v: GroundVerdict = out ?? { ok: false, y: 0, rise: 0, sink: 0, slope: 0, why: null, note: null };
+  v.note = doorNote(lift, tune);
+  let known = 0;
+  for (let i = 0; i < heights.length; i++) if (Number.isFinite(heights[i])) known++;
+  if (known < probes.length || known < 3) return verdict(v, false, 0, 0, 0, 0, 'the ground there is not known yet');
   // The doorstep: the last probe, which `patchProbes` puts at the building's own origin. A caller
   // that hands over corners alone gets the middle of them, which is the fairest thing left to do.
   const door = heights[heights.length - 1];
+  // The floor, where the house really stands once the player has lifted or dropped it.
+  const floor = door + lift;
   let rise = 0;
   let sink = 0;
-  for (const h of good) {
-    if (h - door > rise) rise = h - door;
-    if (door - h > sink) sink = door - h;
+  for (let i = 0; i < heights.length; i++) {
+    const h = heights[i];
+    if (!Number.isFinite(h)) continue;
+    if (h - floor > rise) rise = h - floor;
+    if (floor - h > sink) sink = floor - h;
   }
   let steepest = 0;
   for (let i = 0; i < probes.length; i++) {
@@ -172,11 +260,54 @@ export function groundVerdict(
       if (deg > steepest) steepest = deg;
     }
   }
-  const y = door + tune.lift;
-  if (rise > tune.rise) return { ok: false, y, rise, sink, slope: steepest, why: `the ground stands ${rise.toFixed(1)} m over the doorstep, and ${tune.rise} is the most a house will take` };
-  if (sink > tune.sink) return { ok: false, y, rise, sink, slope: steepest, why: `the ground falls ${sink.toFixed(1)} m away under it, and ${tune.sink} is the most` };
-  if (steepest > tune.slope) return { ok: false, y, rise, sink, slope: steepest, why: `the ground slopes ${steepest.toFixed(0)} degrees under it, and ${tune.slope} is the most` };
-  return { ok: true, y, rise, sink, slope: steepest, why: null };
+  const y = floor + tune.lift;
+  if (rise > tune.rise) return verdict(v, false, y, rise, sink, steepest, `the ground stands ${rise.toFixed(1)} m over the doorstep, and ${tune.rise} is the most a house will take`);
+  if (sink > tune.sink) return verdict(v, false, y, rise, sink, steepest, `the ground falls ${sink.toFixed(1)} m away under it, and ${tune.sink} is the most`);
+  if (steepest > tune.slope) return verdict(v, false, y, rise, sink, steepest, `the ground slopes ${steepest.toFixed(0)} degrees under it, and ${tune.slope} is the most`);
+  return verdict(v, true, y, rise, sink, steepest, null);
+}
+
+/** `groundVerdict`'s answer written into its record, the note already in it. */
+function verdict(v: GroundVerdict, ok: boolean, y: number, rise: number, sink: number, slope: number, why: string | null): GroundVerdict {
+  v.ok = ok;
+  v.y = y;
+  v.rise = rise;
+  v.sink = sink;
+  v.slope = slope;
+  v.why = why;
+  return v;
+}
+
+/**
+ * The last door note written and what it was written for. A lift is held for frames at a time and
+ * the ground test asks every one of them, so the words are written once and handed back while the
+ * lift and the plain jump they are measured against stay as they were. (The step only decides
+ * whether there are any words, which is asked before this.)
+ */
+const DOOR_SAID: { lift: number; most: number; text: string } = { lift: Number.NaN, most: Number.NaN, text: '' };
+
+/**
+ * What the door's height off the ground means to whoever has to walk in, or null when it means
+ * nothing: a step the feet climb on their own. The doorstep's own ground is what the lift is
+ * measured from, so a lift is exactly how far the sill stands over it, or under it.
+ */
+export function doorNote(lift: number, tune = HOUSE_TUNE): string | null {
+  const off = Math.abs(lift);
+  if (!(off > tune.doorStep)) return null;
+  if (lift === DOOR_SAID.lift && tune.doorMost === DOOR_SAID.most) return DOOR_SAID.text;
+  DOOR_SAID.lift = lift;
+  DOOR_SAID.most = tune.doorMost;
+  DOOR_SAID.text = doorWords(lift, off, tune);
+  return DOOR_SAID.text;
+}
+
+/** The words themselves, for a door past the step. */
+function doorWords(lift: number, off: number, tune: typeof HOUSE_TUNE): string {
+  const m = off.toFixed(2);
+  if (off > tune.doorMost) {
+    return lift > 0 ? `the door will stand ${m} m over the ground, out of reach of a plain jump` : `the ground will stand ${m} m over the doorstep, out of reach of a plain jump`;
+  }
+  return lift > 0 ? `the door will stand ${m} m over the ground: you will have to jump to get in` : `the ground will stand ${m} m over the doorstep: you will have to jump to get out`;
 }
 
 /**
@@ -192,11 +323,14 @@ export function groundVerdict(
  */
 export function spotAhead(from: { x: number; z: number }, yaw: number, p: Patch, tune = HOUSE_TUNE): { x: number; z: number } {
   const reach = Math.max(tune.ahead, Math.hypot(p.hx, p.hz) + tune.margin + 2);
-  const cos = Math.cos(yaw);
-  const sin = Math.sin(yaw);
-  // The patch offset turns with the building, so it is taken off in the building's own frame.
-  return { x: from.x + sin * reach - (p.cx * cos - p.cz * sin), z: from.z + cos * reach - (p.cx * sin + p.cz * cos) };
+  // The patch offset turns with the building, so it is taken off in the building's own frame. The
+  // body's forward is the building's own +z turned the same way, which is why the two agree.
+  const off = turnLocal(p.cx, p.cz, yaw, { x: 0, z: 0 });
+  return { x: from.x + Math.sin(yaw) * reach - off.x, z: from.z + Math.cos(yaw) * reach - off.z };
 }
+
+/** `blockedBy`'s middle, kept: it is read into two numbers before anything else is asked. */
+const MIDDLE = { x: 0, z: 0 };
 
 /** How far from a house nothing else may stand: its own patch, plus the margin. */
 export function clearRadius(p: Patch, tune = HOUSE_TUNE): number {
@@ -225,11 +359,10 @@ export interface Standing {
  */
 export function blockedBy(p: Patch, at: { x: number; z: number }, yaw: number, standing: readonly Standing[], tune = HOUSE_TUNE): Standing | null {
   const reach = clearRadius(p, tune);
-  const cos = Math.cos(yaw);
-  const sin = Math.sin(yaw);
   // The patch's own middle, which is not the spot the building was asked for.
-  const mx = at.x + (p.cx * cos - p.cz * sin);
-  const mz = at.z + (p.cx * sin + p.cz * cos);
+  const mid = patchMiddle(p, at, yaw, MIDDLE);
+  const mx = mid.x;
+  const mz = mid.z;
   let best: Standing | null = null;
   let bestGap = Infinity;
   for (const s of standing) {
