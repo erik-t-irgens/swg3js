@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SEAT_TUNE, isTableTemplate, pickBy, planSeats, seatOfMood, seatTally, tuneSeats, type SeatKind, type SeatWorld, type SeatedRow } from '../../../src/world/seatProps.ts';
+import { SEAT_TUNE, isTableTemplate, pickBy, planSeats, seatOfMood, seatPlanKey, seatTally, tuneSeats, type SeatKind, type SeatWorld, type SeatedRow } from '../../../src/world/seatProps.ts';
 import { isSeat } from '../../../src/world/ambient/fillers.ts';
 import { StandingPeople, type StandingRow } from '../../../src/world/standingPeople.ts';
 import { intoWorld } from '../../../src/world/wildLife.ts';
@@ -53,6 +53,13 @@ const row = (key: string, x: number, z: number, heading: number, sits: SeatKind,
   ok(planSeats([row('a', 10, 20, 1.2, 'chair', { inside: false })], empty(), off).props.length === 0, '2: and none out in the open with the switch off');
   ok(planSeats([row('a', 10, 20, 1.2, 'chair')], empty(), { ...SEAT_TUNE, on: false }).props.length === 0, '2: nor anywhere with the whole of it off');
   ok(planSeats([row('a', Number.NaN, 20, 1.2, 'chair'), row('b', 1, 2, Number.NaN, 'chair')], empty()).props.length === 0, '2: a row whose place or facing is not a number stands nothing');
+  // A plan's key: the same rows planned again read the same, so nothing need be stood again for them; a chair the
+  // world's own data now stands under a sitter (a permanent one put there) moves it.
+  const rows = [row('a', 10, 20, 1.2, 'chair'), row('b', 0, 0, 0, 'table')];
+  ok(seatPlanKey(planSeats(rows, empty())) === seatPlanKey(planSeats([...rows].reverse(), empty())), '2: a plan worked out again from the same rows reads the same, whatever order they come in');
+  const hasA: SeatWorld = { has: (kind, x) => kind === 'chair' && x === 10, ground: () => 0 };
+  ok(seatPlanKey(planSeats(rows, hasA)) !== seatPlanKey(planSeats(rows, empty())), "2: while a seat of the world's own under one sitter moves it");
+  ok(seatPlanKey(planSeats(rows, empty(), { ...SEAT_TUNE, ahead: 1 })) !== seatPlanKey(planSeats(rows, empty())) && seatPlanKey(planSeats([], empty())) === '[]', '2: and so does a table stood elsewhere; no plan reads as none');
 }
 
 // --- 3: tables, and who shares one -------------------------------------------------------------

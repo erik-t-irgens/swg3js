@@ -42,8 +42,8 @@ export const GHOST_TUNE = {
   most: 8,
   /**
    * The same reach in a permanent layer, metres, where a building may be sunk into a dune or set on
-   * a ledge on purpose. It is for the editor that places permanent rows, and nothing reads it until
-   * that editor is built.
+   * a ledge on purpose: the dev server's placement editor's, for a building whose destination is one
+   * of the two files of permanent placements.
    */
   mostPermanent: 30,
   /** How see-through the building itself is while it is a ghost. */
@@ -351,20 +351,29 @@ export class PlacementGhost {
     return gone;
   }
 
-  /** Where the ghost stands and how it reads: green for a spot that will take it, red for one that will not. */
-  place(state: GhostState, f: Footprint | null, rows: readonly string[], heightAt: (x: number, z: number) => number): void {
+  /**
+   * Where the ghost stands and how it reads: green for a spot that will take it, red for one that will not --
+   * or, where `allowed` says so, the accent for a spot that will (the dev server's editor, putting it down for
+   * good). Colours only, so no program changes. A building with no footprint (one taken by its model alone)
+   * draws no grid.
+   */
+  place(state: GhostState, f: Footprint | null, rows: readonly string[], heightAt: (x: number, z: number) => number, allowed: 'good' | 'accent' = 'good'): void {
     this.ok = state.ok;
     this.group.position.set(state.x, state.y, state.z);
     this.group.quaternion.identity();
     this.group.rotation.set(0, state.yaw, 0);
-    if (this.grid) this.grid.visible = true;
     this.group.visible = !!this.model;
     for (const m of this.mine) {
       const mat = m as THREE.MeshStandardMaterial;
-      if (mat.color) mat.color.set(colourHex(state.ok ? 'good' : 'bad'));
-      if (mat.emissive) mat.emissive.set(colourHex(state.ok ? 'good' : 'bad')).multiplyScalar(0.25);
+      if (mat.color) mat.color.set(colourHex(state.ok ? allowed : 'bad'));
+      if (mat.emissive) mat.emissive.set(colourHex(state.ok ? allowed : 'bad')).multiplyScalar(0.25);
     }
-    if (f) this.drawGrid(f, rows, state, heightAt);
+    if (!f) {
+      this.hideGrid();
+      return;
+    }
+    if (this.grid) this.grid.visible = true;
+    this.drawGrid(f, rows, state, heightAt, allowed);
   }
 
   /**
@@ -374,15 +383,15 @@ export class PlacementGhost {
    * has none, and a grid under a teacup would say nothing anybody needs. And a quaternion rather
    * than a yaw because the owner asked to be able to lay a crate on its side.
    */
-  placeProp(at: { x: number; y: number; z: number }, turn: { x: number; y: number; z: number; w: number }, ok: boolean): void {
+  placeProp(at: { x: number; y: number; z: number }, turn: { x: number; y: number; z: number; w: number }, ok: boolean, allowed: 'good' | 'accent' = 'good'): void {
     this.ok = ok;
     this.group.position.set(at.x, at.y, at.z);
     this.group.quaternion.set(turn.x, turn.y, turn.z, turn.w);
     this.group.visible = !!this.model;
     for (const m of this.mine) {
       const mat = m as THREE.MeshStandardMaterial;
-      if (mat.color) mat.color.set(colourHex(ok ? 'good' : 'bad'));
-      if (mat.emissive) mat.emissive.set(colourHex(ok ? 'good' : 'bad')).multiplyScalar(0.25);
+      if (mat.color) mat.color.set(colourHex(ok ? allowed : 'bad'));
+      if (mat.emissive) mat.emissive.set(colourHex(ok ? allowed : 'bad')).multiplyScalar(0.25);
     }
     this.hideGrid();
   }
@@ -400,7 +409,7 @@ export class PlacementGhost {
    * a frame -- the same rule the dashed lines on the space map are drawn by. The cells are kept per
    * footprint and each corner is turned through one kept record, so drawing it makes no records.
    */
-  private drawGrid(f: Footprint, rows: readonly string[], state: GhostState, heightAt: (x: number, z: number) => number): void {
+  private drawGrid(f: Footprint, rows: readonly string[], state: GhostState, heightAt: (x: number, z: number) => number, allowed: 'good' | 'accent' = 'good'): void {
     const cells = this.outlineFor(f, rows);
     const want = cells.length * 4;
     if (!this.gridGeometry || (this.gridGeometry.getAttribute('position')?.count ?? 0) < want) {
@@ -422,7 +431,7 @@ export class PlacementGhost {
     const pos = this.gridGeometry.getAttribute('position') as THREE.BufferAttribute;
     const col = this.gridGeometry.getAttribute('color') as THREE.BufferAttribute;
     const idx = this.gridGeometry.getIndex() as THREE.BufferAttribute;
-    const good = this.fill.set(colourHex(state.ok ? 'good' : 'bad'));
+    const good = this.fill.set(colourHex(state.ok ? allowed : 'bad'));
     const edge = this.edge.set(colourHex(state.ok ? 'accent' : 'bad'));
     let v = 0;
     let i = 0;

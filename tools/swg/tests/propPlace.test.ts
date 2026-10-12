@@ -501,8 +501,9 @@ async function movedAcrossATravel(): Promise<void> {
   const { readFileSync } = await import('node:fs');
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   ok('the drop keeps the world it began in across the stand', /const worldAt = placedProps\.inWorld;\s*const row = await placedProps\.put\(/.test(main));
-  ok('and puts back in that world only while the store is still in it, else into its own keeping', /else if \(placedProps\.inWorld === worldAt\) void placedProps\.restore\(from,[\s\S]{0,200}else if \(placedProps\.keepIn\(worldAt, from, this\.placedStore\(\), save\)\)/.test(main));
-  const gone = /const fate = letGoOf\(how, !!from\);\s*if \(fate === 'gone'\) \{([\s\S]*?)\n\s*\}/.exec(main)?.[1] ?? '';
+  // One of yours, whose row the hand carries (`HandSource`'s `local`); nothing else ever goes into the store.
+  ok('and puts back in that world only while the store is still in it, else into its own keeping', /case 'local':\s*if \(placedProps\.inWorld === worldAt\) void placedProps\.restore\(from\.row,[\s\S]{0,200}else if \(placedProps\.keepIn\(worldAt, from\.row, this\.placedStore\(\), save\)\)/.test(main));
+  const gone = /const fate = letGoOf\(how, true\);\s*if \(fate === 'gone'\) \{([\s\S]*?)\n\s*\}/.exec(main)?.[1] ?? '';
   ok('giving one up asks letGoOf, and a prop put away returns before anything is put back', /\breturn;\s*$/.test(gone) && !/restore|keepIn/.test(gone));
 }
 

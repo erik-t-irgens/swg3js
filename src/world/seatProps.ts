@@ -202,6 +202,16 @@ export function planSeats(rows: readonly SeatedRow[], world: SeatWorld, tune: Se
 }
 
 /**
+ * A plan as one string: every prop it stands, by its key, model, place, turn and whether it is indoors, in the
+ * plan's own order. Two plans with the same answer stand the same chairs and tables, so a world whose plan has
+ * not moved need take none of them down to stand them again -- which every permanent placement saved in the dev
+ * server's editor, and the word that its file changed after it, would otherwise do to every seat of the world.
+ */
+export function seatPlanKey(plan: SeatPlan): string {
+  return JSON.stringify(plan.props.map((p) => [p.key, p.kind, p.model, p.x, p.y, p.z, p.yaw, p.inside]));
+}
+
+/**
  * Move any of `SEAT_TUNE`, live; answers which it moved. A number, a switch or a list of model names is
  * only ever replaced by one of its own kind (a list by a list of names that is not empty), so a typo in
  * the console cannot turn the reach into a word or leave a world with no model to draw a chair with.

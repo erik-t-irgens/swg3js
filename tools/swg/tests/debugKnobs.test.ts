@@ -380,8 +380,14 @@ function body(text: string, signature: string): string {
 // in the second a stand takes, so each run is its own record, checked by identity after every await, with keys
 // no other run uses, or the older run's copy of every chair is filed under a key the newer one overwrote.
 {
-  const stand = body(main, 'private async standSeats(pack: string): Promise<void>');
+  const stand = body(main, 'private async standSeats(pack: string, force = false): Promise<void>');
   ok(/solid: false/.test(stand) && !/solid: true/.test(stand), '18: a seat of ours is never solid, so a body sat on it is not pushed off');
+  // A plan that has not moved is not stood again: the editor's every save, and the file's word after it, asked for
+  // the seats and took every chair and table of the world down and up again under the people sitting on them.
+  const sigAt = stand.indexOf('const sig = plan ? seatPlanKey(plan) : \'\';');
+  const skipAt = stand.search(/if \(!force && was\.run > 0 && was\.pack === pack && was\.gen === world && was\.sig === sig\) return;/);
+  ok(sigAt > 0 && skipAt > sigAt && skipAt < stand.indexOf('this.clearSeatsStood(') && skipAt < stand.indexOf('placeProp('), '18: the plan is worked out first, and a run in force for the same world and the same plan is left standing, before anything is taken down');
+  ok(/if \(moved\.length \|\| opts\.again\) void this\.standSeats\(here, true\);/.test(main), "18: while the console's knob stands them all again whatever the plan");
   ok(/this\.seatsStood = run;/.test(stand) && /const current = \(\) => this\.seatsStood === run && this\.world\.generation === world;/.test(stand), '18: a run is its own record, and current only while it is the record and the world it began in is still here');
   const loaded = stand.indexOf('await this.props.load();');
   const loopCheck = stand.indexOf('if (!current()) return;', stand.indexOf('for (const p of plan.props)'));

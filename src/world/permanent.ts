@@ -10,7 +10,9 @@
 // A row that cannot stand is skipped and named, never thrown: its pack is not on this machine (`noPack`), its
 // model is not in the pack (`noModel`), the other layer holds its id (`clash`), it is a building in a space
 // zone (`space`, as a house is refused there), or the world is the dungeons' world of copies (`copies`: a row
-// stands at its raw place, so it would turn up in one copy of the forty-eight).
+// stands at its raw place, so it would turn up in one copy of the forty-eight). On the dev server a row the
+// placement editor has taken in hand (`lift`) is down and stays down (`inHand`) until it is put back
+// (`restore`) or saved (`land`).
 //
 // **A world that has gone takes its rows with it.** Every call asks the world's generation and treats a new
 // one as a world with nothing standing, so nothing here ever takes down a key in the world that came after,
@@ -42,8 +44,9 @@ export const DRESSING_TUNE = {
 
 /** What kind of world the rows are in: decides the frame and what is skipped. */
 export type WorldKind = 'ground' | 'space' | 'copies';
-export type SkipReason = 'badRow' | 'clash' | 'noPack' | 'noModel' | 'copies' | 'space';
-const REASONS: readonly SkipReason[] = ['badRow', 'clash', 'noPack', 'noModel', 'copies', 'space'];
+/** Why a row does not stand; `inHand` is one the dev server's editor has taken up (`lift`), which comes back with `restore` or `land`. */
+export type SkipReason = 'badRow' | 'clash' | 'noPack' | 'noModel' | 'copies' | 'space' | 'inHand';
+const REASONS: readonly SkipReason[] = ['badRow', 'clash', 'noPack', 'noModel', 'copies', 'space', 'inHand'];
 
 /** A model's own box, in its own frame. Either corner may come first: spans are taken, never corners (the BOX lesson). */
 export interface PlacementBox {
@@ -97,10 +100,19 @@ export function dressingStandOf(row: PlacementRow, g: GamePlace, key: string, th
   if (row.pack === 'props') {
     const def = row.thing ? thingOf(row.thing) : null;
     if (!def) return null;
-    return { ...at, model: def.model, solid: row.solid ?? !furniture(def.template), effectsOf: def.template };
+    return { ...at, model: def.model, solid: standsSolid(row, furniture(def.template)), effectsOf: def.template };
   }
   if (!row.model) return null;
-  return { ...at, model: row.model, solid: row.solid ?? true };
+  return { ...at, model: row.model, solid: standsSolid(row, false) };
+}
+
+/**
+ * Whether a row stands solid: its own word where it says one, else solid -- except a props row whose thing is a
+ * seat or a table (`furniture`, asked of the thing's template), which is passable (`dressingStandOf`'s rule, and
+ * the one the editor's Solid shows and turns, so the two can never disagree).
+ */
+export function standsSolid(row: Pick<PlacementRow, 'solid' | 'pack'>, furniture: boolean): boolean {
+  return row.solid ?? (row.pack === 'props' ? !furniture : true);
 }
 
 /** Metres round a stood row a player's own thing may not stand: its row's own, else the tune's on a story row, else none. Read live, so the tune moves it. */
@@ -252,6 +264,13 @@ export class PermanentLayer {
   private guarded: StoodRow[] = [];
   /** Why each row that is not standing is not, by its key (the reading's skips are kept apart, by layer). */
   private readonly skips = new Map<string, { id: string; layer: PlacementLayer; kind: string; why: SkipReason }>();
+  /**
+   * The rows the dev server's editor has taken in hand (`lift`), by key: taken down, and treated by every sync
+   * as rows that are not to stand, so a file read again while one is in hand never stands it a second time
+   * under the ghost, and putting it down unmoved stands it again (`land`), which a sync that still believed it
+   * stood would never do.
+   */
+  private readonly lifted = new Set<string>();
   private readonly place: GamePlace = { x: 0, y: 0, z: 0, q: [0, 0, 0, 1] };
 
   constructor(deps: PermanentDeps) {
@@ -284,6 +303,7 @@ export class PermanentLayer {
     this.files.story = null;
     this.files.world = null;
     this.forgetStanding();
+    this.lifted.clear();
   }
 
   /**
@@ -327,6 +347,45 @@ export class PermanentLayer {
     return this.sync();
   }
 
+  /**
+   * A row taken in hand by the dev server's editor: taken down here and now (whoever stands in a building's
+   * rooms is stood on its doorstep first, as any taking down does), and left down by every sync until it is
+   * put back (`restore`) or saved (`land`). Answers the row as it stood, for the hand to carry, or null when
+   * nothing stands under the key in this world.
+   */
+  lift(key: string): StoodRow | null {
+    if (!this.current()) return null;
+    const s = this.stood.get(key);
+    if (!s) return null;
+    this.deps.unstand(key);
+    this.stood.delete(key);
+    this.lifted.add(key);
+    this.skips.set(key, { id: s.row.id, layer: s.layer, kind: s.row.kind, why: 'inHand' });
+    this.guarded = [...this.stood.values()].filter(mayGuard);
+    return s;
+  }
+
+  /** A row taken in hand given back unchanged (Escape, a refused save): stood again as its file says. */
+  restore(key: string): Promise<unknown>[] {
+    if (!this.lifted.delete(key) || !this.current()) return [];
+    return this.sync();
+  }
+
+  /**
+   * A save answered: both layers as the endpoint wrote them, and the row that was in hand (`key`, null for a
+   * thing never stood) no longer held down, in one plan, so a row saved where it stood is stood again and one
+   * saved somewhere else is stood there, once.
+   */
+  land(key: string | null, story: PlacementRead | null, world: PlacementRead | null): Promise<unknown>[] {
+    if (key) this.lifted.delete(key);
+    return this.setLayers(story, world);
+  }
+
+  /** Whether a row is in the editor's hand. */
+  inHand(key: string): boolean {
+    return this.current() && this.lifted.has(key);
+  }
+
   /** Bring what stands to what both layers say; answers what to wait on for what was stood to be built. */
   private sync(): Promise<unknown>[] {
     const merged = mergeLayers(this.files.story?.rows ?? [], this.files.world?.rows ?? []);
@@ -335,7 +394,7 @@ export class PermanentLayer {
     const want: PlacementEntry[] = [];
     for (const e of merged.rows) {
       const key = placementKey(e.row.id);
-      const why: SkipReason | null = this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : !this.deps.packReady(e.row.pack) ? 'noPack' : null;
+      const why: SkipReason | null = this.lifted.has(key) ? 'inHand' : this.kind === 'copies' ? 'copies' : this.kind === 'space' && e.row.kind === 'building' ? 'space' : !this.deps.packReady(e.row.pack) ? 'noPack' : null;
       if (why) this.skips.set(key, { id: e.row.id, layer: e.layer, kind: e.row.kind, why });
       else want.push(e);
     }
@@ -455,7 +514,7 @@ export class PermanentLayer {
    * speaks of is still the one up; once it has gone, every question above answers nothing.
    */
   report(): { world: string; current: boolean; frame: PlacementFrame; kind: WorldKind; layers: Record<PlacementLayer, LayerReport>; rows: { id: string; layer: PlacementLayer; key: string; kind: string; label: string; stood: boolean; why: SkipReason | null }[]; refused: { layer: PlacementLayer; id: string; why: string }[] } {
-    const blank = (): Record<SkipReason, number> => ({ badRow: 0, clash: 0, noPack: 0, noModel: 0, copies: 0, space: 0 });
+    const blank = (): Record<SkipReason, number> => ({ badRow: 0, clash: 0, noPack: 0, noModel: 0, copies: 0, space: 0, inHand: 0 });
     const layers = {} as Record<PlacementLayer, LayerReport>;
     const refused: { layer: PlacementLayer; id: string; why: string }[] = [];
     for (const layer of ['story', 'world'] as const) {

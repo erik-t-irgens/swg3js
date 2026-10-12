@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
 import { placementFileOf } from './src/story/placementPath.ts';
@@ -81,14 +81,38 @@ function privateStory(): Plugin {
 /**
  * Tells the page when one of the permanent placements' files changes (`placements:changed`, a custom HMR
  * event naming the layer and the world), so an edit by hand, or the editor's own write, is stood without a
- * reload. Vite serves and builds `public/` itself, and no module imports these files, so a save reloads
- * nothing on its own; this is the only word the page gets. A file in a dot folder or under a dot name says
- * nothing, and neither does anything that is not `<layer>/<world>.json` (`placementFileOf`).
+ * reload. Vite builds `public/` itself, and no module imports these files, so a save reloads nothing on its
+ * own; this is the only word the page gets. A file in a dot folder or under a dot name says nothing, and
+ * neither does anything that is not `<layer>/<world>.json` (`placementFileOf`).
+ *
+ * On the dev server it also answers the page's ask for one of those files itself, from the disk as it stands at
+ * that moment, and a file that is not there with a 404. Vite would answer from its own list of the public folder,
+ * which learns of a new file only once its watcher has told it: the page asking in the moment after the editor
+ * first wrote a world's file (the editor says so the instant it is written) was handed the page itself, which
+ * reads as no file at all, and the rows the save had just stood were taken down again.
  */
 function placementFiles(): Plugin {
   return {
     name: 'placement-files',
     configureServer(server) {
+      server.middlewares.use('/placements', (req, res, next) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+        const word = placementFileOf(decodeURIComponent((req.url ?? '/').split('?')[0]));
+        if (!word) return next();
+        const file = path.resolve(PLACEMENTS_DIR, word.layer, `${word.world}.json`);
+        if (!file.startsWith(PLACEMENTS_DIR + path.sep)) return next();
+        res.setHeader('Cache-Control', 'no-store');
+        fs.readFile(file, (err, data) => {
+          if (err) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            res.end('not found');
+            return;
+          }
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(req.method === 'HEAD' ? undefined : data);
+        });
+      });
       server.watcher.add(PLACEMENTS_DIR);
       const timers = new Map<string, ReturnType<typeof setTimeout>>();
       const changed = (file: string): void => {
@@ -109,6 +133,37 @@ function placementFiles(): Plugin {
         );
       };
       for (const ev of ['add', 'change', 'unlink'] as const) server.watcher.on(ev, changed);
+    },
+  };
+}
+
+/**
+ * The placement editor's endpoint, `POST /__dev/placements`, which writes a world's two files of permanent
+ * placements under `public/placements/` one row at a time (`tools/dev/placementsEndpoint.mjs`, its rules in
+ * `src/world/placementEdits.ts`). The dev server's alone: a build carries no server, a release is packed
+ * without this file, and the launcher answers nothing but GET. The glue is loaded at the first ask by a name
+ * worked out here, so it and what it imports are never this config's dependencies and editing them never
+ * restarts the dev server; the price is that the endpoint runs the code it first loaded until a restart.
+ * Every file it writes is said to the page at once (`placements:changed`; the page reads the file through the
+ * placement files' own answer above, from the disk, so it finds what was just written), and the watcher above
+ * says it again a moment later, which the page's sync finds already done.
+ */
+function placementsEditor(): Plugin {
+  return {
+    name: 'placements-editor',
+    apply: 'serve',
+    configureServer(server) {
+      const glue = pathToFileURL(path.resolve(ROOT, 'tools', 'dev', 'placementsEndpoint.mjs')).href;
+      server.middlewares.use('/__dev/placements', (req, res) => {
+        import(/* @vite-ignore */ glue)
+          .then((m: { handle: (req: unknown, res: unknown, opts: unknown) => Promise<void> }) => m.handle(req, res, { dir: PLACEMENTS_DIR, notify: (word: { layer: string; world: string }) => server.ws.send('placements:changed', word) }))
+          .catch((err: unknown) => {
+            if (res.headersSent) return;
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({ ok: false, why: `the placement editor's endpoint failed: ${err instanceof Error ? err.message : String(err)}` }));
+          });
+      });
     },
   };
 }
@@ -147,7 +202,7 @@ function privateAssets(): Plugin {
 
 export default defineConfig({
   base: './',
-  plugins: [privateAssets(), privateStory(), placementFiles()],
+  plugins: [privateAssets(), privateStory(), placementFiles(), placementsEditor()],
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.

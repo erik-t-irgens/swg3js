@@ -1,6 +1,6 @@
 // The Escape menu: resume, switch character, and the settings pages (the keys, with a primary
 // and a secondary for every action, and the graphics, every knob the game has, applied live).
-import { DEFAULT_BINDINGS, type Action, type Input } from '../core/input';
+import { DEFAULT_BINDINGS, controlsActions, type Action, type Input } from '../core/input';
 import { DEFAULT_SETTINGS, saveSettings, type Settings } from '../core/settings';
 import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, onBindingsChanged, type Knob } from './hudPage.ts';
@@ -104,6 +104,8 @@ const ACTION_LABELS: Record<Action, string> = {
   placeLift: 'Raise or lower what you are placing (hold and move the mouse)',
   takeProp: 'Pick up a prop of yours (in hand: put it away; at your door: take the building down)',
   putAway: 'Put away a prop in hand, or give up a deed',
+  // The dev server's alone: a release never lists the action (`controlsActions`), nor carries these words.
+  placeLayer: import.meta.env.DEV ? 'Where what you are placing is kept (dev server only)' : '',
   debugMenu: 'Debug menu',
   waypoints: 'Waypoints (map tab)',
   journal: 'Journal (jobs, documents, the file)',
@@ -585,7 +587,8 @@ export class Menu {
   }
 
   private keyRows(): string {
-    return (Object.keys(DEFAULT_BINDINGS) as Action[])
+    // Every action there is, but in a release the dev server's own (`DEV_ONLY_ACTIONS`), which nothing reads there.
+    return controlsActions(import.meta.env.DEV)
       .map((a) => {
         const codes = this.input.bindings[a];
         const cell = (slot: number) => `<button class="key${codes[slot] ? '' : ' empty'}" data-action="${a}" data-slot="${slot}">${keyName(codes[slot] ?? '')}</button>`;

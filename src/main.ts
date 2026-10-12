@@ -163,7 +163,7 @@ import { standingPeople, PEOPLE_TUNE, type GcwSide } from './world/standingPeopl
 import { ambientPeople, OURS_TUNE, type AmbientPort } from './world/ambient/ambientPeople.ts';
 import { ROUTINE_TUNE } from './world/ambient/routines.ts';
 import { FILLER_TUNE, isSeat } from './world/ambient/fillers.ts';
-import { SEAT_TUNE, isTableTemplate, planSeats, seatTally, tuneSeats, type SeatPlan } from './world/seatProps.ts';
+import { SEAT_TUNE, isTableTemplate, planSeats, seatPlanKey, seatTally, tuneSeats, type SeatPlan } from './world/seatProps.ts';
 import type { AssetPack } from './world/assetPack.ts';
 import { DIFFICULTY, DIFFICULTY_RANGE, clampDifficulty, setDifficulty } from './world/difficulty.ts';
 import { HOUSE_TUNE } from './world/housePlace.ts';
@@ -218,16 +218,20 @@ import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/termi
 import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
 import { clearRadius, patchOfBounds, patchOfFootprint, type Footprint, type Patch } from './world/housePlace.ts';
-import { NO_KEY, PlacingBar, placingView, type PlacingKeys } from './ui/placingBar.ts';
+import { NO_KEY, PlacingBar, placingView, type PlacingKeys, type PlacingView } from './ui/placingBar.ts';
 import { PLACE_HOLD_TUNE, anchorReleased, applyHold, holdGain, holdKindOf, holdState, liftDelta, placeAnchor, stepToGrid, tumbleAxes, tumbleBy, tumbleDeltas, turnDelta, wheelDir, type HoldKind, type ViewAxes } from './world/placeHold.ts';
 import { HousingUi } from './ui/housingUi.ts';
 import { PropsUi } from './ui/propsUi.ts';
 import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
 import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, type PropTurn, type PropVerdict } from './world/propPlace.ts';
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
-import { HOUSING_TUNE, LocalHomes, atDoorOf, houseName, isLocalHome, myBuildings, type MyBuilding } from './world/myBuildings.ts';
-import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, type StandAnswer, type WorldKind } from './world/permanent.ts';
-import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
+import { HOUSING_TUNE, LocalHomes, atDoorOf, awayText, houseName, isLocalHome, myBuildings, type MyBuilding } from './world/myBuildings.ts';
+import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
+import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
+import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, inHandText, keptText, nextDestination, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource } from './world/permanentEdit.ts';
+import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
+import { EditChip } from './ui/editChip.ts';
+import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowView } from './ui/permanentPanel.ts';
 import { LAIR_TUNE } from './world/mobiles/lairs.ts';
 import { CLOUD_MARCH, type CloudsPass } from './core/fx/clouds';
 import { CLOUD_TUNE, cloudLook, loadCloudPack, loadCloudVolumes, worthDrawing, type CloudPack } from './world/cloudLook.ts';
@@ -540,6 +544,18 @@ const npcGlow: FighterGlow[] = [0, 1].map(() => ({ pos: new THREE.Vector3(), col
 const aimLook = new THREE.Vector3();
 /** A deed's footprint rows when it carries none, so the frame that draws its grid hands over no new list. */
 const NO_ROWS: readonly string[] = [];
+/** A thing taken in hand fresh from a tab, which has nowhere to go back to (`HandSource`). */
+const HAND_FRESH: { kind: 'fresh' } = Object.freeze({ kind: 'fresh' as const });
+/**
+ * A building in hand: what it is called, its model, the deed it came from (none for a building the dev
+ * server's editor took by its model alone), that deed's footprint and its rows (none without one) and the
+ * patch it asks for (the footprint's, else the model's own box; worked out once, as it is taken in hand, not
+ * every frame), the ghost's distance, turn and lift, what it last said (`ghostState`, kept, or null before
+ * its first frame), where it came from (`HandSource`) and where it is kept when it is put down.
+ */
+type BuildingHand = { name: string; model: string; deed: DeedRow | null; foot: Footprint | null; rows: readonly string[]; patch: Patch; reach: number; yaw: number; lift: number; state: GhostState | null; from: BuildingSource; dest: KeptIn };
+/** A prop in hand (`App.propPlacing`). */
+type PropHand = { def: PropDef; reach: number; turn: PropTurn; lift: number; ok: boolean; why: string | null; from: HandSource; dest: KeptIn };
 /** How near the controls in a ship's bridge E takes them, metres in the hull's frame. */
 const CONTROLS_RANGE = 2.5;
 /**
@@ -2110,7 +2126,7 @@ class App {
     this.housingUi = new HousingUi(this.ui);
     this.housingUi.onTab = (id) => this.toggleInventory(id as InventoryTab);
     this.housingUi.onPlace = (id) => {
-      void this.startPlacing(id).then((why) => {
+      void this.startPlacingBuilding({ deed: id }).then((why) => {
         if (why) this.messages.system(why);
       });
     };
@@ -2154,12 +2170,16 @@ class App {
     this.placingBar.onStep = (which, dir) => this.stepPlacingGrid(which === 'lift' ? 'lift' : 'turn', dir);
     this.placingBar.onPlace = () => void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
     this.placingBar.onCancel = () => (this.propPlacing ? this.stopPlacingProp() : this.stopPlacing());
-    // A prop picked back up: thrown away, where Cancel puts it back.
-    this.placingBar.onPutAway = () => this.stopPlacingProp('away');
+    // A prop picked back up: thrown away, where Cancel puts it back (a permanent row on a second press, `awayAsked`).
+    this.placingBar.onPutAway = () => {
+      if (this.awayAsked()) this.stopPlacingProp('away');
+    };
     // The placing keys' caps, spelled once here and again whenever the Controls page moves one, never
     // in a frame: the bar, its hint, the Props tab's foot and the Housing tab's words all read them.
     this.refreshPlaceKeys();
     onBindingsChanged(() => this.refreshPlaceKeys());
+    // The placement editor's chip and the two tabs' Yours | Permanent panels: the dev server's alone.
+    if (import.meta.env.DEV) this.makeEditor();
     // The creator's hour: play lets the day run at its own rate from wherever it stands, and a drag
     // that has rested takes the reflections again at once rather than on their four-second clock.
     this.placeBar.onPlay = (playing) => {
@@ -2765,7 +2785,7 @@ class App {
           return { placing: null };
         }
         if (deed) {
-          const why = await this.startPlacing(deed);
+          const why = await this.startPlacingBuilding({ deed });
           if (why) return { error: why };
         }
         const p0 = this.placing;
@@ -2773,14 +2793,25 @@ class App {
           if (typeof opts.turn === 'number') for (let i = 0; i < Math.abs(opts.turn); i++) this.stepPlacingGrid('turn', Math.sign(opts.turn));
           if (typeof opts.lift === 'number') for (let i = 0; i < Math.abs(opts.lift); i++) this.stepPlacingGrid('lift', Math.sign(opts.lift));
           if (typeof opts.turnDeg === 'number') p0.yaw = turnTo(p0.yaw + (opts.turnDeg * Math.PI) / 180);
-          if (typeof opts.liftM === 'number') p0.lift = houseLiftTo(opts.liftM);
+          if (typeof opts.liftM === 'number') {
+            p0.lift = houseLiftTo(opts.liftM, this.houseMost());
+            // A hold under way goes on from the lift set, not from where it had the lift before.
+            this.placeHold.raw = p0.lift;
+          }
         }
-        if (typeof opts.reach === 'number' && this.placing) this.placing.reach = opts.reach;
+        if (typeof opts.reach === 'number' && this.placing) {
+          this.placing.reach = opts.reach;
+          this.propAnchor.on = false;
+        }
         if (this.placing) this.stepPlacing();
         if (opts.drop) {
-          const was = this.placing?.state;
+          const was = this.placing;
+          const state = was?.state;
+          this.editLast = null;
           await this.dropPlacing();
-          return { dropped: !!was?.ok, why: was?.why ?? null };
+          // Kept for good on the dev server: saved, or asking for its second click, which a second drop gives.
+          if (import.meta.env.DEV && was && was.dest !== 'yours') return { dropped: !!this.lastEdit()?.saved, said: this.lastEdit()?.said ?? null, inHand: !!this.placing, ok: state?.ok ?? false, why: state?.why ?? null };
+          return { dropped: !!state?.ok, why: state?.why ?? null };
         }
         const p = this.placing;
         if (!p) {
@@ -2794,8 +2825,14 @@ class App {
           };
         }
         return {
-          placing: p.deed.id,
-          name: p.deed.name,
+          // The deed in hand, or (the dev server's editor) the gallery model taken by itself.
+          placing: p.deed?.id ?? p.model,
+          name: p.name,
+          model: p.model,
+          // Where it came from (`fresh`, or a `permanent` row picked up) and where it is kept when put down.
+          source: p.from.kind,
+          dest: p.dest,
+          anchored: this.propAnchor.on,
           reach: Math.round(p.reach),
           yaw: Number(((p.yaw * 180) / Math.PI).toFixed(1)),
           lift: Number(p.lift.toFixed(2)),
@@ -2809,8 +2846,8 @@ class App {
           // The placing bar's own lifetime count of writes to the page: steady while nothing it says
           // has changed, which `__debug.hud().writes` does not count.
           barWrites: this.placingBar.writes,
-          foot: p.deed.foot ? `${p.deed.foot.w}x${p.deed.foot.h} cells of ${p.deed.foot.cw} m` : null,
-          lots: p.deed.lots,
+          foot: p.deed?.foot && p.foot ? `${p.deed.foot.w}x${p.deed.foot.h} cells of ${p.deed.foot.cw} m` : null,
+          lots: p.deed?.lots ?? null,
           tune: { ...GHOST_TUNE },
         };
       },
@@ -2830,6 +2867,15 @@ class App {
        * it stood), `{ away: true }` puts it away for good, as O again, Delete or the bar's Put away
        * do, and `{ tune: { … } }` moves the numbers, every one of which is ours.
        *
+       * On the dev server, with the placement editor (`__debug.placements`): `{ take: true }` takes the
+       * nearer of yours and the permanent props, a permanent one kept in its own file (`source`, `layer`,
+       * `dest` in the report, and `said`, what the editor said); `{ drop: true }` with the thing going to a
+       * file is a click on the world -- the first save to a file in a session, or a refused spot, answers
+       * `dropped: false` with the question in `said`, and a second drop within the editor's `confirmMs`
+       * saves it; `{ cancel: true }` stands a permanent row again where it stood, and `{ away: true }`
+       * takes it out of its file on a second `away` within `confirmMs`, the first answering the question in
+       * `said`, as the keys and the bar ask before they do.
+       *
        * `find` searches the catalogue by name or id, which is the only way to learn an id from a
        * driven tab: the panel's list cannot be read from here.
        */
@@ -2841,8 +2887,10 @@ class App {
         }
         if (opts.away) {
           const was = this.propPlacing;
+          // A permanent row asks first, as the keys and the bar do: the question is `said`, and a second away answers it.
+          if (was && !this.awayAsked()) return { placing: was.def.name || was.def.id, putAway: null, said: this.editArm?.words ?? null };
           this.stopPlacingProp('away');
-          return { placing: null, putAway: was ? (was.def.name || was.def.id) : null, wasPickedUp: !!was?.from, standing: placedProps.all.length };
+          return { placing: null, putAway: was ? (was.def.name || was.def.id) : null, wasPickedUp: !!was && was.from.kind !== 'fresh', standing: placedProps.all.length };
         }
         if (!this.props.loaded) await this.props.load();
         if (opts.find !== undefined) {
@@ -2851,8 +2899,9 @@ class App {
           return { found: hits.length, first: hits.slice(0, 40).map((p) => ({ id: p.id, name: p.name ?? null, group: p.group, size: p.size })) };
         }
         if (opts.take) {
+          this.editLast = null;
           const said = await this.takeNearestProp();
-          if (!this.propPlacing) return { standing: placedProps.all.length, said };
+          if (!this.propPlacing) return { standing: placedProps.all.length, said, ...(this.placing ? { building: this.placing.name } : {}) };
         }
         if (id) {
           const why = await this.startPlacingProp(id);
@@ -2878,7 +2927,10 @@ class App {
         if (this.propPlacing) this.stepPlacingProp();
         if (opts.drop) {
           const was = this.propPlacing;
+          this.editLast = null;
           await this.dropPlacingProp();
+          // Kept for good on the dev server: saved, or asking for its second click, which a second drop gives.
+          if (import.meta.env.DEV && was && was.dest !== 'yours') return { dropped: !!this.lastEdit()?.saved, said: this.lastEdit()?.said ?? null, inHand: !!this.propPlacing, ok: was.ok, why: was.why };
           return { dropped: !!was?.ok, why: was?.why ?? placedProps.note ?? null, standing: placedProps.all.length };
         }
         const p = this.propPlacing;
@@ -2916,7 +2968,13 @@ class App {
           why: p.why,
           keys: { ...this.placeKeysNow },
           // Picked back up out of the world: Escape puts it back, O, Delete or `{ away: true }` throw it away.
-          pickedUp: !!p.from,
+          pickedUp: p.from.kind !== 'fresh',
+          // Where it came from (`fresh`, `local` one of yours, or a `permanent` row the dev server's editor picked
+          // up, with its `layer`) and where it is kept when it is put down (`yours`, `story`, `world`).
+          source: p.from.kind,
+          ...(p.from.kind === 'permanent' ? { layer: p.from.layer, row: p.from.row.id } : {}),
+          dest: p.dest,
+          ...(import.meta.env.DEV && this.editLast ? { said: this.editLast.said } : {}),
           standing: mine.length,
           tune: { ...PROP_TUNE },
         };
@@ -2932,10 +2990,72 @@ class App {
        * a row; `{ snippet: '<id>' }` prints a story object and an area naming a row, ready to paste into a story;
        * `{ snippet: 'example' }` prints a ready-made world-edit file round where you stand, to save as the file
        * it names; and `{ tune: { … } }` moves `DRESSING_TUNE`, every number of which is ours.
+       *
+       * The placement editor, on the dev server alone (a release answers that it is the dev server's):
+       * `{ layer: 'yours' | 'permanent' }` moves the Props and Housing tabs' switch; `{ dest: 'story' | 'world' }`
+       * moves where a thing taken now, and the thing in hand, is saved (as L in hand does); `{ confirm: true }`
+       * takes the session's first-save question as answered for that file; `{ put: row, layer }` writes a row
+       * into a layer's file (one with no id is given one), `{ remove: '<id>' }` takes one out of its file and
+       * `{ rename: ['<from>', '<to>'] }` gives one a new id, each through the dev server's own endpoint as the
+       * game's saves are, and stood as soon as it answers; `{ take: '<gallery model>' }` takes any gallery building
+       * in hand by its model, deed or not, with the switch on Permanent; and `{ edit: { confirmMs } }` moves
+       * `PERMANENT_EDIT_TUNE`. The report's `editor` says where the switch and the destinations stand, the
+       * question waiting for its second click, what the editor last said, and the endpoint's own numbers
+       * (`PLACEMENTS_ENDPOINT_TUNE`, the copy this build was made with: the dev server runs its own).
        */
-      placements: async (opts: { reload?: boolean; go?: string; snippet?: string; tune?: Partial<typeof DRESSING_TUNE> } = {}) => {
+      placements: async (
+        opts: {
+          reload?: boolean;
+          go?: string;
+          snippet?: string;
+          tune?: Partial<typeof DRESSING_TUNE>;
+          layer?: 'yours' | 'permanent' | PlacementLayer;
+          dest?: PlacementLayer;
+          confirm?: boolean;
+          put?: Record<string, unknown>;
+          remove?: string;
+          rename?: [string, string];
+          take?: string;
+          edit?: Partial<typeof PERMANENT_EDIT_TUNE>;
+        } = {},
+      ) => {
         if (opts.tune) Object.assign(DRESSING_TUNE, opts.tune);
         const here = packIdOf(this.world.planet, this.zone);
+        const editing = opts.layer !== undefined || opts.dest !== undefined || opts.confirm !== undefined || opts.put !== undefined || opts.remove !== undefined || opts.rename !== undefined || opts.take !== undefined || opts.edit !== undefined;
+        if (editing && !import.meta.env.DEV) return { error: "the editor is the dev server's" };
+        let said: string | null = null;
+        if (import.meta.env.DEV && editing) {
+          if (opts.edit) Object.assign(PERMANENT_EDIT_TUNE, opts.edit);
+          if (opts.put === undefined && (opts.layer === 'yours' || opts.layer === 'permanent')) this.setEditLayer(opts.layer);
+          if (opts.dest === 'story' || opts.dest === 'world') this.handTo(opts.dest);
+          if (opts.confirm) {
+            // The file the thing in hand goes to, else the session's.
+            const d = (this.propPlacing ?? this.placing)?.dest;
+            this.editDest.confirmed[d === 'story' || d === 'world' ? d : this.editDest.dest] = true;
+          }
+          // A row in the editor's hand is the hand's until it is put down: neither written over nor taken out here.
+          const held = typeof opts.put?.id === 'string' ? this.inHandRefusal(opts.put.id) : null;
+          if (opts.put !== undefined && held) {
+            said = held;
+            this.editSay(false, held);
+          } else if (opts.put !== undefined) {
+            const layer = opts.layer === 'story' || opts.layer === 'world' ? opts.layer : this.editDest.dest;
+            const reply = await this.postPlacements({ op: 'put', layer, world: here, row: opts.put });
+            if (reply.ok) {
+              await this.landPlacements(reply, null, here, this.world.generation);
+              said = savedText(reply.file, reply.id);
+            } else said = reply.why;
+            this.editSay(reply.ok, said, reply.ok ? reply : undefined);
+          }
+          if (opts.remove) {
+            const had = this.editRowOf(opts.remove);
+            const heldOut = this.inHandRefusal(opts.remove, true);
+            said = !had ? `no row ${opts.remove} on ${here}` : heldOut ?? (await this.deletePermanent(had.layer, opts.remove));
+            if (heldOut) this.editSay(false, heldOut);
+          }
+          if (opts.rename) said = await this.editRename(opts.rename[0], opts.rename[1]);
+          if (opts.take) said = (await this.startPlacingBuilding({ model: opts.take })) ?? `${opts.take} in hand, going to ${this.placing?.dest ?? 'nowhere'}`;
+        }
         if (opts.snippet === 'example') {
           const ex = await this.exampleDressing();
           if ('text' in ex) console.log(`${ex.file}:\n${ex.text}`);
@@ -2950,14 +3070,10 @@ class App {
           const s = this.permanent.rowOf(placementKey(id));
           if (!s) return { error: `no permanent row ${id} stands on ${here}`, rows: r.rows.map((x) => x.id) };
           if (opts.go) {
-            // A step off its edge, on its own height. One standing in a room is walked into through the door, as
-            // the fittings' are: the player is put on the doorstep of the permanent building it stands in (a
-            // house's origin is its doorstep), so the rooms are followed from the door as they always are.
-            const home = s.row.inside ? this.permanent.nearest(s, 80, 'building') : null;
-            const off = Math.max(1, s.radius + 1);
-            const to = home ? new THREE.Vector3(home.x, home.y + 0.3, home.z) : new THREE.Vector3(s.x + off, (s.row.inside ? this.world.terrain.heightAt(s.x + off, s.z) : s.y) + 0.3, s.z);
-            this.player.reset(to);
-            return { went: id, at: { x: Math.round(s.x), y: Number(s.y.toFixed(1)), z: Math.round(s.z) }, note: s.row.inside ? `it stands in a room: walk in through the door${home ? ` of ${home.label}` : ''}` : '' };
+            // A step off its edge, on its own height; one standing in a room, the doorstep of the permanent
+            // building it stands in (`goToPlacement`).
+            const went = this.goToPlacement(id);
+            return { went: id, at: went.at, note: s.row.inside ? went.said : '' };
           }
           const object = storyObjectSnippet(s.row, here, s.label.toUpperCase());
           const area = storyAreaSnippet(s.row, here, Math.max(6, Math.ceil(s.radius + 4)), s.label.toUpperCase());
@@ -2992,6 +3108,23 @@ class App {
           refused: r.refused,
           note: r.layers.story.source === 'none' && r.layers.world.source === 'none' ? `no permanent placements on ${here}: { snippet: 'example' } prints a file to try` : '',
           tune: { ...DRESSING_TUNE },
+          ...(import.meta.env.DEV
+            ? {
+                said,
+                editor: {
+                  layer: this.editLayer,
+                  dest: this.editDest.dest,
+                  confirmed: { ...this.editDest.confirmed },
+                  hand: (this.propPlacing ?? this.placing) ? { source: (this.propPlacing ?? this.placing)!.from.kind, dest: (this.propPlacing ?? this.placing)!.dest } : null,
+                  armed: this.editArm && performance.now() < this.editArm.until ? this.editArm.words : null,
+                  saving: this.editSaving,
+                  last: this.editLast,
+                  chip: this.editChip?.text ?? null,
+                  endpoint: { ...PLACEMENTS_ENDPOINT_TUNE },
+                  edit: { ...PERMANENT_EDIT_TUNE },
+                },
+              }
+            : {}),
         };
       },
       /**
@@ -3364,7 +3497,7 @@ class App {
       seats: (opts: { tune?: Record<string, unknown>; again?: boolean; go?: boolean } = {}) => {
         const moved = opts.tune ? tuneSeats(opts.tune) : [];
         const here = packIdOf(this.world.planet, this.zone);
-        if (moved.length || opts.again) void this.standSeats(here);
+        if (moved.length || opts.again) void this.standSeats(here, true);
         const plan = this.seatsStood.pack === here ? this.seatsStood.plan : null;
         const props = plan?.props ?? [];
         const at = this.player.worldPos;
@@ -9763,9 +9896,11 @@ class App {
     this.ride?.abort('leaving for the select screen', true);
     this.shuttleRigs?.clearHolds();
     // Whatever was in hand goes before the world does, as on a travel: a prop picked back up is
-    // written back into this world's store first, so the next visit finds it standing.
-    this.stopPlacing();
+    // written back into this world's store first, so the next visit finds it standing (and a permanent
+    // row the dev server's editor picked up is left as its file has it, for the next visit to stand).
+    this.stopPlacing('keep');
     this.stopPlacingProp('keep');
+    if (import.meta.env.DEV) this.editChip?.show(null);
     this.menu.hide();
     this.closePanels();
     // The hands are emptied on the way out, or the next character played (of the same species) would start with this one's weapon.
@@ -13512,8 +13647,9 @@ class App {
     // meshes out of a pack this world owns, and a prop's pack is let go on the far side. A prop
     // picked back up is written back into this world's store in this same breath and stood again
     // the next time the world is entered: put back the ordinary way, its stand would wait on a model
-    // load and land in a world that had already gone, and the thing would be lost.
-    this.stopPlacing();
+    // load and land in a world that had already gone, and the thing would be lost. A permanent row the
+    // dev server's editor had up is left as its file has it, for the next visit to stand.
+    this.stopPlacing('keep');
     this.stopPlacingProp('keep');
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
@@ -14287,6 +14423,8 @@ class App {
     // hand is the same thing with its own rules, and only ever one of the two is out.
     if (this.placing) this.stepPlacing();
     else if (this.propPlacing) this.stepPlacingProp();
+    // The placement editor's chip, on the dev server: written only when what it says changes.
+    if (import.meta.env.DEV) this.stepEditChip();
     // A conversation takes the view over the shoulder, eased from the orbit just placed and back to it.
     if (this.talkNow || this.talkCam.blend > 0) this.talkCamera(blocked, dt);
     // The frame on which the wheel has just brought the orbit in is drawn as the cockpit, not from the orbit's tilt.
@@ -16938,7 +17076,7 @@ class App {
    * and the plan they came from. One record per run of `standSeats`, and the record is the run's token: a run
    * a later one replaced stops at its next await and takes down whatever it stood after being replaced.
    */
-  private seatsStood: { pack: string; keys: string[]; plan: SeatPlan | null; note: string; run: number } = { pack: '', keys: [], plan: null, note: '', run: 0 };
+  private seatsStood: { pack: string; keys: string[]; plan: SeatPlan | null; note: string; run: number; gen: number; sig: string } = { pack: '', keys: [], plan: null, note: '', run: 0, gen: -1, sig: '' };
   /** Counts the runs of `standSeats`, so each files what it stands under keys no other run uses. */
   private seatsRuns = 0;
 
@@ -16961,24 +17099,34 @@ class App {
    * await, with the world's own generation beside it, which a trip to the select screen and back to the same
    * planet moves on), every key carries its run's number, and a run replaced while a prop of its was being
    * stood takes that prop straight down again.
+   *
+   * **A plan that has not moved is not stood again** (unless `force`, the console's knob): the plan is worked
+   * out first, against what the world's own data stands -- never ours, which are filed under keys of their own
+   * that `dataPlacedNear` does not count -- and a run in force for the same world whose plan reads the same
+   * (`seatPlanKey`) is left standing. Every permanent placement the dev server's editor saves asks for the seats
+   * again, and so does each word that its file changed which follows the save, and each of those took every
+   * chair and table of the world down and stood them one by one again under the people sitting on them.
    */
-  private async standSeats(pack: string): Promise<void> {
-    this.clearSeatsStood(this.seatsStood.pack === pack);
-    const run = { pack, keys: [] as string[], plan: null as SeatPlan | null, note: '', run: ++this.seatsRuns };
-    this.seatsStood = run;
+  private async standSeats(pack: string, force = false): Promise<void> {
     const world = this.world.generation;
-    const current = () => this.seatsStood === run && this.world.generation === world;
     const centre = this.world.layoutCenter;
-    if (!centre) {
+    const plan = centre
+      ? planSeats(standingPeople.seatedRows(centre), {
+          has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
+          ground: (x, z) => this.world.terrain.heightAt(x, z),
+        })
+      : null;
+    const sig = plan ? seatPlanKey(plan) : '';
+    const was = this.seatsStood;
+    if (!force && was.run > 0 && was.pack === pack && was.gen === world && was.sig === sig) return;
+    this.clearSeatsStood(was.pack === pack);
+    const run = { pack, keys: [] as string[], plan, note: '', run: ++this.seatsRuns, gen: world, sig };
+    this.seatsStood = run;
+    const current = () => this.seatsStood === run && this.world.generation === world;
+    if (!centre || !plan) {
       run.note = 'this world has no layout to stand them in';
       return;
     }
-    const rows = standingPeople.seatedRows(centre);
-    const plan = planSeats(rows, {
-      has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
-      ground: (x, z) => this.world.terrain.heightAt(x, z),
-    });
-    run.plan = plan;
     if (!plan.props.length) return;
     // The props pack behind the world only where this world's own pack lacks a model the plan asks for.
     let guest: AssetPack | null = null;
@@ -17012,7 +17160,7 @@ class App {
   /** Everything `standSeats` stood, taken down where the world it was stood in is still here. */
   private clearSeatsStood(takeDown: boolean): void {
     if (takeDown) for (const key of this.seatsStood.keys) this.world.unplaceBuilding(key);
-    this.seatsStood = { pack: '', keys: [], plan: null, note: '', run: 0 };
+    this.seatsStood = { pack: '', keys: [], plan: null, note: '', run: 0, gen: -1, sig: '' };
   }
 
   /**
@@ -17168,6 +17316,7 @@ class App {
       this.noteDressing();
       // A story object looked for before its row was filed was remembered as not found for a while.
       this.storyStands.clear();
+      if (import.meta.env.DEV) this.refreshEditPanels();
     } catch (err) {
       console.warn('placements: this world\'s permanent placements could not be stood', err);
     }
@@ -17194,6 +17343,7 @@ class App {
     this.noteDressing();
     this.storyStands.clear();
     void this.standSeats(pack);
+    if (import.meta.env.DEV) this.refreshEditPanels();
   }
 
   /** What could not be stood, said once a sync on the console, so a row that never shows is not a mystery. */
@@ -17995,12 +18145,8 @@ class App {
     }
   }
 
-  /**
-   * A placement in hand: the deed, its footprint and the patch it asks for (worked out once, as the
-   * deed is taken in hand, not every frame), the ghost's distance, turn and lift, and what it last said
-   * (`ghostState`, kept, or null before its first frame).
-   */
-  private placing: { deed: DeedRow; foot: Footprint; patch: Patch; reach: number; yaw: number; lift: number; state: GhostState | null } | null = null;
+  /** A building in hand (`BuildingHand`), or null. */
+  private placing: BuildingHand | null = null;
   private readonly ghost = new PlacementGhost();
   /** The ghost's state, written into every frame a building is in hand: one record for every placement. */
   private readonly ghostState: GhostState = { x: 0, z: 0, y: 0, yaw: 0, ok: false, why: null, clear: 0, lift: 0, note: null };
@@ -18042,34 +18188,58 @@ class App {
   }
 
   /**
-   * Take a deed in hand: load its building, make a ghost of it and go into placing.
+   * Take a building in hand: load it, make a ghost of it and go into placing. From a deed (the Housing tab,
+   * `__debug.deed`), or -- on the dev server, for a building kept for good -- by its gallery model alone, deed
+   * or not, which is judged on the patch its own box asks for and draws no grid.
    *
    * The model is the gallery pack's own and is **borrowed**, never cloned: the ghost swaps each
    * mesh's material for a see-through copy and puts the originals back when it lets go. It is
    * prepared first, so a placement never compiles a program on the frame it starts.
+   *
+   * `from` is where it came from (fresh, or a permanent row the editor picked up) and `dest` where it is kept
+   * when it is put down; a fresh one goes where the tabs' switch says (`freshDest`). A building of yours still
+   * needs a deed, and the deed's world; one kept for good needs neither, nor a footprint.
    */
-  private async startPlacing(deedId: string): Promise<string | null> {
-    const deed = deedById(deedId);
-    if (!deed) return 'there is no such deed';
-    if (!deed.model) return 'this game has no model for that building';
-    if (!deed.foot) return 'the archives have no footprint for that building';
-    const wrong = wrongWorld(deed, this.world.planet.id);
-    if (wrong) return wrong;
+  private async startPlacingBuilding(take: { deed: string } | { model: string }, opts: { from?: BuildingSource; dest?: KeptIn } = {}): Promise<string | null> {
+    const dest = opts.dest ?? this.freshDest();
+    const forGood = dest !== 'yours';
+    let deed: DeedRow | null = null;
+    let modelId: string;
+    let name: string;
+    if ('deed' in take) {
+      deed = deedById(take.deed);
+      if (!deed) return 'there is no such deed';
+      if (!deed.model) return 'this game has no model for that building';
+      if (!deed.foot && !forGood) return 'the archives have no footprint for that building';
+      if (!forGood) {
+        const wrong = wrongWorld(deed, this.world.planet.id);
+        if (wrong) return wrong;
+      }
+      modelId = deed.model;
+      name = deed.name;
+    } else {
+      if (!forGood) return 'a building of yours is put down from a deed';
+      modelId = take.model;
+      name = houseName(modelId, allDeeds());
+    }
+    if (import.meta.env.DEV && forGood && this.world.planet.space) return 'nothing stands for good out here but props';
     if (this.player.mounted || this.player.piloting || this.player.aboard || this.player.noclip) return 'not while you are riding or aboard something';
     const pack = await this.world.housesPack();
     if (!pack) return 'the gallery pack is not converted';
+    if (!pack.find(modelId)) return `${modelId} is not in the gallery pack`;
     let model;
     try {
-      model = await pack.model(deed.model);
+      model = await pack.model(modelId);
     } catch (err) {
-      return `${deed.model} would not load: ${err instanceof Error ? err.message : String(err)}`;
+      return `${modelId} would not load: ${err instanceof Error ? err.message : String(err)}`;
     }
     // The ghost draws the whole building, rooms and all, which is what makes it read as a house
     // rather than as a shell; it is one shared scene, never a copy.
     const shown = model.scene;
     await this.world.prepareActor(shown);
-    const foot = footprintOf(deed);
-    if (!foot) return 'the archives have no footprint for that building';
+    const foot = deed ? footprintOf(deed) : null;
+    if (!foot && !forGood) return 'the archives have no footprint for that building';
+    const patch = foot ? patchOfFootprint(foot) : patchOfBounds({ min: model.bounds.min.toArray(), max: model.bounds.max.toArray() });
     this.closePanelsForPlacing();
     // Anything already in hand is given up first, as taking a prop does: only ever one is out.
     this.stopPlacing();
@@ -18078,13 +18248,26 @@ class App {
     this.hangGhost();
     // It starts facing the way the view looks, which is the way it is pushed out, so its doorstep is
     // toward the player and the house reaches away.
-    this.placing = { deed, foot, patch: patchOfFootprint(foot), reach: GHOST_TUNE.reach, yaw: turnTo(this.viewHeading()), lift: 0, state: null };
+    this.placing = { name, model: modelId, deed, foot, rows: foot ? (deed?.foot?.rows ?? NO_ROWS) : NO_ROWS, patch, reach: GHOST_TUNE.reach, yaw: turnTo(this.viewHeading()), lift: 0, state: null, from: opts.from ?? HAND_FRESH, dest };
     this.refreshPlaceKeys();
     const s = this.placingSays;
-    this.sayPlacing(deed.name, false, 'move it where you want it', null, 'house', (this.placing.yaw * 180) / Math.PI, 0, 0, null);
+    this.sayPlacing(name, false, 'move it where you want it', null, 'house', (this.placing.yaw * 180) / Math.PI, 0, 0, null);
     this.placingBar.show(s);
-    this.messages.system(`placing ${deed.name}: ${this.placingWords(false)}`);
+    this.messages.system(`placing ${name}: ${this.placingWords(false)}`);
     return null;
+  }
+
+  /**
+   * Where a thing taken fresh from a tab is kept: yours, unless the dev server's editor has the tabs' switch on
+   * Permanent, when it goes to the session's destination. Always yours in a release.
+   */
+  private freshDest(): KeptIn {
+    return import.meta.env.DEV && this.editLayer === 'permanent' ? this.editDest.dest : 'yours';
+  }
+
+  /** How far a building in hand may be raised or sunk: further when it is kept for good. */
+  private houseMost(): number {
+    return this.placing && this.placing.dest !== 'yours' ? GHOST_TUNE.mostPermanent : GHOST_TUNE.most;
   }
 
   /**
@@ -18118,6 +18301,8 @@ class App {
     this.awayCap = keyLabel(this.input.bindings.takeProp[0] ?? this.input.bindings.putAway[0] ?? '');
     this.housingUi?.setKeys(k.turn, k.lift);
     this.propsUi?.setKeys(k.turn, k.lift);
+    // The placement editor's panels name the key that moves where a thing is kept.
+    if (import.meta.env.DEV) this.refreshEditPanels();
   }
 
   /** How to move a thing in hand, in the keys bound now, for the line that explains it as it is taken up. */
@@ -18142,6 +18327,8 @@ class App {
     s.keys = this.placeKeysNow;
     s.locked = this.input.locked;
     s.holding = this.placeHold.which;
+    // On the dev server the bar says where the thing will be kept, and a first click waiting for its second.
+    if (import.meta.env.DEV) this.sayEdit(s);
   }
 
   /**
@@ -18156,13 +18343,35 @@ class App {
     return Math.abs(d.x) + Math.abs(d.z) > 1e-6 ? Math.atan2(d.x, d.z) : this.player.heading;
   }
 
-  /** Give the deed back and put the model away exactly as it was found. */
-  private stopPlacing(): void {
-    if (!this.placing) return;
+  /**
+   * Give up the building in hand and put the model away exactly as it was found, one of the three ways a
+   * prop is let go of (`stopPlacingProp`). A deed's house, or a building taken by its model, has nowhere to
+   * go back to whichever way. A permanent row the dev server's editor picked up goes back where its file
+   * stands it (`back`, Escape), is taken out of its file (`away`, Delete), or is left in its file for the next
+   * visit to stand (`keep`, a travel and the select screen, the world going with it).
+   */
+  private stopPlacing(how: LetGo = 'back'): void {
+    const p = this.placing;
+    if (!p) return;
     const mine = this.ghost.release();
     if (mine.length) this.world.forgetMaterials(mine);
     this.placing = null;
+    this.propAnchor.on = false;
+    // A key still held is a new hold for whatever comes into hand next, started from that thing's own lift.
+    this.placeHold.which = null;
     this.placingBar.hide();
+    const from = p.from;
+    switch (from.kind) {
+      case 'fresh':
+        return;
+      case 'permanent':
+        if (import.meta.env.DEV) this.letGoPermanent(from, how, p.name);
+        return;
+      default: {
+        const never: never = from;
+        return never;
+      }
+    }
   }
 
   /**
@@ -18175,15 +18384,25 @@ class App {
   private stepPlacing(): void {
     const p = this.placing;
     if (!p) return;
-    // Out where the view looks, from where the player stands; the footprint, its patch, the deps and
-    // the state are all kept, so a frame of it makes nothing of its own.
-    const at = ghostSpot(this.player.worldPos, this.viewHeading(), p.reach, this.ghostAt);
+    // A building picked back up stands exactly where it stood until the player walks or looks away (the
+    // wheel lets go of it too), as a prop does; let go, it is out where the view looks, from where the player
+    // stands. The footprint, its patch, the deps and the state are all kept, so a frame of it makes nothing.
+    const a = this.propAnchor;
+    if (a.on && anchorReleased(a, this.player.worldPos, this.viewHeading(), PLACE_HOLD_TUNE)) a.on = false;
+    const at = a.on ? this.anchoredSpot(a) : ghostSpot(this.player.worldPos, this.viewHeading(), p.reach, this.ghostAt);
     const state = ghostVerdict(p.patch, at, p.yaw, this.ghostDeps, p.lift, this.ghostState);
     p.state = state;
-    this.ghost.place(state, p.foot, p.deed.foot?.rows ?? NO_ROWS, this.ghostHeight);
+    this.ghost.place(state, p.foot, p.rows, this.ghostHeight, p.dest === 'yours' ? 'good' : 'accent');
     // A door standing over a step or a jump is said beside an allowed spot and never refuses it.
-    this.sayPlacing(p.deed.name, state.ok, state.why, state.note, 'house', (p.yaw * 180) / Math.PI, 0, state.lift, null);
+    this.sayPlacing(p.name, state.ok, state.why, state.note, 'house', (p.yaw * 180) / Math.PI, 0, state.lift, null);
     this.placingBar.show(this.placingSays);
+  }
+
+  /** Where an anchored building stands on the ground, into the ghost's kept spot. */
+  private anchoredSpot(a: { x: number; z: number }): { x: number; z: number } {
+    this.ghostAt.x = a.x;
+    this.ghostAt.z = a.z;
+    return this.ghostAt;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -18197,12 +18416,14 @@ class App {
   /**
    * A prop in hand: which one, how far ahead, how it is turned, how far it has been lifted.
    *
-   * `from` is the row it was **picked back up** from, when it was. Giving up a prop taken out of the
-   * world would otherwise throw it away, since picking one up takes it off the world and out of the
-   * store in the same breath: with the row kept, Escape puts it back exactly where it stood, which is
-   * what anybody pressing Escape means.
+   * `from` is where it came from (`HandSource`): taken fresh from the tab, or **picked back up** -- one of
+   * yours, with the row it was, or (the dev server's editor) a permanent row with its layer. Giving up a prop
+   * taken out of the world would otherwise throw it away, since picking one up takes it off the world and out
+   * of the store in the same breath: with the row kept, Escape puts it back exactly where it stood, which is
+   * what anybody pressing Escape means. `dest` is where it is kept when it is put down: yours, or (the dev
+   * server's editor) one of the two files of permanent placements.
    */
-  private propPlacing: { def: PropDef; reach: number; turn: PropTurn; lift: number; ok: boolean; why: string | null; from: PlacedProp | null } | null = null;
+  private propPlacing: PropHand | null = null;
 
   /** Whether a prop is in hand, which takes the wheel and the click exactly as a building does. */
   get isPlacingProp(): boolean {
@@ -18213,12 +18434,16 @@ class App {
   private showProps(): void {
     this.propsUi.held = this.propPlacing?.def.id ?? null;
     this.propsUi.show();
+    if (import.meta.env.DEV) this.refreshEditPanels();
     this.propsUi.attach(this.props.loaded ? this.props : null);
     if (!this.props.loaded) void this.props.load().then(() => this.propsUi.open && this.propsUi.attach(this.props));
   }
 
-  /** Take a prop in hand. Answers why not, or null. */
-  private async startPlacingProp(id: string): Promise<string | null> {
+  /**
+   * Take a prop in hand. Answers why not, or null. `from` is where it came from (fresh from the tab unless
+   * said), and `dest` where it is kept when it is put down (where the tabs' switch says, unless said).
+   */
+  private async startPlacingProp(id: string, opts: { from?: HandSource; dest?: KeptIn } = {}): Promise<string | null> {
     const def = this.props.find(id);
     if (!def) return 'there is no such prop';
     if (this.player.mounted || this.player.piloting || this.player.noclip) return 'not while you are riding or piloting';
@@ -18234,7 +18459,7 @@ class App {
     this.closePanelsForPlacing();
     this.ghost.hold(model);
     this.hangGhost();
-    this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null, from: null };
+    this.propPlacing = { def, reach: PROP_TUNE.reach, turn: { ...NO_TURN }, lift: 0, ok: true, why: null, from: opts.from ?? HAND_FRESH, dest: opts.dest ?? this.freshDest() };
     this.refreshPlaceKeys();
     this.sayPlacing(def.name || def.id, true, 'move it where you want it', null, 'prop', 0, 0, 0, null);
     this.placingBar.show(this.placingSays);
@@ -18258,6 +18483,11 @@ class App {
    * the world is going; the next visit stands it with everything else. Put back the ordinary way its
    * stand waits on a model load and lands in a world that has gone, after the row was taken out of
    * the store, and the thing is lost.
+   *
+   * Which of those it is depends on where it came from (`HandSource`), and only one of your own ever goes
+   * back into your store: a permanent row the dev server's editor picked up is stood again from its file,
+   * taken out of it, or left in it (`letGoPermanent`), and never written into this browser's store, which
+   * would stand a second copy of it there while its file still stands it for everybody.
    */
   private stopPlacingProp(how: LetGo = 'back'): void {
     const p = this.propPlacing;
@@ -18266,21 +18496,38 @@ class App {
     if (mine.length) this.world.forgetMaterials(mine);
     this.propPlacing = null;
     this.propAnchor.on = false;
+    // A key still held is a new hold for whatever comes into hand next, started from that thing's own lift.
+    this.placeHold.which = null;
     this.placingBar.hide();
     const name = p.def.name || p.def.id;
     const from = p.from;
-    const fate = letGoOf(how, !!from);
-    if (fate === 'gone') {
-      this.messages.system(from ? `${name} put away` : `${name} given up`);
-      return;
+    switch (from.kind) {
+      case 'fresh':
+        if (letGoOf(how, false) === 'gone') this.messages.system(`${name} given up`);
+        return;
+      case 'local': {
+        const fate = letGoOf(how, true);
+        if (fate === 'gone') {
+          this.messages.system(`${name} put away`);
+          return;
+        }
+        if (fate === 'nothing') return;
+        const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
+        if (fate === 'write') {
+          void placedProps.restore(from.row, this.placedDeps(), save, false);
+          return;
+        }
+        void placedProps.restore(from.row, this.placedDeps(), save).then((stood) => this.messages.system(stood ? `${name} put back where it was` : placedProps.note || `${name} is kept, and stands again the next time you come here`));
+        return;
+      }
+      case 'permanent':
+        if (import.meta.env.DEV) this.letGoPermanent(from, how, name);
+        return;
+      default: {
+        const never: never = from;
+        return never;
+      }
     }
-    if (fate === 'nothing' || !from) return;
-    const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
-    if (fate === 'write') {
-      void placedProps.restore(from, this.placedDeps(), save, false);
-      return;
-    }
-    void placedProps.restore(from, this.placedDeps(), save).then((stood) => this.messages.system(stood ? `${name} put back where it was` : placedProps.note || `${name} is kept, and stands again the next time you come here`));
   }
 
   /**
@@ -18317,9 +18564,10 @@ class App {
     const v = propVerdict(p.def.bounds, at, p.turn, this.propDeps, PROP_TUNE, this.propSaid);
     p.ok = v.ok;
     p.why = v.why;
-    this.ghost.placeProp(at, p.turn, v.ok);
-    // A prop picked back up out of the world can be put away for good; the cap is the pick-up key's.
-    const away = p.from ? this.awayCap : null;
+    this.ghost.placeProp(at, p.turn, v.ok, p.dest === 'yours' ? 'good' : 'accent');
+    // A prop picked back up out of the world can be put away for good (one of the dev server's permanent
+    // rows: taken out of its file); the cap is the pick-up key's.
+    const away = p.from.kind !== 'fresh' ? this.awayCap : null;
     this.sayPlacing(p.def.name || p.def.id, v.ok, v.why, null, 'prop', (spinOf(p.turn) * 180) / Math.PI, (tiltOf(p.turn) * 180) / Math.PI, p.lift, away);
     this.placingBar.show(this.placingSays);
   }
@@ -18334,8 +18582,9 @@ class App {
     floorAt: (x: number, y: number, z: number) => this.world.groundAt(x, y + 0.5, z, this.propInside),
     solidAt: (x: number, y: number, z: number) => this.world.solidAt(x, y, z),
     // A player's own thing is never stood within a permanent placement's guard: a quest's yard stays as its
-    // story dressed it. The name is the row's own, kept, so asking makes nothing.
-    reserved: (x: number, z: number, r: number) => this.permanent.guardedAt(x, z, r)?.label ?? null,
+    // story dressed it. The name is the row's own, kept, so asking makes nothing. Not for a thing the dev
+    // server's editor is putting down for good, where the owner dresses densely on purpose.
+    reserved: (x: number, z: number, r: number) => (this.propPlacing && this.propPlacing.dest !== 'yours' ? null : (this.permanent.guardedAt(x, z, r)?.label ?? null)),
   };
 
   /**
@@ -18358,7 +18607,10 @@ class App {
       this.propPlacing.reach = pushBy(this.propPlacing.reach, notches);
       return;
     }
-    if (this.placing) this.placing.reach = wheelReach(this.placing.reach, notches);
+    if (this.placing) {
+      this.propAnchor.on = false;
+      this.placing.reach = wheelReach(this.placing.reach, notches);
+    }
   }
 
   /**
@@ -18376,7 +18628,7 @@ class App {
     const house = this.placing;
     if (kind === 'lift') {
       if (prop) prop.lift = propLiftTo(stepToGrid(prop.lift, t.gridLiftProp, dir));
-      else if (house) house.lift = houseLiftTo(stepToGrid(house.lift, t.gridLiftHouse, dir));
+      else if (house) house.lift = houseLiftTo(stepToGrid(house.lift, t.gridLiftHouse, dir), this.houseMost());
       this.placeHold.raw = prop ? prop.lift : house ? house.lift : 0;
       return;
     }
@@ -18424,7 +18676,10 @@ class App {
    *   rolls a prop, and F held (`placeLift`) raises and lowers it -- R winning when both are held -- and
    *   while either is held the mouse is the thing's and not the camera's, so the view holds still. With
    *   neither held, a drag on the bar's own buttons (a free pointer) does the same.
-   * - Delete gives a deed up and puts a prop away; the pick-up key puts a prop away too.
+   * - Delete gives a deed up and puts a prop away; the pick-up key puts a prop away too. A permanent row the
+   *   dev server's editor picked up is taken out of its file either way, on a second press (`awayAsked`).
+   * - On the dev server, L (`placeLayer`) moves where the thing is kept round (`cycleDestination`). It is the
+   *   saber's on and off by default, which is not read while something is in hand, and is never muted.
    * - And for the rest of the frame everything that fights is muted (`FIGHT_ACTIONS`), so the click that
    *   puts it down does not also swing or fire, and R does not throw a lit saber.
    */
@@ -18449,9 +18704,11 @@ class App {
       void (this.propPlacing ? this.dropPlacingProp() : this.dropPlacing());
     } else this.stepHold(dt);
     if (this.propPlacing) {
-      // The pick-up key again, or Delete: thrown away for good rather than put back, which Escape does.
-      if (takeKey || input.pressedAction('putAway')) this.stopPlacingProp('away');
-    } else if (this.placing && input.pressedAction('putAway')) this.stopPlacing();
+      // The pick-up key again, or Delete: thrown away for good rather than put back, which Escape does -- a
+      // permanent row the editor picked up only on a second press (`awayAsked`), since it leaves its file.
+      if ((takeKey || input.pressedAction('putAway')) && this.awayAsked()) this.stopPlacingProp('away');
+    } else if (this.placing && input.pressedAction('putAway') && this.awayAsked()) this.stopPlacing('away');
+    if (import.meta.env.DEV && (this.placing || this.propPlacing) && input.pressedAction('placeLayer')) this.cycleDestination();
     input.mute(FIGHT_ACTIONS);
     return true;
   }
@@ -18488,15 +18745,25 @@ class App {
     d.dx = 0;
     d.dy = 0;
     const axes = which === 'tumble' ? this.tumbleAxesNow() : this.viewAxesNow;
-    applyHold(this.placeHold, which, dx, dy, dt, this.cam.sensitivity, axes, prop, this.placing, GHOST_TUNE.most, performance.now(), PLACE_HOLD_TUNE);
+    applyHold(this.placeHold, which, dx, dy, dt, this.cam.sensitivity, axes, prop, this.placing, this.houseMost(), performance.now(), PLACE_HOLD_TUNE);
   }
 
-  /** Put it down, if the ground will take it. */
+  /**
+   * Put it down, if the ground will take it. A building of yours goes up from its deed (the server's, or this
+   * browser's for the session); one the dev server's editor is putting down for good is saved to its file
+   * instead (`savePermanentBuilding`).
+   */
   private async dropPlacing(): Promise<void> {
     const p = this.placing;
-    const model = p?.deed.model;
-    if (!p?.state?.ok || !model) return;
-    const { deed, state } = p;
+    if (!p) return;
+    if (import.meta.env.DEV && p.dest !== 'yours') {
+      await this.savePermanentBuilding(p);
+      return;
+    }
+    const deed = p.deed;
+    const state = p.state;
+    const model = deed?.model;
+    if (!state?.ok || !deed || !model) return;
     this.stopPlacing();
     // With a server the house goes up when the server answers, exactly as everybody else's does.
     if (this.net.session.authority === 'server') {
@@ -18577,10 +18844,23 @@ class App {
    * compiled before it shows, lit, shadowed and solid -- and the row goes into this browser's own
    * storage for this world, so it is there next time. With a server it would be the server's row;
    * that half is not wired yet and this file is written so it is the same rows sent.
+   *
+   * One the dev server's editor is putting down for good is saved to its file instead
+   * (`savePermanentProp`), and a permanent row never comes down here as yours.
    */
   private async dropPlacingProp(): Promise<void> {
     const p = this.propPlacing;
     if (!p) return;
+    if (import.meta.env.DEV && p.dest !== 'yours') {
+      await this.savePermanentProp(p);
+      return;
+    }
+    if (p.from.kind === 'permanent') {
+      // A permanent thing never becomes yours (`nextDestination` never offers it): the click is refused and it
+      // stays in hand.
+      if (import.meta.env.DEV) this.messages.system(notYoursText(this.placeKeysNow.del));
+      return;
+    }
     if (!p.ok) {
       this.messages.system(p.why ?? 'it will not go there');
       return;
@@ -18593,7 +18873,7 @@ class App {
     // A prop picked back up is going down here, not back where it stood: let go of without putting it
     // back, or moving one left the old one standing as well and every move made a second of it.
     const from = p.from;
-    p.from = null;
+    p.from = HAND_FRESH;
     this.stopPlacingProp();
     const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
     // The world it is being put down in, kept across the stand's wait: a travel in that wait leaves the
@@ -18605,11 +18885,23 @@ class App {
       return;
     }
     // Refused where it was put: one that came out of the world goes back where it stood rather than being
-    // lost -- in its own world's keeping, and stood only if that is still the world the store is in.
+    // lost -- in its own world's keeping, and stood only if that is still the world the store is in. Only
+    // one of yours: nothing else ever goes into this browser's store, and a permanent row never reaches
+    // here at all (refused above, where it stays in hand).
     const why = placedProps.note || 'it would not go there';
-    if (!from) this.messages.system(why);
-    else if (placedProps.inWorld === worldAt) void placedProps.restore(from, this.placedDeps(), save).then(() => this.messages.system(`${why}; ${name} is back where it stood`));
-    else if (placedProps.keepIn(worldAt, from, this.placedStore(), save)) this.messages.system(`${why}; ${name} is kept where it stood, and stands there the next time you come back`);
+    switch (from.kind) {
+      case 'fresh':
+        this.messages.system(why);
+        return;
+      case 'local':
+        if (placedProps.inWorld === worldAt) void placedProps.restore(from.row, this.placedDeps(), save).then(() => this.messages.system(`${why}; ${name} is back where it stood`));
+        else if (placedProps.keepIn(worldAt, from.row, this.placedStore(), save)) this.messages.system(`${why}; ${name} is kept where it stood, and stands there the next time you come back`);
+        return;
+      default: {
+        const never: never = from;
+        return never;
+      }
+    }
   }
 
   /** How a placed prop is stood and taken down: the streamer's own placement, keyed on the thing. */
@@ -18662,11 +18954,20 @@ class App {
    * the very duplication that file exists to prevent. Holding it is the honest answer until the
    * ledger keeps things rather than kinds.
    *
+   * On the dev server the permanent props within the same reach are as much to hand as your own, and
+   * the nearer of the two is taken (`takePermanent`, which says which it took); with neither near, your
+   * building's doorstep, then a permanent building's origin within the doorstep's reach. In a release
+   * nothing in play ever picks a permanent row up.
+   *
    * Answers what it said when nothing came into hand (the console reads it), else null.
    */
   private async takeNearestProp(): Promise<string | null> {
     const me = this.player.worldPos;
     const row = placedProps.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far);
+    if (import.meta.env.DEV) {
+      const fixed = this.permanent.nearest({ x: me.x, y: me.y, z: me.z }, PROP_TUNE.far, 'prop');
+      if (fixed && (!row || Math.hypot(fixed.x - me.x, fixed.y - me.y, fixed.z - me.z) < Math.hypot(row.x - me.x, row.y - me.y, row.z - me.z))) return this.takePermanent(fixed);
+    }
     if (!row) {
       // Nothing of yours to pick up, but a building of yours whose doorstep this is: the same key
       // opens the Housing tab with its take-down already asked, which is still two answers away
@@ -18679,6 +18980,10 @@ class App {
         this.messages.system(said);
         return said;
       }
+      if (import.meta.env.DEV) {
+        const building = this.permanent.nearest({ x: me.x, y: me.y, z: me.z }, HOUSING_TUNE.doorReach, 'building');
+        if (building) return this.takePermanent(building);
+      }
       // Nothing of yours, but something the world stands for good: said so, which is the one way a player
       // tells the world's own things from theirs at a glance. Nothing in play picks one up.
       const fixed = this.permanent.nearest({ x: me.x, y: me.y, z: me.z }, DRESSING_TUNE.nearReach);
@@ -18687,23 +18992,33 @@ class App {
       return said;
     }
     const def = this.props.find(row.id);
-    placedProps.take(row.thing, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
+    const save = (world: string, rows: readonly PlacedProp[]) => this.savePlaced(world, rows);
+    placedProps.take(row.thing, this.placedDeps(), save);
     this.messages.system(`${def?.name || row.id} picked up`);
     // Back in hand, turned as it stood, so a nudge is one press and a click puts it back. The row it
     // came from is kept with it, so giving up returns it rather than losing it.
     if (!def) return null;
-    const why = await this.startPlacingProp(def.id);
+    const why = await this.startPlacingProp(def.id, { from: { kind: 'local', row }, dest: 'yours' });
     if (why) {
+      // It came out of the store with the pick-up, so it goes back where it stood rather than being lost.
+      void placedProps.restore(row, this.placedDeps(), save);
       this.messages.system(why);
       return why;
     }
     const p = this.propPlacing;
     if (!p) return null;
-    p.turn = { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] };
-    p.from = row;
-    // And anchored exactly where it stood -- its lift the height it stood at over the floor there, its
-    // reach how far off it is -- until the player walks or looks away or rolls the wheel, so "pick it up
-    // and turn it two degrees" is two degrees and not a move to wherever the view points.
+    this.anchorPicked(p, row, { x: row.q[0], y: row.q[1], z: row.q[2], w: row.q[3] });
+    return null;
+  }
+
+  /**
+   * A thing picked back up, turned as it stood and anchored exactly where it stood -- its lift the height it
+   * stood at over the floor there, its reach how far off it is -- until the player walks or looks away or
+   * rolls the wheel, so "pick it up and turn it two degrees" is two degrees and not a move to wherever the
+   * view points. `row` is its place in the game's frame.
+   */
+  private anchorPicked(p: { turn: PropTurn; lift: number; reach: number }, row: { x: number; y: number; z: number }, turn: PropTurn): void {
+    p.turn = turn;
     const at = this.player.worldPos;
     const floor = this.world.groundAt(row.x, at.y + 1.6, row.z, !!this.player.inside);
     p.lift = Math.min(PROP_TUNE.most, Math.max(-PROP_TUNE.most, row.y - (floor ?? at.y)));
@@ -18716,7 +19031,619 @@ class App {
     a.px = at.x;
     a.pz = at.z;
     a.yaw = this.viewHeading();
+  }
+
+  // ---- The placement editor: permanent rows written from the placing hand (the dev server only). ----
+  //
+  // Everything below answers nothing in a release: every call to it is behind `import.meta.env.DEV`, and each
+  // method stops at its first line there, so the build carries none of its words (`src/world/permanentEdit.ts`
+  // holds them). The rows are written by the dev server's own endpoint (`POST /__dev/placements`,
+  // `src/world/placementEdits.ts`), one row at a time, into the two files that ship with the game; its answer
+  // is both layers as they read now, which are stood at once (`landPlacements`), and the dev server's word that
+  // the files changed, which follows a moment later, finds that already done.
+
+  /** The Props and Housing tabs' switch: what a thing taken from them is kept as. Never remembered across a reload. */
+  private editLayer: 'yours' | 'permanent' = 'yours';
+  /** The session's destination for a thing taken with the switch on Permanent, and the files a save has been confirmed to this session. */
+  private readonly editDest: { dest: PlacementLayer; confirmed: Record<PlacementLayer, boolean> } = { dest: 'story', confirmed: { story: false, world: false } };
+  /**
+   * A first press waiting for its second (`PERMANENT_EDIT_TUNE.confirmMs`): a first save to a file this session, a
+   * refused spot placed anyway, or a permanent row in hand taken out of its file (`away`, which names the row).
+   */
+  private editArm: { what: 'save' | 'force' | 'away'; dest: PlacementLayer; until: number; words: string; id?: string } | null = null;
+  /** A save asked of the dev server and not answered yet: the thing stays in hand, and another click asks nothing. */
+  private editSaving = false;
+  /** What the last thing the editor did came to, for the console. */
+  private editLast: { saved: boolean; said: string; id?: string; file?: string } | null = null;
+  /** The chip at the top of the screen, and the two tabs' panels; made on the dev server alone. */
+  private editChip: EditChip | null = null;
+  private editPanels: { props: PermanentPanel; housing: PermanentPanel } | null = null;
+  /** Every building the gallery has with rooms, for the Housing tab's panel, once asked for. */
+  private editModels: { id: string; name: string }[] | null = null;
+
+  /** The world the editor writes for: the pack id, which names the files. */
+  private editWorld(): string {
+    return packIdOf(this.world.planet, this.zone);
+  }
+
+  /** What the placing bar says of the editor: where the thing in hand is kept, and a first click waiting for its second. */
+  private sayEdit(s: PlacingView): void {
+    if (!import.meta.env.DEV) return;
+    const dest = this.propPlacing?.dest ?? this.placing?.dest ?? null;
+    s.badge = dest ? badgeOf(dest) : null;
+    s.badgeTone = dest && dest !== 'yours' ? 'accent' : 'muted';
+    if (this.editArm && performance.now() >= this.editArm.until) this.editArm = null;
+    s.armed = this.editArm ? this.editArm.words : this.editSaving ? 'saving…' : null;
+  }
+
+  /** The chip at the top of the screen, a frame at a time: written only when what it says changes. */
+  private stepEditChip(): void {
+    if (!import.meta.env.DEV) return;
+    const chip = this.editChip;
+    if (!chip) return;
+    const hand = this.propPlacing?.dest ?? this.placing?.dest ?? null;
+    const dest = hand && hand !== 'yours' ? hand : this.editLayer === 'permanent' ? this.editDest.dest : null;
+    chip.show(this.inWorld && dest ? badgeOf(dest) : null);
+  }
+
+  /** What the editor last said, read afresh (an await between may have moved it). */
+  private lastEdit(): { saved: boolean; said: string; id?: string; file?: string } | null {
+    return this.editLast;
+  }
+
+  /** What the editor says, on the message line and kept for the console. */
+  private editSay(saved: boolean, said: string, reply?: PlacementReplyOk): void {
+    this.editLast = { saved, said, ...(reply ? { id: reply.id, file: reply.file } : {}) };
+    this.messages.system(said);
+  }
+
+  /** L in hand: where the thing in hand is kept moves on (`nextDestination`). */
+  private cycleDestination(): void {
+    if (!import.meta.env.DEV) return;
+    const hand = this.propPlacing ?? this.placing;
+    if (!hand) return;
+    this.handTo(this.nextDestOf(hand));
+  }
+
+  /**
+   * Where L would keep the thing in hand next: `nextDestination`, with yours passed over for a building that
+   * cannot be yours (no deed, or not its deed's world). What L does and what the first save's question offers,
+   * which are one answer so the question never offers what L will not do.
+   */
+  private nextDestOf(hand: PropHand | BuildingHand): KeptIn {
+    let next = nextDestination(hand.dest, hand.from.kind);
+    if (next === 'yours' && hand === this.placing && this.houseYoursWhy(this.placing)) next = nextDestination(next, hand.from.kind);
+    return next;
+  }
+
+  /**
+   * The pick-up key again, Delete or the bar's Put away: whether to throw the thing in hand away now. Anything
+   * but a permanent row the editor picked up goes at once; that one is taken out of a file every player is
+   * handed, so the first press asks (`takeOutText`, in place of the bar's verdict) and a second within `confirmMs`
+   * takes it out, as the panel's Delete asks before it does.
+   */
+  private awayAsked(): boolean {
+    if (!import.meta.env.DEV) return true;
+    const hand = this.propPlacing ?? this.placing;
+    if (!hand || hand.from.kind !== 'permanent') return true;
+    const { layer, row } = hand.from;
+    const now = performance.now();
+    const arm = this.editArm;
+    if (arm && arm.what === 'away' && arm.id === row.id && now < arm.until) {
+      this.editArm = null;
+      return true;
+    }
+    this.editArm = { what: 'away', dest: layer, id: row.id, until: now + PERMANENT_EDIT_TUNE.confirmMs, words: takeOutText(row.id, destinationFile(layer, this.editWorld())) };
+    this.editLast = { saved: false, said: this.editArm.words };
+    return false;
+  }
+
+  /** Why a building in hand cannot be yours, or null: yours, it is a deed's house under the deed's own rules, its footprint and its world. */
+  private houseYoursWhy(house: BuildingHand): string | null {
+    if (!house.deed) return 'a building of yours is put down from a deed';
+    if (!house.foot) return 'the archives have no footprint for that building';
+    return wrongWorld(house.deed, this.world.planet.id);
+  }
+
+  /** Where the thing in hand is kept, and the session's destination with it when that is a file. */
+  private handTo(dest: KeptIn): void {
+    if (!import.meta.env.DEV) return;
+    const prop = this.propPlacing;
+    const house = this.placing;
+    const hand = prop ?? house;
+    if (hand) {
+      if (hand.from.kind === 'permanent' && dest === 'yours') {
+        this.editSay(false, notYoursText(this.placeKeysNow.del));
+        return;
+      }
+      const why = house && dest === 'yours' ? this.houseYoursWhy(house) : null;
+      if (why) {
+        this.editSay(false, why);
+        return;
+      }
+      hand.dest = dest;
+      // Back to yours, a building's lift is the hand's ordinary reach again.
+      if (house && dest === 'yours') house.lift = houseLiftTo(house.lift, GHOST_TUNE.most);
+      this.editSay(false, keptText(prop ? prop.def.name || prop.def.id : house!.name, dest, this.editWorld()));
+    }
+    if (dest !== 'yours') this.editDest.dest = dest;
+    this.editArm = null;
+    this.refreshEditPanels();
+  }
+
+  /** The tabs' switch moved. */
+  private setEditLayer(layer: 'yours' | 'permanent'): void {
+    if (!import.meta.env.DEV) return;
+    this.editLayer = layer;
+    this.editArm = null;
+    if (layer === 'permanent' && !this.editModels) {
+      void this.world.housesPack().then((pack) => {
+        const walkIn = pack?.category('layout').filter((d) => (d.cells?.length ?? 0) > 1) ?? [];
+        const deeds = allDeeds();
+        this.editModels = walkIn.map((d) => ({ id: d.id, name: houseName(d.id, deeds) })).sort((a, b) => a.name.localeCompare(b.name));
+        this.refreshEditPanels();
+      });
+    }
+    this.refreshEditPanels();
+  }
+
+  /**
+   * A click with the thing in hand going to a file: whether to save now. The first save to a file in a session
+   * waits for a second click within `confirmMs`, saying the file and where L would keep it instead; a refused
+   * spot waits for one too, and is placed anyway on it (a first save's file named there as well, the second
+   * click confirming both). Shift is never a force. `next` is where L would keep it instead (`nextDestOf`), which
+   * the question offers; a question about taking the row out of its file is no answer to a click.
+   */
+  private editClick(ok: boolean, why: string | null, dest: PlacementLayer, next: KeptIn): boolean {
+    if (!import.meta.env.DEV) return false;
+    const now = performance.now();
+    const arm = this.editArm;
+    const live = !!arm && arm.what !== 'away' && now < arm.until && arm.dest === dest;
+    const confirmed = this.editDest.confirmed[dest];
+    const world = this.editWorld();
+    if (!ok) {
+      if (live && arm!.what === 'force') {
+        this.editArm = null;
+        return true;
+      }
+      this.editArm = { what: 'force', dest, until: now + PERMANENT_EDIT_TUNE.confirmMs, words: forceText(why, dest, world, !confirmed) };
+      this.editLast = { saved: false, said: this.editArm.words };
+      return false;
+    }
+    // Confirmed this session, or a second click on a file's question (or on a refused spot that has since come
+    // right: its question named the file too).
+    if (confirmed || live) {
+      this.editArm = null;
+      return true;
+    }
+    const key = this.input.bindings.placeLayer[0];
+    this.editArm = { what: 'save', dest, until: now + PERMANENT_EDIT_TUNE.confirmMs, words: confirmText(dest, world, key ? keyLabel(key) : NO_KEY, next) };
+    this.editLast = { saved: false, said: this.editArm.words };
+    return false;
+  }
+
+  /** One ask of the dev server's placement editor, answered. */
+  private async postPlacements(op: Record<string, unknown>): Promise<PlacementReply> {
+    if (!import.meta.env.DEV) return { ok: false, why: "the editor is the dev server's" };
+    try {
+      const res = await fetch('/__dev/placements', { method: 'POST', headers: { 'Content-Type': 'application/json', [EDITOR_HEADER]: EDITOR_HEADER_VALUE }, body: JSON.stringify(op), cache: 'no-store' });
+      const body = (await res.json().catch(() => null)) as PlacementReply | null;
+      return body && typeof body === 'object' && typeof body.ok === 'boolean' ? body : { ok: false, why: `the dev server answered ${res.status}` };
+    } catch (err) {
+      return { ok: false, why: `the dev server's placement editor did not answer: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  /**
+   * An answer stood: both layers as the endpoint wrote them, in one plan, the row that was in hand (`landed`)
+   * no longer held down -- in the world they were written for, and nowhere if it has gone (the next arrival
+   * reads the files). Then the story objects are looked for afresh, the seats planned again round what stands,
+   * and the panels drawn again.
+   */
+  private async landPlacements(reply: PlacementReplyOk, landed: string | null, pack: string, gen: number): Promise<boolean> {
+    if (!import.meta.env.DEV) return false;
+    const current = () => this.world.generation === gen && this.editWorld() === pack && this.permanent.worldId === pack && this.permanent.generation === gen;
+    if (!current()) return false;
+    await this.dressingPacks([...(reply.story?.rows ?? []), ...(reply.world?.rows ?? [])]);
+    if (!current()) return false;
+    void this.dressingWait(this.permanent.land(landed, reply.story, reply.world));
+    this.noteDressing();
+    this.storyStands.clear();
+    void this.standSeats(pack);
+    this.refreshEditPanels();
+    return true;
+  }
+
+  /** Whether a world can take a permanent placement at all, or why not. */
+  private editRefusal(building: boolean): string | null {
+    if (!import.meta.env.DEV) return null;
+    const kind = this.worldKindOf(this.world.planet);
+    if (kind === 'copies') return "nothing stands for good in the dungeons' world of copies";
+    if (building && kind === 'space') return 'nothing stands for good out here but props';
+    if (!this.world.layoutCenter) return 'this world has no layout to stand anything in';
     return null;
+  }
+
+  /**
+   * The ground a row is judged on as it is saved: the terrain under its origin, which is what the Standing here
+   * list measures it against later (`groundMoved`); none in a space zone. A row in a room writes none of it.
+   */
+  private groundForRow(x: number, z: number): number | null {
+    return this.world.planet.space ? null : this.world.terrain.heightAt(x, z);
+  }
+
+  /**
+   * Why the panel or the console may not change a row now, or null: one in the editor's hand is the hand's until
+   * it is put down, since its save writes the row the hand carries (its id, its solidity, its words) over the
+   * file and its key stays held down meanwhile -- renamed under it, a second copy stood where it stood and the
+   * old id written back beside the new one.
+   */
+  private inHandRefusal(id: string, deleting = false): string | null {
+    if (!import.meta.env.DEV || !this.permanent.inHand(placementKey(id))) return null;
+    return inHandText(id, this.placeKeysNow.del, deleting);
+  }
+
+  /** A prop in hand going to a file, clicked down: saved there, the second click first where one is asked for. */
+  private async savePermanentProp(p: PropHand): Promise<void> {
+    if (!import.meta.env.DEV) return;
+    const dest = p.dest;
+    if (dest === 'yours' || this.editSaving) return;
+    const refused = this.editRefusal(false);
+    if (refused) return this.editSay(false, refused);
+    if (!this.editClick(p.ok, p.why, dest, this.nextDestOf(p))) return;
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const frame = this.permanent.frame;
+    const at = this.ghost.group.position;
+    const from = p.from;
+    const base = from.kind === 'permanent' ? from.row : null;
+    const row = rowFromProp(p.def, { x: at.x, y: at.y, z: at.z }, [p.turn.x, p.turn.y, p.turn.z, p.turn.w], !!this.player.inside, this.world.layoutCenter, frame, base, this.groundForRow(at.x, at.z));
+    const op = from.kind === 'permanent' && from.layer !== dest ? { op: 'move', from: from.layer, layer: dest, world: pack, id: from.row.id, row } : { op: 'put', layer: dest, world: pack, row };
+    this.editSaving = true;
+    const reply = await this.postPlacements(op);
+    this.editSaving = false;
+    if (!reply.ok) return this.editSay(false, reply.why);
+    this.editDest.confirmed[dest] = true;
+    // Saved: let go of what is in hand as saved, nothing put back and nothing written into your store. One of
+    // yours made permanent left your store when it was picked up; given up while the save was out, it was put
+    // back there, and is taken out again, or it would stand twice.
+    if (this.propPlacing === p) {
+      p.from = HAND_FRESH;
+      this.stopPlacingProp();
+    } else if (from.kind === 'local' && placedProps.all.some((r) => r.thing === from.row.thing)) {
+      placedProps.take(from.row.thing, this.placedDeps(), (world, rows) => this.savePlaced(world, rows));
+    }
+    await this.landPlacements(reply, base ? placementKey(base.id) : null, pack, gen);
+    this.editSay(true, savedText(reply.file, reply.id), reply);
+  }
+
+  /** A building in hand going to a file, clicked down: saved there as a prop is. */
+  private async savePermanentBuilding(p: BuildingHand): Promise<void> {
+    if (!import.meta.env.DEV) return;
+    const dest = p.dest;
+    const state = p.state;
+    if (dest === 'yours' || this.editSaving || !state) return;
+    const refused = this.editRefusal(true);
+    if (refused) return this.editSay(false, refused);
+    if (!this.editClick(state.ok, state.why, dest, this.nextDestOf(p))) return;
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const from = p.from;
+    const base = from.kind === 'permanent' ? from.row : null;
+    const row = rowFromHouse(state, p.model, p.deed?.id ?? null, this.world.layoutCenter, this.permanent.frame, base, this.groundForRow(state.x, state.z));
+    const op = from.kind === 'permanent' && from.layer !== dest ? { op: 'move', from: from.layer, layer: dest, world: pack, id: from.row.id, row } : { op: 'put', layer: dest, world: pack, row };
+    this.editSaving = true;
+    const reply = await this.postPlacements(op);
+    this.editSaving = false;
+    if (!reply.ok) return this.editSay(false, reply.why);
+    this.editDest.confirmed[dest] = true;
+    if (this.placing === p) {
+      p.from = HAND_FRESH;
+      this.stopPlacing();
+    }
+    await this.landPlacements(reply, base ? placementKey(base.id) : null, pack, gen);
+    this.editSay(true, savedText(reply.file, reply.id), reply);
+  }
+
+  /**
+   * A permanent row picked up, let go of: stood again from its file (`back`), taken out of its file (`away`),
+   * or left as its file has it for the next visit to stand (`keep`, the world going with it). Never written
+   * into this browser's store.
+   */
+  private letGoPermanent(from: { kind: 'permanent'; layer: PlacementLayer; row: PlacementRow }, how: LetGo, name: string): void {
+    if (!import.meta.env.DEV) return;
+    const key = placementKey(from.row.id);
+    switch (how) {
+      case 'back':
+        void this.dressingWait(this.permanent.restore(key));
+        this.editSay(false, `${name} put back where it stood`);
+        return;
+      case 'away':
+        void this.deletePermanent(from.layer, from.row.id);
+        return;
+      case 'keep':
+        return;
+      default: {
+        const never: never = how;
+        return never;
+      }
+    }
+  }
+
+  /** A row taken out of its file; one in hand that the dev server would not take out stands again. Answers what was said. */
+  private async deletePermanent(layer: PlacementLayer, id: string): Promise<string> {
+    if (!import.meta.env.DEV) return '';
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const key = placementKey(id);
+    const reply = await this.postPlacements({ op: 'delete', layer, world: pack, id });
+    if (!reply.ok) {
+      if (this.permanent.inHand(key)) void this.dressingWait(this.permanent.restore(key));
+      this.editSay(false, reply.why);
+      return reply.why;
+    }
+    await this.landPlacements(reply, key, pack, gen);
+    const said = removedText(id, destinationFile(layer, pack));
+    this.editSay(true, said, reply);
+    return said;
+  }
+
+  /**
+   * A permanent row taken in hand, as the pick-up key takes one of your own: down in the world at once (its
+   * file is not touched), in hand turned and anchored exactly where it stood, and kept in its own file until
+   * L says otherwise. A building comes up by its deed where its deed still makes it, else by its model; a row
+   * of this world's own pack is not the editor's to take up yet. Answers why not, or null.
+   */
+  private async takePermanent(s: StoodRow): Promise<string | null> {
+    if (!import.meta.env.DEV) return null;
+    const { key, row, layer } = s;
+    const g = placementToGame(row, this.world.layoutCenter, this.permanent.frame);
+    const turn = { x: g.q[0], y: g.q[1], z: g.q[2], w: g.q[3] };
+    const fail = (why: string): string => {
+      this.editSay(false, why);
+      return why;
+    };
+    if (row.kind === 'prop') {
+      const def = row.thing ? this.props.find(row.thing) : null;
+      if (!def) return fail(`${row.thing ?? row.id} is not in the props catalogue`);
+      if (!this.permanent.lift(key)) return fail(`${row.id} is not standing`);
+      const why = await this.startPlacingProp(def.id, { from: { kind: 'permanent', layer, row }, dest: layer });
+      if (why) {
+        void this.dressingWait(this.permanent.restore(key));
+        return fail(why);
+      }
+      const p = this.propPlacing;
+      if (!p) return null;
+      this.anchorPicked(p, s, turn);
+    } else {
+      if (row.pack !== 'gallery' || !row.model) return fail(`${row.id} is in this world's own pack, which the editor does not take up yet: edit its file by hand`);
+      if (!this.permanent.lift(key)) return fail(`${row.id} is not standing`);
+      const take = row.deed && deedById(row.deed)?.model === row.model ? { deed: row.deed } : { model: row.model };
+      const why = await this.startPlacingBuilding(take, { from: { kind: 'permanent', layer, row }, dest: layer });
+      if (why) {
+        void this.dressingWait(this.permanent.restore(key));
+        return fail(why);
+      }
+      const p = this.placing;
+      if (!p) return null;
+      // Turned as it stands, its lift the height it stands at over the ground under its doorstep, and anchored
+      // there until the player walks or looks away, as a prop picked up is.
+      const me = this.player.worldPos;
+      p.yaw = turnTo(yawOfTurn(g.q));
+      p.lift = houseLiftTo(s.y - this.world.terrain.heightAt(s.x, s.z), GHOST_TUNE.mostPermanent);
+      p.reach = Math.min(GHOST_TUNE.far, Math.max(GHOST_TUNE.near, Math.hypot(s.x - me.x, s.z - me.z)));
+      const a = this.propAnchor;
+      a.on = true;
+      a.x = s.x;
+      a.y = s.y;
+      a.z = s.z;
+      a.px = me.x;
+      a.pz = me.z;
+      a.yaw = this.viewHeading();
+    }
+    this.editSay(false, pickedUpText(s.label, layer));
+    return null;
+  }
+
+  /** A row of this world's files by id, and the layer it is in (the world edit where both hold it). */
+  private editRowOf(id: string): { layer: PlacementLayer; row: PlacementRow } | null {
+    for (const layer of ['world', 'story'] as const) {
+      const row = this.permanent.fileOf(layer)?.rows.find((r) => r.id === id);
+      if (row) return { layer, row };
+    }
+    return null;
+  }
+
+  /** A row written again as it is but for what the panel changed: a put, stood when it answers. Answers what was said. */
+  private async editPut(layer: PlacementLayer, row: PlacementRow): Promise<string> {
+    if (!import.meta.env.DEV) return '';
+    const held = this.inHandRefusal(row.id);
+    if (held) {
+      this.editSay(false, held);
+      return held;
+    }
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const reply = await this.postPlacements({ op: 'put', layer, world: pack, row });
+    if (!reply.ok) {
+      this.editSay(false, reply.why);
+      return reply.why;
+    }
+    await this.landPlacements(reply, null, pack, gen);
+    const said = savedText(reply.file, reply.id);
+    this.editSay(true, said, reply);
+    return said;
+  }
+
+  /** A row given a new id in its file. Answers what was said. */
+  private async editRename(from: string, to: string): Promise<string> {
+    if (!import.meta.env.DEV) return '';
+    const had = this.editRowOf(from);
+    if (!had) return 'there is no such row on this world';
+    const held = this.inHandRefusal(from);
+    if (held) {
+      this.editSay(false, held);
+      return held;
+    }
+    const pack = this.editWorld();
+    const gen = this.world.generation;
+    const reply = await this.postPlacements({ op: 'rename', layer: had.layer, world: pack, id: from, to });
+    if (!reply.ok) {
+      this.editSay(false, reply.why);
+      return reply.why;
+    }
+    await this.landPlacements(reply, null, pack, gen);
+    const said = savedText(reply.file, reply.id);
+    this.editSay(true, said, reply);
+    return said;
+  }
+
+  /** Whether a props row's thing is a seat or a table, which stands passable unless its row says otherwise. */
+  private isFurnitureThing(thing: string | undefined): boolean {
+    const def = thing ? this.props.find(thing) : null;
+    return !!def && (isSeat(def.template) || isTableTemplate(def.template));
+  }
+
+  /** Whether a row stands solid: its own word, else the default, by the very rule it is stood by (`standsSolid`). */
+  private solidOf(row: PlacementRow): boolean {
+    return standsSolid(row, row.pack === 'props' && this.isFurnitureThing(row.thing));
+  }
+
+  /**
+   * How far the ground has moved under a row standing out in the open since it was put there, in words, or null
+   * within `DRESSING_TUNE.drift` (`groundMoved`): against the ground the editor saved it on where its row says,
+   * so a building raised or sunk on purpose is never flagged for it; a row written by hand is measured as
+   * `groundMoved` says. Nothing in a room or in space.
+   */
+  private driftOf(row: PlacementRow, g: { x: number; y: number; z: number }): string | null {
+    if (!import.meta.env.DEV || row.inside || this.world.planet.space) return null;
+    const moved = groundMoved(row, g.y, this.world.terrain.heightAt(g.x, g.z), DRESSING_TUNE.drift);
+    return moved === null ? null : driftText(moved, row.ground !== undefined);
+  }
+
+  /** What one of the two tabs' panels shows: this world's rows of that kind, nearest first, and for buildings every one the gallery has. */
+  private editPanelModel(kind: 'prop' | 'building'): PermanentPanelModel {
+    if (!import.meta.env.DEV) return { layer: 'yours', dest: '', layerKey: '', rows: [], more: 0, models: null, note: '' };
+    const pack = this.editWorld();
+    const layerKey = this.input.bindings.placeLayer[0];
+    const me = this.player.worldPos;
+    const r = this.permanent.report();
+    const current = r.current && r.world === pack;
+    const rows: { d: number; view: PermanentRowView }[] = [];
+    if (current) {
+      for (const x of r.rows) {
+        if (x.kind !== kind) continue;
+        const s = x.stood ? this.permanent.rowOf(x.key) : null;
+        const row = s?.row ?? this.permanent.fileOf(x.layer)?.rows.find((f) => f.id === x.id) ?? null;
+        if (!row) continue;
+        const g = s ? { x: s.x, y: s.y, z: s.z } : placementToGame(row, this.world.layoutCenter, r.frame);
+        const d = Math.hypot(g.x - me.x, g.z - me.z);
+        const held = x.why === 'inHand';
+        rows.push({ d, view: { id: x.id, layer: x.layer, label: s?.label ?? this.dressingLabel(row), away: awayText(d), bad: held ? null : x.why, drift: s ? this.driftOf(row, g) : null, solid: this.solidOf(row), name: row.name ?? '', note: row.note ?? '', stood: x.stood, held } });
+      }
+    }
+    rows.sort((a, b) => a.d - b.d);
+    const shown = rows.slice(0, 40);
+    return {
+      layer: this.editLayer,
+      dest: destinationFile(this.editDest.dest, pack),
+      layerKey: layerKey ? keyLabel(layerKey) : NO_KEY,
+      rows: shown.map((x) => x.view),
+      more: rows.length - shown.length,
+      models: kind === 'building' ? (this.editModels ?? []) : null,
+      note: current ? `none stands for good on ${pack}` : "this world's permanent placements are not stood yet",
+    };
+  }
+
+  /** The two tabs' panels drawn again, whichever is open. */
+  private refreshEditPanels(): void {
+    if (!import.meta.env.DEV) return;
+    const panels = this.editPanels;
+    if (!panels) return;
+    if (this.propsUi.open) panels.props.show(this.editPanelModel('prop'));
+    if (this.housingUi.open) panels.housing.show(this.editPanelModel('building'));
+  }
+
+  /** The chip and the two panels made and wired, on the dev server alone. */
+  private makeEditor(): void {
+    if (!import.meta.env.DEV) return;
+    this.editChip = new EditChip(this.ui);
+    // The tabs carry no place for the panel of their own, so a release lays them out as it always did.
+    const propsAt = editSlots(this.propsUi.root);
+    const housingAt = editSlots(this.housingUi.root);
+    const props = new PermanentPanel(propsAt.head, propsAt.body, 'prop');
+    const housing = new PermanentPanel(housingAt.head, housingAt.body, 'building');
+    this.editPanels = { props, housing };
+    for (const panel of [props, housing]) {
+      panel.onLayer = (layer) => this.setEditLayer(layer);
+      panel.onGo = (id) => this.messages.system(this.goToPlacement(id).said);
+      panel.onTake = (id) => {
+        const s = this.permanent.rowOf(placementKey(id));
+        if (s) void this.takePermanent(s);
+        else this.messages.system(`${id} is not standing`);
+      };
+      panel.onDelete = (id) => {
+        const had = this.editRowOf(id);
+        const held = this.inHandRefusal(id, true);
+        if (held) this.editSay(false, held);
+        else if (had) void this.deletePermanent(had.layer, id);
+      };
+      panel.onRename = (id, to) => void this.editRename(id, to);
+      panel.onWords = (id, name, note) => {
+        const had = this.editRowOf(id);
+        if (!had) return;
+        const row: PlacementRow = { ...had.row };
+        if (name) row.name = name;
+        else delete row.name;
+        if (note) row.note = note;
+        else delete row.note;
+        void this.editPut(had.layer, row);
+      };
+      panel.onSolid = (id, solid) => {
+        const had = this.editRowOf(id);
+        if (had) void this.editPut(had.layer, { ...had.row, solid });
+      };
+      panel.onCopy = (id, what) => void this.copySnippet(id, what);
+      panel.onModel = (model) => {
+        void this.startPlacingBuilding({ model }, { dest: this.editDest.dest }).then((why) => {
+          if (why) this.messages.system(why);
+        });
+      };
+    }
+  }
+
+  /** A story object or an area naming a row, onto the clipboard where the page may write it, else onto the console. */
+  private async copySnippet(id: string, what: 'object' | 'area'): Promise<void> {
+    if (!import.meta.env.DEV) return;
+    const s = this.permanent.rowOf(placementKey(id));
+    const had = s ? { row: s.row } : this.editRowOf(id);
+    if (!had) return;
+    const label = (s?.label ?? this.dressingLabel(had.row)).toUpperCase();
+    const pack = this.editWorld();
+    const text = what === 'object' ? storyObjectSnippet(had.row, pack, label) : storyAreaSnippet(had.row, pack, Math.max(6, Math.ceil((s?.radius ?? 2) + 4)), label);
+    const file = what === 'object' ? `objects/${id}.jsonc` : `areas/${id}-area.jsonc`;
+    try {
+      if (!window.isSecureContext || !navigator.clipboard) throw new Error('no clipboard');
+      await navigator.clipboard.writeText(text);
+      this.messages.system(`copied ${file} for ${id}: paste it into the story`);
+    } catch {
+      console.log(`${file}:\n${text}`);
+      this.messages.system(`${file} for ${id} is on the console: the page may not write the clipboard`);
+    }
+  }
+
+  /**
+   * Stand beside a permanent row: a step off its edge on its own height, or for one standing in a room the
+   * doorstep of the permanent building it stands in, so its rooms are followed from the door as they always are.
+   */
+  private goToPlacement(id: string): { said: string; at?: { x: number; y: number; z: number } } {
+    const s = this.permanent.rowOf(placementKey(id));
+    if (!s) return { said: `no permanent row ${id} stands on ${this.editWorld()}` };
+    const home = s.row.inside ? this.permanent.nearest(s, 80, 'building') : null;
+    const off = Math.max(1, s.radius + 1);
+    const to = home ? new THREE.Vector3(home.x, home.y + 0.3, home.z) : new THREE.Vector3(s.x + off, (s.row.inside ? this.world.terrain.heightAt(s.x + off, s.z) : s.y) + 0.3, s.z);
+    this.player.reset(to);
+    return { said: s.row.inside ? `${id} stands in a room: walk in through the door${home ? ` of ${home.label}` : ''}` : `beside ${id}`, at: { x: Math.round(s.x), y: Number(s.y.toFixed(1)), z: Math.round(s.z) } };
   }
 
   // ---- The band: an instrument in hand, its own track of a song, and everybody else's. ----
@@ -18962,6 +19889,7 @@ class App {
       mine: mine.map((b) => ({ id: b.id, name: b.name, line: b.line })),
       mineNote: this.net.session.authority === 'server' ? 'none of yours on this world' : 'none put down this session (with no server a building lasts as long as the world it stands in)',
     });
+    if (import.meta.env.DEV) this.refreshEditPanels();
   }
 
   /** The Skills tab shown for the class in play: its skills on offer, and its slots. */

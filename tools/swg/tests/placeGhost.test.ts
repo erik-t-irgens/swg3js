@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo, outlineCells, turnTo, wheelReach, type GhostDeps } from '../../../src/world/placeGhost.ts';
 import { HOUSE_TUNE, doorNote, patchOfFootprint, type Footprint } from '../../../src/world/housePlace.ts';
 import { PLACE_HOLD_TUNE, stepToGrid } from '../../../src/world/placeHold.ts';
+import { colourHex } from '../../../src/core/palette.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -289,6 +290,29 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
   ghost.place(state, dotted, ['F.F'], () => 10);
   ok(ghost.outline !== kept && ghost.outline?.length === 2, 'and another footprint works its own out');
   ghost.dispose();
+
+  // The dev server's placement editor: a building taken by its model alone has no footprint and draws no grid --
+  // not the last deed's left standing under it -- and a spot that will take a thing going to a file is drawn in
+  // the accent, a refused one red as ever. Colours only.
+  const editing = new PlacementGhost();
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial());
+  editing.hold(mesh);
+  const gridOf = () => (editing as unknown as { grid: THREE.Mesh | null }).grid;
+  editing.place(state, HOUSE, HOUSE_ROWS, () => 10);
+  ok(gridOf()?.visible === true, "a deed's house draws its grid");
+  editing.place(state, null, [], () => 10);
+  ok(gridOf()?.visible === false, 'and one taken by its model alone right after draws none: the last grid is put away');
+  const tint = () => (mesh.material as THREE.MeshStandardMaterial).color.getHex();
+  editing.place({ ...state, ok: true }, null, [], () => 10, 'accent');
+  ok(tint() === colourHex('accent'), 'a spot that will take it, going to a file, is drawn in the accent');
+  editing.place({ ...state, ok: false }, null, [], () => 10, 'accent');
+  ok(tint() === colourHex('bad'), 'and a refused one red, wherever it is going');
+  editing.place({ ...state, ok: true }, null, [], () => 10);
+  ok(tint() === colourHex('good'), 'while yours is green');
+  editing.placeProp({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 }, true, 'accent');
+  ok(tint() === colourHex('accent'), 'and a prop going to a file the same');
+  editing.release();
+  editing.dispose();
 }
 
 // ---------------------------------------------------------------- the bar's words
@@ -455,6 +479,33 @@ const flat = (h = 10): GhostDeps => ({ heightAt: () => h, waterAt: () => -Infini
     ok(hint.textContent.endsWith('click put it down · Esc give it up'), 'and a fresh one says only Escape');
     v.kind = 'house';
     v.keys = { turn: 'R', lift: 'F', del: 'Del' };
+
+    // The dev server's placement editor: a badge beside the name saying where it will be kept, in the words the
+    // game hands over, and a first click waiting for its second said in place of the verdict, in the accent.
+    // A release hands over neither, and the bar shows neither.
+    const badge = root.querySelector('.badge');
+    say(true, null, 0, null);
+    ok(badge.hidden === true, 'with no badge handed over (a release), none is shown');
+    v.badge = 'PERMANENT · STORY';
+    v.badgeTone = 'accent';
+    const beforeBadge = bar.writes;
+    say(true, null, 0, null);
+    ok(!badge.hidden && badge.textContent === 'PERMANENT · STORY' && badge.className === 'badge accent' && bar.writes === beforeBadge + 1, 'a badge handed over is shown, in the accent, written once');
+    say(true, null, 0, null);
+    ok(bar.writes === beforeBadge + 1, 'and the same badge again writes nothing');
+    v.armed = 'click again to save it';
+    say(false, 'that is under water', 0, null);
+    ok(why.textContent === 'click again to save it' && why.className === 'why note', 'a first click waiting for its second is said in place of the verdict, a refusal included, in the accent');
+    v.armed = null;
+    say(false, 'that is under water', 0, null);
+    ok(why.textContent === 'that is under water' && why.className === 'why bad', 'and once it is answered or runs out the verdict is back');
+    v.badge = 'YOURS';
+    v.badgeTone = 'muted';
+    say(true, null, 0, null);
+    ok(badge.textContent === 'YOURS' && badge.className === 'badge', 'yours is said in the muted colour');
+    v.badge = null;
+    say(true, null, 0, null);
+    ok(badge.hidden === true, 'and taken away again when there is none');
 
     // The two press-and-drag buttons, pressed as a pointer would press them.
     const turnBtn = root.querySelector('.hold-turn');

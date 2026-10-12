@@ -18,6 +18,10 @@
 // hand back), where Escape puts it back exactly where it stood. The button is there only while what
 // is in hand came out of the world, and carries the cap of the pick-up key, which does the same.
 //
+// On the dev server it also wears a badge saying where the thing will be kept, and says a first click
+// that waits for its second in place of the verdict; the game hands both over as words of its own, so the
+// bar carries none of the editor's and a release, which hands over neither, shows neither.
+//
 // It builds its own element and says what was pressed. It knows nothing about deeds, worlds or
 // ghosts, so a test can drive it with no game at all. Every colour on it is one of the eighteen.
 
@@ -34,6 +38,9 @@ const PLACING_BAR_CSS = `
 #placing-bar .why.note { color: var(--accent); }
 #placing-bar .hint { font-size: 10px; letter-spacing: 0.04em; color: var(--muted); text-align: center; pointer-events: none; }
 #placing-bar .lift, #placing-bar .turn { font-size: 11px; letter-spacing: 0.04em; color: var(--accent); min-width: 4.2em; text-align: center; }
+#placing-bar .badge { font-size: 10px; letter-spacing: 0.08em; color: var(--muted); border: 1px solid var(--rule); border-radius: 3px; padding: 1px 6px; }
+#placing-bar .badge.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+#placing-bar .badge[hidden] { display: none; }
 #placing-bar button { font: inherit; font-size: 11px; letter-spacing: 0.05em; color: var(--muted); background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; padding: 4px 9px; cursor: pointer; }
 #placing-bar button:hover { color: var(--ink); border-color: var(--edge); }
 #placing-bar button.hold { cursor: ns-resize; touch-action: none; }
@@ -90,11 +97,22 @@ export interface PlacingView {
   /** What a held key is doing to it now, or null. */
   holding: HoldKind | null;
   kind: 'house' | 'prop';
+  /**
+   * Where it will be kept, as a badge beside its name, or null for none: the dev server's placement editor
+   * says it (yours, or which file), and a release never does. `badgeTone` is the colour it is said in.
+   */
+  badge: string | null;
+  badgeTone: 'muted' | 'accent';
+  /**
+   * A first click waiting for its second, in its own words, said in place of the verdict while it waits (the
+   * dev server's editor asking before a first save to a file, or before a refused spot is placed anyway).
+   */
+  armed: string | null;
 }
 
 /** A view with nothing in it, for the game to keep and write into. */
 export function placingView(): PlacingView {
-  return { name: '', ok: false, why: null, note: null, keys: { turn: '', lift: '', del: '' }, turn: 0, tipped: 0, lift: 0, away: null, locked: true, holding: null, kind: 'house' };
+  return { name: '', ok: false, why: null, note: null, keys: { turn: '', lift: '', del: '' }, turn: 0, tipped: 0, lift: 0, away: null, locked: true, holding: null, kind: 'house', badge: null, badgeTone: 'muted', armed: null };
 }
 
 /**
@@ -147,6 +165,7 @@ export class PlacingBar {
   onPutAway: () => void = () => {};
 
   private readonly what: HTMLElement;
+  private readonly badge: HTMLElement;
   private readonly why: HTMLElement;
   private readonly hint: HTMLElement;
   private readonly lift: HTMLElement;
@@ -161,7 +180,7 @@ export class PlacingBar {
    * What was last written, field by field and rounded as shown, so a frame that changes nothing writes
    * nothing and builds no string to find that out.
    */
-  private readonly last = { open: false, name: '', ok: false, why: null as string | null, note: null as string | null, turnKey: '', liftKey: '', delKey: '', turn: Number.NaN, tipped: Number.NaN, lift: Number.NaN, away: null as string | null, locked: false, holding: null as HoldKind | null, kind: '' };
+  private readonly last = { open: false, name: '', ok: false, why: null as string | null, note: null as string | null, turnKey: '', liftKey: '', delKey: '', turn: Number.NaN, tipped: Number.NaN, lift: Number.NaN, away: null as string | null, locked: false, holding: null as HoldKind | null, kind: '', badge: null as string | null, badgeTone: '', armed: null as string | null };
   /** How many times the page was written to, for `__debug.hud`'s own counting. */
   writes = 0;
 
@@ -179,12 +198,14 @@ export class PlacingBar {
         <button class="hold hold-lift" title="hold and drag up or down to raise or lower it; click for a notch up, right click for one down">&#8597; Height <span class="cap cap-lift"></span></button>
         <span class="lift"></span>
         <span class="what"></span>
+        <span class="badge" hidden></span>
         <button class="go">Place</button>
         <button class="away" title="throw it away rather than put it back" hidden>Put away <span class="cap cap-away"></span></button>
         <button class="cancel">Cancel (Esc)</button>
       </div>`;
     parent.appendChild(this.root);
     this.what = this.root.querySelector('.what')!;
+    this.badge = this.root.querySelector('.badge')!;
     this.why = this.root.querySelector('.why')!;
     this.hint = this.root.querySelector('.hint')!;
     this.lift = this.root.querySelector('.lift')!;
@@ -294,7 +315,10 @@ export class PlacingBar {
       l.away === v.away &&
       l.locked === v.locked &&
       l.holding === v.holding &&
-      l.kind === v.kind
+      l.kind === v.kind &&
+      l.badge === v.badge &&
+      l.badgeTone === v.badgeTone &&
+      l.armed === v.armed
     ) {
       return;
     }
@@ -313,11 +337,24 @@ export class PlacingBar {
     l.locked = v.locked;
     l.holding = v.holding;
     l.kind = v.kind;
+    l.badge = v.badge;
+    l.badgeTone = v.badgeTone;
+    l.armed = v.armed;
     this.root.hidden = false;
     this.writes++;
     this.what.textContent = v.name;
-    this.why.textContent = v.ok ? (said ?? (v.kind === 'prop' ? 'it will stand there' : 'the ground will take it')) : (v.why ?? 'not here');
-    this.why.className = `why ${v.ok ? (said ? 'note' : 'good') : 'bad'}`;
+    this.badge.hidden = v.badge === null;
+    this.badge.textContent = v.badge ?? '';
+    this.badge.className = `badge${v.badgeTone === 'accent' ? ' accent' : ''}`;
+    // A first click waiting for its second says so in place of the verdict, in the accent: it is a question,
+    // and neither a refusal nor a go-ahead.
+    if (v.armed !== null) {
+      this.why.textContent = v.armed;
+      this.why.className = 'why note';
+    } else {
+      this.why.textContent = v.ok ? (said ?? (v.kind === 'prop' ? 'it will stand there' : 'the ground will take it')) : (v.why ?? 'not here');
+      this.why.className = `why ${v.ok ? (said ? 'note' : 'good') : 'bad'}`;
+    }
     this.hint.textContent = placingHint(v);
     // Degrees to a tenth, and a prop's tip beside its spin once its up is off the world's.
     this.turn.textContent = `${(turn / 10).toFixed(1)}°${v.kind === 'prop' && tipped ? ` · tipped ${tipped}°` : ''}`;

@@ -65,6 +65,12 @@ export interface PlacementRow {
   clear?: number;
   /** Metres round it a player's own thing may not stand; absent, `DRESSING_TUNE.guard` on a story row and none on a world edit. */
   guard?: number;
+  /**
+   * The ground's height under it when it was put there, out in the open: what the editor's list measures the
+   * ground under it against now, so one raised or sunk on purpose is not taken for one the ground moved under.
+   * Says nothing about how it stands.
+   */
+  ground?: number;
   name?: string;
   note?: string;
   /** When it was written, milliseconds since the epoch. */
@@ -112,7 +118,7 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const NAME_ID = /^[A-Za-z0-9_.-]{1,96}$/;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 /** The fields a row may carry; the reserved ones are read and set aside. */
-const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'name', 'note', 'at']);
+const FIELDS = new Set(['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'name', 'note', 'at']);
 const RESERVED = new Set(['fill', 'locked', 'effectsOf']);
 
 /** The streamer's key for a row's id. */
@@ -188,6 +194,11 @@ export function readPlacementRow(v: unknown, unknown: string[] = []): PlacementR
     const r = num(o[circle]);
     if (r === undefined || r < 0 || r > L.circle) return `${circle} is a number of metres from 0 to ${L.circle}`;
     row[circle] = r;
+  }
+  if (o.ground !== undefined) {
+    const g = num(o.ground);
+    if (g === undefined || Math.abs(g) > L.height) return `its ground is a height of ${L.height} m at most either way`;
+    row.ground = g;
   }
   if (o.name !== undefined) {
     if (typeof o.name !== 'string' || o.name.length > L.name || CONTROL.test(o.name)) return `its name is words of ${L.name} characters at most`;
@@ -319,8 +330,8 @@ export function radiusOfBounds(b: { min: readonly number[]; max: readonly number
 }
 
 /**
- * What a row stands as, as one string: every field that moves what stands, and none of `name`, `note` and
- * `at`, which only say things about it. Two rows with the same answer stand the same, so a change to a
+ * What a row stands as, as one string: every field that moves what stands, and none of `ground`, `name`,
+ * `note` and `at`, which only say things about it. Two rows with the same answer stand the same, so a change to a
  * row's words re-stands nothing. Exact rather than a digest, since a sync compares at most a few thousand.
  */
 export function rowHash(row: PlacementRow): string {
@@ -386,12 +397,17 @@ export function mintPlacementId(base: string, taken: ReadonlySet<string>): strin
 }
 
 /** The field order a row is written in, so one row is always one line spelled the same way. */
-const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'name', 'note', 'at'];
+const ORDER: (keyof PlacementRow)[] = ['id', 'kind', 'pack', 'thing', 'model', 'deed', 'x', 'y', 'z', 'q', 'solid', 'inside', 'clear', 'guard', 'ground', 'name', 'note', 'at'];
+/** Every field a row of this build reads, in the order it is written. */
+export const PLACEMENT_FIELDS: readonly string[] = ORDER;
+const ORDERED = new Set<string>(ORDER);
 
 /**
  * A whole file's text: its header a field a line, then one line a row, sorted by id, each row's fields in
  * one fixed order. A change to one row is a change to one line, so git shows exactly what moved. No
- * comment, in either layer: the file is JSON, and `note` is where a row's words go.
+ * comment, in either layer: the file is JSON, and `note` is where a row's words go. A row handed over as
+ * the very object a file was read into (the editor writing back rows it did not touch) keeps every field
+ * it carries that this build does not read, after the rest, so a word written by hand is never lost.
  */
 export function placementsFileText(world: string, frame: PlacementFrame, rows: readonly PlacementRow[]): string {
   const sorted = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -401,6 +417,11 @@ export function placementsFileText(world: string, frame: PlacementFrame, rows: r
       const v = r[k];
       if (v === undefined) continue;
       parts.push(`${JSON.stringify(k)}: ${JSON.stringify(v)}`);
+    }
+    const all = r as unknown as Record<string, unknown>;
+    for (const k of Object.keys(all)) {
+      if (ORDERED.has(k) || all[k] === undefined) continue;
+      parts.push(`${JSON.stringify(k)}: ${JSON.stringify(all[k])}`);
     }
     return `    { ${parts.join(', ')} }`;
   });

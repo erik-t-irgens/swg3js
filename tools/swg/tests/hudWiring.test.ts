@@ -426,7 +426,13 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   const muteAt = keys.lastIndexOf('input.mute(FIGHT_ACTIONS);');
   const dropAt = keys.indexOf("input.pressedAction('attack')");
   ok(muteAt > 0 && dropAt > 0 && muteAt > dropAt && /input\.mute\(FIGHT_ACTIONS\);\s*return true;/.test(keys), 'while it is in hand the click is read to put it down and then everything that fights is muted for the rest of the frame');
-  ok(/stepHold\(dt\)/.test(keys) && /input\.pressedAction\('putAway'\)\) this\.stopPlacing\(\)/.test(keys), 'the held keys are read there, and Delete gives up a deed as it puts a prop away');
+  ok(/stepHold\(dt\)/.test(keys) && /input\.pressedAction\('putAway'\) && this\.awayAsked\(\)\) this\.stopPlacing\('away'\)/.test(keys) && /\(takeKey \|\| input\.pressedAction\('putAway'\)\) && this\.awayAsked\(\)\) this\.stopPlacingProp\('away'\)/.test(keys), 'the held keys are read there, and Delete gives up a deed as it puts a prop away (and takes a permanent row the editor picked up out of its file, once a second press has answered `awayAsked`)');
+  // A permanent row is taken out of a file every player is handed, so its first press only asks; a question about
+  // taking it out is no answer to a click that would save it.
+  const asked = bodyOf(main, 'private awayAsked(): boolean');
+  ok(/if \(!hand \|\| hand\.from\.kind !== 'permanent'\) return true;/.test(asked) && /arm\.what === 'away' && arm\.id === row\.id && now < arm\.until/.test(asked) && /what: 'away'/.test(asked), "anything but a permanent row goes at once, and that one goes on a second press for the same row within confirmMs");
+  ok(/this\.placingBar\.onPutAway = \(\) => \{\s*if \(this\.awayAsked\(\)\) this\.stopPlacingProp\('away'\);/.test(main), "the bar's Put away asks the same");
+  ok(/const live = !!arm && arm\.what !== 'away' && now < arm\.until && arm\.dest === dest;/.test(main), 'and a click to save is never taken for the answer to it');
   // The click frame: a key still held keeps the mouse from the camera there too, so a refused drop never
   // swings the view (nor lets go of a thing picked back up), and nothing moves the thing as it goes down.
   ok(/if \(input\.pressedAction\('attack'\)\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(input\.held\('placeTurn'\) \|\| input\.held\('placeLift'\)\) \{\s*input\.mouseDX = 0;\s*input\.mouseDY = 0;\s*\}\s*void \(this\.propPlacing \? this\.dropPlacingProp\(\) : this\.dropPlacing\(\)\);\s*\} else this\.stepHold\(dt\);/.test(keys), 'on the frame of the click a held key still takes the mouse from the camera, and the hold is not stepped');
@@ -437,7 +443,7 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(/const shift = input\.isDown\('ShiftLeft'\) \|\| input\.isDown\('ShiftRight'\);/.test(hold) && /let which: HoldKind \| null = holdKindOf\(input\.held\('placeTurn'\), input\.held\('placeLift'\), shift, !!prop\);/.test(hold), 'which hold the keys make is `holdKindOf` of the two keys, shift read raw, and whether a prop is in hand');
   ok(/if \(which\) \{\s*dx = input\.mouseDX;\s*dy = input\.mouseDY;\s*input\.mouseDX = 0;\s*input\.mouseDY = 0;/.test(hold), 'a held key takes the mouse from the camera');
   ok(/\} else if \(d\.which\) \{[\s\S]*?which = holdKindOf\(d\.which === 'turn', d\.which === 'lift', d\.shift, !!prop\);\s*dx = d\.dx;\s*dy = d\.dy;/.test(hold), "a bar button pressed holds by the same gate, whether or not the pointer moved this frame");
-  ok(/const axes = which === 'tumble' \? this\.tumbleAxesNow\(\) : this\.viewAxesNow;\s*applyHold\(this\.placeHold, which, dx, dy, dt, this\.cam\.sensitivity, axes, prop, this\.placing, GHOST_TUNE\.most, performance\.now\(\), PLACE_HOLD_TUNE\);/.test(hold), 'and the frame of the hold is `applyHold`, with the camera\'s own axes for a tumble and the mouse sensitivity');
+  ok(/const axes = which === 'tumble' \? this\.tumbleAxesNow\(\) : this\.viewAxesNow;\s*applyHold\(this\.placeHold, which, dx, dy, dt, this\.cam\.sensitivity, axes, prop, this\.placing, this\.houseMost\(\), performance\.now\(\), PLACE_HOLD_TUNE\);/.test(hold) && /\? GHOST_TUNE\.mostPermanent : GHOST_TUNE\.most/.test(bodyOf(main, 'private houseMost(): number')), 'and the frame of the hold is `applyHold`, with the camera\'s own axes for a tumble, the mouse sensitivity, and a building\'s reach the permanent layer\'s when it is kept for good');
   const axesNow = bodyOf(main, 'private tumbleAxesNow(): ViewAxes');
   ok(/const d = this\.cam\.camera\.getWorldDirection\(this\.viewDir\);\s*return tumbleAxes\(d\.x, d\.z, this\.player\.heading, this\.viewAxesNow\);/.test(axesNow), "a prop tumbles about the camera's own direction in the world, never `cam.forward()`, which aboard a hull is the hull's frame");
   ok(/tumbleBy\(p\.turn, this\.tumbleAxesNow\(\), tip, roll\);/.test(bodyOf(main, 'private tumbleProp(p: { turn: PropTurn }')), 'and so does a notch of the tumble (the wheel, the console)');
@@ -451,13 +457,17 @@ const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string
   ok(/ghostSpot\(this\.player\.worldPos, this\.viewHeading\(\), p\.reach, this\.ghostAt\)/.test(bodyOf(main, 'private stepPlacing(): void')), 'a building is pushed out where the camera looks');
   const propStep = bodyOf(main, 'private stepPlacingProp(): void');
   ok(/const heading = this\.viewHeading\(\);/.test(propStep) && /else propSpot\(me, heading, p\.reach, spot\);/.test(propStep), 'and so is a prop');
-  ok(/yaw: turnTo\(this\.viewHeading\(\)\)/.test(bodyOf(main, 'private async startPlacing(deedId: string)')), 'a building taken in hand starts facing the way the view looks');
+  // Its parameters carry braces of their own, so the method is read to its own closing line.
+  const startBuilding = /private async startPlacingBuilding\([\s\S]*?\n  \}\r?\n/.exec(main)?.[0] ?? '';
+  ok(/yaw: turnTo\(this\.viewHeading\(\)\)/.test(startBuilding), 'a building taken in hand starts facing the way the view looks');
   const camAt = main.indexOf('this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);');
   const ghostAt = main.search(/if \(this\.placing\) this\.stepPlacing\(\);\s*else if \(this\.propPlacing\) this\.stepPlacingProp\(\);/);
   const wheelAt = main.indexOf('this.wheelPlacing(-input.wheel);');
   ok(camAt > 0 && ghostAt > camAt && wheelAt > 0 && wheelAt < camAt, 'the ghost is placed after the camera, reading this frame\'s view, and the wheel is taken before the camera zooms with it');
   // A prop picked back up is anchored where it stood, and let go once the player walks or looks away.
-  const take = bodyOf(main, 'private async takeNearestProp(): Promise<string | null>');
+  // The anchoring is one method (`anchorPicked`), which the pick-up key's own take and the editor's both call.
+  const take = /private anchorPicked\([\s\S]*?\n  \}\r?\n/.exec(main)?.[0] ?? '';
+  ok(/this\.anchorPicked\(p, row, \{ x: row\.q\[0\], y: row\.q\[1\], z: row\.q\[2\], w: row\.q\[3\] \}\);/.test(bodyOf(main, 'private async takeNearestProp(): Promise<string | null>')), 'the pick-up key anchors what it takes up where it stood');
   ok(/a\.on = true;\s*a\.x = row\.x;\s*a\.y = row\.y;\s*a\.z = row\.z;\s*a\.px = at\.x;\s*a\.pz = at\.z;\s*a\.yaw = this\.viewHeading\(\);/.test(take), 'a prop picked back up is anchored at its own place, from where the player stands and looks');
   ok(/p\.lift = Math\.min\(PROP_TUNE\.most, Math\.max\(-PROP_TUNE\.most, row\.y - \(floor \?\? at\.y\)\)\);/.test(take) && /p\.reach = [^\n]*Math\.hypot\(row\.x - at\.x, row\.z - at\.z\)/.test(take), 'with its lift the height it stood at over the floor, and its reach how far off it is');
   ok(/if \(a\.on && anchorReleased\(a, me, heading, PLACE_HOLD_TUNE\)\) a\.on = false;/.test(propStep) && /if \(a\.on\) \{\s*spot\.x = a\.x;\s*spot\.y = me\.y;\s*spot\.z = a\.z;\s*\} else propSpot/.test(propStep), 'it stands exactly there until `anchorReleased` lets it go');

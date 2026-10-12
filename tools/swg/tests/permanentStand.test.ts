@@ -12,8 +12,9 @@
 // row says so; a row moved is moved, once, and what is waited on for it settles only once it is built; a row
 // taken out of the file comes down; a clash stands one; a world that has gone takes down nothing of the next,
 // answers no question about it, and the next stands everything again; a guard is metres round the thing's own
-// turned footprint, read live; a row renamed or moved to the other layer is called and guarded as it reads now.
-// Nothing is written.
+// turned footprint, read live; a row renamed or moved to the other layer is called and guarded as it reads now;
+// and a row the dev server's editor takes in hand is down until it is given back or saved, stands once where it
+// was saved, and the file's own word that it changed, which follows every save, stands nothing. Nothing is written.
 import assert from 'node:assert/strict';
 import { CRATE, HALL, makeStreamer, gatePrepare, THREE, INDOOR_FILTER, type Harness } from './streamHarness.ts';
 
@@ -286,6 +287,97 @@ const colliderName = (h: Harness, o: unknown) => {
     ok(asked(13.4, -10) && !asked(13.6, -10) && asked(-13.4, -10) && !asked(-13.6, -10), `5 (${what}): and ${DRESSING_TUNE.guard} m past either side wall`);
     ok(asked(0, -29.4) && !asked(0, -29.6), `5 (${what}): and past its back wall`);
   }
+}
+
+// 6. The dev server's editor: a row taken in hand is down and stays down while files are read again, comes back
+//    where it stood when it is given back, and stands once where it was saved; the file's own word that it
+//    changed, which follows every save, then stands nothing.
+{
+  const h = await makeStreamer();
+  const gen = { n: 1 };
+  const layer = layerOver(h, gen);
+  layer.enter('tatooine', { x: 0, z: 0 }, 'ground', 1);
+  const out = { x: 800, z: 100 };
+  const row = (extra: Partial<Row> = {}): Row => ({ id: 'locker', kind: 'prop', pack: 'props', thing: 'crate_test', x: -out.x, y: 0, z: out.z, q: [1, 0, 0, 0], ...extra });
+  const world = file([row()]);
+  layer.setLayers(null, world);
+  await h.settle(out);
+  const first = placed(h, 'place/locker');
+  ok(!!first && (h.stream.placedState('place/locker')?.colliders ?? 0) === 1, '6: a row stands, and is solid');
+  const lifted = layer.lift('place/locker');
+  ok(lifted?.row.id === 'locker' && lifted.layer === 'world' && !placed(h, 'place/locker') && h.meshesAt(out.x, out.z) === 0 && layer.inHand('place/locker'), '6: taken in hand it is down in the world at once, its row and layer handed over');
+  ok(layer.rowOf('place/locker') === null && layer.report().rows.some((x) => x.id === 'locker' && x.why === 'inHand'), "6: and is reported in hand, not standing");
+  // The file read again while it is in hand (the dev server's word for somebody else's save) does not stand it under the ghost.
+  const again = layer.setLayers(null, world);
+  await h.settle(out);
+  ok(!placed(h, 'place/locker') && again.length === 0, '6: a file read again while it is in hand does not stand it a second time');
+  // Given back unchanged: stood again where it stood, once.
+  layer.restore('place/locker');
+  await h.settle(out);
+  const back = placed(h, 'place/locker');
+  ok(!!back && back !== first && back.x === out.x && filedPlaces(h) === 1 && h.meshesAt(out.x, out.z) === 1 && !layer.inHand('place/locker'), '6: given back, it stands again where it stood, once');
+  // Taken up and saved two metres along, with its words: the save's answer stands it there, once.
+  layer.lift('place/locker');
+  const saved = file([row({ x: -(out.x + 2), name: 'Locker', at: 1_760_000_000_000 })]);
+  const builds = layer.land('place/locker', null, saved);
+  await Promise.all(builds);
+  await h.settle(out);
+  const moved = placed(h, 'place/locker');
+  ok(!!moved && moved.x === out.x + 2 && filedPlaces(h) === 1 && h.meshesAt(out.x, out.z) === 0 && h.meshesAt(out.x + 2, out.z) === 1 && layer.rowOf('place/locker')?.label === 'Locker', '6: saved somewhere else it stands there, once, under its new name');
+  // The dev server's word that the file changed follows, read from the file as written: nothing stands again.
+  const echo = layer.setLayer('world', readPlacementsFile(placementsFileText('tatooine', 'raw', saved.rows), 'tatooine', 'ground'));
+  await h.settle(out);
+  ok(echo.length === 0 && placed(h, 'place/locker') === moved && filedPlaces(h) === 1 && h.meshesAt(out.x + 2, out.z) === 1, '6: the file read again after the save is a diff with nothing in it: the very same thing stands');
+  // Saved unmoved: stood again all the same, which a sync that still believed it stood would never do.
+  layer.lift('place/locker');
+  layer.land('place/locker', null, saved);
+  await h.settle(out);
+  ok(!!placed(h, 'place/locker') && placed(h, 'place/locker').x === out.x + 2 && filedPlaces(h) === 1, '6: put down unmoved, it stands again');
+  // A row taken out of its file while it is in hand is not stood when it is given back.
+  layer.lift('place/locker');
+  layer.land('place/locker', null, null);
+  await h.settle(out);
+  ok(!placed(h, 'place/locker') && layer.count === 0, '6: taken out of its file while in hand, it stays gone');
+  // A world that has gone forgets what was in hand.
+  layer.setLayers(null, world);
+  await h.settle(out);
+  layer.lift('place/locker');
+  gen.n = 2;
+  ok(!layer.inHand('place/locker') && layer.restore('place/locker').length === 0, '6: once its world has gone, nothing is in hand and nothing is given back into the next');
+  // A travel or the select screen leaves a row in hand as its file has it (`keep`), so the next arrival stands it:
+  // the world entered again forgets the hand, and the very file stands it -- and so does a row of the same id in
+  // the next world, since ids are minted per world's files and `crate-1` recurs on every one.
+  layer.enter('tatooine', { x: 0, z: 0 }, 'ground', 2);
+  layer.setLayers(null, world);
+  await h.settle(out);
+  ok(!!placed(h, 'place/locker') && placed(h, 'place/locker').x === out.x && !layer.inHand('place/locker') && filedPlaces(h) === 1, '6: the next arrival forgets what was in hand, and stands the row its file still holds');
+  layer.lift('place/locker');
+  gen.n = 3;
+  layer.enter('naboo', { x: 0, z: 0 }, 'ground', 3);
+  const elsewhere = { x: 820, z: 140 };
+  layer.setLayers(null, readPlacementsFile(placementsFileText('naboo', 'raw', [row({ x: -elsewhere.x, z: elsewhere.z })]), 'naboo', 'ground'));
+  await h.settle(elsewhere);
+  ok(!!placed(h, 'place/locker') && placed(h, 'place/locker').x === elsewhere.x && !layer.inHand('place/locker'), "6: and a row of another world under the same id stands there: the last world's hand is not this one's");
+}
+
+// 6b. A save answered while other rows stand: only the row that was in hand is stood again, and every other row is
+//     the very thing that stood before, filed once -- `land` is one diff, never a second stand of everything.
+{
+  const h = await makeStreamer();
+  const gen = { n: 1 };
+  const layer = layerOver(h, gen);
+  layer.enter('tatooine', { x: 0, z: 0 }, 'ground', 1);
+  const out = { x: 800, z: 100 };
+  const row = (id: string, x: number, extra: Partial<Row> = {}): Row => ({ id, kind: 'prop', pack: 'props', thing: 'crate_test', x: -x, y: 0, z: out.z, q: [1, 0, 0, 0], ...extra });
+  layer.setLayers(null, file([row('locker', out.x), row('other', out.x + 6)]));
+  await h.settle(out);
+  const other = placed(h, 'place/other');
+  ok(!!other && !!placed(h, 'place/locker') && filedPlaces(h) === 2, '6b: two rows stand');
+  layer.lift('place/locker');
+  layer.land('place/locker', null, file([row('locker', out.x + 2, { at: 1 }), row('other', out.x + 6)]));
+  await h.settle(out);
+  ok(placed(h, 'place/other') === other && filedPlaces(h) === 2 && placed(h, 'place/locker')?.x === out.x + 2, '6b: the save stands the row that was in hand where it was saved, and the row beside it is the very thing that stood, filed once');
+  ok(h.meshesAt(out.x + 6, out.z) === 1, '6b: drawn once');
 }
 
 ok(CRATE.id === 'crate' && HALL.cells.length === 2, 'the harness carries the crate and the hall');

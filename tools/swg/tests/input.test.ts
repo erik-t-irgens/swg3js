@@ -256,6 +256,37 @@ const KEY = 'swg3js.bindings';
   ok(!(FIGHT_ACTIONS as readonly string[]).includes('placeTurn') && !(FIGHT_ACTIONS as readonly string[]).includes('placeLift') && !(FIGHT_ACTIONS as readonly string[]).includes('forward'), 'and never the placing keys or the walk');
 }
 
+// --- the placement editor's destination: the dev server's alone ----------------------------------------------
+// L in hand moves where a thing is kept (`placeLayer`), borrowed from the saber's on and off as the placing keys
+// borrow R and F: shared on purpose, so neither takes it off the other, and the Controls page of a release does
+// not list it at all (nothing there reads it).
+{
+  store.clear();
+  const { DEV_ONLY_ACTIONS, controlsActions } = await import('../../../src/core/input.ts');
+  ok(DEFAULT_BINDINGS.placeLayer.join() === 'KeyL' && DEFAULT_BINDINGS.saberToggle.join() === 'KeyL', 'the editor\'s destination is on L, shared with the saber\'s on and off');
+  ok(DEV_ONLY_ACTIONS.has('placeLayer') && !controlsActions(false).includes('placeLayer') && controlsActions(true).includes('placeLayer'), 'a release\'s Controls page leaves it out, and the dev server\'s lists it');
+  ok(controlsActions(false).length === Object.keys(DEFAULT_BINDINGS).length - DEV_ONLY_ACTIONS.size && controlsActions(false).includes('saberToggle'), 'and leaves nothing else out');
+  const shared = loadedBindings({ saberToggle: ['KeyL', 'KeyK'] });
+  ok(shared.placeLayer.join() === 'KeyL', 'a saber key chosen with L kept leaves the destination on L: the two share it by default');
+  const moved = loadedBindings({ emote1: ['KeyL'] });
+  ok(moved.placeLayer.length === 0 && moved.saberToggle.length === 0, 'while L chosen for something else is taken off both, as any default gives way to a choice');
+  const input = new Input(canvas);
+  input.assignKey('saberToggle', ['KeyP'], 'KeyP');
+  ok(input.bindings.placeLayer.join() === 'KeyL' && input.bindings.saberToggle.join() === 'KeyP', 'the saber moved off L on the Controls page leaves the destination on it');
+  input.assignKey('saberToggle', ['KeyL'], 'KeyL');
+  ok(input.bindings.placeLayer.join() === 'KeyL' && input.bindings.saberToggle.join() === 'KeyL', 'and put back on L shares it with the destination again, as their defaults do');
+  ok(!(FIGHT_ACTIONS as readonly string[]).includes('placeLayer') && !(FIGHT_ACTIONS as readonly string[]).includes('saberToggle'), 'neither is muted with the fight while something is in hand, so L reads as the destination then');
+  const main = (await import('node:fs')).readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  ok(/if \(!this\.map\.open && !this\.anyPanelOpen\(\) && !this\.placing && !this\.propPlacing\) \{\s*if \(input\.pressedAction\('saberToggle'\)/.test(main), 'and the saber\'s on and off is never read with something in hand');
+  ok(/if \(import\.meta\.env\.DEV && \(this\.placing \|\| this\.propPlacing\) && input\.pressedAction\('placeLayer'\)\) this\.cycleDestination\(\);/.test(main), 'the destination is read only with something in hand, and only on the dev server');
+  // The Controls page itself: it lists what `controlsActions` gives it for the build it is in, and the action's words
+  // are the dev server's alone, so a release neither lists the action nor carries what it would say.
+  const menu = (await import('node:fs')).readFileSync(new URL('../../../src/ui/menu.ts', import.meta.url), 'utf8');
+  const keyRows = /private keyRows\(\): string \{([\s\S]*?)\n  \}/.exec(menu)?.[1] ?? '';
+  ok(/return controlsActions\(import\.meta\.env\.DEV\)\s*\.map\(/.test(keyRows) && !/Object\.keys\(DEFAULT_BINDINGS\)/.test(keyRows), "the Controls page lists `controlsActions` for the build it is in, never the whole table");
+  ok(/placeLayer: import\.meta\.env\.DEV \? '[^']+' : '',/.test(menu), "and the action's label is words on the dev server and none in a release");
+}
+
 // --- the console's bind -------------------------------------------------------------------------------------
 {
   store.clear();

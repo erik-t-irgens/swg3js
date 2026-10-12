@@ -54,6 +54,9 @@ export type Action =
   | 'takeProp'
   // A prop in hand that was picked back up: throw it away rather than put it back.
   | 'putAway'
+  // The dev server's placement editor, with something in hand: where it is kept when it is put down (yours,
+  // the story's dressing, the world edits). Read only on the dev server, and never shown in a release.
+  | 'placeLayer'
   // The debug menu: every `__debug` helper, run from a window.
   | 'debugMenu'
   // The map open on its Waypoints tab: every waypoint the character keeps, to mark, track, rename, colour and take away.
@@ -130,6 +133,10 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // Throwing a prop in hand away. The pick-up key does the same while one is in hand; Delete is the
   // key anybody reaches for to get rid of something, and nothing else in the game uses it.
   putAway: ['Delete'],
+  // The placement editor's destination, on the dev server alone: L, borrowed from the saber's on and off
+  // rather than spent, as the placing keys borrow R and F. The saber's key is not read while something is
+  // in hand, and this one is read only then, so the two never answer one press.
+  placeLayer: ['KeyL'],
   // The debug menu, on the key a console has always had in a game (Jedi Academy's own is there): the
   // one left of 1, which nothing else in this game uses. It types a character into a box, so inside
   // the menu's own boxes it is Escape that shuts it.
@@ -146,6 +153,17 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   group: ['Period'],
 };
 const STORAGE_KEY = 'swg3js.bindings';
+
+/**
+ * Actions only the dev server's tools read: kept in the table so a binding of one reads and keeps like any
+ * other, and left off the Controls page of a release (`controlsActions`), where nothing reads them.
+ */
+export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>(['placeLayer']);
+
+/** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */
+export function controlsActions(dev: boolean): Action[] {
+  return (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => dev || !DEV_ONLY_ACTIONS.has(a));
+}
 
 /**
  * Everything that fights: the click and the other triggers, the block, the saber's throw and its style,
@@ -222,8 +240,8 @@ export function bindingsToKeep(chosen: Readonly<Partial<Record<Action, readonly 
 /**
  * Whether taking `code` for `action` must take it off `other` as well. Not when both have it by default:
  * those two share it on purpose and are never pressed in the same place (the alt attack and the block on
- * right mouse, the placing keys on R and F), so a key put back on its own default stays shared with
- * the other default that has it.
+ * right mouse, the placing keys on R and F, the editor's destination on the saber's L), so a key put back
+ * on its own default stays shared with the other default that has it.
  */
 export function takesKeyFrom(action: Action, other: Action, code: string): boolean {
   if (other === action) return false;

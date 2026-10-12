@@ -170,9 +170,12 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   // The one placing block for both kinds (`stepPlacingKeys`): with a prop in hand O or Delete puts it away,
   // and it answers that something was in hand, which the pick-up below it reads.
   const placingKeys = bodyOf(main, 'private stepPlacingKeys(dt: number');
-  ok(/if \(this\.propPlacing\) \{[\s\S]*?if \(takeKey \|\| input\.pressedAction\('putAway'\)\) this\.stopPlacingProp\('away'\)/.test(placingKeys), 'the pick-up key (O) again, or Delete, puts a prop in hand away');
+  // A permanent row the dev server's editor picked up goes on a second press (`awayAsked`), which answers yes at once
+  // for anything else, and in a release always.
+  ok(/if \(this\.propPlacing\) \{[\s\S]*?if \(\(takeKey \|\| input\.pressedAction\('putAway'\)\) && this\.awayAsked\(\)\) this\.stopPlacingProp\('away'\)/.test(placingKeys), 'the pick-up key (O) again, or Delete, puts a prop in hand away');
+  ok(/private awayAsked\(\): boolean \{\s*if \(!import\.meta\.env\.DEV\) return true;/.test(main), 'with no question asked of anything but a permanent row, and none in a release');
   ok(/const hadInHand = this\.stepPlacingKeys\(dt, takeKey\);/.test(main) && /if \(takeKey && !hadInHand/.test(main) && /return true;\s*\}$/.test(placingKeys), 'and the same press does not then pick the next one up');
-  ok(/this\.placingBar\.onPutAway = \(\) => this\.stopPlacingProp\('away'\)/.test(main) && /onPutAway/.test(bar) && /Put away/.test(bar), "the placing bar's Put away does the same");
+  ok(/this\.placingBar\.onPutAway = \(\) => \{\s*if \(this\.awayAsked\(\)\) this\.stopPlacingProp\('away'\);/.test(main) && /onPutAway/.test(bar) && /Put away/.test(bar), "the placing bar's Put away does the same");
   ok(/Put back \(Esc\)/.test(bar), 'and its Escape says it puts the prop back, which it does');
   // Escape in the key's own listener gives up what is in hand, and giving it up is the plain Escape: a
   // prop picked back up goes back where it stood (`stopPlacingProp()` with no fate is `back`).
@@ -183,7 +186,25 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   ok(/this\.stopPlacingProp\('keep'\)/.test(travel), 'a travel writes a prop in hand back into the store before the world goes');
   const toSelect = /private switchToSelect\(\): void \{[\s\S]{0,3000}/.exec(main)?.[0] ?? '';
   ok(/this\.stopPlacingProp\('keep'\)/.test(toSelect), 'and so does leaving for the select screen');
-  ok(/const from = p\.from;\s*p\.from = null;\s*this\.stopPlacingProp\(\);/.test(main), 'a prop picked up and put down somewhere else is moved, not left standing where it was as well');
+  ok(/this\.stopPlacing\('keep'\)/.test(travel) && /this\.stopPlacing\('keep'\)/.test(toSelect), 'and a building in hand is let go of the same way, so a permanent row the editor had up is left as its file has it');
+  const drop = bodyOf(main, 'private async dropPlacingProp(): Promise<void>');
+  ok(/const from = p\.from;\s*p\.from = HAND_FRESH;\s*this\.stopPlacingProp\(\);/.test(drop), 'a prop picked up and put down somewhere else is moved, not left standing where it was as well');
+
+  // Where a thing in hand came from (`HandSource`): every let-go switches on it, with a `never` default the
+  // compiler holds to every kind, and a permanent row the dev server's editor picked up never reaches this
+  // browser's own store -- not put back into it, not kept in it, not saved over it -- which would stand a
+  // second copy of it there while its file still stands it for everybody.
+  const stopProp = bodyOf(main, 'private stopPlacingProp(how: LetGo = ');
+  const stopHouse = bodyOf(main, 'private stopPlacing(how: LetGo = ');
+  const letGoPermanent = /private letGoPermanent\([\s\S]*?\n  \}\r?\n/.exec(main)?.[0] ?? '';
+  for (const [what, body] of [['stopPlacingProp', stopProp], ['stopPlacing', stopHouse], ['dropPlacingProp', drop]] as const) {
+    ok(/switch \(from\.kind\) \{/.test(body) && /const never: never = from;/.test(body), `${what} switches on where the thing came from, every kind named`);
+  }
+  const permanentCases = [stopProp, stopHouse, drop].map((b) => /case 'permanent':([\s\S]*?)(?:case '|default:)/.exec(b)?.[1] ?? '');
+  ok(permanentCases[0].length > 0 && permanentCases[1].length > 0 && permanentCases.every((c) => !/placedProps\.(restore|keepIn|put)|savePlaced/.test(c)), "a permanent source's branch never reaches the store's restore, keepIn or put");
+  ok(letGoPermanent.length > 0 && !/placedProps\.|savePlaced/.test(letGoPermanent) && /case 'back':[\s\S]*?this\.permanent\.restore\(key\)/.test(letGoPermanent) && /case 'away':[\s\S]*?this\.deletePermanent\(/.test(letGoPermanent) && /case 'keep':\s*return;/.test(letGoPermanent), 'it is stood again from its file on Escape, taken out of its file by Delete, and left as its file has it on a travel');
+  const refuseAt = drop.indexOf("if (p.from.kind === 'permanent') {");
+  ok(refuseAt > 0 && refuseAt < drop.indexOf('placedProps.put(') && refuseAt < drop.indexOf('p.from = HAND_FRESH;'), 'and a click asking to keep one as yours is refused before anything is put or let go of');
 }
 
 console.log(`\n${passed} checks passed`);
