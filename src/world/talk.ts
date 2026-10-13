@@ -117,12 +117,14 @@ export interface TalkBody {
  * Why a body cannot be spoken to, in a few words, or null when it can. The order is the order the
  * reasons are worth hearing in: a thing that is not a person is that before it is anything else.
  */
-export function whyNotTalk(b: TalkBody, player: Fighter): string | null {
+export function whyNotTalk(b: TalkBody, player: Fighter, trainer = false): string | null {
   if (!b.humanoid) return 'not somebody to talk to';
   if (b.dead || b.removed) return 'gone';
   if (!b.ready) return 'not here yet';
   if (b.fixture) return 'at its post';
-  if (b.side === 'hostile' || hostileSides(b, player)) return 'hostile';
+  // A trainer is spoken to whatever side the words of its body put it on, so long as it would not pick a fight:
+  // the game's commando trainers wear bodies the catalogue tags hostile and civilian both, and stand passive.
+  if ((!trainer && b.side === 'hostile') || hostileSides(b, player)) return 'hostile';
   if (b.engaged) return 'in a fight';
   return null;
 }
@@ -163,8 +165,8 @@ export function talkPick<T>(other: T | null, follower: T | null, elseWants: () =
 
 /** One answer in the window: what it is, its words, whether it may be chosen now and why not. */
 export interface TalkOption {
-  /** `corvette`: a ticket taker's own answer, which sends the player to its faction's copy of the corvette. */
-  id: 'follow' | 'stay' | 'leave' | 'corvette';
+  /** `corvette`: a ticket taker's own answer, which sends the player to its faction's copy of the corvette. `train`: a trainer's, which opens the Skills tab's Progress section at them. */
+  id: 'follow' | 'stay' | 'leave' | 'corvette' | 'train';
   label: string;
   enabled: boolean;
   why: string;
@@ -182,17 +184,21 @@ export const TALK_WORDS = Object.freeze({
   serverKeeps: 'this server cannot let them walk off with you, so they will not follow you',
   /** A corvette's ticket taker: take me to the ship. Ours, as every word here is. */
   corvette: 'Take me to the corvette.',
+  /** A trainer: what they teach, on the Skills tab. */
+  train: 'Train me.',
 });
 
 /**
  * The answers on offer: to a follower, stop following; to anybody else, follow, which is refused in
  * words once as many follow as may, and of a body another player's game keeps (`keptElsewhere`); to a
- * corvette's ticket taker (`taker`), first of all, the trip to the ship; and always the way out. One of a
- * story's people (`atPost`) is offered neither follow nor stop following: the story stands them at their post
- * and takes them down away from it, so one led off would vanish mid-walk. Written into `out` when one is given.
+ * corvette's ticket taker (`taker`), first of all, the trip to the ship; to a trainer (`trainer`), first of all,
+ * training; and always the way out. One of a story's people (`atPost`) is offered neither follow nor stop
+ * following: the story stands them at their post and takes them down away from it, so one led off would vanish
+ * mid-walk. Written into `out` when one is given.
  */
-export function talkOptions(following: boolean, full: boolean, out: TalkOption[] = [], keptElsewhere = false, taker = false, atPost = false): TalkOption[] {
+export function talkOptions(following: boolean, full: boolean, out: TalkOption[] = [], keptElsewhere = false, taker = false, atPost = false, trainer = false): TalkOption[] {
   out.length = 0;
+  if (trainer && !following) out.push({ id: 'train', label: TALK_WORDS.train, enabled: true, why: '' });
   if (taker && !following) out.push({ id: 'corvette', label: TALK_WORDS.corvette, enabled: true, why: '' });
   if (following && !atPost) out.push({ id: 'stay', label: TALK_WORDS.stay, enabled: true, why: '' });
   else if (!atPost) {

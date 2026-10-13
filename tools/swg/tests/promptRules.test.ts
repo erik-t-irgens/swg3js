@@ -294,7 +294,14 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
     return main.slice(start, i + 1);
   };
   const target = body(/private talkTarget\(\): Mobile \| null \{/);
-  ok(/whyNotTalk\(m, me\)\) continue;/.test(target), 'the use key offers to talk only to somebody who may be spoken to (never a bandit, a droid or somebody fighting)');
+  ok(/whyNotTalk\(m, me, this\.isTrainer\(m\)\)\) continue;/.test(target), 'the use key offers to talk only to somebody who may be spoken to (never a bandit, a droid or somebody fighting; a trainer who would not fight is the one exception)');
+  // The game's own trainers stand on the hostile side: every call that decides whether somebody may be spoken to
+  // hands the rule whether they are one, or nobody can ever talk to a trainer (what the first cut's smoke run found).
+  const calls = [...main.matchAll(/whyNotTalk\((\w+), ([\w.]+)(, this\.isTrainer\((\w+)\))?\)/g)];
+  const plain = calls.filter((c) => !c[3] || c[4] !== c[1]).map((c) => c[0]);
+  ok(calls.length >= 6 && calls.length === (main.match(/whyNotTalk\(/g) ?? []).length && plain.length === 0, `every call that decides whether somebody may be spoken to says whether they are a trainer, the console's lists included (${calls.length}${plain.length ? `; not: ${plain.join(' | ')}` : ''})`);
+  ok(/const why = whyNotTalk\(m, this\.world\.playerTarget, this\.isTrainer\(m\)\);/.test(body(/private startTalk\(m: Mobile, review: string \| null = null\): string \| null \{/)), 'and opening a conversation asks the same');
+  ok(/private isTrainer\(m: Mobile\): boolean \{\s*return Object\.hasOwn\(TRAINERS, standingPeople\.speakerOf\(m\)\?\.who \?\? ''\);/.test(main), "a trainer being one of the world's people whose row's own creature the trainers' table names");
   ok(/if \(other && !this\.talkSeen\(other\)\) other = null;/.test(target) && /if \(follower && !this\.talkSeen\(follower\)\) follower = null;/.test(target) && /=== Infinity;/.test(body(/private talkSeen\(m: Mobile\): boolean \{/)) && /this\.physics\.blockDistance\(/.test(body(/private talkSeen\(m: Mobile\): boolean \{/)), 'and never through a wall: eye to face, against what stands still, for whoever it picks');
   ok(/reachOf\([^;]*TALK_TUNE, follows\)/.test(target) && /return talkPick\(other, follower, this\.talkElseWants\);/.test(target), 'somebody following you is asked squarely, after anybody else, and yields to whatever else wants the key');
   ok(/this\.nearestVehicle\(\)/.test(body(/private readonly talkElseWants = \(\): boolean => \{/)) && /GATE_TUNE\.reach/.test(body(/private readonly talkElseWants = \(\): boolean => \{/)), '... which is a vehicle, a hull to board or a gate in reach');

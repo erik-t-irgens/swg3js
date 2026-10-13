@@ -105,6 +105,8 @@ export interface MoveEvents {
   heading: THREE.Vector3 | null;
   /** What the landing roll took off the fall's harm, on the frame the feet touch down (0 with no roll). */
   rollSaved: number;
+  /** How far the body came down, in metres, on the frame the feet touch down (0 on every other). */
+  fell: number;
 }
 
 /** Lengths of the special jump clips (seconds) when the rig cannot say. */
@@ -187,6 +189,11 @@ export class JkaMovement {
     return this.rollLeft > 0;
   }
 
+  /** Seconds since the roll under way began, or Infinity when not rolling: what a roll's dodge reads (`roll.iframes`). */
+  get rollElapsed(): number {
+    return this.rollLeft > 0 ? JKA.rollTime - this.rollLeft : Infinity;
+  }
+
   /** The roll's direction and how long it has left, for the roll stab. */
   get roll(): { dir: Dir; left: number } | null {
     return this.rollLeft > 0 && this.rollDir ? { dir: this.rollDir, left: this.rollLeft } : null;
@@ -228,7 +235,7 @@ export class JkaMovement {
    * from the previous step. `force` reports the pool and spends from it.
    */
   step(dt: number, vel: THREE.Vector3, pos: THREE.Vector3, grounded: boolean, cmd: MoveCommand, force: { value: number; spend: (n: number) => void }): MoveEvents {
-    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, flip: null, rolled: null, landed: null, forceLanded: false, damage: 0, special: null, heading: null, rollSaved: 0 };
+    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, flip: null, rolled: null, landed: null, forceLanded: false, damage: 0, special: null, heading: null, rollSaved: 0, fell: 0 };
     // Metres to units for the client's arithmetic.
     let vx = vel.x / UNIT;
     let vy = vel.y / UNIT;
@@ -249,6 +256,7 @@ export class JkaMovement {
       ev.landed = delta;
       const fell = Number.isFinite(this.apexY) ? (this.apexY - pos.y) / UNIT : 0;
       fellUnits = fell;
+      ev.fell = fell * UNIT;
       // Coming down from within your own jump's reach never hurts, as in the client's forceJumpZStart rule;
       // beyond that the damage grows with the extra height rather than with the square of the speed. Progress
       // adds to the reach (`fallSafeExtra`, in units; nought until something is earned).

@@ -124,6 +124,7 @@ import { isBasinWater, surfaces } from './surfaces';
 import { PLACED_TUNE } from './placedTiers.ts';
 import { TurretManager, type TurretTarget } from '../combat/turrets';
 import { PLAYER_KEY, type Aggression, type Hittable, type Living, type Side } from '../combat/kit';
+import { STRIKE, type StrikeKind } from '../combat/strikeTag.ts';
 import { clashes } from '../combat/clash.ts';
 
 const tmpQ = new THREE.Quaternion();
@@ -426,10 +427,12 @@ const SHADER_PACING: boolean = (() => {
 })();
 
 /**
- * Told when the player lands a blow: what was hurt, by how much, and whether that blow finished it.
- * The interface's damage feedback is the one thing that listens (`World.watchPlayerHits`).
+ * Told when the player lands a blow: what was hurt, by how much, whether that blow finished it, and what
+ * struck it (`STRIKE.kind`, held by the striking site for the length of the call: a gun, a launcher, a grenade
+ * or a charge, a blade, a turned bolt, the Force; null where nobody said). The interface's damage feedback and
+ * the player's encounters listen (`World.watchPlayerHits`).
  */
-export type PlayerHitWatch = (target: Living, amount: number, killed: boolean) => void;
+export type PlayerHitWatch = (target: Living, amount: number, killed: boolean, kind: StrikeKind | null) => void;
 
 /**
  * The player as one of the living: the only one the game makes exactly one of, so its key is a
@@ -6086,6 +6089,7 @@ export class World {
             seed: how.seed,
             worldId: `wild:${how.id}`,
             overrides: how.overrides,
+            creature: how.creature,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
             respawn: how.respawn,
@@ -6189,6 +6193,7 @@ export class World {
             worldId: how.id,
             essential: how.essential,
             overrides: how.overrides,
+            creature: how.creature,
             mood: how.mood,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
@@ -6346,6 +6351,7 @@ export class World {
             worldId: `ours:${how.id}`,
             essential: true,
             overrides: how.overrides,
+            creature: how.creature,
             mood: how.mood,
             weapons: how.weapons,
             weaponGroups: how.weaponGroups,
@@ -7504,7 +7510,7 @@ export class World {
           // stays on the list for a while and refuses damage on its own first line, and emptying a
           // clip into one used to tick the crosshair and say a line for every shot.
           if (!watch || before || source !== this.playerTarget || t === this.playerTarget) return;
-          watch(t, amount, !before && t.dead);
+          watch(t, amount, !before && t.dead, STRIKE.kind);
         };
         // Marked only once it has really taken the wrapper, so a body that would not is tried again
         // the next time something comes or goes rather than being written off for good.

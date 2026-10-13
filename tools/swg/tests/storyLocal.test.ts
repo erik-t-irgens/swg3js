@@ -195,7 +195,7 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   g.clock.wall += 300;
   g.tick();
   ok(g.q('test:goto')?.state === 'done' && g.events.some((e) => e.k === 'room' && e.cell === 'cantina' && e.template === CANTINA), 'stepping into the cantina raises the room and finishes the job');
-  ok(g.purse.credits === credits + 10 && g.said.includes('Paid 10 credits') && g.said.some((s) => /^Experience 5 recorded/.test(s)) && g.said.includes('Freelance standing rose') && g.said.includes('Done: TEST: go to a place'), 'and the reward is paid out of the purse, and said: credits, experience, which way Standing moved, and the job done');
+  ok(g.purse.credits === credits + 10 && g.said.includes('Paid 10 credits') && g.said.some((s) => /^Experience 5: a bonus/.test(s)) && g.said.includes('Freelance standing rose') && g.said.includes('Done: TEST: go to a place'), 'and the reward is paid out of the purse, and said: credits, experience, which way Standing moved, and the job done');
   ok(g.client.book!.xp === 5 && g.client.book!.tracks?.freelance?.standing === 10, 'experience and Standing are recorded in the book');
 }
 
@@ -372,9 +372,10 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   g.host.grant('test:reward');
   ok(g.purse.credits === credits + 25 && g.said.includes('Paid 25 credits') && g.said.includes('shirt s03: owned already, so nothing more was given'), 'the reward pays its credits, and the shirt owned already is said rather than given twice');
   g.host.event({ k: 'signal', name: 'debug:test-again' });
-  ok(g.stepOf('test:reward', 'give')?.state === 'done' && g.purse.credits === credits + 25 && g.paid.length === 2, 'looped round to the reward step in the same run: nothing more is paid');
+  // Three orders: the credits, the shirt, and the experience as a bonus into the skills used (`PayOrder.bonus`).
+  ok(g.stepOf('test:reward', 'give')?.state === 'done' && g.purse.credits === credits + 25 && g.paid.length === 3, 'looped round to the reward step in the same run: nothing more is paid');
   g.host.restart('test:reward');
-  ok(g.purse.credits === credits + 25 && g.paid.length === 2, 'nor when the job is started over');
+  ok(g.purse.credits === credits + 25 && g.paid.length === 3, 'nor when the job is started over');
 }
 
 // ---- the fourth wave's words -----------------------------------------------------------------------------------
@@ -437,7 +438,7 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   g.host.event({ k: 'signal', name: 'debug:again' });
   ok(g.stepOf('own:wages', 'work')?.state === 'active', 'looped round to the paying step in the same run');
   g.host.event({ k: 'signal', name: 'debug:work' });
-  ok(g.purse.credits === credits + 7 && g.paid.length === 2 && g.client.book!.xp === 2 && g.client.book!.tracks?.empire?.standing === 3 && g.client.book!.tracks?.rebellion?.standing === 3, 'and done again: nothing more is paid, given, recorded or moved');
+  ok(g.purse.credits === credits + 7 && g.paid.length === 3 && g.client.book!.xp === 2 && g.client.book!.tracks?.empire?.standing === 3 && g.client.book!.tracks?.rebellion?.standing === 3, 'and done again: nothing more is paid, given, recorded or moved');
 }
 
 // ---- a waypoint a story sets is the story's: set once, and taken away without touching the player's own -------------
@@ -500,7 +501,7 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   g.line.authority = 'me';
   g.line.status = 'off';
   g.line.mode = 'off';
-  ok(g.host.grant('test:reward').ok && g.paid.length === 2, 'with no server keeping the credits the job is taken and paid');
+  ok(g.host.grant('test:reward').ok && g.paid.length === 3, 'with no server keeping the credits the job is taken and paid');
 }
 
 // ---- the sets read again while a server held the book: the jobs run against the new ones once it is back -------------

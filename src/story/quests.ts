@@ -146,6 +146,13 @@ export interface PayOrder {
   item?: { kind: 'wear' | 'weapon'; id: string; n: number };
   charge?: number;
   owe?: string;
+  /**
+   * A quest's experience as a bonus into the skills the character used since its run began (`since`, the run's
+   * own `at`): paid by whoever holds the character's progress (`src/progress/learn.ts`'s `questBonus`), keyed by
+   * this order's `key`, never into a general pool. A host that keeps no progress pays nothing for it and refuses
+   * nothing, as for any order it does not know.
+   */
+  bonus?: { xp: number; since: number };
 }
 
 /** What the message line may say about it. The words are the display's (a later wave); these are the facts. */
@@ -995,6 +1002,10 @@ export class Draft {
       this.notes.push({ k: 'item', quest: q, kind: it.kind, id: it.id, n: it.n });
     }
     if (r.xp > 0 && this.change({ k: 'xp', add: r.xp })) this.notes.push({ k: 'xp', quest: q, n: r.xp });
+    // A quest's run pays its experience as a bonus into the skills used while it ran, under this very key; a
+    // conversation's and the console's (no quest run behind them) pay none. The book's counter above stays a record.
+    const run = r.xp > 0 ? this.quest(q) : null;
+    if (run && this.def(q)) this.pay.push({ key, bonus: { xp: r.xp, since: run.at } });
     for (const s of r.standing) this.standing(q, s.track, s.add);
     // Trust is never said on the message line (the owner's call: it shows only in words, elsewhere).
     for (const t of r.trust ?? []) {

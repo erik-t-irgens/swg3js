@@ -135,6 +135,8 @@ export interface OursSpawn {
   room?: number;
   mood?: string;
   overrides?: PersonOverrides;
+  /** The creature it is stood as, which the body only wears: what the player's progress keys on. */
+  creature?: string;
   weapons?: readonly string[];
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
 }
@@ -814,6 +816,7 @@ export class AmbientPeople {
       inside,
       room: inside ? where.room : undefined,
       overrides: overridesOf(person.creature),
+      creature: person.who || undefined,
       weapons: weaponsOf(person.creature),
       weaponGroups: null,
     });
@@ -894,6 +897,7 @@ export class AmbientPeople {
       room: inside ? where.room : undefined,
       mood: spot.seat ? SEATED : undefined,
       overrides: overridesOf(person.creature),
+      creature: person.who || undefined,
       weapons: weaponsOf(person.creature),
       weaponGroups: null,
     });

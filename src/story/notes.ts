@@ -3,8 +3,9 @@
 // host can send the very same words, so a job is announced one way whoever holds it.
 //
 // The lines are the design's: "Job: <title>", "Objective: <line>", "Done: <title>", "Failed: <title>
-// (<why>)", "Reached <waypoint>", "Paid <n> credits", "Experience <n> recorded (it counts for nothing
-// yet)". The rest are ours and in the same voice ("Spent <n> credits" for a price a conversation charged,
+// (<why>)", "Reached <waypoint>", "Paid <n> credits", "Experience <n>: a bonus into the skills you used
+// during it" (a quest's experience is paid to the character's progress as a bonus, `src/progress/learn.ts`,
+// which says the skills on a line of its own). The rest are ours and in the same voice ("Spent <n> credits" for a price a conversation charged,
 // "To read: <title>" for a document handed over, "A call from <who>" for a call, "Journal: <title>" for a
 // new entry in the journal). Standing says which way it moved and never by how much, since Standing is shown
 // as a bar with its numbers hidden; Trust and the ISB's file are never said at all. A rank changing is said in
@@ -91,7 +92,7 @@ export function noteWords(note: StoryNote, lib: StorySet, deps: NoteWordsDeps, g
       return note.n > 1 ? `Received ${name} ×${note.n}` : `Received ${name}`;
     }
     case 'xp':
-      return `Experience ${note.n.toLocaleString('en-GB')} recorded (it counts for nothing yet)`;
+      return `Experience ${note.n.toLocaleString('en-GB')}: a bonus into the skills you used during it`;
     case 'standing':
       return note.n === 0 ? null : `${TRACK_WORDS[note.track] ?? note.track} standing ${note.n > 0 ? 'rose' : 'fell'}`;
     case 'say':

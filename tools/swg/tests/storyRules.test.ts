@@ -89,7 +89,9 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   const paid = h.event({ k: 'arrive', world: 'tatooine', p: [3440, -4810], room }, at(T0 + 4000));
   const done = q(h, 'test:goto')!;
   ok(done.state === 'done' && done.outcome === 'done' && done.completions === 1 && done.ended === T0 + 4000, 'in the room, within reach: the reward step pays and ends the quest done');
-  ok(paid.pay.length === 1 && paid.pay[0].credits === 10 && paid.pay[0].key === 'test:goto#1#paid' && h.book.xp === 5 && h.book.tracks?.freelance?.standing === 10, 'credits to pay once under the reward\'s own key, experience recorded and standing added');
+  ok(paid.pay.length === 2 && paid.pay[0].credits === 10 && paid.pay[0].key === 'test:goto#1#paid' && h.book.xp === 5 && h.book.tracks?.freelance?.standing === 10, 'credits to pay once under the reward\'s own key, experience recorded and standing added');
+  // And the experience as a bonus into the skills used while the run went on, under the same key, from when it began.
+  ok(paid.pay[1].key === 'test:goto#1#paid' && paid.pay[1].bonus?.xp === 5 && paid.pay[1].bonus.since === done.at && paid.pay[1].credits === undefined, "a quest's experience is ordered paid as a bonus, from when its run began, under the reward's own key");
   ok(h.book.paid?.['test:goto#1#paid']?.by === 'browser' && paid.notes.some((n) => n.k === 'done'), 'the book says who paid, and the message line is told it is done');
   const again = h.event({ k: 'arrive', world: 'tatooine', p: [3440, -4810], room }, at(T0 + 5000));
   ok(again.ch.length === 0 && again.pay.length === 0, 'the detector saying it again (they repeat while true) pays nothing and changes nothing');
@@ -195,7 +197,8 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
 {
   const h = hostOf(LIB, 'server');
   const r = h.grant('test:reward', at(T0));
-  ok(r.pay.length === 2 && r.pay[0].credits === 25 && r.pay[1].item?.id === 'shirt_s03' && r.pay[1].item.kind === 'wear' && h.book.xp === 10 && h.book.tracks?.freelance?.standing === 5, 'credits and an item to pay, experience and standing recorded');
+  ok(r.pay.length === 3 && r.pay[0].credits === 25 && r.pay[1].item?.id === 'shirt_s03' && r.pay[1].item.kind === 'wear' && h.book.xp === 10 && h.book.tracks?.freelance?.standing === 5, 'credits and an item to pay, experience and standing recorded');
+  ok(r.pay[2].bonus?.xp === 10 && r.pay[2].key === 'test:reward#1#give', "and the experience ordered paid as a bonus into the skills used, under the reward's key");
   ok(h.book.paid?.['test:reward#1#give']?.by === 'server' && r.notes.some((n) => n.k === 'item') && r.notes.some((n) => n.k === 'xp'), 'recorded as paid by the server that paid it');
   const loop = h.event({ k: 'signal', name: 'debug:test-again' }, at(T0 + 1));
   ok(stepOf(h, 'test:reward', 'give')?.state === 'done' && loop.pay.length === 0 && h.book.xp === 10 && h.book.tracks?.freelance?.standing === 5, 'looped round to the reward step in the same run: it is done again and pays nothing');
@@ -204,7 +207,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   h.event({ k: 'signal', name: 'debug:test-finish' }, at(T0 + 2));
   ok(q(h, 'test:reward')?.state === 'done', 'and finishing ends it');
   const run2 = h.grant('test:reward', at(T0 + 3));
-  ok(run2.pay.length === 2 && run2.pay[0].key === 'test:reward#2#give', 'a second run is a second reward, under its own key');
+  ok(run2.pay.length === 3 && run2.pay[0].key === 'test:reward#2#give' && run2.pay[2].bonus?.since === T0 + 3, 'a second run is a second reward, under its own key, its bonus from when it began');
 }
 
 // ---- test:repeat: a cooldown and the daily standing cap -------------------------------------------------
@@ -440,7 +443,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   const h = hostOf(LIB, 'server');
   let pays = h.grant('test:reward', at(T0)).pay.length;
   for (let i = 1; i <= 5; i++) pays += h.restart('test:reward', at(T0 + i)).pay.length;
-  ok(pays === 2 && q(h, 'test:reward')?.run === 6 && h.book.xp === 10 && h.book.tracks?.freelance?.standing === 5, 'restarted five times, the reward step reached again on every run pays nothing more: no credits, item, experience or standing');
+  ok(pays === 3 && q(h, 'test:reward')?.run === 6 && h.book.xp === 10 && h.book.tracks?.freelance?.standing === 5, 'restarted five times, the reward step reached again on every run pays nothing more: no credits, item, experience, bonus or standing');
   let more = 0;
   for (let i = 1; i <= 5; i++) {
     h.drop('test:reward', at(T0 + 10 + i));
@@ -449,7 +452,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   ok(more === 0 && h.book.xp === 10 && Object.keys(h.book.paid ?? {}).length === 1, 'nor dropped and granted again, five times over');
   h.event({ k: 'signal', name: 'debug:test-finish' }, at(T0 + 100));
   const next = h.grant('test:reward', at(T0 + 101));
-  ok(q(h, 'test:reward')?.completions === 1 && next.pay.length === 2 && next.pay[0].key === 'test:reward#2#give', 'once it is done, taking it again counts towards a second completion and pays again');
+  ok(q(h, 'test:reward')?.completions === 1 && next.pay.length === 3 && next.pay[0].key === 'test:reward#2#give', 'once it is done, taking it again counts towards a second completion and pays again');
 }
 
 // ---- repeats: never, a limit, once a game day, once a real day ---------------------------------------------------
@@ -782,7 +785,7 @@ function setOf(prefix: string, quests: Record<string, unknown>[], extra: { path:
   };
   ok(sansPayer(browser.book) === sansPayer(server.book) && Object.keys(server.book.paid ?? {}).length > 0, 'a browser holding the book itself, told the same things, holds the same book, but for who paid');
   ok(stableText(mirror.map((r) => r.pay)) === stableText(results.map((r) => r.pay)) && results.every((r) => r.why === null) && mirror.every((r) => r.why === null), 'and is asked for the same payments, and neither refused anything');
-  ok(results.flatMap((r) => r.pay).length === 2, 'only the reward\'s two payments were asked for, the loop round and the restart paying nothing');
+  ok(results.flatMap((r) => r.pay).length === 3, 'only the reward\'s three payments were asked for (its credits, its thing and its experience as a bonus), the loop round and the restart paying nothing');
 }
 
 // ---- what a paid key paid, read back off the set (a server's settle) ------------------------------------

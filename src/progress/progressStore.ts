@@ -43,6 +43,11 @@ export function saveRecord(store: ProgressStorage, rec: ProgressRecord | null): 
   return store.set(KEY(rec.char), recordText(rec));
 }
 
+/** Keep a record already written out as text (`recordText`), for a caller that has measured it. */
+export function saveRecordText(store: ProgressStorage, char: string, text: string): boolean {
+  return store.set(KEY(char), text);
+}
+
 /**
  * How many changes a character's kept record holds that no server has seen, read without making it anybody's:
  * what the change counter of a character this browser is not holding reads.

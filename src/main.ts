@@ -15,6 +15,7 @@ const torchRoomInverse = new THREE.Matrix4();
 import { BountyHunterKit } from './combat/bountyHunter';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
 import { GodHold, godRefusal } from './player/godMode.ts';
+import { recordHarmKind } from './player/harmRule.ts';
 import { HeldNotes } from './ui/heldNotes.ts';
 import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
 import { findRackWeapon, forcedArmsRefusal } from './world/mobiles/arms.ts';
@@ -113,9 +114,14 @@ import { BookClient, STORY_TUNE, tuneStory, type StoryResult } from './story/boo
 import { browserStoryStorage } from './story/storyStore.ts';
 import { ProgressClient, type ProgressDebugAsk } from './progress/progressClient.ts';
 import { LEVELS_PATH, LevelsFile } from './progress/levelsFile.ts';
-import { challengeOf } from './progress/challenge.ts';
-import { BUILT_CORE, ratingOf } from './progress/core.ts';
+import { bandOf, challengeOf } from './progress/challenge.ts';
+import { BUILT_CORE, ratingOf, reached } from './progress/core.ts';
 import { spSpent } from './progress/record.ts';
+import { ENCOUNTER_TUNE, Encounters, tuneEncounter, type MemberLook, type MemberWho } from './progress/encounter.ts';
+import { memberLook, memberWho, type MemberDeps } from './world/encounterMembers.ts';
+import { restedAt } from './progress/payout.ts';
+import { DISCIPLINES, TRAINERS, TRAINER_NAMES, TRAINER_WORLDS } from './progress/disciplines.ts';
+import { ProgressUi, type ProgressTeacher, type TrainerLine } from './ui/progressUi.ts';
 import { STATS, statDef, type StatDef, type StatId } from './progress/stats.ts';
 import { PROGRESS_LIMITS, PROGRESS_RULES, PROGRESS_TUNE, tuneProgress } from './progress/tune.ts';
 import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally, type JobsLine, type LocalWallet } from './story/localHost.ts';
@@ -990,9 +996,55 @@ class App {
    * greeting says it holds progress. A field initialiser so the session's hooks can reach it from anywhere in the
    * constructor; it keeps its record beside the story book's, in this browser's storage.
    */
-  private readonly progress = new ProgressClient({ store: browserStoryStorage(), now: () => sharedClock.now() });
+  private readonly progress = new ProgressClient({
+    store: browserStoryStorage(),
+    now: () => sharedClock.now(),
+    levels: () => this.levelsFile.levels(),
+    // A payout, a milestone, a node learnt or given back, a quest's bonus: one line each, in our words.
+    say: (line) => this.messages.note(line),
+  });
   /** The game's own challenge table as the converter wrote it, fetched once; the fallback bands of ours until it lands, and for good without it. */
   private readonly levelsFile = new LevelsFile();
+  /**
+   * The fights the player has, noticed for them (src/progress/encounter.ts): opened by the first blow given or
+   * taken, every member looked at four times a second through `look`, and closed into a claim the progress
+   * record is paid from. A field initialiser for the same reason the record is: the hooks that feed it are
+   * wired all through the constructor.
+   */
+  private readonly encounters: Encounters<Living> = new Encounters<Living>({
+    who: (t, out) => this.encounterWho(t, out),
+    look: (t, out) => this.encounterLook(t, out),
+    now: () => sharedClock.now(),
+    sim: () => this.world?.simTime ?? 0,
+    planet: () => (this.world?.planet ? packIdOf(this.world.planet, this.zone) : ''),
+    diff: () => DIFFICULTY.scale,
+    whole: () => this.player?.maxHp ?? 100,
+    // Last stand, once a fight, while Fortitude has reached it.
+    onOpen: () => {
+      this.player.lastStand = reached(this.progress.record, 'fortitude', 75, PROGRESS_RULES);
+    },
+    onClose: (claim) => {
+      this.player.lastStand = false;
+      const o = this.progress.claim(claim);
+      this.encounters.notePaid(claim.id, o.paid ?? {}, o.why, o.pools);
+    },
+  });
+  /**
+   * Whatever struck the player, held for the length of one blow on the record (the wrapper round its `damage`),
+   * beside `hurtSource`: what the frame's own `hurt` hands `takeDamage` so a roll's dodge can name it.
+   */
+  private hurtBy: Living | null = null;
+  /** The progress step's own clock, so the encounters are looked at four times a second and not every frame. */
+  private progressClock = 0;
+  /**
+   * The trainer the player is learning from: the kind of person (`TRAINERS`) and the body, which must stay within
+   * `teachReach`; or the developer's stand-in (`__debug.progress({ trainer: true })`), with no body. Null with none.
+   */
+  private teacher: ProgressTeacher | null = null;
+  /** The Progress section of the Skills tab, which draws on open and on a change of the record, and never in a frame. */
+  private readonly progressUi = new ProgressUi();
+  /** The kept struct the bolts read a rolling player's dodge through, written each frame rather than made. */
+  private readonly boltDodge = { rolling: false, reach: ENCOUNTER_TUNE.dodgeReach, onDodge: (source: Living | null) => this.encounters.dodged(source) };
   /**
    * The jobs, held by this browser while nobody else holds the book (src/story/localHost.ts): the shared
    * rules over the book above and the sets read here, paying out of the character's own purse and
@@ -1720,13 +1772,18 @@ class App {
       // A follower's stray blow on the one it follows is no blow at all: it never turns on you, and a
       // swing or a spit that finds you on its way to something else lands on nothing.
       if (isFollowerSource(source)) return;
+      // A fight opens on the first blow taken from anything that may be in one, a bite and a blade alike, and
+      // whatever struck is in it (`encounters`). Before the blow, so the fight it opens hears the health it costs.
+      if (source && source !== target) this.encounters.struckBy(source);
       this.hurtSource = from ?? null;
+      this.hurtBy = source ?? null;
       // Put back whatever happens: a direction left standing would be worn by the next blow that
       // has none of its own, and a fall would flash with an arc on the side of whatever last shot.
       try {
         innerDamage(amount, from);
       } finally {
         this.hurtSource = null;
+        this.hurtBy = null;
       }
       // Whatever struck you is what the people following you fight (`FollowerSet.assist`).
       if (source && source !== target) this.world.followers.assist(source);
@@ -1734,14 +1791,25 @@ class App {
     // Every blow the player lands, whatever struck and whichever file called it: the world wraps each
     // living thing's own `damage` once as it joins the list, so this is one hook rather than a dozen.
     // What you strike is what the people following you fight, too.
-    this.world.watchPlayerHits((hit, amount, killed) => {
+    this.world.watchPlayerHits((hit, amount, killed, kind) => {
       this.landedHit(hit, amount, killed);
+      // The player's own blow, and what struck it, into the fight it opens or is part of.
+      this.encounters.hit(hit, amount, killed, kind);
       if (!killed) this.world.followers.assist(hit);
       // A body of the world's own finished by the player's blow is a kill a job may be counting. One
       // another browser keeps never finishes here (the blow goes to its keeper); the server's word of its
       // death, with the player among those who struck, is what counts that one (`owned.onGone`).
       else if (isMobileBody(hit)) this.storyKill(hit);
     });
+    // The player's health really lost, and what took it, for how heavy the fight is (only a blow's counts); a
+    // blow a roll dodged, which is the fight's Acrobatics; and a landing roll that kept some of a fall off,
+    // which pays Acrobatics whether or not anything was being fought.
+    this.player.onHarm = (lost, kind) => this.encounters.hurt(lost, kind);
+    this.player.onDodge = (source) => this.encounters.dodged(source as Living | null);
+    this.player.onRolled = (fell, saved) => {
+      const at = sharedClock.now();
+      this.progress.task({ id: `r${Math.floor(at).toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`, at, kind: 'roll', fell, saved });
+    };
     // What the world says once, in words: standing in a flow, and stepping out of one. It goes to the
     // message line like every other one-shot notice and never to the prompt, which is rewritten every
     // frame from outside every guard. One line when a burn starts and one when it stops, never a
@@ -1804,6 +1872,12 @@ class App {
     this.backpack.onDestroy = (key) => void this.destroyItem(key);
     this.forceUi.loadout = [...DEFAULT_LOADOUT];
     this.forceUi.onChange = (loadout) => this.setSkills(this.kit.id, loadout);
+    // Its Progress section, first in the tab: drawn with the tab and when the record changes, never in a frame.
+    this.progressUi.mount(this.forceUi.progressHost);
+    this.forceUi.onRender = () => this.renderProgress();
+    this.progressUi.onLearn = (id) => this.learnNode(id);
+    this.progressUi.onSurrender = (id) => this.surrenderNode(id);
+    this.progressUi.onMark = () => this.markTrainer();
     // A blade colour picked on the rack goes on the blades now and into the character's record.
     this.weaponsUi.onSaberColor = (hex) => {
       this.player.setSaberColor(hex);
@@ -5689,7 +5763,7 @@ class App {
             if (!this.player.noclip && !this.player.mounted) this.world.turrets.update(dt, this.player, this.world.bolts);
             // Where the player stands first, then one step of everything alive: without the first,
             // the brains would all chase where the player was when the helper was called.
-            this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0 && !this.ride?.riding, (dmg) => this.player.takeDamage(dmg));
+            this.world.setPlayerTarget(this.player.worldPos, !this.player.noclip && this.player.hp > 0 && !this.ride?.riding, (dmg, from) => this.player.takeDamage(dmg, false, recordHarmKind(this.hurtBy, from), this.hurtBy));
             this.world.stepLiving(dt, this.player.worldPos, this.cam.camera);
             this.physics.step(dt);
             // The blades are drawn and then weighed against one another here as they are in the
@@ -5713,6 +5787,8 @@ class App {
             // The jobs' detectors and their sweep, on the clock this moves on, so a walk to a job's place
             // can be taken from a tab that draws no frames.
             this.stepStory(dt, true);
+            // And the fights, looked at on that same clock, so one can be fought and closed from a driven tab.
+            this.stepProgress(dt, true);
             this.input.endFrame();
           }
         } finally {
@@ -7360,7 +7436,7 @@ class App {
           // frame, so a body farther off is refused here rather than opened and shut again unseen.
           const me = this.world.playerTarget;
           const within = (x: Mobile): boolean => Math.hypot(x.pos.x - at.x, x.pos.z - at.z) <= TALK_TUNE.keep;
-          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me) && within(x)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
+          const m = opts.to === 'nearest' ? live.filter((x) => !whyNotTalk(x, me, this.isTrainer(x)) && within(x)).sort(byDistance)[0] : live.find((x) => x.key === opts.to);
           if (!m) said = opts.to === 'nearest' ? `nobody within ${TALK_TUNE.keep} m may be spoken to` : `no body with key ${opts.to}`;
           else if (!within(m)) said = `${m.label} is ${Math.hypot(m.pos.x - at.x, m.pos.z - at.z).toFixed(1)} m off: too far to talk to (more than ${TALK_TUNE.keep} m)`;
           else said = this.startTalk(m) ?? `talking to ${m.label}`;
@@ -7389,7 +7465,7 @@ class App {
           near: live
             .filter((m) => m.pos.distanceTo(at) <= near)
             .sort(byDistance)
-            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, this.world.followers.following(m))), verdict: whyNotTalk(m, me) ?? 'may be spoken to' })),
+            .map((m) => ({ key: m.key, name: m.label, away: r2(Math.hypot(m.pos.x - at.x, m.pos.z - at.z)), side: m.side, following: this.world.followers.following(m), inReach: !Number.isNaN(reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, this.world.followers.following(m))), verdict: whyNotTalk(m, me, this.isTrainer(m)) ?? 'may be spoken to' })),
           tune: { ...TALK_TUNE },
         };
       },
@@ -7422,7 +7498,7 @@ class App {
         if (opts?.core3) {
           const me = this.world.playerTarget;
           const why = conversationPack.whyNotReview(opts.core3);
-          const m = (this.world.mobiles?.live ?? []).filter((x) => !x.removed && !whyNotTalk(x, me) && !tooFar(x)).sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0];
+          const m = (this.world.mobiles?.live ?? []).filter((x) => !x.removed && !whyNotTalk(x, me, this.isTrainer(x)) && !tooFar(x)).sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0];
           // Its words on their way first: nobody near speaks this tree, so nothing has asked for them.
           const def = conversationPack.set?.talks[`core3:talk/${opts.core3}`];
           if (def) for (const t of tablesOf(def)) this.strings.want(t);
@@ -7718,11 +7794,17 @@ class App {
        * learns a node, and whatever it needs above it, for no XP, Skill Points or teacher; `{ surrender: id }` takes
        * one away with whatever stands on it; `{ xp: { demolitions: 5000, marksmanship: 400 } }` gives XP (or takes it
        * under nought); `{ reset: true }` empties the record; `{ rules: { base: 30 } }` moves `PROGRESS_RULES`,
-       * `{ limits }` and `{ tune }` the limits and the pacing; `{ rate: 2 }` the XP rate. Every one goes through the
-       * record's own changes, as anything that earns will.
+       * `{ limits }` and `{ tune }` the limits and the pacing; `{ rate: 2 }` the XP rate. `{ trainer: true }` stands a
+       * developer's commando trainer in reach (`false` takes it away) and `{ learn: 'demo.novice' }` learns through
+       * the real rule -- the XP, the Skill Points, the teacher -- after any XP given in the same ask. Every one goes
+       * through the record's own changes, as anything that earns does.
        */
-      progress: (opts?: ProgressDebugAsk & { limits?: Partial<typeof PROGRESS_LIMITS>; tune?: Partial<typeof PROGRESS_TUNE> }) => {
-        const results = opts ? this.progress.debug(opts) : [];
+      progress: (opts?: ProgressDebugAsk & { limits?: Partial<typeof PROGRESS_LIMITS>; tune?: Partial<typeof PROGRESS_TUNE>; trainer?: boolean }) => {
+        // A developer's trainer in reach, before anything learnt in the same ask: kept until `trainer: false` or a travel.
+        if (opts?.trainer === true) this.teacher = { who: 'trainer_commando', name: TRAINER_NAMES.trainer_commando, dev: true, body: null };
+        else if (opts?.trainer === false && this.teacher?.dev) this.teacher = null;
+        const results = opts ? this.progress.debug({ ...opts, teacher: opts.teacher ?? this.teacher?.who ?? null }) : [];
+        if (opts?.trainer !== undefined && this.forceUi.open) this.renderProgress();
         if (opts?.limits || opts?.tune) {
           const tuned = tuneProgress({ limits: opts.limits, tune: opts.tune });
           if (tuned.held) results.push({ limits: 'moved', held: tuned.held });
@@ -7741,9 +7823,31 @@ class App {
           nodes: Object.keys(rec?.nodes ?? {}).sort(),
           moved: this.statRows().filter((r) => r.moved),
           rate: PROGRESS_RULES.xpRate,
+          rested: restedAt(rec, Math.round(sharedClock.now() / 1000), PROGRESS_RULES),
+          teacher: this.teacher ? { who: this.teacher.who, name: this.teacher.name, dev: this.teacher.dev } : null,
+          lastStand: this.player.lastStand,
+          buckets: this.progress.buckets.report(),
+          page: { renders: this.progressUi.renders },
           record: this.progress.report(),
           statsVersion: this.player.stats.version,
         };
+      },
+      /**
+       * The fights the player has (`src/progress/encounter.ts`): the one open -- each member's creature, world name,
+       * level and band against the character's challenge, whether it fought, is dead, gone or still a threat, its
+       * health's share, what is logged and what is held, how heavy, and how long it has been quiet -- and the last
+       * eight closed, each with its outcome, why, the claim and what each pool was paid and why not more.
+       * `{ tune: { calm: 5 } }` moves `ENCOUNTER_TUNE` (`calm`, `leaveRange`, `membersMax`, `dodgeReach`, `teachReach`,
+       * `passivePays`, `heavyShare`, `kept`).
+       */
+      encounter: (opts?: { tune?: Partial<Record<keyof typeof ENCOUNTER_TUNE, number>> }) => {
+        if (opts?.tune) tuneEncounter(opts.tune);
+        const rec = this.progress.record;
+        const challenge = challengeOf(spSpent(rec));
+        const levels = this.levelsFile.levels();
+        const open = this.encounters.report() as { members?: { level: number | null }[] };
+        if (open.members) for (const m of open.members) (m as { band?: string }).band = bandOf(m.level, challenge, levels, PROGRESS_RULES);
+        return { tune: { ...ENCOUNTER_TUNE }, challenge, levels: this.levelsFile.state, open, counts: { ...this.encounters.counts }, closed: this.encounters.closed.map((c) => ({ ...c })) };
       },
       /**
        * One stat's breakdown (`'blast.self'`): its base, what each layer does to it and where that came from (a node,
@@ -7800,7 +7904,7 @@ class App {
         if (opts?.recruit !== undefined) {
           const me = this.world.playerTarget;
           const live = (this.world.mobiles?.live ?? []).filter((m) => !m.removed && !set.following(m));
-          const m = opts.recruit === 'nearest' ? live.filter((x) => !whyNotTalk(x, me)).sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0] : live.find((x) => x.key === opts.recruit);
+          const m = opts.recruit === 'nearest' ? live.filter((x) => !whyNotTalk(x, me, this.isTrainer(x))).sort((a, b) => a.pos.distanceTo(at) - b.pos.distanceTo(at))[0] : live.find((x) => x.key === opts.recruit);
           said = m ? (this.world.recruit(m) ?? `${m.label} follows you`) : 'nobody to ask';
         }
         if (opts?.dismiss === true) said = `${set.dismissAll()} asked to stop following you`;
@@ -8559,6 +8663,8 @@ class App {
     // does nothing at all unless what grants them moved.
     this.progress.onChange((why, localWas) => {
       this.applyProgressStats();
+      // The Skills tab's Progress section, drawn again only when it is showing and the record moved.
+      if (this.forceUi.open) this.renderProgress();
       if (!this.current || this.creating) return;
       if (why === 'settled') this.net.session.noteSettled({ ...this.marked(this.current)!, progress: { local: localWas } }, this.marked(this.current));
       else this.net.session.noteCharacter(this.marked(this.current));
@@ -8913,6 +9019,9 @@ class App {
     };
     owned.onAdd = (row) => standRow(row, this.worldKey());
     owned.onGone = (id, why, back, fresh, by) => {
+      // The fight a body another browser keeps was in hears of it at once; `look` would see it a moment later.
+      // A body only just stood here, already down everywhere else, was in no fight of this browser's.
+      if (!fresh) this.encounters.gone(id, why);
       // A death that names this browser's player among those who struck it is a kill a job may count,
       // whoever kept the body: the one case `watchPlayerHits` cannot see is a body another browser keeps,
       // and this word is its only witness. A body this browser keeps and the player finished was counted
@@ -9735,7 +9844,7 @@ class App {
       // is on its way, and neither browser has to guess what the other did with it.
       // A bolt turned away by a blade is still that gun's bolt where it finally lands, so the mark
       // it will leave is the incoming bolt's own and not a plain blaster's.
-      this.world.bolts.fire(at, out, { owner: 'player', damage: bolt.damage, metresPerSecond: bolt.speed, life: bolt.life, color: bolt.color, size: bolt.size, scar: bolt.scar, projectile: bolt.projectile, exclude: this.player.aboard ? this.player.aboard.vehicle.body : this.player.body, frame: this.player.aboard ? { matrix: this.player.aboard.vehicle.group.matrixWorld, physics: this.player.aboard.physics } : null, source: this.world.playerTarget });
+      this.world.bolts.fire(at, out, { owner: 'player', damage: bolt.damage, metresPerSecond: bolt.speed, life: bolt.life, color: bolt.color, size: bolt.size, scar: bolt.scar, projectile: bolt.projectile, exclude: this.player.aboard ? this.player.aboard.vehicle.body : this.player.body, frame: this.player.aboard ? { matrix: this.player.aboard.vehicle.group.matrixWorld, physics: this.player.aboard.physics } : null, source: this.world.playerTarget, kind: 'deflect' });
       return true;
     };
     // This player's own health is looked at ten times a second and sent at `healthHz`, which is why
@@ -10446,7 +10555,10 @@ class App {
     // its own. The jobs followed, the detectors' memory, the room they last read (and the building it holds
     // on to) and the things found for the story go with them.
     this.story.use(null);
-    // The progress record goes with it, the same way.
+    // The fight under way is broken off and claimed before the record goes, and the trainer with it; then the
+    // progress record goes with the book, the same way.
+    this.encounters.left();
+    this.teacher = null;
     this.progress.use(null);
     this.tracker.clear();
     this.storyWatch.reset();
@@ -12821,6 +12933,13 @@ class App {
     give: (n) => void purse.give(n),
     spend: (n, then) => purse.spend(n, 'That', then),
     item: (kind, id) => this.equipment.give(kind, id),
+    // A quest's bonus into the skills used while it ran, while this browser holds the character's progress
+    // (always, until a server holds it: then nothing here pays it, and a server-held story pays none this pass).
+    bonus: (order) => {
+      if (!order.bonus || this.progress.host !== 'local' || !this.progress.record) return false;
+      this.progress.bonus(order.key, order.bonus.xp, order.bonus.since);
+      return true;
+    },
   };
 
   /**
@@ -12938,6 +13057,131 @@ class App {
     const r = this.jobs.event({ k: 'use', object: o.id });
     if (!r.ok && r.why) this.messages.system(r.why);
     return true;
+  }
+
+  /**
+   * Four times a second, from the frame loop and from `__debug.advance`, on its own clock as the story's is: the
+   * fight under way looked at member by member (`encounters.tick`), which is how a death nobody reported -- a burn
+   * finishing a body, a follower's or the companion's blow -- closes it; and the trainer the player is learning
+   * from let go once they walk out of reach, the Skills tab drawn again if it is showing. Nothing while the game
+   * does not simulate: a fight's calm runs on `World.simTime`, which stands still then too.
+   */
+  private stepProgress(dt: number, simulate: boolean): void {
+    this.progressClock -= dt;
+    if (this.progressClock > 0) return;
+    this.progressClock = 1 / Math.max(1, PROGRESS_TUNE.hz);
+    if (!this.inWorld) return;
+    const at = this.player.worldPos;
+    // The teacher is asked after even while play stands still under the Skills tab, which is where the page says
+    // "while you stay near": a body taken away or a player moved from the console drops it there and then.
+    const t = this.teacher;
+    if (t?.body && (t.body.removed || t.body.dead || Math.hypot(t.body.pos.x - at.x, t.body.pos.z - at.z) > ENCOUNTER_TUNE.teachReach)) {
+      this.teacher = null;
+      if (this.forceUi.open) this.renderProgress();
+    }
+    if (!simulate || this.dying) return;
+    this.encounters.tick(at.x, at.z);
+  }
+
+  /**
+   * Whether something may be in a fight with the player, and what it is (`Encounters`' `who`): never the player,
+   * another player, a follower or the companion. What it is, for the payout, is its row's own creature
+   * (`Mobile.creature`), a fighter's species, an old creature's own name, never the body nor the world's name.
+   */
+  private encounterWho(t: Living, out: MemberWho): boolean {
+    return memberWho(t, out, this.memberDeps);
+  }
+
+  /**
+   * A member as it is now (`Encounters`' `look`), into the kept struct it is handed: dead, taken away, where,
+   * its health, whether it is still in the fight with the player or anybody on their side (`isThreat`), and its
+   * temper. Four times a second for at most a fight's members; it allocates nothing (`memberLook`).
+   */
+  private encounterLook(t: Living, out: MemberLook): boolean {
+    return memberLook(t, out, this.memberDeps);
+  }
+
+  /** What `memberWho` and `memberLook` need of the game: one kept object, read at the moment each is asked. */
+  private readonly memberDeps: MemberDeps = {
+    player: () => this.world.playerTarget,
+    isCompanion: (t) => isMobileBody(t) && this.companion.isBody(t),
+    ours: (key) => this.companionOurs(key),
+  };
+
+  /** The Skills tab's Progress section drawn from the record as it stands: on the tab's own render and on a change, never in a frame. */
+  private renderProgress(): void {
+    this.progressUi.render({
+      holder: this.progress.host,
+      rec: this.progress.record,
+      now: Math.round(sharedClock.now() / 1000),
+      teacher: this.teacher,
+      trainer: this.trainerLine(),
+      stats: import.meta.env.DEV ? this.statRows() : null,
+    });
+  }
+
+  /** The nearest row on this world that stands a trainer of anything (`TRAINERS`), from where the player is; null with none. */
+  private nearestTrainer(): ReturnType<typeof standingPeople.nearestOf> {
+    if (!this.inWorld || this.world.planet?.space) return null;
+    const at = this.player.worldPos;
+    return standingPeople.nearestOf((who) => Object.hasOwn(TRAINERS, who), at.x, at.z);
+  }
+
+  /**
+   * What the section says of trainers: the one the player is learning from, or where the nearest on this world
+   * stands (with a waypoint on offer), or, on a world with none, the worlds that have one, by their own names.
+   */
+  private trainerLine(): TrainerLine {
+    const taught = DISCIPLINES.map((d) => d.name).join(' and ');
+    const t = this.teacher;
+    if (t) return { text: t.dev ? `A ${t.name} stands in, from the console: ${taught} may be learnt and given back here.` : `${t.name} teaches ${taught} here, while you stay near.`, mark: false };
+    const near = this.nearestTrainer();
+    if (near) {
+      const far = near.metres >= 1000 ? `${(near.metres / 1000).toFixed(1)} km` : `${Math.round(near.metres)} m`;
+      return { text: `The nearest ${TRAINER_NAMES[near.who] ?? 'trainer'} on this world stands ${far} from here${near.inside ? ', indoors' : ''}.`, mark: true };
+    }
+    const worlds = [...new Set(Object.values(TRAINER_WORLDS).flat())].map((id) => planetById(id)?.name ?? id);
+    const list = worlds.length > 1 ? `${worlds.slice(0, -1).join(', ')} and ${worlds[worlds.length - 1]}` : (worlds[0] ?? 'no world');
+    return { text: `No trainer of ${taught} stands on this world; they stand on ${list}.`, mark: false };
+  }
+
+  /** The nearest trainer on this world as a waypoint of the player's own, said on the message line. */
+  private markTrainer(): void {
+    const near = this.nearestTrainer();
+    if (!near) {
+      this.messages.system('No trainer stands on this world.');
+      return;
+    }
+    const raw = gameToRaw(near.x, near.z, this.world.layoutCenter);
+    const name = TRAINER_NAMES[near.who] ?? 'Trainer';
+    const label = name.charAt(0).toUpperCase() + name.slice(1);
+    const out = this.story.addWaypoint({ name: label, world: packIdOf(this.world.planet, this.zone), f: 'raw', p: [raw.x, raw.z, null], on: true });
+    this.messages.system(out.ok ? `Waypoint set: ${label}` : `No waypoint: ${out.why}`);
+  }
+
+  /** Learn a node from the trainer in reach, by the rule the record's host applies; a refusal said in words. */
+  private learnNode(id: string): void {
+    const o = this.progress.learn(id, this.teacher?.who ?? null);
+    if (!o.ok && o.why) this.messages.system(o.why);
+  }
+
+  /** Give a node back to the trainer in reach, for its fee through the purse; the node goes only once the money did. */
+  private surrenderNode(id: string): void {
+    const o = this.progress.surrender(id, this.teacher?.who ?? null, purse, (done) => {
+      if (!done.ok && done.why) this.messages.system(done.why);
+    });
+    if (!o.ok && o.why) this.messages.system(o.why);
+  }
+
+  /** Whether one of the world's people is a trainer: its row's own creature is a kind `TRAINERS` names. Asked of a body in reach, never of a crowd. */
+  private isTrainer(m: Mobile): boolean {
+    return Object.hasOwn(TRAINERS, standingPeople.speakerOf(m)?.who ?? '');
+  }
+
+  /** A trainer's own answer taken: the Skills tab opened on its Progress section, at that trainer while the player stays near. */
+  private openTraining(m: Mobile, who: string): void {
+    this.teacher = { who, name: m.label, dev: false, body: m };
+    this.toggleInventory('force');
   }
 
   /**
@@ -14381,6 +14625,9 @@ class App {
     const passenger = !!ship?.passenger;
     if (!passenger) this.ride?.abort('travel', true);
     this.traveling = true;
+    // A fight does not cross: it is broken off here, and the trainer is left behind with the world.
+    this.encounters.left();
+    this.teacher = null;
     this.map.hide();
     this.closePanels();
     // Whatever was in hand is given up before the world under it goes: a ghost holds borrowed
@@ -14807,6 +15054,11 @@ class App {
    */
   private async carryAcross(zone: string, hull: Vehicle, pose: { pos: THREE.Vector3; quaternion: THREE.Quaternion }): Promise<Vehicle | null> {
     if (hull.destroyed || hull.disposed || this.traveling || !this.world.vehicles.includes(hull)) return null;
+    // A fight does not cross a jump any more than a travel: it is broken off here, before the world it was in
+    // goes (its members are that world's bodies, and the new world's `simTime` starts again at nought, so a
+    // fight carried over could never go quiet), and the trainer is left behind with the world.
+    this.encounters.left();
+    this.teacher = null;
     const planet = planetById(zone);
     this.zone = planet.zones?.length ? planet.zones[0].id : undefined;
     this.postfx?.reset();
@@ -15488,8 +15740,9 @@ class App {
       // anybody riding a hull nothing may hurt (a shuttle), which the hull's own guards say again.
       if (v === rider && v.flipped && !v.invulnerable) {
         this.dismountBeside(v);
-        // Thrown by the ground, not by anybody: no direction, so the red flash and no arc.
-        if (player.takeDamage(10)) this.hurtFrom(null);
+        // Thrown by the ground, not by anybody: no direction, so the red flash and no arc; and the
+        // surroundings' harm, which a fight's Fortitude does not count.
+        if (player.takeDamage(10, false, 'env')) this.hurtFrom(null);
         this.messages.hitYou('thrown off: the speeder is on its back');
       }
       if (v.justHit > 0) {
@@ -15497,8 +15750,9 @@ class App {
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
         if (v === rider && !v.invulnerable) {
           // A jolt through the hull under you: the hull keeps no record of what it ran into, so
-          // there is no direction to point at and the flash is the whole of it.
-          if (player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)))) this.hurtFrom(null);
+          // there is no direction to point at and the flash is the whole of it. A crash is the
+          // surroundings' harm, as a fall is.
+          if (player.takeDamage(Math.round(Math.min(40, (v.justHit - 6) * 1.5)), false, 'env')) this.hurtFrom(null);
         }
       }
       if (v.struck > 0) {
@@ -15552,8 +15806,8 @@ class App {
     }
     if (player.piloting?.crashed && !player.piloting.invulnerable) {
       const m = player.piloting;
-      // Flown into the ground: no side to it.
-      if (player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)))) this.hurtFrom(null);
+      // Flown into the ground: no side to it, and the surroundings' harm.
+      if (player.takeDamage(Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95)), false, 'env')) this.hurtFrom(null);
       m.crashed = 0;
     }
     if (player.mounted) {
@@ -15562,7 +15816,7 @@ class App {
       if (m.crashed && !m.invulnerable) {
         // Flown into the ground: hurt by the speed, and the crash shown where it happened.
         const dmg = Math.round(THREE.MathUtils.clamp((m.crashed - 8) * 1.2, 5, 95));
-        const took = player.takeDamage(dmg);
+        const took = player.takeDamage(dmg, false, 'env');
         if (took) this.hurtFrom(null);
         this.effects.burst(m.pos, 0xffb070, 3 + m.radius, 0.35);
         this.effects.flash(m.pos, 0xff8a50, 20, 25, 0.3);
@@ -15848,6 +16102,10 @@ class App {
     }
     const ctx: KitContext = { dt, input: this.input, player, world: this.world, cam: this.cam, physics: this.physics, effects: this.effects, bolts: this.world.bolts, weapons: this.weapons };
     this.kit.update(ctx);
+    // A rolling player on foot in the world beats the bolts that go close by (`ENCOUNTER_TUNE.dodgeReach`).
+    const dodge = this.boltDodge;
+    dodge.rolling = player.jka.rolling && !player.aboard && !player.mounted;
+    dodge.reach = ENCOUNTER_TUNE.dodgeReach;
     this.world.bolts.update(dt, {
       physics: this.physics,
       effects: this.effects,
@@ -15858,17 +16116,26 @@ class App {
       // And the player as something a bolt can set alight, which is what makes an enemy's acid or a
       // fireball burn them as it burns every other body; a shot of their own is never handed it.
       playerHittable: this.world.playerTarget,
-      block: (bolt, hit, out) => player.deflect(bolt.dir, hit, this.cam, out),
+      // A bolt turned away is a member's shot blocked: it is in the fight, and the blade's work is Melee's.
+      block: (bolt, hit, out) => {
+        const held = player.deflect(bolt.dir, hit, this.cam, out);
+        if (held && !bolt.inert) this.encounters.blocked(bolt.source);
+        return held;
+      },
       // The bolt hands over where it was when it reached you, which is the direction it came from
       // closely enough for an arc: a bolt travels 600 m/s and the point is a frame old at most.
       onPlayerHit: (dmg, from, source) => {
         if (player.mounted || player.noclip) return;
         // A follower's stray shot stops on you and takes nothing: it never turns on you.
         if (isFollowerSource(source)) return;
-        if (player.takeDamage(dmg)) this.hurtFrom(from);
+        // A bolt never reaches the record's own `damage`, so the fight it opens is told here: whatever shot
+        // you is in it, and the shot's health goes to it through `onHarm` as a blow's does.
+        if (source) this.encounters.struckBy(source);
+        if (player.takeDamage(dmg, false, 'blow', source ?? null)) this.hurtFrom(from);
         // Whatever shot you is what the people following you fight.
         if (source) this.world.followers.assist(source);
       },
+      dodge,
     });
   }
 
@@ -16761,6 +17028,8 @@ class App {
     this.ride?.abort('died', true);
     if (this.dying) return;
     this.dying = true;
+    // The fight the player was in is lost here, once, and claimed for what a close loss pays.
+    this.encounters.died();
     // A job's step that fails on the player's death fails here, once; and the dead are in no area, so a
     // watch being kept is closed now rather than counting the time spent dead and coming back.
     try {
@@ -22884,7 +23153,7 @@ class App {
     for (const m of mobiles.live) {
       const follows = followers.following(m);
       const d = reachOf(m.pos.x - at.x, m.pos.y - at.y, m.pos.z - at.z, talkLook.x, talkLook.z, TALK_TUNE, follows);
-      if (!(d < (follows ? followerD : otherD)) || whyNotTalk(m, me)) continue;
+      if (!(d < (follows ? followerD : otherD)) || whyNotTalk(m, me, this.isTrainer(m))) continue;
       if (follows) {
         follower = m;
         followerD = d;
@@ -22944,7 +23213,7 @@ class App {
    */
   private startTalk(m: Mobile, review: string | null = null): string | null {
     if (this.talkNow) this.endTalk(false);
-    const why = whyNotTalk(m, this.world.playerTarget);
+    const why = whyNotTalk(m, this.world.playerTarget, this.isTrainer(m));
     if (why) return why;
     const following = this.world.followers.following(m);
     // The companion walking with the player is the story's cast member too, stood by their keeper.
@@ -23159,8 +23428,10 @@ class App {
    */
   private talkOptionsFor(m: Mobile, following: boolean): TalkOption[] {
     const taker = !!corvetteFor(standingPeople.rowOf(m)?.takes);
+    // One of the game's own trainers (its row's creature names a kind `TRAINERS` knows) offers training first.
+    const trainer = this.isTrainer(m);
     // The companion follows by the story's word, never the game's own follow and stay answers.
-    return talkOptions(following, this.world.followers.full, [], m.isDriven, taker, this.storyStands.castOf(m) !== null || this.companion.isBody(m));
+    return talkOptions(following, this.world.followers.full, [], m.isDriven, taker, this.storyStands.castOf(m) !== null || this.companion.isBody(m), trainer);
   }
 
   /** The words of a line: a reference looked up (in the conversation's own table for a `:key`), its substitutions filled, the player's name for `%TU`. */
@@ -23315,6 +23586,13 @@ class App {
       return;
     }
     const m = t.body;
+    if (o.id === 'train') {
+      // The Skills tab on its Progress section, at this trainer, good while the player stays near.
+      const who = standingPeople.speakerOf(m)?.who ?? '';
+      this.endTalk(false);
+      if (Object.hasOwn(TRAINERS, who)) this.openTraining(m, who);
+      return;
+    }
     if (o.id === 'corvette') {
       // The trip to the ship, once the taker's reply has stood its time (`stepTalk`).
       const row = standingPeople.rowOf(m);
@@ -24401,8 +24679,10 @@ class App {
       // passes it, and it is what turns the red flash into an arc on the side the blow came from.
       const hurt = (dmg: number, from?: THREE.Vector3) => {
         if (!simulate || player.mounted || player.noclip || player.aboard) return;
-        // A blow god mode refused shows nothing: no red flash and no arc for a blow that did nothing.
-        if (player.takeDamage(dmg)) this.hurtFrom(from ?? this.hurtSource);
+        // A blow god mode refused shows nothing: no red flash and no arc for a blow that did nothing. What
+        // struck it is handed on, so a roll's dodge can name it; with nothing that struck and nowhere it came
+        // from it is the surroundings' (the lava, the water, a fire's tick), which no roll dodges.
+        if (player.takeDamage(dmg, false, recordHarmKind(this.hurtBy, from), this.hurtBy)) this.hurtFrom(from ?? this.hurtSource);
       };
       // The weather's view of the player: aboard rooms nothing falls; a ridden ship's box keeps rain out of its canopy.
       this.world.aboard = !!player.aboard;
@@ -24531,6 +24811,8 @@ class App {
       // swept once a second whatever it is doing (a world clock runs on while a panel is open), and the
       // jobs followed under the roster.
       this.stepStory(rawDt, simulate);
+      // The fights, four times a second while the game simulates, and the trainer the player learns from.
+      this.stepProgress(rawDt, simulate);
       // The ship menu is where space is gone to and come back from; the prompt says when the ship is high enough.
       // The long line of every key is what it always was, but it is now a setting, and it costs
       // nothing on the frame path either way: the *conditions* were always its cost, not the words,

@@ -42,6 +42,12 @@ const body = (over: Partial<TalkBody> = {}): TalkBody => ({ humanoid: true, dead
   ok(whyNotTalk(body({ side: 'hostile', aggression: 'defensive' }), PLAYER) === 'hostile', 'a bandit waiting to be struck first is still a bandit');
   ok(whyNotTalk(body({ side: 'imperial', aggression: 'aggressive' }), PLAYER) === 'hostile', 'an Imperial who would open fire on the player is hostile');
   ok(whyNotTalk(body({ side: 'rebel', aggression: 'aggressive' }), PLAYER) === null && !hostileSides({ side: 'rebel', aggression: 'aggressive' }, PLAYER), 'while an aggressive rebel leaves the player alone, so the matrix says they may be spoken to');
+  // The game's commando trainers wear bodies the catalogue tags hostile as well as civilian, and stand passive.
+  ok(whyNotTalk(body({ side: 'hostile', aggression: 'passive' }), PLAYER, true) === null && whyNotTalk(body({ side: 'hostile', aggression: 'passive' }), PLAYER) === 'hostile', 'a trainer on the hostile side who would not fight may be spoken to, and nobody else on that side');
+  ok(whyNotTalk(body({ side: 'hostile', aggression: 'aggressive' }), PLAYER, true) === 'hostile', 'but a trainer who would pick a fight may not');
+  const trained = talkOptions(false, false, [], false, false, false, true);
+  ok(trained[0].id === 'train' && trained[0].label === 'Train me.' && trained.some((o) => o.id === 'follow') && trained[trained.length - 1].id === 'leave', 'a trainer offers training first, then the rest as ever');
+  ok(talkOptions(true, false, [], false, false, false, true)[0].id !== 'train', 'though not while following the player');
   // A fighter stood from the console is on the side that fights every person, which is the rule and not
   // a list: no fighter can ever be spoken to.
   ok(whyNotTalk(body({ side: 'fighter', aggression: 'aggressive' }), PLAYER) === 'hostile', 'a fighter from the console fights every person, and is hostile');

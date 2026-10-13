@@ -12,12 +12,23 @@
 // count while it holds that character, else the stored record's, since a character's mark is sometimes worked
 // out (behind a loading screen, for a record rewritten once) before its record is the one held here.
 //
-// Nothing in here touches the page, three or a socket: the storage and the clock are handed in, so the node
-// tests drive it over a map, and the whole folder ships with the release by one rule.
+// **What earns.** A fight closed (`claim`), a landing roll that saved some of a fall (`task`), a node learnt or
+// given back at a trainer, a quest's bonus: each worked out here by the very rules a server will run
+// (`payout.ts`, `learn.ts`) against the record as it stands, applied as one batch, and said on the message line
+// in words worked out from the record before it and after (`notes.ts`). The buckets that hold each pool to so
+// much a minute live here, in memory, by character.
+//
+// Nothing in here touches the page, three or a socket: the storage, the clock, the game's table and the line it
+// speaks on are handed in, so the node tests drive it over a map, and the whole folder ships with the release by
+// one rule.
 
-import { grantChanges, resetChanges, unlearnChanges, xpChanges } from './learn.ts';
-import { applyProgress, emptyRecord, recordSummary, secondsOf, type ProgressChange, type ProgressRecord } from './record.ts';
-import { loadRecord, localOf, saveRecord, type ProgressStorage } from './progressStore.ts';
+import { grantChanges, learnChanges, questBonus, resetChanges, surrenderChanges, unlearnChanges, xpChanges, whyNotSurrender } from './learn.ts';
+import { progressNotes, snapOf, type NoteKind } from './notes.ts';
+import { XpBuckets, payClaim, payTask, type EncounterClaim, type PayResult, type ProgressTask } from './payout.ts';
+import { RECORD_MAX, applyProgress, copyRecord, emptyRecord, recordSummary, recordText, secondsOf, type ProgressChange, type ProgressRecord } from './record.ts';
+import { loadRecord, localOf, saveRecordText, type ProgressStorage } from './progressStore.ts';
+import type { ConTable } from './challenge.ts';
+import { nodeById } from './disciplines.ts';
 import { PROGRESS_LIMITS, PROGRESS_RULES, tuneProgress } from './tune.ts';
 
 export type ProgressHost = 'local' | 'server' | 'held';
@@ -33,6 +44,10 @@ export interface ProgressDeps {
   store: ProgressStorage;
   /** The shared clock, in milliseconds: what every time in a record is written on, in whole seconds. */
   now(): number;
+  /** The game's own challenge table, or null until it lands (and for good without it). */
+  levels?(): ConTable | null;
+  /** One line for the message line. */
+  say?(line: string): void;
 }
 
 /** What the console asks of the record held here (`__debug.progress`). */
@@ -43,6 +58,30 @@ export interface ProgressDebugAsk {
   reset?: boolean;
   rules?: Record<string, unknown>;
   rate?: number;
+  /** Learn a node through the real rule, from this teacher (the game hands in the one in reach, or the developer's). */
+  learn?: string;
+  teacher?: string | null;
+}
+
+/** What a payout, a learning or a giving back came to: how many changes went in, what each pool gained, why not. */
+export interface ProgressOutcome {
+  ok: boolean;
+  changed: number;
+  paid?: Record<string, number>;
+  why?: string;
+  /** The payout's working, for the console. */
+  pools?: PayResult['pools'];
+  notes: string[];
+}
+
+/**
+ * What a purse is asked, for a fee: take it, and run `then` only once it really went (`src/net/purse.ts`); and
+ * whether a spend is still waiting on its answer (`busy`), since a server's purse keeps one answer waiting at a
+ * time and a second spend asked meanwhile takes the first one's place: both fees go, and only one `then` runs.
+ */
+export interface FeePurse {
+  spend(amount: number, what: string, then: () => void): void;
+  busy?(): boolean;
 }
 
 export class ProgressClient {
@@ -107,17 +146,110 @@ export class ProgressClient {
     const rec = this.rec;
     if (!rec) return { changed: 0, why: ['there is no character in play'] };
     if (!ch.length) return { changed: 0, why: [] };
-    const out = applyProgress(rec, ch, PROGRESS_LIMITS);
+    // Tried on a copy, so a batch that would take the record past the most it may be written out as is refused
+    // whole and leaves the record as it was (`RECORD_MAX`, the line a server will not take one past).
+    const draft = copyRecord(rec);
+    const out = applyProgress(draft, ch, PROGRESS_LIMITS);
     this.stats.refused += out.why.length;
     if (!out.changed) return out;
-    const was = rec.local;
-    rec.local++;
-    saveRecord(this.deps.store, rec);
+    const was = draft.local;
+    draft.local++;
+    const text = recordText(draft);
+    if (text.length > RECORD_MAX) {
+      this.stats.refused++;
+      return { changed: 0, why: [...out.why, `the record would be ${text.length.toLocaleString('en-GB')} characters, past the ${RECORD_MAX.toLocaleString('en-GB')} it may be`] };
+    }
+    this.rec = draft;
+    saveRecordText(this.deps.store, draft.char, text);
     this.stats.batches++;
     this.stats.changes += out.changed;
     this.stats.lastWhy = why;
     this.emit(why, was);
     return out;
+  }
+
+  /** The buckets each pool's pay is held to, by character, in memory: a reload empties them, and the record's `paid` keeps a claim from paying twice. */
+  readonly buckets = new XpBuckets();
+
+  /** Who holds the record may change it: this browser, in this wave, whenever a character is in play. */
+  private get mine(): boolean {
+    return !!this.rec && this.host === 'local';
+  }
+
+  /** A batch worked out by the rules, applied, and said: what it came to. */
+  private settle(kind: NoteKind, r: { ch: ProgressChange[]; why?: string; paid?: Record<string, number>; pools?: PayResult['pools'] }, fee = 0): ProgressOutcome {
+    const rec = this.rec;
+    if (!rec) return { ok: false, changed: 0, why: 'there is no character in play', notes: [] };
+    if (!r.ch.length) return { ok: false, changed: 0, ...(r.why ? { why: r.why } : {}), ...(r.pools ? { pools: r.pools } : {}), notes: [] };
+    const before = snapOf(rec);
+    const out = this.apply(r.ch);
+    if (!out.changed) return { ok: false, changed: 0, why: out.why.join('; ') || 'the record would not take it', notes: [] };
+    const notes = progressNotes(kind, before, this.rec!, PROGRESS_RULES, fee);
+    for (const n of notes) this.deps.say?.(n);
+    return { ok: true, changed: out.changed, ...(r.paid ? { paid: r.paid } : {}), ...(r.pools ? { pools: r.pools } : {}), ...(out.why.length ? { why: out.why.join('; ') } : {}), notes };
+  }
+
+  /** A fight closed (`encounter.ts`): what it pays, worked out here and applied. */
+  claim(c: EncounterClaim): ProgressOutcome {
+    if (!this.mine) return { ok: false, changed: 0, why: 'there is no character in play', notes: [] };
+    const r = payClaim(this.rec!, c, { now: this.deps.now(), levels: this.deps.levels?.() ?? null, rules: PROGRESS_RULES, limits: PROGRESS_LIMITS, bucket: this.buckets });
+    return this.settle('claim', r as { ch: ProgressChange[]; why?: string; paid?: Record<string, number>; pools?: PayResult['pools'] });
+  }
+
+  /** A landing roll that saved some of a fall: what it pays into Acrobatics. */
+  task(t: ProgressTask): ProgressOutcome {
+    if (!this.mine) return { ok: false, changed: 0, why: 'there is no character in play', notes: [] };
+    const r = payTask(this.rec!, t, { now: this.deps.now(), levels: null, rules: PROGRESS_RULES, limits: PROGRESS_LIMITS, bucket: this.buckets });
+    return this.settle('task', r as { ch: ProgressChange[]; why?: string; paid?: Record<string, number> });
+  }
+
+  /** A node learnt from a teacher (the kind of person in reach, or null), by the rule a server will apply. */
+  learn(node: string, teacher: string | null): ProgressOutcome {
+    if (!this.mine) return { ok: false, changed: 0, why: 'there is no character in play', notes: [] };
+    return this.settle('learn', learnChanges(this.rec!, node, teacher, this.at(), PROGRESS_RULES));
+  }
+
+  /**
+   * A node given back to a teacher, for its fee: the rule asked first, then the purse asked for the fee, and only
+   * once the money really went is the node given back -- worked out again then, against the record as it stands,
+   * so nothing that happened while the purse answered can be undone. `done` hears what it came to.
+   *
+   * **One at a time.** A server's purse keeps one answer waiting, and a second spend asked before the first is
+   * answered takes its place: both fees would go and only the second's `then` would run, against a record the
+   * first had not yet changed, and be refused. So nothing is given back while the purse is still answering for
+   * anything (`busy`), and a refusal after the fee went -- the node learnt upon or the character gone meanwhile --
+   * is said, in words that say the fee went, rather than dropped.
+   */
+  surrender(node: string, teacher: string | null, purse: FeePurse, done?: (o: ProgressOutcome) => void): ProgressOutcome {
+    if (!this.mine) return { ok: false, changed: 0, why: 'there is no character in play', notes: [] };
+    if (purse.busy?.()) return { ok: false, changed: 0, why: 'the purse is still answering for the last thing asked of it: give it a moment', notes: [] };
+    const first = surrenderChanges(this.rec!, node, teacher, this.at(), PROGRESS_RULES);
+    if (first.why) return { ok: false, changed: 0, why: first.why, notes: [] };
+    const char = this.rec!.char;
+    const name = nodeById(node)?.name ?? node;
+    purse.spend(first.fee, `Giving back ${name}`, () => {
+      // Still this character, and still allowed: the purse may answer after anything at all has happened.
+      const why = !this.mine || this.rec!.char !== char ? 'the character changed' : whyNotSurrender(this.rec!, node, teacher);
+      if (why) {
+        const said = `The fee for ${name} went, and it was not given back: ${why}`;
+        if (done) done({ ok: false, changed: 0, why: said, notes: [] });
+        else this.deps.say?.(said);
+        return;
+      }
+      const again = surrenderChanges(this.rec!, node, teacher, this.at(), PROGRESS_RULES);
+      // Settled first and handed over after: `done?.(this.settle(...))` would never settle at all with no `done`,
+      // since an optional call that is not made does not work out its arguments either.
+      const out = this.settle('surrender', again, again.fee);
+      if (done) done(out);
+      else if (!out.ok && out.why) this.deps.say?.(`The fee for ${name} went, and it was not given back: ${out.why}`);
+    });
+    return { ok: true, changed: 0, why: 'asked the purse for the fee', notes: [] };
+  }
+
+  /** A quest's bonus, paid into the skills used since its run began (`since`, the shared clock's milliseconds). */
+  bonus(key: string, xp: number, since: number): ProgressOutcome {
+    if (!this.mine) return { ok: false, changed: 0, why: 'there is no character in play', notes: [] };
+    return this.settle('bonus', questBonus(this.rec!, key, xp, since, { now: this.deps.now(), rules: PROGRESS_RULES, limits: PROGRESS_LIMITS }));
   }
 
   /** Now on the shared clock, in the whole seconds a record keeps. */
@@ -141,7 +273,7 @@ export class ProgressClient {
       results.push({ rate: PROGRESS_RULES.xpRate });
     }
     const rec = this.rec;
-    const want = op.grant !== undefined || op.surrender !== undefined || op.xp !== undefined || op.reset;
+    const want = op.grant !== undefined || op.surrender !== undefined || op.xp !== undefined || op.reset || op.learn !== undefined;
     if (want && !rec) {
       results.push({ ok: false, why: 'there is no character in play' });
       return results;
@@ -155,10 +287,16 @@ export class ProgressClient {
       const out = this.apply(r.ch);
       results.push({ do: what, ok: out.changed > 0, changed: out.changed, ...(r.why || out.why.length ? { why: [r.why, ...out.why].filter(Boolean).join('; ') } : {}) });
     };
-    if (op.reset) run('reset', { ch: resetChanges(rec) });
-    if (typeof op.surrender === 'string') run(`surrender ${op.surrender}`, unlearnChanges(rec, op.surrender, this.at()));
-    if (typeof op.grant === 'string') run(`grant ${op.grant}`, grantChanges(rec, op.grant, this.at(), PROGRESS_RULES));
-    if (op.xp && typeof op.xp === 'object') run('xp', xpChanges(rec, op.xp, PROGRESS_RULES));
+    // Each asked of the record as the one before it left it: a batch applied is a new record object (`apply`).
+    if (op.reset) run('reset', { ch: resetChanges(this.rec!) });
+    if (typeof op.surrender === 'string') run(`surrender ${op.surrender}`, unlearnChanges(this.rec!, op.surrender, this.at()));
+    if (typeof op.grant === 'string') run(`grant ${op.grant}`, grantChanges(this.rec!, op.grant, this.at(), PROGRESS_RULES));
+    if (op.xp && typeof op.xp === 'object') run('xp', xpChanges(this.rec!, op.xp, PROGRESS_RULES));
+    // Through the player's own rule, after any XP given in the same ask, so `{ xp, trainer, learn }` learns.
+    if (typeof op.learn === 'string') {
+      const o = this.learn(op.learn, op.teacher ?? null);
+      results.push({ do: `learn ${op.learn}`, ok: o.ok, changed: o.changed, ...(o.why ? { why: o.why } : {}), ...(o.notes.length ? { said: o.notes } : {}) });
+    }
     return results;
   }
 

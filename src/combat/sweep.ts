@@ -17,6 +17,7 @@ import { PathMemory, type HitLedger, type SweepCast, type Vec3Like } from './sab
 import type { Effects } from './effects';
 import type { BoltFrame } from './bolts';
 import type { Hittable, KitContext, Living } from './kit';
+import { STRIKE, type StrikeKind } from './strikeTag.ts';
 
 const mid = new THREE.Vector3();
 const tmp = new THREE.Vector3();
@@ -72,6 +73,11 @@ export interface Striker {
    * out to the world with this. Absent out in the world.
    */
   matrix?: THREE.Matrix4 | null;
+  /**
+   * What the blow is, for the player's progress (`strikeTag.ts`): the player's own striker is a blade's,
+   * every other swinger's says nothing.
+   */
+  kind?: StrikeKind | null;
 }
 
 /**
@@ -97,6 +103,7 @@ const mine: Striker = {
   color: 0x9fd4ff,
   now: 0,
   matrix: null,
+  kind: 'melee',
 };
 /** Whose `hittableAt` the kept striker is asking: one closure for the module rather than a bound method a frame. */
 let asking: { hittableAt(handle: number): Hittable | undefined } | null = null;
@@ -127,6 +134,7 @@ export function playerStrike(ctx: KitContext, frame: BoltFrame | null, radius: n
   mine.color = color;
   mine.now = now;
   mine.matrix = frame ? frame.matrix : null;
+  mine.kind = 'melee';
   return mine;
 }
 
@@ -147,7 +155,14 @@ const onTouch = (collider: RAPIER.Collider): boolean => {
   // Aboard, the hull around the rooms is not a target: a fight inside must not cut the ship down.
   if (c && !already.has(c) && c !== who.spare) {
     already.add(c);
-    c.damage(who.damage, who.from, who.push, who.source);
+    // What struck, held for the blow: a blade of the player's says so; anybody else's leaves it as it was.
+    const was = STRIKE.kind;
+    if (who.kind) STRIKE.kind = who.kind;
+    try {
+      c.damage(who.damage, who.from, who.push, who.source);
+    } finally {
+      STRIKE.kind = was;
+    }
     const fx = who.effects;
     if (fx) {
       tmp2.copy(c.pos).y += c.halfHeight;

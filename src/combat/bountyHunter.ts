@@ -12,6 +12,8 @@ import { DEFAULT_GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from '.
 import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
 import { Unarmed } from './unarmed';
 import { THROW_BALL, THROW_SHAPE, lobbed, throwVelocity } from './demoMath.ts';
+import { STRIKE, strikeAs, type StrikeKind } from './strikeTag.ts';
+import { PROGRESS_RULES } from '../progress/tune.ts';
 
 /** A charge in the world: a thrown grenade or flechette mine on its fuse, a trip mine on its wall, a det pack waiting for the key. */
 interface Charge {
@@ -56,6 +58,11 @@ const TRIP_RADIUS = 5;
 const PACK_DAMAGE = 120;
 const PACK_RADIUS = 6;
 const MAX_PACKS = 6;
+
+/** What a gun's shot is to the player's progress: a launcher's rocket is Demolitions' work, every other gun's Marksmanship's. */
+function strikeKindOf(gun: GunProfile): StrikeKind {
+  return gun.type === 'rocket' ? 'launcher' : 'gun';
+}
 
 const dir = new THREE.Vector3();
 const from = new THREE.Vector3();
@@ -249,6 +256,12 @@ export class BountyHunterKit implements Kit {
 
   /** What a grenade's cooldown is times, as the player's progress makes it; written every update, read by the display between them. */
   private grenadeCooldown = 1;
+  /**
+   * Seconds the gun has been aimed with the body standing still, nought the moment either stops: what
+   * Marksmanship 25's steady breath waits on (`PROGRESS_RULES.core.marksmanship.steadyAfter`) before a shot's
+   * aimed spread takes its `gun.steady` share. That share is exactly 1 until the milestone is reached.
+   */
+  private aimStill = 0;
 
   /** A gadget's whole cooldown: a grenade's through the player's progress, anything else its own. */
   private cooldownOf(g: GadgetDef): number {
@@ -280,6 +293,7 @@ export class BountyHunterKit implements Kit {
     this.altCd = Math.max(0, this.altCd - dt);
     for (const [id, left] of this.cds) this.cds.set(id, Math.max(0, left - dt));
     this.grenadeCooldown = player.stats.grenadeCooldown;
+    this.aimStill = player.aiming && !player.moving ? this.aimStill + dt : 0;
 
     const gun = this.profile(ctx);
     if (gun !== this.lastProfile) {
@@ -429,14 +443,22 @@ export class BountyHunterKit implements Kit {
       }
       if (cl.tick <= 0) {
         cl.tick = 0.5;
-        for (const h of this.targets(ctx)) {
-          if (h.dead || h.pos.distanceTo(cl.pos) > cl.radius) continue;
-          if (cl.spec.dot) h.afflict?.(cl.spec.dot.dps, Math.min(cl.spec.dot.seconds, 3));
-          if (cl.spec.slow) h.slow?.(1);
-          h.damage(cl.spec.damage * 0.1, cl.pos, 0, ctx.world.playerTarget);
+        // A grenade's cloud is Demolitions' work, held for every sting it gives this tick.
+        const was = STRIKE.kind;
+        STRIKE.kind = 'demolitions';
+        try {
+          for (const h of this.targets(ctx)) {
+            if (h.dead || h.pos.distanceTo(cl.pos) > cl.radius) continue;
+            if (cl.spec.dot) h.afflict?.(cl.spec.dot.dps, Math.min(cl.spec.dot.seconds, 3));
+            if (cl.spec.slow) h.slow?.(1);
+            h.damage(cl.spec.damage * 0.1, cl.pos, 0, ctx.world.playerTarget);
+          }
+        } finally {
+          STRIKE.kind = was;
         }
         const p = ctx.player;
-        if (!p.mounted && p.pos.distanceTo(cl.pos) < cl.radius * 0.8) p.takeDamage(cl.spec.dot ? cl.spec.dot.dps * 0.5 : 2);
+        // Standing in your own cloud is your own doing, as your own blast is.
+        if (!p.mounted && p.pos.distanceTo(cl.pos) < cl.radius * 0.8) p.takeDamage(cl.spec.dot ? cl.spec.dot.dps * 0.5 : 2, false, 'self');
       }
       if (Math.random() < dt * 12) {
         tmp.set(cl.pos.x + (Math.random() - 0.5) * cl.radius * 1.4, cl.pos.y + Math.random() * 1.8, cl.pos.z + (Math.random() - 0.5) * cl.radius * 1.4);
@@ -510,7 +532,7 @@ export class BountyHunterKit implements Kit {
             effects.ring(tmp, mode.color, radius * 2.5, 0.4);
             effects.burst(tmp, 0xffc080, radius * 0.6, 0.3);
             effects.flash(tmp, mode.color, 30 + (mode.splash?.damage ?? mode.damage) * 0.3, radius * 4, 0.25);
-          } else this.blast(ctx, tmp, mode.splash?.damage ?? mode.damage, mode.splash?.radius ?? 5, mode, mode.push);
+          } else this.blast(ctx, tmp, mode.splash?.damage ?? mode.damage, mode.splash?.radius ?? 5, strikeKindOf(gun), mode, mode.push);
           cool(mode.fireTime);
         }
         return false;
@@ -579,7 +601,9 @@ export class BountyHunterKit implements Kit {
     const level = gun.type === 'bryar' ? Math.max(1, Math.min(5, Math.ceil(charge * 5))) / 5 : charge;
     const damage = mode.charge ? mode.damage + (mode.charge.maxDamage - mode.damage) * (mode.charge.bolts ? 1 : level) : mode.damage;
     const count = mode.charge?.bolts ? 1 + Math.floor(charge * (mode.charge.bolts - 1)) : (mode.pellets ?? 1);
-    const base = ((player.aiming ? mode.aimSpread : mode.spread) * player.postureSpread * Math.PI) / 180;
+    // Aimed and still for a breath, a shot's aimed spread takes the steady share (Marksmanship 25; exactly 1 until then).
+    const steady = player.aiming && this.aimStill >= PROGRESS_RULES.core.marksmanship.steadyAfter ? player.stats.steady : 1;
+    const base = ((player.aiming ? mode.aimSpread : mode.spread) * player.postureSpread * steady * Math.PI) / 180;
     side.crossVectors(aimDir, UP).normalize();
     lift.crossVectors(side, aimDir);
     const fx = player.equipped.right?.fx;
@@ -588,6 +612,8 @@ export class BountyHunterKit implements Kit {
     const gunSound = combatSounds.gunOf(player.equipped.right);
     // A homing rocket follows what was under the crosshair when it left.
     const mark = mode.homing ? this.targetAhead(ctx, 60, player.stats.pickCos) : null;
+    // What the shot is to the player's progress: a launcher's rocket is Demolitions' work, every other gun's Marksmanship's.
+    const kind = strikeKindOf(gun);
     for (let i = 0; i < count; i++) {
       shotDir.copy(aimDir);
       if (mode.fan && count > 1) shotDir.addScaledVector(side, Math.tan(((i - (count - 1) / 2) * (mode.pelletSpread ?? 4) * Math.PI) / 180));
@@ -616,8 +642,9 @@ export class BountyHunterKit implements Kit {
           // second (`scarFamilyOf`). A rocket leaves a char, a slugthrower a pit, a flame gun soot
           // and a lightning gun a fork, so the four read apart on a wall.
           scar: scarFamilyOf(gun.type, fx?.id),
+          kind,
           onHit: (p, target) => {
-            if (mode.splash) this.blast(ctx, p, mode.splash.damage, mode.splash.radius, mode);
+            if (mode.splash) this.blast(ctx, p, mode.splash.damage, mode.splash.radius, kind, mode);
             if (target) this.afflict(ctx, target, mode);
           },
         });
@@ -665,7 +692,7 @@ export class BountyHunterKit implements Kit {
     const gun = combatSounds.gunOf(player.equipped.right);
     if (target) {
       tmp.copy(at);
-      target.damage(damage, tmp, mode.push * (1 + level), world.playerTarget);
+      strikeAs(strikeKindOf(profile), target, damage, tmp, mode.push * (1 + level), world.playerTarget);
       this.afflict(ctx, target, mode);
       combatSounds.hit(gun, end.x, end.y, end.z, 'creature');
       effects.burst(end, 0xffb070, 0.7, 0.15);
@@ -680,7 +707,7 @@ export class BountyHunterKit implements Kit {
       // beam fired at a wall marks it square, and one fired across a wall leans a little.
       if (missed !== 'water' && marksHold(hit.collider)) layScar(scarFamilyOf(profile.type, player.equipped.right?.fx?.id), end.x, end.y, end.z, -along.x, -along.y, -along.z, hit.collider.handle);
     }
-    if (mode.splash) this.blast(ctx, end, mode.splash.damage, mode.splash.radius, mode);
+    if (mode.splash) this.blast(ctx, end, mode.splash.damage, mode.splash.radius, strikeKindOf(profile), mode);
     effects.flash(end, mode.color, 10, 6, 0.1);
   }
 
@@ -708,16 +735,23 @@ export class BountyHunterKit implements Kit {
     const cone = mode.cone ?? { range: 5, angle: 20 };
     const cos = Math.cos((cone.angle * Math.PI) / 180);
     if (!player.aboard) {
-      for (const c of this.targets(ctx)) {
-        if (c.dead) continue;
-        tmp.copy(c.pos).y += c.halfHeight;
-        tmp.sub(muzzle);
-        const d = tmp.length();
-        if (d > cone.range + c.halfHeight) continue;
-        if (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos) continue;
-        c.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
-        this.afflict(ctx, c, mode);
-        if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push, world.playerTarget);
+      // A gun's work, held for every blow of the cone this frame and put back after.
+      const was = STRIKE.kind;
+      STRIKE.kind = 'gun';
+      try {
+        for (const c of this.targets(ctx)) {
+          if (c.dead) continue;
+          tmp.copy(c.pos).y += c.halfHeight;
+          tmp.sub(muzzle);
+          const d = tmp.length();
+          if (d > cone.range + c.halfHeight) continue;
+          if (d > 0.5 && tmp.divideScalar(d).dot(aimDir) < cos) continue;
+          c.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
+          this.afflict(ctx, c, mode);
+          if (mode.push > 0 && Math.random() < dt * 2) c.damage(0, player.pos, mode.push, world.playerTarget);
+        }
+      } finally {
+        STRIKE.kind = was;
       }
       for (const t of world.turrets.turrets) {
         tmp.copy(t.pos).sub(muzzle);
@@ -801,7 +835,7 @@ export class BountyHunterKit implements Kit {
     const target = this.targetAhead(ctx, cone.range, Math.cos((cone.angle * Math.PI) / 180));
     if (target) {
       end.copy(target.pos).y += target.halfHeight;
-      target.damage(mode.damage * dt, player.pos, 0, world.playerTarget);
+      strikeAs('gun', target, mode.damage * dt, player.pos, 0, world.playerTarget);
       this.afflict(ctx, target, mode);
       if (mode.chain) {
         let other: Hittable | null = null;
@@ -815,7 +849,7 @@ export class BountyHunterKit implements Kit {
           }
         }
         if (other) {
-          other.damage(mode.damage * mode.chain.share * dt, player.pos, 0, world.playerTarget);
+          strikeAs('gun', other, mode.damage * mode.chain.share * dt, player.pos, 0, world.playerTarget);
           this.afflict(ctx, other, mode);
           tmp.copy(other.pos).y += other.halfHeight;
           ctx.bolts.beam(end, tmp, mode.color, 0.08, 0.7);
@@ -909,25 +943,33 @@ export class BountyHunterKit implements Kit {
    * A blast at a point: everything within `radius` metres hurt by up to `damage` and thrown outward,
    * the player too when close; vehicles and turrets by `machines` times as much (the proton grenade);
    * `spec` adds the grenade's burn, freeze or stun to what it reached. `machines` is the grenade's own unless the
-   * caller hands in what progress makes of it, which only a grenade's or a charge's detonation does.
+   * caller hands in what progress makes of it, which only a grenade's or a charge's detonation does. `kind` is
+   * what the blast is to the player's progress: a grenade's or a charge's Demolitions, a rocket's splash the
+   * launcher's, any other gun's splash and the flechette's mines a gun's.
    */
-  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number, mode: FireMode | null, push = 10, color = 0xffa050, spec: GrenadeSpec | null = null, machines = spec?.machines ?? 1): void {
+  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number, kind: StrikeKind, mode: FireMode | null, push = 10, color = 0xffa050, spec: GrenadeSpec | null = null, machines = spec?.machines ?? 1): void {
     const { world, effects, player } = ctx;
     effects.ring(at, mode?.color ?? color, radius * 2.5, 0.4);
     effects.burst(at, spec ? color : 0xffc080, radius * 0.6, 0.3);
     effects.flash(at, mode?.color ?? color, 30 + damage * 0.3, radius * 4, 0.25);
-    for (const c of this.targets(ctx)) {
-      tmp.copy(c.pos).sub(at);
-      const d = tmp.length();
-      if (d > radius) continue;
-      const f = 1 - d / radius;
-      c.damage(damage * f + damage * 0.1, at, push * f + 4, world.playerTarget);
-      if (mode) this.afflict(ctx, c, mode);
-      if (spec) {
-        if (spec.dot) c.afflict?.(spec.dot.dps, spec.dot.seconds);
-        if (spec.slow) c.slow?.(spec.slow);
-        if (spec.stun) c.stun?.(spec.stun);
+    const was = STRIKE.kind;
+    STRIKE.kind = kind;
+    try {
+      for (const c of this.targets(ctx)) {
+        tmp.copy(c.pos).sub(at);
+        const d = tmp.length();
+        if (d > radius) continue;
+        const f = 1 - d / radius;
+        c.damage(damage * f + damage * 0.1, at, push * f + 4, world.playerTarget);
+        if (mode) this.afflict(ctx, c, mode);
+        if (spec) {
+          if (spec.dot) c.afflict?.(spec.dot.dps, spec.dot.seconds);
+          if (spec.slow) c.slow?.(spec.slow);
+          if (spec.stun) c.stun?.(spec.stun);
+        }
       }
+    } finally {
+      STRIKE.kind = was;
     }
     for (const t of world.turrets.turrets) {
       const d = t.pos.distanceTo(at);
@@ -947,7 +989,8 @@ export class BountyHunterKit implements Kit {
     // it does for a body, exactly as it does for a vehicle above.
     shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);
     const dp = player.pos.distanceTo(at);
-    if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * player.stats.blastSelf * (1 - dp / (radius * 0.7)));
+    // Your own blast is your own doing: it buys no Fortitude, and a roll does not dodge it.
+    if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * player.stats.blastSelf * (1 - dp / (radius * 0.7)), false, 'self');
     // A blast sets off the charges near it: a chain of mines, a det pack under a grenade.
     for (const other of this.charges) {
       if (other.kind !== 'grenade' && other.mesh.position.distanceTo(at) < radius * player.stats.chainReach) other.fuse = Math.min(other.fuse, 0.15 + Math.random() * 0.1);
@@ -962,7 +1005,7 @@ export class BountyHunterKit implements Kit {
     // the player's progress makes it (Demolition Expert's `blast.machines`, the very number until it is owned); a
     // flechette's mines carry their gun's mode and, like every gun's splash, keep their own.
     const machines = c.spec?.machines ?? 1;
-    this.blast(ctx, at, c.damage, c.radius, c.mode, c.push, c.color, c.spec, c.mode ? machines : ctx.player.stats.apply('blast.machines', machines));
+    this.blast(ctx, at, c.damage, c.radius, c.mode ? 'gun' : 'demolitions', c.mode, c.push, c.color, c.spec, c.mode ? machines : ctx.player.stats.apply('blast.machines', machines));
     if (c.spec?.cloud) this.clouds.push({ pos: at.clone(), radius: c.spec.radius * 0.8, spec: c.spec, left: c.spec.cloud, tick: 0 });
     this.removeCharge(ctx, c);
   }

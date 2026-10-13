@@ -11,7 +11,7 @@
 // **People** -- the story's named people the character has met, by the name they know them by, with where and when
 // each was last seen, and gone only once it is known; and the companion, and how they stand. **Standing** -- each
 // track's rank in words, a bar to the next rung with its numbers hidden, Trust in words only, a suspension or a
-// burn said in words, and experience, recorded and counting for nothing yet.
+// burn said in words, and the experience quests have paid, each as a bonus into the skills used during it.
 //
 // It is a panel: it frees the mouse and the game does not simulate while it is up. What it shows is a model it
 // is handed, built when it opens and when the story changes, never in a frame, and every change is asked of the
@@ -575,7 +575,7 @@ export class JournalUi {
       if (t.division) box.append(this.el('div', 's', `Division: ${t.division.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()}`));
       nodes.push(box);
     }
-    nodes.push(this.el('div', 'jr-xp', `Experience: ${(s?.xp ?? 0).toLocaleString('en-GB')} (recorded; counts for nothing yet)`));
+    nodes.push(this.el('div', 'jr-xp', `Experience from quests: ${(s?.xp ?? 0).toLocaleString('en-GB')} (each paid as a bonus into the skills used during it; the Skills tab shows them)`));
     this.body.replaceChildren(...nodes);
   }
 }

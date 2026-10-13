@@ -20,6 +20,7 @@ import type { EffectHandle, ParticleEffects } from '../world/particles';
 import type { Effects } from './effects';
 import { ENGINE_UNIT, boltStretch, groundBoltSpeed } from './guns.ts';
 import { layScar, marksHold, type ScarFamily } from './scars.ts';
+import { strikeAs, type StrikeKind } from './strikeTag.ts';
 import type { Hittable, Living } from './kit';
 
 /** A metre per engine unit. One home, in `guns.ts`, where the guns' own speeds are written down. */
@@ -125,6 +126,11 @@ export interface BoltOptions {
    * that, which is better than leaving nothing at all. Null leaves no mark at all.
    */
   scar?: ScarFamily | null;
+  /**
+   * What the player's own shot used, for their progress (`strikeTag.ts`): a gun's bolt, a launcher's rocket.
+   * Held for the length of the blow it lands, so whatever hears the blow knows what struck. Left out, nobody's.
+   */
+  kind?: StrikeKind | null;
 }
 
 export interface BoltFrame {
@@ -186,6 +192,10 @@ export interface Bolt {
    * Null marks nothing.
    */
   scar: ScarFamily | null;
+  /** What it struck with, for the player's progress (`BoltOptions.kind`); a bolt the player's blade turned is `deflect`. */
+  kind: StrikeKind | null;
+  /** It has already gone by a rolling player close enough to count as a dodge, so it counts once. */
+  dodged: boolean;
 }
 
 /** A shot that landed the instant it was fired: its line, fading over its life. */
@@ -219,6 +229,12 @@ export interface BoltWorld {
   block(bolt: Bolt, hit: THREE.Vector3, out: THREE.Vector3): boolean;
   /** A bolt reached the player and was not turned away: how hard, from where, and whose it was (null for nobody's). */
   onPlayerHit(damage: number, from: THREE.Vector3, source?: Living | null): void;
+  /**
+   * Whether the player is rolling just now, and how near a bolt must go by their middle to count as one the
+   * roll beat (`ENCOUNTER_TUNE.dodgeReach`): somebody else's real bolt that passes that near while they roll
+   * is told once to `onDodge`, with whose it was. Absent, nothing is ever dodged.
+   */
+  dodge?: { rolling: boolean; reach: number; onDodge(source: Living | null): void } | null;
 }
 
 const tmp = new THREE.Vector3();
@@ -325,7 +341,7 @@ export class Bolts {
 
   /** Fire a bolt from `from` along `dir` (unit length). */
   fire(from: THREE.Vector3, dir: THREE.Vector3, o: BoltOptions): Bolt {
-    const { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null, inert = false, wire = 0, scar = 'bolt' } = o;
+    const { owner, damage = BLASTER.damage, speed = BLASTER.velocity, metresPerSecond, inherit, life = BLASTER.life, color = 0xff4a2a, exclude, projectile, size = 1, push = BLASTER.push, onHit, gravity = 0, bounces = 0, homing = null, frame = null, source = null, sound = null, inert = false, wire = 0, scar = 'bolt', kind = null } = o;
     const [coreMat, glowMat] = this.materialsFor(color);
     const mesh = new THREE.Group();
     mesh.add(new THREE.Mesh(this.core, coreMat), new THREE.Mesh(this.glow, glowMat), new THREE.Mesh(this.head, glowMat));
@@ -362,7 +378,7 @@ export class Bolts {
     // ship's bolt fired by something that does not carry one, the set of the projectile it draws,
     // and failing both the plain blaster, so a bolt is never silent leaving and loud landing.
     const gun = sound ?? (projectile ? combatSounds.projectileGun(projectile.effect) : null) ?? GENERIC_GUN;
-    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false, color, size, projectile: projectile ?? null, inert, wire, scar: scar ?? null };
+    const bolt: Bolt = { pos: from.clone(), dir: heading, speed: s, damage, owner, exclude, age: 0, life, lead: fx && projectile ? projectile.reach : (LENGTH / 2) * mesh.scale.z, reflected: 0, mesh, fx, hitFx: fx ? (projectile?.hit ?? null) : null, fxPack: fx ? fxPlayer : null, push, onHit: onHit ?? null, gravity, bounces, homing, vel: gravity || homing ? vel.clone().multiplyScalar(s) : null, frame, source, sound: gun, flew: false, color, size, projectile: projectile ?? null, inert, wire, scar: scar ?? null, kind, dodged: false };
     if (frame) this.settle(bolt);
     this.bolts.push(bolt);
     this.fired[owner]++;
@@ -498,6 +514,8 @@ export class Bolts {
       const ray = new RAPIER.Ray(b.pos, b.dir);
       const hit = w.physics.world.castRayAndGetNormal(ray, step + b.lead, true, undefined, undefined, undefined, b.exclude, b.inert ? this.passableNotPeer : this.passable);
       if (!hit) {
+        // Gone by a rolling player close enough to have been dodged, before it moves on.
+        if (w.dodge?.rolling && !b.dodged && !b.inert && b.owner !== 'player') this.noteDodge(b, w, b.pos.x + b.dir.x * step, b.pos.y + b.dir.y * step, b.pos.z + b.dir.z * step);
         b.pos.addScaledVector(b.dir, step);
         this.settle(b);
         continue;
@@ -545,6 +563,8 @@ export class Bolts {
           b.exclude = w.player.body;
           // It is the player's shot now: whatever it goes on to hurt turns on them, not the shooter.
           b.source = w.playerSource ?? null;
+          // And a blade's: what it lands is the blade's work, for the player's progress.
+          b.kind = 'deflect';
           b.reflected++;
           b.age = 0;
           b.dir.copy(bounce);
@@ -570,6 +590,8 @@ export class Bolts {
         this.remove(i, hitPoint);
         continue;
       }
+      // It struck something else on its way past a rolling player: dodged, if it went by close enough.
+      if (w.dodge?.rolling && !b.dodged && !b.inert && b.owner !== 'player') this.noteDodge(b, w, hitPoint.x, hitPoint.y, hitPoint.z);
       // What it struck, and what may be taken off it: a picture of somebody else's bolt is seen and
       // heard striking a creature, a hull or a wall exactly as the real one is, and takes nothing
       // from any of them. Read both ways round, a copy striking a person looked and sounded like a
@@ -588,6 +610,8 @@ export class Bolts {
         b.owner = 'enemy';
         b.exclude = (struck as { body?: RAPIER.RigidBody }).body ?? b.exclude;
         b.source = typeof (struck as Partial<Living>).key === 'number' ? (struck as Living) : null;
+        // The blocker's shot now, and none of the player's work.
+        b.kind = null;
         b.reflected++;
         b.age = 0;
         b.dir.copy(bounce);
@@ -629,7 +653,8 @@ export class Bolts {
       if (struck) {
         if (target) {
           tmp.copy(b.pos).addScaledVector(b.dir, -1);
-          target.damage(b.damage, tmp, b.push, b.source);
+          // What it struck with, held for the blow, so the player's own bolt says which skill it used.
+          strikeAs(b.kind, target, b.damage, tmp, b.push, b.source);
         }
         combatSounds.hit(b.sound, hitPoint.x, hitPoint.y, hitPoint.z, 'creature');
         w.effects.burst(hitPoint, 0xffb070, 0.7, 0.15);
@@ -672,6 +697,36 @@ export class Bolts {
       }
       this.remove(i, hitPoint);
     }
+  }
+
+  /**
+   * A bolt that went from where it is to (`x`, `y`, `z`) this step past a rolling player: when that stretch came
+   * within `dodge.reach` of the middle of the player's body, the roll beat it, and whoever fired it is told
+   * once (`Bolt.dodged`). Arithmetic on numbers alone: a bolt in the air is asked this every frame it flies.
+   */
+  private noteDodge(b: Bolt, w: BoltWorld, x: number, y: number, z: number): void {
+    const d = w.dodge;
+    if (!d) return;
+    const p = w.player.pos;
+    // The middle of a standing body, as everything that aims at the player aims at it.
+    const mx = p.x;
+    const my = p.y + 0.9;
+    const mz = p.z;
+    const ax = b.pos.x;
+    const ay = b.pos.y;
+    const az = b.pos.z;
+    const sx = x - ax;
+    const sy = y - ay;
+    const sz = z - az;
+    const len2 = sx * sx + sy * sy + sz * sz;
+    let t = len2 > 1e-9 ? ((mx - ax) * sx + (my - ay) * sy + (mz - az) * sz) / len2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const dx = ax + sx * t - mx;
+    const dy = ay + sy * t - my;
+    const dz = az + sz * t - mz;
+    if (dx * dx + dy * dy + dz * dz > d.reach * d.reach) return;
+    b.dodged = true;
+    d.onDodge(b.source);
   }
 
   /**

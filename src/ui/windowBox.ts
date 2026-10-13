@@ -55,7 +55,8 @@ export const WINDOW_MIN: Readonly<Record<string, Readonly<Size>>> = Object.freez
   appearance: { w: 680, h: 360 },
   backpack: { w: 680, h: 440 },
   shipedit: { w: 680, h: 420 },
-  force: { w: 680, h: 280 },
+  // The Skills tab holds the character's progress above its slots, so it wants the backpack's height.
+  force: { w: 680, h: 440 },
   // The deeds a player can buy, each row a name with its size, its lots and its upkeep.
   housing: { w: 680, h: 340 },
   // The props: a folding group per kind over a grid of pictures, so it wants the room the wardrobe's

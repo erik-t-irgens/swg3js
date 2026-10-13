@@ -23,6 +23,7 @@ import { breathReport, maxBreath, newBreath, resetBreath, stepBreath as spendBre
 import { LAVA_HARM, newLavaHold, resetLavaHold, stepLavaHold, type LavaHold } from '../world/lavaHarmMath.ts';
 import { lavaSinkReport, newLavaSink, resetLavaSink, stepLavaSink as spendLavaSink, tuneLavaSink, type LavaSink, type LavaSinkTune } from './lavaSinkMath.ts';
 import { PlayerStats } from './playerStats.ts';
+import { newHarm, newHarmAsk, takeHarm, type HarmAsk, type HarmKind } from './harmRule.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -1539,12 +1540,30 @@ export class Player {
   god = false;
 
   /**
-   * Health off for a blow; false when it was refused (god mode), so the caller shows no red flash and
-   * no arc for a blow that did nothing. `force` is the console's own `kill('player')`, which still kills.
+   * Last stand (Fortitude 75): armed by the game as a fight opens once the skill has reached it, and spent by the
+   * first blow or fall that would have killed, which leaves one point of health instead (`harmRule.ts`).
    */
-  takeDamage(amount: number, force = false): boolean {
+  lastStand = false;
+  /** Told of every point of health really lost, and what took it: a blow, a fall, the player's own blast, or the surroundings. */
+  onHarm: ((lost: number, kind: HarmKind) => void) | null = null;
+  /** Told of a blow a roll's first moments dodged (`roll.iframes`), naming whatever struck it, or null. */
+  onDodge: ((source: unknown) => void) | null = null;
+  /** Told of a landing roll that saved some of a fall: how far the fall was, in metres, and the health it kept. */
+  onRolled: ((fell: number, saved: number) => void) | null = null;
+  /** The harm rule's question and answer, kept: a blow can land every frame (a held flame). */
+  private readonly harmAsk: HarmAsk = newHarmAsk();
+  private readonly harmAnswer = newHarm();
+
+  /**
+   * Health off for a blow; false when it was refused (god mode, or a roll's dodge), so the caller shows no red
+   * flash and no arc for a blow that did nothing. `force` is the console's own `kill('player')`, which still
+   * kills. `kind` is what it is -- a blow from something, a fall, the player's own blast or cloud, or the
+   * surroundings -- and `source` whatever struck, for a dodge to name (`harmRule.ts` is the whole of it, the
+   * glue included: `takeHarm` reads the roll and last stand off this body and writes the answer back).
+   */
+  takeDamage(amount: number, force = false, kind: HarmKind = 'blow', source: unknown = null): boolean {
     if (this.god && !force) return false;
-    this.hp = Math.max(0, this.hp - amount * this.damageTaken);
+    if (!takeHarm(this, amount, force, kind, source, this.harmAsk, this.harmAnswer)) return false;
     this.regenDelay = 5;
     return true;
   }
@@ -2269,7 +2288,9 @@ export class Player {
       if (ev.rolled) this.playOnce(`BOTH_ROLL_${ev.rolled}`, 0.05);
       if (this.jka.rolling) this.crouching = false;
       if (ev.landed !== null && ev.landed >= 2 && !ev.rolled && !this.saber.busy) this.playOnce(this.jumpClip('LAND', ev.forceLanded), 0.06);
-      if (ev.damage > 0) this.takeDamage(ev.damage);
+      if (ev.damage > 0) this.takeDamage(ev.damage, false, 'fall');
+      // A landing roll that kept some of a fall's harm off: what Acrobatics is paid for, outside a fight as well.
+      if (ev.rollSaved > 0) this.onRolled?.(ev.fell, ev.rollSaved);
     } else if (this.grounded) {
       this.vel.x = move.x * speed;
       this.vel.z = move.z * speed;

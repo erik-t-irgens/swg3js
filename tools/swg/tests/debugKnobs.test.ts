@@ -177,13 +177,14 @@ function body(text: string, signature: string): string {
 
   // The seam: every way the player is hurt ends in takeDamage, and it asks first.
   const player = src('player/player.ts');
-  const take = body(player, 'takeDamage(amount: number, force = false): boolean');
+  // What the blow is and what struck it ride along (progress: a roll's dodge names its source), after `force`.
+  const take = body(player, "takeDamage(amount: number, force = false, kind: HarmKind = 'blow', source: unknown = null): boolean");
   ok(take.trimStart().startsWith('{\n    if (this.god && !force) return false;'), '14: Player.takeDamage asks god mode before anything else, and says the blow was refused');
   ok(/^\s+god = false;$/m.test(player) && !/god:\s/.test(src('core/settings.ts')), '14: the flag lives on the player and is never saved');
   const all = main.split('\n');
   const sites = all.map((l, i) => ({ l, next: all[i + 1] ?? '' })).filter((s) => /\.takeDamage\(/.test(s.l));
   const unguarded = sites.filter(({ l, next }) => {
-    if (/if \((player|p)\.takeDamage\(/.test(l) || /takeDamage\(1e9, true\)/.test(l) || /=> this\.player\.takeDamage\(dmg\)/.test(l)) return false;
+    if (/if \((player|p)\.takeDamage\(/.test(l) || /takeDamage\(1e9, true\)/.test(l) || /=> this\.player\.takeDamage\(dmg[,)]/.test(l)) return false;
     // A blow kept in a name first: the very next line must flash on that name and nothing else.
     const named = /const (took|jolted) = /.exec(l);
     return !(named && new RegExp(`^\\s*if \\(${named[1]}\\) this\\.hurtFrom\\(`).test(next));

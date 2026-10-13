@@ -109,6 +109,8 @@ export interface WildSpawn {
   id: string;
   /** Its own creature's numbers over its body's (`overridesOf`, as a standing person's are). */
   overrides?: PersonOverrides;
+  /** The creature it is, which the body only wears: what the player's progress keys on. */
+  creature?: string;
   /** Its own creature's weapons, and the groups those names stand for. */
   weapons?: readonly string[];
   weaponGroups?: Readonly<Record<string, readonly string[]>> | null;
@@ -694,6 +696,7 @@ export class WildLife {
       seed: site.seed ^ i,
       id,
       overrides: overridesOf(c),
+      creature: who ?? undefined,
       weapons: weaponsOf(c),
       weaponGroups: this.manifest?.weaponGroups ?? null,
       respawn: rec.wait,

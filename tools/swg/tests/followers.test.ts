@@ -433,9 +433,10 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   ok(may > driven && may < books, 'whether the wire will let it go is asked before its lair or its row lets go of it');
   ok(leave > books && leave < add, 'and it leaves the wire before it follows, never after');
   // A corvette's ticket taker's own answer is one more argument (`taker`), and a story person's post one more
-  // after it (`atPost`, which the companion shares, following by the story's word), which leave these as they
-  // were; every path builds them in `talkOptionsFor`.
-  ok(/return talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven(, taker(, this\.storyStands\.castOf\(m\) !== null( \|\| this\.companion\.isBody\(m\))?)?)?\);/.test(main) && !/[^.]talkOptions\(t?\.?following, this\.world/.test(main.replace(/return talkOptions\(following, this\.world/, '')), "the conversation offers no 'Follow me' to a body another browser keeps, and says why, on every path");
+  // after it (`atPost`, which the companion shares, following by the story's word), and a trainer's own answer one
+  // more after that (`trainer`), which leave these as they were; every path builds them in `talkOptionsFor`.
+  ok(/return talkOptions\(following, this\.world\.followers\.full, \[\], m\.isDriven, taker, this\.storyStands\.castOf\(m\) !== null \|\| this\.companion\.isBody\(m\), trainer\);/.test(main) && !/[^.]talkOptions\(t?\.?following, this\.world/.test(main.replace(/return talkOptions\(following, this\.world/, '')), "the conversation offers no 'Follow me' to a body another browser keeps, and says why, on every path");
+  ok(/const trainer = this\.isTrainer\(m\);/.test(body(main, /private talkOptionsFor\(m: Mobile, following: boolean\): TalkOption\[\] \{/)), "and a trainer's own answer is offered to whoever the trainers' table names, on every path");
   const unshare = body(read('world/mobiles/manager.ts'), /unshare\(m: Mobile\): boolean \{/);
   ok(/if \(!this\.mayUnshare\(m\)\) return false;/.test(unshare) && /net\.leave\(id\)/.test(unshare) && /m\.unshare\(\);/.test(unshare), "the manager's own unshare refuses what may not leave, says it walked off and lets go of its name");
   const mayUnshare = body(read('world/mobiles/manager.ts'), /mayUnshare\(m: Mobile\): boolean \{/);
@@ -449,13 +450,13 @@ function order(over: Partial<FollowOrder> = {}): FollowOrder {
   const shot = body(main, /onPlayerHit: \(dmg, from, source\) => \{/);
   for (const [what, text, hurts] of [
     ['a blow', wrapper, 'innerDamage(amount, from)'],
-    ['a shot', shot, 'player.takeDamage(dmg)'],
+    ['a shot', shot, 'player.takeDamage(dmg'],
   ] as const) {
     const guard = text.indexOf('if (isFollowerSource(source)) return;');
     ok(guard > 0 && guard < text.indexOf(hurts), `a follower's stray ${what.slice(2)} that finds the player lands on nothing, asked before anything is taken off`);
     ok(text.indexOf('this.world.followers.assist(source)') > text.indexOf(hurts), `and whatever lands ${what} on the player is handed to the followers`);
   }
-  ok((main.match(/this\.world\.followers\.assist\(source\)/g) ?? []).length === 2 && /this\.world\.followers\.assist\(hit\)/.test(body(main, /this\.world\.watchPlayerHits\(\(hit, amount, killed\) => \{/)), 'those two, and whatever the player strikes, are the only ways a foe reaches them');
+  ok((main.match(/this\.world\.followers\.assist\(source\)/g) ?? []).length === 2 && /this\.world\.followers\.assist\(hit\)/.test(body(main, /this\.world\.watchPlayerHits\(\(hit, amount, killed(, kind)?\) => \{/)), 'those two, and whatever the player strikes, are the only ways a foe reaches them');
   // What those two are handed: a bolt says whose it was, a person's shots and spit are its own, and a
   // creature's unprovoked bite -- the one blow that reaches no `damage` of its own -- is carried down to the
   // player's record with its biter, through the record's own `damage` so the wrapper above hears it.

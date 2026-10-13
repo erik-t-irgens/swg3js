@@ -211,6 +211,7 @@ export const DEMOLITIONS: DisciplineDef = {
       name: 'Improvised Ordnance',
       text: 'Craft field grenades from salvage.',
       note: 'a stand-in until crafting is decided: each grenade holds two throws, refilled one at a time',
+      standIn: 'a stand-in until crafting is decided: each grenade holds two throws',
       requires: ['demo.ordnance.3'],
       grants: [{ stat: 'grenade.stock', op: 'set', rule: 'stock' }],
     }),

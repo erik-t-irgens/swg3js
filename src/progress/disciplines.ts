@@ -45,6 +45,8 @@ export interface NodeDef {
   text: string;
   /** What this pass makes of it, where that differs from the doc's words or waits on something. */
   note?: string;
+  /** Said under the node on the page: what it is in this pass stands in for the doc's until something else is built. */
+  standIn?: string;
   /** The nodes it needs owned: the Novice, or the node above it in its branch. The Master's three branches are its tier's rule. */
   requires: string[];
   grants: GrantDef[];
@@ -75,6 +77,9 @@ export const TRAINERS: Record<string, string[]> = { trainer_commando: ['demoliti
  * `tools/swg/core3ref/statics.json` stand one (Corellia one, Rori three, Talus two, Tatooine three of the nine).
  */
 export const TRAINER_WORLDS: Record<string, string[]> = { trainer_commando: ['corellia', 'rori', 'talus', 'tatooine'] };
+
+/** What the page and the line call each kind of trainer [ours]. */
+export const TRAINER_NAMES: Record<string, string> = { trainer_commando: 'commando trainer' };
 
 const NODES = new Map<string, NodeDef>();
 for (const d of DISCIPLINES) for (const n of d.nodes) NODES.set(n.id, n);

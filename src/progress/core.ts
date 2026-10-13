@@ -213,3 +213,15 @@ export function coreGrants(rec: ProgressRecord, rules: ProgressRules): SourcedGr
 export function ratingsOf(rec: ProgressRecord | null, rules: ProgressRules): number[] {
   return BUILT_CORE.map((s) => ratingOf(rec?.core?.[s] ?? 0, rules));
 }
+
+/** Whether a skill's rating has reached a mark (a milestone's 25, 50, 75 or 100). */
+export function reached(rec: ProgressRecord | null, skill: CoreSkill, at: number, rules: ProgressRules): boolean {
+  return ratingOf(rec?.core?.[skill] ?? 0, rules) >= at;
+}
+
+/** The milestones a skill passed going from one rating to another, lowest first. */
+export function milestonesCrossed(skill: CoreSkill, from: number, to: number): Milestone[] {
+  const def = coreDef(skill);
+  if (!def || to <= from) return [];
+  return def.milestones.filter((m) => m.at > from && m.at <= to);
+}

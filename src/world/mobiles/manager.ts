@@ -65,6 +65,8 @@ export interface SpawnOpts {
   scale?: number;
   inside?: boolean;
   overrides?: MobileSpawn['overrides'];
+  /** The creature it stands for, where the spawner knows it (`MobileSpawn.creature`): its row's own. */
+  creature?: string;
   heading?: number;
   /**
    * One number everything this spawn would otherwise roll is drawn from (src/world/spawnSeed.ts):
@@ -524,6 +526,7 @@ export class MobileManager {
       overrides: opts.overrides,
       perch,
       ...(opts.name ? { name: opts.name } : {}),
+      ...(opts.creature ? { creature: opts.creature } : {}),
     };
     const m = new Mobile(spawn, {
       physics: this.deps.physics,

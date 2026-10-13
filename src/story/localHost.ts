@@ -102,16 +102,24 @@ export interface LocalWallet {
   spend(n: number, then: () => void): void;
   /** One thing into the backpack; false for one owned already, which is said rather than given twice. */
   item(kind: 'wear' | 'weapon', id: string): boolean;
+  /**
+   * A quest's bonus (`PayOrder.bonus`) into the skills used while it ran, through whoever holds the character's
+   * progress; false when nobody here may pay it. Absent, a bonus pays nothing and says so to nobody.
+   */
+  bonus?(order: PayOrder): boolean;
 }
 
 /**
  * One payment of the story's, out of this browser's own purse and backpack: what the game's `pay` dep is. A
  * price (`charge`) is taken only when the money is there and really moves, and false says it did not, which
  * the host turns into "could not be spent" rather than "Spent"; credits are put in; a thing goes into the
- * backpack. Never into or out of a purse a server keeps, where only its admin may put credits in and only its
- * own answer may take them out.
+ * backpack; a quest's bonus goes to the character's progress through the wallet's own `bonus`. Never into or
+ * out of a purse a server keeps, where only its admin may put credits in and only its own answer may take them
+ * out.
  */
 export function payLocally(order: PayOrder, w: LocalWallet): boolean {
+  // A quest's bonus goes to the character's progress, never to a purse or a backpack.
+  if (order.bonus) return w.bonus?.(order) ?? true;
   if (order.charge) {
     if (w.serverKeeps() || w.credits() < order.charge) return false;
     let taken = false;

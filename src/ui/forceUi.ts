@@ -1,6 +1,7 @@
-// The Skills tab of the inventory: every skill the class has (a Jedi's Force powers, a Bounty
-// Hunter's gadgets), with the slot it sits in (the number keys 1 to 6), so the player picks which
-// to carry. The choice is kept with the character.
+// The Skills tab of the inventory: the character's progress first (its own section, `progressUi.ts`, which the
+// game draws into the host this keeps at the top of the tab's body), then every skill the class has (a Jedi's
+// Force powers, a Bounty Hunter's gadgets), with the slot it sits in (the number keys 1 to 6), so the player
+// picks which to carry. The choice is kept with the character.
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { escapeHtml } from './catalogue';
 import { POWERS, SLOT_COUNT, type PowerDef } from '../combat/forcePowers';
@@ -8,6 +9,12 @@ import { POWERS, SLOT_COUNT, type PowerDef } from '../combat/forcePowers';
 export class ForceUi {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
+  /** Where the Progress section is drawn, first in the tab's body: the game hands it to `ProgressUi.mount`. */
+  readonly progressHost: HTMLElement;
+  /** Where the number slots are drawn, under it. */
+  private readonly slots: HTMLElement;
+  /** Drawn first on every render of the tab: the Progress section, which the game draws. */
+  onRender: () => void = () => {};
   /** The skills on offer: the Force powers, or the gadgets. */
   defs: PowerDef[] = POWERS;
   /** The skill in each slot, by id, or null for an empty slot. */
@@ -42,13 +49,18 @@ export class ForceUi {
       <div class="wardrobe-panel">
         <div class="wardrobe-header">
           ${tabStrip(INVENTORY_TABS, 'force')}
-          <span class="count">the number keys 1 to 6 use what is in their slot</span>
+          <span class="count">your progress, and the number keys 1 to 6 use what is in their slot</span>
           <button class="close">Close <b>I</b></button>
         </div>
         <div class="wardrobe-main"><div class="wardrobe-body weapons-body"></div></div>
       </div>`;
     parent.appendChild(this.root);
     this.body = this.root.querySelector('.weapons-body')!;
+    this.progressHost = document.createElement('div');
+    this.progressHost.className = 'progress-host';
+    this.slots = document.createElement('div');
+    this.slots.className = 'skills-slots';
+    this.body.append(this.progressHost, this.slots);
     this.root.querySelector('.close')!.addEventListener('click', () => this.dismiss());
     wireTabs(this.root, 'force', (id) => this.onTab(id));
     this.root.addEventListener('click', (e) => {
@@ -57,6 +69,7 @@ export class ForceUi {
   }
 
   render(): void {
+    this.onRender();
     const slotOf = (id: string) => this.loadout.indexOf(id);
     const rows = this.defs.map((p) => {
       const at = slotOf(p.id);
@@ -71,8 +84,8 @@ export class ForceUi {
       const p = id ? this.defs.find((x) => x.id === id) : null;
       slots.push(`<span class="hand-slot"><b>${i + 1}</b> ${p ? escapeHtml(p.name) : '<em>empty</em>'}</span>`);
     }
-    this.body.innerHTML = `<div class="in-hands">${slots.join('')}</div>${rows.join('')}`;
-    for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-power]')) {
+    this.slots.innerHTML = `<div class="in-hands">${slots.join('')}</div>${rows.join('')}`;
+    for (const b of this.slots.querySelectorAll<HTMLButtonElement>('button[data-power]')) {
       b.addEventListener('click', () => {
         const id = b.dataset.power!;
         const slot = Number(b.dataset.slot);

@@ -14,6 +14,11 @@
 export const PURSE_TUNE = {
   /** What a character has with no server at all, the first time it is asked. Matches the server's own. */
   start: 25000,
+  /**
+   * How long a spend asked of a server counts as still waiting on its answer (`busy`), in milliseconds: an
+   * answer lost with a dropped line never comes, and nothing should wait on it for the rest of the session.
+   */
+  answerWait: 15000,
 };
 
 export interface PurseDeps {
@@ -42,8 +47,8 @@ export class Purse {
   known = false;
   /** The last thing the server refused, for the console. */
   lastWhy = '';
-  /** What a spend was waiting on, so the answer can be acted on when it comes. */
-  private waiting: { what: string; then: () => void } | null = null;
+  /** What a spend was waiting on, so the answer can be acted on when it comes, and when it was asked. */
+  private waiting: { what: string; then: () => void; at: number } | null = null;
 
   attach(deps: PurseDeps): void {
     this.deps = deps;
@@ -67,6 +72,16 @@ export class Purse {
     this.waiting = null;
   }
 
+  /**
+   * Whether a spend is still waiting on the server's answer. Only one waits at a time, so a second spend asked
+   * meanwhile takes the first one's place and the first one's `then` never runs: whatever must not lose a fee that
+   * way (giving a node back) asks this first. Never true with no server answering, where a spend is answered at
+   * once, nor past `answerWait`, since an answer lost with a dropped line never comes.
+   */
+  busy(): boolean {
+    return this.waiting !== null && !!this.deps?.shared() && Date.now() - this.waiting.at < PURSE_TUNE.answerWait;
+  }
+
   /** Ask the server what this character has. Does nothing with no server: the number is already here. */
   ask(): void {
     if (this.deps?.shared()) this.deps.send({ t: 'purse', do: 'ask' });
@@ -86,7 +101,7 @@ export class Purse {
       return;
     }
     if (this.deps?.shared()) {
-      this.waiting = { what, then };
+      this.waiting = { what, then, at: Date.now() };
       this.deps.send({ t: 'purse', do: 'spend', credits: n, what });
       return;
     }

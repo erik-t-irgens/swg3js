@@ -266,6 +266,11 @@ export interface MobileSpawn {
    * left out is the body's own; `level` is only ever shown.
    */
   overrides?: { hp?: number; damage?: number; aggression?: Aggression; level?: number; ranged?: { range: number; additive: boolean } | null };
+  /**
+   * The creature it stands for, where the one standing it knows: its row's own (a standing person's, a lair's, one
+   * of ours), which many bodies may be drawn as and one body may draw many of. Left out, its entry's id.
+   */
+  creature?: string;
   /** The name it goes by, where it is not its entry's (a story's person). */
   name?: string;
   /**
@@ -404,8 +409,15 @@ export class Mobile implements Living, NpcSubject {
   blow: number;
   private readonly baseHp: number;
   private readonly baseBlow: number;
-  /** Its level, where its own creature or its body's entry has one: the nameplate shows it and nothing else reads it. */
+  /** Its level, where its own creature or its body's entry has one: the nameplate and the player's encounters read it. */
   readonly level: number | null;
+  /**
+   * What creature it is, as against which body it wears: its row's own creature where whoever stood it knew it
+   * (`MobileSpawn.creature`), else its entry's id. The player's progress keys diminishing returns and a first win
+   * on it, never on the body, which many creatures share, nor on the world's name for it, which every body has
+   * its own of. Nothing else reads it.
+   */
+  readonly creature: string;
   /** The ranged attack its own numbers give it, or null for none: its row's creature's where it has one, else its body's. */
   private readonly rangedStat: { range: number; additive: boolean } | null;
   dead = false;
@@ -901,6 +913,7 @@ export class Mobile implements Living, NpcSubject {
     this.hp = this.maxHp;
     this.blow = scaledByDifficulty(this.baseBlow);
     this.level = spawn.overrides?.level ?? e.stats?.level ?? null;
+    this.creature = spawn.creature || e.id;
     this.rangedStat = spawn.overrides && spawn.overrides.ranged !== undefined ? spawn.overrides.ranged : (e.stats?.ranged ?? null);
     this.heading = spawn.heading;
     this.facing = spawn.heading;

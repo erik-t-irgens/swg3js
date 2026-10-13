@@ -73,7 +73,7 @@ const ACTION_LABELS: Record<Action, string> = {
   saberStyle: 'Next saber style / blaster',
   mount: 'Mount, dismount, elevator',
   ship: 'Ship menu (in a ship)',
-  switchClass: 'Switch class',
+  switchClass: 'Switch class (developer)',
   map: 'Map',
   help: 'Help',
   inventory: 'Inventory',

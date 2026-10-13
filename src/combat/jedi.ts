@@ -7,6 +7,7 @@ import { sabers } from '../audio/saberSounds.ts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
 import { nearestInCone, type ConeQuery } from './targets';
 import { BLADE_RADIUS, BladePath, playerStrike, strikeSweep } from './sweep.ts';
+import { strikeAs } from './strikeTag.ts';
 import { BrushClock, SABER_HIT, bodyTeleported, brushDamage, noteBrush, saberSwingStart, type HitLedger } from './saberHit.ts';
 import { roomFrame } from '../vehicles/surfaceRoom.ts';
 import { loosePropAhead, shoveLooseProps } from '../world/looseProps.ts';
@@ -591,7 +592,7 @@ export class JediKit implements Kit {
         const hurt = (drain ? 20 : 30) * dt;
         // The source is what makes it fight back: without it a defensive or skittish body would
         // simply stand there while it was burned.
-        target.damage(hurt, player.pos, 0, world.playerTarget);
+        strikeAs('force', target, hurt, player.pos, 0, world.playerTarget);
         if (drain) player.heal(hurt * 0.6);
         if (!drain && target.grounded && Math.random() < dt * 1.2) {
           tmp2.copy(target.pos).sub(player.pos).setY(0).normalize();
@@ -659,7 +660,7 @@ export class JediKit implements Kit {
         tmp2.copy(player.pos).addScaledVector(tmp, 3.2 + g.halfHeight);
         tmp2.y = player.pos.y + 1.6 + g.halfHeight;
         g.holdAt?.(tmp2, dt);
-        g.damage(6 * dt, player.pos, 0, world.playerTarget);
+        strikeAs('force', g, 6 * dt, player.pos, 0, world.playerTarget);
         tmp2.copy(g.pos).y += g.halfHeight;
         ctx.effects.flash(tmp2, 0xc0b0ff, 4, 5, 0.08);
         // The choke, on the body being choked: the client's own effect for this power, and it
@@ -855,7 +856,7 @@ export class JediKit implements Kit {
       if (d > 16) continue;
       tmp2.normalize();
       if (d > 3 && tmp2.dot(tmp) < 0.35) continue;
-      c.damage(sign > 0 ? 10 : 4, player.pos, 0, world.playerTarget);
+      strikeAs('force', c, sign > 0 ? 10 : 4, player.pos, 0, world.playerTarget);
       // Pulled, it comes to the player's feet: the shove scales with how far it is.
       tmp2.multiplyScalar(sign);
       c.knock?.(tmp2, sign > 0 ? 22 * (1 - d / 18) + 6 : 4 + d * 1.1);
@@ -889,7 +890,7 @@ export class JediKit implements Kit {
       const d = tmp2.length();
       if (d > 10) continue;
       tmp2.setY(0).normalize();
-      c.damage(25 * (1 - d / 12) + 5, player.pos, 0, world.playerTarget);
+      strikeAs('force', c, 25 * (1 - d / 12) + 5, player.pos, 0, world.playerTarget);
       c.knock?.(tmp2, 26 * (1 - d / 12) + 8);
     }
     for (const sp of world.vehicles) {

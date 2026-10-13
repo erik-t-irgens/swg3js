@@ -630,6 +630,35 @@ export function recordText(rec: ProgressRecord): string {
   return JSON.stringify(rec);
 }
 
+/**
+ * A copy of a record that changes nothing in it: every table a table of its own with no prototype, every list
+ * and every row a list of its own, a later wave's section copied as plain data. What a host works a batch out
+ * on (so each trim it writes is decided against the list as the changes before it left it) and what a batch is
+ * tried on before the record held takes it, without a round trip through `cleanRecord`, which would repair.
+ */
+export function copyRecord(rec: ProgressRecord): ProgressRecord {
+  const out: ProgressRecord = { ...rec, core: table(rec.core), pools: table(rec.pools), nodes: table<NodeRec>() };
+  for (const id of Object.keys(rec.nodes)) out.nodes[id] = { at: rec.nodes[id].at, xp: rec.nodes[id].xp };
+  if (rec.earned) out.earned = table(rec.earned);
+  if (rec.gone) out.gone = table(rec.gone);
+  if (rec.seen) out.seen = [...rec.seen];
+  if (rec.recent) {
+    const r = table<[number, number]>();
+    for (const k of Object.keys(rec.recent)) r[k] = [rec.recent[k][0], rec.recent[k][1]];
+    out.recent = r;
+  }
+  if (rec.paid) out.paid = table(rec.paid);
+  if (rec.bonus) out.bonus = [...rec.bonus];
+  if (rec.log) out.log = rec.log.map((row) => [row[0], row[1], row[2], row[3]] as LogRow);
+  if (rec.perks) out.perks = [...rec.perks];
+  for (const k of Object.keys(rec)) {
+    if (KNOWN.includes(k)) continue;
+    const kept = plainCopy(rec[k], 0, { left: SECTION_NODES });
+    if (kept !== undefined) out[k] = kept;
+  }
+  return out;
+}
+
 /** What `__debug.progress()` and a server's status page say of a record. */
 export function recordSummary(rec: ProgressRecord | null): Record<string, unknown> | null {
   if (!rec) return null;

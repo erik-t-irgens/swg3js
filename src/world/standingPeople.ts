@@ -166,6 +166,8 @@ export interface PersonSpawn {
   essential: boolean;
   /** Its own creature's numbers over its body's; absent where the pack says nothing. */
   overrides?: PersonOverrides;
+  /** The creature it is stood as this life (`PersonPlan.who`), which the body only wears: what the player's progress keys on. */
+  creature?: string;
   /** The mood it stands in: its idle, where a species rig has a branch for it. */
   mood?: string;
   /** Its own creature's weapons, first and second, and the groups those names stand for. */
@@ -912,6 +914,7 @@ export class StandingPeople {
         seed: seedOfRow(r, i),
         essential,
         overrides: overridesOf(who.creature),
+        creature: who.who || undefined,
         mood: who.mood ?? undefined,
         weapons: weaponsOf(who.creature),
         weaponGroups: this.extras.weaponGroups ?? null,
@@ -1121,6 +1124,26 @@ export class StandingPeople {
   /** Whether the rows have been carried into the world's frame yet, which everything the people of ours ask needs. */
   get inWorld(): boolean {
     return this.framed;
+  }
+
+  /**
+   * The nearest row standing a kind of person (`test` on the row's own creature), measured across the ground
+   * from a point to where its body stands in the world's frame: what the Skills tab says of the nearest trainer
+   * of a discipline on this world, and marks as a waypoint. Null when no row stands one, or the rows are not in
+   * the world's frame yet. Walks the rows; asked on a page's render, never in a frame.
+   */
+  nearestOf(test: (who: string) => boolean, x: number, z: number): { x: number; y: number; z: number; key: string; who: string; inside: boolean; metres: number } | null {
+    if (!this.framed) return null;
+    let best: { x: number; y: number; z: number; key: string; who: string; inside: boolean; metres: number } | null = null;
+    for (let i = 0; i < this.rows.length; i++) {
+      const r = this.rows[i];
+      if (!test(r.who)) continue;
+      const st = this.stands[i];
+      const d = Math.hypot(st.x - x, st.z - z);
+      if (best && d >= best.metres) continue;
+      best = { x: st.x, y: st.y, z: st.z, key: r.key ?? `row${i}`, who: r.who, inside: st.inside, metres: d };
+    }
+    return best;
   }
 
   /**
