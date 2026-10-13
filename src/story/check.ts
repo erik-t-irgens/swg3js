@@ -46,15 +46,29 @@
 // own body's clip list in hand (`clips`) a clip that body has not got is warned about. `cues` are warned
 // about as kept and not played yet. A `choice` step that no answer ever chooses can never be done (rule 3).
 //
+// Rule 1 reaches the permanent placements too, when their rows are handed in (`placements`, read out of the
+// build's two files by the command line): an object whose template is `place/<id>` names a row on its world,
+// one layer only (a world edit wins a clash and the story's row never stands), that the game really stands
+// there (never on a world it has not got, never in the dungeons' world of copies, never a building in a space
+// zone: the row says why, `never`), and under `OBJECT_FIND` of its `near`, which is how far round it the game
+// looks -- strictly under, as `LayoutStreamer.nearestPlaced` finds, and measured there from the player with
+// the height counting half again, which the checker cannot know, so a `near` at the very edge is refused.
+// And an object written with the template of a thing a permanent row stands near its point is warned about:
+// a permanent row is filed under its own key, never its template, so the game finds the snapshot's own thing
+// there or nothing, and what was meant is `place/<id>`. Without the rows, none of it is checked.
+// `checkPlacements` names an id held by both layers once, whether or not any object names it.
+//
 // Each problem names its file and line. A warning is something the owner may mean; an error is something
 // that would leave a player stuck or the rules broken.
 
 import { CARD_KINDS, type DocSrc } from './doc.ts';
 import { readSlot } from './gestures.ts';
 import { lineAt } from './jsonc.ts';
+import type { PlacementLayer } from './placementPath.ts';
+import { placementIdOf, placementKey } from './placements.ts';
 import { reachFrom, stepsOutOf } from './quests.ts';
 import { scriptNames } from './scripts.ts';
-import { joinSets, stepPath, type ActionDef, type CondJson, type Issue, type LoadResult, type Place, type QuestDef, type StepDef, type StorySet } from './set.ts';
+import { OBJECT_FIND, joinSets, stepPath, type ActionDef, type CondJson, type Issue, type LoadResult, type Place, type QuestDef, type StepDef, type StorySet } from './set.ts';
 import { isLevelSignal, raisersFor, waitedOn } from './signals.ts';
 import type { TalkDef } from './talkSet.ts';
 import { readiness, STEP_TYPES } from './vocab.ts';
@@ -75,12 +89,62 @@ export interface CheckOptions {
   others?: readonly StorySet[];
   /** The clips the player's own body has (a species rig's list), when this machine has one: a gesture clip not in it is warned about. */
   clips?: ReadonlySet<string> | null;
+  /**
+   * The permanent placements, by world and then by row id, each id with every layer that holds it (two is a
+   * clash). Without them an object naming `place/<id>` is not checked against anything.
+   */
+  placements?: PlacementsKnown | null;
 }
+
+/** One permanent placement's row as the checker knows it. */
+export interface PlacementRef {
+  /** Where it stands on the ground, `[x, z]` in its file's frame: raw on a planet and the game's own in a space zone, which is the frame a story's `near` is written in there. */
+  at: [number, number];
+  layer: PlacementLayer;
+  /** The file it is in, as the command line shows it, and the line its row is on. */
+  file: string;
+  line: number;
+  /** The object template of the thing it stands, where that is known (a props row's thing, a building's deed); read for a warning only. */
+  template?: string | null;
+  /**
+   * Why the game never stands this row, in words, or nothing when it does: its world is not one the game has,
+   * is the dungeons' world of copies (`PermanentLayer` stands nothing there), or is a space zone and the row a
+   * building (refused there as a house is).
+   */
+  never?: string | null;
+}
+
+/** Every permanent placement's row, by world and then by id; an id two layers hold has two refs. */
+export type PlacementsKnown = ReadonlyMap<string, ReadonlyMap<string, readonly PlacementRef[]>>;
 
 export interface CheckResult {
   errors: Issue[];
   warnings: Issue[];
-  counts: { quests: number; steps: number; areas: number; objects: number; talks: number; nodes: number; cast: number; docs: number; signals: number; unresolved: number; needs: number; later: number };
+  counts: { quests: number; steps: number; areas: number; objects: number; talks: number; nodes: number; cast: number; docs: number; signals: number; unresolved: number; needs: number; later: number; placed: number };
+}
+
+/** The row that stands for an id: the world edit's where both layers hold it, as the game merges them (`mergeLayers`). */
+function standingRef(refs: readonly PlacementRef[]): PlacementRef {
+  return refs.find((r) => r.layer === 'world') ?? refs[0];
+}
+
+/**
+ * Every id that both layers hold on one world, once, at the story layer's row: the game stands the world
+ * edit and skips the story's as a clash, so the story's row is a row nothing stands (rule 1). Answered
+ * whatever names it, since it is the files' fault and not one set's; and not answered where neither row
+ * would stand anyway (`never` on both), which the files' own notes already say.
+ */
+export function checkPlacements(placements: PlacementsKnown): Issue[] {
+  const out: Issue[] = [];
+  for (const [world, ids] of placements) {
+    for (const [id, refs] of ids) {
+      if (refs.length < 2 || refs.every((r) => r.never)) continue;
+      const story = refs.find((r) => r.layer === 'story') ?? refs[0];
+      const edit = standingRef(refs);
+      out.push({ level: 'error', file: story.file, line: story.line, message: `${id} is in both files on ${world}: the world edit's row (${edit.file}:${edit.line}) stands and this one never does; give one of them another id`, rule: 1 });
+    }
+  }
+  return out;
 }
 
 /** Every condition's quest, step and area references, walked. */
@@ -251,7 +315,8 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
   const cat = opts.catalogue ?? null;
   const clips = opts.clips ?? null;
   const scripts = new Set(scriptNames());
-  const counts = { quests: 0, steps: 0, areas: Object.keys(set.areas).length, objects: Object.keys(set.objects).length, talks: 0, nodes: 0, cast: Object.keys(set.cast ?? {}).length, docs: Object.keys(set.docs ?? {}).length, signals: 0, unresolved: 0, needs: 0, later: set.later.length };
+  const placements = opts.placements ?? null;
+  const counts = { quests: 0, steps: 0, areas: Object.keys(set.areas).length, objects: Object.keys(set.objects).length, talks: 0, nodes: 0, cast: Object.keys(set.cast ?? {}).length, docs: Object.keys(set.docs ?? {}).length, signals: 0, unresolved: 0, needs: 0, later: set.later.length, placed: 0 };
   const signalsSeen = new Set<string>();
   /** Every choice a `choose(q, s, option)` anywhere makes, as `<quest>#<step>`: a choice step none makes can never be done. */
   const chosen = new Set<string>();
@@ -830,6 +895,38 @@ export function checkSet(input: LoadResult | StorySet, opts: CheckOptions = {}):
   for (const id of Object.keys(set.objects)) {
     const o = set.objects[id];
     if (worlds && !worlds.has(o.world)) errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/world'), message: `${o.world} is not a world this game has`, rule: 7 });
+    // ---- rule 1 for the permanent placements: a `place/<id>` names a row that stands where `near` says ----
+    const placeId = placementIdOf(o.template);
+    if (placeId !== null) counts.placed++;
+    if (!placements) continue;
+    const onWorld = placements.get(o.world);
+    if (placeId !== null) {
+      const refs = onWorld?.get(placeId);
+      if (!refs?.length) {
+        errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/template'), message: `${o.template} names no permanent placement on ${o.world}: neither of its two files has a row ${placeId}`, rule: 1 });
+        continue;
+      }
+      const row = standingRef(refs);
+      if (row.never) {
+        errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/template'), message: `${o.template} names a row the game never stands (${row.file}:${row.line}): ${row.never}`, rule: 1 });
+        continue;
+      }
+      // Strictly under the reach, as the game finds (`nearestPlaced` keeps only what is nearer than it).
+      const d = Math.hypot(row.at[0] - o.near[0], row.at[1] - o.near[1]);
+      if (d >= OBJECT_FIND) errors.push({ level: 'error', file: o.src.file, line: lineAt(o.src.lines, '/near'), message: `near is ${Math.round(d * 10) / 10} m from where ${placeId} stands (${row.file}:${row.line}), and the game finds it only under ${OBJECT_FIND} m round near`, rule: 1 });
+      continue;
+    }
+    // A thing a permanent row stands is filed under the row's own key: an object naming its template finds the
+    // snapshot's own thing there, or nothing.
+    if (!onWorld) continue;
+    let near: { id: string; ref: PlacementRef; d: number } | null = null;
+    for (const [rowId, refs] of onWorld) {
+      const ref = standingRef(refs);
+      if (ref.never || !ref.template || ref.template !== o.template) continue;
+      const d = Math.hypot(ref.at[0] - o.near[0], ref.at[1] - o.near[1]);
+      if (d < OBJECT_FIND && (!near || d < near.d)) near = { id: rowId, ref, d };
+    }
+    if (near) warnings.push({ level: 'warning', file: o.src.file, line: lineAt(o.src.lines, '/template'), message: `a permanent placement of this template stands ${Math.round(near.d)} m from near (${near.id}, ${near.ref.file}:${near.ref.line}), and the game never finds it by its template: write "template": "${placementKey(near.id)}" if that is the thing meant`, rule: 1 });
   }
   counts.signals = signalsSeen.size;
   const order = (a: Issue, b: Issue): number => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line);

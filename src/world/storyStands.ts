@@ -21,12 +21,16 @@
 // Pure: the world is asked through `StandDeps` and `CastDeps`, so the node test hands it a world of its own.
 // Every number here is ours.
 
+import { OBJECT_FIND } from '../story/set.ts';
 import type { CastView, ObjectView } from '../story/view.ts';
 import { rawToGameX, rawToGameZ } from '../story/waypoints.ts';
 
 export const STAND_TUNE = {
-  /** Metres round an object's point within which the thing of its template is looked for. */
-  find: 30,
+  /**
+   * Metres round an object's point within which the thing of its template is looked for: the story's own
+   * `OBJECT_FIND`, which the checker holds a permanent placement's row to, until the console moves it.
+   */
+  find: OBJECT_FIND,
   /** Milliseconds before a thing not found is looked for again. */
   retry: 2000,
   /** Metres above or below the feet past which a thing in reach across the ground is on another floor. */

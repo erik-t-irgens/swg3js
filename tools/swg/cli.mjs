@@ -257,6 +257,7 @@ import { statusJson } from './statusplan.mjs';
 // Only `status` needs these two here; the `travel` command itself loads the whole module when it runs.
 import { rowsLost, TRAVEL_OWN_MODELS } from './travel.mjs';
 import { PROPS_PACK_VERSION, propCounts as propCountsOf } from './props.mjs';
+import { placementPackLines, placementRows, placementsFolder } from './placementsStatus.mjs';
 /** The shape of deeds.json. A pack written by an older run is asked for again rather than read. */
 const DEED_PACK_VERSION = 1;
 /** The shape of a world's travel.json. A pack written by an older run is asked for again. */
@@ -2953,6 +2954,9 @@ function packStatus(dir) {
       if ((deedPack.version ?? 0) !== DEED_PACK_VERSION) need(`deeds <swg-dir> ${dir} --retail-only`, 'the deeds were written in an older shape than this build reads');
     }
   }
+  // The permanent placements this build ships (`public/placements/`): which packs their rows need that this
+  // install has not got. Said, never asked for: nothing about a file somebody wrote is a reason to convert.
+  for (const line of placementPackLines(placementRows(placementsFolder()), dir, readJson)) console.log(line);
   // The doors in the buildings' doorways (`doors`): a table per pack beside its manifest and the door
   // models in one shared folder. Asked for again whenever a world or the gallery was converted after
   // its table was written (the table is built from that layout's models), or a table names a door

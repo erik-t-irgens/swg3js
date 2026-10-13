@@ -231,7 +231,26 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   // The put-back of a move the world refuses is the placer's own (`placeLocalHome`'s `back`, which localHomes.test.ts
   // drives), so the drop calls the placer once and has no second copy of the rule.
   ok((dropHome.match(/this\.placeLocalHome\(/g) ?? []).length === 1, 'a refused move is put back where it stood by the placer itself, not by a second call from the drop');
-  ok(/if \(moved\.fate === 'gone'\) this\.homeMoveSaid = MOVE_SAYS\.world;\s*else if \(!this\.localHomes\.find\(row\.key\)\) this\.homeMoveSaid = MOVE_SAYS\.gone;\s*else if \(moved\.placed\)/.test(dropHome), 'and a move whose house was taken down from the Housing tab while it went up says so, never that it moved');
+  // What it came to is `localMoveOf`'s (which localHomes.test.ts runs over the real placer's landings), and the
+  // words follow that answer, so a move taken down while it went up is never said, or reported, as moved.
+  ok(/this\.homeMove = localMoveOf\(moved, !!this\.localHomes\.find\(row\.key\)\);\s*if \(this\.homeMove === 'world'\) this\.homeMoveSaid = MOVE_SAYS\.world;\s*else if \(this\.homeMove === 'gone'\) this\.homeMoveSaid = MOVE_SAYS\.gone;\s*else if \(this\.homeMove === 'moved'\)/.test(dropHome), 'and a move whose house was taken down from the Housing tab while it went up says so, never that it moved');
+  ok(/homes\.askMove\([^\n]*\);\s*this\.homeMove = 'asked';/.test(dropHome) && /this\.stopPlacing\('keep'\);\s*this\.homeMove = 'kept';/.test(dropHome) && /this\.stopPlacing\(\);\s*this\.homeMove = 'back';/.test(dropHome) && /if \(!row\) \{\s*this\.homeMove = 'gone';/.test(dropHome), "every way a move ends says what it came to: asked of the server, let go of where it stood, back where it stood, or gone");
+  // And the click before any of that is answered too, and the words with it on every ending that says any, so
+  // `homes()` (`lastOutcome`, `lastMove`) never reads one click's answer beside another's words.
+  const fresh = /this\.homeMove = null;\s*this\.homeMoveSaid = '';\s*const state = p\.state;\s*if \(!state\?\.ok\) \{\s*this\.homeMove = 'held';\s*return;\s*\}/.exec(dropHome);
+  ok(!!fresh && fresh.index < dropHome.indexOf('const keeper = this.homesKeeper;'), 'a click starts its answer afresh, and one the ghost refuses is held');
+  ok(/if \(refusal\) \{\s*this\.homeMove = 'held';\s*this\.homeMoveSaid = refusal;/.test(dropHome), 'one refused for want of a keeper is held, in the words said');
+  ok(/this\.homeMove = 'kept';\s*this\.homeMoveSaid = MOVE_SAYS\.keeper;/.test(dropHome) && /this\.homeMove = 'back';\s*this\.homeMoveSaid = `\$\{MOVE_SAYS\.cannot\}/.test(dropHome), "and a change of keeper and a server that cannot move one keep the words they said, as every other ending does");
+  const assigns = dropHome.match(/this\.homeMove = [^;]+;/g) ?? [];
+  const saids = dropHome.match(/this\.homeMoveSaid = [^;]+;/g) ?? [];
+  ok(assigns.length === 8 && saids.length === 10, `every ending writes both (${assigns.length} answers, ${saids.length} words, counting the fresh start of each and the four of a move this machine keeps)`);
+  // The console's own drop (W8): `dropped` is what the move came to, never the ghost's verdict, which only says the
+  // spot could take it -- a move the world then refused and stood back, or one taken down while it went up, was
+  // reported dropped.
+  const deedHelper = /\n {6}deed: async \(deed\?: string[\s\S]*?\n {6}\},\r?\n/.exec(main)?.[0] ?? '';
+  const homeDrop = /if \(home\) \{([\s\S]*?)\n {10}\}/.exec(deedHelper)?.[1] ?? '';
+  ok(/this\.homeMove = null;\s*await this\.dropPlacing\(\);/.test(deedHelper) && /const outcome: HouseMove = \(this\.homeMove as HouseMove \| null\) \?\? 'held';/.test(homeDrop) && /dropped: moveDropped\(outcome\), outcome,/.test(homeDrop), "deed's drop of a house in hand reports what the move came to, cleared before the drop and read after it");
+  ok(homeDrop.length > 0 && !/state\?\.ok/.test(homeDrop) && /asked: outcome === 'asked'/.test(homeDrop), "and never reads the ghost's verdict for it");
   const takeHome = bodyOf(main, 'private async takeHome(home: MyBuilding): Promise<string | null>');
   const liftAt = takeHome.indexOf('this.localHomes.lift(row.key)');
   ok(liftAt > 0 && liftAt < takeHome.indexOf('this.world.unplaceBuilding(row.key);') && /this\.standOutOf\(row\.key\);\s*this\.world\.unplaceBuilding\(row\.key\);/.test(takeHome), "this machine's is held in hand before it comes down, and whoever stands in it is stood out first");

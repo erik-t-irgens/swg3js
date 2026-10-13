@@ -9,7 +9,7 @@
 // Run: node tools/swg/tests/localHomes.test.ts
 
 import assert from 'node:assert/strict';
-import { LOCAL_HOME_PREFIX, LocalHomes, MOVE_SAYS, homesKey, isLocalHome, placeLocalHome, readHome, type HomeStore, type LocalHome, type LocalHomeDeps } from '../../../src/world/myBuildings.ts';
+import { LOCAL_HOME_PREFIX, LocalHomes, MOVE_SAYS, homesKey, isLocalHome, localMoveOf, moveDropped, placeLocalHome, readHome, type HomeStore, type LocalHome, type LocalHomeDeps } from '../../../src/world/myBuildings.ts';
 import { propsKey } from '../../../src/world/propsPlaced.ts';
 
 let passed = 0;
@@ -315,6 +315,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   ok(moved.placed && moved.fate === 'stands' && w.filed.get(k)!.x === 400 && w.filed.get(k)!.yaw === 2 && w.filed.size === 1 && w.twice() === 0, 'moved, it goes up where it was put, under the same key, filed once');
   const kept = JSON.parse(s.kept.get(homesKey('tatooine'))!) as LocalHome[];
   ok(h.find(k)!.x === 400 && h.find(k)!.r === 15 && kept.find((r) => r.key === k)!.x === 400 && kept.length === 1, 'and its row says where it stands now, in this machine\'s keeping too, one row still');
+  ok(localMoveOf(moved, !!h.find(k)) === 'moved' && moveDropped(localMoveOf(moved, true)), 'what the move came to: moved, which the console reports as dropped');
 }
 
 {
@@ -331,6 +332,8 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   const no = await placeLocalHome(h, row, { ...row, x: 900 }, w.deps);
   ok(!no.placed && no.fate === 'none' && !!no.why && h.find(k)!.x === 100 && !h.isPlacing(k), 'refused where it was put, its row stays where it stood and nothing is left going up');
   ok(no.back === 'stands' && w.filed.size === 1 && w.filed.get(k)!.x === 100 && h.isStanding(k) && w.twice() === 0, 'and it is stood again where it stood, by the placer itself, filed once');
+  // The spot the ghost allowed is no move: the console once reported this one dropped, off the ghost's verdict.
+  ok(localMoveOf(no, !!h.find(k)) === 'back' && !moveDropped(localMoveOf(no, !!h.find(k))), 'what the move came to: back where it stood, which is not a drop');
   // A put-back is not put back again, and one already standing is left alone.
   ok((await placeLocalHome(h, h.find(k)!, h.find(k)!, w.deps)).back === undefined && w.twice() === 0, 'a put-back asks for no put-back of its own');
   // Refused while this machine no longer keeps the player's houses: nothing stood, the row waiting where it stood.
@@ -367,6 +370,8 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   const kept = JSON.parse(s.kept.get(homesKey('tatooine'))!) as LocalHome[];
   ok(out.fate === 'down' && !w.filed.has(k) && !h.isStanding(k) && !h.isPlacing(k), 'a house taken down while its move was going up lands and comes straight back down, nothing of it filed');
   ok(h.find(k) === null && !kept.some((r) => r.key === k) && kept.length === 1 && h.all.length === 1, "and it stays off the list and out of this machine's keeping, the other house kept beside it");
+  // It went up before it came back down, so its landing says placed: what the move came to is the list's word, gone.
+  ok(out.placed && localMoveOf(out, !!h.find(k)) === 'gone' && !moveDropped(localMoveOf(out, !!h.find(k))), 'what the move came to: gone, never moved, though what went up said placed');
   // The same for a move the world refuses: taken down meanwhile, nothing stands it back.
   const k2 = h.mint();
   h.add(house(k2, { x: 50 }));
@@ -379,6 +384,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   w.release();
   const out2 = await going2;
   ok(!out2.placed && out2.back === undefined && !w.filed.has(k2) && h.find(k2) === null, 'and a refused move of a house taken down meanwhile is not stood back where it stood');
+  ok(localMoveOf(out2, !!h.find(k2)) === 'gone', 'and what that move came to is gone as well');
 }
 
 {
@@ -453,8 +459,34 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   w.release();
   const out = await going;
   ok(out.fate === 'gone' && out.why === MOVE_SAYS.world && !out.placed, 'a move whose world loaded again in the wait went with that world');
+  ok(localMoveOf(out, !!h.find(k)) === 'world' && !moveDropped('world'), 'what the move came to: its world went first');
+  ok(moveDropped('asked') && !moveDropped('held') && !moveDropped('kept') && !moveDropped(null), "and a server's asked of it is a drop, while one still in hand, let go of where it stood, or never begun is not");
   const kept = JSON.parse(s.kept.get(homesKey('tatooine'))!) as LocalHome[];
   ok(h.find(k)!.x === 100 && kept[0].x === 100 && !h.isPlacing(k) && !h.isStanding(k), 'and its row stays where it stood, in the list and in this machine\'s keeping');
+}
+
+{
+  // A move overtaken by a travel to another world, which is the way a world goes in play: the list is that world's
+  // now and holds no row of this house, so what the drop hands `localMoveOf` is `kept` false -- and it is still the
+  // world that went, said as such, never a house taken down. Its row waits in Tatooine's keeping where it stood.
+  const s = shelf();
+  const h = new LocalHomes();
+  h.enter('tatooine', s.store);
+  const w = world();
+  const k = h.mint();
+  h.add(house(k));
+  w.holdNext();
+  const row = h.find(k)!;
+  const going = placeLocalHome(h, row, { ...row, x: 520 }, w.deps);
+  await tick();
+  w.state.gen++;
+  h.enter('naboo', s.store);
+  w.release();
+  const out = await going;
+  ok(out.fate === 'gone' && h.find(k) === null && localMoveOf(out, !!h.find(k)) === 'world', 'a move whose world was left for another in the wait went with that world, though the list in hand no longer has its row');
+  ok(localMoveOf({ placed: false, fate: 'gone', why: MOVE_SAYS.world }, false) === 'world' && localMoveOf({ placed: true, fate: 'stands', why: null }, false) === 'gone', 'the world going is asked before the row: a row missing after a travel is the world gone, after a landing a house taken down');
+  const kept = JSON.parse(s.kept.get(homesKey('tatooine'))!) as LocalHome[];
+  ok(kept.length === 1 && kept[0].key === k && kept[0].x === 100, "and its row is in Tatooine's keeping where it stood, for the next visit to stand");
 }
 
 console.log(`\n${passed} checks passed`);

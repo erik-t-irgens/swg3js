@@ -116,7 +116,7 @@ import { isTextHash, journalHashes, textHash } from '../src/story/journal.ts';
 import { noteForWire } from '../src/story/notes.ts';
 import { namedOnly } from '../src/story/people.ts';
 import { awaits, evalCond, placeOf, rewardOfKey, whyNotGrant } from '../src/story/quests.ts';
-import { emptySet, joinSets, loadSet } from '../src/story/set.ts';
+import { OBJECT_FIND, emptySet, joinSets, loadSet } from '../src/story/set.ts';
 import { Reassembly, STORY_WIRE, bookText, chunkText, cleanStoryWord, cleanTexts, nodeWord } from '../src/story/storyWire.ts';
 import { viewHash } from '../src/story/view.ts';
 import { gameToRawX, gameToRawZ, isQuestWaypoint } from '../src/story/waypoints.ts';
@@ -160,8 +160,8 @@ export const STORY_TUNING = {
   talkReach: 3,
   /** Conversation words (an opening or an answer; a close is never counted) one browser may send in a second. */
   talkRate: 4,
-  /** Metres round an object's point the browser looks for the thing of its template in (`STAND_TUNE.find`), which a use is measured past. */
-  useFind: 30,
+  /** Metres round an object's point the browser looks for the thing of its template in (`STAND_TUNE.find`, from the same `OBJECT_FIND`), which a use is measured past. */
+  useFind: OBJECT_FIND,
   /**
    * Milliseconds a browser's word of the game hour stands, on a world whose hour the server cannot work out
    * for itself (one the game's list of planets does not know): one hour of the game's own day. Past it the

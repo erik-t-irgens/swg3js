@@ -16,11 +16,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkSet, issueLine, type CheckOptions } from '../../../src/story/check.ts';
-import { loadSet, type StorySet } from '../../../src/story/set.ts';
+import { checkPlacements, checkSet, issueLine, type CheckOptions } from '../../../src/story/check.ts';
+import { placementKey, placementsFileText, type PlacementRow } from '../../../src/story/placements.ts';
+import { OBJECT_FIND, TEMPLATE, loadSet, type StorySet } from '../../../src/story/set.ts';
 import { isTestText, type TextRef } from '../../../src/story/text.ts';
 import { FILE_MAX, readStorySet } from '../../../server/storySet.mjs';
-import { catalogueOf, checkFolder, defaultFolders, worldIds } from '../../story/check.mjs';
+import { PLACEMENTS_DIR, catalogueOf, checkFolder, defaultFolders, placedTemplatesOf, placementsOf, worldIds } from '../../story/check.mjs';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -263,6 +264,141 @@ const warns = (r: ReturnType<typeof checkSet>, re: RegExp) => r.warnings.some((w
     [{ path: 'areas/yard.jsonc', text: JSON.stringify({ id: 'yard', world: 'tatooine', shape: { kind: 'circle', c: [0, 0], r: 5 } }) }],
   );
   ok(!raisers.errors.some((e) => e.rule === 3 && /left:|room:|outword/.test(e.message)), 'rule 3: an area\'s left:, a room: and a signal an outcome raises all have their raiser');
+}
+
+// ---- rule 1 for the permanent placements: a story object naming `place/<id>` --------------------------------------
+{
+  const ref = (at: [number, number], layer: 'story' | 'world', template: string | null = null, line = 3, never: string | null = null) => ({ at, layer, file: `public/placements/${layer}/tatooine.json`, line, template, never });
+  const LOCKER_TEMPLATE = 'object/tangible/furniture/all/shared_frn_all_storage_locker.iff';
+  const placements = new Map([
+    [
+      'tatooine',
+      new Map([
+        ['eisley-locker', [ref([3448, -4688], 'story', LOCKER_TEMPLATE)]],
+        // Both layers hold it: the world edit's row stands, a hundred metres from the story's.
+        ['yard-gate', [ref([100, 100], 'story', null, 4), ref([0, 0], 'world', null, 2)]],
+      ]),
+    ],
+    // Rows the game never stands, as `placementsOf` marks them: anything in the world of copies, a building in a space zone.
+    ['dungeon1', new Map([['copy-crate', [ref([0, 0], 'story', null, 3, "dungeon1 is the dungeons' world of copies, where no permanent row stands")]], ['copy-both', [ref([0, 0], 'story', null, 4, 'x'), ref([0, 0], 'world', null, 5, 'x')]]])],
+    ['space_tatooine', new Map([['orbit-house', [ref([0, 0], 'world', LOCKER_TEMPLATE, 3, 'a space zone stands no building')]]])],
+  ]);
+  const obj = (id: string, template: string, near: [number, number], world = 'tatooine') => ({ path: `objects/${id}.jsonc`, text: JSON.stringify({ id, world, template, near, label: 'TEST' }, null, 2) });
+  const run = (objects: { path: string; text: string }[], opts: CheckOptions = { placements }) => check('own', [], opts, objects);
+  const good = run([obj('locker', 'place/eisley-locker', [3450, -4690])]);
+  ok(good.errors.length === 0 && good.counts.placed === 1, `an object naming a row that stands within ${OBJECT_FIND} m of its near is clean, and counted (${good.errors.map((e) => issueLine(e)).join('; ')})`);
+  const none = run([obj('ghost', 'place/no-such-row', [0, 0]), obj('elsewhere', 'place/eisley-locker', [3448, -4688], 'naboo')]);
+  ok(none.errors.filter((e) => e.rule === 1 && /names no permanent placement on tatooine/.test(e.message) && e.file === 'objects/ghost.jsonc' && e.line > 1).length === 1, 'a place/<id> that no row on its world carries is refused, at its own template line');
+  ok(none.errors.some((e) => e.rule === 1 && e.file === 'objects/elsewhere.jsonc' && /on naboo/.test(e.message)), 'and so is one naming a row that stands on another world');
+  const far = run([obj('far', 'place/eisley-locker', [3488, -4688])]);
+  ok(far.errors.some((e) => e.rule === 1 && e.file === 'objects/far.jsonc' && /near is 40 m from where eisley-locker stands \(public\/placements\/story\/tatooine\.json:3\)/.test(e.message)), `a near more than ${OBJECT_FIND} m from the row is refused, naming where the row is (${far.errors.map((e) => e.message).join('; ')})`);
+  // The game keeps only what is nearer than its reach (`LayoutStreamer.nearestPlaced`: `d >= bestD` is passed over,
+  // `bestD` starting at the reach), so a row exactly the reach away is never found.
+  const edge = run([obj('edge', 'place/eisley-locker', [3448 + OBJECT_FIND, -4688])]);
+  ok(edge.errors.some((e) => e.rule === 1 && e.file === 'objects/edge.jsonc' && new RegExp(`near is ${OBJECT_FIND} m from where eisley-locker stands.*only under ${OBJECT_FIND} m`).test(e.message)), `one exactly ${OBJECT_FIND} m off is refused, since the game finds only what is nearer than that (${edge.errors.map((e) => e.message).join('; ')})`);
+  const inside = run([obj('inside', 'place/eisley-locker', [3448 + OBJECT_FIND - 0.1, -4688])]);
+  ok(inside.errors.length === 0, `and one a tenth of a metre nearer is clean (${inside.errors.map((e) => e.message).join('; ')})`);
+  const never = run([obj('copy', 'place/copy-crate', [0, 0], 'dungeon1'), obj('orbit', 'place/orbit-house', [0, 0], 'space_tatooine')]);
+  ok(never.errors.some((e) => e.rule === 1 && e.file === 'objects/copy.jsonc' && /names a row the game never stands .*world of copies/.test(e.message)) && never.errors.some((e) => e.rule === 1 && e.file === 'objects/orbit.jsonc' && /never stands .*a space zone stands no building/.test(e.message)), `an object naming a row the game never stands -- in the world of copies, a building in a space zone -- is refused, saying why, though the row is there and within reach (${never.errors.map((e) => e.message).join('; ')})`);
+  const orbitWarn = run([obj('orbit-template', LOCKER_TEMPLATE, [0, 0], 'space_tatooine')]);
+  ok(!orbitWarn.warnings.some((w) => w.rule === 1), 'and nothing is told to name a row the game never stands');
+  const clash = run([obj('gate-near-edit', 'place/yard-gate', [5, 5]), obj('gate-near-story', 'place/yard-gate', [100, 100])]);
+  ok(!clash.errors.some((e) => e.file === 'objects/gate-near-edit.jsonc') && clash.errors.some((e) => e.file === 'objects/gate-near-story.jsonc' && /yard-gate stands \(public\/placements\/world\/tatooine\.json:2\)/.test(e.message)), 'an id both layers hold is found where the world edit stands, as the game merges them, and never where the story\'s row was');
+  const clashes = checkPlacements(placements);
+  ok(clashes.length === 1 && clashes[0].rule === 1 && clashes[0].level === 'error' && clashes[0].file === 'public/placements/story/tatooine.json' && clashes[0].line === 4 && /yard-gate is in both files on tatooine/.test(clashes[0].message), "an id both layers hold is an error once, at the story's row, which never stands; and not where neither row would stand anyway (the world of copies)");
+  const warned = run([obj('by-template', LOCKER_TEMPLATE, [3450, -4690]), obj('by-template-far', LOCKER_TEMPLATE, [3600, -4600]), obj('other-template', 'object/tangible/terminal/shared_terminal_mission.iff', [3449, -4688])]);
+  ok(warned.errors.length === 0 && warned.warnings.some((w) => w.rule === 1 && w.file === 'objects/by-template.jsonc' && /write "template": "place\/eisley-locker"/.test(w.message)), 'an object written with the template of a thing a permanent row stands near its point is warned: the game never finds that row by its template');
+  ok(!warned.warnings.some((w) => w.file === 'objects/by-template-far.jsonc'), 'and one with no such row near it is not');
+  ok(!warned.warnings.some((w) => w.file === 'objects/other-template.jsonc'), "nor one of another template a metre from the row: the snapshot's own thing of that template is what it means");
+  const unchecked = run([obj('ghost', 'place/no-such-row', [0, 0]), obj('by-template', LOCKER_TEMPLATE, [3450, -4690])], {});
+  ok(unchecked.errors.length === 0 && unchecked.warnings.length === 0 && unchecked.counts.placed === 1, 'with no placements handed in nothing of it is checked, and the object naming one is still counted');
+  ok(TEMPLATE.test(placementKey('eisley-locker')) && TEMPLATE.test('place/a_b-9'), "a row's key passes the story's own template pattern, so nothing in the story had to change to name one");
+}
+
+// ---- npm run story:check reads the build's own placements -----------------------------------------------------------
+{
+  const scratch = mkdtempSync(join(tmpdir(), 'story-placements-'));
+  try {
+    // The placements: written exactly as the editor writes them, one row a line.
+    const dir = join(scratch, 'placements');
+    mkdirSync(join(dir, 'story'), { recursive: true });
+    mkdirSync(join(dir, 'world'), { recursive: true });
+    const row = (id: string, x: number, z: number, more: Partial<PlacementRow> = {}): PlacementRow => ({ id, kind: 'prop', pack: 'props', thing: 'frn_locker', x, y: 5, z, q: [1, 0, 0, 0], ...more });
+    // `both` is in both layers, the world edit's row far from the story's, so which one a near is measured from shows.
+    writeFileSync(join(dir, 'story', 'tatooine.json'), placementsFileText('tatooine', 'raw', [row('eisley-locker', 3448, -4688), row('both', 10, 10)]));
+    writeFileSync(join(dir, 'world', 'tatooine.json'), placementsFileText('tatooine', 'raw', [row('both', 200, 200), { ...row('house', 0, 0), kind: 'building', pack: 'gallery', thing: undefined, model: 'ply_tato_house_sm_s01_fp1', deed: 'tatooine_house_small_deed' }]));
+    // A file for a world the game has not got, one refused whole (its header names another world), a row that
+    // does not read, and a name that is not a world's file at all.
+    writeFileSync(join(dir, 'world', 'hoth.json'), placementsFileText('hoth', 'raw', [row('cold', 0, 0)]));
+    writeFileSync(join(dir, 'world', 'naboo.json'), placementsFileText('corellia', 'raw', [row('stray', 0, 0)]));
+    writeFileSync(join(dir, 'story', 'corellia.json'), placementsFileText('corellia', 'raw', [row('fine', 1, 1)]).replace('"thing": "frn_locker"', '"thing": "bad thing!"'));
+    writeFileSync(join(dir, 'story', 'notes.txt'), 'not a placements file');
+    // Rows the game never stands: the world of copies' every one, and a building in a space zone (its prop stands).
+    writeFileSync(join(dir, 'world', 'dungeon1.json'), placementsFileText('dungeon1', 'raw', [row('copy-crate', 0, 0)]));
+    writeFileSync(join(dir, 'world', 'space_tatooine.json'), placementsFileText('space_tatooine', 'game', [row('orbit-crate', 0, 0), { ...row('orbit-house', 50, 50), kind: 'building', pack: 'gallery', thing: undefined, model: 'ply_tato_house_sm_s01_fp1' }]));
+    // What the packs say each row stands (`placedTemplatesOf`), out of a stand-in assets-private.
+    const root = join(scratch, 'root');
+    mkdirSync(join(root, 'assets-private', 'props'), { recursive: true });
+    writeFileSync(join(root, 'assets-private', 'props', 'manifest.json'), JSON.stringify({ props: [{ id: 'frn_locker', template: 'object/tangible/furniture/shared_frn_locker.iff' }] }));
+    writeFileSync(join(root, 'assets-private', 'deeds.json'), JSON.stringify({ deeds: [{ id: 'tatooine_house_small_deed', makes: 'object/building/player/player_house_tatooine_small_style_01.iff' }] }));
+    const templates = placedTemplatesOf(root);
+    ok(templates.things.get('frn_locker') === 'object/tangible/furniture/shared_frn_locker.iff' && templates.deeds.get('tatooine_house_small_deed') === 'object/building/player/shared_player_house_tatooine_small_style_01.iff', "a props row's thing is its catalogue template, and a building's deed the building it makes as a snapshot names it (shared_)");
+    ok(placedTemplatesOf(join(scratch, 'nowhere')).things.size === 0, 'and a machine with neither pack knows none, without failing');
+    const read = placementsOf(dir, { root });
+    const tat = read.placements.get('tatooine');
+    // Sorted by id, under the header's five lines: `both` on line 6, `eisley-locker` on 7.
+    ok(read.files === 7 && tat?.get('eisley-locker')?.[0].line === 7 && tat?.get('both')?.[0].line === 6 && tat?.get('eisley-locker')?.[0].layer === 'story' && tat?.get('both')?.length === 2, `both layers read as the game reads them, each row on its own line (${JSON.stringify(tat?.get('eisley-locker'))})`);
+    // Each ref says its own layer: which row of an id both hold is the one that stands (the world edit's) reads it.
+    ok(JSON.stringify(tat?.get('both')?.map((r) => r.layer)) === '["story","world"]' && tat?.get('both')?.[1].at[0] === 200, `an id both layers hold has one row a layer, each named for its own (${JSON.stringify(tat?.get('both'))})`);
+    ok(tat?.get('eisley-locker')?.[0].template === 'object/tangible/furniture/shared_frn_locker.iff' && tat?.get('house')?.[0].template === 'object/building/player/shared_player_house_tatooine_small_style_01.iff', 'each with the template the packs say it stands');
+    ok(read.notes.some((n) => /world\/hoth\.json: warning: hoth is not a world this game has/.test(n)) && read.notes.some((n) => /world\/naboo\.json: warning: the whole file is refused/.test(n)) && read.notes.some((n) => /story\/corellia\.json:6: warning: row fine is skipped/.test(n)), `what the files say of themselves is a warning each (${read.notes.join(' | ')})`);
+    ok(!read.notes.some((n) => /notes\.txt/.test(n)), 'and a file that is no world\'s is not read at all');
+    // What the game never stands is marked so, with why, and said: the world of copies' every row, a building in space.
+    const space = read.placements.get('space_tatooine');
+    ok(/world of copies/.test(read.placements.get('dungeon1')?.get('copy-crate')?.[0].never ?? '') && read.notes.some((n) => /world\/dungeon1\.json: warning: dungeon1 is the dungeons' world of copies/.test(n)), `every row in the world of copies is one the game never stands, and the file says so (${read.notes.join(' | ')})`);
+    ok(/space zone stands no building/.test(space?.get('orbit-house')?.[0].never ?? '') && !space?.get('orbit-crate')?.[0].never && read.notes.some((n) => /world\/space_tatooine\.json:\d+: warning: row orbit-house is never stood: a space zone stands no building/.test(n)), "and a building in a space zone is one, while a prop beside it stands");
+    ok(/not a world this game has/.test(read.placements.get('hoth')?.get('cold')?.[0].never ?? ''), "and a row for a world the game has not got is one too, named for the world it is not");
+    // The counts are what the game stands: an id two layers hold once, on worlds that stand it; a world whose every
+    // row was skipped (corellia here) holds none and is no world of the count.
+    ok(read.standing === 4 && read.worlds === 2 && read.never === 3 && !read.placements.has('corellia'), `what the game stands is counted, and what it never stands apart (${read.standing} over ${read.worlds}, ${read.never} never)`);
+    const none = placementsOf(join(scratch, 'not-there'), { root });
+    ok(none.files === 0 && none.placements.size === 0 && none.notes.length === 0, 'a placements folder that is not there is none, and says nothing');
+    ok(PLACEMENTS_DIR === join(ROOT, 'public', 'placements'), "with none named, it is this checkout's own public/placements, which the build ships");
+    // The command line: an object naming a row, then the same with its near forty metres off.
+    const story = join(scratch, 'story-private');
+    mkdirSync(join(story, 'objects'), { recursive: true });
+    writeFileSync(join(story, 'story.jsonc'), '{ "prefix": "own", "title": "TEST" }');
+    writeFileSync(join(story, 'objects', 'locker.jsonc'), JSON.stringify({ id: 'locker', world: 'tatooine', template: 'place/eisley-locker', near: [3449, -4688], label: 'TEST' }, null, 2));
+    // Near only the world edit's row of `both`, two hundred metres from the story's: clean only if measured from the row that stands.
+    writeFileSync(join(story, 'objects', 'gate.jsonc'), JSON.stringify({ id: 'gate', world: 'tatooine', template: 'place/both', near: [201, 200], label: 'TEST' }, null, 2));
+    const cli = join(ROOT, 'tools', 'story', 'check.mjs');
+    const clean = spawnSync(process.execPath, [cli, `--root=${root}`, `--placements=${dir}`, story], { encoding: 'utf8', cwd: ROOT });
+    const lines = clean.stdout.split('\n');
+    ok(clean.status === 1 && lines.some((l) => /story\/tatooine\.json:\d+: error: both is in both files on tatooine/.test(l)) && lines.some((l) => /: 4 permanent placements the game stands over 2 worlds, in 7 files \(and 3 rows it never stands\)$/.test(l.trim())) && lines.some((l) => /2 objects \(2 naming a permanent placement\).* 0 errors/.test(l)), `the command reads the placements once, says the clash once and the count, and the objects naming rows are clean, the one by the world edit's row of an id both hold measured from it (${lines.filter((l) => /error|placement/.test(l)).join(' | ')})`);
+    rmSync(join(story, 'objects', 'gate.jsonc'));
+    // `--root` moves where story-private and assets-private are read, never the placements: with none named they are
+    // this checkout's own, whatever `--root` says. A root holding a placements folder of its own (a row no checkout
+    // has, under an id nobody would write) is not read: the object naming that row names nothing.
+    const rootOnly = `root-only-${process.pid}-${Date.now()}`;
+    mkdirSync(join(root, 'public', 'placements', 'story'), { recursive: true });
+    writeFileSync(join(root, 'public', 'placements', 'story', 'tatooine.json'), placementsFileText('tatooine', 'raw', [row(rootOnly, 3448, -4688)]));
+    const rooted = join(scratch, 'story-rooted');
+    mkdirSync(join(rooted, 'objects'), { recursive: true });
+    writeFileSync(join(rooted, 'story.jsonc'), '{ "prefix": "own", "title": "TEST" }');
+    writeFileSync(join(rooted, 'objects', 'rooted.jsonc'), JSON.stringify({ id: 'rooted', world: 'tatooine', template: `place/${rootOnly}`, near: [3448, -4688], label: 'TEST' }, null, 2));
+    const viaRoot = spawnSync(process.execPath, [cli, `--root=${root}`, rooted], { encoding: 'utf8', cwd: ROOT });
+    ok(viaRoot.status === 1 && /^public\/placements: /m.test(viaRoot.stdout) && new RegExp(`objects/rooted\\.jsonc:\\d+: error: place/${rootOnly} names no permanent placement on tatooine`).test(viaRoot.stdout), `with --root and no --placements the placements read are this checkout's own public/placements, never the root's (${viaRoot.stdout.split('\n').filter((l) => /placement/.test(l)).join(' | ')})`);
+    writeFileSync(join(dir, 'world', 'tatooine.json'), placementsFileText('tatooine', 'raw', [row('house', 0, 0)]));
+    const quiet = spawnSync(process.execPath, [cli, `--root=${root}`, `--placements=${dir}`, story], { encoding: 'utf8', cwd: ROOT });
+    ok(quiet.status === 0, `with the clash gone it passes (${quiet.stdout.split('\n').filter((l) => /error/.test(l)).join(' | ')})`);
+    writeFileSync(join(story, 'objects', 'locker.jsonc'), JSON.stringify({ id: 'locker', world: 'tatooine', template: 'place/eisley-locker', near: [3488, -4688], label: 'TEST' }, null, 2));
+    const off = spawnSync(process.execPath, [cli, `--root=${root}`, `--placements=${dir}`, story], { encoding: 'utf8', cwd: ROOT });
+    ok(off.status === 1 && /objects\/locker\.jsonc:\d+: error: near is 40 m from where eisley-locker stands/.test(off.stdout), `and fails once its near is forty metres off the row (${off.stdout.split('\n').find((l) => /error/.test(l))})`);
+    const bare = spawnSync(process.execPath, [cli, `--root=${root}`, `--placements=${join(scratch, 'not-there')}`, story], { encoding: 'utf8', cwd: ROOT });
+    ok(bare.status === 1 && /no permanent placements, so an object naming one names nothing/.test(bare.stdout) && /names no permanent placement on tatooine/.test(bare.stdout), 'and with no placements at all, an object naming one names nothing, and says so');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 // ---- a folder of story files, read off the disk -----------------------------------------------------------------

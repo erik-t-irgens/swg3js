@@ -11,6 +11,9 @@
 //   - the detectors raise what stays true again only after `repeatEv`, so standing still is not a flood;
 //   - a story object is found where the world really places its template, about the object's own point
 //     turned into the world's frame, the nearest on the world stood on, looked for again a little later;
+//   - a story object naming a permanent placement (`"template": "place/<id>"`, as the editor's snippet writes it)
+//     is found by that key where the row stands and works the use key, with nothing in the story changed for it,
+//     and is found where the row moved to once the found places are cleared;
 //   - a reward is paid once whatever happens twice, and a thing owned already is said rather than given;
 //   - the fourth wave's words hand over credits, a thing, experience, Standing, a waypoint and words, and
 //     read credits, a thing owned and Standing; each that pays pays once per completion, however often
@@ -44,7 +47,8 @@ import type { NodeWord } from '../../../src/story/storyHost.ts';
 import { Purse } from '../../../src/net/purse.ts';
 import { noteWords } from '../../../src/story/notes.ts';
 import type { PayOrder, StoryEvent } from '../../../src/story/quests.ts';
-import { questWaypointId } from '../../../src/story/view.ts';
+import { cleanView, questWaypointId } from '../../../src/story/view.ts';
+import { placementKey, storyObjectSnippet, toGame as placementToGame, type PlacementRow } from '../../../src/story/placements.ts';
 import { textOf } from '../../../src/story/text.ts';
 import { StoryWatch, type WatchPlace } from '../../../src/world/storyWatch.ts';
 import { STAND_TUNE, StoryStands } from '../../../src/world/storyStands.ts';
@@ -306,6 +310,59 @@ function game(opts: { sets?: boolean; own?: { path: string; text: string }[]; re
   d.host.grant('own:brave');
   ok(d.watch.death(d.host.view(), (ev) => d.host.event(ev)) && d.q('own:brave')?.state === 'failed' && d.said.includes('Failed: TEST: do not die'), 'the player dying fails a step that fails on death, and the message line says so');
   ok(!d.watch.death(d.host.view(), (ev) => d.host.event(ev)), 'and with nothing failing on death, a death is not handed on');
+}
+
+// ---- a permanent placement named as a story object: `place/<id>`, with nothing in the story changed ------------------
+{
+  // The row as its file holds it (raw, on Tatooine), and the object naming it written by the very snippet the
+  // console and the editor hand over; the stand-in world files the row under its key at its place in the game's
+  // frame, which is where the permanent layer stands it (`toGame`), and answers only for a key it was asked about,
+  // measured as `LayoutStreamer.nearestPlaced` measures: from the player's own height, a metre up or down counting
+  // as a metre and a half, and only what is nearer than the reach.
+  const centre = { x: -1376, z: -3576 };
+  const row: PlacementRow = { id: 'eisley-locker', kind: 'prop', pack: 'props', thing: 'frn_locker', x: 3448.12, y: 5, z: -4688.4, q: [1, 0, 0, 0] };
+  const objectText = storyObjectSnippet(row, 'tatooine', 'TEST: LOCKER');
+  const own = [
+    { path: 'story.jsonc', text: '{ "prefix": "own", "title": "TEST" }' },
+    { path: 'objects/eisley-locker.jsonc', text: objectText },
+    { path: 'quests/locker.jsonc', text: JSON.stringify({ id: 'locker', title: 'TEST: open the locker', givers: [{ kind: 'debug' }], start: ['open'], steps: { open: { type: 'use', object: 'obj/eisley-locker', objective: 'TEST: open the locker', ends: 'done' } } }) },
+  ];
+  const g = game({ own });
+  ok(g.host.grant('own:locker').ok, 'a job waiting on an object that names a permanent placement is taken like any other');
+  const view = g.host.view()!;
+  const o = view.objects.find((x) => x.id === 'own:obj/eisley-locker');
+  ok(!!o && o.template === placementKey(row.id) && o.template === 'place/eisley-locker' && view.watch.some((w) => w.k === 'use' && w.object === 'own:obj/eisley-locker'), `the snippet reads as a story object whose template is the row's key, and the view watches it (${o?.template})`);
+  // What a server's view goes through on its way to a browser keeps it as it is.
+  const wire = cleanView(JSON.parse(JSON.stringify(view)));
+  ok(wire?.objects.some((x) => x.id === 'own:obj/eisley-locker' && x.template === 'place/eisley-locker') === true, "and a server's view, cleaned on arrival, carries the same key");
+  const filed = new Map<string, { x: number; y: number; z: number }>();
+  const stand = (r: PlacementRow) => {
+    const at = placementToGame(r, centre);
+    filed.set(placementKey(r.id), { x: at.x, y: at.y, z: at.z });
+    return at;
+  };
+  const asked: string[] = [];
+  const deps = {
+    placed: (template: string, x: number, y: number, z: number, reach: number) => {
+      asked.push(template);
+      const p = filed.get(template);
+      return p && Math.hypot(p.x - x, (p.y - y) * 1.5, p.z - z) < reach ? p : null;
+    },
+  };
+  const at = stand(row);
+  const stands = new StoryStands();
+  // The test set's own terminal is in the view as well (it offers a job), and is asked about under its template.
+  ok(stands.near(view.objects, 'tatooine', 1, centre, at.x + 1, 5, at.z, 0, deps)?.id === 'own:obj/eisley-locker' && asked.includes('place/eisley-locker'), 'a metre from where the row stands, it is the thing the use key works, asked of the world by its key');
+  g.host.event({ k: 'use', object: 'own:obj/eisley-locker' });
+  ok(g.q('own:locker')?.state === 'done', 'and using it finishes the job waiting on it');
+  // The row moved in its file (the editor, or a hand edit) and stood again where it says now: the place found for
+  // this world is kept until the cache is cleared, as the game clears it on a placements file changing.
+  const moved = { ...row, x: row.x + 12 };
+  const now = stand(moved);
+  ok(stands.near(view.objects, 'tatooine', 1, centre, now.x, 5, now.z, 0, deps) === null, 'moved twelve metres, the place kept for this world is the old one');
+  stands.clear();
+  ok(stands.near(view.objects, 'tatooine', 1, centre, now.x, 5, now.z, 0, deps)?.id === 'own:obj/eisley-locker', 'cleared, it is looked for again and found where the row stands now');
+  ok(stands.near(view.objects, 'tatooine', 1, centre, at.x, 5, at.z, 0, deps) === null, 'and no longer where it stood');
 }
 
 // ---- a reward paid once; a thing owned already said, not given -------------------------------------------------

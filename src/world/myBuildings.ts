@@ -396,6 +396,31 @@ export async function placeLocalHome(h: LocalHomes, row: LocalHome, at: LocalHom
   return { placed: out.ok, fate, why: out.ok ? null : out.why };
 }
 
+/**
+ * What one move of a house of yours came to: `moved` where the ghost had it (this machine's), `asked` of the server
+ * that keeps it (which moves it for everybody when it answers), `back` where it stood (the world would not take it
+ * there, or the server cannot move a house), `gone` (taken down while it was in hand or going up), `world` (its
+ * world went while it was going up), `kept` (let go of where it stood, its keeper having changed), and `held` (it is
+ * still in hand: the ghost's own refusal, or a keeper that cannot be asked just now).
+ */
+export type HouseMove = 'moved' | 'asked' | 'back' | 'gone' | 'world' | 'kept' | 'held';
+
+/**
+ * What a move of a house this machine keeps came to, from its landing (`placeLocalHome`) and whether its row is
+ * still kept once it has landed. A landing that went up but whose row was taken off the list meanwhile is `gone`,
+ * never `moved`: what went up came straight back down.
+ */
+export function localMoveOf(landing: LocalHomeLanding, kept: boolean): HouseMove {
+  if (landing.fate === 'gone') return 'world';
+  if (!kept) return 'gone';
+  return landing.placed ? 'moved' : 'back';
+}
+
+/** Whether a move left the hand going where the ghost had it: moved here, or asked of the server that keeps it. */
+export function moveDropped(m: HouseMove | null): boolean {
+  return m === 'moved' || m === 'asked';
+}
+
 /** One of the player's own buildings, as the Housing tab lists it. */
 export interface MyBuilding {
   /** What a take-down names: the server's id, or the local key. */

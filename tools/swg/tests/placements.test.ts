@@ -14,8 +14,17 @@
 //  - **A sync takes down only what moved**: a row's name, note and time are words about it, and a change to
 //    them re-stands nothing.
 //
+//  - **`status` only says which pack the rows need** (`tools/swg/placementsStatus.mjs`): a machine with no
+//    placements folder (every one today) reads none and does not fail, and nothing about a file somebody wrote
+//    is ever a step to run.
+//
 // Plain node with type stripping: the modules under test are imported with their extensions.
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
+import { placementPackLines, placementRows, placementsFolder, worldPackCommand } from '../placementsStatus.mjs';
 import { TEMPLATE } from '../../../src/story/set.ts';
 import { parseJsonc } from '../../../src/story/jsonc.ts';
 import { PLACEMENT_LIMITS, fromGame, isPlacementId, mergeLayers, mintPlacementId, placementFileOf, placementIdOf, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementRow, readPlacementsFile, rowHash, storyAreaSnippet, storyObjectSnippet, syncPlan, toGame, type PlacementRow } from '../../../src/story/placements.ts';
@@ -32,6 +41,7 @@ function ok(what: string, pass: boolean, note = ''): void {
   }
 }
 const near = (a: number, b: number, eps = 1e-9) => Math.abs(a - b) <= eps;
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 const crate: PlacementRow = { id: 'eisley-bay22-locker', kind: 'prop', pack: 'props', thing: 'placable_loot_crate', x: 3448.12, y: 5.03, z: -4688.4, q: [0.92388, 0, 0.38268, 0], solid: true, inside: true, name: 'Locker', note: 'the drawer and the coat hooks', at: 1760000000000 };
 const house: PlacementRow = { id: 'anchorhead-house-1', kind: 'building', pack: 'gallery', model: 'ply_tato_house_sm_s01_fp1', deed: 'tatooine_house_small_deed', x: 0, y: 12.4, z: 0, q: [0.70711, 0, 0.70711, 0], clear: 14.5 };
@@ -207,6 +217,74 @@ const fileOf = (rows: unknown[], head: Record<string, unknown> = {}) => JSON.str
   ok('and an area snippet is a circle round it', !area.error && a.shape?.kind === 'circle' && a.shape.r === 8 && a.shape.c?.[1] === -4688.4);
 }
 ok('the guard a story row carries where it says none is a metre and a half', DRESSING_TUNE.guard === 1.5);
+
+// ---- What `status` says of them: a pack the rows need, information only ------------------------------------------
+{
+  const scratch = mkdtempSync(join(tmpdir(), 'placements-status-'));
+  try {
+    const packs = join(scratch, 'assets-private');
+    mkdirSync(packs, { recursive: true });
+    const readJson = (file: string) => {
+      try {
+        return JSON.parse(readFileSync(file, 'utf8'));
+      } catch {
+        return null;
+      }
+    };
+    // No folder at all, which is every install today: nothing read, nothing failed, one line saying so.
+    ok('a checkout or a release with no placements folder reads no rows and does not fail', placementsFolder(join(scratch, 'no-checkout')) === null && placementRows(null).length === 0 && placementRows(join(scratch, 'nowhere')).length === 0);
+    const none = placementPackLines([], packs, readJson);
+    ok('and status says there are none, in one line', none.length === 1 && /placements: none in this build/.test(none[0]));
+    // A release carries the built copy (`dist/placements`) and no `public/`.
+    mkdirSync(join(scratch, 'release', 'dist', 'placements', 'world'), { recursive: true });
+    ok("a release's rows are the build's own copy", placementsFolder(join(scratch, 'release')) === join(scratch, 'release', 'dist', 'placements'));
+    // A checkout whose last row was taken out (the editor takes `public/placements` away with it) after a build:
+    // its `dist/` still holds the last build's copy, which is no row anybody ships.
+    mkdirSync(join(scratch, 'emptied', 'public'), { recursive: true });
+    mkdirSync(join(scratch, 'emptied', 'dist', 'placements', 'world'), { recursive: true });
+    writeFileSync(join(scratch, 'emptied', 'dist', 'placements', 'world', 'tatooine.json'), placementsFileText('tatooine', 'raw', [crate]));
+    ok("a checkout with no placements in public/ has none, whatever its last build's dist/ holds", placementsFolder(join(scratch, 'emptied')) === null);
+    // Rows on two worlds, out of all three packs, with no pack converted here.
+    const dir = join(scratch, 'checkout', 'public', 'placements');
+    mkdirSync(join(dir, 'story'), { recursive: true });
+    mkdirSync(join(dir, 'world'), { recursive: true });
+    writeFileSync(join(dir, 'story', 'tatooine.json'), placementsFileText('tatooine', 'raw', [crate, { ...crate, id: 'other-crate', thing: 'missing_thing' }]));
+    writeFileSync(join(dir, 'world', 'tatooine.json'), placementsFileText('tatooine', 'raw', [house, { id: 'wall', kind: 'prop', pack: 'world', model: 'wall_s01', x: 1, y: 0, z: 1, q: [1, 0, 0, 0] }]));
+    writeFileSync(join(dir, 'world', 'naboo.json'), placementsFileText('naboo', 'raw', [{ ...crate, id: 'theed-crate' }]));
+    ok("a checkout's rows are its public folder's", placementsFolder(join(scratch, 'checkout')) === dir);
+    const rows = placementRows(dir);
+    ok('every row of both layers is read, with its world and layer', rows.length === 5 && rows.filter((r) => r.world === 'tatooine').length === 4 && rows.some((r) => r.layer === 'world' && r.row.id === 'wall'));
+    const lacking = placementPackLines(rows, packs, readJson);
+    ok('with no packs converted, each world says which pack its rows need, with the command that makes it', lacking.some((l) => /permanent placements on tatooine need the props pack for 2 rows.*npm run swg -- props <swg-dir> .* --retail-only/.test(l)) && lacking.some((l) => /on tatooine need the gallery pack for 1 row/.test(l)) && lacking.some((l) => /on tatooine need the tatooine pack for 1 row.*snapshot <swg-dir> tatooine/.test(l)) && lacking.some((l) => /on naboo need the props pack for 1 row/.test(l)), lacking.join(' | '));
+    // The snapshot of one world writes into the very folder it is given, so the command names the world's own pack
+    // folder, as the rest of status does; given the packs' root it would convert a whole world into the wrong place.
+    const snap = lacking.find((l) => /need the tatooine pack/.test(l)) ?? '';
+    ok('a world pack is asked for into its own folder', snap.includes(`snapshot <swg-dir> tatooine ${join(packs, 'tatooine')} --center=auto --radius=all --retail-only`), snap);
+    // A space zone's own pack is the space command's, which writes `<dir>/<zone>` itself; the made-up system is its own command's.
+    const spaceRow = { world: 'space_tatooine', layer: 'world', row: { id: 'rock', kind: 'prop', pack: 'world', model: 'asteroid_a', x: 0, y: 0, z: 0, q: [1, 0, 0, 0] } };
+    const spaceLines = placementPackLines([spaceRow], packs, readJson);
+    ok("a space zone's rows ask for the space command, into the packs' root", spaceLines.some((l) => l.includes(`need the space_tatooine pack for 1 row`) && l.includes(`npm run swg -- space <swg-dir> space_tatooine ${packs} --retail-only`)) && !spaceLines.some((l) => /snapshot/.test(l)), spaceLines.join(' | '));
+    ok('and the made-up system its own', worldPackCommand('space_sandbox', packs) === `sandbox <swg-dir> ${packs} --retail-only`);
+    ok('and a summary first', /placements: 5 permanent rows over 2 worlds/.test(lacking[0]));
+    // The packs converted, holding all but one thing: one line for what a pack has not got, and never a reconversion.
+    mkdirSync(join(packs, 'props'), { recursive: true });
+    mkdirSync(join(packs, 'gallery'), { recursive: true });
+    mkdirSync(join(packs, 'tatooine'), { recursive: true });
+    writeFileSync(join(packs, 'props', 'manifest.json'), JSON.stringify({ props: [{ id: crate.thing }] }));
+    // The house's model in a gallery category other than the walk-in buildings': the game finds a row's model in any
+    // of the pack's categories (`AssetPack.find`), so status does too.
+    writeFileSync(join(packs, 'gallery', 'manifest.json'), JSON.stringify({ categories: { layout: [{ id: 'some_other_house' }], vehicles: [{ id: house.model }] } }));
+    writeFileSync(join(packs, 'tatooine', 'manifest.json'), JSON.stringify({ categories: { structures: [{ id: 'wall_s01' }] } }));
+    const have = placementPackLines(rows, packs, readJson);
+    ok('with the packs here, only what a pack has not got is said, and that converting again does not change it unless the archives hold it', have.length === 2 && /props pack here has not got 1 of what the permanent placements on tatooine stand \(missing_thing\)/.test(have[1]) && /converting again does not change/.test(have[1]), have.join(' | '));
+    ok('and a gallery model is found in whichever of its categories holds it', !have.some((l) => /gallery pack/.test(l)), have.join(' | '));
+    // The status is information only: cli.mjs prints the lines and never puts them on the to-do list.
+    const cli = readFileSync(join(ROOT, 'tools', 'swg', 'cli.mjs'), 'utf8');
+    ok("status prints the lines and never asks for a step for them", /for \(const line of placementPackLines\(placementRows\(placementsFolder\(\)\), dir, readJson\)\) console\.log\(line\);/.test(cli) && !/need\([^)]*placement/i.test(cli));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 console.log(`placements: ${checks} checks, ${bad} failed`);
 if (bad) process.exit(1);

@@ -316,6 +316,12 @@ export const CLEARED = 'cleared';
 export const GOTO_RADIUS = 8;
 /** An object's reach when none is written, in metres. Ours. */
 export const OBJECT_REACH = 3;
+/**
+ * Metres round an object's `near` within which the thing of its template is looked for, in the game
+ * (`STAND_TUNE.find`, which starts from this) and by the checker, which refuses an object naming a permanent
+ * placement (`place/<id>`) whose row stands further off than this. Ours.
+ */
+export const OBJECT_FIND = 30;
 /** Standing a repeatable quest may give in one real day, unless it says otherwise (the design's 500). */
 export const STANDING_PER_REAL_DAY = 500;
 
