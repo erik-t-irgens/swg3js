@@ -3828,6 +3828,11 @@ export class World {
     return this.layoutStream?.unplace(key) ?? false;
   }
 
+  /** How many things put down in play stand in the rooms of a building placed in play, by what it was filed under. */
+  thingsInside(key: string): number {
+    return this.layoutStream?.hostedBy(key) ?? 0;
+  }
+
   /**
    * A building placed in play is about to come down: everybody this browser keeps standing in its
    * rooms is stood outdoors round its doorstep first, which is the building's own origin on the

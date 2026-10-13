@@ -26,6 +26,7 @@ import { fromBase32, fromHex, hmacSha256, sha256, toBase32, toHex, utf8 } from '
 import { SESSION, Session, characterMark, playerIdOf, proofOf, tuneSession, verifierOf, wordProofOf, type SessionStore } from '../../../src/net/session.ts';
 import { MULTIPLAYER_PARTS, multiplayerMarkup } from '../../../src/ui/multiplayerPage.ts';
 import { keeperOf, keeperState, type Keeper } from '../../../src/net/propsKept.ts';
+import { atDoorDoes } from '../../../src/world/myBuildings.ts';
 import { checkClaim, playerIdFor, verifierFor } from '../../../server/identity.mjs';
 import { cleanClaim } from '../../../server/wire.mjs';
 
@@ -491,6 +492,31 @@ const claimOf = (sent: Record<string, unknown>[]) => sent.find((m) => m.t === 'c
   ok(b.it.propsVersion === 0 && b.it.debug().props === 0, 'a server whose greeting says nothing of props keeps none');
   ok(keeper(b.it, 'pending') === 'local' && keeper(b.it, 'server') === 'local', "so a player's props are this machine's against it, even coming back to it over a line that dropped from one that kept them");
   ok(keeperOf('pending', keeperState(facts, b.it, false, true, false, 100)) === 'server', 'while its houses, which it does keep, are its own');
+}
+
+{
+  // Whether the far end moves a house where it stands (W7): heard in the greeting, in force once the server has us,
+  // and nothing at all from a server whose greeting says nothing of it -- every relay from before, which would drop a
+  // move in silence, so the pick-up key at a door keeps to the Housing tab's take-down against it.
+  const a = session();
+  a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  a.it.opening();
+  a.it.hail({ v: 6, now: 1, nonce: NONCE, homes: 2 });
+  ok(a.it.homesVersion === 0 && a.it.debug().homes === 2, 'a server that moves a house says so, and nothing rests on it until the claim is taken');
+  ok(atDoorDoes(true, a.it.homesVersion) === 'tab', 'so until then a house it keeps is offered to the Housing tab at its door');
+  a.it.claimed({ character: 'char-1' }, 'same');
+  ok(a.it.homesVersion === 2 && atDoorDoes(true, a.it.homesVersion) === 'take', 'once it is, a house it keeps comes up where it stands');
+  a.it.closed();
+  ok(a.it.homesVersion === 0, 'and with the line gone nothing rests on the greeting');
+  a.it.opening();
+  ok(a.it.debug().homes === 0, 'a line opened again has heard nothing yet');
+  const b = session();
+  b.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  b.it.opening();
+  b.it.hail({ v: 6, now: 1, nonce: NONCE, props: 1 });
+  b.it.claimed({ character: 'char-1' }, 'same');
+  ok(b.it.homesVersion === 0 && b.it.debug().homes === 0, 'a server whose greeting says nothing of it moves none');
+  ok(atDoorDoes(true, b.it.homesVersion) === 'tab' && atDoorDoes(false, b.it.homesVersion) === 'take', "so the key at the door of one it keeps opens the Housing tab, while this machine's own still come up");
 }
 
 {

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { HOME_TUNING, Homes, applyHomes, cleanHome, cleanRemove, mayPlace } from '../../../server/homes.mjs';
+import { HOMES_VERSION, HOME_SAYS, HOME_TUNING, Homes, applyHomes, cleanHome, cleanHomeMove, cleanRemove, homeRefusal, mayPlace } from '../../../server/homes.mjs';
 import { Store, applyChange, emptyWorld } from '../../../server/store.mjs';
 
 let passed = 0;
@@ -187,6 +187,80 @@ const homes = () => {
   ok(h.place('c2', 8, 'tatooine', cleanHome(good)!).ok, 'and free again once it comes down');
 }
 
+// ---------------------------------------------------------------- moving one (W7)
+
+{
+  ok(HOMES_VERSION === 2, 'a server that moves a house says homes: 2, one past putting one up and taking one down');
+  const m = cleanHomeMove({ id: 'h3', x: 40, y: 2.25, z: -60, h: 0.5 + Math.PI * 2, r: 10000 })!;
+  ok(!!m && m.id === 'h3' && m.x === 40 && m.y === 2.25 && m.z === -60, 'a move names its house and carries its new place, at the height the browser measured');
+  ok(m.h === cleanHome(made({ h: 0.5 }))!.h && m.r === HOME_TUNING.clear, 'its heading kept in one turn and its circle capped, as a placing\'s are');
+  ok(!cleanHomeMove({ x: 40, y: 2, z: -60, h: 0 }) && !cleanHomeMove({ id: '__proto__', x: 40, y: 2, z: -60, h: 0 }) && !cleanHomeMove({ id: 'h3', x: Number.NaN, y: 2, z: -60, h: 0 }) && !cleanHomeMove({ id: 'h3', x: 1e9, y: 2, z: -60, h: 0 }) && !cleanHomeMove(null), 'and the ways a move can be nonsense are not taken');
+  const no = homeRefusal({ t: 'moveHome', id: 'h3', x: 'nowhere' }, HOME_SAYS.unread);
+  ok(no.t === 'homeNo' && no.id === 'h3' && no.why === HOME_SAYS.unread, 'a move the server cannot read is refused naming its house, so its browser stands it again');
+  ok(!('id' in homeRefusal({ t: 'moveHome', id: '__proto__' }, HOME_SAYS.unread)) && !('id' in homeRefusal(null, HOME_SAYS.nowhere)), 'and names none when the word names nothing this server could have handed out');
+}
+
+{
+  const { h, log, tick } = homes();
+  const id = h.place('c1', 7, 'tatooine', cleanHome(good)!, [7, 8]).id!;
+  const seq = h.seq;
+  tick(500);
+  const out = h.move('c1', 7, 'tatooine', id, cleanHomeMove({ id, x: 300, y: 7.5, z: -20, h: 2, r: 12 })!, [7, 8, 9]);
+  ok(out.ok, 'the owner moves their own house');
+  ok(out.tell.length === 3 && out.tell.every((t: { msg: { t: string } }) => t.msg.t === 'homeMoved'), 'and everybody on the world is told the same word, the one who moved it first');
+  const wire = (out.tell[0] as { to: number; msg: { home: Record<string, unknown> } });
+  ok(wire.to === 7 && wire.msg.home.id === id && wire.msg.home.owner === 'c1' && wire.msg.home.model === good.model, 'under the same id, still theirs and still the same building');
+  ok(wire.msg.home.x === 300 && wire.msg.home.y === 7.5 && wire.msg.home.h === 2, 'where it stands now');
+  const rec = log[log.length - 1] as { t: string; id: string; home: Record<string, unknown> };
+  ok(rec.t === 'home' && rec.id === id && rec.home.x === 300 && !('owner' in rec.home) && !('model' in rec.home), 'written down as the record a placing writes, with only what moved in it');
+  ok(h.seq === seq && h.rows.size === 1 && h.ownedBy('c1') === 1, 'and the counter, the count and whose it is are untouched: a move makes nothing new');
+  ok(h.forWorld('tatooine')[0].x === 300 && h.describe().moved === 1, 'the world has it where it went, and the status page counts the move');
+  ok(h.place('c2', 8, 'tatooine', cleanHome(good)!).ok, 'and the spot it left is free for somebody else');
+}
+
+{
+  const { h } = homes();
+  const id = h.place('c1', 7, 'tatooine', cleanHome(good)!).id!;
+  const theirs = h.move('c2', 8, 'tatooine', id, cleanHomeMove({ id, x: 500, y: 0, z: 0, h: 0, r: 12 })!, [7, 8]);
+  ok(!theirs.ok && theirs.why!.includes('not yours'), 'somebody else may not move it');
+  const said = theirs.tell[0] as { to: number; msg: { t: string; id: string } };
+  ok(theirs.tell.length === 1 && said.to === 8 && said.msg.t === 'homeNo' && said.msg.id === id, 'and only they are told, naming the house, so their browser stands it again where it stood');
+  ok(h.forWorld('tatooine')[0].x === good.x, 'and it has not moved');
+  ok(h.move('c2', 8, 'tatooine', id, cleanHomeMove({ id, x: 500, y: 0, z: 0, h: 0, r: 12 })!, [7, 8], true).ok, 'the admin may');
+  const other = h.move('c1', 7, 'naboo', id, cleanHomeMove({ id, x: 900, y: 0, z: 0, h: 0, r: 12 })!, [7]);
+  ok(!other.ok && other.why!.includes('another world') && (other.tell[0] as { msg: { id: string } }).msg.id === id, 'and a house is moved on its own world only, a move from another refused naming it');
+  const gone = h.move('c1', 7, 'tatooine', 'h999', cleanHomeMove({ id: 'h999', x: 0, y: 0, z: 0, h: 0, r: 12 })!, [7, 8]);
+  ok(gone.ok && gone.tell.length === 1 && (gone.tell[0] as { msg: { t: string; id: string } }).msg.t === 'homeDown', 'a house that is not there any more is not an error: its asker is told it is down');
+}
+
+{
+  // Its own old circle is never in its way; anybody else's is.
+  const { h } = homes();
+  const mine = h.place('c1', 7, 'tatooine', cleanHome(made({ x: 0, r: 20 }))!).id!;
+  const yours = h.place('c2', 8, 'tatooine', cleanHome(made({ x: 100, r: 20 }))!).id!;
+  ok(h.move('c1', 7, 'tatooine', mine, cleanHomeMove({ id: mine, x: 3, y: 1, z: 1, h: 0.3, r: 20 })!).ok, 'a house nudged a few metres overlaps only the circle it left, which is not in its way');
+  const onto = h.move('c1', 7, 'tatooine', mine, cleanHomeMove({ id: mine, x: 95, y: 1, z: 0, h: 0, r: 20 })!);
+  ok(!onto.ok && onto.why!.includes('already standing') && (onto.tell[0] as { msg: { id: string } }).msg.id === mine, 'one moved onto another house is refused, naming it');
+  ok(h.rows.get(mine)!.x === 3 && h.rows.get(yours)!.x === 100, 'and neither house has moved');
+}
+
+{
+  // A move replayed off the log stands it where it went, whose it still is, and a restart hands out no id twice.
+  const { h, log } = homes();
+  const a = h.place('c1', 7, 'tatooine', cleanHome(good)!).id!;
+  h.place('c1', 7, 'tatooine', cleanHome(made({ x: 900 }))!);
+  h.move('c1', 7, 'tatooine', a, cleanHomeMove({ id: a, x: -400, y: 9, z: 12, h: 1.5, r: 18 })!);
+  const replayed = emptyWorld(1);
+  for (const rec of log) applyChange(replayed, rec);
+  const back = new Homes({ tuning: HOME_TUNING });
+  back.load(replayed);
+  const row = back.rows.get(a)!;
+  ok(row.x === -400 && row.y === 9 && row.z === 12 && row.h === 1.5 && row.r === 18, 'a move read back off the log stands where it went');
+  ok(row.owner === 'c1' && row.model === good.model && row.world === 'tatooine', 'still theirs, still the same building, on the same world');
+  const fresh = back.place('c2', 8, 'tatooine', cleanHome(made({ x: 5000 }))!).id!;
+  ok(back.rows.size === 3 && fresh !== a && !Object.prototype.hasOwnProperty.call(replayed.houses, fresh), 'and a house put down after it takes an id never used');
+}
+
 // ---------------------------------------------------------------- the record, and the replay
 
 {
@@ -304,6 +378,7 @@ if (typeof WebSocket === 'undefined') {
     const a = await connect('Han', 'char-a', 'a world');
     const b = await connect('Chewie', 'char-b', 'a world');
     const far = await connect('Leia', 'char-c', 'another world');
+    ok((a.last('hail') as { homes?: number } | undefined)?.homes === HOMES_VERSION, 'the relay\'s hail says it moves a house where it stands');
 
     a.send({ t: 'placeHome', model: 'a_house', x: 30, y: 6.25, z: -40, h: 1, r: 14 });
     await settle();

@@ -89,6 +89,8 @@ export interface Hail {
   paint?: number;
   /** Whether the server keeps a player's props: 1 does; 0 or absent leaves them this browser's own. */
   props?: number;
+  /** Whether the server moves a house where it stands: 2 does; 0 or absent only puts one up and takes one down. */
+  homes?: number;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -305,6 +307,8 @@ export interface SessionStats {
   paint: number;
   /** Whether the far end's greeting said it keeps a player's props: 1 it does, 0 this browser keeps them. */
   props: number;
+  /** Whether the far end's greeting said it moves a house where it stands: 2 it does, 0 a house is only taken down. */
+  homes: number;
 }
 
 /**
@@ -346,7 +350,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0, props: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0, props: 0, homes: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -672,6 +676,7 @@ export class Session {
     this.stat.items = 0;
     this.stat.paint = 0;
     this.stat.props = 0;
+    this.stat.homes = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -727,6 +732,8 @@ export class Session {
     this.stat.paint = Number(h.paint) > 0 ? Math.floor(Number(h.paint)) : 0;
     // And whether it keeps a player's props (`propsVersion`).
     this.stat.props = Number(h.props) > 0 ? Math.floor(Number(h.props)) : 0;
+    // And whether it moves a house where it stands (`homesVersion`).
+    this.stat.homes = Number(h.homes) > 0 ? Math.floor(Number(h.homes)) : 0;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -968,6 +975,17 @@ export class Session {
    */
   get propsVersion(): number {
     return this.stat.authority === 'server' ? this.stat.props : 0;
+  }
+
+  /**
+   * Whether the server holding the world moves a house where it stands, as its greeting said: 2 does, so one of the
+   * player's own houses picked up at its door is asked of it where it goes now (`moveHome`) and moves for everybody
+   * when it answers (server/homes.mjs); anything less only puts one up and takes one down, and the pick-up key at a
+   * door keeps to the Housing tab's take-down against it. Nought with no server, against the relay that came before
+   * and on a line that has dropped.
+   */
+  get homesVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.homes : 0;
   }
 
   /**

@@ -16,7 +16,7 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { HOUSING_TUNE, LOCAL_HOME_PREFIX, LocalHomes, atDoorOf, awayText, doorstepSpot, houseName, isLocalHome, myBuildings, type LocalHome } from '../../../src/world/myBuildings.ts';
+import { HOUSING_TUNE, LOCAL_HOME_PREFIX, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, doorstepSpot, houseName, insideText, isLocalHome, movedHouseText, myBuildings, type LocalHome } from '../../../src/world/myBuildings.ts';
 import { homeKey } from '../../../src/net/homes.ts';
 
 let passed = 0;
@@ -168,7 +168,9 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   ok(/HOUSING_TUNE\.armMs/.test(ui) && /disabled/.test(ui) && /arming/.test(ui), 'and its answer stays shut for a moment after the question');
   ok(/Your buildings/.test(ui) && /Take down/.test(ui), 'it lists your buildings, with a Take down on each');
   ok(/this\.housingUi\.onRemove = \(id\) => this\.messages\.system\(this\.takeDownHome\(id\)\)/.test(main), 'and its answer takes that one down');
-  ok(/atDoorOf\(this\.myBuildingsHere\(\), \{ x: me\.x, z: me\.z \}, HOUSING_TUNE\.doorReach\)/.test(main) && /this\.housingUi\.ask\(home\.id\)/.test(main), "the pick-up key at a building's own doorstep opens the tab with that building's take-down asked");
+  // W7: the pick-up key at the door takes the house up where it stands; only against a server that cannot move one
+  // does it open the tab with the take-down asked, as it always did.
+  ok(/const home = atDoorOf\(this\.myBuildingsHere\(\), \{ x: me\.x, z: me\.z \}, HOUSING_TUNE\.doorReach\);\s*if \(home\) \{\s*if \(atDoorDoes\(home\.shared, this\.net\.session\.homesVersion\) === 'take'\) return this\.takeHome\(home\);\s*this\.toggleInventory\('housing'\);\s*this\.housingUi\.ask\(home\.id\);/.test(main), "the pick-up key at a building's own doorstep takes it up where it stands, and against a server that cannot move one opens the tab with its take-down asked");
 
   // Props.
   ok(/putAway: \['Delete'\]/.test(input) && /putAway:/.test(menu), 'Delete puts a prop in hand away, and the Controls page names it');
@@ -210,6 +212,61 @@ const read = (path: string) => readFileSync(new URL(`../../../${path}`, import.m
   ok(letGoPermanent.length > 0 && !/placedProps\.|savePlaced/.test(letGoPermanent) && /case 'back':[\s\S]*?this\.permanent\.restore\(key\)/.test(letGoPermanent) && /case 'away':[\s\S]*?this\.deletePermanent\(/.test(letGoPermanent) && /case 'keep':\s*return;/.test(letGoPermanent), 'it is stood again from its file on Escape, taken out of its file by Delete, and left as its file has it on a travel');
   const refuseAt = drop.indexOf("if (p.from.kind === 'permanent') {");
   ok(refuseAt > 0 && refuseAt < drop.indexOf('placedProps.put(') && refuseAt < drop.indexOf('p.from = HAND_FRESH;'), 'and a click asking to keep one as yours is refused before anything is put or let go of');
+
+  // W7: a house of yours picked up where it stands. It is a kind of hand of its own, let go of where it stood on
+  // Escape and on Delete alike (never taken down: the Housing tab does that), and left where it stood on a travel.
+  ok(/case 'home':\s*this\.letGoHome\(from, how, p\.name\);\s*return;/.test(stopHouse), 'a house of yours in hand is let go of by its own branch of the switch, apart from a permanent row');
+  const letGoHome = bodyOf(main, 'private letGoHome(from: HomeSource, how: LetGo, name: string, say = true): void');
+  ok(/this\.localHomes\.lower\(from\.id\);\s*if \(how === 'keep' \|\| !here\) return;/.test(letGoHome) && /if \(row && this\.homesKeeper === 'local'\) void this\.placeLocalHome\(row\);/.test(letGoHome), "this machine's is let go of in hand, and stood again where it stood through the one placer, unless the world or the keeper is going");
+  ok(/if \(how === 'keep' \|\| !here\) \{\s*homes\.unhide\(from\.id\);\s*return;\s*\}\s*homes\.show\(from\.id\);/.test(letGoHome) && !/askDown|removeHome|unplaceBuilding|localHomes\.remove/.test(letGoHome), "a server's is shown again, or left to the server, and neither is ever taken down from here");
+  const dropBuilding = bodyOf(main, 'private async dropPlacing(): Promise<void>');
+  ok(/if \(p\.from\.kind === 'home'\) \{\s*await this\.dropHome\(p, p\.from\);\s*return;\s*\}/.test(dropBuilding) && dropBuilding.indexOf("p.from.kind === 'home'") < dropBuilding.indexOf('const deed = p.deed;'), 'a click with a house of yours in hand moves it, before anything about deeds is asked');
+  const dropHome = bodyOf(main, 'private async dropHome(p: BuildingHand, from: HomeSource): Promise<void>');
+  ok(dropHome.indexOf('const refusal = this.keptRefusal(keeper);') > 0 && dropHome.indexOf('const refusal = this.keptRefusal(keeper);') < dropHome.indexOf('p.from = HAND_FRESH;'), 'refused (it stays in hand) while nobody knows who keeps the houses or their server is not answering, before anything is let go of');
+  ok(/if \(!from\.local && this\.net\.session\.homesVersion < HOMES_MOVE_VERSION\)/.test(dropHome) && dropHome.indexOf('homesVersion < HOMES_MOVE_VERSION') < dropHome.indexOf('homes.askMove('), 'never asked of a server whose hail does not say it moves a house');
+  ok(/p\.from = HAND_FRESH;\s*this\.stopPlacing\(\);/.test(dropHome), 'let go of without being put back, or moving one would stand it where it was as well');
+  ok(/homes\.askMove\(from\.id, \{ x: state\.x, z: state\.z \}, state\.yaw, state\.clear, state\.y\);/.test(dropHome), "a server's is asked of the server with the ghost's doorstep, heading, circle and height");
+  ok(/this\.localHomes\.lower\(from\.id\);[\s\S]*?this\.placeLocalHome\(row, \{ \.\.\.row, x: state\.x, y: state\.y, z: state\.z, yaw: state\.yaw, r: state\.clear \}\)/.test(dropHome), "and this machine's goes up under its own key through the one placer, where the ghost has it");
+  ok(!/unplaceBuilding|world\.placeBuilding/.test(dropHome), 'never through a placing or a take-down of its own: the tickets are the one placer\'s');
+  // The put-back of a move the world refuses is the placer's own (`placeLocalHome`'s `back`, which localHomes.test.ts
+  // drives), so the drop calls the placer once and has no second copy of the rule.
+  ok((dropHome.match(/this\.placeLocalHome\(/g) ?? []).length === 1, 'a refused move is put back where it stood by the placer itself, not by a second call from the drop');
+  ok(/if \(moved\.fate === 'gone'\) this\.homeMoveSaid = MOVE_SAYS\.world;\s*else if \(!this\.localHomes\.find\(row\.key\)\) this\.homeMoveSaid = MOVE_SAYS\.gone;\s*else if \(moved\.placed\)/.test(dropHome), 'and a move whose house was taken down from the Housing tab while it went up says so, never that it moved');
+  const takeHome = bodyOf(main, 'private async takeHome(home: MyBuilding): Promise<string | null>');
+  const liftAt = takeHome.indexOf('this.localHomes.lift(row.key)');
+  ok(liftAt > 0 && liftAt < takeHome.indexOf('this.world.unplaceBuilding(row.key);') && /this\.standOutOf\(row\.key\);\s*this\.world\.unplaceBuilding\(row\.key\);/.test(takeHome), "this machine's is held in hand before it comes down, and whoever stands in it is stood out first");
+  const hideAt = takeHome.indexOf('homes.hide(row.id);');
+  const countLocal = takeHome.indexOf('this.world.thingsInside(row.key)');
+  const countServer = takeHome.indexOf('this.world.thingsInside(homeKey(row.id))');
+  ok(hideAt > 0 && countLocal > 0 && countLocal < liftAt && countServer > 0 && countServer < hideAt, 'what was put down in its rooms is counted before it comes down, which lets go of them');
+  ok(/from = \{ kind: 'home', id: row\.key, local: true, [^\n]*\binside, gen \};/.test(takeHome) && /from = \{ kind: 'home', id: row\.id, local: false, [^\n]*\binside, gen \};/.test(takeHome), 'and the count rides with the house in hand, which the drop says');
+  ok(/this\.homeMoveSaid = movedHouseText\(p\.name, from\.inside, true\);/.test(dropHome) && /this\.homeMoveSaid = movedHouseText\(p\.name, from\.inside, false\);/.test(dropHome), 'which says what stays where it stood, asked of the server or moved here');
+  ok(/thingsInside\(key: string\): number \{\s*return this\.layoutStream\?\.hostedBy\(key\) \?\? 0;/.test(world), "the world's count is the streamer's own (`hostedBy`, which placedColliders.test.ts runs on the real streamer)");
+  ok(takeHome.indexOf("const refusal = this.keptRefusal('server');") > 0 && takeHome.indexOf("const refusal = this.keptRefusal('server');") < hideAt, "a server's is refused while its server is not answering, before it is taken down here");
+  // A server's whose move is asked and not answered yet is down here already: it is not taken up a second time.
+  const askingAt = takeHome.indexOf('if (homes.isHidden(row.id)) return fail(MOVE_SAYS.asking);');
+  ok(askingAt > 0 && askingAt < hideAt && askingAt < countServer, "a server's whose move is still asked of the server is refused, before anything is counted or hidden");
+  // Its world or its keeper changed while the model loaded: nothing was in hand for the keeper's change to let go of
+  // (`switchHomesKeeper`), so the pick-up asks again once it has the hand, and lets go of it where it stood.
+  const awaitAt = takeHome.indexOf('await this.startPlacingBuilding(');
+  const recheck = /if \(this\.world\.generation !== gen \|\| this\.homesKeeper !== \(from\.local \? 'local' : 'server'\)\) \{\s*this\.stopPlacing\('keep'\);\s*return fail\(MOVE_SAYS\.keeper\);\s*\}/.exec(takeHome);
+  ok(/const gen = this\.world\.generation;/.test(takeHome.slice(0, awaitAt)) && !!recheck && recheck.index > awaitAt && recheck.index < takeHome.indexOf('this.anchorBuilding('), 'a pick-up overtaken by a new world or a change of keeper while its model loaded is let go of where it stood, never anchored');
+  ok(/if \(why\) \{[\s\S]*?this\.letGoHome\(from, 'back', from\.row\.name, false\);/.test(takeHome) && /this\.anchorBuilding\(p, from\.row, from\.row\.yaw, GHOST_TUNE\.most\);/.test(takeHome), 'one that cannot be taken up stands again where it stood, and one taken up is anchored exactly where it stands');
+  ok(/if \(this\.localHomes\.inHand\(row\.key\)\) continue;/.test(bodyOf(main, 'private async standLocalHomes(): Promise<void>')), "no run of standing puts one of this machine's back while it is in hand");
+  ok(/if \(this\.placing\?\.from\.kind === 'home'\) this\.stopPlacing\('keep'\);\s*switchSets\(to, this\.homeSets\);/.test(bodyOf(main, 'private switchHomesKeeper(to: Keeper): void')), 'a change of keeper lets go of a house of yours in hand where it stood, before the sets change');
+  ok(/if \(held\?\.from\.kind === 'home' && held\.from\.id === id\) return inHandHouseText\(held\.name\);/.test(bodyOf(main, 'private takeDownHome(id: string): string')), "the Housing tab's take-down waits for a house in hand to be put down");
+  ok(/if \(routeHomeWord\(msg, homes\)\) \{/.test(main), "every house word off the socket reaches the houses through the one router the relay's round trip runs");
+}
+
+// ---------------------------------------------------------------- what moving a house says, and when the key moves one (W7)
+
+{
+  ok(atDoorDoes(false, 0) === 'take' && atDoorDoes(true, 2) === 'take', "the key at the door takes up this machine's house, and a server's that moves houses");
+  ok(atDoorDoes(true, 0) === 'tab' && atDoorDoes(true, 1) === 'tab', "and a server's that does not, opens the Housing tab with its take-down asked");
+  ok(insideText(0) === '' && insideText(1).includes('one thing') && insideText(3).includes('3 things') && insideText(3).includes('stay where they stood'), 'what stays behind is said, only when there is something');
+  ok(movedHouseText('Small House', 2, false) === 'Small House is moved; the 2 things put down inside it stay where they stood' && movedHouseText('Small House', 0, true) === 'Small House: asking the server to move it', 'a move says what moved and what stayed');
+  ok(backHouseText('Small House', true).includes('Housing tab') && backHouseText('Small House', false) === 'Small House put back where it stood', 'and Delete says it never takes a house down, which the Housing tab does');
+  ok(MOVE_SAYS.cannot === 'this server cannot move a house', "and a server that cannot move one is said in the design's own words");
 }
 
 console.log(`\n${passed} checks passed`);

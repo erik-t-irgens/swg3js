@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { footprintEntry, footprintFaults, footprintPatch, footprintSize, readFootprint } from '../sfp.mjs';
 import { deedCounts, joinDeeds, wordsFrom } from '../deeds.mjs';
 import { patchOfFootprint } from '../../../src/world/housePlace.ts';
+import { deedOfModel, type DeedRow } from '../../../src/world/deeds.ts';
 import { W, chunk, encode, form } from './iffWriter.ts';
 
 let passed = 0;
@@ -166,6 +167,18 @@ function makeSfp(width: number, height: number, pivotX: number, pivotZ: number, 
     const houses = placeable.filter((r) => /house/.test(r.id));
     note(`${houses.length} of them are houses, from ${Math.min(...houses.map((h) => h.lots))} to ${Math.max(...houses.map((h) => h.lots))} lots`);
   }
+}
+
+// ---------------------------------------------------------------- a house picked back up, by its model (W7)
+{
+  // A house already standing is taken up again by the deed that makes its model, for the grid it was placed on: one
+  // that may stand on this world first, then any with a footprint, and none where no deed with a footprint makes it.
+  const foot = { w: 2, h: 2, px: 0, pz: 0, cw: 8, ch: 8, rows: ['FF', 'FF'] };
+  const row = (id: string, model: string | null, zones: string[], withFoot = true): DeedRow => ({ id, name: id, named: true, desc: '', makes: '', model, layout: null, lots: 1, upkeep: 0, zones, foot: withFoot ? foot : null, patch: null });
+  const deeds = [row('naboo_only', 'ply_house', ['naboo']), row('footless', 'ply_house', [], false), row('tatooine_one', 'ply_house', ['tatooine']), row('other', 'ply_shop', [])];
+  ok(deedOfModel('ply_house', 'tatooine', deeds)?.id === 'tatooine_one', "the deed that may stand on this world is the one a house here is taken up by");
+  ok(deedOfModel('ply_house', 'lok', deeds)?.id === 'naboo_only', 'with none for this world, any deed of its model with a footprint');
+  ok(deedOfModel('ply_tower', 'tatooine', deeds) === null && deedOfModel('ply_house', 'lok', [deeds[1]]) === null, 'and none where no deed with a footprint makes it: judged on its model\'s own box, as it was put down');
 }
 
 console.log(`\n${passed} checks passed`);

@@ -32,7 +32,21 @@
 // creatures do. Writing to the disk is one callback handed in, so the tests run the whole of this
 // over a plain object and read the log back.
 //
+// **Moving one.** A house of yours can be picked up where it stands and put down somewhere else on the same
+// world (`moveHome`), by whoever owns it or the server's admin: it keeps its id, its owner and its model, and
+// everybody on the world is told where it stands now (`homeMoved`). Its own old circle is never in its way.
+// Unlike a placing, a move is never dropped in silence: the browser that asked has already taken the house down
+// in its own world and stands it again only on hearing back, so every move not acted on is answered to the asker
+// alone, naming the house (`homeNo { why, id }`), and it stands again there where it stood.
+//
 // Dependency-free, and shared with tools/swg/tests/homes.test.ts.
+
+/**
+ * What a server's hail says when it can move a house: 2. Version 1 is putting one down and taking one away, which
+ * every server since the houses has done and which a hail before this said nothing about; a browser moves a house
+ * only on a server that says 2, and against any other keeps to taking it down from the Housing tab.
+ */
+export const HOMES_VERSION = 2;
 
 /**
  * Every number this file invents. None of them is from the game.
@@ -44,7 +58,7 @@ export const HOME_TUNING = {
   world: 2000,
   /** How many this server holds at once. */
   rows: 20000,
-  /** How many placing or removing words one browser may send in a second. */
+  /** How many placing, moving or removing words one browser may send in a second. */
   perSecond: 4,
   /**
    * The largest circle a building may keep to itself, metres. The widest one in the pack asks for
@@ -95,11 +109,44 @@ export function cleanHome(x, tuning = HOME_TUNING) {
   return { model: x.model, x: px, y: py, z: pz, h, r };
 }
 
+/** The shape of a house id this server hands out, as a browser sends it back. */
+const ID = /^[A-Za-z0-9_-]{1,40}$/;
+
 /** A cleaned copy of a `removeHome`, or undefined. */
 export function cleanRemove(x) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
-  if (typeof x.id !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(x.id) || RESERVED.includes(x.id)) return undefined;
+  if (typeof x.id !== 'string' || !ID.test(x.id) || RESERVED.includes(x.id)) return undefined;
   return { id: x.id };
+}
+
+/**
+ * A cleaned copy of a `moveHome` -- which house, and where it goes now: its doorstep, its height, its heading and
+ * the circle it keeps clear, exactly as a placing's -- or undefined. Unlike a placing, one that fails is answered
+ * (`Homes.refuse`): see `HOME_SAYS`.
+ */
+export function cleanHomeMove(x, tuning = HOME_TUNING) {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
+  if (typeof x.id !== 'string' || !ID.test(x.id) || RESERVED.includes(x.id)) return undefined;
+  // The same rules as a placing's, read with a model of its own so the one cleaner says what a place is.
+  const at = cleanHome({ ...x, model: 'moved' }, tuning);
+  return at ? { id: x.id, x: at.x, y: at.y, z: at.z, h: at.h, r: at.r } : undefined;
+}
+
+/**
+ * What a browser is told when a move is not acted on, in the server's own words. A placing or a removal that never
+ * reached the rules is dropped in silence, as it always was (a house that did not go up is one the browser never
+ * saw appear); a move has already taken its house down in the browser that asked, so it is answered every time.
+ */
+export const HOME_SAYS = {
+  nowhere: 'there is nowhere to move it',
+  tooFast: 'that was more than the server takes in a second: wait a moment and try again',
+  unread: 'the server could not read that',
+};
+
+/** The refusal a move gets: `homeNo` with the server's words, naming the house when the word names one this server could have handed out. */
+export function homeRefusal(msg, why) {
+  const id = msg && typeof msg === 'object' && typeof msg.id === 'string' && ID.test(msg.id) && !RESERVED.includes(msg.id) ? msg.id : undefined;
+  return { t: 'homeNo', why, ...(id ? { id } : {}) };
 }
 
 /**
@@ -169,6 +216,7 @@ export class Homes {
     /** The next id, which a load carries forward so a restart never repeats one. */
     this.seq = 1;
     this.placed = 0;
+    this.moved = 0;
     this.removed = 0;
     this.refusals = 0;
   }
@@ -206,13 +254,15 @@ export class Homes {
   }
 
   /**
-   * The house already standing whose circle this one would reach into, or null.
+   * The house already standing whose circle this one would reach into, or null. `except` is a house never in the
+   * way: the one being moved, whose own old circle is where it is picked up from.
    *
    * It is a walk of the world's own list rather than a grid: a world holds at most `world` of them,
    * a placing is a keypress and not a frame, and a grid would be a second thing to keep right.
    */
-  overlapping(world, x, z, r) {
+  overlapping(world, x, z, r, except = null) {
     for (const id of this.byWorld.get(world) ?? []) {
+      if (id === except) continue;
       const row = this.rows.get(id);
       if (!row) continue;
       const want = row.r + r + this.tuning.apart;
@@ -249,6 +299,47 @@ export class Homes {
     return { ok: true, id, tell };
   }
 
+  /** A move refused, to the one who asked and to nobody else, naming the house, which its browser stands again where it stood. */
+  noMove(session, why, id) {
+    this.refusals++;
+    return { ok: false, why, tell: [{ to: session, msg: { t: 'homeNo', why, id } }] };
+  }
+
+  /** A move not acted on before it reached the rules (nowhere to put it, too many words, not readable), answered all the same. */
+  refuse(session, msg, why) {
+    this.refusals++;
+    return { ok: false, why, tell: [{ to: session, msg: homeRefusal(msg, why) }] };
+  }
+
+  /**
+   * Move one: picked up where it stands and put down somewhere else on the same world, by whoever owns it or
+   * the server's admin. It keeps its id, its owner and its model; what changes is where it stands, how it is
+   * turned, how high, and the circle it keeps clear, and nothing but its own old circle is out of its way.
+   * Everybody on the world is told the same word, the one who moved it first, since that is the answer it is
+   * waiting for. A house that is not there any more is not an error: the one who asked is told it is down,
+   * which is what they need to hear to stop holding its place.
+   */
+  move(character, session, world, id, want, sessions = [], admin = false) {
+    const row = this.rows.get(id);
+    if (!row) return { ok: true, tell: [{ to: session, msg: { t: 'homeDown', id } }] };
+    if (row.owner !== character && !admin) return this.noMove(session, 'that is not yours to move', id);
+    if (row.world !== world) return this.noMove(session, 'that stands on another world', id);
+    if (this.overlapping(world, want.x, want.z, want.r, id)) return this.noMove(session, 'something is already standing there', id);
+    row.x = want.x;
+    row.y = want.y;
+    row.z = want.z;
+    row.h = want.h;
+    row.r = want.r;
+    row.at = this.now();
+    // The same record a placing writes, with only what moved in it: `applyHomes` merges it over the house it names.
+    this.write({ t: 'home', id, home: { x: row.x, y: row.y, z: row.z, h: row.h, r: row.r, at: row.at } });
+    this.moved++;
+    const msg = { t: 'homeMoved', home: wireOf(row) };
+    const tell = [{ to: session, msg }];
+    for (const s of sessions) if (s !== session) tell.push({ to: s, msg });
+    return { ok: true, tell };
+  }
+
   /**
    * Take one away. Only whoever owns it, or the server's admin, may; and a house that is not there
    * is not an error, because a browser that pressed twice is being careful rather than wrong.
@@ -281,6 +372,6 @@ export class Homes {
 
   /** What the status page prints. */
   describe() {
-    return { standing: this.rows.size, worlds: this.byWorld.size, owners: this.byOwner.size, placed: this.placed, removed: this.removed, refusals: this.refusals, tuning: this.tuning };
+    return { standing: this.rows.size, worlds: this.byWorld.size, owners: this.byOwner.size, placed: this.placed, moved: this.moved, removed: this.removed, refusals: this.refusals, tuning: this.tuning };
   }
 }

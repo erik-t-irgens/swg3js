@@ -11,8 +11,10 @@
 //
 // **Where it came from** (`HandSource`) decides what letting go of it does, and every let-go in the game switches
 // on it, so the compiler names a kind of hand a branch forgot: a thing taken fresh from a tab has nowhere to go
-// back to, one of your own picked up goes back into your store, and a permanent row picked up is stood again
-// from its file, taken out of it, or (a travel, the select screen) left in the file for the next visit to stand.
+// back to, one of your own picked up goes back into your store, a house of your own picked up at its door stands
+// again where it stood or is moved where it is put down (never taken down: the Housing tab does that), and a
+// permanent row picked up is stood again from its file, taken out of it, or (a travel, the select screen) left in
+// the file for the next visit to stand.
 //
 // **The words are here and nowhere else**, so a release, which never reaches any of this (every call is behind
 // `import.meta.env.DEV`), carries none of them.
@@ -40,8 +42,17 @@ export type Destination = 'yours' | PlacementLayer;
  */
 export type HandSource = { kind: 'fresh' } | { kind: 'local'; row: PlacedProp } | { kind: 'server'; row: KeptRow } | { kind: 'permanent'; layer: PlacementLayer; row: PlacementRow };
 
-/** The same for a building, which is never one of your own props. */
-export type BuildingSource = Exclude<HandSource, { kind: 'local' | 'server' }>;
+/**
+ * One of your own houses picked up where it stands (the pick-up key at its door): the server's id or this machine's
+ * key (`id`), whether this machine keeps it (`local`) or a server does, where it stood in the game's frame (`row`:
+ * its doorstep, its height, its heading and the circle it kept clear), how many things put down in its rooms stay
+ * where they stood when it moves (`inside`), and which world it was picked up in (`gen`, `World.generation`): a
+ * house whose world has gone since is let go of where it stood, kept for the next visit.
+ */
+export type HomeSource = { kind: 'home'; id: string; local: boolean; row: { model: string; name: string; x: number; y: number; z: number; yaw: number; r: number }; inside: number; gen: number };
+
+/** The same for a building, which is never one of your own props, and may be one of your own houses. */
+export type BuildingSource = Exclude<HandSource, { kind: 'local' | 'server' }> | HomeSource;
 
 /** A row as the editor writes it: its id absent for a thing never saved, which the endpoint names. */
 export type DraftRow = Omit<PlacementRow, 'id'> & { id?: string };
@@ -67,13 +78,20 @@ export function badgeOf(dest: Destination): string {
 }
 
 /**
- * L in hand: the next place to keep it. Taken fresh, or one of your own picked up: yours, the story's dressing,
- * the world edits, and round. A permanent row picked up: the two files only, since a permanent thing never
- * becomes yours.
+ * L in hand: the next place to keep it. Taken fresh, or one of your own props picked up: yours, the story's
+ * dressing, the world edits, and round. A permanent row picked up: the two files only, since a permanent thing never
+ * becomes yours. A house of your own picked up where it stands: yours only, since it is moved, keeping its id and
+ * its keeper, and never copied into a file while its keeper still stands it.
  */
-export function nextDestination(dest: Destination, source: HandSource['kind']): Destination {
+export function nextDestination(dest: Destination, source: HandSource['kind'] | BuildingSource['kind']): Destination {
+  if (source === 'home') return 'yours';
   if (source === 'permanent') return dest === 'story' ? 'world' : 'story';
   return dest === 'yours' ? 'story' : dest === 'story' ? 'world' : 'yours';
+}
+
+/** A file asked for while a house of yours picked up where it stands is in hand, which is refused. */
+export function homeStaysText(name: string): string {
+  return `${name} is yours and moves where it stands: a house goes into a file from the Housing tab with Permanent on`;
 }
 
 /** The first save to a file in a session asks a second click, and says where L would keep it instead. */

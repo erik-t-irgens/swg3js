@@ -84,6 +84,22 @@ export function deedById(id: string): DeedRow | null {
   return byId.get(id) ?? null;
 }
 
+/**
+ * The deed a building already standing is taken up by when it is picked up again, for the footprint it was placed
+ * on: one that makes its model and carries a footprint, one that may stand on this world first. Null where no deed
+ * makes it with a footprint (a building the console put down by its model alone), which is then judged on its
+ * model's own box, as it was put down.
+ */
+export function deedOfModel(model: string, planetId: string, deeds: readonly DeedRow[] = rows): DeedRow | null {
+  let any: DeedRow | null = null;
+  for (const d of deeds) {
+    if (d.model !== model || !d.foot) continue;
+    if (!wrongWorld(d, planetId)) return d;
+    any ??= d;
+  }
+  return any;
+}
+
 /** The deeds that can really be put down: the ones whose building this game has a model for. */
 export function placeableDeeds(): DeedRow[] {
   return rows.filter((d) => !!d.model);

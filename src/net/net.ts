@@ -149,6 +149,8 @@ interface ServerWord {
   paint?: number;
   /** Whether a server's hail says it keeps a player's props (1); a server before it says nothing. */
   props?: number;
+  /** Whether a server's hail says it moves a house where it stands (2); a server before it says nothing. */
+  homes?: number;
 }
 
 /**
@@ -438,7 +440,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -618,10 +620,11 @@ export class Net {
       // group's words are; what it means belongs to src/space/docking.ts.
       case 'spot':
       // The buildings players have put down on this world: the list handed over on arriving, and
-      // one going up or coming down while you are standing there. Handed over whole, as the group's
-      // words are; what they mean belongs to src/net/homes.ts.
+      // one going up, moving (a server whose hail says `homes: 2`) or coming down while you are standing
+      // there. Handed over whole, as the group's words are; what they mean belongs to src/net/homes.ts.
       case 'homes':
       case 'homeUp':
+      case 'homeMoved':
       case 'homeDown':
       case 'homeNo':
       // The props players have put down on this world, which a server whose hail says `props` keeps: the

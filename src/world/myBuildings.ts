@@ -18,11 +18,17 @@
 // or a follower's still names it is the dangerous case, and a house is placed with its own origin on
 // the ground at its doorstep (`housePlace.ts`), so that is where everybody is put.
 //
+// A house of the player's own can be picked up where it stands (the pick-up key at its door) and put down
+// somewhere else: it comes down, everybody in it stood out first, is held in hand here (`LocalHomes.lift`)
+// so no run of standing puts it back meanwhile, and goes up again under the same key through the same
+// placing tickets every other stand takes, its row written where it stands now only once it has.
+//
 // Pure of three, of the DOM and of fetching, so a node test can be the game. Rule for this file (node
 // runs it with type stripping for the tests): every import with its `.ts` extension, no constructor
 // parameter properties.
 
 import { mintThing } from './propsPlaced.ts';
+import { HOMES_MOVE_VERSION } from '../net/homes.ts';
 
 /** One house this machine put down itself, in the world it stands in. */
 export interface LocalHome {
@@ -114,6 +120,12 @@ export class LocalHomes {
    */
   private readonly placing = new Map<string, number>();
   private ticket = 0;
+  /**
+   * Houses picked up where they stood and in the player's hand (`lift`): down in the world on purpose, kept here
+   * where they stood, and stood by no run until they are put down or back (`lower`). An arrival lets go of them,
+   * since a thing in hand is let go of before the world goes.
+   */
+  private readonly held = new Set<string>();
   /** Why the last write did not reach the storage, for the console: kept for the session instead. */
   note = '';
 
@@ -138,6 +150,7 @@ export class LocalHomes {
     this.rows = [];
     this.up.clear();
     this.placing.clear();
+    this.held.clear();
     this.round++;
     let raw: unknown;
     try {
@@ -176,6 +189,7 @@ export class LocalHomes {
     if (i < 0) return null;
     const [row] = this.rows.splice(i, 1);
     this.up.delete(key);
+    this.held.delete(key);
     this.save();
     return row;
   }
@@ -238,19 +252,43 @@ export class LocalHomes {
   }
 
   /**
+   * One picked up where it stands and taken in hand: no longer standing (the game takes it down), kept here where
+   * it stood, and passed over by every run of standing until it is put down or back (`lower`). Refused (false) for
+   * one this list does not keep, or one still going up, whose placing on its way would otherwise land it in the
+   * world while it is in hand.
+   */
+  lift(key: string): boolean {
+    if (!this.rows.some((r) => r.key === key) || this.placing.has(key)) return false;
+    this.held.add(key);
+    this.up.delete(key);
+    return true;
+  }
+
+  /** Whether one is in the player's hand. */
+  inHand(key: string): boolean {
+    return this.held.has(key);
+  }
+
+  /** One in hand let go of: put down somewhere, put back where it stood, or left to the next run of standing. */
+  lower(key: string): void {
+    this.held.delete(key);
+  }
+
+  /**
    * A house begun with `beginPlace` has landed, `placed` whether it went up, `wanted` whether this machine keeps
    * the player's houses now. Answers what the game does with it: `stands` (marked standing here), `down` (take it
    * straight back down), or `none`. One whose placing an arrival let go of went with the world it went up in, and
    * comes down only while nothing of this world stands or goes up under its key. Otherwise it stands while it is
    * wanted and kept and not already standing -- whichever run began it, so one a run since overtaken left on its way
-   * (everything taken down and stood again while a model loaded) stands rather than being lost or filed twice.
+   * (everything taken down and stood again while a model loaded) stands rather than being lost or filed twice. One
+   * that lands for a house now in the player's hand comes straight back down.
    */
   land(key: string, ticket: number, placed: boolean, wanted: boolean): 'stands' | 'down' | 'none' {
     const mine = this.placing.get(key) === ticket;
     if (mine) this.placing.delete(key);
     if (!placed) return 'none';
     if (!mine) return this.up.has(key) || this.placing.has(key) ? 'none' : 'down';
-    if (wanted && !this.up.has(key) && this.rows.some((r) => r.key === key)) {
+    if (wanted && !this.held.has(key) && !this.up.has(key) && this.rows.some((r) => r.key === key)) {
       this.up.add(key);
       return 'stands';
     }
@@ -269,6 +307,7 @@ export class LocalHomes {
     this.rows = [];
     this.up.clear();
     this.placing.clear();
+    this.held.clear();
     this.round++;
     this.worldId = '';
     this.store = null;
@@ -284,6 +323,77 @@ export class LocalHomes {
       this.note = 'this browser will not keep them: they last as long as this session';
     }
   }
+}
+
+/** What standing one of this machine's houses asks of the world around it, so a node test can be the world. */
+export interface LocalHomeDeps {
+  /** Stand it (`World.placeBuilding`): where it went, or why not. */
+  place(model: string, opts: { at: { x: number; z: number }; yaw: number; y: number; key: string }): Promise<{ ok: boolean; why: string | null; x: number; y: number; z: number; yaw: number; clear: number }>;
+  /** Take it down by its key (`World.unplaceBuilding`). */
+  unplace(key: string): void;
+  /** Whether this machine keeps the player's houses now (`App.homesKeeper`). */
+  wanted(): boolean;
+  /** Which world load is in force (`World.generation`): one that moves while a house goes up took that house with it. */
+  generation(): number;
+}
+
+/** What standing one house came to (`placeLocalHome`). */
+export interface LocalHomeLanding {
+  /** Whether it went up in the world it was put into, wherever it then stands. */
+  placed: boolean;
+  /** What its landing came to (`LocalHomes.land`); `busy` when it was left alone, `gone` when its world went first. */
+  fate: 'stands' | 'down' | 'none' | 'busy' | 'gone';
+  why: string | null;
+  /**
+   * A move the world would not take where it was put, stood again where it stood: what that came to. Absent when
+   * nothing was put back -- the move went up, or it was a put-back itself, or the house was taken down meanwhile,
+   * or this machine no longer keeps the player's houses (it then waits where it stood for a game with no server).
+   */
+  back?: 'stands' | 'down' | 'none' | 'busy' | 'gone';
+}
+
+/**
+ * One house this machine keeps stood where `at` says, under its own key, through the placing tickets every stand of a
+ * key takes (`beginPlace`, then `land`): a house put back where it stood (`at` the row itself), or moved, whose row is
+ * written where it stands now only once it has gone up there, and stays where it stood otherwise. One already
+ * standing, going up or in hand is left alone (`busy`), so no key is ever filed twice; one whose world went while it
+ * was going up went with that world, its row untouched (`gone`); and one that lands while this machine no longer
+ * keeps the player's houses comes straight back down (`down`), its move kept for a game with no server.
+ *
+ * Two things a move does here and nowhere else, so the test runs the very code the game does. Its row is written
+ * where it stands now only while the house is still kept: one taken down from the Housing tab while its move was
+ * going up stays taken down (its landing finds no row and comes back down), where writing it first brought the house
+ * back and saved it again. And a move the world will not take where it was put is stood again where it stood, through
+ * the same tickets, while it is still kept and this machine still keeps the houses (`back`).
+ */
+export async function placeLocalHome(h: LocalHomes, row: LocalHome, at: LocalHome, deps: LocalHomeDeps): Promise<LocalHomeLanding> {
+  if (h.isStanding(row.key) || h.isPlacing(row.key) || h.inHand(row.key)) return { placed: false, fate: 'busy', why: null };
+  const world = h.world;
+  const gen = deps.generation();
+  const ticket = h.beginPlace(row.key);
+  let out: Awaited<ReturnType<LocalHomeDeps['place']>> = { ok: false, why: 'it would not go there', x: 0, y: 0, z: 0, yaw: 0, clear: 0 };
+  try {
+    out = await deps.place(row.model, { at: { x: at.x, z: at.z }, yaw: at.yaw, y: at.y, key: row.key });
+  } catch (err) {
+    out.why = err instanceof Error ? err.message : String(err);
+  }
+  // Its world gone while it was going up (a travel, or the same world loaded again): it went with that world, and
+  // the next visit stands it from its row, which is left where it stood.
+  if (h.world !== world || deps.generation() !== gen) {
+    if (h.land(row.key, ticket, out.ok, false) === 'down') deps.unplace(row.key);
+    return { placed: false, fate: 'gone', why: MOVE_SAYS.world };
+  }
+  if (out.ok && at !== row && h.find(row.key)) h.add({ ...row, x: out.x, y: out.y, z: out.z, yaw: out.yaw, r: out.clear });
+  const fate = h.land(row.key, ticket, out.ok, deps.wanted());
+  if (fate === 'down') deps.unplace(row.key);
+  if (!out.ok && at !== row) {
+    const kept = h.find(row.key);
+    if (kept && deps.wanted()) {
+      const back = await placeLocalHome(h, kept, kept, deps);
+      return { placed: false, fate, why: out.why, back: back.fate };
+    }
+  }
+  return { placed: out.ok, fate, why: out.ok ? null : out.why };
 }
 
 /** One of the player's own buildings, as the Housing tab lists it. */
@@ -360,6 +470,61 @@ export function atDoorOf<T extends { x: number; z: number }>(rows: readonly T[],
     }
   }
   return best;
+}
+
+/**
+ * What the pick-up key does at the doorstep of one of the player's own houses: takes it up where it stands
+ * (`take`); or, at a house a server keeps whose hail does not say it moves one (`HOMES_MOVE_VERSION`), opens the
+ * Housing tab with its take-down asked (`tab`), which is all the key did before houses could be moved and all such
+ * a server can do with one.
+ */
+export function atDoorDoes(shared: boolean, homesVersion: number): 'take' | 'tab' {
+  return shared && homesVersion < HOMES_MOVE_VERSION ? 'tab' : 'take';
+}
+
+/** What moving a house of your own says, in one place. */
+export const MOVE_SAYS = {
+  /** A server whose hail does not say it moves houses. */
+  cannot: 'this server cannot move a house',
+  /** One of this machine's still going up. */
+  going: 'it is still going up: try again in a moment',
+  /** One a server keeps whose move is asked and not answered yet. */
+  asking: 'the server has not said yet where it goes: try again in a moment',
+  /** One taken down while it was in hand, by the Housing tab or by the server's admin. */
+  gone: 'that building is not standing any more',
+  /** Its keeper changed while it was in hand. */
+  keeper: 'who keeps your houses changed while it was in hand: it stays where it stood',
+  /** One of this machine's standing while a server keeps the player's houses (one the console put down there alone). */
+  waits: "a server keeps your houses here: this machine's own are moved in a game with no server",
+  /** Its world went while it was going up somewhere else. */
+  world: 'the world changed while it was going up: it stays where it stood',
+};
+
+/** The things put down in a house's rooms, which stay where they stood when it moves: said, or '' for none. */
+export function insideText(n: number): string {
+  if (!(n > 0)) return '';
+  return n === 1 ? 'the one thing put down inside it stays where it stood' : `the ${n} things put down inside it stay where they stood`;
+}
+
+/** A house of yours taken up where it stands (the placing bar says how to put it back). */
+export function pickedHouseText(name: string): string {
+  return `${name} picked up where it stands`;
+}
+
+/** A house of yours put down somewhere else, or asked of the server to be (`asked`), with what stays behind. */
+export function movedHouseText(name: string, inside: number, asked: boolean): string {
+  const left = insideText(inside);
+  return `${asked ? `${name}: asking the server to move it` : `${name} is moved`}${left ? `; ${left}` : ''}`;
+}
+
+/** A house of yours let go of where it stood: Escape, or Delete, which never takes a house down. */
+export function backHouseText(name: string, del: boolean): string {
+  return del ? `a house is taken down from the Housing tab: ${name} is back where it stood` : `${name} put back where it stood`;
+}
+
+/** The Housing tab's take-down asked of a house in the player's hand. */
+export function inHandHouseText(name: string): string {
+  return `${name} is in your hand: put it down first`;
 }
 
 /**

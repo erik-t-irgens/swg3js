@@ -14,6 +14,16 @@
 // It keeps no pictures and no models: `World` does, and a world unloading takes every building with
 // it, so all this has to remember is which ids it has standing so that a list arriving twice does
 // not build the same house twice.
+//
+// **A house of the player's own moved** (a server whose hail says `homes: 2`): picked up at its door it is
+// taken down here only (`hide`) -- everybody else goes on seeing it where it stands -- and put down it is asked
+// of the server (`askMove`) and stays down here until the server answers: `homeMoved` stands it where it is
+// now, in every browser on the world at once, and a refusal names it (`homeNo { id }`) and it stands again
+// where it stood. A move is the old house down and the new one up under the same key, through the same one
+// stand a key that every other word goes through, so two words in one breath never file it twice.
+//
+// Rule for this file (node runs it with type stripping for the tests): every import with its `.ts`
+// extension, no enum, no namespace, no constructor parameter properties.
 
 /** One building as it comes over the wire. Every field is the server's; none is worked out here. */
 export interface HomeRow {
@@ -31,12 +41,43 @@ export interface HomeRow {
 }
 
 /** The words the socket has to hand over for any of this to happen. */
-export const HOME_WORDS = ['homes', 'homeUp', 'homeDown', 'homeNo'] as const;
+export const HOME_WORDS = ['homes', 'homeUp', 'homeMoved', 'homeDown', 'homeNo'] as const;
+
+/** What a server's hail says when it moves a house where it stands (server/homes.mjs's `HOMES_VERSION`). */
+export const HOMES_MOVE_VERSION = 2;
 
 /** What the key of a placed home is in the streamer. It is a name nothing in a snapshot has. */
 export function homeKey(id: string): string {
   return `home:${id}`;
 }
+
+/** A row off the wire, or null when it is not one: a far end on another build can send anything. */
+export function readHomeRow(raw: unknown): HomeRow | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (typeof r.id !== 'string' || !r.id || typeof r.model !== 'string' || !r.model) return null;
+  if (!num(r.x) || !num(r.y) || !num(r.z) || !num(r.h)) return null;
+  return { id: r.id, owner: typeof r.owner === 'string' ? r.owner : '', model: r.model, x: r.x, y: r.y, z: r.z, h: r.h, r: num(r.r) ? r.r : 0, at: num(r.at) ? r.at : 0 };
+}
+
+/** Whether two rows stand one building in one place, turned one way and keeping one circle clear. */
+function sameSpot(a: HomeRow, b: HomeRow): boolean {
+  return a.model === b.model && a.x === b.x && a.y === b.y && a.z === b.z && a.h === b.h && a.r === b.r;
+}
+
+/**
+ * A word off the socket handed to the houses when it is one of theirs (`HOME_WORDS`); answers whether it was. What
+ * the game's own socket handler calls, and what the relay's round-trip test calls the same way.
+ */
+export function routeHomeWord(msg: Record<string, unknown> | null | undefined, homes: Homes): boolean {
+  if (!msg || !(HOME_WORDS as readonly unknown[]).includes(msg.t)) return false;
+  homes.word(msg);
+  return true;
+}
+
+/** Why one of the server's houses is not stood here: in its owner's hand, or its move asked and not answered yet. */
+type Hidden = 'hand' | 'asked';
 
 /** What `Homes` needs of the world around it, so a node test can hand it something small. */
 export interface HomeDeps {
@@ -63,6 +104,8 @@ export class Homes {
    */
   private busy = new Map<string, number>();
   private ticket = 0;
+  /** The player's own houses kept down here: one in hand, or one whose move was asked and not answered yet. */
+  private readonly hidden = new Map<string, Hidden>();
   /** For the console: how many have been stood, how many refused, and the last thing the server said. */
   stood = 0;
   refused = 0;
@@ -91,11 +134,13 @@ export class Homes {
    * built on a world, and the server sends that list only when a browser *changes* world -- so on a
    * respawn, a reload or any other arrival back where you already were, throwing the rows away
    * would leave the houses gone with nothing left to ask for them again. So the rows go only when
-   * the world really changes, and `ready` puts the same ones back up when it does not.
+   * the world really changes, and `ready` puts the same ones back up when it does not. A house in
+   * hand is let go of before an arrival, so nothing is hidden.
    */
   enter(world: string): void {
     this.standing.clear();
     this.busy.clear();
+    this.hidden.clear();
     this.age++;
     if (world !== this.world) {
       this.rows.clear();
@@ -108,6 +153,7 @@ export class Homes {
     this.standing.clear();
     this.rows.clear();
     this.busy.clear();
+    this.hidden.clear();
     this.age++;
     this.world = '';
     this.held = false;
@@ -161,13 +207,23 @@ export class Homes {
   /** Everything the server has said about this world, handed over whole. */
   word(msg: Record<string, unknown>): void {
     if (msg.t === 'homes') {
-      const rows = Array.isArray(msg.rows) ? (msg.rows as HomeRow[]) : [];
-      for (const row of rows) void this.up(row);
+      // The whole of what stands here as the server has it now: a move asked and not answered (a line that
+      // dropped in between) has its answer in it, and a house standing where it no longer stands is moved.
+      for (const [id, why] of this.hidden) if (why === 'asked') this.hidden.delete(id);
+      for (const raw of Array.isArray(msg.rows) ? msg.rows : []) {
+        const row = readHomeRow(raw);
+        if (row) this.moved(row);
+      }
       return;
     }
     if (msg.t === 'homeUp') {
-      const row = msg.home as HomeRow | undefined;
+      const row = readHomeRow(msg.home);
       if (row) void this.up(row);
+      return;
+    }
+    if (msg.t === 'homeMoved') {
+      const row = readHomeRow(msg.home);
+      if (row) this.moved(row);
       return;
     }
     if (msg.t === 'homeDown') {
@@ -177,6 +233,10 @@ export class Homes {
     if (msg.t === 'homeNo') {
       this.refused++;
       this.lastWhy = String(msg.why ?? '');
+      // A move refused names its house, which stands again where it stood; one naming none is about a house
+      // that never went up, of which nothing stood here to put back.
+      const id = typeof msg.id === 'string' ? msg.id : '';
+      if (id && this.hidden.get(id) === 'asked') this.show(id);
       this.deps?.say(this.lastWhy);
     }
   }
@@ -191,6 +251,69 @@ export class Homes {
     this.deps?.send({ t: 'removeHome', id });
   }
 
+  /**
+   * Ask the server to move one of the player's own: its new doorstep, heading, circle and height, as a placing
+   * sends them. It stays down here until the server answers, and moves for everybody when it does; refused, it
+   * stands again where it stood.
+   */
+  askMove(id: string, at: { x: number; z: number }, yaw: number, clear: number, y: number): void {
+    this.hideAs(id, 'asked');
+    this.deps?.send({ t: 'moveHome', id, x: at.x, y, z: at.z, h: yaw, r: clear });
+  }
+
+  /** One of the player's own taken in hand: down here only, until it is shown again or the server moves it. */
+  hide(id: string): void {
+    this.hideAs(id, 'hand');
+  }
+
+  /** One kept down here stood again where the server has it (Escape, a refusal). */
+  show(id: string): void {
+    this.hidden.delete(id);
+    const row = this.rows.get(id);
+    if (row && !this.held) void this.up(row);
+  }
+
+  /**
+   * One let go of with nothing asked (a travel, the select screen, a change of keeper): kept down here no longer,
+   * and stood with the rest the next time they are stood, but not now, since the world or the keeper is going.
+   */
+  unhide(id: string): void {
+    this.hidden.delete(id);
+  }
+
+  /** Which of the player's own are kept down here, for the console. */
+  hiddenIds(): string[] {
+    return [...this.hidden.keys()];
+  }
+
+  /** Whether one is kept down here: in its owner's hand, or its move asked and not answered. */
+  isHidden(id: string): boolean {
+    return this.hidden.has(id);
+  }
+
+  /** Whether one stands here now. */
+  isStanding(id: string): boolean {
+    return this.standing.has(id);
+  }
+
+  private hideAs(id: string, why: Hidden): void {
+    this.hidden.set(id, why);
+    if (this.standing.delete(id)) this.deps?.unplace(homeKey(id));
+  }
+
+  /**
+   * A row stood again where it stands now: the old one down here first (whoever stands in it stood out on its
+   * doorstep by `unplace`), then up at its new place, under the same key and through the one stand a key has.
+   * One already standing exactly there (a list handed over again on a line that came back) is left alone.
+   */
+  private moved(row: HomeRow): void {
+    const was = this.rows.get(row.id);
+    if (was && this.standing.has(row.id) && sameSpot(was, row)) return;
+    if (this.standing.delete(row.id)) this.deps?.unplace(homeKey(row.id));
+    if (this.hidden.get(row.id) === 'asked') this.hidden.delete(row.id);
+    void this.up(row);
+  }
+
   /** Which of the standing ones this character owns, nearest first, for the console. */
   mine(character: string, at: { x: number; z: number }): HomeRow[] {
     const out = [...this.rows.values()].filter((r) => r.owner === character);
@@ -199,28 +322,38 @@ export class Homes {
   }
 
   /** What `__debug.homes()` prints. */
-  report(): { standing: number; held: boolean; stood: number; refused: number; lastWhy: string; rows: HomeRow[] } {
-    return { standing: this.standing.size, held: this.held, stood: this.stood, refused: this.refused, lastWhy: this.lastWhy, rows: [...this.rows.values()] };
+  report(): { standing: number; held: boolean; hidden: string[]; stood: number; refused: number; lastWhy: string; rows: HomeRow[] } {
+    return { standing: this.standing.size, held: this.held, hidden: this.hiddenIds(), stood: this.stood, refused: this.refused, lastWhy: this.lastWhy, rows: [...this.rows.values()] };
   }
 
+  /**
+   * Stand one row, once. A stand already going up for it is the one that lands: never a second under its key,
+   * which would file the key twice and leave a copy no take-down can reach. What it lands into is decided as it
+   * lands: in a world since left it went with that world; otherwise it stands if the rows still want it (not
+   * held, not hidden, the same row), and goes straight back down if not -- and a row moved meanwhile goes up
+   * again at its new place, by the stand that has just landed handing over to the next.
+   */
   private async up(row: HomeRow): Promise<void> {
     if (!row || typeof row.id !== 'string' || !row.id) return;
-    // Held down: the server's word is kept, and stood when the server keeps the player's houses again.
-    if (this.held) {
-      this.rows.set(row.id, row);
-      return;
-    }
+    // The same house said again (a list handed over twice, a word for one standing or going up) keeps the row
+    // the stand on its way holds, so that stand does not take itself for one a move overtook.
+    const was = this.rows.get(row.id);
+    if (!was || !sameSpot(was, row)) this.rows.set(row.id, row);
+    // Held down, or in its owner's hand or asked about: the server's word is kept, and stood when it may be.
+    if (this.held || this.hidden.has(row.id)) return;
     if (this.standing.has(row.id) || this.busy.has(row.id)) return;
     const deps = this.deps;
     if (!deps) return;
     const ticket = ++this.ticket;
     this.busy.set(row.id, ticket);
-    this.rows.set(row.id, row);
+    // What this stand stands: the row as it is kept now, which is this one or the same house said before it.
+    const mine = this.rows.get(row.id) as HomeRow;
     const age = this.age;
+    let again = false;
     try {
       // The server's own height, not one measured again here: the ground was tested once, by
       // whoever placed it, and a house has one height whatever browser is looking at it.
-      const out = await deps.place(row.model, { at: { x: row.x, z: row.z }, yaw: row.h, key: homeKey(row.id), y: row.y });
+      const out = await deps.place(mine.model, { at: { x: mine.x, z: mine.z }, yaw: mine.h, key: homeKey(mine.id), y: mine.y });
       // The world torn down while it was going up: after a reload into the same world the rows are
       // still there and wanting it is not the question, which is why the age is checked at all. It
       // went with the world it went up in, and comes down here only while nothing of this world
@@ -230,10 +363,12 @@ export class Homes {
         if (!this.standing.has(row.id) && !this.busy.has(row.id)) deps.unplace(homeKey(row.id));
         return;
       }
-      // Taken down, or held down, while it was going up: it comes straight back down. Held and then
-      // resumed in that time, it stands after all, since `ready` left it to this placing.
-      if (!this.rows.has(row.id) || this.held) {
-        deps.unplace(homeKey(row.id));
+      // Taken down, held down, picked up or moved while it was going up: it comes straight back down. Held and
+      // then resumed in that time, it stands after all, since `ready` left it to this placing; moved, the stand
+      // that landed hands over to one for where it stands now (`again`), so the key is never filed twice.
+      if (this.held || this.hidden.has(row.id) || this.rows.get(row.id) !== mine) {
+        if (out.ok) deps.unplace(homeKey(row.id));
+        again = !this.held && !this.hidden.has(row.id) && this.rows.has(row.id);
         return;
       }
       if (out.ok) {
@@ -246,6 +381,8 @@ export class Homes {
       }
     } finally {
       if (this.busy.get(row.id) === ticket) this.busy.delete(row.id);
+      const now = again ? this.rows.get(row.id) : undefined;
+      if (now) void this.up(now);
     }
   }
 
@@ -254,6 +391,7 @@ export class Homes {
     // Forgotten first and in every case, so a house whose word arrived while it was still going up
     // is taken down by the placing itself rather than left standing with nothing to name it.
     this.rows.delete(id);
+    this.hidden.delete(id);
     if (!this.standing.delete(id)) return;
     this.deps?.unplace(homeKey(id));
   }

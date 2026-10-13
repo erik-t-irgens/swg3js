@@ -9,7 +9,7 @@
 // placement taken away), the per-tier instance count, and the three-way `solid` rule that keeps our seats
 // from ever being solid. Nothing is written; only counts are printed.
 import assert from 'node:assert/strict';
-import { INDOOR_FILTER, ROCK_AT, gatePrepare, makeStreamer, type Harness } from './streamHarness.ts';
+import { INDOOR_FILTER, ROCK_AT, THREE, gatePrepare, makeStreamer, type Harness } from './streamHarness.ts';
 
 // After the harness, never beside it: a static import here would be resolved before the harness has put
 // its stub in front of the particle player, and that module will not load under plain node.
@@ -156,6 +156,36 @@ const FLOOR = 0.3;
   ok(h.stream.tierReport().loadedInstances === 1, `8: the tier holds the one instance (${h.stream.tierReport().loadedInstances})`);
   await h.settle({ x: 20000, z: 20000 }, 2);
   ok(h.stream.tierReport().loadedInstances === 0, '8: and none once it has unloaded');
+}
+
+// 9. What a house picked up and moved leaves where it stood (`hostedBy`, the count `World.thingsInside` hands the
+//    pick-up): the things put down in its rooms, counted while it stands, let go of as it comes up, and filed under
+//    it again only if it is put down where its rooms cover them.
+{
+  const h = await makeStreamer();
+  const at = { x: 300, z: 100 };
+  await h.settle(at);
+  const q = new THREE.Quaternion();
+  await h.stream.place({ model: 'hall', template: 'home:H', x: at.x, y: 0, z: at.z, q, radius: 10, solid: true });
+  // Two crates in its room on its floor, and one outside its walls.
+  await h.stream.place({ model: 'crate', template: 'prop:in1', x: at.x + 2, y: 0.3, z: at.z + 3, q, radius: 0.5, inside: true });
+  await h.stream.place({ model: 'crate', template: 'prop:in2', x: at.x - 3, y: 0.3, z: at.z - 2, q, radius: 0.5, inside: true });
+  await h.stream.place({ model: 'crate', template: 'prop:out', x: at.x + 30, y: 0, z: at.z, q, radius: 0.5 });
+  await h.settle(at);
+  ok(h.stream.hostedBy('home:H') === 2, `9: a house counts the two things put down in its rooms, and not the one outside (${h.stream.hostedBy('home:H')})`);
+  ok(h.stream.hostedBy('home:none') === 0 && h.stream.hostedBy('prop:in1') === 0, '9: a key nothing is filed under, or a thing that hosts nothing, counts none');
+  // Taken up: it hosts nothing any more, and what stood in it still stands, where it stood.
+  ok(h.stream.unplace('home:H') && h.stream.hostedBy('home:H') === 0, '9: taken up, it counts none');
+  const in1 = h.s.placedByKey.get('prop:in1');
+  ok(!!in1 && !in1.host && in1.x === at.x + 2 && h.stream.placedState('prop:in1') !== null && h.stream.placedState('prop:in2') !== null, '9: and the things that stood in it are still filed where they stood, with no host');
+  // Put down a long way off, it takes none of them with it.
+  await h.stream.place({ model: 'hall', template: 'home:H', x: at.x + 200, y: 0, z: at.z, q, radius: 10, solid: true });
+  ok(h.stream.hostedBy('home:H') === 0 && !h.s.placedByKey.get('prop:in1').host, '9: moved a long way off, it hosts none of what stood in it');
+  // Put down where it stood again, its rooms cover them, and they are filed under it again (`rehostAround`).
+  h.stream.unplace('home:H');
+  await h.stream.place({ model: 'hall', template: 'home:H', x: at.x, y: 0, z: at.z, q, radius: 10, solid: true });
+  await h.settle(at);
+  ok(h.stream.hostedBy('home:H') === 2 && h.s.placedByKey.get('prop:in1').host === h.s.placedByKey.get('home:H'), '9: put back over them, its rooms take both again');
 }
 
 console.log(`\n${passed} checks passed`);

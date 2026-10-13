@@ -980,6 +980,18 @@ export class LayoutStreamer {
   }
 
   /**
+   * How many things put down in play stand in the rooms of the building filed under a key: what a house picked up
+   * and moved leaves where it stood. Asked before it is taken up, which lets go of every one of them (`unhost`).
+   */
+  hostedBy(template: string): number {
+    const house = this.placedByKey.get(template);
+    if (!house) return 0;
+    let n = 0;
+    for (const p of this.placedByKey.values()) if (p.host === house) n++;
+    return n;
+  }
+
+  /**
    * The building standing under a key something was put down in play under, or null (not placed,
    * or placed into a tier that has not loaded, or a thing with no rooms). A building made from a
    * placement carries that placement as its `object`, whichever path built it.

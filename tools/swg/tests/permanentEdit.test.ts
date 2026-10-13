@@ -6,7 +6,7 @@
 //
 // Run: node tools/swg/tests/permanentEdit.test.ts
 import assert from 'node:assert/strict';
-import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, destinationText, driftText, forceText, groundMoved, inHandText, keptText, nextDestination, notYoursText, pickedUpText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, yawTurn, type Destination } from '../../../src/world/permanentEdit.ts';
+import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, destinationText, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, notYoursText, pickedUpText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, yawTurn, type Destination } from '../../../src/world/permanentEdit.ts';
 import { readPlacementRow, toGame, type PlacementRow } from '../../../src/story/placements.ts';
 import { dressingStandOf, standsSolid } from '../../../src/world/permanent.ts';
 
@@ -117,6 +117,8 @@ const cleaned = (draft: object, id = 'x'): PlacementRow => {
   ok(round('yours', 'fresh', 3) === 'story world yours', 'taken fresh: yours, the story, the world edits, and round');
   ok(round('yours', 'local', 3) === 'story world yours', 'one of yours picked up the same: it may become permanent');
   ok(round('story', 'permanent', 4) === 'world story world story' && nextDestination('yours', 'permanent') === 'story', 'a permanent row picked up goes between the two files only, and never to yours from anywhere');
+  ok((['yours', 'story', 'world'] as const).every((d) => nextDestination(d, 'home') === 'yours'), 'a house of yours picked up where it stands stays yours from anywhere: it is moved, never copied into a file');
+  ok(homeStaysText('Small House').startsWith('Small House is yours and moves where it stands'), 'and asking for a file says so');
   ok(destinationFile('story', 'tatooine') === 'public/placements/story/tatooine.json' && destinationText('world', 'tatooine') === 'public/placements/world/tatooine.json' && destinationText('yours', 'tatooine') === 'yours', 'every destination is named by the file it is saved to');
   ok(badgeOf('yours') === 'YOURS' && badgeOf('story') === 'PERMANENT · STORY' && badgeOf('world') === 'PERMANENT · WORLD EDIT', "the badge and the chip say which");
   const ask = confirmText('story', 'tatooine', 'L', 'world');

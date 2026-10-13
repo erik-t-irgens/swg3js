@@ -170,7 +170,7 @@ import { HOUSE_TUNE } from './world/housePlace.ts';
 import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, portsOf, ridesFrom, type FareTable, type Port, type Ride } from './world/shuttle.ts';
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
-import { homeKey, homes } from './net/homes.ts';
+import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.ts';
 import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
@@ -216,7 +216,7 @@ interface TravelWait {
 import { SHIP_TERMINAL_TEMPLATES, SHIP_TERMINAL_TUNE, SHIP_TRIP_ORBIT, shipTripsFrom, shipTripsNote, type ShipTerminalState } from './world/shipTerminal.ts';
 import type { Building, PlacedObject } from './world/layoutStream';
 import { TerminalUi, type TerminalPort, type TerminalShipTrip } from './ui/terminalUi.ts';
-import { allDeeds, deedById, deedLine, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
+import { allDeeds, deedById, deedLine, deedOfModel, footprintOf, loadDeeds, wrongWorld, type DeedRow } from './world/deeds.ts';
 import { GHOST_TUNE, PlacementGhost, ghostSpot, ghostVerdict, liftTo as houseLiftTo, turnTo, wheelReach, type GhostDeps, type GhostState } from './world/placeGhost.ts';
 import { clearRadius, patchOfBounds, patchOfFootprint, type Footprint, type Patch } from './world/housePlace.ts';
 import { NO_KEY, PlacingBar, placingView, type PlacingKeys, type PlacingView } from './ui/placingBar.ts';
@@ -226,10 +226,10 @@ import { PropsUi } from './ui/propsUi.ts';
 import { PropCatalogue, type PropDef } from './world/propCatalogue.ts';
 import { PROP_TUNE, NO_TURN, liftTo as propLiftTo, propSpot, propVerdict, pushBy, spinOf, tiltOf, turnAbout, type PropTurn, type PropVerdict } from './world/propPlace.ts';
 import { letGoOf, placedProps, propsKey, type LetGo, type PlacedDeps, type PlacedProp } from './world/propsPlaced.ts';
-import { HOUSING_TUNE, LocalHomes, atDoorOf, awayText, houseName, isLocalHome, myBuildings, type HomeStore, type MyBuilding } from './world/myBuildings.ts';
+import { HOUSING_TUNE, LocalHomes, MOVE_SAYS, atDoorDoes, atDoorOf, awayText, backHouseText, houseName, inHandHouseText, isLocalHome, movedHouseText, myBuildings, pickedHouseText, placeLocalHome, type HomeStore, type LocalHome, type LocalHomeDeps, type LocalHomeLanding, type MyBuilding } from './world/myBuildings.ts';
 import { DRESSING_TUNE, PermanentLayer, dressingStandOf, keepOffOf, standsSolid, type StandAnswer, type StoodRow, type WorldKind } from './world/permanent.ts';
 import { PLACEMENT_LAYERS, fromGame, placementKey, placementsFileText, placementsPath, radiusOfBounds, readPlacementsFile, storyAreaSnippet, storyObjectSnippet, toGame as placementToGame, type GamePlace, type PlacementLayer, type PlacementRead, type PlacementRow } from './story/placements.ts';
-import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, inHandText, keptText, nextDestination, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource } from './world/permanentEdit.ts';
+import { PERMANENT_EDIT_TUNE, badgeOf, confirmText, destinationFile, driftText, forceText, groundMoved, homeStaysText, inHandText, keptText, nextDestination, notYoursText, pickedUpText, removedText, rowFromHouse, rowFromProp, savedText, takeOutText, yawOfTurn, type BuildingSource, type Destination as KeptIn, type HandSource, type HomeSource } from './world/permanentEdit.ts';
 import { EDITOR_HEADER, EDITOR_HEADER_VALUE, PLACEMENTS_ENDPOINT_TUNE, type PlacementReply, type PlacementReplyOk } from './world/placementEdits.ts';
 import { EditChip } from './ui/editChip.ts';
 import { PermanentPanel, editSlots, type PermanentPanelModel, type PermanentRowView } from './ui/permanentPanel.ts';
@@ -2795,7 +2795,10 @@ class App {
        * it up; and `{ tune: { … } }` moves the ghost's own numbers (`mostPermanent` among them). The
        * report's `note` is what the door's height off the ground will mean, which never refuses a
        * spot, and `barWrites` is how many times the placing bar has written the page, which a steady
-       * hand leaves where it was.
+       * hand leaves where it was. A house of yours the pick-up key took up at its door
+       * (`__debug.prop(undefined, { take: true })`) is in hand the same way, `source: 'home'` with its
+       * id: `{ drop: true }` moves it (`moved`, `key`, `asked` when a server keeps it, `said`, and
+       * `state` where it stands in the streamer) and `{ cancel: true }` puts it back where it stood.
        */
       deed: async (deed?: string, opts: { turn?: number; lift?: number; turnDeg?: number; liftM?: number; reach?: number; drop?: boolean; cancel?: boolean; tune?: Partial<typeof GHOST_TUNE> } = {}) => {
         if (opts.tune) Object.assign(GHOST_TUNE, opts.tune);
@@ -2826,10 +2829,19 @@ class App {
         if (opts.drop) {
           const was = this.placing;
           const state = was?.state;
+          const home = was?.from.kind === 'home' ? was.from : null;
           this.editLast = null;
+          this.homeMoveSaid = '';
           await this.dropPlacing();
           // Kept for good on the dev server: saved, or asking for its second click, which a second drop gives.
           if (import.meta.env.DEV && was && was.dest !== 'yours') return { dropped: !!this.lastEdit()?.saved, said: this.lastEdit()?.said ?? null, inHand: !!this.placing, ok: state?.ok ?? false, why: state?.why ?? null };
+          // A house of yours picked up where it stands: moved under the same key (this machine's), or asked of the
+          // server, which moves it for everybody when it answers; `said` is what the move said, `state` where it
+          // stands in the streamer now (its colliders come with the next sweep).
+          if (home) {
+            const key = home.local ? home.id : homeKey(home.id);
+            return { dropped: !!state?.ok && this.placing !== was, inHand: this.placing === was, moved: home.id, key, keeper: this.homesKeeper, asked: !home.local && this.placing !== was, why: state?.why ?? null, said: this.homeMoveSaid || null, state: this.world.placedState(key) };
+          }
           return { dropped: !!state?.ok, why: state?.why ?? null };
         }
         const p = this.placing;
@@ -2848,8 +2860,11 @@ class App {
           placing: p.deed?.id ?? p.model,
           name: p.name,
           model: p.model,
-          // Where it came from (`fresh`, or a `permanent` row picked up) and where it is kept when put down.
+          // Where it came from (`fresh`, a `permanent` row picked up, or a `home` of yours picked up where it stands,
+          // with its id, its keeper and how many things put down inside it stay where they stood when it moves) and
+          // where it is kept when put down.
           source: p.from.kind,
+          ...(p.from.kind === 'home' ? { home: p.from.id, local: p.from.local, inside: p.from.inside } : {}),
           dest: p.dest,
           anchored: this.propAnchor.on,
           reach: Math.round(p.reach),
@@ -2930,7 +2945,7 @@ class App {
         if (opts.take) {
           this.editLast = null;
           const said = await this.takeNearestProp();
-          if (!this.propPlacing) return { mineHere: placedProps.all.length, said, ...(this.placing ? { building: this.placing.name } : {}) };
+          if (!this.propPlacing) return { mineHere: placedProps.all.length, said, ...(this.placing ? { building: this.placing.name, source: this.placing.from.kind, anchored: this.propAnchor.on } : {}) };
         }
         if (id) {
           const why = await this.startPlacingProp(id);
@@ -3617,11 +3632,13 @@ class App {
        * said; `yours` is the Housing tab's own list (the server's that are yours and the ones this
        * browser put down itself), each with `solid`, how many colliders it has this instant (0 until
        * its size tier has loaded and the sweep has run, -1 for one the streamer does not hold),
-       * `atDoor` the one whose doorstep you are standing at, and `{ tune: { armMs, doorReach,
-       * standApart } }` moves `HOUSING_TUNE`. `keeper` is who keeps the player's houses now (the
-       * server, this machine, or `pending` while an arrival waits to hear), `local` this machine's own
-       * for this world with whether each stands, and `waiting` how many of them wait for a game with
-       * no server.
+       * `atDoor` the one whose doorstep you are standing at (where O takes it up where it stands), and
+       * `{ tune: { armMs, doorReach, standApart } }` moves `HOUSING_TUNE`. `keeper` is who keeps the
+       * player's houses now (the server, this machine, or `pending` while an arrival waits to hear),
+       * `version` whether that server moves a house (2) or only takes one down, `hidden` the server's
+       * that are yours kept down here while in hand or while a move is asked, `local` this machine's own
+       * for this world with whether each stands or is in hand, `waiting` how many of them wait for a
+       * game with no server, and `lastMove` what the last house moved came to.
        */
       homes: (opts: { tune?: Partial<typeof HOUSING_TUNE> } = {}) => {
         if (opts.tune) {
@@ -3635,9 +3652,13 @@ class App {
           shared: this.net.session.authority === 'server',
           // Who keeps the player's houses now: `server`, `local` (this machine) or `pending` (an arrival waiting to hear).
           keeper: this.homesKeeper,
+          // Whether the server moves a house where it stands (2), as its hail said; 0 with none, or an older one.
+          version: this.net.session.homesVersion,
           mine: homes.mine(me, { x: p.x, z: p.z }).map((r) => r.id),
-          // This machine's own for this world, kept in its storage, each standing or waiting for a game with no server.
-          local: this.localHomes.all.map((r) => ({ key: r.key, model: r.model, name: r.name, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], standing: this.localHomes.isStanding(r.key) })),
+          // This machine's own for this world, kept in its storage, each standing, in the player's hand, or waiting for a game with no server.
+          local: this.localHomes.all.map((r) => ({ key: r.key, model: r.model, name: r.name, at: [Math.round(r.x), Number(r.y.toFixed(1)), Math.round(r.z)], yaw: Number(((r.yaw * 180) / Math.PI).toFixed(1)), standing: this.localHomes.isStanding(r.key), inHand: this.localHomes.inHand(r.key) })),
+          // What the last house moved came to.
+          ...(this.homeMoveSaid ? { lastMove: this.homeMoveSaid } : {}),
           waiting: this.localHomes.waiting,
           ...(this.localHomes.note ? { localNote: this.localHomes.note } : {}),
           yours: yours.map((b) => ({ id: b.id, name: b.name, away: Math.round(b.away), shared: b.shared, solid: this.world.placedState(b.shared ? homeKey(b.id) : b.id)?.colliders ?? -1 })),
@@ -8099,10 +8120,10 @@ class App {
     const homeWordWas = this.net.onWord;
     this.net.onWord = (msg) => {
       homeWordWas(msg);
-      if (msg?.t === 'homes' || msg?.t === 'homeUp' || msg?.t === 'homeDown' || msg?.t === 'homeNo') {
-        homes.word(msg);
+      // Every house word through the one router the relay's round trip runs (`routeHomeWord`).
+      if (routeHomeWord(msg, homes)) {
         // The tab's list of your buildings follows what the server says while it is open.
-        if (this.housingUi.open && msg.t !== 'homeNo') this.showHousing();
+        if (this.housingUi.open && msg?.t !== 'homeNo') this.showHousing();
       }
       if (routePropWord(msg, keptProps)) {
         // A row the catalogue cannot draw yet waits for it, and stands once it has landed.
@@ -17397,9 +17418,13 @@ class App {
     if (this.propsUi?.open) this.propsUi.setKept(this.keptPropsText());
   }
 
-  /** The houses' keeper changes: the same, for the server's houses and this machine's. */
+  /**
+   * The houses' keeper changes: the same, for the server's houses and this machine's. A house of the player's own
+   * in hand belongs to the keeper it came from, and is let go of first where it stood, as a travel lets go of it.
+   */
   private switchHomesKeeper(to: Keeper): void {
     this.homesKeeper = to;
+    if (this.placing?.from.kind === 'home') this.stopPlacing('keep');
     switchSets(to, this.homeSets);
     if (this.housingUi?.open) this.showHousing();
   }
@@ -17445,6 +17470,8 @@ class App {
     const round = this.localHomes.beginStand();
     for (const row of [...this.localHomes.all]) {
       if (!this.localHomes.standing(round)) return;
+      // One in the player's hand is down on purpose until it is put down or back (`LocalHomes.lift`).
+      if (this.localHomes.inHand(row.key)) continue;
       // One already going up is left to the placing on its way, which stands it as it lands if it is still
       // wanted (`LocalHomes.land`): placed a second time, its key would be filed twice.
       if (this.localHomes.isStanding(row.key) || this.localHomes.isPlacing(row.key)) continue;
@@ -17458,6 +17485,23 @@ class App {
     }
     if (this.housingUi?.open) this.showHousing();
   }
+
+  /**
+   * One house this machine keeps, stood where `at` says under its own key, through the placing tickets every stand of
+   * a key takes: put back where it stood, or moved (`placeLocalHome` in `myBuildings.ts`, which localHomes.test.ts
+   * runs against a world that counts every key it files).
+   */
+  private placeLocalHome(row: LocalHome, at: LocalHome = row): Promise<LocalHomeLanding> {
+    return placeLocalHome(this.localHomes, row, at, this.localHomeDeps);
+  }
+
+  /** What standing one of this machine's houses asks of the world, made once: the world asked is whichever stands. */
+  private readonly localHomeDeps: LocalHomeDeps = {
+    place: (model, o) => this.world.placeBuilding(model, o),
+    unplace: (key) => void this.world.unplaceBuilding(key),
+    wanted: () => this.homesKeeper === 'local',
+    generation: () => this.world.generation,
+  };
 
   /** Every house this machine keeps taken down here, whoever stands in one put on its doorstep first; all kept. */
   private takeDownLocalHomes(): void {
@@ -18494,13 +18538,16 @@ class App {
    * mesh's material for a see-through copy and puts the originals back when it lets go. It is
    * prepared first, so a placement never compiles a program on the frame it starts.
    *
-   * `from` is where it came from (fresh, or a permanent row the editor picked up) and `dest` where it is kept
-   * when it is put down; a fresh one goes where the tabs' switch says (`freshDest`). A building of yours still
-   * needs a deed, and the deed's world; one kept for good needs neither, nor a footprint.
+   * `from` is where it came from (fresh, a permanent row the editor picked up, or a house of yours picked up where
+   * it stands) and `dest` where it is kept when it is put down; a fresh one goes where the tabs' switch says
+   * (`freshDest`). A building of yours still needs a deed, and the deed's world; one kept for good needs neither,
+   * nor a footprint; and a house of yours picked up already stands on this world, so it is taken up by its deed
+   * where one makes it (for its grid) and by its model where none does, as it was put down.
    */
   private async startPlacingBuilding(take: { deed: string } | { model: string }, opts: { from?: BuildingSource; dest?: KeptIn } = {}): Promise<string | null> {
     const dest = opts.dest ?? this.freshDest();
     const forGood = dest !== 'yours';
+    const home = opts.from?.kind === 'home';
     let deed: DeedRow | null = null;
     let modelId: string;
     let name: string;
@@ -18508,15 +18555,15 @@ class App {
       deed = deedById(take.deed);
       if (!deed) return 'there is no such deed';
       if (!deed.model) return 'this game has no model for that building';
-      if (!deed.foot && !forGood) return 'the archives have no footprint for that building';
-      if (!forGood) {
+      if (!deed.foot && !forGood && !home) return 'the archives have no footprint for that building';
+      if (!forGood && !home) {
         const wrong = wrongWorld(deed, this.world.planet.id);
         if (wrong) return wrong;
       }
       modelId = deed.model;
       name = deed.name;
     } else {
-      if (!forGood) return 'a building of yours is put down from a deed';
+      if (!forGood && !home) return 'a building of yours is put down from a deed';
       modelId = take.model;
       name = houseName(modelId, allDeeds());
     }
@@ -18536,7 +18583,7 @@ class App {
     const shown = model.scene;
     await this.world.prepareActor(shown);
     const foot = deed ? footprintOf(deed) : null;
-    if (!foot && !forGood) return 'the archives have no footprint for that building';
+    if (!foot && !forGood && !home) return 'the archives have no footprint for that building';
     const patch = foot ? patchOfFootprint(foot) : patchOfBounds({ min: model.bounds.min.toArray(), max: model.bounds.max.toArray() });
     this.closePanelsForPlacing();
     // Anything already in hand is given up first, as taking a prop does: only ever one is out.
@@ -18644,9 +18691,11 @@ class App {
   /**
    * Give up the building in hand and put the model away exactly as it was found, one of the three ways a
    * prop is let go of (`stopPlacingProp`). A deed's house, or a building taken by its model, has nowhere to
-   * go back to whichever way. A permanent row the dev server's editor picked up goes back where its file
-   * stands it (`back`, Escape), is taken out of its file (`away`, Delete), or is left in its file for the next
-   * visit to stand (`keep`, a travel and the select screen, the world going with it).
+   * go back to whichever way. A house of yours picked up where it stands goes back where it stood on Escape and
+   * on Delete alike, which never takes a house down (the Housing tab does), and is left where it stood, kept,
+   * on a travel or a change of keeper (`letGoHome`). A permanent row the dev server's editor picked up goes back
+   * where its file stands it (`back`, Escape), is taken out of its file (`away`, Delete), or is left in its file
+   * for the next visit to stand (`keep`, a travel and the select screen, the world going with it).
    */
   private stopPlacing(how: LetGo = 'back'): void {
     const p = this.placing;
@@ -18664,6 +18713,9 @@ class App {
         return;
       case 'permanent':
         if (import.meta.env.DEV) this.letGoPermanent(from, how, p.name);
+        return;
+      case 'home':
+        this.letGoHome(from, how, p.name);
         return;
       default: {
         const never: never = from;
@@ -19066,14 +19118,18 @@ class App {
 
   /**
    * Put it down, if the ground will take it. A building of yours goes up from its deed (the server's, or this
-   * browser's for the session); one the dev server's editor is putting down for good is saved to its file
-   * instead (`savePermanentBuilding`).
+   * browser's for the session); a house of yours picked up where it stands is moved there (`dropHome`); one the
+   * dev server's editor is putting down for good is saved to its file instead (`savePermanentBuilding`).
    */
   private async dropPlacing(): Promise<void> {
     const p = this.placing;
     if (!p) return;
     if (import.meta.env.DEV && p.dest !== 'yours') {
       await this.savePermanentBuilding(p);
+      return;
+    }
+    if (p.from.kind === 'home') {
+      await this.dropHome(p, p.from);
       return;
     }
     const deed = p.deed;
@@ -19151,6 +19207,10 @@ class App {
    * Answers what to say.
    */
   private takeDownHome(id: string): string {
+    // One in the player's hand is the hand's until it is put down or back: taken down under it, Escape would have
+    // nothing to put back and a drop nothing to move.
+    const held = this.placing;
+    if (held?.from.kind === 'home' && held.from.id === id) return inHandHouseText(held.name);
     if (isLocalHome(id)) {
       const row = this.localHomes.find(id);
       if (!row) return 'that building is not standing any more';
@@ -19185,6 +19245,165 @@ class App {
     p.reset(door.setY(door.y + 0.3));
     p.hp = hp;
     this.messages.system('the building you were in came down; you are standing on its doorstep');
+  }
+
+  /**
+   * One of the player's own houses taken up where it stands: the pick-up key at its door. Whoever stands in its rooms
+   * is stood out on its doorstep first and it comes down -- here only for one a server keeps (`Homes.hide`), whose
+   * every other browser goes on seeing it where it stands until the server says it moved; held in hand for one this
+   * machine keeps (`LocalHomes.lift`), so no run of standing puts it back meanwhile. Then it is in hand, turned as it
+   * stands, its lift the height it stands at over the ground under its doorstep, and anchored exactly there, so a
+   * nudge is a nudge. The things put down in its rooms are counted first, since coming down lets go of them: they
+   * stay where they stood when it moves, and the move says so. Answers why not, or null.
+   */
+  private async takeHome(home: MyBuilding): Promise<string | null> {
+    const fail = (why: string): string => {
+      this.messages.system(why);
+      return why;
+    };
+    const gen = this.world.generation;
+    let from: HomeSource;
+    if (!home.shared) {
+      const row = this.localHomes.find(home.id);
+      if (!row) return fail(MOVE_SAYS.gone);
+      if (this.homesKeeper !== 'local') return fail(MOVE_SAYS.waits);
+      if (this.localHomes.inHand(row.key)) return fail(inHandHouseText(row.name));
+      const inside = this.world.thingsInside(row.key);
+      if (!this.localHomes.lift(row.key)) return fail(MOVE_SAYS.going);
+      this.standOutOf(row.key);
+      this.world.unplaceBuilding(row.key);
+      from = { kind: 'home', id: row.key, local: true, row: { model: row.model, name: row.name, x: row.x, y: row.y, z: row.z, yaw: row.yaw, r: row.r ?? 0 }, inside, gen };
+    } else {
+      const refusal = this.keptRefusal('server');
+      if (refusal) return fail(refusal);
+      const row = homes.rows.get(home.id);
+      if (!row) return fail(MOVE_SAYS.gone);
+      // Kept down here already: its move asked of the server and not answered yet (nothing else hides one but a hand).
+      if (homes.isHidden(row.id)) return fail(MOVE_SAYS.asking);
+      const inside = this.world.thingsInside(homeKey(row.id));
+      // Down here alone, everybody in its rooms stood out first (`homes.attach`'s `unplace`).
+      homes.hide(row.id);
+      from = { kind: 'home', id: row.id, local: false, row: { model: row.model, name: home.name, x: row.x, y: row.y, z: row.z, yaw: row.h, r: row.r }, inside, gen };
+    }
+    const deed = deedOfModel(from.row.model, this.world.planet.id);
+    const why = await this.startPlacingBuilding(deed ? { deed: deed.id } : { model: from.row.model }, { from, dest: 'yours' });
+    if (why) {
+      // Never let go of: it stands again where it stood.
+      this.letGoHome(from, 'back', from.row.name, false);
+      return fail(why);
+    }
+    const p = this.placing;
+    if (!p || p.from !== from) return null;
+    // Its world or its keeper changed while it was being taken up: it is let go of where it stood, kept.
+    if (this.world.generation !== gen || this.homesKeeper !== (from.local ? 'local' : 'server')) {
+      this.stopPlacing('keep');
+      return fail(MOVE_SAYS.keeper);
+    }
+    this.anchorBuilding(p, from.row, from.row.yaw, GHOST_TUNE.most);
+    this.messages.system(pickedHouseText(p.name));
+    return null;
+  }
+
+  /**
+   * A house of yours picked up where it stands, let go of. Put back (Escape) or given up with Delete, which never
+   * takes a house down, it stands again where it stood: shown again for one a server keeps, stood again under its
+   * own key for one this machine keeps. Left (`keep`: a travel, the select screen, a change of keeper), it is kept
+   * where it stood and stands with the rest the next time they are stood. A house whose world has gone since it was
+   * picked up is left to that world's next visit, whichever way. `say` false lets go of it without a word.
+   */
+  private letGoHome(from: HomeSource, how: LetGo, name: string, say = true): void {
+    const here = this.world.generation === from.gen;
+    if (from.local) {
+      this.localHomes.lower(from.id);
+      if (how === 'keep' || !here) return;
+      const row = this.localHomes.find(from.id);
+      if (row && this.homesKeeper === 'local') void this.placeLocalHome(row);
+    } else {
+      if (how === 'keep' || !here) {
+        homes.unhide(from.id);
+        return;
+      }
+      homes.show(from.id);
+    }
+    if (say) this.messages.system(backHouseText(name, how === 'away'));
+  }
+
+  /**
+   * A house of yours in hand, clicked down where the ghost has it: moved, never built again from nothing. One a
+   * server keeps is asked of it (`moveHome`) and stays down here until it answers, when it moves for everybody on the
+   * world at once and stands again where it stood if refused; one this machine keeps goes up under its own key through
+   * the placing tickets every stand takes, its row written where it stands now once it has, and back where it stood
+   * if the world will not take it there. What was put down in its rooms stays where it stood, which is said.
+   * Refused (it stays in hand) while nobody knows who keeps the player's houses or their server is not answering.
+   */
+  private async dropHome(p: BuildingHand, from: HomeSource): Promise<void> {
+    const state = p.state;
+    if (!state?.ok) return;
+    const keeper = this.homesKeeper;
+    const refusal = this.keptRefusal(keeper);
+    if (refusal) {
+      this.messages.system(refusal);
+      return;
+    }
+    if ((keeper === 'local') !== from.local) {
+      this.stopPlacing('keep');
+      this.messages.system(MOVE_SAYS.keeper);
+      return;
+    }
+    if (!from.local && this.net.session.homesVersion < HOMES_MOVE_VERSION) {
+      this.stopPlacing();
+      this.messages.system(`${MOVE_SAYS.cannot}: ${p.name} is back where it stood`);
+      return;
+    }
+    // Going down here, not back where it stood: let go of without putting it back, or moving one would stand it
+    // where it was as well.
+    p.from = HAND_FRESH;
+    this.stopPlacing();
+    if (!from.local) {
+      homes.askMove(from.id, { x: state.x, z: state.z }, state.yaw, state.clear, state.y);
+      this.homeMoveSaid = movedHouseText(p.name, from.inside, true);
+      this.messages.system(this.homeMoveSaid);
+      return;
+    }
+    this.localHomes.lower(from.id);
+    const row = this.localHomes.find(from.id);
+    if (!row) {
+      this.homeMoveSaid = MOVE_SAYS.gone;
+      this.messages.system(MOVE_SAYS.gone);
+      return;
+    }
+    // A move the world will not take where the ghost said it would is stood again where it stood by the placer itself
+    // (`back`), and one taken down from the Housing tab while it was going up stays down there.
+    const moved = await this.placeLocalHome(row, { ...row, x: state.x, y: state.y, z: state.z, yaw: state.yaw, r: state.clear });
+    if (moved.fate === 'gone') this.homeMoveSaid = MOVE_SAYS.world;
+    else if (!this.localHomes.find(row.key)) this.homeMoveSaid = MOVE_SAYS.gone;
+    else if (moved.placed) this.homeMoveSaid = movedHouseText(p.name, from.inside, false);
+    else this.homeMoveSaid = `${moved.why ?? 'it would not go there'}; ${p.name} is back where it stood`;
+    this.messages.system(this.homeMoveSaid);
+    if (this.housingUi.open) this.showHousing();
+  }
+
+  /** What the last house moved came to, for the console. */
+  private homeMoveSaid = '';
+
+  /**
+   * A building picked back up, turned as it stands (`yaw`), its lift the height it stands at over the ground under
+   * its doorstep (within `most`), its reach how far off it is, and anchored there until the player walks or looks
+   * away, as a prop picked up is (`anchorPicked`). `at` is its doorstep, the game's frame.
+   */
+  private anchorBuilding(p: BuildingHand, at: { x: number; y: number; z: number }, yaw: number, most: number): void {
+    const me = this.player.worldPos;
+    p.yaw = turnTo(yaw);
+    p.lift = houseLiftTo(at.y - this.world.terrain.heightAt(at.x, at.z), most);
+    p.reach = Math.min(GHOST_TUNE.far, Math.max(GHOST_TUNE.near, Math.hypot(at.x - me.x, at.z - me.z)));
+    const a = this.propAnchor;
+    a.on = true;
+    a.x = at.x;
+    a.y = at.y;
+    a.z = at.z;
+    a.px = me.x;
+    a.pz = me.z;
+    a.yaw = this.viewHeading();
   }
 
   /**
@@ -19335,6 +19554,10 @@ class App {
    * Your own are whoever keeps them now has (`propsKeeper`): this machine's rows, or -- with a server that
    * keeps them -- the server's rows that are yours (`takeKept`), which nobody else can pick up.
    *
+   * With nothing of yours near enough, your own house whose doorstep you stand at comes up where it stands
+   * (`takeHome`) -- except one a server keeps whose hail does not say it moves a house, when the key opens the
+   * Housing tab with its take-down asked, as it did before houses could be moved (`atDoorDoes`).
+   *
    * On the dev server the permanent props within the same reach are as much to hand as your own, and
    * the nearer of the two is taken (`takePermanent`, which says which it took); with neither near, your
    * building's doorstep, then a permanent building's origin within the doorstep's reach. In a release
@@ -19357,14 +19580,15 @@ class App {
     }
     if (kept) return this.takeKept(kept);
     if (!row) {
-      // Nothing of yours to pick up, but a building of yours whose doorstep this is: the same key
-      // opens the Housing tab with its take-down already asked, which is still two answers away
-      // from anything happening.
+      // Nothing of yours to pick up, but a building of yours whose doorstep this is: it comes up where it
+      // stands. Against a server that cannot move one, the same key opens the Housing tab with its take-down
+      // already asked, which is still two answers away from anything happening.
       const home = atDoorOf(this.myBuildingsHere(), { x: me.x, z: me.z }, HOUSING_TUNE.doorReach);
       if (home) {
+        if (atDoorDoes(home.shared, this.net.session.homesVersion) === 'take') return this.takeHome(home);
         this.toggleInventory('housing');
         this.housingUi.ask(home.id);
-        const said = `take ${home.name} down from the Housing tab, or close it to keep it standing`;
+        const said = `${MOVE_SAYS.cannot}: take ${home.name} down from the Housing tab, or close it to keep it standing`;
         this.messages.system(said);
         return said;
       }
@@ -19558,8 +19782,12 @@ class App {
     return false;
   }
 
-  /** Why a building in hand cannot be yours, or null: yours, it is a deed's house under the deed's own rules, its footprint and its world. */
+  /**
+   * Why a building in hand cannot be yours, or null: yours, it is a deed's house under the deed's own rules, its
+   * footprint and its world. A house of yours picked up where it stands is yours already.
+   */
   private houseYoursWhy(house: BuildingHand): string | null {
+    if (house.from.kind === 'home') return null;
     if (!house.deed) return 'a building of yours is put down from a deed';
     if (!house.foot) return 'the archives have no footprint for that building';
     return wrongWorld(house.deed, this.world.planet.id);
@@ -19574,6 +19802,11 @@ class App {
     if (hand) {
       if (hand.from.kind === 'permanent' && dest === 'yours') {
         this.editSay(false, notYoursText(this.placeKeysNow.del));
+        return;
+      }
+      // A house of yours picked up where it stands is moved, and stays yours (`nextDestination`).
+      if (hand.from.kind === 'home' && dest !== 'yours') {
+        this.editSay(false, homeStaysText(house?.name ?? ''));
         return;
       }
       const why = house && dest === 'yours' ? this.houseYoursWhy(house) : null;
@@ -19862,18 +20095,7 @@ class App {
       if (!p) return null;
       // Turned as it stands, its lift the height it stands at over the ground under its doorstep, and anchored
       // there until the player walks or looks away, as a prop picked up is.
-      const me = this.player.worldPos;
-      p.yaw = turnTo(yawOfTurn(g.q));
-      p.lift = houseLiftTo(s.y - this.world.terrain.heightAt(s.x, s.z), GHOST_TUNE.mostPermanent);
-      p.reach = Math.min(GHOST_TUNE.far, Math.max(GHOST_TUNE.near, Math.hypot(s.x - me.x, s.z - me.z)));
-      const a = this.propAnchor;
-      a.on = true;
-      a.x = s.x;
-      a.y = s.y;
-      a.z = s.z;
-      a.px = me.x;
-      a.pz = me.z;
-      a.yaw = this.viewHeading();
+      this.anchorBuilding(p, s, yawOfTurn(g.q), GHOST_TUNE.mostPermanent);
     }
     this.editSay(false, pickedUpText(s.label, layer));
     return null;

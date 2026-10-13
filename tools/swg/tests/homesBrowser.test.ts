@@ -9,7 +9,7 @@
 // Run: node tools/swg/tests/homesBrowser.test.ts
 
 import assert from 'node:assert/strict';
-import { Homes, homeKey, type HomeRow } from '../../../src/net/homes.ts';
+import { HOME_WORDS, Homes, homeKey, readHomeRow, routeHomeWord, type HomeRow } from '../../../src/net/homes.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -30,6 +30,10 @@ function world() {
   let holding = false;
   const held: (() => void)[] = [];
   let refuse = false;
+  // What the streamer has filed under each key as it stands, and every time a key was filed over a copy already
+  // there -- which the real streamer does by overwriting its map, leaving a copy nothing can take down again.
+  const filed = new Map<string, { x: number; z: number; yaw: number }>();
+  let twice = 0;
   const deps = {
     place: async (model: string, o: { at: { x: number; z: number }; yaw: number; key: string; y: number }) => {
       placed.push({ model, key: o.key, y: o.y, x: o.at.x, z: o.at.z, yaw: o.yaw });
@@ -37,11 +41,14 @@ function world() {
         holding = false;
         await new Promise<void>((done) => void held.push(done));
       }
-      return refuse ? { ok: false, why: 'the ground would not take it' } : { ok: true, why: null };
+      if (refuse) return { ok: false, why: 'the ground would not take it' };
+      if (filed.has(o.key)) twice++;
+      filed.set(o.key, { x: o.at.x, z: o.at.z, yaw: o.yaw });
+      return { ok: true, why: null };
     },
     unplace: (key: string) => {
       removed.push(key);
-      return true;
+      return filed.delete(key);
     },
     say: (text: string) => said.push(text),
     send: (msg: Record<string, unknown>) => sent.push(msg),
@@ -54,6 +61,9 @@ function world() {
     removed,
     said,
     sent,
+    filed,
+    /** How many times a key was filed over a copy already standing under it: always nought. */
+    twice: () => twice,
     /** Hold the next placing open until `release` is called. */
     holdNext: () => {
       holding = true;
@@ -295,6 +305,184 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
   w.release();
   await settle();
   ok(w.h.report().standing === 1 && !w.removed.includes(homeKey('h1')), "and the old one landing takes nothing down here, where the new world's house stands under the same key");
+}
+
+// ---------------------------------------------------------------- a house moved (W7)
+
+{
+  ok((HOME_WORDS as readonly string[]).includes('homeMoved'), 'the words the socket hands over include the move');
+  const w = world();
+  const routed = ['homes', 'homeUp', 'homeMoved', 'homeDown', 'homeNo'].every((t) => routeHomeWord({ t, rows: [] }, w.h));
+  ok(routed && !routeHomeWord({ t: 'props', rows: [] }, w.h) && !routeHomeWord(null, w.h), 'and the one router hands each of them over, and nothing else');
+  ok(!readHomeRow({ id: 'h1', model: 'a_house', x: 'ten', y: 0, z: 0, h: 0 }) && !readHomeRow({ id: '', model: 'a_house', x: 1, y: 0, z: 0, h: 0 }) && !!readHomeRow(row('h1')), 'a row off the wire is read, and one that is not one is not');
+}
+
+{
+  // Somebody else's house moved: the old one down, the new one up, under the one key, once.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.word({ t: 'homeMoved', home: row('h1', { x: 300, h: 2 }) });
+  await settle();
+  ok(w.removed.filter((k) => k === homeKey('h1')).length === 1 && w.placed.length === 2, 'a house moved is taken down where it stood and stood where it went');
+  ok(w.filed.size === 1 && w.filed.get(homeKey('h1'))!.x === 300 && w.filed.get(homeKey('h1'))!.yaw === 2 && w.twice() === 0, 'under its one key, filed once, where it stands now');
+  ok(w.h.report().standing === 1 && w.h.rows.get('h1')!.x === 300, 'and it is standing, its row where it stands now');
+  w.h.word({ t: 'homeMoved', home: row('h1', { x: 300, h: 2 }) });
+  await settle();
+  ok(w.placed.length === 2 && w.removed.length === 1, 'the same move said again moves nothing');
+}
+
+{
+  // A move overtaking its own placing: the placing lands, sees the row has moved on, comes down, and hands over to a
+  // stand at the new place. One house, filed once, where the server says it is.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.holdNext();
+  w.h.word({ t: 'homeUp', home: row('h1') });
+  await settle();
+  w.h.word({ t: 'homeMoved', home: row('h1', { x: 300 }) });
+  await settle();
+  ok(w.placed.length === 1, 'a move while the house is still going up starts no second placing of its key');
+  w.release();
+  await settle();
+  await settle();
+  ok(w.filed.size === 1 && w.filed.get(homeKey('h1'))!.x === 300 && w.twice() === 0, 'it lands where it was put, comes down, and goes up where it went: one house under its key');
+  ok(w.h.report().standing === 1 && w.placed.length === 2, 'standing, placed twice and never at once');
+}
+
+{
+  // The same house said again while it goes up (a list handed over twice) is not taken for a move.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.holdNext();
+  w.h.word({ t: 'homeUp', home: row('h1') });
+  await settle();
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  w.release();
+  await settle();
+  await settle();
+  ok(w.placed.length === 1 && w.removed.length === 0 && w.h.report().standing === 1, 'the same house said twice while going up goes up once and stays');
+}
+
+{
+  // The player's own house: picked up, it comes down here alone; put down, it is asked of the server and stays down
+  // until the server answers; the answer stands it where it went.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.hide('h1');
+  ok(w.removed.includes(homeKey('h1')) && w.h.report().standing === 0 && w.h.isHidden('h1'), 'picked up, it comes down here');
+  w.h.ready();
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  ok(w.placed.length === 1 && w.h.report().standing === 0, 'and nothing stands it again while it is in hand, not the world ready nor a list');
+  w.h.askMove('h1', { x: 250, z: -30 }, 1.25, 16, 6.5);
+  const sent = w.sent[w.sent.length - 1];
+  ok(sent.t === 'moveHome' && sent.id === 'h1' && sent.x === 250 && sent.z === -30 && sent.h === 1.25 && sent.r === 16 && sent.y === 6.5, 'put down, the move is asked of the server with its new doorstep, heading, circle and height');
+  ok(w.placed.length === 1 && w.h.isHidden('h1'), 'and nothing goes up here until the server answers');
+  w.h.word({ t: 'homeMoved', home: row('h1', { x: 250, z: -30, h: 1.25, r: 16, y: 6.5 }) });
+  await settle();
+  ok(w.h.report().standing === 1 && !w.h.isHidden('h1') && w.filed.get(homeKey('h1'))!.x === 250 && w.twice() === 0, 'the answer stands it where it went, once');
+}
+
+{
+  // A move refused names its house, which stands again where it stood; a refusal naming nothing puts nothing back.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.hide('h1');
+  w.h.askMove('h1', { x: 900, z: 0 }, 0, 12, 4);
+  w.h.word({ t: 'homeNo', why: 'something is already standing there' });
+  await settle();
+  ok(w.h.report().standing === 0 && w.h.isHidden('h1'), 'a refusal naming no house leaves the move still asked');
+  w.h.word({ t: 'homeNo', why: 'something is already standing there', id: 'h1' });
+  await settle();
+  ok(w.h.report().standing === 1 && w.filed.get(homeKey('h1'))!.x === 10 && !w.h.isHidden('h1'), 'one naming it stands it again where it stood');
+  ok(w.said.some((s) => s.includes('already standing')), "and the server's words are said");
+}
+
+{
+  // Escape and a travel: shown again stands it where it stood; let go of with nothing asked waits for the next stand.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1'), row('h2', { x: 500 })] });
+  await settle();
+  w.h.hide('h1');
+  w.h.show('h1');
+  await settle();
+  ok(w.h.report().standing === 2 && w.filed.get(homeKey('h1'))!.x === 10 && w.twice() === 0, 'put back, it stands where it stood');
+  w.h.hide('h2');
+  w.h.unhide('h2');
+  await settle();
+  ok(w.h.report().standing === 1 && !w.h.isHidden('h2'), 'let go of with nothing asked, it is not stood now');
+  w.h.ready();
+  await settle();
+  ok(w.h.report().standing === 2, 'but with the rest the next time they are stood');
+}
+
+{
+  // Moved by somebody else (the admin) while it is in its owner's hand: kept, not stood, and put back where it is now.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.hide('h1');
+  w.h.word({ t: 'homeMoved', home: row('h1', { x: 77 }) });
+  await settle();
+  ok(w.h.report().standing === 0 && w.h.rows.get('h1')!.x === 77, 'a move while it is in hand is kept and stands nothing');
+  w.h.show('h1');
+  await settle();
+  ok(w.filed.get(homeKey('h1'))!.x === 77 && w.h.report().standing === 1, 'and put back, it stands where the server says it is');
+}
+
+{
+  // A line that dropped with a move asked: the list handed over again has its answer, and stands it there.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1')] });
+  await settle();
+  w.h.hide('h1');
+  w.h.askMove('h1', { x: 60, z: 0 }, 0, 12, 4);
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1', { x: 60 })] });
+  await settle();
+  ok(w.h.report().standing === 1 && !w.h.isHidden('h1') && w.filed.get(homeKey('h1'))!.x === 60, 'a list after a dropped line answers a move still asked');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1', { x: 61 })] });
+  await settle();
+  ok(w.filed.get(homeKey('h1'))!.x === 61 && w.filed.size === 1 && w.twice() === 0, 'and a house the list has somewhere else is moved there, once');
+}
+
+{
+  // Picked up while it is still going up: it lands, comes straight back down, and nothing of it stands.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.holdNext();
+  w.h.word({ t: 'homeUp', home: row('h1') });
+  await settle();
+  w.h.hide('h1');
+  w.release();
+  await settle();
+  ok(w.h.report().standing === 0 && w.filed.size === 0, 'a house picked up while it goes up comes back down as it lands');
+  w.h.show('h1');
+  await settle();
+  ok(w.h.report().standing === 1 && w.filed.size === 1, 'and put back, it stands');
+}
+
+{
+  // A change of keeper takes the server's houses down and holds them: one in hand stays down when they stand again.
+  const w = world();
+  w.h.enter('tatooine:');
+  w.h.word({ t: 'homes', world: 'tatooine', rows: [row('h1'), row('h2', { x: 500 })] });
+  await settle();
+  w.h.hide('h1');
+  w.h.takeDownAll();
+  w.h.resume();
+  await settle();
+  ok(w.h.report().standing === 1 && w.h.isHidden('h1'), 'the houses stood again leave the one in hand down');
+  w.h.enter('tatooine:');
+  ok(!w.h.isHidden('h1'), 'and an arrival lets go of it, as a thing in hand is let go of before the world goes');
 }
 
 // ---------------------------------------------------------------- what it says and what it sends
