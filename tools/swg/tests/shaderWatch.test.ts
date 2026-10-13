@@ -202,6 +202,7 @@ const ROOM_PASS = { dir: 1, point: 12 };
   ok(readKey(makeKey({ envHeight: '1024', mask1: 1 << 4 }))!.envHeight === '1024', "the environment cube's height is kept, since it is in the program key and a change of it recompiles");
   ok(readKey(makeKey({ defines: { USE_CSM: '1', CSM_CASCADES: '3' } }))!.cascades, "the shadow cascades' define is found among the defines, wherever they sit");
   ok(readKey(makeKey({ custom: 'wet-object|swg-ground-wet-16' }))!.wet, 'and the wet wrap by the front of the key the material wrote itself');
+  ok(readKey(makeKey({ custom: 'swg-ground-tiles-wet' }))!.wet, "and the ground drawn the client's way, which carries the wet look itself, by its own key");
   ok(readKey(makeKey({ custom: 'undefined' }))!.custom === '', 'a material with no key of its own reports none rather than the word undefined');
   ok(readKey(makeKey({ custom: DEFAULT_KEY }))!.custom === '' && readKey(makeKey({ custom: DEFAULT_KEY }))!.customLength === 0, "and three's own empty hook, which nearly every material writes, is no key of its own either");
   ok(readKey(makeKey({ clipping: 6 }))!.clipping === 6, 'the clipping planes are read');

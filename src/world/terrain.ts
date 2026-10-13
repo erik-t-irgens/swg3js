@@ -3,8 +3,22 @@ import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise.ts';
 import type { FarGrid, SwgTerrain } from './swgTerrain';
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
+import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
 
 export const CHUNK_SIZE = 64;
+
+/** What a chunk's ground is built by when the pack's ground is drawn the client's way: the tiler, and the cells it counted by how many layers their tile holds. */
+export type ChunkTiler = GroundTiler & { readonly census: Float64Array };
+
+/**
+ * The physics ground under a chunk's mesh: its heights put at the very corner the mesh starts at (`buildChunk`'s
+ * `origin`, `groundChunkOrigin`), never its bucket's, or on the twelve odd-centred worlds the floor stands up to
+ * 13 m off the drawn ground. The world adds every chunk's heightfield through this and `groundAlign.test.ts` asks
+ * a real Rapier one made by it.
+ */
+export function chunkHeightfield<C>(physics: { createHeightfield(originX: number, originZ: number, size: number, subdivs: number, heights: Float32Array): C }, chunk: { origin: { x: number; z: number }; heights: Float32Array }): C {
+  return physics.createHeightfield(chunk.origin.x, chunk.origin.z, CHUNK_SIZE, CHUNK_RES, chunk.heights);
+}
 
 /** Level ground of height h within radius r, blended smoothly at the edge. */
 export interface FlattenZone { x: number; z: number; r: number; h: number }
@@ -25,13 +39,17 @@ export const CHUNK_RES = 32;
  */
 export const FAMILY_TUNE = { familyChunks: 192 };
 
-// The grid itself and the lookup into it live beside the footsteps that read them: this module
-// cannot be loaded by the node tests (its imports carry no extensions and its constructor takes a
-// parameter property), and a rule about what is underfoot that nothing can check is the kind that
-// quietly goes wrong.
+// The grid itself and the lookup into it live beside the footsteps that read them, where a test of what
+// is underfoot reads them without a terrain; a rule about what is underfoot that nothing can check is the
+// kind that quietly goes wrong. (This module loads in node too now: `groundAlign.test.ts` builds chunks.)
 
 const tmpA = new THREE.Color();
 const tmpB = new THREE.Color();
+/** One pole's family, choice and colour, written by `SwgTerrain.groundIfCached` for every sample a chunk reads. */
+const groundPole = { family: 0, choice: 0, color: 0xffffff };
+/** A tile's four corners, SW, SE, NW, NE: their families and their choices, refilled for each tile. */
+const cornerFams = new Int32Array(4);
+const cornerChoices = new Uint8Array(4);
 
 export class Terrain {
   private readonly fbm: FBM;
@@ -49,6 +67,12 @@ export class Terrain {
   readonly flattenZones: FlattenZone[] = [];
   /** Real SWG terrain for this planet when a converted pack provides it; replaces the noise below. */
   swg: SwgTerrain | null = null;
+  /**
+   * Set when the pack's ground is drawn the client's way (terrain shaders version 4, `terrainTextures.ts`):
+   * every chunk and far tile is then built with each triangle's tile layers, mask codes and tint
+   * (`groundTiles.ts`) in place of its corners' families and weights. Null builds the ground as it always was.
+   */
+  tiler: ChunkTiler | null = null;
   private readonly anchorCells = new Map<string, Anchor[]>();
   private anchorCount = 0;
 
@@ -89,6 +113,7 @@ export class Terrain {
   detachSwg(): void {
     this.swg?.dispose();
     this.swg = null;
+    this.tiler = null;
     // The families belong to that generator's own shader group; nothing may read them against another.
     this.chunkFamilies.clear();
     this.waterLevel = this.planet.water ? this.planet.water.level : -Infinity;
@@ -103,7 +128,18 @@ export class Terrain {
   prepareChunk(cx: number, cz: number, sync: boolean): boolean {
     if (!this.swg) return true;
     const step = CHUNK_SIZE / CHUNK_RES;
-    return this.swg.prepareArea(cx * CHUNK_SIZE - step, cz * CHUNK_SIZE - step, CHUNK_SIZE + 2 * step, sync);
+    const o = this.chunkOrigin(cx, cz);
+    return this.swg.prepareArea(o.x - step, o.z - step, CHUNK_SIZE + 2 * step, sync);
+  }
+
+  /** Where this world's near ground stands against the 64 m buckets: the layout centre's remainder each way (`groundTiles.ts`), nought on a world with no converted terrain. */
+  get groundShift(): GroundShift {
+    return this.swg?.groundShift ?? NO_SHIFT;
+  }
+
+  /** The game-space corner a chunk's ground mesh and heightfield start at: its bucket's, moved onto the client's height points. */
+  chunkOrigin(cx: number, cz: number): { x: number; z: number } {
+    return groundChunkOrigin(cx, cz, this.groundShift, CHUNK_SIZE);
   }
 
   /**
@@ -224,22 +260,27 @@ export class Terrain {
     out.copy(tmpA).multiplyScalar(grain);
   }
 
-  buildChunk(cx: number, cz: number): { geometry: THREE.BufferGeometry; heights: Float32Array } {
-    const r = this.buildGrid(cx * CHUNK_SIZE, cz * CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, { skirt: 8, wantHeights: true });
+  /**
+   * A chunk's ground: its mesh and the heights its physics heightfield is made from, both starting at
+   * `origin` (`chunkOrigin`), which is where the heightfield must be put.
+   */
+  buildChunk(cx: number, cz: number): { geometry: THREE.BufferGeometry; heights: Float32Array; origin: { x: number; z: number } } {
+    const origin = this.chunkOrigin(cx, cz);
+    const r = this.buildGrid(origin.x, origin.z, CHUNK_SIZE, CHUNK_RES, { skirt: 8, wantHeights: true });
     // The family of every sample the ground was painted from, kept for what is underfoot. It is the
     // array the mesh was built from, held rather than copied, and the oldest chunk's goes when the
     // map is full: a body walking a planet all day keeps a bounded handful.
     if (r.families) {
       const key = `${cx},${cz}`;
       this.chunkFamilies.delete(key);
-      this.chunkFamilies.set(key, { fams: r.families, ox: cx * CHUNK_SIZE, oz: cz * CHUNK_SIZE, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3 });
+      this.chunkFamilies.set(key, { fams: r.families, ox: origin.x, oz: origin.z, step: CHUNK_SIZE / CHUNK_RES, w: CHUNK_RES + 3 });
       while (this.chunkFamilies.size > FAMILY_TUNE.familyChunks) {
         const oldest = this.chunkFamilies.keys().next().value as string | undefined;
         if (oldest === undefined) break;
         this.chunkFamilies.delete(oldest);
       }
     }
-    return { geometry: r.geometry, heights: r.heights! };
+    return { geometry: r.geometry, heights: r.heights!, origin };
   }
 
   /** The chunks' family grids, newest last; a planet's own, so a travel takes them with the terrain. */
@@ -278,26 +319,143 @@ export class Terrain {
    * terrain the samples come from the worker; null means not generated yet (retry later).
    */
   buildFarTile(tx: number, tz: number, size: number, res: number, sync = true): THREE.BufferGeometry | null {
+    // Moved with the near ground (`groundChunkOrigin`), so its quads stay square with the chunks' edges and the
+    // cut leaves no sliver open between them, and its samples stand on poles.
+    const o = groundChunkOrigin(tx, tz, this.groundShift, size);
     let hs: FarGrid | undefined;
     if (this.swg) {
-      const grid = this.swg.farGrid(tx * size, tz * size, size, res, sync);
+      const grid = this.swg.farGrid(o.x, o.z, size, res, sync);
       if (!grid) return null;
       hs = grid;
     }
-    const geometry = this.buildGrid(tx * size, tz * size, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
+    const geometry = this.buildGrid(o.x, o.z, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
     if (geometry.userData.fullIndex) return geometry;
     // Remember the full index so quads under detailed chunks can be cut out (World.refreshFarTile).
-    geometry.userData = { fullIndex: geometry.getIndex()!.array.slice(), n: res, ox: tx * size, oz: tz * size, step: size / res };
+    geometry.userData = { fullIndex: geometry.getIndex()!.array.slice(), n: res, ox: o.x, oz: o.z, step: size / res };
     return geometry;
   }
 
   releaseFarTile(tx: number, tz: number, size: number, res: number): void {
-    this.swg?.releaseFarGrid(tx * size, tz * size, size, res);
+    const o = groundChunkOrigin(tx, tz, this.groundShift, size);
+    this.swg?.releaseFarGrid(o.x, o.z, size, res);
   }
 
   /** Drop cached SWG grids far from a point (in game chunks). */
   evict(center: THREE.Vector3, chunkRadius: number): void {
     this.swg?.evict(center.x, center.z, Math.ceil((chunkRadius * CHUNK_SIZE) / this.swg.sampler.blockWidth) + 2);
+  }
+
+  /**
+   * The ground drawn the client's way: one vertex a corner a triangle, as the textured ground always was (the
+   * identity index keeps the far tiles' cut on its six entries a quad), each carrying its triangle's tile whole --
+   * the array layers bottom first and the overlays' mask codes (`tileLayers`), worked out once a cell from its
+   * tile's four corner poles -- its own place in that tile, and the colour map at its own pole. A near chunk's
+   * cell lies in the 4 m tile the terrain's own grid puts it in (the mesh stands on the poles, so a tile's
+   * corners are samples of the grid, its margin included); a far tile's 16 m quad is a tile of its own.
+   */
+  private tiledAttributes(
+    geo: THREE.BufferGeometry,
+    g: { ox: number; oz: number; n: number; step: number; w: number; skirt: number; gridCount: number; skirtSource: Int32Array; positions: Float32Array; normals: Float32Array; indices: number[]; fams: Int32Array; kids: Uint8Array; cols: Uint8Array; tiler: ChunkTiler; swg: SwgTerrain },
+  ): void {
+    const { ox, oz, n, step, w, gridCount, skirtSource, positions, normals, indices, fams, kids, cols, tiler, swg } = g;
+    const tw = swg.tileWidth;
+    const own = step >= tw - 1e-6;
+    const T = own ? step : tw;
+    // Each column's and row's tile edge on the terrain's west and south side.
+    const x0 = new Float64Array(n);
+    const z0 = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      x0[i] = own ? swg.toSwgX(ox + (i + 1) * step) : tw * Math.floor(swg.toSwgX(ox + (i + 0.5) * step) / tw);
+      z0[i] = own ? swg.toSwgZ(oz + i * step) : tw * Math.floor(swg.toSwgZ(oz + (i + 0.5) * step) / tw);
+    }
+    const clampIndex = (v: number) => (v < 0 ? 0 : v >= w ? w - 1 : v);
+    const sampleAt = (tx: number, tz: number) => clampIndex(Math.round((swg.toGameZ(tz) - oz) / step) + 1) * w + clampIndex(Math.round((swg.toGameX(tx) - ox) / step) + 1);
+    const cells = n * n;
+    const cellLayers = new Uint8Array(cells * 4);
+    const cellCodes = new Uint8Array(cells * 3);
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const c = j * n + i;
+        const sw = sampleAt(x0[i], z0[j]);
+        const se = sampleAt(x0[i] + T, z0[j]);
+        const nw = sampleAt(x0[i], z0[j] + T);
+        const ne = sampleAt(x0[i] + T, z0[j] + T);
+        cornerFams[0] = fams[sw];
+        cornerFams[1] = fams[se];
+        cornerFams[2] = fams[nw];
+        cornerFams[3] = fams[ne];
+        cornerChoices[0] = kids[sw];
+        cornerChoices[1] = kids[se];
+        cornerChoices[2] = kids[nw];
+        cornerChoices[3] = kids[ne];
+        const count = tileLayers(cornerFams, cornerChoices, tiler, cellLayers, cellCodes, c * 4, c * 3);
+        if (!own) tiler.census[count]++;
+      }
+    }
+    const gridTris = cells * 6;
+    const cellOf = (t: number): number => {
+      if (t < gridTris) return Math.floor(t / 6);
+      const s = Math.floor((t - gridTris) / 12);
+      const k = s % n;
+      switch (Math.floor(s / n)) {
+        case 0:
+          return k;
+        case 1:
+          return (n - 1) * n + k;
+        case 2:
+          return k * n;
+        default:
+          return k * n + n - 1;
+      }
+    };
+    const tc = indices.length;
+    const dp = new Float32Array(tc * 3);
+    const dn = new Float32Array(tc * 3);
+    const dl = new Uint8Array(tc * 4);
+    const db = new Uint8Array(tc * 4);
+    const dt = new Uint8Array(tc * 3);
+    const toHalves = (v: number) => {
+      const h = Math.round((2 * v) / T);
+      return h < 0 ? 0 : h > 2 ? 2 : h;
+    };
+    for (let t = 0; t < tc; t += 3) {
+      const c = cellOf(t);
+      const ci = c % n;
+      const cj = Math.floor(c / n);
+      for (let k = 0; k < 3; k++) {
+        const v = indices[t + k];
+        const o = t + k;
+        dp[o * 3] = positions[v * 3];
+        dp[o * 3 + 1] = positions[v * 3 + 1];
+        dp[o * 3 + 2] = positions[v * 3 + 2];
+        dn[o * 3] = normals[v * 3];
+        dn[o * 3 + 1] = normals[v * 3 + 1];
+        dn[o * 3 + 2] = normals[v * 3 + 2];
+        for (let q = 0; q < 4; q++) dl[o * 4 + q] = cellLayers[c * 4 + q];
+        db[o * 4] = cellCodes[c * 3];
+        db[o * 4 + 1] = cellCodes[c * 3 + 1];
+        db[o * 4 + 2] = cellCodes[c * 3 + 2];
+        // A skirt's vertex stands where its edge's does, so it takes that one's place and colour.
+        const src = v < gridCount ? v : Math.max(0, skirtSource[v - gridCount]);
+        const vi = src % (n + 1);
+        const vj = Math.floor(src / (n + 1));
+        db[o * 4 + 3] = tileCode(toHalves(swg.toSwgX(ox + vi * step) - x0[ci]), toHalves(swg.toSwgZ(oz + vj * step) - z0[cj]));
+        const s = ((vj + 1) * w + vi + 1) * 3;
+        dt[o * 3] = cols[s];
+        dt[o * 3 + 1] = cols[s + 1];
+        dt[o * 3 + 2] = cols[s + 2];
+      }
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(dp, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(dn, 3));
+    geo.setAttribute('aGroundLayers', new THREE.BufferAttribute(dl, 4));
+    geo.setAttribute('aGroundBlend', new THREE.BufferAttribute(db, 4));
+    geo.setAttribute('aGroundTint', new THREE.BufferAttribute(dt, 3, true));
+    const identity = new Uint32Array(tc);
+    for (let i = 0; i < tc; i++) identity[i] = i;
+    geo.setIndex(new THREE.BufferAttribute(identity, 1));
+    geo.computeBoundingSphere();
+    if (g.skirt === 0) geo.userData = { fullIndex: identity.slice(), n, ox, oz, step };
   }
 
   private buildGrid(ox: number, oz: number, size: number, n: number, opts: { skirt: number; yOffset?: number; wantHeights: boolean }, samples?: FarGrid): { geometry: THREE.BufferGeometry; heights: Float32Array | null; families: Int32Array | null } {
@@ -307,19 +465,43 @@ export class Terrain {
     let hs: Float32Array;
     // Shader family per sample when the planet has real terrain: the ground texture painted there.
     let fams: Int32Array | null = null;
+    // And, for the ground drawn the client's way, each sample's choice among its family's alternates and its colour.
+    const tiler = this.swg ? this.tiler : null;
+    let kids: Uint8Array | null = null;
+    let cols: Uint8Array | null = null;
     if (samples && samples.heights.length === w * w) {
       hs = samples.heights;
       fams = samples.shaders;
+      if (tiler) {
+        kids = samples.children;
+        cols = samples.colors;
+      }
     } else {
       hs = new Float32Array(w * w);
       const swg = this.swg;
       if (swg) fams = new Int32Array(w * w);
+      if (swg && tiler) {
+        kids = new Uint8Array(w * w);
+        cols = new Uint8Array(w * w * 3);
+      }
       for (let j = 0; j < w; j++) {
         for (let i = 0; i < w; i++) {
           const x = ox + (i - 1) * step;
           const z = oz + (j - 1) * step;
-          hs[j * w + i] = this.heightAt(x, z);
-          if (fams && swg) fams[j * w + i] = swg.shaderAt(x, z);
+          const k = j * w + i;
+          hs[k] = this.heightAt(x, z);
+          if (!fams || !swg) continue;
+          // From the cached block in one lookup; a block not cached (never, after `prepareChunk`) is generated as before.
+          if (kids && cols && swg.groundIfCached(x, z, groundPole)) {
+            fams[k] = groundPole.family;
+            kids[k] = groundPole.choice;
+            cols[k * 3] = (groundPole.color >> 16) & 255;
+            cols[k * 3 + 1] = (groundPole.color >> 8) & 255;
+            cols[k * 3 + 2] = groundPole.color & 255;
+          } else {
+            fams[k] = swg.shaderAt(x, z);
+            if (cols) cols.fill(255, k * 3, k * 3 + 3);
+          }
         }
       }
     }
@@ -416,6 +598,10 @@ export class Terrain {
     }
 
     const geo = new THREE.BufferGeometry();
+    if (fams && tiler && kids && cols && swg) {
+      this.tiledAttributes(geo, { ox, oz, n, step, w, skirt: opts.skirt, gridCount, skirtSource, positions, normals, indices, fams, kids, cols, tiler, swg });
+      return { geometry: geo, heights: physHeights, families: fams };
+    }
     if (fams) {
       // Textured ground: every triangle carries the families of its three corners and each vertex
       // its corner weight, so the fragment shader can blend three ground textures across it. That

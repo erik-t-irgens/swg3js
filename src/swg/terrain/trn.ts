@@ -569,6 +569,18 @@ export class TerrainSampler {
     return (c[k] << 16) | (c[k + 1] << 8) | c[k + 2];
   }
 
+  /** The family, choice byte and colour (0xRRGGBB) at the pole a world point maps to, from a cached block only, into `out`: false when it is not generated. */
+  groundAt(x: number, z: number, out: { family: number; choice: number; color: number }): boolean {
+    const p = this.cachedPole(x, z);
+    if (!p) return false;
+    const i = p.index;
+    out.family = p.block.shaders[i] ?? 0;
+    out.choice = p.block.children?.[i] ?? 0;
+    const c = p.block.colors;
+    out.color = c ? (c[i * 3] << 16) | (c[i * 3 + 1] << 8) | c[i * 3 + 2] : 0xffffff;
+    return true;
+  }
+
   /** Static flora family at a world point (0 = none) and its child choice in [0, 1]. */
   floraAt(x: number, z: number, collidable: boolean): { family: number; choice: number } {
     const { block, index } = this.poleIndex(x, z);

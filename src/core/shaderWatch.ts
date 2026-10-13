@@ -418,9 +418,10 @@ export function readKey(cacheKey: string): KeyFacts | null {
     clipping: whole(at(AT.numClippingPlanes)),
     // The cascades write a define (`CSM.setupMaterial` sets `USE_CSM`), so they are looked for among
     // the defines rather than in the whole key: the key's tail is a hook's source text, which could
-    // mention anything. The wet wrap writes the front of the material's own key.
+    // mention anything. The wet wrap writes the front of the material's own key, and so do the ground's two
+    // programs (the families of before and the client's tiles), which carry the wet look themselves.
     cascades: head.includes('USE_CSM'),
-    wet: custom.startsWith('wet-object|') || custom.startsWith('swg-ground-wet-'),
+    wet: custom.startsWith('wet-object|') || custom.startsWith('swg-ground-wet-') || custom.startsWith('swg-ground-tiles-wet'),
     defines,
     custom: shortCustom(custom),
     customLength: noKeyOfItsOwn(custom) ? 0 : custom.length,

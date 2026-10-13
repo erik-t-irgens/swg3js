@@ -20,6 +20,7 @@
 // (`farTile.test.ts`); value imports carry `.ts`.
 import * as THREE from 'three';
 import { keepUploadRange, type UploadRange } from './uploadRange.ts';
+import { groundChunkAt, NO_SHIFT, type GroundShift } from './groundTiles.ts';
 
 /** The switch: true cuts the tile a chunk lies in, and only it, in place. */
 export const FAR_TILE_TUNE = { local: true };
@@ -47,9 +48,10 @@ export interface FarTileCut {
  * Make a tile's cut: `n` quads each way from (`ox`, `oz`) at `step` metres, `full` its whole index, and
  * `chunk` the detailed chunks' size. Every quad starts uncovered; `coverFrom` fills it from the chunks
  * loaded. The index attribute is Uint16 whenever the tile's vertices allow (a 33 by 33 grid, or 6 144
- * corners one a triangle for the textured ground), Uint32 otherwise.
+ * corners one a triangle for the textured ground), Uint32 otherwise. `shift` is where the world's ground
+ * stands against the chunk buckets (`groundChunkOrigin`): a quad belongs to the chunk whose ground covers it.
  */
-export function makeFarTileCut(full: ArrayLike<number>, n: number, ox: number, oz: number, step: number, chunk: number): FarTileCut {
+export function makeFarTileCut(full: ArrayLike<number>, n: number, ox: number, oz: number, step: number, chunk: number, shift: GroundShift = NO_SHIFT): FarTileCut {
   let max = 0;
   for (let i = 0; i < full.length; i++) if (full[i] > max) max = full[i];
   const size = n * n * 6;
@@ -59,8 +61,8 @@ export function makeFarTileCut(full: ArrayLike<number>, n: number, ox: number, o
   const colChunk = new Int32Array(n);
   const rowChunk = new Int32Array(n);
   for (let i = 0; i < n; i++) {
-    colChunk[i] = Math.floor((ox + (i + 0.5) * step) / chunk);
-    rowChunk[i] = Math.floor((oz + (i + 0.5) * step) / chunk);
+    colChunk[i] = groundChunkAt(ox + (i + 0.5) * step, shift.x, chunk);
+    rowChunk[i] = groundChunkAt(oz + (i + 0.5) * step, shift.z, chunk);
   }
   return { n, full, covered: new Uint8Array(n * n), colChunk, rowChunk, index, range: { start: 0, count: 0 }, kept: -1 };
 }
@@ -148,12 +150,12 @@ export function writeKept(t: FarTileCut, geometry: THREE.BufferGeometry): number
  * The old rule, for the node test to hold the cut to and for the switch's other side: the whole index
  * of the quads no loaded chunk covers, worked out from scratch.
  */
-export function keptFromScratch(full: ArrayLike<number>, n: number, ox: number, oz: number, step: number, chunk: number, has: (cx: number, cz: number) => boolean): number[] {
+export function keptFromScratch(full: ArrayLike<number>, n: number, ox: number, oz: number, step: number, chunk: number, has: (cx: number, cz: number) => boolean, shift: GroundShift = NO_SHIFT): number[] {
   const out: number[] = [];
   for (let j = 0; j < n; j++) {
-    const cz = Math.floor((oz + (j + 0.5) * step) / chunk);
+    const cz = groundChunkAt(oz + (j + 0.5) * step, shift.z, chunk);
     for (let i = 0; i < n; i++) {
-      const cx = Math.floor((ox + (i + 0.5) * step) / chunk);
+      const cx = groundChunkAt(ox + (i + 0.5) * step, shift.x, chunk);
       if (has(cx, cz)) continue;
       const q = (j * n + i) * 6;
       for (let k = 0; k < 6; k++) out.push(full[q + k]);

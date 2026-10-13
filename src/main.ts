@@ -4436,17 +4436,42 @@ class App {
        */
       gloss: (x?: number) => this.world.setGroundGloss(x) ?? 'this world has no ground textures',
       /**
-       * What the terrain generator lays on the ground: `ground()` says the rules in force (the 8 m
-       * pattern the families are laid on, how a pole's alternate is chosen, the colour affectors and
-       * how many of the ramps they name the pack carried); `ground({ at: true })` adds the pole under
-       * the player's feet, worked out afresh on this thread (two blocks, 15 to 40 ms; never in a frame):
-       * its family as laid on the pattern and as it was painted, its choice byte and the alternate
-       * that picks, its colour, and every colour affector that wrote there, in order, beside what the
-       * cached blocks the game reads hold there.
+       * What the terrain generator lays on the ground and how it is drawn: `ground()` says the rules in
+       * force (the 8 m pattern the families are laid on, how a pole's alternate is chosen, the colour
+       * affectors and how many of the ramps they name the pack carried) and, under `drawn`, the ground's
+       * own program (the client's tiles, or the families of before), its knobs, its pictures and alternates,
+       * its tiles by how many families they hold, its colour reference and what it holds on the card;
+       * `ground({ colour, gainCap, shine, flat, mirror, masks, opposite, clouds, view })` moves those knobs
+       * (uniforms: nothing compiles) and `ground({ order, children, childCorner })` builds the ground round
+       * the player again with them; `ground({ at: true })` adds the pole under the player's feet, worked out
+       * afresh on this thread (two blocks, 15 to 40 ms; never in a frame): its family as laid on the pattern
+       * and as it was painted, its choice byte and the alternate that picks, its colour, and every colour
+       * affector that wrote there, in order, beside what the cached blocks the game reads hold there.
        */
-      ground: (opts: { at?: boolean } = {}) => {
+      ground: (
+        opts: {
+          at?: boolean;
+          colour?: 'off' | 'client' | 'normalised' | 'channels';
+          gainCap?: number;
+          shine?: 'highlight' | 'flat' | 'off';
+          flat?: number;
+          mirror?: boolean;
+          masks?: boolean;
+          opposite?: 'max' | 'add';
+          order?: 'first' | 'last';
+          children?: boolean;
+          childCorner?: ('sw' | 'se' | 'nw' | 'ne')[];
+          clouds?: boolean | { on?: boolean; strength?: number };
+          view?: 'lit' | 'colour' | 'clouds' | 'bump';
+        } = {},
+      ) => {
         const swg = this.world.terrain.swg;
         if (!swg) return 'this world has no converted terrain';
+        // How the ground is drawn, the knobs moved first (uniforms, or a rebuild round the player for the order,
+        // the children and the child's corner), beside the generator's own rules.
+        const knobs = { ...opts };
+        delete knobs.at;
+        const drawn = this.world.groundDraw(knobs);
         const gen = swg.template.generator;
         const items = gen.summary();
         const hex = (c: number | null) => (c === null ? null : `#${c.toString(16).padStart(6, '0')}`);
@@ -4456,6 +4481,7 @@ class App {
           alternates: `${TERRAIN_GROUND_TUNE.legacyChildren}: each pole's own choice, drawn from its place (the file says ${gen.legacy ? 'legacy' : 'not legacy'})`,
           colourAffectors: { constant: items.ACCN ?? 0, fractalRamp: items.ACRF ?? 0, heightRamp: items.ACRH ?? 0 },
           ramps: { named: swg.ramps.named.length, carried: swg.ramps.loaded, from: COLOR_RAMP_FILE, note: swg.ramps.loaded < swg.ramps.named.length ? 'a ramp the pack does not carry does nothing, as in the client; a pack the terrain command wrote before it wrote ramps (terrain shaders version 3 or older) carries none, and its colour map is the constants\' alone until that command runs again' : 'every ramp named is here' },
+          drawn,
         };
         if (!opts.at) return rules;
         const p = this.player.worldPos;
@@ -5573,6 +5599,13 @@ class App {
         if (!this.settings.colorGrade) return 'the colour grade is off (Menu, Graphics, Effects)';
         return pass.report(this.postfx.ctx);
       },
+      /**
+       * Draw a strip of tiles off-screen with the ground's own tile program and hold every pixel to
+       * `groundMath.ts`, which the node test sweeps: every mask's corners and turns, three and four layers,
+       * the four tints, both ways round, both opposite rules, the hard step and the cloud layer. `ok` false
+       * means the program and the arithmetic have parted. It builds one program of its own.
+       */
+      groundSelfTest: () => this.world.groundSelfTest() ?? 'no renderer yet',
       /** Draw the grade's own shader over known colours and compare every texel with the JavaScript the node test sweeps: `ok` false means the two have drifted apart. */
       gradeSelfTest: () => {
         const pass = this.gradePass();

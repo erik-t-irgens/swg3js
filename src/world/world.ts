@@ -39,11 +39,12 @@ import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
 import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
-import { GROUND_NORMAL, TerrainTextures } from './terrainTextures.ts';
+import { GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest } from './terrainTextures.ts';
+import { GROUND_DRAW_TUNE, groundChunkAt, type CornerName, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { AssetPack, lowerLevels, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
-import { CHUNK_RES, CHUNK_SIZE, Terrain } from './terrain';
+import { CHUNK_SIZE, chunkHeightfield, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
@@ -325,6 +326,8 @@ interface Chunk {
   group: THREE.Group;
   colliders: Collider[];
   heights: Float32Array;
+  /** Where its ground mesh and heightfield start (`Terrain.chunkOrigin`): its bucket's corner moved onto the client's height points. */
+  origin: { x: number; z: number };
   physics: RAPIER.Collider[] | null;
   /** The planet's own flora of this chunk, trees and plants apart (step 5); null for the procedural props. */
   trees: THREE.Group | null;
@@ -621,6 +624,13 @@ export class World {
   private flora: FloraPlanter | null = null;
   /** The planet's ground textures, when the pack carries them; the ground material comes from here. */
   private groundTextures: TerrainTextures | null = null;
+  /**
+   * The ground drawn the client's way (terrain shaders version 4): one material for the whole session, never
+   * disposed, which every world's chunks and far tiles wear and to which each world hands only its textures
+   * (`TerrainTextures.bindTiles`), so its one program is built behind the first loading screen and no travel
+   * builds another. Made the first time a world's ground is drawn that way.
+   */
+  private groundTilesMat: THREE.MeshStandardMaterial | null = null;
   /** Texture anisotropy the renderer supports, set once by main. */
   static anisotropy = 4;
   /** Detailed ground chunks each way around the player, and coarse far tiles; the settings move them. */
@@ -1910,6 +1920,9 @@ export class World {
     this.plantSweep.reset();
     this.groundTextures?.dispose();
     this.groundTextures = null;
+    // The tiler held that world's layers; the session's tile material stays, holding stand-ins until the next. (No
+    // terrain yet before the first world.)
+    if (this.terrain) this.terrain.tiler = null;
     this.dropSky();
     this.waterBodies.clear();
     // The verdict and the looks belong to the world they were read in: a world left under water must
@@ -2876,7 +2889,7 @@ export class World {
   private addChunkPhysics(c: Chunk): void {
     if (c.physics) return;
     const cols: RAPIER.Collider[] = [];
-    cols.push(this.physics.createHeightfield(c.cx * CHUNK_SIZE, c.cz * CHUNK_SIZE, CHUNK_SIZE, CHUNK_RES, c.heights));
+    cols.push(chunkHeightfield(this.physics, c));
     for (const p of c.colliders) {
       // A planting with the client's own shapes stands on them, exactly where they are (`floraCollision.ts`).
       if (p.parts) {
@@ -2901,25 +2914,37 @@ export class World {
       const swg = this.terrain.swg;
       const planet = new Map<number, string>();
       if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) planet.set(f.id, f.name);
-      const textures = await TerrainTextures.load(pack, World.anisotropy, planet);
+      const ground = swg ? { shaderGroup: swg.template.generator.shaderGroup, reference: swg.colorReference, tileWidth: swg.tileWidth, renderer: this.renderer } : undefined;
+      const textures = await TerrainTextures.load(pack, World.anisotropy, planet, ground);
       if (!textures) return;
       this.groundTextures?.dispose();
       this.groundTextures = textures;
-      const mat = textures.groundMaterial(this.csm);
+      // Drawn the client's way: the session's one material takes this world's textures, and the chunks, built
+      // after this, carry their tiles. Otherwise the material of before, the chunks built as they always were.
+      this.terrain.tiler = textures.tiles && swg ? textures.tiles.tiler : null;
+      if (textures.tiles && swg) textures.bindTiles(swg.centerX, swg.centerZ);
+      const mat = this.groundMaterial as THREE.MeshStandardMaterial;
       this.csmMaterials.add(mat);
-      for (const c of this.chunks.values()) c.group.traverse((o) => { if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === this.terrainMat) (o as THREE.Mesh).material = mat; });
-      for (const t of this.farTiles.values()) if (t.material === this.terrainMat) t.material = mat;
+      // A chunk made before now carries no tiles and is made again before the world is shown (`load`), so only
+      // the ground of before is handed its new material in place.
+      if (!textures.tiles) {
+        for (const c of this.chunks.values()) c.group.traverse((o) => { if ((o as THREE.Mesh).isMesh && (o as THREE.Mesh).material === this.terrainMat) (o as THREE.Mesh).material = mat; });
+        for (const t of this.farTiles.values()) if (t.material === this.terrainMat) t.material = mat;
+      }
       // Ground the client never drew (`emptyGround`: the instances zone's) is kept and not drawn.
       this.chunkRoot.visible = !textures.empty;
-      console.info(`terrain: ${textures.families.length} ground textures (${textures.texture.image.width} px)${textures.empty ? ', the client\'s empty punch-out: the ground is not drawn' : ''}`);
+      const mb = textures.gpuMegabytes;
+      console.info(`terrain: ${textures.families.length} ground textures (${textures.texture.image.width} px, ${textures.texture.image.depth} layers, ${mb.total} MB on the card)${textures.tiles ? ', drawn the client\'s way: every alternate, its masks and its colour map' : ''}${textures.empty ? ', the client\'s empty punch-out: the ground is not drawn' : ''}`);
     } catch (err) {
       console.warn('terrain: ground textures failed to load', err);
     }
   }
 
-  /** The material for new ground meshes: textured when the planet has textures, tinted otherwise. */
+  /** The material for new ground meshes: the session's tile material, else textured when the planet has textures, tinted otherwise. */
   private get groundMaterial(): THREE.Material {
-    return this.groundTextures && this.terrain.swg ? this.groundTextures.groundMaterial(this.csm) : this.terrainMat;
+    if (!this.groundTextures || !this.terrain.swg) return this.terrainMat;
+    if (this.groundTextures.tiles) return (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
+    return this.groundTextures.groundMaterial(this.csm);
   }
 
   private async loadFlora(pack: AssetPack, swg: SwgTerrain): Promise<void> {
@@ -6234,6 +6259,96 @@ export class World {
   }
 
   /**
+   * The ground drawn the client's way, its knobs (`GROUND_DRAW_TUNE`) moved live and what it holds reported. The
+   * colour, the gain cap, the shine and its flat strength, the way round, the masks, the opposite rule, the
+   * clouds and the view are uniforms of the session's one material, so nothing compiles; the order, the
+   * children and the child's corner decide what each chunk is built with, so changing one builds the ground
+   * round the player again (the chunks and the far tiles, at once). Null with no converted ground.
+   */
+  groundDraw(o: { colour?: GroundColour; gainCap?: number; shine?: GroundShine; flat?: number; mirror?: boolean; masks?: boolean; opposite?: 'max' | 'add'; order?: 'first' | 'last'; children?: boolean; childCorner?: CornerName[]; clouds?: boolean | { on?: boolean; strength?: number }; view?: 'lit' | 'colour' | 'clouds' | 'bump' } = {}): Record<string, unknown> | null {
+    const t = GROUND_DRAW_TUNE;
+    const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+    if (o.colour && ['off', 'client', 'normalised', 'channels'].includes(o.colour)) t.colour = o.colour;
+    if (num(o.gainCap)) t.gainCap = o.gainCap;
+    if (o.shine && ['highlight', 'flat', 'off'].includes(o.shine)) t.shine = o.shine;
+    if (num(o.flat)) t.flat = o.flat;
+    if (typeof o.mirror === 'boolean') t.mirror = o.mirror;
+    if (typeof o.masks === 'boolean') t.masks = o.masks;
+    if (o.opposite === 'max' || o.opposite === 'add') t.opposite = o.opposite;
+    if (typeof o.clouds === 'boolean') t.clouds.on = o.clouds;
+    else if (o.clouds && typeof o.clouds === 'object') {
+      if (typeof o.clouds.on === 'boolean') t.clouds.on = o.clouds.on;
+      if (num(o.clouds.strength)) t.clouds.strength = o.clouds.strength;
+    }
+    let rebuild = false;
+    if ((o.order === 'first' || o.order === 'last') && o.order !== t.order) {
+      t.order = o.order;
+      rebuild = true;
+    }
+    if (typeof o.children === 'boolean' && o.children !== t.children) {
+      t.children = o.children;
+      rebuild = true;
+    }
+    if (Array.isArray(o.childCorner) && o.childCorner.join() !== t.childCorner.join()) {
+      t.childCorner = o.childCorner.filter((c) => ['sw', 'se', 'nw', 'ne'].includes(c));
+      rebuild = true;
+    }
+    const u = groundTileUniforms();
+    writeGroundDraw(u);
+    if (o.view) u.uGroundLook.value.z = o.view === 'colour' ? 1 : o.view === 'clouds' ? 2 : o.view === 'bump' ? 3 : 0;
+    const textures = this.groundTextures;
+    const tiles = textures?.tiles ?? null;
+    if (rebuild && tiles) this.rebuildGround();
+    if (!textures || !this.terrain.swg) return null;
+    const census = tiles?.tiler.census;
+    const cells = census ? census[1] + census[2] + census[3] + census[4] : 0;
+    const share = (k: number) => (cells ? Number(((census![k] / cells) * 100).toFixed(1)) : 0);
+    const img = textures.texture.image as { width: number; depth: number };
+    return {
+      program: tiles
+        ? "tiles: the client's way, every alternate through its masks and the colour map's tint, one program for every planet"
+        : !GROUND_TILES_WANTED
+          ? "families, as before: localStorage['swg.ground.tiles'] is '0'"
+          : 'families, as before: this pack is from before terrain shaders version 4 (the terrain command writes the alternates, masks and ramps)',
+      tune: { ...t, clouds: { ...t.clouds }, childCorner: [...t.childCorner] },
+      view: ['lit', 'colour', 'clouds', 'bump'][u.uGroundLook.value.z] ?? 'lit',
+      layers: { pictures: img.depth, size: img.width, firstChildOnly: tiles ? tiles.firstOnly || !t.children : null, childrenPerFamily: tiles ? Object.fromEntries(tiles.childCounts) : null },
+      tiles: tiles ? { cellsCounted: cells, byLayers: { one: share(1), two: share(2), three: share(3), four: share(4) }, note: 'percent of the near ground\'s 2 m cells built since the world (or the knobs) last built it, by how many families their tile holds' } : null,
+      colour: { mode: t.colour, reference: tiles?.reference ?? null, ramps: this.terrain.swg.ramps },
+      memoryMB: textures.gpuMegabytes,
+      shift: this.terrain.groundShift,
+      rebuilt: rebuild && !!tiles,
+    };
+  }
+
+  /** The ground round the player built again from nothing, chunks and far tiles, at once: what a change of how tiles are laid needs. */
+  private rebuildGround(): void {
+    (this.terrain.tiler as { refresh?: () => void } | null)?.refresh?.();
+    for (const c of this.chunks.values()) this.disposeChunk(c);
+    this.chunks.clear();
+    for (const [key, t] of this.farTiles) {
+      this.chunkRoot.remove(t);
+      t.geometry.dispose();
+      const [tx, tz] = key.split(',').map(Number);
+      this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
+    }
+    this.farTiles.clear();
+    this.changedN = 0;
+    this.lastCx = Number.NaN;
+    this.lastCz = Number.NaN;
+    this.lastTx = Number.NaN;
+    this.lastTz = Number.NaN;
+    const centre = new THREE.Vector3((this.streamPcx + 0.5) * CHUNK_SIZE, 0, (this.streamPcz + 0.5) * CHUNK_SIZE);
+    this.stream(centre, Infinity);
+    this.streamFar(centre, Infinity);
+  }
+
+  /** `groundSelfTest` (`terrainTextures.ts`) on the world's renderer: the tile program drawn and held to `groundMath.ts`. */
+  groundSelfTest(): GroundSelfTest | null {
+    return this.renderer ? groundSelfTest(this.renderer) : null;
+  }
+
+  /**
    * Turn the sun's shadows on or off, live: every material takes the change on its next draw. Only
    * the renderer's switch flips: the cascade lights keep castShadow, because with no shadow-casting
    * directional light the cascade shader lights every surface with all three cascade lights
@@ -6658,6 +6773,8 @@ export class World {
     this.updateInterior(playerPos);
     perf.begin(SEC.sky);
     this.day.update(dt, fastTime);
+    // The cloud shadows' drift, on the clock the weather reads, so everybody's clouds stand over the same ground.
+    if (this.groundTilesMat) setGroundClock(sharedClock.walkSeconds());
     if (this.swgSky) {
       // What the sky needs from the weather (the area, the level, the blend, the wind) comes first.
       this.weatherWorld.daylight = this.day.daylight;
@@ -7714,10 +7831,11 @@ export class World {
     if (!u.fullIndex) return;
     const { fullIndex, n, ox, oz, step } = u;
     const out: number[] = [];
+    const s = this.terrain.groundShift;
     for (let j = 0; j < n; j++) {
-      const cz = Math.floor((oz + (j + 0.5) * step) / CHUNK_SIZE);
+      const cz = groundChunkAt(oz + (j + 0.5) * step, s.z, CHUNK_SIZE);
       for (let i = 0; i < n; i++) {
-        const cx = Math.floor((ox + (i + 0.5) * step) / CHUNK_SIZE);
+        const cx = groundChunkAt(ox + (i + 0.5) * step, s.x, CHUNK_SIZE);
         if (this.chunks.has(`${cx},${cz}`)) continue;
         const q = (j * n + i) * 6;
         for (let k = 0; k < 6; k++) out.push(fullIndex[q + k]);
@@ -7755,7 +7873,7 @@ export class World {
       this.farTiles.set(`${w.tx},${w.tz}`, mesh);
       // Its cut, kept for its life: which quads the chunks cover and one index attribute of its own (commit 4a).
       const u = geometry.userData as { fullIndex?: ArrayLike<number>; n: number; ox: number; oz: number; step: number };
-      if (u.fullIndex) this.farCuts.set(mesh, makeFarTileCut(u.fullIndex, u.n, u.ox, u.oz, u.step, CHUNK_SIZE));
+      if (u.fullIndex) this.farCuts.set(mesh, makeFarTileCut(u.fullIndex, u.n, u.ox, u.oz, u.step, CHUNK_SIZE, this.terrain.groundShift));
       this.cutWhole(mesh);
       made++;
     }
@@ -7777,7 +7895,7 @@ export class World {
   private createChunk(cx: number, cz: number): void {
     const key = `${cx},${cz}`;
     const group = new THREE.Group();
-    const { geometry, heights } = this.terrain.buildChunk(cx, cz);
+    const { geometry, heights, origin } = this.terrain.buildChunk(cx, cz);
     const mesh = new THREE.Mesh(geometry, this.groundMaterial);
     mesh.receiveShadow = true;
     mesh.castShadow = true;
@@ -7815,7 +7933,7 @@ export class World {
     this.chunkRoot.add(group);
     const mx = (cx + 0.5) * CHUNK_SIZE;
     const mz = (cz + 0.5) * CHUNK_SIZE;
-    const chunk: Chunk = { key, cx, cz, group, colliders, heights, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
+    const chunk: Chunk = { key, cx, cz, group, colliders, heights, origin, physics: null, trees, plants, flora: this.flora ? propGroup : null, floraData, mx, my: this.terrain.heightAt(mx, mz), mz };
     this.chunks.set(key, chunk);
     // Its plants shown or not from the moment it is made, by the eye the last sweep measured from, so a
     // chunk made far off never shows its plants for the quarter second until the next sweep (step 5).

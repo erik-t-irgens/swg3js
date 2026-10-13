@@ -4,7 +4,8 @@ import * as THREE from 'three';
 // ahead of time by a worker so streaming never stalls on generation.
 
 import type { EnvironmentFamily, Layer } from '../swg/terrain/generator.ts';
-import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type GroundProbe, type PoleBlock, type TerrainTemplate } from '../swg/terrain/trn.ts';
+import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type TerrainTemplate } from '../swg/terrain/trn.ts';
+import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
 
 export interface BuildingLayerSource {
   bytes: ArrayBuffer;
@@ -86,8 +87,14 @@ export class SwgTerrain {
   readonly waterTables: SwgWaterTable[] = [];
   /** The colour ramps the terrain's colour affectors name, and which of them the pack carried. */
   readonly ramps: { named: string[]; loaded: number };
+  /** How bright the world's colour map runs (the terrain command's measure, beside the ramps), or null where the pack has none. */
+  readonly colorReference: ColorReference | null;
+  /** Where the ground's mesh stands against the 64 m buckets so its vertices fall on the poles (`groundTiles.ts`). */
+  readonly groundShift: GroundShift;
 
-  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number) {
+  private constructor(trn: ArrayBuffer, layers: BuildingLayerSource[], bitmaps: { familyId: number; bytes: ArrayBuffer }[], ramps: Map<string, ColorRamp>, centerX: number, centerZ: number, colorReference: ColorReference | null = null) {
+    this.colorReference = colorReference;
+    this.groundShift = groundShift(centerX, centerZ);
     this.template = parseTerrainTemplate(new Uint8Array(trn));
     for (const b of bitmaps) attachBitmap(this.template, b.familyId, new Uint8Array(b.bytes));
     const named = rampNames(this.template);
@@ -157,17 +164,20 @@ export class SwgTerrain {
     // A pack converted before the ramps were written has none, and every ramp affector then does
     // nothing, as the client's does for an image it cannot load: the colour map is the constants'.
     let ramps = new Map<string, ColorRamp>();
-    if (rampNames(probe).length) {
-      const bytes = await fetchBytes(COLOR_RAMP_FILE);
-      if (bytes) {
-        try {
-          ramps = readColorRampFile(JSON.parse(new TextDecoder().decode(bytes)));
-        } catch (err) {
-          console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
-        }
+    let reference: ColorReference | null = null;
+    // The file is read for its brightness reference even on a world that names no ramp: the ground's tint is
+    // normalised by it whatever painted the colour map.
+    const bytes = await fetchBytes(COLOR_RAMP_FILE);
+    if (bytes) {
+      try {
+        const json = JSON.parse(new TextDecoder().decode(bytes));
+        if (rampNames(probe).length) ramps = readColorRampFile(json);
+        reference = readColorReference(json);
+      } catch (err) {
+        console.warn(`terrain: ${COLOR_RAMP_FILE} could not be read; the colour ramps do nothing`, err);
       }
     }
-    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ);
+    return new SwgTerrain(trn, layers, bitmaps, ramps, centerX, centerZ, reference);
   }
 
   get waterLevel(): number {
@@ -232,15 +242,17 @@ export class SwgTerrain {
     const z = this.toSwgZ(gz);
     const bw = this.sampler.blockWidth;
     if (this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw))) return this.sampler.heightAt(x, z);
-    const tx = Math.floor(gx / farSize);
-    const tz = Math.floor(gz / farSize);
-    const grid = this.farGrids.get(SwgTerrain.farKey(tx * farSize, tz * farSize, farSize, farRes));
+    // The far tiles stand where the near ground does (`groundChunkOrigin`), moved by the world's shift.
+    const s = this.groundShift;
+    const gx0 = groundChunkAt(gx, s.x, farSize) * farSize + s.x;
+    const gz0 = groundChunkAt(gz, s.z, farSize) * farSize + s.z;
+    const grid = this.farGrids.get(SwgTerrain.farKey(gx0, gz0, farSize, farRes));
     if (!grid) return null;
     const step = farSize / farRes;
     const n = farRes + 3;
     // Column i is game x = gx0 + (i - 1) * step; row j likewise in z.
-    const fx = THREE.MathUtils.clamp((gx - tx * farSize) / step + 1, 0, n - 1.001);
-    const fz = THREE.MathUtils.clamp((gz - tz * farSize) / step + 1, 0, n - 1.001);
+    const fx = THREE.MathUtils.clamp((gx - gx0) / step + 1, 0, n - 1.001);
+    const fz = THREE.MathUtils.clamp((gz - gz0) / step + 1, 0, n - 1.001);
     const i = Math.floor(fx);
     const j = Math.floor(fz);
     const u = fx - i;
@@ -384,6 +396,15 @@ export class SwgTerrain {
   /** The child choice (a byte) at a game-space point, from a cached block only (null when it is not generated). */
   childIfCached(gx: number, gz: number): number | null {
     return this.sampler.childAt(this.toSwgX(gx), this.toSwgZ(gz));
+  }
+
+  /**
+   * The family, the choice and the colour (0xRRGGBB) of the pole under a game-space point, written into `out`
+   * in one lookup, from a cached block only: false when the block is not generated. What a chunk built for the
+   * client's tiles reads at each of its samples.
+   */
+  groundIfCached(gx: number, gz: number, out: { family: number; choice: number; color: number }): boolean {
+    return this.sampler.groundAt(this.toSwgX(gx), this.toSwgZ(gz), out);
   }
 
   /** Everything the generator says about the pole under a game-space point, worked out afresh on this thread. For the console. */
