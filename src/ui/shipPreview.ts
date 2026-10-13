@@ -14,13 +14,21 @@
 // whole freighter at once is dozens of programs in one main-thread task while the world draws
 // behind the page. A material the world has already set up for its shadow cascades keeps the
 // world's record through the compile (`keepShadows`).
+//
+// Its room is its own environment, filtered at the world's one size (`previewStudio.ts`). A material
+// the world reflects its sky in carries the world's filtered sky, which is nothing in this context, so
+// the room is swapped onto every material converted at format 6 around each draw and each compile here
+// and the world's put back after (`EnvironmentSwap`): a hull whose shader has a cube takes the room at
+// its own strength, and one with none takes none, as it takes none in the world. A material from a pack
+// converted before format 6 takes the room as the scene's environment, as everything here always did.
 
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { cellIndexOf } from '../vehicles/interior';
 import type { WingSet } from '../vehicles/wings';
 import type { ShipPaint } from '../vehicles/shipPaint';
 import { specWrap } from '../world/specular.ts';
+import { EnvironmentSwap, PREVIEW_REFLECTIONS } from '../world/envmap.ts';
+import { studioEnvironment } from './previewStudio.ts';
 
 /** How fast the ship turns on its own until the view is dragged (rad/s). */
 const AUTO_TURN = 0.22;
@@ -103,7 +111,7 @@ export class ShipPreview {
     const rim = new THREE.DirectionalLight(0xffffff, 1.3);
     rim.position.set(-1, 2.5, -4);
     this.scene.add(key, fill, rim, new THREE.HemisphereLight(0xbcd3e8, 0x35302a, 0.9));
-    this.scene.environmentIntensity = 0.5;
+    this.scene.environmentIntensity = PREVIEW_REFLECTIONS.strength;
     // The panel sizes the canvas with CSS: watching it keeps the drawing buffer the shape of the box.
     this.observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentRect;
@@ -113,10 +121,24 @@ export class ShipPreview {
       // being sized never shows an empty stage. The camera is placed first, since the fit may have moved.
       if (this.running && this.holder) {
         this.placeCamera();
-        this.renderer.render(this.scene, this.camera);
+        this.draw(this.holder);
       }
     });
     this.canvasEl = this.makeContext();
+  }
+
+  /** The room swapped onto what is drawn here for the length of each draw and compile (`EnvironmentSwap`). */
+  private readonly envSwap = new EnvironmentSwap();
+
+  /** One frame of the stage, the room on the ship's materials for its length and the world's back after it whatever the draw does. */
+  private draw(holder: THREE.Object3D): void {
+    this.scene.environmentIntensity = PREVIEW_REFLECTIONS.strength;
+    this.envSwap.on(holder, this.envTarget.texture, PREVIEW_REFLECTIONS.strength, true);
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      this.envSwap.off();
+    }
   }
 
   /** The canvas drawn into (a new one after the context is made again; it takes the old one's place in the page). */
@@ -137,11 +159,7 @@ export class ShipPreview {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = false;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    const room = new RoomEnvironment();
-    this.envTarget = pmrem.fromScene(room, 0.04);
-    room.dispose();
-    pmrem.dispose();
+    this.envTarget = studioEnvironment(this.renderer);
     this.scene.environment = this.envTarget.texture;
     this.retired = new Promise<void>((resolve) => {
       this.retire = resolve;
@@ -245,7 +263,9 @@ export class ShipPreview {
           // A hull never spawned has materials the world has never adopted: they take the client's highlight
           // before this context first compiles them, as a spawned one's already have (`specular.ts`).
           specWrap(mat);
-          for (const v of Object.values(mat)) if ((v as THREE.Texture | null)?.isTexture) textures.add(v as THREE.Texture);
+          // Not the environment: on a material the world reflects in, it is the world's filtered sky, nothing here.
+          const env = (mat as THREE.MeshStandardMaterial).envMap;
+          for (const v of Object.values(mat)) if ((v as THREE.Texture | null)?.isTexture && v !== env) textures.add(v as THREE.Texture);
         }
       });
     }
@@ -261,11 +281,14 @@ export class ShipPreview {
       if (r !== this.renderer) return;
       const before = r.info.programs?.length ?? 0;
       const restore = this.keepShadows?.(materialsOf(o));
+      // The room on its materials for the compile's own part, as at every draw, so the program built is the one drawn.
+      this.envSwap.on(o, this.envTarget.texture, PREVIEW_REFLECTIONS.strength, true);
       let job: Promise<unknown> | null = null;
       try {
         if (document.hidden) r.compile(soloRoot(o), this.camera, this.scene);
         else job = r.compileAsync(soloRoot(o), this.camera, this.scene);
       } finally {
+        this.envSwap.off();
         restore?.();
       }
       // With the parallel-compile extension a program already linked answers at once, so a model already
@@ -308,7 +331,7 @@ export class ShipPreview {
   }
 
   /** What the preview holds and draws, for the console. */
-  report(): { running: boolean; frames: number; programs: number; textures: number; contexts: number; shipsInContext: number; radius: number; distance: number; wingsOpen: boolean; wings: number } {
+  report(): { running: boolean; frames: number; programs: number; textures: number; contexts: number; shipsInContext: number; radius: number; distance: number; wingsOpen: boolean; wings: number; reflecting: number } {
     return {
       running: this.running,
       frames: this.frames,
@@ -320,6 +343,8 @@ export class ShipPreview {
       distance: round2(this.distance),
       wingsOpen: this.wingsOpen,
       wings: this.wings?.length ?? 0,
+      // The materials the last draw handed the room (format 6's: a cube at its own strength, a plain one at nought).
+      reflecting: this.envSwap.last,
     };
   }
 
@@ -445,7 +470,7 @@ export class ShipPreview {
     this.wings?.step(dt);
     if (!this.userFramed) this.yaw += AUTO_TURN * dt;
     this.placeCamera();
-    this.renderer.render(this.scene, this.camera);
+    this.draw(this.holder);
     this.frames++;
   };
 

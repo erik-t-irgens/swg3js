@@ -162,6 +162,11 @@ export class WaterBodies {
     return this.list;
   }
 
+  /** The black filtered stand-in every body carries until a sky map of its size arrives (null before `attach`); the registry's reflective materials carry it too (`setEnvironmentStandIn`). */
+  get blackEnvironment(): THREE.Texture | null {
+    return this.standIn;
+  }
+
   /** The near sea's swell reach in metres (0 without a sea). */
   get swell(): number {
     return this.nearSwell;

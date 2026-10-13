@@ -12,6 +12,8 @@ import type { Character } from '../player/character';
 import { PreviewDof, type PreviewEffects, type PreviewReport } from './previewDof';
 import { PREVIEW_DOF, previewGate, previewLensOn, previewSpan, type PreviewSpan } from '../core/fx/dofMath.ts';
 import { specWrapTree } from '../world/specular.ts';
+import { EnvironmentSwap } from '../world/envmap.ts';
+import { StudioChoice, studioEnvironment } from './previewStudio.ts';
 
 export class CharacterPreview {
   /** What the settings ask of every doll: App keeps it in step with Effects and Depth of field (a change shows on the next frame). */
@@ -284,6 +286,8 @@ export class CharacterPreview {
       triangles: lensed ? this.dof!.last.triangles : this.renderer.info.render.triangles,
       camera: this.camera.position.toArray().map((v) => Number(v.toFixed(2))),
       path: this.lens ? 'lens' : 'direct',
+      // The materials the draw handed the doll's own studio (a shader with a cube, format 6).
+      reflecting: this.envSwap.last,
     };
   };
 
@@ -297,8 +301,27 @@ export class CharacterPreview {
   /**
    * Straight onto the canvas as always, or, with the depth of field on and the doll close enough for a
    * lens to show on it (more than a pixel of blur, less than 0.7 px to go back), through its lens.
+   *
+   * The doll's own studio goes on what it wears and holds for the length of the draw, and the world's comes
+   * back after it whatever the draw does (`EnvironmentSwap`): the materials are the character's, which the
+   * world reflects its sky in, and a texture the world's renderer filtered is nothing in this context. Every
+   * compile this context makes is inside a draw (the first frame's, and the lens's warm-up), so each is built
+   * with the studio in it and none is built again.
    */
   private draw(model: THREE.Object3D): void {
+    this.envSwap.on(model, this.studio.textureFor(model));
+    try {
+      this.drawWith(model);
+    } finally {
+      this.envSwap.off();
+    }
+  }
+
+  private readonly envSwap = new EnvironmentSwap();
+  /** The doll's own studio, made in this context the first time a draw has anything to give it to (none while the hatch keeps the models out). */
+  private readonly studio = new StudioChoice(() => studioEnvironment(this.renderer));
+
+  private drawWith(model: THREE.Object3D): void {
     const fx = CharacterPreview.effects;
     if (fx.on && fx.strength > 0 && PreviewDof.supported(this.renderer)) {
       const dof = this.dofFor();

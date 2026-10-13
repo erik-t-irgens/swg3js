@@ -336,7 +336,7 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { World } from './world/world';
-import { REFLECTIONS, plainReflectiveCount, reflectiveCount, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
+import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
 import { cardsReport, setCardTune, type CardTune } from './world/cardRule.ts';
 import { CARD_LIGHT_ON, CARD_LIGHT_STATS, CARD_LIGHT_TUNE, CARD_LIGHT_UNIFORMS, LEAF_SHADOW_ON, setCardLightTune, type CardLightTune } from './world/cardLight.ts';
@@ -1433,6 +1433,10 @@ class App {
     // Before any planet loads: every water body needs an environment of one size from the moment
     // it exists, or the first real sky map to arrive recompiles its shader mid-play.
     this.world.waterBodies.attach(this.renderer);
+    // And every reflective material carries that same black stand-in whenever the world has no environment
+    // of its own, so its program never loses the environment between worlds: a hull a jump carries to another
+    // system, and whatever its crew wear and hold, are drawn all through the unload (`envmap.ts`).
+    setEnvironmentStandIn(this.world.waterBodies.blackEnvironment);
     // The effects chain is built only now: the water reflections pass is handed the world's water
     // bodies, so a chain made before the world exists throws on boot.
     if (S.effects) this.postfx = this.makePostFX();
@@ -3293,8 +3297,10 @@ class App {
                 cube: typeof m.userData.swgCube === 'boolean' ? m.userData.swgCube : null,
                 envMap: !!s.envMap,
                 envMapIntensity: s.isMeshStandardMaterial ? Number((s.envMapIntensity ?? 1).toFixed(3)) : null,
-                // What `isReflective` in envmap.ts asks, which is what decides whether it gets one.
+                // What `isReflective` in envmap.ts asks, which is what decides whether a planet's pack registers it;
+                // a model's joins as the world adopts it, where its shader has a cube.
                 countsReflective: !!s.isMeshStandardMaterial && (s.metalnessMap !== null || s.metalness > 0.05 || s.roughness < 0.5),
+                registered: isRegisteredReflective(m),
                 wraps: wrapsOn(m as unknown as Parameters<typeof wrapsOn>[0]).join(',') || 'none',
                 detail: (m.userData.swgDetail as string | undefined) ?? null,
               });
@@ -4507,7 +4513,7 @@ class App {
        * way), and `reflections({ source: 'sky' })` to our own sky dome, the default. The choice is
        * remembered in this browser (`localStorage['swg.reflections']`) and takes effect at once.
        */
-      reflections: (opts: { source?: ReflectionSource; plain?: number } = {}) => {
+      reflections: (opts: { source?: ReflectionSource; plain?: number; models?: boolean; preview?: number } = {}) => {
         if (opts.source === 'sky' || opts.source === 'game') {
           setReflectionSource(opts.source);
           this.world.reflectionsChanged();
@@ -4515,13 +4521,28 @@ class App {
         // How much of it the surfaces whose shader has no reflection cube take: nought, the client's, by
         // default, and 1 is the faint mirror and sky-coloured fill they had before. A uniform; nothing compiles.
         if (typeof opts.plain === 'number') setPlainReflections(opts.plain);
+        // Whether what is worn, held, flown and ridden and the creatures reflect: off writes them at nought, a
+        // uniform, so the look before they had a reflection is compared live and nothing compiles.
+        if (typeof opts.models === 'boolean') setModelReflections(opts.models);
+        // How much of their own studio the previews' models take (ours), read at every draw.
+        if (typeof opts.preview === 'number' && Number.isFinite(opts.preview) && opts.preview >= 0) PREVIEW_REFLECTIONS.strength = opts.preview;
         return {
           source: REFLECTIONS.source,
           registered: reflectiveCount(),
           note: REFLECTIONS.source === 'sky' ? 'our own sky dome, captured every few seconds' : "the planet's own cube maps where an area has one, the dome where it has none",
+          standIn: environmentIsStandIn(),
           plain: REFLECTIONS.plain,
           plainRegistered: plainReflectiveCount(),
           plainNote: REFLECTIONS.plain === 0 ? 'surfaces with no reflection cube take no reflection and no sky-coloured fill, as the client drew them' : `surfaces with no reflection cube take ${REFLECTIONS.plain} of the environment (1 is how they were before)`,
+          models: REFLECTIONS.models,
+          modelsAtLoad: MODEL_REFLECTIONS_AT_LOAD,
+          modelsRegistered: modelReflectiveCount(),
+          modelsNote: !MODEL_REFLECTIONS_AT_LOAD
+            ? "kept out at load (localStorage['swg.reflections.models'] = '0'): worn, held, flown and ridden models and the creatures reflect nothing, as before they had a reflection"
+            : REFLECTIONS.models
+              ? 'worn, held, flown and ridden models and the creatures reflect where their shader has a cube'
+              : 'models written at nought: their reflection and its fill are off, their programs kept',
+          preview: PREVIEW_REFLECTIONS.strength,
         };
       },
       /**

@@ -31,7 +31,7 @@ import { FALLBACK_LAVA_STYLE, groupLava, lavaStyleFor, type LavaStyle } from './
 import { applyLavaHarm, LAVA_HARM, lavaHarmReport, lavaTickDamage, newLavaHold, resetLavaHarm, resetLavaHold, stepLavaHold, tuneLavaHarm, type LavaHarmTune } from './lavaHarmMath.ts';
 import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type PlayerBurn, type PlayerBurnTune } from '../combat/burnMath.ts';
 import type { HeatSources, LavaHeatTable } from './heatSources';
-import { REFLECTIONS, setEnvironment } from './envmap';
+import { REFLECTIONS, joinModelReflections, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
 import { FLORA_WARM, FloraPlanter } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
@@ -4370,6 +4370,10 @@ export class World {
           if (std.normalMap && std.normalScale) std.normalScale.copy(this.normalScale);
           // The only place an animated surface is joined: this material is in the scene now.
           if (m.userData.swgTrack || m.userData.swgScroll || m.userData.swgDetail) surfaces.adopt(m);
+          // And a model's reflection (worn, held, flown, ridden, a creature's), where its shader has a cube: the
+          // environment is in the program key, so it goes on here, before anything compiles, on every path that
+          // loads something in play. A planet's own materials registered as their pack loaded them.
+          if (m.userData.swgCube === true) joinModelReflections(m);
         }
         if (csm && !this.csmMaterials.has(m) && !(m as THREE.ShaderMaterial).isShaderMaterial && m.userData.unlit !== true) {
           csm.setupMaterial(m);
