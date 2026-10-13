@@ -183,7 +183,7 @@ import { LOD_FORMAT, lodMeshesFor as lodMeshesForDeps } from './lodlevels.mjs';
 import { decodeDds } from './dds.mjs';
 import { FLOOR_PACK_VERSION, floorBlock, floorSize, parseFloor } from './flr.mjs';
 import { GOAL_SNAP, NAV_BAKE_RULES, NAV_GRID_VERSION, SLOPE_CLIMB_DEGREES, buildNavGrid, writeNavGrid } from './navgrid.mjs';
-import { buildGlb, glbSpecStamped } from './glb.mjs';
+import { buildGlb, glbAlphaMode, glbSpecStamped } from './glb.mjs';
 import { dump, find, isForm, parseIff, readCString } from './iff.mjs';
 import { classifyDirectory, isRetailByName } from './manifest.mjs';
 import { parseMesh } from './msh.mjs';
@@ -205,7 +205,8 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { DYE_FORMAT, DYE_PALETTE, DYE_PALETTE_COLOURS, DYE_TUNE, EXTRA_GARMENT_PALETTES, colourOf, dyeBlock, dyeMesh, dyeSkip, readsVariable, wardrobeColourStatus } from './dye.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { MATERIAL_FORMAT, describeLines, describeSurface, maskOf, materialStale, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
+import { GLASS_WORDS, MATERIAL_FORMAT, describeLines, describeSurface, isPlainCutOut, maskOf, materialStale, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
+import { bleedCard } from './cardBleed.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
@@ -363,8 +364,9 @@ function printEffectSummary() {
 // `goggle`, `visor` and `lens` are here for the same reason the rest are: a lens is glass. The
 // goggles were the witness -- their own texture's alpha runs 0 to 165 and averages 72, which is a
 // tinted visor and nothing like a cut-out, and drawn as one at a half threshold most of it was
-// discarded and the wearer looked out through two holes.
-const GLASS_NAMED = new RegExp(options.glass ? `glass|window|windshield|canopy|transparen|viewport|pane|goggle|visor|lens|${options.glass}` : 'glass|window|windshield|canopy|transparen|viewport|pane|goggle|visor|lens', 'i');
+// discarded and the wearer looked out through two holes. `canopy` is not (surface.mjs `GLASS_WORDS`
+// says why): every flora canopy it caught was a leaf drawn as a pane of glass.
+const GLASS_NAMED = new RegExp(options.glass ? `${GLASS_WORDS}|${options.glass}` : GLASS_WORDS, 'i');
 
 /** What surface.mjs has read of each shader (and its effects' passes and programs), for this run. */
 const surfaceCache = new Map();
@@ -442,21 +444,41 @@ function paintedMain(vfs, shaderPath) {
  * lit and glow images of a glowing texture. An invisible collidable surface (the pane in a room's
  * window opening, a rail you cannot cross) is drawn as nothing and kept for its colliders.
  * With `opts.paint` (the ships command), a paint shader's main image is its bake at its defaults.
+ * With `opts.cards` (the flora command), a leaf card's entry says what the client drew it as (`card`) and a
+ * cut-out's base picture has the colour under its clear texels bled from the leaf (`cardBleed.mjs`); cached
+ * apart, since a snapshot run converts the same shaders on its placed models first and those are never bled.
  */
 function textureFor(vfs, shaderPath, opts = {}) {
   if (flags.has('--no-textures')) return null;
-  const key = `${shaderPath}${opts.paint ? '|paint' : ''}`;
+  const key = `${shaderPath}${opts.paint ? '|paint' : ''}${opts.cards ? '|cards' : ''}`;
   let result = null;
   if (textureCache.has(key)) result = textureCache.get(key);
   else {
     try {
-      result = surfaceTexture(vfs, shaderPath, { ...surfaceDeps(vfs), thumb: wantThumbs ? thumbTexture : undefined, mainImage: opts.paint ? (p) => paintedMain(vfs, p) : undefined });
+      result = surfaceTexture(vfs, shaderPath, { ...surfaceDeps(vfs), thumb: wantThumbs ? thumbTexture : undefined, mainImage: opts.paint ? (p) => paintedMain(vfs, p) : undefined, bleed: opts.cards ? (img) => bleedCard(img) : undefined });
+      if (result && opts.cards) {
+        const card = cardOf(vfs, shaderPath, result);
+        if (card) result.card = card;
+      }
     } catch (err) {
       console.error(`  texture for ${shaderPath} skipped: ${err.message}`);
     }
     textureCache.set(key, result);
   }
   return result;
+}
+
+/**
+ * What the client drew a leaf card as, for the runtime's card rule: `blend` when its effect's pass blends and
+ * writes no depth (`a_alpha`, which our runtime cuts at half and scales by the mip level), else a cut-out
+ * (`a_punchout`, which the client clipped at half); and the MATL's emissive, which its light adds inside its
+ * saturate. Null for anything the GLB writes opaque or invisible: a card is a material drawn cut out or blended.
+ */
+function cardOf(vfs, shaderPath, entry) {
+  if (!entry || entry.invisible || glbAlphaMode(entry) === 'OPAQUE') return null;
+  const d = describeSurface(vfs, shaderPath, surfaceCache);
+  const pass = d.pass;
+  return { blend: !!(pass?.alphaBlend && !pass.zWrite), emissive: d.material?.emissive ? [...d.material.emissive] : [0, 0, 0] };
 }
 
 /**
@@ -741,7 +763,7 @@ function convertOne(vfs, appearancePath, outFile, opts = {}) {
   // The cells' walkable floors, into the pack's floors.json rather than the manifest: the manifests
   // are written indented, and a floor is thousands of plain numbers.
   if (cells) noteFloors(vfs, dirname(outFile), basename(outFile).replace(/\.glb$/i, ''), cells, flipX);
-  return { meshPath, mesh, flipX, tris, shaders, textured, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects, lods: lodInfo?.lods ?? null };
+  return { meshPath, mesh, flipX, tris, shaders, textured, warnings: mesh.warnings, partCount, cells: cellInfo, portals, effects, lods: lodInfo?.lods ?? null, textures };
 }
 
 // The floors a portal building's cells walk on, gathered per pack and written beside the manifest
@@ -1243,6 +1265,12 @@ function convertFlora(vfs, template, outDir, manifest) {
   const defs = new Map();
   let missing = 0;
   let particles = 0;
+  // The leaf cards the flora draws, by shader: what the client drew each as (blended or cut out) and the
+  // emissive its light adds, from the very entries the GLBs are written from (`textureFor`'s `cards`), so
+  // the manifest's table and the GLBs' own `extras.swgCard` are one answer. The game reads the table with the
+  // pack, before anything stands, and finds by it the placed objects that wear one of these shaders too.
+  const cards = {};
+  let bled = 0;
   for (const family of families) {
     for (const child of family.children) {
       const appearance = child.appearance;
@@ -1261,7 +1289,13 @@ function convertFlora(vfs, template, outDir, manifest) {
       const id = familyOf(appearance);
       try {
         // With the client's own lower levels (step 7): the lowest is the plant's own sprite card on 58 of them.
-        const conv = convertOne(vfs, appearance, join(outDir, 'flora', `${id}.glb`), { lods: true });
+        // And with its leaf cards' class and emissive, their cut-out pictures bled (`cards`).
+        const conv = convertOne(vfs, appearance, join(outDir, 'flora', `${id}.glb`), { lods: true, cards: true });
+        for (const [shader, t] of conv.textures) {
+          if (!t?.card || cards[shader]) continue;
+          cards[shader] = { blend: t.card.blend, emissive: t.card.emissive.map((v) => Math.round(v * 1e4) / 1e4) };
+          if (isPlainCutOut(t)) bled++;
+        }
         const b = conv.mesh.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] };
         const bounds = conv.flipX ? { min: [-b.max[0], b.min[1], b.min[2]], max: [-b.min[0], b.max[1], b.max[2]] } : b;
         defs.set(key, { id, file: `flora/${id}.glb`, bounds, triangles: conv.tris, textured: conv.textured, shaders: conv.shaders.length, appearance, family: family.id, familyName: family.name, ...(conv.lods ? { lods: conv.lods } : {}) });
@@ -1272,10 +1306,41 @@ function convertFlora(vfs, template, outDir, manifest) {
     }
   }
   manifest.categories.flora = [...defs.values()];
+  manifest.cards = cards;
+  writeSharedCards(dirname(outDir), cards);
+  const kinds = Object.values(cards);
+  console.log(`flora cards: ${kinds.length} card shaders, by the client's own pass ${kinds.filter((c) => c.blend).length} blended and ${kinds.filter((c) => !c.blend).length} cut out, ${kinds.filter((c) => c.emissive.some((v) => v > 0)).length} with an emissive; the pictures of the ${bled} the GLB draws as cut-outs bled`);
   // The shapes the client collided with, beside the manifest rather than in it (a mesh shape is a
   // few hundred numbers): what the `floracollision` command writes into a pack converted already.
   const collision = writeFloraCollision(vfs, outDir, manifest.categories.flora);
-  return { models: defs.size, missing, particles, families: families.length, collision };
+  return { models: defs.size, missing, particles, families: families.length, collision, cards: kinds.length };
+}
+
+/** The shape of `flora-cards.json` (`SHARED_CARDS_VERSION` in src/world/cardRule.ts, which reads it). */
+const SHARED_CARDS_VERSION = 1;
+
+/**
+ * Every world's leaf card shaders in one table beside the packs (`<root>/flora-cards.json`, the root being the
+ * folder that holds each world's pack): a world's placed trees can wear a shader only another world plants, and
+ * the game reads this once a session so each is ruled whatever world was visited first. Merged into what is
+ * there, so converting one world's flora keeps every other world's rows; the rows are each world's own `cards`,
+ * the same entries for the same shader wherever it is converted.
+ */
+function writeSharedCards(root, cards) {
+  const file = join(root, 'flora-cards.json');
+  let all = {};
+  if (existsSync(file)) {
+    try {
+      const was = JSON.parse(readFileSync(file, 'utf8'));
+      if (was?.version === SHARED_CARDS_VERSION && was.cards && typeof was.cards === 'object') all = was.cards;
+    } catch {
+      /* a file cut short is written again whole from what this run knows */
+    }
+  }
+  Object.assign(all, cards);
+  const sorted = Object.fromEntries(Object.keys(all).sort().map((k) => [k, all[k]]));
+  writeFileSync(file, JSON.stringify({ version: SHARED_CARDS_VERSION, cards: sorted }));
+  return Object.keys(sorted).length;
 }
 
 /**
@@ -2394,6 +2459,23 @@ function glbsCurrent(files) {
   return null;
 }
 
+/**
+ * Whether a world's flora was converted with its leaf cards' class (`extras.swgCard`, which the flora command
+ * writes on every card material from the leaf pass on): read off the first flora GLB that has a card material
+ * at all, from its own JSON and never from a manifest stamp a later command could copy forward. Null when no
+ * flora GLB of the first dozen can be read or has a card.
+ */
+function floraCardsCurrent(packDir, defs) {
+  for (const d of (defs ?? []).slice(0, 12)) {
+    const f = join(packDir, d.file);
+    if (!existsSync(f)) continue;
+    const json = glbJsonOnly(f);
+    const cards = (json?.materials ?? []).filter((m) => m && (m.alphaMode === 'MASK' || m.alphaMode === 'BLEND') && !m.extras?.invisible);
+    if (cards.length) return cards.every((m) => !!m.extras?.swgCard);
+  }
+  return null;
+}
+
 function packStatus(dir) {
   // A file that is there but will not parse (a conversion stopped or a machine that lost power in
   // the middle of writing it) is taken as missing, so the step that writes it is asked for again,
@@ -2429,6 +2511,10 @@ function packStatus(dir) {
   let wantObjEffects = false;
   /** The worlds whose trees and rocks still stand on guessed cylinders, each with why. */
   const wantFloraCollision = [];
+  /** The worlds whose flora GLBs carry no leaf card class (`extras.swgCard`). */
+  const wantFloraCards = [];
+  /** Every leaf card shader the worlds' own tables name, which the table beside the packs must hold too. */
+  const cardShaders = new Set();
   for (const planet of GAME_PLANETS) {
     const packDir = join(dir, planet);
     const manifest = readJson(join(packDir, 'manifest.json'));
@@ -2605,6 +2691,10 @@ function packStatus(dir) {
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
     if (floraCollision.stale) wantFloraCollision.push(`${planet} (${floraCollision.why})`);
+    // The leaf cards' class and their bled pictures come with the flora command alone; a world's flora from
+    // before carries neither, and the game stands its cards on the names until it does.
+    if (floraCardsCurrent(packDir, manifest.categories?.flora) === false) wantFloraCards.push(planet);
+    if (manifest.cards && typeof manifest.cards === 'object') for (const k of Object.keys(manifest.cards)) cardShaders.add(k);
     if (objects && !fittings) wantFittings = true;
     else if (fittings && fittings.version !== FITTINGS_PACK_VERSION) wantFittings = true;
     // Both commands **append** their models to the manifest's layout category, and a later
@@ -2627,6 +2717,16 @@ function packStatus(dir) {
   if (wantTravel) need(`travel <swg-dir> ${dir} --retail-only`, 'no world has its travel terminals, ticket collectors or shuttles, or a world was converted again after they were written: a starport is a building with nothing in it');
   if (travelMaterials.length) need(`travel <swg-dir> ${dir} --retail-only`, `the travel terminals and shuttles on ${travelMaterials.slice(0, 4).join(', ')}${travelMaterials.length > 4 ? ', ...' : ''} were ${MATERIAL_WHY}`);
   if (wantObjEffects) need(`objeffects <swg-dir> ${dir} --retail-only`, "a world's braziers, fountains, torches and lamps have no fire, spray or glow: the effects their client data hangs on them are not written (objeffects.json), or were written before the world or its fittings");
+  // One run converts every world's flora again (about two minutes for the lot).
+  if (wantFloraCards.length) need(`flora <swg-dir> all ${dir} --retail-only`, `the flora on ${wantFloraCards.length} world${wantFloraCards.length === 1 ? '' : 's'} was converted before the leaf cards said what the client drew them as (blended or cut out, and their emissive) and before their pictures had the colour under their clear texels bled from the leaf, so far crowns thin and darken and the game guesses each card's class from its name (${wantFloraCards.slice(0, 3).join(', ')}${wantFloraCards.length > 3 ? ', ...' : ''})`);
+  // The table every world reads its leaf card shaders from, beside the packs: written by the same run, so it is
+  // asked for only once every world's flora is current and names a shader the table does not hold.
+  if (!wantFloraCards.length && cardShaders.size) {
+    const shared = readJson(join(dir, 'flora-cards.json'));
+    const held = shared?.version === SHARED_CARDS_VERSION && shared.cards && typeof shared.cards === 'object' ? shared.cards : {};
+    const lacking = [...cardShaders].filter((k) => !Object.prototype.hasOwnProperty.call(held, k));
+    if (lacking.length) need(`flora <swg-dir> all ${dir} --retail-only`, `the table of every world's leaf card shaders (flora-cards.json) ${shared ? `lacks ${lacking.length} of them` : 'is not there'}, so a world's placed trees that wear a shader only another world plants are drawn as converted until a world that plants it has been visited`);
+  }
   // One run writes every world's file, and needs no model converted again.
   if (wantFloraCollision.length) need(`floracollision <swg-dir> ${dir} --retail-only`, `the trees and rocks on ${wantFloraCollision.length} world${wantFloraCollision.length === 1 ? '' : 's'} are guessed cylinders, a wide tree solid across most of its canopy, instead of the trunks and rocks the client collided with (${wantFloraCollision.slice(0, 3).join(', ')}${wantFloraCollision.length > 3 ? ', ...' : ''})`);
   if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings, or a world was converted again after they were written: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");

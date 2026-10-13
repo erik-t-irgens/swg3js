@@ -96,6 +96,12 @@ export interface BuiltPlace {
   triangles: number;
   /** Models the pack named and the fetch could not find, which are reported rather than hidden. */
   missing: string[];
+  /**
+   * Each model's own loaded scene, by its id, kept for the leaf cards' rule (`World.preparePlace`): a place's
+   * trees are copies of placed objects and wear the flora's card shaders, but which shaders those are is known
+   * only once the place's own world has loaded its pack, which happens after the place is built.
+   */
+  sources: { id: string; root: THREE.Object3D }[];
 }
 
 const tmpM = new THREE.Matrix4();
@@ -110,11 +116,12 @@ const ONE = new THREE.Vector3(1, 1, 1);
  * is compiled**: the shadow cascades put defines and a hook into a material, and both are part of
  * three's program key, so a material that reached a draw without them would build a second program
  * on a live frame. `breath` is the world's yield between pieces of work, so a long build does not
- * hold the frame.
+ * hold the frame. With `defer`, nothing is adopted here: the caller rules the leaf cards once the
+ * place's world has its pack and adopts then (`World.preparePlace`), before the place is ever shown.
  */
 export async function buildPlace(
   key: string,
-  deps: { adopt: (root: THREE.Object3D) => void; breath: () => Promise<void> },
+  deps: { adopt: (root: THREE.Object3D) => void; breath: () => Promise<void>; defer?: boolean },
 ): Promise<BuiltPlace | null> {
   let place: ScenePlace;
   try {
@@ -139,6 +146,7 @@ export async function buildPlace(
   const group = new THREE.Group();
   group.name = `scene:${key}`;
   const missing: string[] = [];
+  const sources: { id: string; root: THREE.Object3D }[] = [];
   let draws = 0;
   let triangles = 0;
   for (const [id, list] of wanted) {
@@ -150,6 +158,7 @@ export async function buildPlace(
       missing.push(id);
       continue;
     }
+    sources.push({ id, root });
     // Each drawable of the model becomes one instanced mesh carrying every copy of it in the place.
     root.updateMatrixWorld(true);
     const prims: THREE.Mesh[] = [];
@@ -185,8 +194,8 @@ export async function buildPlace(
     await deps.breath();
   }
 
-  deps.adopt(group);
-  return { place, group, models: wanted.size - missing.length, draws, triangles: Math.round(triangles), missing };
+  if (!deps.defer) deps.adopt(group);
+  return { place, group, models: wanted.size - missing.length, draws, triangles: Math.round(triangles), missing, sources };
 }
 
 /**

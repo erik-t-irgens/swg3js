@@ -12,6 +12,8 @@ import type { LoadedModel, Primitive } from './assetPack.ts';
 import type { FloraChunkData } from './floraBatch.ts';
 import { floraColliders } from './floraCollision.ts';
 import type { Collider, Exclusion } from './props';
+import { castsShadow } from './surfaces.ts';
+import { cardReceives } from './cardLight.ts';
 
 /** Flora smaller than this (metres of model radius) never casts a shadow. */
 const SHADOW_MIN_RADIUS = 1.2;
@@ -256,9 +258,12 @@ export class FloraPlanter {
         });
         mesh.instanceMatrix.needsUpdate = true;
         // Grass and shrubs cast nothing: their shadow is a smudge under themselves, and a
-        // caster costs a draw call in every cascade it falls in. Trees still cast.
-        mesh.castShadow = model.radius * Math.max(...list.map((p) => p.scale)) >= SHADOW_MIN_RADIUS;
-        mesh.receiveShadow = true;
+        // caster costs a draw call in every cascade it falls in. Trees still cast, unless their
+        // material casts nothing, which is the layout streamer's own rule (`castsShadow`).
+        const big = model.radius * Math.max(...list.map((p) => p.scale)) >= SHADOW_MIN_RADIUS;
+        mesh.castShadow = big && castsShadow(prim.material);
+        // A leaf card of a tree that casts receives nothing under the cards' `none` (`cardLight.ts`).
+        mesh.receiveShadow = cardReceives(prim.material, big);
         mesh.computeBoundingSphere();
         into.add(mesh);
       }

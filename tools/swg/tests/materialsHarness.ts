@@ -16,7 +16,7 @@ import { readGlb } from '../glbclips.mjs';
 import { parseIff } from '../iff.mjs';
 import { decodePng, encodePng } from '../png.mjs';
 import { effectAlphaMode } from '../sht.mjs';
-import { surfaceReaders, surfaceTexture } from '../surface.mjs';
+import { GLASS_WORDS, surfaceReaders, surfaceTexture } from '../surface.mjs';
 import { loadEffect } from '../texrender.mjs';
 
 export type Img = { width: number; height: number; rgba: Uint8Array };
@@ -70,7 +70,8 @@ export function converterDeps(vfs: Vfs, log: (m: string) => void = () => {}) {
     },
     surfaceFor: readers.surfaceFor,
     normalFor: readers.normalFor,
-    glassNamed: /glass|window|windshield|canopy|transparen|viewport|pane|goggle|visor|lens/i,
+    // The converter's own words (cli.mjs builds `GLASS_NAMED` from them), never a copy kept here.
+    glassNamed: new RegExp(GLASS_WORDS, 'i'),
     byName: effectAlphaMode,
     log,
   };

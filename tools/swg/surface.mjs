@@ -530,7 +530,9 @@ export function normalReadOf(source, samplers) {
  * specular colour, the fourth of the MATL's four ARGB groups read as RGB, and its power, the seventeenth
  * float. The client's programs draw the highlight as that colour times the mask times (N·H) to that power
  * (`materialSpecularColor`, `materialSpecularPower`); 4,723 of the 4,726 the game uses have that group's
- * alpha at one. Null when the shader has none (five screens the game uses).
+ * alpha at one. Null when the shader has none (five screens the game uses). Beside them, `emissive`: the third
+ * group as RGB, which the client's leaf card programs add inside their one saturated light (black on 327 of the
+ * 329 flora card shaders, a grey of 0.421 on two low plants of Dathomir and Kashyyyk).
  */
 export function materialOf(root) {
   const tagOf = (data) => (data && data.length >= 4 ? Buffer.from(data.subarray(0, 4)).reverse().toString('latin1') : null);
@@ -543,8 +545,9 @@ export function materialOf(root) {
       const b = list[i].data;
       if (!b || b.length < 68) continue;
       const f = (n) => Math.round(b.readFloatLE(n * 4) * 1e4) / 1e4;
-      const got = { color: [f(13), f(14), f(15)], power: f(16) };
+      const got = { color: [f(13), f(14), f(15)], power: f(16), emissive: [f(9), f(10), f(11)] };
       if (!got.color.every(Number.isFinite) || !Number.isFinite(got.power)) continue;
+      if (!got.emissive.every(Number.isFinite)) got.emissive = [0, 0, 0];
       if (tagOf(tags[i]?.data) === 'MAIN') return got;
       first ??= got;
     }
@@ -1214,8 +1217,9 @@ function paintedImage(img) {
  * deps: { cache, decodeDds, encodePng, alphaFromEffect(effect, fallback),
  *         surfaceFor(effect, slots, dds, alphaMode, { alphaIsEmissive, envMask, described, shader, mainPath }),
  *         normalFor(path, slot), detailFor?(slots), glassNamed: RegExp, byName(effect), log, thumb?(width, height, rgba),
- *         mainImage?(shaderPath) -> { path, width, height, rgba, hasAlpha? } | null }.
+ *         mainImage?(shaderPath) -> { path, width, height, rgba, hasAlpha? } | null, bleed?(img) -> img }.
  * With `thumb`, the entry carries a non-enumerable `thumb` made from the unsplit main image.
+ * With `bleed` (the flora command), a plain cut-out's base picture is written from what it answers.
  * With `mainImage` answering (a customizable shader baked at its defaults, the ships command's paint),
  * that image replaces the main texture before every later step (the gloss mask, the glow split, the
  * opaque copy, the thumbnail) and the entry's path is the answer's, so a painted hull glows where its
@@ -1377,8 +1381,32 @@ export function surfaceTexture(vfs, shaderPath, deps) {
     result.anim = { mode: d.anim.mode, seconds: [...d.anim.seconds], frames: list };
   }
   if (deps.thumb) Object.defineProperty(result, 'thumb', { value: deps.thumb(main.width, main.height, main.rgba), enumerable: false, configurable: true, writable: true });
+  // 10. A leaf card's colour under its clear texels, bled from the leaf round it (`cardBleed.mjs`), for the one
+  // command that asks (the flora): only a picture drawn as a plain cut-out, the one `result.png` is the base of
+  // (no glow split, no opaque copy, no flip-book, nothing painted), so its alpha and every texel the cut keeps
+  // stay byte for byte what the archives hold. Named for what it is, never the texture's own path: a GLB embeds one
+  // image per name, and a flora model's bark often shares its leaves' picture, so under the one name whichever of
+  // the two was met first decided whether the other's picture was bled.
+  if (deps.bleed && isPlainCutOut(result) && !painted) {
+    result.png = png(deps.bleed(main));
+    result.path = `${mainPath}#bled`;
+  }
   return result;
 }
+
+/** Whether a texture entry is drawn as a plain cut-out whose base picture is its own `png` (glb.mjs `glbImages`): the pictures the leaf bleed may touch. */
+export function isPlainCutOut(entry) {
+  return !!entry && !entry.invisible && entry.alphaMode === 'MASK' && !!entry.hasAlpha && !entry.blend && !entry.translucent && !entry.anim && !entry.lit && !entry.rgb;
+}
+
+/**
+ * The words that name a glass shader (its own name or its texture's), which the converter marks for the
+ * runtime (`GLASS_NAMED` in cli.mjs, and the materials harness the tests build entries with, which imports
+ * this rather than keeping a copy). `canopy` was one until the leaf pass: of the 33 retail shaders whose
+ * path holds it, the only ones that are not foliage, crystal or radial are two fighter cockpits in no
+ * converted model, and every flora canopy it caught was drawn as a pane of glass, square shadow and all.
+ */
+export const GLASS_WORDS = 'glass|window|windshield|transparen|viewport|pane|goggle|visor|lens';
 
 // ---------------------------------------------------------------------------------------------
 // Reports: the converter's log lines and diagnostics.

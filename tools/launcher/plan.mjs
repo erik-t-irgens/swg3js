@@ -41,6 +41,7 @@ const WORDS = {
   ships: 'Ships',
   space: 'Space zones',
   maps: 'Planet maps and the galaxy',
+  flora: 'Trees and plants',
   floracollision: 'What trees and rocks you walk into',
   sounds: 'Sounds',
   music: 'The music players make',

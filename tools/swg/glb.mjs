@@ -76,6 +76,21 @@ export function glbImages(tex) {
 }
 
 /**
+ * How a texture entry is drawn once written: 'BLEND' for an additive, translucent or blended one, 'MASK' for
+ * a cut-out with alpha, 'OPAQUE' for the rest. The one rule `buildGlb` writes a material's `alphaMode` by,
+ * shared with the flora command's `cards` table so the table and the GLBs can never disagree about which
+ * materials are cards.
+ */
+export function glbAlphaMode(tex) {
+  if (!tex || tex.invisible) return tex?.invisible ? 'BLEND' : 'OPAQUE';
+  const mode = tex.alphaMode ?? 'OPAQUE';
+  if (tex.blend || tex.translucent) return 'BLEND';
+  if (mode === 'MASK' && tex.hasAlpha) return 'MASK';
+  if (mode === 'BLEND' && (tex.hasAlpha || tex.opacity !== undefined)) return 'BLEND';
+  return 'OPAQUE';
+}
+
+/**
  * Whether a GLB's JSON says it was written at material format 6 or later: null when it has no textured
  * material to say anything with, else whether any of them carries `extras.swgSpec`, which every textured
  * material written since does (`none` included). This is how `status` tells an old `player`, `parts` or
@@ -239,22 +254,24 @@ export function buildGlb(meshes, { flipX = true, textures = new Map(), skin = nu
           mat.emissiveTexture = { index: emissive };
           mat.emissiveFactor = [1, 1, 1];
         }
-        const mode = tex.alphaMode ?? 'OPAQUE';
-        if (tex.blend || tex.translucent) {
+        const drawn = glbAlphaMode(tex);
+        if (drawn === 'BLEND') {
           // Additive and translucent surfaces blend whatever the effect's alpha mode says (the sky
           // reads alphaMode for its celestial sprites, so the decision lives in its own fields).
           mat.alphaMode = 'BLEND';
           mat.doubleSided = true;
-        } else if (mode === 'MASK' && tex.hasAlpha) {
+          // Glass with no alpha in its texture: a fixed share of its tint over what is behind.
+          if (!tex.blend && !tex.translucent && tex.opacity !== undefined) mat.pbrMetallicRoughness.baseColorFactor[3] = tex.opacity;
+        } else if (drawn === 'MASK') {
           mat.alphaMode = 'MASK';
           mat.alphaCutoff = 0.5;
           mat.doubleSided = true;
-        } else if (mode === 'BLEND' && (tex.hasAlpha || tex.opacity !== undefined)) {
-          mat.alphaMode = 'BLEND';
-          mat.doubleSided = true;
-          // Glass with no alpha in its texture: a fixed share of its tint over what is behind.
-          if (tex.opacity !== undefined) mat.pbrMetallicRoughness.baseColorFactor[3] = tex.opacity;
         }
+        // A leaf card's class and emissive, for the runtime's card rule (src/world/cardRule.ts): whether the
+        // client blended it (its effect's pass blends and writes no depth) or cut it out, and the MATL's
+        // emissive its light adds inside its saturate. Only on a card (a material drawn cut out or blended),
+        // only where the flora command asked (`tex.card`), and never under `swg`, as `swgSpec` is not.
+        if (tex.card && drawn !== 'OPAQUE') mat.extras = { ...(mat.extras ?? {}), swgCard: { blend: !!tex.card.blend, emissive: tex.card.emissive.map(round4) } };
         // Glass by name is marked for the runtime: it casts no shadow and clears while someone is aboard.
         if (tex.glass) mat.extras = { ...(mat.extras ?? {}), glass: true };
         if (tex.noShadow) mat.extras = { ...(mat.extras ?? {}), noShadow: true };

@@ -300,6 +300,8 @@ else {
       },
     },
     renderLayer: (_s: unknown, _c: unknown, _l: number) => void drawnWith.push(String(pool.lit)),
+    // The leaves' own word round each rooms pass (leafWiring.test.ts holds it); nothing of the pool's.
+    roomPass: (_on: boolean) => {},
   };
   const fn = new Function('INTERIOR_LAYER', `return function ${body.replace(/^\s*private /, '').replace(/\(scene: THREE\.Scene, camera: THREE\.Camera, b: Building\): void/, '(scene, camera, b)')}`)(1) as (this: typeof self, s: unknown, c: unknown, b: B) => void;
   fn.call(self, null, null, cantina);

@@ -1,10 +1,13 @@
 import * as THREE from 'three';
-import { isReflective, registerReflective } from './envmap';
+import { isReflective, registerReflective } from './envmap.ts';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { surfaces } from './surfaces';
+import { surfaces } from './surfaces.ts';
 import { drawnLevels } from './lodLevels.ts';
 import { mergeFloraCollision, type FloraCollision } from './floraCollision.ts';
 import { DOORS_PACK_VERSION, type DoorsFile } from './doorMath.ts';
+import { CARD_LIGHT_TUNE } from './cardLight.ts';
+import { prepareCardModel, registerPackCards, registerSharedCards } from './cardRule.ts';
+import { prepareSwayModel } from './floraSway.ts';
 
 export interface CellLight {
   type: number;
@@ -126,6 +129,13 @@ export interface ModelLevel {
 export interface PackManifest {
   planet: string;
   categories: Record<string, PackModelDef[]>;
+  /**
+   * The leaf cards the flora draws, by shader: whether the client blended each (else cut it out) and the emissive
+   * its light adds, the very values the flora GLBs carry as `extras.swgCard` (the flora command writes both). The
+   * card rule finds by it the placed objects that wear a flora card shader too (`cardRule.ts`). Absent on a pack
+   * converted before the leaf pass, whose flora GLBs' own cut-out and blended materials stand in.
+   */
+  cards?: Record<string, { blend: boolean; emissive: number[] }>;
 }
 
 /** An object from the game's world snapshot, in SWG coordinates. */
@@ -273,6 +283,31 @@ export function lowerLevels(m: LoadedModel): readonly ModelLevel[] {
 }
 const NO_LEVELS: readonly ModelLevel[] = [];
 
+/** The session's one read of the table of every world's leaf card shaders, by the site root it was read from. */
+const sharedCards = new Map<string, Promise<void>>();
+
+/**
+ * `flora-cards.json` beside the packs (the flora command writes it with every world's flora, `cardRule.ts`'s
+ * `registerSharedCards` says what it is), read once a session and answered at once after. A site with no such
+ * file (packs converted before it) answers all the same, and the cards are known by the pack's own table and its
+ * flora's names as they were.
+ */
+function loadSharedCards(base: string): Promise<void> {
+  let p = sharedCards.get(base);
+  if (!p) {
+    p = (async () => {
+      try {
+        const res = await fetch(`${base}assets-private/flora-cards.json`);
+        if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) registerSharedCards(await res.json());
+      } catch {
+        /* no table: each pack's own and its flora's names, as before */
+      }
+    })();
+    sharedCards.set(base, p);
+  }
+  return p;
+}
+
 /** Converted SWG content for one planet, loaded from the private assets folder. */
 export class AssetPack {
   private readonly loader = surfaces.withPlugin(new GLTFLoader());
@@ -320,7 +355,14 @@ export class AssetPack {
     }
   }
 
-  private constructor(readonly manifest: PackManifest, private readonly baseUrl: string) {}
+  readonly manifest: PackManifest;
+  private readonly baseUrl: string;
+
+  // Written out, not as parameter properties: node's type stripping runs this file in the leaf cards' wiring test.
+  private constructor(manifest: PackManifest, baseUrl: string) {
+    this.manifest = manifest;
+    this.baseUrl = baseUrl;
+  }
 
   /** The folder this pack is served from, which a pack standing behind another's needs to be named relative to. */
   get root(): string {
@@ -343,12 +385,19 @@ export class AssetPack {
     return new AssetPack(manifest, baseUrl);
   }
 
-  static async load(planetId: string): Promise<AssetPack | null> {
-    const baseUrl = `${import.meta.env.BASE_URL}assets-private/${planetId}/`;
+  /** `base` is the site's own root (the build's base URL unless a test names one). */
+  static async load(planetId: string, base: string = import.meta.env.BASE_URL): Promise<AssetPack | null> {
+    const baseUrl = `${base}assets-private/${planetId}/`;
     try {
       const res = await fetch(`${baseUrl}manifest.json`);
       if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
       const manifest = (await res.json()) as PackManifest;
+      // The leaf card shaders, known before any of the pack's models load, so a placed object wearing one is ruled
+      // as it loads exactly as a planted one is: every world's flora cards (`flora-cards.json` beside the packs,
+      // read once a session), since a world's placed trees can wear a shader only another world plants, and the
+      // pack's own table over them.
+      await loadSharedCards(base);
+      registerPackCards(manifest.cards);
       const pack = new AssetPack(manifest, baseUrl);
       try {
         const lr = await fetch(`${baseUrl}layout.json`);
@@ -414,6 +463,22 @@ export class AssetPack {
     return this.manifest.categories[name] ?? [];
   }
 
+  /** The flora's own defs by id, made the first time they are asked for. */
+  private floraIds: Map<string, PackModelDef> | null = null;
+  private floraDef(id: string): PackModelDef | undefined {
+    this.floraIds ??= new Map((this.manifest.categories.flora ?? []).map((d) => [d.id, d]));
+    return this.floraIds.get(id);
+  }
+
+  /**
+   * Whether a model is the planet's flora (planted by the terrain), as against a placed object or a prop: by its
+   * id, since a planted model the world also places is filed under both, and a def taken from one list is never
+   * the other's object.
+   */
+  isFlora(def: PackModelDef): boolean {
+    return this.floraDef(def.id) !== undefined;
+  }
+
   find(id: string): PackModelDef | undefined {
     for (const list of Object.values(this.manifest.categories)) {
       const hit = list.find((m) => m.id === id);
@@ -422,10 +487,21 @@ export class AssetPack {
     return undefined;
   }
 
+  /**
+   * The def a model loads by. A planted model is its flora def, wherever it is asked for: a world that also places
+   * it (Kashyyyk's wroshyrs, its trillium palms) lists it first under its placed objects, and loaded by that entry
+   * every planting drew the snapshot's GLB -- no bled leaves, no card class -- and stood on a guessed cylinder,
+   * since the collision shapes the client authored are merged onto the flora's defs. The two are the same
+   * appearance at the same bounds and levels, so a placed copy loses nothing by the flora's file.
+   */
+  private defFor(id: string): PackModelDef | undefined {
+    return this.floraDef(id) ?? this.find(id);
+  }
+
   model(id: string): Promise<LoadedModel> {
     let p = this.cache.get(id);
     if (!p) {
-      const def = this.find(id);
+      const def = this.defFor(id);
       if (!def) return Promise.reject(new Error(`model ${id} is not in the ${this.manifest.planet} pack`));
       p = this.loader.loadAsync(this.baseUrl + def.file).then((gltf) => {
         const primitives: Primitive[] = [];
@@ -466,6 +542,13 @@ export class AssetPack {
             }
           }
         });
+        // The leaf cards' rule, the mirror and the sway, every level of the model, before anything draws it: the
+        // one place every model's geometry and materials pass, the flora's, the placed objects' and a guest pack's
+        // alike (`cardRule.ts`, `cardBacks.ts`, `floraSway.ts`). Its own scene first: its cards' crown is that one's.
+        const scenes = [gltf.scene, ...(gltf.scenes ?? []).filter((s) => s !== gltf.scene)];
+        const flora = this.isFlora(def);
+        prepareCardModel(scenes, { flora }, CARD_LIGHT_TUNE.box);
+        prepareSwayModel(scenes, `${this.baseUrl}${def.id}`, def.id, { flora, building: !!def.cells?.length });
         const levels = modelLevels(def, gltf.scenes ?? [], primitives);
         const { min, max } = def.bounds;
         const interiorBoxes = (def.cells ?? [])

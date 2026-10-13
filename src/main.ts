@@ -338,6 +338,10 @@ import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { World } from './world/world';
 import { REFLECTIONS, plainReflectiveCount, reflectiveCount, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
+import { cardsReport, setCardTune, type CardTune } from './world/cardRule.ts';
+import { CARD_LIGHT_ON, CARD_LIGHT_STATS, CARD_LIGHT_TUNE, CARD_LIGHT_UNIFORMS, LEAF_SHADOW_ON, setCardLightTune, type CardLightTune } from './world/cardLight.ts';
+import { cardLightSelfTest, cardsSelfTest, leafShadowSelfTest } from './world/cardSelfTests.ts';
+import { SWAY_TUNE, setSwayTune, swayModel, swayReport, swaySelfTest, type SwayTune } from './world/floraSway.ts';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
 import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { SWOOSH_TUNE } from './world/swooshTrail.ts';
@@ -4506,6 +4510,82 @@ class App {
       },
       /** Draw a lit sphere off-screen with the injected highlight and compare every pixel with `specMath.ts`: `ok` false means the shader and the arithmetic have parted. */
       specSelfTest: () => specSelfTest(this.renderer),
+      /**
+       * The leaf cards' rule (`src/world/cardRule.ts`): `cards()` says what it switched on this session (cards drawn
+       * from their front, glass made leaves, colours dropped, each card's class and where it came from), what the
+       * mirror did (sheets turned, vertices added, the milliseconds) and any wrap left out for a missing anchor.
+       * `{ cutPunch, cutBlend, mipScale, mipScalePunch, wetGloss, backs }` move live (uniforms); `{ rule: 'three' }`
+       * puts the converter's double-sided materials back and `{ rule: 'card' }` the rule again, recompiling every
+       * card (a stall). The load-time ones (`scope`, `lone`, `castSides`, `cardClass`, `colours`, `glassLeaves`,
+       * `mirror`) take effect as models next load.
+       */
+      cards: (opts: Partial<CardTune> & { rule?: 'three' | 'card' } = {}) => {
+        const { rule, ...rest } = opts;
+        if (Object.keys(rest).length) setCardTune(rest);
+        const switched = rule === 'three' || rule === 'card' ? this.world.setCardRule(rule) : null;
+        const programs = (this.renderer.info.programs ?? []) as unknown as { cacheKey: string }[];
+        return {
+          ...cardsReport(),
+          programs: programs.filter((p) => /(^|[|,])card\|/.test(p.cacheKey)).length,
+          ...(switched !== null ? { switchedTo: rule, recompiled: switched, note: `${switched} card materials recompile: a stall of a second or two` } : {}),
+        };
+      },
+      /** Draw the card rule's cases off-screen (see `src/world/cardSelfTests.ts`): `ok` false means a card is drawn from the wrong side, or casts no shadow, or the mirror has not turned a face. */
+      cardsSelfTest: () => cardsSelfTest(this.renderer),
+      /**
+       * The leaf cards' light (`src/world/cardLight.ts`): `cardLight()` gives the colours it lights by in the ramp's
+       * bytes with the shadow row's alpha, the curve, the shadow rule and look, the sun's side, `pointFlat`, the
+       * cards given the light and any left with three's for a missing anchor, and the card meshes not receiving.
+       * `cardLight({ on, curve, rampScale, fills, emissive, gain, exposureRef, bloomCap, shadow, shadowLook, share,
+       * acne, sunSide, pointFlat })` sets them live (uniforms; `shadow: 'none'` a walk over the card meshes).
+       */
+      cardLight: (opts: Partial<Omit<CardLightTune, 'rows'>> & { rows?: Partial<CardLightTune['rows']> } = {}) => {
+        const shadowWas = CARD_LIGHT_TUNE.shadow;
+        if (Object.keys(opts).length) setCardLightTune(opts);
+        const notReceiving = CARD_LIGHT_TUNE.shadow !== shadowWas || CARD_LIGHT_TUNE.shadow === 'none' ? this.world.applyCardShadow() : 0;
+        const u = CARD_LIGHT_UNIFORMS;
+        const bytes = (v: THREE.Vector3) => [v.x, v.y, v.z].map((x) => Math.round(x * 255));
+        const programs = (this.renderer.info.programs ?? []) as unknown as { cacheKey: string }[];
+        return {
+          on: CARD_LIGHT_TUNE.on,
+          live: u.uSwgCardOn.value > 0.5,
+          tune: { ...CARD_LIGHT_TUNE, rows: { ...CARD_LIGHT_TUNE.rows } },
+          colours: { front: bytes(u.uSwgCardFront.value), tangent: bytes(u.uSwgCardTangent.value), back: bytes(u.uSwgCardBack.value), ambient: bytes(u.uSwgCardAmbient.value), fill: bytes(u.uSwgCardFill.value), bounce: bytes(u.uSwgCardBounce.value), row7: bytes(u.uSwgCardRow7.value), row7Alpha: Math.round(u.uSwgCardRow7Alpha.value * 255) },
+          sun: u.uSwgLeafSun.value.toArray().map((v) => Number(v.toFixed(3))),
+          fillDirection: u.uSwgCardFillDir.value.toArray().map((v) => Number(v.toFixed(3))),
+          leafRange: Number(u.uSwgLeafRange.value.toFixed(1)),
+          escapeHatches: { light: CARD_LIGHT_ON ? 'on' : "off (localStorage['swg.cardLight'] = '0')", leafShadow: LEAF_SHADOW_ON ? 'on' : "off (localStorage['swg.leafShadow'] = 'all')" },
+          cards: { marked: CARD_LIGHT_STATS.marked, wrapped: CARD_LIGHT_STATS.injected, uninstalled: CARD_LIGHT_STATS.missingAnchor, missing: [...CARD_LIGHT_STATS.missing], replaced: { ...CARD_LIGHT_STATS.replaced } },
+          cardMeshesNotReceiving: notReceiving,
+          programs: programs.filter((p) => /(^|[|,])card\|/.test(p.cacheKey)).length,
+        };
+      },
+      /** Draw a card through the real chain off-screen at N·L 1, 0 and −1, shadows on and off, a mirrored pair under each sun side and a point light at `pointFlat` 1 and 0, against the client's own bytes (`cardLightMath.ts`). */
+      cardLightSelfTest: () => cardLightSelfTest(this.renderer),
+      /** Draw a crossed card pair under a shadow off-screen: under `all` the half behind the crossing darker, under `self` the halves alike, and a box beyond the crown still shading it. */
+      leafShadowSelfTest: () => leafShadowSelfTest(this.renderer),
+      /**
+       * The flora's sway (`src/world/floraSway.ts`): `sway()` says how many models sway, the materials wrapped and the
+       * depth materials made, the programs, the clock, the wind and its two factors, the eye and the largest
+       * excursion; `sway({ ...any setting of SWAY_TUNE })` changes it live (`shadow` hangs or takes off the depth
+       * materials); `sway({ model: '<id>' })` prints one model's height, canopy base, axis, trunk radius and periods.
+       */
+      sway: (opts: Partial<SwayTune> & { model?: string } = {}) => {
+        const { model, ...rest } = opts;
+        if (model) return swayModel(model) ?? { note: `no swaying model ${model}` };
+        const shadowWas = SWAY_TUNE.shadow;
+        if (Object.keys(rest).length) setSwayTune(rest);
+        const hung = SWAY_TUNE.shadow !== shadowWas ? this.world.applySwayShadow() : null;
+        const programs = (this.renderer.info.programs ?? []) as unknown as { cacheKey: string }[];
+        return {
+          ...swayReport(),
+          programs: { colour: programs.filter((p) => /(^|[|,])sway\|/.test(p.cacheKey)).length, depth: programs.filter((p) => p.cacheKey.includes('swg-sway-depth')).length },
+          depthWarm: { ...this.world.swayDepthWarm },
+          ...(hung !== null ? { meshesWithSwayingShadow: hung } : {}),
+        };
+      },
+      /** Render a probe built from the sway's own chunk into a float target and compare it with `swayMath.swayOffset` to a millimetre. */
+      swaySelfTest: () => swaySelfTest(this.renderer),
       /**
        * The fountains: `fountains()` says what the basins' water and the fountains' own spray are drawn
        * with, and `fountains({ color: '#5d7a70', opacity: 0.45, ripple: 0.8, drift: 0.5, spray: 0.45 })`
@@ -9872,9 +9952,12 @@ class App {
     if (!this.placeBar.element.parentElement) this.ui.appendChild(this.placeBar.element);
     this.world.sceneOnly = true;
     this.world.load(planetById(where.planet), row.pack);
+    // Built and not yet adopted or shown (`defer`): the place's trees wear the flora's leaf card shaders, which are
+    // known only once its world's pack is in (below), and their rule changes their programs' keys.
     const built = await buildPlace(key, {
       adopt: (root) => this.world.adoptMaterials(root),
       breath: () => this.world.breath(),
+      defer: true,
     });
     if (!built) {
       this.world.sceneOnly = false;
@@ -9886,7 +9969,6 @@ class App {
     // the group is what brings the two together.
     const stand = new THREE.Vector3(built.place.stand.x, built.place.stand.y, built.place.stand.z);
     built.group.position.copy(stand);
-    this.world.scene.add(built.group);
     // Nothing about a scene streams, so nothing is left to arrive after it is shown.
     //
     // The camera never moves, so the ground it can see is known before a frame is drawn and there
@@ -9902,6 +9984,10 @@ class App {
     // the two are brought together by standing the figure at the origin and putting the ground
     // there too (see `sceneGroundOffset`).
     await this.world.loadPack(stand);
+    // The place's leaf cards ruled now its world's pack is in (its card table, or its flora's names), then its
+    // materials adopted and the place stood up, so the wait below compiles it as it will be drawn.
+    this.world.preparePlace(built.sources, built.group);
+    this.world.scene.add(built.group);
     // And the wait. `readyAround` is the same one a jump makes inside its closed tunnel: it builds
     // what is left and links every program still queued, so the first frame drawn is the finished
     // picture rather than the first instalment of it.

@@ -245,7 +245,8 @@ function scanned(userData: Record<string, unknown>, opts: { wet?: boolean; detai
   const world = readFileSync(new URL('../../../src/world/world.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const start = world.indexOf('adoptMaterials(root: THREE.Object3D): THREE.Object3D[] {');
   const body = start >= 0 ? world.slice(start, world.indexOf('\n  }\n', start)) : '';
-  ok(/for \(const m of mats\) \{[\s\S]*?csm\.setupMaterial\(m\);[\s\S]*?if \(csm && WET_WRAP\) wetWrap\(m, o\);[\s\S]*?if \(m\.userData\.swgDetail\) detailWrap\(m\);\s*(?:\/\/[^\n]*\n\s*)*if \(m\.userData\.swgSpec\) specWrap\(m\);\s*\}/.test(body), 'World.adoptMaterials wraps the highlight last, after the cascades, the wet look and the detail map, in the same iteration over a mesh\'s materials');
+  // The leaf cards' rule and the sway come after it (`cardRule.ts`, `floraSway.ts`), and only those two.
+  ok(/for \(const m of mats\) \{[\s\S]*?csm\.setupMaterial\(m\);[\s\S]*?if \(csm && WET_WRAP\) wetWrap\(m, o\);[\s\S]*?if \(m\.userData\.swgDetail\) detailWrap\(m\);\s*(?:\/\/[^\n]*\n\s*)*if \(m\.userData\.swgSpec\) specWrap\(m\);\s*(?:\/\/[^\n]*\n\s*)*if \(m\.userData\.swgCardBlend !== undefined\) cardWrap\(m\);\s*if \(m\.userData\.swgSway !== undefined\) swayWrap\(m\);\s*\}/.test(body), 'World.adoptMaterials wraps the highlight after the cascades, the wet look and the detail map, and only the leaf cards\' rule and the sway after it, in the same iteration over a mesh\'s materials');
   ok((world.match(/specWrap\(/g) ?? []).length === 1, 'and nowhere else in the world, so no material is wrapped out of that order');
 }
 

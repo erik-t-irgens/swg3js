@@ -15,6 +15,9 @@ import { Weather, type WeatherViewContext, type WeatherWorldContext } from './we
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
 import { detailWrap } from './detailMap.ts';
 import { specWrap } from './specular.ts';
+import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
+import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
+import { SWAY_TUNE, disposeStandIn, hangSwayDepth, setSwayEye, setSwayRoomPass, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -135,6 +138,11 @@ const lumOf = (c: THREE.Color): number => luminance(c.r, c.g, c.b);
 const tmpM = new THREE.Matrix4();
 /** No nebulae: what the ship contacts are handed off a space zone, made once. */
 const NO_NEBULA_ROWS: readonly Nebula[] = [];
+/** What a building's rooms pass tells the leaves (`PortalRenderer.roomPass`): the cards on the rooms' light, the flora still. */
+function roomPassLeaves(on: boolean): void {
+  setCardRoomPass(on);
+  setSwayRoomPass(on);
+}
 /** How far out a space zone's planets hang, and the radius (metres) a planet of size 1 has there. */
 const SPACE_REACH = 3;
 const SPACE_BODY_DISTANCE = 2600;
@@ -2843,6 +2851,10 @@ export class World {
     fog.color.copy(L.fog);
     // The client's fog is Direct3D's EXP2, the same curve as three's, so the density carries over as is.
     fog.density = L.fogDensity * this.fogScale * this.userFog;
+    // The leaf cards' light (`cardLight.ts`): the ramp's rows for them, the sun's direction toward it, and the
+    // light's depth range their own crown's skip is converted by. Written into existing vectors; nothing allocated.
+    const cam = this.csm?.lights[0]?.shadow.camera;
+    updateCardLight(L.card, this.day.lightDir, cam ? cam.far - cam.near : 0);
   }
 
   private disposeChunk(c: Chunk): void {
@@ -3586,6 +3598,9 @@ export class World {
     this.camera = camera;
     // The rooms' lights lit for a hint are dimmed for every other building's rooms (`hintRoomLight`).
     portals.hintedLights.dim = this.dimRoomLights;
+    // A plant standing in a room wears the materials its model wears outdoors: each rooms pass puts the leaf cards on
+    // the rooms' own light and holds the flora still (`setCardRoomPass`, `setSwayRoomPass`).
+    portals.roomPass = roomPassLeaves;
     // The world pass drawn from inside a building may leave out what these hold when it misses the
     // exits: the placed objects' instanced meshes hang off the scene, the ground's chunks and far tiles off its root.
     if (!portals.narrowParents.includes(this.scene)) portals.narrowParents.push(this.scene, this.chunkRoot);
@@ -4151,6 +4166,69 @@ export class World {
    * builds a program that is never drawn. A material flagged `userData.unlit` is kept out of the
    * cascades altogether, for the same reason in reverse.
    */
+  /**
+   * A baked place made ready to be shown (`sceneWorld.ts`, built with `defer`): its leaf cards ruled and their
+   * geometry mirrored as any placed object's are as it loads (`cardRule.ts`), which needs the card table its own
+   * world's pack brings, and then its materials adopted, before anything draws it. Its trees do not sway: a place
+   * is a captured picture, and its shadows' depth programs are in no warm list.
+   */
+  preparePlace(sources: readonly { id: string; root: THREE.Object3D }[], group: THREE.Object3D): void {
+    for (const s of sources) prepareCardModel([s.root], { flora: false }, CARD_LIGHT_TUNE.box);
+    this.adoptMaterials(group);
+  }
+
+  /** Every leaf card material in the world now (the scene and the flora's stand-ins), for the cards' live switches. */
+  cardMaterials(): Set<THREE.Material> {
+    const out = new Set<THREE.Material>();
+    const take = (o: THREE.Object3D) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) if (m && isCard(m)) out.add(m);
+    };
+    this.scene.traverse(take);
+    for (const o of this.floraWarm) take(o);
+    return out;
+  }
+
+  /** The leaf cards' rule switched live (`__debug.cards({ rule })`): every card in the world recompiles, which is a stall. */
+  setCardRule(rule: 'three' | 'card'): number {
+    return setCardRule(rule, this.cardMaterials());
+  }
+
+  /**
+   * Every card mesh's receiving worked out again after the cards' shadow rule moved (`'none'` takes it off the
+   * card meshes of trees that cast): the flora batches by their finest level's cast rule, a chunk's own meshes
+   * and a placed object's by whether they cast. A per-object uniform: nothing compiles.
+   */
+  applyCardShadow(): number {
+    this.floraField?.applyShadows();
+    let off = 0;
+    this.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material || mesh.name === 'flora batch') return;
+      const m = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (!m || !isCard(m)) return;
+      const receive = cardReceives(mesh.material, mesh.castShadow);
+      if (mesh.receiveShadow !== receive) mesh.receiveShadow = receive;
+      if (!receive) off++;
+    });
+    return off;
+  }
+
+  /** The sway's depth materials hung on, or taken off, every swaying mesh after `SWAY_TUNE.shadow` moved. Answers how many carry one. */
+  applySwayShadow(): number {
+    let n = 0;
+    const take = (o: THREE.Object3D) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || Array.isArray(mesh.material) || !mesh.material || mesh.material.userData.swgSway === undefined) return;
+      hangSwayDepth(mesh);
+      if (mesh.customDepthMaterial) n++;
+    };
+    this.scene.traverse(take);
+    for (const o of this.floraWarm) take(o);
+    return n;
+  }
+
   /** Public because a baked place's materials are adopted from outside: see sceneWorld.ts. */
   adoptMaterials(root: THREE.Object3D): THREE.Object3D[] {
     const csm = this.csm;
@@ -4187,6 +4265,18 @@ export class World {
         // on before anything compiles, its mode, colour and power uniforms. A material converted before
         // material format 6 says nothing of its highlight and keeps three's, exactly as it was.
         if (m.userData.swgSpec) specWrap(m);
+        // The leaf cards' rule after it (its cut, its wet look, its stored normal, and the client's light and the
+        // leaf shadow under their defines), on a material the card rule marked as it loaded (`cardRule.ts`); and
+        // the sway after that, so its text lands before the card's leaf capture and the capture reads the swayed
+        // place. Both a hook and a key prefix, on before anything compiles.
+        if (m.userData.swgCardBlend !== undefined) cardWrap(m);
+        if (m.userData.swgSway !== undefined) swayWrap(m);
+      }
+      // A swaying mesh casts its shadow with the same sway (`floraSway.ts`), hung before it ever casts; and under
+      // the cards' `none` a card mesh that casts receives nothing (a flora batch keeps to its own finest-level rule).
+      if (mesh.isMesh && !Array.isArray(mesh.material)) {
+        if (mesh.material.userData.swgSway !== undefined) hangSwayDepth(mesh);
+        if (CARD_LIGHT_TUNE.shadow === 'none' && mesh.name !== 'flora batch' && isCard(mesh.material)) mesh.receiveShadow = cardReceives(mesh.material, mesh.castShadow);
       }
       if (isNew) fresh.push(o);
     });
@@ -4765,6 +4855,12 @@ export class World {
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
       await this.nextFrame();
     }
+    // The flora's swaying shadows (`floraSway.ts`): the loading sweep never builds a depth program, so one
+    // stand-in per depth combination the swaying meshes above can cast with is drawn into the shadow maps here as
+    // a frame draws them, under the world pass's lights and a room's (`compileSwayDepth` says why it is a draw).
+    // Everything the sweep compiled is offered, the scene's own swaying meshes as well as the stand-ins; one
+    // stand-in a combination is all that is made.
+    this.compileSwayDepth(r, target, objects);
     if (placed.length) {
       this.placedWarmStats.programs = placedPrograms;
       // Their programs are held by the pack's own materials, which outlive them: only the stand-ins go.
@@ -4787,6 +4883,69 @@ export class World {
     return (r.info.programs?.length ?? 0) - before;
   }
 
+  /** A target to bind while the sway's depth programs are warmed when the frames have none (`compileSwayDepth`): a shadow draw always has one. */
+  private depthWarmTarget: THREE.WebGLRenderTarget | null = null;
+  /** What the last warm of the sway's depth programs did, for the console. */
+  readonly swayDepthWarm = { standIns: 0, programs: 0, shadows: false };
+
+  /**
+   * Build the sway's depth programs from stand-ins (see `compileEverything`) by drawing them into the shadow maps
+   * as a frame does. A compile cannot stand in for that draw: three draws the shadow maps before it sets up the
+   * lights of the pass that asked for them, so a depth program is keyed on the light set of the last pass drawn
+   * with this scene -- the world's outdoors, a room's wherever a building's rooms are drawn after the world, which
+   * is in and beside every town -- and on the cascades casting all the same (measured: compiled through the shadow
+   * camera they came out keyed on a light set no frame ever draws with, and the room's were built in play). So the
+   * pass's lights are set up first, under the world pass's layers and then the rooms', each by a compile of
+   * nothing, and the stand-ins, stood just in front of the eye where the nearest cascade draws them, are drawn
+   * into the shadow maps through the portal renderer's own shadow-only draw, with a target bound. A depth material
+   * keeps the program of its first draw whatever the lights do after (it is unlit), and the frames drawn between
+   * the loading screen's batches have already drawn the models' own under whichever set they last left, so each
+   * set is drawn with depth materials of its own (`swayDepthStandIns`' twins), or it would build nothing.
+   */
+  private compileSwayDepth(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget | null, meshes: readonly THREE.Object3D[]): void {
+    const portals = this.portals;
+    const camera = this.camera;
+    this.swayDepthWarm.shadows = r.shadowMap.enabled;
+    if (!portals || !camera || !this.csm || !r.shadowMap.enabled) return;
+    // The scene's own swaying meshes first, then a source for every combination a swaying material can cast with
+    // (`swayDepthCombos`): a placed tier streamed in after this screen lifts may bring one nothing here had.
+    const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos()];
+    const sets = [
+      { layer: 0, standIns: swayDepthStandIns(swaying, 'world') },
+      { layer: INTERIOR_LAYER, standIns: swayDepthStandIns(swaying, 'rooms') },
+    ];
+    this.swayDepthWarm.standIns = sets[0].standIns.length;
+    if (!sets[0].standIns.length) return;
+    const bound = target ?? (this.depthWarmTarget ??= new THREE.WebGLRenderTarget(1, 1));
+    const before = r.info.programs?.length ?? 0;
+    // Not culled: behind a loading screen the cascades' cameras may still stand where the last world left them,
+    // and the probe's own view, which would otherwise draw them, is dropped by the portal renderer's hook.
+    const at = camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(4).add(camera.position);
+    const nothing = new THREE.Group();
+    for (const { layer, standIns } of sets) {
+      for (const s of standIns) {
+        s.position.copy(at);
+        s.frustumCulled = false;
+        s.updateMatrixWorld(true);
+        this.scene.add(s);
+      }
+      try {
+        this.withLayers(camera, layer, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
+        this.withTarget(r, bound, () => portals.drawShadowsOnly(this.scene));
+      } finally {
+        for (const s of standIns) this.scene.remove(s);
+      }
+      this.programs.countLinks(resolveLinks(r, standIns.map((s) => s.customDepthMaterial!).filter(Boolean)));
+      // The geometry and the materials are the models' own (the twins the session's): only the stand-ins go.
+      for (const s of standIns) disposeStandIn(s);
+    }
+    // The shadow-only draw leaves the scene's lights set up as the probe sees them, every layer at once, which is no
+    // pass's: the next frame's shadow pass would key every depth material it draws first on that (measured: three
+    // of three's own depth programs built so, for nothing). The world pass's set is put back.
+    this.withLayers(camera, 0, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
+    this.swayDepthWarm.programs = (r.info.programs?.length ?? 0) - before;
+  }
+
   /**
    * The cascades' light boxes as they stand after this frame's `csm.update`, for the creatures' shadow
    * rule (commit 3c, `refreshCascadeBoxes`): the very frusta three culls each cascade's casters against.
@@ -4796,6 +4955,9 @@ export class World {
 
   /** Call once per frame after the camera has moved. */
   updateShadows(now: number): void {
+    // The sway's distance fade measures from the view camera, written once a frame after it has moved: the chunk
+    // never reads `cameraPosition`, which in the shadow pass is the cascade's (`floraSway.ts`).
+    if (this.camera) setSwayEye(this.camera.position);
     const csm = this.csm;
     if (csm) {
       csm.lightDirection.copy(this.day.lightDir).negate().normalize();
@@ -6516,6 +6678,9 @@ export class World {
     // off the world put back on its stand. One asleep is not read at all.
     stepLooseProps(dt, playerPos);
     this.waterTime += dt;
+    // The flora's sway runs with the water by default (`SWAY_TUNE.clock`), so the meadow keeps moving beside the
+    // lake under an open panel; `'sim'` steps it with the living below instead.
+    if (SWAY_TUNE.clock === 'water') stepSway(dt);
     for (const m of this.waterMaterials) m.userData.uniforms.uTime.value = this.waterTime;
     // Modulo the shader's own loop, whose flow × loopTime is whole: the noise wraps without a seam.
     for (const m of this.lavaMaterials) m.uniforms.uFlowTime.value = this.waterTime % m.userData.loopTime;
@@ -6609,6 +6774,7 @@ export class World {
   stepLiving(dt: number, playerPos: THREE.Vector3, camera: THREE.Camera | null): void {
     this.simTime += dt;
     surfaces.update(this.simTime, this.renderer);
+    if (SWAY_TUNE.clock === 'sim') stepSway(dt);
     // What the world's creatures and the fighters pick a fight out of: the one list of the living, and
     // every other player a blow of theirs could reach (`RemoteBodies.prey`) whatever the players' own
     // damage switch says, since such a blow is the keeper's word and not a player's. Which body may go

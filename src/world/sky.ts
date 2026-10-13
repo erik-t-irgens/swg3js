@@ -5,6 +5,7 @@ import { angularRadius, isFlareBody, tintScale, DISC_FILL, GLOW_FILL, MAX_FLARE_
 import { environmentBodies, pickSuns, starQuadTurn, sunDirection, type SunPick, type SunRule, type SunStarSprite } from '../space/suns';
 import type { FxCloudLayer, FxSkyLight } from '../core/fx/lensFlare';
 import { blockShadow, driftScroll, heaviestTwo, type ForcedKind, type WeatherKind } from './weatherSchedule';
+import { CARD_ROWS, readCardRows, type CardSkyRows, type RampRead } from './cardLight.ts';
 
 // The planet's sky as the original client draws it (see tools/swg/sky.mjs for the export):
 // a gradient sky texture whose columns are the time of day and rows run from the horizon up
@@ -122,19 +123,29 @@ export interface SkyLighting {
   shadowScale: number;
   /** The mix's wind speed scale (clouds drift by it; the weather tilts rain by it). */
   windSpeedScale: number;
+  /**
+   * The rows the leaf cards are lit by (`cardLight.ts`): the front, tangent and back of the client's ramp about the
+   * sun's axis, the ambient, the two plain parallel lights and the shadow colour, at the rows `CARD_ROWS` names,
+   * blended over the mix as every other colour here is, with their alpha scales. Fields of their own, so
+   * `__debug.ambient(row)` goes on moving the hemisphere's rows without touching these.
+   */
+  card: CardSkyRows;
 }
 
 /** Colour ramp rows, in the order the client reads them. */
 /**
  * Rows of the client's 256 x 10 colour ramp, indexed by time of day.
  *
- * Rows 0..7 are the names the engine's own light terms suggest, but rows 0 (Ambient), 3 (Fill)
- * and 4 (Bounce) read #000000 at every hour on every planet, which cannot be what the client
- * lit with -- a scene with no ambient renders everything out of the sun's reach pure black.
- * Rows 8 and 9 are the two that actually carry per-planet light colours (alpha ~164, the
- * client's 4 * (a - 128) / 128 scale encoding), and row 8 is consistently the darker of the
- * pair. That is the shape of a hemisphere term: 9 the sky above, 8 the ground bounce below.
- * They are used as such here; `__debug.ambient(row)` switches rows to compare.
+ * Rows 0..7 are the names the engine's own light terms suggest. Row 0 (Ambient) is black at noon on
+ * all but 4 of the 50 distinct ground ramps, but rows 3 (Fill) and 4 (Bounce) are not black
+ * everywhere: row 3 is lit at noon on 14 of the 50, row 4 on 8 (all of Endor among them, measured),
+ * and the client's leaf cards add both inside their light (`cardLight.ts`). Rows 8 and 9 carry
+ * per-planet light colours (alpha ~164, the client's 4 * (a - 128) / 128 scale encoding), and row 8
+ * is consistently the darker of the pair. Our converter's note names them the client's back and
+ * tangent colours about the sun's axis (no source; row 9's hue follows the sun's rather than the
+ * sky's on 39 of 50 ramps), which is how the leaf cards read them; everything else is lit by them as
+ * a hemisphere term, 9 the sky above and 8 the ground bounce below. `__debug.ambient(row)` switches
+ * the hemisphere's rows to compare.
  */
 const enum Row {
   Ambient = 0,
@@ -399,6 +410,22 @@ export class SwgSky {
     isDay: true,
     shadowScale: 1,
     windSpeedScale: 1,
+    card: {
+      front: new THREE.Color(1, 1, 1),
+      tangent: new THREE.Color(0.5, 0.5, 0.5),
+      back: new THREE.Color(0.1, 0.1, 0.1),
+      ambient: new THREE.Color(0, 0, 0),
+      fill: new THREE.Color(0, 0, 0),
+      bounce: new THREE.Color(0, 0, 0),
+      shadow: new THREE.Color(0, 0, 0),
+      frontScale: 1,
+      tangentScale: 1,
+      backScale: 1,
+      ambientScale: 1,
+      fillScale: 1,
+      bounceScale: 1,
+      shadowAlpha: 0,
+    },
   };
   /** The cube map faces (already in this engine's handedness) the heaviest block names for reflections, by day and night; rewritten every frame. */
   readonly environment: { day: CubeFaces | null; night: CubeFaces | null };
@@ -918,6 +945,13 @@ export class SwgSky {
     return r;
   }
 
+  /** The ramp's three readers as the leaf cards' rows take them (`readCardRows`), made once. */
+  private readonly cardRamp: RampRead = {
+    color: (row, index, out, fallback) => this.rampColor(row, index, out, fallback),
+    scale: (row, index) => this.rampScale(row, index),
+    alpha: (row, index, fallback) => this.rampAlpha(row, index, fallback),
+  };
+
   /** A ramp colour, weighted over the mix in linear light: each block reads its own bytes (the fallback where it has no such row). */
   private rampColor(row: number, index: number, out: THREE.Color, fallback: number): THREE.Color {
     let r = 0;
@@ -1036,6 +1070,8 @@ export class SwgSky {
     this.rampColor(Row.Shadow, index, L.shadow, 0);
     this.rampColor(Row.Clear, index, L.clear, 0.5);
     this.rampColor(Row.Fog, index, L.fog, 0.5);
+    // The leaf cards' rows (`cardLight.ts`), at the rows the card light's tune names, blended in linear light.
+    readCardRows(L.card, this.cardRamp, index, CARD_ROWS);
     L.sunMoonAlpha = this.rampAlpha(Row.Clear, index, 1);
     L.starAlpha = this.rampAlpha(Row.Fog, index, day.isDay ? 0 : 1);
     // Fog, shadows and wind blend over the mix like the colours.

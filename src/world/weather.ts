@@ -47,6 +47,7 @@ import {
 } from './weatherSchedule';
 import { OPEN_ROOF_GRID, OPEN_ROOF_MAP, WEATHER_UNIFORMS } from './wetness';
 import { WATER_WIND, WATER_WIND_FULL } from './water';
+import { FLORA_WIND } from './floraSway.ts';
 import { sharedClock, sharedNote } from './sharedClock.ts';
 
 export interface WeatherSettings {
@@ -824,6 +825,10 @@ export class Weather {
     WATER_WIND.value
       .set(Math.sin(this.windHeading), Math.cos(this.windHeading))
       .multiplyScalar(Math.min(this.windSpeed / WATER_WIND_FULL, 1));
+    // The flora's own (`floraSway.ts`): the heading apart from the strength, which the water's loses at nought.
+    FLORA_WIND.x = Math.sin(this.windHeading);
+    FLORA_WIND.z = Math.cos(this.windHeading);
+    FLORA_WIND.strength = Math.min(this.windSpeed / WATER_WIND_FULL, 1);
 
     // What falls.
     this.collect(active);

@@ -170,6 +170,17 @@ const WET_VERTEX = /* glsl */ `
 `;
 
 /**
+ * Four lines of the wet chunk the leaf cards' rule finds by their exact text (`cardRule.ts`): the flip of a
+ * double-sided surface's underside, the gloss a wet surface takes, and the sheen's Fresnel and its light. A
+ * card in the rain darkens and takes no gloss or sheen by default (`CARD_TUNE.wetGloss`), and its sheen is
+ * worked from whichever face is drawn. Named here so the two can never drift apart.
+ */
+export const WET_FLIP_LINE = 'wetN *= gl_FrontFacing ? 1.0 : -1.0;';
+export const WET_GLOSS_LINE = 'roughnessFactor = mix(roughnessFactor, min(roughnessFactor, 0.28), wetSurface);';
+export const WET_FRES_LINE = 'float wetFres = 0.02 + 0.98 * pow(1.0 - saturate(dot(normal, geometryViewDir)), 5.0);';
+export const WET_SHEEN_LINE = 'reflectedLight.indirectSpecular += uWetSky * wetFres * (wetSurface * 0.3 + wetPuddle * 0.85) * (1.0 - wetSnow);';
+
+/**
  * Fragment, after `#include <color_fragment>`: how wet, how much puddle and how much snow this
  * pixel is, and the darkening and whitening that follow. Every name starts `wet` so nothing in
  * three's chunks or a hook before ours is shadowed. The ground adds puddles; objects only darken,
@@ -195,7 +206,7 @@ if (uWetness + uSnowCover > 0.0005) {
   vec3 wetN = vWetUp / max(length(vWetUp), 1e-4);
   // The side being drawn: a double-sided leaf's or awning's underside faces down.
   #ifdef DOUBLE_SIDED
-    wetN *= gl_FrontFacing ? 1.0 : -1.0;
+    ${WET_FLIP_LINE}
   #endif
   #ifdef FLIP_SIDED
     wetN = -wetN;
@@ -216,7 +227,7 @@ if (uWetness + uSnowCover > 0.0005) {
 
 /** Fragment, after `#include <roughnessmap_fragment>`: wet is glossy, a puddle a mirror, snow matte. */
 const WET_ROUGHNESS = /* glsl */ `
-roughnessFactor = mix(roughnessFactor, min(roughnessFactor, 0.28), wetSurface);
+${WET_GLOSS_LINE}
 roughnessFactor = mix(roughnessFactor, 0.04, wetPuddle);
 roughnessFactor = mix(roughnessFactor, 0.85, wetSnow);
 `;
@@ -238,8 +249,8 @@ if (wetPuddle > 0.001 && uRain > 0.001) {
  */
 const WET_SHEEN = /* glsl */ `
 if (wetSurface + wetPuddle > 0.001) {
-  float wetFres = 0.02 + 0.98 * pow(1.0 - saturate(dot(normal, geometryViewDir)), 5.0);
-  reflectedLight.indirectSpecular += uWetSky * wetFres * (wetSurface * 0.3 + wetPuddle * 0.85) * (1.0 - wetSnow);
+  ${WET_FRES_LINE}
+  ${WET_SHEEN_LINE}
 }
 `;
 

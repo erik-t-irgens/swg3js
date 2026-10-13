@@ -181,14 +181,24 @@ export class PortalRenderer {
    */
   readonly hintedLights: { building: Building | null; dim: (on: boolean) => void } = { building: null, dim: () => {} };
 
+  /**
+   * Told as each building's rooms pass begins (true) and ends (false), for what a room's things must draw apart
+   * from the world's while wearing the very same materials: the world hands the leaf cards' light and the flora's
+   * sway their own switches here (a potted plant in a cantina is lit by the room's lamps and stands in no wind).
+   * Shared uniforms only, so nothing compiles; set by the world once, never per frame.
+   */
+  roomPass: (on: boolean) => void = () => {};
+
   /** One building's interior pass, with the hinted pool dimmed for any building it was not lit for (`hintedLights`). */
   private renderRooms(scene: THREE.Scene, camera: THREE.Camera, b: Building): void {
     const h = this.hintedLights;
     const dim = h.building !== null && h.building !== b;
     if (dim) h.dim(true);
+    this.roomPass(true);
     try {
       this.renderLayer(scene, camera, INTERIOR_LAYER);
     } finally {
+      this.roomPass(false);
       if (dim) h.dim(false);
     }
   }
@@ -356,6 +366,26 @@ export class PortalRenderer {
    */
   ownDraws(): THREE.Object3D[] {
     return [this.portalStandIn, this.resetQuad];
+  }
+
+  /**
+   * The shadow maps drawn as a frame's shadow pass draws them and nothing else, its stray draws dropped as the
+   * pass drops them: what the world's warm-up builds a custom depth material's programs by (`World.compileSwayDepth`),
+   * since only a real shadow draw keys a depth program as the frames will (three draws the shadow maps before it
+   * sets up the lights of the pass that asked for them, so the light set in the key is the last pass's).
+   */
+  drawShadowsOnly(scene: THREE.Scene): void {
+    const r = this.renderer;
+    if (!r.shadowMap.enabled) return;
+    r.shadowMap.needsUpdate = true;
+    this.shadingShadows = true;
+    const strays = this.strays;
+    try {
+      r.render(scene, this.shadowProbe);
+    } finally {
+      this.shadingShadows = false;
+      this.strays = strays;
+    }
   }
 
   /**

@@ -162,6 +162,9 @@ vec3 swgDirectSpecular( const in vec3 irradiance, const in IncidentLight directL
 }
 `;
 
+/** How the film is taken from the wet chunk, which the leaf cards' rule finds by its exact text to keep a wet card matt (`cardRule.ts`). */
+export const SPEC_FILM_LINE = 'swgSpecFilm = max( max( wetSurface, wetPuddle ), wetSnow );';
+
 /**
  * In `main()`, just before the lights: the mask from the texel three's roughness chunk already sampled, and
  * the weather's amount where the wet chunk is in this program (`SWG_WET`, which `wetness.ts` defines with
@@ -173,7 +176,7 @@ export const SPEC_MAIN = /* glsl */ `
 	swgSpecMask = texelRoughness.r;
 #endif
 #ifdef SWG_WET
-	swgSpecFilm = max( max( wetSurface, wetPuddle ), wetSnow );
+	${SPEC_FILM_LINE}
 #endif
 `;
 
