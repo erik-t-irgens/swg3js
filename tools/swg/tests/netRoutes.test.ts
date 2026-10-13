@@ -28,7 +28,9 @@ const read = (rel: string) => readFileSync(new URL(rel, root), 'utf8');
 // The words the server can send, out of every server module, comments and records left out.
 const sent = new Map<string, string>();
 for (const file of readdirSync(new URL('server/', root)).filter((f) => f.endsWith('.mjs'))) {
-  const lines = read(`server/${file}`).split('\n');
+  // Split on either line ending: a checkout with `core.autocrlf` writes CRLF, and a `\r` left on a line keeps
+  // the comment pattern below from matching (`.` stops at it), so every word in a comment read as sent.
+  const lines = read(`server/${file}`).split(/\r?\n/);
   lines.forEach((line, i) => {
     const code = line.replace(/\/\/.*$/, '');
     if (/^\s*\*/.test(code) || /\bwrite\(|\.change\(/.test(code)) return;

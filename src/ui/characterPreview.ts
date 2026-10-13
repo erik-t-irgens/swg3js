@@ -11,6 +11,7 @@ import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js
 import type { Character } from '../player/character';
 import { PreviewDof, type PreviewEffects, type PreviewReport } from './previewDof';
 import { PREVIEW_DOF, previewGate, previewLensOn, previewSpan, type PreviewSpan } from '../core/fx/dofMath.ts';
+import { specWrapTree } from '../world/specular.ts';
 
 export class CharacterPreview {
   /** What the settings ask of every doll: App keeps it in step with Effects and Depth of field (a change shows on the next frame). */
@@ -169,6 +170,10 @@ export class CharacterPreview {
       m.receiveShadow = false;
       m.frustumCulled = false;
     });
+    // The clone shares the character's materials, and on the select screen and the creator's dark stage the
+    // world has never adopted them: they take the client's highlight here, before this context first compiles
+    // them, or the figure would wear three's on a fresh session and the client's once it had been played.
+    specWrapTree(copy);
     const box = meshBounds(copy);
     const size = box.getSize(new THREE.Vector3());
     // meshBounds reads through matrixWorld, so the size already carries this scale: the lens's span

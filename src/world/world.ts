@@ -14,6 +14,7 @@ import { SwgSky, type SkyLighting } from './sky';
 import { Weather, type WeatherViewContext, type WeatherWorldContext } from './weather';
 import { WEATHER_UNIFORMS, WET_WRAP, wetWrap } from './wetness';
 import { detailWrap } from './detailMap.ts';
+import { specWrap } from './specular.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -4182,6 +4183,10 @@ export class World {
         // hook, both in the program key, so it must be on before anything compiles. A material with
         // no detail map (every one in a pack converted before this) is left exactly as it was.
         if (m.userData.swgDetail) detailWrap(m);
+        // And the client's own highlight, last of the four and for the same reason: a hook and a key prefix,
+        // on before anything compiles, its mode, colour and power uniforms. A material converted before
+        // material format 6 says nothing of its highlight and keeps three's, exactly as it was.
+        if (m.userData.swgSpec) specWrap(m);
       }
       if (isNew) fresh.push(o);
     });

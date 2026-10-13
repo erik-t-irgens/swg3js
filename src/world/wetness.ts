@@ -131,6 +131,14 @@ vec2 rainRingSlope(vec2 p, float time, float density) {
 }
 `;
 
+/**
+ * Said with the fragment's declarations: this program carries the wet chunk, so its `wetSurface`,
+ * `wetPuddle` and `wetSnow` exist at the top level of `main()`. The client's highlight (`specular.ts`) reads
+ * it to keep three's GGX on a wet or snowed surface by those amounts, since the rain's glint and the snow's
+ * matt both ride on roughness, and reads nothing of the weather where it is not defined.
+ */
+const WET_DEFINE = '\n#define SWG_WET';
+
 /** Vertex: the varyings, after `#include <common>`. */
 const WET_VERTEX_PARS = /* glsl */ `
 varying vec3 vWetPos;
@@ -271,7 +279,7 @@ export function injectWetness(shader: THREE.WebGLProgramParametersWithUniforms, 
     return;
   }
   shader.vertexShader = after(after(vs, '#include <common>', WET_VERTEX_PARS), '#include <project_vertex>', WET_VERTEX);
-  let f = after(fs, '#include <common>', WEATHER_PARS_GLSL + (ground ? RAIN_RINGS_GLSL : ''));
+  let f = after(fs, '#include <common>', WET_DEFINE + WEATHER_PARS_GLSL + (ground ? RAIN_RINGS_GLSL : ''));
   f = after(f, '#include <color_fragment>', wetColourGlsl(ground));
   f = after(f, '#include <roughnessmap_fragment>', WET_ROUGHNESS);
   if (ground) f = after(f, '#include <normal_fragment_maps>', WET_NORMAL);

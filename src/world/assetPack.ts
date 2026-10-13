@@ -442,12 +442,14 @@ export class AssetPack {
               if (isReflective(m)) registerReflective(m);
               // Interior cells get their own material instances: the portal renderer stencils them apart from the shell.
               if (cell > 0 && !m.userData.interior) {
+                const original = m;
                 m = m.clone();
                 m.userData.interior = true;
                 // The copy joins the registry as the original did. Left out, it kept whatever reflection
                 // map the original had when it was cloned -- none at all when the sky had not been
-                // captured yet, and a freed one once an old capture is let go of.
-                if (isReflective(m)) registerReflective(m);
+                // captured yet, and a freed one once an old capture is let go of. It takes the original's
+                // own strength, not the one the registry has since written into the original's field.
+                if (isReflective(m)) registerReflective(m, original as THREE.MeshStandardMaterial);
                 mats[i] = m;
                 if (Array.isArray(o.material)) o.material[i] = m;
                 else o.material = m;

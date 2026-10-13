@@ -20,6 +20,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { cellIndexOf } from '../vehicles/interior';
 import type { WingSet } from '../vehicles/wings';
 import type { ShipPaint } from '../vehicles/shipPaint';
+import { specWrap } from '../world/specular.ts';
 
 /** How fast the ship turns on its own until the view is dragged (rad/s). */
 const AUTO_TURN = 0.22;
@@ -241,6 +242,9 @@ export class ShipPreview {
         if (!isDrawable(o)) return;
         drawables.push(o);
         for (const mat of materialsOf(o)) {
+          // A hull never spawned has materials the world has never adopted: they take the client's highlight
+          // before this context first compiles them, as a spawned one's already have (`specular.ts`).
+          specWrap(mat);
           for (const v of Object.values(mat)) if ((v as THREE.Texture | null)?.isTexture) textures.add(v as THREE.Texture);
         }
       });

@@ -336,7 +336,8 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { World } from './world/world';
-import { REFLECTIONS, reflectiveCount, setReflectionSource, type ReflectionSource } from './world/envmap';
+import { REFLECTIONS, plainReflectiveCount, reflectiveCount, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
+import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
 import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { SWOOSH_TUNE } from './world/swooshTrail.ts';
@@ -3248,7 +3249,8 @@ class App {
        * "Too reflective" cannot be judged from here and cannot be traced from the packs alone: a
        * material's shine is its metalness, its roughness, whether it has a metalness map at all and
        * what environment the world has given it, and only the live material has all four. `match`
-       * narrows it to materials whose name holds that text (`__debug.shine('pants')`).
+       * narrows it to materials whose name holds that text (`__debug.shine('pants')`), and then looks at
+       * the world's own materials as well, after the player's (`__debug.shine('leaf')` over a forest).
        */
       shine: (match?: string) => {
         const want = (match ?? '').toLowerCase();
@@ -3280,6 +3282,9 @@ class App {
                 color: spec?.color ?? null,
                 power: spec?.power ?? null,
                 mask: spec ? `${spec.mask ?? '?'}${spec.squared ? ' squared' : ''}` : null,
+                // Which highlight it draws now: the client's own term where the wrap is on it (none on a mode
+                // `none`), three's GGX where it is not or the switch says so.
+                highlight: wrapsOn(m as unknown as Parameters<typeof wrapsOn>[0]).includes('spec') ? (SPEC_TUNE.use === 'three' ? "three's GGX (spec({ use: 'three' }))" : spec?.mode === 'none' ? 'none' : `the client's ${spec?.mode === 'aniso' ? 'band' : 'highlight'}`) : "three's GGX",
                 cube: typeof m.userData.swgCube === 'boolean' ? m.userData.swgCube : null,
                 envMap: !!s.envMap,
                 envMapIntensity: s.isMeshStandardMaterial ? Number((s.envMapIntensity ?? 1).toFixed(3)) : null,
@@ -3293,6 +3298,8 @@ class App {
         };
         look(this.player.rig?.root, 'worn');
         for (const hand of ['right', 'left'] as const) look(this.player.heldNode(hand), `held ${hand}`);
+        // Narrowed to a name, the world's own materials too (`shine('leaf')` over a forest, a wall by its shader).
+        if (want) look(this.world.scene, 'world');
         return { materials: rows.length, wetness: Number(WEATHER_UNIFORMS.uWetness.value.toFixed(3)), rows: rows.sort((a, b) => Number(b.countsReflective) - Number(a.countsReflective)).slice(0, 30) };
       },
       /**
@@ -4469,13 +4476,36 @@ class App {
        * way), and `reflections({ source: 'sky' })` to our own sky dome, the default. The choice is
        * remembered in this browser (`localStorage['swg.reflections']`) and takes effect at once.
        */
-      reflections: (opts: { source?: ReflectionSource } = {}) => {
+      reflections: (opts: { source?: ReflectionSource; plain?: number } = {}) => {
         if (opts.source === 'sky' || opts.source === 'game') {
           setReflectionSource(opts.source);
           this.world.reflectionsChanged();
         }
-        return { source: REFLECTIONS.source, registered: reflectiveCount(), note: REFLECTIONS.source === 'sky' ? 'our own sky dome, captured every few seconds' : "the planet's own cube maps where an area has one, the dome where it has none" };
+        // How much of it the surfaces whose shader has no reflection cube take: nought, the client's, by
+        // default, and 1 is the faint mirror and sky-coloured fill they had before. A uniform; nothing compiles.
+        if (typeof opts.plain === 'number') setPlainReflections(opts.plain);
+        return {
+          source: REFLECTIONS.source,
+          registered: reflectiveCount(),
+          note: REFLECTIONS.source === 'sky' ? 'our own sky dome, captured every few seconds' : "the planet's own cube maps where an area has one, the dome where it has none",
+          plain: REFLECTIONS.plain,
+          plainRegistered: plainReflectiveCount(),
+          plainNote: REFLECTIONS.plain === 0 ? 'surfaces with no reflection cube take no reflection and no sky-coloured fill, as the client drew them' : `surfaces with no reflection cube take ${REFLECTIONS.plain} of the environment (1 is how they were before)`,
+        };
       },
+      /**
+       * The client's own highlight (`src/world/specular.ts`): `spec()` says whether the wrap is on, the knobs
+       * and how many materials draw each kind (none, the plain highlight, the band); `spec({ use: 'three' })`
+       * goes back to three's GGX on every one of them and `spec({ use: 'client' })` returns, and `{ gain, cap,
+       * film, gate }` move the rest. All uniforms: nothing compiles. `localStorage['swg.spec'] = 'three'`
+       * leaves the wrap off at the next load.
+       */
+      spec: (opts: Partial<SpecTune> = {}) => {
+        if (Object.keys(opts).length) setSpecTune(opts);
+        return specReport();
+      },
+      /** Draw a lit sphere off-screen with the injected highlight and compare every pixel with `specMath.ts`: `ok` false means the shader and the arithmetic have parted. */
+      specSelfTest: () => specSelfTest(this.renderer),
       /**
        * The fountains: `fountains()` says what the basins' water and the fountains' own spray are drawn
        * with, and `fountains({ color: '#5d7a70', opacity: 0.45, ripple: 0.8, drift: 0.5, spray: 0.45 })`
