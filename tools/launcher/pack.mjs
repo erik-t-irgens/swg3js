@@ -55,6 +55,12 @@ const SOURCE_FILES = ['src/swg/normalDecode.ts', 'src/swg/terrain/trn.ts', 'src/
  * server folds with the Core3 reference), all read from `src/story/` as they are.
  */
 export const STORY_SOURCE = [/^src\/story\/.+\.ts$/, /^src\/story\/testSet\/.+$/, /^src\/story\/core3\/[^/]+\.jsonc$/];
+/**
+ * Progress's rules, a folder of their own for the same reason as the story's: the server runs the very files the
+ * browser does. Every file in it imports only the folder and the hashing, the browser's own client among them,
+ * so it ships whole and harmlessly.
+ */
+export const PROGRESS_SOURCE = [/^src\/progress\/.+\.ts$/];
 /** The launcher proper (the bootstrap is built into the exe and is not needed in the release). */
 const LAUNCHER_FILES = ['tools/launcher/main.mjs', 'tools/launcher/checks.mjs', 'tools/launcher/plan.mjs', 'tools/launcher/serve.mjs', 'tools/launcher/page.html', 'tools/launcher/README.md'];
 /** The converter's data files, beside its modules. */
@@ -202,7 +208,7 @@ export function releaseFiles({ root = ROOT, dist, git = null, untracked = false 
   const gitList = [...new Set([...tracked.keys(), ...extra])].sort();
   // The Core3 reference goes with the converter: it is what travel, fittings, deeds, spawns, snapshot and
   // mobiles read in place of an emulator nobody running the launcher has (`tools/swg/core3ref.mjs`).
-  for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^tools\/swg\/core3ref\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel) || STORY_SOURCE.some((re) => re.test(rel))) add(rel);
+  for (const rel of gitList) if (/^tools\/swg\/[^/]+\.mjs$/.test(rel) || /^tools\/swg\/packs\/[^/]+\.json$/.test(rel) || /^tools\/swg\/core3ref\/[^/]+\.json$/.test(rel) || /^server\/[^/]+\.mjs$/.test(rel) || STORY_SOURCE.some((re) => re.test(rel)) || PROGRESS_SOURCE.some((re) => re.test(rel))) add(rel);
   for (const rel of CONVERTER_DATA) add(rel);
   for (const rel of SOURCE_FILES) add(rel);
   // The launcher proper, and the root files.

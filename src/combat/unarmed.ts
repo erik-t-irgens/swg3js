@@ -47,7 +47,8 @@ export class Unarmed {
         a.copy(player.pos).y += 1.1;
         b.set(a.x + Math.sin(player.heading) * spec.reach, a.y - (this.blow.kind === 'kick' ? 0.3 : 0), a.z + Math.cos(player.heading) * spec.reach);
         this.hit.clear();
-        const n = sweepCapsule(ctx, a, b, spec.radius, spec.damage, this.hit, spec.push, 0xffd0a0);
+        // The shove times what progress makes of it, exactly 1 until Melee moves it.
+        const n = sweepCapsule(ctx, a, b, spec.radius, spec.damage, this.hit, spec.push * player.stats.meleePush, 0xffd0a0);
         // Where the fist or the boot arrived, when it arrived on something.
         if (n) {
           combatSounds.melee(null, true, b.x, b.y, b.z);

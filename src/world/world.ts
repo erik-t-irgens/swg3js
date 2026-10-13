@@ -486,6 +486,11 @@ class PlayerTarget implements Living {
   get burningFor(): number {
     return this.burn.left;
   }
+  /**
+   * What a burn's seconds are times on the player, as their progress makes it (Fortitude's `resist.burn`, written
+   * by the game when the stats move): exactly 1 until something is earned.
+   */
+  burnScale = 1;
   radiusToward(): number {
     return 0.35;
   }
@@ -509,7 +514,7 @@ class PlayerTarget implements Living {
    */
   afflict(dps: number, seconds: number): void {
     if (this.dead) return;
-    takeBurn(this.burn, dps, seconds);
+    takeBurn(this.burn, dps, seconds * this.burnScale);
   }
   /**
    * The fire out and forgotten, in **silence**: a death, a travel, a respawn, a switch turned off.

@@ -76,6 +76,15 @@ export interface MoveCommand {
   groundDistance?: (max: number) => number | null;
   /** Whether there is a floor to stand on `dist` units ahead, within a body height below the body's middle. */
   floorAhead?: (dist: number) => boolean;
+  /**
+   * What the character's progress makes of a fall and the air (`src/player/playerStats.ts`), each one's absence
+   * the very number it always was: units added to how far a fall hurts nothing (0), what a landing roll divides a
+   * fall's harm by (3), the metres a landing roll takes nothing from (0), and the air control's factor (1).
+   */
+  fallSafeExtra?: number;
+  rollDivisor?: number;
+  rollFree?: number;
+  airAccel?: number;
 }
 
 export interface MoveEvents {
@@ -94,6 +103,8 @@ export interface MoveEvents {
   special: string | null;
   /** The move wants the body to face this way (along a wall it runs on, into a wall it grabs). */
   heading: THREE.Vector3 | null;
+  /** What the landing roll took off the fall's harm, on the frame the feet touch down (0 with no roll). */
+  rollSaved: number;
 }
 
 /** Lengths of the special jump clips (seconds) when the rig cannot say. */
@@ -217,7 +228,7 @@ export class JkaMovement {
    * from the previous step. `force` reports the pool and spends from it.
    */
   step(dt: number, vel: THREE.Vector3, pos: THREE.Vector3, grounded: boolean, cmd: MoveCommand, force: { value: number; spend: (n: number) => void }): MoveEvents {
-    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, flip: null, rolled: null, landed: null, forceLanded: false, damage: 0, special: null, heading: null };
+    const ev: MoveEvents = { jumped: false, forceJumpStarted: false, flip: null, rolled: null, landed: null, forceLanded: false, damage: 0, special: null, heading: null, rollSaved: 0 };
     // Metres to units for the client's arithmetic.
     let vx = vel.x / UNIT;
     let vy = vel.y / UNIT;
@@ -229,15 +240,19 @@ export class JkaMovement {
       this.specialElapsed += dt;
       if (this.specialLeft <= 0) this.endSpecial();
     }
+    // How far this landing came down, in units, for the landing roll below.
+    let fellUnits = 0;
     if (grounded && !this.wasGrounded) {
       // PM_CrashLand: the landing speed squared, scaled, decides the animation and any damage.
       const landing = Math.min(0, this.lastVy);
       let delta = landing * landing * 0.0001;
       ev.landed = delta;
       const fell = Number.isFinite(this.apexY) ? (this.apexY - pos.y) / UNIT : 0;
+      fellUnits = fell;
       // Coming down from within your own jump's reach never hurts, as in the client's forceJumpZStart rule;
-      // beyond that the damage grows with the extra height rather than with the square of the speed.
-      const safe = JKA.forceJumpHeight[level] + JKA.forceJumpHeight[0];
+      // beyond that the damage grows with the extra height rather than with the square of the speed. Progress
+      // adds to the reach (`fallSafeExtra`, in units; nought until something is earned).
+      const safe = JKA.forceJumpHeight[level] + JKA.forceJumpHeight[0] + (cmd.fallSafeExtra ?? 0);
       if (fell <= safe) delta = 0;
       else ev.damage = Math.min(JKA.fallDamageMax, Math.round(((fell - safe) * UNIT) * JKA.fallDamagePerMetre));
       ev.forceLanded = this.forceJumping || ev.damage > 0;
@@ -271,9 +286,16 @@ export class JkaMovement {
       this.wasGrounded = grounded;
       return ev;
     }
-    // Touching down crouched while moving rolls out of the landing and absorbs some of it.
+    // Touching down crouched while moving rolls out of the landing and absorbs some of it: a third of it
+    // stays (`rollDivisor`, 3 until progress raises it), and none at all from no higher than `rollFree`
+    // metres (nought until Acrobatics reaches it). What the roll took off is said (`rollSaved`).
     const landingRoll = ev.landed !== null && ev.landed >= 2 && cmd.crouch && wishSpeed > 0;
-    if (landingRoll) ev.damage = Math.round(ev.damage / 3);
+    if (landingRoll) {
+      const before = ev.damage;
+      ev.damage = Math.round(ev.damage / (cmd.rollDivisor ?? 3));
+      if (fellUnits * UNIT <= (cmd.rollFree ?? 0)) ev.damage = 0;
+      ev.rollSaved = before - ev.damage;
+    }
     if (grounded && (cmd.roll || landingRoll) && wishSpeed > 0 && !this.special) {
       // PM_TryRoll: a roll the way you are moving.
       this.rollLeft = JKA.rollTime;
@@ -499,7 +521,7 @@ export class JkaMovement {
 
     // PM_Accelerate: ground and air share the rule, the air just gets less of it.
     if (wishSpeed > 0) {
-      const accel = grounded ? JKA.accelerate : JKA.airAccelerate;
+      const accel = grounded ? JKA.accelerate : JKA.airAccelerate * (cmd.airAccel ?? 1);
       const current = vx * wishDir.x + vz * wishDir.z;
       const add = wishSpeed - current;
       if (add > 0) {

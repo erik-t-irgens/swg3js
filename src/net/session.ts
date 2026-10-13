@@ -154,6 +154,10 @@ function stableJson(value: unknown): string {
  * the thing is and never by its name (a list from the server renames things, and that is no change), and
  * only while any thing carries one -- so every mark from before colours is the mark it was, and a colour
  * set offline counts as a change.
+ *
+ * The character's progress is in it the story's way: by how many batches this browser applied to its record
+ * with nobody else holding it (`progress.local`, src/progress/progressClient.ts, `x:`), and only while there
+ * are any, so a character never played alone keeps the mark it had before there was progress.
  */
 export function characterMark(c: {
   name?: string;
@@ -165,6 +169,7 @@ export function characterMark(c: {
   gadgets?: readonly string[];
   saber?: { color: string };
   story?: { local: number };
+  progress?: { local: number };
 }): string {
   const parts: string[] = [];
   parts.push(`n:${c.name ?? ''}`);
@@ -178,6 +183,8 @@ export function characterMark(c: {
   parts.push(`b:${c.saber?.color ?? ''}`);
   const local = Math.floor(Number(c.story?.local) || 0);
   if (local > 0) parts.push(`q:${local}`);
+  const progressed = Math.floor(Number(c.progress?.local) || 0);
+  if (progressed > 0) parts.push(`x:${progressed}`);
   const tinted = (c.items ?? [])
     .filter((o) => o.tint && Object.keys(o.tint).length)
     .map((o) => `${o.kind}:${o.id}=${stableJson(o.tint)}`)
@@ -498,7 +505,7 @@ export class Session {
    * have changed: the counter goes up only when the record really moved, so starting the game twice is
    * not a change and an evening of trading is.
    */
-  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string; tint?: Record<string, number> | null }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number } } | null, about?: CharacterAbout): void {
+  noteCharacter(c: { id: string; name?: string; outfit?: readonly string[]; items?: readonly { kind: string; id: string; tint?: Record<string, number> | null }[]; held?: { right?: string; left?: string }; ships?: Record<string, unknown>; powers?: readonly string[]; gadgets?: readonly string[]; saber?: { color: string }; story?: { local: number }; progress?: { local: number } } | null, about?: CharacterAbout): void {
     if (about) this.about = { species: about.species, class: about.class, planet: about.planet, zone: about.zone ?? '' };
     // A different character with nothing said about where it is: whatever place the session is holding
     // belongs to the one played before it, and taking it for this one's would read as a journey the

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { combatSounds, COMBAT_TUNE } from '../audio/combatSounds';
 import { RAPIER } from '../core/physics';
-import { GUNS, gunTypeFor, type FireMode, type GunProfile } from './guns';
+import { gunTypeFor, type FireMode, type GunProfile } from './guns';
 import { layScar, marksHold, scarFamilyOf } from './scars.ts';
 import type { BoltFrame } from './bolts';
 import type { Hittable, Kit, KitContext, KitSlot, Living, Resource } from './kit';
@@ -11,6 +11,7 @@ import { shoveLooseProps } from '../world/looseProps.ts';
 import { DEFAULT_GADGETS, gadgetById, type GadgetDef, type GrenadeSpec } from './gadgets';
 import { SLOT_ACTIONS, SLOT_COUNT } from './forcePowers';
 import { Unarmed } from './unarmed';
+import { THROW_BALL, THROW_SHAPE, lobbed, throwVelocity } from './demoMath.ts';
 
 /** A charge in the world: a thrown grenade or flechette mine on its fuse, a trip mine on its wall, a det pack waiting for the key. */
 interface Charge {
@@ -66,6 +67,8 @@ const shotDir = new THREE.Vector3();
 const muzzle = new THREE.Vector3();
 const side = new THREE.Vector3();
 const lift = new THREE.Vector3();
+/** A throw's velocity, written in place (`throwVelocity`). */
+const launch = { x: 0, y: 0, z: 0 };
 const placeQ = new THREE.Quaternion();
 const placeM = new THREE.Matrix4();
 const hullInverse = new THREE.Matrix4();
@@ -233,17 +236,29 @@ export class BountyHunterKit implements Kit {
     return mode?.charge ? Math.min(1, this.chargeTime / mode.charge.time) : 0;
   }
 
-  /** The gun in hand: the rack's, by its client effect, name and class, or the placeholder's by its kind. */
+  /**
+   * The gun in hand: the rack's, by its client effect, name and class, or the placeholder's by its kind, as the
+   * player's progress makes it (`PlayerStats.gun`: the table's own profile until a gun stat is earned, then one
+   * copy kept for good, so the test below sees a new object once and never again).
+   */
   profile(ctx: KitContext): GunProfile {
     const def = ctx.player.equipped.right;
     const cls = def ? def.class : ctx.player.gunClass;
-    return GUNS[gunTypeFor(def, cls)];
+    return ctx.player.stats.gun(gunTypeFor(def, cls));
+  }
+
+  /** What a grenade's cooldown is times, as the player's progress makes it; written every update, read by the display between them. */
+  private grenadeCooldown = 1;
+
+  /** A gadget's whole cooldown: a grenade's through the player's progress, anything else its own. */
+  private cooldownOf(g: GadgetDef): number {
+    return g.grenade ? g.cooldown * this.grenadeCooldown : g.cooldown;
   }
 
   slotCooldown(i: number): number {
     const g = this.gadgetAtHud(i);
     if (!g || g.cooldown <= 0) return 0;
-    return (this.cds.get(g.id) ?? 0) / g.cooldown;
+    return (this.cds.get(g.id) ?? 0) / this.cooldownOf(g);
   }
 
   update(ctx: KitContext): void {
@@ -264,6 +279,7 @@ export class BountyHunterKit implements Kit {
     this.fireCd = Math.max(0, this.fireCd - dt);
     this.altCd = Math.max(0, this.altCd - dt);
     for (const [id, left] of this.cds) this.cds.set(id, Math.max(0, left - dt));
+    this.grenadeCooldown = player.stats.grenadeCooldown;
 
     const gun = this.profile(ctx);
     if (gun !== this.lastProfile) {
@@ -311,8 +327,8 @@ export class BountyHunterKit implements Kit {
       }
       if (!ready) continue;
       if (g.grenade) {
-        this.cds.set(id, g.cooldown);
-        this.throwGrenade(ctx, g.grenade);
+        this.cds.set(id, this.cooldownOf(g));
+        this.throwGrenade(ctx, player.stats.grenade(g.grenade));
       } else if (g.id === 'trip_mine') {
         if (this.placeTripMine(ctx)) this.cds.set(id, g.cooldown);
       } else if (g.id === 'det_pack') {
@@ -571,7 +587,7 @@ export class BountyHunterKit implements Kit {
     // The weapon in hand: its shot, and what its bolts sound like landing. Built once per weapon.
     const gunSound = combatSounds.gunOf(player.equipped.right);
     // A homing rocket follows what was under the crosshair when it left.
-    const mark = mode.homing ? this.targetAhead(ctx, 60, 0.9) : null;
+    const mark = mode.homing ? this.targetAhead(ctx, 60, player.stats.pickCos) : null;
     for (let i = 0; i < count; i++) {
       shotDir.copy(aimDir);
       if (mode.fan && count > 1) shotDir.addScaledVector(side, Math.tan(((i - (count - 1) / 2) * (mode.pelletSpread ?? 4) * Math.PI) / 180));
@@ -892,14 +908,14 @@ export class BountyHunterKit implements Kit {
   /**
    * A blast at a point: everything within `radius` metres hurt by up to `damage` and thrown outward,
    * the player too when close; vehicles and turrets by `machines` times as much (the proton grenade);
-   * `spec` adds the grenade's burn, freeze or stun to what it reached.
+   * `spec` adds the grenade's burn, freeze or stun to what it reached. `machines` is the grenade's own unless the
+   * caller hands in what progress makes of it, which only a grenade's or a charge's detonation does.
    */
-  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number, mode: FireMode | null, push = 10, color = 0xffa050, spec: GrenadeSpec | null = null): void {
+  private blast(ctx: KitContext, at: THREE.Vector3, damage: number, radius: number, mode: FireMode | null, push = 10, color = 0xffa050, spec: GrenadeSpec | null = null, machines = spec?.machines ?? 1): void {
     const { world, effects, player } = ctx;
     effects.ring(at, mode?.color ?? color, radius * 2.5, 0.4);
     effects.burst(at, spec ? color : 0xffc080, radius * 0.6, 0.3);
     effects.flash(at, mode?.color ?? color, 30 + damage * 0.3, radius * 4, 0.25);
-    const machines = spec?.machines ?? 1;
     for (const c of this.targets(ctx)) {
       tmp.copy(c.pos).sub(at);
       const d = tmp.length();
@@ -931,10 +947,10 @@ export class BountyHunterKit implements Kit {
     // it does for a body, exactly as it does for a vehicle above.
     shoveLooseProps(at, radius * 1.5, 1, null, 12 + damage * 0.1);
     const dp = player.pos.distanceTo(at);
-    if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * 0.35 * (1 - dp / (radius * 0.7)));
+    if (dp < radius * 0.7 && !player.mounted) player.takeDamage(damage * player.stats.blastSelf * (1 - dp / (radius * 0.7)));
     // A blast sets off the charges near it: a chain of mines, a det pack under a grenade.
     for (const other of this.charges) {
-      if (other.kind !== 'grenade' && other.mesh.position.distanceTo(at) < radius * 0.8) other.fuse = Math.min(other.fuse, 0.15 + Math.random() * 0.1);
+      if (other.kind !== 'grenade' && other.mesh.position.distanceTo(at) < radius * player.stats.chainReach) other.fuse = Math.min(other.fuse, 0.15 + Math.random() * 0.1);
     }
   }
 
@@ -942,7 +958,11 @@ export class BountyHunterKit implements Kit {
   private detonate(ctx: KitContext, c: Charge): void {
     const at = c.mesh.position;
     combatSounds.blast(c.radius, at.x, at.y, at.z, c.spec?.model ?? null);
-    this.blast(ctx, at, c.damage, c.radius, c.mode, c.push, c.color, c.spec);
+    // What machines take of it: the kit's own grenades, trip mines and det packs (a charge with no gun's mode) as
+    // the player's progress makes it (Demolition Expert's `blast.machines`, the very number until it is owned); a
+    // flechette's mines carry their gun's mode and, like every gun's splash, keep their own.
+    const machines = c.spec?.machines ?? 1;
+    this.blast(ctx, at, c.damage, c.radius, c.mode, c.push, c.color, c.spec, c.mode ? machines : ctx.player.stats.apply('blast.machines', machines));
     if (c.spec?.cloud) this.clouds.push({ pos: at.clone(), radius: c.spec.radius * 0.8, spec: c.spec, left: c.spec.cloud, tick: 0 });
     this.removeCharge(ctx, c);
   }
@@ -964,37 +984,37 @@ export class BountyHunterKit implements Kit {
     const { player } = ctx;
     this.aim(ctx);
     player.handPosition(from);
-    if (from.distanceTo(player.pos) > 1.6) from.copy(player.pos).setY(player.pos.y + 1.4);
+    if (from.distanceTo(player.pos) > 1.6) from.copy(player.pos).setY(player.pos.y + THROW_SHAPE.hand);
     if (player.aboard) from.applyMatrix4(hullInverse);
     dir.copy(end).sub(from);
     if (dir.lengthSq() < 1) dir.copy(aimDir);
     // Lobbed: a level throw arcs up and comes down where it was aimed rather than skidding along the ground.
-    dir.normalize().y += 0.3;
-    dir.normalize();
+    lobbed(dir);
     if (player.aboard) {
       // The charge is a world-space body: back into the world (the hull's frame is only for the aim).
       const m = player.aboard.vehicle.group.matrixWorld;
       from.applyMatrix4(m);
       dir.transformDirection(m);
     }
-    from.addScaledVector(dir, 0.4);
+    from.addScaledVector(dir, THROW_SHAPE.ahead);
     this.lastThrow = { from: from.toArray(), dir: dir.toArray(), at: end.toArray() };
   }
 
   /** The last throw's start, direction and the crosshair point it was aimed at, for the console. */
   private lastThrow: { from: number[]; dir: number[]; at: number[] } | null = null;
 
-  /** A thrown body with its ball collider, moving with the player's own speed. */
+  /** A thrown body with its ball collider, moving with the player's own speed (`throwVelocity`, which the Steady Arm test runs). */
   private throwBody(ctx: KitContext, speed: number, bounce: number, upward = 4): RAPIER.RigidBody {
     const { player, physics } = ctx;
+    const v = throwVelocity(dir, speed, upward, player.vel.x, player.vel.z, launch);
     const body = physics.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(from.x, from.y, from.z)
-        .setLinvel(dir.x * speed + player.vel.x, dir.y * speed + upward, dir.z * speed + player.vel.z)
+        .setLinvel(v.x, v.y, v.z)
         .setAngvel({ x: 6, y: 2, z: 4 })
         .setCcdEnabled(true),
     );
-    physics.world.createCollider(RAPIER.ColliderDesc.ball(0.14).setMass(0.6).setRestitution(bounce).setFriction(0.7), body);
+    physics.world.createCollider(RAPIER.ColliderDesc.ball(THROW_BALL).setMass(0.6).setRestitution(bounce).setFriction(0.7), body);
     return body;
   }
 
@@ -1050,7 +1070,7 @@ export class BountyHunterKit implements Kit {
   /** Throw one of the game's grenades: its model from the rack (or the stand-in), an arc that bounces, its fuse. */
   private throwGrenade(ctx: KitContext, spec: GrenadeSpec): void {
     this.throwFrom(ctx);
-    const body = this.throwBody(ctx, spec.speed, spec.bounce);
+    const body = this.throwBody(ctx, spec.speed, spec.bounce, ctx.player.stats.throwLift);
     const model = this.grenadeModel(ctx, spec);
     let mesh: THREE.Object3D;
     let light: THREE.Object3D | null = null;
@@ -1125,7 +1145,7 @@ export class BountyHunterKit implements Kit {
     laser.quaternion.setFromUnitVectors(UP, tmp.copy(to).sub(start).normalize());
     laser.scale.set(1, len, 1);
     this.scene.add(laser);
-    this.charges.push({ kind: 'trip', mesh, body: null, fuse: 600, damage: TRIP_DAMAGE, radius: TRIP_RADIUS, push: 12, color: 0xff6040, mode: null, spec: null, laser: { from: start, to, mesh: laser }, light: null, armedAt: 0 });
+    this.charges.push({ kind: 'trip', mesh, body: null, fuse: 600, damage: TRIP_DAMAGE, radius: ctx.player.stats.apply('blast.radius', TRIP_RADIUS), push: 12, color: 0xff6040, mode: null, spec: null, laser: { from: start, to, mesh: laser }, light: null, armedAt: 0 });
     return true;
   }
 
@@ -1151,7 +1171,7 @@ export class BountyHunterKit implements Kit {
       body = this.throwBody(ctx, 12, 0.1, 3);
       ctx.player.shotFired();
     }
-    this.charges.push({ kind: 'pack', mesh, body, fuse: 600, damage: PACK_DAMAGE, radius: PACK_RADIUS, push: 14, color: 0xffa050, mode: null, spec: null, light, armedAt: 0 });
+    this.charges.push({ kind: 'pack', mesh, body, fuse: 600, damage: PACK_DAMAGE, radius: ctx.player.stats.apply('blast.radius', PACK_RADIUS), push: 14, color: 0xffa050, mode: null, spec: null, light, armedAt: 0 });
     return true;
   }
 

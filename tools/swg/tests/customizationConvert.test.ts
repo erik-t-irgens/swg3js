@@ -112,6 +112,9 @@ const note = (s: string) => console.log(`note ${s}`);
     };
     ok(asks(), 'status asks for the creator table where there is a species index and no table');
     writeFileSync(join(dir, ...CUSTOMIZATION_FILE.split('/')), JSON.stringify(good));
+    // The same command writes progress's challenge table beside it, which status asks after on its own
+    // (`conTable.test.ts`): here it says the archives had none, so only the creator's table is in question.
+    writeFileSync(join(dir, 'characters', 'levels.json'), JSON.stringify({ format: 1, rows: null, why: 'TEST: none' }));
     ok(!asks(), 'and asks for nothing of it once a whole one is there');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -136,6 +139,9 @@ else {
     const run = spawnSync(process.execPath, [cli, 'customization', swg, out, '--retail-only'], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
     ok(run.status === 0, `the command runs (${(run.stdout || run.stderr).trim().split('\n').slice(-2).join(' / ')})`);
     const file = JSON.parse(readFileSync(join(out, ...CUSTOMIZATION_FILE.split('/')), 'utf8'));
+    // And progress's challenge table beside it, by its shape alone: its numbers are the game's and are not printed.
+    const levels = JSON.parse(readFileSync(join(out, 'characters', 'levels.json'), 'utf8'));
+    ok(levels.format === 1 && Array.isArray(levels.rows) && levels.rows.length === 90 && levels.rows.every((r: number[], i: number) => r.length === 10 && r[0] === i + 1 && r[5] === r[0]), 'the same run writes the challenge table beside it: ninety rows of ten, white each row\'s own level');
     const { openVfs } = await import('../tre.mjs');
     const { isRetailByName } = await import('../manifest.mjs');
     const { parseStringTable } = await import('../datatable.mjs');

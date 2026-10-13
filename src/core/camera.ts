@@ -81,6 +81,12 @@ export class ThirdPersonCamera {
   invertY = false;
   /** The field of view when not aiming, degrees. */
   baseFov = 60;
+  /**
+   * How far toward the shoulder the view comes each frame while aiming: a share a frame, as it always was, which
+   * the player's progress writes (`gun.aimRate`, 0.15 until something is earned). The view's only: a shot's
+   * spread does not blend with it.
+   */
+  aimRate = 0.15;
   private aimBlend = 0;
   /** How far the aimed camera has eased in, 0 to 1: the effects narrow with it, not with the key. */
   get aimAmount(): number {
@@ -294,7 +300,7 @@ export class ThirdPersonCamera {
     this.eyeHeight += (eyeHeight - this.eyeHeight) * Math.min(1, dt * 8);
     this.focus.copy(target).addScaledVector(this.up, this.eyeHeight);
     // Aiming a blaster: the view comes in over the right shoulder, and back to the middle after.
-    this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * 0.15;
+    this.aimBlend += ((this.aim ? 1 : 0) - this.aimBlend) * this.aimRate;
     if (this.aimBlend > 0.001 && !this.firstPerson) {
       this.right(shoulder);
       if (this.framed) shoulder.applyQuaternion(this.frame);

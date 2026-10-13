@@ -22,6 +22,7 @@ import { stepBurn as spendBurn } from '../combat/burnMath.ts';
 import { breathReport, maxBreath, newBreath, resetBreath, stepBreath as spendBreath, tuneBreath, type Breath, type BreathTune } from './breathMath.ts';
 import { LAVA_HARM, newLavaHold, resetLavaHold, stepLavaHold, type LavaHold } from '../world/lavaHarmMath.ts';
 import { lavaSinkReport, newLavaSink, resetLavaSink, stepLavaSink as spendLavaSink, tuneLavaSink, type LavaSink, type LavaSinkTune } from './lavaSinkMath.ts';
+import { PlayerStats } from './playerStats.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -304,8 +305,17 @@ export class Player {
   speedMultiplier = 1;
   saberOn = false;
   classId: ClassId = 'jedi';
+  /**
+   * The stats the character's progress makes (`src/player/playerStats.ts`), kept and worked out only when what
+   * grants them changes: every one its base, today's number, until something is earned. Before anything that
+   * reads one, since a field below starts from one of them.
+   */
+  readonly stats = new PlayerStats();
   hp = 100;
-  readonly maxHp = 100;
+  /** Whole health, as progress makes it (100 until Fortitude raises it). It going up leaves `hp` where it is; going down clamps it (`syncStats`). */
+  get maxHp(): number {
+    return this.stats.healthMax;
+  }
   mounted: Vehicle | null = null;
   /** Swing progress in [0, 1], or -1 when idle (the stand-in swing when the rig has no saber clips). */
   swing = -1;
@@ -329,8 +339,8 @@ export class Player {
   hasJkaClips = false;
   /** The saber's flight when thrown (right mouse). */
   readonly thrown = new SaberThrow();
-  /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts). */
-  saberDefense = 3;
+  /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts); it starts at its stat's, which is 3. */
+  saberDefense = this.stats.saberDefense;
   /** Holding the block (right mouse) with the saber lit: the stance is up and bolts are turned away. */
   blocking = false;
   /**
@@ -1497,9 +1507,9 @@ export class Player {
     return false;
   }
 
-  /** Damage of the current style's swing. */
+  /** Damage of the current style's swing, times what progress makes of it (exactly 1 until something does). */
   get saberDamage(): number {
-    return STYLE_DAMAGE[this.saber.style] * this.damageBoost;
+    return STYLE_DAMAGE[this.saber.style] * this.stats.saberDamage * this.damageBoost;
   }
 
   /** What the blade does over its style's damage (Force Rage raises it). */
@@ -1541,6 +1551,15 @@ export class Player {
 
   heal(amount: number): void {
     this.hp = Math.min(this.maxHp, this.hp + amount);
+  }
+
+  /**
+   * The stats moved (`stats.update` answered true): the player's own saber swings at its rate, and health over a
+   * whole that went down comes down to it. A whole that went up leaves health where it is, to fill by regeneration.
+   */
+  syncStats(): void {
+    this.saber.swingScale = this.stats.saberSwing;
+    if (this.hp > this.maxHp) this.hp = this.maxHp;
   }
 
   /**
@@ -2008,7 +2027,7 @@ export class Player {
       return;
     }
     this.regenDelay = Math.max(0, this.regenDelay - dt);
-    if (this.regenDelay <= 0 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + 4 * dt);
+    if (this.regenDelay <= 0 && this.hp < this.maxHp) this.hp = Math.min(this.maxHp, this.hp + this.stats.healthRegen * dt);
     // And the fire, on that same clock and in that same place: a panel pauses both alike, both step
     // under `__debug.advance`, and a burn keeps the regeneration locked out for as long as it lasts
     // because every blow it lands sets the delay above afresh. Before the mounted branch below, so a
@@ -2226,6 +2245,12 @@ export class Player {
       c.jumpPressed = jumpPressed && !this.saber.busy;
       c.attack = input.held('attack');
       c.speedScale = this.speedMultiplier * this.lavaPaceNow * this.paceScale(walking, mz, mx);
+      // What progress makes of a fall and the air, each today's number until something is earned.
+      const st = this.stats;
+      c.fallSafeExtra = st.fallSafeExtra / UNIT;
+      c.rollDivisor = st.rollDivisor;
+      c.rollFree = st.rollFree;
+      c.airAccel = st.airAccel;
       const force = this.force;
       const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
       if (ev.jumped) {

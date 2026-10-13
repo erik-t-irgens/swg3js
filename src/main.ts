@@ -46,7 +46,7 @@ import { MARK_WORLD, marks, type MarkPlace } from './world/marks.ts';
 import { collectBlades, lightAt, litCeiling, type LitSources } from './combat/bladeLights';
 import { CLASH, clashes } from './combat/clash.ts';
 import { SCARS, scarReport, setScars, tuneScars } from './combat/scars.ts';
-import { gunSpeedReport, type GunSpeedTune } from './combat/guns.ts';
+import { GUNS, gunSpeedReport, gunTypeFor, type GunSpeedTune } from './combat/guns.ts';
 import { footprints } from './world/footprints.ts';
 import { loosePropsGroup, propsDebug } from './world/looseProps.ts';
 import { saberHitReport, type SaberHitTune } from './combat/saberHit.ts';
@@ -111,6 +111,13 @@ import type { RoomDoor } from './world/nav/navRooms.ts';
 import { CITY_TUNE, CityWatch, tuneCities } from './story/cities.ts';
 import { BookClient, STORY_TUNE, tuneStory, type StoryResult } from './story/bookClient.ts';
 import { browserStoryStorage } from './story/storyStore.ts';
+import { ProgressClient, type ProgressDebugAsk } from './progress/progressClient.ts';
+import { LEVELS_PATH, LevelsFile } from './progress/levelsFile.ts';
+import { challengeOf } from './progress/challenge.ts';
+import { BUILT_CORE, ratingOf } from './progress/core.ts';
+import { spSpent } from './progress/record.ts';
+import { STATS, statDef, type StatDef, type StatId } from './progress/stats.ts';
+import { PROGRESS_LIMITS, PROGRESS_RULES, PROGRESS_TUNE, tuneProgress } from './progress/tune.ts';
 import { JOBS_WAIT_CREDITS, LocalHost, jobsWait, payLocally, type JobsLine, type LocalWallet } from './story/localHost.ts';
 import { JOBS_WAIT_OLD, JOBS_WAIT_UNREAD, REMOTE_TUNE, RemoteHost, tuneRemote } from './story/remoteHost.ts';
 import { STORY_WIRE, type StoryAt } from './story/storyWire.ts';
@@ -978,6 +985,15 @@ class App {
     known: () => knownToServer(this.current),
   });
   /**
+   * The character's progress (src/progress/progressClient.ts): the record this browser keeps of the character in
+   * play -- its core skills, its pools and the nodes it owns -- which this browser holds alone until a server's
+   * greeting says it holds progress. A field initialiser so the session's hooks can reach it from anywhere in the
+   * constructor; it keeps its record beside the story book's, in this browser's storage.
+   */
+  private readonly progress = new ProgressClient({ store: browserStoryStorage(), now: () => sharedClock.now() });
+  /** The game's own challenge table as the converter wrote it, fetched once; the fallback bands of ours until it lands, and for good without it. */
+  private readonly levelsFile = new LevelsFile();
+  /**
    * The jobs, held by this browser while nobody else holds the book (src/story/localHost.ts): the shared
    * rules over the book above and the sets read here, paying out of the character's own purse and
    * backpack. Everything it needs is read at the moment it asks, so it can be a field initialiser.
@@ -1776,7 +1792,7 @@ class App {
       now: () => sharedClock.now(),
       // The garments' colours moved onto their things once, behind the loading screen: a new shape of the
       // same record, which the session adopts without counting a change.
-      rewritten: (was, now) => this.net.session.noteRewritten(this.storyMarked(was), this.storyMarked(now)),
+      rewritten: (was, now) => this.net.session.noteRewritten(this.marked(was), this.marked(now)),
       baseUrl: import.meta.env.BASE_URL,
     });
     // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
@@ -7696,6 +7712,53 @@ class App {
         return { results, book: this.story.book?.companion ?? null, view: this.jobs.view()?.companion ?? null, keeper: this.companion.report(at.x, at.z), followers: this.world.followers.count, host: this.jobs.kind };
       },
       /**
+       * The character's progress (`src/progress/`): who holds the record, Skill Points spent of 250, the challenge
+       * level they give, each built core skill's XP and rating, the pools, the nodes owned, whether the game's own
+       * challenge table is converted, and every stat that stands away from its base. `{ grant: 'demo.ordnance.1' }`
+       * learns a node, and whatever it needs above it, for no XP, Skill Points or teacher; `{ surrender: id }` takes
+       * one away with whatever stands on it; `{ xp: { demolitions: 5000, marksmanship: 400 } }` gives XP (or takes it
+       * under nought); `{ reset: true }` empties the record; `{ rules: { base: 30 } }` moves `PROGRESS_RULES`,
+       * `{ limits }` and `{ tune }` the limits and the pacing; `{ rate: 2 }` the XP rate. Every one goes through the
+       * record's own changes, as anything that earns will.
+       */
+      progress: (opts?: ProgressDebugAsk & { limits?: Partial<typeof PROGRESS_LIMITS>; tune?: Partial<typeof PROGRESS_TUNE> }) => {
+        const results = opts ? this.progress.debug(opts) : [];
+        if (opts?.limits || opts?.tune) {
+          const tuned = tuneProgress({ limits: opts.limits, tune: opts.tune });
+          if (tuned.held) results.push({ limits: 'moved', held: tuned.held });
+        }
+        this.applyProgressStats();
+        const rec = this.progress.record;
+        const sp = spSpent(rec);
+        return {
+          results,
+          holder: this.progress.host,
+          sp: { spent: sp, of: PROGRESS_RULES.spCap },
+          challenge: challengeOf(sp),
+          levels: this.levelsFile.state,
+          core: Object.fromEntries(BUILT_CORE.map((s) => [s, { xp: rec?.core[s] ?? 0, rating: ratingOf(rec?.core[s] ?? 0, PROGRESS_RULES) }])),
+          pools: { ...(rec?.pools ?? {}) },
+          nodes: Object.keys(rec?.nodes ?? {}).sort(),
+          moved: this.statRows().filter((r) => r.moved),
+          rate: PROGRESS_RULES.xpRate,
+          record: this.progress.report(),
+          statsVersion: this.player.stats.version,
+        };
+      },
+      /**
+       * One stat's breakdown (`'blast.self'`): its base, what each layer does to it and where that came from (a node,
+       * a core skill's rating, a milestone), its clamp and its value -- the doc's "why is my spread 2.3 degrees?". A
+       * stat a weapon or a grenade carries is shown on the one in hand (or the thermal detonator, the proton
+       * grenade, the rocket). With nothing, every stat this pass reads with its base and its value, and `away`,
+       * the ones moved; `{ absent: true }` the ones there is nothing in the game for yet, and why.
+       */
+      stat: (opts?: string | { absent?: boolean }) => {
+        if (typeof opts === 'string') return this.statBreakdown(opts);
+        if (opts?.absent) return STATS.filter((s) => s.status === 'absent').map((s) => ({ id: s.id, label: s.label, category: s.category, why: (s as StatDef).why }));
+        const rows = this.statRows();
+        return { stats: rows, away: rows.filter((r) => r.moved).map((r) => r.id) };
+      },
+      /**
        * The gestures a conversation's lines are said with (`src/story/gestures.ts`): every line of the one
        * under way (or the last) with the clip it played, or stillness and why, its family and its words;
        * how many gestures the speaker was lent; and `GESTURE_TUNE`. `{ every: true }` makes every line move,
@@ -8487,8 +8550,24 @@ class App {
     // this browser's copy would win the next claim over a server's the player had just chosen.
     this.story.onChange((why, localWas) => {
       if (!this.current || this.creating) return;
-      if (why === 'settled') this.net.session.noteSettled({ ...this.current, story: { local: localWas } }, this.storyMarked(this.current));
-      else this.net.session.noteCharacter(this.storyMarked(this.current));
+      if (why === 'settled') this.net.session.noteSettled({ ...this.marked(this.current)!, story: { local: localWas } }, this.marked(this.current));
+      else this.net.session.noteCharacter(this.marked(this.current));
+    });
+    // The character's progress the same way: a batch applied with nobody else holding the record is a change to
+    // the character (`characterMark`'s `progress.local`), and a settle that takes the count back to nought is
+    // adopted without moving the counter. And whatever changed, the player's stats are worked out again, which
+    // does nothing at all unless what grants them moved.
+    this.progress.onChange((why, localWas) => {
+      this.applyProgressStats();
+      if (!this.current || this.creating) return;
+      if (why === 'settled') this.net.session.noteSettled({ ...this.marked(this.current)!, progress: { local: localWas } }, this.marked(this.current));
+      else this.net.session.noteCharacter(this.marked(this.current));
+    });
+    // The game's own challenge table, once; until it lands, and for good without it, the fallback bands of ours.
+    void this.levelsFile.load(async () => {
+      const res = await fetch(`${import.meta.env.BASE_URL}${LEVELS_PATH}`);
+      if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) return null;
+      return (await res.json()) as unknown;
     });
     // The waypoints on the map's own layer, read each frame the map draws from the book as it stands.
     waypointMapFeed.fill = (out) => this.fillWaypoints(out);
@@ -10367,6 +10446,8 @@ class App {
     // its own. The jobs followed, the detectors' memory, the room they last read (and the building it holds
     // on to) and the things found for the story go with them.
     this.story.use(null);
+    // The progress record goes with it, the same way.
+    this.progress.use(null);
     this.tracker.clear();
     this.storyWatch.reset();
     this.forgetStoryPlace();
@@ -11648,17 +11729,105 @@ class App {
     const hello: Hello = { name: c?.name ?? 'someone', species: this.characterId, class: this.kit?.id ?? 'jedi', planet: this.world.planet?.id ?? '', zone: this.zone, look: c && drawn ? packLook(drawn, c.outfit ?? [], keep) : undefined, held, ship, saber: this.player.bladeColor, mood: c?.mood || undefined };
     // Who the session is about: every connection and every change of world goes through here, so this is
     // where the session learns which character is in play, where it is and what its record holds now.
-    this.net.session.noteCharacter(this.storyMarked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
+    this.net.session.noteCharacter(this.marked(c), { species: hello.species, class: hello.class, planet: hello.planet, zone: hello.zone });
     return hello;
   }
 
   /**
    * The record the session counts changes on, with the story's own count of changes made here with nobody
-   * else holding the book: every call that notes the character goes through this, or the mark would
-   * differ from one call to the next and the counter would rise for nothing.
+   * else holding the book and the progress record's the same: every call that notes the character goes through
+   * this, or the mark would differ from one call to the next and the counter would rise for nothing. Progress's
+   * count is read for the character the mark is about, never off whoever the client holds (a record rewritten
+   * once is marked behind the loading screen before the client holds it).
    */
-  private storyMarked(c: SavedCharacter | null): (SavedCharacter & { story: { local: number } }) | null {
-    return c ? { ...c, story: { local: this.story.local } } : null;
+  private marked(c: SavedCharacter | null): (SavedCharacter & { story: { local: number }; progress: { local: number } }) | null {
+    return c ? { ...c, story: { local: this.story.local }, progress: { local: this.progress.localOf(c.id) } } : null;
+  }
+
+  /**
+   * The player's stats worked out again from the record held, and what reads them outside the player (the
+   * camera's aim blend, a burn's length on the player's record in the world) written, only when what grants
+   * them moved. A payout that crosses no whole rating does nothing here.
+   */
+  private applyProgressStats(): void {
+    const s = this.player.stats;
+    if (!s.update(this.progress.record)) return;
+    this.player.syncStats();
+    this.cam.aimRate = s.aimRate;
+    this.world.playerTarget.burnScale = s.burnScale;
+  }
+
+  /**
+   * What a stat a weapon or a grenade carries is shown on, for the console: the gun in hand's first trigger, the
+   * rocket's, the thermal detonator's or the proton grenade's own number.
+   */
+  private statExample(id: StatId): { on: string; base: number } {
+    const def = this.player.equipped.right;
+    const gun = GUNS[gunTypeFor(def, def ? def.class : this.player.gunClass)];
+    const thermal = GADGETS.find((g) => g.id === 'thermal')?.grenade;
+    switch (id) {
+      case 'gun.spread':
+        return { on: gun.label, base: gun.primary.spread };
+      case 'gun.aimSpread':
+        return { on: gun.label, base: gun.primary.aimSpread };
+      case 'gun.damage':
+        return { on: gun.label, base: gun.primary.damage };
+      case 'gun.refire':
+        return { on: gun.label, base: gun.primary.fireTime };
+      case 'launcher.refire':
+        return { on: GUNS.rocket.label, base: GUNS.rocket.primary.fireTime };
+      case 'throw.speed':
+        return { on: 'Thermal Detonator', base: thermal?.speed ?? NaN };
+      case 'blast.radius':
+        return { on: 'Thermal Detonator', base: thermal?.radius ?? NaN };
+      case 'blast.machines':
+        return { on: 'Proton Grenade', base: GADGETS.find((g) => g.id === 'proton')?.grenade?.machines ?? 1 };
+      default:
+        return { on: '', base: NaN };
+    }
+  }
+
+  /** Every stat this pass reads, with its base and its value as the player's progress makes it: the console's table. */
+  private statRows(): { id: string; label: string; unit: string; status: string; base: number | string; on?: string; value: number; moved: boolean }[] {
+    const s = this.player.stats;
+    const rows: { id: string; label: string; unit: string; status: string; base: number | string; on?: string; value: number; moved: boolean }[] = [];
+    for (const d of STATS as readonly StatDef[]) {
+      if (d.status === 'absent') continue;
+      const id = d.id as StatId;
+      if (typeof d.base === 'number') {
+        const value = s.apply(id, d.base);
+        rows.push({ id, label: d.label, unit: d.unit, status: d.status, base: d.base, value, moved: !Object.is(value, d.base) });
+      } else {
+        const ex = this.statExample(id);
+        rows.push({ id, label: d.label, unit: d.unit, status: d.status, base: ex.base, on: ex.on, value: s.apply(id, ex.base), moved: s.grants.has(id) });
+      }
+    }
+    return rows;
+  }
+
+  /** One stat as `__debug.stat(id)` shows it: base, layers and where each came from, clamp, value. */
+  private statBreakdown(id: string): Record<string, unknown> {
+    const d = statDef(id);
+    if (!d) return { ok: false, why: `there is no stat ${id}`, stats: STATS.map((x) => x.id) };
+    const s = this.player.stats;
+    const sid = d.id as StatId;
+    const ex = typeof d.base === 'number' ? null : this.statExample(sid);
+    const base = typeof d.base === 'number' ? d.base : (ex?.base ?? NaN);
+    return {
+      id: d.id,
+      label: d.label,
+      unit: d.unit,
+      category: d.category,
+      status: d.status,
+      ...(d.by ? { by: d.by } : {}),
+      ...(d.why ? { why: d.why } : {}),
+      base: d.base === null ? null : base,
+      ...(ex ? { on: ex.on } : {}),
+      layers: s.grants.layers(sid),
+      clamp: [d.min, d.max],
+      value: d.status === 'absent' ? null : s.apply(sid, base),
+      reads: d.reads,
+    };
   }
 
   /**
@@ -13182,7 +13351,7 @@ class App {
   private queueHello(): void {
     // What the character owns, wears and flies has changed, whether or not anyone is connected: the
     // counter that settles an evening played offline rises here, and only when the record really moved.
-    this.net.session.noteCharacter(this.storyMarked(this.current));
+    this.net.session.noteCharacter(this.marked(this.current));
     if (!this.net.online) return;
     window.clearTimeout(this.helloTimer);
     this.helloTimer = window.setTimeout(() => {
@@ -13526,6 +13695,8 @@ class App {
     this.select.hide();
     this.creating = true;
     this.current = null;
+    // Nobody's progress is held while a character is made: the new one's is read when it is played.
+    this.progress.use(null);
     // Nobody's hairstyle still loading lands on the new character, whose rig may be the same one.
     this.dropHairChanges();
     this.wardrobe.root.classList.add('creation');
@@ -13695,6 +13866,8 @@ class App {
     // Its story book, from this browser's storage, before anything notes the character: the counter the
     // claim carries reads how many changes the book holds that no server has seen.
     this.story.use(c.id);
+    // And its progress, the same way and for the same reason, which also works the player's stats out from it.
+    this.progress.use(c.id);
     // The NPC pilots' taunts name the character played.
     this.world.ships.playerName = c.name;
     this.traveling = true;

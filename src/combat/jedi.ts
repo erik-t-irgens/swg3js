@@ -378,7 +378,8 @@ export class JediKit implements Kit {
       const yaw = player.heading + (kick === 'L' ? Math.PI / 2 : kick === 'R' ? -Math.PI / 2 : kick === 'B' ? Math.PI : 0);
       a.copy(player.pos).y += 0.8;
       b.set(a.x + Math.sin(yaw) * 1.3, a.y + 0.1, a.z + Math.cos(yaw) * 1.3);
-      this.sweep(ctx, a, b, 0.3, KICK_DAMAGE.min + Math.floor(Math.random() * (KICK_DAMAGE.max - KICK_DAMAGE.min + 1)), this.hitThisSwing, KICK_DAMAGE.push);
+      // The shove times what progress makes of it, exactly 1 until Melee moves it.
+      this.sweep(ctx, a, b, 0.3, KICK_DAMAGE.min + Math.floor(Math.random() * (KICK_DAMAGE.max - KICK_DAMAGE.min + 1)), this.hitThisSwing, KICK_DAMAGE.push * player.stats.meleePush);
     }
     // The dual kata's circling sabers cut everything they pass, again each half turn.
     if (player.orbiting) {

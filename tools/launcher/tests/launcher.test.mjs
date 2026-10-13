@@ -446,6 +446,11 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   const storyLost = [...storyFiles, 'src/net/hash.ts'].filter((f) => !packedPaths.has(f));
   ok(storyFiles.length > 0 && storyFiles.some((f) => f.startsWith('src/story/testSet/quests/')) && storyFiles.some((f) => f.startsWith('src/story/core3/')) && !storyLost.length, `the release carries the story's rules, its test set, the adoptions of the emulator's conversations and the hashing they may use (${storyFiles.length} files${storyLost.length ? `; missing ${storyLost.join(', ')}` : ''})`);
   ok(!packed.some((f) => /(^|\/)story-private(\/|$)/i.test(f.path)), 'and nothing of story-private');
+  // Progress's rules the same way: a folder rule, every `.ts` under `src/progress/` whether or not anything
+  // imports it yet, since the server will run them as they are.
+  const progressFiles = storyWalk(join(root, 'src', 'progress'), 'src/progress/').filter((f) => f.endsWith('.ts'));
+  const progressLost = progressFiles.filter((f) => !packedPaths.has(f));
+  ok(progressFiles.length >= 10 && progressFiles.includes('src/progress/record.ts') && !progressLost.length, `the release carries progress's rules, every file of the folder (${progressFiles.length} files${progressLost.length ? `; missing ${progressLost.join(', ')}` : ''})`);
   const lib = join(scratch, 'importer');
   mkdirSync(join(lib, 'tools'), { recursive: true });
   writeFileSync(join(lib, 'tools', 'a.mjs'), "import './b.mjs';\nconst x = await import('../src/c.ts');\nnew URL('./d.json', import.meta.url);\nimport './gone.mjs';");

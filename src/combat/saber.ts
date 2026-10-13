@@ -476,6 +476,11 @@ export class SaberCombat {
   attackId = 0;
   /** Where its whooshes are heard, and whose they are cancelled as: the player's unless a body hands in its own. */
   voice: SaberVoice = PLAYER_VOICE;
+  /**
+   * What every move's speed is times: the player's own saber takes it from their progress (`Player.syncStats`),
+   * and every other body's stays exactly 1.
+   */
+  swingScale = 1;
   private buffered = false;
   /**
    * What `update` hands back when the move changes, kept and written into rather than made: a body
@@ -672,7 +677,7 @@ export class SaberCombat {
     else if (move.kind === 'attack') this.chainCount = Math.min(16, this.chainCount + 1);
     if (move.kind === 'attack' || move.kind === 'special') this.attackId++;
     const anim = animOf(move, this.style);
-    const speed = animSpeed(move, this.style);
+    const speed = animSpeed(move, this.style) * this.swingScale;
     const loop = move.kind === 'ready';
     const natural = clipDuration(anim);
     // Without the animation, the stand-in timing keeps chains playable: swings 0.45 s, arcs 0.25 s.
