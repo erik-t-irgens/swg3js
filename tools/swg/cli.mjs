@@ -81,6 +81,10 @@
 //                                                                  converted world plants (a trunk, a few cylinders round a rock, nothing at all
 //                                                                  for a bush), into flora-collision.json beside its manifest (extent.mjs). It
 //                                                                  converts no model; snapshot and flora write the same file as they convert
+//   node tools/swg/cli.mjs radial <swg-dir> <out-dir> [--only=naboo,tatooine]   the pictures of every converted world's grass, flowers, reeds,
+//                                                                  ferns and far tree cards (the terrain's radial flora), as terrain/radial.json
+//                                                                  and terrain/radial.rgba beside its terrain file (radial.mjs). It converts no
+//                                                                  model and writes only those two files, each beside itself and renamed over its name
 //   node tools/swg/cli.mjs doors <swg-dir> <out-dir>                the doors standing in every converted portal building's doorways (each portal's
 //                                                                  door style and hardpoint, the client's door style table and the sounds its
 //                                                                  effects name), into doors.json beside each pack's manifest, and the door
@@ -231,6 +235,8 @@ const REGIONS = createRequire(import.meta.url)('./regions/regions.json');
 import { frameCheck, mergePlaceLists, namePorts, placeKey, portKindOf, portLabel, portsWithoutRow, readClientPlaces, title } from './places.mjs';
 import { isZoneGate, writeZoneGates } from './gates.mjs';
 import { COLOR_RAMPS, downscaleRgba, groundStatus, writeColorRamps, writeGroundTextures, writeTerrainBitmaps } from './terrainShaders.mjs';
+import { radialStatusOf } from './radial.mjs';
+import { snapshotCategories, strayCategories } from './worldManifest.mjs';
 import { exportSky } from './sky.mjs';
 import { exportWater, readWaterHarm, waterHarmLines, waterPackNeedsHarm } from './water.mjs';
 import { convertSounds, soundStatus } from './sound.mjs';
@@ -2515,6 +2521,8 @@ function packStatus(dir) {
   const wantFloraCards = [];
   /** Every leaf card shader the worlds' own tables name, which the table beside the packs must hold too. */
   const cardShaders = new Set();
+  /** The worlds whose radial flora (grass and the far tree cards) has no pictures, or pictures from another terrain, each with why. */
+  const wantRadial = [];
   for (const planet of GAME_PLANETS) {
     const packDir = join(dir, planet);
     const manifest = readJson(join(packDir, 'manifest.json'));
@@ -2532,6 +2540,8 @@ function packStatus(dir) {
     const terrain = existsSync(join(packDir, 'terrain.trn'));
     // The ground's pictures, border masks and colour ramps (terrainShaders.mjs), each older shape asked for again.
     const ground = groundStatus(planet, readJson(join(packDir, 'terrain/shaders.json')), readJson(join(packDir, COLOR_RAMPS)));
+    // The grass and the far tree cards (the terrain's radial flora): their pictures, beside the terrain file (radial.mjs).
+    const radial = radialStatusOf(planet, packDir);
     const layers = existsSync(join(packDir, 'terrain')) ? readdirSync(join(packDir, 'terrain')).filter((f) => f.endsWith('.lay')).length : 0;
     const sky = readJson(join(packDir, 'sky.json'));
     const water = readJson(join(packDir, 'water.json'));
@@ -2593,6 +2603,7 @@ function packStatus(dir) {
       gates ? `${gates.gates.length} zone gates${gates.gates.filter((g) => !g.to).length ? `, ${gates.gates.filter((g) => !g.to).length} leading nowhere named` : ''}` : null,
       terrain ? `terrain${layers ? ` + ${layers} building layers` : ''}` : 'NO TERRAIN',
       ground.line,
+      radial.line,
       sky ? `sky (${sky.blocks.length} blocks${sky.weather ? `, weather ${new Set(sky.blocks.map((b) => b.cameraEffect?.file).filter(Boolean)).size} effects` : ', NO WEATHER'})` : 'NO SKY',
       water ? `water (${Object.keys(water.shaders ?? {}).length} shaders, ${Object.values(water.shaders ?? {}).filter((s) => s.kind === 'lava').length} lava${waterPackNeedsHarm(water) ? ', NO WATER VALUES' : ''})` : terrain ? 'NO WATER LOOK' : null,
       withCells.length ? (floored ? `floors ${floored}/${withCells.length} buildings${graphOnly ? ', GRAPHS ONLY (no walkable meshes)' : ''}${floorless ? `, ${floorless} with none in the archives` : ''}` : 'NO FLOORS') : null,
@@ -2674,6 +2685,9 @@ function packStatus(dir) {
     // The client's own lower detail levels and each indoor object's room (step 7): a pack without them draws
     // every placed thing and plant at its finest at every distance, and finds a room's furniture by its boxes.
     else if (objects && (manifest.lodFormat ?? 0) < LOD_FORMAT) need(`snapshot <swg-dir> all ${dir} --radius=all --retail-only`, (manifest.lodFormat ?? 0) < 1 ? `${planet}'s placed models and flora were converted before the client's own detail levels (every one drawn at its finest at any distance)` : `${planet}'s placed models and flora carry detail levels the game can never draw or that stand somewhere else than the model, and a few surfaces a detail map with no coordinates for it`);
+    // Categories an older command left that no snapshot writes (worldManifest.mjs): their models carry the stamp
+    // the manifest says and were never converted at it. A snapshot takes them out.
+    else if (objects && strayCategories(manifest).length) need(`snapshot <swg-dir> ${planet} ${packDir} --center=auto --radius=all --retail-only`, `${planet}'s manifest still carries ${strayCategories(manifest).join(', ')}, which no snapshot writes any more: their models were never converted at the material format the manifest is stamped with`);
     // Travel and the fittings both hang off the same blocks of the emulator's scripts (the Core3 reference),
     // and both must run after the world they join to. A world the scripts really say nothing about
     // writes no file at all, so "none" and "not run yet" cannot be told apart here and the ask is
@@ -2691,6 +2705,7 @@ function packStatus(dir) {
     // keyed by template: wanted again whenever what the table was built from is newer than it.
     if (objects && objEffectsStale(packDir, ['layout.json', 'fittings.json', 'travel.json'])) wantObjEffects = true;
     if (floraCollision.stale) wantFloraCollision.push(`${planet} (${floraCollision.why})`);
+    if (terrain && radial.why) wantRadial.push(radial.why);
     // The leaf cards' class and their bled pictures come with the flora command alone; a world's flora from
     // before carries neither, and the game stands its cards on the names until it does.
     if (floraCardsCurrent(packDir, manifest.categories?.flora) === false) wantFloraCards.push(planet);
@@ -2727,6 +2742,8 @@ function packStatus(dir) {
     const lacking = [...cardShaders].filter((k) => !Object.prototype.hasOwnProperty.call(held, k));
     if (lacking.length) need(`flora <swg-dir> all ${dir} --retail-only`, `the table of every world's leaf card shaders (flora-cards.json) ${shared ? `lacks ${lacking.length} of them` : 'is not there'}, so a world's placed trees that wear a shader only another world plants are drawn as converted until a world that plants it has been visited`);
   }
+  // One run writes every world's grass pictures, and converts no model (radial.mjs).
+  if (wantRadial.length) need(`radial <swg-dir> ${dir} --retail-only`, wantRadial.length === 1 ? wantRadial[0] : `${wantRadial.length} worlds have no pictures for their grass and far tree cards, or pictures from another terrain (${wantRadial[0]}; ...)`);
   // One run writes every world's file, and needs no model converted again.
   if (wantFloraCollision.length) need(`floracollision <swg-dir> ${dir} --retail-only`, `the trees and rocks on ${wantFloraCollision.length} world${wantFloraCollision.length === 1 ? '' : 's'} are guessed cylinders, a wide tree solid across most of its canopy, instead of the trunks and rocks the client collided with (${wantFloraCollision.slice(0, 3).join(', ')}${wantFloraCollision.length > 3 ? ', ...' : ''})`);
   if (wantFittings) need(`fittings <swg-dir> ${dir} --retail-only`, "no world has the fittings the server stood on its buildings, or a world was converted again after they were written: no elevator panel by a lift, no bank terminal outside a bank, no sign over a cantina's door");
@@ -3637,6 +3654,11 @@ async function snapshotPlanet(vfs, planet, outDir) {
     writeFileSync(join(outDir, 'layout.json'), JSON.stringify(layout));
     const manifestPath = join(outDir, 'manifest.json');
     const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) : { planet, categories: {} };
+    // Only the categories a snapshot makes (worldManifest.mjs): one an older command left is dropped rather than
+    // carried forward under a stamp this run never made true of it.
+    const stray = strayCategories(manifest);
+    if (stray.length) console.log(`manifest: ${stray.join(', ')} left out (no snapshot writes ${stray.length === 1 ? 'it' : 'them'} and nothing with a layout draws ${stray.length === 1 ? 'it' : 'them'})`);
+    manifest.categories = snapshotCategories(manifest.categories);
     manifest.categories.layout = [...models.values()].filter((m) => m && !m.failed);
     manifest.materialFormat = MATERIAL_FORMAT;
     // The placed models and the flora carry their lower detail levels from this run on (step 7).
@@ -6758,6 +6780,50 @@ switch (cmd) {
       blocking += Object.values(file.appearances).filter((a) => a.shapes.length).length;
     }
     console.log(`${worlds} worlds: ${appearances} planted appearances read (one a world plants, so one planted on two worlds is counted on each), ${blocking} with a shape the client collided with and ${appearances - blocking} walked through (${Object.entries(kinds).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`).join(', ')})`);
+    break;
+  }
+
+  case 'radial': {
+    // <swg-dir> <out-dir> [--only=naboo,tatooine]: the pictures of every converted world's radial flora -- its
+    // grass, flowers, reeds and ferns and the far hills' tree cards -- into terrain/radial.json and
+    // terrain/radial.rgba beside its terrain file (radial.mjs). It reads the terrain file the pack carries and the
+    // shaders its live radial affectors place, converts no model, and writes only those two files, each beside
+    // itself and renamed over its own name.
+    if (!pos[2]) usage();
+    const { writeRadial } = await import('./radial.mjs');
+    const vfs = mount(pos[1]);
+    const only = options.only ? new Set(options.only.split(',')) : null;
+    let worlds = 0;
+    let layers = 0;
+    let bytes = 0;
+    let missing = 0;
+    const t0 = performance.now();
+    for (const planet of GAME_PLANETS) {
+      if (only && !only.has(planet)) continue;
+      const outDir = join(pos[2], planet);
+      const trnPath = join(outDir, 'terrain.trn');
+      if (!existsSync(trnPath)) continue;
+      const trn = readFileSync(trnPath);
+      const { parseTerrainTemplate } = await import('../../src/swg/terrain/trn.ts');
+      let template;
+      try {
+        template = parseTerrainTemplate(new Uint8Array(trn));
+      } catch (err) {
+        console.log(`${planet}: terrain.trn not read (${err.message})`);
+        continue;
+      }
+      if (!template.generator.radialGroup.childCount) {
+        console.log(`${planet}: no radial flora in its terrain`);
+        continue;
+      }
+      process.stdout.write(`${planet}:`);
+      const r = writeRadial(vfs, template, trn, outDir, { log: (m) => console.log(m), warn: (m) => console.log(`  ${m}`) });
+      worlds++;
+      layers += r.layers;
+      bytes += r.bytes;
+      missing += r.missing;
+    }
+    console.log(`radial: ${worlds} worlds, ${layers} pictures, ${(bytes / 1048576).toFixed(1)} MB${missing ? `, ${missing} shaders missing` : ''} in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     break;
   }
 

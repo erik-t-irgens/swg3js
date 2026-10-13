@@ -399,6 +399,16 @@ export class LayoutStreamer {
    */
   private readonly regionsByNumber = new Map<number, Region>();
   private readonly exclusionCells = new Map<string, Exclusion[]>();
+  /**
+   * The circle each thing put down in play keeps flora off, by its key, and the circles of things since taken up.
+   * The static flora keeps every circle for good (`unplace` says why); the grass, which is built again whenever a
+   * circle moves, reads only the ones still standing (`liveExclusionsFor`), so a house taken down gives its
+   * grass back.
+   */
+  private readonly placedCircles = new Map<string, Exclusion>();
+  private readonly releasedCircles = new WeakSet<Exclusion>();
+  /** Told of every circle kept off the ground or let go of after the world was read (the grass is built again under it). */
+  onFloraCircle: ((e: Exclusion) => void) | null = null;
   private readonly colliders = new Map<PlacedObject, R.Collider[]>();
   /**
    * Which object template each collider belongs to, so a ray that hits something can say what it is
@@ -905,7 +915,12 @@ export class LayoutStreamer {
     this.noteFootprint(region, placed, def ?? null);
     // A thing put down in a house's rooms loads whenever those rooms can be built, as the layout's own furniture does.
     if (placed.host) this.noteIndoor(placed, this.defOf(placed.host.model));
-    if (p.clear && p.clear > 0) this.addExclusion({ x: p.x, z: p.z, r: p.clear });
+    if (p.clear && p.clear > 0) {
+      const circle = { x: p.x, z: p.z, r: p.clear };
+      this.addExclusion(circle);
+      this.placedCircles.set(p.template, circle);
+      this.onFloraCircle?.(circle);
+    }
     this.largestRadius = Math.max(this.largestRadius, Math.min(placed.radius, COLLIDER_RADIUS_CAP));
     // The collider pass only re-sweeps once the player has moved twelve metres; a house put down at
     // their feet has to be solid before that, so the memory of where it last swept is thrown away.
@@ -951,13 +966,21 @@ export class LayoutStreamer {
    * Two things it does not undo, both deliberately. The patch of ground it kept the procedural
    * flora off stays kept: the flora is drawn into a chunk when the chunk is built, so putting the
    * exclusion back would leave a bald patch on every chunk already standing and grow trees only on
-   * the ones built after. And the widest radius the collider sweep reaches for is left where it is,
+   * the ones built after. (The grass is built again whenever a circle moves, so it alone gets the
+   * ground back: `liveExclusionsFor`.) And the widest radius the collider sweep reaches for is left where it is,
    * which only ever makes that sweep look a little further than it needs to.
    */
   unplace(template: string): boolean {
     const placed = this.placedByKey.get(template);
     if (!placed) return false;
     this.placedByKey.delete(template);
+    // Its circle stays kept for the trees and the plants (above); the grass gives the ground back.
+    const circle = this.placedCircles.get(template);
+    if (circle) {
+      this.placedCircles.delete(template);
+      this.releasedCircles.add(circle);
+      this.onFloraCircle?.(circle);
+    }
     const i = this.objects.indexOf(placed);
     if (i >= 0) this.objects.splice(i, 1);
     // A house taken up hosts nothing more, and what stood in it is drawn as it was before anything was
@@ -1087,7 +1110,9 @@ export class LayoutStreamer {
     const key = `${x},${z},${r}`;
     if (this.keptOff.has(key)) return;
     this.keptOff.add(key);
-    this.addExclusion({ x, z, r });
+    const circle = { x, z, r };
+    this.addExclusion(circle);
+    this.onFloraCircle?.(circle);
   }
 
   /**
@@ -1140,6 +1165,13 @@ export class LayoutStreamer {
   /** Scatter exclusions touching a terrain chunk. */
   exclusionsFor(cx: number, cz: number): Exclusion[] {
     return this.exclusionCells.get(`${cx},${cz}`) ?? [];
+  }
+
+  /** The circles touching a terrain chunk that still stand (a thing taken up has let its own go), into `out`, each once. What the grass is kept off. */
+  liveExclusionsFor(cx: number, cz: number, out: Exclusion[]): void {
+    const list = this.exclusionCells.get(`${cx},${cz}`);
+    if (!list) return;
+    for (const e of list) if (!this.releasedCircles.has(e) && !out.includes(e)) out.push(e);
   }
 
   /** Open ground near a point that no object's footprint covers, or null. */

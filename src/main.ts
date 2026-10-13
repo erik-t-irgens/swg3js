@@ -342,6 +342,7 @@ import { cardsReport, setCardTune, type CardTune } from './world/cardRule.ts';
 import { CARD_LIGHT_ON, CARD_LIGHT_STATS, CARD_LIGHT_TUNE, CARD_LIGHT_UNIFORMS, LEAF_SHADOW_ON, setCardLightTune, type CardLightTune } from './world/cardLight.ts';
 import { cardLightSelfTest, cardsSelfTest, leafShadowSelfTest } from './world/cardSelfTests.ts';
 import { SWAY_TUNE, setSwayTune, swayModel, swayReport, swaySelfTest, type SwayTune } from './world/floraSway.ts';
+import { FAR_CARD_TUNE, FAR_CARDS_ON, GRASS_ON, GRASS_STATS, GRASS_STUDY, GRASS_SWAY, GRASS_TUNE, setFarCardTune, setGrassTune, writeGrassUniforms, type FarCardKnob, type GrassKnob } from './world/grass.ts';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
 import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { SWOOSH_TUNE } from './world/swooshTrail.ts';
@@ -4612,6 +4613,68 @@ class App {
       },
       /** Render a probe built from the sway's own chunk into a float target and compare it with `swayMath.swayOffset` to a millimetre. */
       swaySelfTest: () => swaySelfTest(this.renderer),
+      /**
+       * The grass (`src/world/grass.ts`, `GRASS_TUNE`, `GRASS_SWAY`; `src/world/grassMath.ts` places it): the terrain's radial
+       * flora round the eye. `grass()` says whether it is on (and its escape hatch), the world's pictures and tiling, the
+       * chunks in the window built and drawn, the tufts and those in reach of the eye, the share of a screen they cover, the
+       * build time a chunk, what the placing dropped and why, the program, and the research's own count for this world beside
+       * ours. `grass({ on, reach, fade, fadeBand, window, cutoff, mipScale, facing, perTile, jitter, jitterMin, tint, water,
+       * density, sway: { amp, periodScale, periodMin, useChild, stiff }, rebuild })` moves any of it (uniforms, or the window
+       * built again for the knobs that place); `grass({ roads: false })` stops roads and rivers clearing the flora, which the
+       * terrain's worker takes at the next world load.
+       */
+      grass: (opts: GrassKnob & { roads?: boolean } = {}) => {
+        const { roads, ...rest } = opts;
+        if (typeof roads === 'boolean') TERRAIN_GROUND_TUNE.roadsClearFlora = roads;
+        const rebuild = setGrassTune(rest);
+        if (rebuild) this.world.grass?.rebuildAll();
+        writeGrassUniforms(this.world.grassWorld);
+        const r = this.world.grass?.report(this.cam.camera) ?? null;
+        const setup = this.world.grass?.world ?? null;
+        const programs = (this.renderer.info.programs ?? []) as unknown as { name: string }[];
+        const s = GRASS_STATS;
+        return {
+          on: GRASS_TUNE.on,
+          escapeHatch: GRASS_ON ? 'on' : "off for this load (localStorage['swg.grass'] = '0')",
+          tune: { ...GRASS_TUNE },
+          sway: { ...GRASS_SWAY, stiff: GRASS_SWAY.stiff.source },
+          roadsClearFlora: TERRAIN_GROUND_TUNE.roadsClearFlora,
+          world: setup ? { pictures: setup.file.layers, near: [...setup.file.shaders.values()].filter((e) => e.near).length, far: [...setup.file.shaders.values()].filter((e) => e.far).length, tiling: { ...setup.near } } : !GRASS_ON ? 'not loaded: the escape hatch is set for this load' : 'none (this world plants no radial flora, or its pack has no radial pictures: run the radial pass)',
+          ...(r ? { chunks: r.chunks, built: r.built, draws: r.draws, tufts: r.tufts, tuftsInReach: r.inReach, tuftsInView: r.inView, reach: r.reach, fillScreens: r.fillScreens } : {}),
+          study: GRASS_STUDY[this.world.planet.id]?.tufts ? { tuftsInRingMean: GRASS_STUDY[this.world.planet.id].tufts[0], p90: GRASS_STUDY[this.world.planet.id].tufts[1] } : null,
+          builds: s.builds,
+          msPerChunk: s.builds ? Number((s.buildMs / s.builds).toFixed(3)) : 0,
+          lastMs: Number(s.lastBuildMs.toFixed(3)),
+          placing: { ...s.place },
+          programs: programs.filter((p) => p.name === 'grass').length,
+          ...(rebuild ? { rebuilt: true } : {}),
+        };
+      },
+      /**
+       * The far hills' tree cards (`src/world/grass.ts`, `FAR_CARD_TUNE`): the terrain's far radial flora, drawn beyond the
+       * near chunks (where our own trees stand) to the far tiling's end. `farCards()` says whether they are on, the far
+       * tiles with cards built and drawn, the cards, those hidden over a near chunk, those shown within reach, what the
+       * placing dropped and the research's own count for this world; `farCards({ on, reach, fadeBand, jitterMin, water,
+       * perFrame, rebuild })` moves any of it.
+       */
+      farCards: (opts: FarCardKnob = {}) => {
+        const rebuild = setFarCardTune(opts);
+        if (rebuild) this.world.farCards?.rebuildAll();
+        writeGrassUniforms(this.world.grassWorld);
+        const r = this.world.farCards?.report(this.cam.camera.position) ?? null;
+        const s = GRASS_STATS;
+        return {
+          on: FAR_CARD_TUNE.on,
+          escapeHatch: FAR_CARDS_ON ? 'on' : "off for this load (localStorage['swg.farCards'] = '0')",
+          tune: { ...FAR_CARD_TUNE },
+          ...(r ?? {}),
+          study: GRASS_STUDY[this.world.planet.id]?.far ? { inRingMean: GRASS_STUDY[this.world.planet.id].far[0], p90: GRASS_STUDY[this.world.planet.id].far[1], note: 'the research counted the far tiling\'s whole ring; ours starts where our own trees stop' } : null,
+          builds: s.farBuilds,
+          msPerTile: s.farBuilds ? Number((s.farBuildMs / s.farBuilds).toFixed(3)) : 0,
+          placing: { ...s.farPlace },
+          ...(rebuild ? { rebuilt: true } : {}),
+        };
+      },
       /**
        * The fountains: `fountains()` says what the basins' water and the fountains' own spray are drawn
        * with, and `fountains({ color: '#5d7a70', opacity: 0.45, ripple: 0.8, drift: 0.5, spray: 0.45 })`

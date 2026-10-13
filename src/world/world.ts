@@ -36,15 +36,17 @@ import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './
 import { FLORA_WARM, FloraPlanter } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
+import { FAR_CARDS_ON, FarCards, GRASS_ON, GrassField, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
+import type { RadialChild } from '../swg/terrain/flora.ts';
 import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
 import { MaterialScan, SCAN_TUNE, SceneAdds, type ScanHost } from './sceneAdds.ts';
 import { GROUND_NORMAL, GROUND_TILES_WANTED, groundSelfTest, groundTileUniforms, groundTilesMaterial, setGroundClock, TerrainTextures, writeGroundDraw, type GroundSelfTest } from './terrainTextures.ts';
-import { GROUND_DRAW_TUNE, groundChunkAt, type CornerName, type GroundColour, type GroundShine } from './groundTiles.ts';
+import { GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, type CornerName, type GroundColour, type GroundShine } from './groundTiles.ts';
 import { AssetPack, lowerLevels, type LoadedModel } from './assetPack';
 import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
-import { CHUNK_SIZE, chunkHeightfield, Terrain } from './terrain';
+import { CHUNK_SIZE, chunkHeightfield, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
@@ -1664,6 +1666,9 @@ export class World {
           this.packProgress = 0.7;
           await this.loadGroundTextures(pack);
           if (token !== this.loadToken) return null;
+          // The grass and the far hills' tree cards (the terrain's radial flora), once the ground they stand on is.
+          await this.loadGrass(pack, swg);
+          if (token !== this.loadToken) return null;
           this.packProgress = 0.85;
           await this.loadSky(pack, spawn);
           if (token !== this.loadToken) return null;
@@ -1717,6 +1722,8 @@ export class World {
       this.layoutStream.waterSurface = (geometry, matrix, name) => this.basinWaterBody(geometry, matrix, name);
       // The doors in its buildings' doorways, stood with each building's rooms (`doors.ts`).
       this.layoutStream.doorHost = this.doors;
+      // A circle kept off the ground after the world was read (a house put down or taken up): the grass under it is built again.
+      this.layoutStream.onFloraCircle = (e) => this.grass?.circleChanged(e.x, e.z, e.r);
       // A placed object losing its collision while the world goes on: anybody standing raised on it is
       // held where they stand until it is solid again, rather than dropped through it (`perch.ts`).
       this.layoutStream.onFloorGone = (x, z, footprint) => this.mobiles?.perchOver(x, z, footprint);
@@ -1781,6 +1788,7 @@ export class World {
       this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
     }
     this.farTiles.clear();
+    this.farCards?.clear();
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
     this.lastTx = Number.NaN;
@@ -1872,6 +1880,8 @@ export class World {
       t.geometry.dispose();
     }
     this.farTiles.clear();
+    // The grass went with its chunks above; the far cards and the world's pictures go now.
+    this.dropGrass();
     // Drawn again by default: only a world whose ground is the client's empty punch-out hides it.
     this.chunkRoot.visible = true;
     // A dungeon copy's locks go with the world its copies were in.
@@ -2872,6 +2882,8 @@ export class World {
 
   private disposeChunk(c: Chunk): void {
     this.floraField?.remove(c.key);
+    // Its grass first, taken down and freed by the field that keeps its record.
+    this.grass?.chunkGone(c.cx, c.cz);
     this.chunkRoot.remove(c.group);
     c.group.traverse((o) => {
       if (o instanceof THREE.Mesh && !(o instanceof THREE.InstancedMesh)) o.geometry.dispose();
@@ -2991,6 +3003,92 @@ export class World {
 
   /** One instanced stand-in per flora primitive, compiled behind the loading screen and never drawn (commit 4c). */
   private floraWarm: THREE.InstancedMesh[] = [];
+
+  /** The session's one material for every tuft of grass and every far tree card (`grass.ts`), made at the first world that has them and kept. */
+  private grassMat: THREE.ShaderMaterial | null = null;
+  /** One tuft drawn with it, compiled behind every loading screen and never shown. */
+  private grassStand: THREE.Mesh | null = null;
+  /** The grass in the window round the eye, and the far hills' tree cards, for the world now standing (null before any has had them). */
+  grass: GrassField | null = null;
+  farCards: FarCards | null = null;
+  /** The world's radial flora as whichever of the two holds it (the far cards alone hold it with the grass's escape hatch set), or null. */
+  get grassWorld(): GrassSetup | null {
+    return this.grass?.world ?? this.farCards?.world ?? null;
+  }
+  /** This world's radial pictures, disposed when it goes. */
+  private grassPictures: THREE.DataArrayTexture | null = null;
+  /** What the grass and the far cards ask of the world. */
+  private readonly grassHost: GrassHost = {
+    circlesFor: (cx, cz, out) => this.layoutStream?.liveExclusionsFor(cx, cz, out),
+    adopt: (mesh) => {
+      // Its material was adopted and compiled with the stand-in behind the loading screen, so this is a set lookup.
+      const fresh = this.adoptMaterials(mesh);
+      if (fresh.length) this.compileObjects(fresh);
+      // A far tile's cards hang under the ground's root: offered to the exit narrowing with their sphere (in the
+      // world's frame, the mesh standing at the origin). A chunk's grass rides its chunk's own.
+      const m = mesh as THREE.Mesh;
+      if (mesh.parent === this.chunkRoot && m.geometry?.boundingSphere) markNarrowRoot(mesh, m.geometry.boundingSphere);
+    },
+    chunkLoaded: (cx, cz) => this.chunks.has(`${cx},${cz}`),
+  };
+
+  /**
+   * The world's radial flora (`grass.ts`): its pictures out of the pack (the `radial` pass's), the session's one
+   * material handed them and uploaded now, behind the loading screen, and the grass and the far cards told of the
+   * world. A pack without the pictures has neither, as before. The stand-in compiled by the loading screen's sweep
+   * makes the one program every tuft and card draws with.
+   */
+  private async loadGrass(pack: AssetPack, swg: SwgTerrain): Promise<void> {
+    const token = this.loadToken;
+    this.dropGrass();
+    if (!GRASS_ON && !FAR_CARDS_ON) return;
+    if (!swg.template.generator.radialGroup.childCount) return;
+    const loaded = await loadRadialPack((f) => pack.bytes(f), World.anisotropy);
+    if (!loaded) return;
+    // A travel or a leave while the pictures were on their way: this world is not the one standing any more, so
+    // nothing of it is handed to the material, uploaded or kept (as `loadLava` drops its own).
+    if (token !== this.loadToken) {
+      loaded.texture.dispose();
+      return;
+    }
+    const mat = (this.grassMat ??= grassMaterial());
+    this.grassPictures = loaded.texture;
+    setGrassPictures(loaded.texture);
+    if (this.renderer) this.renderer.initTexture(loaded.texture);
+    // Each child's key worked out once a world, so placing a chunk makes no string a tuft.
+    const keys = new Map<RadialChild, string>();
+    for (const f of swg.template.generator.radialGroup.families.values()) for (const c of f.children) keys.set(c, shaderKey(c.shader));
+    const flora = swg.template.flora;
+    const setup: GrassSetup = {
+      src: swg,
+      world: { group: swg.template.generator.radialGroup, shaders: loaded.file.shaders, keyOf: (c) => keys.get(c) ?? shaderKey(c.shader) },
+      file: loaded.file,
+      near: flora.radial,
+      far: flora.farRadial,
+      shift: swg.groundShift,
+      reference: swg.colorReference,
+    };
+    this.grass ??= new GrassField(mat, this.grassHost);
+    this.farCards ??= new FarCards(mat, this.grassHost, this.chunkRoot, FAR_TILE, FAR_TILE_DROP);
+    if (GRASS_ON) this.grass.setWorld(setup);
+    if (FAR_CARDS_ON) this.farCards.setWorld(setup);
+    // The world's reaches and tint into the uniforms whichever of the two is on: the grass writes them as it is
+    // handed the world, but with its escape hatch set the far cards alone would be cut at the default reach.
+    writeGrassUniforms(setup);
+    this.grassStand ??= grassStandIn(mat);
+    this.adoptMaterials(this.grassStand);
+    console.info(`grass: ${loaded.file.layers} pictures (${[...loaded.file.shaders.values()].filter((e) => e.near).length} near, ${[...loaded.file.shaders.values()].filter((e) => e.far).length} far), reach ${flora.radial.maximumDistance} m on ${flora.radial.tileSize} m tiles, far cards to ${flora.farRadial.maximumDistance} m`);
+  }
+
+  /** The world's grass and far cards let go of: their meshes down, their pictures freed. The material stays the session's. */
+  private dropGrass(): void {
+    this.grass?.clear();
+    this.grass?.setWorld(null);
+    this.farCards?.setWorld(null);
+    setGrassPictures(null);
+    this.grassPictures?.dispose();
+    this.grassPictures = null;
+  }
 
   /**
    * The placed models whose programs the next loading-screen sweep builds from stand-ins (step 6,
@@ -4858,6 +4956,11 @@ export class World {
       this.adoptMaterials(o);
       objects.push(o);
     }
+    // One tuft of grass, which is the one program every tuft and every far tree card draws with (`grass.ts`).
+    if (this.grassStand) {
+      this.adoptMaterials(this.grassStand);
+      objects.push(this.grassStand);
+    }
     // Every placed model the old rule would have loaded around the arrival, whose tier the model rule loads
     // later (step 6, `warmPlaced`): a stand-in each, compiled here and let go of after. Only a sweep behind a
     // screen takes them; the Effects switch's in play leaves them for the next one.
@@ -6333,6 +6436,7 @@ export class World {
       this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
     }
     this.farTiles.clear();
+    this.farCards?.clear();
     this.changedN = 0;
     this.lastCx = Number.NaN;
     this.lastCz = Number.NaN;
@@ -6746,6 +6850,10 @@ export class World {
     perf.begin(SEC.streamFar);
     this.streamFar(playerPos, 1);
     perf.end(SEC.streamFar);
+    // The grass round the eye and the far hills' tree cards: a chunk or a tile a frame, and nothing on a frame
+    // that crosses no chunk (`grass.ts`).
+    this.grass?.update(camPos, 1);
+    this.farCards?.update(camPos);
     if (this.layoutStream) {
       perf.begin(SEC.layout);
       // The building the player is in keeps its interior however far its wings reach.
@@ -7706,8 +7814,12 @@ export class World {
       const rebuilt = FAR_TILE_TUNE.local ? this.cutChangedTiles() : this.refreshAllFarTiles();
       perf.end(SEC.farRefresh);
       perf.count(CNT.farTiles, rebuilt);
+      // The far tree cards standing where a chunk came are hidden, where one went shown again: our own trees are drawn there.
+      this.farCards?.chunksChanged(this.changedCx, this.changedCz, this.changedIn, this.changedN);
     }
     this.changedN = 0;
+    // An arrival's or a jump's whole window: its grass built at once, behind whatever screen is up.
+    if (budget === Infinity) this.grass?.update(center, Infinity);
   }
 
   /** Each far tile's cut (commit 4a, `farTile.ts`), for as long as the tile stands. */
@@ -7875,6 +7987,13 @@ export class World {
       const u = geometry.userData as { fullIndex?: ArrayLike<number>; n: number; ox: number; oz: number; step: number };
       if (u.fullIndex) this.farCuts.set(mesh, makeFarTileCut(u.fullIndex, u.n, u.ox, u.oz, u.step, CHUNK_SIZE, this.terrain.groundShift));
       this.cutWhole(mesh);
+      // Its tree cards, out of the same coarse samples (`grass.ts`): built once the eye is within their reach.
+      if (this.farCards && this.terrain.swg) {
+        const o = groundChunkOrigin(w.tx, w.tz, this.terrain.groundShift, FAR_TILE);
+        const grid = this.terrain.swg.farGrid(o.x, o.z, FAR_TILE, FAR_RES, false);
+        const step = FAR_TILE / FAR_RES;
+        if (grid) this.farCards.tileMade(w.tx, w.tz, o.x, o.z, { heights: grid.heights, colors: grid.colors, radialFar: grid.radialFar, n: FAR_RES + 3, step, gx0: o.x - step, gz0: o.z - step });
+      }
       made++;
     }
     if (wanted.length <= made) {
@@ -7888,8 +8007,10 @@ export class World {
         t.geometry.dispose();
         this.farTiles.delete(key);
         this.terrain.releaseFarTile(tx, tz, FAR_TILE, FAR_RES);
+        this.farCards?.tileGone(tx, tz);
       }
     }
+    if (budget === Infinity) this.farCards?.update(center, Infinity);
   }
 
   private createChunk(cx: number, cz: number): void {
@@ -7943,6 +8064,8 @@ export class World {
       this.floraField.add(key, cx, cz, floraData, chunk);
       if (this.floraField.shown) propGroup.visible = false;
     }
+    // Its grass, built under its own group once it is in the window round the eye (`grass.ts`).
+    this.grass?.chunkMade(cx, cz, group);
     const b = this.groundHiddenFor;
     if (b) {
       const r = b.radius + 2;

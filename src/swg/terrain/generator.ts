@@ -2,11 +2,13 @@
 // affectors that build a chunk's height, shader, colour, flora, environment and exclude maps from
 // a .trn's TGEN block. The shader map is laid on the client's 8 m pattern (`snapFamilies`), each
 // painted pole keeps its own choice among its family's alternates, and the colour affectors paint
-// the colour map the client tinted the ground with. The affectors still kept inert (flora radials,
-// ribbons, passability and the like) are parsed so layer bookkeeping stays identical.
+// the colour map the client tinted the ground with. The radial flora (AFDN near, AFDF far) paints two
+// maps of its own over the radial group, as the static flora does over the flora group, and a road or a
+// river clears all four flora maps over its flat part. The affectors still kept inert (ribbons,
+// passability and the like) are parsed so layer bookkeeping stays identical.
 
 import { MultiFractal } from './fractal.ts';
-import { FastRandomGenerator, FloraGroup, hashTuple } from './flora.ts';
+import { FastRandomGenerator, FloraGroup, RadialGroup, hashTuple } from './flora.ts';
 import { ChunkReader, chunkChild, formChild, isForm, nameOf, type IffChunk, type IffForm, type IffNode } from './iff.ts';
 
 // ---------------------------------------------------------------------------
@@ -481,6 +483,9 @@ export interface ChunkData {
   /** Static flora per pole: family id and child choice (0..255) pairs; collidable (trees, rocks) and not (plants). */
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
+  /** Radial flora per pole, family id and child choice pairs as the static maps: near (grass, AFDN) and far (the far hills' tree cards, AFDF). */
+  radialNear: Uint8Array;
+  radialFar: Uint8Array;
   normalMap: Float32Array;
   normalsDirty: boolean;
   /** Environment family id per pole (0 = none): which area's environment rows apply there. */
@@ -493,6 +498,7 @@ export interface ChunkData {
   floraGroup: FloraGroup;
   environmentGroup: EnvironmentGroup;
   rampGroup: ColorRampGroup;
+  radialGroup: RadialGroup;
 }
 
 /**
@@ -501,7 +507,7 @@ export interface ChunkData {
  */
 export type ColorTrace = (by: Affector, index: number, desired: number, amount: number, before: number, after: number) => void;
 
-export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup(), environmentGroup: EnvironmentGroup = new EnvironmentGroup(), rampGroup: ColorRampGroup = new ColorRampGroup()): ChunkData {
+export function createChunkData(startX: number, startZ: number, numberOfPoles: number, distanceBetweenPoles: number, fractalGroup: FractalGroup, shaderGroup: ShaderGroup, bitmapGroup: BitmapGroup = new BitmapGroup(), floraGroup: FloraGroup = new FloraGroup(), environmentGroup: EnvironmentGroup = new EnvironmentGroup(), rampGroup: ColorRampGroup = new ColorRampGroup(), radialGroup: RadialGroup = new RadialGroup()): ChunkData {
   const n = numberOfPoles * numberOfPoles;
   const size = (numberOfPoles - 1) * distanceBetweenPoles;
   return {
@@ -522,6 +528,8 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     excludeMap: new Uint8Array(n),
     floraCollidable: new Uint8Array(n * 2),
     floraNonCollidable: new Uint8Array(n * 2),
+    radialNear: new Uint8Array(n * 2),
+    radialFar: new Uint8Array(n * 2),
     normalMap: new Float32Array(n * 3),
     normalsDirty: true,
     environmentMap: new Uint8Array(n),
@@ -532,6 +540,7 @@ export function createChunkData(startX: number, startZ: number, numberOfPoles: n
     floraGroup,
     environmentGroup,
     rampGroup,
+    radialGroup,
   };
 }
 
@@ -1519,6 +1528,82 @@ export class AffectorFloraStatic extends Affector {
   }
 }
 
+/**
+ * AffectorFloraDynamic (AFDN near, AFDF far): marks poles with a radial family exactly as the static flora
+ * marks them with a flora family -- remove-all clears the pole, otherwise the first float of a generator
+ * seeded with the pole's coordinate hash against the amount times the density decides, an add takes the next
+ * float as the child's choice and a replace removes one family -- over the radial group and two maps of its
+ * own. A legacy terrain drew those numbers from a generator stepped per chunk in the client; the hash is the
+ * rule built, as it is for the static flora and the ground's alternates (`TERRAIN_GROUND_TUNE`).
+ */
+export class AffectorFloraDynamic extends Affector {
+  familyId = 0;
+  operation = Operation.add as number;
+  removeAll = false;
+  densityOverride = false;
+  densityOverrideDensity = 1;
+
+  constructor(tag: 'AFDN' | 'AFDF') {
+    super(tag);
+  }
+
+  affect(wx: number, wz: number, x: number, z: number, amount: number, d: ChunkData): void {
+    if (amount <= 0) return;
+    const map = this.tag === 'AFDN' ? d.radialNear : d.radialFar;
+    const i = (z * d.numberOfPoles + x) * 2;
+    if (this.removeAll) {
+      map[i] = 0;
+      map[i + 1] = 0;
+      return;
+    }
+    const family = d.radialGroup.families.get(this.familyId);
+    if (!family || this.familyId === 0) return;
+    const density = this.densityOverride ? this.densityOverrideDensity : family.density;
+    const rng = new FastRandomGenerator(hashTuple(wx, wz));
+    if (rng.randomFloat() > amount * density) return;
+    if (this.operation === Operation.add) {
+      map[i] = this.familyId;
+      map[i + 1] = Math.floor(rng.randomFloat() * 255);
+    } else if (this.operation === Operation.replace) {
+      // Replace is a removal of one family.
+      if (map[i] === this.familyId) {
+        map[i] = 0;
+        map[i + 1] = 0;
+      }
+    }
+  }
+
+  /** The dynamic affector's own versions, which are numbered unlike the static one's: 0001 brings the operation and remove-all at once, 0002 the density. */
+  load(form: IffForm): void {
+    const v = form.children[0] as IffForm;
+    this.loadHeader(v);
+    const version = Number.parseInt(v.type, 10);
+    const r = new ChunkReader(chunkChild(v, 'DATA')!.data);
+    this.familyId = r.int32();
+    if (version >= 1) {
+      this.operation = r.int32();
+      this.removeAll = r.int32() !== 0;
+    }
+    if (version >= 2) {
+      this.densityOverride = r.int32() !== 0;
+      this.densityOverrideDensity = r.float();
+    }
+  }
+}
+
+/** Clear the four flora maps at a pole: what a road's and a river's flat part do (AffectorRoad::affect, AffectorRiver::affect). */
+function clearFlora(d: ChunkData, i: number): void {
+  const k = i * 2;
+  d.floraCollidable[k] = 0;
+  d.floraCollidable[k + 1] = 0;
+  d.floraNonCollidable[k] = 0;
+  d.floraNonCollidable[k + 1] = 0;
+  d.radialNear[k] = 0;
+  d.radialNear[k + 1] = 0;
+  d.radialFar[k] = 0;
+  d.radialFar[k + 1] = 0;
+}
+
 export class AffectorExclude extends Affector {
   constructor() {
     super('AEXC');
@@ -2180,6 +2265,8 @@ export class AffectorRoad extends AffectorBoundaryPoly {
     const desired = result.height;
     if (dist >= 0 && dist <= width2 * (1 - this.featherDistance)) {
       d.heightMap[i] = this.hasFixedHeights ? this.rampedHeight(wx, wz, original) : desired;
+      // The road's flat part takes every plant off it, the radial ones included (the engine's own rule).
+      if (TERRAIN_GROUND_TUNE.roadsClearFlora) clearFlora(d, i);
     } else {
       const t = dist / width2;
       d.heightMap[i] = this.hasFixedHeights ? this.rampedHeight(wx, wz, original) : lerp(desired, original, t);
@@ -2328,6 +2415,8 @@ export class AffectorRiver extends AffectorBoundaryPoly {
       d.heightMap[i] = desired;
       d.shaderMap[i] = this.bottomFamilyId;
       d.shaderChild[i] = childChoiceAt(wx, wz);
+      // The bed takes every plant off it, the radial ones included (the engine's own rule).
+      if (TERRAIN_GROUND_TUNE.roadsClearFlora) clearFlora(d, i);
     } else if (dist <= subWidth) {
       const t = dist / subWidth;
       d.heightMap[i] = lerp(desired, original, t * t);
@@ -2644,7 +2733,7 @@ export class Layer extends LayerItem {
   }
 }
 
-const INERT_AFFECTORS = new Set(['AFCN', 'ARCN', 'AFDN', 'AFDF', 'ARIB', 'APAS']);
+const INERT_AFFECTORS = new Set(['AFCN', 'ARCN', 'ARIB', 'APAS']);
 const SKIPPED = new Set(['BALL', 'BSPL', 'AHSM', 'AHBM', 'ACBM', 'ASBM', 'AFBM']);
 
 /** TerrainGeneratorLoader::loadLayerItem */
@@ -2738,6 +2827,11 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
       item = new AffectorFloraStatic(t);
       (item as AffectorFloraStatic).load(form);
       break;
+    case 'AFDN':
+    case 'AFDF':
+      item = new AffectorFloraDynamic(t);
+      (item as AffectorFloraDynamic).load(form);
+      break;
     case 'AROA':
       item = new AffectorRoad();
       (item as AffectorRoad).load(form);
@@ -2774,8 +2868,14 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
  * one rule built is `'hash'`, the engine's rule for every other terrain (the first float of a
  * generator seeded with the pole's coordinate hash): exactly the client's on Mustafar, the same
  * spread of alternates everywhere else, and the rule the flora already follows.
+ *
+ * `roadsClearFlora`: a road's flat part and a river's bed clear all four flora maps (the trees, the plants and
+ * both radial maps), which is the engine's own rule (AffectorRoad::affect, AffectorRiver::affect) and moves
+ * trees: measured over the blocks of seven worlds that hold a road or river point, our trees where the client's
+ * own baked map has none fall from 135 to 78, and none of the client's is lost. False is the port of before,
+ * which cleared nothing. The worker reads its own copy, which the terrain's `init` hands it.
  */
-export const TERRAIN_GROUND_TUNE = { legacyChildren: 'hash' as const };
+export const TERRAIN_GROUND_TUNE = { legacyChildren: 'hash' as const, roadsClearFlora: true };
 
 export class TerrainGenerator {
   readonly shaderGroup = new ShaderGroup();
@@ -2784,6 +2884,7 @@ export class TerrainGenerator {
   readonly floraGroup = new FloraGroup();
   readonly environmentGroup = new EnvironmentGroup();
   readonly rampGroup = new ColorRampGroup();
+  readonly radialGroup = new RadialGroup();
   layers: Layer[] = [];
   /** Names of layer item tags that were not understood, for diagnostics. */
   readonly unknownTags = new Map<string, number>();
@@ -2811,6 +2912,11 @@ export class TerrainGenerator {
       this.floraGroup.load(formChild(v, 'FGRP') ?? null);
     } catch (err) {
       this.unknownTags.set(`FGRP: ${(err as Error).message}`, 1);
+    }
+    try {
+      this.radialGroup.load(formChild(v, 'RGRP') ?? null);
+    } catch (err) {
+      this.unknownTags.set(`RGRP: ${(err as Error).message}`, 1);
     }
     try {
       this.environmentGroup.load(formChild(v, 'EGRP'));
@@ -2880,6 +2986,8 @@ export class TerrainGenerator {
     d.colorMap.fill(255);
     d.floraCollidable.fill(0);
     d.floraNonCollidable.fill(0);
+    d.radialNear.fill(0);
+    d.radialFar.fill(0);
     d.excludeMap.fill(0);
     d.environmentMap.fill(0);
     d.seasonalMap.fill(0);
@@ -2936,6 +3044,7 @@ export class TerrainGenerator {
         const fam = this.environmentGroup.families.get(it.familyId);
         return `AENV ${it.name}${on} family ${it.familyId}=${fam?.name ?? '?'}${fam?.seasonal ? ' seasonal' : ''} override ${it.useFeatherClampOverride ? 1 : 0}/${num(it.useFeatherClampOverride ? it.featherClampOverride : this.environmentGroup.featherClamp(it.familyId))}`;
       }
+      if (it instanceof AffectorFloraDynamic) return `${it.tag} ${it.name}${on} ${it.removeAll ? 'remove all' : `${it.operation === Operation.add ? 'add' : 'remove'} family ${it.familyId}=${this.radialGroup.families.get(it.familyId)?.name ?? '?'}${it.densityOverride ? ` density ${num(it.densityOverrideDensity)}` : ''}`}`;
       if (it instanceof AffectorShaderConstant) return `ASCN ${it.name}${on} family ${it.familyId}`;
       if (it instanceof AffectorShaderReplace) return `ASRP ${it.name}${on} ${it.sourceFamilyId} -> ${it.destinationFamilyId}`;
       if (it instanceof AffectorColorConstant) return `ACCN ${it.name}${on} op ${it.operation} colour ${it.r},${it.g},${it.b}`;

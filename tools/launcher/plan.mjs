@@ -43,6 +43,7 @@ const WORDS = {
   maps: 'Planet maps and the galaxy',
   flora: 'Trees and plants',
   floracollision: 'What trees and rocks you walk into',
+  radial: 'Grass, flowers and the far hills’ trees',
   sounds: 'Sounds',
   music: 'The music players make',
   gallery: 'The gallery',

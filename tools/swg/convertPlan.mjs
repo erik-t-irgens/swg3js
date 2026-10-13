@@ -116,6 +116,9 @@ export const STEP_FACTS = {
   // manifest's flora category names (the snapshot writes it, and `flora` writes it again) and writes
   // flora-collision.json into every pack in one run, so it holds them all.
   floracollision: { order: 16.5, lock: 'pack', needs: ['snapshot', 'flora'], seconds: 10, bytes: 0.4 * GB, measured: 'seventeen worlds, 722 planted appearances: 1.6 s, 277 MB' },
+  // The grass and the far tree cards' pictures (radial.mjs). It reads each pack's own terrain.trn, which the
+  // snapshot writes and `terrain` writes again, and writes two files of its own beside it in every pack.
+  radial: { order: 16.6, lock: 'pack', needs: ['snapshot', 'terrain'], seconds: 10, bytes: 0.5 * GB, measured: 'sixteen worlds, 401 pictures: 1.9 s, 371 MB, 100 MB written' },
   // The outdoor walkability grid. It is the one step here that opens no archive at all -- it reads
   // the pack's own terrain, placements and models -- so it mounts nothing, and almost all of its
   // time is the terrain generator running over sixty-seven million poles on one core. It is also

@@ -269,6 +269,30 @@ export const LEAF_CAPTURE = /* glsl */ `
 export const SHADOW_OFFSET = 'shadowWorldPosition = worldPosition + vec4( shadowWorldNormal * directionalLightShadows[ i ].shadowNormalBias, 0 );';
 export const SHADOW_OFFSET_CARD = 'shadowWorldPosition = worldPosition + vec4( swgCardShadowDir( directionalShadowMatrix[ i ], shadowWorldNormal ) * directionalLightShadows[ i ].shadowNormalBias, 0 );';
 
+/**
+ * The `'client'` curve's functions: a display value carried back through three's ACES fit to the scene value that
+ * shows it, and sRGB's two ways. Its own text so the grass (`grass.ts`), which takes no light of three's and so
+ * cannot carry the card's whole declarations, runs these very lines.
+ */
+export const CARD_CURVE_PARS = /* glsl */ `// Three's ACES fit carried back (cardLightMath.ts): its two matrices inverted, its quadratic solved per channel.
+const mat3 SWG_ACES_IN_INV = ${glslMat3(ACES_IN_INV)};
+const mat3 SWG_ACES_OUT_INV = ${glslMat3(ACES_OUT_INV)};
+vec3 swgCardToSrgb( const in vec3 c ) {
+	return mix( pow( max( c, vec3( 0.0 ) ), vec3( 0.41666 ) ) * 1.055 - vec3( 0.055 ), c * 12.92, vec3( lessThan( c, vec3( 0.0031308 ) ) ) );
+}
+vec3 swgCardToLinear( const in vec3 c ) {
+	return mix( pow( max( c, vec3( 0.0 ) ) * 0.9478672986 + vec3( 0.0521327014 ), vec3( 2.4 ) ), c * 0.0773993808, vec3( lessThan( c, vec3( 0.04045 ) ) ) );
+}
+vec3 swgAcesInverse( const in vec3 display ) {
+	vec3 swgV = clamp( SWG_ACES_OUT_INV * clamp( display, 0.0, 1.0 ), 0.0, 1.0 );
+	vec3 swgA = 1.0 - 0.983729 * swgV;
+	vec3 swgB = 0.0245786 - 0.432951 * swgV;
+	vec3 swgC = - ( 0.000090537 + 0.238081 * swgV );
+	vec3 swgF = ( - swgB + sqrt( max( swgB * swgB - 4.0 * swgA * swgC, 0.0 ) ) ) / ( 2.0 * swgA );
+	return max( SWG_ACES_IN_INV * swgF * 0.6, 0.0 );
+}
+`;
+
 /** Fragment declarations: the knobs, the colours, a card's own, the captured factors and the curve's functions. */
 export const CARD_LIGHT_PARS = /* glsl */ `
 float swgShadowNow = 1.0;
@@ -296,24 +320,7 @@ uniform float uSwgCardSunSide;
 uniform float uSwgCardPointFlat;
 uniform vec3 swgCardEmissive;
 varying vec3 vSwgStoredNormal;
-// Three's ACES fit carried back (cardLightMath.ts): its two matrices inverted, its quadratic solved per channel.
-const mat3 SWG_ACES_IN_INV = ${glslMat3(ACES_IN_INV)};
-const mat3 SWG_ACES_OUT_INV = ${glslMat3(ACES_OUT_INV)};
-vec3 swgCardToSrgb( const in vec3 c ) {
-	return mix( pow( max( c, vec3( 0.0 ) ), vec3( 0.41666 ) ) * 1.055 - vec3( 0.055 ), c * 12.92, vec3( lessThan( c, vec3( 0.0031308 ) ) ) );
-}
-vec3 swgCardToLinear( const in vec3 c ) {
-	return mix( pow( max( c, vec3( 0.0 ) ) * 0.9478672986 + vec3( 0.0521327014 ), vec3( 2.4 ) ), c * 0.0773993808, vec3( lessThan( c, vec3( 0.04045 ) ) ) );
-}
-vec3 swgAcesInverse( const in vec3 display ) {
-	vec3 swgV = clamp( SWG_ACES_OUT_INV * clamp( display, 0.0, 1.0 ), 0.0, 1.0 );
-	vec3 swgA = 1.0 - 0.983729 * swgV;
-	vec3 swgB = 0.0245786 - 0.432951 * swgV;
-	vec3 swgC = - ( 0.000090537 + 0.238081 * swgV );
-	vec3 swgF = ( - swgB + sqrt( max( swgB * swgB - 4.0 * swgA * swgC, 0.0 ) ) ) / ( 2.0 * swgA );
-	return max( SWG_ACES_IN_INV * swgF * 0.6, 0.0 );
-}
-#endif
+${CARD_CURVE_PARS}#endif
 #ifdef SWG_LEAF_SHADOW
 uniform vec3 swgLeafBoxMin;
 uniform vec3 swgLeafBoxMax;

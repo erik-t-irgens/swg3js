@@ -3,11 +3,12 @@
 // it), then a pole grid generated for every `generate`. Every map of a grid goes out with it and every
 // one is transferred, never copied, so the answer costs the main thread nothing to receive.
 //
-// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }] }
+// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora }
 //      { type: 'generate', id, startX, startZ, n, step }
 // Out: { type: 'ready', info } | { type: 'grid', id, heights, shaders, children, colors, excluded,
-//      floraCollidable, floraNonCollidable, environments, seasonal } | { type: 'error', message }
+//      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal } | { type: 'error', message }
 
+import { TERRAIN_GROUND_TUNE } from './generator.ts';
 import { attachBitmap, attachRamp, parseLayerFile, parseTerrainTemplate, TerrainSampler } from './trn.ts';
 
 export interface TerrainInitMessage {
@@ -17,6 +18,8 @@ export interface TerrainInitMessage {
   bitmaps: { familyId: number; bytes: ArrayBuffer }[];
   /** The colour ramps the colour affectors read, three bytes a pixel; a ramp that is not here makes its affector do nothing. */
   ramps?: { name: string; width: number; rgb: ArrayBuffer }[];
+  /** The main thread's `TERRAIN_GROUND_TUNE.roadsClearFlora`, since the worker's module is a copy of its own; absent keeps the default. */
+  roadsClearFlora?: boolean;
 }
 
 export interface TerrainGenerateMessage {
@@ -39,6 +42,7 @@ export class TerrainWorkerCore {
   handle(msg: TerrainInitMessage | TerrainGenerateMessage): TerrainWorkerReply {
     try {
       if (msg.type === 'init') {
+        if (typeof msg.roadsClearFlora === 'boolean') TERRAIN_GROUND_TUNE.roadsClearFlora = msg.roadsClearFlora;
         const template = parseTerrainTemplate(new Uint8Array(msg.trn));
         for (const b of msg.bitmaps ?? []) attachBitmap(template, b.familyId, new Uint8Array(b.bytes));
         let ramps = 0;
@@ -57,8 +61,8 @@ export class TerrainWorkerCore {
         if (!this.sampler) throw new Error('terrain worker: generate before init');
         const g = this.sampler.generate(msg.startX, msg.startZ, msg.n, msg.step);
         return {
-          message: { type: 'grid', id: msg.id, heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, environments: g.environments, seasonal: g.seasonal },
-          transfer: [g.heights.buffer, g.shaders.buffer, g.children.buffer, g.colors.buffer, g.excluded.buffer, g.floraCollidable.buffer, g.floraNonCollidable.buffer, g.environments.buffer, g.seasonal.buffer],
+          message: { type: 'grid', id: msg.id, heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal },
+          transfer: [g.heights.buffer, g.shaders.buffer, g.children.buffer, g.colors.buffer, g.excluded.buffer, g.floraCollidable.buffer, g.floraNonCollidable.buffer, g.radialNear.buffer, g.radialFar.buffer, g.environments.buffer, g.seasonal.buffer],
         };
       }
       return { message: { type: 'error', message: `terrain worker: unknown message ${(msg as { type?: unknown }).type}` }, transfer: [] };

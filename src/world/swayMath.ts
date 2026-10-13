@@ -303,16 +303,22 @@ export function swayOffset(out: [number, number, number], p: readonly number[], 
  * flutter; `uSwayTime` the clock, the flutter's frequency and the trunk rule; `uSwayEye`; `uSwayFade`) and a
  * model's own (`uSwayShape`: H, c, the trunk's radius and the gain; `uSwayAxis`: the axis and the frequency).
  * Every name starts `swg` or `uSway`. It never reads `cameraPosition` or `viewMatrix`.
+ *
+ * In three parts, joined into one text for every tree (`SWAY_PARS`): the shared uniforms, a model's own two, and
+ * the functions. The grass (`grass.ts`) takes the shared ones and the functions as they stand and declares a
+ * model's two as plain globals it writes per tuft, so every tuft of every chunk is one call of this very function.
  */
-export const SWAY_PARS = /* glsl */ `
+export const SWAY_SHARED_PARS = /* glsl */ `
 uniform vec4 uSwayWind;
 uniform vec4 uSwayTune;
 uniform vec4 uSwayTime;
 uniform vec3 uSwayEye;
 uniform vec2 uSwayFade;
-uniform vec4 uSwayShape;
+`;
+export const SWAY_MODEL_PARS = /* glsl */ `uniform vec4 uSwayShape;
 uniform vec4 uSwayAxis;
-float swgSwayHash( const in vec2 swgP ) {
+`;
+export const SWAY_FUNCTIONS = /* glsl */ `float swgSwayHash( const in vec2 swgP ) {
 	vec3 swgQ = fract( vec3( swgP.xyx ) * 0.1031 );
 	swgQ = fract( swgQ + dot( swgQ, swgQ.yzx + 33.33 ) );
 	return fract( ( swgQ.x + swgQ.y ) * swgQ.z * 8.0 );
@@ -347,6 +353,8 @@ vec3 swgSwayOffset( const in vec3 swgP, const in mat4 swgModel ) {
 	return swgD * ( uSwayShape.w * swgFade );
 }
 `;
+/** The whole chunk as every tree's program carries it. */
+export const SWAY_PARS = SWAY_SHARED_PARS + SWAY_MODEL_PARS + SWAY_FUNCTIONS;
 
 /** Right after `#include <begin_vertex>`, in the colour program and the depth program alike. */
 export const SWAY_APPLY = /* glsl */ `

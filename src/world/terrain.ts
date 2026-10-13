@@ -6,6 +6,8 @@ import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
 
 export const CHUNK_SIZE = 64;
+/** How far under its true height a far tile's ground is drawn, so the near chunks win where they overlap; what stands on it (the far tree cards) stands that much lower too. */
+export const FAR_TILE_DROP = 2.5;
 
 /** What a chunk's ground is built by when the pack's ground is drawn the client's way: the tiler, and the cells it counted by how many layers their tile holds. */
 export type ChunkTiler = GroundTiler & { readonly census: Float64Array };
@@ -328,7 +330,7 @@ export class Terrain {
       if (!grid) return null;
       hs = grid;
     }
-    const geometry = this.buildGrid(o.x, o.z, size, res, { skirt: 0, yOffset: -2.5, wantHeights: false }, hs).geometry;
+    const geometry = this.buildGrid(o.x, o.z, size, res, { skirt: 0, yOffset: -FAR_TILE_DROP, wantHeights: false }, hs).geometry;
     if (geometry.userData.fullIndex) return geometry;
     // Remember the full index so quads under detailed chunks can be cut out (World.refreshFarTile).
     geometry.userData = { fullIndex: geometry.getIndex()!.array.slice(), n: res, ox: o.x, oz: o.z, step: size / res };

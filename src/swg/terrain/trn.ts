@@ -334,9 +334,29 @@ export interface HeightGrid {
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
+  /** Radial flora, family and choice pairs: the near grass (AFDN) and the far hills' tree cards (AFDF). */
+  radialNear: Uint8Array;
+  radialFar: Uint8Array;
   /** Environment family id at each pole (0 = none) and the same for seasonal areas. */
   environments: Uint8Array;
   seasonal: Uint8Array;
+}
+
+/**
+ * What the grass reads at one pole in one lookup (`TerrainSampler.radialPole`): the radial family and choice
+ * of the map asked for, whether the generator excluded flora there, the colour map (0xRRGGBB), the ground's
+ * height at the point itself (the client's fans) and the ground's normal at the pole, from its neighbours, in
+ * the terrain's own space.
+ */
+export interface RadialPole {
+  family: number;
+  choice: number;
+  excluded: boolean;
+  color: number;
+  height: number;
+  nx: number;
+  ny: number;
+  nz: number;
 }
 
 /** What `TerrainSampler.probe` says about one pole (SWG coordinates; colours packed 0xRRGGBB). */
@@ -367,6 +387,9 @@ export interface PoleBlock {
   excluded: Uint8Array;
   floraCollidable: Uint8Array;
   floraNonCollidable: Uint8Array;
+  /** Radial flora: family and choice pairs, near (AFDN) and far (AFDF); absent on a block a build before them sent. */
+  radialNear?: Uint8Array;
+  radialFar?: Uint8Array;
   /** Environment family id at each pole (0 = none): which area's environment rows apply there. */
   environments: Uint8Array;
   /** The same for seasonal areas, so the place underneath is still known out of season. */
@@ -408,13 +431,13 @@ export class TerrainSampler {
   generate(startX: number, startZ: number, n: number, step: number): HeightGrid {
     const d = this.chunkData(startX, startZ, n, step);
     this.generator.generateChunk(d);
-    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, children: d.shaderChild, colors: d.colorMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, environments: d.environmentMap, seasonal: d.seasonalMap };
+    return { startX, startZ, n, step, heights: d.heightMap, shaders: d.shaderMap, children: d.shaderChild, colors: d.colorMap, excluded: d.excludeMap, floraCollidable: d.floraCollidable, floraNonCollidable: d.floraNonCollidable, radialNear: d.radialNear, radialFar: d.radialFar, environments: d.environmentMap, seasonal: d.seasonalMap };
   }
 
   /** A grid's maps made ready for this terrain's generator (its groups and its ramps), for a caller that runs the generator itself. */
   chunkData(startX: number, startZ: number, n: number, step: number): ChunkData {
     const g = this.generator;
-    return createChunkData(startX, startZ, n, step, g.fractalGroup, g.shaderGroup, g.bitmapGroup, g.floraGroup, g.environmentGroup, g.rampGroup);
+    return createChunkData(startX, startZ, n, step, g.fractalGroup, g.shaderGroup, g.bitmapGroup, g.floraGroup, g.environmentGroup, g.rampGroup, g.radialGroup);
   }
 
   /**
@@ -508,23 +531,44 @@ export class TerrainSampler {
   }
 
   generateBlock(blockX: number, blockZ: number): PoleBlock {
-    const key = `${blockX},${blockZ}`;
-    let b = this.blocks.get(key);
+    let b = this.blockAt(blockX, blockZ);
     if (!b) {
       const s = this.blockStart(blockX, blockZ);
       const g = this.generate(s.x, s.z, this.numberOfPoles, this.poleStep);
-      b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, environments: g.environments, seasonal: g.seasonal };
-      this.blocks.set(key, b);
+      b = { heights: g.heights, shaders: g.shaders, children: g.children, colors: g.colors, excluded: g.excluded, floraCollidable: g.floraCollidable, floraNonCollidable: g.floraNonCollidable, radialNear: g.radialNear, radialFar: g.radialFar, environments: g.environments, seasonal: g.seasonal };
+      this.blocks.set(`${blockX},${blockZ}`, b);
     }
     return b;
   }
 
   hasBlock(blockX: number, blockZ: number): boolean {
-    return this.blocks.has(`${blockX},${blockZ}`);
+    return this.blockAt(blockX, blockZ) !== undefined;
   }
 
   putBlock(blockX: number, blockZ: number, block: PoleBlock): void {
+    this.lastBlock = undefined;
     this.blocks.set(`${blockX},${blockZ}`, block);
+  }
+
+  /**
+   * The last block looked up, kept so a run of lookups in one block (a chunk's grass asks its block several
+   * times a tuft) builds no key: a string a lookup was a sixth of a chunk's placing. Dropped whenever the cache
+   * changes, so it can never answer for a block the cache no longer holds.
+   */
+  private lastBx = Number.NaN;
+  private lastBz = Number.NaN;
+  private lastBlock: PoleBlock | undefined = undefined;
+
+  /** A cached block, or undefined; never generates. */
+  private blockAt(blockX: number, blockZ: number): PoleBlock | undefined {
+    if (this.lastBlock && blockX === this.lastBx && blockZ === this.lastBz) return this.lastBlock;
+    const b = this.blocks.get(`${blockX},${blockZ}`);
+    if (b) {
+      this.lastBx = blockX;
+      this.lastBz = blockZ;
+      this.lastBlock = b;
+    }
+    return b;
   }
 
   /** Index of the pole a world point maps to within its block (ProceduralTerrainAppearance::Chunk::_findMapXz). */
@@ -549,8 +593,41 @@ export class TerrainSampler {
     const bw = this.blockWidth;
     const bx = Math.floor(x / bw);
     const bz = Math.floor(z / bw);
-    const block = this.blocks.get(`${bx},${bz}`);
+    const block = this.blockAt(bx, bz);
     return block ? { block, index: this.indexInBlock(x, z, bx, bz) } : null;
+  }
+
+  /**
+   * Everything the grass reads at the pole a world point maps to, from a cached block only, into `out`: the
+   * near or far radial family and choice, the exclude flag, the colour, the height at the point (the fans) and
+   * the normal at the pole from the poles beside it (central differences, in this terrain's own frame). False,
+   * and nothing written, when the block is not generated. One block lookup and nothing allocated.
+   */
+  radialPole(x: number, z: number, far: boolean, out: RadialPole): boolean {
+    const bw = this.blockWidth;
+    const bx = Math.floor(x / bw);
+    const bz = Math.floor(z / bw);
+    const b = this.blockAt(bx, bz);
+    if (!b) return false;
+    const i = this.indexInBlock(x, z, bx, bz);
+    const map = far ? b.radialFar : b.radialNear;
+    out.family = map ? map[i * 2] : 0;
+    out.choice = map ? map[i * 2 + 1] : 0;
+    out.excluded = b.excluded[i] !== 0;
+    const c = b.colors;
+    out.color = c ? (c[i * 3] << 16) | (c[i * 3 + 1] << 8) | c[i * 3 + 2] : 0xffffff;
+    const h = b.heights;
+    out.height = sampleFans(h, this.numberOfPoles, this.tilesPerBlock, this.tileWidth, x - bx * bw, z - bz * bw);
+    // The pole is never on the block's edge (two poles of pad each side), so all four neighbours are there.
+    const n = this.numberOfPoles;
+    const s2 = 2 * this.poleStep;
+    const dx = (h[i + 1] - h[i - 1]) / s2;
+    const dz = (h[i + n] - h[i - n]) / s2;
+    const len = Math.hypot(dx, 1, dz);
+    out.nx = -dx / len;
+    out.ny = 1 / len;
+    out.nz = -dz / len;
+    return true;
   }
 
   /** The child choice (a byte) at the pole a world point maps to, from a cached block only: null when it is not generated. */
@@ -612,6 +689,7 @@ export class TerrainSampler {
 
   /** Drop cached blocks farther than `radius` blocks from the given block. */
   evict(blockX: number, blockZ: number, radius: number): void {
+    this.lastBlock = undefined;
     for (const key of this.blocks.keys()) {
       const [x, z] = key.split(',').map(Number);
       if (Math.max(Math.abs(x - blockX), Math.abs(z - blockZ)) > radius) this.blocks.delete(key);
@@ -619,6 +697,7 @@ export class TerrainSampler {
   }
 
   invalidateAll(): void {
+    this.lastBlock = undefined;
     this.blocks.clear();
   }
 
@@ -657,6 +736,7 @@ export class TerrainSampler {
     layer.calculateExtent();
     this.generator.addLayer(layer);
     this.building.push(layer);
+    this.lastBlock = undefined;
     this.blocks.clear();
   }
 

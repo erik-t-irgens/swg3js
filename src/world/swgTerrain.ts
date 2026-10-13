@@ -3,8 +3,8 @@ import * as THREE from 'three';
 // Heights are sampled on the main thread from cached pole grids; grids are produced
 // ahead of time by a worker so streaming never stalls on generation.
 
-import type { EnvironmentFamily, Layer } from '../swg/terrain/generator.ts';
-import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type TerrainTemplate } from '../swg/terrain/trn.ts';
+import { TERRAIN_GROUND_TUNE, type EnvironmentFamily, type Layer } from '../swg/terrain/generator.ts';
+import { attachBitmap, attachRamp, bitmapFiles, ORIGIN_OFFSET, parseLayerFile, parseTerrainTemplate, rampNames, readColorRampFile, readColorReference, TerrainSampler, UPPER_PAD, waterTables, type ColorRamp, type ColorReference, type GroundProbe, type PoleBlock, type RadialPole, type TerrainTemplate } from '../swg/terrain/trn.ts';
 import { groundChunkAt, groundShift, type GroundShift } from './groundTiles.ts';
 
 export interface BuildingLayerSource {
@@ -38,6 +38,8 @@ export interface FarGrid {
   shaders: Int32Array;
   children: Uint8Array;
   colors: Uint8Array;
+  /** The far radial map, family and choice pairs a sample: the far hills' tree cards (`farCards.ts`), from the same coarse grid. */
+  radialFar: Uint8Array;
 }
 
 /** Where the pack keeps the colour ramps the colour affectors read (the terrain command's to write, `colorRampFile`'s shape). */
@@ -138,6 +140,7 @@ export class SwgTerrain {
             layers: layers.map((l) => ({ bytes: l.bytes.slice(0), x: l.x, z: l.z, yaw: l.yaw })),
             bitmaps: bitmaps.map((b) => ({ familyId: b.familyId, bytes: b.bytes.slice(0) })),
             ramps: sent,
+            roadsClearFlora: TERRAIN_GROUND_TUNE.roadsClearFlora,
           },
           sent.map((r) => r.rgb),
         );
@@ -321,8 +324,9 @@ export class SwgTerrain {
     const n = res + 3;
     const startX = this.toSwgX(gx0 + (res + 1) * step);
     const startZ = this.toSwgZ(gz0 - step);
-    const finish = (g: { heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array }) => {
-      const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n), children: new Uint8Array(n * n), colors: new Uint8Array(n * n * 3) };
+    const finish = (g: { heights: Float32Array; shaders: Int32Array; children: Uint8Array; colors: Uint8Array; radialFar?: Uint8Array }) => {
+      const out: FarGrid = { heights: new Float32Array(n * n), shaders: new Int32Array(n * n), children: new Uint8Array(n * n), colors: new Uint8Array(n * n * 3), radialFar: new Uint8Array(n * n * 2) };
+      const far = g.radialFar;
       for (let j = 0; j < n; j++) {
         for (let i = 0; i < n; i++) {
           const to = j * n + i;
@@ -333,6 +337,10 @@ export class SwgTerrain {
           out.colors[to * 3] = g.colors[from * 3] ?? 255;
           out.colors[to * 3 + 1] = g.colors[from * 3 + 1] ?? 255;
           out.colors[to * 3 + 2] = g.colors[from * 3 + 2] ?? 255;
+          if (far) {
+            out.radialFar[to * 2] = far[from * 2];
+            out.radialFar[to * 2 + 1] = far[from * 2 + 1];
+          }
         }
       }
       this.farGrids.set(key, out);
@@ -407,6 +415,18 @@ export class SwgTerrain {
     return this.sampler.groundAt(this.toSwgX(gx), this.toSwgZ(gz), out);
   }
 
+  /**
+   * What the grass reads at the pole under a game-space point, from a cached block only (`TerrainSampler.radialPole`):
+   * the near or far radial family and choice, the exclude flag, the colour, the ground's height at the point and
+   * its normal there turned into the game's frame (x mirrored). False when the block is not generated. Never
+   * generates and allocates nothing: a chunk's grass asks this once a tuft.
+   */
+  radialPoleIfCached(gx: number, gz: number, far: boolean, out: RadialPole): boolean {
+    if (!this.sampler.radialPole(this.toSwgX(gx), this.toSwgZ(gz), far, out)) return false;
+    out.nx = -out.nx;
+    return true;
+  }
+
   /** Everything the generator says about the pole under a game-space point, worked out afresh on this thread. For the console. */
   probe(gx: number, gz: number): GroundProbe {
     return this.sampler.probe(this.toSwgX(gx), this.toSwgZ(gz));
@@ -451,7 +471,7 @@ export class SwgTerrain {
     this.worker!.postMessage({ type: 'generate', id, startX, startZ, n, step });
   }
 
-  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; children?: Uint8Array; colors?: Uint8Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; environments?: Uint8Array; seasonal?: Uint8Array; info?: unknown; message?: string }): void {
+  private onMessage(msg: { type: string; id?: number; heights?: Float32Array; shaders?: Int32Array; children?: Uint8Array; colors?: Uint8Array; excluded?: Uint8Array; floraCollidable?: Uint8Array; floraNonCollidable?: Uint8Array; radialNear?: Uint8Array; radialFar?: Uint8Array; environments?: Uint8Array; seasonal?: Uint8Array; info?: unknown; message?: string }): void {
     if (msg.type === 'ready') {
       this.workerReady = true;
       console.info('terrain worker ready', msg.info);
@@ -461,7 +481,7 @@ export class SwgTerrain {
         this.pending.delete(msg.id);
         this.requested.delete(p.key);
         const n = msg.heights.length;
-        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), children: msg.children ?? new Uint8Array(n), colors: msg.colors ?? new Uint8Array(n * 3).fill(255), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) });
+        p.resolve({ heights: msg.heights, shaders: msg.shaders ?? new Int32Array(n), children: msg.children ?? new Uint8Array(n), colors: msg.colors ?? new Uint8Array(n * 3).fill(255), excluded: msg.excluded ?? new Uint8Array(n), floraCollidable: msg.floraCollidable ?? new Uint8Array(n * 2), floraNonCollidable: msg.floraNonCollidable ?? new Uint8Array(n * 2), radialNear: msg.radialNear ?? new Uint8Array(n * 2), radialFar: msg.radialFar ?? new Uint8Array(n * 2), environments: msg.environments ?? new Uint8Array(n), seasonal: msg.seasonal ?? new Uint8Array(n) });
       }
     } else if (msg.type === 'error') {
       console.warn('terrain worker:', msg.message);
