@@ -17,7 +17,7 @@ import { detailWrap } from './detailMap.ts';
 import { specWrap } from './specular.ts';
 import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
 import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
-import { SWAY_TUNE, disposeStandIn, hangSwayDepth, setSwayEye, setSwayRoomPass, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
+import { SWAY_TUNE, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -33,10 +33,12 @@ import { burnReport, clearBurn, newPlayerBurn, takeBurn, tunePlayerBurn, type Pl
 import type { HeatSources, LavaHeatTable } from './heatSources';
 import { REFLECTIONS, joinModelReflections, setEnvironment } from './envmap';
 import { PropFactory, type Collider, type Exclusion, type ScatterItem } from './props';
-import { FLORA_WARM, FloraPlanter } from './flora.ts';
+import { FLORA_WARM, FloraPlanter, plantedShadow } from './flora.ts';
 import { clientPlantDistance, FLORA_TUNE, plantReachOf, PlantSweep } from './floraReach.ts';
 import { FLORA_BATCH, FloraField, type FloraChunkData } from './floraBatch.ts';
-import { FAR_CARDS_ON, FarCards, GRASS_ON, GrassField, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
+import { CHUNK_TREES, FAR_CARDS_ON, FarCards, GRASS_CAST, GRASS_NO_SHADOW, GRASS_ON, GRASS_TUNE, GRASS_UNIFORMS, GrassField, grassDepthMaterial, grassMaterial, grassStandIn, loadRadialPack, setGrassPictures, writeGrassUniforms, type GrassHost, type GrassSetup } from './grass.ts';
+import { GRASS_SHADOW_TUNE, grassCastCascades, grassReach } from './grassMath.ts';
+import { SHADOW_CASTER_TUNE, floraBig } from './shadowCasters.ts';
 import type { RadialChild } from '../swg/terrain/flora.ts';
 import { floraColliders } from './floraCollision.ts';
 import { eyeSpeed, LOD_LEVEL_TUNE, RIDE_LOD_TUNE, rideLodBias, steppedBias, sweepDue } from './lodLevels.ts';
@@ -78,7 +80,7 @@ import { isShadowOnly } from '../core/fxRegistry.ts';
 import { ProgramQueue, resolveLinks } from '../core/programQueue.ts';
 import { PACE_TUNE, framesFor } from '../core/programPace.ts';
 import { pacingHard, shaderBudget } from '../core/shaderWatch.ts';
-import { addPointLight, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
+import { addPointLight, cascadesUsable, fillCascades, luminanceOf, resetFxLights, setDirectional, type FxLights } from '../core/fx/lights';
 import { ParticleEffects, type EffectHandle, type EffectSounds } from './particles';
 import { Ambience, type AmbienceContext, type BedRow, type RoomRow } from '../audio/ambience.ts';
 import { OUTSIDE, type SoundSpace } from '../audio/distance.ts';
@@ -278,12 +280,6 @@ const PHYSICS_RADIUS = 3;
  * shadows at a steep cost, lower it for crisper ones.
  */
 const SHADOW_DISTANCE = 320;
-/**
- * Placed objects smaller than this (metres of model radius) never cast. A shrub's shadow is a
- * smudge under the shrub; paying a draw call per cascade for it is the single biggest waste in
- * the frame. Objects keep receiving shadows either way.
- */
-const SHADOW_MIN_RADIUS = 1.2;
 /**
  * Shadow look. The client's own ambient keeps shadowed surfaces readable; this scales it, and
  * below 1 the world sits darker than retail did. Radius is the blur in shadow-map texels --
@@ -679,8 +675,14 @@ export class World {
   private csm: CSM | null = null;
   /** How far the cascades reach; `__debug.shadows(m)` rebuilds them at a new distance. */
   shadowDistance = SHADOW_DISTANCE;
-  /** Model radius below which a placed object does not cast; `__debug.shadows(m, r)` changes it. */
-  shadowMinRadius = SHADOW_MIN_RADIUS;
+  /**
+   * Model radius below which a placed object does not cast (the casters' rule's `placedMinRadius`, `shadowCasters.ts`):
+   * a shrub's shadow is a smudge under the shrub, and paying a draw call per cascade for it is the single biggest
+   * waste in the frame. Objects keep receiving shadows either way. The page's slider and `__debug.shadows(m, r)` move it.
+   */
+  get shadowMinRadius(): number {
+    return SHADOW_CASTER_TUNE.placedMinRadius;
+  }
   /** Multiplier on the sky's ambient: below 1 is darker than retail. */
   ambientScale = AMBIENT_SCALE;
   private shadowRadius = SHADOW_RADIUS;
@@ -3006,6 +3008,8 @@ export class World {
 
   /** The session's one material for every tuft of grass and every far tree card (`grass.ts`), made at the first world that has them and kept. */
   private grassMat: THREE.ShaderMaterial | null = null;
+  /** And the one depth material they cast with (`grassDepthMaterial`), made with it and drawn once behind the first loading screen. */
+  grassDepth: THREE.ShaderMaterial | null = null;
   /** One tuft drawn with it, compiled behind every loading screen and never shown. */
   private grassStand: THREE.Mesh | null = null;
   /** The grass in the window round the eye, and the far hills' tree cards, for the world now standing (null before any has had them). */
@@ -3029,7 +3033,16 @@ export class World {
       const m = mesh as THREE.Mesh;
       if (mesh.parent === this.chunkRoot && m.geometry?.boundingSphere) markNarrowRoot(mesh, m.geometry.boundingSphere);
     },
-    chunkLoaded: (cx, cz) => this.chunks.has(`${cx},${cz}`),
+    chunkTrees: (cx, cz) => {
+      const c = this.chunks.get(`${cx},${cz}`);
+      if (!c) return CHUNK_TREES.none;
+      return c.trees && !c.trees.visible ? CHUNK_TREES.hidden : CHUNK_TREES.shown;
+    },
+    cascadeOf: (cam) => {
+      const lights = this.csm?.lights;
+      if (lights) for (let i = 0; i < lights.length; i++) if (lights[i].shadow.camera === cam) return i;
+      return 0;
+    },
   };
 
   /**
@@ -3052,6 +3065,7 @@ export class World {
       return;
     }
     const mat = (this.grassMat ??= grassMaterial());
+    const depth = (this.grassDepth ??= grassDepthMaterial());
     this.grassPictures = loaded.texture;
     setGrassPictures(loaded.texture);
     if (this.renderer) this.renderer.initTexture(loaded.texture);
@@ -3068,8 +3082,8 @@ export class World {
       shift: swg.groundShift,
       reference: swg.colorReference,
     };
-    this.grass ??= new GrassField(mat, this.grassHost);
-    this.farCards ??= new FarCards(mat, this.grassHost, this.chunkRoot, FAR_TILE, FAR_TILE_DROP);
+    this.grass ??= new GrassField(mat, this.grassHost, depth);
+    this.farCards ??= new FarCards(mat, this.grassHost, this.chunkRoot, FAR_TILE, FAR_TILE_DROP, depth);
     if (GRASS_ON) this.grass.setWorld(setup);
     if (FAR_CARDS_ON) this.farCards.setWorld(setup);
     // The world's reaches and tint into the uniforms whichever of the two is on: the grass writes them as it is
@@ -3224,8 +3238,10 @@ export class World {
   private floraTemplate: SwgTerrain['template'] | null = null;
   /** The plant sweep (step 5, `floraReach.ts`): where it last measured from, with what reach, its clock and what it left. */
   private readonly plantSweep = new PlantSweep();
-  /** The sweep's one visit per chunk, made once with the world so a sweep makes no closure. */
-  private readonly plantVisit = (c: Chunk): void => this.plantSweep.visit(c, FLORA_TUNE);
+  /** The sweep's one visit per chunk, made once with the world so a sweep makes no closure: a chunk whose trees it flipped is kept for the far cards. */
+  private readonly plantVisit = (c: Chunk): void => {
+    if (this.plantSweep.visit(c, FLORA_TUNE)) this.noteTreeFlip(c);
+  };
 
   /**
    * Whether the plant reach hides anything here: switched on, a planet with flora of its own, and not a
@@ -3364,7 +3380,11 @@ export class World {
     const sweep = this.plantSweep;
     if (!sweep.due(dt, FLORA_TUNE, force)) return;
     sweep.begin(eye.x, eye.y, eye.z, this.plantReach, this.plantsReached);
+    this.flipN = 0;
     this.chunks.forEach(this.plantVisit);
+    // The far tree cards follow the trees within one sweep: hidden where a chunk's trees came back, shown where they went.
+    if (this.flipN) this.farCards?.chunksChanged(this.flipCx, this.flipCz, this.flipTrees, this.flipN);
+    this.flipN = 0;
   }
 
   /**
@@ -3740,7 +3760,10 @@ export class World {
 
   /**
    * Retune the shadows and report what they cost. `distance` rebuilds the cascades at a new
-   * reach (shorter is cheaper *and* sharper); `minRadius` re-gates which placed objects cast.
+   * reach (shorter is cheaper *and* sharper); `minRadius` is the page's smallest caster: it moves
+   * the casters' rule and every placed copy standing is worked out again by it (`applyCasters`),
+   * what was put down in play included, where it once walked the scene a single time and missed
+   * every tier that loaded after. The counts are of what is drawn now.
    */
   setShadows(distance?: number, minRadius?: number): { distance: number; minRadius: number; casters: number; notCasting: number } {
     // Retune in place. CSM.dispose() deletes every patched material's onBeforeCompile, which
@@ -3756,26 +3779,43 @@ export class World {
         this.applyShadowQuality();
       }
     }
-    if (minRadius !== undefined) {
-      this.shadowMinRadius = minRadius;
-      this.scene.traverse((o) => {
-        const m = o as THREE.InstancedMesh;
-        if (!m.isInstancedMesh) return;
-        if (!m.boundingSphere) m.computeBoundingSphere();
-        const g = m.geometry;
-        if (!g.boundingSphere) g.computeBoundingSphere();
-        m.castShadow = (g.boundingSphere?.radius ?? 0) >= minRadius;
-      });
+    if (minRadius !== undefined && Number.isFinite(minRadius) && minRadius >= 0 && minRadius !== SHADOW_CASTER_TUNE.placedMinRadius) {
+      SHADOW_CASTER_TUNE.placedMinRadius = minRadius;
+      this.layoutStream?.applyCasters();
     }
     let casters = 0;
     let notCasting = 0;
-    this.scene.traverse((o) => {
+    this.scene.traverseVisible((o) => {
       const m = o as THREE.Mesh;
-      if (!m.isMesh && !(o as THREE.InstancedMesh).isInstancedMesh) return;
+      if (!m.isMesh) return;
       if (m.castShadow) casters++;
       else notCasting++;
     });
     return { distance: this.shadowDistance, minRadius: this.shadowMinRadius, casters, notCasting };
+  }
+
+  /**
+   * Every flora caster worked out again by the casters' rule in force (`shadowCasters.ts`), after a flora switch or
+   * line moved: the region batches (`applyShadows`, which read the rule live) and each chunk's own meshes by the size
+   * stamped on them as they were planted. `castShadow` and the cards' receiving are all that change, so nothing
+   * compiles; a caster that never cast before finds its depth program because the loading screen drew one stand-in
+   * per way three's depth material can be drawn (`compileShadowDepth`). Answers how many chunk meshes cast.
+   */
+  applyFloraCasters(): number {
+    this.floraField?.applyShadows();
+    let casting = 0;
+    for (const c of this.chunks.values()) {
+      for (const g of [c.trees, c.plants]) {
+        if (!g) continue;
+        for (const o of g.children) if ((o as THREE.Mesh).isMesh && plantedShadow(o as THREE.Mesh)) casting++;
+      }
+    }
+    return casting;
+  }
+
+  /** Every placed copy standing worked out again by the casters' rule (the streamer's own walk). */
+  applyCasters(): number {
+    return this.layoutStream?.applyCasters() ?? 0;
   }
 
   /**
@@ -4320,8 +4360,8 @@ export class World {
 
   /**
    * Every card mesh's receiving worked out again after the cards' shadow rule moved (`'none'` takes it off the
-   * card meshes of trees that cast): the flora batches by their finest level's cast rule, a chunk's own meshes
-   * and a placed object's by whether they cast. A per-object uniform: nothing compiles.
+   * card meshes of trees): the flora batches by their size, a chunk's own meshes and a placed object's by the size
+   * stamped on them (`cardOfTree`), which a flora switch never moves. A per-object uniform: nothing compiles.
    */
   applyCardShadow(): number {
     this.floraField?.applyShadows();
@@ -4331,7 +4371,7 @@ export class World {
       if (!mesh.isMesh || !mesh.material || mesh.name === 'flora batch') return;
       const m = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
       if (!m || !isCard(m)) return;
-      const receive = cardReceives(mesh.material, mesh.castShadow);
+      const receive = cardReceives(mesh.material, cardOfTree(mesh));
       if (mesh.receiveShadow !== receive) mesh.receiveShadow = receive;
       if (!receive) off++;
     });
@@ -4403,7 +4443,7 @@ export class World {
       // the cards' `none` a card mesh that casts receives nothing (a flora batch keeps to its own finest-level rule).
       if (mesh.isMesh && !Array.isArray(mesh.material)) {
         if (mesh.material.userData.swgSway !== undefined) hangSwayDepth(mesh);
-        if (CARD_LIGHT_TUNE.shadow === 'none' && mesh.name !== 'flora batch' && isCard(mesh.material)) mesh.receiveShadow = cardReceives(mesh.material, mesh.castShadow);
+        if (CARD_LIGHT_TUNE.shadow === 'none' && mesh.name !== 'flora batch' && isCard(mesh.material)) mesh.receiveShadow = cardReceives(mesh.material, cardOfTree(mesh));
       }
       if (isNew) fresh.push(o);
     });
@@ -4987,12 +5027,12 @@ export class World {
       onProgress(Math.min(objects.length, i + BATCH), objects.length);
       await this.nextFrame();
     }
-    // The flora's swaying shadows (`floraSway.ts`): the loading sweep never builds a depth program, so one
-    // stand-in per depth combination the swaying meshes above can cast with is drawn into the shadow maps here as
-    // a frame draws them, under the world pass's lights and a room's (`compileSwayDepth` says why it is a draw).
-    // Everything the sweep compiled is offered, the scene's own swaying meshes as well as the stand-ins; one
-    // stand-in a combination is all that is made.
-    this.compileSwayDepth(r, target, objects);
+    // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
+    // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the world
+    // pass's lights and a room's -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep
+    // compiled, the grass's one depth material, and every way three's own depth material can be drawn for a caster
+    // a shadow switch or the smallest caster's slider may turn on in play.
+    this.compileShadowDepth(r, target, objects);
     if (placed.length) {
       this.placedWarmStats.programs = placedPrograms;
       // Their programs are held by the pack's own materials, which outlive them: only the stand-ins go.
@@ -5015,13 +5055,16 @@ export class World {
     return (r.info.programs?.length ?? 0) - before;
   }
 
-  /** A target to bind while the sway's depth programs are warmed when the frames have none (`compileSwayDepth`): a shadow draw always has one. */
+  /** A target to bind while the depth programs are warmed when the frames have none (`compileShadowDepth`): a shadow draw always has one. */
   private depthWarmTarget: THREE.WebGLRenderTarget | null = null;
-  /** What the last warm of the sway's depth programs did, for the console. */
-  readonly swayDepthWarm = { standIns: 0, programs: 0, shadows: false };
+  /**
+   * What the last warm of the depth programs did, for the console: the sway's stand-ins a set, the programs built,
+   * whether shadows were on, whether the grass's depth material was drawn, and the plain combinations a set.
+   */
+  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, plain: 0 };
 
   /**
-   * Build the sway's depth programs from stand-ins (see `compileEverything`) by drawing them into the shadow maps
+   * Build the shadows' depth programs from stand-ins (see `compileEverything`) by drawing them into the shadow maps
    * as a frame does. A compile cannot stand in for that draw: three draws the shadow maps before it sets up the
    * lights of the pass that asked for them, so a depth program is keyed on the light set of the last pass drawn
    * with this scene -- the world's outdoors, a room's wherever a building's rooms are drawn after the world, which
@@ -5033,49 +5076,82 @@ export class World {
    * keeps the program of its first draw whatever the lights do after (it is unlit), and the frames drawn between
    * the loading screen's batches have already drawn the models' own under whichever set they last left, so each
    * set is drawn with depth materials of its own (`swayDepthStandIns`' twins), or it would build nothing.
+   *
+   * Three more go with the sway's (wave 8). The grass's one depth material, on its stand-in tuft under the world set
+   * alone (grass is drawn in the world pass only), which fixes its program for the session. And one plain stand-in
+   * for every way three's own depth material can be drawn for a caster that does not sway (`plainDepthCombos`),
+   * under each set through sources of its own: a flora switch or the page's smallest caster puts cut-out props and
+   * leaves that never cast before into the shadow pass in play, and a clone three makes for one keys its program on
+   * the lights of the moment, so every key they can come to must already have its program. Each makes three's shared
+   * depth material choose its program again (`chooseDepthProgram`), since nothing else these draws differ in would:
+   * drawn as they come, every shared key but the first was left for a live frame. Nothing is warmed with
+   * shadows off at the loading screen: turning them on rebuilds every program anyway.
    */
-  private compileSwayDepth(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget | null, meshes: readonly THREE.Object3D[]): void {
+  private compileShadowDepth(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget | null, meshes: readonly THREE.Object3D[]): void {
     const portals = this.portals;
     const camera = this.camera;
-    this.swayDepthWarm.shadows = r.shadowMap.enabled;
+    const warm = this.shadowDepthWarm;
+    warm.shadows = r.shadowMap.enabled;
+    warm.grass = false;
+    warm.plain = 0;
     if (!portals || !camera || !this.csm || !r.shadowMap.enabled) return;
     // The scene's own swaying meshes first, then a source for every combination a swaying material can cast with
     // (`swayDepthCombos`): a placed tier streamed in after this screen lifts may bring one nothing here had.
     const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos()];
     const sets = [
-      { layer: 0, standIns: swayDepthStandIns(swaying, 'world') },
-      { layer: INTERIOR_LAYER, standIns: swayDepthStandIns(swaying, 'rooms') },
+      { layer: 0, standIns: swayDepthStandIns(swaying, 'world'), plain: plainDepthCombos('world') },
+      { layer: INTERIOR_LAYER, standIns: swayDepthStandIns(swaying, 'rooms'), plain: plainDepthCombos('rooms') },
     ];
-    this.swayDepthWarm.standIns = sets[0].standIns.length;
-    if (!sets[0].standIns.length) return;
+    warm.standIns = sets[0].standIns.length;
+    warm.plain = sets[0].plain.length;
     const bound = target ?? (this.depthWarmTarget ??= new THREE.WebGLRenderTarget(1, 1));
     const before = r.info.programs?.length ?? 0;
     // Not culled: behind a loading screen the cascades' cameras may still stand where the last world left them,
     // and the probe's own view, which would otherwise draw them, is dropped by the portal renderer's hook.
     const at = camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(4).add(camera.position);
     const nothing = new THREE.Group();
-    for (const { layer, standIns } of sets) {
-      for (const s of standIns) {
+    // The grass's stand-in casts with the grass's depth material for the world set's draw alone, then is put back as
+    // it was: it hangs no cascade hooks, so it is drawn into every cascade.
+    const tuft = this.grassStand && this.grassDepth ? this.grassStand : null;
+    for (const { layer, standIns, plain } of sets) {
+      const drawn: THREE.Object3D[] = [...standIns, ...plain];
+      for (const s of drawn) {
         s.position.copy(at);
         s.frustumCulled = false;
         s.updateMatrixWorld(true);
         this.scene.add(s);
       }
+      const withTuft = tuft !== null && layer === 0;
+      if (withTuft) {
+        tuft.customDepthMaterial = this.grassDepth!;
+        tuft.castShadow = true;
+        tuft.position.copy(at);
+        tuft.updateMatrix();
+        tuft.updateMatrixWorld(true);
+        this.scene.add(tuft);
+      }
       try {
         this.withLayers(camera, layer, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
         this.withTarget(r, bound, () => portals.drawShadowsOnly(this.scene));
+        if (withTuft) warm.grass = true;
       } finally {
-        for (const s of standIns) this.scene.remove(s);
+        for (const s of drawn) this.scene.remove(s);
+        if (withTuft) {
+          this.scene.remove(tuft);
+          tuft.castShadow = false;
+          tuft.customDepthMaterial = undefined;
+        }
       }
       this.programs.countLinks(resolveLinks(r, standIns.map((s) => s.customDepthMaterial!).filter(Boolean)));
-      // The geometry and the materials are the models' own (the twins the session's): only the stand-ins go.
+      // The geometry and the materials are the models' own (the twins the session's): only the sway's stand-ins go;
+      // the plain combinations are the session's and kept.
       for (const s of standIns) disposeStandIn(s);
     }
     // The shadow-only draw leaves the scene's lights set up as the probe sees them, every layer at once, which is no
     // pass's: the next frame's shadow pass would key every depth material it draws first on that (measured: three
     // of three's own depth programs built so, for nothing). The world pass's set is put back.
     this.withLayers(camera, 0, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
-    this.swayDepthWarm.programs = (r.info.programs?.length ?? 0) - before;
+    warm.programs = (r.info.programs?.length ?? 0) - before;
   }
 
   /**
@@ -5096,6 +5172,7 @@ export class World {
       csm.update();
       refreshCascadeBoxes(csm.lights, this.cascadeBoxes);
     }
+    this.syncGrassShadows();
     if (now - this.csmScanAt > SCAN_TUNE.everyMs) {
       this.csmScanAt = now;
       perf.begin(SEC.scan);
@@ -5103,6 +5180,53 @@ export class World {
       perf.end(SEC.scan);
     }
     this.drainCompiles();
+  }
+
+  /** Where each cascade ends, metres, for the grass's cast count: a kept array written in place. */
+  private readonly cascadeEnds = new Float32Array(3);
+
+  /**
+   * The cascades into the grass's uniforms, once a frame after they moved (`grass.ts`, `grassShadowMath.ts`): whether
+   * they can be read now (`cascadesUsable`, the effects' own test), each cascade's map where they can and the compare
+   * stand-in where they cannot, each one's own `shadow.matrix` object by reference (the shadow pass refreshes it inside
+   * the very render call whose world pass reads it, so a copy taken now would be a frame late), the breaks and the
+   * range the ambient occlusion is handed, each cascade's bias, the first one's intensity (which carries the storms'
+   * fade), and how many cascades near grass casts into. Maps and matrices are checked by identity, since a map is
+   * replaced when its size moves and does not exist until its first shadow draw. Nothing allocated.
+   */
+  private syncGrassShadows(): void {
+    const u = GRASS_UNIFORMS;
+    const csm = this.csm;
+    const r = this.renderer;
+    const cam = this.camera;
+    const on = !!csm && !!r && !!cam && cascadesUsable(r, csm.lights, csm.breaks);
+    u.uSwgGrassShadowOn.value.x = on ? 1 : 0;
+    if (!on || !csm || !cam) {
+      if (u.uSwgGrassShadow0.value !== GRASS_NO_SHADOW) u.uSwgGrassShadow0.value = GRASS_NO_SHADOW;
+      if (u.uSwgGrassShadow1.value !== GRASS_NO_SHADOW) u.uSwgGrassShadow1.value = GRASS_NO_SHADOW;
+      if (u.uSwgGrassShadow2.value !== GRASS_NO_SHADOW) u.uSwgGrassShadow2.value = GRASS_NO_SHADOW;
+      GRASS_CAST.cascades = 0;
+      return;
+    }
+    const m = u.uSwgGrassShadowMatrix.value;
+    const ranges = u.uSwgGrassCascade.value;
+    const bias = u.uSwgGrassShadowBias.value;
+    for (let i = 0; i < 3; i++) {
+      const s = csm.lights[i].shadow;
+      const map = (s.map as unknown as { depthTexture: THREE.Texture }).depthTexture;
+      const slot = i === 0 ? u.uSwgGrassShadow0 : i === 1 ? u.uSwgGrassShadow1 : u.uSwgGrassShadow2;
+      if (slot.value !== map) slot.value = map;
+      if (m[i] !== s.matrix) m[i] = s.matrix;
+      ranges[i * 2] = i > 0 ? csm.breaks[i - 1] : 0;
+      ranges[i * 2 + 1] = csm.breaks[i];
+      bias.setComponent(i, s.bias);
+      this.cascadeEnds[i] = this.cascadeFar(i);
+    }
+    u.uSwgGrassShadowRange.value = Math.min(cam.far, csm.maxFar) - cam.near;
+    u.uSwgGrassCascadeFade.value = csm.fade ? 1 : 0;
+    u.uSwgGrassShadowOn.value.z = csm.lights[0].shadow.intensity;
+    const setup = this.grassWorld;
+    GRASS_CAST.cascades = setup ? grassCastCascades(grassReach(setup.near, GRASS_TUNE), this.cascadeEnds, GRASS_SHADOW_TUNE.castCascades) : 0;
   }
 
   /** Generate every chunk in view immediately (used when arriving on a planet). */
@@ -6858,6 +6982,8 @@ export class World {
     // that crosses no chunk (`grass.ts`).
     this.grass?.update(camPos, 1);
     this.farCards?.update(camPos);
+    // Which of the grass's chunks cast this frame: written only where it changed, nothing allocated.
+    this.grass?.applyCast(camPos);
     if (this.layoutStream) {
       perf.begin(SEC.layout);
       // The building the player is in keeps its interior however far its wings reach.
@@ -7818,8 +7944,9 @@ export class World {
       const rebuilt = FAR_TILE_TUNE.local ? this.cutChangedTiles() : this.refreshAllFarTiles();
       perf.end(SEC.farRefresh);
       perf.count(CNT.farTiles, rebuilt);
-      // The far tree cards standing where a chunk came are hidden, where one went shown again: our own trees are drawn there.
-      this.farCards?.chunksChanged(this.changedCx, this.changedCz, this.changedIn, this.changedN);
+      // The far tree cards standing where a chunk came are hidden, where one went shown again: our own trees are drawn
+      // there. A chunk that came with its trees hidden by a short Tree distance keeps its cards, lifted.
+      this.farCards?.chunksChanged(this.changedCx, this.changedCz, this.changedTrees, this.changedN);
     }
     this.changedN = 0;
     // An arrival's or a jump's whole window: its grass built at once, behind whatever screen is up.
@@ -7832,7 +7959,14 @@ export class World {
   private changedCx = new Int32Array(64);
   private changedCz = new Int32Array(64);
   private changedIn = new Uint8Array(64);
+  /** And what each one's trees are now, as the far cards read it (`CHUNK_TREES`): none for one that went. */
+  private changedTrees = new Uint8Array(64);
   private changedN = 0;
+  /** The chunks whose trees a plant sweep flipped, handed to the far cards once a sweep: kept arrays, written by index. */
+  private flipCx = new Int32Array(16);
+  private flipCz = new Int32Array(16);
+  private flipTrees = new Uint8Array(16);
+  private flipN = 0;
   /** The tiles a stream call's chunks lie in, written by index and never shortened. */
   private readonly dirtyTiles: (THREE.Mesh | null)[] = [];
   /** Whether a chunk is loaded, for a tile's first cut: one closure, made with the world. */
@@ -7847,14 +7981,47 @@ export class World {
       z.set(this.changedCz);
       const l = new Uint8Array(cap);
       l.set(this.changedIn);
+      const tr = new Uint8Array(cap);
+      tr.set(this.changedTrees);
       this.changedCx = x;
       this.changedCz = z;
       this.changedIn = l;
+      this.changedTrees = tr;
     }
     const i = this.changedN++;
     this.changedCx[i] = cx;
     this.changedCz[i] = cz;
     this.changedIn[i] = loaded ? 1 : 0;
+    // A chunk made has had its trees shown or hidden by the sweep's eye already (`createChunk`'s `plantSweep.show`).
+    this.changedTrees[i] = loaded ? this.grassHost.chunkTrees(cx, cz) : CHUNK_TREES.none;
+  }
+
+  /** Every standing chunk's trees handed to the far cards again (their rule moved, `FAR_CARD_RULE`). */
+  refreshFarCardTrees(): void {
+    this.flipN = 0;
+    for (const c of this.chunks.values()) this.noteTreeFlip(c);
+    if (this.flipN) this.farCards?.chunksChanged(this.flipCx, this.flipCz, this.flipTrees, this.flipN);
+    this.flipN = 0;
+  }
+
+  /** A chunk whose trees a sweep flipped, kept for the far cards (`plantVisit`). */
+  private noteTreeFlip(c: Chunk): void {
+    if (this.flipN >= this.flipCx.length) {
+      const cap = this.flipCx.length * 2;
+      const x = new Int32Array(cap);
+      x.set(this.flipCx);
+      const z = new Int32Array(cap);
+      z.set(this.flipCz);
+      const t = new Uint8Array(cap);
+      t.set(this.flipTrees);
+      this.flipCx = x;
+      this.flipCz = z;
+      this.flipTrees = t;
+    }
+    const i = this.flipN++;
+    this.flipCx[i] = c.cx;
+    this.flipCz[i] = c.cz;
+    this.flipTrees[i] = c.trees && !c.trees.visible ? CHUNK_TREES.hidden : CHUNK_TREES.shown;
   }
 
   /**
@@ -8083,6 +8250,18 @@ export class World {
 
 const chunkBox = new THREE.Box3();
 const chunkPart = new THREE.Sphere();
+
+/**
+ * Whether a card mesh is a tree's, for the leaf cards' `none` (`cardReceives`): by the size stamped on it as it was
+ * made, a chunk's planting's (`casterSize`) or a placed model's radius (`casterRadius`), against the flora's line, so
+ * the rule stays one about size whatever the shadow switches say; a mesh with no stamp by whether it casts, as before.
+ */
+function cardOfTree(mesh: THREE.Mesh): boolean {
+  const u = mesh.userData;
+  if (typeof u.casterSize === 'number') return floraBig(u.casterSize);
+  if (typeof u.casterRadius === 'number') return floraBig(u.casterRadius);
+  return mesh.castShadow;
+}
 
 /**
  * A terrain chunk's sphere in the world, over its ground and whatever grows on it: every mesh's own

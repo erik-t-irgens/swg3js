@@ -284,6 +284,22 @@ interface ShadowMapLike {
 }
 
 /**
+ * Whether the cascades can be read outside three now: the renderer's shadow map on, three cascades (and their
+ * breaks), each casting with a depth texture that has a compare function (PCF). The one test both readers make --
+ * the effects' (`fillCascades`) and the grass's (`World.syncGrassShadows`) -- so the two never disagree about when a
+ * map may be sampled. A cascade's map does not exist until its first shadow draw, and is replaced when its size moves.
+ */
+export function cascadesUsable(renderer: { shadowMap: { enabled: boolean } }, lights: readonly THREE.DirectionalLight[], breaks: readonly number[]): boolean {
+  if (!renderer.shadowMap.enabled || lights.length < FX_MAX_CASCADES || breaks.length < FX_MAX_CASCADES) return false;
+  for (let i = 0; i < FX_MAX_CASCADES; i++) {
+    const l = lights[i];
+    const map = l.shadow.map as ShadowMapLike | null;
+    if (!l.castShadow || !map || !map.depthTexture || !map.depthTexture.compareFunction) return false;
+  }
+  return true;
+}
+
+/**
  * Take the cascades' shadow maps. `count` is FX_MAX_CASCADES only when the renderer's shadow map is
  * enabled and every light casts and has `shadow.map.depthTexture` with a compare function (PCF);
  * otherwise count 0 and every map null, so a disposed or non-compare texture is never handed on.
@@ -294,13 +310,7 @@ export function fillCascades(out: FxCascades, renderer: { shadowMap: { enabled: 
   for (let i = 0; i < out.maps.length; i++) out.maps[i] = null;
   out.range = range > 0 ? range : 1;
   out.fade = fade;
-  let ok = renderer.shadowMap.enabled && lights.length >= FX_MAX_CASCADES && breaks.length >= FX_MAX_CASCADES;
-  for (let i = 0; ok && i < FX_MAX_CASCADES; i++) {
-    const l = lights[i];
-    const map = l.shadow.map as ShadowMapLike | null;
-    if (!l.castShadow || !map || !map.depthTexture || !map.depthTexture.compareFunction) ok = false;
-  }
-  if (!ok) return;
+  if (!cascadesUsable(renderer, lights, breaks)) return;
   for (let i = 0; i < FX_MAX_CASCADES; i++) {
     const l = lights[i];
     const s = l.shadow;

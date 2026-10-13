@@ -13,8 +13,9 @@
 //   6. a placed model sways only when it wears a card, and a building never;
 //   7. the world builds those depth programs by drawing the stand-ins into the shadow maps as a frame does, after
 //      the world pass's lights and then a room's are set up, with a target bound (read from
-//      `World.compileSwayDepth`'s own text and the portal renderer's shadow-only draw), the fixed combinations with
-//      them; and a building's rooms pass holds the flora still.
+//      `World.compileShadowDepth`'s own text and the portal renderer's shadow-only draw), the fixed combinations with
+//      them, and the plain combinations and the grass's own depth material in the same draws (wave 8); and a
+//      building's rooms pass holds the flora still.
 //
 // Run: node tools/swg/tests/floraSway.test.ts
 import assert from 'node:assert/strict';
@@ -46,18 +47,27 @@ const meshesOf = (scenes: THREE.Object3D[]): THREE.Mesh[] => {
 
 {
   const src = readFileSync(fileURLToPath(new URL('../../../src/world/world.ts', import.meta.url)), 'utf8');
-  const start = src.indexOf('private compileSwayDepth(');
+  const start = src.indexOf('private compileShadowDepth(');
   const end = start >= 0 ? src.slice(start).search(/\r?\n {2}\}\r?\n/) : -1;
   const body = start >= 0 && end > 0 ? src.slice(start, start + end) : '';
-  ok(body.includes('portals.drawShadowsOnly(this.scene)') && body.includes("{ layer: 0, standIns: swayDepthStandIns(swaying, 'world') }") && body.includes("{ layer: INTERIOR_LAYER, standIns: swayDepthStandIns(swaying, 'rooms') }"), "the sway's depth programs are built by drawing the stand-ins into the shadow maps, once after the world pass's lights are set up and once after a room's, each set with depth materials of its own");
+  ok(body.includes('portals.drawShadowsOnly(this.scene)') && body.includes("{ layer: 0, standIns: swayDepthStandIns(swaying, 'world'), plain: plainDepthCombos('world') }") && body.includes("{ layer: INTERIOR_LAYER, standIns: swayDepthStandIns(swaying, 'rooms'), plain: plainDepthCombos('rooms') }"), "the sway's depth programs are built by drawing the stand-ins into the shadow maps, once after the world pass's lights are set up and once after a room's, each set with depth materials of its own");
   ok(body.indexOf('r.compile(nothing, camera, this.scene)') >= 0 && body.indexOf('r.compile(nothing, camera, this.scene)') < body.indexOf('portals.drawShadowsOnly'), 'each light set is set up by a compile of nothing under that pass\'s layers before the shadow draw, since three keys a shadow draw on the last pass\'s lights');
   ok(/this\.withTarget\(r, bound, \(\) => portals\.drawShadowsOnly/.test(body) && body.includes('new THREE.WebGLRenderTarget('), 'with a target bound, as a shadow draw always has one');
   ok(body.includes('this.scene.add(s)') && body.includes('this.scene.remove(s)') && body.indexOf('this.scene.remove(s)') > body.indexOf('finally'), 'and the stand-ins stand in the scene for those draws alone, taken out whatever happens');
   const portal = readFileSync(fileURLToPath(new URL('../../../src/world/portalRender.ts', import.meta.url)), 'utf8');
   const draw = portal.slice(portal.indexOf('drawShadowsOnly(scene'), portal.indexOf('drawShadowsOnly(scene') + 600);
   ok(draw.includes('this.shadingShadows = true') && draw.includes('r.shadowMap.needsUpdate = true') && draw.includes('r.render(scene, this.shadowProbe)'), "the portal renderer's shadow-only draw is its own shadow pass: the probe, the maps marked for drawing, and its stray draws dropped");
-  ok(src.indexOf('this.compileSwayDepth(r, target, objects)') > src.indexOf('this.compileFor(r, camera, objects.slice(i, i + BATCH), target)') && src.indexOf('this.compileSwayDepth(r, target, objects)') < src.indexOf('for (const s of placed) s.dispose()'), "after the sweep's own compiles, over everything it compiled, before the placed stand-ins are let go");
+  ok(src.indexOf('this.compileShadowDepth(r, target, objects)') > src.indexOf('this.compileFor(r, camera, objects.slice(i, i + BATCH), target)') && src.indexOf('this.compileShadowDepth(r, target, objects)') < src.indexOf('for (const s of placed) s.dispose()'), "after the sweep's own compiles, over everything it compiled, before the placed stand-ins are let go");
   ok(body.includes('...swayDepthCombos()]') && body.indexOf('...swayDepthCombos()]') < body.indexOf("swayDepthStandIns(swaying, 'world')"), 'and over the fixed combinations as well, so a placed tier streamed in later finds its depth program built');
+  // Wave 8: the plain combinations and the grass's depth material go into the very same draws.
+  const loop = body.slice(body.indexOf('for (const { layer, standIns, plain } of sets) {'));
+  const drawn = loop.indexOf('const drawn: THREE.Object3D[] = [...standIns, ...plain];');
+  const added = loop.indexOf('this.scene.add(s);');
+  const shadowDraw = loop.indexOf('portals.drawShadowsOnly(this.scene)');
+  ok(drawn > 0 && added > drawn && shadowDraw > added && /for \(const s of drawn\) \{[\s\S]{0,160}this\.scene\.add\(s\);/.test(loop) && /finally \{\s*for \(const s of drawn\) this\.scene\.remove\(s\);/.test(loop), 'the plain combinations stand in the scene beside the sway\'s stand-ins for the shadow-only draw of each light set, and are taken out in the `finally`');
+  const tuft = loop.slice(loop.indexOf('if (withTuft) {'));
+  ok(/const tuft = this\.grassStand && this\.grassDepth \? this\.grassStand : null;/.test(body) && /const withTuft = tuft !== null && layer === 0;/.test(loop) && /tuft\.customDepthMaterial = this\.grassDepth!;\s*tuft\.castShadow = true;[\s\S]{0,160}this\.scene\.add\(tuft\);/.test(tuft) && loop.indexOf('this.scene.add(tuft);') < shadowDraw, 'the grass\'s stand-in hangs the grass\'s depth material, casts, and stands in the scene for the world set\'s shadow-only draw alone');
+  ok(/if \(withTuft\) warm\.grass = true;/.test(loop) && loop.indexOf('if (withTuft) warm.grass = true;') > shadowDraw && /if \(withTuft\) \{\s*this\.scene\.remove\(tuft\);\s*tuft\.castShadow = false;\s*tuft\.customDepthMaterial = undefined;/.test(loop), 'which the warm-up reports once it has been drawn, and puts back as it was, out of the scene and casting nothing');
   // A building's rooms pass: no wind indoors, and the switch back after.
   setSwayRoomPass(true);
   const inRooms = SWAY_UNIFORMS.uSwayWind.value.w;

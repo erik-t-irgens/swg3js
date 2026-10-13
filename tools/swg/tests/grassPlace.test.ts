@@ -16,13 +16,17 @@
 //      own frame: each card's family the nearest sample's, its height the samples' bilinear one less the far
 //      ground's drop, its tint the sample's colour; the far grid's own map is that grid mirrored into the game's
 //      frame; and a far lake and a circle drop what they should
-//   3. a far card stands only where no near chunk does: hidden as it is built over a chunk that stands, and
-//      hidden and shown again as chunks come and go (`chunksChanged`), its attribute marked for upload
+//   3. a far card stands only where our own trees are not: hidden as it is built over a chunk that stands with its
+//      trees shown, shown and lifted onto the coarse height over one whose trees a short Tree distance hides, and
+//      hidden and shown again as chunks come and go (`chunksChanged`), its attribute marked for upload; a tile's mesh
+//      hangs the casting depth material and casts by `applyCast` when the far cards are switched to
 //   4. nothing is generated on this thread: with every block cached no block is generated and no height asked
 //      for, and with none cached the chunk places nothing and generates nothing
 //   5. the window: built round the eye, a chunk a frame nearest first, taken down as it leaves; a circle added
 //      builds the chunks under it again; and a frame that crosses no chunk makes nothing (measured on the young
 //      generation, with --expose-gc)
+//   5b. a chunk built through the field hangs the casting depth material and the field's own shadow hooks, which
+//      draw no tuft into a cascade past the count in force; and the window follows the page's grass distance
 //   6. the converted worlds (SWG3JS_PACKS, else assets-private), over chunks drawn at random: every tuft stands at
 //      the ground's own height at its foot; the share of the candidates that find a near family is the share of
 //      the very same chunks' poles that hold one; and it is the study's own share of poles over 2,000 random
@@ -42,8 +46,8 @@ import { shaderKey } from '../../../src/swg/terrain/shaderKey.ts';
 import { readRadialFile, type RadialShaderEntry } from '../../../src/swg/terrain/radialFile.ts';
 import { ORIGIN_OFFSET } from '../../../src/swg/terrain/trn.ts';
 import { SwgTerrain } from '../../../src/world/swgTerrain.ts';
-import { FAR_CARD_DEFAULTS, GRASS_DEFAULTS, GRASS_SWAY_DEFAULTS, MEANT_FOR_WATER, TUFT_FAR, TUFT_HIDDEN, TUFT_PLUS, candidateCapacity, placeFarCards, placeGrass, placeStats, tuftBuffers, type FarSamples, type FloraCircle, type GrassWorld } from '../../../src/world/grassMath.ts';
-import { GrassField, FarCards, GRASS_TUNE, grassMaterial, type GrassHost, type GrassSetup } from '../../../src/world/grass.ts';
+import { FAR_CARD_DEFAULTS, GRASS_DEFAULTS, GRASS_SHADOW_DEFAULTS, GRASS_SHADOW_TUNE, GRASS_SWAY_DEFAULTS, MEANT_FOR_WATER, TUFT_FAR, TUFT_HIDDEN, TUFT_LIFT, TUFT_PLUS, candidateCapacity, placeFarCards, placeGrass, placeStats, tuftBuffers, type FarSamples, type FloraCircle, type GrassWorld } from '../../../src/world/grassMath.ts';
+import { CHUNK_TREES, GrassField, FarCards, GRASS_CAST, GRASS_TUNE, grassDepthMaterial, grassMaterial, setGrassTune, type GrassHost, type GrassSetup } from '../../../src/world/grass.ts';
 import { SWAY_DEFAULTS } from '../../../src/world/swayMath.ts';
 import { groundChunkOrigin } from '../../../src/world/groundTiles.ts';
 import { groundWorlds, PACKS } from './terrainHarness.ts';
@@ -351,7 +355,9 @@ const farCircle: FloraCircle = { x: 150, z: 100, r: 90 };
   const file = readRadialFile({ radialFormat: 1, size: 256, layers: 4, shaders: Object.fromEntries(shaders) })!;
   const setup: GrassSetup = { src: swg, world, file, near, far, shift: swg.groundShift, reference: null };
   const loaded = new Set<string>();
-  const host: GrassHost = { circlesFor: () => {}, adopt: () => {}, chunkLoaded: (cx, cz) => loaded.has(`${cx},${cz}`) };
+  // A bucket whose chunk stands with its trees hidden by a short Tree distance (wave 8): its cards stand in, lifted.
+  const thinned = new Set<string>();
+  const host: GrassHost = { circlesFor: () => {}, adopt: () => {}, chunkTrees: (cx, cz) => (thinned.has(`${cx},${cz}`) ? CHUNK_TREES.hidden : loaded.has(`${cx},${cz}`) ? CHUNK_TREES.shown : CHUNK_TREES.none), cascadeOf: () => 0 };
   // Two 64 m buckets of the tile that hold cards: one with its chunk standing as the tile is built, one without.
   const probe = tuftBuffers(candidateCapacity(far, FAR_TILE));
   placeFarCards(swg, world, far, farOrigin.x, farOrigin.z, FAR_TILE, samples, DROP, () => [], FAR_CARD_DEFAULTS, probe, placeStats());
@@ -362,16 +368,41 @@ const farCircle: FloraCircle = { x: 150, z: 100, r: 90 };
   }
   const buckets = [...counts.keys()];
   const standing = buckets[0];
+  // The fullest of the buckets between the two.
+  const thin = buckets.slice(1, -1).reduce((a, b) => ((counts.get(b) ?? 0) > (counts.get(a) ?? 0) ? b : a), buckets[1]);
   const coming = buckets[buckets.length - 1];
   loaded.add(standing);
-  const cards = new FarCards(material, host, new THREE.Group(), FAR_TILE, DROP);
+  thinned.add(thin);
+  const depth = grassDepthMaterial();
+  const cards = new FarCards(material, host, new THREE.Group(), FAR_TILE, DROP, depth);
   cards.setWorld(setup);
   cards.tileMade(0, 0, farOrigin.x, farOrigin.z, samples);
   cards.update(new THREE.Vector3(farOrigin.x + 256, 5, farOrigin.z + 256), 1);
   const mesh = cards.meshes[0];
-  ok(mesh !== undefined && buckets.length > 4 && standing !== coming, `the tile's cards are built (${buckets.length} buckets hold cards)`);
+  ok(mesh !== undefined && buckets.length > 4 && standing !== coming && thin !== coming, `the tile's cards are built (${buckets.length} buckets hold cards)`);
   const tuft = mesh.geometry.getAttribute('aSwgTuft') as THREE.InstancedBufferAttribute;
   const size = mesh.geometry.getAttribute('aSwgSize') as THREE.InstancedBufferAttribute;
+  // As built, by the far cards' own build: lifted exactly in the bucket whose chunk stands with its trees hidden.
+  let lifted = 0;
+  let liftedElsewhere = 0;
+  for (let i = 0; i < size.count; i++) {
+    const key = `${Math.floor((tuft.array as Float32Array)[i * 4] / 64)},${Math.floor((tuft.array as Float32Array)[i * 4 + 2] / 64)}`;
+    const f = (size.array as Float32Array)[i * 4 + 3];
+    if (f & TUFT_LIFT) {
+      if (key === thin && !(f & TUFT_HIDDEN)) lifted++;
+      else liftedElsewhere++;
+    }
+  }
+  ok(lifted === counts.get(thin) && liftedElsewhere === 0, `built over a chunk whose trees a short Tree distance hides, its cards there are shown and lifted onto the coarse height, and no other card is (${lifted} lifted)`);
+  thinned.delete(thin);
+  cards.chunksChanged([Number(thin.split(',')[0])], [Number(thin.split(',')[1])], [CHUNK_TREES.none], 1);
+  ok(mesh.customDepthMaterial === depth && !mesh.castShadow, 'the tile\'s mesh hangs the casting depth material and, the far cards not casting, casts nothing');
+  GRASS_SHADOW_TUNE.farCast = true;
+  cards.applyCast();
+  const castOn = mesh.castShadow && cards.casting === 1;
+  Object.assign(GRASS_SHADOW_TUNE, GRASS_SHADOW_DEFAULTS);
+  cards.applyCast();
+  ok(castOn && !mesh.castShadow, 'the far cards switched to cast, a tile already standing casts by `applyCast` alone, and stops again when they are switched back');
   /** Each card hidden exactly where its bucket's chunk stands now: the cards wrong, and the cards hidden. */
   const check = (): { wrong: number; hidden: number } => {
     let wrong = 0;
@@ -444,7 +475,7 @@ const farCircle: FloraCircle = { x: 150, z: 100, r: 90 };
   const material = grassMaterial();
   const roots = new Map<string, THREE.Group>();
   let adopted = 0;
-  const host: GrassHost = { circlesFor: (cx, cz, out) => { if (cx === 0 && cz === 0) for (const c of circles) out.push(c); }, adopt: () => void adopted++, chunkLoaded: (cx, cz) => roots.has(`${cx},${cz}`) };
+  const host: GrassHost = { circlesFor: (cx, cz, out) => { if (cx === 0 && cz === 0) for (const c of circles) out.push(c); }, adopt: () => void adopted++, chunkTrees: (cx, cz) => (roots.has(`${cx},${cz}`) ? 1 : 0), cascadeOf: () => 0 };
   const file = readRadialFile({ radialFormat: 1, size: 256, layers: 4, shaders: Object.fromEntries(shaders) })!;
   const setup: GrassSetup = { src: swg, world, file, near, far, shift: swg.groundShift, reference: null };
   const field = new GrassField(material, host);
@@ -514,6 +545,60 @@ const farCircle: FloraCircle = { x: 150, z: 100, r: 90 };
     ok(best.scavenges === 0 && best.made < 64 * 1024, `${frames} frames that cross no chunk make nothing (${Math.max(0, best.made)} bytes, ${best.scavenges} collections of the young generation)`);
   } else note('run with node --expose-gc to measure that a frame crossing no chunk makes nothing');
   ok(GRASS_TUNE.window === 3, 'the window is three chunks across by default');
+}
+
+// ---------------------------------------------------------------- 5b. what a chunk built casts with, and the window's reach
+
+{
+  const material = grassMaterial();
+  const depth = grassDepthMaterial();
+  const roots = new Map<string, THREE.Group>();
+  const cams = [new THREE.OrthographicCamera(), new THREE.OrthographicCamera(), new THREE.OrthographicCamera()];
+  const host: GrassHost = { circlesFor: () => {}, adopt: () => {}, chunkTrees: () => CHUNK_TREES.none, cascadeOf: (c) => Math.max(0, cams.indexOf(c as THREE.OrthographicCamera)) };
+  const file = readRadialFile({ radialFormat: 1, size: 256, layers: 4, shaders: Object.fromEntries(shaders) })!;
+  const setup: GrassSetup = { src: swg, world, file, near, far, shift: swg.groundShift, reference: null };
+  const field = new GrassField(material, host, depth);
+  field.setWorld(setup);
+  // The same 5 by 5 chunks the window's own check prepared its ground for.
+  for (let cz = -2; cz <= 2; cz++) {
+    for (let cx = -2; cx <= 2; cx++) {
+      const g = new THREE.Group();
+      roots.set(`${cx},${cz}`, g);
+      field.chunkMade(cx, cz, g);
+    }
+  }
+  const built = () => (field as unknown as { chunks: { built: boolean }[] }).chunks.filter((c) => c.built).length;
+  const eye = new THREE.Vector3(10, 1.7, 10);
+  for (let i = 0; i < 12; i++) field.update(eye, 1);
+  ok(built() === 9 && GRASS_TUNE.window === 3, `the window of nine round the eye at the world's own reach (${built()} built)`);
+  const mesh = roots.get('0,0')!.children[0] as THREE.Mesh;
+  ok(mesh.customDepthMaterial === depth && !mesh.castShadow, 'a chunk built through the field hangs its casting depth material, and casts nothing until the field finds it in reach of a casting grass');
+  // Its shadow hooks, as three's shadow pass calls them: the probe third, the cascade's own camera fourth.
+  const g = mesh.geometry as THREE.InstancedBufferGeometry;
+  const all = g.instanceCount;
+  const probe = new THREE.PerspectiveCamera();
+  const drawnIn = (n: number): number[] => {
+    GRASS_CAST.cascades = n;
+    const out: number[] = [];
+    for (const cam of cams) {
+      mesh.onBeforeShadow(null as never, null as never, probe, cam, g, depth, null as never);
+      out.push(g.instanceCount);
+      mesh.onAfterShadow(null as never, null as never, probe, cam, g, depth, null as never);
+    }
+    return out;
+  };
+  const one = drawnIn(1);
+  const two = drawnIn(2);
+  GRASS_CAST.cascades = 1;
+  ok(all > 0 && JSON.stringify(one) === JSON.stringify([all, 0, 0]) && JSON.stringify(two) === JSON.stringify([all, all, 0]) && g.instanceCount === all, `and the shadow hooks the field hangs as it builds: a cascade past the count in force draws none of its ${all} tufts, for that one draw (${one.join(', ')}; ${two.join(', ')})`);
+  // The window follows the page's grass distance.
+  setGrassTune({ reachScale: 3 });
+  for (let i = 0; i < 30; i++) field.update(eye, 1);
+  const wide = built();
+  const wideWindow = GRASS_TUNE.window;
+  setGrassTune({ reachScale: 1 });
+  field.update(eye, 1);
+  ok(wideWindow === 5 && wide === 25 && GRASS_TUNE.window === 3 && built() === 9, `the grass distance three times the world's own widens the window to five chunks and builds them (${wide}), and put back it lets the outer ring go (${built()})`);
 }
 
 // ---------------------------------------------------------------- 6. the converted worlds

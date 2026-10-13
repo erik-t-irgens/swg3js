@@ -18,8 +18,36 @@ export interface Settings extends FxSettings {
   shadowDistance: number;
   /** Shadow blur in map texels, 1 crisp to 3 soft. */
   shadowSoftness: number;
-  /** Placed objects this big (radius, metres) and up cast shadows. */
+  /** Placed buildings and props this big (radius, metres) and up cast shadows, what players put down included. */
   shadowCasterRadius: number;
+  // The flora's own (wave 8): what of it is drawn, how far, and what casts and takes the sun's shadow. Scene
+  // content, not an effect, and nothing here builds a shader program in play (`src/world/floraSettings.ts`).
+  /** The terrain's own grass, flowers and small plants round you. */
+  grass: boolean;
+  /** The grass's reach over the world's own (20 to 32 m), 0.5 to 3; the window of chunks built follows it. */
+  grassReach: number;
+  /** A share of the grass's tufts kept, 0.25 to 1. */
+  grassDensity: number;
+  /** The far hills' tree cards. */
+  farCards: boolean;
+  /** The far cards' reach over the world's own end (500 to 1000 m), 1 to 2. */
+  farCardReach: number;
+  /** The small plants' reach, times the world's own plant distance (never under 64 m), 1 to 4. */
+  floraPlantReach: number;
+  /** Metres the trees are drawn to (0: as far as the ground); past it the far tree cards stand in for them. */
+  floraTreeReach: number;
+  /** Trees, planted and placed, cast shadows. */
+  floraTreeShadows: boolean;
+  /** Small plants cast shadows, at their finest level only. */
+  floraPlantShadows: boolean;
+  /** The grass near you casts shadows (the original's never did). */
+  grassShadows: boolean;
+  /** Shadows fall on the grass and on the far tree cards. */
+  grassTakesShadows: boolean;
+  /** The far tree cards cast shadows (only where they stand inside Shadow distance). */
+  farCardShadows: boolean;
+  /** Whether a leaf takes its own tree's shadow: 'self' no (the owner's), 'all' yes, 'none' no shadow on leaves at all. */
+  leafShadows: string;
   /** Multiplier over the planet's own fog density. */
   fog: number;
   /** How strongly the normal maps bend the lighting, 0 flat to 2 doubled. */
@@ -156,6 +184,24 @@ export const DEFAULT_SETTINGS: Settings = {
   shadowDistance: 320,
   shadowSoftness: 1.4,
   shadowCasterRadius: 1.2,
+  // The flora's: every default is what the game drew before the page had a Flora section, but the two the wave
+  // added, and each says whose it is. Ours throughout unless it says otherwise.
+  grass: true,
+  grassReach: 1,
+  grassDensity: 1,
+  farCards: true,
+  farCardReach: 1,
+  floraPlantReach: 2,
+  floraTreeReach: 0,
+  floraTreeShadows: true,
+  floraPlantShadows: false,
+  // Off: the client's grass cast nothing, and casting adds up to three times the grass's vertex work.
+  grassShadows: false,
+  // On (new): the client's shadow volumes darkened whatever was drawn inside them, the grass included (inferred).
+  grassTakesShadows: true,
+  farCardShadows: false,
+  // The owner's: no leaf takes its own tree's shadow.
+  leafShadows: 'self',
   fog: 1,
   normalStrength: 1,
   exposure: 1,

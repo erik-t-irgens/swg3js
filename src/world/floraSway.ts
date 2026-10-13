@@ -15,7 +15,7 @@
 // same uniform objects, hung on every mesh drawn with it (`World.adoptMaterials`); three copies the side, the cut
 // and the picture onto it at every shadow draw. They share one program key (`'swg-sway-depth'`), and their
 // programs are built behind the loading screen by drawing stand-ins into the shadow maps as a frame does, under
-// the world pass's lights and a room's, each set through depth materials of its own (`World.compileSwayDepth`
+// the world pass's lights and a room's, each set through depth materials of its own (`World.compileShadowDepth`
 // says why a compile cannot stand in for that draw).
 //
 // **Spheres.** A crown moves up to about 1.2 m in a storm on the biggest trees, so every geometry of a swaying
@@ -305,7 +305,7 @@ function shadowSideOf(m: THREE.Material): THREE.Side {
 /**
  * One stand-in per depth combination the swaying meshes given can draw their shadow with, so the world's warm-up
  * builds every sway depth program behind the loading screen (the loading sweep never builds a depth program). A
- * stand-in is drawn into the shadow maps as a caster really is (`World.compileSwayDepth`): it wears its source's
+ * stand-in is drawn into the shadow maps as a caster really is (`World.compileShadowDepth`): it wears its source's
  * own material, from which three copies the side, the cut and the picture onto the depth material at the draw, and
  * hangs that depth material as its `customDepthMaterial`, set up as the draw sets it, so a compile of the depth
  * material alone builds the same program. What else is in a depth program's key -- instancing, the second
@@ -407,6 +407,66 @@ export function swayDepthCombos(): THREE.Mesh[] {
     }
   }
   combos = out;
+  return out;
+}
+
+/**
+ * A plain stand-in's shadow hook: the depth material three hands it (the hook's sixth argument) is told to choose its
+ * program again before this draw (`needsUpdate`, a step of its version). Three chooses a material's program again
+ * only when its version moves or the draw differs in instancing, skinning, morphs, clipping, fog or tone mapping
+ * (`WebGLRenderer`'s `setProgram`), never when `map`, `side` or `alphaMap` move, and its shadow pass writes exactly
+ * those three onto its one shared depth material for each caster without a version step. Drawn back to back, the
+ * instanced stand-ins on that shared material chose one program between them, at most, and every other key they
+ * stand for was left for a live frame to build. A clone (a picture with a cut) chooses its own at its first draw
+ * anyway, and choosing again where the key is built only finds it.
+ */
+export function chooseDepthProgram(_r: unknown, _o: unknown, _c: unknown, _s: unknown, _g: unknown, depthMaterial: THREE.Material): void {
+  depthMaterial.needsUpdate = true;
+}
+
+/**
+ * Stand-ins for every way three's own depth material can be drawn for a placed or flora caster that does not sway
+ * (wave 8), one light set's worth: an instanced mesh of one copy for each side three gives the depth material (a
+ * front-only material casts from its back, a double-sided one from both, a back-only one from its front) by each way
+ * its picture can be in its key -- none, a picture, a picture with a cut (which three draws through a clone of its
+ * depth material made per source material), and a picture with an alpha picture beside it (a split-alpha surface's)
+ * with and without a cut -- on the first coordinate set, which is the only one a converted caster's picture uses.
+ * Each set is drawn through sources of its own, kept for the session by `set`: a clone's program is fixed at its
+ * first draw under whatever lights were set up then, so the world's set and the rooms' set each need a clone of their
+ * own. Three's one shared depth material keeps the program it chose last until something it checks moves, so each
+ * stand-in makes it choose again under this set's lights (`chooseDepthProgram`), or the shared keys would come to one.
+ * Not culled; never in a scene but while the warm-up draws them; their geometry and materials are the session's.
+ * Only instanced: every caster the page's switches and slider can turn on is an instanced mesh (a tier's copies, a
+ * level group's, a thing put down in play, a flora batch, a chunk's own plants), and what is not (a building's rooms,
+ * a captured place) casts as it always did.
+ */
+const plainCombos = new Map<string, THREE.InstancedMesh[]>();
+export function plainDepthCombos(set: string): THREE.InstancedMesh[] {
+  let out = plainCombos.get(set);
+  if (out) return out;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 2));
+  const picture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+  picture.needsUpdate = true;
+  out = [];
+  for (const side of [THREE.FrontSide, THREE.DoubleSide, THREE.BackSide]) {
+    for (const kind of ['plain', 'pictured', 'cut', 'alphaPictured', 'alphaCut'] as const) {
+      const alpha = kind === 'alphaPictured' || kind === 'alphaCut';
+      const m = new THREE.MeshStandardMaterial({ side, map: kind === 'plain' ? null : picture, alphaMap: alpha ? picture : null, alphaTest: kind === 'cut' || kind === 'alphaCut' ? 0.5 : 0 });
+      m.name = `plain depth combination (${set}, ${side === THREE.FrontSide ? 'cast from the back' : side === THREE.DoubleSide ? 'both sides' : 'cast from the front'}, ${kind})`;
+      const s = new THREE.InstancedMesh(g, m, 1);
+      s.setMatrixAt(0, new THREE.Matrix4());
+      s.castShadow = true;
+      s.receiveShadow = true;
+      s.frustumCulled = false;
+      s.name = 'plain depth stand-in';
+      s.onBeforeShadow = chooseDepthProgram as THREE.Object3D['onBeforeShadow'];
+      out.push(s);
+    }
+  }
+  plainCombos.set(set, out);
   return out;
 }
 

@@ -34,9 +34,7 @@ import { fitInstanceSphere } from './levelGroup.ts';
 import { CHUNK_SIZE } from './terrain.ts';
 import { castsShadow } from './surfaces.ts';
 import { cardReceives } from './cardLight.ts';
-
-/** A flora model's radius times its scale under which it never casts a shadow: `flora.ts`'s own rule. */
-const SHADOW_MIN_RADIUS = 1.2;
+import { floraBig, floraCasts } from './shadowCasters.ts';
 
 /** The side of a flora region, metres: four chunks by four, the placed objects' own region. */
 export const FLORA_REGION = 256;
@@ -104,8 +102,10 @@ interface Batch {
   want: number;
   fill: number;
   maxScale: number;
-  /** Whether the finest rule would have it cast (its model's radius at its biggest planting's scale), as last rebuilt. */
-  base: boolean;
+  /** Its model's radius at its biggest planting's scale, as last rebuilt: which side of the flora's line it is (`shadowCasters.ts`). */
+  size: number;
+  /** Whether that size is a tree's (`floraBig`), which is what the leaf cards' `none` asks, whatever the switches say. */
+  big: boolean;
   range: UploadRange;
 }
 
@@ -346,7 +346,7 @@ export class FloraField {
     }
     let b = row[level];
     if (!b) {
-      b = { model: m, levels, level, meshes: [], attr: null, cap: 0, count: 0, want: 0, fill: 0, maxScale: 0, base: false, range: { start: 0, count: 0 } };
+      b = { model: m, levels, level, meshes: [], attr: null, cap: 0, count: 0, want: 0, fill: 0, maxScale: 0, size: 0, big: false, range: { start: 0, count: 0 } };
       row[level] = b;
       r.list.push(b);
     }
@@ -382,16 +382,19 @@ export class FloraField {
     }
   }
 
-  /** Whether a batch casts now: the finest rule (`base`), less the lowest level once its switch is past the second cascade. */
+  /**
+   * Whether a batch casts now: the casters' rule at its size and level (`floraCasts`, read live, so the Graphics page's
+   * switches take without a rebuild), less the lowest level once its switch is past the second cascade.
+   */
   private casts(b: Batch): boolean {
-    return levelCasts(b.base, b.level, b.levels.count, b.levels.nearOf[b.level] * this.scale, this.far2, this.tune);
+    return levelCasts(floraCasts(b.size, b.level), b.level, b.levels.count, b.levels.nearOf[b.level] * this.scale, this.far2, this.tune);
   }
 
   /**
-   * Every batch's shadow worked out again (the cascade's end or the scale moved, or the leaf cards' shadow rule
-   * did): a mesh casts as its batch does unless its material casts nothing (`castsShadow`, the layout streamer's
-   * own rule), and a card mesh of a batch whose finest level casts receives nothing under the cards' `none`
-   * (`cardReceives`, tied to `base` and never the live cast). Nothing allocated.
+   * Every batch's shadow worked out again (the cascade's end or the scale moved, the leaf cards' shadow rule did, or
+   * a caster's switch): a mesh casts as its batch does unless its material casts nothing (`castsShadow`, the layout
+   * streamer's own rule), and a card mesh of a tree receives nothing under the cards' `none` (`cardReceives`, tied to
+   * its size and never the live cast). Nothing allocated.
    */
   applyShadows(): void {
     const rl = this.regionList;
@@ -405,7 +408,7 @@ export class FloraField {
           const mesh = meshes[m];
           const want = cast && castsShadow(mesh.material);
           if (mesh.castShadow !== want) mesh.castShadow = want;
-          const receive = cardReceives(mesh.material, b.base);
+          const receive = cardReceives(mesh.material, b.big);
           if (mesh.receiveShadow !== receive) mesh.receiveShadow = receive;
         }
       }
@@ -469,7 +472,8 @@ export class FloraField {
     for (let k = 0; k < list.length; k++) {
       const b = list[k];
       b.count = b.want;
-      b.base = b.model.radius * b.maxScale >= SHADOW_MIN_RADIUS;
+      b.size = b.model.radius * b.maxScale;
+      b.big = floraBig(b.size);
       const cast = this.casts(b);
       if (b.attr && b.count > 0) {
         keepUploadRange(b.attr.updateRanges as UploadRange[], b.range, 0, b.count * 16);
@@ -480,7 +484,7 @@ export class FloraField {
         const mesh = meshes[m];
         mesh.count = b.count;
         mesh.castShadow = cast && castsShadow(mesh.material);
-        mesh.receiveShadow = cardReceives(mesh.material, b.base);
+        mesh.receiveShadow = cardReceives(mesh.material, b.big);
         mesh.visible = this.shown && b.count > 0;
         if (b.count > 0) fitInstanceSphere(mesh);
       }

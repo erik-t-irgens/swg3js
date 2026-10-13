@@ -6,6 +6,7 @@ import { FX_KNOBS, fxPassDef, fxProductDef } from '../core/fxRegistry.ts';
 import { INTERFACE, notifyBindingsChanged, onBindingsChanged, type Knob } from './hudPage.ts';
 import { keyLabel } from './hud.ts';
 import { GAMEPLAY } from './gameplayPage.ts';
+import { FLORA } from './floraPage.ts';
 import { multiplayerMarkup, type CharacterCopy } from './multiplayerPage.ts';
 import { resetWindows } from './drag.ts';
 import { compilerVerdict, verdictNote } from '../core/shaderWatch.ts';
@@ -163,7 +164,7 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'shadowMapSize', label: 'Shadow resolution', hint: 'The edge of each cascade\'s map. Each step doubles the memory; 4096 is crisp, 1024 is cheap.', kind: 'select', options: [{ value: 1024, label: '1024' }, { value: 2048, label: '2048' }, { value: 4096, label: '4096' }] },
       { key: 'shadowDistance', label: 'Shadow distance', hint: 'How far the cascades reach. Shorter is cheaper and sharper up close.', kind: 'range', min: 80, max: 800, step: 20, format: (v) => `${v} m` },
       { key: 'shadowSoftness', label: 'Shadow softness', hint: 'Blur in map texels: 1 crisp, 3 soft.', kind: 'range', min: 1, max: 3, step: 0.1, format: (v) => v.toFixed(1) },
-      { key: 'shadowCasterRadius', label: 'Smallest shadow caster', hint: 'Placed objects at least this big (radius, metres) cast. Larger leaves out the small props, saving a draw call per cascade each.', kind: 'range', min: 0.5, max: 8, step: 0.1, format: (v) => `${v.toFixed(1)} m` },
+      { key: 'shadowCasterRadius', label: 'Smallest shadow caster', hint: 'Placed buildings and props at least this big (radius, metres) cast, what players put down included; trees and plants follow the Flora switches. Larger leaves out the small props, saving a draw call per cascade each.', kind: 'range', min: 0.5, max: 8, step: 0.1, format: (v) => `${v.toFixed(1)} m` },
     ],
   },
   {
@@ -215,6 +216,8 @@ const GRAPHICS: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'mobileAnimRange', label: 'Creature animation range', hint: 'Past this they hold their pose until they come nearer. Their shadows and their movement carry on.', kind: 'range', min: 60, max: 400, step: 20, format: (v) => `${v} m` },
     ],
   },
+  // The plants: scene content, and nothing here builds a shader program in play (`floraPage.ts`).
+  FLORA,
 ];
 
 /**
@@ -327,6 +330,16 @@ export class Menu {
 
   get open(): boolean {
     return !this.root.classList.contains('hidden');
+  }
+
+  /** The Graphics page drawn again where it stands, when it is the one showing: a setting it shows moved from the console. */
+  redrawGraphics(): void {
+    if (!this.open || this.page !== 'graphics') return;
+    const body = this.root.querySelector<HTMLElement>('.menu-body');
+    const scroll = body?.scrollTop ?? 0;
+    this.showPage('graphics');
+    const again = this.root.querySelector<HTMLElement>('.menu-body');
+    if (again) again.scrollTop = scroll;
   }
 
   show(page: Page = 'main'): void {

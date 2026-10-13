@@ -342,7 +342,11 @@ import { cardsReport, setCardTune, type CardTune } from './world/cardRule.ts';
 import { CARD_LIGHT_ON, CARD_LIGHT_STATS, CARD_LIGHT_TUNE, CARD_LIGHT_UNIFORMS, LEAF_SHADOW_ON, setCardLightTune, type CardLightTune } from './world/cardLight.ts';
 import { cardLightSelfTest, cardsSelfTest, leafShadowSelfTest } from './world/cardSelfTests.ts';
 import { SWAY_TUNE, setSwayTune, swayModel, swayReport, swaySelfTest, type SwayTune } from './world/floraSway.ts';
-import { FAR_CARD_TUNE, FAR_CARDS_ON, GRASS_ON, GRASS_STATS, GRASS_STUDY, GRASS_SWAY, GRASS_TUNE, setFarCardTune, setGrassTune, writeGrassUniforms, type FarCardKnob, type GrassKnob } from './world/grass.ts';
+import { FAR_CARD_RULE, FAR_CARD_TUNE, FAR_CARDS_ON, GRASS_CAST, GRASS_ON, GRASS_STATS, GRASS_STUDY, GRASS_SWAY, GRASS_TUNE, GRASS_UNIFORMS, setFarCardTune, setGrassTune, writeGrassUniforms, type FarCardKnob, type GrassKnob } from './world/grass.ts';
+import { GRASS_SHADOW_TUNE, setGrassShadowTune, type GrassShadowTune } from './world/grassMath.ts';
+import { SHADOW_CASTER_TUNE, setShadowCasterTune, type ShadowCasterTune } from './world/shadowCasters.ts';
+import { FLORA_KEYS, consoleToSettings, floraHeldNote, floraOverrides, floraReachBack, floraTunesFrom, type ConsoleSetting, type FloraHelper } from './world/floraSettings.ts';
+import { grassShadowSelfTest } from './world/grassSelfTest.ts';
 import { BASIN_WATER_TUNE } from './world/basinWater.ts';
 import { FOUNTAIN_SPRAY_TUNE } from './world/particleDraw.ts';
 import { SWOOSH_TUNE } from './world/swooshTrail.ts';
@@ -1456,6 +1460,8 @@ class App {
     Character.normalScale.set(S.normalStrength, S.normalStrength);
     this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
     this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
+    // The flora's settings into their tunes before any world or camera, so the first world is planted, cast and drawn by them.
+    this.applyFlora();
     this.applyReach();
     // The spawner's cap and the creatures' animation range, kept by the world for every planet's manager.
     this.world.setMobileDetail(S.mobileCap, S.mobileAnimRange);
@@ -1580,6 +1586,19 @@ class App {
     registerPerfSwitch('lodLevels', { get: () => LOD_LEVEL_TUNE.on, set: (v) => this.world.setLodLevels(!!v), values: [false, true], note: "a placed thing out in the open and a plant drawn at the client's own detail level for its distance from the eye (the finest, the middle and the lowest the pack carries); off, every copy at its finest" });
     registerPerfSwitch('exactRooms', { get: () => FURNITURE_TUNE.exactRooms, set: (v) => (FURNITURE_TUNE.exactRooms = !!v), values: [false, true], note: "a room's furniture hosted by the building the snapshot names (a pack converted with them) rather than the one the rooms' boxes find, and seen from the room it names as well as every room the boxes find. Read when a world is read, so it takes effect at the next arrival: an in-session `ab` on it compares nothing" });
     registerPerfSwitch('floraRegions', { get: () => FLORA_BATCH.on, set: (v) => this.world.setFloraRegions(!!v), values: [false, true], note: "the plants and trees drawn one batch per 256 m region, model and level, rather than one mesh per 64 m chunk, model and piece (the levels ride on these)" });
+    // The flora's shadows (wave 8): each a flip that compiles nothing, so `perf({ ab })` can put both sides on one screen.
+    registerPerfSwitch('grassCast', { get: () => GRASS_SHADOW_TUNE.cast, set: (v) => this.flipFloraTune(() => setGrassShadowTune({ cast: !!v })), values: [false, true], note: 'the grass near you casts the sun\'s shadow (into the cascades its reach reaches)' });
+    registerPerfSwitch('grassReceive', { get: () => GRASS_SHADOW_TUNE.receive, set: (v) => this.flipFloraTune(() => setGrassShadowTune({ receive: !!v, farReceive: !!v })), values: [false, true], note: 'the grass and the far tree cards take the sun\'s shadow, one lookup a fragment in the cascades' });
+    registerPerfSwitch('plantsCast', { get: () => SHADOW_CASTER_TUNE.plants, set: (v) => this.flipFloraTune(() => setShadowCasterTune({ plants: !!v })), values: [false, true], note: 'small plants cast the sun\'s shadow, at their finest level only' });
+    registerPerfSwitch('farCardsByTrees', {
+      get: () => FAR_CARD_RULE.byTrees,
+      set: (v) => {
+        FAR_CARD_RULE.byTrees = !!v;
+        this.world.refreshFarCardTrees();
+      },
+      values: [false, true],
+      note: "true hides a far tree card only where a chunk's trees are shown, so past a short Tree distance the cards stand in for the trees, lifted over the near ground; false hides one wherever a near chunk stands, as before. At the default Tree distance the two are the same: compare them with `flora({ reach: { treeReach: 128 } })`",
+    });
     // Step 8, detail coming in nearer while the eye moves fast.
     // Step 9, the Theed hangar landing: behaviour, not frame time -- a trip planned with it on lands in the room.
     registerPerfSwitch('roomPads', { get: () => RIDE_TUNE.roomPads, set: (v) => (RIDE_TUNE.roomPads = !!v), values: [false, true], note: "a transport's trip to Theed Starport lands in the royal hangar on the hangar's own branch and its passenger keeps the room stepping on and off; off, set down at the port as before. Read when a trip is planned, so an in-session `ab` on it compares nothing: flip it and fly a trip" });
@@ -4323,7 +4342,14 @@ class App {
         if (typeof opts?.pad === 'number' && Number.isFinite(opts.pad)) FLORA_CLEAR.pad = Math.max(0, opts.pad);
         if (typeof opts?.cap === 'number' && Number.isFinite(opts.cap)) FLORA_CLEAR.cap = Math.max(1, opts.cap);
         if (opts?.reach !== undefined) {
-          applyReachOption(FLORA_TUNE, opts.reach);
+          const reach = opts.reach;
+          if (reach === true) floraReachBack(FLORA_TUNE, this.settings);
+          else if (reach && typeof reach === 'object') {
+            // The two fields with a setting go through it (in memory, never saved); the rest move the tune live.
+            this.setSettingFromConsole('flora', reach as Record<string, unknown>);
+            const { plantReachFactor: _f, treeReach: _t, ...live } = reach;
+            applyReachOption(FLORA_TUNE, live);
+          } else applyReachOption(FLORA_TUNE, reach);
           this.world.refreshFloraReach();
         }
         // What the trees and rocks are solid at (`floraCollision.ts`): `true` puts the shipped rule back,
@@ -4628,7 +4654,7 @@ class App {
         return {
           ...swayReport(),
           programs: { colour: programs.filter((p) => /(^|[|,])sway\|/.test(p.cacheKey)).length, depth: programs.filter((p) => p.cacheKey.includes('swg-sway-depth')).length },
-          depthWarm: { ...this.world.swayDepthWarm },
+          depthWarm: { ...this.world.shadowDepthWarm },
           ...(hung !== null ? { meshesWithSwayingShadow: hung } : {}),
         };
       },
@@ -4647,17 +4673,24 @@ class App {
       grass: (opts: GrassKnob & { roads?: boolean } = {}) => {
         const { roads, ...rest } = opts;
         if (typeof roads === 'boolean') TERRAIN_GROUND_TUNE.roadsClearFlora = roads;
-        const rebuild = setGrassTune(rest);
+        // The fields with a setting (on, reachScale, density) go through the setting, in memory and never saved; the rest move the tune live.
+        const pageNotes = this.setSettingFromConsole('grass', rest as Record<string, unknown>);
+        const { on: _on, reachScale: _scale, density: _density, ...live } = rest;
+        const rebuild = setGrassTune(live);
         if (rebuild) this.world.grass?.rebuildAll();
         writeGrassUniforms(this.world.grassWorld);
         const r = this.world.grass?.report(this.cam.camera) ?? null;
         const setup = this.world.grass?.world ?? null;
         const programs = (this.renderer.info.programs ?? []) as unknown as { name: string }[];
         const s = GRASS_STATS;
+        const over = floraOverrides(GRASS_TUNE, FAR_CARD_TUNE, FLORA_TUNE);
         return {
           on: GRASS_TUNE.on,
           escapeHatch: GRASS_ON ? 'on' : "off for this load (localStorage['swg.grass'] = '0')",
           tune: { ...GRASS_TUNE },
+          settings: { grass: this.settings.grass, grassReach: this.settings.grassReach, grassDensity: this.settings.grassDensity },
+          overrides: { reach: over.grassReach, window: over.grassWindow },
+          ...(pageNotes.length ? { notes: pageNotes } : {}),
           sway: { ...GRASS_SWAY, stiff: GRASS_SWAY.stiff.source },
           roadsClearFlora: TERRAIN_GROUND_TUNE.roadsClearFlora,
           world: setup ? { pictures: setup.file.layers, near: [...setup.file.shaders.values()].filter((e) => e.near).length, far: [...setup.file.shaders.values()].filter((e) => e.far).length, tiling: { ...setup.near } } : !GRASS_ON ? 'not loaded: the escape hatch is set for this load' : 'none (this world plants no radial flora, or its pack has no radial pictures: run the radial pass)',
@@ -4679,7 +4712,9 @@ class App {
        * perFrame, rebuild })` moves any of it.
        */
       farCards: (opts: FarCardKnob = {}) => {
-        const rebuild = setFarCardTune(opts);
+        const pageNotes = this.setSettingFromConsole('farCards', opts as Record<string, unknown>);
+        const { on: _on, reachScale: _scale, ...live } = opts;
+        const rebuild = setFarCardTune(live);
         if (rebuild) this.world.farCards?.rebuildAll();
         writeGrassUniforms(this.world.grassWorld);
         const r = this.world.farCards?.report(this.cam.camera.position) ?? null;
@@ -4688,6 +4723,9 @@ class App {
           on: FAR_CARD_TUNE.on,
           escapeHatch: FAR_CARDS_ON ? 'on' : "off for this load (localStorage['swg.farCards'] = '0')",
           tune: { ...FAR_CARD_TUNE },
+          settings: { farCards: this.settings.farCards, farCardReach: this.settings.farCardReach },
+          overrides: { reach: FAR_CARD_TUNE.reach },
+          ...(pageNotes.length ? { notes: pageNotes } : {}),
           ...(r ?? {}),
           study: GRASS_STUDY[this.world.planet.id]?.far ? { inRingMean: GRASS_STUDY[this.world.planet.id].far[0], p90: GRASS_STUDY[this.world.planet.id].far[1], note: 'the research counted the far tiling\'s whole ring; ours starts where our own trees stop' } : null,
           builds: s.farBuilds,
@@ -4792,8 +4830,63 @@ class App {
       ambient: (row?: number, scale?: number) => this.world.setAmbient(row, scale),
       /** Shadow look: radius is the blur in shadow-map texels (1 crisp, 3 soft), intensity how dark a shadow goes. Reports the cascade splits. */
       shadowLook: (radius?: number, intensity?: number, mapSize?: number) => this.world.setShadowLook(radius, intensity, mapSize),
-      /** Retune shadows: distance is how far the cascades reach, minRadius which objects cast. Shorter reach is cheaper and sharper. */
-      shadows: (distance?: number, minRadius?: number) => this.world.setShadows(distance, minRadius),
+      /**
+       * Retune shadows: distance is how far the cascades reach, minRadius which placed buildings and props cast (the
+       * page's smallest caster). Inside the Graphics page's ranges both are written into its settings in memory and
+       * never saved, so the page shows them; past them (`shadows(1200)`) they are in force now and the page keeps its own.
+       */
+      shadows: (distance?: number, minRadius?: number) => {
+        const notes = this.setSettingFromConsole('shadows', { distance, minRadius });
+        return { ...this.world.setShadows(), settings: { shadowDistance: this.settings.shadowDistance, shadowCasterRadius: this.settings.shadowCasterRadius }, ...(notes.length ? { notes } : {}) };
+      },
+      /**
+       * The flora's shadows (wave 8; `src/world/shadowCasters.ts`, `GRASS_SHADOW_TUNE`): `floraShadows()` says the casters'
+       * rule and the grass's shadow tune, the page's settings, the console's values standing over them, what casts and
+       * takes the shadow by kind, the cascades near grass casts into now, the depth warm-up's report and the grass's
+       * programs. `floraShadows({ trees, plants, grassCast, grassReceive, farCast, leaves })` moves the page's own
+       * settings, in memory and never saved; `{ castCascades, castFacing, castCut, lift, floraMinRadius, plantsFinest }`
+       * move their tunes live. Nothing compiles.
+       */
+      floraShadows: (opts: { trees?: boolean; plants?: boolean; grassCast?: boolean; grassReceive?: boolean; farCast?: boolean; leaves?: 'self' | 'all' | 'none' } & Partial<Pick<GrassShadowTune, 'castCascades' | 'castFacing' | 'castCut' | 'lift'>> & Partial<Pick<ShadowCasterTune, 'floraMinRadius' | 'plantsFinest'>> = {}) => {
+        const notes = this.setSettingFromConsole('floraShadows', opts as Record<string, unknown>);
+        const { castCascades, castFacing, castCut, lift, floraMinRadius, plantsFinest } = opts;
+        setGrassShadowTune({ castCascades, castFacing, castCut, lift });
+        if (setShadowCasterTune({ floraMinRadius, plantsFinest })) {
+          this.world.applyFloraCasters();
+          this.world.applyCasters();
+        }
+        writeGrassUniforms(this.world.grassWorld);
+        const programs = (this.renderer.info.programs ?? []) as unknown as { name: string }[];
+        const g = this.world.grass?.report(this.cam.camera) ?? null;
+        const f = this.world.farCards?.report(this.cam.camera.position) ?? null;
+        const S = this.settings;
+        let placedCasting = 0;
+        let placed = 0;
+        this.scene.traverseVisible((o) => {
+          if (o.userData.casterRadius === undefined || !(o as THREE.Mesh).isMesh) return;
+          placed++;
+          if ((o as THREE.Mesh).castShadow) placedCasting++;
+        });
+        return {
+          casters: { ...SHADOW_CASTER_TUNE },
+          grass: { ...GRASS_SHADOW_TUNE },
+          settings: { floraTreeShadows: S.floraTreeShadows, floraPlantShadows: S.floraPlantShadows, grassShadows: S.grassShadows, grassTakesShadows: S.grassTakesShadows, farCardShadows: S.farCardShadows, leafShadows: S.leafShadows, shadowCasterRadius: S.shadowCasterRadius },
+          overrides: floraOverrides(GRASS_TUNE, FAR_CARD_TUNE, FLORA_TUNE),
+          casting: { grassChunks: g?.casting ?? 0, farTiles: f?.casting ?? 0, floraChunkMeshes: this.world.applyFloraCasters(), placed: `${placedCasting} of ${placed} placed meshes in view` },
+          receiving: { on: GRASS_UNIFORMS.uSwgGrassShadowOn.value.x > 0.5, near: GRASS_SHADOW_TUNE.receive, far: GRASS_SHADOW_TUNE.farReceive, leaves: CARD_LIGHT_TUNE.shadow, leafSkip: LEAF_SHADOW_ON ? 'on' : "off for this load (localStorage['swg.leafShadow'] = 'all'): 'self' acts as 'all'" },
+          grassCascades: GRASS_CAST.cascades,
+          depthWarm: { ...this.world.shadowDepthWarm },
+          programs: { grass: programs.filter((p) => p.name === 'grass').length, grassDepth: programs.filter((p) => p.name === 'grass depth').length },
+          ...(notes.length ? { notes } : {}),
+        };
+      },
+      /**
+       * Hold the grass's shadow to its mirror (`src/world/grassSelfTest.ts`): the receive program drawn into a small float
+       * target against stand-in maps of known depth at a cascade's boundary on both sides, through the last cascade's
+       * fade and with the lift on and off, against `grassShadowMath.ts`; then through a real shadow pass off-screen, a
+       * tuft under a box darkened with receiving on and not off, and a tuft casting onto a plane with casting on and not.
+       */
+      grassShadowSelfTest: () => grassShadowSelfTest(this.renderer),
       /** The ragdolls' numbers (springs, limits, sleep, how a piece turns, whether a body meets its own pieces), changed live: `ragdoll({ selfCollide: true })`, `ragdoll({ inertiaBlend: 1 })`; no argument reads them, with every fallen body's state and the contact filter's counts. */
       ragdoll: (tune?: Partial<typeof RAGDOLL>) => {
         if (tune) Object.assign(RAGDOLL, tune);
@@ -10356,9 +10449,32 @@ class App {
         this.world.setShadowLook(S.shadowSoftness, undefined, S.shadowMapSize);
         break;
       case 'shadowDistance':
-      case 'shadowCasterRadius':
-        this.world.setShadows(S.shadowDistance, S.shadowCasterRadius);
+        this.world.setShadows(S.shadowDistance);
         break;
+      case 'shadowCasterRadius':
+        // The casters' rule, and every placed copy standing worked out again by it (what was put down in play included).
+        this.world.setShadows(undefined, S.shadowCasterRadius);
+        break;
+      case 'grass':
+      case 'grassReach':
+      case 'grassDensity':
+      case 'farCards':
+      case 'farCardReach':
+      case 'floraPlantReach':
+      case 'floraTreeReach':
+      case 'floraTreeShadows':
+      case 'floraPlantShadows':
+      case 'grassShadows':
+      case 'grassTakesShadows':
+      case 'farCardShadows':
+      case 'leafShadows': {
+        // Uniforms, `castShadow` and which chunks are drawn: nothing here builds a shader program in play.
+        this.applyFlora();
+        // A console value standing over the setting just moved stays, and says so (`floraHeldNote`).
+        const held = floraHeldNote(key, floraOverrides(GRASS_TUNE, FAR_CARD_TUNE, FLORA_TUNE));
+        if (held) this.messages.note(held);
+        break;
+      }
       case 'objectReach':
       case 'terrainRadius':
       case 'farRadius': {
@@ -10439,6 +10555,72 @@ class App {
         if (isFxSettingKey(key)) this.queueEffects();
         break;
     }
+  }
+
+  /**
+   * The flora's settings into their tunes and on to the world (wave 8, `src/world/floraSettings.ts`): the grass and the
+   * far cards, their shadows, the plants' and the trees' reaches, which flora casts, and the leaves' own shadow. Called
+   * once in the constructor, before any world or camera, and for every flora key the page or the console moves; `s` is
+   * the page's settings, or for a console value past the page's range those with that one value over them. A field
+   * that places builds the grass again a chunk a frame; everything else is a uniform, a `castShadow` or which chunks are
+   * drawn, so nothing here builds a shader program in play.
+   */
+  private applyFlora(s: Settings = this.settings): void {
+    const t = floraTunesFrom(s);
+    // The console's reach in metres stands over the scale (`reach` is not touched here), and so does a held window.
+    if (setGrassTune(t.grass)) this.world.grass?.rebuildAll();
+    if (setFarCardTune(t.farCards)) this.world.farCards?.rebuildAll();
+    setGrassShadowTune(t.grassShadow);
+    // A small plant distance typed in metres at the console stands over the page's factor until `reach: true`.
+    applyReachOption(FLORA_TUNE, t.reach);
+    setShadowCasterTune(t.casters);
+    const leavesWere = CARD_LIGHT_TUNE.shadow;
+    setCardLightTune({ shadow: t.leaves });
+    writeGrassUniforms(this.world.grassWorld);
+    this.world.refreshFloraReach();
+    this.world.applyFloraCasters();
+    this.world.applyCasters();
+    this.world.farCards?.applyCast();
+    if (this.cam) this.world.grass?.applyCast(this.cam.camera.position);
+    if (CARD_LIGHT_TUNE.shadow !== leavesWere) this.world.applyCardShadow();
+  }
+
+  /** A flora shadow switch flipped outside the settings (the frame report's A/B): the tune moved, then the world walked as `applyFlora` walks it. */
+  private flipFloraTune(move: () => void): void {
+    move();
+    writeGrassUniforms(this.world.grassWorld);
+    this.world.applyFloraCasters();
+    this.world.applyCasters();
+    this.world.farCards?.applyCast();
+    this.world.grass?.applyCast(this.cam.camera.position);
+  }
+
+  /**
+   * A console knob's value for a setting the page shows (`consoleToSettings`): inside the page's range it is written
+   * into the settings in memory and applied as the page would apply it, and the Graphics page is drawn again if it
+   * shows, so the page always shows the one value in force. It is **never saved**: a reload puts back what the page
+   * last saved, and a later save from the page keeps whatever the page shows then, this included, which is the page's
+   * own rule. Past the page's range it is applied live through the same path and the setting is left as it is, so the
+   * next slider moved or a reload puts the page's value back; the answer says so. Answers a line for each.
+   */
+  private setSettingFromConsole(helper: FloraHelper, o: Record<string, unknown>): string[] {
+    const notes: string[] = [];
+    const past: ConsoleSetting[] = [];
+    for (const c of consoleToSettings(helper, o)) {
+      if (c.inRange) {
+        (this.settings as unknown as Record<string, unknown>)[c.key] = c.value;
+        this.applySetting(c.key);
+      } else past.push(c);
+    }
+    if (past.length) {
+      const over = { ...this.settings } as unknown as Record<string, unknown>;
+      for (const c of past) over[c.key] = c.value;
+      if (past.some((c) => c.key === 'shadowDistance' || c.key === 'shadowCasterRadius')) this.world.setShadows(over.shadowDistance as number, over.shadowCasterRadius as number);
+      if (past.some((c) => (FLORA_KEYS as readonly string[]).includes(c.key))) this.applyFlora(over as unknown as Settings);
+      for (const c of past) notes.push(`${c.key} ${String(c.value)} is past the Graphics page's range: in force now, but the page keeps its own value, and the next slider moved or a reload puts that back`);
+    }
+    this.menu.redrawGraphics();
+    return notes;
   }
 
   /**

@@ -9,8 +9,8 @@
 //   3. the client's curve carried back exactly once, the very lines the leaf cards run
 //   2b. a quad of a fixed turn flipped to show its front to the eye, held against the tuft's own geometry
 //   4. the material: one source for every world, the card light's and the sway's uniform objects shared by
-//      reference, fog on, no light of three's, dry and kept out of the cascades; a tuft's mesh casts and takes no
-//      shadow and carries no depth material
+//      reference, fog on, no light of three's, dry and kept out of the cascades; a tuft's mesh made with no depth
+//      material casts nothing and never asks three to receive (the casting and receiving are `grassShadow.test`'s)
 //   5. the world's wiring, read as text: pictures landing for a world that has gone are thrown away, and the
 //      world's reaches are written whichever of the grass and the far cards is on
 //
@@ -73,7 +73,7 @@ ok(/uSwayShape = vec4\(/.test(GRASS_VERTEX) && /uSwayAxis = vec4\(/.test(GRASS_V
   // knob) is flipped to show its front to the eye. The flip is held here against the tuft's own geometry: each of
   // its triangles, wound as its index winds it and placed by the vertex stage's own rule written out again, faces
   // an eye anywhere round it, from both quads of a crossed tuft, at any turn.
-  const flip = 'if ( dot( cross( swgRight, swgUp ), cameraPosition - swgBase ) < 0.0 ) swgRight = - swgRight;';
+  const flip = 'if ( dot( cross( swgRight, swgUp ), SWG_GRASS_EYE - swgBase ) < 0.0 ) swgRight = - swgRight;';
   const at = GRASS_VERTEX.indexOf(flip);
   ok(count(GRASS_VERTEX, flip) === 1 && at > GRASS_VERTEX.indexOf('swgRight = swgAcross > 1e-5') && at < GRASS_VERTEX.indexOf('vec3 swgP = swgBase'), 'the vertex stage flips a quad\'s right toward the eye, once, after the right is made and before the corners are placed');
   const b = tuftBuffers(1);
@@ -133,13 +133,13 @@ ok(a.uniforms.uSwgCardFront === CARD_LIGHT_UNIFORMS.uSwgCardFront && a.uniforms.
 ok(a.uniforms.uSwayWind === SWAY_UNIFORMS.uSwayWind && a.uniforms.uSwayTime === SWAY_UNIFORMS.uSwayTime && a.uniforms.uSwayTune === SWAY_UNIFORMS.uSwayTune, 'and the sway\'s wind, clock and knobs the trees\' own');
 ok(a.uniforms.uSwgGrassMap === GRASS_UNIFORMS.uSwgGrassMap && b.uniforms.uSwgGrassReach === GRASS_UNIFORMS.uSwgGrassReach, 'its own are the session\'s, shared by every material made');
 ok(a.fog === true && a.lights === false && a.userData.dry === true && a.userData.unlit === true && (a as THREE.ShaderMaterial).isShaderMaterial, 'fog on, no light of three\'s, dry and kept out of the cascades');
-ok(!/cameraPosition/.test(GRASS_FRAGMENT) && /cameraPosition/.test(GRASS_VERTEX), 'the eye read only in the vertex stage of a material no shadow pass ever draws');
+ok(!/cameraPosition/.test(GRASS_FRAGMENT) && /cameraPosition/.test(GRASS_VERTEX), 'the eye read only in the vertex stage');
 const buffers = tuftBuffers(2);
 buffers.count = 2;
 buffers.size.set([1, 1, 0, 0, 2, 3, 1, 1]);
 buffers.tuft.set([0, 0, 0, 0, 10, 2, 5, 1]);
 const mesh = tuftMesh(buffers, a);
-ok(!mesh.castShadow && !mesh.receiveShadow && !mesh.customDepthMaterial && mesh.layers.mask === 1, 'a tuft\'s mesh casts and takes no shadow, has no depth material and stands on layer 0 alone');
+ok(!mesh.castShadow && !mesh.receiveShadow && !mesh.customDepthMaterial && mesh.layers.mask === 1, 'a tuft\'s mesh made with no depth material casts nothing, never asks three to receive (it reads the cascades itself) and stands on layer 0 alone');
 ok((mesh.geometry as THREE.InstancedBufferGeometry).instanceCount === 2 && mesh.geometry.boundingSphere!.containsPoint(new THREE.Vector3(10, 4.9, 5)), 'every tuft is drawn and its sphere holds every one, top and all');
 const stand = grassStandIn(a);
 ok(stand.material === a && (stand.geometry as THREE.InstancedBufferGeometry).instanceCount === 1 && stand.geometry.getAttribute('aSwgSway') !== undefined, 'the stand-in the loading screen compiles is a tuft drawn with the same material and every attribute');
@@ -160,7 +160,7 @@ ok(stand.material === a && (stand.geometry as THREE.InstancedBufferGeometry).ins
   const write = body.indexOf('writeGrassUniforms(setup);');
   const line = body.slice(body.lastIndexOf('\n', write), write);
   ok(write > body.indexOf('this.farCards.setWorld(setup)') && !/if \(/.test(line), 'the world\'s reaches go into the uniforms whichever of the grass and the far cards is on');
-  ok(/grass: \(opts[\s\S]{0,400}writeGrassUniforms\(this\.world\.grassWorld\)/.test(mainTs) && /farCards: \(opts[\s\S]{0,200}writeGrassUniforms\(this\.world\.grassWorld\)/.test(mainTs) && !/writeGrassUniforms\(this\.world\.grass\?\.world/.test(mainTs), 'and both knobs write them from whichever of the two holds the world, so the far cards alone keep their world\'s reach');
+  ok(/grass: \(opts[\s\S]{0,900}writeGrassUniforms\(this\.world\.grassWorld\)/.test(mainTs) && /farCards: \(opts[\s\S]{0,500}writeGrassUniforms\(this\.world\.grassWorld\)/.test(mainTs) && !/writeGrassUniforms\(this\.world\.grass\?\.world/.test(mainTs), 'and both knobs write them from whichever of the two holds the world, so the far cards alone keep their world\'s reach');
 }
 
 console.log(`\n${passed} passed`);

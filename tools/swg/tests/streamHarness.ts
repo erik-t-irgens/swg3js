@@ -62,14 +62,15 @@ export const HALL = {
   portals: [{ v: [[-1, 0, 10], [1, 0, 10], [1, 2, 10], [-1, 2, 10]], i: [0, 1, 2, 0, 2, 3] }],
 };
 
-type Def = { id: string; file: string; bounds: { min: number[]; max: number[] }; triangles: number };
+export type Def = { id: string; file: string; bounds: { min: number[]; max: number[] }; triangles: number };
 
-function loadedOf(def: Def, prims: { geometry: THREE.BufferGeometry; cell: number }[], rooms: THREE.Box3[] = []) {
+/** A loaded model as the pack hands it over: a material of its own on a piece where one is given (a leaf card's, glass's), the shared plain one otherwise. */
+export function loadedOf(def: Def, prims: { geometry: THREE.BufferGeometry; cell: number; material?: THREE.Material }[], rooms: THREE.Box3[] = []) {
   const bounds = new THREE.Box3(new THREE.Vector3(def.bounds.min[0], def.bounds.min[1], def.bounds.min[2]), new THREE.Vector3(def.bounds.max[0], def.bounds.max[1], def.bounds.max[2]));
   return {
     def,
     scene: new THREE.Group(),
-    primitives: prims.map((p) => ({ geometry: p.geometry, material: mat, cell: p.cell })),
+    primitives: prims.map((p) => ({ geometry: p.geometry, material: p.material ?? mat, cell: p.cell })),
     radius: Math.max(Math.abs(def.bounds.max[0] - def.bounds.min[0]), Math.abs(def.bounds.max[2] - def.bounds.min[2])) / 2,
     height: def.bounds.max[1] - Math.min(0, def.bounds.min[1]),
     interiorBoxes: rooms,
@@ -79,8 +80,8 @@ function loadedOf(def: Def, prims: { geometry: THREE.BufferGeometry; cell: numbe
   };
 }
 
-/** A pack holding these models, answering the streamer's four questions of it the way `AssetPack` does. */
-function fakePack(planet: string, defs: Def[], models: Record<string, ReturnType<typeof loadedOf>>) {
+/** A pack holding these models, answering the streamer's questions of it the way `AssetPack` does (`flora` the ids it files as its flora). */
+function fakePack(planet: string, defs: Def[], models: Record<string, ReturnType<typeof loadedOf>>, flora: string[] = []) {
   const ready = new Map<string, ReturnType<typeof loadedOf>>();
   return {
     manifest: { planet, categories: { layout: defs } },
@@ -88,6 +89,7 @@ function fakePack(planet: string, defs: Def[], models: Record<string, ReturnType
     objectEffects: null,
     doors: null,
     find: (id: string) => defs.find((d) => d.id === id),
+    isFlora: (def: Def) => flora.includes(def.id),
     loaded: (id: string) => ready.get(id) ?? null,
     model: async (id: string) => {
       const m = models[id];
@@ -135,14 +137,23 @@ export interface Harness {
   tiersShareLists(): number;
 }
 
-/** A streamer over a world of `objects` (the rock by default) with the gallery's house and crate standing behind it. */
-export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS): Promise<Harness> {
+/**
+ * A streamer over a world of `objects` (the rock by default) with the gallery's house and crate standing behind it;
+ * `extra` adds models of its own to the world's pack, `flora` naming those it files as flora.
+ */
+export async function makeStreamer(objects: SnapshotObject[] = DEFAULT_OBJECTS, extra: { defs?: Def[]; models?: Record<string, ReturnType<typeof loadedOf>>; flora?: string[] } = {}): Promise<Harness> {
   const physics = await Physics.create();
   const scene = new THREE.Scene();
-  const world = fakePack('tatooine', [ROCK, CRATE], {
-    rock: loadedOf(ROCK, [{ geometry: boxGeo(26, 30, 26, 0), cell: -1 }]),
-    crate: loadedOf(CRATE, [{ geometry: boxGeo(1, 1, 1, 0), cell: -1 }]),
-  });
+  const world = fakePack(
+    'tatooine',
+    [ROCK, CRATE, ...(extra.defs ?? [])],
+    {
+      rock: loadedOf(ROCK, [{ geometry: boxGeo(26, 30, 26, 0), cell: -1 }]),
+      crate: loadedOf(CRATE, [{ geometry: boxGeo(1, 1, 1, 0), cell: -1 }]),
+      ...(extra.models ?? {}),
+    },
+    extra.flora ?? [],
+  );
   const room = (): THREE.Box3[] => [new THREE.Box3(new THREE.Vector3(-9, 0, -9), new THREE.Vector3(9, 7.5, 9))];
   const shell = () => [
     { geometry: boxGeo(20, 8, 20, 0), cell: 0 },

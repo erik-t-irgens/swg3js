@@ -370,7 +370,7 @@ export class PortalRenderer {
 
   /**
    * The shadow maps drawn as a frame's shadow pass draws them and nothing else, its stray draws dropped as the
-   * pass drops them: what the world's warm-up builds a custom depth material's programs by (`World.compileSwayDepth`),
+   * pass drops them: what the world's warm-up builds a custom depth material's programs by (`World.compileShadowDepth`),
    * since only a real shadow draw keys a depth program as the frames will (three draws the shadow maps before it
    * sets up the lights of the pass that asked for them, so the light set in the key is the last pass's).
    */

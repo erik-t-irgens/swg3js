@@ -14,9 +14,7 @@ import { floraColliders } from './floraCollision.ts';
 import type { Collider, Exclusion } from './props';
 import { castsShadow } from './surfaces.ts';
 import { cardReceives } from './cardLight.ts';
-
-/** Flora smaller than this (metres of model radius) never casts a shadow. */
-const SHADOW_MIN_RADIUS = 1.2;
+import { floraBig, floraCasts } from './shadowCasters.ts';
 import type { SwgTerrain } from './swgTerrain';
 import { CHUNK_SIZE } from './terrain.ts';
 
@@ -257,18 +255,36 @@ export class FloraPlanter {
           (mesh.instanceMatrix.array as Float32Array).set(data.mats.subarray(k * 16, k * 16 + 16), i * 16);
         });
         mesh.instanceMatrix.needsUpdate = true;
-        // Grass and shrubs cast nothing: their shadow is a smudge under themselves, and a
-        // caster costs a draw call in every cascade it falls in. Trees still cast, unless their
-        // material casts nothing, which is the layout streamer's own rule (`castsShadow`).
-        const big = model.radius * Math.max(...list.map((p) => p.scale)) >= SHADOW_MIN_RADIUS;
-        mesh.castShadow = big && castsShadow(prim.material);
-        // A leaf card of a tree that casts receives nothing under the cards' `none` (`cardLight.ts`).
-        mesh.receiveShadow = cardReceives(prim.material, big);
+        // Small plants cast nothing unless the page's switch says so: their shadow is a smudge under themselves,
+        // and a caster costs a draw call in every cascade it falls in. The size is stamped so a switch moved later
+        // is applied without a rebuild, by the very rule that applies it here (`plantedShadow`).
+        mesh.userData.casterSize = model.radius * Math.max(...list.map((p) => p.scale));
+        plantedShadow(mesh);
         mesh.computeBoundingSphere();
         into.add(mesh);
       }
     }
   }
+}
+
+/**
+ * A chunk's own planted mesh's shadow by the casters' rule in force (`shadowCasters.ts`), from the planting's size
+ * stamped on it as it was made (`casterSize`): a tree casts unless "Trees cast shadows" is off, a small plant only
+ * while "Small plants cast shadows" is on (these meshes are the finest level), and never where the material casts
+ * nothing, the layout streamer's own rule (`castsShadow`); a leaf card of a tree takes no shadow under the cards'
+ * `none` (`cardLight.ts`), keyed on its size and never the live cast. The planter calls it as it builds and
+ * `World.applyFloraCasters` over every chunk standing when a switch moves. Writes only what changed; answers whether
+ * it casts (false for a mesh with no size stamped, which it leaves as it is).
+ */
+export function plantedShadow(mesh: THREE.Mesh): boolean {
+  const size = mesh.userData.casterSize;
+  if (typeof size !== 'number') return false;
+  const material = mesh.material as THREE.Material;
+  const cast = floraCasts(size, 0) && castsShadow(material);
+  if (mesh.castShadow !== cast) mesh.castShadow = cast;
+  const receive = cardReceives(material, floraBig(size));
+  if (mesh.receiveShadow !== receive) mesh.receiveShadow = receive;
+  return cast;
 }
 
 /** A model's pieces at every level it carries (step 7): its own, then each lower level's. */

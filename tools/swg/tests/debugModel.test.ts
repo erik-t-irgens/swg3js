@@ -315,7 +315,7 @@ const entry = (b: ViewBranch, key: string) => b.entries().find((e) => e.key === 
   ok(new Set(all).size === all.length, `no helper is filed under two groups (${all.length})`);
   // The knobs: a group of their own, first, holding every one the owner asked for in one place.
   ok(DEBUG_GROUPS[0].title === 'Tuning' && DEBUG_GROUPS[0].helpers === TUNING_HELPERS, 'the knobs are the first group, Tuning');
-  for (const k of ['reach', 'lod', 'god', 'day', 'flora', 'bladeGlow', 'torch', 'hover', 'nebulae', 'difficulty', 'arm', 'seats']) ok(TUNING_HELPERS.includes(k), `and ${k} is one of them`);
+  for (const k of ['reach', 'lod', 'god', 'day', 'flora', 'grass', 'farCards', 'floraShadows', 'bladeGlow', 'torch', 'hover', 'nebulae', 'difficulty', 'arm', 'seats']) ok(TUNING_HELPERS.includes(k), `and ${k} is one of them`);
   const tuning = groupHelpers(TUNING_HELPERS.map((n) => e(n)).concat([e('perf')]));
   ok(tuning[0].title === 'Tuning' && tuning[0].entries.length === TUNING_HELPERS.length && !tuning.slice(1).some((g) => g.entries.some((h) => TUNING_HELPERS.includes(h.name))), 'and the menu lists each of them there and nowhere else');
 

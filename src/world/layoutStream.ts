@@ -14,6 +14,7 @@ import { INTERIOR_LEAD, PORTAL_RANGE, interiorBuildRange, interiorBuildRangeMax,
 import { FURNITURE_ROLE, FURNITURE_TUNE, FurnitureIndex, HOST_FLAG, furnitureDraw, furnitureHosts, furnitureOn, markFurniture, splitCopies, type FurnitureDraw, type FurnitureGroup, type HostAnswer } from './furnitureHost.ts';
 import { mirroredTransform, type EffectHandle, type ParticleEffects } from './particles.ts';
 import { castsShadow, drawsAfterWater, isBasinWater } from './surfaces.ts';
+import { placedCasts } from './shadowCasters.ts';
 import { marks } from './marks.ts';
 import { floraClearRadius, modelReach } from './floraClear.ts';
 import { boxDistance, floorAt, footprintOf, gameX, gameZ, hostRadiusOf, hostReach, modelTier, PLACED_TIERS, PLACED_TUNE, REGION, regionCentre, regionIndex, regionRange, snapshotTier, tiltSin, type FloorAnswer, type FloorAsk } from './placedTiers.ts';
@@ -117,13 +118,32 @@ interface HugeJob {
   pieces: { vertices: Float32Array; indices: Uint32Array }[] | null;
   next: number;
 }
-/**
- * Model radius below which a placed object does not cast a shadow. Shadow casters are culled
- * against the light's frustum rather than the camera's, so every small prop in the cascades'
- * reach costs a draw call per cascade for a shadow the size of its own footprint.
- */
-const SHADOW_MIN_RADIUS = 1.2;
+// Which placed copies cast the sun's shadow is the casters' rule (`shadowCasters.ts`): a model at least the Graphics
+// page's "Smallest shadow caster" casts, since casters are culled against the light's frustum rather than the
+// camera's and every small prop in the cascades' reach costs a draw call per cascade for a shadow the size of its
+// own footprint; a piece that is flora follows the flora's switches. Every mesh made for a copy is stamped with what
+// the rule reads (`stampCaster`), so `applyCasters` can apply a moved slider to every tier standing.
 const MAX_CONCURRENT_LOADS = 3;
+
+/** What the casters' rule reads of a placed mesh, stamped as it is made: its model's radius, whether it is flora, its level position. */
+function stampCaster(mesh: THREE.Object3D, radius: number, flora: boolean, level: number): void {
+  mesh.userData.casterRadius = radius;
+  mesh.userData.casterFlora = flora;
+  mesh.userData.casterLevel = level;
+}
+
+/** Whether a piece's material is a leaf card (`cardRule.ts`'s mark). */
+function wearsCard(material: THREE.Material | THREE.Material[]): boolean {
+  if (!Array.isArray(material)) return material.userData.swgCardBlend !== undefined;
+  for (const m of material) if (m.userData.swgCardBlend !== undefined) return true;
+  return false;
+}
+
+/** Whether a stamped placed mesh casts by the rule in force (and its material at all). */
+function stampedCasts(mesh: THREE.Mesh): boolean {
+  const u = mesh.userData;
+  return placedCasts(u.casterRadius as number, u.casterFlora === true, (u.casterLevel as number) ?? 0) && castsShadow(mesh.material);
+}
 
 export interface PlacedObject {
   model: string;
@@ -1689,6 +1709,7 @@ export class LayoutStreamer {
         }
       }
       const isBuilding = model.interiorBoxes.length > 0;
+      const flora = this.packFlora(model);
       const built: (Building | null)[] = list.map((p) => {
         if (!isBuilding || p.contained) return null;
         const matrix = new THREE.Matrix4().compose(tmpV.set(p.x, p.y, p.z), p.q, ONE);
@@ -1740,7 +1761,8 @@ export class LayoutStreamer {
         });
         // Objects placed inside buildings draw in every pass, like actors, so they show with the room.
         if (instanced[0].contained) mesh.layers.enable(ACTOR_LAYER);
-        mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
+        stampCaster(mesh, model.radius, flora || wearsCard(prim.material), 0);
+        mesh.castShadow = stampedCasts(mesh);
         // A translucent fall or screen draws after the terrain water, which follows the player and
         // so always sorts nearer than this mesh's centre of all its placements.
         if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
@@ -1761,6 +1783,63 @@ export class LayoutStreamer {
     this.loadedModels += byModel.size;
     this.loadedInstances += objects.length;
     return { meshes, buildings, objects, effects, waters, furniture, levels, instances: objects.length };
+  }
+
+  /** Whether each loaded model's pack files it as flora, asked once a model (`packFlora`). */
+  private readonly floraOf = new WeakMap<LoadedModel, boolean>();
+
+  /**
+   * Whether a placed piece answers to the flora's shadow switches rather than the page's smallest caster. Every piece
+   * of a model its pack files as flora does (which takes in the models a world both plants and places: trunk and
+   * leaves alike), and otherwise a piece that is itself a leaf card (`wearsCard`), so a town's placed tree's crown
+   * follows "Trees cast shadows" and a placed shrub's "Small plants" whatever their pack calls them. It is decided by
+   * the piece and not the model: 188 of the packs' 6,796 placed models no pack files as flora wear a card somewhere,
+   * Corellia's 55 m geyser rock and 47 m crystal arch, a debris conduit and the Ewok village's tree with its platforms
+   * among them, and ruled as one they lost the whole of their shadow, rock and platforms too, to "Trees cast shadows"
+   * off. So their solid pieces stay on the smallest caster, and a placed tree its pack does not file keeps its trunk's
+   * shadow with the trees switched off, as any solid that size does.
+   */
+  private packFlora(model: LoadedModel): boolean {
+    let f = this.floraOf.get(model);
+    if (f === undefined) {
+      f = this.pack.isFlora?.(model.def) === true;
+      this.floraOf.set(model, f);
+    }
+    return f;
+  }
+
+  /**
+   * Every placed copy's shadow worked out again by the casters' rule in force (`shadowCasters.ts`): the page's
+   * smallest caster or a flora switch moved. Walks every loaded tier's meshes, which hold what was put down in play
+   * as well: a plain mesh by its stamps, a furniture group's old-rule shadow (its draw rule writes the mesh), a level
+   * group's finest rule (its own level rule over it). A building's rooms cast by their material alone and are not
+   * sized. Answers how many meshes cast after it. Not a frame's work: a slider moved.
+   */
+  applyCasters(): number {
+    let casting = 0;
+    for (const region of this.regions.values()) {
+      for (const tier of region.tiers) {
+        if (!tier || tier === 'loading') continue;
+        for (const o of tier.meshes) {
+          const mesh = o as THREE.Mesh;
+          if (!mesh.isMesh || mesh.userData.casterRadius === undefined || this.levelOfMesh.has(mesh)) continue;
+          const want = stampedCasts(mesh);
+          const g = this.furnitureOfMesh.get(mesh);
+          if (g) {
+            g.cast = want;
+            this.applyFurniture(g);
+          } else if (mesh.castShadow !== want) mesh.castShadow = want;
+        }
+      }
+    }
+    for (const g of this.levelGroups) g.setBase((mesh) => stampedCasts(mesh));
+    for (const region of this.regions.values()) {
+      for (const tier of region.tiers) {
+        if (!tier || tier === 'loading') continue;
+        for (const o of tier.meshes) if ((o as THREE.Mesh).castShadow && o.visible) casting++;
+      }
+    }
+    return casting;
   }
 
   /** Whether a model's outdoor copies are drawn at its levels: it carries more than one, and no piece of it is a basin's water the water system takes. */
@@ -1787,14 +1866,16 @@ export class LayoutStreamer {
     const centre = new THREE.Vector3((b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2);
     const radius = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) / 2;
     const made: THREE.InstancedMesh[] = [];
+    const flora = this.packFlora(model);
     const g = new LevelGroup(
       copies,
       model.levels!,
       centre,
       radius,
-      (prim, n) => {
+      (prim, n, level) => {
         const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, n);
-        mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
+        stampCaster(mesh, model.radius, flora || wearsCard(prim.material), level);
+        mesh.castShadow = stampedCasts(mesh);
         if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
         mesh.receiveShadow = true;
         mesh.name = `level:${model.def.id}`;
@@ -1995,7 +2076,9 @@ export class LayoutStreamer {
       }
       const mesh = new THREE.InstancedMesh(prim.geometry, prim.material, 1);
       mesh.setMatrixAt(0, tmpM.compose(tmpV.set(p.x, p.y, p.z), p.q, ONE));
-      mesh.castShadow = model.radius >= SHADOW_MIN_RADIUS && castsShadow(prim.material);
+      // A house or a prop put down in play by the same rule as a tier's copies, the page's slider included.
+      stampCaster(mesh, model.radius, this.packFlora(model) || wearsCard(prim.material), 0);
+      mesh.castShadow = stampedCasts(mesh);
       if (drawsAfterWater(prim.material)) mesh.renderOrder = 3;
       // A thing standing in a room is drawn with the room, which is the actor layer -- the same line
       // the bulk path has. Without it an indoor placement is stencilled out of the room's own pass

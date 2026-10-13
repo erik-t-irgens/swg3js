@@ -28,9 +28,20 @@
 // **Where it hangs**: a near chunk's grass is one mesh under that chunk's own group (so it is hidden with its
 // ground, `groundHiddenFor`, and goes with it), built when the chunk is in the window round the eye and taken down
 // when it leaves; a far tile's cards are one mesh under the ground's root, offered to the exit narrowing, shown
-// only where no near chunk stands (where our own trees are drawn) and out to the far tiling's end. Layer 0 only,
-// never a room's; no shadow cast or taken (the client's grass program samples none); dry; only uniforms change
-// per frame, and a frame that crosses no chunk does nothing.
+// only where our own trees are not (no near chunk stands there, or one stands with its trees hidden by a short
+// Tree distance, where the card is lifted back onto the coarse height) and out to the far tiling's end. Layer 0
+// only, never a room's; dry; only uniforms change per frame, and a frame that crosses no chunk does nothing.
+//
+// **Shadows** (wave 8, all ours: the client's grass cast none and sampled none). It *takes* the sun's shadow by
+// reading the cascades itself by the ambient occlusion's own arithmetic (`grassShadowMath.ts`): the vertex stage
+// hands over the point lifted toward the sun, so a tuft never shades itself, and its depth along the view, and the
+// fragment stage makes the one lookup and lowers the card sum's front term toward the tangent as a shaded leaf's
+// is, since a shadow compare made in the vertex stage lost the WebGL context under ANGLE on the owner's card;
+// `lights` stays false and the program keeps its one key. It *casts* (off by default)
+// through one depth material of the session made from this very vertex text (`SWG_GRASS_DEPTH`), measuring from
+// the sway's eye, since in a shadow pass `cameraPosition` is the cascade's camera; a near mesh casts only while its
+// chunk is within the reach and only into the cascades whose near edge the reach reaches, which is its instance
+// count set to nought for one draw (the cascade is the shadow hooks' fourth argument; the third is the probe).
 //
 // `localStorage['swg.grass'] = '0'` turns the grass off at load, `swg.farCards = '0'` the far cards.
 import * as THREE from 'three';
@@ -38,8 +49,9 @@ import type { FloraTiling } from '../swg/terrain/trn.ts';
 import { RADIAL_JSON, RADIAL_RGBA, readRadialFile, type RadialFile } from '../swg/terrain/radialFile.ts';
 import { CARD_CURVE_PARS, CARD_LIGHT_UNIFORMS } from './cardLight.ts';
 import { SWAY_TUNE, SWAY_UNIFORMS } from './floraSway.ts';
+import { SSAO_CSM_FADE_MARGIN } from '../core/fx/ssaoMath.ts';
 import {
-  FAR_CARD_DEFAULTS, GRASS_DEFAULTS, GRASS_SWAY_DEFAULTS, TUFT_HIDDEN, candidateCapacity, farReach, grassReach, placeFarCards, placeGrass, placeStats, trimBuffers, tuftBuffers,
+  FAR_CARD_DEFAULTS, GRASS_DEFAULTS, GRASS_SHADOW_TUNE, GRASS_SWAY_DEFAULTS, TUFT_HIDDEN, TUFT_LIFT, candidateCapacity, farReach, grassReach, grassWindowFor, placeFarCards, placeGrass, placeStats, trimBuffers, tuftBuffers,
   type FarCardTune, type FarSamples, type FloraCircle, type GrassSource, type GrassSway, type GrassTune, type GrassWorld, type PlaceStats, type TuftBuffers,
 } from './grassMath.ts';
 import { COLOUR_MODES, GROUND_DRAW_TUNE, groundChunkAt, groundChunkOrigin, type GroundShift } from './groundTiles.ts';
@@ -70,7 +82,15 @@ export const GRASS_CHUNK = 64;
 
 // ---------------------------------------------------------------- the program
 
-/** The vertex stage: placing, facing, fading, swaying and lighting a tuft. */
+/** A number as GLSL writes a float. */
+const glslFloat = (v: number): string => (Number.isInteger(v) ? `${v}.0` : String(v));
+
+/**
+ * The vertex stage: placing, facing, fading, swaying and lighting a tuft, and where the fragment stage looks its
+ * shadow up. With `SWG_GRASS_DEPTH` defined it
+ * is the casting program's (`grassDepthMaterial`): it measures from the sway's eye, may face across the sun,
+ * collapses what does not cast, and leaves out the light and the shadow it would otherwise read.
+ */
 export const GRASS_VERTEX = /* glsl */ `
 #include <common>
 #include <fog_pars_vertex>
@@ -79,6 +99,14 @@ ${SWAY_SHARED_PARS}
 vec4 uSwayShape;
 vec4 uSwayAxis;
 ${SWAY_FUNCTIONS}
+// The eye a tuft is faced to, faded by and flipped toward: the view camera. In a shadow pass the camera three hands a
+// program is the cascade's own, far off toward the sun, so the casting program measures from the sway's eye, which the
+// world writes once a frame from the view camera.
+#ifdef SWG_GRASS_DEPTH
+	#define SWG_GRASS_EYE uSwayEye
+#else
+	#define SWG_GRASS_EYE cameraPosition
+#endif
 uniform vec3 uSwgCardFront;
 uniform vec3 uSwgCardTangent;
 uniform vec3 uSwgCardBack;
@@ -96,6 +124,25 @@ uniform vec4 uSwgGrassReach;
 uniform vec4 uSwgGrassMode;
 // x the grass shown, y the far cards shown.
 uniform vec2 uSwgGrassShow;
+// Metres a far card shown over a near chunk is lifted by: back onto the coarse height the far tile it was dropped for stood on.
+uniform float uSwgGrassFarLift;
+#ifdef SWG_GRASS_DEPTH
+// x near grass casts, y the far cards cast, z a casting tuft faces across the sun (1) rather than the eye (0).
+uniform vec3 uSwgGrassCast;
+#else
+// What the fragment stage needs to read the sun's shadow (GRASS_SHADOW_PARS): where each corner looks it up, lifted
+// toward the sun, and its linear depth, interpolated across the quad; and the light in two parts, the front term's
+// share apart, so the shade can lower it there.
+uniform float uSwgGrassShadowRange;
+// x the cascades readable, y the lift (a share of the tuft's larger side), z the shadow's intensity.
+uniform vec3 uSwgGrassShadowOn;
+// x near grass takes the shadow, y the far cards do.
+uniform vec2 uSwgGrassReceive;
+varying vec3 vSwgLightSun;
+varying vec3 vSwgShadowPos;
+varying float vSwgShadowLd;
+varying float vSwgReceive;
+#endif
 attribute vec4 aSwgTuft;
 attribute vec4 aSwgSize;
 attribute vec4 aSwgTint;
@@ -113,7 +160,8 @@ void main() {
 	bool swgPlus = ( swgFlags & 1 ) != 0;
 	bool swgSecond = position.z > 0.5;
 	vec3 swgBase = aSwgTuft.xyz;
-	float swgDist = distance( swgBase, cameraPosition );
+	if ( swgFar && ( swgFlags & 64 ) != 0 ) swgBase.y += uSwgGrassFarLift;
+	float swgDist = distance( swgBase, SWG_GRASS_EYE );
 	float swgScale = 1.0;
 	float swgFade = 1.0;
 	if ( swgFar ) {
@@ -132,12 +180,22 @@ void main() {
 		} else swgScale = swgEdge;
 		if ( uSwgGrassShow.x < 0.5 ) swgScale = 0.0;
 	}
+	#ifdef SWG_GRASS_DEPTH
+		// What does not cast is collapsed as what is out of reach is: no fragment in the shadow map.
+		if ( swgFar ? uSwgGrassCast.y < 0.5 : uSwgGrassCast.x < 0.5 ) swgScale = 0.0;
+	#endif
 	vSwgUv = vec3( position.x + 0.5, 1.0 - position.y, aSwgSize.z );
 	vSwgTint = aSwgTint.rgb;
 	vSwgRef = aSwgTint.a;
 	vSwgFade = swgFade;
 	vSwgGlow = ( swgFlags & 16 ) != 0 ? 1.0 : 0.0;
 	vSwgLight = vec3( 1.0 );
+	#ifndef SWG_GRASS_DEPTH
+		vSwgLightSun = vec3( 0.0 );
+		vSwgShadowPos = vec3( 0.0 );
+		vSwgShadowLd = 0.0;
+		vSwgReceive = 0.0;
+	#endif
 	if ( swgScale <= 0.0 || ( swgSecond && ! swgPlus ) ) {
 		// Out of reach, hidden, or the second quad of a tuft that has none: collapsed outside the view, no fragments.
 		gl_Position = vec4( 2.0, 2.0, 2.0, 1.0 );
@@ -153,7 +211,12 @@ void main() {
 		float swgYaw = aSwgTuft.w + ( swgSecond ? 1.5707963 : 0.0 );
 		swgRight = vec3( cos( swgYaw ), 0.0, - sin( swgYaw ) );
 	} else {
-		swgRight = cross( swgUp, cameraPosition - swgBase );
+		vec3 swgToward = SWG_GRASS_EYE - swgBase;
+		#ifdef SWG_GRASS_DEPTH
+			// Across the sun, to compare: the shadow then stays still as the eye goes round, but is no longer the quad drawn.
+			if ( uSwgGrassCast.z > 0.5 ) swgToward = uSwgLeafSun;
+		#endif
+		swgRight = cross( swgUp, swgToward );
 		float swgLen = length( swgRight );
 		swgRight = swgLen > 1e-4 ? swgRight / swgLen : vec3( cos( aSwgTuft.w ), 0.0, - sin( aSwgTuft.w ) );
 	}
@@ -163,7 +226,7 @@ void main() {
 	// A quad of a fixed turn (a crossed child's two, every tuft under the 'fixed' knob) shows its front to the eye:
 	// the material draws one side, so seen from behind its right is flipped, which also keeps the picture the right
 	// way round. A quad turned to the eye already faces it and is never flipped.
-	if ( dot( cross( swgRight, swgUp ), cameraPosition - swgBase ) < 0.0 ) swgRight = - swgRight;
+	if ( dot( cross( swgRight, swgUp ), SWG_GRASS_EYE - swgBase ) < 0.0 ) swgRight = - swgRight;
 	vec3 swgP = swgBase + swgRight * ( position.x * aSwgSize.x * swgScale ) + swgUp * ( position.y * aSwgSize.y * swgScale );
 	// Sway: the trees' function, this tuft as its model (a height giving its amplitude, no canopy base, no flutter).
 	float swgDisp = aSwgSway.x;
@@ -178,20 +241,78 @@ void main() {
 	mat4 swgModel = mat4( 1.0 );
 	swgModel[ 3 ] = vec4( swgBase, 1.0 );
 	swgP += swgSwayOffset( vec3( 0.0, position.y * swgH, 0.0 ), swgModel ) * swgScale;
-	// The client's sum at the tuft, by the ground's normal: the ramp about the sun's axis, the ambient, the two fills.
-	float swgD = clamp( dot( swgN, uSwgLeafSun ), -1.0, 1.0 );
-	vec3 swgMain = swgD >= 0.0 ? mix( uSwgCardTangent, uSwgCardFront, swgD ) : mix( uSwgCardTangent, uSwgCardBack, - swgD );
-	vec3 swgSum = uSwgCardAmbient + swgMain;
-	if ( uSwgCardFills > 0.5 ) swgSum += uSwgCardFill * max( dot( swgN, normalize( uSwgCardFillDir ) ), 0.0 );
-	if ( uSwgCardFills > 1.5 ) swgSum += uSwgCardBounce * max( dot( swgN, normalize( uSwgCardBounceDir ) ), 0.0 );
-	vSwgLight = vSwgGlow > 0.5 ? vec3( 1.0 ) : clamp( swgSum * uSwgCardGain, 0.0, 1.0 );
 	vec4 mvPosition = viewMatrix * vec4( swgP, 1.0 );
 	gl_Position = projectionMatrix * mvPosition;
+	#ifndef SWG_GRASS_DEPTH
+		// Where the corner looks the sun's shadow up, lifted toward the sun by a share of the tuft's larger side (the
+		// texel a trunk's shadow falls on stays, and the tuft's own quads never shade it), and its linear depth. The
+		// lookup itself is the fragment stage's: a shadow compare in a vertex stage lost the WebGL context under ANGLE.
+		if ( uSwgGrassShadowOn.x > 0.5 && ( swgFar ? uSwgGrassReceive.y : uSwgGrassReceive.x ) > 0.5 ) {
+			vSwgShadowPos = swgP + uSwgLeafSun * ( uSwgGrassShadowOn.y * max( aSwgSize.x, aSwgSize.y ) * swgScale );
+			vSwgShadowLd = - mvPosition.z / max( uSwgGrassShadowRange, 1e-3 );
+			vSwgReceive = 1.0;
+		}
+		// The client's sum at the tuft, by the ground's normal: the ramp about the sun's axis, the ambient, the two
+		// fills. Handed on in two parts: everything with the front term at the tangent, and the front term's share
+		// apart (vSwgLightSun), which the shade lowers toward the tangent as a shaded leaf's (cardLight.ts), or which
+		// under the 'row7' look stays whole while the fragment lays the shadow row over it.
+		float swgD = clamp( dot( swgN, uSwgLeafSun ), -1.0, 1.0 );
+		vec3 swgMain = swgD >= 0.0 ? uSwgCardTangent : mix( uSwgCardTangent, uSwgCardBack, - swgD );
+		vSwgLightSun = swgD >= 0.0 ? ( uSwgCardFront - uSwgCardTangent ) * swgD : vec3( 0.0 );
+		vec3 swgSum = uSwgCardAmbient + swgMain;
+		if ( uSwgCardFills > 0.5 ) swgSum += uSwgCardFill * max( dot( swgN, normalize( uSwgCardFillDir ) ), 0.0 );
+		if ( uSwgCardFills > 1.5 ) swgSum += uSwgCardBounce * max( dot( swgN, normalize( uSwgCardBounceDir ) ), 0.0 );
+		vSwgLight = swgSum;
+	#endif
 	#include <fog_vertex>
 }
 `;
 
-/** The fragment stage: the picture cut at its reference, its mip scale, the tint and the light in the client's bytes, carried back through the curve. */
+/**
+ * The sun's shadow on a tuft, read in the fragment stage by the ambient occlusion's own arithmetic (`grassShadowMath.ts`
+ * is its mirror): how much of the shadow a fragment at linear depth `ld` takes (the AO's `cascadeKeep`, three's CSM
+ * margin over the last cascade's far end), the cascade it falls in, one hardware compare at the point the vertex stage
+ * lifted toward the sun, a texel off the map or past its far plane lit.
+ */
+export const GRASS_SHADOW_PARS = /* glsl */ `
+uniform sampler2DShadow uSwgGrassShadow0;
+uniform sampler2DShadow uSwgGrassShadow1;
+uniform sampler2DShadow uSwgGrassShadow2;
+uniform mat4 uSwgGrassShadowMatrix[ 3 ];
+// Each cascade's start and end as shares of the range.
+uniform vec2 uSwgGrassCascade[ 3 ];
+uniform float uSwgGrassCascadeFade;
+uniform vec3 uSwgGrassShadowBias;
+// x the cascades readable, y the lift, z the shadow's intensity.
+uniform vec3 uSwgGrassShadowOn;
+varying vec3 vSwgShadowPos;
+varying float vSwgShadowLd;
+varying float vSwgReceive;
+float swgGrassShadow( const in vec3 swgL, const in float swgLd ) {
+	float swgX = uSwgGrassCascade[ 2 ].x;
+	float swgY = uSwgGrassCascade[ 2 ].y;
+	float swgKeep = 1.0;
+	if ( uSwgGrassCascadeFade < 0.5 ) swgKeep = swgLd < swgY ? 1.0 : 0.0;
+	else if ( swgLd > 0.5 * ( swgX + swgY ) ) {
+		float swgM = max( ${glslFloat(SSAO_CSM_FADE_MARGIN)} * swgY * swgY, 1e-6 );
+		swgKeep = clamp( min( swgLd - ( swgX - 0.5 * swgM ), swgY + 0.5 * swgM - swgLd ) / swgM, 0.0, 1.0 );
+	}
+	if ( swgKeep <= 0.0 ) return 1.0;
+	int swgI = swgLd < uSwgGrassCascade[ 0 ].y ? 0 : ( swgLd < uSwgGrassCascade[ 1 ].y ? 1 : 2 );
+	vec4 swgS = uSwgGrassShadowMatrix[ swgI ] * vec4( swgL, 1.0 );
+	swgS.xyz /= swgS.w;
+	swgS.z += uSwgGrassShadowBias[ swgI ];
+	if ( swgS.x < 0.0 || swgS.x > 1.0 || swgS.y < 0.0 || swgS.y > 1.0 || swgS.z > 1.0 ) return 1.0;
+	float swgLit = swgI == 0 ? textureLod( uSwgGrassShadow0, swgS.xyz, 0.0 ) : ( swgI == 1 ? textureLod( uSwgGrassShadow1, swgS.xyz, 0.0 ) : textureLod( uSwgGrassShadow2, swgS.xyz, 0.0 ) );
+	return mix( 1.0, swgLit, uSwgGrassShadowOn.z * swgKeep );
+}
+`;
+
+/**
+ * The fragment stage: the picture cut at its reference, its mip scale, the sun's shadow (after the cut, so a fragment
+ * thrown away reads none), the tint and the light in the client's bytes, carried back through the curve.
+ * `SWG_GRASS_PROBE` writes the shade alone, ahead of the picture (the self-test's probe, `grassSelfTest.ts`).
+ */
 export const GRASS_FRAGMENT = /* glsl */ `
 #include <common>
 #include <fog_pars_fragment>
@@ -205,9 +326,14 @@ uniform vec3 uSwgGrassTintRef;
 uniform float uSwgCardCurve;
 uniform float uSwgCardExposureRef;
 uniform float uSwgCardBloomCap;
-${CARD_CURVE_PARS}
+uniform float uSwgCardShadowLook;
+uniform vec3 uSwgCardRow7;
+uniform float uSwgCardRow7Alpha;
+uniform float uSwgCardGain;
+${CARD_CURVE_PARS}${GRASS_SHADOW_PARS}
 varying vec3 vSwgUv;
 varying vec3 vSwgLight;
+varying vec3 vSwgLightSun;
 varying vec3 vSwgTint;
 varying float vSwgRef;
 varying float vSwgFade;
@@ -223,6 +349,11 @@ vec3 swgGrassTint( const in vec3 swgC ) {
 	return min( swgC / max( uSwgGrassTintRef, vec3( 1e-3 ) ), vec3( uSwgGrassTint.z ) );
 }
 void main() {
+	#ifdef SWG_GRASS_PROBE
+		float swgProbe = vSwgReceive > 0.5 ? swgGrassShadow( vSwgShadowPos, vSwgShadowLd ) : 1.0;
+		gl_FragColor = vec4( swgProbe, swgProbe, swgProbe, 1.0 );
+		return;
+	#endif
 	vec4 swgTexel = texture( uSwgGrassMap, vSwgUv );
 	vec2 swgDx = dFdx( vSwgUv.xy ) * uSwgGrassSize;
 	vec2 swgDy = dFdy( vSwgUv.xy ) * uSwgGrassSize;
@@ -233,8 +364,15 @@ void main() {
 		float swgNoise = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) );
 		if ( swgNoise > vSwgFade ) discard;
 	}
+	// The sun's shadow here, and the front term's share lowered toward the tangent by it (or, under the 'row7' look,
+	// kept whole and the shadow row laid over the display value below), as a shaded leaf's is.
+	float swgShade = vSwgReceive > 0.5 ? swgGrassShadow( vSwgShadowPos, vSwgShadowLd ) : 1.0;
+	float swgRise = uSwgCardShadowLook > 0.5 ? 1.0 : swgShade;
+	vec3 swgLight = vSwgGlow > 0.5 ? vec3( 1.0 ) : clamp( ( vSwgLight + vSwgLightSun * swgRise ) * uSwgCardGain, 0.0, 1.0 );
 	vec3 swgTint = vSwgGlow > 0.5 ? vec3( 1.0 ) : swgGrassTint( vSwgTint );
-	vec3 swgDisplay = clamp( swgTexel.rgb * swgTint * vSwgLight, 0.0, 1.0 );
+	vec3 swgDisplay = clamp( swgTexel.rgb * swgTint * swgLight, 0.0, 1.0 );
+	// The 'row7' look: a shaded tuft blended toward the ramp's shadow row in the client's bytes, as a leaf card is.
+	if ( uSwgCardShadowLook > 0.5 && vSwgGlow < 0.5 ) swgDisplay = mix( swgDisplay, uSwgCardRow7, uSwgCardRow7Alpha * ( 1.0 - clamp( swgShade, 0.0, 1.0 ) ) );
 	vec3 swgColour;
 	if ( uSwgCardCurve < 0.5 ) {
 		swgColour = swgAcesInverse( swgCardToLinear( swgDisplay ) ) / max( uSwgCardExposureRef, 1e-3 );
@@ -248,6 +386,30 @@ void main() {
 }
 `;
 
+/**
+ * The casting program's fragment stage: the colour stage's picture, mip raise and cut (at the shadow's own cut), and
+ * nothing else. A PCF map stores depth alone, so the colour written is never read; it never names a shadow sampler,
+ * since it draws into one.
+ */
+export const GRASS_DEPTH_FRAGMENT = /* glsl */ `
+uniform sampler2DArray uSwgGrassMap;
+uniform float uSwgGrassSize;
+// x the cut (the colour's), y the mip scale, z the dither's switch.
+uniform vec3 uSwgGrassCut;
+uniform float uSwgGrassCastCut;
+varying vec3 vSwgUv;
+varying float vSwgRef;
+void main() {
+	vec4 swgTexel = texture( uSwgGrassMap, vSwgUv );
+	vec2 swgDx = dFdx( vSwgUv.xy ) * uSwgGrassSize;
+	vec2 swgDy = dFdy( vSwgUv.xy ) * uSwgGrassSize;
+	float swgLod = 0.5 * log2( max( max( dot( swgDx, swgDx ), dot( swgDy, swgDy ) ), 1e-12 ) );
+	float swgAlpha = min( 1.0, swgTexel.a * ( 1.0 + uSwgGrassCut.y * max( 0.0, swgLod ) ) );
+	if ( swgAlpha < max( vSwgRef, uSwgGrassCastCut ) ) discard;
+	gl_FragColor = vec4( 1.0 );
+}
+`;
+
 /** A one-layer stand-in for the pictures until a world's arrive: a program's sampler must always hold a real texture. */
 function blankArray(): THREE.DataArrayTexture {
   const t = new THREE.DataArrayTexture(new Uint8Array([255, 255, 255, 0]), 1, 1, 1);
@@ -256,6 +418,19 @@ function blankArray(): THREE.DataArrayTexture {
 }
 
 const BLANK = blankArray();
+
+/**
+ * What a cascade's shadow sampler holds while the cascades cannot be read (shadows off, a map not drawn yet): a real
+ * 1x1 compare texture, never null, because a null shadow sampler binds nothing and the whole draw is dropped (the
+ * ambient occlusion's `noShadow`). It is never sampled for an answer: the shadow's switch is off whenever it stands in.
+ */
+export const GRASS_NO_SHADOW: THREE.DepthTexture = (() => {
+  const t = new THREE.DepthTexture(1, 1, THREE.UnsignedIntType);
+  t.name = 'grass.noShadow';
+  t.compareFunction = THREE.LessEqualCompare;
+  t.needsUpdate = true;
+  return t;
+})();
 
 /** The uniforms of this file's own, kept for the session so every write reaches the one material. */
 export const GRASS_UNIFORMS = {
@@ -267,6 +442,22 @@ export const GRASS_UNIFORMS = {
   uSwgGrassCut: { value: new THREE.Vector3(0.5, 0.1, 0) },
   uSwgGrassTint: { value: new THREE.Vector3(1, 1, 1.6) },
   uSwgGrassTintRef: { value: new THREE.Vector3(1, 1, 1) },
+  uSwgGrassFarLift: { value: 0 },
+  // The shadow they take (`World.syncGrassShadows` writes them once a frame, the maps and matrices by identity).
+  uSwgGrassShadow0: { value: GRASS_NO_SHADOW as THREE.Texture },
+  uSwgGrassShadow1: { value: GRASS_NO_SHADOW as THREE.Texture },
+  uSwgGrassShadow2: { value: GRASS_NO_SHADOW as THREE.Texture },
+  /** The cascades' own `shadow.matrix` objects, by reference: the shadow pass refreshes them inside the very render call whose world pass reads them. */
+  uSwgGrassShadowMatrix: { value: [new THREE.Matrix4(), new THREE.Matrix4(), new THREE.Matrix4()] as THREE.Matrix4[] },
+  uSwgGrassCascade: { value: new Float32Array(6) },
+  uSwgGrassShadowRange: { value: 1 },
+  uSwgGrassCascadeFade: { value: 0 },
+  uSwgGrassShadowBias: { value: new THREE.Vector3() },
+  uSwgGrassShadowOn: { value: new THREE.Vector3(0, 1, 1) },
+  uSwgGrassReceive: { value: new THREE.Vector2(1, 1) },
+  // What casts, and how.
+  uSwgGrassCast: { value: new THREE.Vector3(0, 0, 0) },
+  uSwgGrassCastCut: { value: 0.5 },
 };
 
 /** A world's pictures into the material, or the blank one back; the pictures before are disposed by whoever loaded them. */
@@ -301,6 +492,9 @@ export function grassMaterial(): THREE.ShaderMaterial {
       uSwgCardCurve: c.uSwgCardCurve,
       uSwgCardExposureRef: c.uSwgCardExposureRef,
       uSwgCardBloomCap: c.uSwgCardBloomCap,
+      uSwgCardShadowLook: c.uSwgCardShadowLook,
+      uSwgCardRow7: c.uSwgCardRow7,
+      uSwgCardRow7Alpha: c.uSwgCardRow7Alpha,
       ...GRASS_UNIFORMS,
     },
     vertexShader: GRASS_VERTEX,
@@ -310,7 +504,62 @@ export function grassMaterial(): THREE.ShaderMaterial {
   // Unlit and dry: out of the shadow cascades (which never take a ShaderMaterial anyway) and never wrapped by the weather.
   m.userData.unlit = true;
   m.userData.dry = true;
+  // A casting tuft's shadow from both of its sides: three hands a depth material its source's `shadowSide`, else the
+  // source's side turned over, so a front-only quad would cast from its back alone. Set once, here, since the side
+  // is in the depth program's key.
+  m.shadowSide = THREE.DoubleSide;
   return m;
+}
+
+/**
+ * The depth material every casting tuft and far card is drawn into the sun's shadow with (`customDepthMaterial`):
+ * made once a session beside `grassMaterial`, from the same vertex text under `SWG_GRASS_DEPTH`, with the same uniform
+ * objects by reference, unlit, fogless and dry. Three gives an unlit material its program at its first draw and
+ * never changes it with the lights, so one draw behind the first loading screen (`World.compileShadowDepth`) is its
+ * program for the session.
+ */
+export function grassDepthMaterial(): THREE.ShaderMaterial {
+  const s = SWAY_UNIFORMS;
+  const u = GRASS_UNIFORMS;
+  const m = new THREE.ShaderMaterial({
+    name: 'grass depth',
+    defines: { SWG_GRASS_DEPTH: '' },
+    uniforms: {
+      uSwayWind: s.uSwayWind,
+      uSwayTune: s.uSwayTune,
+      uSwayTime: s.uSwayTime,
+      uSwayEye: s.uSwayEye,
+      uSwayFade: s.uSwayFade,
+      uSwgLeafSun: CARD_LIGHT_UNIFORMS.uSwgLeafSun,
+      uSwgGrassMap: u.uSwgGrassMap,
+      uSwgGrassSize: u.uSwgGrassSize,
+      uSwgGrassReach: u.uSwgGrassReach,
+      uSwgGrassMode: u.uSwgGrassMode,
+      uSwgGrassShow: u.uSwgGrassShow,
+      uSwgGrassCut: u.uSwgGrassCut,
+      uSwgGrassFarLift: u.uSwgGrassFarLift,
+      uSwgGrassCast: u.uSwgGrassCast,
+      uSwgGrassCastCut: u.uSwgGrassCastCut,
+    },
+    vertexShader: GRASS_VERTEX,
+    fragmentShader: GRASS_DEPTH_FRAGMENT,
+    fog: false,
+    lights: false,
+  });
+  m.toneMapped = false;
+  m.userData.unlit = true;
+  m.userData.dry = true;
+  return m;
+}
+
+/** What casts and how, and the shadow's own cut, into the uniforms (`GRASS_SHADOW_TUNE`). Uniforms only. */
+export function writeGrassShadowUniforms(): void {
+  const t = GRASS_SHADOW_TUNE;
+  const u = GRASS_UNIFORMS;
+  u.uSwgGrassCast.value.set(GRASS_ON && GRASS_TUNE.on && t.cast ? 1 : 0, FAR_CARDS_ON && FAR_CARD_TUNE.on && t.farCast ? 1 : 0, t.castFacing === 'sun' ? 1 : 0);
+  u.uSwgGrassCastCut.value = t.castCut;
+  u.uSwgGrassReceive.value.set(t.receive ? 1 : 0, t.farReceive ? 1 : 0);
+  u.uSwgGrassShadowOn.value.y = t.lift;
 }
 
 /** The quads a tuft is drawn with: two, the second crossed, each a metre wide about x nought and a metre tall from its foot. */
@@ -320,8 +569,14 @@ function tuftQuads(g: THREE.InstancedBufferGeometry): void {
   g.setIndex([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
 }
 
-/** One mesh of tufts from filled buffers: a geometry of its own (never sharing an attribute, which a dispose would free under another), its sphere over every tuft. */
-export function tuftMesh(b: TuftBuffers, material: THREE.Material): THREE.Mesh {
+/**
+ * One mesh of tufts from filled buffers: a geometry of its own (never sharing an attribute, which a dispose would
+ * free under another), its sphere over every tuft. It hangs the casting depth material whether or not it casts
+ * (free while it does not), and casts from the moment it is made as the tune says: a far tile's cards by
+ * `farCast`, a near chunk's not until its field's `applyCast` finds it in reach, since every mesh a chunk or tile
+ * builds is made here and a switch applied only on a toggle would be lost at the next build.
+ */
+export function tuftMesh(b: TuftBuffers, material: THREE.Material, depth: THREE.Material | null = null, far = false): THREE.Mesh {
   const g = new THREE.InstancedBufferGeometry();
   tuftQuads(g);
   g.setAttribute('aSwgTuft', new THREE.InstancedBufferAttribute(b.tuft, 4));
@@ -343,7 +598,9 @@ export function tuftMesh(b: TuftBuffers, material: THREE.Material): THREE.Mesh {
   g.boundingSphere.radius += tall * 0.5 + 0.5;
   g.boundingBox = box;
   const mesh = new THREE.Mesh(g, material);
-  mesh.castShadow = false;
+  if (depth) mesh.customDepthMaterial = depth;
+  mesh.castShadow = !!depth && far && FAR_CARDS_ON && FAR_CARD_TUNE.on && GRASS_SHADOW_TUNE.farCast;
+  // Three's own receiving is never asked for: the grass reads the cascades itself, with no light of three's.
   mesh.receiveShadow = false;
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
@@ -403,9 +660,21 @@ export interface GrassHost {
   circlesFor(cx: number, cz: number, out: FloraCircle[]): void;
   /** Called with each mesh made, before it is drawn: the world joins its material to the stencil's set. */
   adopt(mesh: THREE.Object3D): void;
-  /** Whether the near chunk at a 64 m bucket stands: where it does, our own trees are drawn and no far card is. */
-  chunkLoaded(cx: number, cz: number): boolean;
+  /**
+   * What stands at a 64 m bucket, as the far cards read it (`CHUNK_TREES`): no near chunk; one whose trees are shown,
+   * where our own trees are drawn and no far card is; or one whose trees a short Tree distance hides, where the far
+   * cards stand in for them, lifted onto the coarse height. A chunk with no trees of its own reads as shown.
+   */
+  chunkTrees(cx: number, cz: number): number;
+  /** Which cascade a shadow camera is (0 for any other), for a casting chunk's own hooks. */
+  cascadeOf(shadowCamera: THREE.Camera): number;
 }
+
+/** What `GrassHost.chunkTrees` answers: no chunk, a chunk with its trees shown, a chunk with its trees hidden. */
+export const CHUNK_TREES = { none: 0, shown: 1, hidden: 2 } as const;
+
+/** How many cascades near grass casts into this frame (`grassCastCascades`), written by the world once a frame after the cascades move. */
+export const GRASS_CAST = { cascades: 1 };
 
 /** One world's radial flora, as the grass reads it. */
 export interface GrassSetup {
@@ -427,6 +696,7 @@ export function writeGrassUniforms(setup: GrassSetup | null): void {
   u.uSwgGrassShow.value.set(GRASS_ON && t.on ? 1 : 0, FAR_CARDS_ON && FAR_CARD_TUNE.on ? 1 : 0);
   u.uSwgGrassCut.value.set(t.cutoff, t.mipScale, t.fade === 'dither' ? 1 : 0);
   writeTintMode(setup);
+  writeGrassShadowUniforms();
   if (setup) u.uSwgGrassSize.value = setup.file.size;
 }
 
@@ -452,8 +722,18 @@ function followGroundTint(setup: GrassSetup): void {
 
 // ---------------------------------------------------------------- the knobs
 
-/** What `__debug.grass` takes: any setting of the tune, the sway's (its stiff names as a pattern's text), and `rebuild`. */
-export type GrassKnob = Partial<GrassTune> & { sway?: Partial<Omit<GrassSway, 'stiff'>> & { stiff?: string }; rebuild?: boolean };
+/**
+ * What `__debug.grass` takes: any setting of the tune, the sway's (its stiff names as a pattern's text), and
+ * `rebuild`. `window` is a number to hold the window at, or null to give it back to the reach (`windowHold`).
+ */
+export type GrassKnob = Partial<Omit<GrassTune, 'window' | 'windowHold'>> & { window?: number | null; sway?: Partial<Omit<GrassSway, 'stiff'>> & { stiff?: string }; rebuild?: boolean };
+
+/** The window in force: the console's held one, else the one the reach in force needs (`grassWindowFor`). */
+export function grassWindowNow(setup: GrassSetup | null): number {
+  const t = GRASS_TUNE;
+  if (t.windowHold !== null) return t.windowHold;
+  return grassWindowFor(setup ? grassReach(setup.near, t) : (t.reach ?? 30 * t.reachScale));
+}
 
 /** Move the grass's knobs: anything not a usable value is left as it was. Answers whether a knob that places moved (the caller builds the grass again). */
 export function setGrassTune(o: GrassKnob): boolean {
@@ -462,12 +742,12 @@ export function setGrassTune(o: GrassKnob): boolean {
   let rebuild = o.rebuild === true;
   if (typeof o.on === 'boolean') t.on = o.on;
   if (o.reach === null || (num(o.reach) && o.reach > 0)) t.reach = o.reach;
+  if (num(o.reachScale) && o.reachScale > 0) t.reachScale = o.reachScale;
   if (o.fade === 'shrink' || o.fade === 'dither' || o.fade === 'child') t.fade = o.fade;
   if (num(o.fadeBand)) t.fadeBand = Math.min(1, Math.max(0, o.fadeBand));
-  if (num(o.window) && o.window >= 1 && Math.round(o.window) !== t.window) {
-    t.window = Math.min(9, Math.round(o.window));
-    rebuild = true;
-  }
+  // The window follows the reach by itself (the field asks `grassWindowNow` each frame); a number holds it until null.
+  if (o.window === null) t.windowHold = null;
+  else if (num(o.window) && o.window >= 1) t.windowHold = Math.min(9, Math.round(o.window));
   if (num(o.cutoff)) t.cutoff = Math.min(1, Math.max(0, o.cutoff));
   if (num(o.mipScale) && o.mipScale >= 0) t.mipScale = o.mipScale;
   if (o.facing === 'eye' || o.facing === 'fixed') t.facing = o.facing;
@@ -526,6 +806,7 @@ export function setFarCardTune(o: FarCardKnob): boolean {
   let rebuild = o.rebuild === true;
   if (typeof o.on === 'boolean') t.on = o.on;
   if (o.reach === null || (num(o.reach) && o.reach > 0)) t.reach = o.reach;
+  if (num(o.reachScale) && o.reachScale > 0) t.reachScale = o.reachScale;
   if (num(o.fadeBand)) t.fadeBand = Math.min(1, Math.max(0, o.fadeBand));
   if (num(o.jitterMin) && o.jitterMin >= 0 && o.jitterMin !== t.jitterMin) {
     t.jitterMin = Math.min(0.5, o.jitterMin);
@@ -562,6 +843,9 @@ export const GRASS_STUDY: Record<string, { tufts: [number, number]; far: [number
 interface GrassChunk {
   cx: number;
   cz: number;
+  /** Its ground's corner in the game's frame (`groundChunkOrigin`), worked out once as it is made. */
+  x0: number;
+  z0: number;
   group: THREE.Object3D;
   mesh: THREE.Mesh | null;
   built: boolean;
@@ -589,11 +873,36 @@ export class GrassField {
   private scratch: TuftBuffers | null = null;
   readonly material: THREE.ShaderMaterial;
   readonly host: GrassHost;
+  /** The casting depth material every chunk's mesh hangs (`grassDepthMaterial`), or none. */
+  readonly depth: THREE.Material | null;
 
-  constructor(material: THREE.ShaderMaterial, host: GrassHost) {
+  constructor(material: THREE.ShaderMaterial, host: GrassHost, depth: THREE.Material | null = null) {
     this.material = material;
     this.host = host;
+    this.depth = depth;
   }
+
+  /**
+   * A casting chunk's shadow hooks, one pair for the field and hung on every near mesh: a cascade past the count in
+   * force draws none of its tufts. The instance count is the geometry's and read at every draw, where a uniform would
+   * not be: three uploads a material's uniforms only when the material or the program changes from the last draw, so
+   * one depth material drawn into cascade after cascade would carry the first one's value into the rest. The cascade
+   * is the hooks' fourth argument; the third is the camera the shadow render was asked for, the portal renderer's probe.
+   */
+  private zeroed: THREE.InstancedBufferGeometry | null = null;
+  private zeroedCount = 0;
+  private readonly beforeShadow = (_r: THREE.WebGLRenderer, _s: THREE.Scene, _c: THREE.Camera, shadowCamera: THREE.Camera, geometry: THREE.BufferGeometry): void => {
+    if (this.host.cascadeOf(shadowCamera) < GRASS_CAST.cascades) return;
+    const g = geometry as THREE.InstancedBufferGeometry;
+    this.zeroed = g;
+    this.zeroedCount = g.instanceCount;
+    g.instanceCount = 0;
+  };
+  private readonly afterShadow = (_r: THREE.WebGLRenderer, _s: THREE.Scene, _c: THREE.Camera, _shadowCamera: THREE.Camera, geometry: THREE.BufferGeometry): void => {
+    if (this.zeroed !== geometry) return;
+    this.zeroed.instanceCount = this.zeroedCount;
+    this.zeroed = null;
+  };
 
   /** This world's radial flora, or none. Every chunk built for the last is taken down. */
   setWorld(setup: GrassSetup | null): void {
@@ -601,6 +910,14 @@ export class GrassField {
     this.setup = setup;
     this.scratch = setup ? tuftBuffers(candidateCapacity(setup.near, GRASS_CHUNK)) : null;
     this.eyeCx = Number.NaN;
+    if (setup) {
+      // A chunk's corner moves with the world's shift: worked out again for any made before the world came.
+      for (const c of this.chunks) {
+        const o = groundChunkOrigin(c.cx, c.cz, setup.shift, GRASS_CHUNK);
+        c.x0 = o.x;
+        c.z0 = o.z;
+      }
+    }
     writeGrassUniforms(setup);
   }
 
@@ -610,8 +927,40 @@ export class GrassField {
 
   /** A near chunk made: its grass is built when it is in the window. */
   chunkMade(cx: number, cz: number, group: THREE.Object3D): void {
-    this.chunks.push({ cx, cz, group, mesh: null, built: false, stale: false, count: 0, buffers: null });
+    const o = groundChunkOrigin(cx, cz, this.setup?.shift, GRASS_CHUNK);
+    this.chunks.push({ cx, cz, x0: o.x, z0: o.z, group, mesh: null, built: false, stale: false, count: 0, buffers: null });
     this.pending = true;
+  }
+
+  /**
+   * Every built chunk casts while near grass casts and its square lies within the reach of the eye, flat: written
+   * only on a change, once a frame after `update`. Nothing allocated.
+   */
+  applyCast(eye: THREE.Vector3): void {
+    const setup = this.setup;
+    const on = !!setup && !!this.depth && GRASS_ON && GRASS_TUNE.on && GRASS_SHADOW_TUNE.cast;
+    const reach = setup ? grassReach(setup.near, GRASS_TUNE) : 0;
+    for (let i = 0; i < this.chunks.length; i++) {
+      const c = this.chunks[i];
+      const m = c.mesh;
+      if (!m) continue;
+      let want = on;
+      if (want) {
+        const nx = Math.max(c.x0, Math.min(eye.x, c.x0 + GRASS_CHUNK));
+        const nz = Math.max(c.z0, Math.min(eye.z, c.z0 + GRASS_CHUNK));
+        const dx = nx - eye.x;
+        const dz = nz - eye.z;
+        want = dx * dx + dz * dz < reach * reach;
+      }
+      if (m.castShadow !== want) m.castShadow = want;
+    }
+  }
+
+  /** The meshes casting now, for the console. */
+  get casting(): number {
+    let n = 0;
+    for (const c of this.chunks) if (c.mesh?.castShadow) n++;
+    return n;
   }
 
   /** A near chunk gone: its grass with it. */
@@ -635,12 +984,10 @@ export class GrassField {
 
   /** A circle kept off the ground added or let go of: every built chunk it touches is built again. */
   circleChanged(x: number, z: number, r: number): void {
-    const s = this.setup?.shift;
-    if (!s) return;
+    if (!this.setup) return;
     for (const c of this.chunks) {
       if (!c.built) continue;
-      const o = groundChunkOrigin(c.cx, c.cz, s, GRASS_CHUNK);
-      if (x + r < o.x || x - r > o.x + GRASS_CHUNK || z + r < o.z || z - r > o.z + GRASS_CHUNK) continue;
+      if (x + r < c.x0 || x - r > c.x0 + GRASS_CHUNK || z + r < c.z0 || z - r > c.z0 + GRASS_CHUNK) continue;
       c.stale = true;
       this.pending = true;
     }
@@ -668,6 +1015,13 @@ export class GrassField {
         this.eyeCx = Number.NaN;
       }
       return;
+    }
+    // The window follows the reach in force (a number compared a frame): a wider reach builds more chunks round the
+    // eye, a narrower one lets the outer ones go, and nothing already built is built again.
+    const across = grassWindowNow(setup);
+    if (across !== GRASS_TUNE.window) {
+      GRASS_TUNE.window = across;
+      this.pending = true;
     }
     const ecx = groundChunkAt(eye.x, setup.shift.x, GRASS_CHUNK);
     const ecz = groundChunkAt(eye.z, setup.shift.z, GRASS_CHUNK);
@@ -707,7 +1061,6 @@ export class GrassField {
     const setup = this.setup!;
     const t0 = performance.now();
     this.drop(c);
-    const o = groundChunkOrigin(c.cx, c.cz, setup.shift, GRASS_CHUNK);
     // The circles of every bucket the chunk's ground reaches into (it stands up to a metre over its own).
     this.circles.length = 0;
     this.host.circlesFor(c.cx, c.cz, this.circles);
@@ -716,13 +1069,15 @@ export class GrassField {
     if (setup.shift.x && setup.shift.z) this.host.circlesFor(c.cx + 1, c.cz + 1, this.circles);
     const b = this.scratch!;
     b.count = 0;
-    placeGrass(setup.src, setup.world, setup.near, o.x, o.z, GRASS_CHUNK, this.circles, GRASS_TUNE, GRASS_SWAY, SWAY_TUNE, b, GRASS_STATS.place);
+    placeGrass(setup.src, setup.world, setup.near, c.x0, c.z0, GRASS_CHUNK, this.circles, GRASS_TUNE, GRASS_SWAY, SWAY_TUNE, b, GRASS_STATS.place);
     c.built = true;
     c.stale = false;
     c.count = b.count;
     if (b.count) {
       const trimmed = trimBuffers(b);
-      const mesh = tuftMesh(trimmed, this.material);
+      const mesh = tuftMesh(trimmed, this.material, this.depth, false);
+      mesh.onBeforeShadow = this.beforeShadow as THREE.Object3D['onBeforeShadow'];
+      mesh.onAfterShadow = this.afterShadow as THREE.Object3D['onAfterShadow'];
       mesh.name = 'grass';
       c.group.add(mesh);
       this.host.adopt(mesh);
@@ -751,7 +1106,7 @@ export class GrassField {
    * ones in view cover (each quad's area over its distance squared against the view's own, a quad seen square on:
    * the cost the research sized the grass by, before the cut throws most of them away).
    */
-  report(camera: THREE.PerspectiveCamera): { chunks: number; built: number; draws: number; tufts: number; inReach: number; inView: number; fillScreens: number; reach: number } {
+  report(camera: THREE.PerspectiveCamera): { chunks: number; built: number; draws: number; tufts: number; inReach: number; inView: number; fillScreens: number; reach: number; window: number; casting: number } {
     const setup = this.setup;
     const reach = setup ? grassReach(setup.near, GRASS_TUNE) : 0;
     const eye = camera.position;
@@ -781,11 +1136,32 @@ export class GrassField {
         fill += (area / Math.max(d * d, 1)) * k;
       }
     }
-    return { chunks: this.chunks.length, built, draws, tufts, inReach, inView, fillScreens: Number(fill.toFixed(2)), reach };
+    return { chunks: this.chunks.length, built, draws, tufts, inReach, inView, fillScreens: Number(fill.toFixed(2)), reach, window: GRASS_TUNE.window, casting: this.casting };
   }
 }
 
 // ---------------------------------------------------------------- the far cards
+
+/**
+ * Which rule hides a far card (the frame report's `farCardsByTrees`): by the trees (true, wave 8), so a card stands in
+ * for the trees a short Tree distance hides, or by the chunk alone (false, as before), which leaves a ring with
+ * neither between a short Tree distance and the window's edge. The same answer at the default Tree distance.
+ */
+export const FAR_CARD_RULE = { byTrees: true };
+
+/**
+ * A far card's flags for what stands in its 64 m bucket (`CHUNK_TREES`): hidden where a chunk stands with its trees
+ * shown, shown where none stands, and shown lifted onto the coarse height where one stands with its trees hidden.
+ */
+export function cardFlags(flags: number, state: number): number {
+  let f = flags;
+  const s = state === CHUNK_TREES.hidden && !FAR_CARD_RULE.byTrees ? CHUNK_TREES.shown : state;
+  const hide = s === CHUNK_TREES.shown;
+  const lift = s === CHUNK_TREES.hidden;
+  if (((f & TUFT_HIDDEN) !== 0) !== hide) f += hide ? TUFT_HIDDEN : -TUFT_HIDDEN;
+  if (((f & TUFT_LIFT) !== 0) !== lift) f += lift ? TUFT_LIFT : -TUFT_LIFT;
+  return f;
+}
 
 interface FarTile {
   tx: number;
@@ -804,8 +1180,10 @@ interface FarTile {
 
 /**
  * The far hills' tree cards, one mesh a far ground tile, built within the far tiling's reach of the eye, a tile a
- * frame. A card is shown only where no near chunk stands -- there our own trees are -- which is written into its
- * flags when a chunk comes or goes, never worked out per frame.
+ * frame. A card is shown only where our own trees are not -- no near chunk stands there, or one does with its trees
+ * hidden by a short Tree distance, where the card is lifted back onto the coarse height (the far tile it was dropped
+ * for is cut away there) -- which is written into its flags when a chunk comes or goes or a sweep flips a chunk's
+ * trees, never worked out per frame.
  */
 export class FarCards {
   private readonly tiles: FarTile[] = [];
@@ -827,12 +1205,30 @@ export class FarCards {
     return this.circles;
   };
 
-  constructor(material: THREE.ShaderMaterial, host: GrassHost, root: THREE.Object3D, tileSize: number, drop: number) {
+  /** The casting depth material every tile's mesh hangs (`grassDepthMaterial`), or none. */
+  readonly depth: THREE.Material | null;
+
+  constructor(material: THREE.ShaderMaterial, host: GrassHost, root: THREE.Object3D, tileSize: number, drop: number, depth: THREE.Material | null = null) {
     this.material = material;
     this.host = host;
     this.root = root;
     this.tileSize = tileSize;
     this.drop = drop;
+    this.depth = depth;
+    GRASS_UNIFORMS.uSwgGrassFarLift.value = drop;
+  }
+
+  /** Every far mesh casts while the far cards cast (on a toggle; a tile built casts as it is made). */
+  applyCast(): void {
+    const want = !!this.depth && FAR_CARDS_ON && FAR_CARD_TUNE.on && GRASS_SHADOW_TUNE.farCast;
+    for (const t of this.tiles) if (t.mesh && t.mesh.castShadow !== want) t.mesh.castShadow = want;
+  }
+
+  /** The meshes casting now, for the console. */
+  get casting(): number {
+    let n = 0;
+    for (const t of this.tiles) if (t.mesh?.castShadow) n++;
+    return n;
   }
 
   setWorld(setup: GrassSetup | null): void {
@@ -876,10 +1272,12 @@ export class FarCards {
   }
 
   /**
-   * The near chunks that came (`ins[k]` 1) and went (0) in one stream call, `n` of them: each card standing in one
-   * is hidden or shown again. Written into the cards' flags and the attribute marked for upload; allocates nothing.
+   * The near chunks whose state changed in one stream call or one sweep, `n` of them, each as `CHUNK_TREES` says
+   * (`states[k]`: 0 gone, 1 standing with its trees shown, 2 standing with them hidden): each card standing in one is
+   * hidden where our trees are shown, and shown -- lifted where a chunk stands -- where they are not. Written into the
+   * cards' flags and the attribute marked for upload; allocates nothing.
    */
-  chunksChanged(cxs: ArrayLike<number>, czs: ArrayLike<number>, ins: ArrayLike<number>, n: number): void {
+  chunksChanged(cxs: ArrayLike<number>, czs: ArrayLike<number>, states: ArrayLike<number>, n: number): void {
     if (!n) return;
     for (const t of this.tiles) {
       const b = t.buffers;
@@ -891,10 +1289,9 @@ export class FarCards {
         for (let k = 0; k < n; k++) {
           if (cxs[k] !== bx || czs[k] !== bz) continue;
           const flags = b.size[i * 4 + 3];
-          const hidden = (flags & TUFT_HIDDEN) !== 0;
-          const want = ins[k] === 1;
-          if (hidden !== want) {
-            b.size[i * 4 + 3] = want ? flags + TUFT_HIDDEN : flags - TUFT_HIDDEN;
+          const want = cardFlags(flags, states[k]);
+          if (want !== flags) {
+            b.size[i * 4 + 3] = want;
             moved = true;
           }
         }
@@ -959,9 +1356,9 @@ export class FarCards {
         const bz = Math.floor(trimmed.tuft[i * 4 + 2] / GRASS_CHUNK);
         t.bucketX[i] = bx;
         t.bucketZ[i] = bz;
-        if (this.host.chunkLoaded(bx, bz)) trimmed.size[i * 4 + 3] += TUFT_HIDDEN;
+        trimmed.size[i * 4 + 3] = cardFlags(trimmed.size[i * 4 + 3], this.host.chunkTrees(bx, bz));
       }
-      const mesh = tuftMesh(trimmed, this.material);
+      const mesh = tuftMesh(trimmed, this.material, this.depth, true);
       mesh.name = 'far cards';
       (mesh.geometry.getAttribute('aSwgSize') as THREE.InstancedBufferAttribute).setUsage(THREE.DynamicDrawUsage);
       this.root.add(mesh);
@@ -986,13 +1383,14 @@ export class FarCards {
   }
 
   /** The far cards now, for the console: tiles, cards, those shown in reach. */
-  report(eye: THREE.Vector3): { tiles: number; built: number; draws: number; cards: number; hidden: number; inReach: number; reach: number } {
+  report(eye: THREE.Vector3): { tiles: number; built: number; draws: number; cards: number; hidden: number; overChunks: number; inReach: number; reach: number; casting: number } {
     const setup = this.setup;
     const reach = setup ? farReach(setup.far, FAR_CARD_TUNE) : 0;
     let built = 0;
     let draws = 0;
     let cards = 0;
     let hidden = 0;
+    let overChunks = 0;
     let inReach = 0;
     for (const t of this.tiles) {
       if (t.built) built++;
@@ -1005,10 +1403,12 @@ export class FarCards {
           hidden++;
           continue;
         }
+        // Shown over a near chunk whose trees a short Tree distance hides: inside the detailed ground.
+        if (b.size[i * 4 + 3] & TUFT_LIFT) overChunks++;
         if (Math.hypot(b.tuft[i * 4] - eye.x, b.tuft[i * 4 + 2] - eye.z) < reach) inReach++;
       }
     }
-    return { tiles: this.tiles.length, built, draws, cards, hidden, inReach, reach };
+    return { tiles: this.tiles.length, built, draws, cards, hidden, overChunks, inReach, reach, casting: this.casting };
   }
 
   /** Every mesh's attribute world places, for the node test (no frame needs this). */

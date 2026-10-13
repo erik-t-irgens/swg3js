@@ -30,14 +30,18 @@ import { cyclesPerWrap, omegaOf, swayPeriod, type SwayTune } from './swayMath.ts
 export interface GrassTune {
   /** Grass at all (ours; live). */
   on: boolean;
-  /** How far it reaches, metres: null is the world's own near tiling (20 to 32 m; the client's file), a number holds it (uniform). */
+  /** How far it reaches, metres: null is the world's own near tiling (20 to 32 m; the client's file) times `reachScale`, a number holds it (uniform). */
   reach: number | null;
+  /** The world's own reach is taken times this (the Graphics page's "Grass distance", ours; uniform, and the window follows). */
+  reachScale: number;
   /** How it fades at its edge (answer 9: it fades): `shrink` each tuft scales to nothing about its foot across the band; `dither` a stipple, to compare; `child` reads the child's own distance as its cut-off (uniform). */
   fade: 'shrink' | 'dither' | 'child';
   /** The band at the edge, a share of the reach (ours; uniform). */
   fadeBand: number;
-  /** Chunks across the window built round the eye (ours; rebuild). */
+  /** Chunks across the window built round the eye now: worked out from the reach in force (`grassWindowFor`) unless `windowHold` holds one (ours). */
   window: number;
+  /** A window the console typed, held over the worked-out one until `window: null` (ours). */
+  windowHold: number | null;
   /** The alpha cut, the larger of this and the shader's own reference (ours; uniform). */
   cutoff: number;
   /** How much a tuft's alpha is raised a mip level (ours, the trees' fit, unmeasured on grass; uniform). */
@@ -61,19 +65,32 @@ export interface GrassTune {
 export const GRASS_DEFAULTS: Readonly<GrassTune> = {
   on: true,
   reach: null,
+  reachScale: 1,
   fade: 'shrink',
   fadeBand: 0.25,
   window: 3,
+  windowHold: null,
   cutoff: 0.5,
   mipScale: 0.1,
   facing: 'eye',
   perTile: true,
   jitter: null,
   jitterMin: 0.3,
-  tint: 'colourMap',
+  // The owner's, having looked (2026-10-13): the ground's own colour rule reads better on the grass than the client's raw colour map.
+  tint: 'ground',
   water: 'drop',
   density: 1,
 };
+
+/**
+ * The chunks across the window round the eye a reach needs: odd, so the eye's own chunk is the middle, wide enough
+ * that a tuft at the reach's end has its chunk built from anywhere in the eye's chunk, and never past nine. Three
+ * at the worlds' own reaches of 20 to 32 m, as the window always was.
+ */
+export function grassWindowFor(reach: number): number {
+  if (!(reach > 0)) return 1;
+  return Math.min(9, 2 * Math.ceil(reach / 64) + 1);
+}
 
 /** How grass sways (ours, `__debug.grass({ sway })`): its own numbers beside the trees' (`SWAY_TUNE`, whose wind, clock and calm it shares). */
 export interface GrassSway {
@@ -100,8 +117,10 @@ export const GRASS_SWAY_DEFAULTS: Readonly<GrassSway> = {
 export interface FarCardTune {
   /** The far cards at all (live). */
   on: boolean;
-  /** How far they reach, metres: null is the world's far tiling's own end (500 to 1000 m), a number holds it (uniform). */
+  /** How far they reach, metres: null is the world's far tiling's own end (500 to 1000 m) times `reachScale`, a number holds it (uniform). */
   reach: number | null;
+  /** The far tiling's own end is taken times this (the Graphics page's "Far tree card distance"; uniform). */
+  reachScale: number;
   /** The band they shrink across at that end, a share of the reach (uniform). */
   fadeBand: number;
   /** The jitter where the far tiling's border is nought, a share of its tile (rebuild). */
@@ -112,7 +131,71 @@ export interface FarCardTune {
   perFrame: number;
 }
 
-export const FAR_CARD_DEFAULTS: Readonly<FarCardTune> = { on: true, reach: null, fadeBand: 0.1, jitterMin: 0.3, water: 'drop', perFrame: 1 };
+export const FAR_CARD_DEFAULTS: Readonly<FarCardTune> = { on: true, reach: null, reachScale: 1, fadeBand: 0.1, jitterMin: 0.3, water: 'drop', perFrame: 1 };
+
+/**
+ * Whether the grass and the far cards cast the sun's shadow and take it (wave 8), all ours. The client's grass cast
+ * nothing (its program samples no shadow and its stencil volumes came only from opaque effects), so casting starts
+ * off; taking the shadow starts on, since sunlit grass on shaded ground is the worst look there is, and the client's
+ * volumes darkened whatever was drawn inside them.
+ */
+export interface GrassShadowTune {
+  /** Near grass casts (the page's "Grass casts shadows"). */
+  cast: boolean;
+  /** The far cards cast (the page's "Far tree cards cast shadows"). */
+  farCast: boolean;
+  /** Near grass takes the sun's shadow (the page's "Shadows fall on grass"). */
+  receive: boolean;
+  /** The far cards take it (with the same switch on the page). */
+  farReceive: boolean;
+  /** The most cascades a near tuft is drawn into; each only while its near edge is inside the grass's reach. */
+  castCascades: number;
+  /** Which way a casting tuft faces: `eye` as the drawn quad does, `sun` across the sun (still, but no longer the quad you see). */
+  castFacing: 'eye' | 'sun';
+  /** The alpha cut in the shadow's raster. */
+  castCut: number;
+  /** A receiving lookup is moved toward the sun by this share of the tuft's larger side, so a tuft never shades itself. */
+  lift: number;
+}
+
+export const GRASS_SHADOW_DEFAULTS: Readonly<GrassShadowTune> = Object.freeze({ cast: false, farCast: false, receive: true, farReceive: true, castCascades: 3, castFacing: 'eye', castCut: 0.5, lift: 1 });
+
+export const GRASS_SHADOW_TUNE: GrassShadowTune = { ...GRASS_SHADOW_DEFAULTS };
+
+/** Move the grass's shadow knobs: anything not a usable value is left as it was. Answers whether a caster's switch moved (the caller walks the meshes). */
+export function setGrassShadowTune(o: Partial<GrassShadowTune>, t: GrassShadowTune = GRASS_SHADOW_TUNE): boolean {
+  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  let moved = false;
+  if (typeof o.cast === 'boolean' && o.cast !== t.cast) {
+    t.cast = o.cast;
+    moved = true;
+  }
+  if (typeof o.farCast === 'boolean' && o.farCast !== t.farCast) {
+    t.farCast = o.farCast;
+    moved = true;
+  }
+  if (typeof o.receive === 'boolean') t.receive = o.receive;
+  if (typeof o.farReceive === 'boolean') t.farReceive = o.farReceive;
+  if (num(o.castCascades)) t.castCascades = Math.min(3, Math.max(0, Math.round(o.castCascades)));
+  if (o.castFacing === 'eye' || o.castFacing === 'sun') t.castFacing = o.castFacing;
+  if (num(o.castCut)) t.castCut = Math.min(1, Math.max(0, o.castCut));
+  if (num(o.lift) && o.lift >= 0) t.lift = o.lift;
+  return moved;
+}
+
+/**
+ * How many cascades near grass casts into: the first, and each further one whose near edge (the cascade before it's
+ * end, metres from the eye, `ends[i - 1]`) is under the grass's reach, at most `most`. Nothing at all past what the
+ * reach can see: at the defaults (a 320 m Shadow distance, its first cascade ending about 54 m out, a reach of 20 to
+ * 32 m) the first alone.
+ */
+export function grassCastCascades(reach: number, ends: ArrayLike<number>, most: number): number {
+  const cap = Math.min(Math.max(0, Math.floor(most)), ends.length);
+  if (cap <= 0 || !(reach > 0)) return 0;
+  let n = 1;
+  while (n < cap && ends[n - 1] < reach) n++;
+  return n;
+}
 
 /**
  * A child's shader named for water, kept under the drawn water (ours, a name test over the 209 retail radial
@@ -128,6 +211,8 @@ export const TUFT_FAR = 4;
 export const TUFT_HIDDEN = 8;
 export const TUFT_GLOW = 16;
 export const TUFT_FADE = 32;
+/** A far card shown over a near chunk standing with its trees hidden (a short Tree distance): lifted onto the coarse height, since the far tile it was dropped for is cut away there. */
+export const TUFT_LIFT = 64;
 
 /** What a tuft's sway field says when it is not a flagged child's displacement. */
 export const SWAY_LAW = -1;
@@ -158,14 +243,14 @@ export function trimBuffers(b: TuftBuffers): TuftBuffers {
   return { count: n, tuft: b.tuft.slice(0, n * 4), size: b.size.slice(0, n * 4), tint: b.tint.slice(0, n * 4), sway: b.sway.slice(0, n * 4), normal: b.normal.slice(0, n * 3) };
 }
 
-/** The reach the grass runs to: the tune's, else the world's own near tiling's end (the client's file). */
-export function grassReach(tiling: FloraTiling, tune: Pick<GrassTune, 'reach'>): number {
-  return tune.reach ?? (tiling.maximumDistance > 0 ? tiling.maximumDistance : 30);
+/** The reach the grass runs to: the tune's metres, else the world's own near tiling's end (the client's file) times the page's scale. */
+export function grassReach(tiling: FloraTiling, tune: Pick<GrassTune, 'reach'> & Partial<Pick<GrassTune, 'reachScale'>>): number {
+  return tune.reach ?? (tiling.maximumDistance > 0 ? tiling.maximumDistance : 30) * (tune.reachScale ?? 1);
 }
 
-/** The far cards' reach: the tune's, else the far tiling's own end. */
-export function farReach(tiling: FloraTiling, tune: Pick<FarCardTune, 'reach'>): number {
-  return tune.reach ?? (tiling.maximumDistance > 0 ? tiling.maximumDistance : 500);
+/** The far cards' reach: the tune's metres, else the far tiling's own end times the page's scale. */
+export function farReach(tiling: FloraTiling, tune: Pick<FarCardTune, 'reach'> & Partial<Pick<FarCardTune, 'reachScale'>>): number {
+  return tune.reach ?? (tiling.maximumDistance > 0 ? tiling.maximumDistance : 500) * (tune.reachScale ?? 1);
 }
 
 /** How far a candidate moves from its tile's middle each way: the tiling's border, the tune's where it holds one, the floor where the border is nought; never past half a tile. */

@@ -199,11 +199,14 @@ export class PlantSweep {
     this.age = 0;
   }
 
-  /** One chunk's plants and trees shown or hidden by the last sweep's eye and reach, with the band of hysteresis. */
-  show(c: FloraChunk, tune: FloraReachTune = FLORA_TUNE): void {
+  /**
+   * One chunk's plants and trees shown or hidden by the last sweep's eye and reach, with the band of hysteresis.
+   * Answers whether it flipped the chunk's trees, which the far tree cards follow (`FarCards.chunksChanged`).
+   */
+  show(c: FloraChunk, tune: FloraReachTune = FLORA_TUNE): boolean {
     const p = c.plants;
     const t = c.trees;
-    if (!p && !t) return;
+    if (!p && !t) return false;
     const on = this.active && this.measured;
     let d = 0;
     if (on) {
@@ -219,15 +222,19 @@ export class PlantSweep {
     }
     if (t) {
       const v = on ? shownAt(d, tune.treeReach, band, t.visible) : true;
-      if (t.visible !== v) t.visible = v;
+      if (t.visible !== v) {
+        t.visible = v;
+        return true;
+      }
     }
+    return false;
   }
 
-  /** `show`, and the chunk's plants counted into the sweep's stats: what the sweep hands every chunk. */
-  visit(c: FloraChunk, tune: FloraReachTune = FLORA_TUNE): void {
-    this.show(c, tune);
+  /** `show`, and the chunk's plants counted into the sweep's stats: what the sweep hands every chunk. Answers whether its trees flipped. */
+  visit(c: FloraChunk, tune: FloraReachTune = FLORA_TUNE): boolean {
+    const flipped = this.show(c, tune);
     const p = c.plants;
-    if (!p) return;
+    if (!p) return flipped;
     const n = instancesUnder(p);
     const s = this.stats;
     if (p.visible) {
@@ -237,5 +244,6 @@ export class PlantSweep {
       s.hidden++;
       s.hiddenInstances += n;
     }
+    return flipped;
   }
 }

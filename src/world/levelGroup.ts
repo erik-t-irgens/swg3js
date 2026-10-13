@@ -153,7 +153,7 @@ export class LevelGroup {
    */
   private readonly tune: LodLevelTune;
 
-  constructor(copies: readonly LevelCopy[], levels: readonly ModelLevel[], centre: THREE.Vector3, radius: number, make: (prim: Primitive, n: number) => THREE.InstancedMesh, ready: boolean, tune: LodLevelTune = LOD_LEVEL_TUNE) {
+  constructor(copies: readonly LevelCopy[], levels: readonly ModelLevel[], centre: THREE.Vector3, radius: number, make: (prim: Primitive, n: number, level: number) => THREE.InstancedMesh, ready: boolean, tune: LodLevelTune = LOD_LEVEL_TUNE) {
     this.tune = tune;
     const n = copies.length;
     this.n = n;
@@ -201,7 +201,7 @@ export class LevelGroup {
       attr.setUsage(THREE.DynamicDrawUsage);
       const draw: LevelDraw = { near: levels[k].near, meshes: [], base: [], attr, count: 0, members: new Int32Array(n).fill(-1), range: { start: 0, count: 0 } };
       for (const prim of levels[k].primitives) {
-        const mesh = make(prim, n);
+        const mesh = make(prim, n, k);
         mesh.instanceMatrix = attr;
         mesh.count = 0;
         draw.meshes.push(mesh);
@@ -340,6 +340,18 @@ export class LevelGroup {
     this.repacks++;
     this.applyShadows();
     this.applyVisible();
+  }
+
+  /**
+   * Each mesh's finest rule asked again (a caster's switch or the page's smallest caster moved, `shadowCasters.ts`):
+   * `base` answers it for a mesh at a level position, and the level's own shadow rule is applied over it at once.
+   */
+  setBase(base: (mesh: THREE.InstancedMesh, level: number) => boolean): void {
+    for (let k = 0; k < this.draws.length; k++) {
+      const d = this.draws[k];
+      for (let m = 0; m < d.meshes.length; m++) d.base[m] = base(d.meshes[m], k);
+    }
+    this.applyShadows();
   }
 
   /** Each level's meshes cast as the finest rule says, less the lowest level once its switch is past the second cascade (`levelCasts`). */

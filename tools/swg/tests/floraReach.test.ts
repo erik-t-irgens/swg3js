@@ -3,7 +3,8 @@
 // converted world's own terrain file, the hysteresis on a distance walked back and forth across the line, the
 // sweep itself driven over stand-in chunks (its clock, the eye it measures from, the trees left alone, the
 // ground-plane reading, a sweep that hides nothing), each chunk's flora planted as trees and plants apart
-// (src/world/flora.ts, over a stub terrain), and the world's wiring of it read as text.
+// (src/world/flora.ts, over a stub terrain) and casting by the casters' switches as planted and as moved after, and
+// the world's wiring of it read as text.
 //
 // The terrain files are read from the owner's converted packs and nothing of them is written anywhere; a
 // world whose pack is not converted is skipped, and the check that needs one says so.
@@ -14,7 +15,8 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { applyReachOption, clientPlantDistance, FLORA_DEFAULTS, FLORA_TUNE, instancesUnder, plantReachOf, PlantSweep, shownAt, type FloraChunk, type FloraGroupLike, type FloraReachTune } from '../../../src/world/floraReach.ts';
 import { parseTerrainTemplate } from '../../../src/swg/terrain/trn.ts';
-import { FloraPlanter } from '../../../src/world/flora.ts';
+import { FloraPlanter, plantedShadow } from '../../../src/world/flora.ts';
+import { SHADOW_CASTER_DEFAULTS, SHADOW_CASTER_TUNE, setShadowCasterTune } from '../../../src/world/shadowCasters.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -258,6 +260,20 @@ const tune: FloraReachTune = { ...FLORA_DEFAULTS };
   ok(treeCopies === 16 && plantCopies === 64 && planter.planted === treeCopies + plantCopies, `every placement is in one of the two, once: ${treeCopies} trees (one a 16 m tile) and ${plantCopies} plants (one an 8 m tile)`);
   ok(built.colliders.length === treeCopies, 'and only the trees are solid');
   ok(trees.every((m) => m.boundingSphere !== null) && plants.every((m) => m.boundingSphere !== null), "every mesh's sphere is worked out, for the frustum and the world pass from inside");
+  // Its shadow (wave 8): each mesh stamped with its planting's size and cast by the casters' rule as it is planted,
+  // then ruled again, when a switch moves, by the one function the world walks every chunk standing with
+  // (`plantedShadow`, from `World.applyFloraCasters`), with nothing rebuilt.
+  const planted = [...trees, ...plants];
+  const of = (g: THREE.BufferGeometry) => planted.filter((m) => m.geometry === g);
+  ok(planted.every((m) => typeof m.userData.casterSize === 'number') && of(tree).every((m) => m.castShadow) && of(rock).every((m) => m.castShadow) && of(bush).every((m) => !m.castShadow), 'each mesh carries its planting\'s size, and as planted the tree and the 1.5 m rock cast and the 0.4 m bush does not');
+  setShadowCasterTune({ plants: true });
+  const casting = planted.filter((m) => plantedShadow(m)).length;
+  ok(of(bush).every((m) => m.castShadow) && casting === planted.length, `small plants switched on, the walk the world makes turns the bush on in place (${casting} of ${planted.length} casting)`);
+  setShadowCasterTune({ trees: false });
+  for (const m of planted) plantedShadow(m);
+  ok(of(tree).every((m) => !m.castShadow) && of(rock).every((m) => !m.castShadow) && of(bush).every((m) => m.castShadow), 'and trees switched off, the tree and the rock stop while the bush casts on');
+  Object.assign(SHADOW_CASTER_TUNE, SHADOW_CASTER_DEFAULTS);
+  for (const m of planted) plantedShadow(m);
   // And the sweep takes a real chunk's groups as they come out of the planter.
   const s = new PlantSweep();
   const real = { mx: 32, my: 0, mz: 32, trees: built.trees, plants: built.plants };
@@ -275,12 +291,13 @@ const tune: FloraReachTune = { ...FLORA_DEFAULTS };
   ok(/this\.chunks\.set\(key, chunk\);[\s\S]{0,300}this\.plantSweep\.show\(chunk, FLORA_TUNE\);/.test(world), 'and a chunk made is shown or hidden at once, not at the next sweep');
   ok(/this\.sweepFlora\(camPos, dt\);\s*this\.stream\(playerPos, STREAM_BUDGET\);/.test(world), 'the sweep runs every update before the stream, from the camera');
   ok(/this\.sweepFlora\(center, 0, true\);\s*this\.stream\(center, Infinity\);/.test(world), 'and an arrival measures from where the player arrives before any chunk is made');
-  ok(/if \(!sweep\.due\(dt, FLORA_TUNE, force\)\) return;\s*sweep\.begin\(eye\.x, eye\.y, eye\.z, this\.plantReach, this\.plantsReached\);\s*this\.chunks\.forEach\(this\.plantVisit\);/.test(world), 'a sweep begins from the eye it is handed, with the reach in force, on the sweep\'s own clock, and visits every chunk');
-  ok(/private readonly plantVisit = \(c: Chunk\): void => this\.plantSweep\.visit\(c, FLORA_TUNE\);/.test(world), 'with one visit made with the world, so a sweep makes no closure');
+  ok(/if \(!sweep\.due\(dt, FLORA_TUNE, force\)\) return;\s*sweep\.begin\(eye\.x, eye\.y, eye\.z, this\.plantReach, this\.plantsReached\);\s*this\.flipN = 0;\s*this\.chunks\.forEach\(this\.plantVisit\);/.test(world), 'a sweep begins from the eye it is handed, with the reach in force, on the sweep\'s own clock, and visits every chunk');
+  ok(/private readonly plantVisit = \(c: Chunk\): void => \{\s*if \(this\.plantSweep\.visit\(c, FLORA_TUNE\)\) this\.noteTreeFlip\(c\);\s*\};/.test(world), 'with one visit made with the world, so a sweep makes no closure, keeping each chunk whose trees it flipped');
+  ok(/this\.chunks\.forEach\(this\.plantVisit\);\s*\/\/[^\n]*\n\s*if \(this\.flipN\) this\.farCards\?\.chunksChanged\(this\.flipCx, this\.flipCz, this\.flipTrees, this\.flipN\);/.test(world), 'and the far tree cards are handed the flips once a sweep, so they follow the trees within one sweep');
   ok(/private get plantsReached\(\): boolean \{\s*return FLORA_TUNE\.on && !!this\.floraTemplate && !this\.sceneOnly;/.test(world), 'the reach hides nothing with the switch off, with no flora of the planet\'s own, or in a captured place on the creation and selection screens');
   ok(/this\.floraTemplate = null;\s*[\s\S]{0,200}this\.plantSweep\.reset\(\);/.test(world), 'a world let go leaves the next one nothing measured');
   ok(/registerPerfSwitch\('floraReach', \{ get: \(\) => FLORA_TUNE\.on, set: \(v\) => this\.world\.setFloraReach\(!!v\), values: \[false, true\]/.test(main), "the frame report's switch is `floraReach`, the old way first");
-  ok(/applyReachOption\(FLORA_TUNE, opts\.reach\);\s*this\.world\.refreshFloraReach\(\);/.test(main), 'and the console\'s `flora({ reach })` goes through the one rule the test drives');
+  ok(/if \(reach === true\) floraReachBack\(FLORA_TUNE, this\.settings\);[\s\S]{0,500}applyReachOption\(FLORA_TUNE, live\);\s*\} else applyReachOption\(FLORA_TUNE, reach\);\s*this\.world\.refreshFloraReach\(\);/.test(main), 'and the console\'s `flora({ reach })` goes through the one rule the test drives, its two fields with a setting through the setting and `true` keeping the settings\' own values');
 }
 
 console.log(`\n${checks} checks passed`);
