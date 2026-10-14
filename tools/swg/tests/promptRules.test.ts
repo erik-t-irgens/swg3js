@@ -94,7 +94,10 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   ok(ground === 4 && keys(ground).slice(0, 3).join() === 'grappleFire,reelIn,grappleHaul' && keys(ground)[3] === 'mount' && words(ground)[3] === PROMPT_WORDS.mount, `hooked on the ground beside a speeder: the rope's three words, then the mount in the fourth slot (${show(ground).join(', ')})`);
   const alone = fill(at({ grapple: 'ground' }));
   ok(alone === 3, 'hooked on the ground with nothing else near: the three words alone');
-  ok(['grappleLetGo', 'reelIn', 'boostOff', 'haulIn', 'callBack'].every((w) => (PROMPT_WORDS as Record<string, string>)[w].length <= PROMPT.maxLabel), "every one of the rope's words fits the bar's label");
+  ok(['grappleLetGo', 'reelIn', 'boostOff', 'haulIn', 'callBack', 'yank'].every((w) => (PROMPT_WORDS as Record<string, string>)[w].length <= PROMPT.maxLabel), "every one of the rope's words fits the bar's label");
+  // A loose prop on the rope (Grapple wave 3): let go and yank it, then the on-foot block fills the rest.
+  const light = fill(at({ grapple: 'light', near: 'mount' }));
+  ok(keys(light).slice(0, 2).join() === 'grappleFire,grappleHaul' && words(light)[1] === PROMPT_WORDS.yank && PROMPT_WORDS.yank === 'yank it' && keys(light)[2] === 'mount', `a prop on the rope: let go, yank it, and the speeder beside you after them (${show(light).join(', ')})`);
   ok(['grappleFire', 'reelIn', 'grappleBoost', 'grappleHaul'].every((a) => BINDINGS.has(a)), 'and every action it puts a cap on is a binding');
   const off = fill(at({ grapple: '', near: 'mount' }));
   ok(!keys(off).some((k) => k.startsWith('grapple') || k === 'reelIn'), 'with the hook not out the bar shows nothing of it');

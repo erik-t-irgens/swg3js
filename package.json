@@ -43,7 +43,7 @@
     "test:burn": "node tools/swg/tests/playerBurn.test.ts && node tools/swg/tests/burning.test.ts",
     "test:breath": "node tools/swg/tests/breath.test.ts",
     "test:stance": "node tools/swg/tests/fighterStance.test.ts",
-    "test:grapple": "node --expose-gc tools/swg/tests/grapple.test.ts && node tools/swg/tests/grappleWater.test.ts && node tools/swg/tests/grappleMath.test.ts && node tools/swg/tests/grappleWiring.test.ts && node --expose-gc tools/swg/tests/grappleLook.test.ts",
+    "test:grapple": "node --expose-gc tools/swg/tests/grapple.test.ts && node tools/swg/tests/grappleWater.test.ts && node tools/swg/tests/grappleMath.test.ts && node tools/swg/tests/grappleWiring.test.ts && node --expose-gc tools/swg/tests/grappleLook.test.ts && node --expose-gc tools/swg/tests/grappleMass.test.ts",
     "test:posture": "node tools/swg/tests/fighterPosture.test.ts",
     "test:difficulty": "node tools/swg/tests/difficulty.test.ts",
     "test:npcsaber": "node tools/swg/tests/npcSaber.test.ts",

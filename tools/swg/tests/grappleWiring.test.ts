@@ -125,9 +125,12 @@ const adv = main.slice(main.indexOf('      advance: (seconds: number, keys: stri
 ok(adv.slice(0, 4000).includes('this.stepGrappleKeys()'), "advance steps the grapple's keys");
 ok(inOrder(main, ['const hadInHand = this.stepPlacingKeys(dt, takeKey);', 'void this.takeNearestProp();', 'if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) this.stepGrappleKeys();', "if (input.pressedAction('saberToggle')"]).ok, "the frame steps them after the placing hand's and the pick-up and before the rest of the key block, never with the map, a panel or a hand up");
 const stepKeys = method(grapple, '  stepKeys(input: GrappleKeyInput, b: GrappleBody, mutes: string[], fire: () => void): void {');
-const keyOrder = inOrder(stepKeys, ['input.muteUntilUp(GRAPPLE_RELEASE_MUTES)', 'input.mute(mutes)', "input.pressedAction('grappleFire')", "input.pressedAction('grappleBoost')"]);
+const keyOrder = inOrder(stepKeys, ['input.muteUntilUp(this.owedMutes)', 'input.mute(mutes)', "input.pressedAction('grappleFire')", "input.pressedAction('grappleBoost')"]);
 ok(keyOrder.ok, "inside the hook's key block the owed release mute and the frame's mutes come before the fire and the boost are read");
-ok(stepKeys.indexOf('input.muteUntilUp(GRAPPLE_RELEASE_MUTES)', keyOrder.at[3]) > keyOrder.at[3], 'and a let-go the boost made mutes at once, in the same block');
+ok(stepKeys.indexOf('input.muteUntilUp(this.owedMutes)', keyOrder.at[3]) > keyOrder.at[3], 'and a let-go the boost made mutes at once, in the same block');
+// What a let-go owes: every let-go's three, or a loose prop's torch alone (wave 3a), never a list of its own making.
+const letGoText = method(grapple, '  letGo(reason: LetGoReason): void {');
+ok(/this\.owedMutes = this\.state === 'holding' && !\(this\.muteOwed && this\.owedMutes === GRAPPLE_RELEASE_MUTES\) \? THING_RELEASE_MUTES : GRAPPLE_RELEASE_MUTES;/.test(letGoText) && letGoText.indexOf('this.owedMutes =') < letGoText.indexOf("this.state = 'off';"), "a let-go owes the three, or a loose prop's torch alone, chosen before the state is cleared");
 ok(harness.includes('g.stepKeys(input, this, this.mutes, this.fireNow)'), 'the harness calls the very same key block');
 
 // The side buttons' guard in the input.
@@ -200,5 +203,18 @@ ok(main.includes('this.cam.update(input, player.worldPos, blocked, dt, eyes, pla
 const feel = method(main, '  private stepGrappleFeel(): void {');
 ok(feel.includes('this.hurtFrom(this.grappleSlamAt.set(s.x, s.y, s.z));') && feel.includes('setViewShake(g.shakeNow);') && feel.includes('setViewShake(g.joltNow);'), "a slam raises the flash and the arc at its contact, and the shake and the jolt go through the camera's register");
 ok((main.match(/this\.stepGrappleFeel\(\);/g) ?? []).length === 2, 'the feel is handed over by the frame and by advance alike');
+
+// Wave 3a: a loose prop on the rope, and the hook's numbers through the player's stats.
+ok(main.includes('this.player.grapple.propAt = hookablePropAt;') && !main.includes('grapple.isProp'), "the game hangs the pool's own hookablePropAt on the hook");
+ok(grapple.includes("import type { HookableProp } from '../world/looseProps.ts';") && !/^import (?!type )[^;]*from '\.\.\/world\//m.test(grapple), 'and the hook takes nothing of the world but the prop\'s type, so node loads it with no pool');
+ok(player.includes('this.grapple.stats = this.stats;'), "the player hands the hook its own stats, so its range, reel, haul, sway and strength read through them");
+ok(/controller\.setCharacterMass\(80\);/.test(player) && /export const GRAPPLE_PLAYER_MASS = 80;/.test(grapple), "the mass rule weighs a thing against the player's own 80 kg, the controller's");
+const draw = method(player, '  drawGrapple(camera: THREE.PerspectiveCamera, screenH: number): void {');
+ok(inOrder(draw, ['if (g.holding) g.placeThingEnd();', 'ribbon.lay(g.rope.pts, g.rope.n + 1, h, camera);']).ok, "a hooked prop's end is carried onto the prop as it is drawn, before the ribbon is laid");
+const after = method(grapple, '  afterMove(b: GrappleBody, dt: number): void {');
+ok(inOrder(after, ["if (this.state === 'holding') {", 'this.stepThing(b, dt);', "if (this.state !== 'attached') {"]).ok, "the step after the move runs a hooked prop's frame (behind `out`, as both the player and the harness call it) and nothing of the anchor's");
+ok(/const haul = live && \(g\.attached \|\| !!g\.holding\) && g\.keys\.haul;/.test(sounds), "the yank winds the haul's own rumble");
+const fly = method(grapple, '  private flyDart(b: GrappleBody, dt: number): void {');
+ok(inOrder(fly, ["kind === 'prop' ? this.propAt?.(hit.collider.handle)", "this.whoMovesFor(prop.mass) === 'thing'", 'this.attachThing(', "this.say?.('Too heavy to pull.');"]).ok, 'the dart hooks a prop only when the mass rule moves the thing, and says so when it is too heavy');
 
 console.log(`\n${checks} checks passed`);

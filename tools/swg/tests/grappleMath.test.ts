@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   GRAPPLE_RELEASE_MUTES,
+  THING_RELEASE_MUTES,
   WALKABLE,
   aimTrue,
   armAimFor,
@@ -15,6 +16,8 @@ import {
   grappleMutes,
   gravityAddBack,
   joltFor,
+  kindBites,
+  kindHolds,
   leanAngleOf,
   leanEase,
   leanOf,
@@ -35,9 +38,11 @@ import {
   staggerFor,
   swimLifts,
   teleported,
+  turnByQuat,
   underWater,
   wadeDragOf,
   wallFrictionSpare,
+  whoMoves,
   windGainFor,
   type MarkKind,
 } from '../../../src/player/grappleMath.ts';
@@ -103,12 +108,60 @@ const rand = () => {
   ok(underWater(-1, 0, 0) && !underWater(0.5, 0, 0) && underWater(0.5, 0, 0.75) && !underWater(-1, Number.NEGATIVE_INFINITY, 0) && !underWater(-1, Number.NaN, 5), 'underWater: under a column (the swell counted), never where there is none');
 }
 
-// The mark refuses water.
+// The mark refuses water. From wave 3 it shows on a loose prop too, which the dart hooks and the mass rule judges;
+// the range is handed in as the stat table reads it.
 {
-  const t = { minRange: 1.5, range: 100 };
+  const t = { minRange: 1.5 };
   const kinds: MarkKind[] = ['none', 'terrain', 'still', 'pane', 'water', 'door', 'prop', 'moving'];
-  const shown = kinds.filter((k) => markShows(20, k, t));
-  ok(shown.join(',') === 'terrain,still' && !markShows(20, 'water', t) && !markShows(1.4, 'still', t) && !markShows(100.1, 'terrain', t) && markShows(100, 'terrain', t), `the mark shows only on terrain and still things in range (${shown.join(', ')}), never on water`);
+  const at = (dist: number, range: number) => ({ dist, range });
+  const shown = kinds.filter((k) => markShows(k, at(20, 100), t));
+  ok(shown.join(',') === 'terrain,still,prop' && !markShows('water', at(20, 100), t) && !markShows('still', at(1.4, 100), t) && !markShows('terrain', at(100.1, 100), t) && markShows('terrain', at(100, 100), t), `the mark shows only on terrain, still things and loose props in range (${shown.join(', ')}), never on water`);
+  ok(kinds.filter(kindHolds).join(',') === 'terrain,still' && kinds.filter(kindBites).join(',') === 'terrain,still,prop', 'an anchor is terrain or a still thing; the dart bites those and a loose prop');
+  ok(markShows('still', at(150, 200), t) && !markShows('still', at(150, 100), t), 'and the range is the one handed in, so a range progress raised reaches further');
+}
+
+// The mass rule (wave 3, §3.14): who the rope moves.
+{
+  const tune = { heavyRatio: 2 };
+  ok(whoMoves(true, 20, 40, 80, tune) === 'player' && whoMoves(true, 1e9, 40, 80, tune) === 'player', 'anything still: the player, whatever it weighs');
+  ok(whoMoves(false, 20, 40, 80, tune) === 'thing' && whoMoves(false, 40, 40, 80, tune) === 'thing', 'a 20 kg prop at a 40 kg strength comes to you, and one at the strength exactly');
+  ok(whoMoves(false, 120, 40, 80, tune) === 'both' && whoMoves(false, 160, 40, 80, tune) === 'both', 'past the strength and up to twice the player\'s 80 kg: a tug-of-war');
+  ok(whoMoves(false, 400, 40, 80, tune) === 'player' && whoMoves(false, 160.01, 40, 80, tune) === 'player', 'past that the player is moved (a speeder bike, 320 kg, is past it)');
+  ok(whoMoves(false, 20, 10, 80, tune) === 'both', 'a prop heavier than a weakened tether is no longer pulled to you');
+}
+
+// A point carried into a prop's frame and back (wave 3).
+{
+  let worst = 0;
+  const v = { x: 0, y: 0, z: 0 };
+  const a = { x: 0, y: 0, z: 0 };
+  const back = { x: 0, y: 0, z: 0 };
+  for (let i = 0; i < 2000; i++) {
+    let qx = rand() - 0.5;
+    let qy = rand() - 0.5;
+    let qz = rand() - 0.5;
+    let qw = rand() - 0.5;
+    const ql = Math.hypot(qx, qy, qz, qw);
+    qx /= ql;
+    qy /= ql;
+    qz /= ql;
+    qw /= ql;
+    const q = { x: qx, y: qy, z: qz, w: qw };
+    v.x = 10 * (rand() - 0.5);
+    v.y = 10 * (rand() - 0.5);
+    v.z = 10 * (rand() - 0.5);
+    turnByQuat(q, v, false, a);
+    // Against the rotation matrix of q, written out.
+    const mx = (1 - 2 * (qy * qy + qz * qz)) * v.x + 2 * (qx * qy - qz * qw) * v.y + 2 * (qx * qz + qy * qw) * v.z;
+    const my = 2 * (qx * qy + qz * qw) * v.x + (1 - 2 * (qx * qx + qz * qz)) * v.y + 2 * (qy * qz - qx * qw) * v.z;
+    const mz = 2 * (qx * qz - qy * qw) * v.x + 2 * (qy * qz + qx * qw) * v.y + (1 - 2 * (qx * qx + qy * qy)) * v.z;
+    turnByQuat(q, a, true, back);
+    worst = Math.max(worst, Math.abs(a.x - mx), Math.abs(a.y - my), Math.abs(a.z - mz), Math.abs(back.x - v.x), Math.abs(back.y - v.y), Math.abs(back.z - v.z));
+  }
+  ok(worst < 1e-12, `turnByQuat turns a point as the quaternion's matrix does, and its inverse turns it back (worst ${worst.toExponential(1)} over 2000)`);
+  const same = { x: 1, y: 2, z: 3 };
+  turnByQuat({ x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 }, same, false, same);
+  ok(Math.abs(same.x - 3) < 1e-12 && Math.abs(same.y - 2) < 1e-12 && Math.abs(same.z + 1) < 1e-12, 'and it may write over the point it was handed (a quarter turn about y: (1, 2, 3) to (3, 2, -1))');
 }
 
 // The true aim.
@@ -170,6 +223,12 @@ const rand = () => {
   ok(GRAPPLE_RELEASE_MUTES.join(',') === 'jump,flashlight,walk', 'every let-go mutes the jump, the torch and the walk until their keys are up, never the crouch');
   const again = grappleMutes(out, true, true);
   ok(again === 11 && out.join(',') === swingList, 'asked again for the same list it keeps it as it is');
+  // A loose prop on the line (wave 3a): the reels do nothing to it, so only the torch (F, the yank) and the emotes.
+  const held = grappleMutes(out, true, false, true);
+  const heldList = out.join(',');
+  ok(held === 6 && heldList === 'flashlight,emoteWheel,emote1,emote2,emote3,emote4', `with a prop on the line only ${heldList}: the walk, the crouch and the postures are the player's`);
+  const back = grappleMutes(out, true, false);
+  ok(back === 10 && out.join(',') === onList && THING_RELEASE_MUTES.join(',') === 'flashlight', "and back on an anchor the whole list again; a prop's let-go owes the torch alone");
 }
 
 // The gravity knob, read as text: the add-back sits behind `gravity !== 1` and inside the swinging test.

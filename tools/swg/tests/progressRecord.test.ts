@@ -332,6 +332,12 @@ const h = (n: number) => fnv32(`test:${n}`);
   ok(near(all.saberSwing, core.melee.swing) && near(all.meleePush, core.melee.push), `Melee 100: the saber swings times ${all.saberSwing}, a kick or a fist shoves times ${all.meleePush}`);
   ok(all.aimRate === core.marksmanship.aimRate && all.steady === core.marksmanship.steady && near(all.gun('blaster').primary.spread, GUNS.blaster.primary.spread * core.marksmanship.spread), 'Marksmanship 100: the snap aim, the steady breath and the spread at its curve\'s end');
   ok(near(all.fallSafeExtra, core.acrobatics.safeExtra) && near(all.rollDivisor, 3 + core.acrobatics.rollDivisor) && near(all.airAccel, core.acrobatics.airAccel) && near(all.rollIframes, core.acrobatics.iframes) && all.rollFree === core.acrobatics.rollFree, `Acrobatics 100: ${all.fallSafeExtra} m more of a harmless fall, a roll divides by ${all.rollDivisor}, air control times ${all.airAccel}, ${all.rollIframes} s of a roll's dodge, a free roll from ${all.rollFree} m`);
+  // The grapple's swing (the grapple pass's wave 3): Acrobatics multiplies the sway's push and cap along its curve.
+  ok(core.acrobatics.grappleSwing === 1.25 && Object.is(all.apply('grapple.swing', 1), 1.25) && all.grants.layers('grapple.swing')[0]?.from.join() === 'Acrobatics 100', `Acrobatics 100: the grapple's swing times ${all.apply('grapple.swing', 1)}, said as the rating it comes from`);
+  const halfAcro = rated({ acrobatics: 50 });
+  ok(near(halfAcro.apply('grapple.swing', 1), 1.125), `Acrobatics 50: half way along it (${halfAcro.apply('grapple.swing', 1)})`);
+  const noAcro = rated({ marksmanship: 100, melee: 100, fortitude: 100 });
+  ok(!noAcro.grants.has('grapple.swing') && Object.is(noAcro.apply('grapple.swing', 1), 1), 'Acrobatics at 0 writes no entry for the swing, whatever the other skills are');
   const quarter = rated({ fortitude: 25, marksmanship: 25 });
   ok(near(quarter.healthMax, 100 + (core.fortitude.health * 25) / 100) && near(quarter.burnScale, (1 + ((core.fortitude.burn - 1) * 25) / 100) * core.fortitude.burnMore), `Fortitude 25: a quarter of the health and of the burn's curve, and its milestone whole (${quarter.healthMax}, ${quarter.burnScale})`);
   ok(quarter.steady === core.marksmanship.steady && quarter.aimRate === 0.15, 'Marksmanship 25: the steady breath, and the view still at today\'s rate until 50');

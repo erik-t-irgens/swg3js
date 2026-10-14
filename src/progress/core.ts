@@ -62,13 +62,14 @@ export const CORE: readonly CoreDef[] = [
     id: 'acrobatics',
     name: 'Acrobatics',
     grows: 'a roll that saves you from a fall, a dodge that beats a blow',
-    improves: 'how far you fall unhurt, a landing roll, air control, a roll’s dodge',
+    improves: 'how far you fall unhurt, a landing roll, air control, a roll’s dodge, a swing’s momentum on the grapple',
     built: true,
     curve: [
       { stat: 'fall.safeExtra', op: 'add', rule: 'safeExtra' },
       { stat: 'fall.rollDivisor', op: 'add', rule: 'rollDivisor' },
       { stat: 'move.airAccel', op: 'mul', rule: 'airAccel' },
       { stat: 'roll.iframes', op: 'add', rule: 'iframes' },
+      { stat: 'grapple.swing', op: 'mul', rule: 'grappleSwing' },
     ],
     milestones: [
       { at: 25, name: 'Roll out of falls up to 8 m', text: 'a landing roll from no higher than eight metres takes nothing', grants: [{ stat: 'fall.rollFree', op: 'set', rule: 'rollFree' }], waits: null },

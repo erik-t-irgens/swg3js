@@ -1000,6 +1000,22 @@ export class GrappleRope {
     return false;
   }
 
+  /**
+   * Whether the straight span from the anchor to the hand where the caller last wrote it (`hand`) is clear of what
+   * stands still: the rope to a loose prop, which never bends, asks this every frame (wave 3). Its numbers go to the
+   * cast in the kept arrays, never as arguments.
+   */
+  anchorSpanClear(): boolean {
+    const cs = this.cs;
+    cs[0] = this.pts[0];
+    cs[1] = this.pts[1];
+    cs[2] = this.pts[2];
+    cs[3] = this.hand[0];
+    cs[4] = this.hand[1];
+    cs[5] = this.hand[2];
+    return !this.castCs(this.hitC);
+  }
+
   /** How many of the rope's spans are blocked right now, the free span to the hand included: it must be nought. */
   blockedNow(hx: number, hy: number, hz: number): number {
     let blocked = 0;

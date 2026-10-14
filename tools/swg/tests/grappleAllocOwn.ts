@@ -39,7 +39,9 @@ const stubCol = {
   setTranslation: (_t: { x: number; y: number; z: number }) => {},
 };
 const answer = { timeOfImpact: 0, normal: { x: 0, y: 0, z: 0 }, collider: stubCol };
-const boxCast = (r: { origin: { x: number; y: number; z: number }; dir: { x: number; y: number; z: number } }, maxToi: number): typeof answer | null => {
+type StubRay = { origin: { x: number; y: number; z: number }; dir: { x: number; y: number; z: number } };
+const boxCast = (r: StubRay): typeof answer | null => {
+  const maxToi = reachOf.v;
   const ox = r.origin.x;
   const oy = r.origin.y;
   const oz = r.origin.z;
@@ -105,21 +107,48 @@ const boxCast = (r: { origin: { x: number; y: number; z: number }; dir: { x: num
   answer.normal.z = nz;
   return answer;
 };
-// After the setup a ray is answered by a rule small enough to be built into the call (`near`): a call into the stub that
-// is not built in boxes the numbers handed to it, which is the boundary's cost and not the hook's (the engine's own,
-// in the game, is what test 17's calibrations price). A ray from the street (east of the wall by more than the hand
-// ever stands) toward the wall's face, near level, meets it half way along its reach; any other meets nothing, which
-// is what every span of the rope under the lip and every line from the hand does.
+// After the setup a ray is answered by a smaller rule (`near`). A ray from the street (east of the wall by more than
+// the hand ever stands) toward the wall's face, near level, meets it half way along its reach; any other meets nothing,
+// which is what every span of the rope under the lip and every line from the hand does.
 const wall = { timeOfImpact: 0.5, normal: { x: 1, y: 0, z: 0 }, collider: stubCol };
-const near = (r: { origin: { x: number; y: number; z: number }; dir: { x: number; y: number; z: number } }, maxToi: number): typeof answer | null => {
+const near = (r: StubRay): typeof answer | null => {
   if (!(r.origin.x > 3 && r.dir.x < -0.5 && r.dir.y < 0.2 && r.dir.y > -0.2)) return null;
-  wall.timeOfImpact = maxToi * 0.5;
+  wall.timeOfImpact = reachOf.v * 0.5;
   return wall;
 };
-let exact = true;
+/** The reach the hook handed the stand-in cast, kept for the rule it asks, and that rule. */
+const reachOf = { v: 0.5, rule: boxCast };
+// The stand-in for the engine's cast, the call the hook hands its cast's reach to as a number. A call that is not built
+// into its caller boxes the numbers handed to it, which is the boundary's cost and not the hook's (the engine's own, in
+// the game, is what test 17's calibrations price), and the cumulative budget the compiler builds calls in by did not
+// always reach this one: with `segment` and `castPassing` built into `probeMark`, the cast's reach was boxed on every
+// frame of one run in about a dozen (16 B a frame, found by the sampling heap profiler and the inlining trace of the bad
+// runs, every one of them that call). So the stand-in is one function, small enough that the compiler builds it into
+// whatever calls it whatever its budget has left (its small-function rule, 27 bytes of bytecode or fewer), that keeps
+// the reach in a record and asks its rule with no number at all. It stays the one function for the whole run (the rule
+// it asks is what changes), since a call site that has met two functions is no longer built in at all. And its call to
+// the rule meets both rules before anything else runs, for the same reason turned the other way: the rule is never built
+// into `cast`'s own code, which the compiler counts in when it sizes `cast` up (`cast` with `near` built into it was 122
+// bytes to the small-function rule, not 25, and was left out of `probeMark` and `stepThing` again). Twenty turns, since
+// a function keeps no record of what it has called until it has been called a few times.
+const cast = (r: StubRay, maxToi: number): typeof answer | null => {
+  reachOf.v = maxToi;
+  return reachOf.rule(r);
+};
+{
+  const ray: StubRay = { origin: { x: 0, y: 0, z: 0 }, dir: { x: 0, y: 1, z: 0 } };
+  for (let i = 0; i < 20; i++) {
+    reachOf.rule = (i & 1) === 0 ? near : boxCast;
+    cast(ray, 1);
+  }
+}
 const stubWorld = {
-  castRayAndGetNormal: (r: { origin: { x: number; y: number; z: number }; dir: { x: number; y: number; z: number } }, maxToi: number) => (exact ? boxCast(r, maxToi) : near(r, maxToi)),
+  castRayAndGetNormal: cast,
   intersectionWithShape: () => null,
+};
+/** From here on every ray is answered by the smaller rule. */
+const useNear = (): void => {
+  reachOf.rule = near;
 };
 const no = (_h: number): boolean => false;
 const physics = { world: stubWorld, isPane: no, isRagdoll: no, isWalkThrough: no, isPeer: no, isWall: no, broken: false } as unknown as Physics;
@@ -152,6 +181,157 @@ const pos = body.pos;
 const vel = body.vel;
 const keys = g.keys;
 
+// The young generation over the frames, the cleanest of three tries. Each try starts from a full collection, then
+// warms again what it may have thrown away, then empties the young generation with a minor one (which throws no
+// code away), and reads the collections only after two turns of the loop, which is when the observer is told.
+let scavenges = 0;
+const watch = new PerformanceObserver((list) => {
+  for (const e of list.getEntries()) if ((e as unknown as { detail?: { kind?: number } }).detail?.kind === perfConstants.NODE_PERFORMANCE_GC_MINOR) scavenges++;
+});
+watch.observe({ entryTypes: ['gc'] });
+const young = (): number => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')?.space_used_size ?? 0;
+const tick = () => new Promise((r) => setImmediate(r));
+const settle = async () => {
+  await tick();
+  await tick();
+};
+const FRAMES = 200_000;
+async function measure(step: (counting: boolean) => void): Promise<{ made: number; scavenges: number }> {
+  for (let k = 0; k < 100_000; k++) step(false);
+  let best = { made: Infinity, scavenges: Infinity };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    gc!();
+    await settle();
+    for (let k = 0; k < 50_000; k++) step(false);
+    gc!({ type: 'minor' });
+    await settle();
+    scavenges = 0;
+    const before = young();
+    for (let k = 0; k < FRAMES; k++) step(false);
+    const made = young() - before;
+    await settle();
+    if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
+    if (best.scavenges === 0 && best.made <= 0) break;
+  }
+  watch.disconnect();
+  return best;
+}
+
+// Wave 3's hooked prop, run alone (`grappleAllocOwn.ts prop`), so the hook's call sites meet the stand-in prop and
+// nothing else: the tether dragging it, the yank pulling it in and F let go of mid-yank, the rope's end carried onto
+// it from its mesh, the straight span's check, the guards, the arm's way and the mark shown while it holds. The yank's
+// end and a fresh hook are run once before the measure (each happens once a shot, not once a frame).
+if (process.argv.includes('prop')) {
+  // Rays by the small rule from the start: the prop lies where the building's box would stand, and nothing here is a wall.
+  useNear();
+  const pmv = g.view;
+  const pat = { x: 0, y: 0, z: 0 };
+  const noWaterHere = (_p: { x: number; y: number; z: number }): boolean => false;
+  const mesh = { position: { x: -4, y: 0.3, z: 0 }, quaternion: { x: 0, y: 0.38268343236508984, z: 0, w: 0.9238795325112867 } };
+  const stand = { x: -4, y: 0.3, z: 0 };
+  const done = { holds: 0, weightless: 0, kept: 0, stopped: 0, released: 0, weight: 0 };
+  const prop = {
+    label: 'crate',
+    mesh,
+    stand,
+    lost: 400,
+    recalls: 0,
+    mass: 20,
+    // Carried a small share of the way toward the point it is held at, as a body handed a velocity is, so the yank never
+    // arrives inside the measure and the tether's drag never quite closes the gap.
+    holdAt(p: { x: number; y: number; z: number }, _dt: number, weightless = true): void {
+      mesh.position.x += (p.x - mesh.position.x) * 0.02;
+      mesh.position.y += (p.y - mesh.position.y) * 0.02;
+      mesh.position.z += (p.z - mesh.position.z) * 0.02;
+      done.holds++;
+      if (weightless) done.weightless++;
+      else done.kept++;
+    },
+    stop(): void {
+      done.stopped++;
+    },
+    release(_d: { x: number; y: number; z: number }, _power: number, _lift?: number): void {
+      done.released++;
+    },
+    giveWeightBack(): void {
+      done.weight++;
+    },
+  };
+  g.propAt = (h: number) => (h === stubCol.handle ? prop : undefined);
+  const col = stubCol as unknown as RAPIER.Collider;
+  // The whole yank once, to its end: hooked 8 m off, F held until it is in and the rope lets go.
+  pos.x = 4;
+  pos.y = 0;
+  pos.z = 0;
+  pmv.dirX = -1;
+  pmv.dirY = 0;
+  pmv.dirZ = 0;
+  g.attachThing(body, prop, stubCol.handle, -3.7, 0.3, 0, 1, 0, 0, col, physics);
+  const hookedOnce = g.holding;
+  keys.haul = true;
+  let frames = 0;
+  while (g.holding && frames < 600) {
+    frames++;
+    mesh.position.x += 0.2;
+    g.afterMove(body, DT);
+  }
+  const yankedOnce = g.lastLetGo === 'yanked' && done.stopped === 1 && done.released === 1;
+  keys.haul = false;
+  mesh.position.x = -4;
+  // Hooked again from where the loop's first frame stands the rope point, so the guard against a place written without a
+  // reset sees nothing but the loop's own few centimetres a frame.
+  pos.x = 6;
+  g.attachThing(body, prop, stubCol.handle, -3.7, 0.3, 0, 1, 0, 0, col, physics);
+  const seenProp = { tether: 0, yank: 0, letUp: 0, shows: 0 };
+  let pframe = 0;
+  const pstep = (counting: boolean) => {
+    // The rope point walks to and fro 8 to 12 m from the prop, never more than a few centimetres a frame; F is held for
+    // 40 of every 160 frames and the rope's length put back to 12 m as each yank begins, so the tether drags it again.
+    const a = pframe * 0.03;
+    const phase = pframe % 160;
+    pframe++;
+    pos.x = 6 + 2 * Math.sin(a);
+    pos.z = 0.5 * Math.sin(0.5 * a);
+    vel.x = 0.06 * Math.cos(a);
+    vel.z = 0.2;
+    if (phase === 0) g.rope.length = 12;
+    keys.haul = phase < 40;
+    const holdsBefore = done.holds;
+    const weightBefore = done.weight;
+    g.refreshModes(body);
+    g.beforeMove(body, DT);
+    g.afterMove(body, DT);
+    g.look(body, DT);
+    pat.x = pos.x;
+    pat.y = pos.y + GRAPPLE_TUNE.ropeY;
+    pat.z = pos.z;
+    pmv.eyeX = pos.x + 3;
+    pmv.eyeY = 1.6;
+    pmv.eyeZ = pos.z;
+    pmv.dirX = -1;
+    pmv.dirY = 0;
+    pmv.dirZ = 0;
+    pmv.orbit = 0;
+    pmv.hand = pat;
+    pmv.filter = body.filter;
+    pmv.exclude = null;
+    g.probeMark(physics, noWaterHere, DT);
+    // The stand-in prop wanders back toward its stand between yanks, as a crate let lie would not; it keeps the measure's
+    // frames all of one kind of work.
+    mesh.position.x += (-4 - mesh.position.x) * 0.01;
+    if (counting) {
+      if (done.holds > holdsBefore && keys.haul) seenProp.yank++;
+      else if (done.holds > holdsBefore) seenProp.tether++;
+      if (done.weight > weightBefore) seenProp.letUp++;
+      if (g.mark.shows) seenProp.shows++;
+    }
+  };
+  for (let k = 0; k < 8 * 160; k++) pstep(true);
+  const pbest = await measure(pstep);
+  console.log(JSON.stringify({ frames: FRAMES, made: pbest.made, scavenges: pbest.scavenges, seen: seenProp, hookedOnce, yankedOnce, holding: g.holding, bends: g.rope.n }));
+  process.exit(0);
+}
+
 // Fastened 4 m back on the roof, then let down over the lip a frame at a time: the bend at the lip is made by the
 // hook's own sweep against the box, as a walk off a roof makes it.
 g.attachNow(body, -4, 20, 0, 0, 1, 0, stubCol as unknown as RAPIER.Collider, 12);
@@ -164,7 +344,7 @@ for (let i = 0; i <= 120; i++) {
   g.beforeMove(body, DT);
   g.afterMove(body, DT);
 }
-exact = false;
+useNear();
 const bentAtLip = g.rope.n === 1 && Math.abs(g.rope.contact[3] - 0) < 1e-3 && Math.abs(g.rope.contact[4] - 20) < 1e-3;
 g.rope.length = g.rope.spent + 2;
 
@@ -230,36 +410,5 @@ const step = (counting: boolean) => {
 };
 for (let k = 0; k < 6 * 128; k++) step(true);
 
-// The young generation over the frames, the cleanest of three tries. Each try starts from a full collection, then
-// warms again what it may have thrown away, then empties the young generation with a minor one (which throws no
-// code away), and reads the collections only after two turns of the loop, which is when the observer is told.
-let scavenges = 0;
-const watch = new PerformanceObserver((list) => {
-  for (const e of list.getEntries()) if ((e as unknown as { detail?: { kind?: number } }).detail?.kind === perfConstants.NODE_PERFORMANCE_GC_MINOR) scavenges++;
-});
-watch.observe({ entryTypes: ['gc'] });
-const young = (): number => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')?.space_used_size ?? 0;
-const tick = () => new Promise((r) => setImmediate(r));
-const settle = async () => {
-  await tick();
-  await tick();
-};
-const FRAMES = 200_000;
-for (let k = 0; k < 100_000; k++) step(false);
-let best = { made: Infinity, scavenges: Infinity };
-for (let attempt = 0; attempt < 3; attempt++) {
-  gc();
-  await settle();
-  for (let k = 0; k < 50_000; k++) step(false);
-  gc({ type: 'minor' });
-  await settle();
-  scavenges = 0;
-  const before = young();
-  for (let k = 0; k < FRAMES; k++) step(false);
-  const made = young() - before;
-  await settle();
-  if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
-  if (best.scavenges === 0 && best.made <= 0) break;
-}
-watch.disconnect();
+const best = await measure(step);
 console.log(JSON.stringify({ frames: FRAMES, made: best.made, scavenges: best.scavenges, seen, bentAtLip, attached: g.attached, bends: g.rope.n }));

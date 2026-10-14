@@ -82,6 +82,8 @@ export interface GrappleSoundSource {
   readonly counts: { readonly fires: number; readonly bites: number; readonly ratchets: number; readonly boosts: number; readonly slams: number };
   readonly ratchetIn: boolean;
   readonly attached: boolean;
+  /** The rope holds a loose prop (wave 3): F yanks it in to the haul's own rumble. */
+  readonly holding?: boolean;
   readonly out: boolean;
   readonly released: boolean;
   readonly keys: { readonly haul: boolean };
@@ -187,7 +189,7 @@ export class GrappleSounds {
     }
     // The haul's rumble, started once as F starts hauling and faded as it stops. A loop a driven tab is refused is
     // not asked for again every frame: what is wanted is a state, kept apart from whether the mixer has a voice for it.
-    const haul = live && g.attached && g.keys.haul;
+    const haul = live && (g.attached || !!g.holding) && g.keys.haul;
     if (haul !== this.hauling) {
       this.hauling = haul;
       if (haul) this.haulKey = this.loopOf(host, 'haul', GRAPPLE_SOUND.haul, g.clock, 1);

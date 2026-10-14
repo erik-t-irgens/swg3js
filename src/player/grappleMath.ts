@@ -4,7 +4,8 @@
 // the wading drag, the teleport guard, the wall friction that spares the sway, and the ribbon's least
 // width; and from wave 2 the danger (a slam's harm, what counts as one, the stagger's shake and daze, the
 // fast flight after a let-go, the catch's jolt) and the look and the sound (the arm's reach, the camera's
-// scale, the lean and its ease, the ratchet's rate, the wind). No three, no Rapier, no page: a node test
+// scale, the lean and its ease, the ratchet's rate, the wind); and from wave 3 the mass rule (`whoMoves`, who a
+// rope moves) and a point carried into a prop's own frame and back. No three, no Rapier, no page: a node test
 // calls every one of these as the game does.
 //
 // Every number these read is the caller's (`GRAPPLE_TUNE` in `grapple.ts`, handed in); none is kept here.
@@ -109,12 +110,59 @@ export function sagOf(span: number, slack: number): number {
   return Math.sqrt((3 * span * slack) / 8);
 }
 
-/** What the mark's point is: the kinds the dart may hold (`terrain`, `still`), and the ones it refuses. */
+/** What the mark's point is: the kinds the dart may hold (`terrain`, `still`), hook (`prop`), and the ones it refuses. */
 export type MarkKind = 'none' | 'terrain' | 'still' | 'pane' | 'water' | 'door' | 'prop' | 'moving';
 
-/** Whether a kind holds the dart at all. */
+/** Whether a kind holds the dart as an anchor: something that stands still. */
 export function kindHolds(kind: MarkKind): boolean {
   return kind === 'terrain' || kind === 'still';
+}
+
+/** Whether the dart bites a kind at all: an anchor, or a loose prop it hooks (wave 3), which the mass rule then judges. */
+export function kindBites(kind: MarkKind): boolean {
+  return kindHolds(kind) || kind === 'prop';
+}
+
+/**
+ * Who the rope moves (the progression doc's mass rule, §3.14): the player for anything still; the thing when its
+ * mass is at or under the tether's strength; both, a tug-of-war, up to `heavyRatio` times the player's mass; the
+ * player past that. This pass reaches `thing` (a loose prop) and `player` (anything still); nothing yet answers `both`.
+ */
+export type WhoMoves = 'player' | 'thing' | 'both';
+
+export function whoMoves(still: boolean, mass: number, strength: number, playerMass: number, tune: { heavyRatio: number }): WhoMoves {
+  if (still) return 'player';
+  if (mass <= strength) return 'thing';
+  if (mass <= tune.heavyRatio * playerMass) return 'both';
+  return 'player';
+}
+
+/**
+ * A point `v` turned by a unit quaternion `q` (or by its inverse, `inverse` true), into `out` (which may be `v`): how a
+ * point kept in a prop's own frame is carried onto the prop as it lies, and back. The point comes in a kept record, as
+ * the lean's direction does, since the hook's frame calls this every frame it holds a prop.
+ */
+export function turnByQuat(
+  q: { readonly x: number; readonly y: number; readonly z: number; readonly w: number },
+  v: { readonly x: number; readonly y: number; readonly z: number },
+  inverse: boolean,
+  out: { x: number; y: number; z: number },
+): { x: number; y: number; z: number } {
+  const x = v.x;
+  const y = v.y;
+  const z = v.z;
+  const qx = inverse ? -q.x : q.x;
+  const qy = inverse ? -q.y : q.y;
+  const qz = inverse ? -q.z : q.z;
+  const qw = q.w;
+  // t = 2 (q × v); v' = v + w t + q × t.
+  const tx = 2 * (qy * z - qz * y);
+  const ty = 2 * (qz * x - qx * z);
+  const tz = 2 * (qx * y - qy * x);
+  out.x = x + qw * tx + (qy * tz - qz * ty);
+  out.y = y + qw * ty + (qz * tx - qx * tz);
+  out.z = z + qw * tz + (qx * ty - qy * tx);
+  return out;
 }
 
 /**
@@ -127,36 +175,61 @@ export function underWater(y: number, flat: number, swell: number): boolean {
   return Number.isFinite(flat) && flat + swell > y;
 }
 
-/** Whether the mark shows: a kind the dart holds, no nearer than `minRange` and no further than `range`. */
-export function markShows(dist: number, kind: MarkKind, tune: { minRange: number; range: number }): boolean {
-  return kindHolds(kind) && dist >= tune.minRange && dist <= tune.range;
+/**
+ * What the mark's range test reads: the point's distance from the hand and the range, which the caller reads through
+ * the stat table (`grapple.range`, the tune's own while nothing grants it). A kept record the probe writes in place
+ * before it asks, because the probe runs every frame for a player who never fires and a number handed to a call that
+ * is not built into the caller is a fresh number; whether this one is built in is the compiler's budget's to decide,
+ * and the probe's budget is spent on the casts and the getters round it (wave 3 put the range's read in it).
+ */
+export interface MarkReach {
+  dist: number;
+  range: number;
+}
+
+/** Whether the mark shows: a kind the dart bites, no nearer than `minRange` and no further than the range. */
+export function markShows(kind: MarkKind, reach: { readonly dist: number; readonly range: number }, tune: { minRange: number }): boolean {
+  return kindBites(kind) && reach.dist >= tune.minRange && reach.dist <= reach.range;
 }
 
 /**
  * What the hook mutes for the frame, by action, into a kept list: nothing while it is not out; while it
  * is, the walk, the crouch and the torch (whose keys the reels and the haul borrow), the two postures and
  * the emotes, and the jump only while swinging (Space is the boost then; on the ground it jumps, and in
- * water it swims up). Answers how many it wrote.
+ * water it swims up). On a loose prop (`holding`, wave 3) the reels do nothing and the body is on its feet
+ * as ever, so only the torch (F is the yank) and the emotes (refused while the rope is out) are muted: the
+ * walk, the crouch and its landing roll, and the postures are the player's. Answers how many it wrote.
  */
-export function grappleMutes(out: string[], isOut: boolean, swinging: boolean): number {
-  const n = !isOut ? 0 : swinging ? OUT_MUTES.length + 1 : OUT_MUTES.length;
-  // The kept list holds one of three lists, each its own length: written only when it changes, since emptying an
-  // array and pushing into it again hands it a new backing store often enough to cost a byte a frame.
-  if (out.length !== n) {
+export function grappleMutes(out: string[], isOut: boolean, swinging: boolean, holding = false): number {
+  const list = !isOut ? null : holding ? HOLD_MUTES : OUT_MUTES;
+  const n = list === null ? 0 : list === OUT_MUTES && swinging ? OUT_MUTES.length + 1 : list.length;
+  // The kept list holds one of four lists, each its own length and its own first word: written only when it changes,
+  // since emptying an array and pushing into it again hands it a new backing store often enough to cost a byte a frame.
+  if (out.length !== n || (list !== null && out[0] !== list[0])) {
     out.length = 0;
-    if (n > 0) {
-      for (let i = 0; i < OUT_MUTES.length; i++) out.push(OUT_MUTES[i]);
-      if (swinging) out.push('jump');
+    if (list !== null) {
+      for (let i = 0; i < list.length; i++) out.push(list[i]);
+      if (list === OUT_MUTES && swinging) out.push('jump');
     }
   }
   return n;
 }
 
-/** What the hook mutes for as long as it is out, whatever it is doing. */
+/** What the hook mutes for as long as it is out on an anchor or in flight, whatever it is doing. */
 const OUT_MUTES: readonly string[] = ['walk', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4'];
+
+/** What it mutes while the rope holds a loose prop: the torch, whose key is the yank, and the emotes, which the game refuses while the rope is out. */
+const HOLD_MUTES: readonly string[] = ['flashlight', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4'];
 
 /** What every let-go mutes until its keys are up: a held Space would hop on landing, a held F light the torch, a held Shift walk. Never the crouch, which is the landing roll. */
 export const GRAPPLE_RELEASE_MUTES: readonly string[] = ['jump', 'flashlight', 'walk'];
+
+/**
+ * What a let-go of a loose prop mutes until its keys are up: only the torch, whose key was the yank. The jump and the
+ * walk were the player's own all the while the prop was on the line, so a Space or a Shift held through the let-go is
+ * the jump and the walk it already was.
+ */
+export const THING_RELEASE_MUTES: readonly string[] = ['flashlight'];
 
 /**
  * What the gravity knob puts back on the vertical speed a frame: `(1 − scale)·g·dt`. The caller never

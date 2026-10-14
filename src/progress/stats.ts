@@ -102,10 +102,14 @@ export const STATS = [
   { id: 'move.stamina', label: 'Stamina pool and regen', unit: 'points', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no stamina' },
   { id: 'move.mantle', label: 'Mantle height', unit: 'm', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no mantle; Athletics, later' },
   { id: 'move.wallRun', label: 'Wall-run duration', unit: 's', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'Jedi Academy’s wall runs belong to Force jump 3; the Force pass' },
-  { id: 'grapple.range', label: 'Grapple range and reel speed', unit: 'm', category: 'movement', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no grapple' },
+  // ---- the grapple: each base is `GRAPPLE_TUNE`'s own number, which the read site hands in, so the tune stays live ----
+  { id: 'grapple.range', label: 'Grapple range', unit: 'm', category: 'movement', min: 1, max: 1000, base: 100, reads: 'src/player/grapple.ts', status: 'route' },
+  { id: 'grapple.reel', label: 'Grapple reel speed', unit: 'm/s', category: 'movement', min: 0.1, max: 100, base: 6, reads: 'src/player/grapple.ts', status: 'route' },
+  { id: 'grapple.yank', label: 'Grapple haul speed', unit: 'm/s', category: 'movement', min: 0.1, max: 100, base: 18, reads: 'src/player/grapple.ts', status: 'route' },
+  { id: 'grapple.swing', label: 'Swing momentum on the grapple', unit: 'x', category: 'movement', min: 0, max: 10, base: 1, reads: 'src/player/grapple.ts', status: 'built', by: 'Acrobatics' },
   // ---- survivability, not built ----
   { id: 'armor.taken', label: 'Armour effectiveness', unit: 'x', category: 'survivability', min: 0, max: 0, base: null, reads: '', status: A, why: 'items carry no modifiers yet (Force Protect keeps its own field)' },
-  { id: 'resist.stagger', label: 'Stagger and knockdown resistance', unit: 'share', category: 'survivability', min: 0, max: 0, base: null, reads: '', status: A, why: 'nothing staggers or knocks the player down' },
+  { id: 'resist.stagger', label: 'Stagger and knockdown resistance', unit: 'share', category: 'survivability', min: 0, max: 0, base: null, reads: '', status: A, why: 'a slam on the grapple’s rope staggers the player for a moment, and nothing reads this yet' },
   { id: 'resist.status', label: 'Status resistance beyond the burn', unit: 'share', category: 'survivability', min: 0, max: 0, base: null, reads: '', status: A, why: 'the burn is the one status the player carries' },
   { id: 'revive.speed', label: 'Revive speed', unit: 's', category: 'survivability', min: 0, max: 0, base: null, reads: '', status: A, why: 'a death is a ragdoll and a respawn; Medic, later' },
   { id: 'bleed.out', label: 'Bleed-out time', unit: 's', category: 'survivability', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no bleeding out' },
@@ -141,7 +145,7 @@ export const STATS = [
   { id: 'trap.arm', label: 'Trap arm time', unit: 's', category: 'tactical', min: 0, max: 0, base: null, reads: '', status: A, why: 'Entrapment, later' },
   { id: 'trap.conceal', label: 'Trap concealment', unit: 'share', category: 'tactical', min: 0, max: 0, base: null, reads: '', status: A, why: 'Entrapment, later' },
   { id: 'detect.radius', label: 'Detection radius', unit: 'm', category: 'tactical', min: 0, max: 0, base: null, reads: '', status: A, why: 'Awareness, later' },
-  { id: 'tether.strength', label: 'Tether strength', unit: 'kg', category: 'tactical', min: 0, max: 0, base: null, reads: '', status: A, why: 'there is no grapple to tether with' },
+  { id: 'tether.strength', label: 'Tether strength: the heaviest thing the grapple pulls to you', unit: 'kg', category: 'tactical', min: 0, max: 100000, base: 40, reads: 'src/player/grapple.ts', status: 'route' },
   { id: 'lock.grade', label: 'Lock grade', unit: 'grade', category: 'tactical', min: 0, max: 0, base: null, reads: '', status: A, why: 'Slicer, later' },
   { id: 'slice.time', label: 'Slicing time and alarm delay', unit: 's', category: 'tactical', min: 0, max: 0, base: null, reads: '', status: A, why: 'Slicer, later' },
   // ---- crafting and social ----

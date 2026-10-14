@@ -70,6 +70,8 @@ export const PROGRESS_RULES = {
       iframes: 0.15,
       /** 25: a landing roll from no higher than this many metres takes nothing [doc]. */
       rollFree: 8,
+      /** The grapple's sway, its push and its cap, at 100: a swing built a quarter harder (the grapple pass, §3.16). */
+      grappleSwing: 1.25,
     },
   },
   /** What each Demolitions node does, by its name here (`demolitions.ts` names which node reads which). */

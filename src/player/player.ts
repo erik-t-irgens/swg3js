@@ -619,6 +619,8 @@ export class Player {
     // The grappling hook, its rope and its dart: built now on their one material, hidden and marked as actors,
     // so every warm-up compiles them for the world's pass and the rooms' and the first fire builds nothing.
     this.grapple = new Grapple(RAPIER, physics);
+    // Its range, reel, haul, sway and strength read through the player's own stats: the tune's numbers until earned.
+    this.grapple.stats = this.stats;
     const self = this;
     this.gview = {
       pos: this.pos,
@@ -734,6 +736,8 @@ export class Player {
       if (g.returning) grappleDartDir.set(h.x - g.dart[0], h.y - g.dart[1], h.z - g.dart[2]);
       else grappleDartDir.set(g.dartVel[0], g.dartVel[1], g.dartVel[2]);
     } else {
+      // A hooked prop's end carried onto the prop as it is drawn this frame (the pool wrote its mesh after the update).
+      if (g.holding) g.placeThingEnd();
       ribbon.slack = g.slack(this.gview);
       ribbon.screenH = screenH;
       ribbon.lay(g.rope.pts, g.rope.n + 1, h, camera);

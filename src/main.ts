@@ -16,7 +16,7 @@ import { BountyHunterKit } from './combat/bountyHunter';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
 import { GodHold, godRefusal } from './player/godMode.ts';
 import { recordHarmKind } from './player/harmRule.ts';
-import { GRAPPLE_TUNE, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
+import { GRAPPLE_TUNE, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
 import { underWater } from './player/grappleMath.ts';
 import { HeldNotes } from './ui/heldNotes.ts';
 import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
@@ -51,7 +51,7 @@ import { CLASH, clashes } from './combat/clash.ts';
 import { SCARS, scarReport, setScars, tuneScars } from './combat/scars.ts';
 import { GUNS, gunSpeedReport, gunTypeFor, type GunSpeedTune } from './combat/guns.ts';
 import { footprints } from './world/footprints.ts';
-import { loosePropAt, loosePropsGroup, propsDebug } from './world/looseProps.ts';
+import { hookablePropAhead, hookablePropAt, loosePropsGroup, propsDebug } from './world/looseProps.ts';
 import { saberHitReport, type SaberHitTune } from './combat/saberHit.ts';
 import { createBladeList } from './core/fx/bladeList';
 import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
@@ -1693,9 +1693,9 @@ class App {
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
-    // The grapple's one-shot words go to the message line, and a loose prop is named for its mark.
+    // The grapple's one-shot words go to the message line, and a loose prop is found for its mark and its dart's hook.
     this.player.grapple.say = (text) => this.messages.system(text);
-    this.player.grapple.isProp = (h) => !!loosePropAt(h);
+    this.player.grapple.propAt = hookablePropAt;
     this.effects = new Effects(this.scene);
     // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
     this.world.npcDeps.effects = this.effects;
@@ -7090,10 +7090,12 @@ class App {
        * after a `look` first), the hand, the dart, the rope's lengths and points and every count of its wrapping,
        * `blocked` (cast now: it must be 0), the rope's words this frame, the water, the impacts, the gravity, what
        * is muted and what its own work costs. `fire: true` fires at what the mark shows, `fire: [x, y, z]` at a
-       * point with the mark's own range and clear-segment checks; `letGo`, `everyone`, `tune` and `reset` (the
-       * table back as it ships) as their names say.
+       * point with the mark's own range and clear-segment checks, `fire: 'prop'` at the nearest loose prop in view;
+       * `letGo`, `everyone`, `tune` and `reset` (the table back as it ships) as their names say. From wave 3 it says
+       * what the rope `holds` (an anchor or a thing), and of a prop held or under the mark its mass, its distance and
+       * who the mass rule moves (`whoMoves`).
        */
-      grapple: (opts: { fire?: boolean | [number, number, number]; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean } = {}) => {
+      grapple: (opts: { fire?: boolean | [number, number, number] | 'prop'; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean } = {}) => {
         const p = this.player;
         const g = p.grapple;
         const b = p.grappleBody;
@@ -7118,16 +7120,32 @@ class App {
         if (opts.tune) tuneGrapple(opts.tune);
         if (opts.everyone !== undefined) tuneGrapple({ everyone: !!opts.everyone });
         if (opts.letGo) g.letGo('console');
-        if (Array.isArray(opts.fire)) {
+        // The mark's own checks from the hand toward a point: what the line meets first is the mark, and the dart fires at it.
+        const fireToward = (x: number, y: number, z: number): void => {
+          const hand = p.grappleHand(new THREE.Vector3());
+          const d = new THREE.Vector3(x, y, z).sub(hand).normalize();
+          Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body });
+          g.probeMark(b.physics, this.grappleWater, 0);
+          said.push(this.fireGrapple() || 'fired');
+        };
+        if (opts.fire === 'prop') {
           if (g.out) said.push('the grapple is already out');
           else {
-            // The mark's own checks from the hand toward the point: what the line meets first is the mark.
-            const hand = p.grappleHand(new THREE.Vector3());
-            const d = new THREE.Vector3(opts.fire[0], opts.fire[1], opts.fire[2]).sub(hand).normalize();
-            Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body });
-            g.probeMark(b.physics, this.grappleWater, 0);
-            said.push(this.fireGrapple() || 'fired');
+            // The nearest loose prop inside the view's own width, within the hook's reach.
+            const cam = this.cam.camera;
+            const look = cam.getWorldDirection(new THREE.Vector3());
+            const halfWide = Math.atan(Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) * cam.aspect);
+            const found = hookablePropAhead(p.grappleHand(new THREE.Vector3()), look, g.range, Math.cos(halfWide));
+            if (!found) said.push('no loose prop in view within reach');
+            else {
+              const c = found.prop.mesh.position;
+              said.push(`at the ${found.prop.label} ${Math.round(Math.hypot(c.x - p.pos.x, c.y - p.pos.y - GRAPPLE_TUNE.ropeY, c.z - p.pos.z))} m off`);
+              fireToward(c.x, c.y, c.z);
+            }
           }
+        } else if (Array.isArray(opts.fire)) {
+          if (g.out) said.push('the grapple is already out');
+          else fireToward(opts.fire[0], opts.fire[1], opts.fire[2]);
         } else if (opts.fire) {
           if (g.out) said.push('the grapple is already out');
           else {
@@ -7139,22 +7157,33 @@ class App {
         const mk = g.mark;
         const n2 = (v: number) => Number(v.toFixed(2));
         const n3 = (v: number) => Number(v.toFixed(3));
-        const piv = g.attached ? g.pivot(new THREE.Vector3()) : null;
+        const roped = g.attached || g.holding;
+        const piv = roped ? g.pivot(new THREE.Vector3()) : null;
         const watched = ['walk', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'jump'] as const;
+        // A loose prop under the mark (when the rope holds none): what it weighs and who the mass rule would move.
+        const markProp = !g.holding && mk.kind === 'prop' && mk.collider ? (g.propAt?.(mk.collider.handle) ?? null) : null;
+        const held = g.thing;
         return {
           said,
           state: g.state,
+          holds: g.holds,
           everyone: GRAPPLE_TUNE.everyone,
-          mark: { shows: mk.shows, held: mk.held, next: mk.next, distance: n2(mk.distance), kind: mk.kind, at: [n2(mk.x), n2(mk.y), n2(mk.z)] },
+          range: n2(g.range),
+          mark: { shows: mk.shows, held: mk.held, next: mk.next, distance: n2(mk.distance), kind: mk.kind, at: [n2(mk.x), n2(mk.y), n2(mk.z)], ...(markProp ? { mass: n2(markProp.mass), whoMoves: g.whoMovesFor(markProp.mass) } : {}) },
+          thing: held
+            ? { label: held.label, mass: n2(held.mass), distance: n2(g.thingDist), whoMoves: g.whoMovesFor(held.mass), yanking: g.yanking, blocked: n2(g.thingBlocked), recalls: held.recalls }
+            : null,
+          // The prop's middle from the rope point as last measured, kept after a let-go (a yank's end says where it came to).
+          thingDistance: n2(g.thingDist),
           hand: [n3(p.pos.x), n3(p.pos.y + GRAPPLE_TUNE.ropeY), n3(p.pos.z)],
           dart: g.flying ? { at: [n2(g.dart[0]), n2(g.dart[1]), n2(g.dart[2])], flown: n2(Math.hypot(g.dart[0] - g.launch[0], g.dart[1] - g.launch[1], g.dart[2] - g.launch[2])), returning: g.returning } : null,
-          length: n3(g.attached ? g.rope.length : 0),
-          spent: n3(g.attached ? g.rope.spent : 0),
-          free: n3(g.attached ? g.rope.free() : 0),
+          length: n3(roped ? g.rope.length : 0),
+          spent: n3(roped ? g.rope.spent : 0),
+          free: n3(roped ? g.rope.free() : 0),
           taut: g.taut,
           slack: n3(g.slack(b)),
           pivot: piv ? [n3(piv.x), n3(piv.y), n3(piv.z)] : null,
-          points: g.attached ? g.rope.n + 1 : 0,
+          points: roped ? g.rope.n + 1 : 0,
           rope: { ...g.rope.stats, thingBends: g.rope.thingBends, groundBends: g.rope.groundBends },
           blocked: g.blocked(b),
           modes: { ...g.modes, latch: g.latch, sinceLastPull: Number.isFinite(g.sincePull) ? n2(g.sincePull) : null, hauling: g.hauling, lipping: g.lipping },
@@ -11060,13 +11089,13 @@ class App {
     } else hm.onScreen = false;
     hm.anchorOn = false;
     hm.ropeUsed = 0;
-    if (g.attached) {
+    if (g.attached || g.holding) {
       const p = g.rope.pts;
       hm.anchorOn = this.projectToScreen(p[0], p[1], p[2], sp);
       hm.ax = sp.x;
       hm.ay = sp.y;
-      // The rope used over the longest, for the thin arc round the crosshair.
-      hm.ropeUsed = g.rope.length / GRAPPLE_TUNE.range;
+      // The rope used over the longest (as progress makes it), for the thin arc round the crosshair.
+      hm.ropeUsed = g.rope.length / g.range;
     }
   }
 
@@ -12104,8 +12133,10 @@ class App {
       if (d.status === 'absent') continue;
       const id = d.id as StatId;
       if (typeof d.base === 'number') {
-        const value = s.apply(id, d.base);
-        rows.push({ id, label: d.label, unit: d.unit, status: d.status, base: d.base, value, moved: !Object.is(value, d.base) });
+        // The grapple's are read over its tune's own number as it stands (`GRAPPLE_TUNE`), which the read site hands in.
+        const base = grappleStatBase(id) ?? d.base;
+        const value = s.apply(id, base);
+        rows.push({ id, label: d.label, unit: d.unit, status: d.status, base, value, moved: !Object.is(value, base) });
       } else {
         const ex = this.statExample(id);
         rows.push({ id, label: d.label, unit: d.unit, status: d.status, base: ex.base, on: ex.on, value: s.apply(id, ex.base), moved: s.grants.has(id) });
@@ -12121,7 +12152,8 @@ class App {
     const s = this.player.stats;
     const sid = d.id as StatId;
     const ex = typeof d.base === 'number' ? null : this.statExample(sid);
-    const base = typeof d.base === 'number' ? d.base : (ex?.base ?? NaN);
+    // The grapple's stats are read over its tune's own number as it stands, which is the catalogue's while untouched.
+    const base = typeof d.base === 'number' ? (grappleStatBase(sid) ?? d.base) : (ex?.base ?? NaN);
     return {
       id: d.id,
       label: d.label,
@@ -20333,7 +20365,8 @@ class App {
     const g = this.player.grapple;
     const k = (a: Action) => keyLabel(b[a][0] ?? '');
     if (g.flying) return `the dart is out · <b>${k('grappleFire')}</b> calls it back`;
-    return `on the rope · <b>${k('grappleFire')}</b> let go · <b>${k('reelIn')}</b>/<b>${k('reelOut')}</b> reel · <b>${k('grappleBoost')}</b> boost off · <b>${k('grappleHaul')}</b> haul in · ${Math.round(g.rope.length)} of ${Math.round(GRAPPLE_TUNE.range)} m`;
+    if (g.holding) return `a ${g.thing?.label ?? 'prop'} on the line · <b>${k('grappleFire')}</b> let go · <b>${k('grappleHaul')}</b> yank it · ${Math.round(g.rope.length)} of ${Math.round(g.range)} m`;
+    return `on the rope · <b>${k('grappleFire')}</b> let go · <b>${k('reelIn')}</b>/<b>${k('reelOut')}</b> reel · <b>${k('grappleBoost')}</b> boost off · <b>${k('grappleHaul')}</b> haul in · ${Math.round(g.rope.length)} of ${Math.round(g.range)} m`;
   }
 
   /** Under the drawn water or a lava flow: the mark refuses it, whatever the dart's ray struck there. Kept, not made a frame. */

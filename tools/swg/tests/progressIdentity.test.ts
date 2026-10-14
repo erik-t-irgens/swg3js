@@ -77,6 +77,12 @@ const TODAY: Record<string, number> = {
   'demo.chainAll': 0,
   'demo.stagger': 0,
   'demo.dangerClose': 0,
+  // The grapple's (its pass's wave 3): the numbers `GRAPPLE_TUNE` shipped with, which its read sites hand in.
+  'grapple.range': 100,
+  'grapple.reel': 6,
+  'grapple.yank': 18,
+  'grapple.swing': 1,
+  'tether.strength': 40,
 };
 const empty = resolveStats(emptyRecord('c1'), PROGRESS_RULES);
 {
@@ -380,6 +386,71 @@ function fieldOf(id: string): string {
     return !Object.is(v.x, d.x * 18 + 2.5) || !Object.is(v.y, d.y * 18 + 4) || !Object.is(v.z, d.z * 18 + -1.25);
   });
   ok(velOff.length === 0, "and a throw's velocity is the old expression, the thrower's run carried with it");
+}
+
+// ---- 7. the grapple's rows (the grapple pass's wave 3) ------------------------------------------------------
+// Each read site hands the stat table `GRAPPLE_TUNE`'s own number, so the tune stays live: the rows' bases are the
+// tune's defaults, two of the rows were rewritten where they stood rather than added again, an empty record hands
+// every one back by `Object.is`, and the hook's own files read each number through the table and nowhere beside it.
+{
+  const { GRAPPLE_DEFAULTS, GRAPPLE_STATS, Grapple, grappleStatBase } = await import('../../../src/player/grapple.ts');
+  const { RAPIER } = await import('../../../src/core/physics.ts');
+  const ids = ['grapple.range', 'grapple.reel', 'grapple.yank', 'grapple.swing', 'tether.strength'] as const;
+  // Which tune key each is read over, written out by hand: the sway's factor alone has 1, no key, for its base.
+  const keyOf: Record<string, keyof typeof GRAPPLE_DEFAULTS> = { 'grapple.range': 'range', 'grapple.reel': 'reel', 'grapple.yank': 'haul', 'tether.strength': 'strength' };
+  const rows = STATS as readonly StatDef[];
+  const counts = ids.map((id) => rows.filter((s) => s.id === id).length);
+  ok(counts.every((n) => n === 1), `each of the grapple's five rows is in the table exactly once (${ids.map((id, i) => `${id} ${counts[i]}`).join(', ')})`);
+  ok(rows.findIndex((s) => s.id === 'grapple.range') === rows.findIndex((s) => s.id === 'move.wallRun') + 1 && rows.findIndex((s) => s.id === 'tether.strength') === rows.findIndex((s) => s.id === 'detect.radius') + 1, 'and the two rows that stood absent are rewritten where they stood, never added beside themselves');
+  const wrongBase = ids.filter((id) => !Object.is(baseOf(id), id === 'grapple.swing' ? 1 : (GRAPPLE_DEFAULTS[keyOf[id]] as number)));
+  ok(wrongBase.length === 0, `every row's base is the tune's own default, bit for bit (100, 6, 18, 1, 40)${wrongBase.length ? `: ${wrongBase.join(', ')}` : ''}`);
+  ok(Object.entries(GRAPPLE_STATS).every(([id, key]) => keyOf[id] === key) && Object.keys(GRAPPLE_STATS).length === 4, "the hook's own table names the same tune key for each as written here");
+  ok(ids.every((id) => Object.is(grappleStatBase(id), baseOf(id))) && grappleStatBase('health.max') === null, 'and the base it hands the table, read off the tune as it stands, is that default while nothing is tuned');
+  const s = new PlayerStats();
+  ok(ids.every((id) => Object.is(s.apply(id, TODAY[id]), TODAY[id])) && ids.every((id) => !s.grants.has(id)), "an empty record hands each one back by Object.is and holds no entry for any");
+  const statusOf = (id: string) => rows.find((r) => r.id === id)!;
+  ok(statusOf('grapple.swing').status === 'built' && statusOf('grapple.swing').by === 'Acrobatics' && ['grapple.range', 'grapple.reel', 'grapple.yank', 'tether.strength'].every((id) => statusOf(id).status === 'route' && statusOf(id).reads === 'src/player/grapple.ts'), 'Acrobatics writes the swing; the range, the reel, the haul and the strength are read and written by nothing yet');
+  const g = new Grapple(RAPIER, { world: {} } as never);
+  g.stats = s;
+  ok(Object.is(g.range, GRAPPLE_DEFAULTS.range) && g.whoMovesFor(20) === 'thing' && g.whoMovesFor(40) === 'thing' && g.whoMovesFor(41) === 'both', "the hook, handed the player's empty stats, reaches the tune's very range and weighs a 20 kg prop against its 40 kg strength");
+
+  // The read sites, as text: each of these numbers goes through the table in the hook, and nowhere beside it.
+  const read = (rel: string) => readFileSync(new URL(`../../../${rel}`, import.meta.url), 'utf8');
+  const hook = read('src/player/grapple.ts');
+  const math = read('src/player/grappleMath.ts');
+  const main = read('src/main.ts');
+  const player = read('src/player/player.ts');
+  const through = (key: string, id: string) => {
+    const bare = (hook.match(new RegExp(`\\b(?:T|GRAPPLE_TUNE)\\.${key}\\b`, 'g')) ?? []).length;
+    const routed = (hook.match(new RegExp(`stats\\.apply\\('${id.replace('.', '\\.')}', (?:T|GRAPPLE_TUNE)\\.${key}\\)`, 'g')) ?? []).length;
+    return { bare, routed };
+  };
+  for (const [id, key] of Object.entries(keyOf)) {
+    const t = through(key, id);
+    ok(t.bare >= 1 && t.bare === t.routed, `every read of the tune's ${key} in the hook goes through stats.apply('${id}', ...) (${t.routed} of ${t.bare})`);
+  }
+  // Each read whole, to the end of its expression, so a factor written after the swing is caught as well as one before it.
+  const swayReads = hook.match(/\bT\.(swayAccel|swayMax)\b[^;\n]*/g) ?? [];
+  const swayWhole = [/^T\.swayMax \* swing$/, /^T\.swayAccel \* swing \* dt, swayMax - along\)$/];
+  ok(/const swing = this\.stats\.apply\('grapple\.swing', 1\);/.test(hook) && swayReads.length === 2 && swayWhole.every((re) => swayReads.some((r) => re.test(r))), `the sway's push and cap are each times the swing the table hands back and nothing more (${swayReads.join('; ')})`);
+  // No stray 100, 6, 18 or 40 anywhere in the hook's own code (the tune's table and its knob left out, comments and an
+  // index such as sg[6] left out): a read site that wrote the tune's number out would read beside the table.
+  const lines = hook.split(/\r?\n/);
+  const tableAt = lines.findIndex((l) => l.startsWith('export const GRAPPLE_TUNE = {'));
+  const tableEnd = lines.findIndex((l, i) => i > tableAt && l === '};');
+  const knobAt = lines.findIndex((l) => l.startsWith('export function tuneGrapple('));
+  const knobEnd = lines.findIndex((l, i) => i > knobAt && l === '}');
+  const hookStrays = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ i }) => !(i >= tableAt && i <= tableEnd) && !(i >= knobAt && i <= knobEnd))
+    .map(({ l, i }) => ({ code: l.trim().startsWith('*') || l.trim().startsWith('/*') ? '' : l.replace(/\/\/.*$/, '').replace(/'[^']*'|`[^`]*`/g, "''"), i }))
+    .filter(({ code }) => /(?<![\w.[-])(100|6|18|40)(?![\w.\]])/.test(code))
+    .map(({ i }) => `${i + 1}: ${lines[i].trim()}`);
+  ok(tableAt > 0 && tableEnd > tableAt && knobAt > 0 && knobEnd > knobAt && hookStrays.length === 0, `the hook's own code holds no 100, 6, 18 or 40 beside the table (${hookStrays.length} strays${hookStrays.length ? `: ${hookStrays.join(' | ')}` : ''})`);
+  ok(!/tune\.range/.test(math) && /markShows\(kind: MarkKind, reach: \{ readonly dist: number; readonly range: number \}, tune: \{ minRange: number \}\)/.test(math) && /reach\.range = range;/.test(hook), "the mark's range test is handed the range the hook read through the table, and reads none of its own");
+  ok(!/GRAPPLE_TUNE\.(range|reel|haul|swayAccel|swayMax|strength)\b/.test(main) && /hm\.ropeUsed = g\.rope\.length \/ g\.range;/.test(main), 'the game reads the hook\'s range off the hook (the rope used, the long line), never the tune\'s');
+  const strays = player.split('\n').filter((l) => /grapple/i.test(l) && /(?<![\w.])(100|6|18)(?![\w.])/.test(l));
+  ok(strays.length === 0 && /this\.grapple\.stats = this\.stats;/.test(player), `the player holds no 100, 6 or 18 beside the grapple, and hands the hook its own stats (${strays.length} strays)`);
 }
 
 console.log(`\n${checks} checks passed`);

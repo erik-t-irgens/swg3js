@@ -145,9 +145,10 @@ export interface PromptState {
   noclip: boolean;
   /**
    * The grappling hook, while it is out: the dart in flight, attached and swinging (`air`, hanging or a slide),
-   * or attached on the ground or afloat (`ground`), as `ropeModes` decides it. Empty while it is not out.
+   * or attached on the ground or afloat (`ground`), as `ropeModes` decides it, or holding a loose prop it pulls
+   * (`light`). Empty while it is not out.
    */
-  grapple: '' | 'flying' | 'ground' | 'air';
+  grapple: '' | 'flying' | 'ground' | 'air' | 'light';
   /** A jump's own line, which wins over everything else. */
   jump: PromptJump;
   /** A shuttle's passenger, who can only step off, and only on the ground; everything else is the shuttle's. */
@@ -354,6 +355,8 @@ export const PROMPT_WORDS = Object.freeze({
   boostOff: 'boost off',
   haulIn: 'haul in',
   callBack: 'call it back',
+  // A loose prop on the rope: F pulls it to you.
+  yank: 'yank it',
   // Everywhere.
   shipMenu: 'ship menu',
   noclipOff: 'noclip off',
@@ -457,6 +460,11 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     n = push(out, n, 'grappleFire', W.grappleLetGo);
     n = push(out, n, 'reelIn', W.reelIn);
     n = push(out, n, 'grappleHaul', W.haulIn);
+  }
+  // A loose prop on the rope: the body is on its feet as ever, so after the two words the on-foot block fills the rest.
+  if (s.grapple === 'light') {
+    n = push(out, n, 'grappleFire', W.grappleLetGo);
+    n = push(out, n, 'grappleHaul', W.yank);
   }
 
   // Seated in a vehicle, or standing at a ship's bridge controls. Both fly the same hull.

@@ -15,11 +15,21 @@
 // it may hold and bend round is what stands still. The body it works on is a small view of the player
 // (`GrappleBody`), so the node harness runs the very same steps in the very same order the player does.
 //
+// Wave 3 gave it things that move on the rope, the first of them a loose prop (`holding`): a dart that strikes one
+// light enough by the mass rule (`whoMoves`) hooks it, the rope's end kept in the prop's own frame and read off its
+// mesh, never wrapping; F yanks it to the rope point through the grip's own `holdAt`, and with no F the rope is a
+// tether that drags it once walked out past its length. Nothing of a hooked prop touches the body: the rope there
+// moves the thing and never the player. And the hook's numbers that progression can change (its range, the reel, the
+// haul, the sway and the tether's strength) are read through the stat table (`stats.apply`), which hands back the
+// tune's own number while nothing grants them.
+//
 // A player who never fires plays exactly as before: every line the player's update adds for this is behind
 // `out`, and everything that touches the body behind `attached`. Every number here is in `GRAPPLE_TUNE` and
 // moves live through `__debug.grapple({ tune })`.
 import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import type { Physics } from '../core/physics.ts';
+import type { StatId } from '../progress/stats.ts';
+import type { HookableProp } from '../world/looseProps.ts';
 import { JKA, UNIT } from './jkaMove.ts';
 import { GrappleRope, RopeConstraint, isTerrainCollider } from './grappleRope.ts';
 import { SWIM_DEPTH } from './swimStep.ts';
@@ -34,6 +44,7 @@ import {
   grappleMutes,
   gravityAddBack,
   joltFor,
+  kindBites,
   kindHolds,
   leanAngleOf,
   leanIdentity,
@@ -54,12 +65,17 @@ import {
   staggerFor,
   swimLifts,
   teleported,
+  THING_RELEASE_MUTES,
+  turnByQuat,
   wadeDragOf,
   wallFrictionSpare,
+  whoMoves,
   type LeanQuat,
   type LeanStep,
   type MarkKind,
+  type MarkReach,
   type RopeModes,
+  type WhoMoves,
 } from './grappleMath.ts';
 
 export { WALKABLE };
@@ -237,6 +253,21 @@ export const GRAPPLE_TUNE = {
   windGain: 0,
   windFrom: 12,
   windTo: 35,
+  // --- the mass rule (wave 3) --------------------------------------------------------------------------
+  /** The heaviest thing the rope pulls to you (kg), read through the stat table's `tether.strength`. A loose prop weighs 20. */
+  strength: 40,
+  /** Up to this many times the player's own mass a thing is a tug-of-war (`both`), and past it the rope moves the player; nothing answers `both` this pass. */
+  heavyRatio: 2,
+  /** F on a hooked prop pulls it toward this far out along the view from the rope point (m). */
+  yankAhead: 1,
+  /** The yank stops once the prop is within `arriveReach` of the rope point, or after this long (s), and the rope lets go. */
+  yankMost: 1.5,
+  /** What the yank's end throws the prop along the view at (m/s), stopped first: nought, and it drops where it came to. */
+  yankToss: 0,
+  /** The rope to a prop lets go once its straight span has been blocked by something still this long (s). */
+  tetherBlocked: 0.25,
+  /** A prop dragged on the rope lets go this far short of where the pool would put it back on its stand (m). */
+  tetherStandMargin: 5,
   // --- others and the item -----------------------------------------------------------------------------
   /** The points a rope sends to other players (when it is sent at all): at most the wire's sixteen. */
   sendPoints: 16,
@@ -314,9 +345,48 @@ export function tuneGrapple(o: Partial<Record<keyof GrappleTune, unknown>>): Gra
   G.haulFade = Math.max(0, G.haulFade);
   G.windGain = Math.max(0, Math.min(1, G.windGain));
   G.windTo = Math.max(G.windFrom + 0.1, G.windTo);
+  G.strength = Math.max(0, G.strength);
+  G.heavyRatio = Math.max(0, G.heavyRatio);
+  G.yankAhead = Math.max(0, G.yankAhead);
+  G.yankMost = Math.max(0, G.yankMost);
+  G.yankToss = Math.max(0, G.yankToss);
+  G.tetherBlocked = Math.max(0, G.tetherBlocked);
+  G.tetherStandMargin = Math.max(0, G.tetherStandMargin);
   lookHook?.();
   return G;
 }
+
+/**
+ * The hook's numbers that progression can change, each by the stat it is read through and the tune's key that is its
+ * base (§3.16). Every read site hands the stat table the tune's own number, so the tune stays live and an empty record
+ * hands back that very number. `grapple.swing` is a factor over the sway's push and cap, its base 1.
+ */
+export const GRAPPLE_STATS: Readonly<Record<'grapple.range' | 'grapple.reel' | 'grapple.yank' | 'tether.strength', keyof GrappleTune>> = Object.freeze({
+  'grapple.range': 'range',
+  'grapple.reel': 'reel',
+  'grapple.yank': 'haul',
+  'tether.strength': 'strength',
+});
+
+/** The base the hook hands the stat table for one of its stats, as the tune stands now (1 for the sway's factor); null for any other stat. */
+export function grappleStatBase(id: string): number | null {
+  if (id === 'grapple.swing') return 1;
+  const key = (GRAPPLE_STATS as Record<string, keyof GrappleTune | undefined>)[id];
+  if (!key) return null;
+  const v = GRAPPLE_TUNE[key];
+  return typeof v === 'number' ? v : null;
+}
+
+/** What the hook reads its stats through: the player's `PlayerStats`, whose `apply` hands back the very base while nothing grants. */
+export interface GrappleStats {
+  apply(id: StatId, base: number): number;
+}
+
+/** The stats of a body with no progress at all (the node harness's): every number the tune's own. */
+const NO_STATS: GrappleStats = { apply: (_id: StatId, base: number): number => base };
+
+/** The player's own mass as the rope weighs it against a thing: the character controller's (`setCharacterMass(80)`). */
+export const GRAPPLE_PLAYER_MASS = 80;
 
 /** The table back as it ships. */
 export function resetGrappleTune(): GrappleTune {
@@ -325,7 +395,8 @@ export function resetGrappleTune(): GrappleTune {
   return GRAPPLE_TUNE;
 }
 
-export type GrappleState = 'off' | 'flying' | 'attached';
+/** Off; the dart in flight; the rope fastened to an anchor (`attached`); or fastened to a thing it moves, a loose prop (`holding`, wave 3). */
+export type GrappleState = 'off' | 'flying' | 'attached' | 'holding';
 
 /** Why the rope let go, the last time it did: the player's own, a new place, a world swapped, or the rope's. */
 export type LetGoReason =
@@ -350,7 +421,11 @@ export type LetGoReason =
   | 'fouled'
   | 'moved'
   | 'world'
-  | 'console';
+  | 'console'
+  // A hooked prop (wave 3): the yank brought it in; the pool put it back on its stand; its span stayed blocked.
+  | 'yanked'
+  | 'recalled'
+  | 'blocked';
 
 /**
  * The ways out that put the body somewhere new, give it to something else or take it out of the world (§3.10): they end
@@ -531,11 +606,41 @@ export class Grapple {
   lastImpactHaul = false;
   /** A let-go owes the key block its `muteUntilUp` (made inside the player's update, applied the next frame). */
   muteOwed = false;
+  /** What that owed mute takes: every let-go's three, or a loose prop's torch alone (its jump and walk were the player's). */
+  private owedMutes: readonly string[] = GRAPPLE_RELEASE_MUTES;
   lastLetGo: LetGoReason | '' = '';
   /** One-shot words for the message line: the game hangs the line here. */
   say: ((text: string) => void) | null = null;
-  /** Whether a dynamic collider is a loose prop, for the mark's word (the game hangs the props' lookup here). */
-  isProp: ((handle: number) => boolean) | null = null;
+  /**
+   * The loose prop a dynamic collider belongs to, for the mark's word and the dart's hook (the game hangs the pool's
+   * own `hookablePropAt` here, so this file takes nothing of the world but the prop's type); undefined for anything
+   * else, and once the pool has gone with its world.
+   */
+  propAt: ((handle: number) => HookableProp | undefined) | null = null;
+  /** What the hook reads its range, reel, haul, sway and strength through: the player's stats (the game hangs them here). */
+  stats: GrappleStats = NO_STATS;
+
+  // A hooked prop (wave 3, §3.14).
+  /** The prop the rope holds while `holding`, its collider's handle, and its recall count at the hook. */
+  thing: HookableProp | null = null;
+  private thingHandle = -1;
+  private thingRecalls = 0;
+  /** Where on it the rope is fastened, and the face's normal there, in its own frame. */
+  private readonly thingLocal = { x: 0, y: 0, z: 0 };
+  private readonly thingNormal = { x: 0, y: 1, z: 0 };
+  /** F held on it: the yank under way, and how long it has run. */
+  yanking = false;
+  private yankTime = 0;
+  /** How long the straight span has been blocked by something still. */
+  thingBlocked = 0;
+  /** The prop's middle from the rope point, metres, as last measured (kept after a let-go, for the console). */
+  thingDist = 0;
+  /** The rope point where the last frame left it, for the guard against a place written without a reset. */
+  private readonly thingHand = { x: 0, y: 0, z: 0 };
+  /** A point handed to the prop's `holdAt`, a direction to its `release`, and a point turned onto it: kept, written in place. */
+  private readonly thingTo = { x: 0, y: 0, z: 0 };
+  private readonly thingDir = { x: 0, y: 0, z: 0 };
+  private readonly thingAt = { x: 0, y: 0, z: 0 };
 
   // The dart.
   readonly dart = new Float64Array(3);
@@ -653,6 +758,8 @@ export class Grapple {
   /** A segment the probe casts (a, then b, then how far past b), and the next cast's reach, filter and excluded body, kept. */
   private readonly sg = new Float64Array(7);
   private castLen = 0.5;
+  /** The mark's distance and the range, handed to its range test in a record (a number handed to a call is a fresh one). */
+  private readonly markReach: MarkReach = { dist: 0.5, range: 0.5 };
   private castFilter = 0;
   private castExclude: RAPIER_NS.RigidBody | null = null;
   private passPhysics: Physics | null = null;
@@ -697,6 +804,26 @@ export class Grapple {
 
   get flying(): boolean {
     return this.state === 'flying';
+  }
+
+  /** The rope holds a thing it moves (a loose prop): nothing of it touches the body. */
+  get holding(): boolean {
+    return this.state === 'holding';
+  }
+
+  /** What the rope holds: an anchor that stands still, a thing it moves, or nothing. */
+  get holds(): 'anchor' | 'thing' | '' {
+    return this.state === 'attached' ? 'anchor' : this.state === 'holding' ? 'thing' : '';
+  }
+
+  /** The dart's reach and the rope's longest length, as progress makes it: the tune's own number while nothing grants it. */
+  get range(): number {
+    return this.stats.apply('grapple.range', GRAPPLE_TUNE.range);
+  }
+
+  /** Who the rope would move for a thing of this mass (the mass rule), at the tether's strength as progress makes it. */
+  whoMovesFor(mass: number): WhoMoves {
+    return whoMoves(false, mass, this.stats.apply('tether.strength', GRAPPLE_TUNE.strength), GRAPPLE_PLAYER_MASS, GRAPPLE_TUNE);
   }
 
   /** The rope is taut: at its length within `tautEps`, or it bore load this frame. */
@@ -745,9 +872,9 @@ export class Grapple {
     );
   }
 
-  /** The free span's slack: the free length less the hand's distance to the pivot. */
+  /** The free span's slack: the free length less the hand's distance to the pivot (to a hooked prop, its whole length less it). */
   slack(b: GrappleBody): number {
-    if (!this.attached) return 0;
+    if (!this.attached && !this.holding) return 0;
     this.pivot(this.piv);
     const T = GRAPPLE_TUNE;
     return this.rope.free() - len3(b.pos.x - this.piv.x, b.pos.y + T.ropeY - this.piv.y, b.pos.z - this.piv.z);
@@ -786,10 +913,11 @@ export class Grapple {
     return m.sliding ? false : grounded;
   }
 
-  /** What the action bar says of the hook: nothing while it is not out, `flying`, or attached `air` (swinging) and `ground`. */
-  promptWord(): '' | 'flying' | 'ground' | 'air' {
+  /** What the action bar says of the hook: nothing while it is not out, `flying`, attached `air` (swinging) and `ground`, or `light` on a prop. */
+  promptWord(): '' | 'flying' | 'ground' | 'air' | 'light' {
     if (this.state === 'off') return '';
     if (this.state === 'flying') return 'flying';
+    if (this.state === 'holding') return 'light';
     return this.modes.swinging ? 'air' : 'ground';
   }
 
@@ -915,7 +1043,7 @@ export class Grapple {
     // A new hook, as a fire is: the fast flight of the last one ends here.
     this.released = false;
     this.bite(b, x, y, z, nx, ny, nz, collider, b.physics);
-    if (length > 0 && this.attached) this.rope.length = Math.min(T.range, length);
+    if (length > 0 && this.attached) this.rope.length = Math.min(this.range, length);
   }
 
   /** The dart comes home: a miss, a refusal, or the fire key pressed while it flies. */
@@ -931,7 +1059,8 @@ export class Grapple {
   /**
    * Let go, whatever is out: the rope and the dart go, the latch clears, and the walk, the torch and the jump
    * are owed a mute until their keys are up (the next key block applies it, or the key block that let go at
-   * once). Never the crouch: an X held from reeling out into the landing is Jedi Academy's landing roll.
+   * once); a loose prop's let-go owes the torch alone, its yank's key. Never the crouch: an X held from reeling
+   * out into the landing is Jedi Academy's landing roll.
    *
    * A rope let go of while the body flies faster than `slamFrom` starts the fast flight (`released`), so a wall it then
    * flies into still hurts; a call-back or a miss never does, being no rope. A way out that puts the body somewhere new
@@ -944,6 +1073,21 @@ export class Grapple {
       return;
     }
     const wasAttached = this.state === 'attached';
+    // The keys owed a mute: a loose prop's torch alone, unless the whole three are owed already from a let-go not yet
+    // applied (one owed list, so the wider wins).
+    this.owedMutes = this.state === 'holding' && !(this.muteOwed && this.owedMutes === GRAPPLE_RELEASE_MUTES) ? THING_RELEASE_MUTES : GRAPPLE_RELEASE_MUTES;
+    // A hooked prop has its weight back: the yank held it weightless, and nothing else would give it back for a grip's
+    // lapse. Only while the pool still answers for it and its world is whole: a prop freed with its world has no body.
+    const thing = this.thing;
+    if (thing) {
+      const p = this.anchorPhysics;
+      if (p && !p.broken && this.propAt?.(this.thingHandle) === thing) thing.giveWeightBack();
+      this.thing = null;
+      this.thingHandle = -1;
+    }
+    this.yanking = false;
+    this.yankTime = 0;
+    this.thingBlocked = 0;
     this.state = 'off';
     this.returning = false;
     this.rope.release();
@@ -1001,20 +1145,20 @@ export class Grapple {
    * first, then act. A let-go owed from the frame before (made inside the player's update) is muted until its
    * keys are up before anything is read; while the hook is out the frame's mutes go on (the walk, the crouch,
    * the torch, the postures, the emotes, and the jump while swinging, so the Space that boosts is already no
-   * jump); then the fire key fires (`fire`, the caller's, which checks the mark and the refusals), calls the dart
+   * jump; on a loose prop only the torch and the emotes); then the fire key fires (`fire`, the caller's, which checks the mark and the refusals), calls the dart
    * back or lets go, and Space boosts off while swinging, a let-go made here muting at once; and the held reels
    * and the haul are kept for the frame's steps. `mutes` is the caller's kept list.
    */
   stepKeys(input: GrappleKeyInput, b: GrappleBody, mutes: string[], fire: () => void): void {
     this.bodyVel = b.vel;
     if (this.muteOwed) {
-      input.muteUntilUp(GRAPPLE_RELEASE_MUTES);
+      input.muteUntilUp(this.owedMutes);
       this.muteOwed = false;
     }
     if (this.out) this.refreshModes(b);
-    if (grappleMutes(mutes, this.out, this.out && this.modes.swinging)) input.mute(mutes);
+    if (grappleMutes(mutes, this.out, this.out && this.modes.swinging, this.holding)) input.mute(mutes);
     if (input.pressedAction('grappleFire')) {
-      if (this.attached) this.letGo('fire');
+      if (this.attached || this.holding) this.letGo('fire');
       else if (this.flying) {
         this.recall();
         this.counts.recalls++;
@@ -1024,12 +1168,14 @@ export class Grapple {
     const steady = !this.staggered;
     if (this.attached && this.modes.swinging && steady && input.pressedAction('grappleBoost')) this.boost(b);
     if (this.muteOwed) {
-      input.muteUntilUp(GRAPPLE_RELEASE_MUTES);
+      input.muteUntilUp(this.owedMutes);
       this.muteOwed = false;
     }
+    // The reels are an anchor's: on a loose prop their keys are the walk's and the crouch's again, and read as no reel.
     const k = this.keys;
-    k.reelIn = this.out && steady && input.held('reelIn');
-    k.reelOut = this.out && steady && input.held('reelOut');
+    const reels = this.out && steady && !this.holding;
+    k.reelIn = reels && input.held('reelIn');
+    k.reelOut = reels && input.held('reelOut');
     k.haul = this.out && steady && input.held('grappleHaul');
   }
 
@@ -1093,6 +1239,13 @@ export class Grapple {
     this.costNow = 0;
     if (this.state === 'flying') this.flyDart(b, dt);
     if (this.state !== 'attached') {
+      // A hooked prop's guard against a place written without a reset measures the move against the speed the body
+      // has now, before the move: a landing takes the fall's speed off before `afterMove`, and measured after it a hard
+      // landing read as a teleport and let the prop go (the anchor's guard keeps its speed here for the same reason).
+      if (this.state === 'holding') {
+        const v = b.vel;
+        this.speedBefore = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+      }
       if (this.timing) this.costNow += performance.now() - t0;
       return;
     }
@@ -1122,13 +1275,17 @@ export class Grapple {
     // The reel, or the haul, changes the length.
     const haulHeld = this.keys.haul;
     let reel = 0;
-    if (!haulHeld) {
-      if (this.keys.reelIn) reel = -T.reel;
-      else if (this.keys.reelOut) reel = T.reel;
+    if (!haulHeld && (this.keys.reelIn || this.keys.reelOut)) {
+      // The reel's speed as progress makes it (`grapple.reel`): the tune's own while nothing grants it.
+      const reelSpeed = this.stats.apply('grapple.reel', T.reel);
+      reel = this.keys.reelIn ? -reelSpeed : reelSpeed;
     }
     const minLen = rope.spent + T.minFree;
     if (reel < 0 && rope.length + reel * dt < minLen) reel = Math.min(0, (minLen - rope.length) / dt);
-    if (reel > 0 && rope.length + reel * dt > T.range) reel = Math.max(0, (T.range - rope.length) / dt);
+    if (reel > 0) {
+      const range = this.range;
+      if (rope.length + reel * dt > range) reel = Math.max(0, (range - rope.length) / dt);
+    }
     const lengthWas = rope.length;
     rope.length += reel * dt;
     if (rope.length < minLen) {
@@ -1177,9 +1334,13 @@ export class Grapple {
         tx /= tl;
         ty /= tl;
         tz /= tl;
+        // The push and its cap times the swing's momentum as progress makes it (Acrobatics' `grapple.swing`), which is
+        // exactly 1 while nothing grants it, and a number times 1 is that number to the bit.
+        const swing = this.stats.apply('grapple.swing', 1);
+        const swayMax = T.swayMax * swing;
         const along = vel.x * tx + vel.y * ty + vel.z * tz;
-        if (along < T.swayMax) {
-          const a = Math.min(T.swayAccel * dt, T.swayMax - along);
+        if (along < swayMax) {
+          const a = Math.min(T.swayAccel * swing * dt, swayMax - along);
           vel.x += tx * a;
           vel.y += ty * a;
           vel.z += tz * a;
@@ -1301,6 +1462,8 @@ export class Grapple {
     const vel = b.vel;
     const hand = this.hand0;
     const piv = this.piv;
+    // The haul's speed as progress makes it (`grapple.yank`): the tune's own while nothing grants it.
+    const haulSpeed = this.stats.apply('grapple.yank', T.haul);
     // The lip-over is done once its bend has come out and the feet stand over the lip: the haul goes on toward
     // what is now first. The bend comes out while the feet are still a rope point's height under the lip (the
     // rope pulls at the hand), so its coming out alone is not the end: the haul would drive the body into the wall.
@@ -1308,7 +1471,7 @@ export class Grapple {
     const free = rope.free();
     // The lip-over starts when the next step of the haul would reach the shortest: at 18 m/s a frame at 60 fps is
     // 0.3 m, and a step that ended inside `minFree` drives the body into the lip's wall before the lip-over sees it.
-    const lipAt = T.minFree + Math.max(T.lipTrigger, T.haul * dt);
+    const lipAt = T.minFree + Math.max(T.lipTrigger, haulSpeed * dt);
     if (!this.lipping && !this.lipGaveUp && rope.n > 0 && free <= lipAt && piv.y > hand.y && this.bendWalkable(rope.n)) {
       this.lipping = true;
       this.lipTime = 0;
@@ -1366,7 +1529,7 @@ export class Grapple {
     if (lift) gy += T.ropeY;
     const gl = len3(gx, gy, gz);
     if (gl > 1e-6) {
-      const s = Math.min(T.haul, gl / dt) / gl;
+      const s = Math.min(haulSpeed, gl / dt) / gl;
       vel.x = gx * s;
       vel.y = gy * s;
       vel.z = gz * s;
@@ -1375,7 +1538,7 @@ export class Grapple {
       // step falls short by is taken off the move (as the constraint's correction is), never off the velocity,
       // which keeps the haul's own speed for the arrival to take off on the frame it ends (§3.6).
       if (!lift) {
-        const step = Math.min(T.haul * dt, gl);
+        const step = Math.min(haulSpeed * dt, gl);
         const most = Math.max(0, dist - T.minFree);
         if (step > most) {
           const k = (step - most) / gl;
@@ -1590,7 +1753,7 @@ export class Grapple {
       dx = this.dart[0] - b.pos.x;
       dy = this.dart[1] - (b.pos.y + ropeY);
       dz = this.dart[2] - b.pos.z;
-    } else if (this.state === 'attached') {
+    } else if (this.state === 'attached' || this.state === 'holding') {
       this.pivot(this.piv);
       dx = this.piv.x - b.pos.x;
       dy = this.piv.y - (b.pos.y + ropeY);
@@ -1642,6 +1805,12 @@ export class Grapple {
     this.sincePull += dt;
     if (this.state === 'flying') {
       if (!this.returning) this.keepTrail(b);
+      if (this.timing) this.costNow += performance.now() - t0;
+      this.noteCost();
+      return;
+    }
+    if (this.state === 'holding') {
+      this.stepThing(b, dt);
       if (this.timing) this.costNow += performance.now() - t0;
       this.noteCost();
       return;
@@ -1703,6 +1872,230 @@ export class Grapple {
     }
     if (this.timing) this.costNow += performance.now() - t0;
     this.noteCost();
+  }
+
+  // --- a hooked prop (wave 3, §3.14) -----------------------------------------------------------------------
+
+  /**
+   * Hook a loose prop the dart struck at (x, y, z) on a face whose normal is n: the rope's end is kept in the prop's own
+   * frame, at the very point struck (the prop is no wall the rope's casts meet, so it needs no offset off its face),
+   * read off its mesh from now on; its recall count is noted; and the rope lands at the length it reaches, never more
+   * than the range. It never bends, and nothing of the body is touched from here until it lets go.
+   */
+  attachThing(b: GrappleBody, prop: HookableProp, handle: number, x: number, y: number, z: number, nx: number, ny: number, nz: number, collider: Collider | null, p: Physics): void {
+    const T = GRAPPLE_TUNE;
+    const rope = this.rope;
+    rope.use(p.world, this.dartFilter, this.dartExclude);
+    rope.attach(x, y, z, nx, ny, nz, collider, this.launch[0], this.launch[1], this.launch[2]);
+    const m = prop.mesh;
+    const rel = this.thingTo;
+    rel.x = x - m.position.x;
+    rel.y = y - m.position.y;
+    rel.z = z - m.position.z;
+    turnByQuat(m.quaternion, rel, true, this.thingLocal);
+    const n = this.thingDir;
+    n.x = nx;
+    n.y = ny;
+    n.z = nz;
+    turnByQuat(m.quaternion, n, true, this.thingNormal);
+    this.thing = prop;
+    this.thingHandle = handle;
+    this.thingRecalls = prop.recalls;
+    this.state = 'holding';
+    this.released = false;
+    this.anchorPhysics = p;
+    this.anchorWalkable = false;
+    this.yanking = false;
+    this.yankTime = 0;
+    this.thingBlocked = 0;
+    this.reelRun = 0;
+    this.bodyVel = b.vel;
+    this.speedBefore = len3(b.vel.x, b.vel.y, b.vel.z);
+    this.con.reset();
+    this.latch = false;
+    this.hauling = false;
+    this.haulEnded = false;
+    this.lipping = false;
+    this.lipGaveUp = false;
+    this.wallTouch = false;
+    this.sincePull = Infinity;
+    this.counts.bites++;
+    this.dart[0] = x;
+    this.dart[1] = y;
+    this.dart[2] = z;
+    this.placeThingEnd();
+    const h = this.thingHand;
+    h.x = b.pos.x;
+    h.y = b.pos.y + T.ropeY;
+    h.z = b.pos.z;
+    const pts = rope.pts;
+    const reach = len3(pts[0] - h.x, pts[1] - h.y, pts[2] - h.z);
+    this.thingDist = len3(m.position.x - h.x, m.position.y - h.y, m.position.z - h.z);
+    rope.length = Math.min(this.range, Math.max(T.minFree, reach));
+    // The rope's words stay the body's own: a hooked prop is never hanging, sliding, afloat or swinging.
+    ropeModes(false, false, false, false, false, false, 0, T, this.modes);
+  }
+
+  /**
+   * The rope's end carried onto the prop as it lies now: its place in the prop's own frame turned by the mesh's turn and
+   * set on the mesh's place, and the face's normal turned with it, which the dart is drawn along. The pool writes the
+   * mesh from the body for every awake prop and the grip's `holdAt` as it carries one, so nothing here asks the body.
+   * The player's `drawGrapple` asks it again as the frame is drawn, so the rope ends on the prop as it is drawn.
+   */
+  placeThingEnd(): void {
+    const thing = this.thing;
+    if (!thing) return;
+    const m = thing.mesh;
+    const a = turnByQuat(m.quaternion, this.thingLocal, false, this.thingAt);
+    const p = this.rope.pts;
+    p[0] = m.position.x + a.x;
+    p[1] = m.position.y + a.y;
+    p[2] = m.position.z + a.z;
+    const n = turnByQuat(m.quaternion, this.thingNormal, false, this.thingAt);
+    const an = this.rope.anchorNormal;
+    an[0] = n.x;
+    an[1] = n.y;
+    an[2] = n.z;
+  }
+
+  /**
+   * One frame of a hooked prop, after the move: let go if the prop has gone with its pool or its world, was put back on
+   * its stand, is past the stand's margin, has had its span blocked too long, or if the rope point moved further than a
+   * frame allows; then the rope's end carried onto it, and F's yank toward the rope point or, with no F, the tether
+   * dragging it once walked out past the rope's length. A body that never fired never comes here. Its lengths are worked
+   * out in line rather than handed to `len3`: this frame holds enough calls that the compiler's budget for building them
+   * in may not reach every one, and a number handed to a call that is not built in is a fresh number.
+   */
+  private stepThing(b: GrappleBody, dt: number): void {
+    const T = GRAPPLE_TUNE;
+    const thing = this.thing;
+    const p = this.anchorPhysics;
+    if (!thing || !p || p !== b.physics || p.broken) {
+      this.letGo('world');
+      return;
+    }
+    // The pool freed with its world, or the collider now somebody else's: the prop is no longer there to hold.
+    if (this.propAt?.(this.thingHandle) !== thing) {
+      this.letGo('loose');
+      this.say?.('The line came loose.');
+      return;
+    }
+    // Put back on its stand by the pool (thrown off the world, or dragged past `PROPS.lost`): the same body, elsewhere.
+    if (thing.recalls !== this.thingRecalls) {
+      this.letGo('recalled');
+      this.say?.('The line came loose.');
+      return;
+    }
+    const hx = b.pos.x;
+    const hy = b.pos.y + T.ropeY;
+    const hz = b.pos.z;
+    // A place written without a reset (a later path that moves the player itself): let go, rather than drag the prop
+    // after the body at the grip's speed from wherever it was left.
+    const h0 = this.thingHand;
+    const mx = hx - h0.x;
+    const my = hy - h0.y;
+    const mz = hz - h0.z;
+    const moved = Math.sqrt(mx * mx + my * my + mz * mz);
+    h0.x = hx;
+    h0.y = hy;
+    h0.z = hz;
+    if (teleported(moved, this.speedBefore, dt, 0, T)) {
+      this.letGo('moved');
+      return;
+    }
+    const c = thing.mesh.position;
+    // Short of where the pool would put it back: dragged into a recall it would be dragged again, and recalled again.
+    const s = thing.stand;
+    const sx = c.x - s.x;
+    const sy = c.y - s.y;
+    const sz = c.z - s.z;
+    if (Math.sqrt(sx * sx + sy * sy + sz * sz) >= thing.lost - T.tetherStandMargin) {
+      this.letGo('loose');
+      this.say?.('The line came loose.');
+      return;
+    }
+    this.placeThingEnd();
+    const rope = this.rope;
+    const pts = rope.pts;
+    rope.hand[0] = hx;
+    rope.hand[1] = hy;
+    rope.hand[2] = hz;
+    // The straight span, blocked by something still for longer than a moment, lets go: the rope to a prop never bends.
+    if (rope.anchorSpanClear()) this.thingBlocked = 0;
+    else {
+      this.thingBlocked += dt;
+      if (this.thingBlocked > T.tetherBlocked) {
+        this.letGo('blocked');
+        this.say?.('The line fouled and let go.');
+        return;
+      }
+    }
+    const cx = c.x - hx;
+    const cy = c.y - hy;
+    const cz = c.z - hz;
+    this.thingDist = Math.sqrt(cx * cx + cy * cy + cz * cz);
+    const ax = pts[0] - hx;
+    const ay = pts[1] - hy;
+    const az = pts[2] - hz;
+    const reach = Math.sqrt(ax * ax + ay * ay + az * az);
+    const at = this.thingTo;
+    if (this.keys.haul) {
+      // The yank: toward a point `yankAhead` out along the view from the rope point, weightless, at the grip's own
+      // speed, until the prop is within `arriveReach` of the rope point or `yankMost` has run.
+      if (!this.yanking) {
+        this.yanking = true;
+        this.yankTime = 0;
+      }
+      this.yankTime += dt;
+      const d = this.thingDir;
+      const v = this.view;
+      let dx = v.dirX;
+      let dy = v.dirY;
+      let dz = v.dirZ;
+      let dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (!(dl > 1e-6)) {
+        dx = cx;
+        dy = cy;
+        dz = cz;
+        dl = this.thingDist || 1;
+      }
+      d.x = dx / dl;
+      d.y = dy / dl;
+      d.z = dz / dl;
+      if (this.thingDist <= T.arriveReach || this.yankTime >= T.yankMost) {
+        // Come in: stopped where its body stands (never held at its mesh's place, which in the game's frame is a physics
+        // step behind the body, so such a hold throws it back out along its last step at the grip's speed), its weight
+        // given back and tossed along the view at `yankToss` (nought: it drops where it is) with no lift, and the rope
+        // lets go.
+        thing.stop();
+        thing.release(d, T.yankToss, 0);
+        this.letGo('yanked');
+        return;
+      }
+      at.x = hx + d.x * T.yankAhead;
+      at.y = hy + d.y * T.yankAhead;
+      at.z = hz + d.z * T.yankAhead;
+      thing.holdAt(at, dt, true);
+      // The length follows the prop in, never above what it was: F let go leaves it tethered where it got to.
+      if (reach < rope.length) rope.length = Math.max(T.minFree, reach);
+      return;
+    }
+    if (this.yanking) {
+      // F let go mid-yank: the weight back at once, not a grip's lapse later, and the rope a tether again.
+      this.yanking = false;
+      this.yankTime = 0;
+      thing.giveWeightBack();
+    }
+    // The tether: walked out past the rope's length, the prop is drawn back onto it along the rope, keeping its weight,
+    // so the ground and its friction keep it down as it is dragged.
+    const l = rope.length;
+    if (reach > l && reach > 1e-6) {
+      const k = (reach - l) / reach;
+      at.x = c.x - ax * k;
+      at.y = c.y - ay * k;
+      at.z = c.z - az * k;
+      thing.holdAt(at, dt, false);
+    }
   }
 
   /** The hand's place kept while the dart flies, each time it has moved a chord; a full trail keeps every other point. */
@@ -1780,14 +2173,22 @@ export class Grapple {
         const cy = r.origin.y + r.dir.y * t;
         const cz = r.origin.z + r.dir.z * t;
         const kind = this.classify(hit.collider, p);
-        if (kindHolds(kind)) this.bite(b, cx, cy, cz, hit.normal.x, hit.normal.y, hit.normal.z, hit.collider, p);
-        else {
-          this.dart[0] = cx;
-          this.dart[1] = cy;
-          this.dart[2] = cz;
-          this.counts.misses++;
-          this.recall();
+        if (kindHolds(kind)) {
+          this.bite(b, cx, cy, cz, hit.normal.x, hit.normal.y, hit.normal.z, hit.collider, p);
+          return;
         }
+        // A loose prop is hooked when the mass rule says the rope moves it (§3.14); one too heavy is refused in words.
+        const prop = kind === 'prop' ? this.propAt?.(hit.collider.handle) : undefined;
+        if (prop && this.whoMovesFor(prop.mass) === 'thing') {
+          this.attachThing(b, prop, hit.collider.handle, cx, cy, cz, hit.normal.x, hit.normal.y, hit.normal.z, hit.collider, p);
+          return;
+        }
+        if (prop) this.say?.('Too heavy to pull.');
+        this.dart[0] = cx;
+        this.dart[1] = cy;
+        this.dart[2] = cz;
+        this.counts.misses++;
+        this.recall();
         return;
       }
     }
@@ -1796,7 +2197,8 @@ export class Grapple {
     this.dart[2] += sz;
     const flown = len3(this.dart[0] - this.launch[0], this.dart[1] - this.launch[1], this.dart[2] - this.launch[2]);
     const reach = len3(this.dart[0] - hx, this.dart[1] - hy, this.dart[2] - hz);
-    if (flown > T.range + T.missPad || reach > T.range) {
+    const range = this.range;
+    if (flown > range + T.missPad || reach > range) {
       this.counts.misses++;
       this.recall();
     }
@@ -1821,7 +2223,7 @@ export class Grapple {
     h1.z = hz;
     rope.trackPath(this.trail, this.trailCount, h1);
     this.pivot(this.piv);
-    rope.length = Math.min(T.range, rope.spent + len3(hx - this.piv.x, hy - this.piv.y, hz - this.piv.z));
+    rope.length = Math.min(this.range, rope.spent + len3(hx - this.piv.x, hy - this.piv.y, hz - this.piv.z));
     this.state = 'attached';
     this.released = false;
     this.reelRun = 0;
@@ -1854,7 +2256,7 @@ export class Grapple {
     const body = c.parent();
     if (!body || body.isFixed()) return isTerrainCollider(c) ? 'terrain' : 'still';
     if (p.isWall(h)) return 'door';
-    if (this.isProp?.(h)) return 'prop';
+    if (this.propAt?.(h)) return 'prop';
     return 'moving';
   }
 
@@ -1875,7 +2277,9 @@ export class Grapple {
     const v = this.view;
     const hand = v.hand;
     mk.flash = Math.max(0, mk.flash - dt);
-    mk.next = this.attached;
+    mk.next = this.attached || this.holding;
+    // The reach as progress makes it (`grapple.range`): the tune's own while nothing grants it.
+    const range = this.range;
     this.passPhysics = physics;
     this.castFilter = v.filter;
     this.castExclude = v.exclude;
@@ -1888,7 +2292,7 @@ export class Grapple {
     r.dir.y = v.dirY;
     r.dir.z = v.dirZ;
     this.counts.casts++;
-    this.castLen = T.range + T.probePad;
+    this.castLen = range + T.probePad;
     const first = this.castPassing(physics, r);
     let found = false;
     if (first) {
@@ -1931,14 +2335,18 @@ export class Grapple {
       const by = this.t1.y;
       const bz = this.t1.z;
       let kind = this.classify(this.hit.collider, physics);
-      if (kindHolds(kind) && water?.(this.t1)) kind = 'water';
+      if (kindBites(kind) && water?.(this.t1)) kind = 'water';
       const ex = bx - hand.x;
       const ey = by - hand.y;
       const ez = bz - hand.z;
       const dist = Math.sqrt(ex * ex + ey * ey + ez * ez);
       mk.kind = kind;
       mk.distance = dist;
-      if (markShows(dist, kind, T)) {
+      // Its numbers go to the range test in a kept record, never as arguments (`MarkReach`).
+      const reach = this.markReach;
+      reach.dist = dist;
+      reach.range = range;
+      if (markShows(kind, reach, T)) {
         mk.shows = true;
         mk.held = false;
         mk.x = bx;
@@ -1972,7 +2380,7 @@ export class Grapple {
       sg[5] = mk.z;
       sg[6] = 0;
       const blocked = this.segment(physics) && this.hit.toi < dist - 0.05;
-      if (mk.holdLeft > 0 && !blocked && dist >= T.minRange && dist <= T.range) {
+      if (mk.holdLeft > 0 && !blocked && dist >= T.minRange && dist <= range) {
         mk.shows = true;
         mk.held = true;
         return mk;
@@ -2041,7 +2449,7 @@ export class Grapple {
 
   /** How many of the rope's spans are blocked right now, cast on request: it must be nought. */
   blocked(b: GrappleBody): number {
-    if (!this.attached || !this.worldOk(b)) return 0;
+    if ((!this.attached && !this.holding) || !this.worldOk(b)) return 0;
     return this.rope.blockedNow(b.pos.x, b.pos.y + GRAPPLE_TUNE.ropeY, b.pos.z);
   }
 

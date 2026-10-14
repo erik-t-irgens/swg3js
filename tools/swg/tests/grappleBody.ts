@@ -190,6 +190,12 @@ export class TestBody implements GrappleBody {
   private readonly walkPast = (c: RAPIER.Collider): boolean => !this.physics.isRagdoll(c.handle) && !this.physics.isPeer(c.handle) && !this.physics.isWalkThrough(c.handle);
   /** The mark a press fires at, as the game's `fireGrapple` reads the hook's own mark; set by the test. */
   fireAt: { x: number; y: number; z: number } | null = null;
+  /**
+   * What the game's world steps between the player's update and the physics' step (`world.update`, where the loose
+   * props' pool writes each awake prop's mesh from its body), called there in every frame: so a mesh read in the next
+   * frame's update is a physics step behind its body, as it is in the game. None by default.
+   */
+  beforeStep: ((dt: number) => void) | null = null;
   /** What refuses a shot, as `Player.grappleFireState` fills it. */
   prone = false;
   kneeling = false;
@@ -449,6 +455,7 @@ export class TestBody implements GrappleBody {
     if (g.attached && g.lastImpact > 0.5) this.impacts.push(g.lastImpact);
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
     input.endFrame();
+    this.beforeStep?.(dt);
     this.physics.step(dt);
   }
 

@@ -24,8 +24,8 @@
 //   - A prop is a `Living` so that the Force's grip, its push and a blast's shove reach it through
 //     the hooks those already have, but it is deliberately NOT in `World.targets()`: nothing in the
 //     game should ever pick a fight with a crate, and `targets()` is what the brains, the turrets
-//     and the auto-aim read. It is found by handle (`loosePropAt`, which `World.hittableAt` asks)
-//     and by the two seams below, and by nothing else.
+//     and the auto-aim read. It is found by handle (`loosePropAt`, which `World.hittableAt` asks,
+//     and `hookablePropAt`, which the grapple's dart asks), by the two seams below, and by nothing else.
 //   - A prop takes no damage at all. There is no damage model for one in this wave; a blow is a
 //     shove and nothing more, so `dead` is false for as long as the world lasts.
 //
@@ -151,6 +151,11 @@ class LooseProp implements Living {
   still = 0;
   /** Seconds since the last `holdAt`, so a grip that simply stops asking gives the weight back. */
   sinceHold = Number.POSITIVE_INFINITY;
+  /**
+   * How many times it has been put back on its stand. `recall` teleports this very body there, so the prop still
+   * answers by its collider afterwards: the grapple notes this at the hook and lets go the frame it moves.
+   */
+  recalls = 0;
   /** How wide it is across, for `radiusToward` and for the sleep test. */
   private readonly reach: number;
 
@@ -165,6 +170,16 @@ class LooseProp implements Living {
 
   radiusToward(): number {
     return this.reach;
+  }
+
+  /** What it weighs, kilograms: its body's own, which the collider carries. Read once by the grapple's mass rule at a hook. */
+  get mass(): number {
+    return this.body.mass();
+  }
+
+  /** How far from its stand the pool lets it go before putting it back (`PROPS.lost`), read live. */
+  get lost(): number {
+    return PROPS.lost;
   }
 
   /** Not hurt: a blow is a shove and the number is thrown away. `push` is metres a second. */
@@ -184,7 +199,7 @@ class LooseProp implements Living {
    * rather than through the middle, so a crate shot in the corner turns as it goes instead of
    * sliding off flat; a push, a pull and a blast have no one point and go through the middle.
    */
-  knock(dir: THREE.Vector3, power: number, lift = PROPS.shoveLift, at?: THREE.Vector3): void {
+  knock(dir: THREE.Vector3Like, power: number, lift = PROPS.shoveLift, at?: THREE.Vector3): void {
     const m = this.body.mass();
     tmpImpulse.x = dir.x * power * m;
     tmpImpulse.y = (dir.y * power + lift) * m;
@@ -221,9 +236,13 @@ class LooseProp implements Living {
   /**
    * Held in the air ahead of a Jedi. Carried by velocity rather than written into place, so the
    * solver still keeps it out of the walls, and weightless while it is held, so the hold does not
-   * have to fight gravity every step.
+   * have to fight gravity every step. With `weightless` false it keeps its weight and is carried
+   * across rather than up -- its own vertical speed kept, so gravity and the ground decide its height
+   * -- unless the point stands above it by more than it does across: the grapple's tether drags a crate
+   * along the ground that way. Carried along the rope's line whole, a dragged crate rode up it toward
+   * the hand, 0.9 m up after a long walk with its weight and 1.5 m without (measured).
    */
-  holdAt(point: THREE.Vector3, dt: number): void {
+  holdAt(point: THREE.Vector3Like, dt: number, weightless = true): void {
     const step = Math.max(dt, 1 / 60);
     this.readPose();
     tmpTo.copy(point).sub(this.pos).divideScalar(step);
@@ -232,16 +251,31 @@ class LooseProp implements Living {
     tmpVel.x = tmpTo.x;
     tmpVel.y = tmpTo.y;
     tmpVel.z = tmpTo.z;
-    this.body.setGravityScale(0, true);
+    if (weightless) {
+      this.body.setGravityScale(0, true);
+      this.sinceHold = 0;
+    } else if (!(tmpTo.y > Math.sqrt(tmpTo.x * tmpTo.x + tmpTo.z * tmpTo.z))) tmpVel.y = this.body.linvel().y;
     this.body.setLinvel(tmpVel, true);
-    this.sinceHold = 0;
     this.still = 0;
   }
 
-  /** Let go, thrown along `dir` at `power` metres a second. */
-  release(dir: THREE.Vector3, power: number): void {
+  /**
+   * Its speed taken off where its body stands now, which is not where its mesh says: the pool writes the mesh in the
+   * world's update and the physics steps after it, so between frames the mesh is a step behind. A hold at the mesh's
+   * place is therefore a velocity back along the last step, and the grapple's yank, ending with such a hold, threw an
+   * arriving crate back out at the grip's full speed (measured: 14 m/s, 27 m out, at 60 and 30 fps). Its spin goes too,
+   * or a crate that scraped the ground on its way in tumbles on from where it dropped. Nothing is read.
+   */
+  stop(): void {
+    this.body.setLinvel(ZERO, true);
+    this.body.setAngvel(ZERO, true);
+    this.still = 0;
+  }
+
+  /** Let go, thrown along `dir` at `power` metres a second, with `lift` upward (a shove's own, unless told). */
+  release(dir: THREE.Vector3Like, power: number, lift = PROPS.shoveLift): void {
     this.giveWeightBack();
-    this.knock(dir, power);
+    this.knock(dir, power, lift);
   }
 
   giveWeightBack(): void {
@@ -264,8 +298,9 @@ class LooseProp implements Living {
     this.mesh.quaternion.set(r.x, r.y, r.z, r.w);
   }
 
-  /** Back on the stand it was given, still, awake and weighing what it did. */
+  /** Back on the stand it was given, still, awake and weighing what it did; counted, so a rope on it knows. */
   recall(): void {
+    this.recalls++;
     this.giveWeightBack();
     this.body.setTranslation({ x: this.stand.x, y: this.stand.y, z: this.stand.z }, true);
     this.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
@@ -511,6 +546,40 @@ export function stepLooseProps(dt: number, playerPos: THREE.Vector3): void {
 /** The prop a collider belongs to, for `World.hittableAt`: undefined for everything else. */
 export function loosePropAt(handle: number): Hittable | undefined {
   return current?.byCollider.get(handle);
+}
+
+/**
+ * A prop as the grapple's rope holds one (the design's §3.14): what it is, its mesh (which the pool writes from the
+ * body for every awake prop, so the rope's end is read off it and nothing new asks the body for its place), its stand
+ * and how far from it the pool lets it go, how many times it has been put back there, what it weighs, the grip's own
+ * `holdAt` and `release`, and `stop`. `loosePropAt` answers a `Hittable`, which has none of these in its type.
+ */
+export interface HookableProp {
+  readonly label: string;
+  readonly mesh: { readonly position: THREE.Vector3Like; readonly quaternion: { readonly x: number; readonly y: number; readonly z: number; readonly w: number } };
+  readonly stand: THREE.Vector3Like;
+  readonly lost: number;
+  readonly recalls: number;
+  readonly mass: number;
+  holdAt(point: THREE.Vector3Like, dt: number, weightless?: boolean): void;
+  /** Its speed taken off where its body stands now (its mesh is a physics step behind between frames). */
+  stop(): void;
+  release(dir: THREE.Vector3Like, power: number, lift?: number): void;
+  giveWeightBack(): void;
+}
+
+/** The prop a collider belongs to, as the grapple hooks it; undefined for everything else and once the pool is freed. */
+export function hookablePropAt(handle: number): HookableProp | undefined {
+  return current?.byCollider.get(handle);
+}
+
+/**
+ * The nearest prop within `range` of a point and inside `cone` of `dir`, with the collider the grapple's rope would
+ * bite: the console's `__debug.grapple({ fire: 'prop' })` aims at it. Null with none, or no pool.
+ */
+export function hookablePropAhead(from: THREE.Vector3, dir: THREE.Vector3, range: number, cone: number): { prop: HookableProp; handle: number } | null {
+  const p = current?.ahead(from, dir, range, cone);
+  return p ? { prop: p, handle: p.collider.handle } : null;
 }
 
 /**
