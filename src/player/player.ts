@@ -25,6 +25,7 @@ import { PlayerStats } from './playerStats.ts';
 import { newHarm, newHarmAsk, takeHarm, type HarmAsk, type HarmKind } from './harmRule.ts';
 import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFireState } from './grapple.ts';
 import { RopeRibbon, dartMesh } from './grappleDraw.ts';
+import { makeHullController } from './grappleFrames.ts';
 import { armAimFor } from './grappleMath.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 
@@ -362,6 +363,8 @@ export class Player {
   readonly grapple: Grapple;
   /** The rope's ribbon and the dart, on the scene's root (never under the figure, which the doll clones), hidden until the hook is out. */
   private readonly ropeRibbon: RopeRibbon;
+  /** The rope's points where they are drawn (a point on a hull at the hull's drawn pose), kept for the ribbon. */
+  private readonly ropeDrawn: Float64Array;
   private readonly dartView: THREE.Mesh;
   /** The capsule collider's height over the feet as the crouch last wrote it: what the grapple's collider sync puts it at. */
   colliderOffsetY = CAPSULE_RADIUS + STAND_HALF_HEIGHT;
@@ -369,6 +372,11 @@ export class Player {
   stepsAtReset = 0;
   /** The player as the grapple sees it: one view, its getters reading the live body whatever world it is in. */
   private readonly gview: GrappleBody;
+  /** The grapple's hull test's own controller (wave 3), made once in the world: no body, no collider. */
+  readonly hullController: RAPIER.KinematicCharacterController;
+  /** The vehicles the grapple's rope may meet (`World.vehicles`, written at the top of each update), and the terrain's height under the body as the frame read it. */
+  private grappleVehicles: readonly Vehicle[] = [];
+  private groundUnder = Number.NEGATIVE_INFINITY;
   /** What refuses a shot, filled in place each time it is asked. */
   private readonly fireState: GrappleFireState = newFireState();
   /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts); it starts at its stat's, which is 3. */
@@ -616,6 +624,7 @@ export class Player {
     this.body = made.body;
     this.collider = made.collider;
     this.controller = made.controller;
+    this.hullController = makeHullController(physics.world);
     // The grappling hook, its rope and its dart: built now on their one material, hidden and marked as actors,
     // so every warm-up compiles them for the world's pass and the rooms' and the first fire builds nothing.
     this.grapple = new Grapple(RAPIER, physics);
@@ -661,8 +670,19 @@ export class Player {
       },
       // A slam's harm goes through the player's own record of a loss, as a fall's does.
       takeDamage: (amount: number, force: boolean, kind: HarmKind) => self.takeDamage(amount, force, kind),
+      // Wave 3: the vehicles the rope may meet, the hull test's controller (the world's, never a room's), and the terrain's height under the body.
+      get vehicles() {
+        return self.grappleVehicles;
+      },
+      get hullController() {
+        return self.aboard ? null : self.hullController;
+      },
+      get ground() {
+        return self.groundUnder;
+      },
     };
     this.ropeRibbon = new RopeRibbon(this.grapple.rope.capacity, GRAPPLE_TUNE.sagSegments);
+    this.ropeDrawn = new Float64Array(3 * this.grapple.rope.capacity);
     scene.add(this.ropeRibbon.mesh);
     markActor(this.ropeRibbon.mesh);
     this.dartView = dartMesh();
@@ -740,10 +760,14 @@ export class Player {
       if (g.holding) g.placeThingEnd();
       ribbon.slack = g.slack(this.gview);
       ribbon.screenH = screenH;
-      ribbon.lay(g.rope.pts, g.rope.n + 1, h, camera);
+      // A point on a hull is laid where the hull is drawn (its group, a physics step behind its body), so the rope
+      // stays on the drawn hull; with none on a hull the rope's own points are the world's.
+      const pts = g.rope.hullPoints > 0 ? g.drawnPoints(this.ropeDrawn) : g.rope.pts;
+      ribbon.lay(pts, g.rope.n + 1, h, camera);
       // Bitten into the surface it struck, along the way it came.
-      dart.position.set(g.rope.pts[0], g.rope.pts[1], g.rope.pts[2]);
-      grappleDartDir.set(-g.rope.anchorNormal[0], -g.rope.anchorNormal[1], -g.rope.anchorNormal[2]);
+      dart.position.set(pts[0], pts[1], pts[2]);
+      if (g.rope.pf[0] === 0) grappleDartDir.set(-g.rope.anchorNormal[0], -g.rope.anchorNormal[1], -g.rope.anchorNormal[2]);
+      else g.anchorNormalDrawn(grappleDartDir).negate();
     }
     if (grappleDartDir.lengthSq() > 1e-12) dart.quaternion.setFromUnitVectors(AXIS_Z, grappleDartDir.normalize());
     dart.visible = true;
@@ -2257,6 +2281,8 @@ export class Player {
 
   update(dt: number, input: Input, cam: ThirdPersonCamera, world: World): void {
     this.world = world;
+    // What the grapple's rope may meet that moves: the vehicles this browser simulates.
+    this.grappleVehicles = world.vehicles;
     // Dead: the body is the physics' now, and nothing else moves.
     if (this.ragdoll) {
       this.ragdollStep();
@@ -2436,6 +2462,8 @@ export class Player {
       sw.dt = dt;
       // Reeling in toward a pivot rising past `swimLift`, the rope has the vertical (only while attached).
       sw.ropeLift = this.grapple.out && this.grapple.liftsSwimmer(this.gview);
+      // Towed by a rope on a hull, the swimmer skims: the tow's friction in place of the swim's level ease.
+      sw.towed = this.grapple.out && this.grapple.towsSwimmer(this.gview, sw);
       const swum = swimStep(sw, this.swimProbe, this.swimOut);
       speed = swum.speed;
       this.grounded = swum.grounded;
@@ -2553,8 +2581,9 @@ export class Player {
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
     // On the rope and in the flight after it, what each surface refused is taken off the velocity, measured against
-    // what was touched, and a wall struck hard enough is a slam (§3.11).
-    if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview);
+    // what was touched, and a wall struck hard enough is a slam (§3.11); a hull the rope rides and that moves is met in
+    // its own frame there, its move written over the controller's (§3.18).
+    if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview, mv);
     // What the controller allowed of what the swim asked for. A body that asks to rise and is
     // handed back less -- or handed back a fall -- is being held by something it is touching, and
     // no spring above can argue with that.
@@ -2575,8 +2604,9 @@ export class Player {
     }
 
     const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
+    this.groundUnder = ground;
     // The grapple's step after the move: the dart's trail, and attached, the carry round the rope, the wrapping,
-    // the anchor, the haul's arrival, the teleport guard and the slide latch.
+    // the anchor, the haul's arrival, the teleport guard, the towed floor and the slide latch.
     if (this.grapple.out) this.grapple.afterMove(this.gview, dt);
     // And the rest of its frame while anything of it is still easing: the stagger, the jolt, the camera's pull, the
     // lean and the arm. It moves no body, and for a player who never fires it never runs.

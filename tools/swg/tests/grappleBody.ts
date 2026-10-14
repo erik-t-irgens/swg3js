@@ -14,6 +14,8 @@ import { JkaMovement, type MoveCommand } from '../../../src/player/jkaMove.ts';
 import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFireState, type GrappleMark, type WaterTest } from '../../../src/player/grapple.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from '../../../src/player/swimStep.ts';
 import { newHarm, newHarmAsk, takeHarm, type HarmKind } from '../../../src/player/harmRule.ts';
+import { vehicleOfCollider, type Vehicle } from '../../../src/vehicles/vehicle.ts';
+import { makeHullController } from '../../../src/player/grappleFrames.ts';
 
 /** `DIVE_DEPTH` in player.ts: the head is under and looking down dives (the wiring test reads the two equal). */
 export const DIVE_DEPTH_FOR_TESTS = 1.9;
@@ -120,8 +122,10 @@ export function probeFrom(
   exclude: RAPIER.RigidBody | null,
   water: WaterTest | null,
   dt = 0,
+  vehicles: readonly Vehicle[] = [],
 ): GrappleMark {
   const v = g.view;
+  v.vehicles = vehicles;
   v.eyeX = eye.x;
   v.eyeY = eye.y;
   v.eyeZ = eye.z;
@@ -224,6 +228,11 @@ export class TestBody implements GrappleBody {
   readonly harms: { amount: number; kind: HarmKind }[] = [];
   private readonly harmAsk = newHarmAsk();
   private readonly harmAnswer = newHarm();
+  /** Wave 3: the vehicles the rope may meet (stepped by the test in `beforeStep`, as the game's loop steps them after the player), the hull test's own controller, and the terrain's height (`groundAt`) as the frame reads it. */
+  vehicles: Vehicle[] = [];
+  readonly hullController: RAPIER.KinematicCharacterController;
+  groundAt: ((x: number, z: number) => number) | null = null;
+  ground = Number.NEGATIVE_INFINITY;
 
   constructor(physics: Physics) {
     this.physics = physics;
@@ -238,7 +247,10 @@ export class TestBody implements GrappleBody {
     controller.setApplyImpulsesToDynamicBodies(false);
     controller.setCharacterMass(80);
     this.controller = controller;
+    // The hull test's controller, by the very maker the player calls.
+    this.hullController = makeHullController(world);
     this.grapple = new Grapple(RAPIER, physics);
+    this.grapple.vehicleOf = vehicleOfCollider;
     this.input = newInput();
     this.cmd = { forward: new THREE.Vector3(), right: new THREE.Vector3(), fmove: 0, smove: 0, walk: false, crouch: false, roll: false, jump: false, jumpPressed: false, attack: false, speedScale: 1 };
     this.cmd.probe = (dir, dist) => this.probeWall(dir, dist);
@@ -318,13 +330,13 @@ export class TestBody implements GrappleBody {
     }
     const h = this.hand();
     const d = new THREE.Vector3(at.x, at.y, at.z).sub(h).normalize();
-    probeFrom(g, this.physics, h, d, 0, h, this.filter, this.body, null);
+    probeFrom(g, this.physics, h, d, 0, h, this.filter, this.body, null, 0, this.vehicles);
     if (why || !g.mark.shows) {
       this.lastFireRefusal = why || `the mark is on ${g.mark.kind}`;
       return;
     }
     this.lastFireRefusal = '';
-    g.fire(g.mark.x, g.mark.y, g.mark.z, h, this.vel, this.physics, this.filter, this.body, d.x, d.y, d.z);
+    g.fire(g.mark.x, g.mark.y, g.mark.z, h, this.vel, this.physics, this.filter, this.body, d.x, d.y, d.z, g.markTarget());
   };
 
   /** Crouched or standing: the capsule's half height and its offset, written as `Player.setCrouchCollider` writes them. */
@@ -393,6 +405,7 @@ export class TestBody implements GrappleBody {
       sw.speed = speed;
       sw.dt = dt;
       sw.ropeLift = this.hooks && g.out && g.liftsSwimmer(this);
+      sw.towed = this.hooks && g.out && g.towsSwimmer(this, sw);
       const swum = swimStep(sw, this.swimProbe, this.swimOut);
       speed = swum.speed;
       this.grounded = swum.grounded;
@@ -442,7 +455,7 @@ export class TestBody implements GrappleBody {
     }
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, this.filter, this.walkPast);
     const mv = this.controller.computedMovement();
-    if (this.hooks && (g.attached || g.released)) g.clip(this);
+    if (this.hooks && (g.attached || g.released)) g.clip(this, mv);
     this.pos.x += mv.x;
     this.pos.y += mv.y;
     this.pos.z += mv.z;
@@ -450,6 +463,7 @@ export class TestBody implements GrappleBody {
     this.grounded = this.controller.computedGrounded();
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
+    this.ground = this.groundAt ? this.groundAt(this.pos.x, this.pos.z) : Number.NEGATIVE_INFINITY;
     if (this.hooks && g.out) g.afterMove(this, dt);
     if (this.hooks && g.lively) g.look(this, dt);
     if (g.attached && g.lastImpact > 0.5) this.impacts.push(g.lastImpact);

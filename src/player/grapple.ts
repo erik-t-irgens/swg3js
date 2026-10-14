@@ -23,6 +23,17 @@
 // haul, the sway and the tether's strength) are read through the stat table (`stats.apply`), which hands back the
 // tune's own number while nothing grants them.
 //
+// Wave 3b gave it the vehicles this browser simulates (§3.18): the rope no longer passes through a hull. It bends round
+// one as round a wall, the bend riding the hull's own frame as it moves (`grappleFrames.ts` keeps each hull near the
+// rope as a frame, its pose led to the frame's time); the dart bites one, moving or not, aimed true in its frame; and the
+// player stays hooked while it moves, dragged behind a speeder, swung under a ship, reeled or hauled up to it. The rope
+// pulls on the hull by the reduced mass of the two, told to the hull's own hit tests (`Vehicle.pulled`), never on one
+// whose drive writes its velocity, and a parked hull that nothing drives holds against it as though braked (a budget
+// carried between physics steps). A rope on anything that moves slips rather than snapping the player about, a tow
+// slides on rules of its own (and skims over water), a towed body never stands below the terrain, and a hull the rope
+// rides and that moves is met by a test of the rope's own in that hull's frame, not by the character controller, which
+// meets it a step stale.
+//
 // A player who never fires plays exactly as before: every line the player's update adds for this is behind
 // `out`, and everything that touches the body behind `attached`. Every number here is in `GRAPPLE_TUNE` and
 // moves live through `__debug.grapple({ tune })`.
@@ -30,16 +41,29 @@ import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import type { Physics } from '../core/physics.ts';
 import type { StatId } from '../progress/stats.ts';
 import type { HookableProp } from '../world/looseProps.ts';
+import type { Vehicle } from '../vehicles/vehicle.ts';
 import { JKA, UNIT } from './jkaMove.ts';
 import { GrappleRope, RopeConstraint, isTerrainCollider } from './grappleRope.ts';
-import { SWIM_DEPTH } from './swimStep.ts';
+import { HullFrames, MAX_HULL_CONTACTS, newHullHit, type HullFrame } from './grappleFrames.ts';
+import { SWIM_DEPTH, type SwimIn } from './swimStep.ts';
 import type { HarmKind } from './harmRule.ts';
 import {
   GRAPPLE_RELEASE_MUTES,
   WALKABLE,
   aimTrue,
+  brakeBudgetIn,
+  parkedLevelIn,
+  reducedShareIn,
+  slipCatchIn,
+  slipLeftIn,
+  slipReelExcessIn,
+  slipsTurnIn,
+  towingIn,
+  turnBy,
   camScaleFor,
   clipInto,
+  clipIntoRec,
+  type ClipAnswer,
   dazeAt,
   grappleMutes,
   gravityAddBack,
@@ -113,6 +137,11 @@ export const GRAPPLE_TUNE = {
   /** Bending at all; off, a straight rope through everything, to compare. */
   wrap: true,
   rebindReach: 0.2,
+  /** [owner] The rope and the dart see vehicles' hulls (wave 3); off, they pass through every hull as before the amendment, to compare. */
+  vehicles: true,
+  /** The tighten pass on bends that ride a hull: one bending the rope by less than `straightDeg` (degrees) whose straightened span is clear comes out. */
+  tighten: true,
+  straightDeg: 2,
   // --- the body on the rope ----------------------------------------------------------------------------
   /** Where on the body the rope pulls: this far over the feet, a fixed point and never a bone. */
   ropeY: 1.3,
@@ -163,6 +192,34 @@ export const GRAPPLE_TUNE = {
   swimLiftBand: 0,
   /** The drag on a body hanging in water shallower than the swim, per second at the swim's depth. */
   wadeDrag: 1,
+  // --- vehicles (wave 3) -------------------------------------------------------------------------------
+  /** A catch on a rope touching a hull is taken whole up to this relative speed (m/s), the rest at `slipDecel` (m/s²), the rope paying out meanwhile. */
+  slipKeep: 12,
+  slipDecel: 60,
+  /** The most centripetal pull (m/s²) a rope touching a hull holds before its turn slips and the rope pays out. */
+  slipTurn: 80,
+  /** The fastest a hull may shorten the free span by dragging a bend or the anchor away (m/s); past it the rope pays out. */
+  slipReel: 15,
+  /** The most a slipping rope corrects the hand's place in a frame (m); the rest pays out. */
+  slipCorr: 0.25,
+  /** A rope on a hull that pulled within this long (s) counts as taut for the slide: the tow. */
+  towHold: 0.3,
+  /** The ground's (or the water's) drag on a towed body (m/s², against its level speed), in place of Jedi Academy's friction. */
+  towFriction: 6,
+  /** A tow's swing across its rope, relative to its pivot, damped at this rate (1/s): a skier holding a line. */
+  towDamp: 2,
+  /** Of a hull's weight, the level pull a hull at rest at the rope's first pull, and that nothing drives, resists (a budget carried between physics steps); 0 turns the brake off. */
+  parkHold: 0.6,
+  /** Under this level speed (m/s) at the rope's first pull, a hull is at rest and braked. */
+  parkRest: 0.5,
+  /** A roped hull whose lag over the frame passes this (m) leaves the character controller for the hull test, and comes back under half of it; also what makes a hull still for the haul. */
+  hullLag: 0.02,
+  /** The most the hull test moves the body out of a hull it starts inside, in a frame (m). */
+  hullPush: 0.25,
+  /** Off: a roped moving hull stays with the character controller and the capsule's solver pairing, as the amendment first had it, to compare. */
+  hullTest: true,
+  /** Off: a hull's poses are where the last physics step left them, never led to the frame's time (the prototype's `lead: 'none'`), to compare. */
+  hullLead: true,
   // --- the dart and the mark ---------------------------------------------------------------------------
   /** The dart's own speed (m/s). */
   speed: 150,
@@ -352,6 +409,19 @@ export function tuneGrapple(o: Partial<Record<keyof GrappleTune, unknown>>): Gra
   G.yankToss = Math.max(0, G.yankToss);
   G.tetherBlocked = Math.max(0, G.tetherBlocked);
   G.tetherStandMargin = Math.max(0, G.tetherStandMargin);
+  G.straightDeg = Math.max(0, Math.min(45, G.straightDeg));
+  G.slipKeep = Math.max(0, G.slipKeep);
+  G.slipDecel = Math.max(0, G.slipDecel);
+  G.slipTurn = Math.max(1, G.slipTurn);
+  G.slipReel = Math.max(0, G.slipReel);
+  G.slipCorr = Math.max(0.001, G.slipCorr);
+  G.towHold = Math.max(0, G.towHold);
+  G.towFriction = Math.max(0, G.towFriction);
+  G.towDamp = Math.max(0, G.towDamp);
+  G.parkHold = Math.max(0, G.parkHold);
+  G.parkRest = Math.max(0, G.parkRest);
+  G.hullLag = Math.max(1e-4, G.hullLag);
+  G.hullPush = Math.max(0, G.hullPush);
   lookHook?.();
   return G;
 }
@@ -425,7 +495,11 @@ export type LetGoReason =
   // A hooked prop (wave 3): the yank brought it in; the pool put it back on its stand; its span stayed blocked.
   | 'yanked'
   | 'recalled'
-  | 'blocked';
+  | 'blocked'
+  // A vehicle (wave 3): a hull ran the rope out past its range; the hull the anchor is on was refitted; its wing started to swing.
+  | 'ranOut'
+  | 'refit'
+  | 'wing';
 
 /**
  * The ways out that put the body somewhere new, give it to something else or take it out of the world (§3.10): they end
@@ -485,6 +559,12 @@ export interface GrappleBody {
   readonly hp: number;
   /** A loss of health of a kind, as `Player.takeDamage` takes one; false when it was refused (god mode). */
   takeDamage(amount: number, force: boolean, kind: HarmKind): boolean;
+  /** The vehicles this browser simulates (`World.vehicles`): what the rope and the dart may meet that moves (wave 3). */
+  readonly vehicles: readonly Vehicle[];
+  /** The hull test's own character controller (wave 3): the player's offset and slopes, no autostep, no snap. */
+  readonly hullController: RAPIER_NS.KinematicCharacterController | null;
+  /** The terrain's own height under the body, as the frame already reads it for its floor: a towed body's floor outdoors (wave 3). */
+  readonly ground: number;
 }
 
 /** The held keys the hook reads, written by the key block (or the harness) and read by the frame's steps. */
@@ -553,6 +633,18 @@ export interface GrappleMark {
   holdLeft: number;
   /** Seconds the refused press's flash has left. */
   flash: number;
+  /**
+   * The vehicle under the mark (wave 3), or null: the point is then kept in its hull's own frame (`lx`, `ly`, `lz`), so
+   * the next frame's dart aims at it wherever the hull has gone and the diamond is drawn on the drawn hull, and the
+   * hull's point velocity there (`tvx`, `tvy`, `tvz`) is what the dart is aimed true against (the intercept).
+   */
+  vehicle: Vehicle | null;
+  lx: number;
+  ly: number;
+  lz: number;
+  tvx: number;
+  tvy: number;
+  tvz: number;
 }
 
 /**
@@ -577,7 +669,12 @@ export interface MarkView {
   hand: { x: number; y: number; z: number };
   filter: number;
   exclude: RAPIER_NS.RigidBody | null;
+  /** The vehicles this browser simulates, each cast in its own frame (wave 3); empty for none. */
+  vehicles: readonly Vehicle[];
 }
+
+/** No vehicles: the mark's view before the game hands it the world's. */
+const NO_VEHICLES: readonly Vehicle[] = Object.freeze([]);
 
 /** How many frames of the rope's own cost are kept for the console's median and p99. */
 const COST_FRAMES = 600;
@@ -590,9 +687,9 @@ export class Grapple {
   readonly con = new RopeConstraint();
   readonly modes: RopeModes = newRopeModes();
   readonly keys: GrappleKeys = { reelIn: false, reelOut: false, haul: false, swayX: 0, swayZ: 0 };
-  readonly mark: GrappleMark = { shows: false, held: false, next: false, kind: 'none', distance: 0, x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, collider: null, holdLeft: 0, flash: 0 };
+  readonly mark: GrappleMark = { shows: false, held: false, next: false, kind: 'none', distance: 0, x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, collider: null, holdLeft: 0, flash: 0, vehicle: null, lx: 0, ly: 0, lz: 0, tvx: 0, tvy: 0, tvz: 0 };
   /** What the next `probeMark` reads, written by the caller (numbers in fields, never handed to the call). */
-  readonly view: MarkView = { eyeX: 0.5, eyeY: 0.5, eyeZ: 0.5, dirX: 0.5, dirY: 0.5, dirZ: 0.5, orbit: 0.5, hand: { x: 0, y: 0, z: 0 }, filter: 0, exclude: null };
+  readonly view: MarkView = { eyeX: 0.5, eyeY: 0.5, eyeZ: 0.5, dirX: 0.5, dirY: 0.5, dirZ: 0.5, orbit: 0.5, hand: { x: 0, y: 0, z: 0 }, filter: 0, exclude: null, vehicles: NO_VEHICLES };
   /** The slide latch (§3.3): set while hanging, cleared on the ground by slack or slowness and by every let-go. */
   latch = false;
   /** The position correction the constraint asked for this frame, added to the move. */
@@ -619,6 +716,55 @@ export class Grapple {
   propAt: ((handle: number) => HookableProp | undefined) | null = null;
   /** What the hook reads its range, reel, haul, sway and strength through: the player's stats (the game hangs them here). */
   stats: GrappleStats = NO_STATS;
+  /**
+   * The vehicle a collider belongs to (the game hangs `vehicleOfCollider` here, so this file takes nothing of the vehicles
+   * but their type, and node loads it with none); null with none hung, and every hull is then a moving thing it refuses.
+   */
+  vehicleOf: ((handle: number) => Vehicle | null) | null = null;
+
+  // Vehicles on the rope (wave 3, §3.18).
+  /** The hulls the rope rides and is cast against this frame: the rope's own `frames`. */
+  readonly hulls: HullFrames;
+  /** The rope touches a hull: some point of it rides one (the slip, the pull and the tow are its alone). */
+  onHull = false;
+  /** The pivot where it stands at the frame's start and its velocity over the frame (nought on anything still). */
+  private readonly piv0 = { x: 0, y: 0, z: 0 };
+  readonly pivV = { x: 0, y: 0, z: 0 };
+  /** What is left of the catch the rope takes whole (m/s), refilled while it does not pull. */
+  private catchLeft = 12;
+  /** The turn slipped this frame: the carry is skipped and the rope pays out to where the hand went. */
+  private slippingTurn = false;
+  /** The tow (§3.18): the rope on a hull pulled within `towHold`, so it counts as taut for the slide and the tow's friction applies. */
+  towed = false;
+  /** The slip's and the pull's tallies, this second as it runs and the last whole second, for the console. */
+  readonly slipNow = { paid: 0, catches: 0, turns: 0, reels: 0, impulse: 0, hits: 0, pushed: 0, contacts: 0, calls: 0, contactTests: 0, reads: 0 };
+  readonly slipLast = { paid: 0, catches: 0, turns: 0, reels: 0, impulse: 0, hits: 0, pushed: 0, contacts: 0, calls: 0, contactTests: 0, reads: 0 };
+  /** All the rope ever paid out to a hull (m), since it was fastened. */
+  paidOut = 0;
+  private secondLeft = 1;
+  /** The box the free span and the dart may sweep this frame (min, then max, three numbers each): what makes a hull near. */
+  private readonly nearBox = new Float64Array(2 * 3);
+  /** A dart's hit on a hull, the mark's on one, and a hull pull's numbers handed over in kept records. */
+  private readonly hullHit = newHullHit();
+  private readonly markHit = newHullHit();
+  private readonly pullJ = { x: 0, y: 0, z: 0 };
+  private readonly pullAt = { x: 0, y: 0, z: 0 };
+  private readonly parked = { x: 0, z: 0, budget: 0, held: 0 };
+  /**
+   * Numbers handed to the hull's rules and back (`grappleMath`'s `…In` forms), and the length `payOut` pays: kept, since a
+   * number handed to a call the compiler did not build in, or handed back by one, is a fresh number.
+   */
+  private readonly nums = new Float64Array(5);
+  private readonly segA = new Float64Array(3);
+  private readonly segB = new Float64Array(3);
+  private readonly segO = new Float64Array(3);
+  private readonly segD = new Float64Array(3);
+  /** The capsule's middle at the frame's start, for the hull test. */
+  private readonly capStart = new Float64Array(3);
+  /** The rope pulled a hull this frame: its first pull latched its brake. */
+  private pulledHull = false;
+  /** The rope's tension this frame (N·s), handed to `pullHulls` in a field. */
+  private pullJ0 = 0;
 
   // A hooked prop (wave 3, §3.14).
   /** The prop the rope holds while `holding`, its collider's handle, and its recall count at the hook. */
@@ -751,6 +897,12 @@ export class Grapple {
   private readonly markRay: RAPIER_NS.Ray;
   private readonly t1 = { x: 0, y: 0, z: 0 };
   private readonly t2 = { x: 0, y: 0, z: 0 };
+  /** The free span's direction from the pivot to the hand, its length and the step, handed to `sway` (rx, ry, rz, dist, dt). */
+  private readonly swayIn = new Float64Array(5);
+  /** The sway's direction `sway` worked out this frame, nought when there is none: what the wall friction spares. */
+  private readonly swayDir = { x: 0, y: 0, z: 0 };
+  /** A still pivot's velocity, for the sway measured against it. */
+  private readonly stillV = { x: 0, y: 0, z: 0 };
   private readonly sv = { x: 0, y: 0, z: 0 };
   private readonly n1 = { x: 0, y: 0, z: 0 };
   private readonly aimOut = { x: 0, y: 0, z: 0 };
@@ -763,12 +915,18 @@ export class Grapple {
   private castFilter = 0;
   private castExclude: RAPIER_NS.RigidBody | null = null;
   private passPhysics: Physics | null = null;
-  /** What the dart's ray and the mark's pass over: a corpse, a follower, another player. Kept, not made per call. */
+  /**
+   * What the dart's ray and the mark's pass over in the world's cast: a corpse, a follower, another player, and from wave 3
+   * any vehicle's hull (each is cast in its own frame instead, where the world's cast would meet it a physics step stale).
+   * A hull the rope marked walk-through is a hull, not a follower. Kept, not made per call.
+   */
   private readonly dartPass = (c: Collider): boolean => {
     const p = this.passPhysics;
     if (!p) return true;
     const h = c.handle;
-    return !p.isRagdoll(h) && !p.isWalkThrough(h) && !p.isPeer(h);
+    if (p.isRagdoll(h) || p.isPeer(h)) return false;
+    if (this.seenInFrame(h)) return false;
+    return !p.isWalkThrough(h) || !!this.vehicleOf?.(h);
   };
 
   /** The rope's own work, microseconds a frame, the last `COST_FRAMES` of them. */
@@ -787,6 +945,8 @@ export class Grapple {
   constructor(Rapier: R, physics: Physics) {
     this.R = Rapier;
     this.rope = new GrappleRope(Rapier, physics.world, 0, null, GRAPPLE_TUNE);
+    this.hulls = new HullFrames(Rapier, GRAPPLE_TUNE);
+    this.rope.frames = this.hulls.slots;
     this.trail = new Float64Array(3 * Math.max(4, Math.round(GRAPPLE_TUNE.dartTrail)));
     this.kept = new Rapier.CharacterCollision();
     this.ray = new Rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
@@ -888,7 +1048,8 @@ export class Grapple {
   /** The words of the rope from the body as it stands: once a frame before the movement, and by the key block. */
   refreshModes(b: GrappleBody): RopeModes {
     this.bodyVel = b.vel;
-    const held = this.attached && !this.con.taut && this.slack(b) <= GRAPPLE_TUNE.latchSlack;
+    // A tow's rope is pulled and slack by turns from frame to frame: while it pulled within `towHold` it is held for the slide.
+    const held = this.attached && (this.towed || (!this.con.taut && this.slack(b) <= GRAPPLE_TUNE.latchSlack));
     ropeModes(this.attached, b.grounded, b.swimming, this.con.taut, held, this.latch, len2(b.vel.x, b.vel.z), GRAPPLE_TUNE, this.modes);
     this.latch = this.modes.latch;
     return this.modes;
@@ -965,12 +1126,16 @@ export class Grapple {
     mk.flash = 0;
     mk.holdLeft = 0;
     mk.collider = null;
+    if (mk.vehicle) this.markOffHull();
+    this.forgetHullHits();
   }
 
   /**
    * Fire the dart at a point the mark found: aimed so that, carrying the shooter's velocity, it flies the
    * straight segment from the hand to the point (or along the view, when no such aim exists or the console
-   * asks). It flies at `speed`, straight, and bites what it first meets that may hold it.
+   * asks). It flies at `speed`, straight, and bites what it first meets that may hold it. On a moving hull (wave 3)
+   * `target` is the hull's point velocity there, and the aim is true in the hull's frame: the same arithmetic with the
+   * shooter's velocity less the hull's, which aims where the point will be if the hull keeps its velocity.
    */
   fire(
     atX: number,
@@ -984,6 +1149,7 @@ export class Grapple {
     viewX: number,
     viewY: number,
     viewZ: number,
+    target: { readonly x: number; readonly y: number; readonly z: number } | null = null,
   ): void {
     const T = GRAPPLE_TUNE;
     let ex = atX - hand.x;
@@ -993,7 +1159,10 @@ export class Grapple {
     ex /= el;
     ey /= el;
     ez /= el;
-    const k = T.aim === 'true' ? aimTrue(ex, ey, ez, vel.x, vel.y, vel.z, T.speed, this.aimOut) : 0;
+    const rvx = target ? vel.x - target.x : vel.x;
+    const rvy = target ? vel.y - target.y : vel.y;
+    const rvz = target ? vel.z - target.z : vel.z;
+    const k = T.aim === 'true' ? aimTrue(ex, ey, ez, rvx, rvy, rvz, T.speed, this.aimOut) : 0;
     if (k > 0) {
       this.dartVel[0] = T.speed * this.aimOut.x + vel.x;
       this.dartVel[1] = T.speed * this.aimOut.y + vel.y;
@@ -1044,6 +1213,51 @@ export class Grapple {
     this.released = false;
     this.bite(b, x, y, z, nx, ny, nz, collider, b.physics);
     if (length > 0 && this.attached) this.rope.length = Math.min(this.range, length);
+  }
+
+  /**
+   * Fasten the rope on a vehicle's hull at once (wave 3; the console's and the tests'): the point (x, y, z) and its
+   * normal are given in the world against the hull's body where the physics has it now, and kept in the hull's own
+   * frame from there. False when the hull is gone or no frame is free.
+   */
+  attachHull(b: GrappleBody, v: Vehicle, x: number, y: number, z: number, nx: number, ny: number, nz: number, collider: Collider | null, length = -1): boolean {
+    if (this.out) this.letGo('console');
+    this.muteOwed = false;
+    const T = GRAPPLE_TUNE;
+    const slot = this.hulls.adopt(b.physics, v);
+    if (!slot) return false;
+    this.rope.framesMoved();
+    this.launch[0] = b.pos.x;
+    this.launch[1] = b.pos.y + T.ropeY;
+    this.launch[2] = b.pos.z;
+    this.trailCount = 1;
+    this.dartFilter = b.filter;
+    this.dartExclude = b.body;
+    this.dartPhysics = b.physics;
+    this.state = 'flying';
+    this.released = false;
+    const h = this.hullHit;
+    h.slot = slot;
+    h.vehicle = v;
+    h.collider = collider ?? (v.body.numColliders() > 0 ? v.body.collider(0) : null);
+    const w = this.segA;
+    w[0] = x;
+    w[1] = y;
+    w[2] = z;
+    this.hulls.castToLocalOf(slot, w, false, h.local);
+    w[0] = nx;
+    w[1] = ny;
+    w[2] = nz;
+    this.hulls.castToLocalOf(slot, w, true, h.localN);
+    h.world[0] = x;
+    h.world[1] = y;
+    h.world[2] = z;
+    h.worldN[0] = nx;
+    h.worldN[1] = ny;
+    h.worldN[2] = nz;
+    this.biteHull(b, b.physics);
+    if (length > 0 && this.attached) this.rope.length = Math.min(this.range, length);
+    return this.attached;
   }
 
   /** The dart comes home: a miss, a refusal, or the fire key pressed while it flies. */
@@ -1099,6 +1313,19 @@ export class Grapple {
     this.lipGaveUp = false;
     this.wallTouch = false;
     this.swimLiftWas = false;
+    // Every frame the rope rode forgotten, and every hull it marked walk-through put back, through the very colliders
+    // it marked (a disposed hull's body is never asked for its colliders). In the physics they were marked in.
+    this.hulls.clear(this.anchorPhysics ?? this.dartPhysics);
+    this.onHull = false;
+    this.onHullFloor = false;
+    // Nothing of the last hull met is kept past the rope: a hull disposed with its world is never held by the hook.
+    this.forgetHullHits();
+    this.towed = false;
+    this.slippingTurn = false;
+    this.catchLeft = GRAPPLE_TUNE.slipKeep;
+    this.pivV.x = 0;
+    this.pivV.y = 0;
+    this.pivV.z = 0;
     this.anchorPhysics = null;
     this.dartPhysics = null;
     this.muteOwed = true;
@@ -1220,11 +1447,710 @@ export class Grapple {
     return on;
   }
 
+  /**
+   * Whether a tow over water takes the swim's level speed this frame (§3.18): attached, afloat, the rope on a hull that
+   * pulled within `towHold`. Writes into the swim's record what the skim needs (the tow's friction and damping, the
+   * rope's level way from its pivot and the pivot's velocity), so the water's surface is a ground for a tow and the swim's
+   * own ease never drags a towed swimmer off the line.
+   */
+  towsSwimmer(b: GrappleBody, sw: SwimIn): boolean {
+    if (!this.attached || !b.swimming || !this.towed) return false;
+    const T = GRAPPLE_TUNE;
+    this.pivot(this.piv);
+    let rx = b.pos.x - this.piv.x;
+    let rz = b.pos.z - this.piv.z;
+    const rl = len2(rx, rz);
+    if (rl > 1e-6) {
+      rx /= rl;
+      rz /= rl;
+    } else {
+      rx = 0;
+      rz = 0;
+    }
+    sw.towFriction = T.towFriction;
+    sw.towDamp = T.towDamp;
+    sw.towRx = rx;
+    sw.towRz = rz;
+    sw.towVx = this.pivV.x;
+    sw.towVz = this.pivV.z;
+    return true;
+  }
+
   /** The rope's rise in degrees from the hand to its pivot, for the console. */
   rise(b: GrappleBody): number {
     if (!this.attached) return 0;
     this.pivot(this.piv);
     return riseOf(this.piv.x - b.pos.x, this.piv.y - (b.pos.y + GRAPPLE_TUNE.ropeY), this.piv.z - b.pos.z);
+  }
+
+  // --- vehicles on the rope (wave 3, §3.18) ----------------------------------------------------------------
+
+  /** How many of the rope's points ride slot i: what `HullFrames.begin` asks, kept so no closure is made a frame. */
+  private readonly countOn = (i: number): number => this.rope.pointsOn(i);
+
+  /**
+   * The frames this frame: with no vehicle about and nothing on a hull, nothing (the rope costs what it always did);
+   * otherwise the box the free span and the dart may sweep, every hull near it or carrying a point found and led to the
+   * frame's start and end, and the rope told its frames moved.
+   */
+  private stepFrames(b: GrappleBody, dt: number): void {
+    const rope = this.rope;
+    const hulls = this.hulls;
+    if (!(GRAPPLE_TUNE.vehicles && b.vehicles.length > 0) && rope.hullPoints === 0 && !hulls.any) {
+      this.onHull = false;
+      rope.framesMoved();
+      return;
+    }
+    this.fillNearBox(b, dt);
+    hulls.begin(b.physics, b.vehicles, dt, this.nearBox, this.countOn);
+    rope.framesMoved();
+    this.onHull = rope.hullPoints > 0;
+    this.slipNow.reads += hulls.reads;
+  }
+
+  /** The box the rope's free span and the dart may sweep this frame, a metre and the frame's travel round them: min, then max. */
+  private fillNearBox(b: GrappleBody, dt: number): void {
+    const box = this.nearBox;
+    const v = b.vel;
+    const pad = 1 + len3(v.x, v.y, v.z) * dt;
+    const hx = b.pos.x;
+    const hy = b.pos.y + GRAPPLE_TUNE.ropeY;
+    const hz = b.pos.z;
+    box[0] = hx - pad;
+    box[1] = hy - pad;
+    box[2] = hz - pad;
+    box[3] = hx + pad;
+    box[4] = hy + pad;
+    box[5] = hz + pad;
+    if (this.state === 'attached') {
+      const rope = this.rope;
+      this.boxTake(rope.pointAt(rope.n, this.t1));
+      if (rope.n > 0) this.boxTake(rope.pointAt(rope.n - 1, this.t1));
+    } else if (this.state === 'flying') {
+      const t = this.t1;
+      t.x = this.dart[0];
+      t.y = this.dart[1];
+      t.z = this.dart[2];
+      this.boxTake(t);
+      const k = dt + GRAPPLE_TUNE.lead / Math.max(1, len3(this.dartVel[0], this.dartVel[1], this.dartVel[2]));
+      t.x += this.dartVel[0] * k;
+      t.y += this.dartVel[1] * k;
+      t.z += this.dartVel[2] * k;
+      this.boxTake(t);
+    }
+  }
+
+  private boxTake(p: { x: number; y: number; z: number }): void {
+    const box = this.nearBox;
+    if (p.x - 1 < box[0]) box[0] = p.x - 1;
+    if (p.y - 1 < box[1]) box[1] = p.y - 1;
+    if (p.z - 1 < box[2]) box[2] = p.z - 1;
+    if (p.x + 1 > box[3]) box[3] = p.x + 1;
+    if (p.y + 1 > box[4]) box[4] = p.y + 1;
+    if (p.z + 1 > box[5]) box[5] = p.z + 1;
+  }
+
+  /**
+   * Every hull the rope rides, checked before anything is asked of it (§3.10): one disposed, destroyed or ghosted (read
+   * in that order, before any call on its body) lets go of an anchor on it ("The line came loose.") and leaves a bend on
+   * it a still bend where it last stood; one moved further than it could have gone lets the anchor go (`moved`); the
+   * anchor's hull refitted, or the wing under the anchor starting to swing, lets go. False once the rope let go. A hull
+   * whose own hit test fired is counted: the rope's pull must never set one off.
+   */
+  private hullsHold(): boolean {
+    const rope = this.rope;
+    const hulls = this.hulls;
+    for (let i = 1; i < hulls.slots.length; i++) {
+      const h = hulls.hull(i);
+      if (!h.src || h.carries === 0) continue;
+      const anchor = rope.pf[0] === i;
+      if (h.gone) {
+        if (anchor) {
+          this.letGo('loose');
+          this.say?.('The line came loose.');
+          return false;
+        }
+        rope.freeze(i);
+        hulls.free(h);
+        continue;
+      }
+      const v = h.vehicle!;
+      if (v.justHit > 0) this.slipNow.hits++;
+      if (h.jumped) {
+        if (anchor) {
+          this.letGo('moved');
+          return false;
+        }
+        rope.freeze(i);
+        hulls.free(h);
+        continue;
+      }
+      if (!anchor) continue;
+      if (v.refits !== h.refitsAt) {
+        this.letGo('refit');
+        this.say?.('The line came loose.');
+        return false;
+      }
+      const c = rope.cols[0];
+      if (c && v.wingStateOf(c.handle) === 'moving') {
+        this.letGo('wing');
+        this.say?.('The line came loose.');
+        return false;
+      }
+    }
+    this.onHull = rope.hullPoints > 0;
+    if (this.onHull) rope.respan();
+    return true;
+  }
+
+  /** Whether the pivot stands still: on the world, or on a hull that is held or at rest (its lag under `hullLag`). */
+  pivotStill(): boolean {
+    const fi = this.rope.pf[this.rope.n];
+    if (fi === 0) return true;
+    const h = this.hulls.hull(fi);
+    return !h.src || !h.moving;
+  }
+
+  /**
+   * What the console says of the vehicles on the rope (`__debug.grapple()`, wave 3; allocates, the console's only):
+   * each point's frame (`world` or the hull's name), the pivot's speed, the slip's and the pull's tallies over the last
+   * whole second, the tow and what is left of its hold, each roped or near hull's brake, the hull test (the hulls
+   * marked walk-through, its contacts and the metres it pushed the body out over the last second, and the gap from the
+   * capsule to the nearest marked hull's box where the hull stands now), and the hull families cast this frame.
+   */
+  vehicleReport(b: GrappleBody): Record<string, unknown> {
+    const n2 = (v: number) => Number(v.toFixed(2));
+    const n3 = (v: number) => Number(v.toFixed(3));
+    const rope = this.rope;
+    const hulls = this.hulls;
+    const name = (v: Vehicle | null): string => (v ? (v.def?.id ?? v.spec.id) : 'gone');
+    const frames: string[] = [];
+    if (this.attached) for (let i = 0; i <= rope.n; i++) frames.push(rope.pf[i] === 0 ? 'world' : name(hulls.hull(rope.pf[i]).vehicle));
+    const brake: Record<string, unknown>[] = [];
+    const marked: string[] = [];
+    const near: string[] = [];
+    for (let i = 1; i < hulls.slots.length; i++) {
+      const h = hulls.hull(i);
+      if (!h.src) continue;
+      if (h.near) near.push(name(h.vehicle));
+      if (h.marked) marked.push(name(h.vehicle));
+      if (h.carries > 0) brake.push({ vehicle: name(h.vehicle), latched: h.braked, pulled: h.pulledYet, driven: h.vs.driven(), budget: n2(h.budget), moving: h.moving, lag: n3(h.lag) });
+    }
+    const s = this.slipLast;
+    return {
+      frames,
+      onHull: this.onHull,
+      pivotSpeed: n2(len3(this.pivV.x, this.pivV.y, this.pivV.z)),
+      paidOut: n2(this.paidOut),
+      slip: { paid: n2(s.paid), catches: s.catches, turns: s.turns, reels: s.reels },
+      towed: this.towed,
+      towHold: n2(this.onHull && Number.isFinite(this.sincePull) ? Math.max(0, GRAPPLE_TUNE.towHold - this.sincePull) : 0),
+      pull: { impulse: n2(s.impulse), hits: s.hits },
+      brake,
+      hull: { marked, contacts: s.contacts, pushed: n3(s.pushed), calls: s.calls, contactTests: s.contactTests, gap: this.hullGap(b), floor: this.onHullFloor },
+      near,
+      bodyReads: s.reads + hulls.markReads,
+    };
+  }
+
+  /**
+   * The gap (m) from the capsule to the nearest marked hull's bounds box, the hull where it stands now (its body led by
+   * what is left in the accumulator), negative inside; null with no hull marked. The box is not the hull's shape: inside
+   * an open or concave hull (an open cockpit) it reads negative where the capsule touches nothing. The console's (allocates).
+   */
+  hullGap(b: GrappleBody): number | null {
+    let best: number | null = null;
+    const acc = b.physics.behind;
+    for (let i = 1; i < this.hulls.slots.length; i++) {
+      const h = this.hulls.hull(i);
+      const v = h.vehicle;
+      if (!h.marked || !v || v.disposed || !v.body.isValid()) continue;
+      const t = v.body.translation();
+      const r = v.body.rotation();
+      const l = v.body.linvel();
+      const bb = v.spec.bounds;
+      const minx = Math.min(bb.min[0], bb.max[0]);
+      const maxx = Math.max(bb.min[0], bb.max[0]);
+      const miny = Math.min(bb.min[1], bb.max[1]);
+      const maxy = Math.max(bb.min[1], bb.max[1]);
+      const minz = Math.min(bb.min[2], bb.max[2]);
+      const maxz = Math.max(bb.min[2], bb.max[2]);
+      const q = Float64Array.of(r.x, r.y, r.z, r.w);
+      const p = new Float64Array(3);
+      const o = new Float64Array(3);
+      for (let k = 0; k <= 8; k++) {
+        p[0] = b.pos.x - (t.x + l.x * acc);
+        p[1] = b.pos.y + SLAM_REACH + (0.9 * k) / 8 - (t.y + l.y * acc);
+        p[2] = b.pos.z - (t.z + l.z * acc);
+        turnBy(q, true, p, 0, o, 0);
+        const dx = Math.max(minx - o[0], 0, o[0] - maxx);
+        const dy = Math.max(miny - o[1], 0, o[1] - maxy);
+        const dz = Math.max(minz - o[2], 0, o[2] - maxz);
+        const out = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const ins = Math.min(Math.max(minx - o[0], o[0] - maxx, miny - o[1], o[1] - maxy, minz - o[2], o[2] - maxz), 0);
+        const gap = out + ins - SLAM_REACH;
+        if (best === null || gap < best) best = gap;
+      }
+    }
+    return best === null ? null : Number(best.toFixed(3));
+  }
+
+  /** A second of the slip's and the pull's tallies is done: kept for the console, and the next one begun. */
+  private rollSecond(): void {
+    const a = this.slipNow;
+    const z = this.slipLast;
+    z.paid = a.paid;
+    z.catches = a.catches;
+    z.turns = a.turns;
+    z.reels = a.reels;
+    z.impulse = a.impulse;
+    z.hits = a.hits;
+    z.pushed = a.pushed;
+    z.contacts = a.contacts;
+    z.calls = a.calls;
+    z.contactTests = a.contactTests;
+    z.reads = a.reads;
+    a.paid = 0;
+    a.catches = 0;
+    a.turns = 0;
+    a.reels = 0;
+    a.impulse = 0;
+    a.hits = 0;
+    a.pushed = 0;
+    a.contacts = 0;
+    a.calls = 0;
+    a.contactTests = 0;
+    a.reads = 0;
+    this.secondLeft = 1;
+  }
+
+  /** Rope paid out to a hull (the slip's), counted: the length handed over in `nums[4]`. */
+  private payOut(): void {
+    const m = this.nums[4];
+    this.rope.length += m;
+    this.paidOut += m;
+    this.slipNow.paid += m;
+  }
+
+  /**
+   * The step before the move on a rope that touches a hull (§3.18): what the still rope does, every move of the body
+   * relative to the pivot (whose velocity over the frame comes of the frames' poses), and the catch through the slip and
+   * the reduced mass, its tension put on every hull point of the rope. On the ground under such a rope the tow's friction
+   * and damping stand in for the ground's. A hull dragging a point away faster than `slipReel` pays the rope out, as does
+   * a correction past `slipCorr`; past the range the line runs out.
+   */
+  private beforeMoveOnHull(b: GrappleBody, dt: number): void {
+    const T = GRAPPLE_TUNE;
+    const rope = this.rope;
+    const vel = b.vel;
+    const hand = this.hand0;
+    const m = this.modes;
+    // The pivot where it stands at the frame's start and end, and its velocity over the frame.
+    const piv0 = rope.pointAtStart(rope.n, this.piv0);
+    const piv = rope.pointAt(rope.n, this.piv);
+    const pv = this.pivV;
+    pv.x = (piv.x - piv0.x) / dt;
+    pv.y = (piv.y - piv0.y) / dt;
+    pv.z = (piv.z - piv0.z) / dt;
+    if (T.gravity !== 1 && m.swinging) vel.y += gravityAddBack(T.gravity, GRAPPLE_GRAVITY, dt);
+    // The tow: sliding on the ground under a rope on a hull, the tow's friction against the level speed and its swing
+    // across the rope damped, relative to the pivot: a skier holding a line. Every length in this method is `Math.sqrt`
+    // written out, never `len2`/`len3`: which of this big method's small calls the compiler builds in turns on when it
+    // reaches them, and about one process in fifty left a length out and boxed its numbers (16 to 48 B a frame).
+    if (m.sliding) {
+      const horiz = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
+      if (T.towFriction > 0 && horiz > 1e-6) {
+        const f = Math.min(horiz, T.towFriction * dt) / horiz;
+        vel.x -= vel.x * f;
+        vel.z -= vel.z * f;
+      }
+      if (T.towDamp > 0) {
+        let rx = hand.x - piv0.x;
+        let rz = hand.z - piv0.z;
+        const rl = Math.sqrt(rx * rx + rz * rz);
+        if (rl > 1e-6) {
+          rx /= rl;
+          rz /= rl;
+          const ux = vel.x - pv.x;
+          const uz = vel.z - pv.z;
+          const along = ux * rx + uz * rz;
+          const k = Math.min(1, T.towDamp * dt);
+          vel.x -= (ux - rx * along) * k;
+          vel.z -= (uz - rz * along) * k;
+        }
+      }
+    }
+    // The brake's budget, refilled for every hull the rope rides.
+    const g = -b.physics.world.gravity.y;
+    const nums = this.nums;
+    for (let i = 1; i < this.hulls.slots.length; i++) {
+      const h = this.hulls.hull(i);
+      if (h.src && h.carries > 0) {
+        nums[0] = h.budget;
+        nums[1] = h.src.mass();
+        nums[2] = g;
+        nums[3] = dt;
+        brakeBudgetIn(nums, T);
+        h.budget = nums[0];
+      }
+    }
+    // The reel, or the haul, changes the length; a hull dragging a bend or the anchor away faster than `slipReel` pays out.
+    const spentEnd = rope.spent;
+    nums[0] = spentEnd - rope.spentAtStart();
+    nums[1] = dt;
+    slipReelExcessIn(nums, T);
+    if (nums[0] > 0) {
+      nums[4] = nums[0];
+      this.payOut();
+      this.slipNow.reels++;
+    }
+    const haulHeld = this.keys.haul;
+    let reel = 0;
+    if (!haulHeld && (this.keys.reelIn || this.keys.reelOut)) {
+      const reelSpeed = this.stats.apply('grapple.reel', T.reel);
+      reel = this.keys.reelIn ? -reelSpeed : reelSpeed;
+    }
+    const minLen = spentEnd + T.minFree;
+    if (reel < 0 && rope.length + reel * dt < minLen) reel = Math.min(0, (minLen - rope.length) / dt);
+    if (reel > 0) {
+      const range = this.range;
+      if (rope.length + reel * dt > range) reel = Math.max(0, (range - rope.length) / dt);
+    }
+    const lengthWas = rope.length;
+    rope.length += reel * dt;
+    if (rope.length < minLen) {
+      // A hull dragging a point away lengthened what is spent: the free span cannot go under its shortest, so the rope
+      // pays out; a reel-in simply stops there.
+      if (reel >= 0) {
+        nums[4] = minLen - rope.length;
+        this.payOut();
+      }
+      rope.length = minLen;
+      if (reel > 0) reel = 0;
+    }
+    this.sinceTick += dt;
+    if (reel !== 0) {
+      this.reelRun += Math.abs(rope.length - lengthWas);
+      this.ratchetIn = reel < 0;
+      if (ratchetDue(this.reelRun, this.sinceTick, T)) {
+        this.counts.ratchets++;
+        this.sinceTick = 0;
+        this.reelRun -= T.tickEvery;
+      }
+      if (this.reelRun > T.tickEvery) this.reelRun = T.tickEvery;
+    }
+    let rx = hand.x - piv0.x;
+    let ry = hand.y - piv0.y;
+    let rz = hand.z - piv0.z;
+    const dist = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    if (dist > 1e-6) {
+      rx /= dist;
+      ry /= dist;
+      rz /= dist;
+    }
+    // The sway, relative to the pivot.
+    const si = this.swayIn;
+    si[0] = rx;
+    si[1] = ry;
+    si[2] = rz;
+    si[3] = dist;
+    si[4] = dt;
+    this.sway(vel, pv, m.swinging);
+    // The haul, relative to the pivot: on a still hull the still haul whole, on a moving one it ends hanging at `minFree`.
+    const wasHauling = this.hauling;
+    this.hauling = false;
+    const cut = this.haulCut;
+    cut.x = 0;
+    cut.y = 0;
+    cut.z = 0;
+    // `haul` reads the pivot where the free span hangs from at the frame's start.
+    this.piv.x = piv0.x;
+    this.piv.y = piv0.y;
+    this.piv.z = piv0.z;
+    if (!haulHeld) {
+      this.haulEnded = false;
+      this.lipping = false;
+      this.lipGaveUp = false;
+    } else if (dist > 1e-6) {
+      this.haulDist = dist;
+      this.haul(b, dt);
+    }
+    if (wasHauling && !this.hauling && this.haulEnded && T.haulArrive) {
+      // The haul's own speed taken off on the frame it ends: at rest relative to its pivot, which goes on with the hull.
+      vel.x = pv.x;
+      vel.y = pv.y;
+      vel.z = pv.z;
+    }
+    // The swing's drag across the rope in the air, and the wall's friction, relative to the pivot.
+    if (m.hanging && T.swingDrag > 0 && dist > 1e-6 && !this.hauling) {
+      const ux = vel.x - pv.x;
+      const uy = vel.y - pv.y;
+      const uz = vel.z - pv.z;
+      const radial = ux * rx + uy * ry + uz * rz;
+      const k = Math.min(1, T.swingDrag * dt);
+      vel.x -= (ux - rx * radial) * k;
+      vel.y -= (uy - ry * radial) * k;
+      vel.z -= (uz - rz * radial) * k;
+    }
+    if (this.wallTouch && m.swinging && T.wallFriction > 0 && !this.hauling) {
+      const n = this.wallN;
+      const ux = vel.x - pv.x;
+      const uy = vel.y - pv.y;
+      const uz = vel.z - pv.z;
+      const vn = ux * n.x + uy * n.y + uz * n.z;
+      const al = this.t1;
+      al.x = ux - n.x * vn;
+      al.y = uy - n.y * vn;
+      al.z = uz - n.z * vn;
+      const sw = this.t2;
+      const sd = this.swayDir;
+      sw.x = sd.x;
+      sw.y = sd.y;
+      sw.z = sd.z;
+      const sn = sw.x * n.x + sw.y * n.y + sw.z * n.z;
+      sw.x -= n.x * sn;
+      sw.y -= n.y * sn;
+      sw.z -= n.z * sn;
+      wallFrictionSpare(al, sw, T.wallFriction, dt, al);
+      vel.x = pv.x + al.x + n.x * vn;
+      vel.y = pv.y + al.y + n.y * vn;
+      vel.z = pv.z + al.z + n.z * vn;
+    }
+    this.wadeRateNow = 0;
+    if (m.hanging && !b.swimming && b.depth > 0) {
+      const rate = wadeDragOf(b.depth, T, SWIM_DEPTH);
+      if (rate > 0) {
+        const f = Math.exp(-rate * dt);
+        vel.x *= f;
+        vel.y *= f;
+        vel.z *= f;
+        this.wadeRateNow = rate;
+      }
+    }
+    // The constraint on the velocity relative to the pivot, the catch through the slip and shared by the reduced mass.
+    const corr = this.corr;
+    corr.x = 0;
+    corr.y = 0;
+    corr.z = 0;
+    const con = this.con;
+    const tautBefore = con.taut;
+    const free = rope.length - spentEnd;
+    const slack = free - dist;
+    const ux = vel.x - pv.x;
+    const uy = vel.y - pv.y;
+    const uz = vel.z - pv.z;
+    const vr = ux * rx + uy * ry + uz * rz;
+    let allowed = reel;
+    if (slack > 0) allowed += slack / dt;
+    const pivFi = rope.pf[rope.n];
+    const src = pivFi !== 0 ? this.hulls.hull(pivFi).src : null;
+    nums[0] = GRAPPLE_PLAYER_MASS;
+    nums[1] = src && src.takesPull() ? src.mass() : Infinity;
+    reducedShareIn(nums);
+    const share = nums[0];
+    nums[0] = Math.max(0, ux * ux + uy * uy + uz * uz - vr * vr);
+    nums[1] = dist;
+    this.slippingTurn = tautBefore && slipsTurnIn(nums, T);
+    if (this.slippingTurn) this.slipNow.turns++;
+    con.caught = 0;
+    this.pulledHull = false;
+    if (vr > allowed && dist > 1e-6) {
+      const take = vr - allowed;
+      nums[0] = take;
+      nums[1] = this.catchLeft;
+      nums[2] = dt;
+      slipCatchIn(nums, T);
+      const took = nums[0];
+      nums[1] = this.catchLeft;
+      nums[2] = dt;
+      slipLeftIn(nums, T);
+      this.catchLeft = nums[0];
+      if (took < take) {
+        nums[4] = (take - took) * dt;
+        this.payOut();
+        this.slipNow.catches++;
+      }
+      // The player's share of what the rope took, and the hull's as the rope's tension on every hull point of it.
+      const mine = took * (1 - share);
+      vel.x -= rx * mine;
+      vel.y -= ry * mine;
+      vel.z -= rz * mine;
+      con.caught = took;
+      this.pullJ0 = took * GRAPPLE_PLAYER_MASS * (1 - share);
+      this.pullHulls();
+    } else this.catchLeft = T.slipKeep;
+    con.taut = slack <= T.tautEps || con.caught > 0;
+    const slackNow = rope.length - spentEnd - dist;
+    if (slackNow < 0) {
+      let back = -slackNow;
+      if (back > T.slipCorr) {
+        nums[4] = back - T.slipCorr;
+        this.payOut();
+        back = T.slipCorr;
+      }
+      corr.x = -rx * back;
+      corr.y = -ry * back;
+      corr.z = -rz * back;
+    }
+    corr.x -= cut.x;
+    corr.y -= cut.y;
+    corr.z -= cut.z;
+    if (rope.length > this.range) {
+      this.letGo('ranOut');
+      this.say?.('The line ran out.');
+      return;
+    }
+    if (con.caught > 0) {
+      this.sincePull = 0;
+      if (!tautBefore) {
+        this.catchRun = con.caught;
+        this.catchStep = 1;
+      } else if (this.catchStep === 1) {
+        this.catchRun += con.caught;
+        this.catchStep = 2;
+      } else this.catchStep = 0;
+      const jolt = this.catchStep > 0 && this.catchRun > T.joltFrom ? joltFor(this.catchRun, T) : 0;
+      if (jolt > 0) {
+        this.joltNow = this.joltLeft > 0 ? Math.max(this.joltNow, jolt) : jolt;
+        this.joltLeft = T.joltTime;
+        this.lastCatch = this.catchRun;
+      }
+    } else this.catchStep = 0;
+    // Resting on a moving hull's floor is not falling either (the hull test's own landing clamp, `onHullFloor`).
+    if (con.taut || m.onGround || m.afloat || this.onHullFloor) b.jka.holdApex(b.pos.y);
+    // The latch: while hanging, and on a frame the rope on a hull pulls (a body standing when a passing hull's rope catches has never hung).
+    if (m.hanging || con.caught > 0) this.latch = true;
+    this.speedBefore = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+    this.corrLen = Math.sqrt(corr.x * corr.x + corr.y * corr.y + corr.z * corr.z);
+  }
+
+  /**
+   * The rope's tension `J` (N·s this frame, handed over in `pullJ0`) on every hull point of it that takes a pull: the anchor along its span, a bend
+   * along both of its spans, which is a frictionless rope's load on whatever it bends round. A hull at rest at the rope's
+   * first pull that nothing drives holds the level part against its kept brake budget first (§3.18); only the rest goes
+   * to the hull, at the point where the physics has it, through `Vehicle.pulled`, which tells its hit tests.
+   */
+  private pullHulls(): void {
+    const J = this.pullJ0;
+    const T = GRAPPLE_TUNE;
+    const rope = this.rope;
+    const a = this.t1;
+    const c = this.t2;
+    for (let i = 0; i <= rope.n; i++) {
+      const fi = rope.pf[i];
+      if (fi === 0) continue;
+      const h = this.hulls.hull(fi);
+      const src = h.src;
+      if (!src || h.gone || !src.takesPull()) continue;
+      rope.pointAt(i, a);
+      const j = this.pullJ;
+      j.x = 0;
+      j.y = 0;
+      j.z = 0;
+      if (i < rope.n) rope.pointAt(i + 1, c);
+      else {
+        c.x = this.hand0.x;
+        c.y = this.hand0.y;
+        c.z = this.hand0.z;
+      }
+      let dx = c.x - a.x;
+      let dy = c.y - a.y;
+      let dz = c.z - a.z;
+      // By `Math.sqrt` here and below rather than `len3`: a call the compiler leaves out of this is handed fresh numbers.
+      let l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (l > 1e-6) {
+        j.x += (dx / l) * J;
+        j.y += (dy / l) * J;
+        j.z += (dz / l) * J;
+      }
+      if (i > 0) {
+        rope.pointAt(i - 1, c);
+        dx = c.x - a.x;
+        dy = c.y - a.y;
+        dz = c.z - a.z;
+        l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (l > 1e-6) {
+          j.x += (dx / l) * J;
+          j.y += (dy / l) * J;
+          j.z += (dz / l) * J;
+        }
+      }
+      // The parked brake: latched at the rope's first pull on this hull (at rest then, nothing driving it), dropped for
+      // good the moment something drives it.
+      const driven = h.vs.driven();
+      if (!h.pulledYet) {
+        h.pulledYet = true;
+        h.braked = !driven && Math.sqrt(h.lv[0] * h.lv[0] + h.lv[2] * h.lv[2]) < T.parkRest;
+      }
+      if (driven) h.braked = false;
+      this.parked.budget = h.budget;
+      parkedLevelIn(j, h.braked && T.parkHold > 0, this.parked);
+      h.budget = this.parked.budget;
+      j.x = this.parked.x;
+      j.z = this.parked.z;
+      // Put on the body where the physics has the point: its place on the hull taken to the hull's cast pose.
+      const io = h.io;
+      h.s = 1;
+      io[0] = a.x;
+      io[1] = a.y;
+      io[2] = a.z;
+      h.toCast();
+      const at = this.pullAt;
+      at.x = io[3];
+      at.y = io[4];
+      at.z = io[5];
+      src.pull(j, at);
+      this.pulledHull = true;
+      this.slipNow.impulse += Math.sqrt(j.x * j.x + j.y * j.y + j.z * j.z);
+    }
+  }
+
+  /**
+   * The sway, while swinging: the move keys' direction taken into the plane square to the free span (handed over in
+   * `swayIn`), and the body pushed along it, measured against the pivot's velocity `pv` (nought for a still pivot, a
+   * hull's point velocity on one). Not while a slam's stagger runs. The direction is left in `swayDir` (nought with no
+   * sway), which the wall's friction spares. One place for the still path and the hull's, so the push reads the
+   * progress table once.
+   */
+  private sway(vel: { x: number; y: number; z: number }, pv: { x: number; y: number; z: number }, swinging: boolean): void {
+    const T = GRAPPLE_TUNE;
+    const si = this.swayIn;
+    // The step comes in the kept array too: a number handed to a call that is not inlined is a fresh number.
+    const dt = si[4];
+    const rx = si[0];
+    const ry = si[1];
+    const rz = si[2];
+    const swx = this.keys.swayX;
+    const swz = this.keys.swayZ;
+    const sd = this.swayDir;
+    sd.x = 0;
+    sd.y = 0;
+    sd.z = 0;
+    if (!(swinging && !this.staggered && (swx !== 0 || swz !== 0) && si[3] > 1e-6)) return;
+    const d = swx * rx + swz * rz;
+    let tx = swx - rx * d;
+    let ty = -ry * d;
+    let tz = swz - rz * d;
+    // Worked out here rather than through `len3`: a call this method makes that is not inlined is handed fresh numbers.
+    const tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
+    if (!(tl > 1e-6)) return;
+    tx /= tl;
+    ty /= tl;
+    tz /= tl;
+    sd.x = tx;
+    sd.y = ty;
+    sd.z = tz;
+    // The push and its cap times the swing's momentum as progress makes it (Acrobatics' `grapple.swing`), which is
+    // exactly 1 while nothing grants it, and a number times 1 is that number to the bit.
+    const swing = this.stats.apply('grapple.swing', 1);
+    const swayMax = T.swayMax * swing;
+    const along = (vel.x - pv.x) * tx + (vel.y - pv.y) * ty + (vel.z - pv.z) * tz;
+    if (along < swayMax) {
+      const a = Math.min(T.swayAccel * swing * dt, swayMax - along);
+      vel.x += tx * a;
+      vel.y += ty * a;
+      vel.z += tz * a;
+    }
   }
 
   // --- the frame -------------------------------------------------------------------------------------
@@ -1237,6 +2163,10 @@ export class Grapple {
   beforeMove(b: GrappleBody, dt: number): void {
     const t0 = this.timing ? performance.now() : 0;
     this.costNow = 0;
+    // The frames this frame (wave 3): what the rope rides and the hulls near the rope or the dart, led to the frame's time.
+    // Asked only with a vehicle about or something on a hull, so a frame with neither calls nothing new at all.
+    const framed = (this.state === 'flying' || this.state === 'attached') && (this.onHull || this.rope.hullFamilies || (GRAPPLE_TUNE.vehicles && b.vehicles.length > 0) || this.hulls.any);
+    if (framed) this.stepFrames(b, dt);
     if (this.state === 'flying') this.flyDart(b, dt);
     if (this.state !== 'attached') {
       // A hooked prop's guard against a place written without a reset measures the move against the speed the body
@@ -1253,6 +2183,14 @@ export class Grapple {
       this.letGo('world');
       return;
     }
+    // A hull the rope rides that went, moved further than it could, was refitted, or whose wing under the anchor began
+    // to swing: the anchor lets go, a bend becomes a still one (§3.10).
+    if (this.onHull && !this.hullsHold()) return;
+    // Which hulls the rope rides and that move: those leave the character controller for the hull test. Asked on every
+    // attached frame the frames were stepped, whichever path the step then takes, and in the rope's own world: a hull the
+    // rope has just come off (its last bend unwrapped) goes back to the controller at once, not only once it is out of
+    // the rope's reach. A frame with no vehicle about and nothing in a slot asks nothing.
+    if (framed) this.hulls.mark(b.physics);
     const T = GRAPPLE_TUNE;
     const rope = this.rope;
     const vel = b.vel;
@@ -1266,6 +2204,11 @@ export class Grapple {
     const moved = len3(hand.x - rope.hand[0], hand.y - rope.hand[1], hand.z - rope.hand[2]);
     if (teleported(moved, 0, dt, 0, T)) {
       this.letGo('moved');
+      return;
+    }
+    if (this.onHull) {
+      this.beforeMoveOnHull(b, dt);
+      if (this.timing) this.costNow += performance.now() - t0;
       return;
     }
     const m = this.modes;
@@ -1316,41 +2259,14 @@ export class Grapple {
       ry /= dist;
       rz /= dist;
     }
-    // The sway, while swinging: the move keys' direction taken into the plane square to the free span. Not while a
-    // slam's stagger runs.
-    const swx = this.keys.swayX;
-    const swz = this.keys.swayZ;
-    const swaying = m.swinging && !this.staggered && (swx !== 0 || swz !== 0) && dist > 1e-6;
-    let tx = 0;
-    let ty = 0;
-    let tz = 0;
-    if (swaying) {
-      const d = swx * rx + swz * rz;
-      tx = swx - rx * d;
-      ty = -ry * d;
-      tz = swz - rz * d;
-      const tl = len3(tx, ty, tz);
-      if (tl > 1e-6) {
-        tx /= tl;
-        ty /= tl;
-        tz /= tl;
-        // The push and its cap times the swing's momentum as progress makes it (Acrobatics' `grapple.swing`), which is
-        // exactly 1 while nothing grants it, and a number times 1 is that number to the bit.
-        const swing = this.stats.apply('grapple.swing', 1);
-        const swayMax = T.swayMax * swing;
-        const along = vel.x * tx + vel.y * ty + vel.z * tz;
-        if (along < swayMax) {
-          const a = Math.min(T.swayAccel * swing * dt, swayMax - along);
-          vel.x += tx * a;
-          vel.y += ty * a;
-          vel.z += tz * a;
-        }
-      } else {
-        tx = 0;
-        ty = 0;
-        tz = 0;
-      }
-    }
+    // The sway, while swinging (against a still pivot's nought velocity).
+    const si = this.swayIn;
+    si[0] = rx;
+    si[1] = ry;
+    si[2] = rz;
+    si[3] = dist;
+    si[4] = dt;
+    this.sway(vel, this.stillV, m.swinging);
     // The haul (F held): the velocity set along the rope toward its first point, the length following the body
     // down; over a lip it goes up and over; and it arrives at rest.
     const wasHauling = this.hauling;
@@ -1391,9 +2307,10 @@ export class Grapple {
       al.y = vel.y - n.y * vn;
       al.z = vel.z - n.z * vn;
       const sw = this.t2;
-      sw.x = tx;
-      sw.y = ty;
-      sw.z = tz;
+      const sd = this.swayDir;
+      sw.x = sd.x;
+      sw.y = sd.y;
+      sw.z = sd.z;
       const sn = sw.x * n.x + sw.y * n.y + sw.z * n.z;
       sw.x -= n.x * sn;
       sw.y -= n.y * sn;
@@ -1472,16 +2389,26 @@ export class Grapple {
     // The lip-over starts when the next step of the haul would reach the shortest: at 18 m/s a frame at 60 fps is
     // 0.3 m, and a step that ended inside `minFree` drives the body into the lip's wall before the lip-over sees it.
     const lipAt = T.minFree + Math.max(T.lipTrigger, haulSpeed * dt);
-    if (!this.lipping && !this.lipGaveUp && rope.n > 0 && free <= lipAt && piv.y > hand.y && this.bendWalkable(rope.n)) {
+    // Never over the lip of a hull that moves (§3.6): the haul there ends hanging at `minFree` with the rope in.
+    const still = this.pivotStill();
+    if (!this.lipping && !this.lipGaveUp && rope.n > 0 && still && free <= lipAt && piv.y > hand.y && this.bendWalkable(rope.n)) {
       this.lipping = true;
       this.lipTime = 0;
       this.lipBend = rope.n;
       // Where the lip is, and the point the rope ran to before it, kept: the bend may come out on the way over.
-      const j = 3 * rope.n;
-      const k = j - 3;
-      this.lipY = rope.contact[j + 1];
-      this.lipToX = rope.pts[k];
-      this.lipToZ = rope.pts[k + 2];
+      if (rope.hullPoints === 0) {
+        const j = 3 * rope.n;
+        const k = j - 3;
+        this.lipY = rope.contact[j + 1];
+        this.lipToX = rope.pts[k];
+        this.lipToZ = rope.pts[k + 2];
+      } else {
+        // On a hull at rest, where the lip and the point before it stand in the world.
+        this.lipY = rope.contactAt(rope.n, this.t2).y;
+        rope.pointAt(rope.n - 1, this.t2);
+        this.lipToX = this.t2.x;
+        this.lipToZ = this.t2.z;
+      }
     }
     if (this.lipping) {
       this.lipTime += dt;
@@ -1522,10 +2449,11 @@ export class Grapple {
     this.hauling = true;
     // Toward a walkable anchor with nothing bent between, the rope point is aimed where the hand stands when
     // the feet arrive (the anchor plus `ropeY`), which never drives the body into the ground in its last metre.
+    // Only on something still: a body never arrives standing on a hull that moves.
     let gx = piv.x - hand.x;
     let gy = piv.y - hand.y;
     let gz = piv.z - hand.z;
-    const lift = rope.n === 0 && this.anchorWalkable;
+    const lift = rope.n === 0 && this.anchorWalkable && still;
     if (lift) gy += T.ropeY;
     const gl = len3(gx, gy, gz);
     if (gl > 1e-6) {
@@ -1533,6 +2461,12 @@ export class Grapple {
       vel.x = gx * s;
       vel.y = gy * s;
       vel.z = gz * s;
+      // On a hull, relative to it: the pivot's own velocity and the haul toward it.
+      if (this.onHull) {
+        vel.x += this.pivV.x;
+        vel.y += this.pivV.y;
+        vel.z += this.pivV.z;
+      }
       // Aimed at the pivot itself, the haul's last step stops where the haul ends, `minFree` from it: a step of
       // 0.3 m at 60 fps and 0.6 at 30 that ended inside it drove the body into the face it was hauled to. What the
       // step falls short by is taken off the move (as the constraint's correction is), never off the velocity,
@@ -1547,6 +2481,10 @@ export class Grapple {
           this.haulCut.z = gz * k;
         }
       }
+    } else if (this.onHull) {
+      vel.x = this.pivV.x;
+      vel.y = this.pivV.y;
+      vel.z = this.pivV.z;
     } else {
       vel.x = 0;
       vel.y = 0;
@@ -1558,6 +2496,7 @@ export class Grapple {
 
   /** Whether one of bend j's two faces is walkable (a normal at least as level as the controller's climb). */
   private bendWalkable(j: number): boolean {
+    if (this.rope.pf[j] !== 0) return this.rope.faceUp(j) >= WALKABLE;
     return this.rope.face1[3 * j + 1] >= WALKABLE || this.rope.face2[3 * j + 1] >= WALKABLE;
   }
 
@@ -1578,7 +2517,8 @@ export class Grapple {
    * read), and its size kept as the impact. A steep contact says the body is against a wall. On the rope and
    * in the fast flight after it, the hardest contact into a wall is then judged as a slam (§3.11).
    */
-  clip(b: GrappleBody): void {
+  clip(b: GrappleBody, mv: { x: number; y: number; z: number } | null = null): void {
+    this.onHullFloor = false;
     if (!this.attached && !this.released) return;
     const vel = b.vel;
     this.bodyVel = vel;
@@ -1647,6 +2587,17 @@ export class Grapple {
         this.wallN.z = this.n1.z;
       }
     }
+    // The hull test (wave 3, §3.18): every hull the rope rides and that moves, which the controller walked through, met
+    // in its own frame; its move written over the controller's, its contacts clipped and measured against the hull's
+    // own point velocity there, as every contact is. A method of its own, its hardest wall and floor handed through
+    // fields, so what it calls is built into it and no number is boxed on the way.
+    if (mv && this.attached && b.hullController && this.hulls.markedCount > 0) {
+      this.clipWall = wall;
+      this.clipFloor = floor;
+      this.clipOnHulls(b, mv);
+      wall = this.clipWall;
+      floor = this.clipFloor;
+    }
     // The slam rule, on what the clip measured: a wall at a swing's speed hurts and staggers; the haul's own push
     // (F held) and a floor (the fall rule's) are measured for the console and cost nothing.
     const hauling = this.hauling || this.keys.haul;
@@ -1659,6 +2610,83 @@ export class Grapple {
     else if (floor > T.slamFrom) this.noteSlam(floor, 0, 'floor', false);
     // The flight after a let-go ends once the body is slower than a slam.
     if (this.released && !releasedHolds(len3(vel.x, vel.y, vel.z), T)) this.released = false;
+  }
+
+  /** The hardest wall and floor the clip has met this frame, handed to and from `clipOnHulls`, and the clip's answer there. */
+  private clipWall = 0.5;
+  private clipFloor = 0.5;
+  /**
+   * The hull test met a walkable face of a hull the rope rides on the last clip: the body rests on a moving hull's floor,
+   * which no controller grounds it on, so the next frame's step before the move holds the fall's apex there as it does on
+   * the ground. Cleared at every clip and every let-go.
+   */
+  onHullFloor = false;
+  private readonly clipRes: ClipAnswer = { into: 0.5 };
+
+  /** The hull test over every marked hull, and its contacts clipped and measured as the controller's are (`clip`'s). */
+  private clipOnHulls(b: GrappleBody, mv: { x: number; y: number; z: number }): void {
+    const T = GRAPPLE_TUNE;
+    const vel = b.vel;
+    const hulls = this.hulls;
+    hulls.clearContacts();
+    const cs = this.capStart;
+    cs[0] = b.pos.x;
+    cs[1] = b.pos.y + b.colliderOffsetY;
+    cs[2] = b.pos.z;
+    hulls.testHalf = b.colliderOffsetY - SLAM_REACH;
+    hulls.testFilter = b.filter;
+    for (let i = 1; i < hulls.slots.length; i++) if (hulls.hull(i).marked) hulls.hullTest(i, b.collider, b.hullController!, cs, mv);
+    const hc = hulls.contacts;
+    const sv = this.sv;
+    for (let k = 0; k < hc.n; k++) {
+      const j = 3 * k;
+      this.n1.x = hc.normal[j];
+      this.n1.y = hc.normal[j + 1];
+      this.n1.z = hc.normal[j + 2];
+      sv.x = hc.pv[j];
+      sv.y = hc.pv[j + 1];
+      sv.z = hc.pv[j + 2];
+      const walkable = this.n1.y >= WALKABLE;
+      let into: number;
+      if (walkable) {
+        into = Math.max(0, -(vel.y - sv.y));
+        // A hull's floor is this test's own landing clamp: the player's controller walked through the hull, so nothing
+        // else takes a fall off a body resting on it, and gravity piled up under one lying on a moving pod's top to
+        // 58 m/s in 3 s. The speed down into it, relative to the hull there, is taken off, and the fall's apex is held
+        // from it the next frame (`onHullFloor`). The body is not called grounded: on a moving hull it never stands (§3.6),
+        // since the ground's friction and keys are the still ground's, and it rides on as it hangs.
+        if (into > 0 && T.clipRefused) vel.y = sv.y;
+        this.onHullFloor = true;
+      } else {
+        // A hull's contact comes on few frames, so the call is not built in here: its answer comes back in a kept record.
+        clipIntoRec(vel, this.n1, sv, T.clipRelative, T.clipRefused ? vel : this.t1, this.clipRes);
+        into = this.clipRes.into;
+      }
+      if (into > this.lastImpact) {
+        this.lastImpact = into;
+        this.lastImpactHaul = this.hauling;
+      }
+      if (into > this.maxImpact) this.maxImpact = into;
+      if (walkable) {
+        if (into > this.clipFloor) this.clipFloor = into;
+      } else if (into > this.clipWall) {
+        this.clipWall = into;
+        this.slamN.x = this.n1.x;
+        this.slamN.y = this.n1.y;
+        this.slamN.z = this.n1.z;
+      }
+      if (this.n1.y < WALKABLE && this.n1.y > -WALKABLE) {
+        this.wallTouch = true;
+        this.wallN.x = this.n1.x;
+        this.wallN.y = this.n1.y;
+        this.wallN.z = this.n1.z;
+      }
+    }
+    const s = this.slipNow;
+    s.pushed += hc.pushed;
+    s.contacts += hc.n;
+    s.calls += hc.calls;
+    s.contactTests += hc.contactTests;
   }
 
   /**
@@ -1754,10 +2782,11 @@ export class Grapple {
       dy = this.dart[1] - (b.pos.y + ropeY);
       dz = this.dart[2] - b.pos.z;
     } else if (this.state === 'attached' || this.state === 'holding') {
-      this.pivot(this.piv);
-      dx = this.piv.x - b.pos.x;
-      dy = this.piv.y - (b.pos.y + ropeY);
-      dz = this.piv.z - b.pos.z;
+      // Where `afterMove` left it this frame (`pivNow`).
+      const p = this.pivNow;
+      dx = p.x - b.pos.x;
+      dy = p.y - (b.pos.y + ropeY);
+      dz = p.z - b.pos.z;
     }
     const dl = len3(dx, dy, dz);
     if (dl > 1e-6) {
@@ -1803,6 +2832,12 @@ export class Grapple {
     const t0 = this.timing ? performance.now() : 0;
     const T = GRAPPLE_TUNE;
     this.sincePull += dt;
+    // The tow (§3.18): a rope on a hull that pulled within `towHold`, which the next frame's words read as held for the slide.
+    this.nums[0] = this.sincePull;
+    this.towed = this.onHull && this.attached && towingIn(this.onHull, this.nums, T);
+    // The slip's and the pull's tallies, a second at a time, for the console.
+    this.secondLeft -= dt;
+    if (this.secondLeft <= 0) this.rollSecond();
     if (this.state === 'flying') {
       if (!this.returning) this.keepTrail(b);
       if (this.timing) this.costNow += performance.now() - t0;
@@ -1811,6 +2846,7 @@ export class Grapple {
     }
     if (this.state === 'holding') {
       this.stepThing(b, dt);
+      if (this.state === 'holding') this.pivot(this.pivNow);
       if (this.timing) this.costNow += performance.now() - t0;
       this.noteCost();
       return;
@@ -1836,43 +2872,76 @@ export class Grapple {
     // Only while it swings or floats: on its feet the movement owns the velocity and the rope only holds it in, and
     // a carry there turned a walk round the anchor by the rope's tilt, a few hundredths of a metre a second
     // downward, into the ground, which the controller then stepped up out of (measured at 30 fps).
-    if (this.con.taut && !this.hauling && (this.modes.swinging || this.modes.afloat)) this.con.follow(b.vel, h0, h1, piv, piv);
+    if (this.onHull) {
+      // On a hull, relative to the pivot from where it stood at the frame's start to where it stands at its end, and on
+      // the feet too: a hull dragging the rope is no walk round a still anchor, and a body it has just caught standing is
+      // carried round it as the prototype measured. A turn the rope could not hold (`slipTurn`) is not carried, and the
+      // rope pays out to where the hand went.
+      rope.pointAt(rope.n, piv);
+      if (this.slippingTurn) {
+        const nx = h1.x - piv.x;
+        const ny = h1.y - piv.y;
+        const nz = h1.z - piv.z;
+        const need = rope.spent + Math.sqrt(nx * nx + ny * ny + nz * nz);
+        if (rope.length < need) {
+          this.nums[4] = need - rope.length;
+          this.payOut();
+        }
+      } else if (this.con.taut && !this.hauling) this.con.follow(b.vel, h0, h1, this.piv0, piv, this.pivV);
+    } else if (this.con.taut && !this.hauling && (this.modes.swinging || this.modes.afloat)) this.con.follow(b.vel, h0, h1, piv, piv);
     rope.track(h1);
+    if (rope.hullPoints > 0 && !this.onHull) this.onHull = true;
     if (rope.fouled) {
       this.letGo('fouled');
       this.say?.('The line fouled and let go.');
       this.noteCost();
       return;
     }
-    // The anchor: a collider that went (streamed out, rebuilt) is looked for again just behind it.
+    // The anchor: a collider that went (streamed out, rebuilt) is looked for again just behind it. (An anchor on a hull
+    // goes with its hull, which `hullsHold` asks before anything is asked of the hull.)
     const a = rope.cols[0];
-    if (a && !a.isValid() && !rope.rebindAnchor()) {
+    if (rope.pf[0] === 0 && a && !a.isValid() && !rope.rebindAnchor()) {
       this.letGo('loose');
       this.say?.('The line came loose.');
       this.noteCost();
       return;
     }
-    // The haul arriving on a walkable anchor: standing there, the rope lets go.
-    if (this.keys.haul && this.anchorWalkable && rope.n === 0 && b.grounded) {
-      const dx = b.pos.x - rope.pts[0];
-      const dz = b.pos.z - rope.pts[2];
+    // The haul arriving on a walkable anchor that stands still: standing there, the rope lets go.
+    if (this.keys.haul && this.anchorWalkable && rope.n === 0 && b.grounded && this.pivotStill()) {
+      rope.pointAt(0, this.t2);
+      const dx = b.pos.x - this.t2.x;
+      const dz = b.pos.z - this.t2.z;
       if (len2(dx, dz) < T.arriveReach) {
         this.letGo('arrived');
         this.noteCost();
         return;
       }
     }
+    // The towed floor (§3.18): the terrain's colliders stream round the player a few chunks out and a towed body crosses
+    // a chunk every half second, so outdoors it never stands below the terrain's own height, as a vehicle never does.
+    if (this.towed && !b.inside && Number.isFinite(b.ground) && b.pos.y < b.ground) {
+      b.pos.y = b.ground;
+      if (b.vel.y < 0) b.vel.y = 0;
+    }
     // The slide latch: cleared on the ground by slack past `latchSlack` (the ground holding a scrape a few
-    // centimetres inside its length is not slack) or by slowness, and afloat.
+    // centimetres inside its length is not slack) or by slowness, and afloat. Under a tow the rope is held.
     if (b.swimming) this.latch = false;
     else if (b.grounded) {
       this.pivot(piv);
-      const held = this.con.taut || rope.free() - len3(h1.x - piv.x, h1.y - piv.y, h1.z - piv.z) <= T.latchSlack;
+      const held = this.con.taut || this.towed || rope.free() - len3(h1.x - piv.x, h1.y - piv.y, h1.z - piv.z) <= T.latchSlack;
       if (!held || len2(b.vel.x, b.vel.z) <= T.slideOver) this.latch = false;
     }
+    this.pivot(this.pivNow);
     if (this.timing) this.costNow += performance.now() - t0;
     this.noteCost();
   }
+
+  /**
+   * Where the free span hangs from at the frame's end, kept by `afterMove` for `look`: worked out in `look` itself, the
+   * pivot's way onto a hull (a branch and a call that a still rope never takes) was built into it and the rest of what it
+   * builds in boxed the numbers it handed over, 23 B a frame on a still rope (measured in `grappleAllocOwn.ts`).
+   */
+  private readonly pivNow = { x: 0, y: 0, z: 0 };
 
   // --- a hooked prop (wave 3, §3.14) -----------------------------------------------------------------------
 
@@ -2167,6 +3236,23 @@ export class Grapple {
       this.castFilter = this.dartFilter;
       this.castExclude = this.dartExclude;
       const hit = this.castPassing(p, r);
+      // The hulls near (wave 3): the dart's path relative to each, from where it is at the frame's start to where it will
+      // be at its end, taken into each hull's own frame; the first thing met by its share of the frame bites.
+      if (GRAPPLE_TUNE.vehicles && this.hulls.any) {
+        const a = this.segA;
+        const e = this.segB;
+        a[0] = this.dart[0];
+        a[1] = this.dart[1];
+        a[2] = this.dart[2];
+        e[0] = a[0] + sx;
+        e[1] = a[1] + sy;
+        e[2] = a[2] + sz;
+        if (this.hulls.castPath(p.world, a, e, T.lead, this.dartFilter, this.hullHit) && this.hullHit.share * step <= (hit ? hit.timeOfImpact : Infinity)) {
+          this.counts.casts++;
+          this.biteHull(b, p);
+          return;
+        }
+      }
       if (hit) {
         const t = hit.timeOfImpact;
         const cx = r.origin.x + r.dir.x * t;
@@ -2224,6 +3310,44 @@ export class Grapple {
     rope.trackPath(this.trail, this.trailCount, h1);
     this.pivot(this.piv);
     rope.length = Math.min(this.range, rope.spent + len3(hx - this.piv.x, hy - this.piv.y, hz - this.piv.z));
+    this.fastened(b, x, y, z, ny, p);
+  }
+
+  /**
+   * The dart bit a vehicle's hull (wave 3, §3.18): the anchor is kept in the hull's own frame, at the point the dart's
+   * path relative to the hull met it. The hand's kept path was walked through the world while the hull moved under it,
+   * so the span from the anchor to the hand is made clear where it stands now (bent at a plain hit if it is not) rather
+   * than tracked along that path. The rope lands at the length it reaches, never more than the range.
+   */
+  private biteHull(b: GrappleBody, p: Physics): void {
+    const T = GRAPPLE_TUNE;
+    const rope = this.rope;
+    const h = this.hullHit;
+    rope.use(p.world, this.dartFilter, this.dartExclude);
+    rope.attach(h.local[0], h.local[1], h.local[2], h.localN[0], h.localN[1], h.localN[2], h.collider, this.launch[0], this.launch[1], this.launch[2], h.slot);
+    const hx = b.pos.x;
+    const hy = b.pos.y + T.ropeY;
+    const hz = b.pos.z;
+    rope.place(hx, hy, hz);
+    this.pivot(this.piv);
+    rope.length = Math.min(this.range, rope.spent + len3(hx - this.piv.x, hy - this.piv.y, hz - this.piv.z));
+    const slot = this.hulls.hull(h.slot);
+    slot.refitsAt = slot.vehicle ? slot.vehicle.refits : 0;
+    this.fastened(b, h.world[0], h.world[1], h.world[2], h.worldN[1], p);
+    // The rope keeps the hull in its slot from here; the hit's own hold on it goes.
+    h.vehicle = null;
+    h.collider = null;
+  }
+
+  /** What every bite shares once the rope is fastened: the rope's words, its world and its clocks. */
+  private fastened(b: GrappleBody, x: number, y: number, z: number, ny: number, p: Physics): void {
+    const T = GRAPPLE_TUNE;
+    const rope = this.rope;
+    this.onHull = rope.hullPoints > 0;
+    this.paidOut = 0;
+    this.catchLeft = T.slipKeep;
+    this.slippingTurn = false;
+    this.towed = false;
     this.state = 'attached';
     this.released = false;
     this.reelRun = 0;
@@ -2249,15 +3373,30 @@ export class Grapple {
     }
   }
 
-  /** What a collider the dart's ray met is, for whether the dart holds (§3.9). The passing kinds never reach here. */
+  /**
+   * What a collider the dart's ray met is, for whether the dart holds (§3.9). The passing kinds never reach here. A
+   * vehicle's hull is asked before anything else that moves (a hull the rope marked walk-through is still a hull): a
+   * rideable creature is a creature and refused (§15, question 15); any other hull is a `vehicle`, which holds, or with
+   * `vehicles` off a moving thing, refused, as before the amendment. (With them on the world's cast never meets a hull:
+   * each is cast in its own frame instead, and classed there.)
+   */
   classify(c: Collider, p: Physics): MarkKind {
     const h = c.handle;
     if (p.isPane(h)) return 'pane';
     const body = c.parent();
     if (!body || body.isFixed()) return isTerrainCollider(c) ? 'terrain' : 'still';
+    const v = this.vehicleOf?.(h) ?? null;
+    if (v) return v.spec.animal ? 'creature' : GRAPPLE_TUNE.vehicles ? 'vehicle' : 'moving';
     if (p.isWall(h)) return 'door';
     if (this.propAt?.(h)) return 'prop';
     return 'moving';
+  }
+
+  /** Whether the world's cast must step past a hull (the vehicles' families find it in its own frame): any hull but a rideable creature's, with `vehicles` on. */
+  private seenInFrame(h: number): boolean {
+    if (!GRAPPLE_TUNE.vehicles) return false;
+    const v = this.vehicleOf?.(h) ?? null;
+    return !!v && !v.spec.animal;
   }
 
   /**
@@ -2295,15 +3434,38 @@ export class Grapple {
     this.castLen = range + T.probePad;
     const first = this.castPassing(physics, r);
     let found = false;
-    if (first) {
-      const t = first.timeOfImpact;
+    // The vehicles near the ray (wave 3), each read again now, after the physics step, and led to the frame's end by what
+    // is left in the accumulator, the ray cast in its own frame: a hull's point is kept in its own frame (§3.8, step 7).
+    const hullsAbout = T.vehicles && v.vehicles.length > 0;
+    let onHull = false;
+    let pt = first ? first.timeOfImpact : Number.POSITIVE_INFINITY;
+    let pHull = false;
+    const mh = this.markHit;
+    if (hullsAbout) {
+      const o = this.segO;
+      const d = this.segD;
+      o[0] = r.origin.x;
+      o[1] = r.origin.y;
+      o[2] = r.origin.z;
+      d[0] = v.dirX;
+      d[1] = v.dirY;
+      d[2] = v.dirZ;
+      this.hulls.markLen = this.castLen;
+      this.hulls.markFilter = v.filter;
+      if (this.hulls.markCast(physics, v.vehicles, o, d, mh) && mh.toi < pt) {
+        pt = mh.toi;
+        pHull = true;
+      }
+    }
+    if (pt < Number.POSITIVE_INFINITY) {
+      const t = pt;
       const px = r.origin.x + v.dirX * t;
       const py = r.origin.y + v.dirY * t;
       const pz = r.origin.z + v.dirZ * t;
-      const fnx = first.normal.x;
-      const fny = first.normal.y;
-      const fnz = first.normal.z;
-      const fc = first.collider;
+      const fnx = pHull ? mh.worldN[0] : first!.normal.x;
+      const fny = pHull ? mh.worldN[1] : first!.normal.y;
+      const fnz = pHull ? mh.worldN[2] : first!.normal.z;
+      const fc = pHull ? mh.collider : first!.collider;
       // The hand's own line to it: what that meets first is where the dart would bite.
       const sg = this.sg;
       sg[0] = hand.x;
@@ -2313,7 +3475,39 @@ export class Grapple {
       sg[4] = py;
       sg[5] = pz;
       sg[6] = 0.05;
-      if (this.segment(physics)) {
+      const segHit = this.segment(physics);
+      if (hullsAbout) {
+        // And that line in each hull's own frame, nearer than whatever stands still on it.
+        const o = this.segO;
+        const d = this.segD;
+        const hx = px - hand.x;
+        const hy = py - hand.y;
+        const hz = pz - hand.z;
+        const hl = Math.sqrt(hx * hx + hy * hy + hz * hz);
+        if (hl > 1e-4) {
+          o[0] = hand.x;
+          o[1] = hand.y;
+          o[2] = hand.z;
+          d[0] = hx / hl;
+          d[1] = hy / hl;
+          d[2] = hz / hl;
+          this.hulls.markLen = hl + 0.05;
+          this.hulls.markFilter = v.filter;
+          if (this.hulls.markCast(physics, v.vehicles, o, d, mh) && (!segHit || mh.toi < this.hit.toi)) onHull = true;
+          else if (!segHit && pHull) onHull = true;
+        } else if (!segHit && pHull) onHull = true;
+      }
+      if (onHull) {
+        // Where the hull's line (or the camera's, which the hand's line met nothing short of) met the hull.
+        this.t1.x = mh.world[0];
+        this.t1.y = mh.world[1];
+        this.t1.z = mh.world[2];
+        this.hit.nx = mh.worldN[0];
+        this.hit.ny = mh.worldN[1];
+        this.hit.nz = mh.worldN[2];
+        this.hit.collider = mh.collider;
+        found = true;
+      } else if (segHit) {
         found = true;
       } else {
         const hx = px - hand.x;
@@ -2334,7 +3528,7 @@ export class Grapple {
       const bx = this.t1.x;
       const by = this.t1.y;
       const bz = this.t1.z;
-      let kind = this.classify(this.hit.collider, physics);
+      let kind: MarkKind = onHull ? 'vehicle' : this.classify(this.hit.collider, physics);
       if (kindBites(kind) && water?.(this.t1)) kind = 'water';
       const ex = bx - hand.x;
       const ey = by - hand.y;
@@ -2357,13 +3551,31 @@ export class Grapple {
         mk.nz = this.hit.nz;
         mk.collider = this.hit.collider;
         mk.holdLeft = T.snapHold;
+        if (onHull) this.markOnHull(mh);
+        else if (mk.vehicle) this.markOffHull();
+        this.forgetHullHits();
         return mk;
       }
     } else {
       mk.kind = 'none';
       mk.distance = 0;
     }
-    // Nothing shown: the last good mark is held a moment, checked again from the hand.
+    // Nothing shown: the last good mark is held a moment, checked again from the hand. Held on a hull, it is carried
+    // with the hull, read again where it stands now; a hull gone takes the hold with it.
+    if (mk.holdLeft > 0 && mk.vehicle) {
+      const lc = this.segO;
+      lc[0] = mk.lx;
+      lc[1] = mk.ly;
+      lc[2] = mk.lz;
+      if (this.hulls.markPoint(physics, mk.vehicle, lc, this.segA, this.segD)) {
+        mk.x = this.segA[0];
+        mk.y = this.segA[1];
+        mk.z = this.segA[2];
+        mk.tvx = this.segD[0];
+        mk.tvy = this.segD[1];
+        mk.tvz = this.segD[2];
+      } else mk.holdLeft = 0;
+    }
     if (mk.holdLeft > 0 && mk.collider && mk.collider.isValid()) {
       mk.holdLeft -= dt;
       const ex = mk.x - hand.x;
@@ -2383,6 +3595,7 @@ export class Grapple {
       if (mk.holdLeft > 0 && !blocked && dist >= T.minRange && dist <= range) {
         mk.shows = true;
         mk.held = true;
+        this.forgetHullHits();
         return mk;
       }
     }
@@ -2390,7 +3603,144 @@ export class Grapple {
     mk.shows = false;
     mk.held = false;
     mk.collider = null;
+    if (mk.vehicle) this.markOffHull();
+    this.forgetHullHits();
     return mk;
+  }
+
+  /** The mark rests on a hull: its point in the hull's own frame, and the hull's point velocity there, kept. */
+  private markOnHull(h: { readonly vehicle: Vehicle | null; readonly local: Float64Array; readonly pv: Float64Array }): void {
+    const mk = this.mark;
+    mk.vehicle = h.vehicle;
+    mk.lx = h.local[0];
+    mk.ly = h.local[1];
+    mk.lz = h.local[2];
+    mk.tvx = h.pv[0];
+    mk.tvy = h.pv[1];
+    mk.tvz = h.pv[2];
+  }
+
+  private markOffHull(): void {
+    const mk = this.mark;
+    mk.vehicle = null;
+    mk.tvx = 0;
+    mk.tvy = 0;
+    mk.tvz = 0;
+    this.forgetHullHits();
+  }
+
+  /**
+   * The dart's and the mark's last hit on a hull let go of once used: each holds the vehicle and its collider it met,
+   * and a travel or the select screen would otherwise keep a disposed hull (its group, its model, its fight) until the
+   * next hull was met.
+   */
+  private forgetHullHits(): void {
+    this.hullHit.vehicle = null;
+    this.hullHit.collider = null;
+    this.markHit.vehicle = null;
+    this.markHit.collider = null;
+  }
+
+  /** What the dart is aimed true against: the mark's hull's point velocity, or null on anything still. Kept. */
+  private readonly markTargetV = { x: 0, y: 0, z: 0 };
+  markTarget(): { readonly x: number; readonly y: number; readonly z: number } | null {
+    const mk = this.mark;
+    if (!mk.vehicle) return null;
+    this.markTargetV.x = mk.tvx;
+    this.markTargetV.y = mk.tvy;
+    this.markTargetV.z = mk.tvz;
+    return this.markTargetV;
+  }
+
+  /**
+   * Point i of the rope where it is drawn (§3.12): a point on a hull at the hull's drawn pose (its group, written from
+   * its body before the frame's physics step), so the drawn rope stays on the drawn hull; any other where it is. Into
+   * `out` at `o`. The drawn hull jumps by its speed over a physics step every second or third frame at 144 fps against a
+   * player drawn where the player is: that is the game's own stutter of every fast vehicle, not the rope's.
+   */
+  drawnPoint(i: number, out: Float64Array, o: number): void {
+    const rope = this.rope;
+    const k = 3 * i;
+    const fi = rope.pf[i];
+    const v = fi !== 0 ? this.hulls.hull(fi).vehicle : null;
+    if (!v) {
+      if (fi === 0) {
+        out[o] = rope.pts[k];
+        out[o + 1] = rope.pts[k + 1];
+        out[o + 2] = rope.pts[k + 2];
+      } else {
+        rope.pointAt(i, this.t1);
+        out[o] = this.t1.x;
+        out[o + 1] = this.t1.y;
+        out[o + 2] = this.t1.z;
+      }
+      return;
+    }
+    const g = v.group;
+    const q = g.quaternion;
+    const x = rope.pts[k];
+    const y = rope.pts[k + 1];
+    const z = rope.pts[k + 2];
+    const tx = 2 * (q.y * z - q.z * y);
+    const ty = 2 * (q.z * x - q.x * z);
+    const tz = 2 * (q.x * y - q.y * x);
+    out[o] = g.position.x + x + q.w * tx + (q.y * tz - q.z * ty);
+    out[o + 1] = g.position.y + y + q.w * ty + (q.z * tx - q.x * tz);
+    out[o + 2] = g.position.z + z + q.w * tz + (q.x * ty - q.y * tx);
+  }
+
+  /** Every point of the rope where it is drawn (`drawnPoint`), into `out`: the anchor first. */
+  drawnPoints(out: Float64Array): Float64Array {
+    for (let i = 0; i <= this.rope.n; i++) this.drawnPoint(i, out, 3 * i);
+    return out;
+  }
+
+  /** The anchor's normal where it is drawn: on a hull turned by the hull's drawn turn. Into `out`. */
+  anchorNormalDrawn<V extends { x: number; y: number; z: number }>(out: V): V {
+    const rope = this.rope;
+    const x = rope.anchorNormal[0];
+    const y = rope.anchorNormal[1];
+    const z = rope.anchorNormal[2];
+    const fi = rope.pf[0];
+    const v = fi !== 0 ? this.hulls.hull(fi).vehicle : null;
+    if (!v) {
+      out.x = x;
+      out.y = y;
+      out.z = z;
+      return out;
+    }
+    const q = v.group.quaternion;
+    const tx = 2 * (q.y * z - q.z * y);
+    const ty = 2 * (q.z * x - q.x * z);
+    const tz = 2 * (q.x * y - q.y * x);
+    out.x = x + q.w * tx + (q.y * tz - q.z * ty);
+    out.y = y + q.w * ty + (q.z * tx - q.x * tz);
+    out.z = z + q.w * tz + (q.x * ty - q.y * tx);
+    return out;
+  }
+
+  /** The mark's point where it is drawn: on a hull at the hull's drawn pose, else where it is. Into `out`. */
+  markDrawn(out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+    const mk = this.mark;
+    const v = mk.vehicle;
+    if (!v) {
+      out.x = mk.x;
+      out.y = mk.y;
+      out.z = mk.z;
+      return out;
+    }
+    const g = v.group;
+    const q = g.quaternion;
+    const x = mk.lx;
+    const y = mk.ly;
+    const z = mk.lz;
+    const tx = 2 * (q.y * z - q.z * y);
+    const ty = 2 * (q.z * x - q.x * z);
+    const tz = 2 * (q.x * y - q.y * x);
+    out.x = g.position.x + x + q.w * tx + (q.y * tz - q.z * ty);
+    out.y = g.position.y + y + q.w * ty + (q.z * tx - q.x * tz);
+    out.z = g.position.z + z + q.w * tz + (q.x * ty - q.y * tx);
+    return out;
   }
 
   /**

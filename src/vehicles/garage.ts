@@ -407,6 +407,8 @@ export class Garage {
     }
     // The swap: one synchronous step, nothing awaited (glows off the parts, the swap, the mounts measured, the glows re-hung).
     const r = refitSwap(v, s.commit, v.build.root, thrusters, v.wings, v.spec.ship ? (sp) => ownTrail(v, sp) : null, spare);
+    // Counted, so a grappling hook anchored on the hull lets go: the part its dart bit may have gone with the swap.
+    v.refits++;
     v.fit = next;
     // Guns only on what flies as a ship, as at the spawn: a painted speeder repainted on the ground gains none.
     if (v.spec.ship) this.fitGuns(v, def, next, r.mounts);

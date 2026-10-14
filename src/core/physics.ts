@@ -129,6 +129,13 @@ export class Physics {
   readonly world: RAPIER.World;
   private acc = 0;
   /**
+   * How far the bodies stand behind the frame's time: the accumulator's remainder after the last step. A moving body's
+   * pose at a frame's start is its pose led forward by this (the grapple's rope on a vehicle, `grappleFrames.ts`).
+   */
+  get behind(): number {
+    return this.acc;
+  }
+  /**
    * A body of the engine's own that nothing else ever touches: fixed, with no collider, so it is in
    * no query, no contact and no island. It is written, to the very value it already holds, before
    * every step (`stepWorld`), and that write is the whole of the fix for the one panic the engine

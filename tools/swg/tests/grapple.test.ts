@@ -1318,7 +1318,7 @@ await section(17, 'allocation', async () => {
   // as the kept answers, and a call no longer built in boxes the numbers it hands over.
   watch.disconnect();
   const alone = JSON.parse(
-    execFileSync(process.execPath, ['--expose-gc', fileURLToPath(new URL('./grappleAllocOwn.ts', import.meta.url))], { encoding: 'utf8' })
+    execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', fileURLToPath(new URL('./grappleAllocOwn.ts', import.meta.url))], { encoding: 'utf8' })
       .trim()
       .split('\n')
       .pop() ?? '{}',

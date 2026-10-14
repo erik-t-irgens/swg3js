@@ -11,7 +11,7 @@
 // clocks, the camera's pull, the lean toward the rope and the arm's weight and way). It never touches the
 // real engine's world, but Rapier is loaded for the kept ray, triangle and contact record the hook makes once.
 //
-// Run: node --expose-gc tools/swg/tests/grappleAllocOwn.ts
+// Run: node --expose-gc --allow-natives-syntax tools/swg/tests/grappleAllocOwn.ts
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { GRAPPLE_TUNE, Grapple, type GrappleBody } from '../../../src/player/grapple.ts';
@@ -37,6 +37,7 @@ const stubCol = {
   parent: () => null,
   collisionGroups: () => (Group.exterior << 16) | Group.all,
   setTranslation: (_t: { x: number; y: number; z: number }) => {},
+  setRotation: (_r: { x: number; y: number; z: number; w: number }) => {},
 };
 const answer = { timeOfImpact: 0, normal: { x: 0, y: 0, z: 0 }, collider: stubCol };
 type StubRay = { origin: { x: number; y: number; z: number }; dir: { x: number; y: number; z: number } };
@@ -145,13 +146,14 @@ const cast = (r: StubRay, maxToi: number): typeof answer | null => {
 const stubWorld = {
   castRayAndGetNormal: cast,
   intersectionWithShape: () => null,
+  gravity: { x: 0, y: -20.32, z: 0 },
 };
 /** From here on every ray is answered by the smaller rule. */
 const useNear = (): void => {
   reachOf.rule = near;
 };
 const no = (_h: number): boolean => false;
-const physics = { world: stubWorld, isPane: no, isRagdoll: no, isWalkThrough: no, isPeer: no, isWall: no, broken: false } as unknown as Physics;
+const physics = { world: stubWorld, isPane: no, isRagdoll: no, isWalkThrough: no, isPeer: no, isWall: no, broken: false, behind: 0, steps: 0, markWalkThrough: (_c: unknown, _on: boolean) => {} } as unknown as Physics;
 const contactAnswer = { normal1: { x: 1, y: 0, z: 0 }, collider: stubCol };
 let frame = 0;
 const controller = {
@@ -174,6 +176,9 @@ const body: GrappleBody = {
   jka: { holdApex: (_y: number) => {}, rolling: false, inSpecialJump: false },
   hp: 100,
   takeDamage: (_amount: number, _force: boolean, _kind: string) => false,
+  vehicles: [],
+  hullController: null,
+  ground: Number.NEGATIVE_INFINITY,
 };
 const g = new Grapple(RAPIER, physics);
 const DT = 1 / 60;
@@ -196,18 +201,34 @@ const settle = async () => {
   await tick();
 };
 const FRAMES = 200_000;
+/**
+ * The loop that runs the frames, kept out of the optimizing compiler (with `--allow-natives-syntax`, which every test that
+ * runs this file passes). Compiled on the stack, the measure's own loop built the frame's step into itself and the step's
+ * own calls into that, within one shared budget, so whether the hook's every-frame helpers were built in turned on when
+ * that compile happened: one run in two measured 23 to 39 B a frame of numbers boxed at calls left out (the look's
+ * lengths, wave 3b), the next nothing. Interpreted, the loop makes nothing (its counter is a small integer and its
+ * argument a boolean) and the step it calls is compiled as itself, as the player's update calls the hook in the game.
+ */
+function frames(step: (counting: boolean) => void, n: number): void {
+  for (let k = 0; k < n; k++) step(false);
+}
+try {
+  new Function('f', '%NeverOptimizeFunction(f)')(frames);
+} catch {
+  // Without the flag the loop is left to the compiler, as it was before.
+}
 async function measure(step: (counting: boolean) => void): Promise<{ made: number; scavenges: number }> {
-  for (let k = 0; k < 100_000; k++) step(false);
+  frames(step, 100_000);
   let best = { made: Infinity, scavenges: Infinity };
   for (let attempt = 0; attempt < 3; attempt++) {
     gc!();
     await settle();
-    for (let k = 0; k < 50_000; k++) step(false);
+    frames(step, 50_000);
     gc!({ type: 'minor' });
     await settle();
     scavenges = 0;
     const before = young();
-    for (let k = 0; k < FRAMES; k++) step(false);
+    frames(step, FRAMES);
     const made = young() - before;
     await settle();
     if (scavenges < best.scavenges || (scavenges === best.scavenges && made < best.made)) best = { made, scavenges };
@@ -215,6 +236,274 @@ async function measure(step: (counting: boolean) => void): Promise<{ made: numbe
   }
   watch.disconnect();
   return best;
+}
+
+// Wave 3b's hull, run alone (`grappleAllocOwn.ts hull`, and `hull hang`), so the hook's call sites meet the stand-in
+// vehicle, its body, its collider and the hull test's controller and nothing else: a pod's hull moving along +z at 40 m/s,
+// read and led every frame, the rope on its rear face, the body towed 12 m behind it on the ground (or hung at minFree off
+// the rear face, `hang`), so the frames, the lead, the pull by the reduced mass with the brake's budget, the slip, the
+// tow's friction and damping, the walk-through marks, the hull test and its push-out, the relative clip, the carry round
+// a moving pivot and the towed floor all run, and after them wave 2's `look` on that rope and the mark worked out with
+// the vehicle handed over, its hull family's casts meeting the hull and missing it, the mark shown on the hull, held on
+// it and lost (the game's `stepGrappleMark` runs it every frame on foot with a vehicle about). The hull's place and the
+// physics' step count rise a frame at a time as a 60 Hz step would move them, and the body moves with the hull, so the
+// rope's whole state is steady.
+if (process.argv.includes('hull')) {
+  useNear();
+  const hang = process.argv.includes('hang');
+  const V = 40;
+  const tr = { x: 0, y: 1.4, z: 0 };
+  const rot = { x: 0, y: 0, z: 0, w: 1 };
+  const lin = { x: 0, y: 0, z: V };
+  const ang = { x: 0, y: 0, z: 0 };
+  const done = { pulls: 0, contactTests: 0, pushes: 0, hullCalls: 0 };
+  const contact = { distance: 0.02, normal1: { x: 0, y: 0, z: -1 } };
+  // The hull's collider: met by the hull test's push-out on one frame in eight, otherwise clear.
+  const hullCol = {
+    handle: 91,
+    isValid: () => true,
+    parent: (): unknown => hullBody,
+    collisionGroups: () => (Group.exterior << 16) | Group.all,
+    setSolverGroups: (_g: number) => {},
+    contactShape: (_s: unknown, _p: unknown, _r: unknown, _o: number, _out: unknown): typeof contact | null => {
+      done.contactTests++;
+      if ((frame & 7) !== 0) return null;
+      done.pushes++;
+      return contact;
+    },
+  };
+  const hullBody = {
+    handle: 12,
+    isValid: () => true,
+    translation: () => tr,
+    rotation: () => rot,
+    linvel: () => lin,
+    angvel: () => ang,
+    mass: () => 900,
+    numColliders: () => 1,
+    collider: (_k: number) => hullCol,
+    applyImpulseAtPoint: (_j: unknown, _a: unknown, _w: boolean) => {},
+    isFixed: () => false,
+  };
+  const vpos = { x: 0, y: 1.4, z: 0 };
+  const vehicle = {
+    disposed: false,
+    ghosted: false,
+    destroyed: false,
+    holding: false,
+    held: false,
+    landed: false,
+    airborne: false,
+    spec: { id: 'stand-in', bounds: { min: [-2.5, 0, -8], max: [2.5, 2.5, 8] }, animal: false, ship: false },
+    pos: vpos,
+    speed: V,
+    body: hullBody,
+    attitude: { x: 0, y: 0, z: 0, w: 1 },
+    spin: { x: 0, y: 0, z: 0 },
+    autopilot: { drive: {} },
+    refits: 0,
+    justHit: 0,
+    def: null,
+    colliderHandles: [91],
+    wingStateOf: (_h: number) => 'none',
+    pulled: (_j: unknown, _a: unknown) => {
+      done.pulls++;
+    },
+  };
+  // The hull test's own controller: the move it is asked for, allowed whole, with a contact on one frame in sixteen.
+  const asked = { x: 0, y: 0, z: 0 };
+  const hullContact = { normal1: { x: 0, y: 0, z: 1 } };
+  const hullController = {
+    computeColliderMovement: (_c: unknown, d: { x: number; y: number; z: number }, _f: unknown, _g: unknown, _p: unknown) => {
+      asked.x = d.x;
+      asked.y = d.y;
+      asked.z = d.z;
+      done.hullCalls++;
+    },
+    computedMovement: (out: { x: number; y: number; z: number }) => {
+      out.x = asked.x;
+      out.y = asked.y;
+      out.z = asked.z;
+      return out;
+    },
+    numComputedCollisions: () => ((frame & 15) === 0 ? 1 : 0),
+    computedCollision: (_i: number, _out: unknown) => hullContact,
+  };
+  const hb = body as unknown as { vehicles: unknown[]; hullController: unknown; ground: number; grounded: boolean };
+  hb.vehicles = [vehicle];
+  hb.hullController = hullController;
+  hb.ground = 0;
+  // The mark's casts against the hull (§3.8, step 7): its family's ray is the frames' own kept ray, and a ray of that one
+  // object is answered by the slab test against the hull's box where the stand-in physics has it (no turn, so its cast pose
+  // is the world less the lead); every other ray by the small rule as before. One rule more for the stand-in cast to ask,
+  // its function made once.
+  const hullsRay = (g.hulls as unknown as { ray: StubRay }).ray;
+  const hullBox = { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 };
+  const hullAnswer = { timeOfImpact: 0, normal: { x: 0, y: 0, z: 0 }, collider: null as unknown };
+  const hullRule = (r: StubRay): typeof answer | null => {
+    if (r !== hullsRay) return near(r);
+    const ox = r.origin.x;
+    const oy = r.origin.y;
+    const oz = r.origin.z;
+    const dx = r.dir.x;
+    const dy = r.dir.y;
+    const dz = r.dir.z;
+    let tmin = 0;
+    let tmax = reachOf.v;
+    let nx = 0;
+    let ny = 1;
+    let nz = 0;
+    if (dx > -1e-12 && dx < 1e-12) {
+      if (ox < hullBox.x0 || ox > hullBox.x1) return null;
+    } else {
+      const ta = (hullBox.x0 - ox) / dx;
+      const tb = (hullBox.x1 - ox) / dx;
+      const t1 = ta < tb ? ta : tb;
+      const t2 = ta < tb ? tb : ta;
+      if (t1 > tmin) {
+        tmin = t1;
+        nx = dx > 0 ? -1 : 1;
+        ny = 0;
+        nz = 0;
+      }
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+    if (dy > -1e-12 && dy < 1e-12) {
+      if (oy < hullBox.y0 || oy > hullBox.y1) return null;
+    } else {
+      const ta = (hullBox.y0 - oy) / dy;
+      const tb = (hullBox.y1 - oy) / dy;
+      const t1 = ta < tb ? ta : tb;
+      const t2 = ta < tb ? tb : ta;
+      if (t1 > tmin) {
+        tmin = t1;
+        nx = 0;
+        ny = dy > 0 ? -1 : 1;
+        nz = 0;
+      }
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+    if (dz > -1e-12 && dz < 1e-12) {
+      if (oz < hullBox.z0 || oz > hullBox.z1) return null;
+    } else {
+      const ta = (hullBox.z0 - oz) / dz;
+      const tb = (hullBox.z1 - oz) / dz;
+      const t1 = ta < tb ? ta : tb;
+      const t2 = ta < tb ? tb : ta;
+      if (t1 > tmin) {
+        tmin = t1;
+        nx = 0;
+        ny = 0;
+        nz = dz > 0 ? -1 : 1;
+      }
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) return null;
+    }
+    hullAnswer.timeOfImpact = tmin;
+    hullAnswer.normal.x = nx;
+    hullAnswer.normal.y = ny;
+    hullAnswer.normal.z = nz;
+    return hullAnswer as unknown as typeof answer;
+  };
+  const placeHullBox = () => {
+    hullBox.x0 = tr.x - 2.5;
+    hullBox.x1 = tr.x + 2.5;
+    hullBox.y0 = tr.y;
+    hullBox.y1 = tr.y + 2.5;
+    hullBox.z0 = tr.z - 8;
+    hullBox.z1 = tr.z + 8;
+  };
+  const ph = physics as unknown as { steps: number; behind: number };
+  ph.behind = 0.004;
+  ph.steps = 1;
+  // The body's place behind the hull's rear face (z -8 in its frame), its feet's height, and the rope's anchor there.
+  const back = hang ? 8 + GRAPPLE_TUNE.minFree + 0.35 : 8 + 12;
+  const feetY = hang ? 1.4 + 1.25 - 0.6 - GRAPPLE_TUNE.ropeY : 0.05;
+  const lead = () => tr.z + V * ph.behind;
+  pos.x = 0;
+  pos.y = feetY;
+  pos.z = lead() - back;
+  vel.x = 0;
+  vel.y = 0;
+  vel.z = V;
+  hb.grounded = !hang;
+  const hooked = g.attachHull(body, vehicle as never, 0, 1.4 + 1.25, -8, 0, 0, -1, hullCol as unknown as RAPIER.Collider);
+  if (!hang) g.latch = true;
+  hullAnswer.collider = hullCol;
+  reachOf.rule = hullRule;
+  // The mark's view, written as the game's `stepGrappleMark` writes it, with the world's vehicles handed over.
+  const hv = g.view;
+  const hat = { x: 0, y: 0, z: 0 };
+  const noWaterHull = (_p: { x: number; y: number; z: number }): boolean => false;
+  hv.vehicles = hb.vehicles as never;
+  const mv = { x: 0, y: 0, z: 0 };
+  const seenHull = { attached: 0, onHull: 0, marked: 0, towed: 0, taut: 0, pulled: 0, markOn: 0, markHeld: 0, markOff: 0, looked: 0 };
+  const hstep = (counting: boolean) => {
+    frame++;
+    // A 60 Hz step a frame: the hull's place moves on, the body's with it.
+    tr.z += V * DT;
+    vpos.z = tr.z;
+    ph.steps++;
+    const a = frame * 0.05;
+    pos.x = 0.03 * Math.sin(a);
+    pos.y = feetY + 0.02 * Math.sin(0.7 * a);
+    pos.z = lead() - back + 0.03 * Math.sin(1.3 * a);
+    vel.x = 0.1 * Math.cos(a);
+    vel.y = 0;
+    vel.z = V;
+    if (g.rope.length > back + 2) g.rope.length = back + 1;
+    const pulls = done.pulls;
+    g.refreshModes(body);
+    g.beforeMove(body, DT);
+    g.syncCollider(body);
+    mv.x = vel.x * DT + g.corr.x;
+    mv.y = vel.y * DT + g.corr.y;
+    mv.z = vel.z * DT + g.corr.z;
+    g.clip(body, mv);
+    pos.x += mv.x;
+    pos.y += mv.y;
+    pos.z += mv.z;
+    g.afterMove(body, DT);
+    // Wave 2's rest of the frame on a rope that rides a hull: the clocks, the camera's pull, the lean and the arm.
+    const lively = g.lively;
+    if (lively) g.look(body, DT);
+    // The mark after the step, as the game works it out: from behind the body toward the hull's rear, and up off it for a
+    // share of every 64 frames, so its hull's cast both meets the hull and misses it, and the hold on a hull runs.
+    placeHullBox();
+    hat.x = pos.x;
+    hat.y = pos.y + GRAPPLE_TUNE.ropeY;
+    hat.z = pos.z;
+    const up = (frame & 63) >= 40;
+    hv.eyeX = pos.x;
+    hv.eyeY = pos.y + 2;
+    hv.eyeZ = pos.z - 4;
+    hv.dirX = 0;
+    hv.dirY = up ? 0.6 : 0;
+    hv.dirZ = up ? 0.8 : 1;
+    hv.orbit = 0;
+    hv.hand = hat;
+    hv.filter = body.filter;
+    hv.exclude = null;
+    g.probeMark(physics, noWaterHull, DT);
+    if (counting) {
+      if (g.attached) seenHull.attached++;
+      if (g.onHull) seenHull.onHull++;
+      if (g.hulls.markedCount > 0) seenHull.marked++;
+      if (g.towed) seenHull.towed++;
+      if (g.taut) seenHull.taut++;
+      if (done.pulls > pulls) seenHull.pulled++;
+      if (lively) seenHull.looked++;
+      if (g.mark.vehicle && g.mark.shows && !g.mark.held) seenHull.markOn++;
+      else if (g.mark.vehicle && g.mark.held) seenHull.markHeld++;
+      else seenHull.markOff++;
+    }
+  };
+  for (let k = 0; k < 600; k++) hstep(true);
+  const hbest = await measure(hstep);
+  console.log(JSON.stringify({ frames: FRAMES, made: hbest.made, scavenges: hbest.scavenges, hooked, seen: seenHull, done, attached: g.attached, why: g.lastLetGo }));
+  process.exit(0);
 }
 
 // Wave 3's hooked prop, run alone (`grappleAllocOwn.ts prop`), so the hook's call sites meet the stand-in prop and

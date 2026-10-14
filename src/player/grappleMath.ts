@@ -110,12 +110,15 @@ export function sagOf(span: number, slack: number): number {
   return Math.sqrt((3 * span * slack) / 8);
 }
 
-/** What the mark's point is: the kinds the dart may hold (`terrain`, `still`), hook (`prop`), and the ones it refuses. */
-export type MarkKind = 'none' | 'terrain' | 'still' | 'pane' | 'water' | 'door' | 'prop' | 'moving';
+/**
+ * What the mark's point is: the kinds the dart may hold (`terrain`, `still`, and from wave 3 a `vehicle`'s hull, moving or
+ * not), hook (`prop`), and the ones it refuses (a rideable `creature`, which is a creature to the rope this pass).
+ */
+export type MarkKind = 'none' | 'terrain' | 'still' | 'pane' | 'water' | 'door' | 'prop' | 'moving' | 'vehicle' | 'creature';
 
-/** Whether a kind holds the dart as an anchor: something that stands still. */
+/** Whether a kind holds the dart as an anchor: something that stands still, or a vehicle's hull. */
 export function kindHolds(kind: MarkKind): boolean {
-  return kind === 'terrain' || kind === 'still';
+  return kind === 'terrain' || kind === 'still' || kind === 'vehicle';
 }
 
 /** Whether the dart bites a kind at all: an anchor, or a loose prop it hooks (wave 3), which the mass rule then judges. */
@@ -253,6 +256,25 @@ export function clipInto(
   relative: boolean,
   out: { x: number; y: number; z: number },
 ): number {
+  clipIntoRec(v, n, sv, relative, out, CLIP_ANSWER);
+  return CLIP_ANSWER.into;
+}
+
+/** `clipInto`'s answer, written into a kept record: what a caller asks that runs too seldom for the call to be built into it, where a number handed back would be a fresh one. */
+export interface ClipAnswer {
+  into: number;
+}
+const CLIP_ANSWER: ClipAnswer = { into: 0.5 };
+
+/** `clipInto` with its answer written into `res` (the arithmetic is this function's; `clipInto` hands it back). */
+export function clipIntoRec(
+  v: { x: number; y: number; z: number },
+  n: { x: number; y: number; z: number },
+  sv: { x: number; y: number; z: number } | null,
+  relative: boolean,
+  out: { x: number; y: number; z: number },
+  res: ClipAnswer,
+): void {
   const rel = relative && sv !== null;
   const rx = rel ? v.x - sv.x : v.x;
   const ry = rel ? v.y - sv.y : v.y;
@@ -262,12 +284,13 @@ export function clipInto(
     out.x = v.x + n.x * into;
     out.y = v.y + n.y * into;
     out.z = v.z + n.z * into;
-    return into;
+    res.into = into;
+    return;
   }
   out.x = v.x;
   out.y = v.y;
   out.z = v.z;
-  return 0;
+  res.into = 0;
 }
 
 /**
@@ -569,4 +592,287 @@ export function windGainFor(speed: number, tune: { windGain: number; windFrom: n
   if (!(tune.windGain > 0) || !(speed > tune.windFrom)) return 0;
   if (!(speed < tune.windTo)) return tune.windGain;
   return (tune.windGain * (speed - tune.windFrom)) / Math.max(1e-6, tune.windTo - tune.windFrom);
+}
+
+// --- vehicles on the rope (wave 3) -----------------------------------------------------------------------
+
+/**
+ * The hull's share of a catch on a rope between the player (mass `m`) and a hull (mass `M`), by the reduced mass
+ * `μ = m·M/(m + M)` (§3.14): the relative speed the rope takes off splits as `m/(m + M)` to the hull and the rest to the
+ * player. A bike of 320 kg takes a fifth of a catch from an 80 kg player, a pod of 900 a twelfth, a walker a
+ * thirty-fourth; something that takes no pull (`M` infinite) takes nothing and the player all of it.
+ */
+export function reducedShare(m: number, M: number): number {
+  const n = NUMS;
+  n[0] = m;
+  n[1] = M;
+  reducedShareIn(n);
+  return n[0];
+}
+
+// The hull's rules below are each written once, over a kept record of numbers (`n`, its slots named on each): the hook
+// calls those every frame from methods too big for the compiler to build every call into, and a number handed to a call
+// that is not built in, or handed back by one, is a fresh number (measured: one run in five made 6 to 30 B a frame, as
+// whichever of them the compiler left out turned on when it reached them). The plain forms are the same rules for
+// anything that is not every frame (a test, the console), through a record of this file's own.
+const NUMS = new Float64Array(5);
+
+/** `reducedShare` over a record: `n[0]` the player's mass, `n[1]` the hull's (infinite: it takes no pull); the share into `n[0]`. */
+export function reducedShareIn(n: Float64Array): void {
+  const M = n[1];
+  n[0] = M < Infinity ? n[0] / (n[0] + M) : 0;
+}
+
+/** The slip's numbers a rope touching a hull reads (§3.18), each `GRAPPLE_TUNE`'s. */
+export interface SlipTune {
+  slipKeep: number;
+  slipDecel: number;
+  slipTurn: number;
+  slipReel: number;
+  slipCorr: number;
+}
+
+/**
+ * The slip's catch (§3.18, 1): of `take` m/s the constraint would take off the relative speed in a frame of `dt`, what
+ * the rope takes: whole up to the allowance `left` (which starts at `slipKeep` and comes back once the rope stops pulling)
+ * and `slipDecel` a second past it. The rest pays out. `slipLeft` is the allowance after it.
+ */
+export function slipCatch(take: number, left: number, tune: SlipTune, dt: number): number {
+  const n = NUMS;
+  n[0] = take;
+  n[1] = left;
+  n[2] = dt;
+  slipCatchIn(n, tune);
+  return n[0];
+}
+
+/** `slipCatch` over a record: `n[0]` the take, `n[1]` the allowance left, `n[2]` the frame; what the rope takes into `n[0]`. */
+export function slipCatchIn(n: Float64Array, tune: SlipTune): void {
+  n[0] = Math.min(n[0], n[1] + tune.slipDecel * n[2]);
+}
+
+/** What is left of the catch's whole allowance once `took` was taken in a frame of `dt` (§3.18, 1). */
+export function slipLeft(took: number, left: number, tune: SlipTune, dt: number): number {
+  const n = NUMS;
+  n[0] = took;
+  n[1] = left;
+  n[2] = dt;
+  slipLeftIn(n, tune);
+  return n[0];
+}
+
+/** `slipLeft` over a record: `n[0]` what was taken, `n[1]` the allowance left, `n[2]` the frame; the allowance after into `n[0]`. */
+export function slipLeftIn(n: Float64Array, tune: SlipTune): void {
+  n[0] = Math.max(0, n[1] - Math.max(0, n[0] - tune.slipDecel * n[2]));
+}
+
+/**
+ * Whether a turn slips (§3.18, 2): the relative speed across the rope (its square `vt2`) asks more than `slipTurn` m/s²
+ * of centripetal pull on a free span `dist` long. A swing from level asks 40.6 and one pumped to 120 degrees 61, so no
+ * swing under a hull slips; a whip round a hull at 40 m/s on 10 m asks 160.
+ */
+export function slipsTurn(vt2: number, dist: number, tune: SlipTune): boolean {
+  const n = NUMS;
+  n[0] = vt2;
+  n[1] = dist;
+  return slipsTurnIn(n, tune);
+}
+
+/** `slipsTurn` over a record: `n[0]` the square of the speed across the rope, `n[1]` the free span. */
+export function slipsTurnIn(n: Float64Array, tune: SlipTune): boolean {
+  return n[1] > 0.5 && n[0] / n[1] > tune.slipTurn;
+}
+
+/** How much of the free span a hull dragging a bend or the anchor away shortened it by past `slipReel` (§3.18, 3): paid out. */
+export function slipReelExcess(grow: number, tune: SlipTune, dt: number): number {
+  const n = NUMS;
+  n[0] = grow;
+  n[1] = dt;
+  slipReelExcessIn(n, tune);
+  return n[0];
+}
+
+/** `slipReelExcess` over a record: `n[0]` what the free span grew by, `n[1]` the frame; the excess into `n[0]`. */
+export function slipReelExcessIn(n: Float64Array, tune: SlipTune): void {
+  n[0] = Math.max(0, n[0] - tune.slipReel * n[1]);
+}
+
+/**
+ * The parked brake's budget (§3.18): refilled by `parkHold × M × g × dt` every frame and holding at most
+ * `parkHold × M × g × max(dt, 1/60)`, one physics step's worth at 144 fps and the frame's at 30, so a pull that arrives
+ * only on the frames that carry a step meets the same brake a second as one that arrives on every frame.
+ */
+export function brakeBudget(budget: number, mass: number, g: number, dt: number, tune: { parkHold: number }): number {
+  const n = NUMS;
+  n[0] = budget;
+  n[1] = mass;
+  n[2] = g;
+  n[3] = dt;
+  brakeBudgetIn(n, tune);
+  return n[0];
+}
+
+/** `brakeBudget` over a record: `n[0]` the budget, `n[1]` the hull's mass, `n[2]` gravity, `n[3]` the frame; the budget into `n[0]`. */
+export function brakeBudgetIn(n: Float64Array, tune: { parkHold: number }): void {
+  const per = tune.parkHold * n[1] * n[2];
+  const dt = n[3];
+  n[0] = Math.min(n[0] + per * dt, per * Math.max(dt, 1 / 60));
+}
+
+/** A pull's level part, what the brake holds of it, and the budget left (`parkedLevel`), written in place. */
+export interface ParkedPull {
+  x: number;
+  z: number;
+  budget: number;
+  /** What the brake held of the pull (N·s). */
+  held: number;
+}
+
+/**
+ * The level part of a pull `J` (an impulse, N·s) that gets past the parked brake: with the hull `braked` (at rest at the
+ * rope's first pull, nothing driving it), the kept `budget` holds as much of it as it can, and only the rest goes to the
+ * hull. Writes the level parts left and the budget left into `out`; answers what the brake held.
+ */
+export function parkedLevel(J: { readonly x: number; readonly z: number }, braked: boolean, budget: number, out: ParkedPull): number {
+  out.budget = budget;
+  parkedLevelIn(J, braked, out);
+  return out.held;
+}
+
+/**
+ * `parkedLevel` with the budget going in where it comes out (`out.budget`, the kept record the hook hands every frame)
+ * and what the brake held in `out.held`: nothing handed over or back is a bare number.
+ */
+export function parkedLevelIn(J: { readonly x: number; readonly z: number }, braked: boolean, out: ParkedPull): void {
+  const budget = out.budget;
+  const level = Math.sqrt(J.x * J.x + J.z * J.z);
+  const held = braked && level > 0 ? Math.min(level, budget) : 0;
+  const k = level > 0 ? (level - held) / level : 0;
+  out.x = J.x * k;
+  out.z = J.z * k;
+  out.budget = budget - held;
+  out.held = held;
+}
+
+/** A tow (§3.18): a rope touching a hull that pulled within `towHold` counts as taut for the slide, and the tow's friction and damping apply. */
+export function towing(onHull: boolean, sincePull: number, tune: { towHold: number }): boolean {
+  const n = NUMS;
+  n[0] = sincePull;
+  return towingIn(onHull, n, tune);
+}
+
+/** `towing` over a record: `n[0]` the time since the rope last pulled. */
+export function towingIn(onHull: boolean, n: Float64Array, tune: { towHold: number }): boolean {
+  return onHull && n[0] < tune.towHold;
+}
+
+/**
+ * Whether a roped hull is still (§3.18): its lag over the frame, `(|v| + |ω|·r)·(acc + dt)`, under `hullLag`, or under
+ * half of it once it was taken for moving (`marked`), so it never flickers. A still hull stays with the character
+ * controller and takes the still haul; a moving one is met by the hull test.
+ */
+export function hullStill(lag: number, marked: boolean, tune: { hullLag: number }): boolean {
+  const n = NUMS;
+  n[0] = lag;
+  return hullStillIn(n, marked, tune);
+}
+
+/** `hullStill` over a record: `n[0]` the hull's lag over the frame. */
+export function hullStillIn(n: Float64Array, marked: boolean, tune: { hullLag: number }): boolean {
+  const lag = n[0];
+  return !(lag > tune.hullLag || (marked && lag > tune.hullLag / 2));
+}
+
+// --- poses, in kept arrays (a turn is x, y, z, w) -------------------------------------------------------
+
+/**
+ * `v` turned by the unit turn `q` (or by its inverse), into `out` (which may be `v`): three numbers from `vo` in `v` to
+ * `oo` in `out`. Arrays and offsets rather than numbers, since the rope's every-frame mapping calls this and a number
+ * handed to a call the engine does not build into its caller is a fresh number.
+ */
+export function turnBy(q: Float64Array, inverse: boolean, v: Float64Array, vo: number, out: Float64Array, oo: number): void {
+  const x = v[vo];
+  const y = v[vo + 1];
+  const z = v[vo + 2];
+  const qx = inverse ? -q[0] : q[0];
+  const qy = inverse ? -q[1] : q[1];
+  const qz = inverse ? -q[2] : q[2];
+  const qw = q[3];
+  const tx = 2 * (qy * z - qz * y);
+  const ty = 2 * (qz * x - qx * z);
+  const tz = 2 * (qx * y - qy * x);
+  out[oo] = x + qw * tx + (qy * tz - qz * ty);
+  out[oo + 1] = y + qw * ty + (qz * tx - qx * tz);
+  out[oo + 2] = z + qw * tz + (qx * ty - qy * tx);
+}
+
+/**
+ * A pose led forward by `tau` seconds of its velocity `v` and turn rate `w` (the clamp's own `leadPose`): `p + v·tau`,
+ * and the turn by `|w|·tau` about `w`, then `q`. Everything in kept arrays; `lead[0]` is `tau`.
+ */
+export function leadPose(p: Float64Array, q: Float64Array, v: Float64Array, w: Float64Array, lead: Float64Array, outP: Float64Array, outQ: Float64Array): void {
+  const tau = lead[0];
+  outP[0] = p[0] + v[0] * tau;
+  outP[1] = p[1] + v[1] * tau;
+  outP[2] = p[2] + v[2] * tau;
+  const wl = len3(w[0], w[1], w[2]);
+  const ang = wl * tau;
+  if (!(ang > 1e-12)) {
+    outQ[0] = q[0];
+    outQ[1] = q[1];
+    outQ[2] = q[2];
+    outQ[3] = q[3];
+    return;
+  }
+  const s = Math.sin(ang / 2) / wl;
+  const ax = w[0] * s;
+  const ay = w[1] * s;
+  const az = w[2] * s;
+  const aw = Math.cos(ang / 2);
+  // (a) * (q)
+  const qx = q[0];
+  const qy = q[1];
+  const qz = q[2];
+  const qw = q[3];
+  outQ[0] = aw * qx + ax * qw + ay * qz - az * qy;
+  outQ[1] = aw * qy - ax * qz + ay * qw + az * qx;
+  outQ[2] = aw * qz + ax * qy - ay * qx + az * qw;
+  outQ[3] = aw * qw - ax * qx - ay * qy - az * qz;
+}
+
+/** The turn a share `share[0]` of the way from `a` to `b` (the spherical ease, the shorter way round), into `out`. */
+export function slerpTurn(a: Float64Array, b: Float64Array, share: Float64Array, out: Float64Array): void {
+  const t = share[0];
+  let bx = b[0];
+  let by = b[1];
+  let bz = b[2];
+  let bw = b[3];
+  let dot = a[0] * bx + a[1] * by + a[2] * bz + a[3] * bw;
+  if (dot < 0) {
+    dot = -dot;
+    bx = -bx;
+    by = -by;
+    bz = -bz;
+    bw = -bw;
+  }
+  let ka: number;
+  let kb: number;
+  if (dot > 0.9995) {
+    ka = 1 - t;
+    kb = t;
+  } else {
+    const half = Math.acos(dot);
+    const s = Math.sin(half);
+    ka = Math.sin((1 - t) * half) / s;
+    kb = Math.sin(t * half) / s;
+  }
+  const x = a[0] * ka + bx * kb;
+  const y = a[1] * ka + by * kb;
+  const z = a[2] * ka + bz * kb;
+  const w = a[3] * ka + bw * kb;
+  const l = Math.sqrt(x * x + y * y + z * z + w * w) || 1;
+  out[0] = x / l;
+  out[1] = y / l;
+  out[2] = z / l;
+  out[3] = w / l;
 }

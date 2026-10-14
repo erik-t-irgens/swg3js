@@ -761,7 +761,7 @@ for (const fps of FPS) {
 // with the engine's answers kept, held to nothing a frame.
 {
   const alone = JSON.parse(
-    execFileSync(process.execPath, ['--expose-gc', fileURLToPath(new URL('./grappleAllocOwn.ts', import.meta.url)), 'prop'], { encoding: 'utf8' })
+    execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', fileURLToPath(new URL('./grappleAllocOwn.ts', import.meta.url)), 'prop'], { encoding: 'utf8' })
       .trim()
       .split('\n')
       .pop() ?? '{}',

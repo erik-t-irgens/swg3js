@@ -324,6 +324,21 @@ const springAt = new THREE.Vector3();
 /** Every vehicle's colliders by handle, so a hull that hit something can tell another ship from a station. Filled by the constructor, emptied by dispose. */
 const HULLS = new Map<number, Vehicle>();
 
+/**
+ * The vehicle a collider belongs to, or null: how the grapple's dart and mark tell a hull it struck from anything else
+ * (a lookup in the map the constructor fills and `dispose` empties, so a disposed hull's colliders answer null).
+ */
+export function vehicleOfCollider(handle: number): Vehicle | null {
+  return HULLS.get(handle) ?? null;
+}
+
+/** A pull's impulse and where it is put, handed over by the one caller in kept records (`Vehicle.pulled`). */
+export interface PullVector {
+  x: number;
+  y: number;
+  z: number;
+}
+
 export class Vehicle {
   readonly group = new THREE.Group();
   readonly seat = new THREE.Object3D();
@@ -431,6 +446,16 @@ export class Vehicle {
   }
   private readonly prevVel = new THREE.Vector3();
   private prevVelValid = false;
+  /**
+   * The downward speed (m/s, never negative) a grappling rope's pull put on the hull (`pulled`) that the hull still falls
+   * with: the hard floor reads the fall less this, and only while it is not nought, so a rope hauling a parked speeder down
+   * against the ground is not taken for a fall onto it. Each update holds it to the hull's own downward speed then and
+   * lets it go once the hull falls no more (a pull's speed can take a few steps to bring a corner under the ground, while
+   * the springs slow it). Nought on every hull nobody ropes.
+   */
+  toldDown = 0;
+  /** Raised each time the garage refits the hull (a part swapped, the paint changed): a grapple anchored on it lets go. */
+  refits = 0;
   /** A step whose own impulse (a hop, a spawn) must not read as a hit. */
   private skipHitCheck = true;
   private hopCd = 0;
@@ -1352,6 +1377,51 @@ export class Vehicle {
   }
 
   /**
+   * A grappling rope's pull on the hull (the only caller is the grapple, which has already taken a parked hull's brake
+   * off it): the impulse `j` put on the body at the world point `at`, and the same change of speed told to both of the
+   * hull's own hit tests, so neither reads the rope as a collision -- added to what the next step's test measures from
+   * (as the eased cap tells it of its own change), and its downward part kept for the hard floor (`toldDown`). Reads no
+   * tune and nothing of the player. A disposed hull's body is never asked anything.
+   */
+  pulled(j: PullVector, at: PullVector): void {
+    if (this.disposed) return;
+    const body = this.body;
+    if (!body.isValid()) return;
+    body.applyImpulseAtPoint(j, at, true);
+    const m = body.mass();
+    if (!(m > 0)) return;
+    if (this.prevVelValid) {
+      this.prevVel.x += j.x / m;
+      this.prevVel.y += j.y / m;
+      this.prevVel.z += j.z / m;
+    }
+    if (j.y < 0) this.toldDown -= j.y / m;
+  }
+
+  /**
+   * Whether a collider rides one of the hull's wings, and whether that wing is swinging now: `none` for a collider that
+   * rides no wing (or is not the hull's), `still` for one on a wing at rest, `moving` for one on a wing on its way open or
+   * shut. A grapple anchored on such a piece lets go as its wing starts to move. Walks the piece's parents, nothing made.
+   */
+  wingStateOf(handle: number): 'none' | 'still' | 'moving' {
+    const pieces = this.movingPieces;
+    for (let i = 0; i < pieces.length; i++) {
+      const p = pieces[i];
+      if (p.collider.handle !== handle) continue;
+      const goal = this.wings.target ? 1 : 0;
+      const list = this.wings.list;
+      for (let w = 0; w < list.length; w++) {
+        const wing = list[w];
+        let o: THREE.Object3D | null = p.mesh;
+        while (o && o !== wing.pivot) o = o.parent;
+        if (o) return wing.open !== goal ? 'moving' : 'still';
+      }
+      return 'still';
+    }
+    return 'none';
+  }
+
+  /**
    * The wings open in flight with room under them and close on the ground (the flight rule,
    * `wingsWanted`, on last step's height) unless a hand over the rule says otherwise (`wingWant`),
    * each turned about its own Z over its own time, the way the client turns the wing objects it
@@ -1780,6 +1850,15 @@ export class Vehicle {
     const l = body.linvel();
     const a = body.angvel();
     lv.set(l.x, l.y, l.z);
+    // What a grappling rope's pull put downward on the hull and the hull still falls with, for the hard floor below:
+    // never more than its downward speed now, and let go of once it falls no more. Read only while there is any.
+    let told = 0;
+    if (this.toldDown !== 0) {
+      if (lv.y < 0) {
+        if (this.toldDown > -lv.y) this.toldDown = -lv.y;
+        told = this.toldDown;
+      } else this.toldDown = 0;
+    }
     av.set(a.x, a.y, a.z);
     up.copy(WORLD_UP).applyQuaternion(q);
     fwd.set(0, 0, 1).applyQuaternion(q).setY(0).normalize();
@@ -1888,9 +1967,11 @@ export class Vehicle {
         if (under > 0.08) {
           this.pos.y += under + 0.02;
           body.setTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z }, true);
-          if (lv.y < -HIT_THRESHOLD) {
-            this.justHit = Math.max(this.justHit, -lv.y);
-            this.hurtHull((-lv.y - HIT_THRESHOLD) * HIT_DAMAGE);
+          // A fall onto the ground, less what a grappling rope pulled it down by (read only while there is any).
+          const fall = told !== 0 ? lv.y + told : lv.y;
+          if (fall < -HIT_THRESHOLD) {
+            this.justHit = Math.max(this.justHit, -fall);
+            this.hurtHull((-fall - HIT_THRESHOLD) * HIT_DAMAGE);
           }
           if (lv.y < 0) {
             lv.y = 0;

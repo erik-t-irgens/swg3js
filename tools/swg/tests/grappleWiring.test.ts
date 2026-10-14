@@ -66,7 +66,8 @@ const both: [string, string, string][] = [
   ['the step before the move runs while the hook is out', 'if (this.grapple.out) this.grapple.beforeMove(this.gview, dt);', 'if (this.hooks && g.out) g.beforeMove(this, dt);'],
   ['the snap is off while swinging', '|| (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();', '|| (this.hooks && g.attached && g.modes.swinging)) this.controller.disableSnapToGround();'],
   ['the collider sync runs only while attached or in the fast flight after a let-go', 'if (this.grapple.attached || this.grapple.released) {\n      // On the rope, or in the fast flight after letting go of it: the capsule\'s collider put where the body is', 'if (this.hooks && (g.attached || g.released)) {\n      g.syncCollider(this);'],
-  ['the clip (and the slam) runs only while attached or in that flight', 'if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview);', 'if (this.hooks && (g.attached || g.released)) g.clip(this);'],
+  ['the clip (and the slam, and from wave 3 the hull test over the controller\'s move) runs only while attached or in that flight', 'if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview, mv);', 'if (this.hooks && (g.attached || g.released)) g.clip(this, mv);'],
+  ['the swim is handed the tow only while the hook is out (wave 3)', 'sw.towed = this.grapple.out && this.grapple.towsSwimmer(this.gview, sw);', 'sw.towed = this.hooks && g.out && g.towsSwimmer(this, sw);'],
   ['the step after the move runs while the hook is out', 'if (this.grapple.out) this.grapple.afterMove(this.gview, dt);', 'if (this.hooks && g.out) g.afterMove(this, dt);'],
   ['the rest of the frame (the stagger, the jolt, the camera\'s pull, the lean, the arm) runs while anything of it is lively', 'if (this.grapple.lively) this.grapple.look(this.gview, dt);', 'if (this.hooks && g.lively) g.look(this, dt);'],
 ];
@@ -210,11 +211,73 @@ ok(grapple.includes("import type { HookableProp } from '../world/looseProps.ts';
 ok(player.includes('this.grapple.stats = this.stats;'), "the player hands the hook its own stats, so its range, reel, haul, sway and strength read through them");
 ok(/controller\.setCharacterMass\(80\);/.test(player) && /export const GRAPPLE_PLAYER_MASS = 80;/.test(grapple), "the mass rule weighs a thing against the player's own 80 kg, the controller's");
 const draw = method(player, '  drawGrapple(camera: THREE.PerspectiveCamera, screenH: number): void {');
-ok(inOrder(draw, ['if (g.holding) g.placeThingEnd();', 'ribbon.lay(g.rope.pts, g.rope.n + 1, h, camera);']).ok, "a hooked prop's end is carried onto the prop as it is drawn, before the ribbon is laid");
+ok(inOrder(draw, ['if (g.holding) g.placeThingEnd();', 'const pts = g.rope.hullPoints > 0 ? g.drawnPoints(this.ropeDrawn) : g.rope.pts;', 'ribbon.lay(pts, g.rope.n + 1, h, camera);']).ok, "a hooked prop's end is carried onto the prop as it is drawn, before the ribbon is laid, and a point on a hull is laid where the hull is drawn");
 const after = method(grapple, '  afterMove(b: GrappleBody, dt: number): void {');
 ok(inOrder(after, ["if (this.state === 'holding') {", 'this.stepThing(b, dt);', "if (this.state !== 'attached') {"]).ok, "the step after the move runs a hooked prop's frame (behind `out`, as both the player and the harness call it) and nothing of the anchor's");
 ok(/const haul = live && \(g\.attached \|\| !!g\.holding\) && g\.keys\.haul;/.test(sounds), "the yank winds the haul's own rumble");
 const fly = method(grapple, '  private flyDart(b: GrappleBody, dt: number): void {');
 ok(inOrder(fly, ["kind === 'prop' ? this.propAt?.(hit.collider.handle)", "this.whoMovesFor(prop.mass) === 'thing'", 'this.attachThing(', "this.say?.('Too heavy to pull.');"]).ok, 'the dart hooks a prop only when the mass rule moves the thing, and says so when it is too heavy');
+
+// Wave 3b: the vehicles this browser simulates. The class every vehicle shares is the grapple's to call into only through
+// its one pull, nothing of the player's goes into it, and only the grapple takes a hull out of the controller.
+{
+  const { readdirSync, statSync } = await import('node:fs');
+  const { join, relative } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const srcDir = fileURLToPath(new URL('../../../src/', import.meta.url));
+  const files: string[] = [];
+  const walk = (d: string) => {
+    for (const f of readdirSync(d)) {
+      const p = join(d, f);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.ts$/.test(f)) files.push(p);
+    }
+  };
+  walk(srcDir);
+  const callers = (re: RegExp) =>
+    files
+      .filter((f) => re.test(readFileSync(f, 'utf8')))
+      .map((f) => relative(srcDir, f).replace(/\\/g, '/'))
+      .sort();
+  const pulls = callers(/\.pulled\(/);
+  ok(pulls.length === 1 && pulls[0] === 'player/grappleFrames.ts', `nothing in src/ calls Vehicle.pulled but the grapple's own vehicle source (${pulls.join(', ')})`);
+  const frames = read('../../../src/player/grappleFrames.ts');
+  ok(/pull\(j: \{ x: number; y: number; z: number \}, at: \{ x: number; y: number; z: number \}\): void \{\n\s*this\.v\?\.pulled\(j, at\);/.test(frames) && /src\.pull\(j, at\);/.test(grapple), "and that source's pull is the one the grapple's pullHulls makes, with the brake already taken off");
+  const vehicle = read('../../../src/vehicles/vehicle.ts');
+  ok(!/from '\.\.\/player\//.test(vehicle) && !/import\(['"]\.\.\/player\//.test(vehicle), 'vehicle.ts imports nothing of src/player');
+  const marks = callers(/\.markWalkThrough\(/);
+  ok(marks.join(',') === 'player/grappleFrames.ts,world/world.ts', `nothing in src/ marks a collider walk-through but the grapple's hulls and the followers' bodies (${marks.join(', ')})`);
+  ok(/for \(const c of m\.colliders\) this\.physics\.markWalkThrough\(c, on\);/.test(read('../../../src/world/world.ts')), "and the followers' marking is of a follower's own colliders, never a hull's");
+  const remote = read('../../../src/net/remoteBodies.ts');
+  const peerColliders = remote.match(/createCollider\([^\n]*\n\s*[a-z]\.collider\.setCollisionGroups\(PEER_GROUPS\);/g) ?? [];
+  ok(peerColliders.length === 2 && peerColliders.every((c) => c.includes('.setSensor(true)')) && /const PEER_GROUPS = groups\(Group\.peer, 0\);/.test(remote), "remoteBodies.ts' peer colliders keep PEER_GROUPS (a filter of nought) and their sensor flag");
+  ok(/readonly hullController: RAPIER_NS\.KinematicCharacterController \| null;/.test(grapple) && (player.match(/makeHullController\(/g) ?? []).length === 1 && /this\.hullController = makeHullController\(physics\.world\);/.test(player) && /return self\.aboard \? null : self\.hullController;/.test(player), "the hull test's controller is made once, in the player's constructor, and handed to the grapple (none aboard a ship's rooms)");
+  // That controller is one maker's, which the harness calls too, and its offset, slopes and mass are the player's own
+  // controller's (`makeBody`'s), so every vehicle test runs the hull test the game runs.
+  const maker = frames.slice(frames.indexOf('export function makeHullController('), frames.indexOf('\n}\n', frames.indexOf('export function makeHullController(')));
+  const makeBody = method(player, '  private static makeBody(');
+  const setting = (src: string, re: RegExp) => (src.match(re) ?? [])[1] ?? '?';
+  const same = [/createCharacterController\(([^)]*)\)/, /setMaxSlopeClimbAngle\(([^;]*)\);/, /setMinSlopeSlideAngle\(([^;]*)\);/, /setCharacterMass\(([^)]*)\)/].map((re) => [setting(maker, re), setting(makeBody, re)]);
+  ok(
+    maker.length > 0 && same.every(([a, b]) => a !== '?' && a === b) && /hc\.disableAutostep\(\);/.test(maker) && /hc\.disableSnapToGround\(\);/.test(maker) && /hc\.setApplyImpulsesToDynamicBodies\(false\);/.test(maker),
+    `the hull test's controller has the player's own offset, slopes and mass (${same.map(([a]) => a).join(', ')}), no autostep, no snap and no pushing`,
+  );
+  ok(/this\.hullController = makeHullController\(world\);/.test(harness) && !/createCharacterController\(0\.04\);\s*hc\./.test(harness), 'and the harness makes it with the very same maker, never a copy');
+  // Every hand-over of wave 3b in the game, each of which the harness makes for itself: a line lost from the game alone
+  // would leave the rope ignoring every vehicle in play while every behaviour test passed.
+  ok(main.includes('this.player.grapple.vehicleOf = vehicleOfCollider;') && harness.includes('this.grapple.vehicleOf = vehicleOfCollider;'), 'the game and the harness hang the vehicles\' own collider lookup on the hook');
+  ok(inOrder(markStep, ['v.vehicles = this.world.vehicles;', 'g.probeMark(']).ok, "the mark's probe is handed the world's vehicles before it runs");
+  const fireNow = method(main, '  private fireGrapple(): string {');
+  ok(/g\.fire\([^;]*, g\.markTarget\(\)\);/.test(fireNow) && /g\.fire\([^;]*, g\.markTarget\(\)\);/.test(harness), "the fire hands the dart the mark's hull's own motion to aim true against, in the game and the harness");
+  ok(inOrder(update, ['this.grappleVehicles = world.vehicles;', 'this.grapple.refreshModes(this.gview);', 'this.grapple.beforeMove(']).ok && /get vehicles\(\) \{\s*return self\.grappleVehicles;\s*\}/.test(player), "the player's update hands the hook the world's vehicles before the hook's first step of the frame");
+  ok(
+    inOrder(update, ['const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);', 'this.groundUnder = ground;', 'if (this.grapple.out) this.grapple.afterMove(this.gview, dt);']).ok &&
+      inOrder(frame, ['this.ground = this.groundAt ? this.groundAt(this.pos.x, this.pos.z) : Number.NEGATIVE_INFINITY;', 'if (this.hooks && g.out) g.afterMove(this, dt);']).ok &&
+      /get ground\(\) \{\s*return self\.groundUnder;\s*\}/.test(player),
+    "the terrain's height under the body (the towed floor's) is read after the move and before the step after it, in both",
+  );
+  const garage = read('../../../src/vehicles/garage.ts');
+  ok(inOrder(method(garage, '  async refit('), ['refitSwap(', 'v.refits++;']).ok, "a refit's swap counts on the hull, which lets an anchor on it go");
+}
 
 console.log(`\n${checks} checks passed`);

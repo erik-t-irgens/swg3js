@@ -10,8 +10,27 @@ import {
   WALKABLE,
   aimTrue,
   armAimFor,
+  brakeBudget,
+  brakeBudgetIn,
   camScaleFor,
   clipInto,
+  clipIntoRec,
+  hullStill,
+  hullStillIn,
+  parkedLevel,
+  parkedLevelIn,
+  reducedShare,
+  reducedShareIn,
+  slipCatch,
+  slipCatchIn,
+  slipLeft,
+  slipLeftIn,
+  slipReelExcess,
+  slipReelExcessIn,
+  slipsTurn,
+  slipsTurnIn,
+  towing,
+  towingIn,
   dazeAt,
   grappleMutes,
   gravityAddBack,
@@ -47,6 +66,7 @@ import {
   type MarkKind,
 } from '../../../src/player/grappleMath.ts';
 import { SWIM_DEPTH } from '../../../src/player/swimStep.ts';
+import { newBoxHit, quadMeetsBox, rayBox, spanDepth } from '../../../src/player/grappleBox.ts';
 
 const grappleSrc = readFileSync(new URL('../../../src/player/grapple.ts', import.meta.url), 'utf8');
 import { TERRAIN_GROUP, STILL_FLAGS } from '../../../src/player/grappleRope.ts';
@@ -235,7 +255,8 @@ const rand = () => {
 {
   const src = readFileSync(new URL('../../../src/player/grapple.ts', import.meta.url), 'utf8');
   const calls = src.split('\n').filter((l) => l.includes('gravityAddBack(') && !l.includes('import'));
-  ok(calls.length === 1 && /if \(T\.gravity !== 1 && m\.swinging\) vel\.y \+= gravityAddBack\(/.test(calls[0]), `nothing calls gravityAddBack at a scale of 1, nor off the rope: its one call is behind gravity !== 1 and swinging (${calls.length} call)`);
+  // Two calls from wave 3: the still rope's step and the step of a rope on a hull, each behind the very same guard.
+  ok(calls.length === 2 && calls.every((c) => /if \(T\.gravity !== 1 && m\.swinging\) vel\.y \+= gravityAddBack\(/.test(c)), `nothing calls gravityAddBack at a scale of 1, nor off the rope: each of its calls (the still rope's and a hull's) is behind gravity !== 1 and swinging (${calls.length} calls)`);
   ok(gravityAddBack(1, 9.8, 1 / 60) === 0 && Math.abs(gravityAddBack(0.6, 20.32, 1 / 60) - 0.4 * 20.32 / 60) < 1e-12, 'the add-back is (1 - scale) g dt');
 }
 
@@ -441,6 +462,252 @@ const rand = () => {
   ok(cur.x === 0 && cur.y === 0 && cur.z === 0 && cur.w === 1, 'and back to upright exactly, the identity to the bit');
   ok(windGainFor(30, T) === 0, 'the speed wind ships off (windGain 0)');
   ok(windGainFor(12, { windGain: 0.5, windFrom: 12, windTo: 35 }) === 0 && windGainFor(35, { windGain: 0.5, windFrom: 12, windTo: 35 }) === 0.5, 'switched on, it is nought under 12 m/s and 0.5 at 35');
+}
+
+// Vehicles on the rope (wave 3b, §3.18): the reduced mass's share, the slip at its edges, the parked brake and its
+// budget, the tow's hold and a hull's stillness band.
+{
+  ok(reducedShare(80, 320) === 0.2 && Math.abs(reducedShare(80, 880) - 1 / 12) < 1e-15 && reducedShare(80, Infinity) === 0, `a bike (320 kg) takes a fifth of an 80 kg player's catch, a pod (880) a twelfth, a hull that takes no pull nothing (${reducedShare(80, 900).toFixed(4)} for a 900 kg pod)`);
+  const S = { slipKeep: 12, slipDecel: 60, slipTurn: 80, slipReel: 15, slipCorr: 0.25 };
+  const dt = 1 / 60;
+  ok(slipCatch(12, 12, S, dt) === 12 && slipLeft(12, 12, S, dt) === 1, 'a catch of 12 m/s with the whole allowance left is taken whole, and leaves the slip decel a frame (1 m/s) of it');
+  ok(slipCatch(13, 12, S, dt) === 13 && slipLeft(13, 12, S, dt) === 0, 'one of 13 is taken whole too (the allowance and a frame of slipDecel) and spends it all');
+  ok(slipCatch(14, 12, S, dt) === 13 && slipCatch(5, 0, S, dt) === 1, 'past it only the frame of slipDecel is taken: 13 of 14, and 1 of 5 once the allowance is spent');
+  ok(slipLeft(0.5, 0, S, dt) === 0 && slipLeft(0.5, 6, S, dt) === 6, 'the allowance is never below nought, and a catch under the frame of slipDecel spends none of it');
+  ok(!slipsTurn(80 * 10, 10, S) && slipsTurn(80 * 10 + 1, 10, S) && !slipsTurn(1e6, 0.5, S), 'a turn slips past 80 m/s² across the rope (exactly 80 holds) and never on a span of half a metre or less');
+  ok(slipReelExcess(15 * dt, S, dt) === 0 && Math.abs(slipReelExcess(0.5, S, dt) - (0.5 - 0.25)) < 1e-15, 'a hull dragging a point away at 15 m/s is no slip; at 30 m/s over a frame of 60 fps the excess (0.25 m) pays out');
+  const P = { parkHold: 0.6 };
+  const g = 20.32;
+  const per = 0.6 * 320 * g;
+  const at144 = brakeBudget(0, 320, g, 1 / 144, P);
+  const full144 = brakeBudget(at144 * 10, 320, g, 1 / 144, P);
+  const full30 = brakeBudget(0, 320, g, 1 / 30, P);
+  ok(Math.abs(at144 - per / 144) < 1e-9 && Math.abs(full144 - per / 60) < 1e-9 && Math.abs(full30 - per / 30) < 1e-9, `the brake's budget refills by parkHold x M x g a second and holds one physics step's worth at 144 fps (${full144.toFixed(2)} N s) and a frame's at 30 (${full30.toFixed(2)})`);
+  // At 144 fps the rope pulls hardest on the frames that carry a physics step, two or three apart. Carried, the budget
+  // meets 89% of the brake a second there (a gap of three frames is a fifth over one step's worth, and 24 of the second's
+  // 60 gaps are threes) and all of it on every second frame; spent per pull call and never carried (the amendment's
+  // first rule) it met 41%. The design said the carried budget meets the same brake on every second or third frame:
+  // measured, every second frame does, every third 79%, the steps' own frames 89%.
+  const second = (pulls: (f: number) => boolean, carried = true) => {
+    let budget = 0;
+    let held = 0;
+    const out = { x: 0, z: 0, budget: 0, held: 0 };
+    for (let f = 0; f < 144; f++) {
+      budget = carried ? brakeBudget(budget, 320, g, 1 / 144, P) : per / 144;
+      if (!pulls(f)) continue;
+      held += parkedLevel({ x: 1e6, z: 0 }, true, budget, out);
+      budget = out.budget;
+    }
+    return held;
+  };
+  // Which frames carry a step: the accumulator's own rule (a step whenever a sixtieth has gathered).
+  const stepFrames = new Set<number>();
+  {
+    let acc = 0;
+    for (let f = 0; f < 144; f++) {
+      acc += 1 / 144;
+      if (acc >= 1 / 60) {
+        stepFrames.add(f);
+        while (acc >= 1 / 60) acc -= 1 / 60;
+      }
+    }
+  }
+  const one = second(() => true);
+  const two = second((f) => f % 2 === 0);
+  const steps = second((f) => stepFrames.has(f));
+  const perCall = second((f) => stepFrames.has(f), false);
+  ok(Math.abs(two / one - 1) < 0.02 && steps / one > 0.85 && perCall / one < 0.5, `at 144 fps a pull on every frame, every second frame and the frames that carry a physics step meets ${one.toFixed(0)}, ${two.toFixed(0)} and ${steps.toFixed(0)} N s of brake a second; spent per call and never carried, ${perCall.toFixed(0)}`);
+  const out = { x: 0, z: 0, budget: 0, held: 0 };
+  const hang = 80 * g * (1 / 60);
+  const heldHang = parkedLevel({ x: hang, z: 0 }, true, per / 60, out);
+  ok(heldHang === hang && out.x === 0 && out.z === 0 && Math.abs(out.budget - (per / 60 - hang)) < 1e-9, `a steady hang's level pull (${hang.toFixed(2)} N s a frame) is held whole by a braked bike's budget (${(per / 60).toFixed(2)})`);
+  const catchJ = 12 * 80;
+  const heldCatch = parkedLevel({ x: 0, z: catchJ }, true, per / 60, out);
+  ok(Math.abs(heldCatch - per / 60) < 1e-9 && Math.abs(out.z - (catchJ - per / 60)) < 1e-9 && out.budget === 0, `a catch (${catchJ} N s) spends the budget and the rest passes over the brake (${out.z.toFixed(2)})`);
+  const heldOff = parkedLevel({ x: 3, z: 4 }, false, 100, out);
+  ok(heldOff === 0 && out.x === 3 && out.z === 4 && out.budget === 100, 'an unbraked hull holds nothing back and spends no budget');
+  ok(towing(true, 0.29, { towHold: 0.3 }) && !towing(true, 0.3, { towHold: 0.3 }) && !towing(false, 0, { towHold: 0.3 }), 'a tow holds within towHold of the last pull on a hull, and never off one');
+  const L = { hullLag: 0.02 };
+  ok(hullStill(0.02, false, L) && !hullStill(0.0201, false, L), 'a hull is still up to hullLag and moving past it');
+  ok(!hullStill(0.0101, true, L) && hullStill(0.01, true, L), 'once taken for moving it is still again only under half of it (the band)');
+  // The forms the hook calls every frame take their numbers in a kept record and answer in it; the plain forms above are
+  // those same lines through a record of the file's own, so each is checked once. What the record form adds is the slots.
+  const nums = new Float64Array(5);
+  nums.set([14, 12, dt]);
+  slipCatchIn(nums, S);
+  const tookIn = nums[0];
+  nums.set([tookIn, 12, dt]);
+  slipLeftIn(nums, S);
+  const leftIn = nums[0];
+  nums.set([80, 320]);
+  reducedShareIn(nums);
+  const shareIn = nums[0];
+  nums.set([0, 320, g, 1 / 30]);
+  brakeBudgetIn(nums, P);
+  const budgetIn = nums[0];
+  nums.set([0.5, dt]);
+  slipReelExcessIn(nums, S);
+  const reelIn = nums[0];
+  nums.set([801, 10]);
+  const turnsIn = slipsTurnIn(nums, S);
+  nums[0] = 0.29;
+  const towIn = towingIn(true, nums, { towHold: 0.3 });
+  nums[0] = 0.0201;
+  const stillIn = hullStillIn(nums, false, L);
+  const parkedIn = { x: 0, z: 0, budget: per / 60, held: -1 };
+  parkedLevelIn({ x: hang, z: 0 }, true, parkedIn);
+  ok(
+    tookIn === 13 && leftIn === 0 && shareIn === 0.2 && budgetIn === brakeBudget(0, 320, g, 1 / 30, P) && reelIn === slipReelExcess(0.5, S, dt) && turnsIn && towIn && !stillIn && parkedIn.held === hang && parkedIn.x === 0 && Math.abs(parkedIn.budget - (per / 60 - hang)) < 1e-9,
+    'the record forms the hook calls every frame answer in their own slots what the plain forms answer (the budget going in where it comes out, and what the brake held beside it)',
+  );
+  // clipInto and its record-writing sibling are one arithmetic.
+  let same = true;
+  for (let k = 0; k < 2000; k++) {
+    const v = { x: rand() * 20 - 10, y: rand() * 20 - 10, z: rand() * 20 - 10 };
+    const n = { x: rand() - 0.5, y: rand() - 0.5, z: rand() - 0.5 };
+    const nl = Math.hypot(n.x, n.y, n.z);
+    n.x /= nl;
+    n.y /= nl;
+    n.z /= nl;
+    const sv = k % 3 === 0 ? null : { x: rand() * 4 - 2, y: rand() * 4 - 2, z: rand() * 4 - 2 };
+    const rel = k % 2 === 0;
+    const a = { x: 0, y: 0, z: 0 };
+    const b = { x: 0, y: 0, z: 0 };
+    const res = { into: 0 };
+    const into = clipInto(v, n, sv, rel, a);
+    clipIntoRec(v, n, sv, rel, b, res);
+    if (!Object.is(into, res.into) || !Object.is(a.x, b.x) || !Object.is(a.y, b.y) || !Object.is(a.z, b.z)) same = false;
+  }
+  ok(same, 'clipInto and clipIntoRec answer alike over 2,000 random contacts, by Object.is');
+}
+
+// The oriented box (`grappleBox.ts`, built in wave 3b for another player's vehicle, which wave 3c rides; its comparison
+// with the engine's own cuboid is that wave's test 13): its answers against a point-by-point march.
+{
+  const p = Float64Array.of(1, 2, 3);
+  const a = Math.PI / 6;
+  const q = Float64Array.of(0.1 * Math.sin(a / 2), Math.sin(a / 2) * 0.99, 0, Math.cos(a / 2));
+  const ql = Math.hypot(q[0], q[1], q[2], q[3]);
+  for (let i = 0; i < 4; i++) q[i] /= ql;
+  const half = Float64Array.of(1, 0.5, 2);
+  // Inside, by turning the point into the box's frame the long way (a rotation matrix from the quaternion).
+  const [qx, qy, qz, qw] = q;
+  const m = [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + qz * qw), 2 * (qx * qz - qy * qw), 2 * (qx * qy - qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz + qx * qw), 2 * (qx * qz + qy * qw), 2 * (qy * qz - qx * qw), 1 - 2 * (qx * qx + qy * qy)];
+  const inside = (x: number, y: number, z: number) => {
+    const dx = x - p[0];
+    const dy = y - p[1];
+    const dz = z - p[2];
+    const lx = m[0] * dx + m[1] * dy + m[2] * dz;
+    const ly = m[3] * dx + m[4] * dy + m[5] * dz;
+    const lz = m[6] * dx + m[7] * dy + m[8] * dz;
+    return Math.abs(lx) < half[0] && Math.abs(ly) < half[1] && Math.abs(lz) < half[2];
+  };
+  const hit = newBoxHit();
+  const o = new Float64Array(3);
+  const d = new Float64Array(3);
+  let rays = 0;
+  let agree = 0;
+  let hits = 0;
+  for (let k = 0; k < 2000; k++) {
+    o[0] = p[0] + (rand() - 0.5) * 12;
+    o[1] = p[1] + (rand() - 0.5) * 12;
+    o[2] = p[2] + (rand() - 0.5) * 12;
+    if (inside(o[0], o[1], o[2])) continue;
+    // Aimed near the box's middle, a little either way.
+    d[0] = p[0] + (rand() - 0.5) * 3 - o[0];
+    d[1] = p[1] + (rand() - 0.5) * 3 - o[1];
+    d[2] = p[2] + (rand() - 0.5) * 3 - o[2];
+    const dl = Math.hypot(d[0], d[1], d[2]);
+    d[0] /= dl;
+    d[1] /= dl;
+    d[2] /= dl;
+    rays++;
+    let march = -1;
+    for (let t = 0; t <= 20; t += 0.001) {
+      if (inside(o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t)) {
+        march = t;
+        break;
+      }
+    }
+    const met = rayBox(o, d, 20, p, q, half, hit);
+    if (met) hits++;
+    if (met ? march >= 0 && Math.abs(hit.toi - march) < 2e-3 && Math.abs(Math.hypot(hit.nx, hit.ny, hit.nz) - 1) < 1e-9 && hit.nx * d[0] + hit.ny * d[1] + hit.nz * d[2] < 0 : march < 0) agree++;
+  }
+  ok(agree === rays && hits > rays / 4, `a ray against a turned box meets it where a millimetre march does, with a unit normal facing the ray, and misses it where the march does (${agree} of ${rays}, ${hits} hits)`);
+  const mid = Float64Array.of(p[0], p[1], p[2]);
+  const far = Float64Array.of(p[0] + 20, p[1], p[2]);
+  ok(Math.abs(spanDepth(far, mid, p, q, half, 64) - 0.5) < 1e-9 && spanDepth(far, Float64Array.of(p[0] + 20, p[1] + 5, p[2]), p, q, half) === 0, "a span to the box's middle reaches its least half-size deep, one clear of it nothing");
+  let quads = 0;
+  let missed = 0;
+  const quad = new Float64Array(12);
+  for (let k = 0; k < 1000; k++) {
+    for (let i = 0; i < 12; i++) quad[i] = p[i % 3] + (rand() - 0.5) * 8;
+    // A point of either of the quad's two triangles inside the box means it meets: never a false miss. (The pivot at
+    // the start, the hand at the start and at the end; then the hand at the end, the pivot at the end and at the start.)
+    let any = false;
+    for (const [i0, i1, i2] of [
+      [0, 6, 9],
+      [9, 3, 0],
+    ]) {
+      for (let s = 0; s <= 24 && !any; s++) {
+        for (let t = 0; t <= 24 - s && !any; t++) {
+          const u = s / 24;
+          const w = t / 24;
+          const x = quad[i0] + (quad[i1] - quad[i0]) * u + (quad[i2] - quad[i0]) * w;
+          const y = quad[i0 + 1] + (quad[i1 + 1] - quad[i0 + 1]) * u + (quad[i2 + 1] - quad[i0 + 1]) * w;
+          const z = quad[i0 + 2] + (quad[i1 + 2] - quad[i0 + 2]) * u + (quad[i2 + 2] - quad[i0 + 2]) * w;
+          if (inside(x, y, z)) any = true;
+        }
+      }
+    }
+    if (!any) continue;
+    quads++;
+    if (!quadMeetsBox(quad, p, q, half)) missed++;
+  }
+  for (let i = 0; i < 12; i++) quad[i] = p[i % 3] + 30 + i;
+  ok(quads > 50 && missed === 0 && !quadMeetsBox(quad, p, q, half), `a swept quad with any point in the box always meets it (${quads} quads, ${missed} missed), and one far off never`);
+  // And never a false meeting. A point's distance to the box moves by no more than the point does, and every point of a
+  // triangle sampled at 24 steps a side lies within one sample cell's longest edge of a sample, so a quad whose every
+  // sample stands further off the box than that is clear of it for certain, and must not meet it.
+  const away = (x: number, y: number, z: number) => {
+    const dx = x - p[0];
+    const dy = y - p[1];
+    const dz = z - p[2];
+    const lx = Math.max(Math.abs(m[0] * dx + m[1] * dy + m[2] * dz) - half[0], 0);
+    const ly = Math.max(Math.abs(m[3] * dx + m[4] * dy + m[5] * dz) - half[1], 0);
+    const lz = Math.max(Math.abs(m[6] * dx + m[7] * dy + m[8] * dz) - half[2], 0);
+    return Math.hypot(lx, ly, lz);
+  };
+  let clear = 0;
+  let falseHits = 0;
+  let nearest = Infinity;
+  for (let k = 0; k < 3000; k++) {
+    for (let i = 0; i < 12; i++) quad[i] = p[i % 3] + (rand() - 0.5) * 10;
+    let least = Infinity;
+    let cell = 0;
+    for (const [i0, i1, i2] of [
+      [0, 6, 9],
+      [9, 3, 0],
+    ]) {
+      const e = (a: number, b: number) => Math.hypot(quad[a] - quad[b], quad[a + 1] - quad[b + 1], quad[a + 2] - quad[b + 2]);
+      cell = Math.max(cell, e(i0, i1) / 24, e(i1, i2) / 24, e(i2, i0) / 24);
+      for (let s = 0; s <= 24; s++) {
+        for (let t = 0; t <= 24 - s; t++) {
+          const u = s / 24;
+          const w = t / 24;
+          const x = quad[i0] + (quad[i1] - quad[i0]) * u + (quad[i2] - quad[i0]) * w;
+          const y = quad[i0 + 1] + (quad[i1 + 1] - quad[i0 + 1]) * u + (quad[i2 + 1] - quad[i0 + 1]) * w;
+          const z = quad[i0 + 2] + (quad[i1 + 2] - quad[i0 + 2]) * u + (quad[i2 + 2] - quad[i0 + 2]) * w;
+          least = Math.min(least, away(x, y, z));
+        }
+      }
+    }
+    if (!(least > cell + 1e-6)) continue;
+    clear++;
+    nearest = Math.min(nearest, least - cell);
+    if (quadMeetsBox(quad, p, q, half)) falseHits++;
+  }
+  ok(clear > 100 && falseHits === 0, `and a swept quad clear of the box for certain never meets it (${clear} quads within 5 m of its middle, the nearest ${nearest.toFixed(3)} m clear, ${falseHits} false meetings)`);
 }
 
 console.log(`\n${checks} checks passed`);

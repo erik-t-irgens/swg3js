@@ -131,6 +131,8 @@ export interface HudGrappleMark {
   shows: boolean;
   held: boolean;
   next: boolean;
+  /** The point rests on a vehicle's hull (wave 3): the diamond in `warn`, so a moving anchor is told from a still one before firing. */
+  vehicle: boolean;
   /** A refused press: the diamond flashes `bad` while this is above nought. */
   flash: number;
   /** Where the mark stands on the screen, and whether it is in front of the camera at all. */
@@ -146,7 +148,7 @@ export interface HudGrappleMark {
 }
 
 export function newHudGrappleMark(): HudGrappleMark {
-  return { enabled: true, shows: false, held: false, next: false, flash: 0, onScreen: false, x: 0, y: 0, anchorOn: false, ax: 0, ay: 0, ropeUsed: 0 };
+  return { enabled: true, shows: false, held: false, next: false, vehicle: false, flash: 0, onScreen: false, x: 0, y: 0, anchorOn: false, ax: 0, ay: 0, ropeUsed: 0 };
 }
 
 /**
@@ -1136,8 +1138,8 @@ export class Hud {
 
   /**
    * The grapple's mark: a diamond with its corners on the axes where the dart would bite -- `good` when a press
-   * fires, at half alpha from the snap hold, `muted` while attached for the next anchor, `bad` for a refused
-   * press's moment -- and a small `accent` mark at the anchor while the rope is out. While the rope is attached, a
+   * fires, `warn` when that is a vehicle's hull (wave 3), at half alpha from the snap hold, `muted` while attached for
+   * the next anchor, `bad` for a refused press's moment -- and a small `accent` mark at the anchor while the rope is out. While the rope is attached, a
    * thin arc round the crosshair says how much of the longest rope is out, clockwise from twelve, in `muted` and in
    * `warn` past `grappleRopeWarn`. Drawn whatever the Jedi's crosshair switch says, behind its own; never at a ship's
    * controls or with the mouse free. Palette indices and kept numbers only.
@@ -1150,7 +1152,7 @@ export class Hud {
     const S = HUD_SIZES;
     const width = S.grappleMarkWidth * s;
     if (m.onScreen && (m.shows || m.flash > 0)) {
-      const colour = m.flash > 0 && !m.shows ? col.bad : m.next ? col.muted : col.good;
+      const colour = m.flash > 0 && !m.shows ? col.bad : m.next ? col.muted : m.vehicle ? col.warn : col.good;
       const alpha = S.grappleMarkAlpha * (m.held && m.flash <= 0 ? 0.5 : 1);
       this.diamond(m.x, m.y, S.grappleMark * s, width, colour, alpha);
     }

@@ -163,7 +163,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 // `distanceWords` is the interface's own spelling of a distance, threshold and all, so the death
 // card's rows read exactly as the group roster's do.
 import { distanceWords, Hud, hudBindingsChanged, keyLabel, Roster, ROSTER_TUNE } from './ui/hud';
-import { HOVER_TUNE, specFor, type DriveInput } from './vehicles/vehicle';
+import { HOVER_TUNE, specFor, vehicleOfCollider, type DriveInput } from './vehicles/vehicle';
 import { interceptTime, leadPoint } from './combat/intercept';
 import { PostFX, type FxFrameInput, type SunInfo } from './core/postfx';
 import { fxPassDef, isFxSettingKey, type FxPassId } from './core/fxRegistry.ts';
@@ -1696,6 +1696,8 @@ class App {
     // The grapple's one-shot words go to the message line, and a loose prop is found for its mark and its dart's hook.
     this.player.grapple.say = (text) => this.messages.system(text);
     this.player.grapple.propAt = hookablePropAt;
+    // And a vehicle's hull is told by its collider, so the rope bends round it and the dart bites it (wave 3).
+    this.player.grapple.vehicleOf = vehicleOfCollider;
     this.effects = new Effects(this.scene);
     // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
     this.world.npcDeps.effects = this.effects;
@@ -7095,11 +7097,30 @@ class App {
        * what the rope `holds` (an anchor or a thing), and of a prop held or under the mark its mass, its distance and
        * who the mass rule moves (`whoMoves`).
        */
-      grapple: (opts: { fire?: boolean | [number, number, number] | 'prop'; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean } = {}) => {
+      grapple: (opts: { fire?: boolean | [number, number, number] | 'prop' | 'vehicle'; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean; drive?: false | { throttle?: number; steer?: number; seconds?: number } } = {}) => {
         const p = this.player;
         const g = p.grapple;
         const b = p.grappleBody;
         const said: string[] = [];
+        // A parked vehicle set going with nobody on it, through the autopilot drive every vehicle already reads (§3.18):
+        // how a tow is tried alone. Taken off after `seconds` (10), or at once with `drive: false`.
+        if (opts.drive === false) {
+          if (this.grappleDrive) {
+            this.grappleDrive.v.autopilot = null;
+            said.push(`stopped driving the ${this.grappleDrive.v.spec.id}`);
+            this.grappleDrive = null;
+          } else said.push('nothing is being driven');
+        } else if (opts.drive) {
+          const near = this.grappleDriveable();
+          if (!near) said.push('no parked vehicle with nobody on it');
+          else {
+            if (this.grappleDrive) this.grappleDrive.v.autopilot = null;
+            const drive: DriveInput = { throttle: Math.max(-1, Math.min(1, opts.drive.throttle ?? 1)), steer: Math.max(-1, Math.min(1, opts.drive.steer ?? 0)), boost: false, hop: false, up: false, down: false };
+            near.autopilot = { drive };
+            this.grappleDrive = { v: near, left: Math.max(0.1, opts.drive.seconds ?? 10) };
+            said.push(`driving the ${near.spec.id} for ${this.grappleDrive.left} s at throttle ${drive.throttle}, steer ${drive.steer}`);
+          }
+        }
         // The slam rule once at a speed, against a wall a metre ahead along the view: its harm and its stagger.
         if (typeof opts.slam === 'number' && Number.isFinite(opts.slam)) {
           this.cam.forward(this.grappleLook);
@@ -7124,11 +7145,35 @@ class App {
         const fireToward = (x: number, y: number, z: number): void => {
           const hand = p.grappleHand(new THREE.Vector3());
           const d = new THREE.Vector3(x, y, z).sub(hand).normalize();
-          Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body });
+          Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body, vehicles: this.world.vehicles });
           g.probeMark(b.physics, this.grappleWater, 0);
           said.push(this.fireGrapple() || 'fired');
         };
-        if (opts.fire === 'prop') {
+        if (opts.fire === 'vehicle') {
+          if (g.out) said.push('the grapple is already out');
+          else {
+            // The nearest vehicle's middle inside the view's own width, within the hook's reach.
+            const cam = this.cam.camera;
+            const look = cam.getWorldDirection(new THREE.Vector3());
+            const halfWide = Math.atan(Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) * cam.aspect);
+            const hand = p.grappleHand(new THREE.Vector3());
+            let best: { v: Vehicle; at: THREE.Vector3; d: number } | null = null;
+            for (const v of this.world.vehicles) {
+              if (v.disposed || v.ghosted || v.destroyed || v.spec.animal || v === p.mounted) continue;
+              const bb = v.spec.bounds;
+              const at = new THREE.Vector3((bb.min[0] + bb.max[0]) / 2, (bb.min[1] + bb.max[1]) / 2, (bb.min[2] + bb.max[2]) / 2).applyQuaternion(v.group.quaternion).add(v.group.position);
+              const to = at.clone().sub(hand);
+              const dist = to.length();
+              if (dist > g.range || dist < 1 || to.normalize().dot(look) < Math.cos(halfWide)) continue;
+              if (!best || dist < best.d) best = { v, at, d: dist };
+            }
+            if (!best) said.push('no vehicle in view within reach');
+            else {
+              said.push(`at the ${best.v.spec.id} ${Math.round(best.d)} m off`);
+              fireToward(best.at.x, best.at.y, best.at.z);
+            }
+          }
+        } else if (opts.fire === 'prop') {
           if (g.out) said.push('the grapple is already out');
           else {
             // The nearest loose prop inside the view's own width, within the hook's reach.
@@ -7207,6 +7252,10 @@ class App {
           leanSends: g.leanSends,
           camScale: n3(g.camScaleNow),
           sounds: { ...grappleSounds.status(), asked: grappleSounds.log.slice(-8), ratchets: grappleSounds.ratchetsLastSecond(g.clock), counts: { ...grappleSounds.counts }, recent: (this.audio.status().recent as { id: string; result: string }[]).filter((r) => GRAPPLE_SOUND_IDS.includes(r.id)) },
+          // Wave 3: the vehicles on the rope -- each point's frame, the pivot's speed, the slip, the tow, the pull and
+          // the brake, the hull test and the hulls cast this frame -- and what the console's `drive` is driving.
+          ...g.vehicleReport(b),
+          drive: this.grappleDrive ? { vehicle: this.grappleDrive.v.spec.id, left: n2(this.grappleDrive.left) } : null,
         };
       },
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
@@ -11060,8 +11109,10 @@ class App {
    * numbers. One kept vector, so the whole pool costs no allocation; false when the point is behind
    * the camera, which is the number's signal to stand aside rather than to be thrown away.
    */
-  /** Where the grapple's mark and anchor stand on the screen, kept. */
+  /** Where the grapple's mark and anchor stand on the screen, kept, and where each is drawn in the world. */
   private readonly grappleScreen: ScreenPoint = { x: 0, y: 0 };
+  private readonly grappleMarkAt = { x: 0, y: 0, z: 0 };
+  private readonly grappleAnchorAt = new Float64Array(3);
 
   /**
    * The grapple's mark onto the overlay's kept record, after the frame is drawn: the hook's own mark projected
@@ -11077,9 +11128,12 @@ class App {
     hm.shows = mk.shows;
     hm.held = mk.held;
     hm.next = mk.next;
+    hm.vehicle = !!mk.vehicle;
     hm.flash = mk.flash;
     if (mk.shows) {
-      hm.onScreen = this.projectToScreen(mk.x, mk.y, mk.z, sp);
+      // On a hull, where the hull is drawn (the point kept in its own frame), so the diamond sits on the drawn hull.
+      const at = g.markDrawn(this.grappleMarkAt);
+      hm.onScreen = this.projectToScreen(at.x, at.y, at.z, sp);
       hm.x = sp.x;
       hm.y = sp.y;
     } else if (mk.flash > 0) {
@@ -11090,7 +11144,8 @@ class App {
     hm.anchorOn = false;
     hm.ropeUsed = 0;
     if (g.attached || g.holding) {
-      const p = g.rope.pts;
+      const p = this.grappleAnchorAt;
+      g.drawnPoint(0, p, 0);
       hm.anchorOn = this.projectToScreen(p[0], p[1], p[2], sp);
       hm.ax = sp.x;
       hm.ay = sp.y;
@@ -15839,6 +15894,15 @@ class App {
   /** Drive the ridden vehicle from the keys (the mouse or A/D steer, Alt frees the look, W/S throttle, Shift boost, Space hop, the view's tilt or Space and X climb and sink), step every vehicle, and seat the rider. */
   private stepVehicles(dt: number, simulate: boolean): void {
     const { player, input } = this;
+    // The console's `grapple({ drive })`: its autopilot comes off after its seconds of play, or as its hull goes.
+    const gd = this.grappleDrive;
+    if (gd && simulate) {
+      gd.left -= dt;
+      if (gd.left <= 0 || gd.v.disposed) {
+        if (!gd.v.disposed) gd.v.autopilot = null;
+        this.grappleDrive = null;
+      }
+    }
     // Whether play runs, and the ship the player flies or is aboard: what the world's ship contacts and NPC ships
     // read in stepLiving, which runs after this in the loop and in __debug.advance alike.
     this.world.simulating = simulate;
@@ -20222,6 +20286,25 @@ class App {
     return true;
   }
 
+  /** The vehicle the console's `grapple({ drive })` set going with nobody on it, and the seconds its autopilot has left. */
+  private grappleDrive: { v: Vehicle; left: number } | null = null;
+
+  /** The nearest vehicle standing in the world with nobody on it and nothing flying it: what `drive` sets going. */
+  private grappleDriveable(): Vehicle | null {
+    const p = this.player;
+    let best: Vehicle | null = null;
+    let bestD = Infinity;
+    for (const v of this.world.vehicles) {
+      if (v.disposed || v.ghosted || v.destroyed || v.spec.animal || v === p.mounted || v === p.piloting || (v.autopilot && v !== this.grappleDrive?.v)) continue;
+      const d = v.pos.distanceTo(p.worldPos);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
   /** What the grapple mutes this frame, kept: filled by `grappleMutes` and handed to `Input.mute`. */
   private readonly grappleMuteList: string[] = [];
   /** The grapple left with no key by somebody else's choice: said once a session. */
@@ -20316,7 +20399,8 @@ class App {
     const b = p.grappleBody;
     this.cam.camera.getWorldDirection(this.grappleLook);
     p.grappleHand(this.grappleHandAt);
-    g.fire(mk.x, mk.y, mk.z, this.grappleHandAt, p.vel, b.physics, b.filter, b.body, this.grappleLook.x, this.grappleLook.y, this.grappleLook.z);
+    // On a vehicle's hull the dart is aimed true against the hull's own motion there (the intercept).
+    g.fire(mk.x, mk.y, mk.z, this.grappleHandAt, p.vel, b.physics, b.filter, b.body, this.grappleLook.x, this.grappleLook.y, this.grappleLook.z, g.markTarget());
     return '';
   }
 
@@ -20348,6 +20432,8 @@ class App {
     v.hand = this.grappleHandAt;
     v.filter = b.filter;
     v.exclude = b.body;
+    // The vehicles this browser simulates, each read again after the physics step and cast in its own frame (§3.8).
+    v.vehicles = this.world.vehicles;
     g.probeMark(b.physics, this.grappleWater, dt);
     this.grappleMarkProbed = true;
   }

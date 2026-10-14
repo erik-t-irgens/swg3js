@@ -10,8 +10,9 @@
 //
 // One branch is the rope's, behind a flag the caller hands in only while the grapple is attached: reeling in
 // toward a pivot rising past `swimLift`, the rope takes the vertical from the float chase (`ropeLift`). A
-// second, for a tow over water, waits for the vehicles (`towed`). With both down this is the old block to the
-// bit, which `grappleWater.test.ts` holds against a copy of it over ten thousand random states.
+// second is a tow over water (`towed`, wave 3): the tow's own friction and damping take the level speed in place
+// of the swim's ease, so a swimmer towed behind a hull skims. With both down this is the old block to the bit,
+// which `grappleWater.test.ts` holds against a copy of it over ten thousand random states.
 import { afloatVelocity } from '../world/afloat.ts';
 
 /** The original game's run (m/s), as `player.ts` keeps it. */
@@ -45,8 +46,18 @@ export interface SwimIn {
   dt: number;
   /** The grapple has the vertical this frame (attached, afloat, reeling in past `swimLift`). */
   ropeLift: boolean;
-  /** A tow over water, when the vehicles come: the tow's own friction in place of the swim's horizontal ease. */
+  /**
+   * A tow over water (the grapple's rope on a hull that pulled lately): the tow's own friction (m/s², against the level
+   * speed) and its damping across the rope relative to the pivot (1/s) in place of the swim's level ease, the rope's level
+   * way from its pivot (unit) and the pivot's level velocity. The float chase keeps the vertical: the surface is a ground.
+   */
   towed: boolean;
+  towFriction: number;
+  towDamp: number;
+  towRx: number;
+  towRz: number;
+  towVx: number;
+  towVz: number;
 }
 
 /** What `__debug.afloat` reads of the last swimming frame, written in place. */
@@ -72,7 +83,7 @@ export interface SwimOut {
 }
 
 export function newSwimIn(): SwimIn {
-  return { vel: { x: 0, y: 0, z: 0 }, posY: 0, surface: 0, depth: 0, submerged: false, jump: false, crouch: false, moving: false, moveX: 0, moveZ: 0, diveY: 0, forward: true, speed: 0, dt: 0, ropeLift: false, towed: false };
+  return { vel: { x: 0, y: 0, z: 0 }, posY: 0, surface: 0, depth: 0, submerged: false, jump: false, crouch: false, moving: false, moveX: 0, moveZ: 0, diveY: 0, forward: true, speed: 0, dt: 0, ropeLift: false, towed: false, towFriction: 0, towDamp: 0, towRx: 0, towRz: 0, towVx: 0, towVz: 0 };
 }
 
 export function newSwimOut(): SwimOut {
@@ -91,10 +102,29 @@ export function swimStep(s: SwimIn, probe: SwimProbe, out: SwimOut): SwimOut {
   let speed = s.speed;
   speed *= SWIM_SPEED;
   const k = 1 - Math.exp(-dt * 4);
-  // A tow over water would take the horizontal from the tow's own friction here (the vehicles' wave); with no
-  // tow the swim eases toward the keys as it always has.
-  vel.x += (s.moveX * speed - vel.x) * k;
-  vel.z += (s.moveZ * speed - vel.z) * k;
+  if (s.towed) {
+    // Towed over water the swimmer skims: the tow's friction against the level speed, and its swing across the rope
+    // (relative to the pivot) damped, as on the ground. The swim's own ease toward the keys is a drag of 160 m/s² at
+    // 40 m/s, which the rope's slip would pay out at well over a metre a frame.
+    const horiz = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
+    if (s.towFriction > 0 && horiz > 1e-6) {
+      const f = Math.min(horiz, s.towFriction * dt) / horiz;
+      vel.x -= vel.x * f;
+      vel.z -= vel.z * f;
+    }
+    if (s.towDamp > 0 && (s.towRx !== 0 || s.towRz !== 0)) {
+      const rx = vel.x - s.towVx;
+      const rz = vel.z - s.towVz;
+      const along = rx * s.towRx + rz * s.towRz;
+      const d = Math.min(1, s.towDamp * dt);
+      vel.x -= (rx - s.towRx * along) * d;
+      vel.z -= (rz - s.towRz * along) * d;
+    }
+  } else {
+    // With no tow the swim eases toward the keys as it always has.
+    vel.x += (s.moveX * speed - vel.x) * k;
+    vel.z += (s.moveZ * speed - vel.z) * k;
+  }
   // Lying on the surface is not standing still in y any more. With the swell in `surface` the float line
   // moves, so the body has to ride it, and that is the same spring a swimming creature has always held its
   // own line with (`src/world/afloat.ts`). On flat water it asks for nothing, since the line it is chasing is
