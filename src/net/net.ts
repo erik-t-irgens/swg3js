@@ -151,6 +151,8 @@ interface ServerWord {
   props?: number;
   /** Whether a server's hail says it moves a house where it stands (2); a server before it says nothing. */
   homes?: number;
+  /** Whether a server's hail says it holds each character's progress (1); a server before it says nothing. */
+  progress?: number;
 }
 
 /**
@@ -440,7 +442,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -643,6 +645,9 @@ export class Net {
       // The character's story book: the server's copy coming down in pieces, a request for this browser's,
       // a batch of changes and a refusal. What they mean belongs to src/story/bookClient.ts.
       case 'story':
+      // The character's progress, with a server whose hail says it holds it: the server's record, a request for this
+      // browser's, a batch the server worked out and a refusal. What they mean belongs to src/progress/progressClient.ts.
+      case 'progress':
       case 'duel':
         // The group and the words players type: handed over whole to whoever owns them. Nothing is
         // read here, so this switch does not have to grow a case for every word a group can say.

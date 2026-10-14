@@ -422,19 +422,22 @@ export class Stories {
    *   shared?: (npc: string) => boolean,
    *   tests?: boolean,
    *   core3?: (() => { set: object, report: object, errors: object[] } | null) | null,
+   *   progress?: { bonus(character: string, session: number, order: object, tell: object[]): boolean } | null,
    * }} options the numbers to work to; where a record goes to be applied and kept (and whether it is a
    * counter's, to be flushed lazily) and how the log is flushed; the shared clock a story's times are
    * written in; who pays; what the server knows of the worlds; how the sets' files are read; who is the
-   * admin, who is grouped and which creatures the world shares; and how the game's own conversations are
-   * read (`core3Story.mjs`), which are joined to whatever sets are read and never make one of their own.
+   * admin, who is grouped and which creatures the world shares; how the game's own conversations are
+   * read (`core3Story.mjs`), which are joined to whatever sets are read and never make one of their own;
+   * and the characters' progress (`progress.mjs`), which a quest's experience is paid into as a bonus.
    */
-  constructor({ tuning = STORY_TUNING, write = () => {}, flush = () => {}, now = () => Date.now(), purses = null, ledger = null, worlds = NO_WORLDS, read = null, admin = () => false, grouped = () => false, shared = () => false, tests = false, core3 = null } = {}) {
+  constructor({ tuning = STORY_TUNING, write = () => {}, flush = () => {}, now = () => Date.now(), purses = null, ledger = null, worlds = NO_WORLDS, read = null, admin = () => false, grouped = () => false, shared = () => false, tests = false, core3 = null, progress = null } = {}) {
     this.tuning = tuning;
     this.write = write;
     this.flushLog = flush;
     this.now = now;
     this.purses = purses;
     this.ledger = ledger;
+    this.progress = progress;
     this.worlds = worlds;
     this.read = read;
     this.isAdmin = admin;
@@ -1502,8 +1505,14 @@ export class Stories {
     tell.push({ to: line.session, msg: { t: 'story', do: 'view', view, off: this.offset, read } });
   }
 
-  /** One payment: credits through the purse, a thing through the ledger, a price through the purse's own spend. False when nothing was handed over. */
+  /**
+   * One payment: credits through the purse, a thing through the ledger, a price through the purse's own spend, and a
+   * quest's experience as a bonus into the skills used while it ran, through the character's progress (paid there,
+   * keyed by this order's own key, or owed until that character's progress settles). False when nothing was handed
+   * over; a bonus with no progress held here pays nothing.
+   */
   pay(line, o, tell) {
+    if (o.bonus) return this.progress ? this.progress.bonus(line.character, line.session, o, tell) : false;
     if (o.charge) {
       if (!this.purses) return false;
       const r = this.purses.spend(line.character, o.charge, line.session, 'that');

@@ -10,7 +10,9 @@
 // moves with `--set progress.limits.<name>=n`) and writes every trim it decides as a change of its own; a
 // batch another host made, and a record another host handed down or wrote into storage, are applied and read
 // under `PROGRESS_BACKSTOP`, ten times each list and never moved by anybody, so two hosts whose limits differ
-// never cut one record two ways (the story book's own rule, `BACKSTOP_LIMITS`).
+// never cut one record two ways (the story book's own rule, `BACKSTOP_LIMITS`). The rules' own caps (Skill
+// Points, a core skill's XP, a pool's bank, the rested bonus) have a backstop of the same kind for the same
+// reason, `PROGRESS_RULE_BACKSTOP`.
 
 /** The rules every host works progress out by. A server keeps its own copy, which `--set progress.rules.<name>=n` moves. */
 export const PROGRESS_RULES = {
@@ -163,7 +165,12 @@ export const PROGRESS_LIMITS: ProgressLimits = { seen: 200, recent: 100, paid: 1
  */
 export const PROGRESS_BACKSTOP: Readonly<ProgressLimits> = Object.freeze({ seen: 2000, recent: 1000, paid: 1000, bonus: 2000, log: 1200, nodes: 640, gone: 640 });
 
-/** This browser's own pacing, every number ours. The offer and the claim's wait are the line's, which a later wave builds. */
+/**
+ * This browser's own pacing, every number ours. A record handed up to a server shares the first seconds after a
+ * claim with the item list (sent at once, up to 56 KB) and the story book (in 24,000-character pieces every half
+ * second), under the relay's 64 KB a browser may send in a second: so it waits `offerDelay` after the claim is
+ * answered and then goes a piece of `offerChunk` every `offerGap`.
+ */
 export const PROGRESS_TUNE = {
   /** Times a second the encounters are looked at and the queue is flushed. */
   hz: 4,
@@ -173,8 +180,10 @@ export const PROGRESS_TUNE = {
   offerDelay: 1500,
   offerChunk: 8000,
   offerGap: 1000,
-  /** Milliseconds a claim waits for its answer before it is sent once more, with the same id. */
+  /** Milliseconds a claim (or a `sync`) waits for its answer before it is sent once more, with the same id. */
   claimWait: 10000,
+  /** Milliseconds between two claims sent out of the queue, under the two a second a server takes from one line. */
+  claimGap: 600,
 };
 
 /** Bumped whenever a rule moves, so what was worked out of the old ones is worked out again. */
@@ -245,6 +254,76 @@ export interface ProgressTuneAsk {
   backstop?: unknown;
 }
 
+/** A copy of the rules a host may move without moving anybody else's: the server keeps one of its own. */
+export function copyRules(from: ProgressRules = PROGRESS_RULES): ProgressRules {
+  return JSON.parse(JSON.stringify(from)) as ProgressRules;
+}
+
+/** Every table of the rules frozen, so nothing anybody moves can reach a copy that must never move. */
+function freezeDeep<T>(o: T): T {
+  if (o && typeof o === 'object') {
+    for (const v of Object.values(o as Record<string, unknown>)) freezeDeep(v);
+    Object.freeze(o);
+  }
+  return o;
+}
+
+/**
+ * What a record another host decided is held to when it is read -- a server's record handed down, that record read
+ * back out of storage, and every record a server reads back out of its own file -- in the rules' own caps: the
+ * Skill Points a tree may spend, a core skill's XP, a pool's bank and the rested bonus, each at the top of the range
+ * any host may move it to (`RULE_RANGE`), and fixed. The limits' backstop for the rules' caps: a server run with
+ * `--set progress.rules.bankCap` moved up writes pools past this browser's own cap, and read back under anybody's
+ * own rules that record would be cut -- on the server's restart, in the browser's copy, in its storage -- each way
+ * its own, and the copies would part at one revision. A host's own rules decide only what that host pays and what
+ * it takes from a browser handing a record up.
+ */
+export const PROGRESS_RULE_BACKSTOP: Readonly<ProgressRules> = freezeDeep(
+  Object.assign(copyRules(PROGRESS_RULES), {
+    spCap: RULE_RANGE.spCap[1],
+    coreK: RULE_RANGE.coreK[1],
+    coreExp: RULE_RANGE.coreExp[1],
+    bankCap: RULE_RANGE.bankCap[1],
+    restedMax: RULE_RANGE.restedMax[1],
+  }),
+);
+
+/**
+ * Move the rules of one host in place (this browser's `PROGRESS_RULES`, or a server's own copy), each number held to
+ * its range: a top-level rule by name, or one in the nested tables (`band`, `gaps`, `demo`, `core.<skill>`).
+ * Answers whether anything moved.
+ */
+export function moveRules(into: ProgressRules, r: Record<string, unknown>): boolean {
+  let moved = moveNumbers(into as unknown as Record<string, unknown>, r, (k) => RULE_RANGE[k] ?? null);
+  for (const table of ['band', 'gaps', 'demo'] as const) {
+    const t = r[table];
+    if (t && typeof t === 'object') moved = moveNumbers(into[table] as unknown as Record<string, unknown>, t as Record<string, unknown>, (k) => nestedRange(table, k)) || moved;
+  }
+  const core = r.core;
+  if (core && typeof core === 'object') {
+    for (const skill of Object.keys(into.core) as (keyof ProgressRules['core'])[]) {
+      const t = (core as Record<string, unknown>)[skill];
+      if (t && typeof t === 'object') moved = moveNumbers(into.core[skill] as unknown as Record<string, unknown>, t as Record<string, unknown>, (k) => nestedRange('core', k)) || moved;
+    }
+  }
+  return moved;
+}
+
+/**
+ * Move one host's limits in place, never past the backstop's own for each list; answers the ones held there, as
+ * `seen 2000`. A list grown past the backstop would be cut the next time the record is read back under it.
+ */
+export function moveLimits(into: ProgressLimits, asked: Record<string, unknown>): string[] {
+  const top = (k: string): number => (Object.hasOwn(PROGRESS_BACKSTOP, k) ? PROGRESS_BACKSTOP[k as keyof ProgressLimits] : 1);
+  moveNumbers(into as unknown as Record<string, unknown>, asked, (k) => [1, top(k), true]);
+  const held: string[] = [];
+  for (const k of Object.keys(asked)) {
+    const v = asked[k];
+    if (Object.hasOwn(into, k) && typeof v === 'number' && Number.isFinite(v) && Math.round(v) > top(k)) held.push(`${k} ${top(k)}`);
+  }
+  return held;
+}
+
 /**
  * Move any of the rules, the limits or the pacing, each held to what makes sense, in place; the backstop is never
  * moved, and asking to move it is said rather than done. A limit is never moved past the backstop's own for its
@@ -253,31 +332,9 @@ export interface ProgressTuneAsk {
  */
 export function tuneProgress(o: ProgressTuneAsk): { rules: ProgressRules; limits: ProgressLimits; tune: typeof PROGRESS_TUNE; refused?: string; held?: string } {
   let moved = false;
-  if (o.rules && typeof o.rules === 'object') {
-    const r = o.rules as Record<string, unknown>;
-    moved = moveNumbers(PROGRESS_RULES as unknown as Record<string, unknown>, r, (k) => RULE_RANGE[k] ?? null) || moved;
-    for (const table of ['band', 'gaps', 'demo'] as const) {
-      const t = r[table];
-      if (t && typeof t === 'object') moved = moveNumbers(PROGRESS_RULES[table] as unknown as Record<string, unknown>, t as Record<string, unknown>, (k) => nestedRange(table, k)) || moved;
-    }
-    const core = r.core;
-    if (core && typeof core === 'object') {
-      for (const skill of Object.keys(PROGRESS_RULES.core) as (keyof ProgressRules['core'])[]) {
-        const t = (core as Record<string, unknown>)[skill];
-        if (t && typeof t === 'object') moved = moveNumbers(PROGRESS_RULES.core[skill] as unknown as Record<string, unknown>, t as Record<string, unknown>, (k) => nestedRange('core', k)) || moved;
-      }
-    }
-  }
+  if (o.rules && typeof o.rules === 'object') moved = moveRules(PROGRESS_RULES, o.rules as Record<string, unknown>);
   const held: string[] = [];
-  if (o.limits && typeof o.limits === 'object') {
-    const asked = o.limits as Record<string, unknown>;
-    const top = (k: string): number => (Object.hasOwn(PROGRESS_BACKSTOP, k) ? PROGRESS_BACKSTOP[k as keyof ProgressLimits] : 1);
-    moveNumbers(PROGRESS_LIMITS as unknown as Record<string, unknown>, asked, (k) => [1, top(k), true]);
-    for (const k of Object.keys(asked)) {
-      const v = asked[k];
-      if (Object.hasOwn(PROGRESS_LIMITS, k) && typeof v === 'number' && Number.isFinite(v) && Math.round(v) > top(k)) held.push(`${k} ${top(k)}`);
-    }
-  }
+  if (o.limits && typeof o.limits === 'object') held.push(...moveLimits(PROGRESS_LIMITS, o.limits as Record<string, unknown>));
   if (o.tune && typeof o.tune === 'object') {
     moveNumbers(PROGRESS_TUNE as unknown as Record<string, unknown>, o.tune as Record<string, unknown>, (k) => (k === 'hz' ? [1, 60] : k === 'claimQueue' ? [1, 100, true] : [0, 600000, true]));
   }

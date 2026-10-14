@@ -1,6 +1,6 @@
 // What a fight and a roll pay, as the record's own changes: worked out by whoever holds the record (this browser
-// alone, and from the next wave a server, which runs this very file), never by the thing that says what
-// happened. A claim says what was fought, at what level, how it ended and which of the player's skills it used;
+// alone, or a server, which runs this very file and checks a claim's deaths against its own word of them), never
+// by the thing that says what happened. A claim says what was fought, at what level, how it ended and which of the player's skills it used;
 // the amount is this file's arithmetic, every number of it `PROGRESS_RULES`'s and ours. Pure, its own folder.
 //
 // **A won fight pays every skill it used the fight's whole worth.** The worth is each member that fought and
@@ -112,7 +112,7 @@ export class XpBuckets {
   }
 }
 
-/** What a host pays by: its clock, the game's table, its rules and limits, its buckets. A server adds its witness (next wave). */
+/** What a host pays by: its clock, the game's table, its rules and limits, its buckets, and a server's witness. */
 export interface PayCtx {
   /** The shared clock, in milliseconds. */
   now: number;
@@ -120,9 +120,13 @@ export interface PayCtx {
   rules?: ProgressRules;
   limits?: ProgressLimits;
   bucket: XpBuckets | null;
-  /** The server's: whether it heard a shared member die. Absent, every claim is taken at its word. */
+  /**
+   * The server's: whether it believes a member the claim names by its world name (`w`) died -- one of the world's
+   * shared bodies on the server's own word of its death, and a name it does not share against the character's own
+   * rate, as `localKill`. Absent, every claim is taken at its word (this browser holding the record alone).
+   */
   witness?(w: string): boolean;
-  /** The server's: a member nobody shares, counted against the character's own rate. */
+  /** The server's: a dead member nobody shares, counted against the character's own rate; false once that is spent. */
   localKill?(): boolean;
 }
 
@@ -219,18 +223,22 @@ function logGain(b: Batch, src: number, gain: number, now: number, rules: Progre
   b.add({ k: 'logRow', row: [now, now, src, gain] });
 }
 
-/** Put a gain into a core skill or a pool, each held to its cap; answers what really went in. */
+/**
+ * Put a gain into a core skill or a pool, each held to its cap; answers what really went in. Never less than it
+ * was: a record another host paid to a higher cap of its own (a server's `--set`) is kept as it stands, not cut to
+ * this host's cap by a payout.
+ */
 function gainInto(b: Batch, pool: CoreSkill | Pool, add: number, rules: ProgressRules): number {
   if (add <= 0) return 0;
   const rec = b.draft;
   if (isCoreSkill(pool)) {
     const was = rec.core[pool] ?? 0;
-    const now = Math.min(xpCap(rules), was + add);
+    const now = Math.max(was, Math.min(xpCap(rules), was + add));
     if (now !== was) b.add({ k: 'core', skill: pool, xp: now });
     return now - was;
   }
   const was = rec.pools[pool] ?? 0;
-  const now = Math.min(rules.bankCap, was + add);
+  const now = Math.max(was, Math.min(rules.bankCap, was + add));
   if (now === was) return 0;
   b.add({ k: 'pool', pool, xp: now });
   b.add({ k: 'earned', pool, xp: (rec.earned?.[pool] ?? 0) + (now - was) });
@@ -257,10 +265,12 @@ export function payClaim(rec: ProgressRecord, claim: EncounterClaim, ctx: PayCtx
   if (!b.room('paid', now - rules.claimMaxAge)) return { ch: [], paid: {}, why: 'too many fights at once' };
   if (!b.add({ k: 'paid', key: claim.id, at: now })) return { ch: [], paid: {}, why: 'that fight is paid already' };
   const won = claim.outcome === 'won';
-  // The members that count: those that fought; a dead one only when the host believes it died.
-  const witnessed = (m: ClaimMember): boolean => !m.w || !ctx.witness || ctx.witness(m.w);
+  // The members that count: those that fought; a dead one only when the host believes it died -- a body the world
+  // shares on the host's own word of its death, any other against the character's own rate. Asked of a won fight
+  // alone, since only a win pays a kill, so a fight lost or broken off spends nothing of the rate.
+  const believed = (m: ClaimMember): boolean => (m.w && ctx.witness ? ctx.witness(m.w) : !ctx.localKill || ctx.localKill());
   const fought = claim.members.filter((m) => m.fought);
-  const dead = fought.filter((m) => m.dead && witnessed(m));
+  const dead = won ? fought.filter((m) => m.dead && believed(m)) : [];
   // Diminishing returns, by the creature and never the body: each dead one's factor, its repeat written down. Only a win pays a kill.
   const dr = new Map<ClaimMember, number>();
   if (won) {
@@ -331,7 +341,8 @@ export function payClaim(rec: ProgressRecord, claim: EncounterClaim, ctx: PayCtx
     total += gain;
     pools.push({ pool, challenge: c, worth: base, paid: gain, rested: spent, ...(why ? { why } : granted < want ? { why: 'held to its bucket or its cap' } : {}) });
   }
-  if (total <= 0) return { ch: [], paid: {}, why: owed.length ? 'nothing to pay' : 'no skill was used', pools, novelty };
+  // Nothing paid: why, in the first pool's own words where it has any (nothing it fought died, held to its bucket).
+  if (total <= 0) return { ch: [], paid: {}, why: owed.length ? (pools.find((p) => p.why)?.why ?? 'nothing to pay') : 'no skill was used', pools, novelty };
   // What is left of the rested bonus, banked hours and all, when it is not what the record holds.
   if (rested !== (b.draft.rested ?? 0)) b.add({ k: 'rested', xp: rested });
   b.add({ k: 'last', at: now });

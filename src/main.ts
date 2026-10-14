@@ -993,8 +993,9 @@ class App {
   /**
    * The character's progress (src/progress/progressClient.ts): the record this browser keeps of the character in
    * play -- its core skills, its pools and the nodes it owns -- which this browser holds alone until a server's
-   * greeting says it holds progress. A field initialiser so the session's hooks can reach it from anywhere in the
-   * constructor; it keeps its record beside the story book's, in this browser's storage.
+   * greeting says it holds progress, and then only claims and shows what the server's batches say. A field
+   * initialiser so the session's hooks can reach it from anywhere in the constructor; it keeps its record beside
+   * the story book's, in this browser's storage, and reads the line at the moment it asks.
    */
   private readonly progress = new ProgressClient({
     store: browserStoryStorage(),
@@ -1002,6 +1003,10 @@ class App {
     levels: () => this.levelsFile.levels(),
     // A payout, a milestone, a node learnt or given back, a quest's bonus: one line each, in our words.
     say: (line) => this.messages.note(line),
+    send: (msg) => this.net.sendWord(msg),
+    line: () => ({ authority: this.net.session.authority, progress: this.net.session.progressVersion, status: this.net.status, mode: this.net.session.mode }),
+    wall: () => Date.now(),
+    known: () => knownToServer(this.current),
   });
   /** The game's own challenge table as the converter wrote it, fetched once; the fallback bands of ours until it lands, and for good without it. */
   private readonly levelsFile = new LevelsFile();
@@ -7797,7 +7802,10 @@ class App {
        * `{ limits }` and `{ tune }` the limits and the pacing; `{ rate: 2 }` the XP rate. `{ trainer: true }` stands a
        * developer's commando trainer in reach (`false` takes it away) and `{ learn: 'demo.novice' }` learns through
        * the real rule -- the XP, the Skill Points, the teacher -- after any XP given in the same ask. Every one goes
-       * through the record's own changes, as anything that earns does.
+       * through the record's own changes, as anything that earns does. With a server holding the record: `record.line`
+       * says how it stands (settled, a record going up, the claims waiting on an answer, the last refusal), the grant,
+       * the XP and the emptying are the admin's and go to the server, `rate` is the server's to say, and
+       * `{ sync: true }` asks the server for its copy again.
        */
       progress: (opts?: ProgressDebugAsk & { limits?: Partial<typeof PROGRESS_LIMITS>; tune?: Partial<typeof PROGRESS_TUNE>; trainer?: boolean }) => {
         // A developer's trainer in reach, before anything learnt in the same ask: kept until `trainer: false` or a travel.
@@ -7812,9 +7820,10 @@ class App {
         this.applyProgressStats();
         const rec = this.progress.record;
         const sp = spSpent(rec);
+        const report = this.progress.report() as { host: string; line: { serverRate: number | null } };
         return {
           results,
-          holder: this.progress.host,
+          holder: report.host,
           sp: { spent: sp, of: PROGRESS_RULES.spCap },
           challenge: challengeOf(sp),
           levels: this.levelsFile.state,
@@ -7822,13 +7831,14 @@ class App {
           pools: { ...(rec?.pools ?? {}) },
           nodes: Object.keys(rec?.nodes ?? {}).sort(),
           moved: this.statRows().filter((r) => r.moved),
-          rate: PROGRESS_RULES.xpRate,
+          // The rate that pays: the server's while it holds the record, this browser's own otherwise.
+          rate: report.host === 'local' ? PROGRESS_RULES.xpRate : report.line.serverRate,
           rested: restedAt(rec, Math.round(sharedClock.now() / 1000), PROGRESS_RULES),
           teacher: this.teacher ? { who: this.teacher.who, name: this.teacher.name, dev: this.teacher.dev } : null,
           lastStand: this.player.lastStand,
           buckets: this.progress.buckets.report(),
           page: { renders: this.progressUi.renders },
-          record: this.progress.report(),
+          record: report,
           statsVersion: this.player.stats.version,
         };
       },
@@ -8657,6 +8667,20 @@ class App {
       if (why === 'settled') this.net.session.noteSettled({ ...this.marked(this.current)!, story: { local: localWas } }, this.marked(this.current));
       else this.net.session.noteCharacter(this.marked(this.current));
     });
+    // The character's progress, which a server whose greeting says `progress` holds while this browser plays there:
+    // settled once the claim is answered (or the tie is), as the book is, and only then -- never before the line has
+    // the claim, never while the player still has a tie to answer. Its words come in with the rest of the server's;
+    // its pacing (the record handed up a piece a second, a claim unanswered asked again) runs four times a second off
+    // the frame. What a fight sent up came to is kept beside it for the console when the server's answer arrives.
+    this.net.session.onClaimed(() => this.progress.claimed(!!this.net.session.ask));
+    this.net.session.onAnswered(() => this.progress.answered());
+    const progressWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      progressWordWas(msg);
+      if (msg?.t === 'progress') this.progress.word(msg);
+    };
+    window.setInterval(() => this.progress.step(Date.now()), 250);
+    this.progress.onAnswer((id, paid, why) => this.encounters.notePaid(id, paid, why ?? 'paid by the server'));
     // The character's progress the same way: a batch applied with nobody else holding the record is a change to
     // the character (`characterMark`'s `progress.local`), and a settle that takes the count back to nought is
     // adopted without moving the counter. And whatever changed, the player's stats are worked out again, which
@@ -12933,8 +12957,8 @@ class App {
     give: (n) => void purse.give(n),
     spend: (n, then) => purse.spend(n, 'That', then),
     item: (kind, id) => this.equipment.give(kind, id),
-    // A quest's bonus into the skills used while it ran, while this browser holds the character's progress
-    // (always, until a server holds it: then nothing here pays it, and a server-held story pays none this pass).
+    // A quest's bonus into the skills used while it ran, while this browser holds the character's progress. A server
+    // that holds it holds the story too, and its own story host pays the bonus there (server/progress.mjs).
     bonus: (order) => {
       if (!order.bonus || this.progress.host !== 'local' || !this.progress.record) return false;
       this.progress.bonus(order.key, order.bonus.xp, order.bonus.since);

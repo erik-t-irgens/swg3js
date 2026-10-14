@@ -5,11 +5,12 @@
 //
 // A copy a server would not take is set aside rather than thrown away, under
 // `swg.progress.<character>.aside.<n>`, the last three kept, so the owner can put one back by hand. Nothing in
-// the game reads them. A record is read back under the backstop and never the browser's own limits: what is
-// kept is very often a server's record, which a server may hold to longer lists than this browser would.
+// the game reads them. A record is read back under the backstops and never the browser's own limits or rules:
+// what is kept is very often a server's record, which a server may hold to longer lists, and higher caps, than
+// this browser would.
 
 import { cleanRecord, recordText, type ProgressRecord } from './record.ts';
-import { PROGRESS_BACKSTOP, PROGRESS_RULES } from './tune.ts';
+import { PROGRESS_BACKSTOP, PROGRESS_RULE_BACKSTOP } from './tune.ts';
 
 /** Where the strings go. The browser hands in localStorage behind guards; a test, a map. */
 export interface ProgressStorage {
@@ -30,7 +31,7 @@ export function loadRecord(store: ProgressStorage, char: string): ProgressRecord
   const raw = store.get(KEY(char));
   if (!raw) return null;
   try {
-    const rec = cleanRecord(JSON.parse(raw), PROGRESS_BACKSTOP, PROGRESS_RULES);
+    const rec = cleanRecord(JSON.parse(raw), PROGRESS_BACKSTOP, PROGRESS_RULE_BACKSTOP);
     return rec && rec.char === char ? rec : null;
   } catch {
     return null;
@@ -69,7 +70,7 @@ export function asides(store: ProgressStorage, char: string): number[] {
 /** One set-aside copy, or null. */
 export function asideRecord(store: ProgressStorage, char: string, n: number): ProgressRecord | null {
   try {
-    return cleanRecord(JSON.parse(store.get(ASIDE(char, n)) ?? 'null'), PROGRESS_BACKSTOP, PROGRESS_RULES);
+    return cleanRecord(JSON.parse(store.get(ASIDE(char, n)) ?? 'null'), PROGRESS_BACKSTOP, PROGRESS_RULE_BACKSTOP);
   } catch {
     return null;
   }

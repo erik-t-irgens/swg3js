@@ -91,6 +91,8 @@ export interface Hail {
   props?: number;
   /** Whether the server moves a house where it stands: 2 does; 0 or absent only puts one up and takes one down. */
   homes?: number;
+  /** Whether the server holds each character's progress: 1 does; 0 or absent leaves it this browser's own. */
+  progress?: number;
 }
 
 /** What the server keeps about a character, and what a browser offers: the part the two are compared on. */
@@ -316,6 +318,8 @@ export interface SessionStats {
   props: number;
   /** Whether the far end's greeting said it moves a house where it stands: 2 it does, 0 a house is only taken down. */
   homes: number;
+  /** Whether the far end's greeting said it holds each character's progress: 1 it does, 0 this browser holds it. */
+  progress: number;
 }
 
 /**
@@ -357,7 +361,7 @@ export class Session {
   private ffHeard = false;
   /** Said once per line: a server speaking a language newer than this browser's. */
   private saidNewer = false;
-  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0, props: 0, homes: 0 };
+  private stat: SessionStats = { mode: 'off', authority: 'me', player: '', character: '', id: 0, counter: 0, keep: '', ask: null, denied: '', refused: '', taken: false, friendlyFire: false, admin: false, serverVersion: 0, story: 0, items: 0, paint: 0, props: 0, homes: 0, progress: 0 };
 
   /** What the game tells the player: joining, being taken over, a character settled. The message line takes it. */
   onNote: (text: string) => void = () => {};
@@ -684,6 +688,7 @@ export class Session {
     this.stat.paint = 0;
     this.stat.props = 0;
     this.stat.homes = 0;
+    this.stat.progress = 0;
     this.saidNewer = false;
     // A line being opened again is the player asking for this character back, so what was true of the
     // last line is not carried into this one: left set, the console said for the rest of the page's
@@ -741,6 +746,8 @@ export class Session {
     this.stat.props = Number(h.props) > 0 ? Math.floor(Number(h.props)) : 0;
     // And whether it moves a house where it stands (`homesVersion`).
     this.stat.homes = Number(h.homes) > 0 ? Math.floor(Number(h.homes)) : 0;
+    // And whether it holds each character's progress (`progressVersion`).
+    this.stat.progress = Number(h.progress) > 0 ? Math.floor(Number(h.progress)) : 0;
     if (this.stat.serverVersion > WIRE_VERSION && !this.saidNewer) {
       this.saidNewer = true;
       this.onNote('this server speaks a newer language than this browser: some of what it holds may not reach you');
@@ -993,6 +1000,16 @@ export class Session {
    */
   get homesVersion(): number {
     return this.stat.authority === 'server' ? this.stat.homes : 0;
+  }
+
+  /**
+   * Whether the server holding the world holds each character's progress, as its greeting said: 1 does, so this
+   * browser claims what happened and the server works out and pays every amount (src/progress/progressClient.ts);
+   * anything less leaves progress this browser's own, exactly as with no server. Nought with no server, against the
+   * relay that came before, against a server whose greeting says nothing of progress, and on a line that has dropped.
+   */
+  get progressVersion(): number {
+    return this.stat.authority === 'server' ? this.stat.progress : 0;
   }
 
   /**

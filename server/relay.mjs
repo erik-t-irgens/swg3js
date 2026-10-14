@@ -5,7 +5,7 @@
 // they are playing. No dependencies: a WebSocket server on Node's own http module, text frames
 // only, with the checking and the truth in sibling modules beside this one.
 //
-//   node server/relay.mjs [port] [--word=<something>] [--data=<folder>] [--friendly-fire] [--story=<folder>] [--story-tests] [--assets=<folder>]
+//   node server/relay.mjs [port] [--word=<something>] [--data=<folder>] [--friendly-fire] [--story=<folder>] [--story-tests] [--assets=<folder>] [--set <name>=<n>]
 //   npm run relay -- --word=mos-eisley
 //
 // It still speaks to a browser built before any of this: such a browser never sends a claim, never
@@ -184,8 +184,23 @@
 //   { t: 'story', do: 'journal', from, count }               (story 4) the words of a stretch of the journal this browser lost
 //   { t: 'story', do: 'texts', id, n, of, part }             (story 4) the journal's words the server asked for, in pieces
 //   { t: 'story', do: 'mine', ref, text }                    (story 4) a note of the player's own on a journal entry
+//   { t: 'progress', do: 'sync', has, rev, base, local, known }   the character's progress (progress.mjs): what this browser's
+//                                                          copy holds, said once the claim is answered (or the tie is),
+//                                                          as the story book's sync is, and only to a server whose hail
+//                                                          says `progress`
+//   { t: 'progress', do: 'offer', id, n, of, part, known }   its record, asked for, in pieces of 8,000 characters a second
+//                                                          apart, the first a second and a half after the claim, so it
+//                                                          never shares a second with the item list and the book's first
+//   { t: 'progress', do: 'claim', c }                        a fight closed: what was fought (each member's world name for
+//                                                          a shared body, its creature, level, whether it died and fought,
+//                                                          its health left), how it ended and which of the player's
+//                                                          skills it used -- never an amount, which the server works out
+//   { t: 'progress', do: 'task', k }                         a landing roll that saved some of a fall
+//   { t: 'progress', do: 'learn' | 'surrender', node, teacher }   a node learnt, or given back for its fee, at the kind of
+//                                                          person the browser says is in reach
+//   { t: 'progress', do: 'grant' | 'xp' | 'reset', node?, src?, n? }   the admin's own: a node granted, XP given, emptied
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes }   sent the instant the socket opens, before
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress }   sent the instant the socket opens, before
 //                                                          anything is said; `story` is { v, sets, tests }, the story this
 //                                                          server holds, which a browser built before it never reads; `items`
 //                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
@@ -198,7 +213,10 @@
 //                                                          (propsKept.mjs's PROPS_VERSION), so a browser hands its props
 //                                                          to it, and keeps them itself against any other; `homes` is 2
 //                                                          on a server that moves a house where it stands (homes.mjs's
-//                                                          HOMES_VERSION), and a browser asks no other to move one
+//                                                          HOMES_VERSION), and a browser asks no other to move one;
+//                                                          `progress` is 1 on a server that holds each character's
+//                                                          progress (progress.mjs's PROGRESS_WIRE_VERSION), and a browser
+//                                                          holds progress itself against any other
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -298,6 +316,12 @@
 //                                            answer to a reading to the end, which the window that sent it already shows
 //   { t: 'story', do: 'journal', from, entries, texts }   (story 4) the words of a stretch of the journal, by their hash
 //   { t: 'story', do: 'need', hashes }   (story 4) the journal's words this server has not got, after it took that browser's book
+//   { t: 'progress', do: 'rec', rec, take, rate }   (the server's whole record, whose copy stands -- `browser` when the
+//                                            browser's was just taken -- and the XP rate the server pays at)
+//   { t: 'progress', do: 'want' }   (send your record)
+//   { t: 'progress', do: 'ch', rev, ch, kind, of?, fee? }   (a batch the server worked out, at the revision it made, what kind
+//                                            it is and the claim, task or node it answered; the browser applies it as it is)
+//   { t: 'progress', do: 'no', why, of? }   (to whoever asked, and to nobody else: `of` names the claim, task or node)
 //
 // Everything but the claim, the ping and the ask goes to the world the player is on and no further
 // (rooms.mjs). Before this, a browser was told about people on other planets and dressed them,
@@ -327,6 +351,8 @@ import { HOMES_VERSION, HOME_SAYS, HOME_TUNING, Homes, cleanHome, cleanHomeMove,
 import { PROPS_VERSION, PROP_SAYS, PROP_TUNING, PropsKept, cleanPropMove, cleanPropPlace, cleanPropRemove, mayProp } from './propsKept.mjs';
 import { PURSE_TUNING, Purses, credits, mayPurse } from './purse.mjs';
 import { STORY_TUNING, Stories } from './stories.mjs';
+import { PROGRESS_TUNING, Progress, setProgressTuning } from './progress.mjs';
+import { readLevels } from './progressData.mjs';
 import { readStorySet } from './storySet.mjs';
 import { readCore3Story } from './core3Story.mjs';
 import { storyWorlds } from './storyWorlds.mjs';
@@ -445,6 +471,9 @@ for (let i = 0; i < args.length; i++) {
   else if (name.startsWith('prop.') && has(PROP_TUNING, name.slice(5))) PROP_TUNING[name.slice(5)] = value;
   else if (name.startsWith('purse.') && has(PURSE_TUNING, name.slice(6))) PURSE_TUNING[name.slice(6)] = value;
   else if (name.startsWith('story.') && has(STORY_TUNING, name.slice(6))) STORY_TUNING[name.slice(6)] = value;
+  // Progress's own numbers, its copy of the rules (`progress.rules.<name>`, a nested one `progress.rules.band.grey`)
+  // and the limits its batches are made under (`progress.limits.<name>`, never past the backstop nothing moves).
+  else if (name.startsWith('progress.') && setProgressTuning(name.slice(9), value)) continue;
   else console.log(`  --set ${name}: there is no such number, and it has been ignored`);
 }
 
@@ -534,6 +563,25 @@ propsKept.load(store.data);
 // rest: a balance only in memory would be a different number after every restart.
 const purses = new Purses({ tuning: PURSE_TUNING, write: (rec) => store.change(rec) });
 purses.load(store.data);
+// Each character's progress (progress.mjs), written down like the purses: the records are the store's own, so a
+// batch goes through the store, which applies it and puts it in the log before anybody is told. The server is the
+// only one that pays into it while a browser plays here: a browser claims what happened, and this works the amount
+// out by the rules the browser runs alone, checking a shared body's death against the keeper's own word of it.
+// The game's own challenge table is read once from the converted content; the respec fee goes through the purse.
+const levelsRead = readLevels(ASSETS);
+const progress = new Progress({
+  tuning: PROGRESS_TUNING,
+  write: (rec) => store.change(rec),
+  now: () => clock.now(),
+  purses,
+  levels: () => levelsRead.levels,
+  levelsState: levelsRead.state,
+  admin: (c) => admins(c),
+  // One of the world's bodies the server shares: a claim names it dead only on the keeper's own word of its death.
+  shared: (id) => ownership.worldOf(id) !== '',
+  worldOf: (c) => rooms.keyOf(c.id) ?? '',
+});
+progress.load(store.data);
 // Each character's story book (stories.mjs), written down like the purses: the books are the store's
 // own, so a change goes through the store, which applies it and puts it in the log before anybody is
 // told, and the same function applies it again when the log is played back on start. A counter's change
@@ -573,6 +621,8 @@ const stories = new Stories({
   tests: STORY_TESTS,
   // The game's own conversations, out of the Core3 reference every release carries (core3Story.mjs).
   core3: () => readCore3Story(),
+  // A quest's experience, paid as a bonus into the skills the character used while it ran.
+  progress,
 });
 stories.load(store.data);
 stories.readSets();
@@ -1282,6 +1332,11 @@ function onMessage(c, text, trimmed = false) {
       // world's creatures on this word, from every player it names or its keeper, and on nothing else. Kept
       // before anybody is told, so a striker's report sent the moment it hears never comes ahead of it.
       if (ask.do === 'dead') deliverTo(stories.death(ask.id, by, c.id, end.world));
+      // And progress keeps it as its witness: a fight's claim names a shared body dead on this word and on nothing
+      // else, and a claim that came before it (the keeper's death and its claim leave one browser by two paths) runs now.
+      // A seeded body's death stands for claims only while its post is empty (`end.back`), since it comes back
+      // under the same name.
+      if (ask.do === 'dead') deliverTo(progress.death(ask.id, by, c.id, end.world, end.back ?? 0));
       sendToRoom(end.world, { t: 'spawn', do: 'gone', id: ask.id, why: ask.do === 'dead' ? 'dead' : 'taken', ...(end.back ? { back: end.back } : {}), ...(by.length ? { by } : {}) });
       // It is gone, so the picture of where things stand forgets it.
       npcPlaces.gone(end.world, ask.id);
@@ -1610,6 +1665,14 @@ function onMessage(c, text, trimmed = false) {
     if (!c.hello || !c.character) return;
     if (sessions.holder(c.character) !== c.id) return;
     deliverTo(stories.hear(c, msg));
+  } else if (msg.t === 'progress') {
+    // The character's progress: what its copy holds, its copy handed up when asked for, a fight or a roll claimed, a
+    // node learnt or given back. The character's and not the line's, exactly as the story book is: a browser that has
+    // not said which character it plays has none here, and a line a newer browser has taken over no longer speaks for
+    // it. Never trimmed with the news: each of these is a decision, and the amounts are worked out here.
+    if (!c.hello || !c.character) return;
+    if (sessions.holder(c.character) !== c.id) return;
+    deliverTo(progress.hear(c, msg));
   } else if (msg.t === 'placeHome' || msg.t === 'removeHome' || msg.t === 'moveHome') {
     // A building put down in the world. Unlike a dock claim this *is* written down -- it is the
     // thing the whole of it is for -- and unlike an item it belongs to a world rather than to a
@@ -1718,6 +1781,7 @@ const server = createServer((req, res) => {
         props: propsKept.describe(),
         purses: purses.describe(),
         stories: stories.describe(),
+        progress: progress.describe(),
         joinWord: WORD ? 'set' : 'none',
         admin: adminFor(store.data, ADMIN) || 'nobody yet',
         friendlyFire: FRIENDLY_FIRE,
@@ -1736,6 +1800,8 @@ const server = createServer((req, res) => {
         prop: PROP_TUNING,
         purse: PURSE_TUNING,
         story: STORY_TUNING,
+        // Progress's own numbers, with the rules it pays by and the limits its batches are made under.
+        progressTuning: PROGRESS_TUNING,
         // The distances a group works to, which are the client's own and not this server's to pick:
         // they are printed here so what is being enforced can be read off without reading the code.
         ranges: GROUP_RANGES,
@@ -1789,8 +1855,9 @@ server.on('upgrade', (req, socket) => {
   // run here; the sets are the story sets read, by name and hash; `tests` is whether the test set is on.
   // `items` says this server keeps a row per thing, so a browser built for it may hand up two of one item;
   // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them;
-  // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION });
+  // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself;
+  // `progress` that it holds each character's progress, so a browser claims rather than paying itself.
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail() });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');
@@ -1857,6 +1924,9 @@ server.on('upgrade', (req, socket) => {
     // A story book half handed up goes with the line: nothing of it was taken, and the browser offers
     // it again the next time it settles.
     stories.gone(c.id);
+    // So does a progress record half up, and the line's allowances; the character's XP buckets stay, so a reconnect
+    // does not fill them again.
+    progress.gone(c.id);
     // A world nobody is left standing on stops being remembered: the picture of where its creatures
     // had got to is only there for the next browser to arrive, and it is rebuilt from their batches.
     if (key && rooms.members(key).size === 0) npcPlaces.forget(key);
@@ -1916,6 +1986,11 @@ setInterval(() => deliverTo(duels.tick()), COMBAT_WIRE.tick);
 // so once a second costs nothing (faster when a run sets a shorter sweep).
 setInterval(() => deliverTo(stories.tick()), Math.max(100, Math.min(1000, Number(STORY_TUNING.sweep) || 1000)));
 
+// A fight's claim parked for a death word that never came is paid on what was heard once `progress.claimPark` runs
+// out, a progress record whose pieces stopped coming is given up, and old deaths are let go. Four times a second, so
+// a park waits no more than a quarter of a second past its time; with nothing parked or coming it walks empty maps.
+setInterval(() => deliverTo(progress.tick()), 250);
+
 let closing = false;
 const shutDown = (why) => {
   if (closing) return;
@@ -1949,5 +2024,7 @@ server.listen(PORT, () => {
   for (const s of told.sets) for (const line of s.first) console.log(`    ${s.name}: ${line}`);
   if (told.core3) console.log(`  the game's own people speak ${told.core3.played} of the ${told.core3.trees} conversations the Core3 reference keeps (the ${told.core3.adopted} adopted), ${told.core3.voiced} kinds of them${sets.length ? '' : ', once a story set is read'}${told.core3.errors.length ? `; the adoptions read with ${told.core3.errors.length} problem(s): ${told.core3.errors.slice(0, 3).join('; ')}` : ''}`);
   console.log(`  ${ASSETS ? `a planet's arrivals are checked against where the player stands, about the layout centres in ${ASSETS}` : 'no converted content was named (--assets=<folder>), so a planet\'s arrivals are taken on the browser\'s word'}`);
+  const held = progress.describe();
+  console.log(`  each character's progress is kept and paid here (${held.records} records): a browser claims what it fought and used, and the amount is worked out here at ${PROGRESS_TUNING.rules.xpRate} times the rules' rate, a shared body's death checked against its keeper's own word; ${levelsRead.line}`);
   console.log(`  a browser built before this one plays as it always has; http://localhost:${PORT}/ says what is going on`);
 });

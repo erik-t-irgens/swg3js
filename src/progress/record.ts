@@ -193,6 +193,21 @@ export function emptyRecord(char: string): ProgressRecord {
   return { v: PROGRESS_VERSION, char, rev: 0, base: 0, local: 0, core: table<number>(), pools: table<number>(), nodes: table<NodeRec>() };
 }
 
+/**
+ * Whether a record holds nothing at all past its counters: no XP, no node, nothing remembered, no section of a later
+ * wave's. What a browser's `sync` says it `has`, and what a server reads a record handed up by, since an empty one
+ * from a browser that believes a server held the character before is a cache that was cleared, not progress.
+ */
+export function recordIsEmpty(rec: ProgressRecord): boolean {
+  for (const k of Object.keys(rec)) {
+    if (k === 'v' || k === 'char' || k === 'rev' || k === 'base' || k === 'local') continue;
+    const v = rec[k];
+    if (v === undefined || (v !== null && typeof v === 'object' && Object.keys(v).length === 0)) continue;
+    return false;
+  }
+  return true;
+}
+
 /** Skill Points spent: the sum of what every owned node costs. */
 export function spSpent(rec: ProgressRecord | null): number {
   let sp = 0;

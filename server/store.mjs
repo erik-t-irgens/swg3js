@@ -2,7 +2,8 @@
 // own (a row per item, whose shape is the ledger's: see ledger.mjs), the buildings they have put
 // down (a row per house, whose shape is homes.mjs's), the props they have put down (a row per prop,
 // whose shape is propsKept.mjs's), each character's story book (whose shape is
-// `src/story/book.ts`'s, through stories.mjs) and the switches it was started with. One file you can
+// `src/story/book.ts`'s, through stories.mjs), each character's progress record (whose shape is
+// `src/progress/record.ts`'s, through progress.mjs) and the switches it was started with. One file you can
 // read, plus a log of the changes since it was last written.
 //
 // How it is written, and why: the snapshot goes to `world.json.tmp`, is flushed to the disk and
@@ -33,6 +34,7 @@ import { applyHomes } from './homes.mjs';
 import { applyProps } from './propsKept.mjs';
 import { applyPurse } from './purse.mjs';
 import { applyStory, readStories } from './stories.mjs';
+import { applyProgressRec, readProgress } from './progress.mjs';
 
 /** The shape of the file. A file written by a newer server is left alone and not played into. */
 export const STORE_VERSION = 1;
@@ -62,10 +64,12 @@ function table(from = null) {
 /**
  * An empty world: every slot that exists, each filled by the file that owns its shape. `stories` is each
  * character's story book, `storyArchive` the books a browser's copy replaced, kept whole, and `storyTexts` the
- * words of the journals by their hash (stories.mjs).
+ * words of the journals by their hash (stories.mjs); `progress` each character's progress record,
+ * `progressArchive` the records a browser's copy replaced and `progressOwed` the quest bonuses owed to a character
+ * whose progress had not settled yet (progress.mjs).
  */
 export function emptyWorld(epoch = Date.now()) {
-  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), props: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), settings: {} };
+  return { v: STORE_VERSION, seq: 0, epoch, players: table(), characters: table(), items: table(), houses: table(), props: table(), purses: table(), stories: table(), storyArchive: table(), storyTexts: table(), progress: table(), progressArchive: table(), progressOwed: table(), settings: {} };
 }
 
 /**
@@ -111,7 +115,7 @@ export function applyChange(data, rec) {
       // decides what each row looks like on disk, and the same function runs when the thing happens
       // and when the log is replayed on start. Anything neither of them knows is a record from a
       // newer server: kept in the log, not understood here, and not an error.
-      return applyItems(data, rec) || applyHomes(data, rec) || applyProps(data, rec) || applyPurse(data, rec) || applyStory(data, rec);
+      return applyItems(data, rec) || applyHomes(data, rec) || applyProps(data, rec) || applyPurse(data, rec) || applyStory(data, rec) || applyProgressRec(data, rec);
   }
 }
 
@@ -191,11 +195,13 @@ export class Store {
           texts = {};
         }
       }
-      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), props: table(loaded.props), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts) };
+      this.data = { ...emptyWorld(loaded.epoch ?? epoch), ...loaded, players: table(loaded.players), characters: table(loaded.characters), items: table(loaded.items), houses: table(loaded.houses), props: table(loaded.props), purses: table(loaded.purses), stories: table(loaded.stories), storyArchive: table(loaded.storyArchive), storyTexts: table(texts), progress: table(loaded.progress), progressArchive: table(loaded.progressArchive), progressOwed: table(loaded.progressOwed) };
       delete this.data.storyTextsFile;
       // A story book's own tables are keyed by a browser too, a level further down: they are rebuilt
-      // before the log is played back onto them, so a replayed change meets the book a live one did.
+      // before the log is played back onto them, so a replayed change meets the book a live one did. A
+      // progress record's the same way.
       readStories(this.data);
+      readProgress(this.data);
       this.say(`world.json read: ${Object.keys(this.data.players).length} players, ${Object.keys(this.data.characters).length} characters, up to change ${this.data.seq}`);
     }
     let knownEpoch = !!loaded && Number.isFinite(loaded.epoch);
