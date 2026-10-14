@@ -193,7 +193,7 @@ const aimArm = method(rig, '  aimArm(side: ');
 ok(/aimArmBones\(this\.root, upper, fore, [^;]*, dir, roll, weight\);/.test(aimArm), "the rig's aimArm hands its weight to the bones' aim");
 ok(method(player, '  private aimGrappleArm(rig: CharacterRig): void {').includes("rig.aimArm('left', d.set(grappleArmLocal.x, grappleArmLocal.y, grappleArmLocal.z), 0, g.armWeight);"), "and the player aims the left arm by the hook's eased weight");
 // The lean on the wire (§3.15): the whole turn and the leaned origin go while `leanSends`, the one rule the hook keeps.
-const net = method(main, '  private stepNet(dt: number): void {');
+const net = method(main, '  private stepNet(dt: number, frameAt: number): void {');
 ok(net.includes('const leans = !p.aboard && !p.eva && p.grapple.leanSends;') && net.includes('const at = leans ? p.leanedAt(leanedAt) : p.worldPos;'), "stepNet sends while the hook says the lean goes out, from the origin the leaning figure is drawn at");
 ok(net.includes('const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3)') && net.includes("this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)],") && /sendState\(\{[^\n]*\bq,/.test(net), 'and puts the whole turn in the state while it does, with that origin as the place');
 // The receiver: the glide of a peer's turn is `peerTurn.ts`'s, which the node test runs over a let-go at the wire's rate.
@@ -278,6 +278,31 @@ ok(inOrder(fly, ["kind === 'prop' ? this.propAt?.(hit.collider.handle)", "this.w
   );
   const garage = read('../../../src/vehicles/garage.ts');
   ok(inOrder(method(garage, '  async refit('), ['refitSwap(', 'v.refits++;']).ok, "a refit's swap counts on the hull, which lets an anchor on it go");
+
+  // Wave 3c: another player's vehicle. Every hand-over in the game, which the harness makes for itself, and the one number
+  // the rope's pose shares with the peers' own glide.
+  ok(main.includes('this.player.grapplePeers = peerBodies().hullBoxes();') && /get peerHulls\(\) \{\s*return self\.grapplePeers;\s*\}/.test(player), "the game hangs the peers' boxes on the player once, and the player hands them to the hook");
+  ok(inOrder(markStep, ['v.vehicles = this.world.vehicles;', 'v.peers = p.grapplePeers;', 'g.probeMark(']).ok && harness.includes('probeFrom(g, this.physics, h, d, 0, h, this.filter, this.body, null, 0, this.vehicles, this.peerHulls);'), "the mark's probe is handed the peers' boxes before it runs, in the game and the harness");
+  ok(main.includes('this.player.grapple.mayHurtPeer = (id) => combat.mayHurt(id);'), "a slam that came of another player's vehicle asks the fight's own rule whether that player could hurt this one");
+  ok(/const k = 1 - Math\.exp\(-dt \/ 0\.1\);\s*r\.group\.position\.lerp\(r\.target, k\);/.test(remotes) && /export const PEER_GLIDE = 0\.1;/.test(frames), "the rope's 'picture' pose and its turn lead the peers' own glide, 1 - exp(-dt / 0.1), by the same constant");
+  ok(/pull\(_j: \{ x: number; y: number; z: number \}, _at: \{ x: number; y: number; z: number \}\): void \{\}/.test(frames) && /takesPull\(\): boolean \{\s*return false;\s*\}/.test(frames.slice(frames.indexOf('export class PeerHullSource'))), "another player's vehicle takes no pull and its pull does nothing: it is a picture here");
+  ok(!/peerBodies|remoteBodies|remotePlayers/.test(frames) && !/from '\.\.\/net\//.test(grapple), "the rope reads the peers only through the list it is handed, never the peers' own records");
+  const bodies = read('../../../src/net/remoteBodies.ts');
+  ok(/!p\.shipMount && !p\.shipDocked/.test(bodies) && /rv\.mount = def\.source === 'creature';/.test(remotes), "hullBoxes leaves out a mount (the garage def's own test) and a hull docked onto another");
+  // The list's moments: every state's own (`performance.now()` as the message is handled, copied by `viewOf`), and the frame's
+  // clock the game read at its start, handed to the peers before they are moved. Nothing on the peers' path or the rope's
+  // reads a clock of its own: read in `hullOf`, a fresh number every frame for every player riding anything.
+  const viewOf = method(remotes, '  private viewOf(');
+  ok(
+    ['v.shipTarget.copy(rv.target);', 'v.shipTargetQ.copy(rv.targetQ);', 'v.shipVel.copy(rv.vel);', 'v.shipHeardAt = rv.heardAt;', 'v.shipMount = rv.mount;', 'v.shipDocked = rv.dock !== null;', 'v.shipHeardAt = 0;'].every((s) => viewOf.includes(s)),
+    "the peer view carries the ride's state as heard -- its place, turn, the relay's velocity and the moment, in milliseconds -- and says none heard with no ride",
+  );
+  ok(/h\.heardAt = p\.shipHeardAt \/ 1000;/.test(bodies) && /stampHulls\(ms: number\): void \{\s*this\.hullSet\.stamp = ms \/ 1000;\s*\}/.test(bodies), "hullBoxes keeps each state's moment and the list's stamp in seconds, the stamp handed in");
+  const codeOf = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  ok(!/performance\.now|Date\.now/.test(codeOf(bodies)) && !/performance\.now|Date\.now/.test(codeOf(frames)), 'neither the peers\' bodies nor the rope\'s frames read a clock');
+  const stepNet = method(main, '  private stepNet(dt: number, frameAt: number): void {');
+  ok(inOrder(stepNet, ['peerBodies().stampHulls(frameAt);', 'this.remotes.update(dt);']).ok && /const tFrame = performance\.now\(\);/.test(main) && main.includes('this.stepNet(dt, tFrame);'), "the game stamps the peers' list with the clock its frame read at its start, before the peers are moved");
+  ok(/if \(now - this\.lastStateSent < 100\) return;/.test(stepNet) && /export const PEER_SEND = 0\.1;/.test(frames), "the jump test's gap between states is the gap the game sends them at, a tenth of a second");
 }
 
 console.log(`\n${checks} checks passed`);

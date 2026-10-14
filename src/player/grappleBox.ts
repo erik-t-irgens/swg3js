@@ -3,7 +3,8 @@
 // it (two triangles' separating axes). Each is worked in the box's own frame, from a pose (its middle and its turn, a
 // unit quaternion x, y, z, w) and its half-size handed in, so a box that stands where the engine has nothing -- another
 // player's vehicle, whose picture is a sensor every query passes -- is still something the rope bends on. Pure: no
-// engine, no three, and nothing made a call (the scratch it works in is kept here).
+// engine, no three, and nothing made a call (the scratch it works in is kept here). Built in wave 3b and ridden from 3c,
+// whose test 13 holds every answer here to the engine's own cuboid's.
 
 /** Where a ray met a box: how far along it, and the face's outward normal in the world. */
 export interface BoxHit {
@@ -49,13 +50,24 @@ function intoBox(p: Float64Array, q: Float64Array, src: Float64Array, o: number,
 
 /**
  * The ray from `origin` along unit `dir` (each three numbers) for at most `len` against the box at middle `p`, turn `q`
- * and half-size `half`: the first face it enters, into `out`, and true; false when it misses or starts inside.
+ * and half-size `half`: the first face it enters, into `out`, and true; false when it misses or starts inside. The plain
+ * form, for the tests and the console; a frame's casts hand the length over in `out` (`rayBoxIn`).
  */
 export function rayBox(origin: Float64Array, dir: Float64Array, len: number, p: Float64Array, q: Float64Array, half: Float64Array, out: BoxHit): boolean {
+  out.toi = len;
+  return rayBoxIn(origin, dir, p, q, half, out);
+}
+
+/**
+ * `rayBox` with the most the ray may reach handed in `out.toi` and its time of impact handed back there: the form every
+ * frame's cast calls, since a length worked out at the call and handed over as a number to a call that is not built in is
+ * a fresh number, every cast of every frame.
+ */
+export function rayBoxIn(origin: Float64Array, dir: Float64Array, p: Float64Array, q: Float64Array, half: Float64Array, out: BoxHit): boolean {
   intoBox(p, q, origin, 0, lo, 0);
   turn(q, true, dir, 0, ld, 0);
   let tmin = 0;
-  let tmax = len;
+  let tmax = out.toi;
   let axis = -1;
   let sign = 0;
   for (let k = 0; k < 3; k++) {
@@ -117,6 +129,56 @@ export function spanDepth(a: Float64Array, b: Float64Array, p: Float64Array, q: 
     if (d > deepest) deepest = d;
   }
   return deepest;
+}
+
+/**
+ * Whether the span from `a` to `b` meets the box at all, a start inside it included: the slab test over the span's own
+ * share, exact where `spanDepth` samples. With `half` the box shrunk by an offset, whether the span reaches deeper than
+ * that offset into it (the rope's `blocked` on another player's vehicle).
+ */
+export function spanMeetsBox(a: Float64Array, b: Float64Array, p: Float64Array, q: Float64Array, half: Float64Array): boolean {
+  intoBox(p, q, a, 0, lo, 0);
+  intoBox(p, q, b, 0, ld, 0);
+  let tmin = 0;
+  let tmax = 1;
+  for (let k = 0; k < 3; k++) {
+    const o = lo[k];
+    const d = ld[k] - o;
+    const h = half[k];
+    if (h <= 0) return false;
+    if (d > -1e-12 && d < 1e-12) {
+      if (o < -h || o > h) return false;
+      continue;
+    }
+    let t1 = (-h - o) / d;
+    let t2 = (h - o) / d;
+    if (t1 > t2) {
+      const t = t1;
+      t1 = t2;
+      t2 = t;
+    }
+    if (t1 > tmin) tmin = t1;
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return false;
+  }
+  return true;
+}
+
+/** Whether the point `pt` (three numbers in the world) lies inside the box, its faces not included. */
+export function pointInBox(pt: Float64Array, p: Float64Array, q: Float64Array, half: Float64Array): boolean {
+  intoBox(p, q, pt, 0, lo, 0);
+  const x = lo[0];
+  const y = lo[1];
+  const z = lo[2];
+  return x > -half[0] && x < half[0] && y > -half[1] && y < half[1] && z > -half[2] && z < half[2];
+}
+
+/** Whether the triangle `t` (nine numbers, three corners in the world) meets the box: the fan's one triangle as the rope asks it. */
+export function triangleMeetsBox(t: Float64Array, p: Float64Array, q: Float64Array, half: Float64Array): boolean {
+  intoBox(p, q, t, 0, tri, 0);
+  intoBox(p, q, t, 3, tri, 3);
+  intoBox(p, q, t, 6, tri, 6);
+  return triMeetsBox(half);
 }
 
 /** Whether the triangle in `tri` (box frame, nine numbers) meets the box of half-size `half`, by the separating axes. */

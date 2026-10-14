@@ -34,6 +34,14 @@
 // rides and that moves is met by a test of the rope's own in that hull's frame, not by the character controller, which
 // meets it a step stale.
 //
+// Wave 3c gave it another player's vehicle, which in this browser is a picture and a sensor box: the dart bites the box
+// (amber, as any hull), the rope wraps it and tows the player behind it, and while the rope rides it the body is held off
+// it as off a hull this browser simulates, all by the rope's own arithmetic against that box (`grappleBox.ts`, the box
+// test `HullFrames.peerTest`) in a smooth pose of the rope's own (§3.18), and nothing is ever put on it, since only its
+// rider's game can move it. It lets go when that player is no longer shown on that vehicle, or a state of theirs lands further than
+// `peerJump` from where the pose expected it; and a slam that came of it, on the rope or in the flight after one, harms
+// only where that player could hurt you (`mayHurtPeer`, the server's friendly fire or a duel).
+//
 // A player who never fires plays exactly as before: every line the player's update adds for this is behind
 // `out`, and everything that touches the body behind `attached`. Every number here is in `GRAPPLE_TUNE` and
 // moves live through `__debug.grapple({ tune })`.
@@ -44,7 +52,7 @@ import type { HookableProp } from '../world/looseProps.ts';
 import type { Vehicle } from '../vehicles/vehicle.ts';
 import { JKA, UNIT } from './jkaMove.ts';
 import { GrappleRope, RopeConstraint, isTerrainCollider } from './grappleRope.ts';
-import { HullFrames, MAX_HULL_CONTACTS, newHullHit, type HullFrame } from './grappleFrames.ts';
+import { HullFrames, MAX_HULL_CONTACTS, MAX_HULL_FRAMES, newHullHit, type HullFrame, type PeerHull, type PeerHulls, type PeerPicture } from './grappleFrames.ts';
 import { SWIM_DEPTH, type SwimIn } from './swimStep.ts';
 import type { HarmKind } from './harmRule.ts';
 import {
@@ -220,6 +228,33 @@ export const GRAPPLE_TUNE = {
   hullTest: true,
   /** Off: a hull's poses are where the last physics step left them, never led to the frame's time (the prototype's `lead: 'none'`), to compare. */
   hullLead: true,
+  /**
+   * The pose the rope rides on another player's vehicle (wave 3c): 'smooth', dead-reckoned from the relay's own velocity
+   * and held back by the glide's mean lag; 'picture', the glided picture led by the glide's own step, to compare.
+   */
+  peerPose: 'smooth' as 'smooth' | 'picture',
+  /**
+   * How fast the smooth pose eases toward the last state heard plus its velocity times the time since, and the velocity
+   * it rides toward the relay's own (s). The design's 0.3 handed every state's few milliseconds of jitter in when it was
+   * heard on to the pose's speed (a millisecond of it is 4 cm at 40 m/s): with states stamped as they arrive, 5 ms of
+   * network jitter swung the pose 39.4 to 40.6 m/s and a tow over the ground dipped 1.1 m/s under the vehicle's speed at
+   * 144 and 60 fps, where at 0.5 the pose holds 39.6 to 40.3 and the tow stays within 0.8; with every state stamped only
+   * as the next frame starts (a main thread busy all frame) at 60 fps, 0.3 let a tow over the ground go slack past the
+   * tow's own hold and drop to 31 m/s, where 0.5 holds it over 38. The price is a pose slower to follow a change of speed
+   * [computed, a one-dimensional model]: 1.65 m behind the picture at 8 m/s² against 0.9, and run on past a vehicle that
+   * stops by 5.3 m braking at 15 m/s² and 9.4 m stopping dead, against 2.2 and 5.5 at 0.3 (4.3 riding the relay's
+   * velocity raw), before it eases back.
+   */
+  peerCorrect: 0.5,
+  /**
+   * [computed] The smooth pose held back by the picture's own mean lag behind the states' line (s): the glide's time
+   * constant (0.1, `remotePlayers.ts`) plus most of half the tenth of a second between states, 0.143 s at 144 fps, 0.134 at
+   * 60 and 0.118 at 30 (`dt(1 - k)/k + (0.1 - dt)/2`). The design took the time constant alone, and at 0.1 the pose stood
+   * 0.043 m per m/s ahead of the picture at 144 fps and never crossed it; 0.14 runs it through the middle at the owner's rate.
+   */
+  peerLag: 0.14,
+  /** A state of another player's vehicle landing further than this (m) from where the pose expected it is a teleport, and the rope lets go. */
+  peerJump: 10,
   // --- the dart and the mark ---------------------------------------------------------------------------
   /** The dart's own speed (m/s). */
   speed: 150,
@@ -346,6 +381,18 @@ export const GRAPPLE_GRAVITY = JKA.gravity * UNIT;
 /** How far out from the capsule's middle a slam strikes: the player's capsule's radius (`player.ts`'s `CAPSULE_RADIUS`). */
 const SLAM_REACH = 0.35;
 
+/** A point (x, y, z) in another player's picture's own frame, where that picture is drawn, into `out` at `o` (wave 3c). */
+function placeOn(pic: PeerPicture, x: number, y: number, z: number, out: Float64Array, o: number): void {
+  const q = pic.quaternion;
+  const p = pic.position;
+  const tx = 2 * (q.y * z - q.z * y);
+  const ty = 2 * (q.z * x - q.x * z);
+  const tz = 2 * (q.x * y - q.y * x);
+  out[o] = p.x + x + q.w * tx + (q.y * tz - q.z * ty);
+  out[o + 1] = p.y + y + q.w * ty + (q.z * tx - q.x * tz);
+  out[o + 2] = p.z + z + q.w * tz + (q.x * ty - q.y * tx);
+}
+
 /** What writes the rope's colour, roughness and metalness onto its one material (`grappleDraw.ts` registers it). */
 let lookHook: (() => void) | null = null;
 export function setGrappleLook(hook: () => void): void {
@@ -362,6 +409,7 @@ export function tuneGrapple(o: Partial<Record<keyof GrappleTune, unknown>>): Gra
     if (typeof was === 'number' && typeof v === 'number' && Number.isFinite(v)) T[k] = v;
     else if (typeof was === 'boolean' && typeof v === 'boolean') T[k] = v;
     else if (k === 'aim' && (v === 'true' || v === 'fired')) T[k] = v;
+    else if (k === 'peerPose' && (v === 'smooth' || v === 'picture')) T[k] = v;
   }
   const G = GRAPPLE_TUNE;
   G.range = Math.max(G.minRange + 0.1, G.range);
@@ -422,6 +470,9 @@ export function tuneGrapple(o: Partial<Record<keyof GrappleTune, unknown>>): Gra
   G.parkRest = Math.max(0, G.parkRest);
   G.hullLag = Math.max(1e-4, G.hullLag);
   G.hullPush = Math.max(0, G.hullPush);
+  G.peerCorrect = Math.max(0.001, G.peerCorrect);
+  G.peerLag = Math.max(0, G.peerLag);
+  G.peerJump = Math.max(0.1, G.peerJump);
   lookHook?.();
   return G;
 }
@@ -565,6 +616,8 @@ export interface GrappleBody {
   readonly hullController: RAPIER_NS.KinematicCharacterController | null;
   /** The terrain's own height under the body, as the frame already reads it for its floor: a towed body's floor outdoors (wave 3). */
   readonly ground: number;
+  /** Other players' vehicles as their boxes and what the relay said of them (`RemoteBodies.hullBoxes()`, wave 3c); null with none. */
+  readonly peerHulls?: PeerHulls | null;
 }
 
 /** The held keys the hook reads, written by the key block (or the harness) and read by the frame's steps. */
@@ -639,6 +692,9 @@ export interface GrappleMark {
    * hull's point velocity there (`tvx`, `tvy`, `tvz`) is what the dart is aimed true against (the intercept).
    */
   vehicle: Vehicle | null;
+  /** Another player's vehicle under the mark (wave 3c): their relay id and the picture, the point kept in its own frame as a hull's is; 0 and null otherwise. */
+  peer: number;
+  peerObj: PeerPicture | null;
   lx: number;
   ly: number;
   lz: number;
@@ -671,6 +727,8 @@ export interface MarkView {
   exclude: RAPIER_NS.RigidBody | null;
   /** The vehicles this browser simulates, each cast in its own frame (wave 3); empty for none. */
   vehicles: readonly Vehicle[];
+  /** Other players' vehicles, each cast as its box (wave 3c); null for none. */
+  peers: PeerHulls | null;
 }
 
 /** No vehicles: the mark's view before the game hands it the world's. */
@@ -687,9 +745,9 @@ export class Grapple {
   readonly con = new RopeConstraint();
   readonly modes: RopeModes = newRopeModes();
   readonly keys: GrappleKeys = { reelIn: false, reelOut: false, haul: false, swayX: 0, swayZ: 0 };
-  readonly mark: GrappleMark = { shows: false, held: false, next: false, kind: 'none', distance: 0, x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, collider: null, holdLeft: 0, flash: 0, vehicle: null, lx: 0, ly: 0, lz: 0, tvx: 0, tvy: 0, tvz: 0 };
+  readonly mark: GrappleMark = { shows: false, held: false, next: false, kind: 'none', distance: 0, x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, collider: null, holdLeft: 0, flash: 0, vehicle: null, peer: 0, peerObj: null, lx: 0, ly: 0, lz: 0, tvx: 0, tvy: 0, tvz: 0 };
   /** What the next `probeMark` reads, written by the caller (numbers in fields, never handed to the call). */
-  readonly view: MarkView = { eyeX: 0.5, eyeY: 0.5, eyeZ: 0.5, dirX: 0.5, dirY: 0.5, dirZ: 0.5, orbit: 0.5, hand: { x: 0, y: 0, z: 0 }, filter: 0, exclude: null, vehicles: NO_VEHICLES };
+  readonly view: MarkView = { eyeX: 0.5, eyeY: 0.5, eyeZ: 0.5, dirX: 0.5, dirY: 0.5, dirZ: 0.5, orbit: 0.5, hand: { x: 0, y: 0, z: 0 }, filter: 0, exclude: null, vehicles: NO_VEHICLES, peers: null };
   /** The slide latch (§3.3): set while hanging, cleared on the ground by slack or slowness and by every let-go. */
   latch = false;
   /** The position correction the constraint asked for this frame, added to the move. */
@@ -721,6 +779,15 @@ export class Grapple {
    * but their type, and node loads it with none); null with none hung, and every hull is then a moving thing it refuses.
    */
   vehicleOf: ((handle: number) => Vehicle | null) | null = null;
+  /**
+   * Whether the player with this relay id could hurt this one just now (the game hangs `CombatNet.mayHurt` here: the
+   * server's friendly fire, or a duel between them). A slam that came of their vehicle -- on a rope riding it, or in the
+   * fast flight after one -- harms only where this says yes (§3.11); with none hung, nowhere, which is the game with no
+   * server. The stagger, its shake and its daze play either way.
+   */
+  mayHurtPeer: ((id: number) => boolean) | null = null;
+  /** Whose vehicle the rope let go of rode, for the fast flight after it (0 for none): what its slam answers to. */
+  private releasedPeer = 0;
 
   // Vehicles on the rope (wave 3, §3.18).
   /** The hulls the rope rides and is cast against this frame: the rope's own `frames`. */
@@ -844,7 +911,7 @@ export class Grapple {
   /** The body's velocity, kept from the last step that met it, for the speed a let-go is made at. */
   private bodyVel: { x: number; y: number; z: number } | null = null;
   /** The last contact the slam rule judged past `slamFrom`, a slam or not, and where the last slam struck. */
-  readonly lastSlam = { speed: 0, harm: 0, at: Number.NEGATIVE_INFINITY, kind: '' as SlamKind, took: false, x: 0, y: 0, z: 0 };
+  readonly lastSlam = { speed: 0, harm: 0, at: Number.NEGATIVE_INFINITY, kind: '' as SlamKind, took: false, x: 0, y: 0, z: 0, peer: 0, spared: false };
   /** Seconds since the last slam that cost or staggered: a slam hurts at most once in `slamGap`. */
   sinceSlam = Number.POSITIVE_INFINITY;
   /** Seconds into the stagger, or Infinity with none: the stagger, its shake and its daze all read it. */
@@ -1040,6 +1107,20 @@ export class Grapple {
     return this.rope.free() - len3(b.pos.x - this.piv.x, b.pos.y + T.ropeY - this.piv.y, b.pos.z - this.piv.z);
   }
 
+  /**
+   * Whether the free span is no slacker than `latchSlack`: `slack`'s test, answered as a yes or no, because the words are
+   * worked out every frame the rope is out and a number handed back by a call not built in is a fresh number (a slack rope
+   * dragged behind another player's vehicle made one a frame through `slack`).
+   */
+  private slackWithin(b: GrappleBody): boolean {
+    this.pivot(this.piv);
+    const T = GRAPPLE_TUNE;
+    const dx = b.pos.x - this.piv.x;
+    const dy = b.pos.y + T.ropeY - this.piv.y;
+    const dz = b.pos.z - this.piv.z;
+    return this.rope.free() - Math.sqrt(dx * dx + dy * dy + dz * dz) <= T.latchSlack;
+  }
+
   /** The rope's first point from the hand: the nearest bend, else the anchor. */
   pivot(out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
     return this.rope.pointAt(this.rope.n, out);
@@ -1049,7 +1130,7 @@ export class Grapple {
   refreshModes(b: GrappleBody): RopeModes {
     this.bodyVel = b.vel;
     // A tow's rope is pulled and slack by turns from frame to frame: while it pulled within `towHold` it is held for the slide.
-    const held = this.attached && (this.towed || (!this.con.taut && this.slack(b) <= GRAPPLE_TUNE.latchSlack));
+    const held = this.attached && (this.towed || (!this.con.taut && this.slackWithin(b)));
     ropeModes(this.attached, b.grounded, b.swimming, this.con.taut, held, this.latch, len2(b.vel.x, b.vel.z), GRAPPLE_TUNE, this.modes);
     this.latch = this.modes.latch;
     return this.modes;
@@ -1126,7 +1207,7 @@ export class Grapple {
     mk.flash = 0;
     mk.holdLeft = 0;
     mk.collider = null;
-    if (mk.vehicle) this.markOffHull();
+    if (mk.vehicle || mk.peer) this.markOffHull();
     this.forgetHullHits();
   }
 
@@ -1260,6 +1341,63 @@ export class Grapple {
     return this.attached;
   }
 
+  /**
+   * Fasten the rope on another player's vehicle at once (wave 3c; the console's and the tests'): the point (x, y, z) and its
+   * normal are given in the world against the pose the rope rides on it now, and kept in its own frame from there. False
+   * when that player's vehicle is not among the boxes the body sees, or no frame is free.
+   */
+  attachPeer(b: GrappleBody, id: number, x: number, y: number, z: number, nx: number, ny: number, nz: number, length = -1): boolean {
+    if (this.out) this.letGo('console');
+    this.muteOwed = false;
+    const T = GRAPPLE_TUNE;
+    const peers = b.peerHulls ?? null;
+    let e: PeerHull | null = null;
+    if (peers) for (const h of peers.list) if (h.id === id) e = h;
+    if (!peers || !e) return false;
+    const slot = this.hulls.adoptPeer(peers, e);
+    if (!slot) return false;
+    this.rope.framesMoved();
+    this.launch[0] = b.pos.x;
+    this.launch[1] = b.pos.y + T.ropeY;
+    this.launch[2] = b.pos.z;
+    this.trailCount = 1;
+    this.dartFilter = b.filter;
+    this.dartExclude = b.body;
+    this.dartPhysics = b.physics;
+    this.state = 'flying';
+    this.released = false;
+    const f = this.hulls.peerFrame(slot);
+    const h = this.hullHit;
+    h.slot = slot;
+    h.vehicle = null;
+    h.collider = null;
+    h.peer = id;
+    h.peerObj = e.obj;
+    const io = f.io;
+    f.s = 1;
+    io[0] = x;
+    io[1] = y;
+    io[2] = z;
+    f.toLocal();
+    h.local[0] = io[3];
+    h.local[1] = io[4];
+    h.local[2] = io[5];
+    // The normal into its own coordinates: turned back by the pose's own turn.
+    this.segA[0] = nx;
+    this.segA[1] = ny;
+    this.segA[2] = nz;
+    turnBy(f.nq, true, this.segA, 0, h.localN, 0);
+    h.world[0] = x;
+    h.world[1] = y;
+    h.world[2] = z;
+    h.worldN[0] = nx;
+    h.worldN[1] = ny;
+    h.worldN[2] = nz;
+    this.biteHull(b, b.physics);
+    if (length > 0 && this.attached) this.rope.length = Math.min(this.range, length);
+    return this.attached;
+  }
+
   /** The dart comes home: a miss, a refusal, or the fire key pressed while it flies. */
   recall(): void {
     if (this.state !== 'flying' || this.returning) return;
@@ -1302,6 +1440,8 @@ export class Grapple {
     this.yanking = false;
     this.yankTime = 0;
     this.thingBlocked = 0;
+    // Whose vehicle the rope rode, for the flight after it (§3.11): read before the rope is let go of.
+    const peerWas = wasAttached ? this.ropePeer() : 0;
     this.state = 'off';
     this.returning = false;
     this.rope.release();
@@ -1343,8 +1483,23 @@ export class Grapple {
       if (releasedHolds(speed, GRAPPLE_TUNE)) {
         this.released = true;
         this.releasedSpeed = speed;
+        this.releasedPeer = peerWas;
       }
     }
+  }
+
+  /** The relay id of another player whose vehicle any point of the rope rides (the anchor's first), or 0. */
+  ropePeer(): number {
+    const rope = this.rope;
+    if (rope.hullPoints === 0) return 0;
+    for (let i = 0; i <= rope.n; i++) {
+      const fi = rope.pf[i];
+      if (fi > MAX_HULL_FRAMES) {
+        const f = this.hulls.peerFrame(fi);
+        if (f.src) return f.ps.id;
+      }
+    }
+    return 0;
   }
 
   /**
@@ -1496,16 +1651,22 @@ export class Grapple {
   private stepFrames(b: GrappleBody, dt: number): void {
     const rope = this.rope;
     const hulls = this.hulls;
-    if (!(GRAPPLE_TUNE.vehicles && b.vehicles.length > 0) && rope.hullPoints === 0 && !hulls.any) {
+    if (!(GRAPPLE_TUNE.vehicles && (b.vehicles.length > 0 || this.peersAbout(b))) && rope.hullPoints === 0 && !hulls.any) {
       this.onHull = false;
       rope.framesMoved();
       return;
     }
     this.fillNearBox(b, dt);
-    hulls.begin(b.physics, b.vehicles, dt, this.nearBox, this.countOn);
+    hulls.begin(b.physics, b.vehicles, b.peerHulls ?? null, dt, this.nearBox, this.countOn);
     rope.framesMoved();
     this.onHull = rope.hullPoints > 0;
     this.slipNow.reads += hulls.reads;
+  }
+
+  /** Another player's vehicle is among the boxes the body sees (wave 3c). */
+  private peersAbout(b: GrappleBody): boolean {
+    const p = b.peerHulls;
+    return !!p && p.list.length > 0;
   }
 
   /** The box the rope's free span and the dart may sweep this frame, a metre and the frame's travel round them: min, then max. */
@@ -1560,7 +1721,7 @@ export class Grapple {
   private hullsHold(): boolean {
     const rope = this.rope;
     const hulls = this.hulls;
-    for (let i = 1; i < hulls.slots.length; i++) {
+    for (let i = 1; i <= MAX_HULL_FRAMES; i++) {
       const h = hulls.hull(i);
       if (!h.src || h.carries === 0) continue;
       const anchor = rope.pf[0] === i;
@@ -1598,6 +1759,23 @@ export class Grapple {
         return false;
       }
     }
+    // Other players' vehicles (wave 3c): one no longer that player's shown ride (they left, got off, onto another vehicle,
+    // or went out of sight) lets an anchor on it go in words, and one whose state landed further than `peerJump` from
+    // where the pose expected it (a teleport) lets it go as `moved`; a bend on either is kept as a still one.
+    for (let i = MAX_HULL_FRAMES + 1; i < hulls.slots.length; i++) {
+      const f = hulls.peerFrame(i);
+      if (!f.src || f.carries === 0) continue;
+      if (!f.gone && !f.jumped) continue;
+      if (rope.pf[0] === i) {
+        if (f.gone) {
+          this.letGo('loose');
+          this.say?.('The line came loose.');
+        } else this.letGo('moved');
+        return false;
+      }
+      rope.freeze(i);
+      hulls.freePeer(i);
+    }
     this.onHull = rope.hullPoints > 0;
     if (this.onHull) rope.respan();
     return true;
@@ -1607,6 +1785,10 @@ export class Grapple {
   pivotStill(): boolean {
     const fi = this.rope.pf[this.rope.n];
     if (fi === 0) return true;
+    // Another player's vehicle is never still for the haul (wave 3c): its box is a sensor the controller has nothing of, so
+    // the body is only ever held off it by the rope's own box test and never stands on it, and the haul there ends hanging
+    // at `minFree` with the rope in.
+    if (fi > MAX_HULL_FRAMES) return false;
     const h = this.hulls.hull(fi);
     return !h.src || !h.moving;
   }
@@ -1624,21 +1806,45 @@ export class Grapple {
     const rope = this.rope;
     const hulls = this.hulls;
     const name = (v: Vehicle | null): string => (v ? (v.def?.id ?? v.spec.id) : 'gone');
+    const frameName = (fi: number): string => (fi === 0 ? 'world' : fi > MAX_HULL_FRAMES ? `peer:${hulls.peerFrame(fi).ps.id}` : name(hulls.hull(fi).vehicle));
     const frames: string[] = [];
-    if (this.attached) for (let i = 0; i <= rope.n; i++) frames.push(rope.pf[i] === 0 ? 'world' : name(hulls.hull(rope.pf[i]).vehicle));
+    if (this.attached) for (let i = 0; i <= rope.n; i++) frames.push(frameName(rope.pf[i]));
     const brake: Record<string, unknown>[] = [];
     const marked: string[] = [];
     const near: string[] = [];
-    for (let i = 1; i < hulls.slots.length; i++) {
+    for (let i = 1; i <= MAX_HULL_FRAMES; i++) {
       const h = hulls.hull(i);
       if (!h.src) continue;
       if (h.near) near.push(name(h.vehicle));
       if (h.marked) marked.push(name(h.vehicle));
       if (h.carries > 0) brake.push({ vehicle: name(h.vehicle), latched: h.braked, pulled: h.pulledYet, driven: h.vs.driven(), budget: n2(h.budget), moving: h.moving, lag: n3(h.lag) });
     }
+    // Other players' vehicles (wave 3c): each slot's pose mode, how far its pose stood off the drawn picture (now, and the
+    // most over the last whole second, and that per m/s of the vehicle's speed), and its last jump test.
+    const peer: Record<string, unknown>[] = [];
+    for (let i = MAX_HULL_FRAMES + 1; i < hulls.slots.length; i++) {
+      const f = hulls.peerFrame(i);
+      if (!f.src) continue;
+      if (f.near) near.push(frameName(i));
+      const v = f.hull?.vel;
+      const speed = v ? Math.hypot(v[0], v[1], v[2]) : 0;
+      peer.push({ id: f.ps.id, mode: GRAPPLE_TUNE.peerPose, carries: f.carries, smoothToPicture: n3(f.gapWorst), now: n3(f.gap), perMs: speed > 0.5 ? n3(f.gapWorst / speed) : null, speed: n2(speed), jump: { miss: n2(f.lastMiss), timing: n2(f.lastSlack), past: n2(GRAPPLE_TUNE.peerJump + f.lastSlack), jumped: f.jumped }, gone: f.gone });
+    }
+    const rides = this.ropePeer();
+    const main = peer.find((p) => p.id === rides) ?? peer[0] ?? null;
     const s = this.slipLast;
     return {
       frames,
+      peer: {
+        mode: GRAPPLE_TUNE.peerPose,
+        rides,
+        released: this.released ? this.releasedPeer : 0,
+        mayHurt: this.slamPeer() ? this.peerMayHurt(this.slamPeer()) : null,
+        smoothToPicture: main ? main.smoothToPicture : null,
+        perMs: main ? main.perMs : null,
+        jump: main ? main.jump : null,
+        slots: peer,
+      },
       onHull: this.onHull,
       pivotSpeed: n2(len3(this.pivV.x, this.pivV.y, this.pivV.z)),
       paidOut: n2(this.paidOut),
@@ -1661,7 +1867,7 @@ export class Grapple {
   hullGap(b: GrappleBody): number | null {
     let best: number | null = null;
     const acc = b.physics.behind;
-    for (let i = 1; i < this.hulls.slots.length; i++) {
+    for (let i = 1; i <= MAX_HULL_FRAMES; i++) {
       const h = this.hulls.hull(i);
       const v = h.vehicle;
       if (!h.marked || !v || v.disposed || !v.body.isValid()) continue;
@@ -1783,7 +1989,7 @@ export class Grapple {
     // The brake's budget, refilled for every hull the rope rides.
     const g = -b.physics.world.gravity.y;
     const nums = this.nums;
-    for (let i = 1; i < this.hulls.slots.length; i++) {
+    for (let i = 1; i <= MAX_HULL_FRAMES; i++) {
       const h = this.hulls.hull(i);
       if (h.src && h.carries > 0) {
         nums[0] = h.budget;
@@ -1796,7 +2002,8 @@ export class Grapple {
     }
     // The reel, or the haul, changes the length; a hull dragging a bend or the anchor away faster than `slipReel` pays out.
     const spentEnd = rope.spent;
-    nums[0] = spentEnd - rope.spentAtStart();
+    rope.measureSpentAtStart();
+    nums[0] = spentEnd - rope.spentStart;
     nums[1] = dt;
     slipReelExcessIn(nums, T);
     if (nums[0] > 0) {
@@ -1943,7 +2150,8 @@ export class Grapple {
     let allowed = reel;
     if (slack > 0) allowed += slack / dt;
     const pivFi = rope.pf[rope.n];
-    const src = pivFi !== 0 ? this.hulls.hull(pivFi).src : null;
+    // Another player's vehicle takes no pull: the player takes the whole of the catch, as from anything infinitely heavy.
+    const src = pivFi !== 0 ? this.hulls.srcOf(pivFi) : null;
     nums[0] = GRAPPLE_PLAYER_MASS;
     nums[1] = src && src.takesPull() ? src.mass() : Infinity;
     reducedShareIn(nums);
@@ -2038,7 +2246,8 @@ export class Grapple {
     const c = this.t2;
     for (let i = 0; i <= rope.n; i++) {
       const fi = rope.pf[i];
-      if (fi === 0) continue;
+      // The world, and another player's vehicle (a picture here: nothing is ever put on it), take nothing.
+      if (fi === 0 || fi > MAX_HULL_FRAMES) continue;
       const h = this.hulls.hull(fi);
       const src = h.src;
       if (!src || h.gone || !src.takesPull()) continue;
@@ -2165,7 +2374,7 @@ export class Grapple {
     this.costNow = 0;
     // The frames this frame (wave 3): what the rope rides and the hulls near the rope or the dart, led to the frame's time.
     // Asked only with a vehicle about or something on a hull, so a frame with neither calls nothing new at all.
-    const framed = (this.state === 'flying' || this.state === 'attached') && (this.onHull || this.rope.hullFamilies || (GRAPPLE_TUNE.vehicles && b.vehicles.length > 0) || this.hulls.any);
+    const framed = (this.state === 'flying' || this.state === 'attached') && (this.onHull || this.rope.hullFamilies || (GRAPPLE_TUNE.vehicles && (b.vehicles.length > 0 || this.peersAbout(b))) || this.hulls.any);
     if (framed) this.stepFrames(b, dt);
     if (this.state === 'flying') this.flyDart(b, dt);
     if (this.state !== 'attached') {
@@ -2590,8 +2799,10 @@ export class Grapple {
     // The hull test (wave 3, §3.18): every hull the rope rides and that moves, which the controller walked through, met
     // in its own frame; its move written over the controller's, its contacts clipped and measured against the hull's
     // own point velocity there, as every contact is. A method of its own, its hardest wall and floor handed through
-    // fields, so what it calls is built into it and no number is boxed on the way.
-    if (mv && this.attached && b.hullController && this.hulls.markedCount > 0) {
+    // fields, so what it calls is built into it and no number is boxed on the way. Another player's vehicle the rope rides
+    // (wave 3c) is met the same way by the box test of the rope's own arithmetic, moving or not, since nothing else meets it
+    // (`hullTest` false leaves the body to pass through it, as the wave first had it, to compare).
+    if (mv && this.attached && ((b.hullController && this.hulls.markedCount > 0) || (T.hullTest && this.hulls.peersRidden > 0))) {
       this.clipWall = wall;
       this.clipFloor = floor;
       this.clipOnHulls(b, mv);
@@ -2623,7 +2834,7 @@ export class Grapple {
   onHullFloor = false;
   private readonly clipRes: ClipAnswer = { into: 0.5 };
 
-  /** The hull test over every marked hull, and its contacts clipped and measured as the controller's are (`clip`'s). */
+  /** The hull test over every marked hull and the box test over every peer's vehicle the rope rides, and their contacts clipped and measured as the controller's are (`clip`'s). */
   private clipOnHulls(b: GrappleBody, mv: { x: number; y: number; z: number }): void {
     const T = GRAPPLE_TUNE;
     const vel = b.vel;
@@ -2634,8 +2845,10 @@ export class Grapple {
     cs[1] = b.pos.y + b.colliderOffsetY;
     cs[2] = b.pos.z;
     hulls.testHalf = b.colliderOffsetY - SLAM_REACH;
+    hulls.testRadius = SLAM_REACH;
     hulls.testFilter = b.filter;
-    for (let i = 1; i < hulls.slots.length; i++) if (hulls.hull(i).marked) hulls.hullTest(i, b.collider, b.hullController!, cs, mv);
+    if (b.hullController) for (let i = 1; i <= MAX_HULL_FRAMES; i++) if (hulls.hull(i).marked) hulls.hullTest(i, b.collider, b.hullController, cs, mv);
+    if (T.hullTest) for (let i = MAX_HULL_FRAMES + 1; i < hulls.slots.length; i++) if (hulls.peerRidden(i)) hulls.peerTest(i, cs, mv);
     const hc = hulls.contacts;
     const sv = this.sv;
     for (let k = 0; k < hc.n; k++) {
@@ -2703,11 +2916,18 @@ export class Grapple {
     }
     // Within the gap the last slam stands, and so does the console's record of it.
     if (this.sinceSlam < T.slamGap) return 0;
-    const harm = slamHarm(v, b.hp, T);
+    // A slam that came of another player's vehicle (the rope rides it, or this is the flight after such a rope) harms only
+    // where that player could hurt this one (§3.11): damage between players is the server's switch, and a friend driving
+    // through the rope is a blow between players by another road. The stagger, its shake and its daze play either way.
+    const peer = this.slamPeer();
+    const spared = peer !== 0 && !this.peerMayHurt(peer);
+    const harm = spared ? 0 : slamHarm(v, b.hp, T);
     const took = harm > 0 && b.takeDamage(harm, false, 'fall');
     const staggers = staggerFor(v, T) > 0;
     if (staggers) this.staggerAge = 0;
     this.noteSlam(v, harm, kind, took);
+    this.lastSlam.peer = peer;
+    this.lastSlam.spared = spared;
     if (harm > 0 || staggers) {
       this.sinceSlam = 0;
       this.lastSlam.x = px;
@@ -2726,6 +2946,24 @@ export class Grapple {
     s.kind = kind;
     s.took = took;
     s.at = this.clock;
+    s.peer = 0;
+    s.spared = false;
+  }
+
+  /** Whose vehicle a slam now would have come of: the one the rope rides, or through the flight after it the one it rode; 0 for none. */
+  private slamPeer(): number {
+    return this.attached ? this.ropePeer() : this.released ? this.releasedPeer : 0;
+  }
+
+  /** Whether that player could hurt this one just now (`mayHurtPeer`); none hung, or a hook that throws, is no. */
+  private peerMayHurt(id: number): boolean {
+    const may = this.mayHurtPeer;
+    if (!may) return false;
+    try {
+      return may(id) === true;
+    } catch {
+      return false;
+    }
   }
 
   /** A stagger with its shake and daze and no harm: the console's, for judging the screen effect by eye. */
@@ -3331,12 +3569,16 @@ export class Grapple {
     rope.place(hx, hy, hz);
     this.pivot(this.piv);
     rope.length = Math.min(this.range, rope.spent + len3(hx - this.piv.x, hy - this.piv.y, hz - this.piv.z));
-    const slot = this.hulls.hull(h.slot);
-    slot.refitsAt = slot.vehicle ? slot.vehicle.refits : 0;
+    if (!this.hulls.isPeerSlot(h.slot)) {
+      const slot = this.hulls.hull(h.slot);
+      slot.refitsAt = slot.vehicle ? slot.vehicle.refits : 0;
+    }
     this.fastened(b, h.world[0], h.world[1], h.world[2], h.worldN[1], p);
     // The rope keeps the hull in its slot from here; the hit's own hold on it goes.
     h.vehicle = null;
     h.collider = null;
+    h.peer = 0;
+    h.peerObj = null;
   }
 
   /** What every bite shares once the rope is fastened: the rope's words, its world and its clocks. */
@@ -3436,7 +3678,9 @@ export class Grapple {
     let found = false;
     // The vehicles near the ray (wave 3), each read again now, after the physics step, and led to the frame's end by what
     // is left in the accumulator, the ray cast in its own frame: a hull's point is kept in its own frame (§3.8, step 7).
-    const hullsAbout = T.vehicles && v.vehicles.length > 0;
+    // Another player's vehicle (wave 3c) is its box at the pose the rope rides, by the rope's own arithmetic.
+    const peersAbout = T.vehicles && !!v.peers && v.peers.list.length > 0;
+    const hullsAbout = T.vehicles && (v.vehicles.length > 0 || peersAbout);
     let onHull = false;
     let pt = first ? first.timeOfImpact : Number.POSITIVE_INFINITY;
     let pHull = false;
@@ -3452,7 +3696,9 @@ export class Grapple {
       d[2] = v.dirZ;
       this.hulls.markLen = this.castLen;
       this.hulls.markFilter = v.filter;
-      if (this.hulls.markCast(physics, v.vehicles, o, d, mh) && mh.toi < pt) {
+      let met = this.hulls.markCast(physics, v.vehicles, o, d, mh);
+      if (peersAbout && this.hulls.markCastPeers(v.peers, o, d, met, mh)) met = true;
+      if (met && mh.toi < pt) {
         pt = mh.toi;
         pHull = true;
       }
@@ -3493,7 +3739,9 @@ export class Grapple {
           d[2] = hz / hl;
           this.hulls.markLen = hl + 0.05;
           this.hulls.markFilter = v.filter;
-          if (this.hulls.markCast(physics, v.vehicles, o, d, mh) && (!segHit || mh.toi < this.hit.toi)) onHull = true;
+          let met = this.hulls.markCast(physics, v.vehicles, o, d, mh);
+          if (peersAbout && this.hulls.markCastPeers(v.peers, o, d, met, mh)) met = true;
+          if (met && (!segHit || mh.toi < this.hit.toi)) onHull = true;
           else if (!segHit && pHull) onHull = true;
         } else if (!segHit && pHull) onHull = true;
       }
@@ -3524,11 +3772,13 @@ export class Grapple {
         found = true;
       }
     }
-    if (found && this.hit.collider) {
+    // Another player's vehicle is met as its box, which has no collider.
+    const onPeer = onHull && mh.peer !== 0;
+    if (found && (this.hit.collider || onPeer)) {
       const bx = this.t1.x;
       const by = this.t1.y;
       const bz = this.t1.z;
-      let kind: MarkKind = onHull ? 'vehicle' : this.classify(this.hit.collider, physics);
+      let kind: MarkKind = onHull ? 'vehicle' : this.classify(this.hit.collider!, physics);
       if (kindBites(kind) && water?.(this.t1)) kind = 'water';
       const ex = bx - hand.x;
       const ey = by - hand.y;
@@ -3552,7 +3802,7 @@ export class Grapple {
         mk.collider = this.hit.collider;
         mk.holdLeft = T.snapHold;
         if (onHull) this.markOnHull(mh);
-        else if (mk.vehicle) this.markOffHull();
+        else if (mk.vehicle || mk.peer) this.markOffHull();
         this.forgetHullHits();
         return mk;
       }
@@ -3561,13 +3811,14 @@ export class Grapple {
       mk.distance = 0;
     }
     // Nothing shown: the last good mark is held a moment, checked again from the hand. Held on a hull, it is carried
-    // with the hull, read again where it stands now; a hull gone takes the hold with it.
-    if (mk.holdLeft > 0 && mk.vehicle) {
+    // with the hull, read again where it stands now; a hull gone takes the hold with it. So on another player's vehicle.
+    if (mk.holdLeft > 0 && (mk.vehicle || mk.peer)) {
       const lc = this.segO;
       lc[0] = mk.lx;
       lc[1] = mk.ly;
       lc[2] = mk.lz;
-      if (this.hulls.markPoint(physics, mk.vehicle, lc, this.segA, this.segD)) {
+      const held = mk.vehicle ? this.hulls.markPoint(physics, mk.vehicle, lc, this.segA, this.segD) : !!mk.peerObj && this.hulls.markPeerPoint(v.peers, mk.peer, mk.peerObj, lc, this.segA, this.segD);
+      if (held) {
         mk.x = this.segA[0];
         mk.y = this.segA[1];
         mk.z = this.segA[2];
@@ -3576,7 +3827,7 @@ export class Grapple {
         mk.tvz = this.segD[2];
       } else mk.holdLeft = 0;
     }
-    if (mk.holdLeft > 0 && mk.collider && mk.collider.isValid()) {
+    if (mk.holdLeft > 0 && (mk.peer !== 0 || (mk.collider && mk.collider.isValid()))) {
       mk.holdLeft -= dt;
       const ex = mk.x - hand.x;
       const ey = mk.y - hand.y;
@@ -3603,15 +3854,17 @@ export class Grapple {
     mk.shows = false;
     mk.held = false;
     mk.collider = null;
-    if (mk.vehicle) this.markOffHull();
+    if (mk.vehicle || mk.peer) this.markOffHull();
     this.forgetHullHits();
     return mk;
   }
 
-  /** The mark rests on a hull: its point in the hull's own frame, and the hull's point velocity there, kept. */
-  private markOnHull(h: { readonly vehicle: Vehicle | null; readonly local: Float64Array; readonly pv: Float64Array }): void {
+  /** The mark rests on a hull (or another player's vehicle): its point in that frame, and the point velocity there, kept. */
+  private markOnHull(h: { readonly vehicle: Vehicle | null; readonly peer: number; readonly peerObj: PeerPicture | null; readonly local: Float64Array; readonly pv: Float64Array }): void {
     const mk = this.mark;
     mk.vehicle = h.vehicle;
+    mk.peer = h.peer;
+    mk.peerObj = h.peerObj;
     mk.lx = h.local[0];
     mk.ly = h.local[1];
     mk.lz = h.local[2];
@@ -3623,6 +3876,8 @@ export class Grapple {
   private markOffHull(): void {
     const mk = this.mark;
     mk.vehicle = null;
+    mk.peer = 0;
+    mk.peerObj = null;
     mk.tvx = 0;
     mk.tvy = 0;
     mk.tvz = 0;
@@ -3637,15 +3892,19 @@ export class Grapple {
   private forgetHullHits(): void {
     this.hullHit.vehicle = null;
     this.hullHit.collider = null;
+    this.hullHit.peerObj = null;
     this.markHit.vehicle = null;
     this.markHit.collider = null;
+    this.markHit.peerObj = null;
   }
 
   /** What the dart is aimed true against: the mark's hull's point velocity, or null on anything still. Kept. */
   private readonly markTargetV = { x: 0, y: 0, z: 0 };
+  /** The mark's point placed on another player's picture, kept. */
+  private readonly drawnAt = new Float64Array(3);
   markTarget(): { readonly x: number; readonly y: number; readonly z: number } | null {
     const mk = this.mark;
-    if (!mk.vehicle) return null;
+    if (!mk.vehicle && !mk.peer) return null;
     this.markTargetV.x = mk.tvx;
     this.markTargetV.y = mk.tvy;
     this.markTargetV.z = mk.tvz;
@@ -3662,7 +3921,16 @@ export class Grapple {
     const rope = this.rope;
     const k = 3 * i;
     const fi = rope.pf[i];
-    const v = fi !== 0 ? this.hulls.hull(fi).vehicle : null;
+    // On another player's vehicle (wave 3c), on their picture as it is drawn: the rope ends on the hull everybody sees, its
+    // length breathing against the picture's own jerks, which are every observer's today.
+    if (fi > MAX_HULL_FRAMES) {
+      const pic = this.hulls.peerFrame(fi).ps.obj;
+      if (pic) {
+        placeOn(pic, rope.pts[k], rope.pts[k + 1], rope.pts[k + 2], out, o);
+        return;
+      }
+    }
+    const v = fi !== 0 && fi <= MAX_HULL_FRAMES ? this.hulls.hull(fi).vehicle : null;
     if (!v) {
       if (fi === 0) {
         out[o] = rope.pts[k];
@@ -3702,14 +3970,15 @@ export class Grapple {
     const y = rope.anchorNormal[1];
     const z = rope.anchorNormal[2];
     const fi = rope.pf[0];
-    const v = fi !== 0 ? this.hulls.hull(fi).vehicle : null;
-    if (!v) {
+    const pic = fi > MAX_HULL_FRAMES ? this.hulls.peerFrame(fi).ps.obj : null;
+    const v = fi !== 0 && fi <= MAX_HULL_FRAMES ? this.hulls.hull(fi).vehicle : null;
+    if (!v && !pic) {
       out.x = x;
       out.y = y;
       out.z = z;
       return out;
     }
-    const q = v.group.quaternion;
+    const q = pic ? pic.quaternion : v!.group.quaternion;
     const tx = 2 * (q.y * z - q.z * y);
     const ty = 2 * (q.z * x - q.x * z);
     const tz = 2 * (q.x * y - q.y * x);
@@ -3722,6 +3991,14 @@ export class Grapple {
   /** The mark's point where it is drawn: on a hull at the hull's drawn pose, else where it is. Into `out`. */
   markDrawn(out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
     const mk = this.mark;
+    // On another player's vehicle (wave 3c), on their picture as it is drawn.
+    if (mk.peer && mk.peerObj) {
+      placeOn(mk.peerObj, mk.lx, mk.ly, mk.lz, this.drawnAt, 0);
+      out.x = this.drawnAt[0];
+      out.y = this.drawnAt[1];
+      out.z = this.drawnAt[2];
+      return out;
+    }
     const v = mk.vehicle;
     if (!v) {
       out.x = mk.x;

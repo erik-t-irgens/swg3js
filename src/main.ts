@@ -1698,6 +1698,8 @@ class App {
     this.player.grapple.propAt = hookablePropAt;
     // And a vehicle's hull is told by its collider, so the rope bends round it and the dart bites it (wave 3).
     this.player.grapple.vehicleOf = vehicleOfCollider;
+    // And other players' vehicles as the boxes their game keeps, one kept list the peers refill once a frame (wave 3c).
+    this.player.grapplePeers = peerBodies().hullBoxes();
     this.effects = new Effects(this.scene);
     // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
     this.world.npcDeps.effects = this.effects;
@@ -7145,7 +7147,7 @@ class App {
         const fireToward = (x: number, y: number, z: number): void => {
           const hand = p.grappleHand(new THREE.Vector3());
           const d = new THREE.Vector3(x, y, z).sub(hand).normalize();
-          Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body, vehicles: this.world.vehicles });
+          Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body, vehicles: this.world.vehicles, peers: p.grapplePeers });
           g.probeMark(b.physics, this.grappleWater, 0);
           said.push(this.fireGrapple() || 'fired');
         };
@@ -7157,20 +7159,28 @@ class App {
             const look = cam.getWorldDirection(new THREE.Vector3());
             const halfWide = Math.atan(Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) * cam.aspect);
             const hand = p.grappleHand(new THREE.Vector3());
-            let best: { v: Vehicle; at: THREE.Vector3; d: number } | null = null;
+            let best: { name: string; at: THREE.Vector3; d: number } | null = null;
+            const consider = (name: string, at: THREE.Vector3) => {
+              const to = at.clone().sub(hand);
+              const dist = to.length();
+              if (dist > g.range || dist < 1 || to.normalize().dot(look) < Math.cos(halfWide)) return;
+              if (!best || dist < best.d) best = { name, at, d: dist };
+            };
             for (const v of this.world.vehicles) {
               if (v.disposed || v.ghosted || v.destroyed || v.spec.animal || v === p.mounted) continue;
               const bb = v.spec.bounds;
-              const at = new THREE.Vector3((bb.min[0] + bb.max[0]) / 2, (bb.min[1] + bb.max[1]) / 2, (bb.min[2] + bb.max[2]) / 2).applyQuaternion(v.group.quaternion).add(v.group.position);
-              const to = at.clone().sub(hand);
-              const dist = to.length();
-              if (dist > g.range || dist < 1 || to.normalize().dot(look) < Math.cos(halfWide)) continue;
-              if (!best || dist < best.d) best = { v, at, d: dist };
+              consider(v.spec.id, new THREE.Vector3((bb.min[0] + bb.max[0]) / 2, (bb.min[1] + bb.max[1]) / 2, (bb.min[2] + bb.max[2]) / 2).applyQuaternion(v.group.quaternion).add(v.group.position));
             }
-            if (!best) said.push('no vehicle in view within reach');
+            // And another player's vehicle (wave 3c), at the middle of its box on their picture as it is drawn.
+            for (const h of p.grapplePeers?.list ?? []) {
+              const o = h.obj;
+              consider(`vehicle of player ${h.id}`, new THREE.Vector3(h.mid[0], h.mid[1], h.mid[2]).applyQuaternion(new THREE.Quaternion(o.quaternion.x, o.quaternion.y, o.quaternion.z, o.quaternion.w)).add(new THREE.Vector3(o.position.x, o.position.y, o.position.z)));
+            }
+            const found = best as { name: string; at: THREE.Vector3; d: number } | null;
+            if (!found) said.push('no vehicle in view within reach');
             else {
-              said.push(`at the ${best.v.spec.id} ${Math.round(best.d)} m off`);
-              fireToward(best.at.x, best.at.y, best.at.z);
+              said.push(`at the ${found.name} ${Math.round(found.d)} m off`);
+              fireToward(found.at.x, found.at.y, found.at.z);
             }
           }
         } else if (opts.fire === 'prop') {
@@ -7242,7 +7252,7 @@ class App {
           counts: { ...g.counts },
           panes: b.physics.paneCount(),
           // Wave 2: the danger, the look and the sound.
-          lastSlam: g.lastSlam.kind ? { speed: n2(g.lastSlam.speed), harm: g.lastSlam.harm, took: g.lastSlam.took, kind: g.lastSlam.kind, ago: n2(g.clock - g.lastSlam.at) } : null,
+          lastSlam: g.lastSlam.kind ? { speed: n2(g.lastSlam.speed), harm: g.lastSlam.harm, took: g.lastSlam.took, kind: g.lastSlam.kind, ago: n2(g.clock - g.lastSlam.at), peer: g.lastSlam.peer, spared: g.lastSlam.spared } : null,
           stagger: { left: g.staggered ? n2(GRAPPLE_TUNE.stagger - g.staggerAge) : 0, daze: n3(g.dazeNow), shake: n3(viewShakeAmount()), drawnKick: n3(this.fxInput.vignetteKick) },
           released: { on: g.released, speed: n2(g.releasedSpeed) },
           jolt: { speed: n2(g.lastCatch), shake: n3(g.joltNow), left: n2(g.joltLeft) },
@@ -10030,6 +10040,8 @@ class App {
       },
       (id) => combat.mayHurt(id),
     );
+    // A grapple's slam that came of another player's vehicle harms only where that player could hurt this one (§3.11).
+    this.player.grapple.mayHurtPeer = (id) => combat.mayHurt(id);
     // Every other player is somebody the world's creatures may fight while a server carries their blows,
     // whatever the players' own damage switch says (`RemoteBodies.prey`).
     peerBodies().preyCan = () => creatures.seedingNow;
@@ -11128,7 +11140,7 @@ class App {
     hm.shows = mk.shows;
     hm.held = mk.held;
     hm.next = mk.next;
-    hm.vehicle = !!mk.vehicle;
+    hm.vehicle = !!mk.vehicle || mk.peer !== 0;
     hm.flash = mk.flash;
     if (mk.shows) {
       // On a hull, where the hull is drawn (the point kept in its own frame), so the diamond sits on the drawn hull.
@@ -14042,8 +14054,13 @@ class App {
     });
   }
 
-  /** Tell the relay where this player is, a few times a second, and move the others along. */
-  private stepNet(dt: number): void {
+  /**
+   * Tell the relay where this player is, a few times a second, and move the others along. `frameAt` is the frame's own
+   * clock as its start read it (`performance.now()`, ms): the peers' vehicles the grappling hook may ride are stamped with
+   * it as they are refilled (`RemoteBodies.stampHulls`), so nothing on the peers' path reads a clock of its own.
+   */
+  private stepNet(dt: number, frameAt: number): void {
+    peerBodies().stampHulls(frameAt);
     this.remotes.update(dt);
     if (!this.net.online) return;
     const now = performance.now();
@@ -20432,8 +20449,10 @@ class App {
     v.hand = this.grappleHandAt;
     v.filter = b.filter;
     v.exclude = b.body;
-    // The vehicles this browser simulates, each read again after the physics step and cast in its own frame (§3.8).
+    // The vehicles this browser simulates, each read again after the physics step and cast in its own frame (§3.8), and
+    // other players' vehicles, each its box at the pose the rope rides (wave 3c).
     v.vehicles = this.world.vehicles;
+    v.peers = p.grapplePeers;
     g.probeMark(b.physics, this.grappleWater, dt);
     this.grappleMarkProbed = true;
   }
@@ -25170,7 +25189,7 @@ class App {
       this.stepVehicles(dt, simulate);
       perf.end(SEC.vehicles);
       perf.begin(SEC.net);
-      this.stepNet(dt);
+      this.stepNet(dt, tFrame);
       // The rooms of a hull another player flies step themselves, here, once a frame: a room outlives
       // the player whose hull it was (somebody standing in a ship whose pilot has just dropped off the
       // line is standing in a floor that must go on being simulated), and the peers' own pass says

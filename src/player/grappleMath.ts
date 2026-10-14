@@ -5,8 +5,9 @@
 // width; and from wave 2 the danger (a slam's harm, what counts as one, the stagger's shake and daze, the
 // fast flight after a let-go, the catch's jolt) and the look and the sound (the arm's reach, the camera's
 // scale, the lean and its ease, the ratchet's rate, the wind); and from wave 3 the mass rule (`whoMoves`, who a
-// rope moves) and a point carried into a prop's own frame and back. No three, no Rapier, no page: a node test
-// calls every one of these as the game does.
+// rope moves) and a point carried into a prop's own frame and back, the hull's rules (the slip, the brake, the tow), the
+// poses, and the pose a rope rides on another player's vehicle (`peerPoseIn`) with its jump test. No three, no Rapier, no
+// page: a node test calls every one of these as the game does.
 //
 // Every number these read is the caller's (`GRAPPLE_TUNE` in `grapple.ts`, handed in); none is kept here.
 
@@ -875,4 +876,104 @@ export function slerpTurn(a: Float64Array, b: Float64Array, share: Float64Array,
   out[1] = y / l;
   out[2] = z / l;
   out[3] = w / l;
+}
+
+/**
+ * The turn rate that takes the turn `a` to `b` over `n[0]` seconds (rad/s about an axis, into `out`): how a pose that moves
+ * by no body's velocity (another player's vehicle) turned over a frame, the shorter way round.
+ */
+export function turnRateIn(a: Float64Array, b: Float64Array, n: Float64Array, out: Float64Array): void {
+  // b * conj(a)
+  const ax = -a[0];
+  const ay = -a[1];
+  const az = -a[2];
+  const aw = a[3];
+  let x = b[3] * ax + b[0] * aw + b[1] * az - b[2] * ay;
+  let y = b[3] * ay - b[0] * az + b[1] * aw + b[2] * ax;
+  let z = b[3] * az + b[0] * ay - b[1] * ax + b[2] * aw;
+  let w = b[3] * aw - b[0] * ax - b[1] * ay - b[2] * az;
+  if (w < 0) {
+    x = -x;
+    y = -y;
+    z = -z;
+    w = -w;
+  }
+  const s = Math.sqrt(x * x + y * y + z * z);
+  const dt = n[0];
+  if (!(s > 1e-12) || !(dt > 0)) {
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    return;
+  }
+  const k = (2 * Math.atan2(s, w)) / (s * dt);
+  out[0] = x * k;
+  out[1] = y * k;
+  out[2] = z * k;
+}
+
+// --- another player's vehicle (wave 3c) -------------------------------------------------------------------
+
+/** The numbers of ours the pose on another player's vehicle reads (§3.18), each `GRAPPLE_TUNE`'s. */
+export interface PeerPoseTune {
+  peerCorrect: number;
+  peerLag: number;
+}
+
+/**
+ * One frame of the pose a rope rides on another player's vehicle (§3.18, `peerPose` 'smooth'). Their vehicle is drawn here
+ * as a picture glided toward the last state heard at `1 - exp(-dt/0.1)` with no extrapolation, from states ten a second,
+ * so its own speed is a sawtooth about the vehicle's (21 to 61 m/s about 40): a rope riding it swings a tow between 27 and
+ * 49 m/s and shakes the camera ten times a second. This pose is dead-reckoned instead. `s` (three numbers, kept between
+ * frames) is its place before the lag, moved on over the frame (`n[1]`) by a velocity of its own (`vs`, kept) and eased
+ * toward the last state heard (`target`) plus that velocity times the seconds since it was heard (`n[0]`, at the frame's
+ * end) at `1 - exp(-dt / peerCorrect)`; the place the rope rides, into `out`, is `s` held back by the picture's own mean lag
+ * (`vs × peerLag`: the glide's time constant and most of half the gap between states), so it runs through the middle of
+ * the picture's sawtooth rather than ahead of it. `vs` is the relay's own smoothed velocity `vel` eased at the same rate,
+ * never `vel` itself: a state's place is the sender's at its sending and its moment is when it was heard here, so every
+ * state's few milliseconds of network and frame jitter moves `vel` by a metre a second or so, and that step taken whole
+ * through the lag moved the pose by a tenth of a metre in one frame, which at 144 fps swung a tow behind a friend at
+ * 40 m/s between 14 and 49 m/s -- no better than the picture it replaces. Everything in kept arrays: this is every frame's
+ * for a rope on a friend's vehicle.
+ */
+export function peerPoseIn(s: Float64Array, vs: Float64Array, target: Float64Array, vel: Float64Array, n: Float64Array, tune: PeerPoseTune, out: Float64Array): void {
+  const since = n[0];
+  const dt = n[1];
+  const k = 1 - Math.exp(-dt / tune.peerCorrect);
+  const lag = tune.peerLag;
+  for (let i = 0; i < 3; i++) {
+    const v = vs[i] + (vel[i] - vs[i]) * k;
+    vs[i] = v;
+    let x = s[i] + v * dt;
+    x += (target[i] + v * since - x) * k;
+    s[i] = x;
+    out[i] = x - v * lag;
+  }
+}
+
+/** `peerPoseIn` with its two numbers handed plainly, for a test and the console. */
+export function peerPose(s: Float64Array, vs: Float64Array, target: Float64Array, vel: Float64Array, since: number, dt: number, tune: PeerPoseTune, out: Float64Array): void {
+  const n = NUMS;
+  n[0] = since;
+  n[1] = dt;
+  peerPoseIn(s, vs, target, vel, n, tune, out);
+}
+
+/**
+ * How far a state heard landed from where the pose expected it (§3.18, the jump test): the last state heard (`last`, at
+ * `n[0]` seconds) carried on by the velocity heard with it (`vel`) to the new state's moment (`n[1]`), against the new state
+ * (`target`), into `n[0]`; and into `n[1]` how much of that the moments themselves may account for, `|vel| · |gap − n[2]|`,
+ * `n[2]` being the gap the states are sent at. The moments are when each state was heard here, not when it was sent, so a
+ * frame either browser spent stalled, or two states bunched into one frame after it, moves the gap and not the place, and
+ * a miss of that size is the timing's. A sawtooth fits no step bound, so a peer's teleport is told by this and never by the
+ * hand's guard: past `peerJump` plus that allowance the rope lets go (`moved`).
+ */
+export function peerMissIn(last: Float64Array, vel: Float64Array, target: Float64Array, n: Float64Array): void {
+  const gap = n[1] - n[0];
+  const dx = target[0] - (last[0] + vel[0] * gap);
+  const dy = target[1] - (last[1] + vel[1] * gap);
+  const dz = target[2] - (last[2] + vel[2] * gap);
+  const off = gap - n[2];
+  n[0] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  n[1] = Math.sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]) * (off < 0 ? -off : off);
 }

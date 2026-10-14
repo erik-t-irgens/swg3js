@@ -25,7 +25,7 @@ import { PlayerStats } from './playerStats.ts';
 import { newHarm, newHarmAsk, takeHarm, type HarmAsk, type HarmKind } from './harmRule.ts';
 import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFireState } from './grapple.ts';
 import { RopeRibbon, dartMesh } from './grappleDraw.ts';
-import { makeHullController } from './grappleFrames.ts';
+import { makeHullController, type PeerHulls } from './grappleFrames.ts';
 import { armAimFor } from './grappleMath.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 
@@ -377,6 +377,11 @@ export class Player {
   /** The vehicles the grapple's rope may meet (`World.vehicles`, written at the top of each update), and the terrain's height under the body as the frame read it. */
   private grappleVehicles: readonly Vehicle[] = [];
   private groundUnder = Number.NEGATIVE_INFINITY;
+  /**
+   * Other players' vehicles as the rope sees them (wave 3c): `RemoteBodies.hullBoxes()`, one kept list the peers refill once
+   * a frame, which the game hangs here; null with none (the node harness, a page with no peers' bodies).
+   */
+  grapplePeers: PeerHulls | null = null;
   /** What refuses a shot, filled in place each time it is asked. */
   private readonly fireState: GrappleFireState = newFireState();
   /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts); it starts at its stat's, which is 3. */
@@ -679,6 +684,10 @@ export class Player {
       },
       get ground() {
         return self.groundUnder;
+      },
+      // Wave 3c: other players' vehicles, as their boxes.
+      get peerHulls() {
+        return self.grapplePeers;
       },
     };
     this.ropeRibbon = new RopeRibbon(this.grapple.rope.capacity, GRAPPLE_TUNE.sagSegments);

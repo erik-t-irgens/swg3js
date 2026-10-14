@@ -63,10 +63,16 @@ import {
   wallFrictionSpare,
   whoMoves,
   windGainFor,
+  peerMissIn,
+  peerPose,
+  turnRateIn,
   type MarkKind,
 } from '../../../src/player/grappleMath.ts';
 import { SWIM_DEPTH } from '../../../src/player/swimStep.ts';
-import { newBoxHit, quadMeetsBox, rayBox, spanDepth } from '../../../src/player/grappleBox.ts';
+import { newBoxHit, quadMeetsBox, rayBox, spanDepth, spanMeetsBox } from '../../../src/player/grappleBox.ts';
+import { GRAPPLE_TUNE } from '../../../src/player/grapple.ts';
+import { PEER_SEND } from '../../../src/player/grappleFrames.ts';
+import { stepRelayVelocity } from '../../../src/core/fx/velocityMath.ts';
 
 const grappleSrc = readFileSync(new URL('../../../src/player/grapple.ts', import.meta.url), 'utf8');
 import { TERRAIN_GROUP, STILL_FLAGS } from '../../../src/player/grappleRope.ts';
@@ -708,6 +714,249 @@ const rand = () => {
     if (quadMeetsBox(quad, p, q, half)) falseHits++;
   }
   ok(clear > 100 && falseHits === 0, `and a swept quad clear of the box for certain never meets it (${clear} quads within 5 m of its middle, the nearest ${nearest.toFixed(3)} m clear, ${falseHits} false meetings)`);
+}
+
+// Wave 3c: the pose a rope rides on another player's vehicle (§3.18), against the game's own glide of its picture on a
+// target at constant speed heard ten a second: dead-reckoned, the pose moves at the vehicle's own speed every frame, it
+// stands `vel × peerLag` behind the line the states are on, and with the tune's lag it runs through the middle of the
+// picture's sawtooth at the owner's 144 fps (the glide's own mean lag), where at the design's 0.1 it stood ahead of it.
+// The tune's own numbers, read off `GRAPPLE_TUNE`, never written out here.
+{
+  const T = { peerCorrect: GRAPPLE_TUNE.peerCorrect, peerLag: GRAPPLE_TUNE.peerLag };
+  const run = (fps: number, V: number, lag: number) => {
+    const dt = 1 / fps;
+    const k = 1 - Math.exp(-dt / 0.1);
+    const s = new Float64Array(3);
+    // The velocity the pose rides, begun at the relay's own as a slot's fresh start begins it.
+    const vs = Float64Array.of(0, 0, V);
+    const target = new Float64Array(3);
+    const vel = Float64Array.of(0, 0, V);
+    const out = new Float64Array(3);
+    let heard = 0;
+    let next = 0;
+    let pic = 0;
+    let t = 0;
+    let last = Number.NaN;
+    let speedErr = 0;
+    let lineErr = 0;
+    let sum = 0;
+    let worst = 0;
+    let n = 0;
+    for (let i = 0; i < fps * 20; i++) {
+      t += dt;
+      if (t >= next - 1e-9) {
+        target[2] = V * t;
+        heard = t;
+        next += 0.1;
+      }
+      peerPose(s, vs, target, vel, t - heard, dt, { peerCorrect: T.peerCorrect, peerLag: lag }, out);
+      pic += (target[2] - pic) * k;
+      if (t > 3) {
+        speedErr = Math.max(speedErr, Math.abs((out[2] - last) / dt - V));
+        lineErr = Math.max(lineErr, Math.abs(out[2] - (V * t - V * lag)));
+        sum += pic - out[2];
+        worst = Math.max(worst, Math.abs(pic - out[2]));
+        n++;
+      }
+      last = out[2];
+    }
+    return { speedErr, lineErr, mean: sum / n / V, worst: worst / V };
+  };
+  ok(T.peerLag === 0.14 && T.peerCorrect === 0.5, `the tune ships the pose's lag at ${T.peerLag} s and its correction at ${T.peerCorrect} s`);
+  for (const fps of [144, 60, 30]) {
+    const r = run(fps, 40, T.peerLag);
+    ok(r.speedErr < 1e-6 && r.lineErr < 1e-6, `${fps} fps, 40 m/s heard ten a second: the smooth pose moves at the vehicle's speed every frame (off by ${r.speedErr.toExponential(1)} m/s) and stands vel x peerLag behind the states' line (off by ${r.lineErr.toExponential(1)} m)`);
+    ok(r.worst < 0.06, `${fps} fps: it stands at most ${r.worst.toFixed(4)} m per m/s off the glided picture (the smoke bound 0.06), the mean ${r.mean.toFixed(4)}`);
+  }
+  const at144 = run(144, 40, T.peerLag);
+  const old = run(144, 40, 0.1);
+  ok(Math.abs(at144.mean) < 0.005 && old.mean < -0.04, `at 144 fps the picture's mean offset from the pose is ${at144.mean.toFixed(4)} m per m/s with the tune's lag (the glide's own mean lag), where at the design's 0.1 the pose stood ${(-old.mean).toFixed(4)} m per m/s ahead of the picture throughout`);
+
+  // The ease toward the states, on a vehicle that changes its speed: from rest to 40 m/s over a second, then held. The
+  // states' line held back by the lag (the last state plus its velocity times the time since, less the lag) is where the
+  // pose must come to once the correction has had a few of its time constants; the relay's own velocity is the game's.
+  const easeRun = (correct: number) => {
+    const fps = 144;
+    const dt = 1 / fps;
+    const s = new Float64Array(3);
+    const vs = new Float64Array(3);
+    const target = new Float64Array(3);
+    const vel = { x: 0, y: 0, z: 0 };
+    const v3 = new Float64Array(3);
+    const out = new Float64Array(3);
+    const truth = (t: number) => (t < 1 ? 20 * t * t : 20 + 40 * (t - 1));
+    let heard = 0;
+    let next = 0;
+    let t = 0;
+    let off = 0;
+    let most = 0;
+    for (let i = 0; i < fps * 8; i++) {
+      t += dt;
+      if (t >= next - 1e-9) {
+        const z = truth(t);
+        if (i > 0) stepRelayVelocity(vel, 0, 0, z - target[2], t - heard);
+        target[2] = z;
+        heard = t;
+        next += 0.1;
+      }
+      v3[2] = vel.z;
+      peerPose(s, vs, target, v3, t - heard, dt, { peerCorrect: correct, peerLag: T.peerLag }, out);
+      const miss = Math.abs(out[2] - (target[2] + vel.z * (t - heard) - vel.z * T.peerLag));
+      most = Math.max(most, miss);
+      if (t > 1 + 10 * T.peerCorrect) off = Math.max(off, miss);
+    }
+    return { off, most };
+  };
+  const eased = easeRun(T.peerCorrect);
+  const unEased = easeRun(1e9);
+  // The velocity it rides is the relay's eased at the same rate, and the relay's is itself a quarter a state behind, so
+  // the two time constants run one after the other: the pose falls metres behind the line through a 40 m/s² start and
+  // closes on it once the speed holds.
+  ok(eased.off < 0.05 && eased.most < 10 && unEased.off > 1, `a vehicle from rest to 40 m/s in a second: ten of the correction's time constants after it holds its speed the pose stands within ${eased.off.toFixed(4)} m of the states' line held back by the lag (at most ${eased.most.toFixed(2)} m behind it through the start), where with no correction (peerCorrect 1e9) it stays ${unEased.off.toFixed(2)} m off, which proves the test sees the ease`);
+
+  // The states as the game hears them: each one's place is the sender's when it sent it, every 0.1 s, and it is heard here
+  // on the first frame after it arrives, 50 ms on with a few milliseconds of jitter either way. The relay's velocity then
+  // carries that jitter (the game's own `stepRelayVelocity`), and the pose must not hand it on: ridden raw, as the wave
+  // first had it (a velocity written to the relay's own every frame), the pose's own speed swung by tens of metres a second.
+  const jitterRun = (fps: number, jitter: number, raw: boolean) => {
+    const dt = 1 / fps;
+    const V = 40;
+    let seed = 3;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const sends: { at: number; z: number }[] = [];
+    for (let at = 0; at < 13; at += 0.1) sends.push({ at: at + 0.05 + (rnd() * 2 - 1) * jitter, z: V * at });
+    sends.sort((x, y) => x.at - y.at);
+    const s = new Float64Array(3);
+    const vs = Float64Array.of(0, 0, V);
+    const target = new Float64Array(3);
+    const vel = { x: 0, y: 0, z: V };
+    const v3 = new Float64Array(3);
+    const out = new Float64Array(3);
+    let heard = -1;
+    let k = 0;
+    let t = 0;
+    let last = Number.NaN;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 0; i < fps * 12; i++) {
+      t += dt;
+      while (k < sends.length && sends[k].at <= t) {
+        if (heard >= 0) stepRelayVelocity(vel, 0, 0, sends[k].z - target[2], t - heard);
+        target[2] = sends[k].z;
+        heard = t;
+        k++;
+      }
+      if (heard < 0) continue;
+      v3[2] = vel.z;
+      if (raw) vs[2] = vel.z;
+      peerPose(s, vs, target, v3, t - heard, dt, T, out);
+      if (t > 3) {
+        const sp = (out[2] - last) / dt;
+        lo = Math.min(lo, sp);
+        hi = Math.max(hi, sp);
+      }
+      last = out[2];
+    }
+    return { lo, hi };
+  };
+  for (const fps of [144, 60]) {
+    const r = jitterRun(fps, 0.005, false);
+    const raw = jitterRun(fps, 0.005, true);
+    ok(r.lo > 38.5 && r.hi < 41.5 && raw.hi - raw.lo > 10, `${fps} fps, 40 m/s, states sampled as sent and heard on a frame with 5 ms of jitter: the pose's own speed runs ${r.lo.toFixed(2)} to ${r.hi.toFixed(2)} m/s, where riding the relay's velocity raw it ran ${raw.lo.toFixed(2)} to ${raw.hi.toFixed(2)}, which proves the test sees the fault`);
+  }
+
+  // The jump test: a state where the last, carried on by its velocity, said it would be is no miss; one 30 m off its path
+  // is. What the moments the states were heard at can account for (`|v| · |gap − PEER_SEND|`) is handed back beside the
+  // miss, so a receiver that stalled, or two states bunched into one frame after it, is no teleport, where the miss alone
+  // at 100 m/s would have read one.
+  const lastT = Float64Array.of(0, 0, 100);
+  const v = Float64Array.of(0, 0, 40);
+  const n = Float64Array.of(1, 1.1, PEER_SEND);
+  peerMissIn(lastT, v, Float64Array.of(0, 0, 104), n);
+  const onPath = n[0];
+  const onSlack = n[1];
+  n.set([1, 1.1, PEER_SEND]);
+  peerMissIn(lastT, v, Float64Array.of(30, 0, 104), n);
+  const offPath = n[0];
+  const offSlack = n[1];
+  ok(onPath < 1e-9 && onSlack < 1e-9 && Math.abs(offPath - 30) < 1e-9 && offSlack < 1e-9, `the jump test: a state on the dead-reckoned line misses by ${onPath} m, one stepped 30 m off its path by ${offPath} m (past peerJump 10), neither with any of it the timing's`);
+  const fast = Float64Array.of(0, 0, 100);
+  // A receiver stalled 0.2 s: the state sent 0.1 s after the last is heard 0.3 s after it.
+  n.set([1, 1.3, PEER_SEND]);
+  peerMissIn(lastT, fast, Float64Array.of(0, 0, 110), n);
+  const stallMiss = n[0];
+  const stallSlack = n[1];
+  // The next one, bunched into the same frame: heard no time after the one before.
+  n.set([1.3, 1.3, PEER_SEND]);
+  peerMissIn(Float64Array.of(0, 0, 110), fast, Float64Array.of(0, 0, 120), n);
+  const bunchMiss = n[0];
+  const bunchSlack = n[1];
+  ok(stallMiss > 10 && stallMiss <= 10 + stallSlack + 1e-9 && bunchMiss <= 10 + bunchSlack + 1e-9 && bunchMiss > 9.9, `at 100 m/s a state heard 0.2 s late misses by ${stallMiss.toFixed(2)} m (past peerJump alone), ${stallSlack.toFixed(2)} of it the timing's, and the next, bunched into the same frame, by ${bunchMiss.toFixed(2)}, ${bunchSlack.toFixed(2)} the timing's: neither is a teleport`);
+  n.set([1, 1.1, PEER_SEND]);
+  peerMissIn(lastT, fast, Float64Array.of(30, 0, 110), n);
+  ok(n[0] > 10 + n[1], `a state 30 m off the path of a vehicle at 100 m/s, heard on time, still misses by ${n[0].toFixed(2)} m against ${(10 + n[1]).toFixed(2)}: a teleport`);
+
+  // The turn rate a frame's turn makes, back to that turn.
+  const a = Float64Array.of(0, Math.sin(0.2), 0, Math.cos(0.2));
+  const b = Float64Array.of(0, Math.sin(0.25), 0, Math.cos(0.25));
+  const w = new Float64Array(3);
+  turnRateIn(a, b, Float64Array.of(0.5), w);
+  ok(Math.abs(w[1] - 0.2) < 1e-12 && w[0] === 0 && w[2] === 0, `turnRateIn: a tenth of a radian about up in half a second is ${w[1].toFixed(6)} rad/s about up`);
+  // And about two different axes, where the world's frame and the body's part: a body pitched 0.7 rad about x, then turned
+  // 0.1 rad about the world's z. The rate is the world's (b = Δ a, Δ = b a⁻¹), which a mix-up of the two frames (a⁻¹ b,
+  // the turn in the body's own frame) would answer about the pitched axis instead.
+  const ha = 0.35;
+  const pitch = Float64Array.of(Math.sin(ha), 0, 0, Math.cos(ha));
+  const hd = 0.05;
+  const dz = [0, 0, Math.sin(hd), Math.cos(hd)];
+  // dz * pitch
+  const tb = Float64Array.of(
+    dz[3] * pitch[0] + dz[0] * pitch[3] + dz[1] * pitch[2] - dz[2] * pitch[1],
+    dz[3] * pitch[1] - dz[0] * pitch[2] + dz[1] * pitch[3] + dz[2] * pitch[0],
+    dz[3] * pitch[2] + dz[0] * pitch[1] - dz[1] * pitch[0] + dz[2] * pitch[3],
+    dz[3] * pitch[3] - dz[0] * pitch[0] - dz[1] * pitch[1] - dz[2] * pitch[2],
+  );
+  turnRateIn(pitch, tb, Float64Array.of(0.25), w);
+  ok(Math.abs(w[2] - 0.4) < 1e-12 && Math.abs(w[0]) < 1e-12 && Math.abs(w[1]) < 1e-12, `turnRateIn: a body pitched 0.7 rad and turned 0.1 rad about the world's z in a quarter of a second turns at (${w[0].toFixed(6)}, ${w[1].toFixed(6)}, ${w[2].toFixed(6)}) rad/s, the world's z and not the pitched axis`);
+}
+
+// Wave 3c: the exact span test the rope's depth on a box asks (`spanMeetsBox`) against a millimetre march, a start inside included.
+{
+  const p = Float64Array.of(-2, 1, 4);
+  const q = Float64Array.of(0.2, 0.3, -0.1, 0.9);
+  const ql = Math.hypot(q[0], q[1], q[2], q[3]);
+  for (let i = 0; i < 4; i++) q[i] /= ql;
+  const half = Float64Array.of(1.5, 0.6, 2.5);
+  const [qx, qy, qz, qw] = q;
+  const m = [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + qz * qw), 2 * (qx * qz - qy * qw), 2 * (qx * qy - qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz + qx * qw), 2 * (qx * qz + qy * qw), 2 * (qy * qz - qx * qw), 1 - 2 * (qx * qx + qy * qy)];
+  const inside = (x: number, y: number, z: number) => {
+    const dx = x - p[0];
+    const dy = y - p[1];
+    const dz = z - p[2];
+    return Math.abs(m[0] * dx + m[1] * dy + m[2] * dz) < half[0] && Math.abs(m[3] * dx + m[4] * dy + m[5] * dz) < half[1] && Math.abs(m[6] * dx + m[7] * dy + m[8] * dz) < half[2];
+  };
+  const a = new Float64Array(3);
+  const b = new Float64Array(3);
+  let spans = 0;
+  let agree = 0;
+  let met = 0;
+  for (let k = 0; k < 2000; k++) {
+    for (let i = 0; i < 3; i++) {
+      a[i] = p[i] + (rand() - 0.5) * 10;
+      b[i] = p[i] + (rand() - 0.5) * 10;
+    }
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    let march = false;
+    for (let t = 0; t <= len && !march; t += 0.001) {
+      const s = t / len;
+      if (inside(a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s)) march = true;
+    }
+    spans++;
+    const says = spanMeetsBox(a, b, p, q, half);
+    if (says) met++;
+    if (says === march) agree++;
+  }
+  ok(agree >= spans - 2 && met > spans / 5, `spanMeetsBox meets a turned box where a millimetre march does (${agree} of ${spans}, ${met} meeting; a disagreement is a graze within a millimetre)`);
 }
 
 console.log(`\n${checks} checks passed`);

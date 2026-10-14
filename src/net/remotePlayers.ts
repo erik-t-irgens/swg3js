@@ -42,6 +42,19 @@ export interface PeerView {
   /** The picture of the ride they are on, and its box in that picture's own frame; null for neither. */
   ship: THREE.Object3D | null;
   shipBox: PeerBox | null;
+  /**
+   * What the relay last said of that ride, copied each frame while there is one (the grapple's rope rides a pose of its own
+   * worked out from these, §3.18): the place and turn heard, the relay's own smoothed velocity, and when it was heard
+   * (`performance.now()`, ms; 0 before the first). Kept copies, never the ride's own objects.
+   */
+  shipTarget: THREE.Vector3;
+  shipTargetQ: THREE.Quaternion;
+  shipVel: THREE.Vector3;
+  shipHeardAt: number;
+  /** The ride is a creature (its garage def's `source` is `'creature'`): a friend's mount is a creature to the rope. */
+  shipMount: boolean;
+  /** The ride is clamped onto another player's ship (the relay's `dock`): only in space, where nobody on foot fires. */
+  shipDocked: boolean;
   /** Their health as their own browser last said it; nothing here ever takes anything off it. */
   hp: number;
   maxHp: number;
@@ -140,6 +153,8 @@ interface RemoteVehicle {
    * for anything else, and before the picture is in.
    */
   gait: PodGait | null;
+  /** A creature they ride (the garage def's `source`), known once the picture is in: a creature to the grapple's rope. */
+  mount: boolean;
 }
 
 /**
@@ -359,7 +374,7 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null };
+    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null };
     const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
@@ -379,6 +394,20 @@ export class RemotePlayers {
     v.rig = r.rig;
     v.ship = r.vehicle?.obj ?? null;
     v.shipBox = r.vehicle?.box ?? null;
+    // What the relay last said of the ride, copied beside it (the grapple's pose on it reads these, §3.18).
+    const rv = r.vehicle;
+    if (rv) {
+      v.shipTarget.copy(rv.target);
+      v.shipTargetQ.copy(rv.targetQ);
+      v.shipVel.copy(rv.vel);
+      v.shipHeardAt = rv.heardAt;
+      v.shipMount = rv.mount;
+      v.shipDocked = rv.dock !== null;
+    } else {
+      v.shipHeardAt = 0;
+      v.shipMount = false;
+      v.shipDocked = false;
+    }
     v.hp = r.hp;
     v.maxHp = r.maxHp;
     v.down = r.down;
@@ -714,7 +743,7 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null, mount: false };
       r.vehicle = rv;
       void this.bringVehicle(r, rv);
     }
@@ -772,6 +801,8 @@ export class RemotePlayers {
         return;
       }
       rv.gait = gait;
+      // A creature they ride (the very test `Garage` sets `spec.animal` by): a creature to the grapple's rope, as every mount is.
+      rv.mount = def.source === 'creature';
       rv.build = def.fit ? build : null;
       rv.paint = paint;
       rv.fit = fit;

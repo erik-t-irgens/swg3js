@@ -15,7 +15,7 @@ import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFire
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from '../../../src/player/swimStep.ts';
 import { newHarm, newHarmAsk, takeHarm, type HarmKind } from '../../../src/player/harmRule.ts';
 import { vehicleOfCollider, type Vehicle } from '../../../src/vehicles/vehicle.ts';
-import { makeHullController } from '../../../src/player/grappleFrames.ts';
+import { makeHullController, type PeerHulls } from '../../../src/player/grappleFrames.ts';
 
 /** `DIVE_DEPTH` in player.ts: the head is under and looking down dives (the wiring test reads the two equal). */
 export const DIVE_DEPTH_FOR_TESTS = 1.9;
@@ -123,9 +123,11 @@ export function probeFrom(
   water: WaterTest | null,
   dt = 0,
   vehicles: readonly Vehicle[] = [],
+  peers: PeerHulls | null = null,
 ): GrappleMark {
   const v = g.view;
   v.vehicles = vehicles;
+  v.peers = peers;
   v.eyeX = eye.x;
   v.eyeY = eye.y;
   v.eyeZ = eye.z;
@@ -233,6 +235,8 @@ export class TestBody implements GrappleBody {
   readonly hullController: RAPIER.KinematicCharacterController;
   groundAt: ((x: number, z: number) => number) | null = null;
   ground = Number.NEGATIVE_INFINITY;
+  /** Wave 3c: other players' vehicles as their boxes (a real `RemoteBodies.hullBoxes()`, or a test's own stand-in), refilled by the test in `beforeStep` as the game's peers are after the player. */
+  peerHulls: PeerHulls | null = null;
 
   constructor(physics: Physics) {
     this.physics = physics;
@@ -330,7 +334,7 @@ export class TestBody implements GrappleBody {
     }
     const h = this.hand();
     const d = new THREE.Vector3(at.x, at.y, at.z).sub(h).normalize();
-    probeFrom(g, this.physics, h, d, 0, h, this.filter, this.body, null, 0, this.vehicles);
+    probeFrom(g, this.physics, h, d, 0, h, this.filter, this.body, null, 0, this.vehicles, this.peerHulls);
     if (why || !g.mark.shows) {
       this.lastFireRefusal = why || `the mark is on ${g.mark.kind}`;
       return;

@@ -506,6 +506,126 @@ if (process.argv.includes('hull')) {
   process.exit(0);
 }
 
+// Wave 3c's other player's vehicle, run alone (`grappleAllocOwn.ts peer`, and `peer hang`), so the hook's call sites meet
+// the peers' list and nothing else: a pod-sized box moving along +z at 40 m/s as their picture, glided toward states heard
+// ten a second (each heard a few milliseconds early or late, so the relay's velocity moves as the game's does), the list's
+// entry and stamp refilled after the player's update as `RemoteBodies.hullBoxes()` refills them, and the rope fastened
+// on its top with `attachPeer`. Towed 20 m behind it on the ground, or hung at its rear face with the box test meeting
+// the face on some frames (`hang`), the frames' peer slot, the smooth pose and its jump test, the rope's casts, fans and
+// depth against the box by arithmetic, the box test, the relative clip, the carry round a moving pivot and the tow all
+// run, and after them wave 2's `look` and the mark worked out with the peers handed over, its box cast meeting the vehicle
+// and missing it, the mark shown on it, held on it and lost.
+if (process.argv.includes('peer')) {
+  useNear();
+  const hang = process.argv.includes('hang');
+  const V = 40;
+  const obj = { position: { x: 0, y: 0.6, z: 0 }, quaternion: { x: 0, y: 0, z: 0, w: 1 } };
+  const entry = { id: 7, obj, mid: Float64Array.of(0, 1.25, 0), half: Float64Array.of(2.5, 1.25, 8), target: Float64Array.of(0, 0.6, 0), turn: Float64Array.of(0, 0, 0, 1), vel: Float64Array.of(0, 0, V), heardAt: 0 };
+  const peers = { list: [entry], stamp: 0 };
+  const pb = body as unknown as { peerHulls: unknown; grounded: boolean; ground: number };
+  pb.peerHulls = peers;
+  pb.ground = 0;
+  // The relay's velocity as the game steps it, over gaps a few milliseconds off a tenth of a second (a fixed cycle of
+  // them, so the steady state is one the measure can repeat).
+  const clk = { t: 0, next: 0, last: 0, n: 0 };
+  const jitter = [0.003, -0.002, 0.004, -0.004, 0.001, -0.003, 0.002, 0];
+  const relayVel = { x: 0, y: 0, z: V };
+  const k = 1 - Math.exp(-DT / 0.1);
+  const glide = () => {
+    clk.t += DT;
+    if (clk.t >= clk.next) {
+      const heard = clk.t + jitter[clk.n++ & 7];
+      const z = V * clk.next;
+      relayVel.z += ((z - entry.target[2]) / (heard - clk.last) - relayVel.z) * 0.25;
+      entry.target[2] = z;
+      entry.vel[2] = relayVel.z;
+      entry.heardAt = heard;
+      clk.last = heard;
+      clk.next += 0.1;
+    }
+    obj.position.z += (entry.target[2] - obj.position.z) * k;
+    peers.stamp = clk.t;
+  };
+  for (let i = 0; i < 60; i++) glide();
+  // The body's place behind the box's rear face (z -8 in its frame): 20 m back on the ground, or within a hair of the face.
+  const back = hang ? 8 + 0.35 + 0.02 : 8 + 20;
+  const feetY = hang ? 0.6 + 1.25 - 0.8 : 0.05;
+  pos.x = 0;
+  pos.y = feetY;
+  pos.z = obj.position.z - back;
+  vel.x = 0;
+  vel.y = 0;
+  vel.z = V;
+  pb.grounded = !hang;
+  const hooked = g.attachPeer(body, 7, 0, 0.6 + 2.5, obj.position.z - 6, 0, 1, 0);
+  if (!hang) g.latch = true;
+  const hv = g.view;
+  const hat = { x: 0, y: 0, z: 0 };
+  const noWaterPeer = (_p: { x: number; y: number; z: number }): boolean => false;
+  hv.peers = peers as never;
+  const mv = { x: 0, y: 0, z: 0 };
+  const seenPeer = { attached: 0, onPeer: 0, contacts: 0, looked: 0, markOn: 0, markHeld: 0, markOff: 0 };
+  // The pose the rope rides, read where the frames keep it, so the hung body stands against the face the box test meets.
+  const slot = g.hulls.peerSlotOf(entry as never);
+  const pf = slot ? g.hulls.peerFrame(slot) : null;
+  const pstep = (counting: boolean) => {
+    frame++;
+    const a = frame * 0.05;
+    const faceZ = pf ? pf.np[2] - 8 : obj.position.z - 8;
+    pos.x = 0.03 * Math.sin(a);
+    pos.y = feetY + (hang ? 0.02 * Math.sin(0.7 * a) : 0);
+    // Hung, the capsule's face rides the box's within a few centimetres, inside the grown box on some frames.
+    pos.z = hang ? faceZ - 0.35 - 0.04 + 0.03 * Math.sin(1.3 * a) : obj.position.z - back + 0.03 * Math.sin(1.3 * a);
+    vel.x = 0.1 * Math.cos(a);
+    vel.y = 0;
+    vel.z = V;
+    if (g.rope.length > back + 6) g.rope.length = back + 5;
+    const contacts = g.slipNow.contacts;
+    g.refreshModes(body);
+    g.beforeMove(body, DT);
+    g.syncCollider(body);
+    mv.x = vel.x * DT + g.corr.x;
+    mv.y = vel.y * DT + g.corr.y;
+    mv.z = vel.z * DT + g.corr.z;
+    g.clip(body, mv);
+    pos.x += mv.x;
+    pos.y += mv.y;
+    pos.z += mv.z;
+    g.afterMove(body, DT);
+    const lively = g.lively;
+    if (lively) g.look(body, DT);
+    glide();
+    hat.x = pos.x;
+    hat.y = pos.y + GRAPPLE_TUNE.ropeY;
+    hat.z = pos.z;
+    const up = (frame & 63) >= 40;
+    hv.eyeX = pos.x;
+    hv.eyeY = pos.y + 2;
+    hv.eyeZ = pos.z - 4;
+    hv.dirX = 0;
+    hv.dirY = up ? 0.6 : 0;
+    hv.dirZ = up ? 0.8 : 1;
+    hv.orbit = 0;
+    hv.hand = hat;
+    hv.filter = body.filter;
+    hv.exclude = null;
+    g.probeMark(physics, noWaterPeer, DT);
+    if (counting) {
+      if (g.attached) seenPeer.attached++;
+      if (g.onHull) seenPeer.onPeer++;
+      if (g.slipNow.contacts > contacts) seenPeer.contacts++;
+      if (lively) seenPeer.looked++;
+      if (g.mark.peer && g.mark.shows && !g.mark.held) seenPeer.markOn++;
+      else if (g.mark.peer && g.mark.held) seenPeer.markHeld++;
+      else seenPeer.markOff++;
+    }
+  };
+  for (let q = 0; q < 600; q++) pstep(true);
+  const pbest = await measure(pstep);
+  console.log(JSON.stringify({ frames: FRAMES, made: pbest.made, scavenges: pbest.scavenges, hooked, seen: seenPeer, attached: g.attached, why: g.lastLetGo, frame0: (g.vehicleReport(body) as { frames: string[] }).frames[0] }));
+  process.exit(0);
+}
+
 // Wave 3's hooked prop, run alone (`grappleAllocOwn.ts prop`), so the hook's call sites meet the stand-in prop and
 // nothing else: the tether dragging it, the yank pulling it in and F let go of mid-yank, the rope's end carried onto
 // it from its mesh, the straight span's check, the guards, the arm's way and the mark shown while it holds. The yank's

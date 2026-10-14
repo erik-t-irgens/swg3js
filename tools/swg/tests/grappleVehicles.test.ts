@@ -1,4 +1,4 @@
-// The grappling hook on the vehicles this browser simulates (Grapple wave 3b, the design's Â§3.18 and Â§4.11), against
+// The grappling hook on the vehicles this browser simulates (Grapple wave 3b, the design's §3.18 and §4.11), against
 // real Rapier and the game's own `Vehicle` class loaded under node as `hoverRide.test.ts` loads it: the player's own
 // capsule, controller, movement and swim stepped by `grappleBody.ts` in the game's frame order (the player's update,
 // the vehicles' updates, the physics' step), with box hulls of the game's own kinds and sizes. A vehicle nobody ropes
@@ -10,11 +10,18 @@
 // terrain and skims over water; the dart meets a moving bike where the mark said; every way a hull leaves from under the
 // rope lets go in words; a rideable creature is refused and passed; the hook's own arithmetic makes nothing; a moving
 // pod is reeled and hauled up to, braked behind and driven off from without a blow; a still hull takes the still haul.
+// Wave 3c's test 13 adds another player's vehicle: the box the rope meets by its own arithmetic held to the engine's own
+// cuboid; a stand-in picture driven by the game's own glide, its states sent from the sender's own frames and heard 50 ms
+// on with the jitter the game hears them with, towing the player at its speed through the rope's smooth pose (and swinging
+// it, riding the picture, which is the fault); the body held off its box under Shift, F and a vehicle stopping; a vehicle
+// that turns; its let-gos and its stalls; the fan and the depth asked directly; the tow through a real `RemoteBodies`; the
+// slam that answers to that player's right to hurt you; and the dart against the boxes a real `RemoteBodies` keeps, a
+// mount and a docked hull left out.
 // Every check that moves a body runs at 144, 60 and 30 frames a second unless it says otherwise, and every check that
 // claims to see a fault runs the control case the design names, so a test that sees nothing cannot pass.
 //
 // Nothing is read from the game's files. Test 15 measures allocation and needs `node --expose-gc`; without it it says so
-// and passes nothing (its hold on the hook's own code runs `grappleAllocOwn.ts hull` in a node process of its own).
+// and passes nothing (its hold on the hook's own code runs `grappleAllocOwn.ts hull` and `peer` in node processes of their own).
 // `GRAPPLE_ONLY=5,6` runs only those sections.
 //
 // Run: node --expose-gc tools/swg/tests/grappleVehicles.test.ts
@@ -27,7 +34,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { GRAPPLE_DEFAULTS, GRAPPLE_GRAVITY, GRAPPLE_PLAYER_MASS, GRAPPLE_TUNE } from '../../../src/player/grapple.ts';
-import { VehicleSource } from '../../../src/player/grappleFrames.ts';
+import { MAX_HULL_FRAMES, PEER_SEND, VehicleSource } from '../../../src/player/grappleFrames.ts';
+import { newBoxHit, pointInBox, quadMeetsBox, rayBox, spanMeetsBox, triangleMeetsBox } from '../../../src/player/grappleBox.ts';
+import { stepRelayVelocity } from '../../../src/core/fx/velocityMath.ts';
+import { RemoteBodies } from '../../../src/net/remoteBodies.ts';
 import { Vehicle, specFor, type DriveInput, type VehicleKind, type VehicleSpec } from '../../../src/vehicles/vehicle.ts';
 import { SWIM_DEPTH } from '../../../src/player/swimStep.ts';
 import { fnv32 } from '../../../src/progress/record.ts';
@@ -960,7 +970,7 @@ await section(10, 'towed into water', async () => {
     const r = await run(fps, true);
     ok(r.attached && r.paid < 3 && r.dry === 0 && r.harms === 0, `${fps} fps: a pod over a lake at 20 m/s tows a swimmer 12 m behind it for 6 s: still hooked, ${r2(r.paid)} m paid out, swimming throughout (${r.dry} frames out), ${r.harms} harms, ${r2(r.speed)} m/s, the pod pulled back by ${r2(r.pull)} N s a second`);
     // The design's fault (the line paying out past 10 m) was never measured on water, and at 144 fps it does not come: the
-    // swim's ease (80 m/sÂ² at 20 m/s) is caught on every second frame and the catch's allowance comes back on the frames
+    // swim's ease (80 m/s² at 20 m/s) is caught on every second frame and the catch's allowance comes back on the frames
     // between, so the rope takes the whole drag and hands it to the pod. That drag, a dozen times the skim's, is what the
     // fault is there; at 60 and 30 fps the line does pay out.
     const f = await run(fps, false);
@@ -1295,6 +1305,898 @@ await section(12, 'let-gos', async () => {
 });
 
 // =============================================================================================================
+// Another player's vehicle (wave 3c): in this browser a picture glided toward their states and a sensor box every query
+// passes. The rope meets the box by its own arithmetic, rides a smooth pose of its own, keeps the body out of the box by
+// its own box test, and is drawn on the picture.
+
+/**
+ * How a stand-in's states reach this browser, as the game hears them: the sender's own frames at `senderFps`, a state sent
+ * on the first of them a tenth of a second after the last (`App.stepNet`), its place the sender's own there; it arrives
+ * `latency` later, give or take `jitter` (uniform), and it is stamped `arrival` -- as the game stamps it, `performance.now()`
+ * as the message is handled, which a main thread with time to spare does as it arrives -- or `frame`, a main thread busy
+ * all frame long, which handles it as the next frame starts. Either way it reaches the list on the frame after it arrives.
+ * The stand-in the wave was first measured on heard each state on the frame it was due with its place the truth there, so
+ * no jitter could reach it, and a pose that handed the relay's jittered velocity on whole passed it.
+ */
+type Wire = { senderFps: number; latency: number; jitter: number; stamp: 'arrival' | 'frame' };
+/** What every tow below is measured over unless it says otherwise: 50 ms on the way, 5 ms of jitter either side. */
+const WIRE: Wire = { senderFps: 60, latency: 0.05, jitter: 0.005, stamp: 'arrival' };
+/** A main thread busy all frame long, every state stamped as the next frame starts: the worst the game's stamp can be. */
+const BUSY: Wire = { ...WIRE, stamp: 'frame' };
+
+type Truth = (t: number, p: THREE.Vector3, q: THREE.Quaternion) => void;
+
+/** A stand-in's entry, the shape `RemoteBodies.hullBoxes()` hands on. */
+type PeerEntry = { id: number; obj: THREE.Object3D; mid: Float64Array; half: Float64Array; target: Float64Array; turn: Float64Array; vel: Float64Array; heardAt: number };
+
+/**
+ * A stand-in for another player's vehicle as the game's peers keep it: the truth it is driven along on the sender's own
+ * clock, its states sent and heard over a `Wire` (the relay's velocity stepped by the game's own `stepRelayVelocity`
+ * over the gaps they were heard at), the picture glided toward them at the game's own `1 - exp(-dt/0.1)`, and the entry
+ * `RemoteBodies.hullBoxes()` would hand on, refilled after the glide as the game's is -- or, given a real `RemoteBodies`
+ * (`useBodies`), a peer view written each frame as `RemotePlayers.viewOf` writes one (its moment in milliseconds) and handed
+ * to it as the game hands it one, the frame's clock first (`stampHulls`). A twin picture glided the same way, never handed
+ * to the rope, says whether anything was put on the picture. `wall` is the receiver's own clock, which every stamp reads:
+ * a frame that stalled moves it on further than the frame's step (`stallReceiver`), and a sender that stalled takes that
+ * long over one frame while its own simulation steps at most 0.05 s (`stallSender`), as the game's loop clamps its step.
+ */
+class PeerStandIn {
+  readonly id: number;
+  readonly obj = new THREE.Object3D();
+  readonly twin = new THREE.Object3D();
+  readonly target = new THREE.Vector3();
+  readonly targetQ = new THREE.Quaternion();
+  readonly vel = new THREE.Vector3();
+  heardAt = 0;
+  wall = 0;
+  stallReceiver = 0;
+  stallSender = 0;
+  /** States heard on the last frame stepped. */
+  delivered = 0;
+  /** Added to the truth of every state sent from here on (a teleport). */
+  readonly jump = new THREE.Vector3();
+  readonly entry: PeerEntry;
+  readonly peers: { list: PeerEntry[]; stamp: number };
+  /** Frames on which the picture and its twin parted. */
+  touched = 0;
+  private first = true;
+  private senderWall = 0;
+  private senderSim = 0;
+  private lastSent = -1e9;
+  private readonly queue: { arrive: number; p: THREE.Vector3; q: THREE.Quaternion }[] = [];
+  private seed: number;
+  private readonly truth: Truth;
+  private readonly wire: Wire;
+  private readonly size: Size;
+  private bodies: RemoteBodies | null = null;
+  private view: Record<string, unknown> | null = null;
+  constructor(id: number, s: Size, truth: Truth, wire: Wire = WIRE, seed = 11) {
+    this.id = id;
+    this.truth = truth;
+    this.wire = wire;
+    this.seed = seed;
+    this.size = s;
+    this.entry = { id, obj: this.obj, mid: Float64Array.of(0, s.h / 2, 0), half: Float64Array.of(s.w / 2, s.h / 2, s.l / 2), target: new Float64Array(3), turn: Float64Array.of(0, 0, 0, 1), vel: new Float64Array(3), heardAt: 0 };
+    this.peers = { list: [this.entry], stamp: 0 };
+  }
+  private rnd(): number {
+    this.seed = (this.seed * 16807) % 2147483647;
+    return this.seed / 2147483647;
+  }
+  /** Handed to a real `RemoteBodies` from here on, as the game's peers hand theirs. */
+  useBodies(bodies: RemoteBodies): void {
+    this.bodies = bodies;
+    const s = this.size;
+    this.view = {
+      id: this.id,
+      name: 'friend',
+      shown: true,
+      group: new THREE.Object3D(),
+      rig: null,
+      ship: this.obj,
+      shipBox: { half: [s.w / 2, s.h / 2, s.l / 2], mid: [0, s.h / 2, 0] },
+      shipTarget: new THREE.Vector3(),
+      shipTargetQ: new THREE.Quaternion(),
+      shipVel: new THREE.Vector3(),
+      shipHeardAt: 0,
+      shipMount: false,
+      shipDocked: false,
+      hp: 100,
+      maxHp: 100,
+      down: false,
+      saber: false,
+      saberColor: 0,
+      hands: [],
+      saberThrown: null,
+      hullFrame: null,
+    };
+    bodies.peerAdded(this.view as never);
+  }
+  /** One frame of the game's peers, after the player's update: the sender's frames to now, what has arrived heard, the glide, the list refilled. */
+  step(dt: number): void {
+    if (!Object.is(this.obj.position.x, this.twin.position.x) || !Object.is(this.obj.position.y, this.twin.position.y) || !Object.is(this.obj.position.z, this.twin.position.z) || !Object.is(this.obj.quaternion.w, this.twin.quaternion.w)) this.touched++;
+    const stalled = this.stallReceiver > 0;
+    this.wall += stalled ? this.stallReceiver : dt;
+    this.stallReceiver = 0;
+    this.delivered = 0;
+    const w = this.wire;
+    const sdt = 1 / w.senderFps;
+    while (this.senderWall + sdt <= this.wall + 1e-12) {
+      const frame = this.stallSender > 0 ? this.stallSender : sdt;
+      this.stallSender = 0;
+      this.senderWall += frame;
+      this.senderSim += Math.min(frame, 0.05);
+      if (this.senderWall - this.lastSent >= PEER_SEND - 1e-9) {
+        this.lastSent = this.senderWall;
+        const p = new THREE.Vector3();
+        const q = new THREE.Quaternion();
+        this.truth(this.senderSim, p, q);
+        p.add(this.jump);
+        this.queue.push({ arrive: this.senderWall + w.latency + (this.rnd() * 2 - 1) * w.jitter, p, q });
+      }
+    }
+    this.queue.sort((a, b) => a.arrive - b.arrive);
+    while (this.queue.length && this.queue[0].arrive <= this.wall) {
+      const m = this.queue.shift()!;
+      // Handled as it arrives, unless the thread was busy then: all frame long, or stalled through this frame.
+      this.hear(m.p, m.q, w.stamp === 'frame' || stalled ? this.wall : m.arrive);
+    }
+    const k = 1 - Math.exp(-dt / 0.1);
+    this.obj.position.lerp(this.target, k);
+    this.obj.quaternion.slerp(this.targetQ, k);
+    this.twin.position.lerp(this.target, k);
+    this.twin.quaternion.slerp(this.targetQ, k);
+    const e = this.entry;
+    e.target[0] = this.target.x;
+    e.target[1] = this.target.y;
+    e.target[2] = this.target.z;
+    e.turn[0] = this.targetQ.x;
+    e.turn[1] = this.targetQ.y;
+    e.turn[2] = this.targetQ.z;
+    e.turn[3] = this.targetQ.w;
+    e.vel[0] = this.vel.x;
+    e.vel[1] = this.vel.y;
+    e.vel[2] = this.vel.z;
+    e.heardAt = this.heardAt;
+    this.peers.stamp = this.wall;
+    const v = this.view;
+    if (this.bodies && v) {
+      (v.group as THREE.Object3D).position.copy(this.obj.position);
+      (v.shipTarget as THREE.Vector3).copy(this.target);
+      (v.shipTargetQ as THREE.Quaternion).copy(this.targetQ);
+      (v.shipVel as THREE.Vector3).copy(this.vel);
+      v.shipHeardAt = this.first ? 0 : this.heardAt * 1000;
+      this.bodies.stampHulls(this.wall * 1000);
+      this.bodies.peerMoved(v as never);
+    }
+  }
+  private hear(p: THREE.Vector3, q: THREE.Quaternion, at: number): void {
+    if (!this.first) stepRelayVelocity(this.vel, p.x - this.target.x, p.y - this.target.y, p.z - this.target.z, at - this.heardAt);
+    this.target.copy(p);
+    this.targetQ.copy(q);
+    this.heardAt = at;
+    this.delivered++;
+    if (this.first) {
+      this.obj.position.copy(p);
+      this.obj.quaternion.copy(q);
+      this.twin.position.copy(p);
+      this.twin.quaternion.copy(q);
+      this.first = false;
+    }
+  }
+}
+
+await section(13, "another player's vehicle", async () => {
+  // --- the box against the engine's own cuboid ------------------------------------------------------------------
+  {
+    const physics = await makePhysics();
+    const f = Math.fround;
+    let rays = 0;
+    let rayAgree = 0;
+    let rayHits = 0;
+    let tolWorst = 0;
+    let normalBad = 0;
+    let grazes = 0;
+    let spans = 0;
+    let spanAgree = 0;
+    let spanMet = 0;
+    let quads = 0;
+    let quadAgree = 0;
+    let quadMet = 0;
+    let quadNear = 0;
+    let quadBad = 0;
+    let tris = 0;
+    let triAgree = 0;
+    let triMet = 0;
+    let triNear = 0;
+    let triBad = 0;
+    let pts = 0;
+    let ptsBad = 0;
+    const hit = newBoxHit();
+    const o = new Float64Array(3);
+    const d = new Float64Array(3);
+    const a = new Float64Array(3);
+    const bb = new Float64Array(3);
+    const quad = new Float64Array(12);
+    const tri = new Float64Array(9);
+    const p = new Float64Array(3);
+    const q = new Float64Array(4);
+    const half = new Float64Array(3);
+    const grown = new Float64Array(3);
+    const shrunk = new Float64Array(3);
+    const near2 = new Float64Array(3);
+    let shapeSays = 0;
+    let shapeFar = 0;
+    const at0 = { x: 0, y: 0, z: 0 };
+    const noTurn = { x: 0, y: 0, z: 0, w: 1 };
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    /**
+     * One answer of ours against the engine's shape test, which allows itself 2 mm (GJK): agreeing, or a graze within a
+     * hundredth of a millimetre either answer is right about, or the engine meeting what we miss within its own 2 mm. A
+     * meeting of ours the engine denies is a fault, whatever its size.
+     */
+    const judge = (mine: boolean, theirs: boolean, at: (h: Float64Array) => boolean): 'agree' | 'near' | 'bad' => {
+      if (mine === theirs || at(grown) !== at(shrunk)) return 'agree';
+      if (!mine && at(near2)) return 'near';
+      return 'bad';
+    };
+    for (let pose = 0; pose < 10; pose++) {
+      const hx = f(0.3 + rnd() * 4);
+      const hy = f(0.3 + rnd() * 2);
+      const hz = f(0.5 + rnd() * 8);
+      const qa = new THREE.Quaternion().setFromEuler(new THREE.Euler(rnd() * 6.28, rnd() * 6.28, rnd() * 6.28));
+      const c = physics.world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(f(rnd() * 20 - 10), f(rnd() * 10), f(rnd() * 20 - 10)).setRotation(qa));
+      // The very pose and size the engine keeps, single precision as it keeps them.
+      const t = c.translation();
+      const r = c.rotation();
+      p.set([t.x, t.y, t.z]);
+      q.set([r.x, r.y, r.z, r.w]);
+      half.set([hx, hy, hz]);
+      for (let i = 0; i < 3; i++) {
+        grown[i] = half[i] + 1e-5;
+        shrunk[i] = half[i] - 1e-5;
+        near2[i] = half[i] + 0.002;
+      }
+      const reach = Math.hypot(hx, hy, hz) + 4;
+      for (let k = 0; k < 1000; k++) {
+        // A ray from outside, aimed within the box's reach of its middle.
+        for (let i = 0; i < 3; i++) o[i] = f(p[i] + (rnd() - 0.5) * 2 * reach * 1.5);
+        if (spanMeetsBox(o, o, p, q, grown)) continue;
+        for (let i = 0; i < 3; i++) d[i] = p[i] + (rnd() - 0.5) * reach - o[i];
+        const dl = Math.hypot(d[0], d[1], d[2]);
+        for (let i = 0; i < 3; i++) d[i] = f(d[i] / dl);
+        const len = 1 + rnd() * 2 * reach;
+        rays++;
+        const ray = new RAPIER.Ray({ x: o[0], y: o[1], z: o[2] }, { x: d[0], y: d[1], z: d[2] });
+        const theirs = c.castRayAndGetNormal(ray, len, true);
+        const mine = rayBox(o, d, len, p, q, half, hit);
+        if (!!theirs === mine) {
+          rayAgree++;
+          if (mine && theirs) {
+            rayHits++;
+            // Relative to how far along the ray it met it: the engine keeps every pose, ray and answer in single precision.
+            tolWorst = Math.max(tolWorst, Math.abs(hit.toi - theirs.timeOfImpact) / Math.max(1, hit.toi));
+            // The face's normal; on an edge two faces are both right, and the engine's is their middle.
+            const dot = hit.nx * theirs.normal.x + hit.ny * theirs.normal.y + hit.nz * theirs.normal.z;
+            if (dot < 0.9999) {
+              const lp = new THREE.Vector3(o[0] + d[0] * hit.toi - p[0], o[1] + d[1] * hit.toi - p[1], o[2] + d[2] * hit.toi - p[2]).applyQuaternion(new THREE.Quaternion(q[0], q[1], q[2], q[3]).invert());
+              const onFaces = [Math.abs(Math.abs(lp.x) - hx) < 1e-4, Math.abs(Math.abs(lp.y) - hy) < 1e-4, Math.abs(Math.abs(lp.z) - hz) < 1e-4].filter(Boolean).length;
+              if (onFaces < 2) normalBad++;
+            }
+          }
+        } else if (rayBox(o, d, len, p, q, grown, hit) !== rayBox(o, d, len, p, q, shrunk, hit)) {
+          // Within a hundredth of a millimetre of a face or an edge: a graze either answer is right about.
+          grazes++;
+          rayAgree++;
+        }
+        // The same two ends as a span, a start inside the box included now and then.
+        for (let i = 0; i < 3; i++) {
+          a[i] = k % 7 === 0 ? f(p[i] + (rnd() - 0.5) * half[0]) : o[i];
+          bb[i] = f(o[i] + d[i] * len);
+        }
+        // The engine's exact answer for a span is its own solid ray along it (from inside, a hit at nought).
+        spans++;
+        const sl = Math.hypot(bb[0] - a[0], bb[1] - a[1], bb[2] - a[2]);
+        const along = new RAPIER.Ray({ x: a[0], y: a[1], z: a[2] }, { x: (bb[0] - a[0]) / sl, y: (bb[1] - a[1]) / sl, z: (bb[2] - a[2]) / sl });
+        // (A collider's `castRay` answers the time of impact, or -1 for none.)
+        const segTheirs = c.castRay(along, sl, true) >= 0;
+        const segMine = spanMeetsBox(a, bb, p, q, half);
+        if (segMine) spanMet++;
+        if (segTheirs === segMine || spanMeetsBox(a, bb, p, q, grown) !== spanMeetsBox(a, bb, p, q, shrunk)) spanAgree++;
+        // Its shape test (a segment against the cuboid) is not exact: where it says otherwise the span passes within its
+        // own tolerance of the box, which a box grown by 2 mm finds.
+        const seg = new RAPIER.Segment({ x: a[0], y: a[1], z: a[2] }, { x: bb[0], y: bb[1], z: bb[2] });
+        if (c.intersectsShape(seg, at0, noTurn) !== segMine) {
+          shapeSays++;
+          if (!spanMeetsBox(a, bb, p, q, near2)) shapeFar++;
+        }
+        // The point test the rope's own cast asks before it (a span ending inside the box is not met by it).
+        pts++;
+        const inside = c.containsPoint({ x: bb[0], y: bb[1], z: bb[2] });
+        if (inside !== pointInBox(bb, p, q, half) && pointInBox(bb, p, q, grown) === pointInBox(bb, p, q, shrunk)) ptsBad++;
+        // And a swept quad about it, as the fan sweeps one: two triangles, which the engine has only its shape test for.
+        for (let i = 0; i < 12; i++) quad[i] = f(p[i % 3] + (rnd() - 0.5) * 2 * reach);
+        quads++;
+        const tri1 = new RAPIER.Triangle({ x: quad[0], y: quad[1], z: quad[2] }, { x: quad[6], y: quad[7], z: quad[8] }, { x: quad[9], y: quad[10], z: quad[11] });
+        const tri2 = new RAPIER.Triangle({ x: quad[9], y: quad[10], z: quad[11] }, { x: quad[3], y: quad[4], z: quad[5] }, { x: quad[0], y: quad[1], z: quad[2] });
+        const t1Theirs = c.intersectsShape(tri1, at0, noTurn);
+        const t2Theirs = c.intersectsShape(tri2, at0, noTurn);
+        const quadMine = quadMeetsBox(quad, p, q, half);
+        if (quadMine) quadMet++;
+        const qj = judge(quadMine, t1Theirs || t2Theirs, (h) => quadMeetsBox(quad, p, q, h));
+        if (qj === 'agree') quadAgree++;
+        else if (qj === 'near') quadNear++;
+        else quadBad++;
+        // Each of its triangles through the function the rope's fan calls on a box, `triangleMeetsBox`.
+        for (const [i0, i1, i2, theirs] of [
+          [0, 6, 9, t1Theirs],
+          [9, 3, 0, t2Theirs],
+        ] as [number, number, number, boolean][]) {
+          for (let j = 0; j < 3; j++) {
+            tri[j] = quad[i0 + j];
+            tri[3 + j] = quad[i1 + j];
+            tri[6 + j] = quad[i2 + j];
+          }
+          tris++;
+          const triMine = triangleMeetsBox(tri, p, q, half);
+          if (triMine) triMet++;
+          const tj = judge(triMine, theirs, (h) => triangleMeetsBox(tri, p, q, h));
+          if (tj === 'agree') triAgree++;
+          else if (tj === 'near') triNear++;
+          else triBad++;
+        }
+      }
+      physics.world.removeCollider(c, false);
+    }
+    ok(rays >= 8000 && rayAgree === rays && rayHits > rays / 10 && tolWorst <= 1e-5 && normalBad === 0, `the box's ray answers equal the engine's cuboid's over ${rays} random rays at ten random poses: ${rayHits} hits, the time of impact within ${tolWorst.toExponential(1)} of its length (the engine works in single precision), the face's normal the engine's off every edge (${normalBad} not), ${grazes} grazes within 1e-5 m`);
+    ok(spanAgree === spans && spanMet > spans / 10 && shapeFar === 0, `its span answers equal the engine's own solid ray along each span over ${spans} spans (${spanAgree} agree, ${spanMet} meeting it, a start inside it now and then); the engine's segment shape test says otherwise on ${shapeSays}, every one passing within its own 2 mm tolerance of the box (${shapeFar} further)`);
+    ok(ptsBad === 0, `its point test (inside the box, faces not) equals the engine's own containment over ${pts} points, off every graze (${ptsBad} not)`);
+    ok(quadBad === 0 && quadAgree + quadNear === quads && quadMet > quads / 10, `its swept quads equal the engine's two triangles against the cuboid over ${quads} quads (${quadMet} meeting it): the engine meets ${quadNear} that ours misses, every one within its own 2 mm, and ours meets none it denies (${quadBad})`);
+    ok(triBad === 0 && triAgree + triNear === tris && triMet > tris / 10, `and \`triangleMeetsBox\`, which the rope's fan asks of a box, equals the engine's triangle shape test over ${tris} triangles (${triMet} meeting it): ${triNear} met by the engine alone within its 2 mm, none met by ours alone (${triBad})`);
+  }
+
+  // --- the tow on a stand-in picture ----------------------------------------------------------------------------
+  const PID = 7;
+  type TowOpts = {
+    fps: number;
+    speed: number;
+    mode?: 'smooth' | 'picture';
+    seconds?: number;
+    /**
+     * Where the rope is fastened and the player hangs. 'ground': on its top's middle 2 m in from the rear, the player 8 m
+     * behind its rear and 0.6 m over its top, so as the player falls the span sweeps over the rear top edge and bends there,
+     * and the player lands and is towed. 'air': the vehicle 40 m up and the player 10 m under the middle of its belly.
+     * 'side': the vehicle 40 m up, the rope on its top's middle and the player 2 m out from its +x side and 0.6 m over its
+     * top, so the span falls over the side's top edge and the player hangs against that side.
+     */
+    how?: 'ground' | 'air' | 'side';
+    wire?: Wire;
+    at?: { second: number; then: (s: PeerStandIn, b: TestBody) => void };
+    key?: { code: string; from: number };
+    truth?: Truth;
+    bodies?: boolean;
+    tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>;
+  };
+  /**
+   * A stand-in peer's pod-sized vehicle along +z at `speed` (or along `truth`), over flat terrain, the rope fastened on it
+   * against the pose the rope rides (the slot's own, read before the bite), and everything a frame can tell measured.
+   */
+  const towPeer = async (o: TowOpts) => {
+    fresh();
+    GRAPPLE_TUNE.peerPose = o.mode ?? 'smooth';
+    if (o.tune) Object.assign(GRAPPLE_TUNE, o.tune);
+    const fps = o.fps;
+    const speed = o.speed;
+    const seconds = o.seconds ?? 6;
+    const how = o.how ?? 'ground';
+    const physics = await makePhysics();
+    const z0 = 20;
+    // One flat heightfield with no seam under the run: the game's terrain is 64 m heightfields, and a capsule sliding at
+    // 100 m/s catches on the edge between two of them now and then (a third of a metre of rope, a tow's own and every
+    // hull's alike), which is the terrain's and not what this measures.
+    physics.createHeightfield(-1024, -1024, 2048, 64, new Float32Array(65 * 65));
+    const b = new TestBody(physics);
+    b.groundAt = () => 0;
+    const said: string[] = [];
+    b.grapple.say = (s) => said.push(s);
+    const air = how !== 'ground';
+    const y0 = air ? 40 : 0.6;
+    const truth: Truth = o.truth ?? ((tt, p) => void p.set(45, y0, z0 + speed * (tt - 3)));
+    const s = new PeerStandIn(PID, POD, truth, o.wire ?? WIRE);
+    let bodies: RemoteBodies | null = null;
+    if (o.bodies) {
+      bodies = new RemoteBodies();
+      bodies.bind(physics);
+      s.useBodies(bodies);
+      b.peerHulls = bodies.hullBoxes();
+    } else b.peerHulls = s.peers;
+    // The game's order: the peers glided and the list refilled after the player's update, stamped with the frame's clock.
+    b.beforeStep = (dt) => s.step(dt);
+    // Three seconds for the relay's velocity to settle, the player standing well off the path.
+    b.place(40, 0.05, 0);
+    b.run(fps, 3);
+    const g = b.grapple;
+    const peers = b.peerHulls!;
+    const entry = peers.list.find((e) => e.id === PID)!;
+    // Placed against the pose the rope rides, read from its slot before the bite, never against the picture.
+    const slot0 = g.hulls.adoptPeer(peers, entry);
+    const pf0 = g.hulls.peerFrame(slot0);
+    const p0 = new THREE.Vector3(pf0.np[0], pf0.np[1], pf0.np[2]);
+    const q0 = new THREE.Quaternion(pf0.nq[0], pf0.nq[1], pf0.nq[2], pf0.nq[3]);
+    const pose = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyQuaternion(q0).add(p0);
+    const top = POD.h;
+    const hand = how === 'air' ? pose(0, -10, 0) : how === 'side' ? pose(POD.w / 2 + 2, top + 0.6, 0) : pose(0, top + 0.6, -POD.l / 2 - 8);
+    const anchor = how === 'air' ? pose(0, 0, 0) : how === 'side' ? pose(0, top, 0) : pose(0, top, -POD.l / 2 + 2);
+    b.place(hand.x, hand.y - GRAPPLE_TUNE.ropeY, hand.z);
+    b.vel.set(entry.vel[0], entry.vel[1], entry.vel[2]);
+    b.grounded = false;
+    const hooked = g.attachPeer(b, PID, anchor.x, anchor.y, anchor.z, 0, how === 'air' ? -1 : 1, 0);
+    const frame0 = hooked ? (g.vehicleReport(b) as { frames: string[] }).frames[0] : '';
+    const r = {
+      g,
+      b,
+      s,
+      bodies,
+      hooked,
+      frame0,
+      said,
+      edgeErr: 0,
+      bentOn: 0,
+      maxBends: 0,
+      vMin: Infinity,
+      vMax: -Infinity,
+      relMax: 0,
+      deepest: 0,
+      handDepth: -Infinity,
+      blockedMax: 0,
+      perMs: 0,
+      turnErr: 0,
+      turnUnled: 0,
+      drawnErr: 0,
+      pvErr: 0,
+      pvUnturned: 0,
+      missMax: 0,
+      slackMax: 0,
+      slips: 0,
+      landing: 0,
+      paid: 0,
+      touched: 0,
+      harms: 0,
+      maxImpact: 0,
+      reportPerMs: Number.NaN,
+    };
+    let paidAt2 = Number.NaN;
+    const slipSum = (x: { catches: number; turns: number; reels: number }) => x.catches + x.turns + x.reels;
+    const drawn = new Float64Array(3);
+    const harms0 = b.harms.length;
+    let t = 0;
+    const n = Math.round(seconds * fps);
+    for (let i = 0; i < n && g.attached; i++) {
+      const dt = 1 / fps;
+      if (o.at && Math.abs(t + dt - o.at.second) < dt / 2) o.at.then(s, b);
+      if (o.key && Math.abs(t + dt - o.key.from) < dt / 2) b.key(o.key.code, true);
+      // A frame that stalled is stepped by the game's clamped 0.05 s, whatever the wall says.
+      const fdt = s.stallReceiver > 0 ? 0.05 : dt;
+      t += fdt;
+      const before = slipSum(g.slipNow);
+      const lastBefore = slipSum(g.slipLast);
+      b.frame(fdt);
+      const after = slipSum(g.slipNow);
+      const gave = after >= before && slipSum(g.slipLast) === lastBefore ? after - before : slipSum(g.slipLast) - before + after;
+      if (t >= 2) r.slips += gave;
+      r.maxBends = Math.max(r.maxBends, g.rope.n);
+      // Every bend on the vehicle, its contact in the vehicle's own frame, against the edge the span falls over.
+      for (let j = 1; j <= g.rope.n; j++) {
+        if (g.rope.pf[j] <= MAX_HULL_FRAMES) continue;
+        r.bentOn++;
+        const cx = g.rope.contact[3 * j];
+        const cy = g.rope.contact[3 * j + 1];
+        const cz = g.rope.contact[3 * j + 2];
+        r.edgeErr = Math.max(r.edgeErr, how === 'side' ? Math.hypot(cy - top, cx - POD.w / 2) : Math.hypot(cy - top, cz + POD.l / 2));
+      }
+      const slot = g.attached ? g.hulls.peerSlotOf(entry) : 0;
+      if (!slot) continue;
+      const pf = g.hulls.peerFrame(slot);
+      const pos = new THREE.Vector3(pf.np[0], pf.np[1], pf.np[2]);
+      const rot = new THREE.Quaternion(pf.nq[0], pf.nq[1], pf.nq[2], pf.nq[3]);
+      const inv = rot.clone().invert();
+      // By this test's own arithmetic: the rope's spans and the hand against the box at the pose the rope rides.
+      if (t > 0.5) {
+        const pts: THREE.Vector3[] = [];
+        for (let j = 0; j <= g.rope.n; j++) {
+          const lp = new THREE.Vector3(g.rope.pts[3 * j], g.rope.pts[3 * j + 1], g.rope.pts[3 * j + 2]);
+          pts.push(g.rope.pf[j] === 0 ? lp : lp.applyQuaternion(rot).add(pos));
+        }
+        pts.push(handOf(b));
+        const depthOf = (w: THREE.Vector3) => {
+          const l = w.clone().sub(pos).applyQuaternion(inv);
+          return Math.min(POD.w / 2 - Math.abs(l.x), POD.h / 2 - Math.abs(l.y - POD.h / 2), POD.l / 2 - Math.abs(l.z));
+        };
+        for (let j = 1; j < pts.length; j++) for (let m = 0; m <= 32; m++) r.deepest = Math.max(r.deepest, depthOf(pts[j - 1].clone().lerp(pts[j], m / 32)));
+        r.handDepth = Math.max(r.handDepth, depthOf(handOf(b)));
+        r.blockedMax = Math.max(r.blockedMax, g.blocked(b));
+      }
+      // How far the pose stands off the drawn picture, per m/s of the vehicle's speed.
+      const vs = Math.hypot(entry.vel[0], entry.vel[1], entry.vel[2]);
+      if (t >= 2 && vs > 0.5) r.perMs = Math.max(r.perMs, pf.gap / vs);
+      // The pose's turn is the picture's own led by the glide's step: on a frame no state was heard on, the picture glided
+      // after the player's update stands exactly where the rope's turn said it would; the picture before it (the turn not
+      // led), apart from it while the vehicle turns.
+      if (s.delivered === 0 && t >= 1) {
+        const pq = s.obj.quaternion;
+        r.turnErr = Math.max(r.turnErr, 2 * Math.acos(Math.min(1, Math.abs(pq.x * pf.nq[0] + pq.y * pf.nq[1] + pq.z * pf.nq[2] + pq.w * pf.nq[3]))));
+        r.turnUnled = Math.max(r.turnUnled, 2 * Math.acos(Math.min(1, Math.abs(pq.x * pf.bq[0] + pq.y * pf.bq[1] + pq.z * pf.bq[2] + pq.w * pf.bq[3]))));
+      }
+      // The rope's anchor where it is drawn: on the picture, through the picture's own transform.
+      if (g.rope.pf[0] > MAX_HULL_FRAMES) {
+        g.drawnPoint(0, drawn, 0);
+        const want = new THREE.Vector3(g.rope.pts[0], g.rope.pts[1], g.rope.pts[2]).applyQuaternion(s.obj.quaternion).add(s.obj.position);
+        r.drawnErr = Math.max(r.drawnErr, Math.hypot(drawn[0] - want.x, drawn[1] - want.y, drawn[2] - want.z));
+      }
+      // The pose's point velocity at the box's rear top corner against how that corner moved over the frame (its place at
+      // the frame's start and end through the slot's own mapping), and the same without the turn's share.
+      if (t >= 1) {
+        const io = pf.io;
+        const corner = [POD.w / 2, POD.h, -POD.l / 2];
+        pf.s = 0;
+        io.set(corner);
+        pf.localToWorld();
+        const w0 = [io[3], io[4], io[5]];
+        pf.s = 1;
+        io.set(corner);
+        pf.localToWorld();
+        const w1 = [io[3], io[4], io[5]];
+        io.set(w1);
+        pf.pointVelocity();
+        const fdx = (w1[0] - w0[0]) / fdt;
+        const fdy = (w1[1] - w0[1]) / fdt;
+        const fdz = (w1[2] - w0[2]) / fdt;
+        r.pvErr = Math.max(r.pvErr, Math.hypot(io[3] - fdx, io[4] - fdy, io[5] - fdz));
+        r.pvUnturned = Math.max(r.pvUnturned, Math.hypot(pf.ps.lv[0] - fdx, pf.ps.lv[1] - fdy, pf.ps.lv[2] - fdz));
+        // The body against the pose's own point velocity where it is: what a tow behind or beside it slides by.
+        io[0] = b.pos.x;
+        io[1] = b.pos.y + GRAPPLE_TUNE.ropeY;
+        io[2] = b.pos.z;
+        pf.pointVelocity();
+        if (t >= 2) r.relMax = Math.max(r.relMax, Math.hypot(b.vel.x - io[3], b.vel.y - io[4], b.vel.z - io[5]));
+      }
+      r.missMax = Math.max(r.missMax, pf.lastMiss);
+      r.slackMax = Math.max(r.slackMax, pf.lastSlack);
+      if (t >= 2) {
+        if (Number.isNaN(paidAt2)) paidAt2 = g.paidOut;
+        r.vMin = Math.min(r.vMin, b.vel.z);
+        r.vMax = Math.max(r.vMax, b.vel.z);
+      }
+    }
+    if (o.key) b.key(o.key.code, false);
+    // The console's own word for the pose against the picture, per m/s, over the last whole second.
+    r.reportPerMs = g.attached ? ((g.vehicleReport(b) as { peer: { perMs: number | null } }).peer.perMs ?? Number.NaN) : Number.NaN;
+    // What the landing paid out (the ground's friction as the feet first touch, caught by the slip like any hull's tow), and the tow after it.
+    r.landing = Number.isNaN(paidAt2) ? g.paidOut : paidAt2;
+    r.paid = g.paidOut - r.landing;
+    r.touched = s.touched;
+    r.harms = b.harms.length - harms0;
+    r.maxImpact = g.maxImpact;
+    return r;
+  };
+
+  for (const fps of FPS) {
+    for (const speed of [40, 100]) {
+      // On the ground: the bend at its edge, and at 40 m/s the tow itself. A capsule sliding over a heightfield catches on its
+      // triangles' inner edges now and then and loses a frame's travel (every hull's tow alike, wave 3b's pod's too), which the
+      // hand's correction pays out: that is the ground's, so the rope's own length is held in the air below, and at 100 the
+      // speed is reported. The states come over the wire the game's come over.
+      const r = await towPeer({ fps, speed });
+      ok(
+        r.hooked && r.frame0 === `peer:${PID}` && r.g.attached && r.bentOn > 0 && r.edgeErr <= 0.001 && r.deepest <= GRAPPLE_TUNE.wrapOffset + 1e-3 && r.maxBends <= 1 && r.blockedMax === 0 && r.handDepth < 0 && r.touched === 0,
+        `${fps} fps, ${speed} m/s: a rope on another player's vehicle (frames[0] ${r.frame0}) bends once at its rear top edge within ${r3(r.edgeErr * 1000)} mm, no span deeper than the offset into its box (the deepest ${r3(Math.max(0, r.deepest))} m), none blocked, the hand never in it (at most ${r3(r.handDepth)} m), still holds after 6 s, and nothing was ever put on the picture (${r.touched} frames it left its twin)`,
+      );
+      if (speed === 40) {
+        ok(
+          r.vMin >= speed - 1 && r.vMax <= speed + 1 && r.slips === 0 && r.perMs < 0.06 && r.reportPerMs < 0.06,
+          `${fps} fps, 40 m/s, states sampled as sent and heard 50 ms on with 5 ms of jitter: towed behind it over the ground, from 2 s on the player's speed holds between ${r2(r.vMin)} and ${r2(r.vMax)} m/s and the slip never gives (${r.slips}); the pose stands at most ${r3(r.perMs)} m per m/s off the drawn picture (the console's peer.perMs ${r3(r.reportPerMs)} over its last second; the smoke's bound 0.06); ${r3(r.paid)} m paid out by the hand's own correction where the ground's contacts cut a frame's travel (the landing first ${r3(r.landing)}), which the tow in the air below holds at nought`,
+        );
+      } else note(`${fps} fps, 100 m/s over the ground: the speed ran ${r2(r.vMin)} to ${r2(r.vMax)} m/s from 2 s, the slip gave ${r.slips} times and the rope paid ${r3(r.paid)} m (the landing ${r3(r.landing)}), off the heightfield's own contacts`);
+      // In the air, under its belly: the tow with nothing but the rope and the pose.
+      const a = await towPeer({ fps, speed, how: 'air' });
+      ok(
+        a.hooked && a.g.attached && a.vMin >= speed - 1 && a.vMax <= speed + 1 && a.slips === 0 && a.paid + a.landing < 0.01 && a.touched === 0,
+        `${fps} fps, ${speed} m/s: hung 10 m under its belly, from 2 s on the towed speed holds between ${r2(a.vMin)} and ${r2(a.vMax)} m/s, the slip never gives (${a.slips}) and ${r3(a.paid + a.landing)} m is paid out`,
+      );
+    }
+    // The fault: riding the glided picture, led by the glide's own step, the tow follows the picture's sawtooth. At 144 and
+    // 60 fps it swings by tens of metres a second with the slip giving; at 30 fps, where a state falls on every third frame,
+    // the catches come on the sawtooth's fast frames and the slack on its slow ones, and the tow drags along a metre and more
+    // a second short of the vehicle with the rope paying out, which the smooth pose holds.
+    const f = await towPeer({ fps, speed: 40, mode: 'picture' });
+    const swings = f.vMax - f.vMin > 15 && f.slips > 0;
+    const lags = f.vMin < 40 - 1 || f.vMax > 40 + 1;
+    ok(swings || lags, `${fps} fps, 40 m/s riding the picture: the towed speed runs ${r2(f.vMin)} to ${r2(f.vMax)} m/s (${r2(f.vMax - f.vMin)} apart), the slip gives ${f.slips} times and ${r2(f.landing + f.paid)} m is paid out, where the smooth pose held it within 1 m/s, which proves the test sees the fault`);
+  }
+  // The worst stamp the game's can be: a main thread busy all frame long, which hears every state as the next frame starts,
+  // a frame's worth of jitter on top of the network's. The pose is held looser there and still far from the picture.
+  for (const fps of [144, 60]) {
+    const a = await towPeer({ fps, speed: 40, how: 'air', wire: BUSY });
+    const gnd = await towPeer({ fps, speed: 40, wire: BUSY });
+    const pic = await towPeer({ fps, speed: 40, wire: BUSY, mode: 'picture' });
+    ok(
+      a.g.attached && a.vMin >= 38.5 && a.vMax <= 41.5 && a.slips === 0 && gnd.g.attached && gnd.vMin >= 38 && gnd.vMax <= 42 && pic.vMax - pic.vMin > 3 * (gnd.vMax - gnd.vMin),
+      `${fps} fps, 40 m/s, every state stamped as the next frame starts: hung under its belly the tow holds ${r2(a.vMin)} to ${r2(a.vMax)} m/s with the slip never giving (${a.slips}), and over the ground ${r2(gnd.vMin)} to ${r2(gnd.vMax)}, where riding the picture over the ground it swung ${r2(pic.vMin)} to ${r2(pic.vMax)}`,
+    );
+  }
+
+  // A state stepped 30 m off the vehicle's path: a teleport, and the rope lets go (`moved`).
+  {
+    const r = await towPeer({ fps: 60, speed: 40, seconds: 4, at: { second: 2.5, then: (s) => void s.jump.set(30, 0, 0) } });
+    ok(!r.g.attached && r.g.lastLetGo === 'moved', `a state of theirs landing 30 m off the vehicle's path lets go (${r.g.lastLetGo}, "${r.said.join(' | ')}")`);
+  }
+  // A frame either browser spent stalled is no teleport: the receiver's, whose states then come bunched and late, and the
+  // sender's, whose state comes a fifth of a second after its last with a twentieth of a second's travel in it.
+  for (const speed of [40, 100]) {
+    const recv = await towPeer({ fps: 60, speed, how: 'air', at: { second: 2.5, then: (s) => void (s.stallReceiver = 0.2) } });
+    const send = await towPeer({ fps: 60, speed, how: 'air', at: { second: 2.5, then: (s) => void (s.stallSender = 0.2) } });
+    ok(
+      recv.g.attached && send.g.attached && recv.missMax <= GRAPPLE_TUNE.peerJump + recv.slackMax + 1e-6,
+      `${speed} m/s: the receiver stalled 0.2 s holds (a state missed by ${r2(recv.missMax)} m, ${r2(recv.slackMax)} of it the moments it was heard at), and so does the sender stalled 0.2 s (missed by ${r2(send.missMax)}, ${r2(send.slackMax)} the moments')`,
+    );
+    if (speed === 100) ok(Math.max(recv.missMax, send.missMax) > GRAPPLE_TUNE.peerJump, `at 100 m/s a stall's miss (${r2(Math.max(recv.missMax, send.missMax))} m) is past peerJump alone, which the moments' allowance is what holds: the test sees the fault`);
+  }
+  // Their vehicle gone from the list (they left, got off, or went out of sight): the line comes loose, in words.
+  {
+    const r = await towPeer({ fps: 60, speed: 40, seconds: 4, at: { second: 2.5, then: (_s, body) => void ((body.peerHulls!.list as unknown[]).length = 0) } });
+    ok(!r.g.attached && r.g.lastLetGo === 'loose' && r.said.includes('The line came loose.'), `their vehicle gone from the boxes the body sees lets go in words (${r.g.lastLetGo}, "${r.said.join(' | ')}")`);
+  }
+  // Their game measures the picture's box again when its wings settle (and after a refit): the slot takes the new box on the
+  // next frame, never keeping the one it had at the bite.
+  {
+    const r = await towPeer({ fps: 60, speed: 40, seconds: 3, how: 'air', at: { second: 2.5, then: (s) => void ((s.entry.half[0] = 4), (s.entry.mid[0] = 0.2)) } });
+    const pf = r.g.hulls.peerFrame(r.g.hulls.peerSlotOf(r.s.entry));
+    ok(r.g.attached && pf.boxHalf[0] === 4 && pf.boxMid[0] === 0.2 && Math.abs(pf.ps.radius - (Math.hypot(4, POD.h / 2, POD.l / 2) + Math.hypot(0.2, POD.h / 2, 0))) < 1e-9, `a box their game measures again (wings settled) is the box the rope meets on the next frame: half ${pf.boxHalf[0]} across, its middle ${pf.boxMid[0]} over`);
+  }
+
+  // --- up to it, and it stopping: the box test keeps the body out ---------------------------------------------------
+  // Towed 8 m behind it, then Shift held (reel in) or F (haul), or the vehicle braking hard or stopping dead: the body is held
+  // off its box by the rope's own box test as off a hull this browser simulates, so the rope keeps its one bend at the rear
+  // top edge and never bends round the box from inside. With the box test off (`hullTest` false, the body passing through
+  // their sensor as the wave first had it) the hand goes into the box and the rope through it, which proves the test sees it.
+  {
+    const braking = (dec: number) => (tt: number, p: THREE.Vector3) => {
+      const t0 = 5;
+      const z = tt < t0 ? 40 * (tt - 3) : 40 * (t0 - 3) + 40 * Math.min(tt - t0, 40 / dec) - 0.5 * dec * Math.min(tt - t0, 40 / dec) ** 2;
+      p.set(45, 0.6, 20 + z);
+    };
+    for (const fps of FPS) {
+      const cases = [
+        { name: 'Shift held', o: { key: { code: 'ShiftLeft', from: 2 } } },
+        { name: 'F held', o: { key: { code: 'KeyF', from: 2 } } },
+        { name: 'braking at 15 m/s²', o: { truth: braking(15) } },
+        { name: 'stopping dead (400 m/s²)', o: { truth: braking(400) } },
+      ];
+      for (const c of cases) {
+        const r = await towPeer({ fps, speed: 40, ...c.o });
+        ok(
+          r.g.attached && r.maxBends <= 1 && r.handDepth < 0.05 && r.blockedMax === 0 && r.paid + r.landing < 10 && r.harms === 0,
+          `${fps} fps, 40 m/s, ${c.name}: still holds with at most ${r.maxBends} bend (the rear top edge's), the hand never more than ${r3(Math.max(0, r.handDepth))} m into the box, no span through it, ${r2(r.paid + r.landing)} m paid out, and no harm (the hardest contact ${r2(r.maxImpact)} m/s against the pose, from a vehicle whose player could not hurt this one)`,
+        );
+      }
+    }
+    const off = await towPeer({ fps: 144, speed: 40, key: { code: 'ShiftLeft', from: 2 }, tune: { hullTest: false } });
+    const offDead = await towPeer({ fps: 60, speed: 40, truth: braking(400), tune: { hullTest: false } });
+    ok(off.handDepth > 0.3 && off.blockedMax > 0 && offDead.handDepth > 0.3, `with the box test off, Shift puts the hand ${r2(off.handDepth)} m into the box (${off.blockedMax} spans through it) and a dead stop ${r2(offDead.handDepth)} m, which proves the test sees the fault`);
+  }
+
+  // --- a vehicle that turns -----------------------------------------------------------------------------------------------
+  // Flying a circle 40 m up at 40 m/s and half a radian a second, the player hanging against its +x side (the inside of the
+  // turn) on a rope over that side's top edge: the bend stays on the edge in the vehicle's frame, the body is carried at
+  // the pose's own point velocity where it hangs, the pose's turn is the picture's led by the glide's step, the pose's point
+  // velocity is its own motion over the frame (its turn's share and all), and the rope is drawn on the picture.
+  {
+    const V = 40;
+    const w = 0.5;
+    const R = V / w;
+    const circle: Truth = (tt, p, q) => {
+      const psi = w * (tt - 3);
+      p.set(45 + R - R * Math.cos(psi), 40, 20 + R * Math.sin(psi));
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), psi);
+    };
+    for (const fps of FPS) {
+      const r = await towPeer({ fps, speed: V, how: 'side', truth: circle, seconds: 6 });
+      ok(
+        r.g.attached && r.bentOn > 0 && r.edgeErr <= 0.001 && r.maxBends <= 1 && r.handDepth < 0.05 && r.blockedMax === 0 && r.relMax < 3 && r.slips === 0,
+        `${fps} fps, turning at half a radian a second: the rope bends on its +x side's top edge within ${r3(r.edgeErr * 1000)} mm in its own frame, holds with ${r.maxBends} bend, the hand never in the box (${r3(r.handDepth)}), and the body is carried within ${r2(r.relMax)} m/s of the pose's own point velocity where it hangs, the slip never giving`,
+      );
+      ok(
+        r.turnErr < 1e-6 && r.turnUnled > 1e-3 && r.drawnErr < 1e-9 && r.pvErr < 0.1 && r.pvUnturned > 1,
+        `${fps} fps: the pose's turn is the picture's led by the glide's step (off by ${r.turnErr.toExponential(1)} rad on every frame no state came, where unled it is ${r.turnUnled.toExponential(1)} off), the anchor is drawn through the picture's own transform (off by ${r.drawnErr.toExponential(1)} m), and the pose's point velocity at its rear top corner is that corner's own motion over the frame within ${r3(r.pvErr)} m/s (without the turn's share, ${r2(r.pvUnturned)} off)`,
+      );
+    }
+  }
+
+  // --- the fan and the depth on a box, asked directly ---------------------------------------------------------------
+  // On a rope fastened under the belly of a vehicle flying straight, the rope's own fan is handed a sweep that passes the
+  // box's top front corner between its two spans (both clear, the triangle through the corner), one moved 0.2 m clear of the
+  // box, and one whose hand ends inside it; and its count of blocked spans a hand inside the box and one under it.
+  {
+    const r = await towPeer({ fps: 60, speed: 40, how: 'air', seconds: 1 });
+    const g = r.g;
+    const slot = g.hulls.peerSlotOf(r.s.entry);
+    const pf = g.hulls.peerFrame(slot);
+    const pos = new THREE.Vector3(pf.np[0], pf.np[1], pf.np[2]);
+    const rot = new THREE.Quaternion(pf.nq[0], pf.nq[1], pf.nq[2], pf.nq[3]);
+    const at = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z).applyQuaternion(rot).add(pos);
+    const RF = g.rope as unknown as { fw: Float64Array; fws: Float64Array; fanHit(): boolean; hullFamilies: boolean };
+    const W = POD.w / 2;
+    const H = POD.h;
+    const fan = (zPlane: number, h1y: number) => {
+      const piv = at(W + 3, H + 3, zPlane);
+      const h0 = at(W + 3, H - 1, zPlane);
+      const h1 = at(W - 1, h1y, zPlane);
+      RF.fw.set([piv.x, piv.y, piv.z, piv.x, piv.y, piv.z, h0.x, h0.y, h0.z, h1.x, h1.y, h1.z]);
+      RF.fws[0] = 1;
+      RF.fws[1] = 1;
+      const spansClear = g.rope.clear(piv.x, piv.y, piv.z, h0.x, h0.y, h0.z) && g.rope.clear(piv.x, piv.y, piv.z, h1.x, h1.y, h1.z);
+      return { met: RF.fanHit(), spansClear };
+    };
+    const corner = fan(POD.l / 2 - 0.1, H + 0.3);
+    const clear = fan(POD.l / 2 + 0.2, H + 0.3);
+    const inside = fan(POD.l / 2 - 0.1, H - 0.5);
+    ok(RF.hullFamilies && pf.near && corner.spansClear && corner.met && !clear.met && !inside.met, `the rope's fan on their box: a sweep past its corner between two clear spans meets it (${corner.met}, both spans clear ${corner.spansClear}), one 0.2 m clear of it does not (${clear.met}), nor one whose hand ends inside it (${inside.met})`);
+    const below = at(0, -3, 0);
+    const within = at(0, H / 2, 0);
+    const blockedIn = g.rope.blockedNow(within.x, within.y, within.z);
+    const blockedOut = g.rope.blockedNow(below.x, below.y, below.z);
+    ok(blockedIn === 1 && blockedOut === 0, `and its count of blocked spans: the rope from under the belly to a hand inside the box is one (${blockedIn}), to a hand under it none (${blockedOut})`);
+  }
+
+  // --- through a real `RemoteBodies` --------------------------------------------------------------------------------------
+  // The same tow under its belly with the list the rope reads made by a real `RemoteBodies` from a peer view written each
+  // frame as `RemotePlayers.viewOf` writes one, its moments in milliseconds on the page's clock, stamped by the frame's own
+  // clock before the peers are moved as the game stamps it: the units and the copies the rope relies on, end to end.
+  {
+    const r = await towPeer({ fps: 60, speed: 40, how: 'air', bodies: true });
+    const listed = r.bodies!.hullBoxes();
+    const e = listed.list[0];
+    ok(
+      r.hooked && r.g.attached && r.vMin >= 39 && r.vMax <= 41 && r.slips === 0 && e && e.id === PID && Math.abs(listed.stamp - r.s.wall) < 1e-9 && Math.abs(e.heardAt - r.s.heardAt) < 1e-9 && Math.abs(e.vel[2] - r.s.vel.z) < 1e-9 && (r.bodies!.status() as { ropeHulls: number[] }).ropeHulls.join() === `${PID}`,
+      `through a real RemoteBodies the rope rides their vehicle 6 s at ${r2(r.vMin)} to ${r2(r.vMax)} m/s (the list stamped ${r3(listed.stamp)} s, the state heard at ${r3(e?.heardAt ?? Number.NaN)} s, its velocity ${r2(e?.vel[2] ?? Number.NaN)} m/s, the console's ropeHulls ${(r.bodies!.status() as { ropeHulls: number[] }).ropeHulls.join()})`,
+    );
+    r.bodies!.dispose();
+  }
+  fresh();
+
+  // --- a slam that came of their vehicle --------------------------------------------------------------------------
+  {
+    const r = await towPeer({ fps: 60, speed: 40, seconds: 2.5 });
+    const { g, b } = r;
+    const harms0 = b.harms.length;
+    g.mayHurtPeer = null;
+    const spared = g.slamAt(b, 40, 'console', b.pos.x, b.pos.y + 1, b.pos.z + 1);
+    const staggered = g.staggered;
+    b.run(60, 0.6);
+    g.mayHurtPeer = (id) => id === PID;
+    const hurt = g.slamAt(b, 40, 'console', b.pos.x, b.pos.y + 1, b.pos.z + 1);
+    const took = g.lastSlam.took;
+    b.run(60, 0.6);
+    // Let go at the tow's speed: the fast flight after it still answers to whose vehicle it was.
+    g.mayHurtPeer = null;
+    g.letGo('fire');
+    const released = g.released;
+    const flight = g.slamAt(b, 40, 'console', b.pos.x, b.pos.y + 1, b.pos.z + 1);
+    ok(
+      spared === 0 && staggered && b.harms.length === harms0 + 1 && hurt > 0 && took && released && flight === 0 && g.lastSlam.peer === PID && g.lastSlam.spared,
+      `a slam at 40 m/s on a rope riding their vehicle costs nothing where they could not hurt you (${spared}, staggered ${staggered}), ${hurt} where they could (friendly fire or a duel), and in the flight after letting go of it nothing again (${flight}, released ${released})`,
+    );
+  }
+  fresh();
+
+  // --- the dart, against the boxes `RemoteBodies.hullBoxes()` keeps ---------------------------------------------
+  {
+    const dartAt = async (opts: { vehicles?: boolean; mount?: boolean }) => {
+      fresh();
+      if (opts.vehicles === false) GRAPPLE_TUNE.vehicles = false;
+      const physics = await makePhysics();
+      const t = terrain(physics, -128, 128, -128, 128);
+      const bodies = new RemoteBodies();
+      bodies.bind(physics);
+      const obj = new THREE.Object3D();
+      obj.position.set(0, 0.6, 24);
+      // Turned a little, so the mark drawn on it is drawn through its own turn.
+      obj.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.3);
+      const clock = performance.now();
+      const view = {
+        id: PID,
+        name: 'friend',
+        shown: true,
+        group: new THREE.Object3D(),
+        rig: null,
+        ship: obj,
+        shipBox: { half: [POD.w / 2, POD.h / 2, POD.l / 2] as [number, number, number], mid: [0, POD.h / 2, 0] as [number, number, number] },
+        shipTarget: obj.position.clone(),
+        shipTargetQ: obj.quaternion.clone(),
+        shipVel: new THREE.Vector3(),
+        shipHeardAt: clock,
+        shipMount: !!opts.mount,
+        shipDocked: false,
+        hp: 100,
+        maxHp: 100,
+        down: false,
+        saber: false,
+        saberColor: 0,
+        hands: [],
+        saberThrown: null,
+        hullFrame: null,
+      };
+      view.group.position.set(0, 1.4, 24);
+      bodies.peerAdded(view as never);
+      bodies.stampHulls(clock);
+      bodies.peerMoved(view as never);
+      const b = new TestBody(physics);
+      b.groundAt = t.at;
+      b.peerHulls = bodies.hullBoxes();
+      let ms = clock;
+      b.beforeStep = (dt) => {
+        ms += dt * 1000;
+        bodies.stampHulls(ms);
+        bodies.peerMoved(view as never);
+      };
+      b.place(0, 0.05, 0);
+      b.run(60, 0.3);
+      const g = b.grapple;
+      b.fireAt = { x: 0, y: 0.6 + POD.h / 2, z: 24 - POD.l / 2 };
+      b.key('Mouse3', true);
+      b.frame(1 / 60);
+      b.key('Mouse3', false);
+      const kind = g.mark.kind;
+      const markPeer = g.mark.peer;
+      // The mark drawn where the picture is drawn: its point kept in the vehicle's frame, placed through the picture's transform.
+      let markDrawnErr = Number.NaN;
+      if (markPeer) {
+        const md = g.markDrawn({ x: 0, y: 0, z: 0 });
+        const want = new THREE.Vector3(g.mark.lx, g.mark.ly, g.mark.lz).applyQuaternion(obj.quaternion).add(obj.position);
+        markDrawnErr = Math.hypot(md.x - want.x, md.y - want.y, md.z - want.z);
+      }
+      for (let i = 0; i < 60 && g.state === 'flying'; i++) b.frame(1 / 60);
+      const onIt = g.attached && g.rope.pf[0] > MAX_HULL_FRAMES;
+      const frames = (g.vehicleReport(b) as { frames: string[] }).frames;
+      const listed = bodies.hullBoxes().list.map((h) => h.id);
+      bodies.dispose();
+      return { kind, markPeer, markDrawnErr, onIt, frames, state: g.state, listed, refusal: b.lastFireRefusal };
+    };
+    const bite = await dartAt({});
+    ok(bite.kind === 'vehicle' && bite.markPeer === PID && bite.markDrawnErr < 1e-9 && bite.onIt && bite.frames[0] === `peer:${PID}`, `the dart bites their vehicle's box (the mark ${bite.kind} on player ${bite.markPeer}, drawn through the picture's own turn within ${bite.markDrawnErr.toExponential(1)} m; the anchor on ${bite.frames[0]}), passing the sensor the engine keeps round it`);
+    const blind = await dartAt({ vehicles: false });
+    ok(!blind.onIt && blind.kind !== 'vehicle', `with the rope blind to vehicles it never bites the box (the mark ${blind.kind}, ${blind.state}${blind.refusal ? `: ${blind.refusal}` : ''})`);
+    const mount = await dartAt({ mount: true });
+    ok(!mount.onIt && mount.kind !== 'vehicle' && mount.listed.length === 0, `nor a box whose garage def is a creature, which hullBoxes leaves out (the mark ${mount.kind}, ${mount.listed.length} listed)`);
+  }
+  // `hullBoxes` leaves out a hull docked onto another and a peer out of sight, and takes a peer gone off its list.
+  {
+    const physics = await makePhysics();
+    const bodies = new RemoteBodies();
+    bodies.bind(physics);
+    const make = (id: number, o: Partial<{ shown: boolean; shipDocked: boolean; shipMount: boolean }>) => {
+      const obj = new THREE.Object3D();
+      return { id, name: `p${id}`, shown: o.shown ?? true, group: new THREE.Object3D(), rig: null, ship: obj, shipBox: { half: [1, 1, 1], mid: [0, 1, 0] }, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 1000, shipMount: o.shipMount ?? false, shipDocked: o.shipDocked ?? false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: 0, hands: [], saberThrown: null, hullFrame: null };
+    };
+    const views = [make(2, {}), make(3, { shipDocked: true }), make(4, { shown: false }), make(5, { shipMount: true })];
+    for (const v of views) {
+      bodies.peerAdded(v as never);
+      bodies.peerMoved(v as never);
+    }
+    const before = bodies.hullBoxes().list.map((h) => h.id);
+    views[0].shown = false;
+    bodies.peerMoved(views[0] as never);
+    const hidden = bodies.hullBoxes().list.length;
+    views[0].shown = true;
+    bodies.peerMoved(views[0] as never);
+    bodies.peerRemoved(2);
+    ok(before.join() === '2' && hidden === 0 && bodies.hullBoxes().list.length === 0, `hullBoxes lists a shown peer's vehicle (${before.join()}) and never a docked hull, one out of sight or a mount; one hidden or gone leaves it`);
+    bodies.dispose();
+  }
+});
+
+// =============================================================================================================
 await section(14, 'a rideable creature', async () => {
   fresh();
   const physics = await makePhysics();
@@ -1381,6 +2283,20 @@ await section(15, 'allocation', async () => {
     ok(
       r.attached && r.seen.onHull > 0 && r.seen.marked > 0 && r.seen.pulled > 0 && r.seen.looked > 0 && marks && r.done.hullCalls > 0 && r.scavenges === 0 && r.made < 0.2 * r.frames,
       `the hook's own arithmetic ${mode.length > 1 ? 'hung behind a moving pod' : 'towed behind a moving pod'}, the hull test, the look and the mark's hull casts running (the mark on the hull ${r.seen.markOn}, held ${r.seen.markHeld}, off ${r.seen.markOff} of 600 frames): ${Math.max(0, r.made)} bytes over ${r.frames} frames (under 0.2 B a frame, ${r.scavenges} collections)`,
+    );
+  }
+  // And on another player's vehicle (wave 3c): towed behind it with the mark worked out on it, and hung at its rear face
+  // with the box test meeting the face. The smooth pose, its jump test, the box arithmetic of the rope's casts, fans and
+  // depth, the box test and the mark's box cast all run in a frame there, and every number that crosses a call goes in a
+  // field (`rayBoxIn`'s length, `peerHitOut`'s share, the rope's spent length, the words' slack test).
+  for (const mode of [['peer'], ['peer', 'hang']]) {
+    const line = execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', own, ...mode], { encoding: 'utf8', timeout: 600_000 }).trim().split('\n').pop()!;
+    const r = JSON.parse(line) as { frames: number; made: number; scavenges: number; attached: boolean; frame0: string; seen: { onPeer: number; contacts: number; looked: number; markOn: number; markHeld: number; markOff: number } };
+    const hang = mode.length > 1;
+    const ran = hang ? r.seen.contacts > 0 && r.seen.markOff > 0 : r.seen.markOn > 0 && r.seen.markHeld > 0 && r.seen.markOff > 0;
+    ok(
+      r.attached && r.frame0 === 'peer:7' && r.seen.onPeer > 0 && r.seen.looked > 0 && ran && r.scavenges === 0 && r.made < 0.2 * r.frames,
+      `the hook's own arithmetic ${hang ? "hung at another player's vehicle's rear face, the box test meeting it on " + r.seen.contacts + ' of 600 frames' : `towed behind another player's vehicle, the mark on it ${r.seen.markOn}, held ${r.seen.markHeld}, off ${r.seen.markOff} of 600 frames`}: ${Math.max(0, r.made)} bytes over ${r.frames} frames (under 0.2 B a frame, ${r.scavenges} collections)`,
     );
   }
   // (b) The whole per-frame path against the real engine: the frames, the lead, the hull test, the pull, the rope's casts

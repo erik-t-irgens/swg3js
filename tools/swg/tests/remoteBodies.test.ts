@@ -361,6 +361,63 @@ const bodies = new RemoteBodies().bind(physics);
   live.dispose();
 }
 
+// --- 11b: a peer riding a vehicle makes nothing either, the grappling hook's list of them included ---------------------
+// What every frame of a player who never fires pays for the hook's list of the peers' vehicles (`hullBoxes`, Grapple wave
+// 3c): the peer's vehicle's numbers copied into its entry, and the frame's clock handed over by the game (`stampHulls`),
+// never read here. Measured as the grapple's own allocation tests measure, by the young generation over the frames with
+// no collection between, the cleanest of three tries; and beside it the same frames with a clock read into a field, the
+// way the list was first stamped, which proves the measure sees one.
+{
+  const gc = (globalThis as { gc?: (o?: { type: 'minor' }) => void }).gc;
+  if (gc) {
+    const v8 = await import('node:v8');
+    const young = (): number => v8.getHeapSpaceStatistics().find((s) => s.space_name === 'new_space')?.space_used_size ?? 0;
+    const w = await Physics.create();
+    const live = new RemoteBodies().bind(w);
+    const holder = new THREE.Object3D();
+    holder.add(new THREE.Mesh(new THREE.BoxGeometry(4, 2, 12)));
+    const box = measureBox(holder)!;
+    const p = peer(9, 0, 0, 0, { ship: holder, shipBox: box });
+    p.shipTarget = new THREE.Vector3();
+    p.shipTargetQ = new THREE.Quaternion();
+    p.shipVel = new THREE.Vector3(0, 0, 40);
+    p.shipHeardAt = 1000;
+    p.shipMount = false;
+    p.shipDocked = false;
+    live.peerAdded(p);
+    let clock = 1000;
+    const kept = { stamp: 0 };
+    const frame = (i: number, readClock: boolean) => {
+      clock += 16;
+      if (readClock) kept.stamp = performance.now() / 1000;
+      live.stampHulls(clock);
+      holder.position.z = i * 0.01;
+      p.group.position.z = i * 0.01;
+      p.shipTarget.z = i * 0.01;
+      p.shipHeardAt = clock - 8;
+      live.peerMoved(p);
+    };
+    const measure = (readClock: boolean) => {
+      for (let i = 0; i < 20000; i++) frame(i, readClock);
+      let best = Infinity;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        gc({ type: 'minor' });
+        const before = young();
+        for (let i = 0; i < 20000; i++) frame(i, readClock);
+        best = Math.min(best, young() - before);
+      }
+      return best / 20000;
+    };
+    const plain = measure(false);
+    const listed = live.hullBoxes().list.length;
+    const withClock = measure(true);
+    ok(listed === 1 && plain < 0.2 && withClock > 4, `11b: a peer riding a vehicle, on the hook's list (${listed}), makes ${plain.toFixed(3)} B a frame through peerMoved with the frame's clock handed in, where a clock read into a field each frame made ${withClock.toFixed(1)} B, which proves the measure sees one`);
+    live.dispose();
+  } else {
+    ok(true, '11b: run with --expose-gc to measure the young generation over a peer riding a vehicle');
+  }
+}
+
 // --- 12: who the brains may pick a fight with ----------------------------------------------------------
 // A peer is always something a bolt and a blade can find. The one list of the living is different:
 // nothing on this browser can ever finish a peer, so they go on it only while a blow struck here

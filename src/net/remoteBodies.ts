@@ -64,6 +64,10 @@
 //
 // Nothing is allocated per frame: the bodies are made when a peer arrives and taken down when they
 // go, the poses are written through kept scratch objects, and the one blow record is refilled.
+//
+// The grapple's rope reads the peers' vehicles from here too (`hullBoxes`, Grapple wave 3c), and never through the
+// engine: the hull's sensor stays exactly as it is above, filtered out of every query, and the rope meets the picture's
+// own box by its own arithmetic. A mount and a hull docked onto another are left off that list.
 import * as THREE from 'three';
 import { Group, RAPIER, groups, type Physics } from '../core/physics.ts';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit.ts';
@@ -204,10 +208,29 @@ class PeerShip implements Hittable {
   }
 }
 
+/**
+ * A peer's vehicle as the grapple's rope sees it (`hullBoxes`, Grapple wave 3c): their relay id, the picture, its own box
+ * (the measured one, without `shipPad`) and what the relay last said of it (the place and turn heard, the relay's smoothed
+ * velocity, and when, in seconds). The shape `src/player/grappleFrames.ts`'s `PeerHull` reads; refilled once a frame.
+ */
+export interface PeerHullBox {
+  readonly id: number;
+  obj: THREE.Object3D;
+  readonly mid: Float64Array;
+  readonly half: Float64Array;
+  readonly target: Float64Array;
+  readonly turn: Float64Array;
+  readonly vel: Float64Array;
+  heardAt: number;
+}
+
 /** Everything kept for one peer. */
 interface Held {
   figure: PeerBody;
   ship: PeerShip | null;
+  /** Their vehicle as the rope sees it, made the first time they ride something with a box, and whether it is on the list now. */
+  hull: PeerHullBox | null;
+  listedHull: boolean;
 }
 
 /** What the world asks of the peers: the one list, the one map, and a counter that says when they changed. */
@@ -297,9 +320,74 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
 
   peerAdded(p: PeerView): void {
     this.peerRemoved(p.id);
-    this.peers.set(p.id, { figure: new PeerBody(p.id, p.name, this), ship: null });
+    this.peers.set(p.id, { figure: new PeerBody(p.id, p.name, this), ship: null, hull: null, listedHull: false });
     // No collider yet: one is made on the first frame they are shown, which is also the first frame
     // anything knows where they stand. A body made at the origin would be shot at there.
+  }
+
+  // --- the peers' vehicles as the grapple's rope sees them (Grapple wave 3c) ---------------------------------
+
+  /** Every shown peer's vehicle with a box, kept and refilled in place: what `hullBoxes` hands on. */
+  private readonly hullList: PeerHullBox[] = [];
+  /** The list and when it was last refilled (`stamp`, seconds on the clock its `heardAt` is on), one kept object the game hands the rope once. */
+  private readonly hullSet = { list: this.hullList as readonly PeerHullBox[], stamp: 0 };
+
+  /**
+   * Each shown peer's vehicle as a box the grapple's rope can bend on and be towed by (§3.18), leaving out a mount (a
+   * friend's bantha is a creature to the rope) and a hull docked onto another (only in space, where nobody on foot fires).
+   * Read-only, one kept object refilled once a frame after the pictures are placed, so the rope reads it at the next
+   * player's update. The box is never asked of the engine: its sensor stays filtered out of every query, and the rope
+   * tests the box by arithmetic of its own (`src/player/grappleBox.ts`).
+   */
+  hullBoxes(): { readonly list: readonly PeerHullBox[]; readonly stamp: number } {
+    return this.hullSet;
+  }
+
+  /**
+   * The frame's own clock (`performance.now()`, ms, the clock every state's `shipHeardAt` is on), handed over by the game
+   * once a frame before the peers are moved: the moment the list is refilled at, which the rope reads it by. It is the
+   * number the frame already read at its start; nothing here reads a clock, which hands back a fresh number every frame.
+   */
+  stampHulls(ms: number): void {
+    this.hullSet.stamp = ms / 1000;
+  }
+
+  /** A peer's vehicle onto the rope's list or off it, and its numbers refilled while on it. Nothing is allocated past its first time. */
+  private hullOf(held: Held, p: PeerView): void {
+    const box = p.shipBox;
+    const ship = p.ship;
+    const want = p.shown && !!ship && !!box && !!p.shipTarget && p.shipHeardAt > 0 && !p.shipMount && !p.shipDocked;
+    if (!want) {
+      this.dropHull(held);
+      return;
+    }
+    let h = held.hull;
+    if (!h) h = held.hull = { id: p.id, obj: ship, mid: new Float64Array(3), half: new Float64Array(3), target: new Float64Array(3), turn: Float64Array.of(0, 0, 0, 1), vel: new Float64Array(3), heardAt: 0 };
+    h.obj = ship;
+    h.mid[0] = box.mid[0];
+    h.mid[1] = box.mid[1];
+    h.mid[2] = box.mid[2];
+    h.half[0] = box.half[0];
+    h.half[1] = box.half[1];
+    h.half[2] = box.half[2];
+    const t = p.shipTarget;
+    h.target[0] = t.x;
+    h.target[1] = t.y;
+    h.target[2] = t.z;
+    const q = p.shipTargetQ;
+    h.turn[0] = q.x;
+    h.turn[1] = q.y;
+    h.turn[2] = q.z;
+    h.turn[3] = q.w;
+    const v = p.shipVel;
+    h.vel[0] = v.x;
+    h.vel[1] = v.y;
+    h.vel[2] = v.z;
+    h.heardAt = p.shipHeardAt / 1000;
+    if (!held.listedHull) {
+      this.hullList.push(h);
+      held.listedHull = true;
+    }
   }
 
   /**
@@ -310,6 +398,8 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     const held = this.peers.get(p.id);
     const w = this.physics;
     if (!held || !w) return;
+    // Their vehicle as the grapple's rope sees it, whatever becomes of the sensor bodies below.
+    this.hullOf(held, p);
     held.figure.label = p.name;
     held.figure.dead = p.down;
     held.figure.hp = p.hp;
@@ -382,7 +472,16 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     if (!held) return;
     this.dropFigure(held);
     this.dropShip(held);
+    this.dropHull(held);
     this.peers.delete(id);
+  }
+
+  /** Off the rope's list: a peer gone, or every body let go with the physics world. */
+  private dropHull(held: Held): void {
+    if (!held.listedHull) return;
+    const i = this.hullList.indexOf(held.hull!);
+    if (i >= 0) this.hullList.splice(i, 1);
+    held.listedHull = false;
   }
 
   // --- the bodies themselves --------------------------------------------------------------------
@@ -532,6 +631,7 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     for (const held of this.peers.values()) {
       this.dropFigure(held);
       this.dropShip(held);
+      this.dropHull(held);
     }
   }
 
@@ -556,7 +656,7 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
       const f = held.figure;
       rows.push({ id, name: f.label, key: f.key, body: !!f.body, ship: !!held.ship, fights: f.listed, hunted: f.hunted, hp: Math.round(f.hp), down: f.dead, at: f.pos.toArray().map((n) => Number(n.toFixed(2))) });
     }
-    return { bound: !!this.physics, peers: rows.length, bodies: this.byCollider.size, living: this.livingList.length, prey: this.preyList.length, version: this.version, hurts: !!this.onBlow, switched: !this.mayHurt ? 'nothing asked' : 'asked', rows, tune: { ...PEER_BODY_TUNE } };
+    return { bound: !!this.physics, peers: rows.length, bodies: this.byCollider.size, living: this.livingList.length, prey: this.preyList.length, ropeHulls: this.hullList.map((h) => h.id), version: this.version, hurts: !!this.onBlow, switched: !this.mayHurt ? 'nothing asked' : 'asked', rows, tune: { ...PEER_BODY_TUNE } };
   }
 }
 

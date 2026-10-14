@@ -26,7 +26,9 @@
 // pivot moves), a bend's side is worked out again from its hinge each frame, and a bend on a hull that bends the rope by
 // less than `straightDeg` and whose straightened span is clear comes out (`tighten`). A bend whose hull goes away is kept
 // as a still bend where it last stood (`freeze`). With every point on the world and no hull near, every step here is the
-// still rope's arithmetic exactly: the world's mapping is a copy.
+// still rope's arithmetic exactly: the world's mapping is a copy. Another player's vehicle (wave 3c) is a frame like any
+// hull's whose family is a box (`boxMid`, `boxHalf`): its casts, its fan and its depth are the rope's own arithmetic
+// (`grappleBox.ts`) in its own coordinates, and nothing of it is ever asked of the engine.
 //
 // Written the way the prototype that measured every number of it was (A:\swg3js\grapple\proto\rope.ts and r4\mrope.ts):
 // kept arrays, one kept ray and one kept triangle, kept answer records, and the engine's own query flags where the
@@ -36,6 +38,7 @@
 // the world.
 import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import { len3, slerpTurn, turnBy } from './grappleMath.ts';
+import { newBoxHit, pointInBox, rayBoxIn, spanMeetsBox, triangleMeetsBox } from './grappleBox.ts';
 
 type R = typeof RAPIER_NS;
 type Collider = RAPIER_NS.Collider;
@@ -86,12 +89,16 @@ export interface FrameSource {
  * One frame the rope's points may ride: the world (index 0, with no source), or a moving body's. Its poses are worked
  * out once a frame (`grappleFrames.ts`) and only read here: where the query pipeline has the body (`cp`, `cq`: the last
  * physics step's), and where it stands at the frame's start (`bp`, `bq`) and end (`np`, `nq`). Turns are x, y, z, w.
+ *
+ * Another player's vehicle (wave 3c) is a frame with a box and no colliders (`boxMid`, `boxHalf`, in its own coordinates):
+ * the engine has nothing of it but a sensor every query passes, so its family's casts are the rope's own arithmetic
+ * against that box (`grappleBox.ts`), and its cast pose is its own coordinates (`cp` nought, `cq` the identity).
  */
 export interface RopeFrame {
   src: FrameSource | null;
   /** Its colliders are cast this frame: a family of the rope's. */
   near: boolean;
-  /** This frame's own colliders and nothing else: the family's predicate (null for the world). */
+  /** This frame's own colliders and nothing else: the family's predicate (null for the world, and for a box). */
   readonly only: ((c: Collider) => boolean) | null;
   readonly cp: Float64Array;
   readonly cq: Float64Array;
@@ -99,12 +106,18 @@ export interface RopeFrame {
   readonly bq: Float64Array;
   readonly np: Float64Array;
   readonly nq: Float64Array;
+  /** A box in the frame's own coordinates, its middle and half-size, cast by arithmetic in place of colliders; null for any other. */
+  readonly boxMid: Float64Array | null;
+  readonly boxHalf: Float64Array | null;
 }
 
 /** The world as a frame: no body, no poses that move, never a family of its own (the still family is the world's). */
 export function worldFrame(): RopeFrame {
-  return { src: null, near: false, only: null, cp: new Float64Array(3), cq: Float64Array.of(0, 0, 0, 1), bp: new Float64Array(3), bq: Float64Array.of(0, 0, 0, 1), np: new Float64Array(3), nq: Float64Array.of(0, 0, 0, 1) };
+  return { src: null, near: false, only: null, cp: new Float64Array(3), cq: Float64Array.of(0, 0, 0, 1), bp: new Float64Array(3), bq: Float64Array.of(0, 0, 0, 1), np: new Float64Array(3), nq: Float64Array.of(0, 0, 0, 1), boxMid: null, boxHalf: null };
 }
+
+/** A box frame's turn in its own coordinates, which is where it is cast: none. */
+const BOX_TURN = Float64Array.of(0, 0, 0, 1);
 
 /** A set of colliders the rope is cast against, in one frame's own coordinates: the still family alone. */
 export interface RopeFamily {
@@ -337,6 +350,14 @@ export class GrappleRope {
   /** A span's two ends taken into a hull's cast pose, kept. */
   private readonly ca = new Float64Array(3);
   private readonly cb = new Float64Array(3);
+  /** A box frame's cast (wave 3c): the ray's origin and way in its own coordinates, its answer, the fan's triangle and a span's ends there, and the box shrunk by the offset. */
+  private readonly bxO = new Float64Array(3);
+  private readonly bxD = new Float64Array(3);
+  private readonly bxHit = newBoxHit();
+  private readonly bxTri = new Float64Array(9);
+  private readonly bxA = new Float64Array(3);
+  private readonly bxB = new Float64Array(3);
+  private readonly bxIn = new Float64Array(3);
   /** The tracking: the hand at the frame's start and end, and the moments the sweep runs between (`fixedS` holds every moment at one, for the attach's trail). */
   private readonly h0 = new Float64Array(3);
   private fixedS = -1;
@@ -767,6 +788,8 @@ export class GrappleRope {
 
   /** The span's length, handed to `castHulls` in a field (a number handed to a call that is not inlined is a fresh number). */
   private csLen = 0;
+  /** A box is not met by a span that ends inside it (`castHulls`): off only while `blockedNow` counts. */
+  private fromInside = true;
 
   /** The span in `cs` (its length in `csLen`) against each hull near the rope, at the moment `cst`: better than `out` (if `found`) or nothing. */
   private castHulls(out: RopeHit, found: boolean): boolean {
@@ -795,6 +818,42 @@ export class GrappleRope {
       const ux = (this.mo[0] - ca[0]) / len;
       const uy = (this.mo[1] - ca[1]) / len;
       const uz = (this.mo[2] - ca[2]) / len;
+      if (f.boxMid && f.boxHalf) {
+        // Another player's vehicle: its box, by the rope's own arithmetic in its own coordinates (which are its cast
+        // pose), never asked of the engine, which has nothing of it but a sensor every query passes. A span that ends
+        // inside the box is not met by it: that is the hand inside their vehicle, whose sensor the body passes, where the
+        // box test (`HullFrames.peerTest`) could not keep it out in one frame, and no bend is ever made on a box from inside.
+        // The console's count of blocked spans (`blockedNow`) asks without it, so a rope through their vehicle is counted.
+        if (this.fromInside && pointInBox(this.mo, f.boxMid, BOX_TURN, f.boxHalf)) continue;
+        const bo = this.bxO;
+        const bd = this.bxD;
+        bo[0] = ca[0] + ux * pad;
+        bo[1] = ca[1] + uy * pad;
+        bo[2] = ca[2] + uz * pad;
+        bd[0] = ux;
+        bd[1] = uy;
+        bd[2] = uz;
+        this.stats.casts++;
+        this.stats.hullCasts++;
+        const bh = this.bxHit;
+        bh.toi = len - pad;
+        if (!rayBoxIn(bo, bd, f.boxMid, BOX_TURN, f.boxHalf, bh)) continue;
+        this.stats.castHits++;
+        const btoi = bh.toi + pad;
+        if ((found || met) && btoi >= out.toi) continue;
+        out.toi = btoi;
+        this.mi[0] = bh.nx;
+        this.mi[1] = bh.ny;
+        this.mi[2] = bh.nz;
+        this.castDirToWorld(fi);
+        out.nx = this.mo[0];
+        out.ny = this.mo[1];
+        out.nz = this.mo[2];
+        out.collider = null;
+        out.frame = fi;
+        met = true;
+        continue;
+      }
       r.origin.x = ca[0] + ux * pad;
       r.origin.y = ca[1] + uy * pad;
       r.origin.z = ca[2] + uz * pad;
@@ -849,18 +908,31 @@ export class GrappleRope {
       return;
     }
     this.st = 1;
-    this.spent = this.spentNow();
+    this.spentNow();
+    this.spent = this.spentSum;
   }
 
-  /** Every fixed span at the frame's start, for how much a hull dragging a point away lengthened them over the frame. */
-  spentAtStart(): number {
-    if (this.hullPoints === 0) return this.spent;
+  /**
+   * Every fixed span at the frame's start, for how much a hull dragging a point away lengthened them over the frame, into
+   * `spentStart`: a number in a field, never handed back, since the hook asks it every frame a point rides a hull and a
+   * number handed back by a call not built in is a fresh one (a rope hung at another player's vehicle made one a frame).
+   */
+  measureSpentAtStart(): void {
+    if (this.hullPoints === 0) {
+      this.spentStart = this.spent;
+      return;
+    }
     this.st = 0;
-    return this.spentNow();
+    this.spentNow();
+    this.spentStart = this.spentSum;
   }
 
-  /** Every fixed span at the moment `st`. */
-  private spentNow(): number {
+  /** What `measureSpentAtStart` worked out, and what `spentNow` last summed. */
+  spentStart = 0;
+  private spentSum = 0;
+
+  /** Every fixed span at the moment `st`, into `spentSum`. */
+  private spentNow(): void {
     let s = 0;
     const a = this.wa;
     const b = this.wb;
@@ -872,7 +944,7 @@ export class GrappleRope {
       a[1] = b[1];
       a[2] = b[2];
     }
-    return s;
+    this.spentSum = s;
   }
 
   /** A blocked last span bent at its hit point, with no sweep to search (a hand put somewhere). */
@@ -1446,6 +1518,38 @@ export class GrappleRope {
     for (let fi = 1; fi < frames.length; fi++) {
       const fr = frames[fi];
       if (!fr.near || !fr.src) continue;
+      if (fr.boxMid && fr.boxHalf) {
+        // Another player's vehicle: the triangle in its own coordinates against its box, by arithmetic.
+        const bt = this.bxTri;
+        for (let c = 0; c < 3; c++) {
+          this.st = this.tt[c];
+          this.mi[0] = tv[3 * c];
+          this.mi[1] = tv[3 * c + 1];
+          this.mi[2] = tv[3 * c + 2];
+          this.toCast(fi);
+          bt[3 * c] = this.mo[0];
+          bt[3 * c + 1] = this.mo[1];
+          bt[3 * c + 2] = this.mo[2];
+        }
+        // A hand inside the box (corners one and two are the hand's, or the hand's and the pivot's, which stands outside):
+        // the box is not met from inside, as a cast that ends there is not (`castHulls`).
+        const hp = this.bxA;
+        hp[0] = bt[3];
+        hp[1] = bt[4];
+        hp[2] = bt[5];
+        if (pointInBox(hp, fr.boxMid, BOX_TURN, fr.boxHalf)) continue;
+        hp[0] = bt[6];
+        hp[1] = bt[7];
+        hp[2] = bt[8];
+        if (pointInBox(hp, fr.boxMid, BOX_TURN, fr.boxHalf)) continue;
+        this.stats.fans++;
+        this.stats.hullCasts++;
+        if (triangleMeetsBox(bt, fr.boxMid, BOX_TURN, fr.boxHalf)) {
+          this.stats.fanMet++;
+          return true;
+        }
+        continue;
+      }
       for (let c = 0; c < 3; c++) {
         this.st = this.tt[c];
         this.mi[0] = tv[3 * c];
@@ -1865,17 +1969,22 @@ export class GrappleRope {
     this.st = 1;
     const a = new Float64Array(3);
     const b = new Float64Array(3);
-    for (let i = 1; i <= this.n + 1; i++) {
-      this.worldOf(i - 1, a, 0);
-      if (i <= this.n) this.worldOf(i, b, 0);
-      else {
-        b[0] = hx;
-        b[1] = hy;
-        b[2] = hz;
+    this.fromInside = false;
+    try {
+      for (let i = 1; i <= this.n + 1; i++) {
+        this.worldOf(i - 1, a, 0);
+        if (i <= this.n) this.worldOf(i, b, 0);
+        else {
+          b[0] = hx;
+          b[1] = hy;
+          b[2] = hz;
+        }
+        this.cst = 1;
+        if (!this.cast(a[0], a[1], a[2], b[0], b[1], b[2], this.hitC)) continue;
+        if (this.hitC.frame === 0 || this.deepInHull(this.hitC.frame, a, b)) blocked++;
       }
-      this.cst = 1;
-      if (!this.cast(a[0], a[1], a[2], b[0], b[1], b[2], this.hitC)) continue;
-      if (this.hitC.frame === 0 || this.deepInHull(this.hitC.frame, a, b)) blocked++;
+    } finally {
+      this.fromInside = true;
     }
     return blocked;
   }
@@ -1883,8 +1992,25 @@ export class GrappleRope {
   /** Whether the span a to b (in the world at the frame's end) goes deeper than `wrapOffset` into frame fi's colliders, sampled. */
   private deepInHull(fi: number, a: Float64Array, b: Float64Array): boolean {
     const f = this.frames[fi];
-    if (!f.src || !f.only) return false;
     const depth = this.tune.wrapOffset;
+    if (f.src && f.boxMid && f.boxHalf) {
+      // Another player's vehicle: whether the span meets its box shrunk by the offset, exactly, in its own coordinates.
+      this.st = 1;
+      this.mi[0] = a[0];
+      this.mi[1] = a[1];
+      this.mi[2] = a[2];
+      this.toCast(fi);
+      this.bxA.set(this.mo);
+      this.mi[0] = b[0];
+      this.mi[1] = b[1];
+      this.mi[2] = b[2];
+      this.toCast(fi);
+      this.bxB.set(this.mo);
+      const h = this.bxIn;
+      for (let k = 0; k < 3; k++) h[k] = f.boxHalf[k] - depth;
+      return spanMeetsBox(this.bxA, this.bxB, f.boxMid, BOX_TURN, h);
+    }
+    if (!f.src || !f.only) return false;
     this.st = 1;
     for (let k = 1; k < 32; k++) {
       const t = k / 32;
