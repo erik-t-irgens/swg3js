@@ -442,6 +442,29 @@ export class Physics {
   }
 
   /**
+   * A building's invisible window panes: the colliders made of a primitive whose material is drawn as
+   * nothing (`userData.invisible`), filed by the placed objects' collider sweep as it builds them and
+   * taken out with them. The grapple's dart refuses one, since a rope held on a pane hangs on air in a
+   * window; the rope itself still bends on one, as the body still meets it.
+   */
+  private readonly panes = new Set<number>();
+
+  markPane(handle: number, on: boolean): void {
+    if (on) this.panes.add(handle);
+    else this.panes.delete(handle);
+  }
+
+  /** Whether a collider is a building's invisible window pane. */
+  isPane(handle: number): boolean {
+    return this.panes.has(handle);
+  }
+
+  /** How many panes are filed, for the console and the tests: a world unloaded leaves none. */
+  paneCount(): number {
+    return this.panes.size;
+  }
+
+  /**
    * What stops whatever stops only at what stands still, with a shut door counted: a collider with no
    * body, a fixed one, or a wall that moves (`markWall`). Kept, so a caller casting every step makes no
    * closure: the fighters' character controller, the camera's block ray, a gunner's line of fire.

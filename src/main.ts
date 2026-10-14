@@ -16,6 +16,8 @@ import { BountyHunterKit } from './combat/bountyHunter';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
 import { GodHold, godRefusal } from './player/godMode.ts';
 import { recordHarmKind } from './player/harmRule.ts';
+import { GRAPPLE_TUNE, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
+import { underWater } from './player/grappleMath.ts';
 import { HeldNotes } from './ui/heldNotes.ts';
 import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
 import { findRackWeapon, forcedArmsRefusal } from './world/mobiles/arms.ts';
@@ -49,7 +51,7 @@ import { CLASH, clashes } from './combat/clash.ts';
 import { SCARS, scarReport, setScars, tuneScars } from './combat/scars.ts';
 import { GUNS, gunSpeedReport, gunTypeFor, type GunSpeedTune } from './combat/guns.ts';
 import { footprints } from './world/footprints.ts';
-import { loosePropsGroup, propsDebug } from './world/looseProps.ts';
+import { loosePropAt, loosePropsGroup, propsDebug } from './world/looseProps.ts';
 import { saberHitReport, type SaberHitTune } from './combat/saberHit.ts';
 import { createBladeList } from './core/fx/bladeList';
 import { BLADE_GLOW_TUNE, segmentDistanceSq, type BladeGlowTune } from './core/fx/bladeGlowMath.ts';
@@ -1685,6 +1687,9 @@ class App {
     this.world.attachCamera(this.cam.camera, true, this.portals);
     if (!S.shadows) this.world.setShadowsEnabled(false);
     this.player = new Player(this.scene, physics);
+    // The grapple's one-shot words go to the message line, and a loose prop is named for its mark.
+    this.player.grapple.say = (text) => this.messages.system(text);
+    this.player.grapple.isProp = (h) => !!loosePropAt(h);
     this.effects = new Effects(this.scene);
     // The ships' muzzle and hit flashes borrow the pool from here on, without waiting for the weapons rack (which sets it again).
     this.world.npcDeps.effects = this.effects;
@@ -5750,6 +5755,8 @@ class App {
             // A building or a prop in hand takes its keys, the click and a held key's mouse first, and mutes
             // the fight for the rest of the step, as the frame loop has it: so a hold can be driven from here.
             this.stepPlacingKeys(dt);
+            // And the grapple's, beside them as the frame loop has them: its mutes, the fire, the boost, the held reels.
+            if (!this.placing && !this.propPlacing) this.stepGrappleKeys();
             this.stepEmoteKeys();
             this.stepEmoteEnd();
             this.player.update(dt, this.input, this.cam, this.world);
@@ -5778,6 +5785,7 @@ class App {
             // changed nothing. The peers are not stepped by this helper, so their blades are not
             // drawn here either and only the player's, the fighters' and the catalogue's meet.
             this.player.drawBlades(dt, this.cam.camera);
+            this.player.drawGrapple(this.cam.camera, window.innerHeight);
             this.stepClashes();
             this.effects.update(dt);
             this.updateCamera(null);
@@ -7067,6 +7075,79 @@ class App {
        * others; `look(yaw, pitch)` above is what aims the view itself from a driven tab.
        */
       headLook: (tune?: Partial<typeof LOOK>) => lookReport(tune, this.player.rig?.headLook ?? null),
+      /**
+       * The grappling hook: its state, the mark (worked out again from the camera as it stands, so advance one step
+       * after a `look` first), the hand, the dart, the rope's lengths and points and every count of its wrapping,
+       * `blocked` (cast now: it must be 0), the rope's words this frame, the water, the impacts, the gravity, what
+       * is muted and what its own work costs. `fire: true` fires at what the mark shows, `fire: [x, y, z]` at a
+       * point with the mark's own range and clear-segment checks; `letGo`, `everyone`, `tune` and `reset` (the
+       * table back as it ships) as their names say.
+       */
+      grapple: (opts: { fire?: boolean | [number, number, number]; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean } = {}) => {
+        const p = this.player;
+        const g = p.grapple;
+        const b = p.grappleBody;
+        const said: string[] = [];
+        // The rope's own work is timed from the first ask on (a clock read is a fresh number a frame, so not before).
+        if (!g.timing) {
+          g.timing = true;
+          said.push('timing the rope from now');
+        }
+        if (opts.reset) resetGrappleTune();
+        if (opts.tune) tuneGrapple(opts.tune);
+        if (opts.everyone !== undefined) tuneGrapple({ everyone: !!opts.everyone });
+        if (opts.letGo) g.letGo('console');
+        if (Array.isArray(opts.fire)) {
+          if (g.out) said.push('the grapple is already out');
+          else {
+            // The mark's own checks from the hand toward the point: what the line meets first is the mark.
+            const hand = p.grappleHand(new THREE.Vector3());
+            const d = new THREE.Vector3(opts.fire[0], opts.fire[1], opts.fire[2]).sub(hand).normalize();
+            Object.assign(g.view, { eyeX: hand.x, eyeY: hand.y, eyeZ: hand.z, dirX: d.x, dirY: d.y, dirZ: d.z, orbit: 0, hand, filter: b.filter, exclude: b.body });
+            g.probeMark(b.physics, this.grappleWater, 0);
+            said.push(this.fireGrapple() || 'fired');
+          }
+        } else if (opts.fire) {
+          if (g.out) said.push('the grapple is already out');
+          else {
+            this.stepGrappleMark(0);
+            said.push(this.fireGrapple() || 'fired');
+          }
+        }
+        this.stepGrappleMark(0);
+        const mk = g.mark;
+        const n2 = (v: number) => Number(v.toFixed(2));
+        const n3 = (v: number) => Number(v.toFixed(3));
+        const piv = g.attached ? g.pivot(new THREE.Vector3()) : null;
+        const watched = ['walk', 'crouch', 'flashlight', 'prone', 'kneel', 'emoteWheel', 'emote1', 'emote2', 'emote3', 'emote4', 'jump'] as const;
+        return {
+          said,
+          state: g.state,
+          everyone: GRAPPLE_TUNE.everyone,
+          mark: { shows: mk.shows, held: mk.held, next: mk.next, distance: n2(mk.distance), kind: mk.kind, at: [n2(mk.x), n2(mk.y), n2(mk.z)] },
+          hand: [n3(p.pos.x), n3(p.pos.y + GRAPPLE_TUNE.ropeY), n3(p.pos.z)],
+          dart: g.flying ? { at: [n2(g.dart[0]), n2(g.dart[1]), n2(g.dart[2])], flown: n2(Math.hypot(g.dart[0] - g.launch[0], g.dart[1] - g.launch[1], g.dart[2] - g.launch[2])), returning: g.returning } : null,
+          length: n3(g.attached ? g.rope.length : 0),
+          spent: n3(g.attached ? g.rope.spent : 0),
+          free: n3(g.attached ? g.rope.free() : 0),
+          taut: g.taut,
+          slack: n3(g.slack(b)),
+          pivot: piv ? [n3(piv.x), n3(piv.y), n3(piv.z)] : null,
+          points: g.attached ? g.rope.n + 1 : 0,
+          rope: { ...g.rope.stats, thingBends: g.rope.thingBends, groundBends: g.rope.groundBends },
+          blocked: g.blocked(b),
+          modes: { ...g.modes, latch: g.latch, sinceLastPull: Number.isFinite(g.sincePull) ? n2(g.sincePull) : null, hauling: g.hauling, lipping: g.lipping },
+          swim: { rise: n2(g.rise(b)), lift: g.swimLiftNow, wadeDrag: n3(g.wadeRateNow), afloat: g.modes.afloat },
+          lastImpact: n2(g.lastImpact),
+          maxImpact: n2(g.maxImpact),
+          gravity: GRAPPLE_TUNE.gravity,
+          muted: watched.filter((a) => this.input.muted(a)),
+          cost: g.costReport(),
+          lastLetGo: g.lastLetGo,
+          counts: { ...g.counts },
+          panes: b.physics.paneCount(),
+        };
+      },
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
       steady: (on?: boolean) => {
         if (this.player.rig && on !== undefined) this.player.rig.steady = on;
@@ -10530,6 +10611,8 @@ class App {
     // row the dev server's editor picked up is left as its file has it, for the next visit to stand).
     this.stopPlacing('keep');
     this.stopPlacingProp('keep');
+    // And the grapple: the creator draws the figure standing still and must not draw a rope.
+    this.player.grapple.letGo('select');
     if (import.meta.env.DEV) this.editChip?.show(null);
     this.menu.hide();
     this.closePanels();
@@ -10756,6 +10839,7 @@ class App {
       case 'hudDamageNumbers':
       case 'hudNameplate':
       case 'hudJediCrosshair':
+      case 'hudGrappleMark':
       case 'hudMinimap':
       case 'hudMinimapRange':
       case 'hudMinimapNorthUp':
@@ -10913,6 +10997,42 @@ class App {
    * numbers. One kept vector, so the whole pool costs no allocation; false when the point is behind
    * the camera, which is the number's signal to stand aside rather than to be thrown away.
    */
+  /** Where the grapple's mark and anchor stand on the screen, kept. */
+  private readonly grappleScreen: ScreenPoint = { x: 0, y: 0 };
+
+  /**
+   * The grapple's mark onto the overlay's kept record, after the frame is drawn: the hook's own mark projected
+   * through this frame's camera (a refused press with nothing showing flashes at the crosshair), and the anchor
+   * while the rope is out. Numbers into a kept record; nothing made.
+   */
+  private fillGrappleMark(): void {
+    const hm = this.hud.grappleMark;
+    const g = this.player.grapple;
+    const mk = g.mark;
+    const sp = this.grappleScreen;
+    hm.enabled = this.settings.hudGrappleMark;
+    hm.shows = mk.shows;
+    hm.held = mk.held;
+    hm.next = mk.next;
+    hm.flash = mk.flash;
+    if (mk.shows) {
+      hm.onScreen = this.projectToScreen(mk.x, mk.y, mk.z, sp);
+      hm.x = sp.x;
+      hm.y = sp.y;
+    } else if (mk.flash > 0) {
+      hm.onScreen = true;
+      hm.x = Math.round(window.innerWidth / 2);
+      hm.y = Math.round(window.innerHeight / 2);
+    } else hm.onScreen = false;
+    hm.anchorOn = false;
+    if (g.attached) {
+      const p = g.rope.pts;
+      hm.anchorOn = this.projectToScreen(p[0], p[1], p[2], sp);
+      hm.ax = sp.x;
+      hm.ay = sp.y;
+    }
+  }
+
   private projectToScreen(x: number, y: number, z: number, out: ScreenPoint): boolean {
     const v = this.feedbackPoint.set(x, y, z).project(this.cam.camera);
     if (!(v.z <= 1) || !Number.isFinite(v.x)) return false;
@@ -11062,6 +11182,8 @@ class App {
     }
     s.noclip = p.noclip;
     if (s.noclip) return s;
+    // The grapple while it is out, in the rope's own words (`ropeModes`): the bar's own rules decide what it shows.
+    s.grapple = p.grapple.promptWord();
     // On foot, and standing at a bridge's controls too: the long line asks for the lift underfoot
     // before it asks what is flown, and both readings are gathered here so that the long line can
     // read them rather than ask for them again on every frame it is written.
@@ -11208,6 +11330,7 @@ class App {
       this.waypointHud.idle();
       return;
     }
+    this.fillGrappleMark();
     this.hud.draw();
     // The waypoints' marks under the flight display's shapes, so the reticle is drawn over a mark that
     // happens to stand behind it rather than the other way round.
@@ -13867,7 +13990,8 @@ class App {
    */
   private playEmote(clip: string | null): void {
     const rig = this.player.rig;
-    if (!clip || !rig || this.player.mounted) return;
+    // No emote or dance while the grapple is out: the rope holds the arm and the body.
+    if (!clip || !rig || this.player.mounted || this.player.grapple.out) return;
     if (rig.play(clip, { fadeIn: 0.15, loop: loopsEmote(clip) }) === null) {
       this.messages.system(`the rig has no clip ${clip}`);
       return;
@@ -14662,6 +14786,8 @@ class App {
     // dev server's editor had up is left as its file has it, for the next visit to stand.
     this.stopPlacing('keep');
     this.stopPlacingProp('keep');
+    // The grapple lets go before any unload: its anchor is in this world.
+    this.player.grapple.letGo('travel');
     this.input.captured = false;
     const zone = planet.zones?.find((z) => z.id === zoneId);
     console.info(`travel: to ${planet.name}${zone ? ` (${zone.name})` : ''}${ship ? ` flying the ${ship.def.id}${ship.crew ? ` from its rooms${ship.crew.piloting ? ' at the controls' : ''}` : ''}` : ''}`);
@@ -15300,7 +15426,9 @@ class App {
 
   /** The camera after everything has moved: chasing a ship in flight in its own frame, the cockpit, else orbiting the player. */
   private updateCamera(blocked: import('./core/camera').CameraBlocker | null, dt = 1 / 60): void {
+    this.grappleMarkProbed = false;
     this.placeCamera(blocked, dt);
+    if (!this.grappleMarkProbed) this.player.grapple.markOff();
     // The jump's tunnel on the hull where this frame's step left it (after the physics, before the draw), and the world
     // beyond it not drawn while it is closed.
     this.jumpTunnel.follow();
@@ -15441,6 +15569,9 @@ class App {
     // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
     const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
     this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);
+    // The grapple's mark: where the dart would bite, worked out after the camera as the ghost below is, since it
+    // goes where the camera looks; while attached it is the next anchor.
+    this.stepGrappleMark(dt);
     // The ghost of a building being put down: where it stands and whether it may, worked out after
     // the camera, since it goes where the camera looks and so reads this very frame's view. A prop in
     // hand is the same thing with its own rules, and only ever one of the two is out.
@@ -19966,6 +20097,8 @@ class App {
   private stepPlacingKeys(dt: number, takeKey = this.input.pressedAction('takeProp')): boolean {
     const input = this.input;
     const inHand = !!(this.placing || this.propPlacing);
+    // Taking anything into the placing hand lets the grapple go: F is the hand's raise, and its fire is the fight's.
+    if (inHand && !this.handWas) this.player.grapple.letGo('placing');
     if (!inHand && this.handWas) input.muteUntilUp(FIGHT_ACTIONS);
     this.handWas = inHand;
     if (!inHand) {
@@ -19992,6 +20125,116 @@ class App {
     input.mute(FIGHT_ACTIONS);
     return true;
   }
+
+  /** What the grapple mutes this frame, kept: filled by `grappleMutes` and handed to `Input.mute`. */
+  private readonly grappleMuteList: string[] = [];
+  /** The grapple left with no key by somebody else's choice: said once a session. */
+  private grappleNoKeySaid = false;
+  /** The camera's look and the rope point, kept for a shot. */
+  private readonly grappleLook = new THREE.Vector3();
+  private readonly grappleHandAt = new THREE.Vector3();
+
+  /**
+   * The grapple's keys, in the key block right after the placing hand's and in `__debug.advance` beside it,
+   * before the torch and the player's update. Mute first, then act (the design's §5.3): a let-go owed from the
+   * frame before (made inside the player's update) is applied before anything is read; while the hook is out
+   * the walk, the crouch, the torch, the postures and the emotes are muted for the frame, and the jump too while
+   * swinging, so the Space that boosts is already no jump; then the fire key fires, calls the dart back or lets
+   * go, and Space boosts off the line, a let-go made here muting at once; and the held reels and the haul are
+   * handed to the hook for the frame's steps.
+   */
+  private stepGrappleKeys(): void {
+    const input = this.input;
+    // Somebody else's choice took the grapple's only key: said once a session, and never to a player who cleared it on purpose.
+    if (!this.grappleNoKeySaid && !input.bindings.grappleFire.length && !input.chose('grappleFire')) {
+      this.grappleNoKeySaid = true;
+      this.messages.system('The grapple has no key: Escape, Controls.');
+    }
+    // The hook's own key block: the mutes first, then the fire, the call back, the let-go and the boost.
+    this.player.grapple.stepKeys(input, this.player.grappleBody, this.grappleMuteList, this.fireGrappleNow);
+  }
+
+  /** The fire key with nothing out, kept so the key block hands the hook no new closure a frame. */
+  private readonly fireGrappleNow = (): void => {
+    this.fireGrapple();
+  };
+
+  /**
+   * Fire the grapple at what the mark shows, unless something refuses it (§3.8): a refused press, or one with
+   * nothing showing, flashes the diamond `bad` and says nothing, which on a busy line would flood. Answers why
+   * it did not fire, or ''.
+   */
+  private fireGrapple(): string {
+    const p = this.player;
+    const g = p.grapple;
+    const why = g.refusal(p.grappleFireState(!!this.ride?.riding, this.hyperspace.locksControls, !!(this.placing || this.propPlacing), !!this.talkNow));
+    const mk = g.mark;
+    if (why || !mk.shows) {
+      g.flashBad(HUD_SIZES.flashSeconds);
+      return why || (mk.kind === 'none' ? 'nothing in reach' : `the mark is on ${mk.kind}`);
+    }
+    const b = p.grappleBody;
+    this.cam.camera.getWorldDirection(this.grappleLook);
+    p.grappleHand(this.grappleHandAt);
+    g.fire(mk.x, mk.y, mk.z, this.grappleHandAt, p.vel, b.physics, b.filter, b.body, this.grappleLook.x, this.grappleLook.y, this.grappleLook.z);
+    return '';
+  }
+
+  /**
+   * Where the grapple's dart would bite, after the camera is placed (it reads this frame's view), as the placing
+   * ghost is worked out: on foot only, and while the hook could fire or is attached (the next anchor). The water
+   * test is the swim's own surface and a flow's depth, handed in so the hook imports nothing of the world.
+   */
+  private stepGrappleMark(dt: number): void {
+    const p = this.player;
+    const g = p.grapple;
+    if (p.mounted || p.piloting || p.noclip || p.aboard || p.eva || this.world.planet.space) {
+      g.markOff();
+      return;
+    }
+    const cam = this.cam.camera;
+    cam.getWorldDirection(this.grappleLook);
+    const b = p.grappleBody;
+    p.grappleHand(this.grappleHandAt);
+    // The probe reads its view from the hook's kept record, written here: numbers in fields, never handed to the call.
+    const v = g.view;
+    v.eyeX = cam.position.x;
+    v.eyeY = cam.position.y;
+    v.eyeZ = cam.position.z;
+    v.dirX = this.grappleLook.x;
+    v.dirY = this.grappleLook.y;
+    v.dirZ = this.grappleLook.z;
+    v.orbit = this.cam.orbitDistance;
+    v.hand = this.grappleHandAt;
+    v.filter = b.filter;
+    v.exclude = b.body;
+    g.probeMark(b.physics, this.grappleWater, dt);
+    this.grappleMarkProbed = true;
+  }
+
+  /**
+   * Whether this frame's camera worked the grapple's mark out. The camera returns early for a shuttle's passenger,
+   * a ship in flight, the cockpit and Alt-look in a ship, none of which reaches the probe; a mark left from the last
+   * frame on foot (or a refused press's flash, whose clock only the probe runs down) is stood down after it.
+   */
+  private grappleMarkProbed = false;
+
+  /** The long line on the rope (off by default): every key it has, spelled from the bindings, and how much rope is out. */
+  private grappleLine(): string {
+    const b = this.input.bindings;
+    const g = this.player.grapple;
+    const k = (a: Action) => keyLabel(b[a][0] ?? '');
+    if (g.flying) return `the dart is out · <b>${k('grappleFire')}</b> calls it back`;
+    return `on the rope · <b>${k('grappleFire')}</b> let go · <b>${k('reelIn')}</b>/<b>${k('reelOut')}</b> reel · <b>${k('grappleBoost')}</b> boost off · <b>${k('grappleHaul')}</b> haul in · ${Math.round(g.rope.length)} of ${Math.round(GRAPPLE_TUNE.range)} m`;
+  }
+
+  /** Under the drawn water or a lava flow: the mark refuses it, whatever the dart's ray struck there. Kept, not made a frame. */
+  private readonly grappleWater = (p: { readonly x: number; readonly y: number; readonly z: number }): boolean => {
+    const w = this.world;
+    const flat = w.waterColumnAt(p.x, p.z);
+    if (underWater(p.y, flat, Number.isFinite(flat) ? w.seaSwellOverFlat(p.x, p.z, flat) : 0)) return true;
+    return w.lavaAt(p.x, p.y, p.z) > 0;
+  };
 
   /**
    * One frame of a held placing key (or of a pressed bar button), into the thing in hand: which hold the
@@ -22567,6 +22810,8 @@ class App {
       const from: WayBack = { kind: 'doorless', planet: this.world.planet.id, ...(this.zone ? { zone: this.zone } : {}), at: [p.pos.x, p.pos.y, p.pos.z], heading: p.heading };
       const went = this.world.enterDoorless(p.pos);
       if (went) {
+        // Put inside by hand rather than through `reset`: the grapple lets go first.
+        p.grapple.letGo('doorless');
         p.pos.copy(went.at);
         p.vel.set(0, 0, 0);
         this.physics.stepOnce();
@@ -23236,6 +23481,8 @@ class App {
    * the game's own words, with the game's own answers (`talkGreeting`).
    */
   private startTalk(m: Mobile, review: string | null = null): string | null {
+    // Nobody is spoken to from the end of a rope: let go first.
+    if (this.player.grapple.out) return 'the grapple is out: let go first';
     if (this.talkNow) this.endTalk(false);
     const why = whyNotTalk(m, this.world.playerTarget, this.isTrainer(m));
     if (why) return why;
@@ -23829,6 +24076,8 @@ class App {
     // Which way the car went, before the player is moved: the level picked against the one they
     // stood at. A stop at the level they are already on is a step out, and is silent.
     const from = lift?.stops[lift.current]?.level;
+    // The stop picked writes the place by hand rather than through `reset`: the grapple lets go first.
+    p.grapple.letGo('lift');
     p.pos.copy(next);
     p.vel.set(0, 0, 0);
     if (from !== undefined && Math.abs(stop.level - from) > vehicleSounds.tune.liftLevel) {
@@ -24591,6 +24840,9 @@ class App {
         // behind it; and never at a ship's controls, where O is the ultra cruise's own key and every run
         // would also say there is nothing of yours near enough to pick up.
         if (takeKey && !hadInHand && !this.anyPanelOpen() && !this.map.open && !riding && !atControls) void this.takeNearestProp();
+        // The grapple's keys, under the same guard as the rest of the block (never with the map, a panel or the
+        // placing hand up): its mutes first, so the torch, the walk and a swinging jump are already muted below.
+        if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) this.stepGrappleKeys();
         if (!this.map.open && !this.anyPanelOpen() && !this.placing && !this.propPlacing) {
           if (input.pressedAction('saberToggle') && this.kit.id === 'jedi' && !player.mounted) player.toggleSaber();
           if (input.pressedAction('switchClass')) this.setClass(this.kit.id === 'jedi' ? 'bounty_hunter' : 'jedi');
@@ -24755,7 +25007,11 @@ class App {
 
       if (simulate && player.hp <= 0) void this.die();
 
-      player.inside = this.world.inside || !!player.aboard;
+      const inside = this.world.inside || !!player.aboard;
+      // Walking into or out of a building lets the grapple go: its rope and dart were cast under the other
+      // filter, and wrapping through a doorway is work of its own.
+      if (inside !== player.inside && player.grapple.out) player.grapple.letGo('inside');
+      player.inside = inside;
       const room = player.aboard;
       perf.begin(SEC.camera);
       this.updateCamera(player.noclip ? null : room ? (from, to) => room.cameraBlock(from, to) : (from, to) => this.physics.cameraBlock(from, to, player.body, this.world.inside), dt);
@@ -24856,6 +25112,7 @@ class App {
       let prompt = '';
       if (full) {
         if (player.noclip) prompt = `<b>NOCLIP</b> ${Math.round(player.noclipSpeed)} m/s · <b>WASD</b> fly · <b>Space</b> up · <b>Ctrl</b> down · <b>Shift</b> fast · <b>+</b>/<b>-</b> speed · <b>N</b> off`;
+        else if (player.grapple.out) prompt = this.grappleLine();
         else if (player.mounted) prompt = mountPrompt(player.mounted, input.bindings.wings[0] ?? WINGS_KEY) + (player.mounted.spec.ship ? shipHint : '');
         else if (S8.lift) prompt = `<b>E</b> lift: ${this.promptLiftStops} levels`;
         else if (S8.elevator) prompt = `<b>E</b> elevator ${S8.elevator}`;
@@ -25041,6 +25298,8 @@ class App {
       if (this.breakFrames) throw new Error('debug: the frame is broken on purpose');
       // The blades are drawn from where the hands ended up this frame, so they never trail the pose.
       player.drawBlades(dt, this.cam.camera);
+      // And the grapple's rope and dart, laid once a frame before the render from the drawn left hand.
+      player.drawGrapple(this.cam.camera, window.innerHeight);
       // The other players' blades, from where their hands ended up this frame as well (their figures
       // were moved and posed in stepNet above). With the glow pass on they light the world through
       // it, exactly as the player's do, and ask for no light at all. With it off they take a pooled

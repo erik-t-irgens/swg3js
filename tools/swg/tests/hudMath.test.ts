@@ -426,4 +426,14 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   ok(fadeOut(0.5, 1, 0) === 1, 'a fade of nothing never divides by nothing');
 }
 
+// The grapple's diamond and the mark at its anchor (the design's §7, `HUD_SIZES`): the diamond's corners out on
+// the axes, its stroke, its alpha, the anchor's mark, and its inner edge clear of the charge ring at every scale.
+{
+  const { grappleMarkInnerHalo, chargeOuterHalo } = await import('../../../src/ui/hudMath.ts');
+  ok(HUD_SIZES.grappleMark === 32 && HUD_SIZES.grappleMarkWidth === 1.5 && HUD_SIZES.grappleMarkAlpha === 0.85 && HUD_SIZES.grappleAnchor === 6, 'the diamond is 32 px out on its axes with a 1.5 px stroke at 0.85, and the anchor\'s mark 6 px');
+  let clear = true;
+  for (let s = HUD_SIZES.scaleMin; s <= HUD_SIZES.scaleMax + 1e-9; s += 0.05) if (!(grappleMarkInnerHalo(s, 2) > chargeOuterHalo(s, 2))) clear = false;
+  ok(clear, 'and its inner edge, under-stroke and all, clears the charge ring at every display scale');
+}
+
 console.log(`\n${checks} checks passed`);

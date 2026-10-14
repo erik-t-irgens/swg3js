@@ -1536,6 +1536,7 @@ export class LayoutStreamer {
         else if (prim.cell > 0) desc.setCollisionGroups(groups(Group.interior, Group.all));
         const col = this.physics.world.createCollider(desc);
         cols.push(col);
+        if (prim.material.userData.invisible) this.physics.markPane(col.handle, true);
         this.colliderTemplate.set(col.handle, o.template);
       }
       built++;
@@ -2387,6 +2388,8 @@ export class LayoutStreamer {
       else if (prim.cell === 0) desc.setCollisionGroups(groups(Group.exterior, Group.all));
       const col = this.physics.world.createCollider(desc);
       cols.push(col);
+      // A window's pane is a collider nobody sees: the grapple's dart refuses it, and the rope still bends on it.
+      if (prim.material.userData.invisible) this.physics.markPane(col.handle, true);
       // The template it really is, which is what its surface is looked up by: a thing put down in play is
       // filed under a name of its own and carries its template beside it, so a permanent crate, a saved prop
       // and a fitting are heard as what they are.
@@ -2403,6 +2406,7 @@ export class LayoutStreamer {
     if (!cols) return;
     for (const c of cols) {
       this.colliderTemplate.delete(c.handle);
+      this.physics.markPane(c.handle, false);
       // Anything burnt, scarred or trodden on this thing goes with it: the marks are in the world's
       // frame and a mark left behind would hang in the air where the prop was. It is free when
       // nothing is owned, which is every pass in which nobody has shot a crate.

@@ -215,6 +215,9 @@ export class JkaMovement {
     this.jumpHeld = true;
   }
 
+  /** Hold the highest point of a fall at this height: a body on a taut rope, on the ground or in water is falling from here, not from above. */
+  holdApex(y: number): void { this.apexY = y; }
+
   private startSpecial(anim: string, ev: MoveEvents): void {
     this.special = anim;
     this.specialLeft = this.clipDuration(anim) ?? CLIP_SECONDS[anim] ?? 1;

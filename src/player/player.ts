@@ -8,7 +8,6 @@ import type { Vehicle } from '../vehicles/vehicle';
 import { SEATED_EYE_FALLBACK, SEATED_PELVIS_FALLBACK, bodyLift } from '../vehicles/cockpitSeat';
 import { roomFrame, roomTurn, type WalkableRoom } from '../vehicles/surfaceRoom';
 import type { World } from '../world/world';
-import { afloatVelocity } from '../world/afloat.ts';
 import { STANCE_ANIM, STYLE_DAMAGE, SaberCombat, type Dir, type SaberInput } from '../combat/saber';
 import { SaberThrow, THROW } from '../combat/saberThrow';
 import { Ragdoll } from '../combat/ragdoll';
@@ -24,6 +23,9 @@ import { LAVA_HARM, newLavaHold, resetLavaHold, stepLavaHold, type LavaHold } fr
 import { lavaSinkReport, newLavaSink, resetLavaSink, stepLavaSink as spendLavaSink, tuneLavaSink, type LavaSink, type LavaSinkTune } from './lavaSinkMath.ts';
 import { PlayerStats } from './playerStats.ts';
 import { newHarm, newHarmAsk, takeHarm, type HarmAsk, type HarmKind } from './harmRule.ts';
+import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFireState } from './grapple.ts';
+import { RopeRibbon, dartMesh } from './grappleDraw.ts';
+import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 
 /**
  * The two lines a fire says, and the only two: one when you catch, one when it goes out, and
@@ -58,12 +60,8 @@ const STAND_HALF_HEIGHT = 0.45;
 const CROUCH_HALF_HEIGHT = 0.15;
 const WALK_SPEED = 2.0;
 const JUMP_HEIGHT = 1.4;
-/** Depth of the feet below the surface at which walking becomes swimming (the chest is under). */
-const SWIM_DEPTH = 1.1;
 /** Depth at which the head is under and looking down dives. */
 const DIVE_DEPTH = 1.9;
-/** Swimming speed as a fraction of running. */
-const SWIM_SPEED = 0.45;
 const dive = new THREE.Vector3();
 const SWING_TIME = 0.45;
 
@@ -96,6 +94,10 @@ const barrelB = new THREE.Vector3();
 const aim = new THREE.Vector3();
 const aimFrom = new THREE.Vector3();
 const handPos = new THREE.Vector3();
+/** The grapple's drawing: the drawn left hand, the dart's place as a one-point rope, and the way the dart points. */
+const grappleDrawnHand = new THREE.Vector3();
+const grappleDartAt = new Float64Array(3);
+const grappleDartDir = new THREE.Vector3();
 /** How Jedi Academy spells the jump directions in its clip names. */
 /** The dual kata's saber protect: the sabers circle the body at this radius and height, this fast. */
 const ORBIT = { radius: 1.4, height: 1.0, turnsPerSecond: 1.5 };
@@ -272,7 +274,12 @@ export class Player {
    * was, where the body was, what the spring asked for, whether the holding branch was the one
    * taken at all, what the buoyancy cap left of it, and what the character controller then allowed.
    */
-  readonly swimProbe = { dt: 0, surface: 0, want: 0, from: 0, gap: 0, ride: 0, riding: false, asked: 0, capped: 0, moved: Number.NaN };
+  readonly swimProbe = { dt: 0, surface: 0, want: 0, from: 0, gap: 0, ride: 0, riding: false, asked: 0, capped: 0, moved: Number.NaN, rope: false };
+  /** What the swim step reads and hands back (`src/player/swimStep.ts`): kept records, written in place. */
+  private readonly swimIn = newSwimIn();
+  private readonly swimOut = newSwimOut();
+  /** How deep the feet stood under the drawn water on the last update (negative out of it), for the grapple's wading drag. */
+  private waterDepth = Number.NEGATIVE_INFINITY;
   /**
    * The air in the lungs (`src/player/breathMath.ts`, which owns every rule about it). It lives on
    * the body rather than on the world's player record, which is where the fire lives, because
@@ -340,6 +347,23 @@ export class Player {
   hasJkaClips = false;
   /** The saber's flight when thrown (right mouse). */
   readonly thrown = new SaberThrow();
+  /**
+   * The grappling hook (`src/player/grapple.ts`): the dart, the rope and the two steps of a frame this update
+   * runs it through. Every line of it here is behind `out` (flying or attached), and everything that touches
+   * the body behind `attached`, so a player who never fires plays exactly as before.
+   */
+  readonly grapple: Grapple;
+  /** The rope's ribbon and the dart, on the scene's root (never under the figure, which the doll clones), hidden until the hook is out. */
+  private readonly ropeRibbon: RopeRibbon;
+  private readonly dartView: THREE.Mesh;
+  /** The capsule collider's height over the feet as the crouch last wrote it: what the grapple's collider sync puts it at. */
+  colliderOffsetY = CAPSULE_RADIUS + STAND_HALF_HEIGHT;
+  /** The physics world's step count at the last reset: no grapple query is trusted, and no dart fired, until it has stepped since. */
+  stepsAtReset = 0;
+  /** The player as the grapple sees it: one view, its getters reading the live body whatever world it is in. */
+  private readonly gview: GrappleBody;
+  /** What refuses a shot, filled in place each time it is asked. */
+  private readonly fireState: GrappleFireState = newFireState();
   /** Saber defence rank (1..3): how well bolts are blocked and where they are sent (see deflect.ts); it starts at its stat's, which is 3. */
   saberDefense = this.stats.saberDefense;
   /** Holding the block (right mouse) with the saber lit: the stance is up and bolts are turned away. */
@@ -585,6 +609,128 @@ export class Player {
     this.body = made.body;
     this.collider = made.collider;
     this.controller = made.controller;
+    // The grappling hook, its rope and its dart: built now on their one material, hidden and marked as actors,
+    // so every warm-up compiles them for the world's pass and the rooms' and the first fire builds nothing.
+    this.grapple = new Grapple(RAPIER, physics);
+    const self = this;
+    this.gview = {
+      pos: this.pos,
+      vel: this.vel,
+      jka: this.jka,
+      get grounded() {
+        return self.grounded;
+      },
+      get swimming() {
+        return self.swimming;
+      },
+      get depth() {
+        return self.waterDepth;
+      },
+      get inside() {
+        return self.inside;
+      },
+      get physics() {
+        return self.physics;
+      },
+      get body() {
+        return self.body;
+      },
+      get collider() {
+        return self.collider;
+      },
+      get controller() {
+        return self.controller;
+      },
+      get colliderOffsetY() {
+        return self.colliderOffsetY;
+      },
+      get filter() {
+        return self.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+      },
+    };
+    this.ropeRibbon = new RopeRibbon(this.grapple.rope.capacity, GRAPPLE_TUNE.sagSegments);
+    scene.add(this.ropeRibbon.mesh);
+    markActor(this.ropeRibbon.mesh);
+    this.dartView = dartMesh();
+    scene.add(this.dartView);
+    markActor(this.dartView);
+  }
+
+  /** The player as the grapple's steps see it (the console and the key block hand it on). */
+  get grappleBody(): GrappleBody {
+    return this.gview;
+  }
+
+  /**
+   * Everything that refuses a grapple shot (the design's §3.8), filled in place: what the body itself knows,
+   * and what the game hands in (a shuttle's passenger, a jump with the controls, the placing hand, talking).
+   */
+  grappleFireState(riding: boolean, jump: boolean, placing: boolean, talking: boolean): GrappleFireState {
+    const s = this.fireState;
+    s.mounted = !!this.mounted;
+    s.piloting = !!this.piloting;
+    s.noclip = this.noclip;
+    s.eva = this.eva;
+    s.aboard = !!this.aboard;
+    s.riding = riding;
+    s.jump = jump;
+    s.dead = !!this.ragdoll || this.hp <= 0;
+    s.placing = placing;
+    s.talking = talking;
+    s.prone = this.prone;
+    s.kneeling = this.kneeling;
+    s.rolling = this.jka.rolling;
+    s.special = this.jka.inSpecialJump;
+    s.swgProfile = this.moveProfile === 'swg';
+    s.stepped = this.physics.steps > this.stepsAtReset;
+    return s;
+  }
+
+  /** The rope point as the hook fires from it: over the feet by `ropeY`, in the world. */
+  grappleHand(out: THREE.Vector3): THREE.Vector3 {
+    return out.set(this.pos.x, this.pos.y + GRAPPLE_TUNE.ropeY, this.pos.z);
+  }
+
+  /**
+   * The rope and the dart laid for this frame, after the body is posed and before the frame is drawn (beside
+   * `drawBlades`): the ribbon from the anchor through every bend to the drawn left hand, the free span hung by
+   * the constraint's own slack; the dart in flight, or at the anchor. Hidden while the hook is not out. Writes
+   * kept arrays and the two meshes' places; never a matrix in a draw hook.
+   */
+  drawGrapple(camera: THREE.PerspectiveCamera, screenH: number): void {
+    const g = this.grapple;
+    const ribbon = this.ropeRibbon;
+    const dart = this.dartView;
+    if (!g.out) {
+      if (ribbon.mesh.visible) ribbon.hide();
+      if (dart.visible) dart.visible = false;
+      return;
+    }
+    // The drawn left hand, where the second blade already hangs: the left is Jedi Academy's Force hand.
+    const bone = this.rig?.boneFor('leftHand');
+    if (bone) bone.getWorldPosition(grappleDrawnHand);
+    else this.grappleHand(grappleDrawnHand);
+    const h = grappleDrawnHand;
+    if (g.flying) {
+      grappleDartAt[0] = g.dart[0];
+      grappleDartAt[1] = g.dart[1];
+      grappleDartAt[2] = g.dart[2];
+      ribbon.slack = 0;
+      ribbon.screenH = screenH;
+      ribbon.lay(grappleDartAt, 1, h, camera);
+      dart.position.set(g.dart[0], g.dart[1], g.dart[2]);
+      if (g.returning) grappleDartDir.set(h.x - g.dart[0], h.y - g.dart[1], h.z - g.dart[2]);
+      else grappleDartDir.set(g.dartVel[0], g.dartVel[1], g.dartVel[2]);
+    } else {
+      ribbon.slack = g.slack(this.gview);
+      ribbon.screenH = screenH;
+      ribbon.lay(g.rope.pts, g.rope.n + 1, h, camera);
+      // Bitten into the surface it struck, along the way it came.
+      dart.position.set(g.rope.pts[0], g.rope.pts[1], g.rope.pts[2]);
+      grappleDartDir.set(-g.rope.anchorNormal[0], -g.rope.anchorNormal[1], -g.rope.anchorNormal[2]);
+    }
+    if (grappleDartDir.lengthSq() > 1e-12) dart.quaternion.setFromUnitVectors(AXIS_Z, grappleDartDir.normalize());
+    dart.visible = true;
   }
 
   /**
@@ -629,6 +775,8 @@ export class Player {
    * frame, and from here `pos` is in that frame; the figure is drawn wherever the hull puts it.
    */
   board(interior: WalkableRoom, local: THREE.Vector3): void {
+    // The body moves to another physics world: the rope's anchor is the last world's.
+    this.grapple.letGo('board');
     if (this.aboard) this.leave();
     this.mounted = null;
     this.worldBody = { physics: this.physics, body: this.body, collider: this.collider, controller: this.controller };
@@ -653,6 +801,7 @@ export class Player {
     const saved = this.worldBody;
     const room = this.aboard;
     if (!saved || !room) return;
+    this.grapple.letGo('leave');
     const w = room.physics.world;
     w.removeCharacterController(this.controller);
     w.removeRigidBody(this.body);
@@ -716,6 +865,8 @@ export class Player {
     // of it made inside the ground and thrown apart on the first step that resolved them. The figure
     // rises to its real feet on the frame it dies, which is the one moment the pop is paid for.
     this.dropLavaSink();
+    // The rope lets go: the body is the physics' now, and the ragdoll keeps the swing's velocity.
+    this.grapple.letGo('death');
     if (this.ragdoll || !this.rig) return;
     this.saber.holster();
     this.thrown.cancel();
@@ -746,6 +897,8 @@ export class Player {
 
   /** Stand the player somewhere, keeping health and the rest as they are (stepping off a ship). */
   stand(p: THREE.Vector3): void {
+    // A new place: the rope cannot come with it.
+    this.grapple.letGo('stand');
     this.pos.copy(p);
     this.vel.set(0, 0, 0);
     this.grounded = true;
@@ -758,6 +911,10 @@ export class Player {
   }
 
   reset(p: THREE.Vector3): void {
+    // An arrival, a respawn, a teleport, the console: a new place, and the rope's anchor is the last one's.
+    this.grapple.letGo('reset');
+    // No grapple query is trusted until the world has stepped since this.
+    this.stepsAtReset = this.physics.steps;
     this.pos.copy(p);
     this.vel.set(0, 0, 0);
     this.grounded = true;
@@ -959,6 +1116,7 @@ export class Player {
   }
 
   toggleNoclip(): void {
+    this.grapple.letGo('noclip');
     this.noclip = !this.noclip;
     this.vel.set(0, 0, 0);
     this.body.setEnabled(!this.noclip);
@@ -1848,6 +2006,8 @@ export class Player {
   }
 
   mount(speeder: Vehicle): void {
+    // A rider has no rope.
+    this.grapple.letGo('mount');
     this.mounted = speeder;
     this.body.setEnabled(false);
     this.vel.set(0, 0, 0);
@@ -2073,6 +2233,7 @@ export class Player {
     this.jkaMode = this.hasJkaClips && (this.blocking || fighting || !!this.rig?.overridingJka);
 
     if (this.mounted) {
+      if (this.grapple.out) this.grapple.letGo('mount');
       this.rig?.stopOverride();
       this.thrown.cancel();
       this.updateBlades();
@@ -2082,6 +2243,7 @@ export class Player {
     }
 
     if (this.noclip) {
+      if (this.grapple.out) this.grapple.letGo('noclip');
       this.rig?.stopOverride();
       this.saber.holster();
       this.thrown.cancel();
@@ -2090,8 +2252,9 @@ export class Player {
       return;
     }
 
-    // On foot in space, outside any ship's rooms: adrift.
+    // On foot in space, outside any ship's rooms: adrift. The zero-g tether waits, so the rope lets go.
     if (world.planet.space && !this.aboard) {
+      if (this.grapple.out) this.grapple.letGo('eva');
       this.evaUpdate(dt, input, cam);
       return;
     }
@@ -2180,58 +2343,50 @@ export class Player {
     // slack keeps the float line from flickering between states.
     this.swimming = !this.inside && depth > (this.swimming ? SWIM_DEPTH - 0.3 : SWIM_DEPTH);
     this.submerged = this.swimming && depth > DIVE_DEPTH;
+    this.waterDepth = depth;
+    // The rope's words for this frame, from the body as the swim has just left it (`ropeModes`, the one place
+    // they are decided), and the move keys' direction as the sway: read below and by the grapple's steps.
+    if (this.grapple.out) {
+      this.grapple.refreshModes(this.gview);
+      this.grapple.keys.swayX = moving ? move.x : 0;
+      this.grapple.keys.swayZ = moving ? move.z : 0;
+    }
 
     if (this.swimming) {
-      // Swimming: slow, no gravity, free up and down; looking down while submerged dives.
-      // (Untouched by the movement profile: the water keeps its own rules.)
+      // Swimming: slow, no gravity, free up and down; looking down while submerged dives. (Untouched by the
+      // movement profile: the water keeps its own rules.) The arithmetic is `swimStep`'s, the block moved out
+      // unchanged so the grapple's tests run the game's own swim; what is not arithmetic stays here.
       this.rig?.stopOverride();
       this.saber.holster();
-      speed *= SWIM_SPEED;
-      const k = 1 - Math.exp(-dt * 4);
-      this.vel.x += (move.x * speed - this.vel.x) * k;
-      this.vel.z += (move.z * speed - this.vel.z) * k;
-      // Lying on the surface is not standing still in y any more. With the swell in `surface` the
-      // float line moves, so the body has to ride it, and that is the same spring a swimming
-      // creature has always held its own line with (`src/world/afloat.ts`). On flat water it asks
-      // for nothing, since the line it is chasing is exactly where the body already is.
-      const ride = afloatVelocity(surface - SWIM_DEPTH, this.pos.y, this.vel.y, dt);
-      let vy = 0;
-      let riding = false;
-      if (input.held('jump')) vy = SWIM_SPEED * RUN_SPEED;
-      else if (input.held('crouch')) vy = -SWIM_SPEED * RUN_SPEED;
-      else if (moving) {
-        // Under water the camera steers: swim where you look. At the surface only a steep
-        // look downwards dives, so ordinary forward swimming keeps the head up.
+      const sw = this.swimIn;
+      sw.vel = this.vel;
+      sw.posY = this.pos.y;
+      sw.surface = surface;
+      sw.depth = depth;
+      sw.submerged = this.submerged;
+      sw.jump = input.held('jump');
+      sw.crouch = input.held('crouch');
+      sw.moving = moving;
+      sw.moveX = move.x;
+      sw.moveZ = move.z;
+      // Under water the camera steers: swim where you look.
+      if (moving) {
         cam.camera.getWorldDirection(dive);
-        vy = dive.y * speed * (mz >= 0 ? 1 : -1);
-        if (!this.submerged && (vy > 0 || dive.y > -0.5)) { vy = ride; riding = true; }
-      } else if (!this.submerged) { vy = ride; riding = true; }
-      else vy = -0.3; // a slow sink when idle under water
-      // The other branches are a speed the body is *asked* for and eased onto; the spring's answer
-      // is a considered speed already, with its own damping in it, so it goes on as it stands.
-      // Easing that as well is a second lag on top of the first, and the two together left the
-      // body a quarter of a metre out of step with a swell it should have been riding.
-      if (riding) this.vel.y = vy;
-      else this.vel.y += (vy - this.vel.y) * (1 - Math.exp(-dt * 6));
-      // Buoyancy: rising past the float line stops at it.
-      const asked = this.vel.y;
-      if (this.vel.y > 0 && depth - this.vel.y * dt < SWIM_DEPTH) this.vel.y = Math.max(0, (depth - SWIM_DEPTH) / dt);
-      // What this frame really decided, for `__debug.afloat`. One kept object, written only while
-      // swimming, so it costs a handful of stores and allocates nothing: a body that will not hold
-      // its line can be told apart from one that is never asked to, and both from one that asks and
-      // is refused by the character controller.
-      const probe = this.swimProbe;
-      probe.dt = dt;
-      probe.surface = surface;
-      probe.want = surface - SWIM_DEPTH;
-      probe.from = this.pos.y;
-      probe.gap = surface - SWIM_DEPTH - this.pos.y;
-      probe.ride = ride;
-      probe.riding = riding;
-      probe.asked = asked;
-      probe.capped = this.vel.y;
-      probe.moved = Number.NaN;
-      this.grounded = false;
+        sw.diveY = dive.y;
+      }
+      sw.forward = mz >= 0;
+      sw.speed = speed;
+      sw.dt = dt;
+      // Reeling in toward a pivot rising past `swimLift`, the rope has the vertical (only while attached).
+      sw.ropeLift = this.grapple.out && this.grapple.liftsSwimmer(this.gview);
+      const swum = swimStep(sw, this.swimProbe, this.swimOut);
+      speed = swum.speed;
+      this.grounded = swum.grounded;
+      // Water breaks a fall. The swim never told the movement so, and a fall into deep water was paid on the
+      // shore as the first step out landed, measured from the top of the fall (and on Progression I, a crouched
+      // step out was paid as a landing roll too). The fall's memory is held here on every swimming frame, for
+      // everyone: the owner's call, and the one change to what a player who never fires meets in play.
+      this.jka.holdApex(this.pos.y);
     } else if (this.moveProfile === 'jka') {
       // Jedi Academy's ground and air rules: friction, acceleration, air control, and jumps
       // that keep lifting while the key is held, as far as the Force Jump level allows.
@@ -2270,8 +2425,13 @@ export class Player {
       c.rollDivisor = st.rollDivisor;
       c.rollFree = st.rollFree;
       c.airAccel = st.airAccel;
+      // On the rope and swinging, the move keys sway and Space boosts (the grapple's own), so the movement is
+      // handed neither; sliding on the ground with the rope taut, it is handed no ground (no friction). Both
+      // are the rope's words, rewritten in the hook's own `command`, which the node harness calls too; while the
+      // hook is not attached nothing here changes.
+      const stepGrounded = this.grapple.command(c, this.grounded);
       const force = this.force;
-      const ev = this.jka.step(dt, this.vel, this.pos, this.grounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
+      const ev = this.jka.step(dt, this.vel, this.pos, stepGrounded, c, { value: force?.value ?? 100, spend: (n) => { if (force) force.value = Math.max(0, force.value - n); } });
       if (ev.jumped) {
         this.grounded = false;
         // The jump for the direction pushed (PM_JumpForDir); with the body turned the way it runs, that is always forward.
@@ -2308,16 +2468,34 @@ export class Player {
     if (!this.swimming && this.moveProfile !== 'jka') this.vel.y -= g * dt;
     // Falling into deep water: the plunge slows quickly.
     if (depth > 0 && !this.swimming && this.vel.y < -4) this.vel.y += (-4 - this.vel.y) * (1 - Math.exp(-dt * 8));
+    // The grapple's step before the move: the dart's flight, and attached, the reel or the haul, the sway, the
+    // drags, the constraint and its correction, and the fall's memory held while the rope is taut.
+    if (this.grapple.out) this.grapple.beforeMove(this.gview, dt);
 
-    if (this.vel.y > 0.5 || this.swimming) this.controller.disableSnapToGround();
+    // The snap to the ground is off while swinging on the rope as well as rising and swimming.
+    if (this.vel.y > 0.5 || this.swimming || (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();
     else this.controller.enableSnapToGround(0.35);
     const filter = this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+    let moveX = this.vel.x * dt;
+    let moveY = this.vel.y * dt;
+    let moveZ = this.vel.z * dt;
+    if (this.grapple.attached) {
+      // On the rope: the capsule's collider put where the body is (the controller starts from the collider,
+      // which runs up to two frames behind at 144 fps), and the rope's correction added to the move.
+      this.grapple.syncCollider(this.gview);
+      const gc = this.grapple.corr;
+      moveX += gc.x;
+      moveY += gc.y;
+      moveZ += gc.z;
+    }
     // The dead are walked through: a corpse is no wall. So is another player: their body comes off
     // the wire and teleports between messages, and one walked into must never climb, shove or trap
     // you. Their collision groups already keep them out of a filtered query like this one; the
     // predicate is what keeps it true if that filter is ever widened.
-    this.controller.computeColliderMovement(this.collider, { x: this.vel.x * dt, y: this.vel.y * dt, z: this.vel.z * dt }, undefined, filter, this.walkPast);
+    this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
+    // On the rope, what each surface refused is taken off the velocity, measured against what was touched.
+    if (this.grapple.attached) this.grapple.clip(this.gview);
     // What the controller allowed of what the swim asked for. A body that asks to rise and is
     // handed back less -- or handed back a fall -- is being held by something it is touching, and
     // no spring above can argue with that.
@@ -2338,6 +2516,9 @@ export class Player {
     }
 
     const ground = this.aboard ? -1e9 : terrain.heightAt(this.pos.x, this.pos.z);
+    // The grapple's step after the move: the dart's trail, and attached, the carry round the rope, the wrapping,
+    // the anchor, the haul's arrival, the teleport guard and the slide latch.
+    if (this.grapple.out) this.grapple.afterMove(this.gview, dt);
     // Fallen out of the world: back onto the ground. Not inside a building, whose rooms (a bunker's
     // lowest landing, a dungeon under a mountain) go far below the terrain's floor.
     if (!this.aboard && !this.inside && this.pos.y < terrain.floor) {
@@ -2730,6 +2911,8 @@ export class Player {
     const half = crouched ? CROUCH_HALF_HEIGHT : STAND_HALF_HEIGHT;
     this.collider.setHalfHeight(half);
     this.collider.setTranslationWrtParent({ x: 0, y: CAPSULE_RADIUS + half, z: 0 });
+    // Kept, so the grapple's collider sync puts the capsule at its own offset and never reads the engine.
+    this.colliderOffsetY = CAPSULE_RADIUS + half;
     // The offset only reaches the collider's world position at the next physics step; placing it now
     // keeps this frame's ground test from seeing the new capsule at the old centre (and flickering).
     this.collider.setTranslation({ x: this.pos.x, y: this.pos.y + CAPSULE_RADIUS + half, z: this.pos.z });

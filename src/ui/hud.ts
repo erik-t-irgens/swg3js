@@ -18,6 +18,7 @@ const HELP_LINES: readonly { text: string; actions: readonly string[]; move?: bo
   { text: '%s mount and dismount · %s fast-forward time', actions: ['mount', 'fastForward'] },
   { text: '%s map · %s inventory · %s spawner · %s help · %s noclip · %s debug menu · Esc frees the mouse', actions: ['map', 'inventory', 'spawner', 'help', 'noclip', 'debugMenu'] },
   { text: 'placing a building or a prop: hold %s and move the mouse to turn it, hold %s to raise it', actions: ['placeTurn', 'placeLift'] },
+  { text: 'grapple: %s fire and let go · hold %s reel in · hold %s reel out · %s boost off · hold %s haul in · move keys sway', actions: ['grappleFire', 'reelIn', 'reelOut', 'grappleBoost', 'grappleHaul'] },
   { text: 'Esc → Controls rebinds every one of these, and the display follows at once', actions: [] },
 ];
 
@@ -114,6 +115,35 @@ export interface HudColours {
   readonly void: number;
   readonly hot: number;
   readonly good: number;
+  readonly bad: number;
+}
+
+/**
+ * The grapple's mark as the overlay draws it, filled by the game each frame from the hook's own mark and
+ * this frame's camera: where the dart would bite on the screen, and the anchor while the rope is out. Plain
+ * numbers and switches in one kept record, so drawing it makes nothing.
+ */
+export interface HudGrappleMark {
+  /** The Interface page's switch: off, nothing of the mark is drawn (the hook still fires). */
+  enabled: boolean;
+  /** A press would fire: the diamond in `good`; `held` from the snap hold, at half alpha; `next` while attached, in `muted`. */
+  shows: boolean;
+  held: boolean;
+  next: boolean;
+  /** A refused press: the diamond flashes `bad` while this is above nought. */
+  flash: number;
+  /** Where the mark stands on the screen, and whether it is in front of the camera at all. */
+  onScreen: boolean;
+  x: number;
+  y: number;
+  /** The anchor's small mark, while the rope is out and the anchor in front of the camera. */
+  anchorOn: boolean;
+  ax: number;
+  ay: number;
+}
+
+export function newHudGrappleMark(): HudGrappleMark {
+  return { enabled: true, shows: false, held: false, next: false, flash: 0, onScreen: false, x: 0, y: 0, anchorOn: false, ax: 0, ay: 0 };
 }
 
 /**
@@ -341,6 +371,8 @@ export class Hud {
   private jedi = false;
   /** The tighter, brighter crosshair while a shot is being aimed; set by whoever reads the input. */
   private aiming = false;
+  /** The grapple's mark, written by the game each frame it is simulated and drawn on the overlay with the crosshair. */
+  readonly grappleMark: HudGrappleMark = newHudGrappleMark();
   /** What `report` hands back: one object, filled in place. */
   private readonly out = { ops: 0, icons: 0, keys: '', attached: false, crosshair: false, hands: '', breath: '' };
 
@@ -1096,6 +1128,39 @@ export class Hud {
         this.out.ops += 2;
       }
     }
+    this.drawGrappleMark(this.grappleMark);
+  }
+
+  /**
+   * The grapple's mark: a diamond with its corners on the axes where the dart would bite -- `good` when a press
+   * fires, at half alpha from the snap hold, `muted` while attached for the next anchor, `bad` for a refused
+   * press's moment -- and a small `accent` mark at the anchor while the rope is out. Drawn whatever the Jedi's
+   * crosshair switch says, behind its own; never at a ship's controls or with the mouse free. Palette indices
+   * and kept numbers only.
+   */
+  private drawGrappleMark(m: HudGrappleMark): void {
+    const c = this.canvas;
+    const col = this.colours;
+    if (!c || !col || !m.enabled || this.mouseFreeDrawn || this.bodyHidden()) return;
+    const s = this.scale;
+    const S = HUD_SIZES;
+    const width = S.grappleMarkWidth * s;
+    if (m.onScreen && (m.shows || m.flash > 0)) {
+      const colour = m.flash > 0 && !m.shows ? col.bad : m.next ? col.muted : col.good;
+      const alpha = S.grappleMarkAlpha * (m.held && m.flash <= 0 ? 0.5 : 1);
+      this.diamond(m.x, m.y, S.grappleMark * s, width, colour, alpha);
+    }
+    if (m.anchorOn) this.diamond(m.ax, m.ay, S.grappleAnchor * s, width, col.accent, S.grappleMarkAlpha);
+  }
+
+  /** A diamond of four strokes, its corners `r` out on the axes. */
+  private diamond(x: number, y: number, r: number, width: number, colour: number, alpha: number): void {
+    const c = this.canvas!;
+    c.line(x, y - r, x + r, y, width, colour, alpha);
+    c.line(x + r, y, x, y + r, width, colour, alpha);
+    c.line(x, y + r, x - r, y, width, colour, alpha);
+    c.line(x - r, y, x, y - r, width, colour, alpha);
+    this.out.ops += 4;
   }
 
   /** A frame the overlay drew nothing on: the shape count goes to nothing with it. */

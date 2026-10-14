@@ -254,6 +254,57 @@ const KEY = 'swg3js.bindings';
   ok((SLOT_ACTIONS as readonly string[]).every((a) => (FIGHT_ACTIONS as readonly string[]).includes(a)), 'everything that fights includes every slot the kits read');
   ok(['attack', 'altAttack', 'altFire', 'block', 'saberThrow', 'saberStyle'].every((a) => (FIGHT_ACTIONS as readonly string[]).includes(a)), 'and the triggers, the block, the throw and the saber style');
   ok(!(FIGHT_ACTIONS as readonly string[]).includes('placeTurn') && !(FIGHT_ACTIONS as readonly string[]).includes('placeLift') && !(FIGHT_ACTIONS as readonly string[]).includes('forward'), 'and never the placing keys or the walk');
+  // The one fight action no kit reads: the grapple's fire, which a hand in use mutes as it mutes a shot.
+  const beyond = (FIGHT_ACTIONS as readonly string[]).filter((a) => !(SLOT_ACTIONS as readonly string[]).includes(a) && !['attack', 'altAttack', 'altFire', 'block', 'saberThrow', 'saberStyle'].includes(a));
+  ok(beyond.join() === 'grappleFire', `and one named exception beyond the kits' slots and triggers: ${beyond.join(', ')}`);
+}
+
+// --- the grapple's five actions (the design's §5.1) --------------------------------------------------------------
+{
+  store.clear();
+  const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
+  ok(holders('Mouse3').join() === 'grappleFire', 'Mouse 4 (the back side button) is the grapple\'s fire alone');
+  ok(holders('ShiftLeft').join() === 'walk,reelIn' && holders('ShiftRight').join() === 'walk,reelIn', 'Shift is the walk\'s and the reel-in\'s');
+  ok(holders('ControlLeft').join() === 'crouch' && holders('KeyX').join() === 'crouch,reelOut', 'Ctrl is the crouch\'s alone, and X the crouch\'s and the reel-out\'s');
+  ok(holders('Space').join() === 'jump,grappleBoost', 'Space is the jump\'s and the boost\'s');
+  ok(holders('KeyF').sort().join() === 'flashlight,grappleHaul,placeLift', 'F is the torch\'s, the placing height\'s and the haul\'s');
+  const keys = Object.keys(DEFAULT_BINDINGS);
+  const at = keys.indexOf('flashlight');
+  ok(keys.slice(at + 1, at + 6).join() === 'grappleFire,reelIn,reelOut,grappleBoost,grappleHaul', 'listed together after the torch, so the Controls page shows them together');
+  // The rebind cases: a key a player chose for something else wins over these defaults.
+  const emote = loadedBindings({ emote1: ['ShiftLeft'] });
+  ok(emote.emote1.join() === 'ShiftLeft' && emote.reelIn.join() === 'ShiftRight' && emote.walk.join() === 'ShiftRight', 'an emote put on Left Shift keeps it, and the reel-in (and the walk) keep Right Shift');
+  const blocked = loadedBindings({ block: ['Mouse3'] });
+  ok(blocked.block.join() === 'Mouse3' && blocked.grappleFire.length === 0, 'a block chosen on Mouse 4 keeps it, and the fire is left with no key');
+  const walked = loadedBindings({ walk: ['CapsLock'] });
+  ok(walked.walk.join() === 'CapsLock' && walked.reelIn.join() === 'ShiftLeft,ShiftRight', 'the walk moved to Caps Lock leaves the reel-in on Shift, which nobody chose');
+  const xed = loadedBindings({ emote2: ['KeyX'] });
+  ok(xed.emote2.join() === 'KeyX' && xed.reelOut.length === 0 && xed.crouch.join() === 'ControlLeft,ControlRight', 'an emote put on X takes it off the reel-out and the crouch, which keeps Ctrl');
+  // Whose choice emptied the fire: told only when it was somebody else's.
+  store.set(KEY, JSON.stringify({ block: ['Mouse3'] }));
+  const theirs = new Input(canvas);
+  ok(theirs.bindings.grappleFire.length === 0 && !theirs.chose('grappleFire'), "with somebody's block on Mouse 4 the fire has no key and was not chosen empty (the game says so once)");
+  store.clear();
+  const mine = new Input(canvas);
+  mine.assignKey('grappleFire', [], null);
+  ok(mine.bindings.grappleFire.length === 0 && mine.chose('grappleFire'), 'taken off the fire on purpose (Backspace on the Controls page), it is chosen empty, and nothing is said');
+  // The reel-in moved and put back shares Shift with the walk again.
+  store.clear();
+  const back = new Input(canvas);
+  back.assignKey('reelIn', ['KeyV'], 'KeyV');
+  ok(back.bindings.reelIn.join() === 'KeyV' && back.bindings.walk.join() === 'ShiftLeft,ShiftRight', 'the reel-in moved to V leaves the walk on Shift');
+  back.assignKey('reelIn', ['ShiftLeft', 'ShiftRight'], 'ShiftLeft');
+  ok(back.bindings.reelIn.join() === 'ShiftLeft,ShiftRight' && back.bindings.walk.join() === 'ShiftLeft,ShiftRight', 'and put back on Shift it shares it with the walk again, as their defaults do');
+}
+
+// --- Ctrl with a move key, kept from the browser while the pointer is locked ------------------------------------
+{
+  const { cancelsKey } = await import('../../../src/core/input.ts');
+  const b = { ...DEFAULT_BINDINGS };
+  ok(['KeyW', 'KeyS', 'KeyA', 'KeyD'].every((k) => cancelsKey(k, true, true, b)), 'Ctrl with W, S, A or D is cancelled while the pointer is locked');
+  ok(!cancelsKey('KeyI', true, true, b) && !cancelsKey('KeyS', true, false, b) && !cancelsKey('KeyS', false, true, b), 'Ctrl with I, Ctrl with the pointer free and S with no Ctrl are not');
+  const moved = { ...DEFAULT_BINDINGS, forward: ['KeyE'] };
+  ok(cancelsKey('KeyE', true, true, moved) && !cancelsKey('KeyW', true, true, moved), 'a move key rebound to another code is followed: Ctrl with it is cancelled, and Ctrl with the old one is not');
 }
 
 // --- the placement editor's destination: the dev server's alone ----------------------------------------------

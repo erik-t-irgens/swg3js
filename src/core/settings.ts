@@ -152,6 +152,8 @@ export interface Settings extends FxSettings {
   hudNameplate: boolean;
   /** A crosshair for a Jedi as well as a Bounty Hunter, since a Force power is aimed too. */
   hudJediCrosshair: boolean;
+  /** The grapple's diamond where the dart would bite: drawn whether or not the hook is ever fired, so it has a switch. */
+  hudGrappleMark: boolean;
   /** The minimap at the top left: the planet's own picture round you, with your waypoints on it. */
   hudMinimap: boolean;
   /** Metres from the minimap's middle to its rim, 300 to 3200. */
@@ -257,6 +259,8 @@ export const DEFAULT_SETTINGS: Settings = {
   hudDamageNumbers: false,
   hudNameplate: true,
   hudJediCrosshair: true,
+  // On, the owner's answer: it is the only way to aim the hook, and it shows nearly everywhere outdoors.
+  hudGrappleMark: true,
   // Ours, all five: the minimap and the marks start on because they are the only way a waypoint is
   // seen without opening the map; eight hundred metres is the design's reach, and north up is how the
   // map window itself is drawn.

@@ -142,6 +142,15 @@ export const HUD_SIZES = {
   footTickLen: 5,
   chargeRadius: 16,
   chargeWidth: 2.5,
+  /**
+   * The grapple's mark: a diamond with its corners on the axes this far out, this wide, at this alpha, drawn
+   * where the dart would bite. At 32 its inner halo clears the charge ring's outer halo at every scale; at 28
+   * the two would touch while a shot charges. And the small mark at the anchor while it is in front of the view.
+   */
+  grappleMark: 32,
+  grappleMarkWidth: 1.5,
+  grappleMarkAlpha: 0.85,
+  grappleAnchor: 6,
   /** An ability cell and its glyph. */
   slotSize: 40,
   slotGlyph: 28,
@@ -658,4 +667,20 @@ export function fadeOut(age: number, life: number, fade: number): number {
   if (age >= life) return 0;
   if (age <= life - fade || fade <= 0) return 1;
   return clamp01((life - age) / fade);
+}
+
+/**
+ * The grapple's diamond's inner edge from the middle, its dark under-stroke included, at a scale: the
+ * corners stand `grappleMark` out on the axes, so an edge's nearest point is that over the square root of
+ * two, less half the stroke and the under-stroke's own widening (`widen`, the overlay's, two pixels a side).
+ */
+export function grappleMarkInnerHalo(scale: number, widen: number): number {
+  const S = HUD_SIZES;
+  return (S.grappleMark * scale) / Math.SQRT2 - (S.grappleMarkWidth * scale) / 2 - widen * scale;
+}
+
+/** The charge ring's outer edge from the middle, its dark under-stroke included: what the diamond must clear. */
+export function chargeOuterHalo(scale: number, widen: number): number {
+  const S = HUD_SIZES;
+  return S.chargeRadius * scale + (S.chargeWidth * scale) / 2 + widen * scale;
 }

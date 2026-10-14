@@ -83,6 +83,24 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // The grappling hook (the design's §5.5): the dart in flight is called back and nothing else is offered;
+  // swinging it is the rope's four words and nothing else; on the ground its three words come first and the
+  // fourth slot falls through to what the feet offer, a speeder beside you included.
+  const flying = fill(at({ grapple: 'flying', near: 'mount' }));
+  ok(flying === 1 && keys(flying)[0] === 'grappleFire' && words(flying)[0] === PROMPT_WORDS.callBack, `the dart in flight: call it back, and nothing else (${show(flying).join(', ')})`);
+  const air = fill(at({ grapple: 'air', near: 'mount' }));
+  ok(keys(air).join() === 'grappleFire,reelIn,grappleBoost,grappleHaul' && words(air).join() === [PROMPT_WORDS.grappleLetGo, PROMPT_WORDS.reelIn, PROMPT_WORDS.boostOff, PROMPT_WORDS.haulIn].join(), `swinging: let go, reel in, boost off, haul in, and it returns there (${show(air).join(', ')})`);
+  const ground = fill(at({ grapple: 'ground', near: 'mount' }));
+  ok(ground === 4 && keys(ground).slice(0, 3).join() === 'grappleFire,reelIn,grappleHaul' && keys(ground)[3] === 'mount' && words(ground)[3] === PROMPT_WORDS.mount, `hooked on the ground beside a speeder: the rope's three words, then the mount in the fourth slot (${show(ground).join(', ')})`);
+  const alone = fill(at({ grapple: 'ground' }));
+  ok(alone === 3, 'hooked on the ground with nothing else near: the three words alone');
+  ok(['grappleLetGo', 'reelIn', 'boostOff', 'haulIn', 'callBack'].every((w) => (PROMPT_WORDS as Record<string, string>)[w].length <= PROMPT.maxLabel), "every one of the rope's words fits the bar's label");
+  ok(['grappleFire', 'reelIn', 'grappleBoost', 'grappleHaul'].every((a) => BINDINGS.has(a)), 'and every action it puts a cap on is a binding');
+  const off = fill(at({ grapple: '', near: 'mount' }));
+  ok(!keys(off).some((k) => k.startsWith('grapple') || k === 'reelIn'), 'with the hook not out the bar shows nothing of it');
+}
+
+{
   // Seated in a ship in flight: the four the long line carried at once.
   const n = fill(at({ mounted: true, vehicle: { kind: 'ship', ship: true, airborne: true, canLand: true, powered: true, guns: true, cutKey: 'KeyJ' } }));
   ok(n === PROMPT.slots, `flying: the bar is full (${show(n).join(', ')})`);

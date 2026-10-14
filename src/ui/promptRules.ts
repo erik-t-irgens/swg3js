@@ -143,6 +143,11 @@ export interface PromptState {
   live: boolean;
   /** Flying free of the world. */
   noclip: boolean;
+  /**
+   * The grappling hook, while it is out: the dart in flight, attached and swinging (`air`, hanging or a slide),
+   * or attached on the ground or afloat (`ground`), as `ropeModes` decides it. Empty while it is not out.
+   */
+  grapple: '' | 'flying' | 'ground' | 'air';
   /** A jump's own line, which wins over everything else. */
   jump: PromptJump;
   /** A shuttle's passenger, who can only step off, and only on the ground; everything else is the shuttle's. */
@@ -213,6 +218,7 @@ export function newPromptState(): PromptState {
   return {
     live: false,
     noclip: false,
+    grapple: '',
     jump: 'none',
     ride: '',
     mounted: false,
@@ -241,6 +247,7 @@ export function newPromptState(): PromptState {
 export function resetPromptState(s: PromptState): PromptState {
   s.live = false;
   s.noclip = false;
+  s.grapple = '';
   s.jump = 'none';
   s.ride = '';
   s.mounted = false;
@@ -341,6 +348,12 @@ export const PROMPT_WORDS = Object.freeze({
   nextTarget: 'next target',
   hop: 'hop',
   boost: 'boost',
+  // The grappling hook, while it is out.
+  grappleLetGo: 'let go',
+  reelIn: 'reel in',
+  boostOff: 'boost off',
+  haulIn: 'haul in',
+  callBack: 'call it back',
   // Everywhere.
   shipMenu: 'ship menu',
   noclipOff: 'noclip off',
@@ -423,6 +436,27 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     n = push(out, n, 'noclipFaster', W.faster);
     n = push(out, n, 'noclipSlower', W.slower);
     return n;
+  }
+
+  // The grappling hook, while it is out. Swinging or with the dart in flight, nothing else the bar offers can
+  // be done, so it returns; on the ground or afloat its three words come first and the fourth slot falls
+  // through to whatever the on-foot block offers (a speeder beside you is mounted, and mounting lets go).
+  // Reel out is the fifth and is left to the help block.
+  if (s.grapple === 'flying') {
+    n = push(out, n, 'grappleFire', W.callBack);
+    return n;
+  }
+  if (s.grapple === 'air') {
+    n = push(out, n, 'grappleFire', W.grappleLetGo);
+    n = push(out, n, 'reelIn', W.reelIn);
+    n = push(out, n, 'grappleBoost', W.boostOff);
+    n = push(out, n, 'grappleHaul', W.haulIn);
+    return n;
+  }
+  if (s.grapple === 'ground') {
+    n = push(out, n, 'grappleFire', W.grappleLetGo);
+    n = push(out, n, 'reelIn', W.reelIn);
+    n = push(out, n, 'grappleHaul', W.haulIn);
   }
 
   // Seated in a vehicle, or standing at a ship's bridge controls. Both fly the same hull.

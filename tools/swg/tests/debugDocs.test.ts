@@ -412,6 +412,12 @@ function readOne(file: string, text: string, out: SourceHelpers): void {
   ok(new Set(filed).size === filed.length, 'and none is filed twice');
   const unfiled = [...keys.keys()].filter((k) => !filed.includes(k));
   console.log(`note ${unfiled.length} helper(s) are listed under Other: ${unfiled.join(', ') || 'none'}`);
+  // The grappling hook's: its own row, every example the design names, and filed with the character beside the head's look.
+  const grapple = docs.get('grapple');
+  const codes = grapple?.examples.map((e) => e.code) ?? [];
+  ok(!!grapple && ['grapple()', 'grapple({ fire: true })', 'grapple({ fire: [x, y, z] })', 'grapple({ letGo: true })', 'grapple({ everyone: false })', 'grapple({ reset: true })'].every((c) => codes.includes(c)) && codes.some((c) => c.startsWith('grapple({ tune:')), `the grapple has its own row with every example the design names (${codes.length})`);
+  const home = DEBUG_GROUPS.find((g) => g.helpers.includes('grapple'));
+  ok(!!home && home.helpers.indexOf('grapple') === home.helpers.indexOf('headLook') + 1, `and the menu files it beside headLook (${home?.title ?? 'nowhere'})`);
 }
 
 console.log(`\n${checks} checks passed`);

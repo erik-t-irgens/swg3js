@@ -75,6 +75,7 @@ export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'hudDamageNumbers', label: 'Damage numbers', kind: 'toggle', hint: 'Small numbers rising where your blows land. Off to begin with: the game said its results in words, and those words go to the message line.' },
       { key: 'hudNameplate', label: 'Name over what you look at', kind: 'toggle', hint: 'Put the crosshair on something alive nearby and its name and health stand over its head, instead of a "nearby" line at the foot of the top-left corner.' },
       { key: 'hudJediCrosshair', label: 'Crosshair as a Jedi', kind: 'toggle', hint: 'A Force power is aimed and nothing showed where. A crosshair that is always there changes how a saber fight feels, so it is yours to switch off.' },
+      { key: 'hudGrappleMark', label: 'Grapple mark', kind: 'toggle', hint: 'A small green diamond where the grappling hook would bite, which is the only way to aim it. The ground counts, so outdoors on foot it shows nearly all the time, whether or not you ever fire; switch it off and the hook still fires at what the crosshair is on.' },
     ],
   },
 ];

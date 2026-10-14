@@ -29,6 +29,13 @@ export type Action =
   | 'noclipFaster'
   | 'noclipSlower'
   | 'flashlight'
+  // The grappling hook: fire and let go, the two held reels, the boost off the line, the haul. The four
+  // after the first borrow walk's, crouch's, jump's and the torch's keys, which mean nothing on the rope.
+  | 'grappleFire'
+  | 'reelIn'
+  | 'reelOut'
+  | 'grappleBoost'
+  | 'grappleHaul'
   | 'fastForward'
   | 'slot1'
   | 'slot2'
@@ -101,6 +108,15 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   noclipFaster: ['Equal', 'NumpadAdd'],
   noclipSlower: ['Minus', 'NumpadSubtract'],
   flashlight: ['KeyF'],
+  // The grappling hook. Fire is the side button nearest the thumb ("Mouse 4", the browser's button 3), the
+  // owner's choice; the other four share their keys with walk, crouch, jump and the torch on purpose, as the
+  // placing keys borrow R and F, and are read only while the hook is out, when those four are muted. Reel-out
+  // is X alone and never Ctrl: pumping holds W with it, and Ctrl+W closes the tab past anything a page can do.
+  grappleFire: ['Mouse3'],
+  reelIn: ['ShiftLeft', 'ShiftRight'],
+  reelOut: ['KeyX'],
+  grappleBoost: ['Space'],
+  grappleHaul: ['KeyF'],
   fastForward: ['KeyT'],
   slot1: ['Digit1'],
   slot2: ['Digit2'],
@@ -171,9 +187,28 @@ export function controlsActions(dev: boolean): Action[] {
  * are muted for the whole frame after the placing keys are read (`Input.mute`), so the click that puts
  * a thing down does not also fire or swing, a held R turns it without throwing a lit saber, and 1 with
  * a crate in hand uses no power; and when the hand empties, any of them still held stays muted until
- * its key is let go (`Input.muteUntilUp`). A test holds this to the kits' own slot list.
+ * its key is let go (`Input.muteUntilUp`). A test holds this to the kits' own slot list, with the grapple's
+ * fire the one named exception: it is no kit's, and the placing hand mutes it as it mutes a shot.
  */
-export const FIGHT_ACTIONS: readonly Action[] = ['attack', 'altAttack', 'altFire', 'block', 'saberThrow', 'saberStyle', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6'];
+export const FIGHT_ACTIONS: readonly Action[] = ['attack', 'altAttack', 'altFire', 'block', 'saberThrow', 'saberStyle', 'slot1', 'slot2', 'slot3', 'slot4', 'slot5', 'slot6', 'grappleFire'];
+
+/** The four actions that move: the keys a Ctrl held with is cancelled while the pointer is locked. */
+const MOVE_ACTIONS: readonly Action[] = ['forward', 'back', 'left', 'right'];
+
+/**
+ * Whether a key going down is kept from the browser for being Ctrl with a move key, while the pointer is
+ * locked: Ctrl+S, Ctrl+D and Ctrl+A would otherwise save the page, bookmark it or select everything in the
+ * middle of a crouch-walk and break the lock. Narrow on purpose: nothing else with Ctrl is touched, so the
+ * developer's tools still open, and Ctrl+W, which no page can stop, is the browser's whatever this says.
+ */
+export function cancelsKey(code: string, ctrl: boolean, locked: boolean, bindings: Readonly<Record<string, readonly string[]>>): boolean {
+  if (!ctrl || !locked) return false;
+  for (const a of MOVE_ACTIONS) if (bindings[a]?.includes(code)) return true;
+  return false;
+}
+
+/** The mouse's side buttons (back and forward): their release would send the tab back or forward a page. */
+export const SIDE_BUTTONS: readonly number[] = [3, 4];
 
 /**
  * What a player chose, out of what was saved or asked for: every entry that is an action with a list of key
@@ -279,6 +314,8 @@ export class Input {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (['Space', 'Tab', 'KeyM', 'AltLeft', 'AltRight'].includes(e.code)) e.preventDefault();
+      // Ctrl with a move key, while the pointer is locked: the browser's save, bookmark and select-all kept out of a crouch-walk.
+      if (cancelsKey(e.code, e.ctrlKey, this.locked, this.bindings)) e.preventDefault();
       if (e.repeat) return;
       this.down.add(e.code);
       this.pressed.add(e.code);
@@ -299,6 +336,14 @@ export class Input {
       this.pressed.add(code);
     });
     document.addEventListener('mouseup', (e) => this.down.delete(`Mouse${e.button}`));
+    // The side buttons (3 back, 4 forward): their release and their click send the tab back or forward a
+    // page, in play and while one is being bound on the Controls page alike. Both are kept from the browser
+    // in the capture phase on the window, always, whatever is bound and whether or not the pointer is locked.
+    const sideGuard = (e: MouseEvent) => {
+      if (e.button === 3 || e.button === 4) e.preventDefault();
+    };
+    window.addEventListener('mouseup', sideGuard, true);
+    window.addEventListener('auxclick', sideGuard, true);
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.canvas;
       if (!this.locked) this.down.clear();
@@ -457,6 +502,14 @@ export class Input {
   resetBindings(): void {
     this.chosen = {};
     this.settle();
+  }
+
+  /**
+   * Whether the player chose this action's keys, an empty list included: what tells an action left with no
+   * key by somebody else's choice (which the game says once) from one emptied on purpose (which it never does).
+   */
+  chose(action: Action): boolean {
+    return Object.hasOwn(this.chosen, action);
   }
 
   /** The player's choices as they were kept, read once as the game starts. */
