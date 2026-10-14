@@ -25,6 +25,7 @@ import { PlayerStats } from './playerStats.ts';
 import { newHarm, newHarmAsk, takeHarm, type HarmAsk, type HarmKind } from './harmRule.ts';
 import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFireState } from './grapple.ts';
 import { RopeRibbon, dartMesh } from './grappleDraw.ts';
+import { armAimFor } from './grappleMath.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from './swimStep.ts';
 
 /**
@@ -98,6 +99,12 @@ const handPos = new THREE.Vector3();
 const grappleDrawnHand = new THREE.Vector3();
 const grappleDartAt = new Float64Array(3);
 const grappleDartDir = new THREE.Vector3();
+/** The grapple's look (wave 2): the lean as a turn, the rope point's lift it turns, and the arm's turn and way in the figure's own frame. */
+const grappleLeanQ = new THREE.Quaternion();
+const grappleLift = new THREE.Vector3();
+const grappleArmTurn = new THREE.Quaternion();
+const grappleArmDir = new THREE.Vector3();
+const grappleArmLocal = { x: 0, y: 0, z: 0 };
 /** How Jedi Academy spells the jump directions in its clip names. */
 /** The dual kata's saber protect: the sabers circle the body at this radius and height, this fast. */
 const ORBIT = { radius: 1.4, height: 1.0, turnsPerSecond: 1.5 };
@@ -647,6 +654,11 @@ export class Player {
       get filter() {
         return self.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
       },
+      get hp() {
+        return self.hp;
+      },
+      // A slam's harm goes through the player's own record of a loss, as a fall's does.
+      takeDamage: (amount: number, force: boolean, kind: HarmKind) => self.takeDamage(amount, force, kind),
     };
     this.ropeRibbon = new RopeRibbon(this.grapple.rope.capacity, GRAPPLE_TUNE.sagSegments);
     scene.add(this.ropeRibbon.mesh);
@@ -830,13 +842,54 @@ export class Player {
       this.group.position.copy(this.pos);
       this.group.quaternion.copy(this.evaFrame);
     } else {
-      this.group.position.copy(this.pos);
+      // Leaning into the rope, the figure is drawn turned about the rope point (`leanedAt`); the capsule and `pos`
+      // stay upright.
+      this.leanedAt(this.group.position);
       // Drawn into the flow it is standing in. `drawnSink` and not `lava.sink`, and the view reads
       // the very same getter, so the two cannot come apart on the paths that place the figure
       // themselves.
       this.group.position.y -= this.drawnSink;
       this.group.rotation.set(0, this.heading, 0);
+      if (this.grapple.leaning) this.group.quaternion.premultiply(this.leanTurn(grappleLeanQ));
     }
+  }
+
+  /** The grapple's lean (§3.12) as a turn in the world's frame, into `out`. */
+  private leanTurn(out: THREE.Quaternion): THREE.Quaternion {
+    const l = this.grapple.lean;
+    return out.set(l.x, l.y, l.z, l.w);
+  }
+
+  /**
+   * Where the figure's own origin is drawn, into `out`: `pos`, or while the body leans into the rope, `pos` turned by
+   * the lean about the rope point `ropeY` over the feet, so the rope point stays where the rope holds it. What
+   * `placeVisual` stands the figure at (before a flow's sink), and what goes to other players with the whole turn.
+   */
+  leanedAt(out: THREE.Vector3): THREE.Vector3 {
+    out.copy(this.pos);
+    if (!this.grapple.leaning) return out;
+    // The rope point less the lean's turn of the rope point's own lift: pos + up·ropeY − L·(up·ropeY).
+    const lift = grappleLift.set(0, GRAPPLE_TUNE.ropeY, 0);
+    out.y += lift.y;
+    lift.applyQuaternion(this.leanTurn(grappleLeanQ));
+    return out.sub(lift);
+  }
+
+  /**
+   * The left arm up the rope (§3.12), laid over the clip's pose by the hook's eased weight: the hook's direction from
+   * the rope point to the rope's first point, taken into the figure's own frame as `placeVisual` will stand it this
+   * frame (its heading, then the lean, then the rig's own turn under the group), held where no shoulder reaches
+   * (`armAimFor`). Called after every other arm aim, unconditionally while the line is out, since the chain before it
+   * leaves the arms alone whenever Jedi Academy's clips pose the body.
+   */
+  private aimGrappleArm(rig: CharacterRig): void {
+    const g = this.grapple;
+    const turn = grappleArmTurn.setFromAxisAngle(UP_AXIS, this.heading);
+    if (g.leaning) turn.premultiply(this.leanTurn(grappleLeanQ));
+    turn.multiply(rig.root.quaternion).invert();
+    const d = grappleArmDir.set(g.armDir.x, g.armDir.y, g.armDir.z).applyQuaternion(turn);
+    armAimFor(d.x, d.y, d.z, GRAPPLE_TUNE, grappleArmLocal);
+    rig.aimArm('left', d.set(grappleArmLocal.x, grappleArmLocal.y, grappleArmLocal.z), 0, g.armWeight);
   }
 
   /** The body left to the physics after death, until the respawn. */
@@ -2479,9 +2532,10 @@ export class Player {
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
     let moveZ = this.vel.z * dt;
-    if (this.grapple.attached) {
-      // On the rope: the capsule's collider put where the body is (the controller starts from the collider,
-      // which runs up to two frames behind at 144 fps), and the rope's correction added to the move.
+    if (this.grapple.attached || this.grapple.released) {
+      // On the rope, or in the fast flight after letting go of it: the capsule's collider put where the body is (the
+      // controller starts from the collider, which runs up to two frames behind at 144 fps), and the rope's correction
+      // added to the move (nought once it has let go).
       this.grapple.syncCollider(this.gview);
       const gc = this.grapple.corr;
       moveX += gc.x;
@@ -2494,8 +2548,9 @@ export class Player {
     // predicate is what keeps it true if that filter is ever widened.
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, filter, this.walkPast);
     const mv = this.controller.computedMovement();
-    // On the rope, what each surface refused is taken off the velocity, measured against what was touched.
-    if (this.grapple.attached) this.grapple.clip(this.gview);
+    // On the rope and in the flight after it, what each surface refused is taken off the velocity, measured against
+    // what was touched, and a wall struck hard enough is a slam (§3.11).
+    if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview);
     // What the controller allowed of what the swim asked for. A body that asks to rise and is
     // handed back less -- or handed back a fall -- is being held by something it is touching, and
     // no spring above can argue with that.
@@ -2519,6 +2574,9 @@ export class Player {
     // The grapple's step after the move: the dart's trail, and attached, the carry round the rope, the wrapping,
     // the anchor, the haul's arrival, the teleport guard and the slide latch.
     if (this.grapple.out) this.grapple.afterMove(this.gview, dt);
+    // And the rest of its frame while anything of it is still easing: the stagger, the jolt, the camera's pull, the
+    // lean and the arm. It moves no body, and for a player who never fires it never runs.
+    if (this.grapple.lively) this.grapple.look(this.gview, dt);
     // Fallen out of the world: back onto the ground. Not inside a building, whose rooms (a bunker's
     // lowest landing, a dungeon under a mountain) go far below the terrain's floor.
     if (!this.aboard && !this.inside && this.pos.y < terrain.floor) {
@@ -2615,7 +2673,8 @@ export class Player {
     // Decided from the move itself, not from whether the upper body has taken it yet: a swing that
     // starts on the move must not turn the legs to the camera for a frame before it is split off them.
     const swingOnLegs = moving && this.grounded && !!this.rig && (this.rig.overridingUpperOnly || (this.hasJkaClips && this.saber.busy && this.saber.current.kind !== 'special' && !this.jka.rolling && !this.jka.inSpecialJump));
-    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || (fighting && !swingOnLegs) || (!this.grounded && this.jkaMode) || cam.firstPerson;
+    // Swinging on the rope the body faces the way the view looks, as it does in the air in a fight (§3.12).
+    const faceCamera = (this.classId === 'bounty_hunter' && (this.gunReady || !this.hasGunClips)) || (fighting && !swingOnLegs) || (!this.grounded && this.jkaMode) || cam.firstPerson || (this.grapple.attached && this.grapple.modes.swinging);
     const camYaw = Math.atan2(fwd.x, fwd.z);
     let legsOffset = 0;
     if (this.lockedHeading) {
@@ -2863,6 +2922,8 @@ export class Player {
     } else if (this.saberOn) {
       rig.aimArm('right', armDir.set(-0.45, -0.55, 0.7).normalize());
     }
+    // The left arm up the grapple's rope, over whatever the chain above did or left alone, while its weight is up.
+    if (this.grapple.armWeight > 0 && !this.mounted) this.aimGrappleArm(rig);
   }
 
   /**

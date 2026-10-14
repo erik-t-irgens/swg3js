@@ -151,6 +151,14 @@ export const HUD_SIZES = {
   grappleMarkWidth: 1.5,
   grappleMarkAlpha: 0.85,
   grappleAnchor: 6,
+  /**
+   * The rope used over the longest, while the rope is in: a thin arc round the crosshair at this radius and this
+   * width, `muted`, turning `warn` past this share. At a width of 1 its under-stroke clears the charge ring's at every
+   * scale; it passes inside the diamond's corners and meets that stroke's halo only near its diagonals.
+   */
+  grappleRopeArc: 22,
+  grappleRopeArcWidth: 1,
+  grappleRopeWarn: 0.9,
   /** An ability cell and its glyph. */
   slotSize: 40,
   slotGlyph: 28,
@@ -677,6 +685,12 @@ export function fadeOut(age: number, life: number, fade: number): number {
 export function grappleMarkInnerHalo(scale: number, widen: number): number {
   const S = HUD_SIZES;
   return (S.grappleMark * scale) / Math.SQRT2 - (S.grappleMarkWidth * scale) / 2 - widen * scale;
+}
+
+/** The rope-used arc's inner edge from the middle, its dark under-stroke included, at a scale: what clears the charge ring. */
+export function grappleRopeArcInnerHalo(scale: number, widen: number): number {
+  const S = HUD_SIZES;
+  return S.grappleRopeArc * scale - (S.grappleRopeArcWidth * scale) / 2 - widen * scale;
 }
 
 /** The charge ring's outer edge from the middle, its dark under-stroke included: what the diamond must clear. */

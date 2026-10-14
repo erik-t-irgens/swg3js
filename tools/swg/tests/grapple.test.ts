@@ -17,9 +17,10 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
-import { GRAPPLE_DEFAULTS, GRAPPLE_GRAVITY, GRAPPLE_TUNE, newFireState } from '../../../src/player/grapple.ts';
+import { GRAPPLE_DEFAULTS, GRAPPLE_GRAVITY, GRAPPLE_TUNE, newFireState, tuneGrapple } from '../../../src/player/grapple.ts';
 import { GrappleRope, bendOffsetDir } from '../../../src/player/grappleRope.ts';
-import { grappleMutes } from '../../../src/player/grappleMath.ts';
+import { grappleMutes, joltFor, leanRate, slamHarm } from '../../../src/player/grappleMath.ts';
+import { GRAPPLE_SOUND, GRAPPLE_SOUND_IDS, GrappleSounds } from '../../../src/audio/grappleSounds.ts';
 import { RopeRibbon } from '../../../src/player/grappleDraw.ts';
 import { Group, groups, isEngineFault, RAPIER, type Physics } from '../../../src/core/physics.ts';
 import { CAPSULE_RADIUS, CROUCH_HALF_HEIGHT, TestBody, THREE, box, ground, heightChunk, makePhysics, probeFrom, trunk } from './grappleBody.ts';
@@ -1928,6 +1929,860 @@ await section(28, 'the slab', async () => {
   const on = await drape(true, cut, false, -1.4);
   const off = await drape(false, cut, false, -1.4);
   ok(on.blocked === 0 && off.blocked > 0 && on.opposedMet > 0, `the hand carried past the edge a hair inside it: ${off.blocked} blocked span with the old rule (${off.n} bends), none with opposedLean (${on.n} bends, opposed faces met ${on.opposedMet} times): the test sees the fault`);
+  fresh();
+});
+
+// =============================================================================================================
+// Wave 2: the danger (30, 31), the sound (32), and the look (33, 34), and nothing of any of it for a body that
+// never fires (35).
+await section(30, 'the slam', async () => {
+  // A swing from rest into a wall at the bottom (the design's §3.11 table): the beam 40 m up, a wall whose face stands
+  // 1.2 m past the swing's bottom.
+  const swing = async (fps: number, L: number, fromDeg: number) => {
+    let top: unknown = null;
+    const { physics, b } = await scene((p) => {
+      ground(p, 0);
+      top = box(p, [-0.5, 40, -0.5], [0.5, 41, 0.5], false);
+      box(p, [-3, 0, -10], [-1.2, 60, 10], false);
+    });
+    const th = (fromDeg * Math.PI) / 180;
+    b.place(L * Math.sin(th), 39.95 - L * Math.cos(th) - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 40, 0, 0, -1, 0, top as never, L);
+    let staggered = 0;
+    b.run(fps, 4, () => {
+      if (b.grapple.staggered) staggered++;
+    });
+    return { b, staggered };
+  };
+  for (const fps of FPS) {
+    const lv = await swing(fps, 20, 90);
+    const s = lv.b.grapple.lastSlam;
+    const harm = lv.b.harms.length ? lv.b.harms[0].amount : -1;
+    ok(lv.b.harms.length === 1 && lv.b.grapple.counts.slams === 1 && harm === slamHarm(s.speed, 100, GRAPPLE_TUNE) && Math.abs(harm - 35) <= 2 && s.kind === 'swing' && s.took && lv.b.harms[0].kind === 'fall', `${fps} fps: 20 m from level into a wall at ${r2(s.speed)} m/s: one harm of ${harm} (slamHarm of the speed, within 2 of 35), as a fall's`);
+    ok(lv.staggered > 0 && lv.b.hp === 100 - harm && lv.b.grapple.attached, `${fps} fps: and it staggers (${lv.staggered} frames), the rope holding through it`);
+    const sx = await swing(fps, 20, 60);
+    const h6 = sx.b.harms.length ? sx.b.harms[0].amount : -1;
+    ok(sx.b.harms.length === 1 && Math.abs(h6 - 9) <= 2 && h6 === slamHarm(sx.b.grapple.lastSlam.speed, 100, GRAPPLE_TUNE) && sx.staggered === 0, `${fps} fps: from 60 degrees on 20 m, ${r2(sx.b.grapple.lastSlam.speed)} m/s costs ${h6} (within 2 of 9) and no stagger`);
+  }
+  // Hanging off a ledge: stepping off a 20 m roof on 8 m of rope meets the wall at 12 m/s or so, which is free.
+  for (const fps of FPS) {
+    let bld: unknown = null;
+    const { physics, b } = await scene((p) => {
+      ground(p, 0);
+      bld = box(p, [-10, 0, -10], [0, 20, 10], true);
+    });
+    b.forward.set(1, 0, 0);
+    b.right.set(0, 0, 1);
+    b.place(-0.6, 20, 0);
+    physics.stepOnce();
+    b.run(fps, 0.3);
+    b.hook(-4, 20, 0, 0, 1, 0, bld as never, 12);
+    b.key('KeyW', true);
+    b.run(fps, 6, (t) => {
+      if (t >= 0.6) b.key('KeyW', false);
+    });
+    ok(b.harms.length === 0 && b.grapple.maxImpact > 5 && b.grapple.maxImpact < GRAPPLE_TUNE.slamFrom, `${fps} fps: hanging off a ledge costs nothing (it met the wall at ${r2(b.grapple.maxImpact)} m/s)`);
+  }
+  // Pressed against a wall for 5 s, the sway held into it: nothing after the first contact, and here nothing at all.
+  for (const fps of FPS) {
+    let wall: unknown = null;
+    const { physics, b } = await scene((p) => {
+      wall = box(p, [-10, 0, -10], [0, 30, 10], true);
+    });
+    b.forward.set(-1, 0, 0);
+    b.right.set(0, 0, -1);
+    b.place(0.4, 25 - 10 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 25, 0, 1, 0, 0, wall as never, 10.01);
+    b.key('KeyW', true);
+    b.run(fps, 5);
+    b.key('KeyW', false);
+    ok(b.harms.length === 0 && b.grapple.counts.slams === 0, `${fps} fps: pressed against the wall it hangs on for 5 s, the sway held into it: no harm (the hardest contact ${r2(b.grapple.maxImpact)} m/s)`);
+  }
+  // The haul's own push never slams. With the arrival on (as it ships) the haul's steps stop at minFree and nothing after
+  // meets the face fast (test 14); so the rule is proved with the arrival off, where the haul's own 18 m/s, still pointed
+  // at the face, meets it the frame after it ends: with F still held it is the haul's push and costs nothing; let go of
+  // the same frame it ends, the same contact is a slam (the test sees the fault).
+  const haulAt = async (fps: number, arrive: boolean, letGoOnEnd: boolean) => {
+    let wall: unknown = null;
+    const { physics, b } = await scene((p) => {
+      wall = box(p, [-3, -10, -10], [-1.2, 30, 10], true);
+    });
+    GRAPPLE_TUNE.haulArrive = arrive;
+    // In the air, so no ground's friction takes the haul's speed off before it meets the face.
+    b.place(14, 5, 0);
+    physics.stepOnce();
+    // Level with the hand, so the haul runs straight at the face.
+    b.hook(-1.2, b.pos.y + GRAPPLE_TUNE.ropeY, 0, 1, 0, 0, wall as never);
+    b.key('KeyF', true);
+    let measured = 0;
+    let staggered = false;
+    for (let i = 0; i < 3 * fps && b.grapple.attached; i++) {
+      b.frame(1 / fps);
+      // The haul's last step has brought the hand to the shortest: F let go before the next frame reads it.
+      if (letGoOnEnd && b.grapple.hauling && handToPivot(b) <= GRAPPLE_TUNE.minFree + 0.01) b.key('KeyF', false);
+      measured = Math.max(measured, b.grapple.lastImpact);
+      if (b.grapple.staggered) staggered = true;
+    }
+    b.key('KeyF', false);
+    return { b, measured, staggered, slam: { ...b.grapple.lastSlam } };
+  };
+  for (const fps of FPS) {
+    const held = await haulAt(fps, false, false);
+    ok(held.measured > GRAPPLE_TUNE.slamFrom && held.slam.kind === 'haul' && held.b.harms.length === 0 && !held.staggered, `${fps} fps: arrival off, F held: the haul's own speed meets the face at ${r2(held.measured)} m/s, measured as the haul's (${held.slam.kind}) and costing nothing, no stagger`);
+    const loose = await haulAt(fps, false, true);
+    ok(loose.b.harms.length === 1 && loose.slam.kind === 'swing', `${fps} fps: let go of F as the haul's last step lands, the same contact (${r2(loose.slam.speed)} m/s) is a slam of ${loose.b.harms[0]?.amount ?? 0}: the test sees the fault`);
+    const ships = await haulAt(fps, true, false);
+    ok(ships.b.harms.length === 0 && ships.measured <= 5, `${fps} fps: as it ships, the haul arrives at rest and the face is met at ${r2(ships.measured)} m/s, nothing`);
+  }
+  // A floor is not a wall: a let-go at 25 m/s straight down onto flat ground costs only its fall harm.
+  for (const fps of FPS) {
+    const drop = async (rope: boolean) => {
+      let top: unknown = null;
+      const { physics, b } = await scene((p) => {
+        ground(p, 0);
+        top = box(p, [-0.5, 60, -0.5], [0.5, 61, 0.5], false);
+      });
+      b.jka.forceLevel = 0;
+      b.place(0, 10, 0);
+      physics.stepOnce();
+      if (rope) b.hook(0, 60, 0, 0, -1, 0, top as never, 100);
+      b.vel.set(0, -25, 0);
+      if (rope) b.grapple.letGo('fire');
+      const released = b.grapple.released;
+      let landed = -1;
+      for (let i = 0; i < 3 * fps && landed < 3; i++) {
+        b.frame(1 / fps);
+        if (b.grounded) landed++;
+      }
+      return { b, released };
+    };
+    const r = await drop(true);
+    const plain = await drop(false);
+    // The landing is measured as a floor's where the controller reports the contact (at 144 fps its snap lands the body
+    // with none to report); either way it is never a slam.
+    const kind = r.b.grapple.lastSlam.kind;
+    ok(r.released && r.b.harms.length === 0 && r.b.grapple.counts.slams === 0 && (kind === 'floor' || kind === '') && r.b.fallDamage === plain.b.fallDamage && r.b.fallDamage > 0, `${fps} fps: let go at 25 m/s down onto flat ground (in the fast flight), it lands ${kind === 'floor' ? `at ${r2(r.b.grapple.lastSlam.speed)} m/s on a floor` : 'with no contact to measure'}: nothing from the slam, ${r.b.fallDamage} from the fall as a plain fall costs ${plain.b.fallDamage}`);
+  }
+  // The fast flight after a let-go: a body let go of at 30 m/s 2 m short of a wall still strikes it and pays.
+  const flight = async (fps: number, vx: number, vy: number, attachedAtHit = false) => {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      beam = box(p, [49.5, 20, -0.5], [50.5, 21, 0.5], false);
+      box(p, [-3, -10, -10], [-1.2, 30, 10], false);
+    });
+    b.place(-1.2 + 0.35 + 2, 5, 0);
+    physics.stepOnce();
+    b.hook(50, 20, 0, -1, 0, 0, beam as never, 100);
+    b.vel.set(vx, vy, 0);
+    if (!attachedAtHit) b.grapple.letGo('fire');
+    return { physics, b };
+  };
+  for (const fps of FPS) {
+    const { b } = await flight(fps, -30, 0);
+    const released = b.grapple.released;
+    let staggered = false;
+    b.run(fps, 0.4, () => {
+      if (b.grapple.staggered) staggered = true;
+    });
+    const s = b.grapple.lastSlam;
+    ok(released && b.harms.length === 1 && s.kind === 'released' && b.harms[0].amount === slamHarm(s.speed, 100, GRAPPLE_TUNE) && staggered, `${fps} fps: let go at 30 m/s 2 m short of a wall, the flight strikes it at ${r2(s.speed)} m/s for ${b.harms[0]?.amount ?? 0} and staggers`);
+    // Let go at 10 m/s: never released, and nothing of the hook runs on the frames after.
+    const slow = await flight(fps, -10, 0);
+    const sb = slow.b;
+    let clips = 0;
+    let syncs = 0;
+    const clip = sb.grapple.clip.bind(sb.grapple);
+    const sync = sb.grapple.syncCollider.bind(sb.grapple);
+    sb.grapple.clip = (x) => {
+      clips++;
+      clip(x);
+    };
+    sb.grapple.syncCollider = (x) => {
+      syncs++;
+      sync(x);
+    };
+    sb.run(fps, 0.5);
+    ok(!sb.grapple.released && clips === 0 && syncs === 0 && sb.harms.length === 0, `${fps} fps: let go at 10 m/s, the flight is never released and neither the clip nor the sync runs on the frames after (${clips}, ${syncs})`);
+    // Let go rising at 20 m/s in open air: released, and ended once gravity has it under slamFrom.
+    const up = await flight(fps, 0, 20);
+    let endedAt = -1;
+    let speedThen = 0;
+    up.b.run(fps, 1, (t) => {
+      if (endedAt < 0 && !up.b.grapple.released) {
+        endedAt = t;
+        speedThen = up.b.vel.length();
+      }
+    });
+    ok(endedAt > 0 && speedThen <= GRAPPLE_TUNE.slamFrom + 1e-9 && speedThen > GRAPPLE_TUNE.slamFrom - (G + 1) / fps, `${fps} fps: let go rising at 20 m/s, the flight ends ${r3(endedAt)} s on, at ${r2(speedThen)} m/s, the first frame under slamFrom`);
+  }
+  // slamKill: driven into a wall at 55 m/s on the rope, the whole of the health goes, and last stand leaves one point.
+  for (const fps of FPS) {
+    for (const stand of [false, true]) {
+      const { b } = await flight(fps, -55, 0, true);
+      b.lastStand = stand;
+      b.run(fps, 0.2);
+      const s = b.grapple.lastSlam;
+      ok(s.speed >= GRAPPLE_TUNE.slamKill && b.harms.length === 1 && b.harms[0].amount === 100 && b.hp === (stand ? 1 : 0), `${fps} fps: into a wall at ${r2(s.speed)} m/s on the rope${stand ? ' under last stand' : ''}: ${b.harms[0]?.amount} harm, ${b.hp} left`);
+    }
+  }
+  // A slam hurts at most once in slamGap. Let go at 30 m/s across a corner, the flight strikes one wall and, a tenth of a
+  // second on, the other, both past slamFrom: only the first costs. With the gap at nought the same run costs twice (the
+  // test sees the fault).
+  const corner = async (fps: number, slamGap = GRAPPLE_DEFAULTS.slamGap) => {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      beam = box(p, [49.5, 20, 49.5], [50.5, 21, 50.5], false);
+      // Two walls meeting at (-1.2, -1.2): one facing +x, one facing +z.
+      box(p, [-3, -10, -10], [-1.2, 30, 10], false);
+      box(p, [-10, -10, -3], [10, 30, -1.2], false);
+    });
+    GRAPPLE_TUNE.slamGap = slamGap;
+    // Half a metre from the first wall and three from the second.
+    b.place(-1.2 + 0.35 + 0.5, 5, -1.2 + 0.35 + 3);
+    physics.stepOnce();
+    b.hook(50, 20, 50, 0, -1, 0, beam as never, 100);
+    const v = 30 / Math.SQRT2;
+    b.vel.set(-v, 0, -v);
+    b.grapple.letGo('fire');
+    // Every contact the clip measured past slamFrom, read on the frames the clip ran (once the flight ends it runs no more,
+    // and its last measure stands).
+    const hits: number[] = [];
+    const released = b.grapple.released;
+    let t = 0;
+    const clip = b.grapple.clip.bind(b.grapple);
+    b.grapple.clip = (x) => {
+      clip(x);
+      if (b.grapple.lastImpact > GRAPPLE_TUNE.slamFrom) hits.push(t);
+    };
+    for (let i = 0; i < Math.round(0.6 * fps); i++) {
+      t = (i + 1) / fps;
+      b.frame(1 / fps);
+    }
+    return { b, hits, released };
+  };
+  for (const fps of FPS) {
+    const c = await corner(fps);
+    const gap = c.hits.length >= 2 ? c.hits[1] - c.hits[0] : -1;
+    ok(c.released && c.hits.length === 2 && gap > 0 && gap < GRAPPLE_TUNE.slamGap && c.b.harms.length === 1 && c.b.grapple.counts.slams === 1 && c.b.harms[0].amount === slamHarm(c.b.grapple.lastSlam.speed, 100, GRAPPLE_TUNE), `${fps} fps: across a corner the flight strikes two walls past slamFrom ${r3(gap)} s apart (inside slamGap ${GRAPPLE_TUNE.slamGap}): one harm of ${c.b.harms[0]?.amount ?? 0}, not two`);
+    const open = await corner(fps, 0);
+    fresh();
+    ok(open.hits.length === 2 && open.b.harms.length === 2, `${fps} fps: with the gap at nought the same flight costs ${open.b.harms.length} harms (the test sees the fault)`);
+  }
+  // The gap's clock runs whatever else of the hook is still: a slam from the console on a body with nothing out and too
+  // slow to stagger, then another inside the gap (nothing) and another after it (it costs). The gap's clock is the hook's
+  // `look`, which runs while the gap does; before, nothing else being lively, the gap stood shut for good.
+  for (const fps of FPS) {
+    const { physics, b } = await scene((p) => ground(p, 0));
+    b.place(0, 0.02, 0);
+    physics.stepOnce();
+    b.run(fps, 0.2);
+    const first = b.grapple.slamAt(b, 20, 'console', 0, 1, -1);
+    const staggeredByFirst = b.grapple.staggered;
+    const inGap = b.grapple.slamAt(b, 25, 'console', 0, 1, -1);
+    const livelyInGap = b.grapple.lively;
+    let livelyAfter = true;
+    b.run(fps, 0.5, () => {
+      livelyAfter = b.grapple.lively;
+    });
+    const after = b.grapple.slamAt(b, 25, 'console', 0, 1, -1);
+    ok(first === slamHarm(20, 100, GRAPPLE_TUNE) && first > 0 && !staggeredByFirst && inGap === 0 && livelyInGap && !livelyAfter, `${fps} fps: with nothing out, a slam at 20 m/s costs ${first} and no stagger, another inside the gap nothing, and once the gap has run nothing of the hook is left to step`);
+    ok(after === slamHarm(25, 100, GRAPPLE_TUNE) && after > 0 && b.harms.length === 2, `${fps} fps: and a slam at 25 m/s after the gap costs ${after} again`);
+  }
+  fresh();
+});
+
+// =============================================================================================================
+await section(31, 'the stagger', async () => {
+  for (const fps of FPS) {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      beam = box(p, [-0.5, 30, -0.5], [0.5, 31, 0.5], false);
+    });
+    b.place(4, 30 - 0.05 - 10 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 30, 0, 0, -1, 0, beam as never, 12);
+    b.run(fps, 0.5);
+    b.grapple.staggerNow();
+    const len0 = b.grapple.rope.length;
+    b.key('ShiftLeft', true);
+    let reeledWhileStaggered = false;
+    let staggerFrames = 0;
+    let dazePeak = 0;
+    let shakeFirst = -1;
+    for (let i = 0; i < Math.round(0.45 * fps); i++) {
+      b.frame(1 / fps);
+      if (b.grapple.staggered) {
+        staggerFrames++;
+        if (b.grapple.keys.reelIn) reeledWhileStaggered = true;
+      }
+      dazePeak = Math.max(dazePeak, b.grapple.dazeNow);
+      if (shakeFirst < 0) shakeFirst = b.grapple.shakeNow;
+    }
+    const lenStaggered = b.grapple.rope.length;
+    b.run(fps, 0.3);
+    b.key('ShiftLeft', false);
+    ok(!reeledWhileStaggered && Math.abs(lenStaggered - len0) < 1e-9 && b.grapple.rope.length < len0 - 0.5, `${fps} fps: while it staggers (${staggerFrames} frames) the reel is refused, and after it the held reel winds in (${r2(len0 - b.grapple.rope.length)} m)`);
+    ok(Math.abs(dazePeak - GRAPPLE_TUNE.daze) < 0.05 && shakeFirst > 0 && shakeFirst <= GRAPPLE_TUNE.shake && b.harms.length === 0, `${fps} fps: the daze peaks at ${r3(dazePeak)} (the tune's ${GRAPPLE_TUNE.daze}), the shake starts at ${r3(shakeFirst)}, and the console's stagger costs nothing`);
+    ok(b.grapple.dazeNow === 0 && b.grapple.shakeNow === 0 && !b.grapple.staggered, `${fps} fps: and both are nought once it has run out`);
+    // Space during a stagger boosts nothing; after it, it boosts and lets go.
+    b.grapple.staggerNow();
+    tap(b, 'Space', 1 / fps);
+    const heldThrough = b.grapple.attached;
+    b.run(fps, 0.6);
+    tap(b, 'Space', 1 / fps);
+    ok(heldThrough && b.grapple.state === 'off' && b.grapple.lastLetGo === 'boost', `${fps} fps: Space while staggered is no boost (still on the rope), and after the stagger it boosts off (${b.grapple.lastLetGo})`);
+  }
+  // The sway and the haul are refused while it staggers too. Hanging still under a beam, W held through a stagger pushes
+  // nothing across the rope and F hauls nothing; once it has run out, the same keys sway and haul.
+  for (const fps of FPS) {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      beam = box(p, [-0.5, 30, -0.5], [0.5, 31, 0.5], false);
+    });
+    b.forward.set(1, 0, 0);
+    b.right.set(0, 0, 1);
+    b.place(0, 30 - 0.05 - 12 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 30, 0, 0, -1, 0, beam as never, 12);
+    b.run(fps, 0.5);
+    const dt = 1 / fps;
+    // The sway: the speed along W's way.
+    b.grapple.staggerNow();
+    b.key('KeyW', true);
+    let swayStaggered = 0;
+    while (b.grapple.staggered) {
+      b.frame(dt);
+      swayStaggered = Math.max(swayStaggered, Math.abs(b.vel.x));
+    }
+    b.run(fps, 0.3);
+    const swayAfter = Math.abs(b.vel.x);
+    b.key('KeyW', false);
+    ok(b.grapple.modes.swinging && swayStaggered < 0.05 && swayAfter > 1, `${fps} fps: W held while it staggers pushes nothing across the rope (${r3(swayStaggered)} m/s), and after it sways the body (${r2(swayAfter)} m/s)`);
+    // The haul: F held through a stagger hauls nothing and takes no rope in; after it, it hauls.
+    b.grapple.letGo('console');
+    b.place(0, 30 - 0.05 - 12 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 30, 0, 0, -1, 0, beam as never, 12);
+    b.run(fps, 0.5);
+    b.grapple.staggerNow();
+    const len0 = b.grapple.rope.length;
+    b.key('KeyF', true);
+    let hauledStaggered = false;
+    while (b.grapple.staggered) {
+      b.frame(dt);
+      if (b.grapple.hauling || b.grapple.keys.haul) hauledStaggered = true;
+    }
+    const lenStaggered = b.grapple.rope.length;
+    let hauledAfter = false;
+    b.run(fps, 0.3, () => {
+      if (b.grapple.hauling) hauledAfter = true;
+    });
+    b.key('KeyF', false);
+    ok(!hauledStaggered && Math.abs(lenStaggered - len0) < 1e-9 && hauledAfter && b.grapple.rope.length < len0 - 2, `${fps} fps: F held while it staggers hauls nothing (the rope stays ${r2(lenStaggered)} m), and after it hauls (${r2(b.grapple.rope.length)} m)`);
+  }
+});
+
+// =============================================================================================================
+await section(32, 'the ratchet and the sounds', async () => {
+  const prepared: string[] = [];
+  const played: { id: string; pitch: number; loop: boolean; key: number }[] = [];
+  const stopped: { key: number; fade: number | undefined }[] = [];
+  let nextKey = 1;
+  const host = {
+    bank: { available: true, template: (_id: string) => ({ category: 7, priority: 3, full: 12 }), offer: () => {} },
+    play: (id: string, o?: { pitch?: number }) => {
+      played.push({ id, pitch: o?.pitch ?? 0, loop: false, key: nextKey });
+      return nextKey++;
+    },
+    loop: (id: string) => {
+      played.push({ id, pitch: 0, loop: true, key: nextKey });
+      return nextKey++;
+    },
+    stop: (key: number, fade?: number) => void stopped.push({ key, fade }),
+    setGain: () => {},
+    isPlaying: () => true,
+    prepare: (ids: Iterable<string>) => void prepared.push(...ids),
+  };
+  const space = { building: -1, cell: -1 };
+  const at = new THREE.Vector3();
+  for (const fps of FPS) {
+    played.length = 0;
+    stopped.length = 0;
+    prepared.length = 0;
+    const sounds = new GrappleSounds();
+    sounds.attach(host, null);
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      ground(p, 0);
+      box(p, [-101, 0, -20], [-99, 40, 20], true);
+      beam = box(p, [-0.5, 30, -0.5], [0.5, 31, 0.5], false);
+    });
+    const step = () => sounds.step(b.grapple, b.hand(at), b.vel, space, true);
+    b.place(0, 0.02, 0);
+    physics.stepOnce();
+    b.run(fps, 0.3, step);
+    // A dart flown 100 m to a wall: the fire's clank and the bite's clicks, and no ratchet at all on the way.
+    b.fireAt = { x: -99, y: 1.32, z: 0 };
+    b.key('Mouse3', true);
+    b.frame(1 / fps);
+    step();
+    b.key('Mouse3', false);
+    let flew = 0;
+    while (b.grapple.flying && flew < 2 * fps) {
+      b.frame(1 / fps);
+      step();
+      flew++;
+    }
+    ok(b.grapple.attached && flew / fps > 0.5 && b.grapple.counts.ratchets === 0, `${fps} fps: a 100 m dart flight (${r2(flew / fps)} s) asks for no ratchet`);
+    ok(played.filter((p) => p.id === GRAPPLE_SOUND.fire).length === 1 && played.filter((p) => p.id === GRAPPLE_SOUND.bite).length === 1, `${fps} fps: one clank as it fired and one bite as it held`);
+    ok(GRAPPLE_SOUND_IDS.every((id) => prepared.includes(id) || id === GRAPPLE_SOUND.boost), `${fps} fps: every one of the hook's sounds was asked for before it was needed`);
+    b.grapple.letGo('console');
+    // Hanging under a beam: two seconds of held reel at the base 6 m/s.
+    b.place(2, 30 - 0.05 - 12 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 30, 0, 0, -1, 0, beam as never, 12.5);
+    b.run(fps, 0.3, step);
+    const r0 = b.grapple.counts.ratchets;
+    const plays0 = played.filter((p) => p.id === GRAPPLE_SOUND.ratchet).length;
+    b.key('ShiftLeft', true);
+    b.run(fps, 2, step);
+    b.key('ShiftLeft', false);
+    const reeled = b.grapple.counts.ratchets - r0;
+    const ratchetPlays = played.filter((p) => p.id === GRAPPLE_SOUND.ratchet);
+    ok(reeled > 0 && reeled <= 2 * GRAPPLE_TUNE.tickMax && ratchetPlays.length - plays0 === reeled && ratchetPlays.every((p) => p.pitch === GRAPPLE_TUNE.reelPitch), `${fps} fps: a 2 s held reel at 6 m/s asks for ${reeled} ratchets (at most ${2 * GRAPPLE_TUNE.tickMax}), each played once, pitched up ${GRAPPLE_TUNE.reelPitch}`);
+    // Two seconds of haul: its rumble, once, and no ratchet; let go of F, the rumble fades. The reel above wound the rope
+    // to its shortest, where F has nothing to haul, so it is hooked again on 12.5 m first, and the haul is seen to run.
+    b.grapple.letGo('console');
+    b.place(2, 30 - 0.05 - 12 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 30, 0, 0, -1, 0, beam as never, 12.5);
+    b.run(fps, 0.3, step);
+    const r1 = b.grapple.counts.ratchets;
+    const lenBefore = b.grapple.rope.length;
+    let hauledFrames = 0;
+    b.key('KeyF', true);
+    b.run(fps, 2, () => {
+      step();
+      if (b.grapple.hauling) hauledFrames++;
+    });
+    b.key('KeyF', false);
+    b.run(fps, 0.1, step);
+    const loops = played.filter((p) => p.id === GRAPPLE_SOUND.haul && p.loop);
+    ok(hauledFrames > 0.2 * fps && b.grapple.rope.length < lenBefore - 5, `${fps} fps: F hauls for ${r2(hauledFrames / fps)} s, the rope taken in from ${r2(lenBefore)} m to ${r2(b.grapple.rope.length)} m`);
+    ok(b.grapple.counts.ratchets === r1 && loops.length === 1 && stopped.some((s) => s.key === loops[0].key && s.fade === GRAPPLE_TUNE.haulFade), `${fps} fps: and that haul asks for no ratchet; its rumble is looped once and faded over ${GRAPPLE_TUNE.haulFade} s as F is let go`);
+    ok(played.every((p) => p.id !== GRAPPLE_SOUND.wind), `${fps} fps: and the speed wind ships off`);
+  }
+  // The hook's own cap, which the base reel never reaches (6 m/s asks for exactly tickMax a second by distance alone): the
+  // reel raised to 30 m/s winds in 60 ratchets' worth a second and asks for no more than tickMax in any second of the
+  // hook's own clock. With the cap off (tickMax 1000) the same reel asks for far more (the test sees the fault). And a
+  // fast reel banks nothing: slowed to 1 m/s it asks for what 1 m/s winds in, not what the fast reel wound in past the cap.
+  const reelRun = async (fps: number, tickMax: number) => {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      ground(p, 0);
+      beam = box(p, [-0.5, 30, -0.5], [0.5, 31, 0.5], false);
+    });
+    tuneGrapple({ reel: 30, tickMax });
+    b.place(0, 0.02, 0);
+    physics.stepOnce();
+    b.run(fps, 0.2);
+    // A hundred metres of rope over a 29 m drop: slack the whole time, so the reel winds and nothing lifts.
+    b.hook(0, 30, 0, 0, -1, 0, beam as never, 100);
+    const at: number[] = [];
+    let seen = b.grapple.counts.ratchets;
+    const each = () => {
+      for (; seen < b.grapple.counts.ratchets; seen++) at.push(b.grapple.clock);
+    };
+    b.key('ShiftLeft', true);
+    b.run(fps, 2, each);
+    const fast = at.length;
+    let most = 0;
+    for (let k = 0; k < at.length; k++) {
+      let n = 0;
+      for (let j = k; j < at.length && at[j] - at[k] < 1 - 1e-9; j++) n++;
+      most = Math.max(most, n);
+    }
+    // Slowed to 1 m/s, the held reel goes on: what it asks for now is its own.
+    tuneGrapple({ reel: 1 });
+    const before = at.length;
+    const lenSlow = b.grapple.rope.length;
+    b.run(fps, 2, each);
+    b.key('ShiftLeft', false);
+    const slow = at.length - before;
+    const reeledSlow = lenSlow - b.grapple.rope.length;
+    return { fast, most, slow, reeledSlow, len: b.grapple.rope.length };
+  };
+  for (const fps of FPS) {
+    const capped = await reelRun(fps, GRAPPLE_DEFAULTS.tickMax);
+    // What the cap lets through at this frame rate: a ratchet every whole number of frames no shorter than a tickMax-th.
+    const most = Math.floor(fps / Math.ceil(fps / GRAPPLE_DEFAULTS.tickMax - 1e-9));
+    ok(capped.most <= GRAPPLE_DEFAULTS.tickMax && capped.most >= most && capped.fast <= 2 * GRAPPLE_DEFAULTS.tickMax + 1, `${fps} fps: the held reel at 30 m/s asks for ${capped.fast} ratchets in 2 s, at most ${capped.most} in any second of the hook's clock (the cap ${GRAPPLE_DEFAULTS.tickMax} binding)`);
+    const byDistance = Math.floor(capped.reeledSlow / GRAPPLE_DEFAULTS.tickEvery);
+    ok(capped.reeledSlow > 1.5 && capped.slow <= byDistance + 1, `${fps} fps: slowed to 1 m/s it winds in ${r2(capped.reeledSlow)} m and asks for ${capped.slow} ratchets (that distance's ${byDistance}, one more at most): nothing banked from the fast reel`);
+    const open = await reelRun(fps, 1000);
+    ok(open.most > 2 * GRAPPLE_DEFAULTS.tickMax, `${fps} fps: with the cap lifted the same reel asks for ${open.most} in a second (the test sees the fault)`);
+  }
+  fresh();
+});
+
+// =============================================================================================================
+await section(33, "the camera's pull and the jolt", async () => {
+  for (const fps of FPS) {
+    let top: unknown = null;
+    const { physics, b } = await scene((p) => {
+      ground(p, 0);
+      top = box(p, [-0.5, 40, -0.5], [0.5, 41, 0.5], false);
+    });
+    const L = 30;
+    b.place(L, 39.95 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 40, 0, 0, -1, 0, top as never, L);
+    let atBottom = 0;
+    let let_ = false;
+    let landedAt = -1;
+    let backAt = -1;
+    const dt = 1 / fps;
+    for (let i = 0; i < 8 * fps; i++) {
+      const x0 = b.pos.x;
+      b.frame(dt);
+      const t = (i + 1) * dt;
+      if (!let_ && x0 > 0 && b.pos.x <= 0) {
+        atBottom = b.grapple.camScaleNow;
+        let_ = true;
+        b.grapple.letGo('fire');
+      }
+      if (let_ && landedAt < 0 && b.grounded) landedAt = t;
+      if (landedAt >= 0 && backAt < 0 && Object.is(b.grapple.camScaleNow, 1)) backAt = t;
+    }
+    ok(atBottom > 1.2, `${fps} fps: at the bottom of a 30 m swing from level the camera's scale is ${r3(atBottom)} (above 1.2)`);
+    ok(landedAt > 0 && backAt > 0 && backAt - landedAt <= GRAPPLE_TUNE.camBack + dt && !b.grapple.lively, `${fps} fps: let go there, it is back to exactly 1 ${r2(backAt - landedAt)} s after the feet find ground (within ${GRAPPLE_TUNE.camBack} s), and nothing of the hook is left to step`);
+  }
+  // The catch: a slack rope going taut after 10 m of fall jolts the view a moment, by the design's rule.
+  for (const fps of FPS) {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      beam = box(p, [-0.5, 40, -0.5], [0.5, 41, 0.5], false);
+    });
+    b.place(0, 40 - 0.05 - 2 - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 40, 0, 0, -1, 0, beam as never, 12);
+    let jolt = 0;
+    let caught = 0;
+    let lastJoltFrame = -1;
+    for (let i = 0; i < 3 * fps; i++) {
+      b.frame(1 / fps);
+      if (b.grapple.joltNow > jolt) {
+        jolt = b.grapple.joltNow;
+        caught = b.grapple.lastCatch;
+      }
+      if (b.grapple.joltLeft > 0) lastJoltFrame = i;
+    }
+    ok(caught > 15 && Math.abs(jolt - joltFor(caught, GRAPPLE_TUNE)) < 1e-12 && jolt > 0.1 && jolt <= GRAPPLE_TUNE.joltMax, `${fps} fps: caught after 10 m of slack at ${r2(caught)} m/s, the view jolts by ${r3(jolt)} (joltFor of the catch)`);
+    ok(lastJoltFrame >= 0 && b.grapple.joltLeft === 0 && b.grapple.joltNow === 0 && b.harms.length === 0, `${fps} fps: for ${GRAPPLE_TUNE.joltTime} s and then nothing, and the catch costs nothing`);
+  }
+});
+
+// =============================================================================================================
+await section(34, 'the lean and the arm', async () => {
+  for (const fps of FPS) {
+    let top: unknown = null;
+    const { physics, b } = await scene((p) => {
+      top = box(p, [-0.5, 40, -0.5], [0.5, 41, 0.5], false);
+    });
+    const L = 20;
+    const th = Math.PI / 3;
+    b.place(L * Math.sin(th), 39.95 - L * Math.cos(th) - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 40, 0, 0, -1, 0, top as never, L);
+    const dt = 1 / fps;
+    const rate = leanRate(GRAPPLE_TUNE) * dt;
+    const level = (GRAPPLE_TUNE.leanLevel * Math.PI) / 180;
+    let worstStep = 0;
+    let worstGap = 0;
+    let prev = 0;
+    // The whole turn goes out on every frame the lean is past level (a frame it did not would have a receiver stand the
+    // figure up), counted both ways round the let-go.
+    let unsent = 0;
+    let leaningFrames = 0;
+    // The arm comes up over armIn, never in one frame.
+    let armUp = -1;
+    for (let i = 0; i < 2 * fps; i++) {
+      b.frame(dt);
+      const a = b.grapple.leanAngle;
+      worstStep = Math.max(worstStep, Math.abs(a - prev));
+      prev = a;
+      if (a > level) {
+        leaningFrames++;
+        if (!b.grapple.leanSends) unsent++;
+      }
+      if (armUp < 0 && b.grapple.armWeight === 1) armUp = i + 1;
+      if (i > 0.5 * fps) {
+        // Settled, the lean is the tilt's share of the rope's own angle from upright.
+        const piv = b.pivot();
+        const ropeAngle = Math.acos((piv.y - (b.pos.y + GRAPPLE_TUNE.ropeY)) / Math.hypot(piv.x - b.pos.x, piv.y - (b.pos.y + GRAPPLE_TUNE.ropeY), piv.z - b.pos.z));
+        worstGap = Math.max(worstGap, Math.abs(a - GRAPPLE_TUNE.tilt * Math.min(ropeAngle, Math.PI / 2)));
+      }
+    }
+    ok(worstStep <= rate + 1e-9 && worstGap < 0.06 && b.grapple.armWeight === 1, `${fps} fps: swinging from 60 degrees the body leans the tilt's share of the rope's angle (within ${r3((worstGap * 180) / Math.PI)} degrees as it swings), never moving more than the lean's rate in a frame, the arm all the way up`);
+    ok(armUp > 1 && Math.abs(armUp * dt - GRAPPLE_TUNE.armIn) <= dt + 1e-9, `${fps} fps: the arm came up the rope over ${r3(armUp * dt)} s as the hook went out (armIn ${GRAPPLE_TUNE.armIn}), never in one frame`);
+    // Let go: upright within leanOut, never in one frame; the whole turn goes on going out until the lean has been level
+    // for leanTail, and then stops.
+    const before = b.grapple.leanAngle;
+    b.grapple.letGo('fire');
+    let frames = 0;
+    let levelAt = -1;
+    let sendsEnd = -1;
+    let sentAfterEnd = false;
+    prev = before;
+    let biggest = 0;
+    let upright = -1;
+    let armDown = -1;
+    while ((upright < 0 || armDown < 0 || sendsEnd < 0 || frames < (sendsEnd + 0.2 * fps)) && frames < 10 * fps) {
+      b.frame(dt);
+      frames++;
+      const a = b.grapple.leanAngle;
+      biggest = Math.max(biggest, prev - a);
+      prev = a;
+      if (a > level) {
+        leaningFrames++;
+        if (!b.grapple.leanSends) unsent++;
+      } else if (levelAt < 0) levelAt = frames;
+      if (levelAt > 0 && sendsEnd < 0 && !b.grapple.leanSends) sendsEnd = frames;
+      if (sendsEnd > 0 && b.grapple.leanSends) sentAfterEnd = true;
+      if (upright < 0 && a === 0) upright = frames;
+      if (armDown < 0 && b.grapple.armWeight === 0) armDown = frames;
+    }
+    ok(before > level && upright > 1 && upright * dt <= GRAPPLE_TUNE.leanOut + dt && biggest <= rate + 1e-9, `${fps} fps: let go leaning ${r2((before * 180) / Math.PI)} degrees, it is upright in ${r3(upright * dt)} s (within leanOut ${GRAPPLE_TUNE.leanOut}), never in one frame`);
+    ok(leaningFrames > fps && unsent === 0, `${fps} fps: its whole turn goes out on every one of the ${leaningFrames} frames it leans past leanLevel, swinging and easing upright`);
+    const tail = (sendsEnd - levelAt) * dt;
+    ok(levelAt > 0 && sendsEnd > levelAt && Math.abs(tail - GRAPPLE_TUNE.leanTail) <= dt + 1e-9 && !sentAfterEnd, `${fps} fps: and for ${r3(tail)} s after it is level (leanTail ${GRAPPLE_TUNE.leanTail}), so the last turn a receiver hears is upright; then it stops`);
+    ok(armDown > 1 && Math.abs(armDown * dt - GRAPPLE_TUNE.armOut) <= dt + 1e-9, `${fps} fps: the arm comes down over ${r3(armDown * dt)} s (armOut ${GRAPPLE_TUNE.armOut})`);
+  }
+  // Afloat the body eases upright, the rope still in.
+  for (const fps of FPS) {
+    let top: unknown = null;
+    const { physics, b } = await scene((p) => {
+      top = box(p, [-0.5, 30, -0.5], [0.5, 31, 0.5], false);
+    });
+    b.surface = () => 10;
+    b.place(8, 8.6, 0);
+    physics.stepOnce();
+    b.hook(0, 30, 0, 0, -1, 0, top as never, 40);
+    b.grapple.lean.x = 0;
+    b.grapple.lean.z = -Math.sin(0.3);
+    b.grapple.lean.w = Math.cos(0.3);
+    b.grapple.leanAngle = 0.6;
+    b.run(fps, 1);
+    ok(b.swimming && b.grapple.modes.afloat && b.grapple.attached && b.grapple.leanAngle === 0 && b.grapple.armWeight === 1, `${fps} fps: afloat on the rope the body eases upright (${r3(b.grapple.leanAngle)}) and the arm stays up it`);
+  }
+});
+
+// =============================================================================================================
+await section(35, 'nothing of wave 2 for a body that never fires', async () => {
+  for (const fps of FPS) {
+    const { physics, b } = await scene((p) => {
+      ground(p, 0);
+      box(p, [10, 0, -5], [20, 8, 5]);
+    });
+    b.place(0, 0.05, 0);
+    physics.stepOnce();
+    let lively = 0;
+    let worst = 0;
+    const dt = 1 / fps;
+    for (let i = 0; i < 4 * fps; i++) {
+      b.key('KeyW', i < 3 * fps);
+      b.key('Space', i % fps === 0);
+      b.frame(dt);
+      if (b.grapple.lively) lively++;
+      if (!Object.is(b.grapple.camScaleNow, 1)) worst++;
+    }
+    b.key('KeyW', false);
+    b.key('Space', false);
+    ok(lively === 0 && worst === 0 && !b.grapple.released && b.grapple.leanAngle === 0 && b.grapple.armWeight === 0 && b.grapple.counts.slams === 0 && b.harms.length === 0, `${fps} fps: walking and jumping with the hook never fired, nothing of it is ever lively, the camera's scale is 1 by Object.is, and nothing slams`);
+  }
+});
+
+// =============================================================================================================
+await section(36, 'what ends the fast flight, and what stands it all down', async () => {
+  // Let go at 30 m/s in open air, far from anything: the fast flight runs.
+  const flying = async () => {
+    let beam: unknown = null;
+    const { physics, b } = await scene((p) => {
+      beam = box(p, [49.5, 20, -0.5], [50.5, 21, 0.5], false);
+    });
+    b.place(0, 5, 0);
+    physics.stepOnce();
+    b.hook(50, 20, 0, -1, 0, 0, beam as never, 100);
+    b.vel.set(-30, 0, 0);
+    b.grapple.letGo('fire');
+    return { physics, b, beam };
+  };
+  // A new hook ends it, fired or fastened.
+  {
+    const { physics, b } = await flying();
+    const was = b.grapple.released;
+    const h = b.hand();
+    b.grapple.fire(50, 20.5, 0, h, b.vel, physics, b.filter, b.body, 1, 0, 0);
+    const afterFire = b.grapple.released;
+    const second = await flying();
+    second.b.hook(50, 20, 0, -1, 0, 0, second.beam as never, 100);
+    ok(was && !afterFire && b.grapple.flying && !second.b.grapple.released && second.b.grapple.attached, 'let go at 30 m/s the flight runs; a new fire ends it, and so does a rope fastened at once');
+  }
+  // The water, a roll and a special move end it (each writes the velocity of its own), each read as the clip reads the
+  // body, on a view of the same body: the control, the plain body at the same speed, keeps flying.
+  {
+    const { b } = await flying();
+    b.grapple.clip(b);
+    const plain = b.grapple.released;
+    const view = (over: Record<string, unknown>) => Object.assign(Object.create(b), over);
+    const ended: string[] = [];
+    for (const [what, over] of [
+      ['the water', { swimming: true }],
+      ['a roll', { jka: { holdApex() {}, rolling: true, inSpecialJump: false } }],
+      ['a special move', { jka: { holdApex() {}, rolling: false, inSpecialJump: true } }],
+    ] as const) {
+      b.grapple.released = true;
+      b.grapple.clip(view(over));
+      if (!b.grapple.released) ended.push(what);
+    }
+    ok(plain && ended.length === 3, `at 30 m/s with nothing struck the flight holds; it ends in ${ended.join(', ')}`);
+  }
+  // Every way out that puts the body somewhere new, gives it away or kills it stands everything down at once -- the
+  // flight, the stagger, the lean, its tail on the wire, the arm and the camera's pull -- with a rope out or not; every
+  // other let-go is the body flying on, and leaves them all to ease.
+  const ends = ['reset', 'stand', 'death', 'board', 'leave', 'mount', 'noclip', 'eva', 'travel', 'select', 'lift', 'doorless', 'world', 'moved'] as const;
+  const fliesOn = ['fire', 'boost', 'arrived', 'inside', 'placing', 'loose', 'fouled', 'console'] as const;
+  for (const roped of [false, true]) {
+    const wrong: string[] = [];
+    for (const reason of [...ends, ...fliesOn]) {
+      const { b, beam } = await flying();
+      if (roped) {
+        b.hook(50, 20, 0, -1, 0, 0, beam as never, 100);
+        b.vel.set(-30, 0, 0);
+      }
+      const g = b.grapple;
+      g.released = true;
+      g.staggerNow();
+      g.lean.z = -Math.sin(0.2);
+      g.lean.w = Math.cos(0.2);
+      g.leanAngle = 0.4;
+      g.leanTailLeft = 0.3;
+      g.armWeight = 0.5;
+      g.camScaleNow = 1.2;
+      g.letGo(reason);
+      const calm = !g.released && !g.staggered && g.leanAngle === 0 && !g.leanSends && g.armWeight === 0 && Object.is(g.camScaleNow, 1) && !g.lively;
+      const end = (ends as readonly string[]).includes(reason);
+      if (calm !== end) wrong.push(reason);
+    }
+    ok(wrong.length === 0, `${roped ? 'on the rope' : 'with nothing out'}, ${ends.length} ways out stand everything down at once and ${fliesOn.length} leave it to ease (${wrong.join(', ') || 'none wrong'})`);
+  }
+  fresh();
+});
+
+// =============================================================================================================
+await section(37, 'the lean on the wire', async () => {
+  // A swing let go of, sent as `stepNet` sends it -- at most every 100 ms, the whole turn (rounded to three places) while
+  // `leanSends`, the heading always -- and drawn by two receivers at the same frame rate: this build's glide
+  // (`glidePeerTurn`) and the glide that came before it, written out (a browser built before cannot be changed). This
+  // build's must never jump: every frame's change of tilt is within what a glide toward its target can make, and once
+  // upright it faces the heading. The old one snapped a leaning figure upright the frame `q` stopped, and read a heading
+  // past a quarter turn mirrored: with the tail its snap is under half a degree, and without it (`leanTail` 0, the
+  // sender this build replaced) it is many degrees (the test sees the fault).
+  const { UPRIGHT_EPS, glidePeerTurn, yawOf } = await import('../../../src/net/peerTurn.ts');
+  // The one step a glide does not make: the hand-back to the heading's own glide, from under this tilt to none.
+  const handBack = 2 * Math.asin(Math.sqrt(UPRIGHT_EPS)) + 1e-9;
+  const oldGlide = (obj: InstanceType<typeof THREE.Object3D>, targetQ: InstanceType<typeof THREE.Quaternion> | null, heading: number, k: number) => {
+    if (targetQ) obj.quaternion.slerp(targetQ, k);
+    else {
+      let diff = heading - obj.rotation.y;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      obj.rotation.set(0, obj.rotation.y + diff * k, 0);
+    }
+  };
+  const tiltOf = (q: InstanceType<typeof THREE.Quaternion>) => 2 * Math.asin(Math.min(1, Math.sqrt(q.x * q.x + q.z * q.z)));
+  const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+  const UP = new THREE.Vector3(0, 1, 0);
+  const run = async (fps: number, headingDeg: number, leanTail: number) => {
+    let top: unknown = null;
+    const { physics, b } = await scene((p) => {
+      top = box(p, [-0.5, 40, -0.5], [0.5, 41, 0.5], false);
+    });
+    GRAPPLE_TUNE.leanTail = leanTail;
+    const L = 20;
+    const th = Math.PI / 3;
+    b.place(L * Math.sin(th), 39.95 - L * Math.cos(th) - GRAPPLE_TUNE.ropeY, 0);
+    physics.stepOnce();
+    b.hook(0, 40, 0, 0, -1, 0, top as never, L);
+    const h = (headingDeg * Math.PI) / 180;
+    const yawQ = new THREE.Quaternion().setFromAxisAngle(UP, h);
+    const drawn = new THREE.Quaternion();
+    const sent = new THREE.Quaternion();
+    const upright = new THREE.Quaternion().setFromAxisAngle(UP, h);
+    const now = new THREE.Object3D();
+    const before = new THREE.Object3D();
+    const s = { turned: false };
+    let targetQ: InstanceType<typeof THREE.Quaternion> | null = null;
+    const dt = 1 / fps;
+    const k = 1 - Math.exp(-dt / 0.1);
+    let t = 0;
+    let lastSent = -Infinity;
+    let worstJump = 0;
+    let worstYaw = 0;
+    let oldSnap = 0;
+    let oldYaw = 0;
+    let stoppedAt = -1;
+    let letGoAt = -1;
+    let leanAtLetGo = 0;
+    for (let i = 0; i < Math.round(2.5 * fps); i++) {
+      if (letGoAt < 0 && t >= 0.5) {
+        letGoAt = t;
+        leanAtLetGo = b.grapple.leanAngle;
+        b.grapple.letGo('fire');
+      }
+      b.frame(dt);
+      t += dt;
+      // The figure as placeVisual stands it: the heading, then the lean.
+      const l = b.grapple.lean;
+      drawn.copy(yawQ).premultiply(sent.set(l.x, l.y, l.z, l.w));
+      if (t - lastSent >= 0.1 - 1e-9) {
+        lastSent = t;
+        if (b.grapple.leanSends) {
+          const r = (v: number) => Number(v.toFixed(3));
+          targetQ = (targetQ ?? new THREE.Quaternion()).set(r(drawn.x), r(drawn.y), r(drawn.z), r(drawn.w)).normalize();
+        } else {
+          if (targetQ && stoppedAt < 0) stoppedAt = t;
+          targetQ = null;
+        }
+      }
+      // This build's receiver: never a jump in tilt past what one glide step toward its target makes.
+      const prevNow = now.quaternion.clone();
+      glidePeerTurn(now, targetQ, h, k, s);
+      const aim = targetQ ?? upright;
+      const allowed = k * prevNow.angleTo(aim) + 1e-6;
+      worstJump = Math.max(worstJump, Math.abs(tiltOf(now.quaternion) - tiltOf(prevNow)) - allowed);
+      if (letGoAt >= 0 && tiltOf(now.quaternion) < (1 * Math.PI) / 180) worstYaw = Math.max(worstYaw, Math.abs(wrap(yawOf(now.quaternion) - h)));
+      // The receiver built before.
+      const prevOld = tiltOf(before.quaternion);
+      const hadQ = !!targetQ;
+      oldGlide(before, targetQ, h, k);
+      if (!hadQ && prevOld > 0) oldSnap = Math.max(oldSnap, prevOld - tiltOf(before.quaternion) - k * prevOld);
+      if (letGoAt >= 0 && !hadQ) oldYaw = Math.max(oldYaw, Math.abs(wrap(yawOf(before.quaternion) - h)));
+    }
+    return { worstJump, worstYaw, oldSnap, oldYaw, stoppedAt, letGoAt, leanAtLetGo, turned: s.turned, finalYaw: Math.abs(wrap(yawOf(now.quaternion) - h)), finalTilt: tiltOf(now.quaternion) };
+  };
+  const deg = (r: number) => r2((r * 180) / Math.PI);
+  for (const fps of FPS) {
+    for (const headingDeg of [30, 150]) {
+      const w = await run(fps, headingDeg, GRAPPLE_DEFAULTS.leanTail);
+      ok(w.leanAtLetGo > 0.2 && w.stoppedAt > w.letGoAt && w.worstJump < handBack && !w.turned && w.finalTilt < 1e-3 && w.finalYaw < 1e-3 && w.worstYaw < (1 * Math.PI) / 180, `${fps} fps, facing ${headingDeg}: let go leaning ${deg(w.leanAtLetGo)} degrees, the turn sent until ${r2(w.stoppedAt - w.letGoAt)} s on; this build's receiver never jumps (${r3((Math.max(0, w.worstJump) * 180) / Math.PI)} degrees past a glide's step at most, the hand-back to its heading), faces within ${deg(w.worstYaw)} degrees of the heading once upright, and ends upright on it`);
+      ok(w.oldSnap < (0.5 * Math.PI) / 180, `${fps} fps, facing ${headingDeg}: a receiver built before stands the figure up by ${deg(w.oldSnap)} degrees in one frame when the turn stops (under half a degree, the tail's doing)`);
+      if (headingDeg > 90) ok(w.oldYaw > Math.PI / 3, `${fps} fps, facing ${headingDeg}: and reads that heading mirrored for a moment (${deg(w.oldYaw)} degrees off), which only this build's receiver mends`);
+      const bare = await run(fps, headingDeg, 0);
+      ok(bare.oldSnap > (2 * Math.PI) / 180 && bare.worstJump < handBack, `${fps} fps, facing ${headingDeg}: with no tail the receiver built before snaps ${deg(bare.oldSnap)} degrees upright in one frame (the test sees the fault), and this build's still glides`);
+    }
+  }
   fresh();
 });
 

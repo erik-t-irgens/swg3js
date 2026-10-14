@@ -4,8 +4,8 @@
 import * as THREE from 'three';
 import { FX_PRODUCTS, type FxPassId, type FxProductId, type FxSettings } from '../fxRegistry.ts';
 import type { SkyLighting } from '../../world/sky';
-import { UNSET_BLADES, type FxBladeList } from './bladeList';
-import { createFxLights, type FxLights } from './lights';
+import { UNSET_BLADES, type FxBladeList } from './bladeList.ts';
+import { createFxLights, type FxLights } from './lights.ts';
 import type { FxCloudLayer, FxSkyLight } from './lensFlare';
 import type { RoomAirFrame } from '../../world/roomAir';
 
@@ -45,6 +45,12 @@ export interface FxFrameInput {
   aiming: boolean;
   /** How far the aimed camera has eased in, 0 to 1. */
   aimAmount: number;
+  /**
+   * Added to the vignette's strength this frame: the grapple's daze while a slam staggers the player, nought otherwise.
+   * A frame input and not a setting: it moves only a uniform of a pass the vignette's own switch already has on, and
+   * never turns a pass on.
+   */
+  vignetteKick: number;
   firstPerson: boolean;
   /** Metres from the camera to the orbit's centre (cam.orbitDistance): the shooter's plane while aiming over the shoulder; 0 in first person and in a ship's chase. */
   orbitDistance: number;
@@ -172,6 +178,8 @@ export interface FxFrameContext {
   planetId: string;
   aiming: boolean;
   aimAmount: number;
+  /** Added to the vignette's strength this frame (the grapple's daze); nought by default. */
+  vignetteKick: number;
   firstPerson: boolean;
   /** Metres from the camera to the shooter's plane; 0 in first person and in a chase. */
   orbitDistance: number;
@@ -258,6 +266,7 @@ export function createContext(renderer: THREE.WebGLRenderer, settings: FxSetting
     planetId: '',
     aiming: false,
     aimAmount: 0,
+    vignetteKick: 0,
     firstPerson: false,
     orbitDistance: 0,
     waterInView: false,
@@ -346,6 +355,7 @@ export function updateContext(ctx: FxFrameContext, input: FxFrameInput, size: TH
   ctx.planetId = input.planetId;
   ctx.aiming = input.aiming;
   ctx.aimAmount = input.aimAmount;
+  ctx.vignetteKick = input.vignetteKick;
   ctx.firstPerson = input.firstPerson;
   ctx.orbitDistance = input.orbitDistance;
   ctx.waterInView = input.waterInView;

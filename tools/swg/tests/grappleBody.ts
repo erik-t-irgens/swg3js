@@ -13,6 +13,7 @@ import { Group, PLAYER_SOLVER, Physics, RAPIER, TRIMESH_FLAGS, cleanTrimesh, gro
 import { JkaMovement, type MoveCommand } from '../../../src/player/jkaMove.ts';
 import { GRAPPLE_TUNE, Grapple, newFireState, type GrappleBody, type GrappleFireState, type GrappleMark, type WaterTest } from '../../../src/player/grapple.ts';
 import { newSwimIn, newSwimOut, swimStep, SWIM_DEPTH } from '../../../src/player/swimStep.ts';
+import { newHarm, newHarmAsk, takeHarm, type HarmKind } from '../../../src/player/harmRule.ts';
 
 /** `DIVE_DEPTH` in player.ts: the head is under and looking down dives (the wiring test reads the two equal). */
 export const DIVE_DEPTH_FOR_TESTS = 1.9;
@@ -204,6 +205,19 @@ export class TestBody implements GrappleBody {
   swimToggles = 0;
   jumped = 0;
   specials: string[] = [];
+  // Health, as the player's own harm rule keeps it (`harmRule.ts`'s `takeHarm`, the very glue `Player.takeDamage`
+  // runs past god mode): what the slam takes off, with last stand.
+  hp = 100;
+  lastStand = false;
+  god = false;
+  readonly damageTaken = 1;
+  readonly stats = { rollIframes: 0 };
+  onHarm: ((lost: number, kind: HarmKind) => void) | null = null;
+  onDodge: ((source: unknown) => void) | null = null;
+  /** Every loss the hook asked for, with its kind. */
+  readonly harms: { amount: number; kind: HarmKind }[] = [];
+  private readonly harmAsk = newHarmAsk();
+  private readonly harmAnswer = newHarm();
 
   constructor(physics: Physics) {
     this.physics = physics;
@@ -230,6 +244,13 @@ export class TestBody implements GrappleBody {
 
   get filter(): number {
     return this.inside ? groups(Group.all, Group.all & ~(Group.terrain | Group.exterior)) : groups(Group.all, Group.all);
+  }
+
+  /** A loss of health as the player takes one: god mode first, then the harm rule itself. */
+  takeDamage(amount: number, force: boolean, kind: HarmKind): boolean {
+    if (this.god && !force) return false;
+    this.harms.push({ amount, kind });
+    return takeHarm(this, amount, force, kind, null, this.harmAsk, this.harmAnswer);
   }
 
   /** The game's wall probe for the Jedi's wall moves (`Player.probeWall`). */
@@ -407,7 +428,7 @@ export class TestBody implements GrappleBody {
     let moveX = this.vel.x * dt;
     let moveY = this.vel.y * dt;
     let moveZ = this.vel.z * dt;
-    if (this.hooks && g.attached) {
+    if (this.hooks && (g.attached || g.released)) {
       g.syncCollider(this);
       moveX += g.corr.x;
       moveY += g.corr.y;
@@ -415,7 +436,7 @@ export class TestBody implements GrappleBody {
     }
     this.controller.computeColliderMovement(this.collider, { x: moveX, y: moveY, z: moveZ }, undefined, this.filter, this.walkPast);
     const mv = this.controller.computedMovement();
-    if (this.hooks && g.attached) g.clip(this);
+    if (this.hooks && (g.attached || g.released)) g.clip(this);
     this.pos.x += mv.x;
     this.pos.y += mv.y;
     this.pos.z += mv.z;
@@ -424,6 +445,7 @@ export class TestBody implements GrappleBody {
     if (this.grounded && this.vel.y < 0) this.vel.y = 0;
     if (!wasGrounded && this.grounded && Math.abs(mv.y) < 1e-4 && this.vel.y > 0) this.grounded = false;
     if (this.hooks && g.out) g.afterMove(this, dt);
+    if (this.hooks && g.lively) g.look(this, dt);
     if (g.attached && g.lastImpact > 0.5) this.impacts.push(g.lastImpact);
     this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.pos.y, z: this.pos.z });
     input.endFrame();

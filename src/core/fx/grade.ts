@@ -569,8 +569,9 @@ export class GrainVignettePass extends ShaderFxPass {
   prepare(ctx: FxFrameContext): void {
     const s = ctx.settings;
     const u = this.material.uniforms;
-    // Aiming tightens the vignette a little, as a focus cue, and only while it is on at all.
-    u.uVignette.value = s.vignette ? Math.min(1, s.vignetteStrength + AIM_VIGNETTE * ctx.aimAmount) : 0;
+    // Aiming tightens the vignette a little, as a focus cue, and only while it is on at all; so does the grapple's
+    // daze while a slam staggers the player (`vignetteKick`), which with the vignette off is never drawn.
+    u.uVignette.value = s.vignette ? Math.min(1, s.vignetteStrength + AIM_VIGNETTE * ctx.aimAmount + ctx.vignetteKick) : 0;
     u.uGrain.value = s.filmGrain ? s.filmGrainStrength : 0;
     u.uGrainStep.value = Math.floor(ctx.time * GRAIN_RATE) % 65536;
     u.uFrame.value = ctx.frame % 65536;

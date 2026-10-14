@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Character, type GripAxes } from './character';
+import { aimArmBones } from './armAim.ts';
 import { HeadHider, type HeadStatusRow } from './headHide.ts';
 import { HeadLook } from './lookAt.ts';
 import { MOOD_TUNE } from './moods.ts';
@@ -1246,23 +1247,17 @@ export class CharacterRig {
    * Point an arm along a direction given in the character's local space
    * (+Z forward, +Y up). Call after update() and after world matrices are
    * current, so it overrides the clip pose while respecting the shoulder.
+   * `weight` lays that much of the aim over the clip's pose (the grapple's
+   * left arm eases in and out by it); at 1 it is the aim outright, as it
+   * always was, and at nought the clip's pose is left as it stands.
    */
-  aimArm(side: 'left' | 'right', dir: THREE.Vector3, roll = 0): void {
+  aimArm(side: 'left' | 'right', dir: THREE.Vector3, roll = 0, weight = 1): void {
     const upper = this.boneFor(side === 'right' ? 'rightUpperArm' : 'leftUpperArm');
     const fore = this.boneFor(side === 'right' ? 'rightForeArm' : 'leftForeArm');
     if (!upper || !upper.parent) return;
-    const rest = this.restArm.get(side)!;
-    // The rest axis is known in root space, so the world rest axis is the root's rotation applied to it.
-    this.root.getWorldQuaternion(rootQ);
-    upper.parent.getWorldQuaternion(parentQ);
-    restWorld.copy(rest).applyQuaternion(rootQ);
-    dirWorld.copy(dir).applyQuaternion(rootQ).normalize();
-    alignQ.setFromUnitVectors(restWorld, dirWorld);
-    if (roll !== 0) alignQ.multiply(tmpQ.setFromAxisAngle(dirWorld, roll));
-    // World rotation = align × the bone's bind-pose world rotation, expressed in the parent's frame,
-    // so the bone keeps its authored twist and only the arm direction changes.
-    upper.quaternion.copy(parentQ).invert().multiply(alignQ).multiply(rootQ).multiply(this.bindToRoot.get(upper)!);
-    if (fore) fore.quaternion.copy(this.bindLocal.get(fore)!);
+    const bind = this.bindToRoot.get(upper);
+    if (!bind) return;
+    aimArmBones(this.root, upper, fore, this.restArm.get(side)!, bind, fore ? (this.bindLocal.get(fore) ?? null) : null, dir, roll, weight);
   }
 }
 

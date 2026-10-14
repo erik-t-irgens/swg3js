@@ -7,7 +7,8 @@
 // engine calls are always the engine's, never pays). Here the hook only ever meets the kept answers, so what the
 // young generation grows by over a frame is the hook's own: the sway, both reels, the haul and its lip-over, the
 // drags, the constraint and its correction, the collider sync, the clip and the wall it finds, the carry, the wrap's
-// sweep and fan, the bend made at the lip, the anchor's check, and the mark shown and held. It never touches the
+// sweep and fan, the bend made at the lip, the anchor's check, the mark shown and held, and wave 2's `look` (the
+// clocks, the camera's pull, the lean toward the rope and the arm's weight and way). It never touches the
 // real engine's world, but Rapier is loaded for the kept ray, triangle and contact record the hook makes once.
 //
 // Run: node --expose-gc tools/swg/tests/grappleAllocOwn.ts
@@ -141,7 +142,9 @@ const body: GrappleBody = {
   controller: controller as unknown as RAPIER.KinematicCharacterController,
   colliderOffsetY: 0.8,
   filter: 0x7fff7fff,
-  jka: { holdApex: (_y: number) => {} },
+  jka: { holdApex: (_y: number) => {}, rolling: false, inSpecialJump: false },
+  hp: 100,
+  takeDamage: (_amount: number, _force: boolean, _kind: string) => false,
 };
 const g = new Grapple(RAPIER, physics);
 const DT = 1 / 60;
@@ -196,6 +199,8 @@ const step = (counting: boolean) => {
   g.syncCollider(body);
   g.clip(body);
   g.afterMove(body, DT);
+  // Wave 2's rest of the frame: the clocks, the camera's pull, the lean toward the rope and the arm.
+  g.look(body, DT);
   at.x = pos.x;
   at.y = pos.y + GRAPPLE_TUNE.ropeY;
   at.z = pos.z;

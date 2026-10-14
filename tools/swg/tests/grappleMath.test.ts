@@ -6,23 +6,39 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   GRAPPLE_RELEASE_MUTES,
+  WALKABLE,
   aimTrue,
+  armAimFor,
+  camScaleFor,
   clipInto,
+  dazeAt,
   grappleMutes,
   gravityAddBack,
+  joltFor,
+  leanAngleOf,
+  leanEase,
+  leanOf,
+  leanToward,
   len2,
   len3,
   markShows,
   newRopeModes,
+  ratchetDue,
+  releasedHolds,
   ribbonWidth,
   riseOf,
   ropeModes,
   sagOf,
+  shakeAt,
+  slamCounts,
+  slamHarm,
+  staggerFor,
   swimLifts,
   teleported,
   underWater,
   wadeDragOf,
   wallFrictionSpare,
+  windGainFor,
   type MarkKind,
 } from '../../../src/player/grappleMath.ts';
 import { SWIM_DEPTH } from '../../../src/player/swimStep.ts';
@@ -251,6 +267,121 @@ const rand = () => {
   ok(TERRAIN_GROUP === Group.terrain, "the rope's terrain bit is the physics' own Group.terrain");
   const F = RAPIER.QueryFilterFlags;
   ok(STILL_FLAGS === (F.EXCLUDE_SENSORS | F.EXCLUDE_KINEMATIC | F.EXCLUDE_DYNAMIC), "the still family's flags are the engine's own: no sensor, nothing kinematic, nothing dynamic");
+}
+
+// --- wave 2: the danger, the look and the sound, at the tune as it ships -----------------------------------
+{
+  const { GRAPPLE_DEFAULTS } = await import('../../../src/player/grapple.ts');
+  const T = GRAPPLE_DEFAULTS;
+  // The slam's table (§3.11): nothing up to 16.8, 3.1 a m/s over it, 60 at most, the whole health past 50.
+  ok(slamHarm(16.8, 100, T) === 0 && slamHarm(16.79, 100, T) === 0, 'a slam costs nothing at 16.8 m/s and under');
+  ok(slamHarm(28, 100, T) === 35, `20 m from level (28 m/s) costs ${slamHarm(28, 100, T)} (35)`);
+  ok(slamHarm(19.8, 100, T) === 9 && slamHarm(24.2, 100, T) === 23 && slamHarm(34.2, 100, T) === 54, 'the design table: 9 at 19.8, 23 at 24.2, 54 at 34.2');
+  ok(slamHarm(36.2, 100, T) === 60 && slamHarm(45, 100, T) === 60 && slamHarm(49.99, 100, T) === 60, 'held to 60 from 36.2 m/s to just under 50');
+  ok(slamHarm(50, 100, T) === 100 && slamHarm(55, 73, T) === 73 && slamHarm(64, 1, T) === 1, 'and the whole of the health at 50 m/s and above');
+  // What counts: a surface steeper than the climb, and never the haul's own push.
+  ok(WALKABLE === Math.cos((55 * Math.PI) / 180), "the walkable line is the controller's own climb, cos 55 degrees");
+  ok(!slamCounts(0.574, false) && !slamCounts(1, false) && slamCounts(0.57, false) && slamCounts(0, false) && slamCounts(-1, false), 'a floor (normal at least 0.574 up) is never a slam; a wall and a ceiling are');
+  ok(!slamCounts(0, true) && !slamCounts(-1, true), 'and nothing is while F hauls');
+  ok(staggerFor(23.2, T) === 0 && staggerFor(23.21, T) === T.stagger && staggerFor(50, T) === 0.5, 'past 23.2 m/s a slam staggers for half a second');
+  ok(releasedHolds(16.81, T) && !releasedHolds(16.8, T), 'the flight after a let-go holds while faster than 16.8 m/s');
+  // The daze and the shake.
+  let dazeOk = true;
+  let peak = 0;
+  for (let t = 0; t <= 0.6; t += 0.0005) {
+    const d = dazeAt(t, T);
+    if (d > T.daze + 1e-12 || d < 0) dazeOk = false;
+    peak = Math.max(peak, d);
+  }
+  ok(dazeAt(0, T) === 0 && dazeAt(T.stagger, T) === 0 && dazeAt(-1, T) === 0 && dazeAt(Number.POSITIVE_INFINITY, T) === 0, 'the daze is nought at the stagger\'s start, at its end, before and after');
+  ok(Math.abs(dazeAt(T.dazeIn, T) - T.daze) < 1e-12 && dazeOk && Math.abs(peak - T.daze) < 1e-3, `and peaks at the daze (${T.daze}) at dazeIn (${T.dazeIn} s), never past it`);
+  ok(dazeAt(0.3, { ...T, daze: 0 }) === 0, 'a daze of nought draws nothing');
+  ok(shakeAt(0, T) === T.shake && Math.abs(shakeAt(T.shakeTime / 2, T) - T.shake / 2) < 1e-12 && shakeAt(T.shakeTime, T) === 0 && shakeAt(1, T) === 0, `the shake falls from ${T.shake} to nought over ${T.shakeTime} s and is nought after`);
+  // The jolt, at full gravity as the first proposal's numbers at 0.6 (§3.11): the same slack gives the same jolt.
+  ok(joltFor(T.joltFrom, T) === 0 && joltFor(3, T) === 0 && joltFor(1e6, T) === T.joltMax, 'the jolt is nought under joltFrom and never past joltMax');
+  let worstJolt = 0;
+  for (let slack = 0; slack <= 15; slack += 0.05) {
+    const full = joltFor(Math.sqrt(2 * 20.32 * slack), T);
+    const eased = joltFor(Math.sqrt(2 * 20.32 * 0.6 * slack), { joltFrom: 4, joltPer: 0.02, joltMax: 0.3 });
+    worstJolt = Math.max(worstJolt, Math.abs(full - eased));
+  }
+  ok(worstJolt <= 0.02, `over slack of 0 to 15 m a catch at full gravity jolts within ${worstJolt.toFixed(4)} of the first proposal's at 0.6 (0.02)`);
+  // The ratchet's cap: never more than tickMax in a second, at any reel up to 100 m/s and any frame rate.
+  let worstRate = 0;
+  for (const fps of [30, 60, 144, 240]) {
+    for (const speed of [1, 6, 12, 30, 100]) {
+      const dt = 1 / fps;
+      let reeled = 0;
+      let since = Number.POSITIVE_INFINITY;
+      const at: number[] = [];
+      for (let i = 0; i < fps * 5; i++) {
+        since += dt;
+        reeled += speed * dt;
+        if (ratchetDue(reeled, since, T)) {
+          at.push(i * dt);
+          since = 0;
+          reeled -= T.tickEvery;
+        }
+        if (reeled > T.tickEvery) reeled = T.tickEvery;
+      }
+      for (let k = 0; k < at.length; k++) {
+        let n = 0;
+        for (let j = k; j < at.length && at[j] - at[k] < 1 - 1e-9; j++) n++;
+        worstRate = Math.max(worstRate, n);
+      }
+    }
+  }
+  ok(worstRate <= T.tickMax, `ratchetDue never answers more than ${T.tickMax} in any second, at 1 to 100 m/s of reel and 30 to 240 fps (the most in a second: ${worstRate})`);
+  // The arm's reach, the camera's pull, the lean.
+  const a = { x: 0, y: 0, z: 0 };
+  const deg = (v: { x: number; y: number; z: number }) => (Math.atan2(-v.z, v.y) * 180) / Math.PI;
+  armAimFor(0, Math.cos(Math.PI / 3), -Math.sin(Math.PI / 3), T, a);
+  ok(Math.abs(deg(a) - 45) < 1e-9 && Math.abs(Math.hypot(a.x, a.y, a.z) - 1) < 1e-12, `a rope 60 degrees behind straight up is reached for at 45 (${deg(a).toFixed(3)})`);
+  armAimFor(0.3, Math.cos(Math.PI / 6), -Math.sin(Math.PI / 6), T, a);
+  ok(a.x === 0.3 && a.y === Math.cos(Math.PI / 6) && a.z === -Math.sin(Math.PI / 6), 'one 30 degrees behind is left alone, sideways share and all');
+  armAimFor(0.2, -0.5, 0.8, T, a);
+  ok(a.x === 0.2 && a.y === -0.5 && a.z === 0.8, 'and one in front is never touched');
+  ok(camScaleFor(10, T) === 1 && camScaleFor(0, T) === 1 && camScaleFor(35, T) === 1.3 && camScaleFor(80, T) === 1.3 && Math.abs(camScaleFor(22.5, T) - 1.15) < 1e-12, 'the camera\'s scale is 1 at 10 m/s, 1.3 at 35, straight between');
+  const q = { x: 9, y: 9, z: 9, w: 9 };
+  leanOf({ x: 1, y: 1, z: 0 }, { tilt: 0 }, q);
+  ok(Object.is(q.x, 0) && Object.is(q.y, 0) && Object.is(q.z, 0) && q.w === 1, 'leanOf at a tilt of nought is the identity, to the bit');
+  leanOf({ x: 1, y: 1, z: 0 }, { tilt: 0.7 }, q);
+  // The lean turns straight up toward the rope by 0.7 of its 45 degrees: straight up turned by it is the turn's
+  // second column, (2(xy - wz), 1 - 2(x² + z²), 2(yz + wx)).
+  const ux = 2 * (q.x * q.y - q.w * q.z);
+  const uy = 1 - 2 * (q.x * q.x + q.z * q.z);
+  const uz = 2 * (q.y * q.z + q.w * q.x);
+  ok(Math.abs((Math.atan2(ux, uy) * 180) / Math.PI - 31.5) < 1e-9 && Math.abs(uz) < 1e-12, `and at 0.7 it tips straight up 31.5 degrees toward a rope 45 off upright (${((Math.atan2(ux, uy) * 180) / Math.PI).toFixed(3)})`);
+  leanOf({ x: 0, y: 1, z: 0 }, { tilt: 0.7 }, q);
+  ok(q.w === 1 && q.x === 0 && q.z === 0, 'a rope straight up is no lean at all');
+  for (const dt of [1 / 30, 1 / 60, 1 / 144]) {
+    const level = (T.leanLevel * Math.PI) / 180;
+    let ang = T.tilt * (Math.PI / 2);
+    const first = leanEase(ang, dt, T);
+    let frames = 0;
+    while (ang > level && frames < 10000) {
+      ang = leanEase(ang, dt, T);
+      frames++;
+    }
+    ok(first > level && frames * dt <= T.leanOut + dt && frames > 1, `${Math.round(1 / dt)} fps: the largest lean (${Math.round(T.tilt * 90)} degrees) eases under leanLevel in ${(frames * dt).toFixed(3)} s (within leanOut ${T.leanOut}), never in one frame`);
+  }
+  // The quaternion ease reaches its target exactly, and moves no further than the step.
+  const cur = { x: 0, y: 0, z: 0, w: 1 };
+  const tgt = { x: 0, y: 0, z: 0, w: 1 };
+  leanOf({ x: 1, y: 1, z: 0.3 }, { tilt: 0.7 }, tgt);
+  const target = leanAngleOf(tgt);
+  let steps = 0;
+  while (leanAngleOf(cur) < target - 1e-9 && steps < 1000) {
+    const before = leanAngleOf(cur);
+    leanToward(cur, tgt, { step: 0.05, left: 0 }, cur);
+    if (leanAngleOf(cur) - before > 0.05 + 1e-9) steps = 9999;
+    steps++;
+  }
+  ok(steps < 1000 && cur.x === tgt.x && cur.w === tgt.w, `leanToward reaches its target exactly in ${steps} steps, none longer than the step`);
+  leanToward(cur, { x: 0, y: 0, z: 0, w: 1 }, { step: 10, left: 0 }, cur);
+  ok(cur.x === 0 && cur.y === 0 && cur.z === 0 && cur.w === 1, 'and back to upright exactly, the identity to the bit');
+  ok(windGainFor(30, T) === 0, 'the speed wind ships off (windGain 0)');
+  ok(windGainFor(12, { windGain: 0.5, windFrom: 12, windTo: 35 }) === 0 && windGainFor(35, { windGain: 0.5, windFrom: 12, windTo: 35 }) === 0.5, 'switched on, it is nought under 12 m/s and 0.5 at 35');
 }
 
 console.log(`\n${checks} checks passed`);

@@ -2,9 +2,15 @@
 // rope or on its feet, and how), the dart's aim, the drawn sag, which marks the dart may bite, what the
 // hook mutes, the gravity knob's add-back, the clip of a velocity into a surface, the swim's lift test,
 // the wading drag, the teleport guard, the wall friction that spares the sway, and the ribbon's least
-// width. No three, no Rapier, no page: a node test calls every one of these as the game does.
+// width; and from wave 2 the danger (a slam's harm, what counts as one, the stagger's shake and daze, the
+// fast flight after a let-go, the catch's jolt) and the look and the sound (the arm's reach, the camera's
+// scale, the lean and its ease, the ratchet's rate, the wind). No three, no Rapier, no page: a node test
+// calls every one of these as the game does.
 //
 // Every number these read is the caller's (`GRAPPLE_TUNE` in `grapple.ts`, handed in); none is kept here.
+
+/** The controller's climb limit as a normal's upward share: a face this level or more is walkable (cos 55°). */
+export const WALKABLE = Math.cos((55 * Math.PI) / 180);
 
 /**
  * The length of (x, y) and of (x, y, z), by `Math.sqrt`. Every length the hook works out a frame goes through
@@ -269,4 +275,225 @@ export function riseOf(dx: number, dy: number, dz: number): number {
   const l = len3(dx, dy, dz);
   if (!(l > 1e-9)) return 0;
   return (Math.asin(Math.max(-1, Math.min(1, dy / l))) * 180) / Math.PI;
+}
+
+// --- the danger (wave 2) ------------------------------------------------------------------------------
+
+/**
+ * Whether a contact the controller refused can be a slam: only a surface steeper than the controller's own climb
+ * (a walkable floor is the fall rule's), and never while F hauls (the haul sets its velocity into whatever it is
+ * hauled at every frame, so its own push is measured and costs nothing).
+ */
+export function slamCounts(normalY: number, hauling: boolean): boolean {
+  return normalY < WALKABLE && !hauling;
+}
+
+/**
+ * What a slam at `v` m/s into what it struck costs: nothing up to `slamFrom`, `slamPer` a m/s over it rounded and
+ * held to `slamMax`, and the whole of the health `hp` past `slamKill`, as a fall that kills does.
+ */
+export function slamHarm(v: number, hp: number, tune: { slamFrom: number; slamPer: number; slamMax: number; slamKill: number }): number {
+  if (!(v > tune.slamFrom)) return 0;
+  if (v >= tune.slamKill) return Math.max(0, hp);
+  return Math.min(tune.slamMax, Math.round(tune.slamPer * (v - tune.slamFrom)));
+}
+
+/** How long a slam at `v` m/s staggers: the tune's `stagger` above `staggerFrom`, else nothing. */
+export function staggerFor(v: number, tune: { staggerFrom: number; stagger: number }): number {
+  return v > tune.staggerFrom ? tune.stagger : 0;
+}
+
+/**
+ * The daze `t` seconds into a stagger: the vignette's kick, rising to `daze` over `dazeIn` and falling as (1 − u)² to
+ * nought at the stagger's end. Nothing before it began, after it ended, or with the daze at nought.
+ */
+export function dazeAt(t: number, tune: { daze: number; dazeIn: number; stagger: number }): number {
+  if (!(t >= 0) || !(t < tune.stagger) || !(tune.daze > 0)) return 0;
+  const rise = Math.max(0, Math.min(tune.dazeIn, tune.stagger));
+  if (t < rise) return (tune.daze * t) / rise;
+  const u = (t - rise) / Math.max(1e-9, tune.stagger - rise);
+  const f = 1 - u;
+  return tune.daze * f * f;
+}
+
+/** The stagger's shake `t` seconds into it: `shake` at its start, falling straight to nought over `shakeTime`. */
+export function shakeAt(t: number, tune: { shake: number; shakeTime: number }): number {
+  if (!(t >= 0) || !(t < tune.shakeTime) || !(tune.shake > 0)) return 0;
+  return tune.shake * (1 - t / tune.shakeTime);
+}
+
+/** Whether the fast flight after a let-go goes on: while the body is still faster than `slamFrom`. */
+export function releasedHolds(speed: number, tune: { slamFrom: number }): boolean {
+  return speed > tune.slamFrom;
+}
+
+/** The camera's jolt for a catch that took `caught` m/s off the rope point: nothing under `joltFrom`, never past `joltMax`. */
+export function joltFor(caught: number, tune: { joltFrom: number; joltPer: number; joltMax: number }): number {
+  if (!(caught > tune.joltFrom)) return 0;
+  return Math.min(tune.joltMax, tune.joltPer * (caught - tune.joltFrom));
+}
+
+// --- the look (wave 2) --------------------------------------------------------------------------------
+
+/**
+ * Where the left arm is aimed, given the direction to the rope's first point in the figure's own frame (+Z ahead, +Y
+ * up): a direction leaning back past `armReach` degrees behind straight up, where no shoulder reaches, is turned
+ * forward to that line about the shoulders' own axis, its sideways share kept; one hanging back past the same
+ * angle behind straight down is turned to that line instead, whichever is nearer. Everything else is left alone.
+ * Writes into `out`, which may not be the input.
+ */
+export function armAimFor(dx: number, dy: number, dz: number, tune: { armReach: number }, out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  out.x = dx;
+  out.y = dy;
+  out.z = dz;
+  if (!(dz < 0)) return out;
+  const r = Math.sqrt(dy * dy + dz * dz);
+  if (!(r > 1e-9)) return out;
+  const reach = (Math.max(0, Math.min(90, tune.armReach)) * Math.PI) / 180;
+  // How far behind straight up, about the shoulders' axis: 0 up, 90 straight back, 180 straight down.
+  const back = Math.atan2(-dz, dy);
+  if (back <= reach || back >= Math.PI - reach) return out;
+  const to = back < Math.PI / 2 ? reach : Math.PI - reach;
+  out.y = r * Math.cos(to);
+  out.z = -r * Math.sin(to);
+  return out;
+}
+
+/** The camera's orbit scale at a speed: 1 up to `camFrom`, `camScale` from `camTo`, straight between. */
+export function camScaleFor(speed: number, tune: { camFrom: number; camTo: number; camScale: number }): number {
+  if (!(speed > tune.camFrom)) return 1;
+  if (!(speed < tune.camTo)) return tune.camScale;
+  return 1 + ((tune.camScale - 1) * (speed - tune.camFrom)) / (tune.camTo - tune.camFrom);
+}
+
+/** A quaternion, as the lean keeps one: (x, y, z) the axis times the sine of half the turn, w its cosine. */
+export interface LeanQuat {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+}
+
+/** The identity, written into `q`. */
+export function leanIdentity(q: LeanQuat): LeanQuat {
+  q.x = 0;
+  q.y = 0;
+  q.z = 0;
+  q.w = 1;
+  return q;
+}
+
+/**
+ * The drawn body's lean toward the rope: the turn that tips straight up toward the rope's direction (`d`, from the
+ * rope point to its first point, any length) by `tilt` of the angle between them, that angle held to 90 degrees, in
+ * the world's frame. The identity exactly at a tilt of nought or with the rope straight up or down. The direction comes
+ * in a kept record rather than as numbers, since the hook's frame calls this every frame it swings and a number handed
+ * to a call the engine does not build into its caller is a fresh number.
+ */
+export function leanOf(d: { readonly x: number; readonly y: number; readonly z: number }, tune: { readonly tilt: number }, out: LeanQuat): LeanQuat {
+  const dx = d.x;
+  const dy = d.y;
+  const dz = d.z;
+  const tilt = tune.tilt;
+  const l = len3(dx, dy, dz);
+  // The axis is straight up crossed with the rope: (dz, 0, -dx), which turns up toward the rope.
+  const al = len2(dz, dx);
+  if (!(l > 1e-9) || !(al > 1e-9 * l)) return leanIdentity(out);
+  const angle = Math.acos(Math.max(-1, Math.min(1, dy / l)));
+  const a = tilt * Math.min(angle, Math.PI / 2);
+  if (!(a > 0)) return leanIdentity(out);
+  const s = Math.sin(a / 2) / al;
+  out.x = dz * s;
+  out.y = 0;
+  out.z = -dx * s;
+  out.w = Math.cos(a / 2);
+  return out;
+}
+
+/** How far a lean `q` turns the body from upright, radians. */
+export function leanAngleOf(q: LeanQuat): number {
+  return 2 * Math.acos(Math.min(1, Math.abs(q.w)));
+}
+
+/**
+ * How fast the lean may move, radians a second: the largest lean there is (`tilt` of a quarter turn) in `leanOut`, so a
+ * let-go eases the body upright from any lean within `leanOut` and never in one frame. A tilt tuned to nought still
+ * eases a lean left standing back (a tenth of the quarter turn is the least it moves by).
+ */
+export function leanRate(tune: { tilt: number; leanOut: number }): number {
+  return (Math.max(0.1, tune.tilt) * (Math.PI / 2)) / Math.max(1e-3, tune.leanOut);
+}
+
+/** A lean of `from` radians eased back toward upright over a frame of `dt` seconds. */
+export function leanEase(from: number, dt: number, tune: { tilt: number; leanOut: number }): number {
+  return Math.max(0, from - leanRate(tune) * Math.max(0, dt));
+}
+
+/** The step a lean may turn by this frame (radians, written by the caller) and the angle left after it (written back). */
+export interface LeanStep {
+  step: number;
+  left: number;
+}
+
+/**
+ * The lean `cur` turned toward `target` by at most `io.step` radians, into `out` (which may be `cur`): the spherical ease
+ * between the two, held to the step. Writes the angle left between them into `io.left`. The numbers go in and come
+ * back in the kept record for the reason `leanOf`'s direction does.
+ */
+export function leanToward(cur: LeanQuat, target: LeanQuat, io: LeanStep, out: LeanQuat): void {
+  const step = io.step;
+  let tx = target.x;
+  let ty = target.y;
+  let tz = target.z;
+  let tw = target.w;
+  let dot = cur.x * tx + cur.y * ty + cur.z * tz + cur.w * tw;
+  if (dot < 0) {
+    dot = -dot;
+    tx = -tx;
+    ty = -ty;
+    tz = -tz;
+    tw = -tw;
+  }
+  const half = Math.acos(Math.min(1, dot));
+  const angle = 2 * half;
+  if (!(angle > 1e-12) || !(step < angle)) {
+    out.x = target.x;
+    out.y = target.y;
+    out.z = target.z;
+    out.w = target.w;
+    io.left = 0;
+    return;
+  }
+  const t = Math.max(0, step) / angle;
+  const s = Math.sin(half);
+  const a = Math.sin((1 - t) * half) / s;
+  const b = Math.sin(t * half) / s;
+  const x = cur.x * a + tx * b;
+  const y = cur.y * a + ty * b;
+  const z = cur.z * a + tz * b;
+  const w = cur.w * a + tw * b;
+  const l = Math.sqrt(x * x + y * y + z * z + w * w) || 1;
+  out.x = x / l;
+  out.y = y / l;
+  out.z = z / l;
+  out.w = w / l;
+  io.left = angle - Math.max(0, step);
+}
+
+// --- the sound (wave 2) -------------------------------------------------------------------------------
+
+/**
+ * Whether a ratchet play is due: `reeled` metres of rope reeled by the held reel since the last one, at least
+ * `tickEvery` of it, and at least a `tickMax`th of a second since the last, so a reel however fast never asks for
+ * more than `tickMax` a second.
+ */
+export function ratchetDue(reeled: number, sinceLast: number, tune: { tickEvery: number; tickMax: number }): boolean {
+  return reeled >= tune.tickEvery && sinceLast + 1e-9 >= 1 / Math.max(1, tune.tickMax);
+}
+
+/** The speed wind's gain: nothing under `windFrom`, rising straight to `windGain` at `windTo`. */
+export function windGainFor(speed: number, tune: { windGain: number; windFrom: number; windTo: number }): number {
+  if (!(tune.windGain > 0) || !(speed > tune.windFrom)) return 0;
+  if (!(speed < tune.windTo)) return tune.windGain;
+  return (tune.windGain * (speed - tune.windFrom)) / Math.max(1e-6, tune.windTo - tune.windFrom);
 }

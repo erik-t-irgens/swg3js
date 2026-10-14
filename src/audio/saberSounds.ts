@@ -468,6 +468,24 @@ export class SaberSounds {
     }
   }
 
+  /**
+   * One of Jedi Academy's files by its path in the archives, as the converter copied it: the path itself, or the same
+   * name with the other of `.wav` and `.mp3` (the game's own loader falls back between them, and so does this); null
+   * when the pack has not arrived or holds neither. The grapple's boost is made of the melee whooshes this way.
+   */
+  jkaFile(path: string): string | null {
+    const files = this.pack?.files;
+    if (!files) return null;
+    if (files[path] !== undefined) return path;
+    const other = path.endsWith('.wav') ? `${path.slice(0, -4)}.mp3` : path.endsWith('.mp3') ? `${path.slice(0, -4)}.wav` : null;
+    return other && files[other] !== undefined ? other : null;
+  }
+
+  /** What `jkaFile` reads from: the adopted pack's files, another object only when another pack is adopted; null before one. */
+  get jkaFiles(): object | null {
+    return this.pack?.files ?? null;
+  }
+
   /** A pattern's files, in order: `saberhup%d.wav` over 4 to 6 is three samples of one template. */
   private samplesOf(pattern: string, range: [number, number] | undefined, have: (p: string) => string | null): string[] {
     const out: string[] = [];

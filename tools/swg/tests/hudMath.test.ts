@@ -434,6 +434,13 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   let clear = true;
   for (let s = HUD_SIZES.scaleMin; s <= HUD_SIZES.scaleMax + 1e-9; s += 0.05) if (!(grappleMarkInnerHalo(s, 2) > chargeOuterHalo(s, 2))) clear = false;
   ok(clear, 'and its inner edge, under-stroke and all, clears the charge ring at every display scale');
+  // The rope-used arc (wave 2): a thin arc at 22 px round the crosshair, warning past nine tenths, clear of the charge
+  // ring, under-stroke and all, at every scale.
+  const { grappleRopeArcInnerHalo } = await import('../../../src/ui/hudMath.ts');
+  ok(HUD_SIZES.grappleRopeArc === 22 && HUD_SIZES.grappleRopeArcWidth === 1 && HUD_SIZES.grappleRopeWarn === 0.9, "the rope's arc is 22 px out with a 1 px stroke, and turns to warn past 0.9 of the longest rope");
+  let arcClear = true;
+  for (let s = HUD_SIZES.scaleMin; s <= HUD_SIZES.scaleMax + 1e-9; s += 0.05) if (!(grappleRopeArcInnerHalo(s, 2) > chargeOuterHalo(s, 2))) arcClear = false;
+  ok(arcClear, 'and its inner edge, under-stroke and all, clears the charge ring at every display scale');
 }
 
 console.log(`\n${checks} checks passed`);

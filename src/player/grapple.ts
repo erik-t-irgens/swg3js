@@ -1,7 +1,14 @@
 // The grappling hook: its one table of numbers, and the hook itself -- the dart, the mark, firing and
-// letting go, and the two steps of a frame the player's update runs it through (`beforeMove`, `clip`,
-// `afterMove`, the design's §3.1). The rope's own geometry and its constraint are `grappleRope.ts`; the
-// arithmetic that needs nothing but numbers is `grappleMath.ts`; what is drawn is `grappleDraw.ts`.
+// letting go, and the steps of a frame the player's update runs it through (`beforeMove`, `clip`,
+// `afterMove`, the design's §3.1, and from wave 2 `look`). The rope's own geometry and its constraint are
+// `grappleRope.ts`; the arithmetic that needs nothing but numbers is `grappleMath.ts`; what is drawn is
+// `grappleDraw.ts`; what is heard is `grappleSound.ts`.
+//
+// Wave 2 gave it its danger and its look. A swing into a wall faster than `slamFrom` hurts, measured against what
+// was struck, and past `staggerFrom` staggers with a shake through the camera's own register and a daze through
+// the player's own vignette; the fast flight after a let-go counts too (`released`). The catch jolts the view, the
+// drawn body leans into the rope and the left arm points up it, and the camera pulls back with speed: all of it
+// eased in `look`, which moves no body.
 //
 // The rope is our own constraint on the player's kinematic capsule: no joint (they never move a kinematic
 // body), no body added or taken away per shot, and the dart is a ray, never a body and never a bolt. What
@@ -16,7 +23,46 @@ import type { Physics } from '../core/physics.ts';
 import { JKA, UNIT } from './jkaMove.ts';
 import { GrappleRope, RopeConstraint, isTerrainCollider } from './grappleRope.ts';
 import { SWIM_DEPTH } from './swimStep.ts';
-import { GRAPPLE_RELEASE_MUTES, aimTrue, clipInto, grappleMutes, gravityAddBack, kindHolds, len2, len3, markShows, newRopeModes, riseOf, ropeModes, swimLifts, teleported, wadeDragOf, wallFrictionSpare, type MarkKind, type RopeModes } from './grappleMath.ts';
+import type { HarmKind } from './harmRule.ts';
+import {
+  GRAPPLE_RELEASE_MUTES,
+  WALKABLE,
+  aimTrue,
+  camScaleFor,
+  clipInto,
+  dazeAt,
+  grappleMutes,
+  gravityAddBack,
+  joltFor,
+  kindHolds,
+  leanAngleOf,
+  leanIdentity,
+  leanOf,
+  leanRate,
+  leanToward,
+  len2,
+  len3,
+  markShows,
+  newRopeModes,
+  ratchetDue,
+  releasedHolds,
+  riseOf,
+  ropeModes,
+  shakeAt,
+  slamCounts,
+  slamHarm,
+  staggerFor,
+  swimLifts,
+  teleported,
+  wadeDragOf,
+  wallFrictionSpare,
+  type LeanQuat,
+  type LeanStep,
+  type MarkKind,
+  type RopeModes,
+} from './grappleMath.ts';
+
+export { WALKABLE };
 
 type R = typeof RAPIER_NS;
 type Collider = RAPIER_NS.Collider;
@@ -132,6 +178,65 @@ export const GRAPPLE_TUNE = {
   ropeMetalness: 0,
   /** The dart's length. Build-only. */
   dartSize: 0.12,
+  /** The left arm up the rope: eased in over this long (s) as the hook goes out, and out over this long after. */
+  armIn: 0.08,
+  armOut: 0.15,
+  /** The furthest behind straight up (degrees) the arm reaches; a rope further back is reached for along that line. */
+  armReach: 45,
+  /** The drawn body leans toward the rope by this share of the rope's angle from upright, turning about the rope point. */
+  tilt: 0.7,
+  /** The largest lean eases back to upright over this long (s) once the body is off the rope, or afloat; never in one frame. */
+  leanOut: 0.3,
+  /** Under this lean (degrees) the body is level. */
+  leanLevel: 0.5,
+  /**
+   * The whole turn goes on going to other players this long (s) after the lean is level, so the last turn they hear is
+   * upright and their own glide (a tenth of a second's time constant) has eased the figure upright before it stops:
+   * a receiver built before stands a figure upright in one frame the moment `q` stops (§3.15).
+   */
+  leanTail: 0.5,
+  /** The camera pulls back with speed: from 1 at `camFrom` (m/s) to `camScale` at `camTo`, eased over `camEase` (s), and back to 1 within `camBack` (s) of the feet finding ground. */
+  camFrom: 10,
+  camTo: 35,
+  camScale: 1.3,
+  camEase: 0.4,
+  camBack: 1.5,
+  /** A slack rope's catch past `joltFrom` (m/s) jolts the view by `joltPer` a m/s over it, at most `joltMax`, for `joltTime` (s). The first proposal's 4 and 0.02 carried to full gravity. */
+  joltFrom: 5.2,
+  joltPer: 0.015,
+  joltMax: 0.3,
+  joltTime: 0.15,
+  // --- the danger --------------------------------------------------------------------------------------
+  /** A swing into a wall faster than this (m/s, relative to what was struck) hurts; also where the fast flight after a let-go ends. The first proposal's 13 over the square root of 0.6. */
+  slamFrom: 16.8,
+  /** Health a m/s over `slamFrom`, rounded. The first proposal's 4 over the square root of 0.6. */
+  slamPer: 3.1,
+  slamMax: 60,
+  /** Past this (m/s) a slam takes the whole of the health, which last stand may still leave a point of. */
+  slamKill: 50,
+  /** A slam hurts at most once in this long (s). */
+  slamGap: 0.4,
+  /** Past this (m/s) a slam staggers for `stagger` seconds: no sway, reel, haul or boost. The first proposal's 18 over the square root of 0.6. */
+  staggerFrom: 23.2,
+  stagger: 0.5,
+  /** The stagger's shake at its start through the camera's own register, falling to nought over `shakeTime` (s); 0 turns it off. */
+  shake: 0.4,
+  shakeTime: 0.3,
+  /** [owner: "a little bit of a screen effect"] The vignette's kick at the daze's peak, risen to over `dazeIn` (s) and falling as (1 − u)² to the stagger's end; 0 turns it off. */
+  daze: 0.6,
+  dazeIn: 0.05,
+  // --- the sound ---------------------------------------------------------------------------------------
+  /** The ratchet plays once for every this much rope (m) the held reel winds in or pays out, and never more than `tickMax` a second. */
+  tickEvery: 0.5,
+  tickMax: 12,
+  /** The ratchet's pitch (semitones): up reeling in, down paying out. */
+  reelPitch: 2,
+  /** The haul's rumble fades out over this long (s) as F is let go. */
+  haulFade: 0.15,
+  /** The speed wind's gain, nothing under `windFrom` (m/s) and this at `windTo`; 0 is off until the owner has heard it. */
+  windGain: 0,
+  windFrom: 12,
+  windTo: 35,
   // --- others and the item -----------------------------------------------------------------------------
   /** The points a rope sends to other players (when it is sent at all): at most the wire's sixteen. */
   sendPoints: 16,
@@ -150,8 +255,8 @@ export const ROPE_WIRE_POINTS = 16;
 /** The game's own gravity (Jedi Academy's 800 u/s², whatever the planet). */
 export const GRAPPLE_GRAVITY = JKA.gravity * UNIT;
 
-/** The controller's climb limit as a normal's upward share: a face this level or more is walkable (cos 55°). */
-export const WALKABLE = Math.cos((55 * Math.PI) / 180);
+/** How far out from the capsule's middle a slam strikes: the player's capsule's radius (`player.ts`'s `CAPSULE_RADIUS`). */
+const SLAM_REACH = 0.35;
 
 /** What writes the rope's colour, roughness and metalness onto its one material (`grappleDraw.ts` registers it). */
 let lookHook: (() => void) | null = null;
@@ -183,6 +288,32 @@ export function tuneGrapple(o: Partial<Record<keyof GrappleTune, unknown>>): Gra
   G.ropeColour = Math.max(0, Math.min(0xffffff, Math.round(G.ropeColour)));
   G.ropeRoughness = Math.max(0, Math.min(1, G.ropeRoughness));
   G.ropeMetalness = Math.max(0, Math.min(1, G.ropeMetalness));
+  G.armIn = Math.max(0.001, G.armIn);
+  G.armOut = Math.max(0.001, G.armOut);
+  G.armReach = Math.max(0, Math.min(90, G.armReach));
+  G.tilt = Math.max(0, Math.min(1, G.tilt));
+  G.leanOut = Math.max(0.01, G.leanOut);
+  G.leanLevel = Math.max(0, G.leanLevel);
+  G.leanTail = Math.max(0, G.leanTail);
+  G.camTo = Math.max(G.camFrom + 0.1, G.camTo);
+  G.camEase = Math.max(0.001, G.camEase);
+  G.camBack = Math.max(0.01, G.camBack);
+  G.joltMax = Math.max(0, Math.min(1, G.joltMax));
+  G.joltTime = Math.max(0, G.joltTime);
+  G.slamFrom = Math.max(0, G.slamFrom);
+  G.slamKill = Math.max(G.slamFrom, G.slamKill);
+  G.slamMax = Math.max(0, G.slamMax);
+  G.slamGap = Math.max(0, G.slamGap);
+  G.stagger = Math.max(0, G.stagger);
+  G.dazeIn = Math.max(0, Math.min(G.stagger, G.dazeIn));
+  G.shake = Math.max(0, Math.min(1, G.shake));
+  G.shakeTime = Math.max(0.001, G.shakeTime);
+  G.daze = Math.max(0, Math.min(1, G.daze));
+  G.tickEvery = Math.max(0.01, G.tickEvery);
+  G.tickMax = Math.max(1, G.tickMax);
+  G.haulFade = Math.max(0, G.haulFade);
+  G.windGain = Math.max(0, Math.min(1, G.windGain));
+  G.windTo = Math.max(G.windFrom + 0.1, G.windTo);
   lookHook?.();
   return G;
 }
@@ -222,6 +353,36 @@ export type LetGoReason =
   | 'console';
 
 /**
+ * The ways out that put the body somewhere new, give it to something else or take it out of the world (§3.10): they end
+ * the fast flight after a let-go and stand down the stagger, the jolt, the lean, the arm and the camera's pull at once,
+ * whether or not a rope was out. Every other let-go is the body flying on from where it was.
+ */
+function endsFlight(reason: LetGoReason): boolean {
+  switch (reason) {
+    case 'reset':
+    case 'stand':
+    case 'death':
+    case 'board':
+    case 'leave':
+    case 'mount':
+    case 'noclip':
+    case 'eva':
+    case 'travel':
+    case 'select':
+    case 'lift':
+    case 'doorless':
+    case 'world':
+    case 'moved':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** What a contact the slam rule judged was: a swing's on the rope, the flight's after a let-go, the haul's own push, a floor's, the console's. */
+export type SlamKind = '' | 'swing' | 'released' | 'haul' | 'floor' | 'console';
+
+/**
  * The player as the hook needs it: a small view, so the node harness's body and the game's player answer
  * the same calls. `pos` and `vel` are written in place; the rest is read.
  */
@@ -243,7 +404,12 @@ export interface GrappleBody {
   readonly colliderOffsetY: number;
   /** The collision groups the player's own queries pass (indoors leaves out the ground and the shells). */
   readonly filter: number;
-  readonly jka: { holdApex(y: number): void };
+  /** The movement: the fall's memory held, and whether a roll or a special move is writing the velocity of its own. */
+  readonly jka: { holdApex(y: number): void; readonly rolling: boolean; readonly inSpecialJump: boolean };
+  /** Health now: a slam past `slamKill` takes the whole of it. */
+  readonly hp: number;
+  /** A loss of health of a kind, as `Player.takeDamage` takes one; false when it was refused (god mode). */
+  takeDamage(amount: number, force: boolean, kind: HarmKind): boolean;
 }
 
 /** The held keys the hook reads, written by the key block (or the harness) and read by the frame's steps. */
@@ -414,6 +580,66 @@ export class Grapple {
   swimLiftNow = false;
   wadeRateNow = 0;
 
+  // The danger (§3.11).
+  /**
+   * The fast flight after a let-go: set by a let-go from the rope faster than `slamFrom`, and ended when the body is
+   * slower than that, a new hook is fired, it swims, a roll or a special move begins, or it is put somewhere new.
+   * While it holds the player's update runs the collider sync, the clip and the slam exactly as on the rope, and
+   * nothing else of the hook; a player who never fires is never released.
+   */
+  released = false;
+  /** The speed the flight began at, for the console. */
+  releasedSpeed = 0;
+  /** The body's velocity, kept from the last step that met it, for the speed a let-go is made at. */
+  private bodyVel: { x: number; y: number; z: number } | null = null;
+  /** The last contact the slam rule judged past `slamFrom`, a slam or not, and where the last slam struck. */
+  readonly lastSlam = { speed: 0, harm: 0, at: Number.NEGATIVE_INFINITY, kind: '' as SlamKind, took: false, x: 0, y: 0, z: 0 };
+  /** Seconds since the last slam that cost or staggered: a slam hurts at most once in `slamGap`. */
+  sinceSlam = Number.POSITIVE_INFINITY;
+  /** Seconds into the stagger, or Infinity with none: the stagger, its shake and its daze all read it. */
+  staggerAge = Number.POSITIVE_INFINITY;
+  /** The stagger's shake and daze this frame, which the game writes into the camera's register and the vignette. */
+  shakeNow = 0;
+  dazeNow = 0;
+  /** The catch's jolt for the camera, the seconds it has left, and the last catch's speed (m/s). */
+  joltNow = 0;
+  joltLeft = 0;
+  lastCatch = 0;
+  /** The catch being summed over its two frames, and which of them this is (0 with no catch under way). */
+  private catchRun = 0.5;
+  private catchStep = 0;
+  /** The hook's own clock (s), stepped by `look`: when a slam was, and the ratchets a second. */
+  clock = 0;
+  /** The contact the frame's clip found hardest into a wall, and its normal (the slam's point is taken from it). */
+  private readonly slamN = { x: 0, y: 0, z: 0 };
+
+  // The look (§3.12): the lean, the arm, the camera's pull, all eased in `look`.
+  /** The drawn body's lean toward the rope, a turn in the world's frame about the rope point; the identity when upright. */
+  readonly lean: LeanQuat = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly leanTarget: LeanQuat = { x: 0, y: 0, z: 0, w: 1 };
+  /** The rope's way handed to the lean, and the lean's step and what it left: kept, so the frame's calls take no fresh numbers. */
+  private readonly lookDir = { x: 0, y: 1, z: 0 };
+  private readonly leanStep: LeanStep = { step: 0.5, left: 0.5 };
+  /** How far the lean turns the body from upright now, radians. */
+  leanAngle = 0;
+  /** Seconds the whole turn still goes to other players since the lean came level (`leanTail`); nought once it has run out. */
+  leanTailLeft = 0;
+  /** How much of the left arm's pose is the aim up the rope (0 to 1), eased in and out. */
+  armWeight = 0;
+  /** The way from the rope point to the rope's first point (the dart while it flies), a unit vector in the world. */
+  readonly armDir = { x: 0, y: 1, z: 0 };
+  /** The camera's orbit scale this frame: the literal 1 whenever the rope is not out and the eased tail has finished. */
+  camScaleNow = 1;
+  /** Off the ground since the rope was out: the camera's pull eases with the speed until the feet find ground. */
+  private camAirborne = false;
+
+  // The sound (§3.13): the ratchet's count is the held reel's alone.
+  /** Rope reeled by the held reel since the last ratchet (m), and seconds since it. */
+  private reelRun = 0;
+  private sinceTick = Number.POSITIVE_INFINITY;
+  /** The last ratchet was reeling in (pitched up) rather than paying out. */
+  ratchetIn = true;
+
   // Kept answers and rays.
   private readonly kept: RAPIER_NS.CharacterCollision;
   private readonly ray: RAPIER_NS.Ray;
@@ -448,7 +674,8 @@ export class Grapple {
    * hands back a fresh number, and the hook's frame allocates nothing it does not have to.
    */
   timing = false;
-  readonly counts = { fires: 0, bites: 0, misses: 0, recalls: 0, refused: 0, casts: 0 };
+  /** What the hook has done, counted: the game plays a sound for each fire, bite, ratchet, boost and slam as its count moves. */
+  readonly counts = { fires: 0, bites: 0, misses: 0, recalls: 0, refused: 0, casts: 0, ratchets: 0, boosts: 0, slams: 0 };
 
   constructor(Rapier: R, physics: Physics) {
     this.R = Rapier;
@@ -477,6 +704,47 @@ export class Grapple {
     return this.attached && this.con.taut;
   }
 
+  /** A slam's stagger is running: no sway, reel, haul or boost. */
+  get staggered(): boolean {
+    return this.staggerAge < GRAPPLE_TUNE.stagger;
+  }
+
+  /** The drawn body leans at all: the player's `placeVisual` turns it about the rope point. */
+  get leaning(): boolean {
+    return this.leanAngle > 0;
+  }
+
+  /**
+   * The figure's whole turn goes to other players: while the lean is past `leanLevel`, and for `leanTail` after it came
+   * level, so the last turn they hear is upright and their glide has brought the figure upright with it (§3.15). Sent
+   * only until the lean was level, the last turn a receiver heard leaned by up to the lean's step between two states
+   * (about 21 degrees at ten a second), which a receiver built before stood upright in one frame.
+   */
+  get leanSends(): boolean {
+    return this.leanAngle > (GRAPPLE_TUNE.leanLevel * Math.PI) / 180 || this.leanTailLeft > 0;
+  }
+
+  /**
+   * Anything of the hook still to step this frame (`look`): the rope out, the flight after a let-go, a stagger, a
+   * jolt, a lean or its tail on the wire, the arm or the camera's pull not yet eased away, or a slam's gap still
+   * running (its clock is `look`'s, so a slam that left nothing else to ease would hold the gap shut for good). False,
+   * and the player's update runs nothing of it, for a player who never fires.
+   */
+  get lively(): boolean {
+    return (
+      this.state !== 'off' ||
+      this.released ||
+      this.staggerAge !== Number.POSITIVE_INFINITY ||
+      this.joltLeft > 0 ||
+      this.armWeight > 0 ||
+      this.leanAngle > 0 ||
+      this.leanTailLeft > 0 ||
+      this.sinceSlam < GRAPPLE_TUNE.slamGap ||
+      this.camScaleNow !== 1 ||
+      this.camAirborne
+    );
+  }
+
   /** The free span's slack: the free length less the hand's distance to the pivot. */
   slack(b: GrappleBody): number {
     if (!this.attached) return 0;
@@ -492,6 +760,7 @@ export class Grapple {
 
   /** The words of the rope from the body as it stands: once a frame before the movement, and by the key block. */
   refreshModes(b: GrappleBody): RopeModes {
+    this.bodyVel = b.vel;
     const held = this.attached && !this.con.taut && this.slack(b) <= GRAPPLE_TUNE.latchSlack;
     ropeModes(this.attached, b.grounded, b.swimming, this.con.taut, held, this.latch, len2(b.vel.x, b.vel.z), GRAPPLE_TUNE, this.modes);
     this.latch = this.modes.latch;
@@ -619,6 +888,8 @@ export class Grapple {
     this.dartExclude = exclude;
     this.returning = false;
     this.state = 'flying';
+    // A new hook ends the fast flight of the last one: what it meets now is the new rope's business.
+    this.released = false;
     this.counts.fires++;
   }
 
@@ -641,6 +912,8 @@ export class Grapple {
     this.dartFilter = b.filter;
     this.dartExclude = b.body;
     this.state = 'flying';
+    // A new hook, as a fire is: the fast flight of the last one ends here.
+    this.released = false;
     this.bite(b, x, y, z, nx, ny, nz, collider, b.physics);
     if (length > 0 && this.attached) this.rope.length = Math.min(T.range, length);
   }
@@ -659,9 +932,18 @@ export class Grapple {
    * Let go, whatever is out: the rope and the dart go, the latch clears, and the walk, the torch and the jump
    * are owed a mute until their keys are up (the next key block applies it, or the key block that let go at
    * once). Never the crouch: an X held from reeling out into the landing is Jedi Academy's landing roll.
+   *
+   * A rope let go of while the body flies faster than `slamFrom` starts the fast flight (`released`), so a wall it then
+   * flies into still hurts; a call-back or a miss never does, being no rope. A way out that puts the body somewhere new
+   * (`endsFlight`) ends that flight and everything the hook still eases, whether or not anything was out.
    */
   letGo(reason: LetGoReason): void {
-    if (this.state === 'off') return;
+    const ends = endsFlight(reason);
+    if (this.state === 'off') {
+      if (ends) this.calm();
+      return;
+    }
+    const wasAttached = this.state === 'attached';
     this.state = 'off';
     this.returning = false;
     this.rope.release();
@@ -677,7 +959,41 @@ export class Grapple {
     this.dartPhysics = null;
     this.muteOwed = true;
     this.lastLetGo = reason;
+    // The rope's correction goes with it: the flight after it syncs the collider and adds nothing to the move.
+    this.corr.x = 0;
+    this.corr.y = 0;
+    this.corr.z = 0;
+    this.reelRun = 0;
     ropeModes(false, false, false, false, false, false, 0, GRAPPLE_TUNE, this.modes);
+    if (ends) this.calm();
+    else if (wasAttached) {
+      const v = this.bodyVel;
+      const speed = v ? len3(v.x, v.y, v.z) : 0;
+      if (releasedHolds(speed, GRAPPLE_TUNE)) {
+        this.released = true;
+        this.releasedSpeed = speed;
+      }
+    }
+  }
+
+  /**
+   * Everything the hook still eases, stood down at once: the fast flight, the stagger and its shake and daze, the jolt,
+   * the lean, the arm and the camera's pull. For a body put somewhere new, given to a mount or a ship's rooms, or dead,
+   * none of which may carry a stagger or a lean on from where it was.
+   */
+  private calm(): void {
+    this.released = false;
+    this.staggerAge = Number.POSITIVE_INFINITY;
+    this.shakeNow = 0;
+    this.dazeNow = 0;
+    this.joltNow = 0;
+    this.joltLeft = 0;
+    leanIdentity(this.lean);
+    this.leanAngle = 0;
+    this.leanTailLeft = 0;
+    this.armWeight = 0;
+    this.camScaleNow = 1;
+    this.camAirborne = false;
   }
 
   /**
@@ -690,6 +1006,7 @@ export class Grapple {
    * and the haul are kept for the frame's steps. `mutes` is the caller's kept list.
    */
   stepKeys(input: GrappleKeyInput, b: GrappleBody, mutes: string[], fire: () => void): void {
+    this.bodyVel = b.vel;
     if (this.muteOwed) {
       input.muteUntilUp(GRAPPLE_RELEASE_MUTES);
       this.muteOwed = false;
@@ -703,15 +1020,17 @@ export class Grapple {
         this.counts.recalls++;
       } else fire();
     }
-    if (this.attached && this.modes.swinging && input.pressedAction('grappleBoost')) this.boost(b);
+    // A slam's stagger takes the boost, the reels and the haul for its half second (the sway in `beforeMove`).
+    const steady = !this.staggered;
+    if (this.attached && this.modes.swinging && steady && input.pressedAction('grappleBoost')) this.boost(b);
     if (this.muteOwed) {
       input.muteUntilUp(GRAPPLE_RELEASE_MUTES);
       this.muteOwed = false;
     }
     const k = this.keys;
-    k.reelIn = this.out && input.held('reelIn');
-    k.reelOut = this.out && input.held('reelOut');
-    k.haul = this.out && input.held('grappleHaul');
+    k.reelIn = this.out && steady && input.held('reelIn');
+    k.reelOut = this.out && steady && input.held('reelOut');
+    k.haul = this.out && steady && input.held('grappleHaul');
   }
 
   /** Space while swinging: a push along the line toward its first point, and the rope lets go. */
@@ -729,6 +1048,8 @@ export class Grapple {
     b.vel.x += rx * T.boost;
     b.vel.y += ry * T.boost;
     b.vel.z += rz * T.boost;
+    this.bodyVel = b.vel;
+    this.counts.boosts++;
     this.letGo('boost');
   }
 
@@ -782,6 +1103,7 @@ export class Grapple {
     const T = GRAPPLE_TUNE;
     const rope = this.rope;
     const vel = b.vel;
+    this.bodyVel = vel;
     const hand = this.hand0;
     hand.x = b.pos.x;
     hand.y = b.pos.y + T.ropeY;
@@ -807,10 +1129,25 @@ export class Grapple {
     const minLen = rope.spent + T.minFree;
     if (reel < 0 && rope.length + reel * dt < minLen) reel = Math.min(0, (minLen - rope.length) / dt);
     if (reel > 0 && rope.length + reel * dt > T.range) reel = Math.max(0, (T.range - rope.length) / dt);
+    const lengthWas = rope.length;
     rope.length += reel * dt;
     if (rope.length < minLen) {
       rope.length = minLen;
       if (reel > 0) reel = 0;
+    }
+    // The ratchet: once for every `tickEvery` of rope the held reel wound in or paid out, never more than `tickMax` a
+    // second. Only the held reel's: the dart's pay-out has the fire's clank and the haul its own rumble.
+    this.sinceTick += dt;
+    if (reel !== 0) {
+      this.reelRun += Math.abs(rope.length - lengthWas);
+      this.ratchetIn = reel < 0;
+      if (ratchetDue(this.reelRun, this.sinceTick, T)) {
+        this.counts.ratchets++;
+        this.sinceTick = 0;
+        this.reelRun -= T.tickEvery;
+      }
+      // A reel past the cap never banks ratchets to play once it slows.
+      if (this.reelRun > T.tickEvery) this.reelRun = T.tickEvery;
     }
     const piv = this.pivot(this.piv);
     let rx = hand.x - piv.x;
@@ -822,10 +1159,11 @@ export class Grapple {
       ry /= dist;
       rz /= dist;
     }
-    // The sway, while swinging: the move keys' direction taken into the plane square to the free span.
+    // The sway, while swinging: the move keys' direction taken into the plane square to the free span. Not while a
+    // slam's stagger runs.
     const swx = this.keys.swayX;
     const swz = this.keys.swayZ;
-    const swaying = m.swinging && (swx !== 0 || swz !== 0) && dist > 1e-6;
+    const swaying = m.swinging && !this.staggered && (swx !== 0 || swz !== 0) && dist > 1e-6;
     let tx = 0;
     let ty = 0;
     let tz = 0;
@@ -918,6 +1256,7 @@ export class Grapple {
     }
     // The constraint: the outward speed capped at the reel's rate plus the slack, the drift put back.
     const corr = this.corr;
+    const tautBefore = this.con.taut;
     this.con.free = rope.free();
     this.con.reel = reel;
     this.con.apply(vel, hand, piv, dt, corr, T);
@@ -925,7 +1264,27 @@ export class Grapple {
     corr.x -= cut.x;
     corr.y -= cut.y;
     corr.z -= cut.z;
-    if (this.con.caught > 0) this.sincePull = 0;
+    if (this.con.caught > 0) {
+      this.sincePull = 0;
+      // A slack rope going taut is a catch: it costs nothing, and past `joltFrom` it jolts the view a moment. The
+      // constraint takes a catch's speed in two frames (the last of the slack lets some through, the frame after takes
+      // the rest), so the catch is the two summed from the frame the rope runs out of slack, which reads the same at any
+      // frame rate; a rope already bearing load takes no catch.
+      if (!tautBefore) {
+        this.catchRun = this.con.caught;
+        this.catchStep = 1;
+      } else if (this.catchStep === 1) {
+        this.catchRun += this.con.caught;
+        this.catchStep = 2;
+      } else this.catchStep = 0;
+      // Asked only past `joltFrom`: a steady rope's per-frame catch never reaches it, and the frame's call takes no number.
+      const jolt = this.catchStep > 0 && this.catchRun > T.joltFrom ? joltFor(this.catchRun, T) : 0;
+      if (jolt > 0) {
+        this.joltNow = this.joltLeft > 0 ? Math.max(this.joltNow, jolt) : jolt;
+        this.joltLeft = T.joltTime;
+        this.lastCatch = this.catchRun;
+      }
+    } else this.catchStep = 0;
     // Hanging on a taut rope is not falling, nor is standing or floating: the fall counts from here.
     if (this.con.taut || m.onGround || m.afloat) b.jka.holdApex(b.pos.y);
     if (m.hanging) this.latch = true;
@@ -1039,10 +1398,10 @@ export class Grapple {
     return this.rope.face1[3 * j + 1] >= WALKABLE || this.rope.face2[3 * j + 1] >= WALKABLE;
   }
 
-  /** The capsule's collider put where the body is, at its own offset, before the controller moves it (the 144 fps fault). */
+  /** The capsule's collider put where the body is, at its own offset, before the controller moves it (the 144 fps fault): on the rope, and in the fast flight after it. */
   private readonly syncAt = { x: 0, y: 0, z: 0 };
   syncCollider(b: GrappleBody): void {
-    if (!this.attached || !GRAPPLE_TUNE.syncCollider) return;
+    if (!(this.attached || this.released) || !GRAPPLE_TUNE.syncCollider) return;
     const s = this.syncAt;
     s.x = b.pos.x;
     s.y = b.pos.y + b.colliderOffsetY;
@@ -1053,16 +1412,26 @@ export class Grapple {
   /**
    * After the controller has worked out its move (§3.1, 5): each contact's refused speed taken off the
    * velocity, measured relative to what was touched (nought for anything still, whose velocity is never
-   * read), and its size kept as the impact. A steep contact says the body is against a wall.
+   * read), and its size kept as the impact. A steep contact says the body is against a wall. On the rope and
+   * in the fast flight after it, the hardest contact into a wall is then judged as a slam (§3.11).
    */
   clip(b: GrappleBody): void {
-    if (!this.attached) return;
+    if (!this.attached && !this.released) return;
+    const vel = b.vel;
+    this.bodyVel = vel;
+    // The flight ends in water, and as a roll or a special move begins (each writes the velocity of its own).
+    if (this.released && (b.swimming || b.jka.rolling || b.jka.inSpecialJump)) {
+      this.released = false;
+      return;
+    }
     const T = GRAPPLE_TUNE;
     const c = b.controller;
-    const vel = b.vel;
     this.lastImpact = 0;
     this.lastImpactHaul = false;
     this.wallTouch = false;
+    // The hardest contact into a wall and into a floor this frame, for the slam rule after the loop.
+    let wall = 0;
+    let floor = 0;
     const n = c.numComputedCollisions();
     for (let i = 0; i < n; i++) {
       const hit = c.computedCollision(i, this.kept);
@@ -1100,6 +1469,14 @@ export class Grapple {
         this.lastImpactHaul = this.hauling;
       }
       if (into > this.maxImpact) this.maxImpact = into;
+      if (walkable) {
+        if (into > floor) floor = into;
+      } else if (into > wall) {
+        wall = into;
+        this.slamN.x = this.n1.x;
+        this.slamN.y = this.n1.y;
+        this.slamN.z = this.n1.z;
+      }
       if (this.n1.y < WALKABLE && this.n1.y > -WALKABLE) {
         this.wallTouch = true;
         this.wallN.x = this.n1.x;
@@ -1107,6 +1484,151 @@ export class Grapple {
         this.wallN.z = this.n1.z;
       }
     }
+    // The slam rule, on what the clip measured: a wall at a swing's speed hurts and staggers; the haul's own push
+    // (F held) and a floor (the fall rule's) are measured for the console and cost nothing.
+    const hauling = this.hauling || this.keys.haul;
+    if (wall > T.slamFrom && slamCounts(this.slamN.y, hauling)) {
+      // Where it struck: the capsule's own side toward the wall (its radius out from its middle), which is what the
+      // damage arc points at.
+      const r = SLAM_REACH;
+      this.slamAt(b, wall, this.attached ? 'swing' : 'released', b.pos.x - this.slamN.x * r, b.pos.y + b.colliderOffsetY - this.slamN.y * r, b.pos.z - this.slamN.z * r);
+    } else if (wall > T.slamFrom) this.noteSlam(wall, 0, 'haul', false);
+    else if (floor > T.slamFrom) this.noteSlam(floor, 0, 'floor', false);
+    // The flight after a let-go ends once the body is slower than a slam.
+    if (this.released && !releasedHolds(len3(vel.x, vel.y, vel.z), T)) this.released = false;
+  }
+
+  /**
+   * The slam rule at `v` m/s into what was struck, at (`px`, `py`, `pz`): at most once in `slamGap`, the harm the
+   * table says (`slamHarm`, the whole health past `slamKill`) taken as a fall's (`'fall'`: the world hurt the body,
+   * so no fight opens and a roll's first instant never dodges it), and past `staggerFrom` the stagger, its shake and
+   * its daze. The rope holds through it. Answers the harm. The console's `slam` asks it outright.
+   */
+  slamAt(b: GrappleBody, v: number, kind: SlamKind, px: number, py: number, pz: number): number {
+    const T = GRAPPLE_TUNE;
+    if (!(v > T.slamFrom)) {
+      this.noteSlam(v, 0, kind, false);
+      return 0;
+    }
+    // Within the gap the last slam stands, and so does the console's record of it.
+    if (this.sinceSlam < T.slamGap) return 0;
+    const harm = slamHarm(v, b.hp, T);
+    const took = harm > 0 && b.takeDamage(harm, false, 'fall');
+    const staggers = staggerFor(v, T) > 0;
+    if (staggers) this.staggerAge = 0;
+    this.noteSlam(v, harm, kind, took);
+    if (harm > 0 || staggers) {
+      this.sinceSlam = 0;
+      this.lastSlam.x = px;
+      this.lastSlam.y = py;
+      this.lastSlam.z = pz;
+      this.counts.slams++;
+    }
+    return harm;
+  }
+
+  /** A contact the slam rule judged, kept for the console whether it cost anything or not. */
+  private noteSlam(speed: number, harm: number, kind: SlamKind, took: boolean): void {
+    const s = this.lastSlam;
+    s.speed = speed;
+    s.harm = harm;
+    s.kind = kind;
+    s.took = took;
+    s.at = this.clock;
+  }
+
+  /** A stagger with its shake and daze and no harm: the console's, for judging the screen effect by eye. */
+  staggerNow(): void {
+    this.staggerAge = 0;
+  }
+
+  /**
+   * The rest of the hook's frame, after the move (from wave 2): its clocks, the stagger's shake and daze, the catch's
+   * jolt running out, the camera's pull eased toward the speed and back to 1 once the feet find ground, the drawn
+   * lean eased toward the rope while swinging and back to upright otherwise (and the tail its turn is still sent for
+   * once level), and the arm's weight and direction. The player's update calls it while anything of it is `lively`,
+   * after `afterMove`; it moves no body.
+   */
+  look(b: GrappleBody, dt: number): void {
+    const T = GRAPPLE_TUNE;
+    this.bodyVel = b.vel;
+    this.clock += dt;
+    this.sinceSlam += dt;
+    if (this.staggerAge !== Number.POSITIVE_INFINITY) {
+      this.staggerAge += dt;
+      if (this.staggerAge >= T.stagger && this.staggerAge >= T.shakeTime) this.staggerAge = Number.POSITIVE_INFINITY;
+    }
+    this.shakeNow = shakeAt(this.staggerAge, T);
+    this.dazeNow = dazeAt(this.staggerAge, T);
+    if (this.joltLeft > 0) {
+      this.joltLeft -= dt;
+      if (this.joltLeft <= 0) {
+        this.joltLeft = 0;
+        this.joltNow = 0;
+      }
+    }
+    // The camera's pull: with the speed while the rope is out or the body has not come down since, then back to the
+    // literal 1 within `camBack` of the feet finding ground.
+    const vel = b.vel;
+    if (this.state !== 'off' || this.released) this.camAirborne = true;
+    else if (b.grounded || b.swimming) this.camAirborne = false;
+    let s = this.camScaleNow;
+    if (this.camAirborne) {
+      const want = camScaleFor(len3(vel.x, vel.y, vel.z), T);
+      s += (want - s) * (1 - Math.exp(-dt / T.camEase));
+    } else if (s !== 1) {
+      const rate = Math.max(0.05, Math.abs(T.camScale - 1)) / T.camBack;
+      s = s > 1 ? Math.max(1, s - rate * dt) : Math.min(1, s + rate * dt);
+    }
+    this.camScaleNow = s;
+    // The rope's first point from the rope point: the dart while it flies, the nearest bend or the anchor once in.
+    const ropeY = T.ropeY;
+    let dx = 0;
+    let dy = 0;
+    let dz = 0;
+    if (this.state === 'flying') {
+      dx = this.dart[0] - b.pos.x;
+      dy = this.dart[1] - (b.pos.y + ropeY);
+      dz = this.dart[2] - b.pos.z;
+    } else if (this.state === 'attached') {
+      this.pivot(this.piv);
+      dx = this.piv.x - b.pos.x;
+      dy = this.piv.y - (b.pos.y + ropeY);
+      dz = this.piv.z - b.pos.z;
+    }
+    const dl = len3(dx, dy, dz);
+    if (dl > 1e-6) {
+      this.armDir.x = dx / dl;
+      this.armDir.y = dy / dl;
+      this.armDir.z = dz / dl;
+    }
+    // The lean: toward the rope while swinging (never afloat, never on its feet), upright otherwise, at a rate that
+    // takes the largest lean upright in `leanOut`, so it is never dropped in one frame.
+    const tgt = this.leanTarget;
+    if (this.state === 'attached' && this.modes.swinging && dl > 1e-6) {
+      const d = this.lookDir;
+      d.x = dx;
+      d.y = dy;
+      d.z = dz;
+      leanOf(d, T, tgt);
+    } else leanIdentity(tgt);
+    const io = this.leanStep;
+    io.step = leanRate(T) * dt;
+    leanToward(this.lean, tgt, io, this.lean);
+    this.leanAngle = leanAngleOf(this.lean);
+    if (this.leanAngle < 1e-9 && tgt.w === 1) {
+      leanIdentity(this.lean);
+      this.leanAngle = 0;
+    }
+    // The tail on the wire: held full while the lean is past level, run down once it is level. Written only while it
+    // moves, as the arm's weight is.
+    if (this.leanAngle > (T.leanLevel * Math.PI) / 180) {
+      if (this.leanTailLeft !== T.leanTail) this.leanTailLeft = T.leanTail;
+    } else if (this.leanTailLeft > 0) this.leanTailLeft = this.leanTailLeft > dt ? this.leanTailLeft - dt : 0;
+    // The arm: in over `armIn` while the hook is out, out over `armOut` after, keeping the last way it pointed.
+    if (this.state !== 'off') {
+      if (this.armWeight < 1) this.armWeight = Math.min(1, this.armWeight + dt / T.armIn);
+    } else if (this.armWeight > 0) this.armWeight = Math.max(0, this.armWeight - dt / T.armOut);
   }
 
   /**
@@ -1301,6 +1823,9 @@ export class Grapple {
     this.pivot(this.piv);
     rope.length = Math.min(T.range, rope.spent + len3(hx - this.piv.x, hy - this.piv.y, hz - this.piv.z));
     this.state = 'attached';
+    this.released = false;
+    this.reelRun = 0;
+    this.bodyVel = b.vel;
     this.anchorPhysics = p;
     this.anchorWalkable = ny >= WALKABLE;
     this.con.reset();

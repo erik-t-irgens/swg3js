@@ -65,12 +65,14 @@ const both: [string, string, string][] = [
   ['the swim\'s grounded is written back', 'this.grounded = swum.grounded;', 'this.grounded = swum.grounded;'],
   ['the step before the move runs while the hook is out', 'if (this.grapple.out) this.grapple.beforeMove(this.gview, dt);', 'if (this.hooks && g.out) g.beforeMove(this, dt);'],
   ['the snap is off while swinging', '|| (this.grapple.attached && this.grapple.modes.swinging)) this.controller.disableSnapToGround();', '|| (this.hooks && g.attached && g.modes.swinging)) this.controller.disableSnapToGround();'],
-  ['the collider sync runs only while attached', 'if (this.grapple.attached) {\n      // On the rope: the capsule\'s collider put where the body is', 'if (this.hooks && g.attached) {\n      g.syncCollider(this);'],
-  ['the clip runs only while attached', 'if (this.grapple.attached) this.grapple.clip(this.gview);', 'if (this.hooks && g.attached) g.clip(this);'],
+  ['the collider sync runs only while attached or in the fast flight after a let-go', 'if (this.grapple.attached || this.grapple.released) {\n      // On the rope, or in the fast flight after letting go of it: the capsule\'s collider put where the body is', 'if (this.hooks && (g.attached || g.released)) {\n      g.syncCollider(this);'],
+  ['the clip (and the slam) runs only while attached or in that flight', 'if (this.grapple.attached || this.grapple.released) this.grapple.clip(this.gview);', 'if (this.hooks && (g.attached || g.released)) g.clip(this);'],
   ['the step after the move runs while the hook is out', 'if (this.grapple.out) this.grapple.afterMove(this.gview, dt);', 'if (this.hooks && g.out) g.afterMove(this, dt);'],
+  ['the rest of the frame (the stagger, the jolt, the camera\'s pull, the lean, the arm) runs while anything of it is lively', 'if (this.grapple.lively) this.grapple.look(this.gview, dt);', 'if (this.hooks && g.lively) g.look(this, dt);'],
 ];
 for (const [what, inPlayer, inHarness] of both) ok(update.includes(inPlayer) && frame.includes(inHarness), `${what}, in the player's update and in the harness`);
-const sync = update.slice(update.indexOf('if (this.grapple.attached) {\n      // On the rope'));
+ok(inOrder(update, ['grapple.afterMove(', 'grapple.look(']).ok && inOrder(frame, ['g.afterMove(', 'g.look(']).ok, 'the look comes after the step after the move, in both');
+const sync = update.slice(update.indexOf('if (this.grapple.attached || this.grapple.released) {\n      // On the rope'));
 ok(inOrder(sync, ['this.grapple.syncCollider(this.gview);', 'moveX += gc.x;', 'moveY += gc.y;', 'moveZ += gc.z;', 'computeColliderMovement(']).ok, "inside that guard the collider is synced and the rope's correction added to the move, before the controller");
 const command = method(grapple, '  command(c: { fmove: number; smove: number; jump: boolean; jumpPressed: boolean }, grounded: boolean): boolean {');
 ok(/if \(this\.state !== 'attached'\) return grounded;/.test(command) && /if \(m\.swinging\) \{\s*c\.fmove = 0;\s*c\.smove = 0;\s*c\.jump = false;\s*c\.jumpPressed = false;\s*\}/.test(command) && /return m\.sliding \? false : grounded;/.test(command), "the hook's command hands nothing on unless attached, takes the keys and the jump while swinging and the ground while sliding");
@@ -131,5 +133,72 @@ ok(harness.includes('g.stepKeys(input, this, this.mutes, this.fireNow)'), 'the h
 // The side buttons' guard in the input.
 ok(/window\.addEventListener\('mouseup', sideGuard, true\)/.test(input) && /window\.addEventListener\('auxclick', sideGuard, true\)/.test(input), 'the input listens for mouseup and auxclick on the window in the capture phase');
 ok(/e\.button === 3 \|\| e\.button === 4/.test(input), 'and its guard names buttons 3 and 4, the back and forward side buttons');
+
+// Wave 2: the sounds, the daze, the look.
+const sounds = read('../../../src/audio/grappleSounds.ts');
+const grade = read('../../../src/core/fx/grade.ts');
+const { GRAPPLE_SOUND, GRAPPLE_SOUND_IDS } = await import('../../../src/audio/grappleSounds.ts');
+const roles = Object.keys(GRAPPLE_SOUND) as (keyof typeof GRAPPLE_SOUND)[];
+const played = [...sounds.matchAll(/GRAPPLE_SOUND\.(\w+)/g)].map((m) => m[1]);
+const unprepared = roles.filter((r) => !GRAPPLE_SOUND_IDS.includes(GRAPPLE_SOUND[r]));
+ok(unprepared.length === 0 && played.every((r) => roles.includes(r as keyof typeof GRAPPLE_SOUND)), `every grapple sound id is in the prepared list (${roles.length} roles; ${unprepared.join(', ') || 'none missing'})`);
+const step = method(sounds, '  step(g: GrappleSoundSource, hand: { x: number; y: number; z: number }, vel: { readonly x: number; readonly y: number; readonly z: number }, space: SoundSpace, live: boolean): void {');
+ok(/while \(s\.ratchets < c\.ratchets\) \{\s*s\.ratchets\+\+;\s*this\.once\(host, 'ratchet', GRAPPLE_SOUND\.ratchet, g\.clock\);/.test(step), 'the ratchet is played one for one with the hook\'s own ratchet count');
+// The step runs every frame of the session for a player who may never fire: it is handed the velocity record, never a
+// speed worked out in the call (a fresh number a frame), and reads the speed only while the wind is wanted.
+const soundStep = method(main, '  private stepGrappleSounds(): void {');
+ok(soundStep.includes('grappleSounds.step(p.grapple, p.grappleHand(this.grappleSoundAt), p.vel, this.listenerPose.space,') && !soundStep.includes('Math.sqrt'), 'the game hands the sound step the velocity record, not a speed it worked out');
+ok(/live && \(g\.out \|\| g\.released\) && GRAPPLE_TUNE\.windGain > 0 \? windGainFor\(len3\(vel\.x, vel\.y, vel\.z\), GRAPPLE_TUNE\) : 0;/.test(step), 'and the step works the speed out only while the wind is wanted');
+ok(main.includes('grappleSounds.attach(this.audio, sabers);') && /const files = this\.jka \? this\.jka\.jkaFiles : null;\s*if \(files !== this\.boostFor\) \{/.test(sounds), "the boost's Jedi Academy file is looked for once for each pack the sabers adopt, never every frame");
+const srcFiles = ['../../../src/main.ts', '../../../src/player/player.ts', '../../../src/player/grapple.ts', '../../../src/audio/audio.ts', '../../../src/audio/grappleSounds.ts'];
+const ratchetIn = srcFiles.filter((f) => read(f).includes('item_ratchet'));
+ok(ratchetIn.length === 1 && ratchetIn[0].endsWith('grappleSounds.ts') && (sounds.match(/GRAPPLE_SOUND\.ratchet/g) ?? []).length === 2, 'and that is the only place the ratchet is played (named once in the table, asked for once)');
+ok(inOrder(method(main, '  private arrive('), ['this.world.load(', 'grappleSounds.renew();', 'this.world.loadPack(']).ok, "every arrival asks for the grapple's sounds again behind its loading screen");
+const feet = method(main, '  private stepFeet(');
+ok(feet.includes('this.stepGrappleSounds();'), "the sounds step beside the feet's, which both the frame and advance reach every step");
+// The daze: one frame input into the vignette, never a pass turned on.
+const pass = grade.slice(grade.indexOf('export class GrainVignettePass'));
+const enabled = method(pass, '  enabled(ctx: FxFrameContext): boolean {');
+ok(/u\.uVignette\.value = s\.vignette \? Math\.min\(1, s\.vignetteStrength \+ AIM_VIGNETTE \* ctx\.aimAmount \+ ctx\.vignetteKick\) : 0;/.test(pass), "the vignette adds the grapple's kick only inside its own `s.vignette ?` branch");
+ok(enabled.length > 0 && !enabled.includes('vignetteKick'), 'and the pass\'s `enabled` never reads it, so the kick can never turn the pass on');
+ok(main.includes('f.vignetteKick = this.grappleDaze;') && main.includes('this.grappleDaze = simulate ? player.grapple.dazeNow : 0;'), 'the kick is the stagger\'s daze on a simulated frame and nought on any other');
+// And the frame's input reaches the context the pass reads, by the effects' own `updateContext`, run here.
+{
+  const THREE = await import('three');
+  const { createContext, updateContext } = await import('../../../src/core/fx/context.ts');
+  const ctx = createContext({} as never, {} as never, { width: 4, height: 4, texture: null, depthTexture: null } as never);
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 9000);
+  camera.updateMatrixWorld();
+  const input = { camera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0.37, firstPerson: false, orbitDistance: 0, waterInView: false, followFar: 0, blades: ctx.blades, lights: ctx.lights, skyLights: [], skyLightCount: 0, clouds: [], cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(), underwaterOpacity: 0.75, underwaterReach: 0, room: null, weather: null };
+  ok(ctx.vignetteKick === 0, 'a fresh context starts with no kick');
+  updateContext(ctx, input as never, new THREE.Vector2(4, 4));
+  const kicked = ctx.vignetteKick;
+  input.vignetteKick = 0;
+  updateContext(ctx, input as never, new THREE.Vector2(4, 4));
+  ok(kicked === 0.37 && ctx.vignetteKick === 0, `updateContext carries the frame's kick into the context the vignette reads (${kicked}), and nought the frame after`);
+}
+// The look, in the player: the lean in `placeVisual`, the arm after the arm chain, the heading on the rope.
+const place = method(player, '  placeVisual(): void {');
+ok(place.includes('this.leanedAt(this.group.position);') && place.includes('if (this.grapple.leaning) this.group.quaternion.premultiply(this.leanTurn(grappleLeanQ));'), 'the lean is written in placeVisual, once a frame before the render, about the rope point');
+const animate = method(player, '  private animateRig(dt: number, speed: number, moving: boolean, mz = 0, mx = 0): void {');
+ok(inOrder(animate, ["} else if (this.saberOn) {", 'if (this.grapple.armWeight > 0 && !this.mounted) this.aimGrappleArm(rig);']).ok, 'the left arm is aimed up the rope after the arm chain, while its weight is up');
+ok(update.includes('|| (this.grapple.attached && this.grapple.modes.swinging);'), 'and the heading follows the view while swinging on the rope');
+// The arm's weight reaches the bones: the rig hands it to the aim (passed as 1, the arm would snap up the rope).
+const rig = read('../../../src/player/rig.ts');
+const aimArm = method(rig, '  aimArm(side: ');
+ok(/aimArmBones\(this\.root, upper, fore, [^;]*, dir, roll, weight\);/.test(aimArm), "the rig's aimArm hands its weight to the bones' aim");
+ok(method(player, '  private aimGrappleArm(rig: CharacterRig): void {').includes("rig.aimArm('left', d.set(grappleArmLocal.x, grappleArmLocal.y, grappleArmLocal.z), 0, g.armWeight);"), "and the player aims the left arm by the hook's eased weight");
+// The lean on the wire (§3.15): the whole turn and the leaned origin go while `leanSends`, the one rule the hook keeps.
+const net = method(main, '  private stepNet(dt: number): void {');
+ok(net.includes('const leans = !p.aboard && !p.eva && p.grapple.leanSends;') && net.includes('const at = leans ? p.leanedAt(leanedAt) : p.worldPos;'), "stepNet sends while the hook says the lean goes out, from the origin the leaning figure is drawn at");
+ok(net.includes('const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3)') && net.includes("this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)],") && /sendState\(\{[^\n]*\bq,/.test(net), 'and puts the whole turn in the state while it does, with that origin as the place');
+// The receiver: the glide of a peer's turn is `peerTurn.ts`'s, which the node test runs over a let-go at the wire's rate.
+const remotes = read('../../../src/net/remotePlayers.ts');
+ok(remotes.includes("import { glidePeerTurn } from './peerTurn.ts';") && remotes.includes('glidePeerTurn(r.group, r.targetQ, r.heading, k, r);') && !/r\.group\.rotation\.set\(0, r\.group\.rotation\.y/.test(remotes), "a peer's turn is glided by peerTurn.ts, never by the Euler yaw a whole turn leaves behind");
+// The camera's pull and the shake: the camera's own arguments and register, nothing new in it.
+ok(main.includes('this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);'), "the on-foot camera is handed the hook's own scale in place of its 1");
+const feel = method(main, '  private stepGrappleFeel(): void {');
+ok(feel.includes('this.hurtFrom(this.grappleSlamAt.set(s.x, s.y, s.z));') && feel.includes('setViewShake(g.shakeNow);') && feel.includes('setViewShake(g.joltNow);'), "a slam raises the flash and the arc at its contact, and the shake and the jolt go through the camera's register");
+ok((main.match(/this\.stepGrappleFeel\(\);/g) ?? []).length === 2, 'the feel is handed over by the frame and by advance alike');
 
 console.log(`\n${checks} checks passed`);

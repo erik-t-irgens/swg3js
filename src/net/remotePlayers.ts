@@ -19,6 +19,7 @@ import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { hangHeld } from './peerHands.ts';
+import { glidePeerTurn } from './peerTurn.ts';
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -168,8 +169,10 @@ interface Remote {
   label: THREE.Sprite;
   target: THREE.Vector3;
   heading: number;
-  /** The figure's whole turn, when the peer sends one (aboard a hull, adrift). */
+  /** The figure's whole turn, when the peer sends one (aboard a hull, adrift, leaning on a grapple's rope). */
   targetQ: THREE.Quaternion | null;
+  /** The figure's turn last came off the wire whole, so its Euler angles are not its heading (`peerTurn.ts`). */
+  turned: boolean;
   state: string;
   speed: number;
   saber: boolean;
@@ -357,7 +360,7 @@ export class RemotePlayers {
     this.scene.add(group);
     markActor(group);
     const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -924,14 +927,9 @@ export class RemotePlayers {
       // smoothly between the relay's few updates a second.
       const k = 1 - Math.exp(-dt / 0.1);
       r.group.position.lerp(r.target, k);
-      if (r.targetQ) {
-        // The whole turn: aboard a hull or adrift, the figure is not upright in the world.
-        r.group.quaternion.slerp(r.targetQ, k);
-      } else {
-        let diff = r.heading - r.group.rotation.y;
-        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-        r.group.rotation.set(0, r.group.rotation.y + diff * k, 0);
-      }
+      // The whole turn (aboard a hull, adrift, leaning on a rope: the figure is not upright in the world), else the
+      // heading; a figure coming off a whole turn is eased upright as one, never stood up or mirrored in a frame.
+      glidePeerTurn(r.group, r.targetQ, r.heading, k, r);
       // In somebody else's hull: the glide is taken in that hull's own frame, at the same rate as
       // every other glide, and the figure is carried onto the hull's live pose after this pass.
       const ab = r.aboard;

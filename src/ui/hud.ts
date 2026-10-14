@@ -116,6 +116,7 @@ export interface HudColours {
   readonly hot: number;
   readonly good: number;
   readonly bad: number;
+  readonly warn: number;
 }
 
 /**
@@ -140,10 +141,12 @@ export interface HudGrappleMark {
   anchorOn: boolean;
   ax: number;
   ay: number;
+  /** How much of the longest rope is out (0 to 1) while the rope is attached, nought otherwise: the arc round the crosshair. */
+  ropeUsed: number;
 }
 
 export function newHudGrappleMark(): HudGrappleMark {
-  return { enabled: true, shows: false, held: false, next: false, flash: 0, onScreen: false, x: 0, y: 0, anchorOn: false, ax: 0, ay: 0 };
+  return { enabled: true, shows: false, held: false, next: false, flash: 0, onScreen: false, x: 0, y: 0, anchorOn: false, ax: 0, ay: 0, ropeUsed: 0 };
 }
 
 /**
@@ -1134,9 +1137,10 @@ export class Hud {
   /**
    * The grapple's mark: a diamond with its corners on the axes where the dart would bite -- `good` when a press
    * fires, at half alpha from the snap hold, `muted` while attached for the next anchor, `bad` for a refused
-   * press's moment -- and a small `accent` mark at the anchor while the rope is out. Drawn whatever the Jedi's
-   * crosshair switch says, behind its own; never at a ship's controls or with the mouse free. Palette indices
-   * and kept numbers only.
+   * press's moment -- and a small `accent` mark at the anchor while the rope is out. While the rope is attached, a
+   * thin arc round the crosshair says how much of the longest rope is out, clockwise from twelve, in `muted` and in
+   * `warn` past `grappleRopeWarn`. Drawn whatever the Jedi's crosshair switch says, behind its own; never at a ship's
+   * controls or with the mouse free. Palette indices and kept numbers only.
    */
   private drawGrappleMark(m: HudGrappleMark): void {
     const c = this.canvas;
@@ -1151,6 +1155,11 @@ export class Hud {
       this.diamond(m.x, m.y, S.grappleMark * s, width, colour, alpha);
     }
     if (m.anchorOn) this.diamond(m.ax, m.ay, S.grappleAnchor * s, width, col.accent, S.grappleMarkAlpha);
+    if (m.ropeUsed > 0) {
+      const used = m.ropeUsed < 1 ? m.ropeUsed : 1;
+      c.arc(Math.round(window.innerWidth / 2), Math.round(window.innerHeight / 2), S.grappleRopeArc * s, 0, 360 * used, S.grappleRopeArcWidth * s, used > S.grappleRopeWarn ? col.warn : col.muted, S.grappleMarkAlpha);
+      this.out.ops++;
+    }
   }
 
   /** A diamond of four strokes, its corners `r` out on the axes. */

@@ -24,7 +24,7 @@ import { findRackWeapon, forcedArmsRefusal } from './world/mobiles/arms.ts';
 import { Effects } from './combat/effects';
 import { JediKit } from './combat/jedi';
 import type { ClassId, Kit, KitContext, Living } from './combat/kit';
-import { setViewShake, ThirdPersonCamera } from './core/camera.ts';
+import { setViewShake, ThirdPersonCamera, viewShakeAmount } from './core/camera.ts';
 import { markActor, passesSeeing, PortalRenderer, SHADOW_STRAYS } from './world/portalRender.ts';
 import { cullOn, NARROW_STATS, PORTAL_CULL, type PortalCullTune, type VisBuilding } from './world/portalVis.ts';
 import { ROUTE_KIND, ROUTE_KIND_NAMES, ROUTE_TUNE } from './world/portalCull.ts';
@@ -392,6 +392,7 @@ import { BodySounds, type BodyLists, type FootTune, type PlayerBody } from './au
 import { combatSounds, GENERIC_GUN, type CombatTables, type CombatTune } from './audio/combatSounds.ts';
 import { vehicleSounds, type SoundVehicle, type VehicleTables, type VehicleTune } from './audio/vehicleSounds.ts';
 import { sabers } from './audio/saberSounds.ts';
+import { GRAPPLE_SOUND_IDS, grappleSounds } from './audio/grappleSounds.ts';
 import { CLIP_EVENT_TUNE, type ClipEventTune } from './audio/clipEvents.ts';
 import { FAMILY_TUNE } from './world/terrain';
 import { COLOR_RAMP_FILE } from './world/swgTerrain.ts';
@@ -668,6 +669,8 @@ function wayBackNowhere(back: WayBack): boolean {
 }
 /** Where a thrown blade is in the world, for the state that carries it; written once a message. */
 const thrownAt = new THREE.Vector3();
+/** Where a figure leaning into the grapple's rope is drawn from, for the state that carries its whole turn. */
+const leanedAt = new THREE.Vector3();
 /** Where the view looks, for the head that follows it; written once a frame and never made. */
 const headLook = new THREE.Vector3();
 /** Scratch for putting a walker out of a hull another player flies: where that hull is, and what it is doing. */
@@ -1180,7 +1183,7 @@ class App {
   /** What the blades' light ceiling reads, kept and refilled each frame; the world and the pool are set in the constructor. */
   private readonly litSources: LitSources = { world: null!, effects: null!, torch: null };
   /** What the effects are told about each frame, refilled in drawFrame rather than made again. */
-  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
+  private readonly fxInput: FxFrameInput = { camera: null as unknown as THREE.PerspectiveCamera, dt: 1 / 60, sun: null, portalView: false, cameraInHull: false, inside: false, aboard: false, space: false, fog: null, daylight: 1, dayIndex: 0, lighting: null, planetId: '', aiming: false, aimAmount: 0, vignetteKick: 0, firstPerson: false, orbitDistance: 0, skyLights: createSkyLights(MAX_FLARE_SOURCES), skyLightCount: 0, clouds: createCloudLayers(MAX_CLOUD_LAYERS), cloudCount: 0, cameraUnderwater: false, cameraSubmerged: false, underwaterDepth: 0, underwaterColor: new THREE.Color(0x2e7fbb), underwaterOpacity: 0.75, underwaterReach: 0, waterInView: false, blades: this.fxBlades, lights: this.fxLights, room: null, followFar: 0, weather: null };
   private readonly fxSun: SunInfo = { dir: new THREE.Vector3(), color: new THREE.Color(), intensity: 0 };
   /**
    * Each world's measured sky, kept for the session once it has been fetched (a few hundred bytes,
@@ -1482,6 +1485,9 @@ class App {
     // and the world, which is asked only what room the ear is in and whether it is raining on the
     // blade or the blade is under water.
     sabers.attach(this.audio, { clips: this.feet.index, world: this.world, baseUrl: import.meta.env.BASE_URL });
+    // The grapple's sounds through the same mixer; its boost is made of Jedi Academy's own melee whooshes, which the
+    // sabers' pack says are there.
+    grappleSounds.attach(this.audio, sabers);
     // A fighter's blade is the sabers' to speak for: the guns hold the hook and the fighters ask
     // through it, so nothing in the world has to know what a lit blade sounds like.
     combatSounds.useSaber({
@@ -5760,6 +5766,10 @@ class App {
             this.stepEmoteKeys();
             this.stepEmoteEnd();
             this.player.update(dt, this.input, this.cam, this.world);
+            // The grapple's danger as the frame loop hands it over: a slam's flash and arc, the shake and the jolt.
+            this.stepGrappleFeel();
+            this.grappleDaze = this.player.grapple.dazeNow;
+            this.grappleLive = true;
             this.scorch(dt);
             this.stepCombat(dt);
             // The jump's clock (its countdown and phases); the transit itself waits on drawn frames and streaming, which this does not give.
@@ -7083,11 +7093,22 @@ class App {
        * point with the mark's own range and clear-segment checks; `letGo`, `everyone`, `tune` and `reset` (the
        * table back as it ships) as their names say.
        */
-      grapple: (opts: { fire?: boolean | [number, number, number]; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean } = {}) => {
+      grapple: (opts: { fire?: boolean | [number, number, number]; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean } = {}) => {
         const p = this.player;
         const g = p.grapple;
         const b = p.grappleBody;
         const said: string[] = [];
+        // The slam rule once at a speed, against a wall a metre ahead along the view: its harm and its stagger.
+        if (typeof opts.slam === 'number' && Number.isFinite(opts.slam)) {
+          this.cam.forward(this.grappleLook);
+          const harm = g.slamAt(b, opts.slam, 'console', p.pos.x + this.grappleLook.x, p.pos.y + 1, p.pos.z + this.grappleLook.z);
+          said.push(`a slam at ${opts.slam} m/s: ${harm} harm${g.staggered ? ', staggered' : ''}`);
+        }
+        // A stagger with its shake and daze and no harm, for judging the screen effect by eye.
+        if (opts.stagger) {
+          g.staggerNow();
+          said.push('staggered');
+        }
         // The rope's own work is timed from the first ask on (a clock read is a fresh number a frame, so not before).
         if (!g.timing) {
           g.timing = true;
@@ -7146,6 +7167,17 @@ class App {
           lastLetGo: g.lastLetGo,
           counts: { ...g.counts },
           panes: b.physics.paneCount(),
+          // Wave 2: the danger, the look and the sound.
+          lastSlam: g.lastSlam.kind ? { speed: n2(g.lastSlam.speed), harm: g.lastSlam.harm, took: g.lastSlam.took, kind: g.lastSlam.kind, ago: n2(g.clock - g.lastSlam.at) } : null,
+          stagger: { left: g.staggered ? n2(GRAPPLE_TUNE.stagger - g.staggerAge) : 0, daze: n3(g.dazeNow), shake: n3(viewShakeAmount()), drawnKick: n3(this.fxInput.vignetteKick) },
+          released: { on: g.released, speed: n2(g.releasedSpeed) },
+          jolt: { speed: n2(g.lastCatch), shake: n3(g.joltNow), left: n2(g.joltLeft) },
+          arm: this.grappleArmError(),
+          armWeight: n2(g.armWeight),
+          lean: n2((g.leanAngle * 180) / Math.PI),
+          leanSends: g.leanSends,
+          camScale: n3(g.camScaleNow),
+          sounds: { ...grappleSounds.status(), asked: grappleSounds.log.slice(-8), ratchets: grappleSounds.ratchetsLastSecond(g.clock), counts: { ...grappleSounds.counts }, recent: (this.audio.status().recent as { id: string; result: string }[]).filter((r) => GRAPPLE_SOUND_IDS.includes(r.id)) },
         };
       },
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
@@ -10249,6 +10281,7 @@ class App {
     this.physicsFailed = true;
     try {
       this.audio.stopAll();
+      grappleSounds.forget();
     } catch {
       /* the sound is a courtesy */
     }
@@ -10589,6 +10622,7 @@ class App {
     // Every voice and every looping source goes with the world, or a planet's beds would follow
     // the player onto the select screen and into the next character's world.
     this.audio.stopAll();
+    grappleSounds.forget();
     // The shuttles with it: they are in the scene and the physics that outlive the world, and left
     // stood they would land, hum and lift off behind the select screen, heard from wherever the camera
     // was left. The next arrival stands its own world's again.
@@ -11025,11 +11059,14 @@ class App {
       hm.y = Math.round(window.innerHeight / 2);
     } else hm.onScreen = false;
     hm.anchorOn = false;
+    hm.ropeUsed = 0;
     if (g.attached) {
       const p = g.rope.pts;
       hm.anchorOn = this.projectToScreen(p[0], p[1], p[2], sp);
       hm.ax = sp.x;
       hm.ay = sp.y;
+      // The rope used over the longest, for the thin arc round the crosshair.
+      hm.ropeUsed = g.rope.length / GRAPPLE_TUNE.range;
     }
   }
 
@@ -11500,6 +11537,19 @@ class App {
     this.listenerAt.z = lz;
     this.feet.update(dt, this.listenerAt, lists);
     this.stepRideSounds();
+    this.stepGrappleSounds();
+  }
+
+  /**
+   * The grapple's sounds (`src/audio/grappleSounds.ts`), here beside the feet's because this is the one place both the
+   * frame loop and `__debug.advance` reach every step: one sound for each fire, bite, ratchet, boost and slam the hook
+   * counted since the last, at the rope point (the slam at its contact), in the ear's own room; the haul's rumble while
+   * F hauls on a simulated frame; and the speed wind, which ships off. A driven tab hears nothing: the mixer records.
+   */
+  private stepGrappleSounds(): void {
+    const p = this.player;
+    // The velocity goes as the record it is: a speed worked out here would be a fresh number every frame of the session.
+    grappleSounds.step(p.grapple, p.grappleHand(this.grappleSoundAt), p.vel, this.listenerPose.space, this.grappleLive && this.inWorld && !this.creating);
   }
 
   /**
@@ -13914,7 +13964,13 @@ class App {
     this.lastStateSent = now;
     const p = this.player;
     const rig = p.rig;
-    const at = p.worldPos;
+    // Leaning into the grapple's rope (§3.15), the figure's whole turn goes over, with the origin it is drawn at (turned
+    // about the rope point), and goes on going over through the lean's ease back and for `leanTail` after it is level
+    // (`leanSends`): a browser built before stands a figure upright in one frame the moment its `q` stops, so the last
+    // turn it hears is upright and its own glide has caught up with it. Every relay keeps `q` and every browser already
+    // slerps a figure to it, so this needs no restart.
+    const leans = !p.aboard && !p.eva && p.grapple.leanSends;
+    const at = leans ? p.leanedAt(leanedAt) : p.worldPos;
     const n2 = (n: number) => Number(n.toFixed(2));
     const n3 = (n: number) => Number(n.toFixed(3));
     // The vehicle this player is on, so the others see it with them on it; and the figure's
@@ -13949,7 +14005,7 @@ class App {
     // from that ship's own pose rather than gliding it about on the hull it rides.
     const dock = own ? this.docking.clamp.wire(own) : null;
     const veh: PeerVehicle | undefined = own ? { id: own.def?.id ?? own.spec.id, p: [n2(own.pos.x), n2(own.pos.y), n2(own.pos.z)], q: own.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: own.riderPose ?? undefined, ...(own.wings.length ? { w: own.wings.target ? 1 : 0 } as const : {}), ...(own.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}) } : undefined;
-    const q = p.aboard || p.eva ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
+    const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     // In a jump, from its start until the tunnel opens, the others do not see this player or the ship
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
     // peer would be handed a place a kilometre from the last one ten times a second, which their side
@@ -14655,6 +14711,9 @@ class App {
     const stand = at ?? this.spawn;
     this.player.reset(stand);
     this.world.warmUp(stand);
+    // The grapple's sounds asked for again behind this loading screen (the first frame the bank is in), so the first
+    // fire, bite and ratchet of the world are never dropped for want of a buffer.
+    grappleSounds.renew();
     this.physics.stepOnce();
     this.cam.yaw = Math.PI;
     this.hud.setPlanet(planet);
@@ -15568,7 +15627,9 @@ class App {
     this.cam.setFrame(player.aboard ? roomTurn(player.aboard) : player.eva ? player.evaFrame : null);
     // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
     const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
-    this.cam.update(input, player.worldPos, blocked, dt, eyes, 1, player.eyeHeight);
+    // The orbit pulls back with the speed while the grapple swings the body (§3.12): its own eased scale, the literal 1
+    // whenever the rope is not out and the tail has run out, so nobody who never fires meets it.
+    this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
     // The grapple's mark: where the dart would bite, worked out after the camera as the ghost below is, since it
     // goes where the camera looks; while attached it is the next anchor.
     this.stepGrappleMark(dt);
@@ -16936,6 +16997,9 @@ class App {
       f.planetId = this.world.planet?.id ?? '';
       f.aiming = this.player.aiming;
       f.aimAmount = this.cam.aimAmount;
+      // The grapple's daze while a slam staggers the player: the vignette darkens a little more for that half second,
+      // and only where the vignette is on (§3.11). Nought on every frame nothing staggers or play stands still.
+      f.vignetteKick = this.grappleDaze;
       f.firstPerson = this.cam.firstPerson;
       f.orbitDistance = this.cam.orbitDistance;
       f.waterInView = this.world.waterBodies.inView;
@@ -20133,6 +20197,50 @@ class App {
   /** The camera's look and the rope point, kept for a shot. */
   private readonly grappleLook = new THREE.Vector3();
   private readonly grappleHandAt = new THREE.Vector3();
+  /** The hook's slam count as last handed on, the slam's contact for the arc, and the rope point the sounds play at. */
+  private grappleSlamsSeen = 0;
+  private readonly grappleSlamAt = new THREE.Vector3();
+  private readonly grappleSoundAt = new THREE.Vector3();
+  /** The daze the effects draw this frame (§3.11), and whether the frame was simulated for the haul's rumble. */
+  private grappleDaze = 0;
+  private grappleLive = false;
+
+  /**
+   * What the grapple's danger hands the game, after the player's update (§3.11): a slam that took health raises the
+   * red flash and the damage arc toward the wall it struck (`hurtFrom`, as every blow does); the stagger's shake and
+   * the catch's jolt are the camera's own register, written on every frame they run. A player who never fires has
+   * no slam, no shake and no jolt, and nothing here does anything.
+   */
+  private stepGrappleFeel(): void {
+    const g = this.player.grapple;
+    if (g.counts.slams !== this.grappleSlamsSeen) {
+      this.grappleSlamsSeen = g.counts.slams;
+      const s = g.lastSlam;
+      if (s.took) this.hurtFrom(this.grappleSlamAt.set(s.x, s.y, s.z));
+    }
+    if (g.shakeNow > 0) setViewShake(g.shakeNow);
+    if (g.joltLeft > 0) setViewShake(g.joltNow);
+  }
+
+  /**
+   * For the console: the angle (degrees) between the left upper arm as it is drawn now (shoulder to elbow) and the way
+   * from the shoulder to the rope's first point, or null with no rope or no rig. Measured from the drawn bones after
+   * the frame, so it holds the aim, the lean and the reach's clamp to account together.
+   */
+  private grappleArmError(): number | null {
+    const p = this.player;
+    const g = p.grapple;
+    const rig = p.rig;
+    const upper = rig?.boneFor('leftUpperArm');
+    const fore = rig?.boneFor('leftForeArm');
+    if (!g.attached || !upper || !fore) return null;
+    const s = upper.getWorldPosition(new THREE.Vector3());
+    const arm = fore.getWorldPosition(new THREE.Vector3()).sub(s).normalize();
+    const to = new THREE.Vector3();
+    g.pivot(to);
+    to.sub(s).normalize();
+    return Number(((Math.acos(Math.max(-1, Math.min(1, arm.dot(to)))) * 180) / Math.PI).toFixed(1));
+  }
 
   /**
    * The grapple's keys, in the key block right after the placing hand's and in `__debug.advance` beside it,
@@ -24916,12 +25024,17 @@ class App {
       perf.begin(SEC.player);
       if (simulate) {
         player.update(dt, input, this.cam, this.world);
+        // What the grapple's danger hands the game: a slam's flash and arc, the stagger's shake and the catch's jolt.
+        this.stepGrappleFeel();
         // The thrown and orbiting sabers and the hilt glow from the pooled flash lights (so no light comes
         // or goes with them), unless the effects light what is around the blades.
         if (!this.bladeGlowOwnsLight()) for (const spot of player.lightSpots()) this.effects.flash(spot.pos, player.saberColor, spot.intensity, spot.distance, 0.08);
         this.scorch(dt);
         this.stepCombat(dt);
       }
+      // The daze is the stagger's, and a stagger stands still with the play: never drawn under a panel or the map.
+      this.grappleDaze = simulate ? player.grapple.dazeNow : 0;
+      this.grappleLive = simulate;
       // The frame report's flight (`__debug.perf({ fly })`): the body carried along over the ground at a
       // set speed, on frames of play only, which are the only ones its trace records.
       if (this.perfFlight && simulate) this.stepPerfFlight(dt);
