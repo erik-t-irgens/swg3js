@@ -10,6 +10,7 @@ server/data
 .env
 *.tre
 .why
+*.patch
 # Anything unpacked from a game install so that it can be read on this machine is ignored
 # exactly as assets-private is: nothing derived from either install is ever committed, and a
 # `git add -A` must not be able to publish it. The folders and files below are where such
@@ -23,3 +24,4 @@ restuss.txt
 
 # The launcher's local builds: the exe, and releases packed to try before publishing.
 launcher-build
+public/dem/**/*.raw

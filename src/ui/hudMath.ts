@@ -147,18 +147,18 @@ export const HUD_SIZES = {
    * where the dart would bite. At 32 its inner halo clears the charge ring's outer halo at every scale; at 28
    * the two would touch while a shot charges. And the small mark at the anchor while it is in front of the view.
    */
-  grappleMark: 32,
-  grappleMarkWidth: 1.5,
+  grappleMark: 12,
+  grappleMarkWidth: .8,
   grappleMarkAlpha: 0.85,
-  grappleAnchor: 6,
+  grappleAnchor: 3,
   /**
    * The rope used over the longest, while the rope is in: a thin arc round the crosshair at this radius and this
    * width, `muted`, turning `warn` past this share. At a width of 1 its under-stroke clears the charge ring's at every
    * scale; it passes inside the diamond's corners and meets that stroke's halo only near its diagonals.
    */
-  grappleRopeArc: 22,
-  grappleRopeArcWidth: 1,
-  grappleRopeWarn: 0.9,
+  grappleRopeArc: 10,
+  grappleRopeArcWidth: .5,
+  grappleRopeWarn: 0.5,
   /** An ability cell and its glyph. */
   slotSize: 40,
   slotGlyph: 28,

@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { PlanetDef } from '../data/planets';
 import { FBM, hash2 } from './noise.ts';
+import type { DemPatch } from './demTerrain';
+import type { DemShader } from './demShader';
 import type { FarGrid, SwgTerrain } from './swgTerrain';
 import { sampleFamily, type FamilyGrid } from '../audio/footsteps.ts';
 import { groundChunkOrigin, NO_SHIFT, tileCode, tileLayers, type GroundShift, type GroundTiler } from './groundTiles.ts';
@@ -159,7 +161,38 @@ export class Terrain {
     return this.heightAt(x, z);
   }
 
+  /** A patch of real-world ground laid over this planet, or null. See demTerrain.ts. */
+  dem: DemPatch | null = null;
+  /** Metres of fractal relief added under the DEM's own sample spacing. */
+  demDetail = 0;
+  /**
+   * Which ground family to paint at a point, for a planet whose heights are real-world elevation.
+   * Where a converted world answers this from its own terrain template, a DEM planet answers it
+   * from rules in the planet entry: see demShader.ts. Set, it replaces the template's say entirely,
+   * which is the point -- the template's filters were authored against another world's ground.
+   */
+  demShader: DemShader | null = null;
+  /** The borrowed pack's families by name, kept so the rules can be reworked without reloading it. */
+  demFamilies: ReadonlyMap<string, number> | null = null;
+
+  /** Bound once: the rules call it a few times a sample and a fresh closure each time would show. */
+  private readonly heightSampler = (x: number, z: number): number => this.heightAt(x, z);
+
+  /** This planet's own ground at a point, ignoring any patch: the far end of the patch's feather. */
+  private groundBeneathDem(x: number, z: number): number {
+    return this.swg ? this.swg.heightAt(x, z) : this.rawHeightAt(x, z);
+  }
+
   heightAt(x: number, z: number): number {
+    // Inside a DEM patch the real ground wins, feathered out to the planet's own at the edge.
+    // Put before everything else so the mesh, the heightfield and every query agree: they all
+    // come through here, and `buildGrid` calls it once per sample for both.
+    if (this.dem) {
+      const h = this.dem.heightAt(x, z, () => this.groundBeneathDem(x, z));
+      // Fractal relief below what the raster can hold. A 10 m source carries the shape of a mesa
+      // and nothing of the ground between, so this is what stops it reading as a smooth shell.
+      if (h !== null) return this.demDetail > 0 ? h + this.detail.fbm(x * 0.11, z * 0.11, 3) * this.demDetail : h;
+    }
     if (this.swg) return this.swg.heightAt(x, z);
     let h = this.rawHeightAt(x, z);
     for (const zone of this.flattenZones) {
@@ -481,7 +514,10 @@ export class Terrain {
     } else {
       hs = new Float32Array(w * w);
       const swg = this.swg;
-      if (swg) fams = new Int32Array(w * w);
+      // A DEM planet has no template to ask, so its rules stand in: the ground is painted whenever
+      // either one can name a family.
+      const rules = this.demShader;
+      if (swg || rules) fams = new Int32Array(w * w);
       if (swg && tiler) {
         kids = new Uint8Array(w * w);
         cols = new Uint8Array(w * w * 3);
@@ -492,7 +528,15 @@ export class Terrain {
           const z = oz + (j - 1) * step;
           const k = j * w + i;
           hs[k] = this.heightAt(x, z);
-          if (!fams || !swg) continue;
+          if (!fams) continue;
+          if (rules) {
+            // Asked of the terrain's own heightAt, so the rules see exactly the ground the mesh and
+            // the collider were built from, fractal detail and all.
+            fams[k] = rules.familyAt(x, z, this.heightSampler);
+            if (cols) cols.fill(255, k * 3, k * 3 + 3);
+            continue;
+          }
+          if (!swg) continue;
           // From the cached block in one lookup; a block not cached (never, after `prepareChunk`) is generated as before.
           if (kids && cols && swg.groundIfCached(x, z, groundPole)) {
             fams[k] = groundPole.family;

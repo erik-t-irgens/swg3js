@@ -1,3 +1,4 @@
+import { GRAND_CANYON_LOK } from '../world/demShader';
 export type TreeStyle = 'none' | 'palm' | 'pine' | 'round' | 'dead' | 'giant' | 'swamp';
 
 /** One terrain of a planet the game split into separate zones (Kashyyyk), each its own converted pack. */
@@ -14,6 +15,25 @@ export interface PlanetDef {
   tagline: string;
   description: string;
   seed: number;
+  /**
+ * Take another pack's sky: its skybox, sun, moons, celestial bodies, star field, cloud layers and
+ * colour ramp, with nothing else of that world. For a planet whose ground is real-world elevation
+ * and which therefore has no pack of its own, so would otherwise stand under the procedural dome
+ * in `sky` below. Naming the pack rather than taking the whole thing is the point: its terrain
+ * would replace these heights and its buildings would arrive at their own coordinates, which on
+ * other ground means a city hanging off the side of a mountain.
+ */
+  borrowSky?: string;
+  /**
+ * Ground textures for a planet whose heights are real-world elevation. The families come from an
+ * installed pack and the rules decide where each goes, evaluated against this planet's own
+ * ground rather than the pack's. `__debug.families(pack)` lists what a pack has to offer, and
+ * demShader.ts holds the rule shape and a worked set for the Grand Canyon.
+ *
+ * Only the pack's shader table and its texture files are taken. Its terrain is not attached and
+ * its layout is not placed, so nothing of that world's heights or buildings comes with them.
+ */
+  ground?: import('../world/demShader').GroundRules;
   /** Zones with their own terrain; the first is where travel lands. Absent for single-terrain planets. */
   zones?: PlanetZone[];
   /**
@@ -48,6 +68,22 @@ export interface PlanetDef {
     flatten: number;
     /** Small high-frequency bumps in metres. */
     detail: number;
+  };
+  dem?: {
+    /** Folder holding base16.raw and base.json. */
+    url: string;
+    /** Metres a side. Match `--extent`; the whole map when it covers the whole map. */
+    size: number;
+    /** Added to every height, for sitting a real elevation near this planet's own ground level. */
+    lift: number;
+    /** Metres of blend to the planet's own noise at the raster's edge. 0 when it covers the map. */
+    feather?: number;
+    /**
+     * Metres of fractal relief added under the raster's sample spacing. A 10 m DEM holds the shape
+     * of a valley and nothing of its surface, so a little noise below that scale is the difference
+     * between ground and a smooth grey shell. It goes into the heightfield, so it is walked on too.
+     */
+    detail?: number;
   };
   water?: { level: number; color: number; opacity: number };
   palette: { low: number; mid: number; high: number; slope: number; shore: number };
@@ -267,6 +303,84 @@ export const PLANETS: PlanetDef[] = [
       { id: 'south_dungeons', name: 'Kkowir Forest', pack: 'kashyyyk_south_dungeons' },
       { id: 'pob_dungeons', name: 'Myyydril Caverns and the Avatar Platform', pack: 'kashyyyk_pob_dungeons' },
     ],
+  },
+  {
+    id: 'canyon',
+    name: 'Granyon',
+    tagline: 'Grandeur like nowhere in the galaxy.',
+    description: 'Crevasse',
+    seed: 6660,
+    gravity: 21,
+    sky: { top: 0x8a5a3a, horizon: 0xe0a26a, sunColor: 0xffd7a3, suns: 1, sunElevation: 0.8, sunAzimuth: 4.4 },
+    fog: { color: 0xd39a66, density: 0.00038 },
+    light: { sunIntensity: 2.6, ambientSky: 0xd9a070, ambientGround: 0x6a5040, ambientIntensity: 1.15 },
+    terrain: { base: 2, amplitude: 48, frequency: 0.0032, octaves: 5, ridged: 0.8, flatten: 1.0, detail: 0.7 },
+    dem: { url: '/dem/canyon', size: 32768, lift: -719.7274780273438, feather: 600, detail: .4 },
+    water: { level: 100, color: 0x2c4a52, opacity: 0.86 },
+    palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
+    props: { treeDensity: 0, rockDensity: 0.55, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
+    creatures: { name: 'Bantha', count: 8, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
+    ground: GRAND_CANYON_LOK,
+    borrowSky: 'lok',
+  },
+  {
+    // Ground from USGS 3DEP around Seattle: Puget Sound, Bainbridge, Lake Washington and the
+    // first rise of the Cascades. The source is 1/3 arc-second -- about 7 m across and 10 m
+    // north-south at this latitude -- so everything below the fractal detail is invention.
+    id: 'seattle',
+    name: 'Rainier',
+    tagline: 'A drowned coast under cloud',
+    description: 'Deep cold water between forested ridges, the sea reaching far inland through a country that was carved by ice and never quite drained.',
+    borrowSky: 'dantooine',
+    seed: 1138,
+    gravity: 21,
+    sky: { top: 0x6f8296, horizon: 0xb9c2c6, sunColor: 0xe8eef2, suns: 1, sunElevation: 0.42, sunAzimuth: 2.9 },
+    fog: { color: 0xaeb9bf, density: 0.00042 },
+    light: { sunIntensity: 1.5, ambientSky: 0x9fb3c4, ambientGround: 0x55604f, ambientIntensity: 1.25 },
+    terrain: { base: 0, amplitude: 60, frequency: 0.0030, octaves: 4, ridged: 0.4, flatten: 1.0, detail: 0.4 },
+    dem: { url: '/dem/seattle', size: 32768, lift: 15.707568168640137, feather: 0, detail: 1 },
+    water: { level: 25, color: 0x2c4a52, opacity: 0.86 },
+    palette: { low: 0x5f9a47, mid: 0x4a7f3a, high: 0x8a9a75, slope: 0x6f6a60, shore: 0xc8ba85 },
+    props: { treeDensity: 0.9, rockDensity: 0.12, treeStyle: 'pine', canopy: 0x2c4028, trunk: 0x4a3828, rock: 0x6c6a63, treeScale: 1.3 },
+    creatures: { name: 'Elk', count: 10, color: 0x6b513a, size: 2.0, speed: 6, hp: 180, aggressive: false, damage: 0 },
+  },
+  {
+    id: 'monument',
+    name: 'Monument',
+    dem: { url: '/dem/monument', size: 16288, lift: -1490.344970703125, feather: 0, detail: 1 },
+    tagline: 'Monument Valley',
+    description: 'An old land from another world',
+    seed: 4242,
+    gravity: 22,
+    sky: { top: 0x8db9e6, horizon: 0xf4dcae, sunColor: 0xfff1cf, suns: 2, sunElevation: 0.9, sunAzimuth: 0.7 },
+    fog: { color: 0xead2a3, density: 0.00012 },
+    swgFogScale: 0.005,
+    light: { sunIntensity: 1.0, ambientSky: 0xbfd6f2, ambientGround: 0xd9b57a, ambientIntensity: 1.0 },
+    terrain: { base: 0, amplitude: 16, frequency: 0.0038, octaves: 4, ridged: 0.6, flatten: 1.1, detail: 0.35 },
+    water: { level: 150, color: 0x2f6f8a, opacity: 0.8 },
+    palette: { low: 0xd8b073, mid: 0xe7c78d, high: 0xf2dcaa, slope: 0xb48d56, shore: 0xe7c78d },
+    props: { treeDensity: 0, rockDensity: 0.55, treeStyle: 'none', canopy: 0x000000, trunk: 0x000000, rock: 0x8f7355, treeScale: 1 },
+    creatures: { name: 'Bantha', count: 8, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
+    borrowSky: 'tatooine',
+  },
+  {
+    id: 'helens',
+    name: 'Helensar',
+    dem: { url: '/dem/helens', size: 24576, lift: -299.8861083984375, feather: 0, detail: 1 },
+    tagline: 'An erupted goliath',
+    description: 'An old land from another world',
+    seed: 4001,
+    gravity: 22,
+    sky: { top: 0x8db9e6, horizon: 0xf4dcae, sunColor: 0xfff1cf, suns: 2, sunElevation: 0.9, sunAzimuth: 0.7 },
+    fog: { color: 0xead2a3, density: 0.00012 },
+    swgFogScale: 0.005,
+    light: { sunIntensity: 2.6, ambientSky: 0xbfd6f2, ambientGround: 0xd9b57a, ambientIntensity: 1.0 },
+    terrain: { base: 0, amplitude: 16, frequency: 0.0038, octaves: 4, ridged: 0.6, flatten: 1.1, detail: 1 },
+    water: { level: .5, color: 0x2f6f8a, opacity: 0.8 },
+    palette: { low: 0x6faa4f, mid: 0x5a9542, high: 0x9ab27a, slope: 0x7a6a50, shore: 0xd0c48a },
+    props: { treeDensity: 0.7, rockDensity: 0.25, treeStyle: 'round', canopy: 0x3f8a3a, trunk: 0x6a4a2a, rock: 0x8a8a80, treeScale: 1.1 },
+    creatures: { name: 'Bantha', count: 8, color: 0x6b5334, size: 2.3, speed: 2, hp: 260, aggressive: false, damage: 0 },
+    borrowSky: 'corellia',
   },
 ];
 

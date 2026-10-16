@@ -50,6 +50,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
+import type { GroundRules } from './demShader';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
 import { DRESSING_TUNE, type DressingStand, type StandAnswer } from './permanent.ts';
@@ -397,7 +398,7 @@ const SKY_FRAG = /* glsl */ `
 `;
 
 /** The standing "nobody has said what a blow does yet" callback, so `update` can tell. */
-const NO_HURT = (): void => {};
+const NO_HURT = (): void => { };
 
 /** How many of an actor's textures are uploaded before the frame is given a turn (`prepareActor`). */
 const TEXTURES_PER_YIELD = 4;
@@ -1221,13 +1222,13 @@ export class World {
     const swell = this.swellOver(x, z, flat, groundY);
     const why = !terrain ? 'no terrain'
       : !SEA_FEED.on ? 'the sea reader is switched off (sea({ on: true }))'
-      : this.globalWaterIsLava ? 'this world s water is lava'
-      : !Number.isFinite(flat) ? 'no water over this point'
-      : !near ? 'no near sea mesh built here'
-      : !onSea ? 'this table is not the sea (a lake, a pool, or the sea not drawn)'
-      : waveHeight <= 0 ? 'this mesh carries no swell at all (uWaveHeight 0: every lake and the far ring)'
-      : !(scale > 0) ? (depth < 5 ? `the water is only ${depth.toFixed(2)} m deep here, and the swell fades out under 5 m` : 'the scale came to nothing')
-      : null;
+        : this.globalWaterIsLava ? 'this world s water is lava'
+          : !Number.isFinite(flat) ? 'no water over this point'
+            : !near ? 'no near sea mesh built here'
+              : !onSea ? 'this table is not the sea (a lake, a pool, or the sea not drawn)'
+                : waveHeight <= 0 ? 'this mesh carries no swell at all (uWaveHeight 0: every lake and the far ring)'
+                  : !(scale > 0) ? (depth < 5 ? `the water is only ${depth.toFixed(2)} m deep here, and the swell fades out under 5 m` : 'the scale came to nothing')
+                    : null;
     return {
       swell: Number.isFinite(swell) ? Number(swell.toFixed(4)) : null,
       why,
@@ -1425,6 +1426,29 @@ export class World {
     this.packId = packId;
     this.terrain?.detachSwg();
     this.terrain = new Terrain(planet);
+    // A planet whose ground is real-world elevation. The raster arrives after the world is already
+    // standing, so the ground is remade once it lands rather than held up waiting for it.
+    if (planet.dem) {
+      const d = planet.dem;
+      this.terrain.demDetail = d.detail ?? 0;
+      void import('./demTerrain').then(async ({ loadDemPatch }) => {
+        try {
+          const patch = await loadDemPatch(d.url, { size: d.size, lift: d.lift, feather: d.feather ?? 0 });
+          this.terrain.dem = patch;
+          // The colour bands run across minH..maxH, which the planet's own `terrain` block sized for
+          // noise. Real elevation is a different order of relief, and left alone every slope above
+          // the noise's amplitude would clamp to one flat colour. The raster knows its own range,
+          // so it sets the band, the way a converted pack's ground does in `setSwg`.
+          this.terrain.minH = patch.minHeight + patch.lift;
+          this.terrain.maxH = patch.maxHeight + patch.lift;
+          this.terrain.floor = this.terrain.minH - 30;
+          if (planet.ground) await this.loadBorrowedGround(planet.ground, patch.lift);
+          this.remakeGround();
+        } catch (err) {
+          console.warn(`${planet.id}: its elevation did not load, so the ground is the planet's own noise`, err);
+        }
+      });
+    }
     this.props = new PropFactory(planet);
     this.creatures = new CreatureManager(planet, this.terrain, this.physics);
     this.scene.add(this.creatures.group);
@@ -1586,7 +1610,21 @@ export class World {
     const pack = await AssetPack.load(this.packId);
     if (token !== this.loadToken) return null;
     if (!pack) {
-      this.packStatus = 'no pack';
+      // No pack of its own. A planet can still borrow a sky: everything above the horizon comes from
+      // the named pack and nothing below it does, so real-world ground keeps its own heights and
+      // gains a real sun, moons and star field.
+      if (planet.borrowSky) {
+        try {
+          const lent = await AssetPack.load(planet.borrowSky);
+          if (token !== this.loadToken) return null;
+          if (lent) await this.loadSky(lent, spawn);
+          else console.warn(`sky: ${planet.id} asked to borrow ${planet.borrowSky}, which is not installed`);
+        } catch (err) {
+          console.warn(`sky: ${planet.id} could not borrow ${planet.borrowSky}`, err);
+        }
+        if (token !== this.loadToken) return null;
+      }
+      this.packStatus = planet.borrowSky ? 'sky only' : 'no pack';
       this.packProgress = 1;
       return null;
     }
@@ -2843,8 +2881,11 @@ export class World {
 
   /** The colour of the ground at a point: its texture family's mean on a real planet, the palette's elsewhere. */
   groundColorAt(x: number, z: number, out: THREE.Color): THREE.Color {
-    if (this.terrain.swg && this.groundTextures) {
-      const c = this.groundTextures.averageColor(this.terrain.swg.shaderAt(x, z));
+    if ((this.terrain.swg || this.terrain.demShader) && this.groundTextures) {
+      const family = this.terrain.swg
+        ? this.terrain.swg.shaderAt(x, z)
+        : this.terrain.demShader!.familyAt(x, z, (gx, gz) => this.terrain.heightAt(gx, gz));
+      const c = this.groundTextures.averageColor(family);
       if (c) return out.copy(c);
     }
     return this.terrain.groundColorAt(x, z, out);
@@ -2931,9 +2972,62 @@ export class World {
 
   /** The converted flora models, keyed by the appearance file the terrain names. */
   /** The pack's ground textures; existing chunks and far tiles switch to them when they arrive. */
-  private async loadGroundTextures(pack: AssetPack): Promise<void> {
+  /**
+   * Ground textures for a DEM planet: an installed pack's families, placed by this planet's rules.
+   *
+   * The pack is read for its shader table and its textures and nothing else. `SwgTerrain.create`
+   * with no building layers, and no `attachSwg`, is what keeps it to that -- attaching it would
+   * replace these heights and bring that world's buildings to their own coordinates, which on
+   * other ground means a city hanging off a cliff.
+   */
+  private async loadBorrowedGround(spec: GroundRules, lift: number): Promise<void> {
+    const token = this.loadToken;
     try {
-      const swg = this.terrain.swg;
+      const pack = await AssetPack.load(spec.pack);
+      if (token !== this.loadToken) return;
+      if (!pack) {
+        console.warn(`ground: ${this.planet.id} asked for ${spec.pack}'s families, which is not installed`);
+        return;
+      }
+      const trn = await pack.terrain();
+      if (token !== this.loadToken) return;
+      if (!trn) {
+        console.warn(`ground: pack ${spec.pack} carries no terrain, so it has no families to lend`);
+        return;
+      }
+      const table = await SwgTerrain.create(trn, [], 0, 0, (file) => pack.bytes(file));
+      if (token !== this.loadToken) return;
+      const byName = new Map<string, number>();
+      let families = 0;
+      for (const f of table.template.generator.shaderGroup.families.values()) {
+        byName.set(f.name, f.id);
+        // A lowercase alias too, so a rule need not match the pack's capitalisation.
+        byName.set(f.name.toLowerCase(), f.id);
+        families++;
+      }
+      const { DemShader } = await import('./demShader');
+      // 4 m between slope samples: one tile, the finest the ground is actually built at.
+      const shader = new DemShader(spec, byName, lift, 4);
+      if (token !== this.loadToken) return;
+      if (shader.missing.length) {
+        console.warn(`ground: ${spec.pack} has no family named ${shader.missing.join(', ')}; those rules do nothing`);
+      }
+      this.terrain.demShader = shader;
+      this.terrain.demFamilies = byName;
+      // The texture array itself, built from the lent pack. The family list is read off the
+      // terrain the rules paint with, not off `terrain.swg`, which a DEM planet does not have.
+      await this.loadGroundTextures(pack, table);
+      if (token !== this.loadToken) return;
+      console.info(`ground: ${this.planet.id} painted with ${families} of ${spec.pack}'s families by ${spec.rules.length} rules`);
+    } catch (err) {
+      console.warn(`ground: ${this.planet.id} could not borrow ${spec.pack}'s families`, err);
+    }
+  }
+
+  private async loadGroundTextures(pack: AssetPack, lent?: SwgTerrain): Promise<void> {
+    try {
+      // `lent` is a pack read for its families alone, by a planet with no terrain of its own.
+      const swg = lent ?? this.terrain.swg;
       const planet = new Map<number, string>();
       if (swg) for (const f of swg.template.generator.shaderGroup.families.values()) planet.set(f.id, f.name);
       const ground = swg ? { shaderGroup: swg.template.generator.shaderGroup, reference: swg.colorReference, tileWidth: swg.tileWidth, renderer: this.renderer } : undefined;
@@ -2943,8 +3037,9 @@ export class World {
       this.groundTextures = textures;
       // Drawn the client's way: the session's one material takes this world's textures, and the chunks, built
       // after this, carry their tiles. Otherwise the material of before, the chunks built as they always were.
-      this.terrain.tiler = textures.tiles && swg ? textures.tiles.tiler : null;
-      if (textures.tiles && swg) textures.bindTiles(swg.centerX, swg.centerZ);
+      // `swg` may be a table lent for its families alone; the tiler needs the planet's own.
+      this.terrain.tiler = textures.tiles && this.terrain.swg ? textures.tiles.tiler : null;
+      if (textures.tiles && this.terrain.swg) textures.bindTiles(this.terrain.swg.centerX, this.terrain.swg.centerZ);
       const mat = this.groundMaterial as THREE.MeshStandardMaterial;
       this.csmMaterials.add(mat);
       // A chunk made before now carries no tiles and is made again before the world is shown (`load`), so only
@@ -2964,8 +3059,15 @@ export class World {
 
   /** The material for new ground meshes: the session's tile material, else textured when the planet has textures, tinted otherwise. */
   private get groundMaterial(): THREE.Material {
-    if (!this.groundTextures || !this.terrain.swg) return this.terrainMat;
-    if (this.groundTextures.tiles) return (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
+    // Either a converted world's own terrain or a DEM planet's rules can name the family at a
+    // point, and the textured material only needs that a family was named. Testing `swg` alone
+    // threw away everything a DEM planet had done: ids painted correctly into the geometry, the
+    // texture array loaded, and then the plain material handed back regardless.
+    if (!this.groundTextures || !(this.terrain.swg || this.terrain.demShader)) return this.terrainMat;
+    // The client's own tiled ground needs the tiler, which needs real SWG terrain under it.
+    if (this.groundTextures.tiles && this.terrain.swg) {
+      return (this.groundTilesMat ??= groundTilesMaterial(groundTileUniforms(), this.csm));
+    }
     return this.groundTextures.groundMaterial(this.csm);
   }
 
@@ -4651,7 +4753,7 @@ export class World {
     root.traverse = (cb: (o: THREE.Object3D) => void) => {
       for (const o of objects) cb(o);
     };
-    root.traverseVisible = () => {};
+    root.traverseVisible = () => { };
     return root;
   }
 
@@ -4781,7 +4883,7 @@ export class World {
   /** Every pass of one object, in one go: behind a loading screen, where nothing is being looked at. */
   private compileWhole(o: THREE.Object3D): number {
     let made = 0;
-    for (;;) {
+    for (; ;) {
       const step = this.compileOne(o);
       made += step.made;
       if (step.done) return made;
@@ -4963,7 +5065,7 @@ export class World {
    * than on the first shot or the first look at a building. Returns how many programs were made.
    */
   async compileAllAsync(
-    onProgress: (done: number, total: number) => void = () => {},
+    onProgress: (done: number, total: number) => void = () => { },
     /**
      * There used to be a `waitReady` here, asking for the programs to be ready and not merely
      * created before this returns. It is gone because it is now always true and cannot be asked
@@ -5393,16 +5495,16 @@ export class World {
     const place = airborne || space
       ? (b: VehicleSpec['bounds']) => [at.x, at.y + b.min[1], at.z] as [number, number, number]
       : (b: VehicleSpec['bounds']) => {
-          const turn = inRoom ? this.roomHeading(inRoom, heading) : heading;
-          const spot = inRoom ? this.roomSpot(inRoom, b, at, turn) : null;
-          if (spot) {
-            placedInRoom = true;
-            roomTurn = turn;
-            return spot;
-          }
-          if (inRoom) console.info(`garage: ${def.id} does not fit in this room with room to spare: it is stood on the ground instead`);
-          return this.clearGround(b, at, heading, def.source === 'creature');
-        };
+        const turn = inRoom ? this.roomHeading(inRoom, heading) : heading;
+        const spot = inRoom ? this.roomSpot(inRoom, b, at, turn) : null;
+        if (spot) {
+          placedInRoom = true;
+          roomTurn = turn;
+          return spot;
+        }
+        if (inRoom) console.info(`garage: ${def.id} does not fit in this room with room to spare: it is stood on the ground instead`);
+        return this.clearGround(b, at, heading, def.source === 'creature');
+      };
     let v: Vehicle;
     try {
       v = await this.garage.spawn(def, this.physics, this.scene, at.x, at.y, at.z, heading, kind, place, {
@@ -5693,7 +5795,7 @@ export class World {
    */
   keepShadowRecords(materials: THREE.Material[]): () => void {
     const csm = this.csm;
-    if (!csm) return () => {};
+    if (!csm) return () => { };
     const kept: [THREE.Material, string][] = [];
     for (const m of materials) if (csm.shaders.has(m)) kept.push([m, csm.shaders.get(m) as string]);
     return () => {
@@ -6564,6 +6666,12 @@ export class World {
   }
 
   /** The ground round the player built again from nothing, chunks and far tiles, at once: what a change of how tiles are laid needs. */
+  /** Drop every ground chunk and far tile so the next frame builds them again: for anything that
+   *  changes what `Terrain.heightAt` answers after the world is already standing. */
+  remakeGround(): void {
+    this.rebuildGround();
+  }
+
   private rebuildGround(): void {
     (this.terrain.tiler as { refresh?: () => void } | null)?.refresh?.();
     for (const c of this.chunks.values()) this.disposeChunk(c);
@@ -6661,7 +6769,7 @@ export class World {
 
   private async waitReadyAround(pos: THREE.Vector3, timeoutMs: number): Promise<boolean> {
     const t0 = performance.now();
-    for (;;) {
+    for (; ;) {
       const ls = this.layoutStream;
       if (this.packStatus !== 'loading' && (!ls || (ls.loadedAround(pos.x, pos.z) && ls.collidersPending === 0))) {
         // Cascades and the wet wrap first, then the programs: everything the queue is still holding
@@ -6734,7 +6842,7 @@ export class World {
     // Nothing here waits on the parallel-compile extension: `compileAllAsync` finishes every link it
     // makes before it returns, which is what the old `waitReady` asked for and what a hidden tab (whose
     // chained timers are held to one a minute) could never have got from a poll.
-    await this.compileAllAsync(() => {}, { keepQueue: true });
+    await this.compileAllAsync(() => { }, { keepQueue: true });
     return this.readyAround(pos, Math.max(1000, timeoutMs - (performance.now() - t0)));
   }
 

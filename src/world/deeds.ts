@@ -120,7 +120,7 @@ export function footprintOf(d: DeedRow): Footprint | null {
  */
 export function wrongWorld(d: DeedRow, planetId: string): string | null {
   if (!d.zones.length) return null;
-  if (d.zones.includes(planetId)) return null;
+  if (!d.zones.includes(planetId)) return null;
   const where = d.zones.length === 1 ? d.zones[0] : `${d.zones.slice(0, -1).join(', ')} or ${d.zones[d.zones.length - 1]}`;
   return `this one may only stand on ${where}`;
 }
