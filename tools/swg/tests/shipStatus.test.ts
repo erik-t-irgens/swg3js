@@ -720,4 +720,63 @@ const part = (slot: string, share: number, down = false) => ({ slot, hp: share *
   ok(once > before && p.writes === once, `the word under the speed is written once when it changes and not again (${once - before} writes)`);
 }
 
+// ---------------------------------------------------------------------------------------------
+// The race display's engines (the racer pass, wave 2): the condition block with its shields and armour stood down, a pip
+// per engine part in the part's own words, a burning pip in the burn's colour, a notch on the heat arc per part out, and
+// the engines' words under the speed.
+{
+  const { RACE_REPAIRING, RACE_OUT } = shipHud;
+  ok(partWord('race_left_0') === 'left engine, top part' && partWord('race_right_2') === 'right engine, bottom part' && partWord('race_engine_1') === 'engine, middle part', "an engine part is named by its engine and its place: 'left engine, top part'");
+  const hud = new ShipHud(new StubEl() as never);
+  const p = probe(hud);
+  const said: string[] = [];
+  hud.messages = (kind, text) => said.push(`${kind}|${text}`);
+  const rows = (hud as unknown as { layerRows: StubEl[] }).layerRows;
+  const parts = ['race_left_0', 'race_left_1', 'race_left_2', 'race_right_0', 'race_right_1', 'race_right_2'].map((slot) => ({ slot, hp: 1, max: 1, down: false, burning: false }));
+  hud.setStatus(status(NaN, NaN, NaN, NaN, 0.9), null, parts, true, false);
+  ok(rows.length === 2 && rows.every((r) => r.style.display === 'none'), 'a race-driven hull has no shields or armour: their two rows stand down');
+  ok(p.pips.filter((q) => q.shown).length === 6 && p.hullPct.textContent === '90%', 'the hull and its six engine parts show');
+  parts[4].burning = true;
+  hud.setStatus(status(NaN, NaN, NaN, NaN, 0.9), null, parts, true, false);
+  ok(p.pips[4].root.classList.contains('hot') && said.length === 0, 'a part on fire is drawn in the burn colour, and says nothing yet');
+  parts[4].burning = false;
+  parts[4].down = true;
+  parts[4].hp = 0;
+  hud.setStatus(status(NaN, NaN, NaN, NaN, 0.9), null, parts, true, false);
+  ok(!p.pips[4].root.classList.contains('hot') && p.pips[4].down && said.length === 1 && said[0] === 'hit you|right engine, middle part down', `burnt out it crosses out and says so in the part's own words (${said[0]})`);
+  hud.setStatus(status(1, 1, 1, 1, 1), { shieldMax: [100, 100], armourMax: [100, 100] }, [part('reactor', 1)]);
+  ok(rows.every((r) => r.style.display === ''), "a ship's condition after it puts the two rows back");
+
+  // The heat arc's notches, one per part out, cut as a ship's guns are.
+  const rec = new Recorder();
+  hud.attach(rec, COL);
+  const view = newFlightView();
+  view.race = true;
+  view.speed = 150;
+  view.fullSpeed = 333.3;
+  view.topSpeed = 240;
+  view.boostTop = 300;
+  view.heat = 0.9;
+  view.parts = 6;
+  view.partsOut = (1 << 4) | (1 << 5);
+  view.raceWord = RACE_OUT;
+  hud.setFlight(view);
+  hud.update(1 / 60);
+  rec.clear();
+  hud.draw();
+  ok(rec.ops.filter((o) => o.kind === 'arc' && o.colour === COL.void).length === 2, 'two parts out cut two notches in the heat arc');
+  view.partsOut = 0;
+  hud.setFlight(view);
+  rec.clear();
+  hud.draw();
+  ok(rec.ops.filter((o) => o.kind === 'arc' && o.colour === COL.void).length === 0, 'and whole engines none');
+  const word = (hud as unknown as { wingWord: StubEl }).wingWord;
+  view.raceWord = RACE_OUT;
+  hud.setFlight(view);
+  ok(word.textContent === 'engine out', "a part out says 'engine out' under the speed");
+  view.raceWord = RACE_REPAIRING;
+  hud.setFlight(view);
+  ok(word.textContent === 'repairing', "and the repair 'repairing'");
+}
+
 console.log(`\n${checks} checks passed`);

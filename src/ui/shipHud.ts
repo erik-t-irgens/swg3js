@@ -146,7 +146,10 @@ export const RACE_NONE = 0;
 export const RACE_RACING = 1;
 export const RACE_READY = 2;
 export const RACE_OVERHEATED = 3;
-const RACE_WORD = ['', 'racing', 'boost ready', 'overheated'] as const;
+/** The engines: a part being repaired, a part out (the race drive's engine parts, src/vehicles/drivetrain.ts). */
+export const RACE_REPAIRING = 4;
+export const RACE_OUT = 5;
+const RACE_WORD = ['', 'racing', 'boost ready', 'overheated', 'repairing', 'engine out'] as const;
 
 /** What the target is to the pilot. */
 export const STAND_ENEMY = 0;
@@ -166,8 +169,10 @@ const WING_CALM = 'var(--muted, #9fb3c4)';
 // ---------------------------------------------------------------------------------------------
 // The words and the shares.
 
-/** A chassis slot in words, for "engine down". */
+/** A chassis slot in words, for "engine down"; a race-driven hull's engine part (`race_left_0`) as "left engine, top part". */
 export function partWord(slot: string): string {
+  const race = /^race_(left|right|engine)_([0-2])$/.exec(slot);
+  if (race) return `${race[1] === 'engine' ? 'engine' : `${race[1]} engine`}, ${['top', 'middle', 'bottom'][Number(race[2])]} part`;
   if (slot === 'shield_0' || slot === 'shield_1') return 'shield generator';
   if (slot === 'droid_interface') return 'droid interface';
   const gun = /^weapon_(\d+)$/.exec(slot);
@@ -194,6 +199,8 @@ export interface ShipPartState {
   readonly hp: number;
   readonly max: number;
   readonly down: boolean;
+  /** On fire (a race-driven hull's engine part): its pip in the burn's colour. */
+  readonly burning?: boolean;
 }
 
 /** A share, or NaN (a dash) where the ship's maximum of it is 0: the status gives 0 there. */
@@ -262,6 +269,10 @@ export interface FlightView {
   heat: number;
   charge: number;
   raceWord: number;
+  /** The race display's engine parts: how many, a bit per part out (a notch on the heat arc each) and per part burning. */
+  parts: number;
+  partsOut: number;
+  burning: number;
 }
 
 /** A flight view to fill: made once by the caller and handed over every frame. */
@@ -295,6 +306,9 @@ export function newFlightView(): FlightView {
     heat: 1,
     charge: 0,
     raceWord: RACE_NONE,
+    parts: 0,
+    partsOut: 0,
+    burning: 0,
   };
 }
 
@@ -370,9 +384,11 @@ interface Pip {
   share: number;
   down: boolean;
   warm: boolean;
+  /** On fire (a race-driven hull's engine part). */
+  hot: boolean;
 }
 
-const div = (parent: HTMLElement | null, className: string): HTMLElement => {
+const div =(parent: HTMLElement | null, className: string): HTMLElement => {
   const el = document.createElement('div');
   if (className) el.className = className;
   if (parent) parent.appendChild(el);
@@ -401,6 +417,9 @@ export class ShipHud {
   private readonly pips: Pip[] = [];
   private readonly pipRow: HTMLElement;
   private readonly hullPct: HTMLElement;
+  /** The shields' and the armour's rows, which a race-driven hull's condition hides (it has neither). */
+  private readonly layerRows: HTMLElement[] = [];
+  private layersShown = true;
   private condShown = false;
   private hullPctShown = -1;
   /** Whether each pip's part was down when it was last looked at, so a change makes exactly one message. */
@@ -531,8 +550,11 @@ export class ShipHud {
     this.cond.textContent = '';
     this.bars.length = 0;
     this.pips.length = 0;
+    this.layerRows.length = 0;
+    this.layersShown = true;
     for (const face of [0, 1]) {
       const row = div(this.cond, 'row');
+      this.layerRows.push(row);
       const lab = div(row, 'label');
       lab.textContent = face === 0 ? 'Shields' : 'Armour';
       const layer = face === 0 ? 'shield' : 'armour';
@@ -552,7 +574,7 @@ export class ShipHud {
       const root = div(this.pipRow, 'hud-pip');
       root.style.display = 'none';
       const fill = div(root, 'fill');
-      this.pips.push({ root, fill, shown: false, share: -1, down: false, warm: false });
+      this.pips.push({ root, fill, shown: false, share: -1, down: false, warm: false, hot: false });
     }
   }
 
@@ -679,7 +701,7 @@ export class ShipHud {
    * still says so in words. That is the half of it the design calls the answer to "with the pointer
    * locked there is no hover", and it is worth having with the block switched off.
    */
-  setStatus(s: ShipStatusLine | null, max?: ShipStatusMax | null, parts?: readonly ShipPartState[] | null, show = true): void {
+  setStatus(s: ShipStatusLine | null, max?: ShipStatusMax | null, parts?: readonly ShipPartState[] | null, show = true, layers = true): void {
     if (!s) {
       this.setShown(false);
       this.setPips(null, false);
@@ -687,6 +709,12 @@ export class ShipHud {
       return;
     }
     this.setShown(show);
+    // A race-driven hull has no shields and no armour: their rows stand down, the hull and its engine parts stay.
+    if (show && layers !== this.layersShown) {
+      this.layersShown = layers;
+      for (const row of this.layerRows) row.style.display = layers ? '' : 'none';
+      this.writes += this.layerRows.length;
+    }
     if (show) {
       this.setBar(this.bars[0], has(s.shield[0], max?.shieldMax[0]));
       this.setBar(this.bars[1], has(s.shield[1], max?.shieldMax[1]));
@@ -756,6 +784,12 @@ export class ShipHud {
       if (p.down !== pip.down) {
         pip.down = p.down;
         pip.root.classList.toggle('down', p.down);
+        this.writes++;
+      }
+      const hot = !!p.burning;
+      if (hot !== pip.hot) {
+        pip.hot = hot;
+        pip.root.classList.toggle('hot', hot);
         this.writes++;
       }
     }
@@ -905,6 +939,9 @@ export class ShipHud {
     v.heat = view.heat;
     v.charge = view.charge;
     v.raceWord = view.raceWord;
+    v.parts = view.parts;
+    v.partsOut = view.partsOut;
+    v.burning = view.burning;
     this.writeSpeed();
   }
 
@@ -933,7 +970,7 @@ export class ShipHud {
       const word = this.view.race ? (RACE_WORD[this.view.raceWord] ?? '') : (WING_WORD[w] ?? '');
       this.wingWord.textContent = word;
       this.wingEl.style.display = word ? 'block' : 'none';
-      this.wingWord.style.color = (!this.view.race && w === WING_HELD) || (this.view.race && this.view.raceWord === RACE_OVERHEATED) ? WING_WARN : WING_CALM;
+      this.wingWord.style.color = (!this.view.race && w === WING_HELD) || (this.view.race && (this.view.raceWord === RACE_OVERHEATED || this.view.raceWord === RACE_OUT)) ? WING_WARN : WING_CALM;
       this.writes += 3;
     }
   }
@@ -1229,6 +1266,18 @@ export class ShipHud {
       const alpha = heat < S.boostPulse ? R.pulseLow + R.pulseSwing * (0.5 + 0.5 * Math.sin(this.clock * Math.PI * 2)) : R.fillAlpha;
       c.arc(cx, cy, r, S.gunsFrom, along(S.gunsFrom, S.gunsTo, heat), w, colour, alpha);
       this.op(1);
+    }
+    // A notch per engine part out, cut as a ship's guns are, one slice a part.
+    if (v.parts > 0 && v.partsOut) {
+      const n = Math.max(1, Math.min(v.parts, Math.round(R.gunCap)));
+      for (let i = 0; i < n; i++) {
+        if (!(v.partsOut & (1 << i))) continue;
+        gunSlice(i, n, this.place.scale, this.slice);
+        c.arc(cx, cy, r, this.slice.from, this.slice.to, w, col.void, R.notchAlpha);
+        const mid = (this.slice.from + this.slice.to) / 2;
+        c.line(pointX(cx, r - w / 2, mid), pointY(cy, r - w / 2, mid), pointX(cx, r + w / 2, mid), pointY(cy, r + w / 2, mid), S.boresightWidth * this.place.scale, col.bad, R.tickAlpha);
+        this.op(2);
+      }
     }
     c.arc(cx, cy, r, S.boostFrom, S.boostTo, w, col.rule, 1);
     this.op(1);

@@ -1,6 +1,6 @@
 // The gallery's sorting and layout, which need no archives.
 import assert from 'node:assert/strict';
-import { swgAnimCategory, jkaAnimCategory, groupByCategory, layOutRows, labelOf, buildGallery, interiorLayouts, isLiftCell } from '../gallery.mjs';
+import { swgAnimCategory, jkaAnimCategory, groupByCategory, layOutRows, labelOf, buildGallery, interiorLayouts, isLiftCell, GALLERY_EXHIBITS, exhibitsFor, engineRearPoint, borrowedHardpoint, sebulbaStatus } from '../gallery.mjs';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -75,4 +75,83 @@ const g3 = buildGallery({ log: () => {}, only: ['interiors'] }, {
 });
 ok(g3.sections.length === 1 && g3.sections[0].id === 'interiors' && g3.sections[0].items.length === 2, 'the interiors section holds the layouts');
 ok(g3.sections[0].items[0].model === 'thm_tato_cantina' && g3.sections[0].items[1].lifts?.length === 2, 'each is converted from its layout file, the lifts carried');
+
+// Exhibits of ours: appended to their section's templates only on a whole run, converted from their own appearance
+// with the exhibit handed over, carrying their own rider pose and marked invented.
+{
+  ok(GALLERY_EXHIBITS.length >= 1 && GALLERY_EXHIBITS.every((e: { invented?: boolean }) => e.invented === true), 'every exhibit of ours says it is ours');
+  ok(exhibitsFor('vehicles').length === GALLERY_EXHIBITS.filter((e: { section: string }) => e.section === 'vehicles').length && exhibitsFor('houses').length === 0, "a section's exhibits are its own");
+  const seen: { template: string; appearance?: string; exhibit?: unknown }[] = [];
+  const deps = {
+    convert: (t: string, appearance?: string, exhibit?: unknown) => {
+      seen.push({ template: t, appearance, exhibit });
+      return { model: labelOf(t), radius: 3, height: 2 };
+    },
+    convertAnims: () => null,
+    templates: (prefix: string) => (prefix.startsWith('object/mobile/vehicle') ? ['object/mobile/vehicle/shared_test_speeder.iff'] : []),
+  };
+  const whole = buildGallery({ log: () => {}, only: ['vehicles'] }, deps);
+  const items = whole.sections[0].items as { template: string; label: string; riderPose?: string; seats?: number; invented?: boolean }[];
+  const ex = GALLERY_EXHIBITS[0] as { template: string; appearance: string; label: string; riderPose: string };
+  const mine = items.find((i) => i.template === ex.template);
+  ok(items.length === 1 + exhibitsFor('vehicles').length && !!mine, "a whole vehicles run appends the exhibits after the archive's templates");
+  ok(mine?.label === ex.label && mine?.riderPose === ex.riderPose && mine?.seats === 1 && mine?.invented === true, "an exhibit carries its own label, its own rider pose for one seat, and the mark that it is ours");
+  ok(seen.some((s) => s.template === ex.template && s.appearance === ex.appearance && s.exhibit === GALLERY_EXHIBITS[0]), 'and is converted from its own appearance with the exhibit handed to the converter');
+  ok(!items.find((i) => i.template === 'object/mobile/vehicle/shared_test_speeder.iff')?.invented, "an archive's own template is never marked ours");
+  seen.length = 0;
+  const cut = buildGallery({ log: () => {}, only: ['vehicles'], limit: 5 }, deps);
+  ok(cut.sections[0].items.length === 1 && !seen.some((s) => s.template === ex.template), 'a run cut to its first few templates (--limit) is those and nothing more');
+  const keptRun = buildGallery({ log: () => {}, only: ['houses'], existing: { sections: whole.sections } }, { ...deps, keepModels: () => {} });
+  const keptMine = (keptRun.sections.find((s: { id: string }) => s.id === 'vehicles')?.items as { template: string; invented?: boolean; riderPose?: string }[]).find((i) => i.template === ex.template);
+  ok(keptMine?.invented === true && keptMine?.riderPose === ex.riderPose, 'a vehicles section kept from the last build keeps the exhibit, its mark and its pose');
+}
+
+// The points an exhibit is given: an engine joint's rear middle in the joint's own frame, and a hardpoint borrowed by name.
+{
+  // Two joints: a root at the origin, and an engine moved 2 m out along x and turned a quarter about y.
+  const s = Math.SQRT1_2;
+  const joints = [
+    { name: 'root', parent: -1 },
+    { name: 'lft_engine', parent: 0 },
+  ];
+  const rest = [
+    { rotation: [1, 0, 0, 0], translation: [0, 0, 0] },
+    { rotation: [s, 0, s, 0], translation: [2, 0, 0] },
+  ];
+  // Four vertices on the engine (its box x 1.5..2.5, y 0..1, z -4..-1) and one on the root, all weighted wholly.
+  const positions = new Float32Array([1.5, 0, -1, 2.5, 1, -1, 2, 0.5, -4, 2, 0.2, -3, 0, 0, -9]);
+  const mgn = {
+    transforms: ['root', 'lft_engine'],
+    positions,
+    weightCounts: [1, 1, 1, 1, 1],
+    weightStart: [0, 1, 2, 3, 4],
+    weightTransform: [1, 1, 1, 1, 0],
+    weightValue: [1, 1, 1, 1, 1],
+    hardpoints: [{ name: 'player', parent: 'body', rotation: [1, 0, 0, 0], position: [0.1, 0.2, -0.3] }],
+  };
+  const hp = engineRearPoint([mgn], joints, rest, 'LFT_ENGINE', 'engine_1');
+  ok(hp?.name === 'engine_1' && hp.parent === 'lft_engine', "an engine point is named as asked and hung on the joint, the joint's name matched whatever its case");
+  // The rear middle in the model's frame is (2, 0.5, -4); less the joint's place, (0, 0.5, -4); into a frame turned a
+  // quarter about y, x' = -z' of the turn's inverse: the point is (4, 0.5, 0) in the joint's own frame.
+  const p = hp?.position ?? [NaN, NaN, NaN];
+  ok(Math.abs(p[0] - 4) < 1e-6 && Math.abs(p[1] - 0.5) < 1e-6 && Math.abs(p[2]) < 1e-6, 'its place is the rearmost of the joint\'s own vertices and their middle across and up, in the joint\'s frame');
+  ok(hp?.rotation.join() === '1,0,0,0', 'with no turn of its own');
+  ok(engineRearPoint([mgn], joints, rest, 'rght_engine', 'engine_2') === null, 'a joint the skeleton has not got gives no point');
+  const noVerts = engineRearPoint([{ ...mgn, weightTransform: [0, 0, 0, 0, 0] }], joints, rest, 'lft_engine', 'engine_1');
+  ok(noVerts === null, 'nor does a joint no vertex is weighted to');
+  const borrowed = borrowedHardpoint([mgn], 'PLAYER');
+  ok(borrowed?.name === 'player' && borrowed.parent === 'body' && borrowed.position.join() === '0.1,0.2,-0.3', 'a hardpoint is borrowed by name, whatever its case, with its joint and place');
+  if (borrowed) borrowed.position[0] = 99;
+  ok(mgn.hardpoints[0].position[0] === 0.1, 'as a copy, so the mesh it came from is left as it was');
+  ok(borrowedHardpoint([mgn], 'saddle') === null, 'and a name the mesh has not got gives none');
+}
+
+// Whether `status` asks for the vehicles again for Sebulba's pod: only while the gallery lists Anakin's and not his.
+{
+  const index = (...labels: string[]) => ({ sections: [{ id: 'vehicles', items: labels.map((label) => ({ label })) }] });
+  ok(sebulbaStatus(index('podracer_anakin', 'speederbike')).stale === true, "a gallery with Anakin's pod and not Sebulba's is asked for again");
+  ok(sebulbaStatus(index('podracer_anakin', 'podracer_sebulba')).stale === false, 'one with both is not');
+  ok(sebulbaStatus(index('speederbike')).stale === false, "nor one with neither, whose archives may stop before the pods' own");
+  ok(sebulbaStatus(null).stale === false && sebulbaStatus({ sections: [] }).stale === false, 'nor no gallery at all');
+}
 console.log(`${checks} checks passed`);

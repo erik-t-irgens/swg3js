@@ -55,6 +55,8 @@ export type Action =
   | 'wings'
   // A vehicle spawned as a speeder bike: traversal (today's bike) and racing mode, and back.
   | 'raceMode'
+  // A pod or a racing bike: held, the worst engine part is mended (at a cost in speed).
+  | 'repair'
   // A building or a prop in hand: held, the mouse turns it (`placeTurn`) or raises and lowers it
   // (`placeLift`). Keys of their own rather than the strafe keys, so the player can walk while placing.
   | 'placeTurn'
@@ -140,6 +142,11 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // with wings and this only for a vehicle spawned as a bike, so the two never answer one press. Rebinding either
   // leaves the other on U (`takesKeyFrom`).
   raceMode: ['KeyU'],
+  // Mending a race-driven hull's engines, held, on the saber throw's key and the placing hand's turn, shared with both on
+  // purpose: the throw is read only on foot (nothing on-foot runs while mounted), the turn only with something in hand,
+  // and this only mounted on a racing hull with the hand empty, so the three never answer one press. Rebinding any one
+  // leaves the others on R (`takesKeyFrom`).
+  repair: ['KeyR'],
   // A building or a prop in hand: R held turns it and F held raises and lowers it, with the mouse. R is
   // the saber throw's and F the torch's, borrowed rather than spent: the throw is muted with the rest of
   // the fight while something is in hand (`FIGHT_ACTIONS`), and the torch is not read at all while

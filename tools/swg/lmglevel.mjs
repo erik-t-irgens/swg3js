@@ -11,6 +11,20 @@ export function triangleCount(mgn) {
 }
 
 /**
+ * The file a skeletal appearance's mesh name is read from. A `.mgn` the archives lack, with a `.lmg` of the same stem
+ * beside it, is read as that level list (its finest level with geometry, `finestLevelWithGeometry`); anything else is
+ * the name as it is (a `.lmg`, a `.mgn` the archives hold, a name missing with no list beside it, which the caller
+ * reports missing as it always has). Measured over every retail `.sat`: of the named mesh files the archives lack,
+ * exactly two have a list beside them, both pods (Sebulba's, which nothing else in the game used, and Anakin's mesh
+ * again under another name), so the rule changes nothing else the converter makes.
+ */
+export function satMeshFile(name, has) {
+  if (typeof name !== 'string' || !/\.mgn$/i.test(name) || has(name)) return name;
+  const list = name.replace(/\.mgn$/i, '.lmg');
+  return has(list) ? list : name;
+}
+
+/**
  * The finest level with geometry. `levels` are the mesh files finest first (`parseLmg`); `has(file)`
  * says whether the archives hold one and `load(file)` parses it. Returns `{ file, mgn }`:
  * - the first level that exists, parsed, when it has triangles (exactly what was taken before);

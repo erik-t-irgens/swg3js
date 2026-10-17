@@ -74,6 +74,8 @@ export interface DriveInput {
   slide?: boolean;
   lean?: number;
   pitch?: number;
+  /** The repair key held (a race-driven hull's engines, src/vehicles/drivetrain.ts). */
+  repair?: boolean;
 }
 
 export interface VehicleSpec {

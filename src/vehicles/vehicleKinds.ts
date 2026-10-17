@@ -3,7 +3,8 @@
 // The kind used to be the first of five name patterns to match a vehicle's label, its template or its model, and a
 // vehicle no pattern matched became a speeder bike; every "speeder" the bike pattern missed became a hover car that
 // climbs with the view, which is how the Sith, Geonosian and swamp speeders and every landspeeder came to fly. The
-// table below is the gallery's 57 vehicles by their garage id, sorted by what each is: the open landspeeders and
+// table below is the gallery's 57 vehicles and the one exhibit of ours beside them (Sebulba's pod) by their garage id,
+// sorted by what each is: the open landspeeders and
 // every multi-seat skiff, lifter and transport are bikes that race (the owner's answer), the Koro-2 and the Organa
 // stay hover cars, the snowspeeder is an aircraft and the basilisk walks. The name rule stays as the fallback for an
 // id the table lacks (a pack converted later), and `RACE_TUNE.kinds: 'names'` puts it back for everything.
@@ -30,7 +31,7 @@ const GROUND: VehicleKindRow = { kind: 'ground' };
 const HOVER: VehicleKindRow = { kind: 'flyer' };
 const AIR: VehicleKindRow = { kind: 'flyer', air: true };
 
-/** The gallery's vehicles by their garage id (the gallery label), each with the kind it is. */
+/** The gallery's vehicles by their garage id (the gallery label), each with the kind it is: 57 of the game's and one exhibit of ours. */
 export const VEHICLE_KINDS: Readonly<Record<string, VehicleKindRow>> = {
   a1_deluxe_floater: BIKE,
   air2_swoop_speeder: BIKE,
@@ -75,6 +76,8 @@ export const VEHICLE_KINDS: Readonly<Record<string, VehicleKindRow>> = {
   pod_racer_one: POD,
   pod_racer_two: POD,
   podracer_anakin: POD,
+  // Sebulba's pod: an exhibit of ours (the converter's `GALLERY_EXHIBITS`), the archives' one pod no template names.
+  podracer_sebulba: POD,
   ric_920_speeder: BIKE,
   // A six-seat floating platform.
   senate_pod: BIKE,

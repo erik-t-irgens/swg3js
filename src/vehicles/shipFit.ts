@@ -13,6 +13,7 @@
 // server whose hail says `paint: 2` passes the colour itself on.
 import type { AttachmentDef } from './shipAssembly.ts';
 import { isRawColour, rawRgb } from '../player/texrender.ts';
+import { RACE_CATEGORIES, type RaceLevels } from './raceMath.ts';
 
 export interface ComponentWeapon { projectile: number; speed: number; range: number; missile?: 1; countermeasure?: 1; tractor?: 1; beam?: 1; mining?: 1 }
 /** One row of the game's component table (components.json; its index there is what a look lists). */
@@ -34,7 +35,7 @@ export interface ShipFit { components: Record<string, string>; paint: Record<str
 /**
  * A fit as a hello carries it (`fitForWire`): its paint values all of the hull's own palettes, and beside them
  * `colours`, each colour carried whole by its variable, which a server whose hail says `paint: 2` passes on and
- * a browser built for it lays over the paint (`fitFromWire`). Absent when the fit has none.
+ * a browser built for it lays over the paint (`fitFromWire`). Absent when the fit has none. Never a race upgrade.
  */
 export interface WireFit extends ShipFit { colours?: Record<string, number> }
 /** A fit checked against the hull: every slot filled in (null = empty), its look (-1 = no model), every paint variable, the droid. */
@@ -133,9 +134,13 @@ export function nearestIndex(rgb: readonly number[], colors: readonly (readonly 
  */
 export function fitForWire(fit: ShipFit, paint: FitPaint | null | undefined, palettes: Readonly<Record<string, number[][]>> | null | undefined): { fit: WireFit; nearer: string[] } {
   const nearer: string[] = [];
-  if (!Object.values(fit.paint ?? {}).some((v) => isRawColour(v))) return { fit, nearer };
+  // Handling never crosses: a race upgrade (`race_*`) is taken out of the components whichever way the fit goes.
+  const raced = Object.keys(fit.components ?? {}).some((k) => RACE_KEY.test(k));
+  const components: Record<string, string> = raced ? {} : fit.components;
+  if (raced) for (const [k, v] of Object.entries(fit.components)) if (!RACE_KEY.test(k)) components[k] = v;
+  if (!Object.values(fit.paint ?? {}).some((v) => isRawColour(v))) return { fit: raced ? { ...fit, components } : fit, nearer };
   const colours: Record<string, number> = {};
-  const out: WireFit = { components: { ...fit.components }, paint: { ...fit.paint }, ...(fit.droid ? { droid: fit.droid } : {}) };
+  const out: WireFit = { components: { ...components }, paint: { ...fit.paint }, ...(fit.droid ? { droid: fit.droid } : {}) };
   for (const [k, value] of Object.entries(fit.paint)) {
     if (!isRawColour(value)) continue;
     delete out.paint[k];
@@ -192,7 +197,8 @@ export function resolveFit(def: FitDef, components: ComponentDef[], index: Map<s
     out.components[s.slot] = name;
     out.looks[s.slot] = name === null ? -1 : lookOf(def, s.slot, index.get(name) ?? -1);
   }
-  for (const k of Object.keys(savedComponents)) if (!def.slots.some((s) => s.slot === k)) notes.push(`${k}: the hull has no such slot; dropped`);
+  // A race upgrade (`race_*`) is a level the race drive reads, not a slot: stepped over without a word.
+  for (const k of Object.keys(savedComponents)) if (!RACE_KEY.test(k) && !def.slots.some((s) => s.slot === k)) notes.push(`${k}: the hull has no such slot; dropped`);
   const wantDroid = typeof saved?.droid === 'string' ? saved.droid : '';
   if (wantDroid) {
     const d = droids.find((x) => x.id === wantDroid);
@@ -209,6 +215,72 @@ export function resolveFit(def: FitDef, components: ComponentDef[], index: Map<s
   }
   for (const k of Object.keys(savedPaint)) if (!(def.paint?.variables ?? []).some((v) => v.name === k)) notes.push(`paint ${k}: the hull has no such variable; dropped`);
   return out;
+}
+
+/**
+ * A race upgrade's key in a kept fit's components (`race_top`), whose value names a level part (`race_top_3`): the seven
+ * categories of `RACE_CATEGORIES`, each absent at stock (level 0). Kept beside a speeder's paint in the fit the character
+ * already keeps per garage id, so a level is saved, hashed into the character's mark and carried by a server with
+ * nothing new; and kept out of everything else a fit does: `resolveFit` steps over them without a note, `fitForWire`
+ * strips them (handling never crosses), and a save that is not the race writer's keeps the ones already kept
+ * (`keepRaceKeys`).
+ */
+export const RACE_KEY = /^race_/;
+/** A level part's name: its category and its level, one to five. */
+const RACE_PART = /^race_([a-z]+)_([1-5])$/;
+
+/** The upgrade levels a kept fit names, by category; a category it names nothing for (or nothing sensible) is absent, which is stock. */
+export function raceLevelsOf(fit: ShipFit | null | undefined): Partial<RaceLevels> {
+  const out: Partial<RaceLevels> = {};
+  const c = fit?.components;
+  if (!c || typeof c !== 'object') return out;
+  for (const cat of RACE_CATEGORIES) {
+    const key = `race_${cat}`;
+    const v = Object.prototype.hasOwnProperty.call(c, key) ? c[key] : undefined;
+    if (typeof v !== 'string') continue;
+    const m = RACE_PART.exec(v);
+    if (!m || m[1] !== cat) continue;
+    out[cat] = Number(m[2]);
+  }
+  return out;
+}
+
+/**
+ * A fit with upgrade levels written into it: every category `levels` names is set (level 0, stock, is the key taken
+ * out), every one it leaves out keeps what the fit had, and the rest of the fit is copied as it is.
+ */
+export function withRaceLevels(fit: ShipFit | null | undefined, levels: Partial<RaceLevels>): ShipFit {
+  const components: Record<string, string> = { ...(fit?.components ?? {}) };
+  for (const cat of RACE_CATEGORIES) {
+    const n = levels[cat];
+    if (typeof n !== 'number' || !Number.isFinite(n)) continue;
+    const level = Math.max(0, Math.min(5, Math.round(n)));
+    const key = `race_${cat}`;
+    if (level > 0) components[key] = `race_${cat}_${level}`;
+    else delete components[key];
+  }
+  return { components, paint: { ...(fit?.paint ?? {}) }, ...(fit?.droid ? { droid: fit.droid } : {}) };
+}
+
+/**
+ * A fit a writer that is not the race writer saves (the ship edit page, the console's refit and repaint), with the race
+ * keys the kept fit already had laid back over it: a painted speeder's edit page saves its whole fit with no race keys,
+ * and without this every save of its paint would erase its upgrades. Whatever race keys `next` carries are the old
+ * fit's, never its own, since only the race writer may move a level.
+ */
+export function keepRaceKeys(old: ShipFit | null | undefined, next: ShipFit): ShipFit {
+  const components: Record<string, string> = {};
+  for (const [k, v] of Object.entries(next.components ?? {})) if (!RACE_KEY.test(k)) components[k] = v;
+  for (const [k, v] of Object.entries(old?.components ?? {})) if (RACE_KEY.test(k)) components[k] = v;
+  return { ...next, components };
+}
+
+/**
+ * Whether a packed fit says nothing at all (no component, race upgrade, paint value or droid), which the character
+ * keeps as absent: absent is stock. A fit of race upgrades alone is kept.
+ */
+export function keptFitEmpty(fit: ShipFit): boolean {
+  return !Object.keys(fit.components ?? {}).length && !Object.keys(fit.paint ?? {}).length && !fit.droid;
 }
 
 /** The fit a ship has before anyone changes it: everything stock. */

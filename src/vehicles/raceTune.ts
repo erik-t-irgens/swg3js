@@ -226,6 +226,8 @@ const POD: RaceBase = {
   crashImpact: 90,
   crashDrop: 65,
   crashFrom: 90,
+  // A stock pod mends a burnt-out engine part in about twelve seconds of holding the repair key, a full one in under three.
+  repairRate: 0.08,
   // About the middle of the seven pods, which run from 5 to 11.4 m wide.
   box: [7, 3, 15],
 };

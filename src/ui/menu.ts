@@ -107,6 +107,7 @@ const ACTION_LABELS: Record<Action, string> = {
   rollRight: 'Roll right (adrift in space); lean right (racing a pod or a bike)',
   wings: 'Open and close the wings (flying a ship)',
   raceMode: 'Racing mode (speeder bike)',
+  repair: 'Repair engines (hold; racing a pod or a bike)',
   placeTurn: 'Turn what you are placing (hold and move the mouse; shift tips and rolls a prop)',
   placeLift: 'Raise or lower what you are placing (hold and move the mouse)',
   takeProp: 'Pick up a prop of yours (in hand: put it away; at your door: take the building down)',

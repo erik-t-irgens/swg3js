@@ -18,8 +18,14 @@ export interface StandInRun {
   frame(dt: number): void;
 }
 
+/** The liquid a run is stepped over, where a test hands one: its surface's height and whether that liquid is a flow. */
+export interface StandInLiquid {
+  water?: ((x: number, z: number) => number) | null;
+  lava?: ((x: number, z: number) => boolean) | null;
+}
+
 /** A pod (or a bike in racing mode) at `speed` along +z on flat ground, its drive at `levels`. */
-export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed: number): StandInRun {
+export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed: number, liquid: StandInLiquid = {}): StandInRun {
   const t = { x: 0, y: 1.2, z: 0 };
   const lv = { x: 0, y: 0, z: speed };
   const av = { x: 0, y: 0, z: 0 };
@@ -118,7 +124,9 @@ export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed:
     },
     topSurface: () => null,
   } as unknown as Physics;
-  const race = new RaceDrive(kind, { ground: reader });
+  const water = liquid.water ?? null;
+  const lava = liquid.lava ?? null;
+  const race = new RaceDrive(kind, { ground: water ? { ...reader, water } : reader });
   race.setLevels(levels, vehicle);
   if (race.modes) race.setMode(vehicle, 'racing');
   const drive: DriveInput = { throttle: 1, steer: 0, heading: null, boost: false, hop: false, up: false, down: false, vertical: 0 };
@@ -127,7 +135,7 @@ export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed:
     vehicle,
     drive,
     frame(dt: number): void {
-      race.step(vehicle, dt, drive, flat, null, null, physics);
+      race.step(vehicle, dt, drive, flat, water, lava, physics);
       physics.step(dt);
     },
   };

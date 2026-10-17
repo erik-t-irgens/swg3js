@@ -20,6 +20,7 @@ import { RACE_CLOCK, RaceDrive, attachRace, holdsLiving, raceFling, type RaceGro
 import { boostFor, boostOf, fallDisplacement, speedOf, thrustA, thrustCapOf, thrustFor } from '../../../src/vehicles/raceMath.ts';
 import { RACE_BASE, RACE_TUNE, readRaceHatch, tuneRace } from '../../../src/vehicles/raceTune.ts';
 import { raceBoxFor, raceRoute, raceSpecFor } from '../../../src/vehicles/vehicleKinds.ts';
+import { ENGINE_TUNE, mendEngines, tuneEngines } from '../../../src/vehicles/drivetrain.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -556,7 +557,11 @@ await section(8, 'wear', async () => {
     const w = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 4000, 60) });
     launch(w, 333, 60);
     let least = Infinity;
-    for (let i = 0; i < 12 && !w.v.destroyed; i++) {
+    // Thirty glances where twelve once did: the engines take two-thirds of every scrape now, the hull the rest.
+    for (let i = 0; i < 30 && !w.v.destroyed; i++) {
+      // The engines mended between glances: a side burnt out by them pulls the pod into the very wall it glances,
+      // which crashes it (the pull doing its job, `drivetrain.ts`), and what is measured here is the hull's floor.
+      mendEngines(w.race!.engines);
       w.race!.heading = 0;
       w.race!.u.x = 0;
       w.race!.u.z = 1;
@@ -1026,7 +1031,8 @@ await section(20, 'the handling, through the drive', async () => {
     ok(Math.abs(r.race!.lean) > 0.9 && Math.abs(roll(r.v)) > 40, `20: leaned at speed the pod rolls ${r2(roll(r.v))} degrees onto its side`);
   }
   // The heat: held boosting past its seconds the engines overheat, the boost is refused until they are back to readyAt,
-  // and then charges again.
+  // and then charges again. The overheat also sets a part burning (W2), which refuses the boost on its own until the fire
+  // is out: that part is mended the moment it catches, so what is measured here is the heat's lock alone.
   {
     const r = await setup({ kind: 'pod', z: -3000 });
     r.input.throttle = 1;
@@ -1036,10 +1042,15 @@ await section(20, 'the handling, through the drive', async () => {
     let boostedLocked = false;
     let freeAt = -1;
     let note = '';
+    let burning = -1;
     drive(r, 60, 20, (run) => {
       const race = run.race!;
       note ||= race.takeNote();
-      if (lockedAt < 0 && race.locked) lockedAt = run.t;
+      if (lockedAt < 0 && race.locked) {
+        lockedAt = run.t;
+        burning = race.engines.parts.filter((p) => p.fire > 0).length;
+        mendEngines(race.engines);
+      }
       if (race.locked && (race.boosting || race.charge > 0)) boostedLocked = true;
       if (lockedAt >= 0 && freeAt < 0 && !race.locked) freeAt = run.t;
       return freeAt >= 0 && run.t - freeAt > 1.5;
@@ -1047,6 +1058,7 @@ await section(20, 'the handling, through the drive', async () => {
     const h = r.race!.handling;
     const cool = (RACE_TUNE.readyAt / 100) * h.coolSeconds;
     ok(lockedAt > 0 && note === 'engines overheated', `20: held boosting the engines overheat after ${r2(lockedAt - 6)} s and say so ("${note}")`);
+    ok(burning === 1, `20: and the overheat sets exactly one part burning (${burning})`);
     ok(!boostedLocked && freeAt > 0 && Math.abs(freeAt - lockedAt - cool) < 0.1 && (r.race!.boosting || r.race!.charge > 0), `20: the boost is refused for ${r2(freeAt - lockedAt)} s (back to readyAt, ${r2(cool)} s) and then charges again`);
   }
 });
@@ -1204,6 +1216,128 @@ await section(23, 'a racing hull, a hook and the grapple', async () => {
   ok(/if \(!hc\.isValid\(\) \|\| !hc\.isEnabled\(\)\) continue;/.test(frames), '23: (grappleFrames.ts: the hull test pushes out of no disabled collider)');
 });
 
+await section(24, 'the engines, through the drive', async () => {
+  // A side put out at 300 m/s: the top falls to the limp's share and the speed is shared out under it, so it eases down
+  // at the brake, never in a step, and no step reads a hit.
+  for (const fps of [144, 60, 20]) {
+    const r = await setup({ kind: 'pod', z: -3000 });
+    launch(r, 300, fps);
+    r.input.boost = false;
+    r.race!.boosting = false;
+    drive(r, fps, 0.2);
+    const plain = r.race!.plainTop();
+    for (const i of [3, 4, 5]) {
+      r.race!.engines.parts[i].d = 1;
+      r.race!.engines.parts[i].out = true;
+    }
+    const hp = r.v.hp;
+    let worst = 0;
+    let last = r.race!.h;
+    const brake = r.race!.handling.brake;
+    drive(r, fps, 6, (run) => {
+      worst = Math.max(worst, (last - run.race!.h) / ((Math.max(last, 1) / brake) * (1 / fps)));
+      last = run.race!.h;
+    });
+    const limp = ENGINE_TUNE.limp * plain;
+    ok(r.hits.length === 0 && r.v.hp === hp, `24: at ${fps} fps a side put out at 300 m/s reads no hit on any step (hull ${r2(r.v.hp)})`);
+    ok(worst <= 1.05 && r.race!.h <= limp + 1 && r.race!.engines.limp, `24: and the pod eases down to its limp top ${r2(limp)} (now ${r2(r.race!.h)} m/s), never faster than the brake (worst ${r2(worst)} of it a step)`);
+  }
+  // Held boosting until the engines overheat: exactly one part burning the step they do.
+  {
+    const r = await setup({ kind: 'pod', z: -3000 });
+    r.race!.rng = (() => {
+      let s = 1;
+      return () => ((s = (s * 16807) % 2147483647) / 2147483647);
+    })();
+    r.input.throttle = 1;
+    drive(r, 60, 6);
+    r.input.boost = true;
+    let burningAt = -1;
+    drive(r, 60, 12, (run) => {
+      if (run.race!.locked && burningAt < 0) burningAt = run.race!.engines.parts.filter((p) => p.fire > 0).length;
+      return burningAt >= 0;
+    });
+    ok(burningAt === 1, `24: held boosting, the engines overheat with exactly one part burning (${burningAt})`);
+  }
+  // A 10-degree graze at full speed on a wall on the left damages the left engine and only it.
+  {
+    const a = (10 * Math.PI) / 180;
+    const r = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 2000, 60) });
+    launch(r, 333, 60);
+    drive(r, 60, 1.5, (run) => {
+      if (run.hits.length) run.input.heading = -a;
+      return run.hits.some((h) => h.kind === 'scrape');
+    });
+    const left = r.race!.engines.parts.slice(0, 3).reduce((s, p) => s + p.d, 0);
+    const right = r.race!.engines.parts.slice(3).reduce((s, p) => s + p.d, 0);
+    ok(r.hits.some((h) => h.kind === 'scrape') && left > 0 && right === 0, `24: a 10-degree graze at full speed on a wall to the left damages the left engine (${r2(left)}) and not the right (${r2(right)})`);
+  }
+  // The hull takes a third of what a scrape cost it before the engines had parts: the same first graze, run once as the
+  // drive is and once with the hull's share put back to the whole, costs the hull a third as much.
+  {
+    const a = (10 * Math.PI) / 180;
+    const graze = async (): Promise<{ lost: number; kind: string }> => {
+      const r = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 2000, 60) });
+      launch(r, 333, 60);
+      const hp = r.v.hp;
+      drive(r, 60, 1.5, (run) => run.hits.length > 0);
+      return { lost: hp - r.v.hp, kind: r.hits[0]?.kind ?? '' };
+    };
+    const now = await graze();
+    const share = ENGINE_TUNE.hullShare;
+    tuneEngines({ hullShare: 1 });
+    const whole = await graze();
+    tuneEngines({ hullShare: share });
+    ok(now.kind === 'scrape' && whole.kind === 'scrape' && now.lost > 0 && Math.abs(now.lost / whole.lost - share) < 1e-9, `24: a scrape costs the hull ${r2(now.lost)} hp, a third of the ${r2(whole.lost)} it cost before the engines took the rest (${(now.lost / whole.lost).toFixed(4)})`);
+  }
+  // A step met hard: past the strike's hurt it costs the hull and exactly one part of the engines, never more than
+  // strikeMost of it; a strike under the hurt costs neither. The look-ahead is kept from seeing the step (its reader
+  // answers flat ground), or the hull rises over it in time and nothing is struck at all.
+  {
+    let hurt = 0;
+    const said: string[] = [];
+    for (const height of [1, 2, 3]) {
+      const step: G = (_x, z) => (z > 400 ? height : 0);
+      const r = await setup({ kind: 'pod', g: step, z: 0, reader: readerOf(FLAT) });
+      launch(r, 333, 60);
+      const hp = r.v.hp;
+      drive(r, 60, 3);
+      const parts = r.race!.engines.parts.filter((p) => p.d > 0);
+      const lost = hp - r.v.hp;
+      const kinds = r.hits.map((h) => h.kind);
+      said.push(`${height} m: ${kinds.join(',') || 'nothing'}, hull ${r2(lost)}, ${parts.length} parts`);
+      if (r.v.destroyed || kinds.some((k) => k !== 'strike')) continue;
+      if (lost > 0) {
+        hurt++;
+        ok(parts.length === 1 && parts[0].d <= ENGINE_TUNE.strikeMost + 1e-12, `24: a step of ${height} m struck at full speed costs the hull ${r2(lost)} and exactly one part ${r2(parts[0]?.d ?? 0)} (at most strikeMost ${ENGINE_TUNE.strikeMost})`);
+      } else ok(parts.length === 0, `24: a step of ${height} m ${kinds.length ? 'struck under the hurt' : 'ridden over with nothing struck'} costs no part`);
+    }
+    ok(hurt > 0, `24: (and at least one of the steps was struck hard enough to hurt: ${said.join('; ')})`);
+  }
+  // Scrapes on a hull already at its floor: the parts take them and the hull stays there.
+  {
+    const a = (20 * Math.PI) / 180;
+    const r = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 2000, 60) });
+    r.v.hp = RACE_TUNE.wearFloor;
+    launch(r, 250, 60);
+    drive(r, 60, 1.5, (run) => {
+      if (run.hits.length) run.input.heading = -a;
+    });
+    const damaged = r.race!.engines.parts.some((p) => p.d > 0);
+    ok(r.hits.some((h) => h.kind === 'scrape') && damaged && r.v.hp === RACE_TUNE.wearFloor && !r.v.destroyed, `24: scrapes past the hull's floor damage the engines and leave the hull at ${r2(r.v.hp)}`);
+  }
+  // A pod-shaped def raced as a bike has the bike's one engine of three parts.
+  {
+    const podDef = { id: 'test_pod', kind: 'podracer' as const, source: 'gallery', clipSpeeds: { run: 10 } };
+    const big = { min: [-5, 0, -5.5], max: [5, 3.5, 5.5] };
+    const spawn = raceSpecFor(podDef, 'speederbike', big);
+    const r = await setup({ kind: spawn.drive!, bounds: big as VehicleSpec['bounds'], raceBox: spawn.raceBox });
+    ok(r.race!.engines.sides === 1 && r.race!.engines.parts.length === 3, '24: a pod-shaped def raced as a bike has one engine of three parts');
+    const p = await setup({ kind: 'pod' });
+    ok(p.race!.engines.sides === 2 && p.race!.engines.parts.length === 6, '24: and raced as a pod, two of three');
+  }
+});
+
 // --- nothing made a step ---------------------------------------------------------------------------------------------
 await section(18, 'nothing made a step', async () => {
   // The cleanest of three processes: when the compiler builds what happens to be compiled first decides a little of what
@@ -1221,7 +1355,7 @@ await section(18, 'nothing made a step', async () => {
   if (alone.skipped) note(`the allocation measure was skipped: ${alone.skipped}`);
   else {
     // Under a byte a step on average: what is left is a strike's few numbers, which is an event and not a step.
-    ok(alone.planned > 0 && alone.scavenges === 0 && alone.made < 1 * alone.frames, `18: over ${alone.frames} steps of the drive's own code (racing, planning, sweeping, bridging, striking) it makes ${Math.max(0, alone.made)} bytes (${(Math.max(0, alone.made) / alone.frames).toFixed(2)} a step, ${alone.scavenges} collections)`);
+    ok(alone.planned > 0 && alone.scavenges === 0 && alone.made < 1 * alone.frames, `18: over ${alone.frames} steps of the drive's own code (racing, planning, sweeping, bridging, striking, the engines burning, pulling and mended) it makes ${Math.max(0, alone.made)} bytes (${(Math.max(0, alone.made) / alone.frames).toFixed(2)} a step, ${alone.scavenges} collections)`);
     ok(alone.view.scavenges === 0 && alone.view.made < 0.2 * alone.view.frames, `18: and over ${alone.view.frames} frames of the race view ${Math.max(0, alone.view.made)} bytes`);
   }
 });

@@ -141,6 +141,123 @@ export function interiorLayouts(templates, { pobOf, cellsOf = () => [], withHous
 export const GALLERY_SECTIONS = ['houses', 'vehicles', 'weapons', 'anims', 'interiors'];
 
 /**
+ * Exhibits of ours, appended to a section's templates: things the archives hold whole that no template of the game's
+ * names, so a walk of the templates never finds them. One, so far: **Sebulba's pod**, a skinned pod on the same skeleton
+ * as every other skinned pod, whose appearance names Gasgano's animation table and a mesh file the archives lack beside a
+ * level list that is there (`satMeshFile`), and which nothing in the game ever used: no template, no mount-table row, no
+ * rider pose, no name. Its template is a name of ours under the vehicles' folder (nothing reads it from the archives),
+ * its rider pose Gasgano's (the table the archives pair this mesh with), its seat Gasgano's own `player` point in its
+ * `body` joint's frame (`seatFrom`: every skinned pod puts it within a few centimetres of the others in that frame, and
+ * with one skeleton the same point in `body`'s frame is the same place in the pod), and its engine points ours, at each
+ * engine joint's rear middle (`engines`, `engineRearPoint`). Every number of it is worked out from the archives when the
+ * converter runs; none is written here.
+ */
+export const GALLERY_EXHIBITS = [
+  {
+    section: 'vehicles',
+    template: 'object/mobile/vehicle/shared_podracer_sebulba.iff',
+    appearance: 'appearance/pv_sebulba_podracer.sat',
+    label: 'podracer_sebulba',
+    riderPose: 'vehicle_podracer_01',
+    invented: true,
+    seatFrom: 'appearance/gasgano_pod_racer.sat',
+    engines: [
+      { joint: 'lft_engine', name: 'engine_1' },
+      { joint: 'rght_engine', name: 'engine_2' },
+    ],
+  },
+];
+
+/** The exhibits of a section, as `buildGallery` appends them to its templates. */
+export function exhibitsFor(section) {
+  return GALLERY_EXHIBITS.filter((e) => e.section === section);
+}
+
+/** A rest-pose local (rotation w, x, y, z; translation) as a column-major 4x4. */
+function trs(q, t) {
+  const [w, x, y, z] = q;
+  const xx = x * x, yy = y * y, zz = z * z, xy = x * y, xz = x * z, yz = y * z, wx = w * x, wy = w * y, wz = w * z;
+  return [1 - 2 * (yy + zz), 2 * (xy + wz), 2 * (xz - wy), 0, 2 * (xy - wz), 1 - 2 * (xx + zz), 2 * (yz + wx), 0, 2 * (xz + wy), 2 * (yz - wx), 1 - 2 * (xx + yy), 0, t[0], t[1], t[2], 1];
+}
+
+function mul(a, b) {
+  const o = new Array(16).fill(0);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++) o[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
+  return o;
+}
+
+/**
+ * A point of ours at an engine joint's rear middle, as a hardpoint in that joint's frame (`{ name, parent, rotation,
+ * position }`, the shape a mesh's own hardpoints have): over the body's meshes (`parseMgn`'s, in the model's own frame
+ * at the rest pose), the vertices weighted heaviest to the joint, their rearmost along the pod (the least z: a pod's
+ * engines lead it, and their exhausts face its cockpit) and their middle across and up. `joints` are the skeleton's
+ * (`{ name, parent }`, a parent before its children) and `rest` their rest-pose locals (`poseAtFrame(skeleton, null,
+ * 0)`). Null when no vertex is that joint's.
+ */
+export function engineRearPoint(mgns, joints, rest, joint, name) {
+  const want = String(joint).toLowerCase();
+  const j = joints.findIndex((x) => String(x.name).toLowerCase() === want);
+  if (j < 0) return null;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity;
+  for (const m of mgns) {
+    const count = (m?.positions?.length ?? 0) / 3;
+    for (let p = 0; p < count; p++) {
+      let best = -1;
+      let heaviest = -Infinity;
+      const start = m.weightStart[p];
+      for (let k = 0; k < m.weightCounts[p]; k++) {
+        if (m.weightValue[start + k] > heaviest) {
+          heaviest = m.weightValue[start + k];
+          best = m.weightTransform[start + k];
+        }
+      }
+      if (best < 0 || String(m.transforms[best]).toLowerCase() !== want) continue;
+      const x = m.positions[p * 3];
+      const y = m.positions[p * 3 + 1];
+      const z = m.positions[p * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+    }
+  }
+  if (!Number.isFinite(minZ)) return null;
+  const world = [];
+  joints.forEach((x, i) => {
+    const local = trs(rest[i].rotation, rest[i].translation);
+    world[i] = x.parent >= 0 ? mul(world[x.parent], local) : local;
+  });
+  // Into the joint's own frame: a rigid inverse, rotation transposed.
+  const w = world[j];
+  const px = (minX + maxX) / 2 - w[12];
+  const py = (minY + maxY) / 2 - w[13];
+  const pz = minZ - w[14];
+  const position = [w[0] * px + w[1] * py + w[2] * pz, w[4] * px + w[5] * py + w[6] * pz, w[8] * px + w[9] * py + w[10] * pz];
+  return { name, parent: joints[j].name, rotation: [1, 0, 0, 0], position };
+}
+
+/** A hardpoint of a mesh's own by name (`parseMgn`'s, in its joint's frame), copied, or null: what an exhibit borrows. */
+export function borrowedHardpoint(mgns, name) {
+  const want = String(name).toLowerCase();
+  for (const m of mgns) for (const hp of m?.hardpoints ?? []) if (String(hp.name).toLowerCase() === want) return { name: hp.name, parent: hp.parent, rotation: [...hp.rotation], position: [...hp.position] };
+  return null;
+}
+
+/**
+ * Whether a gallery's vehicles carry Sebulba's pod, as `status` reads it: asked for while the gallery lists Anakin's pod
+ * and not Sebulba's. `status` mounts no archives, so it cannot ask whether Sebulba's appearance is there; Anakin's stands
+ * in for it, since both live in one archive and nowhere else, so an install whose archives stop before that one is never
+ * asked for a pod it cannot make.
+ *  -> { stale, why }
+ */
+export function sebulbaStatus(index) {
+  const labels = new Set(((index?.sections ?? []).find((s) => s?.id === 'vehicles')?.items ?? []).map((i) => i?.label));
+  const stale = labels.has('podracer_anakin') && !labels.has('podracer_sebulba');
+  return { stale, why: stale ? "the gallery has no Sebulba's pod: the archives' one pod the gallery never offered, which the vehicles' conversion now adds" : '' };
+}
+
+/**
  * How the gallery converts a skeletal model (every one it has is a vehicle: the walkers, the
  * basilisk, the jetpacks and the pod racers): its own clips when it walks with them (`clips`, the
  * list the creatures keep), and its body mesh's hardpoints kept as hp:<name> nodes under their
@@ -169,6 +286,8 @@ export function skeletalModelEntry(id, source, info, animated) {
     triangles,
     skeletal: true,
     hardpoints: (info.hardpoints ?? []).map((h) => h.name),
+    // Where an exhibit's points came from when they are not its own mesh's (Sebulba's pod: a seat borrowed, engines ours).
+    ...(info.hardpointsFrom ? { hardpointsFrom: info.hardpointsFrom } : {}),
     ...(animated ? { clips: info.animations, clipSpeeds: info.clipSpeeds ?? {} } : {}),
     ...(triangles ? {} : { failed: `no triangles (${[...(info.missing ?? []), ...(info.skipped ?? [])].slice(0, 3).join('; ') || 'no meshes'})` }),
   };
@@ -245,20 +364,24 @@ export function buildGallery({ log = () => {}, only = GALLERY_SECTIONS, limit = 
     const kept = !only.includes(id) ? existing?.sections?.find((s) => s.id === id) : null;
     if (!only.includes(id) && !kept) return;
     if (kept) {
-      for (const it of kept.items) items.push({ template: it.template, model: it.model, radius: it.radius, height: it.height, label: it.label ?? labelOf(it.template), ...(it.riderPose ? { riderPose: it.riderPose, seats: it.seats } : {}), ...(it.lifts ? { lifts: it.lifts } : {}) });
+      for (const it of kept.items) items.push({ template: it.template, model: it.model, radius: it.radius, height: it.height, label: it.label ?? labelOf(it.template), ...(it.riderPose ? { riderPose: it.riderPose, seats: it.seats } : {}), ...(it.invented ? { invented: true } : {}), ...(it.lifts ? { lifts: it.lifts } : {}) });
       deps.keepModels?.([...new Set(items.map((it) => it.model))]);
     } else {
-      for (const entry of templates.slice(0, limit)) {
+      // The section's own exhibits of ours after the templates the archives name (`GALLERY_EXHIBITS`); a run cut to its
+      // first few templates (`--limit`, the tests') is that and nothing more.
+      for (const entry of [...templates.slice(0, limit), ...(Number.isFinite(limit) ? [] : exhibitsFor(id))]) {
         const it = typeof entry === 'string' ? { template: entry } : entry;
-        const r = deps.convert(it.template, it.appearance);
+        const r = deps.convert(it.template, it.appearance, it);
         if (!r || r.skip) {
           skipped++;
           const why = String(r?.skip ?? 'failed').replace(/:.*$/, '').slice(0, 60);
           reasons.set(why, (reasons.get(why) ?? 0) + 1);
           continue;
         }
-        // A vehicle carries how its rider sits (the mount tables' rider pose), for the riding clip; a structure its lift cells.
-        items.push({ template: it.template, model: r.model, radius: r.radius, height: r.height, label: it.label ?? labelOf(it.template), ...(r.riderPose ? { riderPose: r.riderPose, seats: r.seats } : {}), ...(it.lifts?.length ? { lifts: it.lifts } : {}) });
+        // A vehicle carries how its rider sits (the mount tables' rider pose, else an exhibit's own), for the riding
+        // clip; a structure its lift cells.
+        const ride = r.riderPose ? { riderPose: r.riderPose, seats: r.seats } : it.riderPose ? { riderPose: it.riderPose, seats: it.seats ?? 1 } : {};
+        items.push({ template: it.template, model: r.model, radius: r.radius, height: r.height, label: it.label ?? labelOf(it.template), ...ride, ...(it.invented ? { invented: true } : {}), ...(it.lifts?.length ? { lifts: it.lifts } : {}) });
       }
     }
     // A row is as deep as its deepest exhibit: with the structures sorted biggest first the giants
@@ -266,7 +389,7 @@ export function buildGallery({ log = () => {}, only = GALLERY_SECTIONS, limit = 
     if (bigFirst) items.sort((a, b) => b.radius - a.radius);
     const { placed, depth } = layOutRows(items, { gap, rowWidth, startZ: z });
     for (const p of placed) objects.push({ template: p.template, model: p.model, x: p.x, y, z: p.z, q: [1, 0, 0, 0], radius: p.radius });
-    sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height, ...(p.riderPose ? { riderPose: p.riderPose, seats: p.seats } : {}), ...(p.lifts ? { lifts: p.lifts } : {}) })) });
+    sections.push({ id, title, z, depth, items: placed.map((p) => ({ label: p.label, template: p.template, model: p.model, x: p.x, y, z: p.z, radius: p.radius, height: p.height, ...(p.riderPose ? { riderPose: p.riderPose, seats: p.seats } : {}), ...(p.invented ? { invented: true } : {}), ...(p.lifts ? { lifts: p.lifts } : {}) })) });
     log(`${title}: ${placed.length} placed${kept ? ' (kept from the last build)' : ''}${skipped ? `, ${skipped} skipped (${[...reasons.entries()].map(([why, n]) => `${n} ${why}`).join('; ')})` : ''}, rows from z ${z} to ${Math.round(z + depth)}`);
     z += depth + 30;
   };

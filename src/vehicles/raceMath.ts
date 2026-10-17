@@ -64,6 +64,8 @@ export interface RaceBase {
   crashImpact: number;
   crashDrop: number;
   crashFrom: number;
+  /** How fast the repair key mends the worst engine part (its damage a second; `drivetrain.ts`). */
+  repairRate: number;
   /** The box it collides as while it races, width, height and length (the shared one of its kind). */
   box: [number, number, number];
 }
@@ -75,7 +77,7 @@ export const VERTICAL_KEYS = ['riseMax', 'fallMax'] as const;
 /** The distances a speed reaches in a time, scaled with the speeds. */
 export const DISTANCE_KEYS = ['lookMax', 'lookStep', 'faceLen', 'climbLen', 'slopeLen'] as const;
 /** Every number of a base, in a fixed order (the box apart). */
-export const BASE_KEYS = ['V', 'BT', 'cap', 'stockTop', 't75', 'coast', 'brake', 'reverseTop', 'chargeTime', 'boostSeconds', 'coolSeconds', 'tau', 'maxTurn', 'turnFullAt', 'turnResponse', 'bankMax', 'bankEase', 'leanMax', 'leanFrom', 'ride', 'lookMax', 'lookStep', 'riseRate', 'riseMax', 'band', 'bandRate', 'fall', 'fallMax', 'airborneAt', 'sweepStep', 'faceLen', 'climbLen', 'climbGrade', 'slopeLen', 'strikeSpark', 'strikeHurt', 'strikeHull', 'strikeMost', 'crashImpact', 'crashDrop', 'crashFrom'] as const;
+export const BASE_KEYS = ['V', 'BT', 'cap', 'stockTop', 't75', 'coast', 'brake', 'reverseTop', 'chargeTime', 'boostSeconds', 'coolSeconds', 'tau', 'maxTurn', 'turnFullAt', 'turnResponse', 'bankMax', 'bankEase', 'leanMax', 'leanFrom', 'ride', 'lookMax', 'lookStep', 'riseRate', 'riseMax', 'band', 'bandRate', 'fall', 'fallMax', 'airborneAt', 'sweepStep', 'faceLen', 'climbLen', 'climbGrade', 'slopeLen', 'strikeSpark', 'strikeHurt', 'strikeHull', 'strikeMost', 'crashImpact', 'crashDrop', 'crashFrom', 'repairRate'] as const;
 export type RaceNumber = (typeof BASE_KEYS)[number];
 
 /**
@@ -126,6 +128,7 @@ export function newBase(): RaceBase {
     crashImpact: 0.5,
     crashDrop: 0.5,
     crashFrom: 0.5,
+    repairRate: 0.5,
     box: [0.5, 0.5, 0.5],
   };
   for (const k of BASE_KEYS) out[k] = 0;
@@ -224,6 +227,7 @@ export function resolveRace(base: RaceBase, levels: Partial<RaceLevels>, conditi
   out.V = base.V * lerp(base.stockTop, upgrades.top, t('top'));
   out.brake = base.brake * lerp(1, upgrades.airbrake, t('airbrake'));
   out.coolSeconds = base.coolSeconds * lerp(1, upgrades.cooling, t('cooling'));
+  out.repairRate = base.repairRate * lerp(1, upgrades.repair, t('repair'));
   return out;
 }
 

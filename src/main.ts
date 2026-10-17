@@ -272,7 +272,7 @@ import { FEEDBACK_TUNE, HudFeedback, type FeedbackTune, type ScreenPoint } from 
 import { Nameplates, PLATE_TUNE, pickPlate } from './ui/nameplate';
 import { VehiclesUi } from './ui/vehiclesUi';
 import { ShipEditUi } from './ui/shipEditUi';
-import { DROID_SHOWN, DROID_SHOWN_BY_HULL, PAINT_CARRIED_WHOLE, droidShown, droidSink, fitForWire, fitKey, isColourKey, packFit, partsOf, slotLabel, stockFit, type ResolvedFit, type ShipFit, type WireFit } from './vehicles/shipFit.ts';
+import { DROID_SHOWN, DROID_SHOWN_BY_HULL, PAINT_CARRIED_WHOLE, droidShown, droidSink, fitForWire, fitKey, isColourKey, keepRaceKeys, keptFitEmpty, packFit, partsOf, raceLevelsOf, slotLabel, stockFit, withRaceLevels, type ResolvedFit, type ShipFit, type WireFit } from './vehicles/shipFit.ts';
 import { NpcUi } from './ui/npcUi';
 import { CATALOGUE_COMMAND } from './world/mobiles/catalogue';
 import { ambientOverrides, lookBounds, spawnDistance } from './world/mobiles/spawning';
@@ -289,7 +289,7 @@ import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
 import { CRUISE_KEY, CRUISE_TUNE, Cruise, tuneCruise } from './space/cruise';
 import { HyperspaceTunnel } from './space/hyperspaceTunnel';
-import { RACE_OVERHEATED, RACE_RACING, RACE_READY, STAND_ENEMY, STAND_FRIEND, STAND_NEUTRAL, ShipHud, WING_CLOSED, WING_HELD, WING_NONE, WING_OPEN, WING_OPENING, newFlightView, newTargetView, type FlightTune, type FlightView, type MessageKind as ShipMessageKind, type TargetView } from './ui/shipHud';
+import { RACE_OUT, RACE_OVERHEATED, RACE_RACING, RACE_READY, RACE_REPAIRING, STAND_ENEMY, STAND_FRIEND, STAND_NEUTRAL, ShipHud, WING_CLOSED, WING_HELD, WING_NONE, WING_OPEN, WING_OPENING, newFlightView, newTargetView, type FlightTune, type FlightView, type MessageKind as ShipMessageKind, type TargetView } from './ui/shipHud';
 import { TargetFx } from './space/targetFx';
 import { FACTION_COLOR, FACTION_LABEL, shipStanding, type ShipFaction } from './space/factions';
 import { NpcBrain } from './space/npcBrain';
@@ -351,7 +351,10 @@ import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
-import { RACE_CLOCK, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
+import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
+import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
+import { hardpointName } from './vehicles/shipAssembly.ts';
+import { EngineFx } from './vehicles/engineFx.ts';
 import { raceNote, raceRoute } from './vehicles/vehicleKinds.ts';
 import { RACE_BLOCK_MARGIN, easeFovOut, frameRaceView, newRaceView, newRaceViewOut, raceBlocked, raceEyeOf, raceTurnOf, releaseRaceView, steerRaceView, widenRaceView, type RaceViewInput } from './vehicles/raceView.ts';
 import type { RaceLevels } from './vehicles/raceMath.ts';
@@ -423,6 +426,23 @@ import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS
 // The race drive's hatch, read before anything spawns or the garage sorts a vehicle: `localStorage['swg.race'] = '0'`
 // starts the session with the pass switched off, so nothing is built differently (src/vehicles/raceTune.ts).
 readRaceHatch(() => (typeof localStorage === 'undefined' ? null : localStorage.getItem('swg.race')));
+
+/** A race-driven hull's engine part as the flight display's condition block reads one (`ShipPartState`), written in place. */
+interface RacePartView {
+  readonly slot: string;
+  hp: number;
+  readonly max: number;
+  down: boolean;
+  burning: boolean;
+}
+
+/** The part views of a set of engines: `race_left_0` to `race_right_2` on a pod, `race_engine_0` to `_2` on a bike (`partWord` names them). */
+function racePartViews(sides: 1 | 2): RacePartView[] {
+  const out: RacePartView[] = [];
+  for (let i = 0; i < sides * 3; i++) out.push({ slot: sides === 1 ? `race_engine_${i}` : `race_${i < 3 ? 'left' : 'right'}_${i % 3}`, hp: 1.5, max: 1, down: false, burning: false });
+  for (const v of out) v.hp = 1;
+  return out;
+}
 
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
@@ -1478,6 +1498,8 @@ class App {
     this.world = new World(this.scene, physics);
     // The target effects place the world's ship effects (made in the World constructor).
     this.targetFx = new TargetFx(this.world.shipFx);
+    // A race-driven hull's damaged engines smoke and burn through the same ship effects (src/vehicles/engineFx.ts).
+    this.engineFx.attach(this.world.shipFx);
     this.world.renderer = this.renderer;
     // The sound of the place: the area's beds, the game's placed sound objects and the loops its
     // particle effects name. The numbering of buildings and boarded hulls is this class's, so that a
@@ -6676,6 +6698,11 @@ class App {
         if (switches.kinds !== undefined || opts.tune?.kinds !== undefined || switches.on !== undefined || opts.tune?.on !== undefined) {
           const g = this.garage ?? this.world.garage;
           if (g) words.push(`${g.reclassify()} of the gallery's vehicles changed kind (a vehicle standing keeps its own)`);
+          // Off, the glows the pass moved onto a pod's or bike's own engine points go back to where they always stood, at the next spawn.
+          if (g && !RACE_TUNE.on) {
+            const n = g.clearRaceThrusters();
+            if (n) words.push(`${n} vehicles' glows go back to their old places at the next spawn`);
+          }
         }
         const me = this.player.worldPos;
         const mounted = this.player.mounted;
@@ -6691,7 +6718,17 @@ class App {
         }
         const race = v.race;
         if (opts.mode === 'racing' || opts.mode === 'traversal') words.push(!RACE_TUNE.on ? 'the pass is switched off: a bike has no modes (U does nothing)' : race.setMode(v, opts.mode) || `${opts.mode} mode`);
-        if (opts.upgrades !== undefined) race.setLevels(opts.upgrades, v);
+        if (opts.upgrades !== undefined) {
+          race.setLevels(opts.upgrades, v);
+          // Kept with the character in the vehicle's fit (`race_*`), by its garage id, as the race writer: a reload and a
+          // fresh spawn of the same vehicle find them again.
+          const id = v.def?.id ?? v.spec.id;
+          if (this.current && !this.creating) {
+            this.saveFit(id, withRaceLevels(this.savedFit(id), race.levels), true);
+            this.flushFits();
+            words.push(`levels kept with the character for ${id}`);
+          } else words.push('levels set on this vehicle only: no character is in the world to keep them');
+        }
         if (typeof opts.condition === 'number') race.setCondition(opts.condition, v);
         if (typeof opts.steer === 'number' && Number.isFinite(opts.steer)) {
           if (v !== mounted || !race.wants(v) || RACE_TUNE.view !== 'race') words.push('steer sets the race view\'s target: ride a pod, or a bike in racing mode, with the race view on');
@@ -6736,6 +6773,77 @@ class App {
           switches: tune,
           ceiling,
           words,
+        };
+      },
+      /**
+       * The engines of the ridden, else the nearest, pod or bike (src/vehicles/drivetrain.ts): `engines()` reports each
+       * part (damage, burning, out), the heat, the pull, the top's share and the limp, whether the boost may run, the
+       * repair, each engine's thrust and damage band, the glows' points (the def's race thrusters or the rear spots) and
+       * the damage effects standing at them. `engines({ hit: 'left', amount: 0.5 })` lays a scrape's damage on a side
+       * (one random part of it), `engines({ damage: { right: 0.8 } })` sets every part of a side to a damage,
+       * `engines({ burn: 3 })` sets part 3 on fire (counting from the left engine's top as 1), `engines({ heat: 0 })`
+       * overheats them now as a run dry does, `engines({ repair: true })` makes every part whole, and
+       * `engines({ tune: { … } })` moves any number of `ENGINE_TUNE` live.
+       */
+      engines: (opts: { hit?: 'left' | 'right' | 'engine'; amount?: number; damage?: { left?: number; right?: number; engine?: number }; burn?: number; heat?: number; repair?: boolean; tune?: Partial<Record<keyof EngineTune, unknown>> } = {}) => {
+        const words: string[] = [];
+        if (opts.tune) words.push(...tuneEngines(opts.tune));
+        const me = this.player.worldPos;
+        const mounted = this.player.mounted;
+        const v = mounted?.race ? mounted : ([...this.world.vehicles].filter((o) => o.race).sort((a, b) => a.pos.distanceTo(me) - b.pos.distanceTo(me))[0] ?? null);
+        if (!v?.race) return { vehicle: 'no pod or bike standing: spawn one (spawn(\'podracer_anakin\'))', words, tune: { ...ENGINE_TUNE } };
+        const race = v.race;
+        const e = race.engines;
+        const sideOf = (s: string | undefined) => (e.sides === 1 || s === 'left' || s === 'engine' ? 0 : 1);
+        if (opts.hit) {
+          const amount = typeof opts.amount === 'number' && Number.isFinite(opts.amount) ? opts.amount : 0.25;
+          const i = damagePart(e, sideOf(opts.hit), amount, race.rng);
+          words.push(i < 0 ? 'every part of that side is out' : `${enginePartName(e.sides, i)} took ${amount}`);
+        }
+        if (opts.damage) {
+          for (const [side, d] of Object.entries(opts.damage)) {
+            if (typeof d !== 'number' || !Number.isFinite(d)) continue;
+            const from = sideOf(side) * 3;
+            for (let i = from; i < from + 3; i++) {
+              const p = e.parts[i];
+              p.d = Math.min(1, Math.max(0, d));
+              p.out = p.d >= 1;
+              if (p.out) p.fire = 0;
+            }
+          }
+        }
+        if (typeof opts.burn === 'number' && Number.isFinite(opts.burn)) {
+          const p = e.parts[Math.round(opts.burn) - 1];
+          if (!p) words.push(`there are ${e.parts.length} parts, numbered from 1`);
+          else if (p.out) words.push('that part is out: it cannot burn');
+          else {
+            p.fire = Math.max(p.fire, 1e-6);
+            words.push(`${enginePartName(e.sides, Math.round(opts.burn) - 1)} on fire`);
+          }
+        }
+        if (opts.heat === 0) {
+          const i = race.overheatNow();
+          words.push(i < 0 ? 'overheated, and no part could catch' : `overheated: ${enginePartName(e.sides, i)} on fire`);
+        } else if (typeof opts.heat === 'number' && Number.isFinite(opts.heat)) race.heat = Math.min(100, Math.max(0, opts.heat));
+        if (opts.repair) {
+          mendEngines(e);
+          words.push('every part whole again');
+        }
+        // The glows: where they stand and why there.
+        const glows = v.engines.map((g) => hardpointName(g.object.parent ?? g.object) ?? (g.object.parent?.userData.glowSpot ? 'a rear spot' : g.object.parent?.name || 'unnamed'));
+        const def = v.def ?? null;
+        return {
+          id: v.spec.id,
+          ownKind: def?.kind ?? null,
+          spawnedAs: v.spec.kind,
+          racing: race.active,
+          heat: Number(race.heat.toFixed(1)),
+          overheated: race.locked,
+          ...race.enginesReport(),
+          glows: { points: glows, from: def?.raceThrusters?.length ? "the def's race thrusters" : def?.thrusters?.length ? "the def's thrusters" : glows.length && v.engines.every((g) => g.object.parent?.userData.glowSpot) ? 'the rear spots' : 'its own hardpoints', raceThrusters: def?.raceThrusters ?? null },
+          effects: this.engineFx.report(v),
+          words,
+          tune: { ...ENGINE_TUNE },
         };
       },
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
@@ -10907,6 +11015,8 @@ class App {
     this.waypointHud.clear();
     this.cityWatch.reset();
     this.minimap.standDown();
+    // A raced hull's smoke and fire stand in the session's ship effects, which outlive every world: taken away with it.
+    this.engineFx.clear();
     this.world.leave();
     this.shipHud.clear();
     this.messages.clear();
@@ -11482,6 +11592,8 @@ class App {
       const race = RACE_TUNE.on && flown === p.mounted ? flown.race : null;
       v.mode = race?.modes ? race.mode : '';
       v.slide = !!race && race.wants(flown);
+      // An engine part damaged or burning, raced: the repair key mends it.
+      v.repair = v.slide && (race!.engines.mean > 0 || race!.engines.burnBits !== 0);
       v.cutKey = CUT_ENGINES_KEY;
       // A speeder or a mount has no ship menu of its own to offer.
       if (!v.ship) s.shipMenu = '';
@@ -14673,6 +14785,8 @@ class App {
     // made hidden and their textures uploaded, so the first hit neither compiles nor uploads.
     this.loadingScreen.setWhat('preparing ship effects');
     await this.world.ships.prepareEffects(this.renderer);
+    // And a raced hull's engine smoke and fire, once a session, so the first fire builds nothing.
+    await this.engineFx.prepare(this.renderer);
     // The reflections go in before anything compiles, or the first capture of the sky lands on a live
     // frame and rebuilds every reflective material in the world at once (a jump already waited).
     this.loadingScreen.setWhat('reflections');
@@ -14878,6 +14992,9 @@ class App {
     // The shuttles of the world left behind: in the scene and the physics that outlive it, so they go
     // now, whether or not the world arrived at has any of its own.
     this.shuttleRigs?.clear();
+    // And a raced hull's smoke and fire, which stand in the session's ship effects: those outlive every world too, and
+    // left standing they burn on at the last world's places until the next world's first vehicle step.
+    this.engineFx.clear();
     // And the console's own shuttle trips and parked hull, whose hulls went with the world: their pads
     // are let go of now, once nothing of that world stands, so no hold is left waiting on it.
     this.endConsoleShuttles('the world changed');
@@ -15482,6 +15599,8 @@ class App {
     this.shipHud.clear();
     this.shipTarget = null;
     this.targetFx.select(null, false, null);
+    // And any raced hull's smoke and fire, which stand in the session's ship effects as the target's bracket does.
+    this.engineFx.clear();
     this.world.loadCarrying(hull, planet, packIdOf(planet, this.zone));
     // What `arrive` does for a zone: the gates go with the world, even here, where every zone a jump
     // reaches is a system with none. A world swapped under the hull with the last one's gates still
@@ -15887,6 +16006,8 @@ class App {
   };
 
   /** The race view's state, its frame's answer and what it is handed, kept and written in place (src/vehicles/raceView.ts). */
+  /** The smoke and fire at a race-driven hull's damaged engines, one standing effect a side (src/vehicles/engineFx.ts). */
+  private readonly engineFx = new EngineFx();
   private readonly raceView = newRaceView();
   private readonly raceOut = newRaceViewOut();
   private readonly raceIn: RaceViewInput = { heading: 0.5, mouseDX: 0.5, k: 0.5, keys: false, alt: false, orbitYaw: 0.5, speed: 0.5, ceiling: 0.5, seatY: 0.5, dt: 0.5 };
@@ -16319,6 +16440,9 @@ class App {
       if (race && race.wants(pilot)) {
         drive.slide = input.held('jump');
         drive.lean = (input.held('rollRight') ? 1 : 0) - (input.held('rollLeft') ? 1 : 0);
+        // The repair, held (R by default, shared with the saber throw, which nothing reads while mounted, and the placing
+        // hand's turn, which is read only with something in hand): read only with the hand empty.
+        drive.repair = input.held('repair') && !this.placing && !this.propPlacing;
         // The nose from the view's tilt only when asked for: off, a player looking up would lose speed for no reason they can see.
         drive.pitch = RACE_TUNE.pitchFrom === 'view' && !free ? Math.sign(tilt) * THREE.MathUtils.clamp((Math.abs(tilt) - RACE_TUNE.trimDead) / Math.max(1e-3, RACE_TUNE.trimFull - RACE_TUNE.trimDead), 0, 1) : 0;
         if (RACE_TUNE.view === 'race') {
@@ -16446,6 +16570,8 @@ class App {
     this.world.livingHold = holdsLiving(racedNow) || (!!this.perfFlight && RACE_TUNE.on && RACE_TUNE.holdLiving === 'always');
     const raceWords = racedNow?.race?.takeNote();
     if (raceWords) this.messages.system(raceWords);
+    // The smoke and fire at every race-driven hull's damaged engines, put where the hulls stand after this step.
+    this.engineFx.update(this.world.vehicles);
     // The way up and the way down, for whoever flies the ship: near the top of a planet's sky its
     // space zone is within reach; in space, the planet below. Both are taken from the ship menu.
     const flown = pilot;
@@ -16715,7 +16841,35 @@ class App {
     fv.leadOn = false;
     fv.heat = race.heat / 100;
     fv.charge = race.charge;
-    fv.raceWord = race.locked ? RACE_OVERHEATED : !race.boosting && Math.abs(race.h) >= RACE_TUNE.boostGate * race.handling.V ? RACE_READY : RACE_RACING;
+    const e = race.engines;
+    fv.parts = e.parts.length;
+    fv.partsOut = e.outBits;
+    fv.burning = e.burnBits;
+    // Repairing first (what the pilot is doing), then the heat, then a part out, then the boost.
+    fv.raceWord = e.repairing >= 0 ? RACE_REPAIRING : race.locked ? RACE_OVERHEATED : e.outBits ? RACE_OUT : !race.boosting && Math.abs(race.h) >= RACE_TUNE.boostGate * race.handling.V ? RACE_READY : RACE_RACING;
+  }
+
+  /** The race display's condition block, kept and written in place: the hull, and one part state a pip (`raceCondition`). */
+  private readonly raceStatus: import('./ui/shipHud').ShipStatusLine = { shield: [NaN, NaN], armour: [NaN, NaN], hull: 1 };
+  private readonly raceParts: { pod: RacePartView[]; bike: RacePartView[] } = { pod: racePartViews(2), bike: racePartViews(1) };
+
+  /**
+   * A race-driven hull's condition for the flight display's block: its hull's share and one pip per engine part, its
+   * share whole, crossed out when out and in the burn's colour while on fire (`ShipHud.setStatus` with its shield and
+   * armour rows stood down). Writes into kept records.
+   */
+  private raceCondition(v: Vehicle, race: RaceDrive): readonly RacePartView[] {
+    this.raceStatus.hull = v.maxHp > 0 ? v.hp / v.maxHp : 0;
+    const e = race.engines;
+    const list = e.sides === 2 ? this.raceParts.pod : this.raceParts.bike;
+    for (let i = 0; i < list.length; i++) {
+      const p = e.parts[i];
+      const view = list[i];
+      view.hp = p.out ? 0 : 1 - p.d;
+      view.down = p.out;
+      view.burning = p.fire > 0;
+    }
+    return list;
   }
 
   /**
@@ -22941,6 +23095,12 @@ class App {
     this.flushFits();
     try {
       const v = await this.world.spawnVehicle(def, this.player.pos, this.player.heading, kind, false, this.fitFor(def));
+      // The upgrade levels kept with the character for this garage id (`race_*` in its fit), resolved against the base of
+      // the kind it was spawned as: a pod's levels raced as a bike are a bike's upgrades at the same levels.
+      if (v.race) {
+        const levels = raceLevelsOf(this.savedFit(def.id));
+        if (Object.keys(levels).length) v.race.setLevels(levels, v);
+      }
       // A fitted ship stood out is the one the others are told of while none is flown.
       if (v.spec.ship && def.fit) this.lastShipDef = def;
       const b = v.spec.bounds;
@@ -22983,13 +23143,18 @@ class App {
     return this.current?.ships?.[id] ?? null;
   }
 
-  /** Keep a ship's fit with the character (a stock one is dropped: absent is stock), written on a 300 ms debounce. */
-  private saveFit(id: string, fit: ShipFit): void {
+  /**
+   * Keep a ship's fit with the character (a stock one is dropped: absent is stock), written on a 300 ms debounce. Only
+   * the race writer (`raceWriter`, the console's `race({ upgrades })`) moves the race upgrades (`race_*`); every other
+   * writer's fit has the ones already kept laid back over it (`keepRaceKeys`), or a painted speeder's edit page, which
+   * saves its whole fit with none, would erase them.
+   */
+  private saveFit(id: string, fit: ShipFit, raceWriter = false): void {
     const c = this.current;
     if (!c || this.creating) return;
-    const packed = packFit(fit);
+    const packed = packFit(raceWriter ? fit : keepRaceKeys(this.savedFit(id), fit));
     const ships = { ...(c.ships ?? {}) };
-    if (!Object.keys(packed.components).length && !Object.keys(packed.paint).length && !packed.droid) delete ships[id];
+    if (keptFitEmpty(packed)) delete ships[id];
     else ships[id] = packed;
     c.ships = ships;
     window.clearTimeout(this.fitSaveTimer);
@@ -25809,10 +25974,14 @@ class App {
       this.targetFx.update();
       // The flown ship's shields, armour, hull, boost, its parts and what is down; the comms fading.
       const fight = flownFight;
-      const condition = fight && this.settings.hudShipCondition ? fight : null;
+      // A race-driven hull ridden: its own condition in the same block, the hull and a pip per engine part (no shields
+      // or armour), the parts watched for words whether it is drawn or not, as a ship's are.
+      const raceCond = !fight && racing ? this.raceCondition(racing, racing.race!) : null;
+      const condition = (fight || raceCond) && this.settings.hudShipCondition ? (fight ?? raceCond) : null;
       // The parts are watched whether the block is drawn or not, so a part going down still says so
       // in words with the block switched off; the last argument is what draws it.
-      this.shipHud.setStatus(fight ? flownStatus : null, fight?.stats, fight ? fight.cond.parts : null, !!condition);
+      if (raceCond) this.shipHud.setStatus(this.raceStatus, null, raceCond, !!condition, false);
+      else this.shipHud.setStatus(fight ? flownStatus : null, fight?.stats, fight ? fight.cond.parts : null, !!condition);
       // The body's own bars and the class's slot row stand down while the ship's condition is in their
       // place: a health bar that cannot change in flight read as a second, broken one.
       this.showBodyBlock(!condition);

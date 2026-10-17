@@ -106,6 +106,8 @@ export interface PromptVehicle {
   mode: '' | 'traversal' | 'racing';
   /** Raced (a pod, or a bike in racing mode): Space slides rather than hops. */
   slide: boolean;
+  /** Raced with an engine part damaged: the repair key mends it. */
+  repair: boolean;
 }
 
 /** A vehicle struct with nothing in it: the caller keeps one and fills it. */
@@ -128,6 +130,7 @@ export function newPromptVehicle(): PromptVehicle {
     cutKey: '',
     mode: '',
     slide: false,
+    repair: false,
   };
 }
 
@@ -297,6 +300,7 @@ export function resetPromptState(s: PromptState): PromptState {
   v.cutKey = '';
   v.mode = '';
   v.slide = false;
+  v.repair = false;
   return s;
 }
 
@@ -366,6 +370,8 @@ export const PROMPT_WORDS = Object.freeze({
   // A speeder bike's two modes, on U: the cap names the one a press goes to.
   racingMode: 'racing mode',
   traversalMode: 'traversal mode',
+  // A raced hull with an engine part damaged: held, the worst part is mended.
+  repair: 'repair',
   // The grappling hook, while it is out.
   grappleLetGo: 'let go',
   reelIn: 'reel in',
@@ -490,17 +496,21 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     const out1 = s.piloting ? W.letGo : v.ship ? W.leave : W.dismount;
     n = push(out, n, 'mount', out1);
     if (!v.ship) {
-      // A bike in racing mode: the boost, the slide on Space, and the way back to traversal.
+      // A bike in racing mode: the boost, the slide on Space, and the way back to traversal; with an engine part
+      // damaged the repair comes before the way back, which is the one the bar has no room left for.
       if (v.mode === 'racing') {
         if (v.boost) n = push(out, n, 'walk', W.boost);
         n = push(out, n, 'jump', W.slide);
+        if (v.repair) n = push(out, n, 'repair', W.repair);
         n = push(out, n, 'raceMode', W.traversalMode);
         return n;
       }
-      // Today's: the hop, the boost; a pod raced slides on Space instead; a bike in traversal offers racing mode.
+      // Today's: the hop, the boost; a pod raced slides on Space instead (and repairs while a part is damaged); a bike
+      // in traversal offers racing mode.
       if (v.hop && !v.slide) n = push(out, n, 'jump', W.hop);
       if (v.boost) n = push(out, n, 'walk', W.boost);
       if (v.slide) n = push(out, n, 'jump', W.slide);
+      if (v.slide && v.repair) n = push(out, n, 'repair', W.repair);
       if (v.mode === 'traversal') n = push(out, n, 'raceMode', W.racingMode);
       return n;
     }

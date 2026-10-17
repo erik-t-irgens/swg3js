@@ -216,7 +216,7 @@ import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
 import { SANDBOX_ZONE, buildSandbox, pickSkyZone, sandboxStatus } from './sandbox.mjs';
 import { mountCreatures, riderPoseFor } from './mounts.mjs';
-import { gallerySatOptions, galleryPaintStatus, podSeatStatus, skeletalModelEntry } from './gallery.mjs';
+import { borrowedHardpoint, engineRearPoint, gallerySatOptions, galleryPaintStatus, podSeatStatus, sebulbaStatus, skeletalModelEntry } from './gallery.mjs';
 import { pickSaddleHardpoint, saddleEntry, saddleStatus, satHardpoints } from './saddles.mjs';
 import { assembleShip, assemblyStatus, clientChildren, expandPart, partFamilyOf, SHIP_ASSEMBLY_FORMAT } from './shipparts.mjs';
 import {
@@ -228,7 +228,7 @@ import { resolveTemplateParam } from './objtemplate.mjs';
 import { setStringId } from './items.mjs';
 import * as M from './mobiles.mjs';
 import * as MS from './mobilescan.mjs';
-import { finestLevelWithGeometry } from './lmglevel.mjs';
+import { finestLevelWithGeometry, satMeshFile } from './lmglevel.mjs';
 import { createRequire } from 'node:module';
 
 /** Named places per planet (see regions/build.mjs). */
@@ -1749,7 +1749,7 @@ function bakeGlowSplit(vfs, shaderPath, shader, image, ctx) {
  * `paint` (the gallery's skinned vehicles) bakes a paint shader as a ship's is (skinnedTexture), and
  * `info.shaders` names every shader the model kept, for the paint's recipes.
  */
-function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moods = false, rigOnly = false, paint = false } = {}) {
+function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80, variables = new Map(), wear = [], extraClips = null, parts = null, gender = null, hardpoints = false, extraHardpoints = [], moreHardpoints = null, moods = false, rigOnly = false, paint = false } = {}) {
   let satPath = path.replace(/\\/g, '/');
   if (/\.iff$/i.test(satPath)) {
     const cache = new Map();
@@ -1828,7 +1828,8 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   }
   for (const source of sources) {
     for (const name of source.sat.meshes) {
-      let file = name;
+      // A named mesh the archives lack is read from the level list beside it, where there is one (Sebulba's pod).
+      let file = satMeshFile(name, (f) => vfs.has(f));
       let parsed = null;
       if (/\.lmg$/i.test(file)) {
         if (!vfs.has(file)) {
@@ -2053,7 +2054,9 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   } else if (latFile) info.missing.push(latFile);
   // The body's hardpoints (a mount's saddle, the basilisk's rider point, a pod racer's seat) ride their
   // joints as hp:<name> nodes; the mount tables' own appearance adds its saddle when this one lacks it
-  // (`extraHardpoints`). The first of a name wins.
+  // (`extraHardpoints`). The first of a name wins. `moreHardpoints` works points out of the body's own meshes and the
+  // skeleton (the gallery's exhibit of Sebulba's pod: its engine points, gallery.mjs), after anything the meshes carry.
+  if (moreHardpoints) extraHardpoints = [...extraHardpoints, ...moreHardpoints(composed.filter((c) => c.body).map((c) => c.mgn), skeleton)];
   const skin = skinData(skeleton, clips, { flipX: true, hardpoints: keptHardpoints(composed, extraHardpoints, hardpoints) });
   // A one-frame pose is written twice a frame apart. `skinData` gives such a clip a duration of
   // zero, three finishes a zero-length action on its first update, and a repeating one divides by
@@ -2113,6 +2116,49 @@ function convertSat(vfs, path, outFile, { animations = 'all', maxAnimations = 80
   if (rigOnly) writeFileSync(outFile, buildGlb([], { flipX: true, skin, animations: skin.clips }));
   else writeFileSync(outFile, buildGlb(meshes, { flipX: true, textures, skin, animations: skin.clips }));
   return info;
+}
+
+/**
+ * A gallery exhibit's points (gallery.mjs `GALLERY_EXHIBITS`), for `convertSat`: `borrowed`, the hardpoints taken from
+ * another appearance's own meshes (`seatFrom`'s `player`, in its joint's frame), `worked`, a function of the exhibit's own
+ * body meshes and skeleton that makes its engine points (`engineRearPoint`), and `from`, each name's provenance for the
+ * manifest entry. Everything is read from the archives here; nothing is carried in from elsewhere.
+ */
+function exhibitHardpoints(vfs, exhibit) {
+  const borrowed = [];
+  const from = {};
+  if (exhibit.seatFrom) {
+    try {
+      const sat = parseSat(readIff(vfs, exhibit.seatFrom));
+      const mgns = [];
+      for (const name of sat.meshes) {
+        let file = satMeshFile(name, (f) => vfs.has(f));
+        let parsed = null;
+        if (/\.lmg$/i.test(file) && vfs.has(file)) ({ file, mgn: parsed } = finestLevelWithGeometry(parseLmg(readIff(vfs, file)), { has: (l) => vfs.has(l), load: (l) => parseMgn(readIff(vfs, l)) }));
+        if (!parsed && file && vfs.has(file)) parsed = parseMgn(readIff(vfs, file));
+        if (parsed) mgns.push(parsed);
+      }
+      const seat = borrowedHardpoint(mgns, 'player');
+      if (seat) {
+        borrowed.push(seat);
+        from[seat.name] = `borrowed from ${exhibit.seatFrom}`;
+      } else console.log(`  ${exhibit.label}: ${exhibit.seatFrom} carries no player point to borrow; its pilot sits by the pod rule's next choice`);
+    } catch (err) {
+      console.log(`  ${exhibit.label}: its seat could not be borrowed from ${exhibit.seatFrom} (${err.message})`);
+    }
+  }
+  const worked = (mgns, skeleton) => {
+    const rest = poseAtFrame(skeleton, null, 0);
+    const out = [];
+    for (const e of exhibit.engines ?? []) {
+      const hp = engineRearPoint(mgns, skeleton.joints, rest, e.joint, e.name);
+      if (hp) out.push(hp);
+      else console.log(`  ${exhibit.label}: no vertex is ${e.joint}'s, so no ${e.name}`);
+    }
+    return out;
+  };
+  for (const e of exhibit.engines ?? []) from[e.name] = `ours, at ${e.joint}'s rear middle`;
+  return { borrowed, worked, from };
 }
 
 /** Copy a building template's terrain modification layer (.lay) into <out>/terrain/. Returns the pack-relative file or null. */
@@ -3062,6 +3108,10 @@ function packStatus(dir) {
     const vehiclePaint = galleryPaintStatus(gallery, readJson(join(dir, 'gallery/gallery.json')));
     console.log(`  gallery: ${vehiclePaint.vehicles} vehicles, ${vehiclePaint.painted} models whose colours a player can change${vehiclePaint.stale ? ' (converted before a speeder could be painted)' : ''}`);
     if (vehiclePaint.stale) need(podsStale ? `gallery <swg-dir> ${dir} --retail-only` : `gallery <swg-dir> ${dir} --only=vehicles --retail-only`, vehiclePaint.why);
+    // Sebulba's pod, a named product looked for and never a stamp: its own `if`, asked for while the gallery lists
+    // Anakin's pod (which lives in the same archive) and not Sebulba's (gallery.mjs `sebulbaStatus`).
+    const sebulba = sebulbaStatus(readJson(join(dir, 'gallery/gallery.json')));
+    if (sebulba.stale && !podsStale && !vehiclePaint.stale) need(`gallery <swg-dir> ${dir} --only=vehicles --retail-only`, sebulba.why);
   }
   // The deeds a player buys a building with, which was the other pack nothing reported: without it
   // the Housing tab is empty and no building can be put down at all. It checks each deed against the
@@ -5868,7 +5918,7 @@ switch (cmd) {
     };
     // One template into the pack's models, as the snapshot does it (static, portal building, or a skeletal thing at its bind pose).
     // With `appearance`, that file rather than the template's own: a station's portal layout, where the template names the hull.
-    const convert = (template, appearance = null) => {
+    const convert = (template, appearance = null, exhibit = null) => {
       const vehicle = !!paintMaker && /^object\/mobile\/vehicle\//.test(template ?? '');
       let r = appearance ? resolveAppearanceToMesh(vfs, appearance) : resolveTemplateMesh(vfs, template, cache);
       if (r.skip) return { skip: r.skip };
@@ -5904,8 +5954,16 @@ switch (cmd) {
         if (r.skeletal) {
           id = familyOf(r.skeletal);
           if (!models.has(id)) {
+            // An exhibit of ours (Sebulba's pod, gallery.mjs `GALLERY_EXHIBITS`): its seat borrowed from the pod it shares a
+            // skeleton with, and engine points of ours at its engine joints' rear middles, all worked out here from the archives.
+            const extra = exhibit?.seatFrom || exhibit?.engines ? exhibitHardpoints(vfs, exhibit) : null;
             // Its hardpoints kept under their joints: a pod racer's pilot sits on its own `player` point.
-            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), gallerySatOptions(animated, CREATURE_CLIPS, vehicle));
+            const info = convertSat(vfs, r.skeletal, join(outDir, `${id}.glb`), { ...gallerySatOptions(animated, CREATURE_CLIPS, vehicle), ...(extra ? { extraHardpoints: extra.borrowed, moreHardpoints: extra.worked } : {}) });
+            if (extra) {
+              const kept = new Set((info.hardpoints ?? []).map((h) => h.name));
+              info.hardpointsFrom = Object.fromEntries(Object.entries(extra.from).filter(([n]) => kept.has(n)));
+              console.log(`  ${template}: an exhibit of ours (${r.skeletal}): ${Object.entries(info.hardpointsFrom).map(([n, f]) => `${n} ${f}`).join(', ') || 'no point borrowed or made'}`);
+            }
             // The names it kept go in its entry, which is how `status` tells a gallery converted before they were kept.
             const entry = skeletalModelEntry(id, r.skeletal, info, animated);
             const tris = entry.triangles;

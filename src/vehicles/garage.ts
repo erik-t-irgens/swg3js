@@ -5,6 +5,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Vehicle, specFor, type VehicleKind, type VehicleSpec } from './vehicle';
 import { hoverCarFor, kindFor, raceSpecFor } from './vehicleKinds.ts';
 import { attachRace, type RaceDeps } from './raceDrive.ts';
+import { RACE_TUNE } from './raceTune.ts';
+import { glowShare, raceThrustersFor, type EnginePoint } from './raceSpots.ts';
 import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
@@ -93,6 +95,12 @@ export interface VehicleDef {
   cockpit?: { file: string; zoom?: number[]; firstOffset?: number[]; thirdOffset?: number[] } | null;
   /** The hardpoints the client data puts thruster effects at. */
   thrusters?: string[];
+  /**
+   * The engine points a gallery pod's or bike's glows stand on, worked out at its first spawn with the race pass on
+   * (`raceThrustersFor`, src/vehicles/raceSpots.ts; empty: it has none) and given to `thrusters`; both cleared when the
+   * pass goes off. Never written for a def whose own kind is neither, whatever it is spawned as.
+   */
+  raceThrusters?: string[];
   file: string;
   template?: string;
   /** The gallery's model id, for sorting it again by its names (`reclassify`). */
@@ -298,6 +306,21 @@ export class Garage {
     }
     this.vehicles.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
     return changed;
+  }
+
+  /**
+   * Every gallery def's race thrusters taken off again (the pass switched off live), so the next spawn hangs its glows
+   * where it always did. A vehicle standing keeps its glows. Returns how many defs had them.
+   */
+  clearRaceThrusters(): number {
+    let n = 0;
+    for (const d of this.vehicles) {
+      if (d.raceThrusters === undefined) continue;
+      if (d.raceThrusters.length && d.thrusters === d.raceThrusters) delete d.thrusters;
+      delete d.raceThrusters;
+      n++;
+    }
+    return n;
   }
 
   find(name: string): VehicleDef | undefined {
@@ -680,6 +703,15 @@ export class Garage {
     const paint = this.paintFor(def, opts);
     paint?.track(model);
     const bounds = this.frameModel(def, model);
+    // A gallery pod's or bike's own engine points, named once at its first spawn with the race pass on, for its glows
+    // (src/vehicles/raceSpots.ts): by what it is, never by what it is spawned as, since the def is every spawn's.
+    if (def.raceThrusters === undefined) {
+      const list = raceThrustersFor(def, def.source === 'gallery' ? enginePoints(model) : [], RACE_TUNE.on);
+      if (list) {
+        def.raceThrusters = list;
+        if (list.length) def.thrusters = list;
+      }
+    }
     // How far the open wings reach under the closed belly, on the real vertices (a portal hull's rooms left out).
     const drop = a.wings.length ? wingDrop(model, a.wings, (o) => cellIndexOf(o) <= 0) : 0;
     const hardpoints: string[] = [];
@@ -1193,7 +1225,8 @@ export class Garage {
       }
     }
     // The glows and trails are made now, on their nodes, so the preparation below compiles them too.
-    const glow = def.source !== 'creature' ? makeEngineGlow(spec, model, engines) : null;
+    // On a pod's or bike's own engine points the width's glow is shared among them (`glowShare`).
+    const glow = def.source !== 'creature' ? makeEngineGlow(spec, model, engines, def.raceThrusters?.length ? glowShare(engines.length) : 1) : null;
     try {
       // The whole assembly (parts, cockpit frame, glows, trails) joins the world's material schemes and is compiled
       // before the vehicle exists, so nothing compiles once it is shown.
@@ -1500,12 +1533,43 @@ function markDry(root: THREE.Object3D): void {
 }
 
 /**
+ * A model's hardpoints as the race thrusters' rule reads them (`racerThrusters`): each name with its place across and
+ * along in the vehicle's frame, read once the model is framed (a skinned pod's on its joints at their rest pose).
+ */
+function enginePoints(model: THREE.Object3D): EnginePoint[] {
+  const out: EnginePoint[] = [];
+  const p = new THREE.Vector3();
+  const at = new THREE.Vector3();
+  model.updateMatrixWorld(true);
+  const origin = model.getWorldPosition(new THREE.Vector3());
+  model.traverse((o) => {
+    const name = hardpointName(o);
+    if (name === null) return;
+    o.getWorldPosition(p);
+    at.copy(p).sub(origin).add(model.position);
+    out.push({ name, x: at.x, z: at.z });
+  });
+  return out;
+}
+
+/** Each glow's engine, on its sprite (`userData.side`: 0 the left, +x; 1 the right), from where it stands in the vehicle's frame. */
+function markGlowSides(v: Vehicle): void {
+  const p = new THREE.Vector3();
+  v.group.updateMatrixWorld(true);
+  for (const e of v.engines) {
+    e.object.getWorldPosition(p);
+    v.group.worldToLocal(p);
+    e.object.userData.side = p.x >= 0 ? 0 : 1;
+  }
+}
+
+/**
  * Engine glow on a machine, made before the vehicle exists (so the preparation compiles it with
  * the model): additive discs on the engine hardpoints (under whatever carries them, so a glow on a
  * wing's engine turns with it) or at the rear of the box, and for a ship a trail per glow, its
  * mesh not yet in the scene. Orange for a podracer's turbines and blue for a repulsor drive.
  */
-function makeEngineGlow(spec: VehicleSpec, model: THREE.Object3D, spots: THREE.Object3D[]): EngineGlow {
+function makeEngineGlow(spec: VehicleSpec, model: THREE.Object3D, spots: THREE.Object3D[], share = 1): EngineGlow {
   const b = spec.bounds;
   const w = b.max[0] - b.min[0];
   const h = b.max[1] - b.min[1];
@@ -1536,7 +1600,7 @@ function makeEngineGlow(spec: VehicleSpec, model: THREE.Object3D, spots: THREE.O
     sprites.push(sp);
   }
   // A ship's glow is sized by its hull's height, not its width: a fighter's wings make it wide, its engines are not.
-  const size = ship ? Math.min(7, Math.max(0.5, h * 0.4)) : Math.min(1.6, 0.25 + w * 0.18);
+  const size = (ship ? Math.min(7, Math.max(0.5, h * 0.4)) : Math.min(1.6, 0.25 + w * 0.18)) * share;
   // A ship's exhaust leaves a ribbon behind it in flight, longer the faster it goes; each follows its glow wherever that is carried.
   const trails = ship ? sprites.map((sp) => new EngineTrail(color, sp)) : [];
   trails.forEach((t, i) => (sprites[i].userData.trail = t));
@@ -1561,6 +1625,8 @@ function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
   for (const t of glow.trails) v.ownedMaterials.push(t.mesh.material as THREE.Material);
   // The heat haze follows the same glows: each one's place, base size and its own noise offset.
   rebindGlows(v, glow.spots, null);
+  // Which engine each glow is on, for a race-driven hull's (+x the left, `drivetrain.ts`): measured once, at the spawn.
+  if (v.race) markGlowSides(v);
   const ship = !!v.spec.ship;
   const base = v.onUpdate;
   v.onUpdate = (dt, self, drive) => {
@@ -1584,8 +1650,14 @@ function wireEngineGlow(v: Vehicle, glow: EngineGlow): void {
     if (self.cockpitFrame) self.cockpitFrame.visible = piloted;
     self.setGlassClear(piloted || self.occupied);
     const k = size * (0.35 + 0.65 * Math.min(1, Math.abs(self.speed) / self.spec.maxSpeed) + 0.4 * throttle + (self.boosting ? 0.6 : 0)) * (self.overheated > 0 ? 0.4 + 0.3 * Math.random() : 1);
-    // The live glows only (a refit's spare ones are parked, hidden).
-    for (const e of self.engines) e.object.scale.set(k, k, 1);
+    // The live glows only (a refit's spare ones are parked, hidden). On a race-driven hull each scales with its own
+    // engine's thrust (its parts' mean of 1 - damage, nought for a part out); on anything else as it always did.
+    const race = self.race;
+    const thrust = race && race.active ? race.engines.thrust : null;
+    for (const e of self.engines) {
+      const t = thrust ? thrust[e.object.userData.side === 1 ? 1 : 0] : 1;
+      e.object.scale.set(k * t, k * t, 1);
+    }
     if (self.glowMaterial) self.glowMaterial.opacity = (ship ? 0.35 : 0.55) + 0.45 * Math.min(1, Math.abs(self.speed) / 8 + throttle);
   };
 }

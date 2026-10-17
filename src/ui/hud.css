@@ -169,6 +169,8 @@
   background: var(--component);
 }
 .hud-pip.low > .fill { background: var(--warn); }
+/* A race-driven hull's engine part on fire: its fill in the burn's colour until it is repaired or burns out. */
+.hud-pip.hot > .fill { background: var(--hot); }
 .hud-pip.down > .fill { display: none; }
 .hud-pip.down { border-color: var(--bad); }
 /* The cross on a part that is down: two 1.5 px strokes, no image and no glyph fetch. */

@@ -77,7 +77,9 @@ import {
   type SpeedParts,
 } from './raceMath.ts';
 import { RACE_GEN, RACE_TUNE, RACE_UPGRADES, baseFor } from './raceTune.ts';
+import { ENGINE_TUNE, damageAny, damagePart, hitSide, newEngineSet, overheat, sideBand, stepEngines, type EngineSet } from './drivetrain.ts';
 import { BODY_SPEED_CAP, type DriveInput, type Vehicle } from './vehicle.ts';
+import { LAVA_HARM } from '../world/lavaHarmMath.ts';
 
 /**
  * Whether play is running: `stepVehicles` writes it every step from its own `simulate` (which `__debug.advance` passes
@@ -131,9 +133,22 @@ export class RaceDrive {
   readonly handling: RaceBase = newBase();
   private readonly baseNow: RaceBase = newBase();
   private gen = -1;
-  /** Upgrade levels, in memory this wave, and the condition (reserved: 1). */
+  /** Upgrade levels (kept with the character in the vehicle's fit, `shipFit.ts`'s `race_*` keys), and the condition (reserved: 1). */
   readonly levels: RaceLevels = levelsAt(0);
   condition = 1.5;
+  /**
+   * The engines (`drivetrain.ts`): two of three parts raced as a pod, one raced as a bike. Their damage takes a share
+   * off the plain top (`topNow`, laid on the resolved `V`, which is kept whole as `vFull`), pulls the stick and can
+   * refuse the boost.
+   */
+  readonly engines: EngineSet;
+  /** The random numbers a scrape, a strike or an overheat draws (which part): replaceable for tests. */
+  rng: () => number = Math.random;
+  private vFull = 0.5;
+  private topNow = 1.5;
+  /** The velocity a hit just lost, across (written before `score`, for the side it struck). */
+  private lossX = 0.5;
+  private lossZ = 0.5;
   /** The spec's two tops as they were before the drive wrote the race tops into them, put back on hand-over. */
   private keptMax = 0.5;
   private keptBoost = 0.5;
@@ -246,6 +261,7 @@ export class RaceDrive {
   /** The ground readers of the step now running, kept only for its length (cleared after). */
   private stepGround: ((x: number, z: number) => number) | null = null;
   private stepWater: ((x: number, z: number) => number) | null = null;
+  private stepLava: ((x: number, z: number) => boolean) | null = null;
   private stepPhysics: Physics | null = null;
   private stepVehicle: Vehicle | null = null;
   private readonly deps: RaceDeps;
@@ -299,6 +315,11 @@ export class RaceDrive {
     this.metZ = 0;
     this.metDepth = 0;
     this.condition = 1;
+    this.engines = newEngineSet(kind);
+    this.vFull = 0;
+    this.topNow = 1;
+    this.lossX = 0;
+    this.lossZ = 0;
   }
 
   /**
@@ -315,6 +336,9 @@ export class RaceDrive {
   private resolve(v: Vehicle | null): void {
     baseFor(this.kind, this.baseNow);
     resolveRace(this.baseNow, this.levels, this.condition, RACE_UPGRADES, this.handling);
+    // The engines' share of the top laid on the resolved one, kept whole beside it for the next change of share.
+    this.vFull = this.handling.V;
+    this.handling.V = this.vFull * this.topNow;
     this.gen = RACE_GEN.n;
     if (this.active) {
       this.share(this.h);
@@ -472,6 +496,19 @@ export class RaceDrive {
     this.cmd.z += dz;
   }
 
+  /**
+   * The engines overheated now, exactly as a run dry does it (the console's `engines({ heat: 0 })`): no coolness left,
+   * the boost ended and refused until `readyAt`, one part set on fire. The part's index, or -1 when none could catch.
+   */
+  overheatNow(): number {
+    this.heat = 0;
+    this.boosting = false;
+    this.locked = true;
+    this.charge = 0;
+    this.note = 'engines overheated';
+    return overheat(this.engines, this.rng);
+  }
+
   /** The words the drive has for the message line since it was last asked, once. */
   takeNote(): string {
     const n = this.note;
@@ -509,7 +546,7 @@ export class RaceDrive {
    * too tall to clear, and one command for the body. `ground` is the vehicle's own reader (the terrain under the hull,
    * or a room's floor), `water` the flat water.
    */
-  step(v: Vehicle, dt: number, drive: DriveInput | null, ground: ((x: number, z: number) => number) | null, water: ((x: number, z: number) => number) | null, _lava: ((x: number, z: number) => boolean) | null, physics: Physics): void {
+  step(v: Vehicle, dt: number, drive: DriveInput | null, ground: ((x: number, z: number) => number) | null, water: ((x: number, z: number) => number) | null, lava: ((x: number, z: number) => boolean) | null, physics: Physics): void {
     const body = v.body;
     if (!body.isValid()) return;
     if (!this.active) this.adopt(v);
@@ -529,6 +566,7 @@ export class RaceDrive {
     }
     this.stepGround = ground;
     this.stepWater = water;
+    this.stepLava = lava;
     this.stepPhysics = physics;
     this.stepVehicle = v;
     try {
@@ -536,6 +574,7 @@ export class RaceDrive {
     } finally {
       this.stepGround = null;
       this.stepWater = null;
+      this.stepLava = null;
       this.stepPhysics = null;
       this.stepVehicle = null;
     }
@@ -576,6 +615,8 @@ export class RaceDrive {
   private sEz = 0.5;
   private sRoll = 0.5;
   private sOverWater = false;
+  /** The liquid's surface over the hull's column the last step (-Infinity where there is none). */
+  private sWetTop = 0.5;
   private sBraking = false;
   /** The velocity the last step left, read once. */
   private readonly lvNow = { x: 0.5, y: 0.5, z: 0.5 };
@@ -662,6 +703,10 @@ export class RaceDrive {
       return false;
     },
     (d, v) => d.hitTest(v),
+    (d, v, drive) => {
+      d.engineStep(v, drive);
+      return false;
+    },
     (d, _v, drive) => {
       d.thrustStep(drive);
       return false;
@@ -734,6 +779,8 @@ export class RaceDrive {
         tmpV.set(this.cmd.x - lv.x, this.cmd.y - lv.y, this.cmd.z - lv.z);
         const impact = tmpV.length();
         const drop = this.cmd.length() - len3(lv.x, lv.y, lv.z);
+        this.lossX = tmpV.x;
+        this.lossZ = tmpV.z;
         if (this.score(v, verdict, impact, drop, 'contact')) return true;
         // A scrape: the velocity taken from what the step left, the command held off the wall for a moment.
         this.holdNormal.copy(tmpV).normalize();
@@ -757,6 +804,26 @@ export class RaceDrive {
   }
 
   /**
+   * The engines' step (`drivetrain.ts`): the repair key, the fires, the pull, the top's share and whether the boost may
+   * run. A share that moved (a part out, an engine out, a repair begun or ended) lowers or raises the top the curve
+   * runs to, and the speed the hull has is shared out again under it, so what the lowered top cannot hold eases down
+   * at the brake as `over` and nothing in the command jumps (a jump would be read as a hit).
+   */
+  private engineStep(v: Vehicle, drive: DriveInput | null): void {
+    const e = this.engines;
+    e.dt = this.sDt;
+    e.wantRepair = !!drive && drive.repair === true;
+    e.rate = this.handling.repairRate;
+    stepEngines(e, ENGINE_TUNE);
+    if (e.top !== this.topNow) {
+      this.topNow = e.top;
+      this.handling.V = this.vFull * e.top;
+      this.share(this.h);
+      this.writeSpec(v);
+    }
+  }
+
+  /**
    * The speed's parts: the thrust on the curve, the boost and the engines' heat, what the curve cannot hold, the
    * slope's push; the speed held under the ceiling. In three parts, each small enough that the compiler builds its
    * every call into it.
@@ -774,7 +841,6 @@ export class RaceDrive {
     const dt = this.sDt;
     const A = thrustA(h.t75);
     const tCap = thrustCapOf(A, tune.thrustCap);
-    const reverseT = -thrustFor(-h.reverseTop, h.V, A);
     const th = drive ? drive.throttle : 0;
     const trim = drive && tune.pitchFrom === 'view' && typeof drive.pitch === 'number' ? Math.max(-1, Math.min(1, drive.pitch)) : 0;
     this.sTh = th;
@@ -791,7 +857,11 @@ export class RaceDrive {
     } else if (this.h > tune.reverseBelow) {
       braking = true;
       this.T *= Math.exp(-dt / Math.max(1e-3, h.brake));
-    } else this.T = Math.max(-reverseT, this.T + th * dt);
+    } else {
+      // The most reverse thrust, worked out only here where it is used: worked out every step it was a number made a
+      // step once the curve's inverse had been asked for forward speeds as well (a speed shared out at a lowered top).
+      this.T = Math.max(thrustFor(-h.reverseTop, h.V, A), this.T + th * dt);
+    }
     if (this.T > tCap) this.T = tCap;
     this.sBraking = braking;
   }
@@ -803,7 +873,8 @@ export class RaceDrive {
     const dt = this.sDt;
     const th = this.sTh;
     const now = Math.abs(this.h);
-    const wantBoost = !!drive && drive.boost && th > 0 && this.cut <= 0 && !this.locked && !this.sBraking;
+    // A part out or burning, or a repair under way, refuses it (`boostOk`).
+    const wantBoost = !!drive && drive.boost && th > 0 && this.cut <= 0 && !this.locked && !this.sBraking && this.engines.boostOk;
     if (this.boosting && !wantBoost) {
       this.boosting = false;
       this.charge = 0;
@@ -817,16 +888,28 @@ export class RaceDrive {
     if (this.boosting) {
       this.B += dt;
       this.heat -= (100 / Math.max(1e-3, h.boostSeconds)) * dt;
-      if (this.heat <= 0) {
-        this.heat = 0;
+    } else {
+      this.B *= Math.exp(-dt / Math.max(1e-3, tune.boostDecay));
+      this.heat = Math.min(100, this.heat + (100 / Math.max(1e-3, h.coolSeconds)) * dt);
+    }
+    // Over a flow the engines lose their coolness whatever the throttle does: only over one, the liquid standing over the
+    // ground under the hull (`sOverWater`, the last step's) and the hull's lowest point within the reach the world's own
+    // burn gives a ride over a flow (`LAVA_HARM.rideReach`), and only then is the column asked whether its liquid is a
+    // flow. Asked of the column alone, every racing hull on the lava world overheated: its whole sea is a flow, under
+    // dry ground as much as anywhere, so the column answered yes everywhere.
+    const lava = this.stepLava;
+    const sv = this.stepVehicle;
+    if (lava && sv && this.sOverWater && this.low - this.sWetTop <= LAVA_HARM.rideReach && lava(sv.pos.x, sv.pos.z)) this.heat -= ENGINE_TUNE.lavaHeat * dt;
+    if (this.heat <= 0) {
+      this.heat = 0;
+      if (!this.locked) {
+        // Overheated: the boost refused until the engines are back to `readyAt`, and one part caught fire.
         this.boosting = false;
         this.locked = true;
         this.charge = 0;
         this.note = 'engines overheated';
+        overheat(this.engines, this.rng);
       }
-    } else {
-      this.B *= Math.exp(-dt / Math.max(1e-3, tune.boostDecay));
-      this.heat = Math.min(100, this.heat + (100 / Math.max(1e-3, h.coolSeconds)) * dt);
     }
     if (this.locked && this.heat >= tune.readyAt) this.locked = false;
     this.over *= Math.exp(-dt / Math.max(1e-3, h.brake));
@@ -867,6 +950,9 @@ export class RaceDrive {
     const trim = this.sTrim;
     let s = drive ? drive.steer : 0;
     if (s === 0 && drive && drive.heading !== undefined && drive.heading !== null) s = Math.max(-1, Math.min(1, -wrap(drive.heading - this.heading) / tune.aimLock));
+    // Damaged parts pull toward their side, and a side under repair toward itself (`drivetrain.ts`'s `pullOf`).
+    const pull = this.engines.pull;
+    if (pull !== 0) s = Math.max(-1, Math.min(1, s + pull));
     this.stick = s;
     const sign = s > 0 ? 1 : s < 0 ? -1 : 0;
     const snap = sign !== 0 && this.lastSign !== 0 && sign !== this.lastSign;
@@ -898,11 +984,13 @@ export class RaceDrive {
     const dt = this.sDt;
     const water = this.stepWater;
     const wetHere = water ? water(v.pos.x, v.pos.z) : -Infinity;
-    this.qx = v.pos.x;
-    this.qz = v.pos.z;
-    this.footAt();
-    const overWater = wetHere > this.qg + 0.05;
+    // Over water: the liquid standing over the ground itself. Never over `footAt`'s ground, which is the higher of the
+    // ground and the water (what the hull rides on), so measured against it no column was ever over water.
+    const ground = this.stepGround;
+    const bed = ground ? ground(v.pos.x, v.pos.z) : -Infinity;
+    const overWater = wetHere > bed + 0.05;
     this.sOverWater = overWater;
+    this.sWetTop = wetHere;
     let mul = 1;
     if (drive && drive.slide) mul *= tune.slide;
     if (this.sTh <= 0) mul *= tune.offThrottle;
@@ -991,7 +1079,8 @@ export class RaceDrive {
     const tune = RACE_TUNE;
     const dt = this.sDt;
     this.bank = ease(this.bank, bankTarget(this.w, h.maxTurn, h.bankMax), h.bankEase, dt);
-    const leanWant = drive && Math.abs(this.h) >= h.leanFrom ? Math.max(-1, Math.min(1, drive.lean ?? 0)) : 0;
+    // Never while a side is being repaired: the pilot's hands are full.
+    const leanWant = drive && Math.abs(this.h) >= h.leanFrom && this.engines.repairing < 0 ? Math.max(-1, Math.min(1, drive.lean ?? 0)) : 0;
     this.lean = ease(this.lean, leanWant, tune.leanEase, dt);
   }
 
@@ -1585,6 +1674,9 @@ export class RaceDrive {
         this.u.z = lz / left;
       }
       this.share(left);
+      // What it lost is the speed into the face, along the face's own normal: the side it struck.
+      this.lossX = into * gx;
+      this.lossZ = into * gz;
       if (verdict !== HIT_NONE && this.score(v, verdict, into, speed - left, 'face')) return 2;
       return 1;
     }
@@ -1600,7 +1692,11 @@ export class RaceDrive {
       this.lastHit.loss = closing;
       this.lastHit.drop = 0;
       this.lastHit.at = this.steps;
-      if (closing > h.strikeHurt) v.raceHurt(Math.min(h.strikeMost, (closing - h.strikeHurt) * h.strikeHull), tune.wearFloor);
+      if (closing > h.strikeHurt) {
+        v.raceHurt(Math.min(h.strikeMost, (closing - h.strikeHurt) * h.strikeHull), tune.wearFloor);
+        // And a part of either engine, never much: a bad landing is felt in the engines, never ruinous.
+        damageAny(this.engines, Math.min(ENGINE_TUNE.strikeMost, (closing - h.strikeHurt) * ENGINE_TUNE.strikePart), this.rng);
+      }
     }
     return 0;
   }
@@ -1616,6 +1712,9 @@ export class RaceDrive {
     if (verdict === HIT_CRASH && RACE_TUNE.offCourse === 'stop') verdict = HIT_SCRAPE;
     this.share(Math.max(0, left));
     if (verdict === HIT_NONE) return false;
+    // Lost straight ahead: square on, so a coin picks the engine it is felt in.
+    this.lossX = cut * this.u.x;
+    this.lossZ = cut * this.u.z;
     return this.score(v, verdict, cut, cut, why);
   }
 
@@ -1637,12 +1736,37 @@ export class RaceDrive {
       return v.destroyed;
     }
     v.justHit = Math.max(v.justHit, Math.min(20, impact));
-    v.raceHurt((impact - tune.hitLoss) * tune.scrapeHull, tune.wearFloor);
+    // The engines take most of a scrape (a part of the struck side; a bike's one engine) and the hull the rest, never
+    // under its floor.
+    const past = impact - tune.hitLoss;
+    v.raceHurt(past * tune.scrapeHull * ENGINE_TUNE.hullShare, tune.wearFloor);
+    const side = hitSide(this.lossX, this.lossZ, -Math.cos(this.heading), Math.sin(this.heading), this.rng);
+    damagePart(this.engines, side, past * ENGINE_TUNE.scrapePart, this.rng);
     this.cut = tune.scrapeCut;
     this.kick = tune.kickTime;
     this.boosting = false;
     this.charge = 0;
     return false;
+  }
+
+  /** The engines in numbers, for the console (`__debug.engines()`, `race()`); allocates, never called in a frame. */
+  enginesReport(): Record<string, unknown> {
+    const e = this.engines;
+    const r2 = (n: number) => Number(n.toFixed(2));
+    return {
+      engines: e.sides,
+      parts: e.parts.map((p, i) => ({ part: enginePartName(e.sides, i), damage: r2(p.out ? 1 : p.d), burning: p.fire > 0 ? r2(p.fire) : 0, out: p.out })),
+      pull: r2(e.pull),
+      topShare: r2(e.top),
+      limp: e.limp,
+      boostAllowed: e.boostOk,
+      repairing: e.repairing >= 0 ? enginePartName(e.sides, e.repairing) : null,
+      repairHeld: r2(e.held),
+      repairRate: r2(this.handling.repairRate),
+      thrust: e.sides === 1 ? [r2(e.thrust[0])] : [r2(e.thrust[0]), r2(e.thrust[1])],
+      bands: e.sides === 1 ? [sideBand(e, 0)] : [sideBand(e, 0), sideBand(e, 1)],
+      meanDamage: r2(e.mean),
+    };
   }
 
   /** The drive in numbers, for the console (`__debug.race()`); allocates, never called in a frame. */
@@ -1686,10 +1810,17 @@ export class RaceDrive {
       lastHit: this.lastHit.kind ? { ...this.lastHit, loss: r2(this.lastHit.loss), drop: r2(this.lastHit.drop), stepsAgo: this.steps - this.lastHit.at } : null,
       hull: r2(v.hp),
       wearFloor: RACE_TUNE.wearFloor,
+      engines: this.enginesReport(),
       raceBox: v.spec.raceBox ?? null,
       raceBoxOn: !!v.raceBoxCollider?.isEnabled(),
     };
   }
+}
+
+/** The part names the console and the display use: the engine, then top, middle or bottom. */
+export function enginePartName(sides: number, i: number): string {
+  const engine = sides === 1 ? 'engine' : i < 3 ? 'left engine' : 'right engine';
+  return `${engine}, ${['top', 'middle', 'bottom'][i % 3]} part`;
 }
 
 /** The drive for a vehicle spawned as a pod or a bike, attached at once (nothing is awaited after `new Vehicle`); null for anything else. */

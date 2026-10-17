@@ -378,4 +378,20 @@ const KEY = 'swg3js.bindings';
   store.clear();
 }
 
+// --- the racer pass's repair: on R with the saber throw and the placing turn, on purpose ---------------------------
+{
+  store.clear();
+  const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
+  ok(DEFAULT_BINDINGS.repair.join() === 'KeyR' && holders('KeyR').sort().join() === 'placeTurn,repair,saberThrow', 'the repair is on R, shared on purpose with the saber throw and the placing turn (mounted, on foot, and in hand)');
+  const input = new Input(canvas);
+  ok(input.bindings.repair.join() === 'KeyR' && input.bindings.saberThrow.join() === 'KeyR' && input.bindings.placeTurn.join() === 'KeyR', 'a fresh profile has all three on R');
+  input.assignKey('repair', ['KeyH'], 'KeyH');
+  const after = new Input(canvas);
+  ok(after.bindings.repair.join() === 'KeyH' && after.bindings.saberThrow.join() === 'KeyR' && after.bindings.placeTurn.join() === 'KeyR', 'the repair rebound to H leaves the throw and the turn on R, across a reload');
+  store.clear();
+  const chose = loadedBindings({ emote2: ['KeyR'] });
+  ok(chose.emote2.join() === 'KeyR' && chose.repair.length === 0 && chose.saberThrow.length === 0 && chose.placeTurn.length === 0, 'a player who chose R for something else takes it from all three');
+  store.clear();
+}
+
 console.log(`\n${checks} checks passed`);

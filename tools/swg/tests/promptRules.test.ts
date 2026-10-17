@@ -168,6 +168,14 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
   ok(words(racing).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.boost},${PROMPT_WORDS.slide},${PROMPT_WORDS.traversalMode}` && keys(racing)[2] === 'jump' && keys(racing)[3] === 'raceMode', `a bike racing: dismount, boost, slide on Space, traversal mode (${show(racing).join(', ')})`);
   const pod = fill(at({ mounted: true, vehicle: { kind: 'podracer', hop: true, boost: true, mode: '', slide: true } }));
   ok(words(pod).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.boost},${PROMPT_WORDS.slide}`, `a pod: dismount, boost, slide, and no mode (${show(pod).join(', ')})`);
+  // An engine part damaged (wave 2): the repair is offered, after the slide; on a racing bike before the way back, which
+  // the four slots then leave to the help block.
+  const podHurt = fill(at({ mounted: true, vehicle: { kind: 'podracer', hop: true, boost: true, mode: '', slide: true, repair: true } }));
+  ok(words(podHurt).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.boost},${PROMPT_WORDS.slide},${PROMPT_WORDS.repair}` && keys(podHurt)[3] === 'repair', `a pod with a damaged part: dismount, boost, slide, repair on its own key (${show(podHurt).join(', ')})`);
+  const bikeHurt = fill(at({ mounted: true, vehicle: { kind: 'speederbike', hop: true, boost: true, mode: 'racing', slide: true, repair: true } }));
+  ok(words(bikeHurt).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.boost},${PROMPT_WORDS.slide},${PROMPT_WORDS.repair}`, `a racing bike with a damaged part: the repair before the way back (${show(bikeHurt).join(', ')})`);
+  const traversalHurt = fill(at({ mounted: true, vehicle: { kind: 'speederbike', hop: true, boost: true, mode: 'traversal', slide: false, repair: true } }));
+  ok(!words(traversalHurt).includes(PROMPT_WORDS.repair), 'a bike in traversal is not raced, so no repair is offered whatever its parts');
   const koro = fill(at({ mounted: true, vehicle: { kind: 'flyer', hop: true, boost: true, mode: '', slide: false } }));
   ok(!words(koro).includes(PROMPT_WORDS.racingMode) && !words(koro).includes(PROMPT_WORDS.slide), `a hover car at its own kind offers what it did before (${show(koro).join(', ')})`);
 }

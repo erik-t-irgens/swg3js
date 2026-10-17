@@ -11,8 +11,11 @@
 import assert from 'node:assert/strict';
 import {
   VehicleSounds,
+  VEHICLE_SOUND_LENDS,
   VEHICLE_TUNE,
+  FIRE_STATES,
   baseName,
+  damagedThruster,
   bestName,
   dopplerSemitones,
   engineFromClientData,
@@ -700,6 +703,152 @@ const TABLES: VehicleTables = {
   host.clear();
   sounds.update(0.1, [xw], null, null);
   ok(host.shots().includes('sound/sys_rebel_power_decrease.snd'), 'and stepping out powers it down');
+}
+
+// ---- a raced pod's damaged engines: the set its mean damage chooses, the fire over it, the bands' sparks ----
+//
+// Shaped as the converter writes a pod's client data: four thruster sets at levels 0, 0.5, 0.75 and 1, the last with
+// no engine at all, each damaged one with four fire loops in the order idle, speed-up, slow-down, run; and damage bands
+// each named twice (once a side), whose client effect carries the spark's sound.
+{
+  const ENGINE = { idle: 'sound/veh_pod_idle_lp.snd', accel: 'sound/veh_pod_accel.snd', decel: 'sound/veh_pod_decel.snd', run: 'sound/veh_pod_run_lp.snd' };
+  // Four loops of four names a set, so every state's loop is told from every other's by its name alone.
+  const SMALL = ['sound/fire_test_a_idle.snd', 'sound/fire_test_a_accel.snd', 'sound/fire_test_a_decel.snd', 'sound/fire_test_a_run.snd'];
+  const LARGE = ['sound/fire_test_b_idle.snd', 'sound/fire_test_b_accel.snd', 'sound/fire_test_b_decel.snd', 'sound/fire_test_b_run.snd'];
+  const FIRE = /fire_test_/;
+  const POD = {
+    thrusters: [
+      { level: 0, name: 'engine_sound', ...ENGINE, damaged: [] },
+      { level: 0.5, name: 'engine_sound', ...ENGINE, damaged: SMALL },
+      { level: 0.75, name: 'engine_sound', ...ENGINE, damaged: LARGE },
+      { level: 1, name: 'engine_sound', idle: null, accel: null, decel: null, run: null, damaged: LARGE },
+    ],
+    damage: [
+      { from: 0.5, to: 0.75, effect: 'clienteffect/veh_damage_test.cef', sound: null },
+      { from: 0.5, to: 0.75, effect: 'clienteffect/veh_damage_test.cef', sound: null },
+      { from: 0.75, to: 0.99, effect: 'clienteffect/veh_damage_test.cef', sound: null },
+      { from: 1, to: 1, effect: 'clienteffect/veh_damage_test.cef', sound: null },
+    ],
+  };
+  const PACK: VehicleEventsPack = {
+    clientData: { ...EVENTS.clientData, 'clientdata/vehicle/pod_racer_one.iff': POD },
+    clientEffects: { 'clienteffect/veh_damage_test.cef': { sounds: ['sound/exp_spark_test.snd'], particle: 'appearance/pt_test.prt' } },
+  };
+
+  ok(damagedThruster(POD, 0) === POD.thrusters[0] && damagedThruster(POD, 0.49)?.level === 0, 'a mean damage under the first damaged level chooses the undamaged set');
+  ok(damagedThruster(POD, 0.5)?.level === 0.5 && damagedThruster(POD, 0.74)?.level === 0.5 && damagedThruster(POD, 0.8)?.level === 0.75, "and each mean the set whose level is the largest at or under it");
+  ok(damagedThruster(POD, 1)?.level === 1 && damagedThruster(null, 0.6) === null, 'a whole engine burnt out chooses the last set, and a vehicle with no client data none');
+  ok(FIRE_STATES.join() === 'idle,accel,decel,run', "a damaged set's four fire loops are read in the order idle, speed-up, slow-down, run");
+
+  const host = new FakeMixer();
+  const sounds = new VehicleSounds();
+  sounds.attach(host as never, '');
+  sounds.adoptEvents(PACK);
+  sounds.setTables(TABLES);
+  sounds.setListener(0, 0, 0, { building: -1, cell: -1 });
+  const parts = [0, 0, 0, 0, 0, 0].map((d) => ({ d, out: false }));
+  const engines = { mean: 0, parts };
+  const race = { active: true, engines };
+  const setDamage = (all: number[]): void => {
+    for (let i = 0; i < parts.length; i++) parts[i].d = all[i];
+    engines.mean = all.reduce((s, d) => s + d, 0) / all.length;
+  };
+  const pod = makeVehicle({ id: 'pod_racer_one', def: { id: 'pod_racer_one' }, race });
+  (pod as { speed: number }).speed = 60;
+  sounds.update(0.1, [pod], pod, null);
+  ok(host.living().includes(ENGINE.run) && !host.living().some((id) => FIRE.test(id)), 'a whole pod raced sounds its undamaged engine and no fire');
+  ok([...SMALL, ...LARGE].every((id) => host.prepared.includes(id)) && host.prepared.includes('sound/exp_spark_test.snd'), "a hull a race drive may take has its damaged sets' fire loops and its bands' sparks prepared before any part burns");
+
+  host.clear();
+  setDamage([0.6, 0.6, 0.6, 0.6, 0.6, 0.6]);
+  for (let i = 0; i < 25; i++) sounds.update(0.1, [pod], pod, null);
+  const fireKey = host.keyOf(SMALL[3]);
+  ok(host.living().includes(ENGINE.run) && fireKey > 0, "at a mean damage of 0.6 the pod sounds the 0.5 set: its engine loop, and that set's run fire as a third voice beside it");
+  ok(host.gains.get(fireKey) === VEHICLE_TUNE.fire || host.started.find((s) => s.key === fireKey)?.gain === VEHICLE_TUNE.fire, 'the fire plays at its own gain');
+  ok(host.shots().filter((id) => id === 'sound/exp_spark_test.snd').length === 6, "each part crossing into the client data's first band sparks once with that band's own effect sound");
+  host.clear();
+  sounds.update(0.1, [pod], pod, null);
+  ok(!host.shots().includes('sound/exp_spark_test.snd'), 'and a part staying in its band does not spark again');
+
+  // The throttle closing: the slow-down fire for `fireShift`, then the idle one; opening again, the speed-up fire for as
+  // long, then the run one. Each by its own name, and only it among the set's four.
+  const fires = (): string[] => host.living().filter((id) => FIRE.test(id));
+  const tick = (seconds: number) => {
+    for (let i = 0; i < Math.round(seconds / 0.1); i++) sounds.update(0.1, [pod], pod, null);
+  };
+  host.clear();
+  (pod as { speed: number }).speed = 0;
+  sounds.update(0.1, [pod], pod, null);
+  ok(fires().join() === SMALL[2], `the throttle closing plays the set's slow-down fire (${fires().join() || 'none'})`);
+  tick(VEHICLE_TUNE.fireShift - 0.3);
+  ok(fires().join() === SMALL[2], 'and holds it while the shift lasts');
+  tick(0.6);
+  ok(fires().join() === SMALL[0], `and after it, standing still, the idle fire (${fires().join() || 'none'})`);
+  (pod as { speed: number }).speed = 60;
+  sounds.update(0.1, [pod], pod, null);
+  ok(fires().join() === SMALL[1], `the throttle opening plays the set's speed-up fire (${fires().join() || 'none'})`);
+  tick(VEHICLE_TUNE.fireShift - 0.3);
+  ok(fires().join() === SMALL[1], 'and holds it while the shift lasts');
+  tick(0.6);
+  ok(fires().join() === SMALL[3], `and after it, at speed, the run fire (${fires().join() || 'none'})`);
+
+  // Every part burnt out: the last set, whose engine is silent and whose fire plays.
+  host.clear();
+  (pod as { speed: number }).speed = 60;
+  setDamage([1, 1, 1, 1, 1, 1]);
+  for (let i = 0; i < 25; i++) sounds.update(0.1, [pod], pod, null);
+  ok(!host.living().includes(ENGINE.run) && !host.living().includes(ENGINE.idle) && fires().join() === LARGE[3], 'with every part burnt out the engine loop is silent and the fire plays, as the game\'s own data has it');
+  ok(host.shots().filter((id) => id === 'sound/exp_spark_test.snd').length === 6, 'and each part sparks again as it crosses into a band above, once however many bands one step takes it across');
+  const report = sounds.status() as { machines: { id: string; fire: { level: number | null; state: string | null; voice: string | null } | null }[] };
+  const row = report.machines.find((m) => m.id === 'pod_racer_one');
+  ok(row?.fire?.level === 1 && row.fire.state === 'run' && row.fire.voice === LARGE[3], "the report names the damaged set's level, the fire's state and the loop it holds");
+
+  // Repaired whole, or the drive letting the hull go: the fire stops and the engine comes back.
+  host.clear();
+  setDamage([0, 0, 0, 0, 0, 0]);
+  sounds.update(0.1, [pod], pod, null);
+  ok(host.living().includes(ENGINE.run) && !host.living().some((id) => FIRE.test(id)), 'repaired whole, the fire stops and the engine sounds again');
+  setDamage([0.8, 0.8, 0.8, 0.8, 0.8, 0.8]);
+  sounds.update(0.1, [pod], pod, null);
+  race.active = false;
+  host.clear();
+  sounds.update(0.1, [pod], pod, null);
+  ok(!host.living().some((id) => FIRE.test(id)) && host.living().includes(ENGINE.run), 'a hull the drive is not holding sounds whole, whatever its parts were');
+  race.active = true;
+  host.clear();
+  sounds.update(0.1, [pod], pod, null);
+  ok(!host.shots().includes('sound/exp_spark_test.snd'), 'and taken again with that damage it does not spark for damage it already had');
+
+  // A hull first heard already damaged (a fresh record: a new mixer side, a pod taken after a reload) reads its parts'
+  // bands in silence and sparks only for a band crossed after it: its first read is not a crossing.
+  {
+    const host3 = new FakeMixer();
+    const sounds3 = new VehicleSounds();
+    sounds3.attach(host3 as never, '');
+    sounds3.adoptEvents(PACK);
+    sounds3.setTables(TABLES);
+    sounds3.setListener(0, 0, 0, { building: -1, cell: -1 });
+    const parts3 = [0.8, 0.8, 0.8, 0.6, 0.6, 0.6].map((d) => ({ d, out: false }));
+    const engines3 = { mean: 0.7, parts: parts3 };
+    const damaged = makeVehicle({ id: 'pod_racer_one', def: { id: 'pod_racer_one' }, race: { active: true, engines: engines3 } });
+    (damaged as { speed: number }).speed = 60;
+    for (let i = 0; i < 5; i++) sounds3.update(0.1, [damaged], damaged, null);
+    ok(!host3.shots().includes('sound/exp_spark_test.snd'), 'a hull first heard with parts already in their bands does not spark for them');
+    parts3[3].d = 0.8;
+    sounds3.update(0.1, [damaged], damaged, null);
+    ok(host3.shots().filter((id) => id === 'sound/exp_spark_test.snd').length === 1, 'and sparks once when a part then crosses into a band above');
+  }
+
+  // Sebulba's pod, an exhibit of ours, lent Gasgano's client data.
+  ok(VEHICLE_SOUND_LENDS.podracer_sebulba === 'clientdata/vehicle/pod_racer_one.iff', "Sebulba's pod is lent the client data Gasgano's pod joins to");
+  const seb = makeVehicle({ id: 'podracer_sebulba', def: { id: 'podracer_sebulba' } });
+  const host2 = new FakeMixer();
+  const sounds2 = new VehicleSounds();
+  sounds2.attach(host2 as never, '');
+  sounds2.adoptEvents(PACK);
+  sounds2.setListener(0, 0, 0, { building: -1, cell: -1 });
+  sounds2.update(0.1, [seb], seb, null);
+  ok(host2.living().includes(ENGINE.idle), "and so sounds with Gasgano's own engine, which no name match would ever find for it");
 }
 
 console.log(`\n${passed} checks passed`);

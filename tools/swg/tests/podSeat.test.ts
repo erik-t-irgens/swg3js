@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { POD_COCKPIT_JOINT, POD_GAIT, POD_SEAT, boneNamed, boneOver, hangPodSeat, isPod, nudgeSeat, placeIn, podGait, podRuns, podSeatRule, podSpeed, seatInVehicle, seatPod, stepPodGait, stepPodPicture, type PodSeatRule, type Vec3 } from '../../../src/vehicles/podSeat.ts';
 import { findHardpoint } from '../../../src/vehicles/shipAssembly.ts';
-import { gallerySatOptions, podSeatStatus, skeletalModelEntry } from '../gallery.mjs';
+import { GALLERY_PAINT_FORMAT, gallerySatOptions, podSeatStatus, skeletalModelEntry } from '../gallery.mjs';
 import { hardpointsKept, keptHardpoints, skinData } from '../skeletal.mjs';
 import { buildGlb } from '../glb.mjs';
 import { readGlb } from '../glbclips.mjs';
@@ -437,13 +437,21 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
   ok(!('clips' in still) && /^no triangles \(appearance\/mesh\/x\.mgn\)$/.test(still.failed), 'one that does not walk carries no clips, and one with no triangles says why');
   ok(skeletalModelEntry('x', 'x.sat', { meshes: [{ triangles: 3 }] }, false).hardpoints.length === 0, 'and one converted keeping nothing lists nothing');
 
-  const cli = readFileSync(join(root, 'tools', 'swg', 'cli.mjs'), 'utf8');
+  // Line ends as git keeps them, whatever this checkout writes (a Windows checkout writes CR LF).
+  const cli = readFileSync(join(root, 'tools', 'swg', 'cli.mjs'), 'utf8').replace(/\r\n/g, '\n');
   const sat = cli.slice(cli.indexOf('function convertSat('), cli.indexOf('\n}\n', cli.indexOf('function convertSat(')));
   ok(/skinData\(skeleton, clips, \{ flipX: true, hardpoints: keptHardpoints\(composed, extraHardpoints, hardpoints\) \}\)/.test(sat), 'convertSat hands skinData the points keptHardpoints keeps of its composed meshes');
   ok(/if \(hardpoints\) \{\s*info\.hardpoints = hardpointsKept\(skin\);/.test(sat), 'and says it kept what hardpointsKept lists');
   const at = cli.indexOf("case 'gallery': {");
   const block = cli.slice(at, cli.indexOf("case 'jka-extract'", at));
-  ok(at > 0 && /convertSat\(vfs, r\.skeletal, [^\n]*gallerySatOptions\(animated, CREATURE_CLIPS, vehicle\)\)/.test(block), "the gallery's own call to convertSat takes its options from gallerySatOptions, a vehicle's paint with them");
+  // An exhibit of ours lays its borrowed and worked points beside them (`exhibitHardpoints`), so the options are spread:
+  // the whole object is pinned, so no key laid after gallerySatOptions' can take `hardpoints` back off.
+  ok(at > 0 && /convertSat\(vfs, r\.skeletal, join\(outDir, `\$\{id\}\.glb`\), \{ \.\.\.gallerySatOptions\(animated, CREATURE_CLIPS, vehicle\), \.\.\.\(extra \? \{ extraHardpoints: extra\.borrowed, moreHardpoints: extra\.worked \} : \{\}\) \}\);/.test(block), "the gallery's own call to convertSat takes its options from gallerySatOptions, a vehicle's paint with them, and an exhibit's borrowed and worked points after them, nothing else");
+  ok(/const extra = exhibit\?\.seatFrom \|\| exhibit\?\.engines \? exhibitHardpoints\(vfs, exhibit\) : null;/.test(block), "and an exhibit's points are worked out for it (Sebulba's pod: a seat borrowed, engine points of ours)");
+  // Inside convertSat: a named mesh the archives lack is read from the level list beside it, and the worked points join
+  // the ones handed in before the kept ones are chosen.
+  ok(/for \(const name of source\.sat\.meshes\) \{\n(?:\s*\/\/[^\n]*\n)*\s*let file = satMeshFile\(name, \(f\) => vfs\.has\(f\)\);\n\s*let parsed = null;\n\s*if \(\/\\\.lmg\$\/i\.test\(file\)\) \{/.test(sat), "convertSat reads each of a .sat's meshes from the file satMeshFile names, a level list read as one");
+  ok(/if \(moreHardpoints\) extraHardpoints = \[\.\.\.extraHardpoints, \.\.\.moreHardpoints\(composed\.filter\(\(c\) => c\.body\)\.map\(\(c\) => c\.mgn\), skeleton\)\];\n\s*const skin = skinData\(skeleton, clips,/.test(sat), 'and lays the points worked out of its own body beside those handed in, before skinData keeps them');
   ok(gallerySatOptions(false, 'none', true).paint === true && !('paint' in gallerySatOptions(false, 'none')), "and a vehicle's paint is asked for through it, and nothing else's");
   ok(/const entry = skeletalModelEntry\(id, r\.skeletal, info, animated\);[\s\S]{0,120}models\.set\(id, entry\);/.test(block), 'and files the entry skeletalModelEntry makes of what it said');
 }
@@ -576,7 +584,8 @@ else {
 
 // ---------------------------------------------------------------------------------------------
 // 14. Status: a gallery whose pods name no player point (converted before they were kept) is asked
-// for again; one whose pods keep it is not. The rule itself, then `status` run over a drawn pack.
+// for again; one whose pods keep it is not. The rule itself, then `status` run over a drawn pack,
+// which also asks for the vehicles while they list Anakin's pod and not Sebulba's.
 {
   const pod = (id: string, hardpoints?: string[]) => ({ id, skeletal: true, source: `appearance/${id}.sat`, file: `${id}.glb`, ...(hardpoints ? { hardpoints } : {}) });
   ok(podSeatStatus([pod('gasgano_pod_racer'), pod('balta_podracer'), { id: 'speeder_ab1' }]).pods === 2, 'the skeletal pods are counted by name, the rest left out');
@@ -599,6 +608,25 @@ else {
     ok(before.length === 1 && /seat point/.test(before[0]), `status asks for the gallery again over pods converted without their player point ("${before[0] ?? ''}")`);
     ok(galleryAsks([pod('gasgano_pod_racer', ['player', 'engine_1']), pod('mawhonical_pod_racer', ['player'])]).length === 0, 'and not over pods that carry it');
     ok(galleryAsks([{ id: 'speeder_ab1', source: 'appearance/speeder_ab1.apt', file: 'speeder_ab1.glb' }]).length === 0, 'nor over a gallery with no skinned pods at all');
+
+    // Sebulba's pod, asked for by its name in the gallery's own index: while the vehicles list Anakin's pod and not his,
+    // and never while they list both or neither (an install whose archives stop before the pods' own).
+    const sebulbaAsks = (labels: string[]): string[] => {
+      writeFileSync(join(dir, 'gallery', 'gallery.json'), JSON.stringify({ sections: [{ id: 'vehicles', title: 'Vehicles', z: 0, depth: 10, items: labels.map((label) => ({ label, template: `object/mobile/vehicle/shared_${label}.iff`, model: label })) }] }));
+      try {
+        writeFileSync(join(dir, 'gallery', 'manifest.json'), JSON.stringify({ planet: 'gallery', materialFormat: MATERIAL_FORMAT, lodFormat: LOD_FORMAT, paintFormat: GALLERY_PAINT_FORMAT, categories: { layout: [] } }));
+        const r = spawnSync(process.execPath, [cli, 'status', dir, '--json'], { encoding: 'utf8', maxBuffer: 16 * 1048576 });
+        assert.equal(r.status, 0, `status runs over the drawn pack: ${r.stderr}`);
+        const steps = (JSON.parse(r.stdout.slice(r.stdout.indexOf('{'))) as { steps: { command: string; reasons: string[] }[] }).steps;
+        return steps.filter((s) => s.command === 'gallery').flatMap((s) => s.reasons);
+      } finally {
+        rmSync(join(dir, 'gallery', 'gallery.json'), { force: true });
+      }
+    };
+    const without = sebulbaAsks(['podracer_anakin', 'speederbike']);
+    ok(without.length === 1 && /Sebulba/.test(without[0]), `status asks for the vehicles again over a gallery with Anakin's pod and not Sebulba's ("${without[0] ?? ''}")`);
+    ok(sebulbaAsks(['podracer_anakin', 'podracer_sebulba', 'speederbike']).length === 0, 'and not over one with both');
+    ok(sebulbaAsks(['speederbike']).length === 0, 'nor over one with neither');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

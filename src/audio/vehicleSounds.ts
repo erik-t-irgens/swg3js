@@ -30,6 +30,14 @@
 import { OUTSIDE, type SoundSpace } from './distance.ts';
 import type { LoopHost } from './emitters.ts';
 
+/**
+ * Client data lent to a vehicle no template of the game's joins to any, read before the joins (`vehicleData`): Sebulba's
+ * pod, an exhibit of ours on Gasgano's skeleton and clips, plays the client data Gasgano's pod joins to, as the mount
+ * tables already lend it to Anakin's pod and the light-bending one. Ours, and a lend rather than a row of the converter's
+ * sound join, since that join walks only the archive's own templates and would never visit one of ours.
+ */
+export const VEHICLE_SOUND_LENDS: Readonly<Record<string, string>> = { podracer_sebulba: 'clientdata/vehicle/pod_racer_one.iff' };
+
 /** One `VTHR > VSND` set of a client data file: a damage level and its four loops. */
 export interface ThrusterSet {
   level?: number;
@@ -149,7 +157,29 @@ export interface SoundVehicle {
   readonly fit: { looks: Record<string, number> } | null;
   /** `progress` is the mean share open (0..1); a stand-in that leaves it out is taken to be moving whenever `target` turns. */
   readonly wings: { readonly length: number; readonly target: boolean; readonly progress?: number };
+  /**
+   * A pod's or a racing bike's race drive (src/vehicles/raceDrive.ts), whose engine parts' damage chooses which of the
+   * vehicle's own damaged thruster sets it sounds with: absent or not active, the undamaged one, as ever.
+   */
+  readonly race?: { readonly active: boolean; readonly engines: { readonly mean: number; readonly parts: readonly { readonly d: number; readonly out: boolean }[] } } | null;
 }
+
+/**
+ * The damaged thruster set a mean damage chooses: the one whose level is the largest at or under it (the first of a level
+ * on a tie), so a whole engine has the undamaged set; null when the file has no set at or under it.
+ */
+export function damagedThruster(entry: ClientDataSounds | null | undefined, mean: number): ThrusterSet | null {
+  let best: ThrusterSet | null = null;
+  for (const t of entry?.thrusters ?? []) {
+    const level = t.level ?? 0;
+    if (level > mean + 1e-9) continue;
+    if (!best || level > (best.level ?? 0)) best = t;
+  }
+  return best;
+}
+
+/** The engine's state a damaged set's fire loop is chosen for, in the set's own order: idle, speed-up, slow-down, run. */
+export const FIRE_STATES = ['idle', 'accel', 'decel', 'run'] as const;
 
 export interface VehicleTune {
   /** INVENTED: the share of top speed by which the run loop is at full and the idle is gone. */
@@ -186,6 +216,10 @@ export interface VehicleTune {
   lockGap: number;
   /** INVENTED: metres between two lift stops' doorways under which the pick is a step out rather than a ride. */
   liftLevel: number;
+  /** INVENTED: the gain a damaged engine's fire loop plays at. */
+  fire: number;
+  /** INVENTED: seconds a damaged engine's fire plays its speed-up or slow-down loop after the throttle crosses, before the idle or the run. */
+  fireShift: number;
 }
 
 /**
@@ -212,6 +246,8 @@ export const VEHICLE_TUNE: VehicleTune = {
   water: 1,
   lockGap: 1.5,
   liftLevel: 0.5,
+  fire: 1,
+  fireShift: 1,
 };
 
 /**
@@ -432,6 +468,26 @@ interface Rec {
   /** Its distance to the ear last frame, for the Doppler shift and the flyby. */
   lastDistance: number;
   hasDistance: boolean;
+  /**
+   * A race-driven hull's damaged engines: the ground vehicle's client data (its damaged thruster sets and damage bands),
+   * the level of the set its parts' mean damage chooses now (-1: the undamaged one), that set's four engine loops and its
+   * four fire loops, the fire's voice and the state it plays, and each part's band already sounded.
+   */
+  entry: ClientDataSounds | null;
+  fireLevel: number;
+  readonly damagedSet: EngineSounds;
+  readonly fireIds: (string | null)[];
+  readonly fireVoice: Voice;
+  /** Which of `FIRE_STATES` the fire plays, whether the throttle counts as open for it, and until when a crossing's loop holds. */
+  fireState: number;
+  fireOpen: boolean;
+  fireUntil: number;
+  /** The client data's damage bands (their lower edges, ascending) and the first sound of each band's effect. */
+  bands: number[];
+  bandSounds: (string | null)[];
+  readonly partBand: number[];
+  /** Whether the parts' bands have been read once since the drive took the hull, so a remount does not spark for old damage. */
+  bandPrimed: boolean;
 }
 
 /**
@@ -451,7 +507,7 @@ export class VehicleSounds {
    * `status()`, where it is reported as `engines` and `silent` beside these; `resolved` and
    * `resolvedSilent` are how often a set was worked out, which a refit or a table landing does again.
    */
-  readonly counts = { vehicles: 0, resolved: 0, resolvedSilent: 0, accels: 0, decels: 0, wings: 0, flybys: 0, hits: 0, downs: 0, power: 0, jumps: 0, lifts: 0, targets: 0, noHost: 0 };
+  readonly counts = { vehicles: 0, resolved: 0, resolvedSilent: 0, accels: 0, decels: 0, wings: 0, flybys: 0, hits: 0, downs: 0, power: 0, jumps: 0, lifts: 0, targets: 0, fireSets: 0, sparks: 0, noHost: 0 };
   readonly log: VehicleLogRow[] = [];
   /** Sounds asked for that the bank turned out not to hold; each is named once, for the report. */
   readonly missing = new Set<string>();
@@ -623,6 +679,18 @@ export class VehicleSounds {
       retryAt: -1e9,
       lastDistance: 0,
       hasDistance: false,
+      entry: null,
+      fireLevel: -1,
+      damagedSet: { idle: null, accel: null, decel: null, run: null, source: 'damaged VSND' },
+      fireIds: [null, null, null, null],
+      fireVoice: voiceAt(v.pos),
+      fireState: 0,
+      fireOpen: false,
+      fireUntil: -1e9,
+      bands: [],
+      bandSounds: [],
+      partBand: [0, 0, 0, 0, 0, 0],
+      bandPrimed: false,
     };
     this.recs.set(v as object, rec);
     this.live.push(rec);
@@ -646,6 +714,7 @@ export class VehicleSounds {
     this.dropVoice(rec.idleVoice);
     this.dropVoice(rec.runVoice);
     this.dropVoice(rec.waterVoice);
+    this.dropVoice(rec.fireVoice);
   }
 
   /** One voice let go and forgotten: the key, the sound it held and the space it held it in. */
@@ -677,7 +746,9 @@ export class VehicleSounds {
     // (a creature is not a machine and has no engine anyway).
     const doppler = rec.own || v.spec.animal ? 0 : dopplerSemitones(closing, this.tune);
     const pitch = this.tune.pitchSpan * share + doppler;
+    this.stepDamage(rec);
     this.stepEngine(rec, share, pitch);
+    this.stepFire(rec, share);
     this.stepWater(rec);
     this.stepWings(rec);
     this.followShot(rec, rec.throttleShot);
@@ -691,7 +762,9 @@ export class VehicleSounds {
    * one voice a ship.
    */
   private stepEngine(rec: Rec, share: number, pitch: number): void {
-    const set = rec.set;
+    // A race-driven hull with damaged engines sounds with the damaged set its parts' mean damage chooses, whose engine
+    // loops are the undamaged set's until the last, which has none: a whole engine burnt out is silent but for its fire.
+    const set = rec.fireLevel > 0 ? rec.damagedSet : rec.set;
     if (!set.run && !set.idle) {
       // Nothing to play: a hull the pack has no engine for, and a hull whose new fit turned out to
       // have none, which must let go of whatever the old one was playing.
@@ -728,6 +801,89 @@ export class VehicleSounds {
     const gain = this.tune.parkedGain + (1 - this.tune.parkedGain) * mix.run;
     this.holdLoop(rec, rec.runVoice, id, gain, pitch);
     this.holdLoop(rec, rec.idleVoice, null, 0, 0);
+  }
+
+  /**
+   * A race-driven hull's damage: the damaged thruster set its parts' mean damage chooses (worked out again only when the
+   * level it lands on moves), and a spark from the client data's own band effect for each part that crosses into a band.
+   * Nothing here allocates: the chosen set is written into the record's own, and the parts are walked by index.
+   */
+  private stepDamage(rec: Rec): void {
+    const race = rec.v.race;
+    const entry = rec.entry;
+    if (!race || !race.active || !entry) {
+      if (rec.fireLevel !== -1) rec.fireLevel = -1;
+      rec.bandPrimed = false;
+      return;
+    }
+    const engines = race.engines;
+    const mean = engines.mean;
+    const chosen = mean > 0 ? damagedThruster(entry, mean) : null;
+    const level = chosen ? (chosen.level ?? 0) : -1;
+    if (level !== rec.fireLevel) {
+      rec.fireLevel = level;
+      const d = rec.damagedSet;
+      const f = rec.fireIds;
+      d.idle = chosen?.idle ?? null;
+      d.accel = chosen?.accel ?? null;
+      d.decel = chosen?.decel ?? null;
+      d.run = chosen?.run ?? null;
+      const fires = chosen?.damaged;
+      for (let i = 0; i < 4; i++) f[i] = fires && i < fires.length ? (fires[i] ?? null) : null;
+      if (level > 0) {
+        this.counts.fireSets++;
+        this.note(`fire set ${level}`, rec.v.def?.id ?? rec.v.spec.id, f[3] ?? f[0], 0);
+      }
+    }
+    // The bands: how many of the client data's lower edges each part's damage has reached. A part crossing up into one
+    // sparks with that band's own sound; going down (a repair) only moves the count, and the first read after the drive
+    // takes the hull only reads, so damage brought back to a remount does not spark again.
+    const bands = rec.bands;
+    if (!bands.length) return;
+    const parts = engines.parts;
+    const n = parts.length < rec.partBand.length ? parts.length : rec.partBand.length;
+    for (let i = 0; i < n; i++) {
+      const d = parts[i].d;
+      let b = 0;
+      while (b < bands.length && d >= bands[b] - 1e-6) b++;
+      const was = rec.partBand[i];
+      rec.partBand[i] = b;
+      if (!rec.bandPrimed || b <= was) continue;
+      const id = rec.bandSounds[b - 1];
+      if (!id) continue;
+      this.counts.sparks++;
+      this.at(rec, `spark ${i}`, id);
+    }
+    rec.bandPrimed = true;
+  }
+
+  /**
+   * The fire a damaged set carries, as a voice of its own beside the engine's: the set's four fire loops follow the
+   * engine's state, the speed-up or the slow-down one for `fireShift` seconds after the throttle crosses, then the run
+   * one while the run loop has the larger share of the mix and the idle one under it. Silent on a whole engine.
+   */
+  private stepFire(rec: Rec, share: number): void {
+    if (rec.fireLevel <= 0) {
+      if (rec.fireVoice.key || rec.fireVoice.id) this.holdLoop(rec, rec.fireVoice, null, 0, 0);
+      rec.fireOpen = share > this.tune.open;
+      return;
+    }
+    if (!rec.fireOpen && share > this.tune.open) {
+      rec.fireOpen = true;
+      rec.fireState = 1;
+      rec.fireUntil = this.clock + this.tune.fireShift;
+    } else if (rec.fireOpen && share < this.tune.close) {
+      rec.fireOpen = false;
+      rec.fireState = 2;
+      rec.fireUntil = this.clock + this.tune.fireShift;
+    } else if (this.clock >= rec.fireUntil) {
+      // `engineMix`'s run share, worked out in line rather than handed back in an object.
+      const cross = Math.max(0.01, this.tune.crossAt);
+      rec.fireState = (share >= cross ? 1 : share / cross) >= 0.5 ? 3 : 0;
+    }
+    const f = rec.fireIds;
+    const id = f[rec.fireState] ?? f[3] ?? f[0];
+    this.holdLoop(rec, rec.fireVoice, id, this.tune.fire, 0);
   }
 
   private stepWater(rec: Rec): void {
@@ -983,15 +1139,41 @@ export class VehicleSounds {
         }
       }
       rec.water = null;
+      rec.entry = null;
+      rec.bands = [];
+      rec.bandSounds = [];
     } else {
       const entry = this.vehicleData(v);
       set = engineFromClientData(entry, playable, family);
       rec.water = entry?.ground?.find((g) => g.water)?.sound ?? null;
+      rec.entry = entry;
+      this.bandsOf(rec, entry);
     }
+    rec.fireLevel = -1;
+    rec.bandPrimed = false;
     rec.set = set ?? EMPTY_ENGINE;
     if (rec.set.run || rec.set.idle) this.counts.resolved++;
     else this.counts.resolvedSilent++;
     this.prepareOf(rec);
+  }
+
+  /**
+   * A vehicle client data's damage bands (`DAMA`), as lower edges in ascending order with the first sound of each band's
+   * client effect: the pods' files name each band once a side, so a band's edge is kept once. Worked out on a resolve.
+   */
+  private bandsOf(rec: Rec, entry: ClientDataSounds | null): void {
+    const raw = Array.isArray(entry?.damage) ? (entry!.damage as { from?: number; effect?: string | null; sound?: string | null }[]) : [];
+    const edges: { from: number; sound: string | null }[] = [];
+    for (const band of raw) {
+      const from = typeof band?.from === 'number' && Number.isFinite(band.from) ? band.from : NaN;
+      if (!(from > 0)) continue;
+      if (edges.some((e) => Math.abs(e.from - from) < 1e-6)) continue;
+      const sound = band.sound ?? (band.effect ? (this.events?.clientEffects?.[band.effect]?.sounds?.[0] ?? null) : null);
+      edges.push({ from, sound });
+    }
+    edges.sort((a, b) => a.from - b.from);
+    rec.bands = edges.map((e) => e.from);
+    rec.bandSounds = edges.map((e) => e.sound);
   }
 
   /**
@@ -1073,6 +1255,9 @@ export class VehicleSounds {
     const data = this.events?.clientData;
     if (!data) return null;
     const id = v.def?.id ?? v.spec.id;
+    // A lend of ours first (`VEHICLE_SOUND_LENDS`): an exhibit no template joins to anything.
+    const lent = Object.hasOwn(VEHICLE_SOUND_LENDS, id) ? data[VEHICLE_SOUND_LENDS[id]] : undefined;
+    if (lent) return lent;
     const joins = this.events?.ships?.vehicles;
     for (const want of [id, v.def?.template]) {
       if (!want) continue;
@@ -1141,6 +1326,12 @@ export class VehicleSounds {
     const list = this.prepareList;
     list.length = 0;
     for (const id of [rec.set.idle, rec.set.accel, rec.set.decel, rec.set.run, rec.water, rec.wing, rec.flyby]) if (id) list.push(id);
+    // A hull a race drive may take: its damaged sets' fire loops and its bands' sparks too, so a part's first fire is not
+    // the sound that waits for its buffer.
+    if (rec.v.race && rec.entry) {
+      for (const t of rec.entry.thrusters ?? []) for (const id of t.damaged ?? []) if (id && !list.includes(id)) list.push(id);
+      for (const id of rec.bandSounds) if (id && !list.includes(id)) list.push(id);
+    }
     if (list.length) host.prepare(list);
   }
 
@@ -1320,6 +1511,11 @@ export class VehicleSounds {
           // its machine is the other fault that cannot be heard from a driven tab.
           distance: [this.voiceDistance(rec.idleVoice), this.voiceDistance(rec.runVoice), this.voiceDistance(rec.waterVoice)],
         },
+        // A race-driven hull's damage: the damaged set's level (null while whole or not racing), the fire's state and the
+        // loop it holds, and the client data's bands.
+        fire: rec.entry
+          ? { level: rec.fireLevel > 0 ? rec.fireLevel : null, state: rec.fireLevel > 0 ? FIRE_STATES[rec.fireState] : null, voice: rec.fireVoice.id, key: rec.fireVoice.key, bands: rec.bands.slice(), parts: rec.partBand.slice() }
+          : null,
         speed: Math.round(rec.v.speed * 10) / 10,
         distance: Math.round(rec.lastDistance),
       });

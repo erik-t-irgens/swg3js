@@ -139,18 +139,29 @@ const physics = {
 
 const race = new RaceDrive('pod', { ground: reader });
 race.setLevels('max', vehicle);
-const drive: DriveInput = { throttle: 1, steer: 0, heading: 0.5, boost: true, hop: false, up: false, down: false, vertical: 0, slide: false, lean: 0, pitch: 0 };
+const drive: DriveInput = { throttle: 1, steer: 0, heading: 0.5, boost: true, hop: false, up: false, down: false, vertical: 0, slide: false, lean: 0, pitch: 0, repair: false };
 // Frame times that cross the fixed steps every way: 144, 75 and 40 fps in turn. Kept as the engine's own numbers (the
 // list holds something that is not a number too, so the engine keeps each as made), as a game's frame hands its own on.
 const DTS: unknown[] = [1 / 144, 1 / 75, 1 / 40, 'not a number'];
 let k = 0;
 const counts = { planned: 0 };
+/** The engines' damage, fires and repair in the run (`RACE_ALLOC_ENGINES=0` leaves them whole, to compare). */
+const ENGINES_AT_WORK = process.env.RACE_ALLOC_ENGINES !== '0';
 function frame(): void {
   const dt = DTS[k++ % 3] as number;
   // A gentle weave: the target off the nose and back.
   drive.heading = race.heading + Math.sin(k / 400) * 0.2;
   drive.slide = (k & 1023) < 100;
   drive.lean = (k & 2047) < 300 ? 1 : 0;
+  // The engines at work (src/vehicles/drivetrain.ts): a part worn past the pull now and then, another set burning, and
+  // the repair held for a while, so the fires burn, the pull reaches the stick, the top's share moves and the repair
+  // mends. A part burning out, a repair begun or ended moves the top, which shares the speed out again and rewrites the
+  // spec: events, a few a minute, with a few numbers each, and not steps; the steps between them make nothing.
+  if (ENGINES_AT_WORK && (k & 8191) === 1) {
+    race.engines.parts[4].d = 0.7;
+    race.engines.parts[1].fire = 0.001;
+  }
+  drive.repair = ENGINES_AT_WORK && (k & 8191) > 7700;
   race.step(vehicle, dt, drive, ground, null, null, physics);
   if (race.planned > 0) counts.planned++;
   physics.step(dt);

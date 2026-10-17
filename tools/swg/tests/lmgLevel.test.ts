@@ -4,7 +4,7 @@
 // is passed over for the next that draws; with none that draws, the old answer stands so the
 // caller reports it as it always has; and an unreadable level is never skipped.
 import assert from 'node:assert/strict';
-import { finestLevelWithGeometry, triangleCount } from '../lmglevel.mjs';
+import { finestLevelWithGeometry, satMeshFile, triangleCount } from '../lmglevel.mjs';
 
 let passed = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -108,6 +108,17 @@ ok(triangleCount(mgn(2, 3)) === 5 && triangleCount(mgn()) === 0 && triangleCount
   const a = archive({ 'l0.mgn': mgn(0), 'l1.mgn': 'bad', 'l2.mgn': mgn(5) });
   const r = finestLevelWithGeometry(['l0.mgn', 'l1.mgn', 'l2.mgn'], a.io);
   ok(r.file === 'l0.mgn', 'a stripped level then an unreadable one: the search stops, and the finest present stands');
+}
+
+// The file a skeletal appearance's mesh name is read from (`satMeshFile`): a named mesh the archives lack, with a level
+// list of the same stem beside it, is read as that list; nothing else changes.
+{
+  const in_ = (...files: string[]) => (f: string) => files.includes(f);
+  ok(satMeshFile('appearance/mesh/pv_test_pod.mgn', in_('appearance/mesh/pv_test_pod.lmg')) === 'appearance/mesh/pv_test_pod.lmg', 'a named mesh the archives lack, with a level list of its stem beside it, is read as the list');
+  ok(satMeshFile('appearance/mesh/pv_test_pod.mgn', in_()) === 'appearance/mesh/pv_test_pod.mgn', 'one with no list beside it stays as named, for the caller to call missing as it always has');
+  ok(satMeshFile('appearance/mesh/pv_test_pod.mgn', in_('appearance/mesh/pv_test_pod.mgn', 'appearance/mesh/pv_test_pod.lmg')) === 'appearance/mesh/pv_test_pod.mgn', 'a named mesh the archives hold is read as itself, a list beside it or not');
+  ok(satMeshFile('appearance/mesh/pv_test_pod.lmg', in_()) === 'appearance/mesh/pv_test_pod.lmg', 'a name that is already a list is left as it is');
+  ok(satMeshFile('appearance/mesh/PV_TEST_POD.MGN', in_('appearance/mesh/PV_TEST_POD.lmg')) === 'appearance/mesh/PV_TEST_POD.lmg', "the extension is matched whatever its case, and the stem kept as written");
 }
 
 console.log(`\n${passed} checks passed`);

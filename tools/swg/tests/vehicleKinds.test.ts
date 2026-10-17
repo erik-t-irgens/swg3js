@@ -27,13 +27,13 @@ const restore = () => {
 
 const rows = Object.entries(VEHICLE_KINDS);
 const count = (f: (r: (typeof rows)[number][1]) => boolean) => rows.filter(([, r]) => f(r)).length;
-ok(rows.length === 57, `the table has the gallery's 57 vehicles (${rows.length})`);
+ok(rows.length === 58 && Object.hasOwn(VEHICLE_KINDS, 'podracer_sebulba'), `the table has the gallery's 57 vehicles and Sebulba's pod, an exhibit of ours (${rows.length})`);
 const pods = count((r) => r.kind === 'podracer');
 const bikes = count((r) => r.kind === 'speederbike');
 const hover = count((r) => r.kind === 'flyer' && !r.air);
 const air = count((r) => r.kind === 'flyer' && !!r.air);
 const ground = count((r) => r.kind === 'ground');
-ok(pods === 7 && bikes === 33 && hover === 3 && air === 6 && ground === 8, `7 pods, 33 bikes, 3 hover cars, 6 aircraft and 8 that walk or roll (${pods}, ${bikes}, ${hover}, ${air}, ${ground})`);
+ok(pods === 8 && bikes === 33 && hover === 3 && air === 6 && ground === 8, `8 pods, 33 bikes, 3 hover cars, 6 aircraft and 8 that walk or roll (${pods}, ${bikes}, ${hover}, ${air}, ${ground})`);
 ok(rows.every(([id, r]) => kindFor({ id }).kind === r.kind && kindFor({ id }).inferred), 'with the switch on, every row is its own kind and never a guess');
 ok(hoverCarFor('koro2_speeder') === true && hoverCarFor('landspeeder_organa') === true && hoverCarFor('snowspeeder') === false && hoverCarFor('jetpack') === false && hoverCarFor('no_such_vehicle') === undefined, "a flyer is a hover car or an aircraft by its row; an id the table lacks is the name rule's");
 ok(races('podracer') && races('speederbike') && !races('flyer') && !races('ground') && !races('ship'), 'every pod and every bike races, nothing else');
@@ -87,6 +87,17 @@ restore();
 if (gallery) {
   const missing = gallery.filter((v) => !Object.hasOwn(VEHICLE_KINDS, v.label)).map((v) => v.label);
   ok(gallery.length > 0 && missing.length === 0, `every vehicle of the converted gallery has a row (${gallery.length}${missing.length ? `; missing ${missing.join(', ')}` : ''})`);
+  // Sebulba's pod, once the vehicles are converted again: its seat borrowed, its engine points ours, a rider pose (names
+  // and counts only).
+  const seb = gallery.find((v) => v.label === 'podracer_sebulba') as (GalleryVehicle & { riderPose?: string; invented?: boolean }) | undefined;
+  if (!seb) note("the gallery has no Sebulba's pod yet: convert the vehicles again (npm run swg -- gallery '@SWG' assets-private --only=vehicles --retail-only)");
+  else {
+    const m = JSON.parse(readFileSync(`${GALLERY}/manifest.json`, 'utf8')) as { categories: { layout: { id: string; hardpoints?: string[]; hardpointsFrom?: Record<string, string> }[] } };
+    const e = m.categories.layout.find((x) => x.id === seb.model);
+    const hp = e?.hardpoints ?? [];
+    ok(['player', 'engine_1', 'engine_2'].every((n) => hp.includes(n)) && !!seb.riderPose && seb.invented === true, `Sebulba's pod lists player, engine_1 and engine_2 among its ${hp.length} points and a rider pose, marked as ours`);
+    ok(/^borrowed/.test(e?.hardpointsFrom?.player ?? '') && /^ours/.test(e?.hardpointsFrom?.engine_1 ?? '') && /^ours/.test(e?.hardpointsFrom?.engine_2 ?? ''), 'and its manifest entry says the seat is borrowed and the engines ours');
+  }
 } else note('no gallery converted: the rows are not held against it');
 
 // --- the routing over every row against every kind ------------------------------------------------------------------
