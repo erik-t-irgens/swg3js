@@ -98,6 +98,14 @@ export interface PromptVehicle {
   boost: boolean;
   /** The key that cuts a flying ship's engines. It has no binding of its own, so it comes in as a key. */
   cutKey: string;
+  /**
+   * A vehicle spawned as a speeder bike: its mode, traversal (today's bike) or racing; '' for anything else, a pod
+   * included. Read from the kind it was spawned as, so a Koro-2 spawned as a bike offers racing mode and one at its
+   * own kind offers what it always did.
+   */
+  mode: '' | 'traversal' | 'racing';
+  /** Raced (a pod, or a bike in racing mode): Space slides rather than hops. */
+  slide: boolean;
 }
 
 /** A vehicle struct with nothing in it: the caller keeps one and fills it. */
@@ -118,6 +126,8 @@ export function newPromptVehicle(): PromptVehicle {
     hop: false,
     boost: false,
     cutKey: '',
+    mode: '',
+    slide: false,
   };
 }
 
@@ -285,6 +295,8 @@ export function resetPromptState(s: PromptState): PromptState {
   v.hop = false;
   v.boost = false;
   v.cutKey = '';
+  v.mode = '';
+  v.slide = false;
   return s;
 }
 
@@ -349,6 +361,11 @@ export const PROMPT_WORDS = Object.freeze({
   nextTarget: 'next target',
   hop: 'hop',
   boost: 'boost',
+  // A pod, or a bike in racing mode: Space slides it wider and looser through a turn.
+  slide: 'slide',
+  // A speeder bike's two modes, on U: the cap names the one a press goes to.
+  racingMode: 'racing mode',
+  traversalMode: 'traversal mode',
   // The grappling hook, while it is out.
   grappleLetGo: 'let go',
   reelIn: 'reel in',
@@ -473,8 +490,18 @@ export function fillActions(s: PromptState, out: PromptAction[]): number {
     const out1 = s.piloting ? W.letGo : v.ship ? W.leave : W.dismount;
     n = push(out, n, 'mount', out1);
     if (!v.ship) {
-      if (v.hop) n = push(out, n, 'jump', W.hop);
+      // A bike in racing mode: the boost, the slide on Space, and the way back to traversal.
+      if (v.mode === 'racing') {
+        if (v.boost) n = push(out, n, 'walk', W.boost);
+        n = push(out, n, 'jump', W.slide);
+        n = push(out, n, 'raceMode', W.traversalMode);
+        return n;
+      }
+      // Today's: the hop, the boost; a pod raced slides on Space instead; a bike in traversal offers racing mode.
+      if (v.hop && !v.slide) n = push(out, n, 'jump', W.hop);
       if (v.boost) n = push(out, n, 'walk', W.boost);
+      if (v.slide) n = push(out, n, 'jump', W.slide);
+      if (v.mode === 'traversal') n = push(out, n, 'raceMode', W.racingMode);
       return n;
     }
     // Down on the ground, or on its way down: what gets it up again is the whole of it.

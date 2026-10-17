@@ -418,6 +418,11 @@ function readOne(file: string, text: string, out: SourceHelpers): void {
   ok(!!grapple && ['grapple()', 'grapple({ fire: true })', 'grapple({ fire: [x, y, z] })', 'grapple({ letGo: true })', 'grapple({ everyone: false })', 'grapple({ reset: true })'].every((c) => codes.includes(c)) && codes.some((c) => c.startsWith('grapple({ tune:')), `the grapple has its own row with every example the design names (${codes.length})`);
   const home = DEBUG_GROUPS.find((g) => g.helpers.includes('grapple'));
   ok(!!home && home.helpers.indexOf('grapple') === home.helpers.indexOf('headLook') + 1, `and the menu files it beside headLook (${home?.title ?? 'nowhere'})`);
+  // The race drive's (the racer pass): its own row with the examples its design names, and filed with the vehicles.
+  const race = docs.get('race');
+  const raceCodes = race?.examples.map((e) => e.code) ?? [];
+  ok(!!race && ['race()', "race({ upgrades: 'max' })", 'race({ steer: 0.5 })', "race({ mode: 'racing' })", 'race({ on: false })', "race({ bridge: 'off' })", "race({ offCourse: 'stop' })"].every((c) => raceCodes.includes(c)) && raceCodes.some((c) => c.startsWith('race({ tune:')) && raceCodes.some((c) => c.startsWith('race({ base:')), `the race drive has its own row with the examples its design names (${raceCodes.length})`);
+  ok(DEBUG_GROUPS.find((g) => g.helpers.includes('race'))?.title === 'Vehicles and ships', 'and the menu files it with the vehicles and ships');
 }
 
 console.log(`\n${checks} checks passed`);

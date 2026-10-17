@@ -53,6 +53,8 @@ export type Action =
   | 'rollRight'
   // A ship whose wings open: the pilot opens and closes them.
   | 'wings'
+  // A vehicle spawned as a speeder bike: traversal (today's bike) and racing mode, and back.
+  | 'raceMode'
   // A building or a prop in hand: held, the mouse turns it (`placeTurn`) or raises and lowers it
   // (`placeLift`). Keys of their own rather than the strafe keys, so the player can walk while placing.
   | 'placeTurn'
@@ -134,6 +136,10 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   rollLeft: ['KeyZ'],
   rollRight: ['KeyV'],
   wings: ['KeyU'],
+  // A speeder bike's racing mode, on the wings' key and shared with it on purpose: the wings are read only for a ship
+  // with wings and this only for a vehicle spawned as a bike, so the two never answer one press. Rebinding either
+  // leaves the other on U (`takesKeyFrom`).
+  raceMode: ['KeyU'],
   // A building or a prop in hand: R held turns it and F held raises and lowers it, with the mouse. R is
   // the saber throw's and F the torch's, borrowed rather than spent: the throw is muted with the rest of
   // the fight while something is in hand (`FIGHT_ACTIONS`), and the torch is not read at all while

@@ -262,6 +262,8 @@ if (process.argv.includes('hull')) {
   const hullCol = {
     handle: 91,
     isValid: () => true,
+    // The hull test steps over a collider that is not enabled (a race box standing aside, a raced hull's own).
+    isEnabled: () => true,
     parent: (): unknown => hullBody,
     collisionGroups: () => (Group.exterior << 16) | Group.all,
     setSolverGroups: (_g: number) => {},

@@ -2,7 +2,9 @@
 // has, sorted into the four kinds by name, and spawned beside the player to ride.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Vehicle, specFor, vehicleKindOf, type VehicleKind, type VehicleSpec } from './vehicle';
+import { Vehicle, specFor, type VehicleKind, type VehicleSpec } from './vehicle';
+import { hoverCarFor, kindFor, raceSpecFor } from './vehicleKinds.ts';
+import { attachRace, type RaceDeps } from './raceDrive.ts';
 import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
@@ -93,6 +95,8 @@ export interface VehicleDef {
   thrusters?: string[];
   file: string;
   template?: string;
+  /** The gallery's model id, for sorting it again by its names (`reclassify`). */
+  model?: string;
   bounds?: VehicleSpec['bounds'];
   /** A creature's locomotion clip speeds, for its mixer. */
   clipSpeeds?: Record<string, number>;
@@ -144,6 +148,8 @@ export interface BuildOptions {
   paintWait?: number;
   /** Checked just before the vehicle is made: false drops the spawn (SpawnCancelled; the world unloaded meanwhile). */
   alive?: () => boolean;
+  /** What a race drive reads of the world (its cached ground), for a vehicle spawned as a pod or a bike. */
+  race?: RaceDeps;
 }
 
 /** The engine glows made before a vehicle exists (so the preparation compiles them with it), wired to it once it does. */
@@ -182,10 +188,11 @@ export class Garage {
         for (const it of index.sections.find((s) => s.id === 'vehicles')?.items ?? []) {
           const m = files.get(it.model);
           if (!m) continue;
-          const kind = vehicleKindOf(it.label) ?? vehicleKindOf(it.template) ?? vehicleKindOf(it.model);
+          // By the table of the gallery's vehicles while it is used (`vehicleKinds.ts`), else by the names as before.
+          const { kind, inferred } = kindFor({ id: it.label, template: it.template, model: it.model });
           // A speeder whose shaders take colours: a fit of its paint alone (`paintOnlyFit`), its recipes beside the gallery's manifest.
           const fit = paintOnlyFit(m.paint);
-          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind: kind ?? 'speederbike', inferred: kind !== null, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds, ...(fit ? { fit, paintDir: 'assets-private/gallery/' } : {}) });
+          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind, inferred, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, model: it.model, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds, ...(fit ? { fit, paintDir: 'assets-private/gallery/' } : {}) });
         }
       }
     } catch (err) {
@@ -273,6 +280,24 @@ export class Garage {
     // the list. It costs one walk of the manifests, once, and nothing per spawn or per frame.
     setImmunityCatalogue(g.vehicles.map((v) => v.template));
     return g;
+  }
+
+  /**
+   * Every gallery vehicle sorted again by the rule in force (the table, or the names: `RACE_TUNE.kinds`, the switch),
+   * and the list sorted by kind again, so the next spawn and the panel show the change; a vehicle standing keeps the
+   * kind it was spawned with. Returns how many changed kind.
+   */
+  reclassify(): number {
+    let changed = 0;
+    for (const v of this.vehicles) {
+      if (v.source !== 'gallery') continue;
+      const { kind, inferred } = kindFor({ id: v.id, template: v.template, model: v.model });
+      if (kind !== v.kind) changed++;
+      v.kind = kind;
+      v.inferred = inferred;
+    }
+    this.vehicles.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+    return changed;
   }
 
   find(name: string): VehicleDef | undefined {
@@ -1050,7 +1075,15 @@ export class Garage {
       }
     });
     if (hardpoints.length) console.info(`garage: ${def.id} hardpoints: ${hardpoints.join(', ')}`);
-    const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature' });
+    const spec = specFor(kind, def.id, def.label, bounds, { animal: def.source === 'creature', hoverCar: hoverCarFor(def.id) });
+    // What the rider's own game runs follows the kind it is spawned as (`raceRoute`): a vehicle raced as a pod or a
+    // bike carries a race box beside its own hull, swapped in only while it races. The seat and the clips below still
+    // follow what it is.
+    // The whole of it is `raceSpecFor`'s answer (nothing with the pass off), written here and at the attach below as it stands.
+    const race = raceSpecFor(def, kind, bounds);
+    if (race.hull) spec.hull = race.hull;
+    if (race.raceBox) spec.raceBox = race.raceBox;
+    if (race.note) console.info(`garage: ${def.id} spawned as a ${kind}: ${race.note}`);
     // The ship's own size, for the chase camera and the boarding range (its bounds reach its farthest wing either side).
     if (model.userData.reach) spec.reach = model.userData.reach as number;
     if (def.source === 'creature') {
@@ -1186,6 +1219,9 @@ export class Garage {
     if (place) [x, y, z] = place(bounds);
     // Nothing may be awaited in finishSpawn after this line: the body is live, falling and unsprung until the world adds the vehicle.
     const v = new Vehicle(spec, model, physics, scene, x, y - bounds.min[1] + spec.hover, z, heading);
+    // The race drive, attached at once (a bike in traversal until U), by the same answer its spec was built from: none
+    // with the switch off at the spawn, so a vehicle spawned with it off drives as before until it is spawned again.
+    attachRace(v, race.drive, opts.race ?? { ground: null });
     // The wings, for every kind (a vehicle that is not a ship never flies, so its stay shut unless the console forces them).
     v.wings = a.wings;
     v.wingDrop = drop > WING_DROP_MIN ? drop : 0;

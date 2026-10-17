@@ -658,4 +658,66 @@ const part = (slot: string, share: number, down = false) => ({ slot, hp: share *
   ok(hud.report().scale === HUD_SIZES.scaleMax, 'and is clamped to the ends the design fixes');
 }
 
+// ---------------------------------------------------------------------------------------------
+// The race display (the racer pass): a pod, or a bike in racing mode, ridden. The arcs alone -- no boresight, no aim
+// circle, no cursor, no lead and no target -- the speed up the left scaled to the ceiling, the engines' heat headroom
+// up the right where a ship's guns are, the boost's charge across the bottom; and a steady frame writes nothing.
+{
+  const { RACE_RACING, RACE_READY, RACE_OVERHEATED } = shipHud;
+  const hud = new ShipHud(new StubEl() as never);
+  const rec = new Recorder();
+  hud.attach(rec, COL);
+  const view = newFlightView();
+  view.race = true;
+  view.speed = 250;
+  view.fullSpeed = 333.3;
+  view.topSpeed = 264.6;
+  view.boostTop = 333.3;
+  view.wings = WING_NONE;
+  view.gunSlots = 0;
+  view.hasBooster = true;
+  view.heat = 0.8;
+  view.charge = 0.5;
+  view.raceWord = RACE_READY;
+  view.leadOn = true;
+  view.circle = 120;
+  hud.setFlight(view);
+  hud.update(1 / 60);
+  rec.clear();
+  hud.draw();
+  const boresight = rec.ops.filter((o) => o.kind === 'line' && o.alpha === HUD_SIZES.boresightAlpha && o.colour === COL.ink);
+  ok(boresight.length === 0 && !rec.ops.some((o) => o.kind === 'poly') && !rec.ops.some((o) => o.kind === 'ring'), 'a race view draws no reticle: no boresight, no cursor and no lead');
+  ok(rec.ops.some((o) => o.kind === 'arc' && o.from === HUD_SIZES.gunsFrom && o.colour === COL.good), 'it draws the heat headroom up the right, in the good colour while it is over half');
+  ok(rec.ops.some((o) => o.kind === 'arc' && o.from === HUD_SIZES.boostFrom && o.colour === COL.accent), 'and the charge across the bottom');
+  view.heat = 0.2;
+  view.charge = 0;
+  view.raceWord = RACE_OVERHEATED;
+  hud.setFlight(view);
+  rec.clear();
+  hud.draw();
+  ok(rec.ops.some((o) => o.kind === 'arc' && o.from === HUD_SIZES.gunsFrom && o.colour === COL.bad), 'the heat under a quarter is drawn in the bad colour');
+  // A steady race frame writes nothing.
+  const p = probe(hud);
+  view.raceWord = RACE_RACING;
+  for (let i = 0; i < 12; i++) {
+    hud.setFlight(view);
+    hud.update(1 / 60);
+  }
+  const before = p.writes;
+  for (let i = 0; i < 30; i++) {
+    hud.setFlight(view);
+    hud.update(1 / 60);
+  }
+  ok(p.writes === before, `a steady race frame writes nothing (${p.writes - before})`);
+  view.raceWord = RACE_OVERHEATED;
+  hud.setFlight(view);
+  hud.update(1 / 60);
+  const once = p.writes;
+  for (let i = 0; i < 30; i++) {
+    hud.setFlight(view);
+    hud.update(1 / 60);
+  }
+  ok(once > before && p.writes === once, `the word under the speed is written once when it changes and not again (${once - before} writes)`);
+}
+
 console.log(`\n${checks} checks passed`);

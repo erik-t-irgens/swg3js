@@ -116,6 +116,7 @@ import { Garage, SpawnCancelled, type RefitReport, type VehicleDef } from '../ve
 import { fitKey, type ResolvedFit } from '../vehicles/shipFit';
 import { inTurn } from '../vehicles/shipMounts';
 import { Vehicle, type VehicleKind, type VehicleSpec } from '../vehicles/vehicle';
+import type { RaceDeps, RaceGround } from '../vehicles/raceDrive.ts';
 import { SHIP_ROOM } from '../vehicles/landing';
 import { Bolts } from '../combat/bolts';
 import { ShipInterior } from '../vehicles/interior';
@@ -730,6 +731,26 @@ export class World {
   groundIfCached(x: number, z: number): number | null {
     return this.groundAtCached(x, z);
   }
+  /**
+   * What a race-driven hull reads of the ground ahead (`src/vehicles/raceDrive.ts`): a built block only, the far grid
+   * only at its own 16 m lattice points (each read once and kept by the drive, since every far lookup builds its key),
+   * and the flat water. Never `heightAt`, which would generate a block on the main thread. Made once; it reads the
+   * terrain of the world loaded now.
+   */
+  readonly raceGround: RaceGround = {
+    near: (x, z) => this.terrain.nearHeightIfCached(x, z),
+    far: (i, j) => this.terrain.farSampleAt(i, j, FAR_TILE, FAR_RES),
+    farStep: FAR_TILE / FAR_RES,
+    farX: () => this.terrain.groundShift.x,
+    farZ: () => this.terrain.groundShift.z,
+    water: (x, z) => this.terrain.waterHeightAt(x, z),
+  };
+  private readonly raceDeps: RaceDeps = { ground: this.raceGround };
+  /**
+   * Nothing new stood or put away near the player while they race faster than `RACE_TUNE.livingAbove`: written every
+   * step by the game (`holdsLiving`), read beside `streamHold` by the three streams of the living.
+   */
+  livingHold = false;
   /** The chunk the ground streams round, as the last `stream` found it (NaN before the first). */
   private streamPcx = Number.NaN;
   private streamPcz = Number.NaN;
@@ -5410,6 +5431,7 @@ export class World {
         prepare: (r) => this.vehiclePrepare(r),
         forget: (m) => this.forgetMaterials(m),
         alive: () => gen === this.loadGeneration && this.terrain === terrain,
+        race: this.raceDeps,
       });
     } catch (err) {
       if (err instanceof SpawnCancelled) throw new Error('the world changed while the vehicle was being prepared');
@@ -6134,7 +6156,7 @@ export class World {
         },
         // It holds when the streamer holds (an ultra cruise pins both), and never runs at all for
         // the creation and selection screens, which are a cut-out world with no streaming.
-        held: () => this.streamHold || this.sceneOnly || !this.simulating,
+        held: () => this.streamHold || this.livingHold || this.sceneOnly || !this.simulating,
       };
     }
     return this.wildDepsKept;
@@ -6211,7 +6233,7 @@ export class World {
         freeStart: () => this.mobiles?.freeStart(),
         frees: (m) => this.mobiles?.frees(m) ?? 0,
         centre: () => this.layoutCenter,
-        held: () => this.streamHold || this.sceneOnly || !this.simulating,
+        held: () => this.streamHold || this.livingHold || this.sceneOnly || !this.simulating,
         // A person in a room needs that room's floor to exist first. The streamer builds a
         // building's cells by distance, so asking for the ground there answers null until it has.
         cellReady: (x, y, z) => this.groundAt(x, y + 2, z, true) !== null,
@@ -6358,7 +6380,7 @@ export class World {
             room: how.room,
           }) ?? 'no world',
         remove: (m) => this.mobiles?.remove(m),
-        held: () => this.streamHold || this.sceneOnly || !this.simulating,
+        held: () => this.streamHold || this.livingHold || this.sceneOnly || !this.simulating,
         world: () => (this.planet?.space ? '' : standingPeople.world || this.packId),
         seconds: () => sharedClock.walkSeconds(),
         buildings: () => this.layoutStream?.buildings ?? none,

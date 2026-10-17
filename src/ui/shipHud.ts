@@ -141,6 +141,13 @@ export const WING_HELD = 4;
 
 const WING_WORD = ['', 'wings closed', 'wings opening', 'wings open', 'wings waiting for room'] as const;
 
+/** The word under the speed while a pod or a racing bike is ridden (the race display): racing, the boost ready to charge, or the engines overheated. */
+export const RACE_NONE = 0;
+export const RACE_RACING = 1;
+export const RACE_READY = 2;
+export const RACE_OVERHEATED = 3;
+const RACE_WORD = ['', 'racing', 'boost ready', 'overheated'] as const;
+
 /** What the target is to the pilot. */
 export const STAND_ENEMY = 0;
 export const STAND_FRIEND = 1;
@@ -246,6 +253,15 @@ export interface FlightView {
   hasBooster: boolean;
   /** WING_NONE, WING_CLOSED, WING_OPENING, WING_OPEN or WING_HELD. */
   wings: number;
+  /**
+   * The race display: a pod or a racing bike ridden. No reticle, no aim circle, no cursor, no lead and no target;
+   * the speed arc scaled to the ceiling (`fullSpeed`), the engines' heat headroom (0..1, full cold) where the guns'
+   * arc is, the boost's charge (0..1) where the booster's is, and the word under the speed (`RACE_*`).
+   */
+  race: boolean;
+  heat: number;
+  charge: number;
+  raceWord: number;
 }
 
 /** A flight view to fill: made once by the caller and handed over every frame. */
@@ -275,6 +291,10 @@ export function newFlightView(): FlightView {
     boostShare: 0,
     hasBooster: false,
     wings: WING_NONE,
+    race: false,
+    heat: 1,
+    charge: 0,
+    raceWord: RACE_NONE,
   };
 }
 
@@ -881,6 +901,10 @@ export class ShipHud {
     v.boostShare = view.boostShare;
     v.hasBooster = view.hasBooster;
     v.wings = view.wings;
+    v.race = view.race;
+    v.heat = view.heat;
+    v.charge = view.charge;
+    v.raceWord = view.raceWord;
     this.writeSpeed();
   }
 
@@ -900,13 +924,16 @@ export class ShipHud {
         this.writes++;
       }
     }
-    const w = this.view.wings;
+    // The word under the speed: the wings' state, or in the race display the race's own word, which stands in the
+    // same place (a race-driven hull has no wings to show). Both are kept as one number, offset apart, so a change
+    // between them writes once.
+    const w = this.view.race ? 100 + this.view.raceWord : this.view.wings;
     if (w !== this.wingShown) {
       this.wingShown = w;
-      const word = WING_WORD[w] ?? '';
+      const word = this.view.race ? (RACE_WORD[this.view.raceWord] ?? '') : (WING_WORD[w] ?? '');
       this.wingWord.textContent = word;
       this.wingEl.style.display = word ? 'block' : 'none';
-      this.wingWord.style.color = w === WING_HELD ? WING_WARN : WING_CALM;
+      this.wingWord.style.color = (!this.view.race && w === WING_HELD) || (this.view.race && this.view.raceWord === RACE_OVERHEATED) ? WING_WARN : WING_CALM;
       this.writes += 3;
     }
   }
@@ -1020,6 +1047,11 @@ export class ShipHud {
     const col = this.colours;
     if (!c || !col || !this.flying) return;
     const s = this.place.scale;
+    // The race display draws the arcs alone: a pod has no guns to aim, nothing to lead and no target.
+    if (this.view.race) {
+      this.drawArcs(c, col, this.place.cx, this.place.cy, s);
+      return;
+    }
     // The reticle hangs on the boresight, which drifts off the middle while a chase view catches a
     // turn; the three arcs stay on the middle, so the instrument never swims about the screen.
     this.drawReticle(c, col, this.place.cx + this.view.ox, this.place.cy + this.view.oy, s);
@@ -1138,6 +1170,10 @@ export class ShipHud {
     const half = this.place.tickLen / 2;
     this.railTick(c, col, cx, cy, r, half, a.openAngle, s);
     this.railTick(c, col, cx, cy, r, half, a.topAngle, s);
+    if (v.race) {
+      this.drawRaceArcs(c, col, cx, cy, r, w);
+      return;
+    }
     // The guns, up the right: the refire clock across the whole arc, a notch where a slot is down.
     if (v.gunSlots > 0) {
       c.arc(cx, cy, r, S.gunsFrom, S.gunsTo, w, col.rule, 1);
@@ -1173,6 +1209,33 @@ export class ShipHud {
         c.arc(cx, cy, r, S.boostFrom, along(S.boostFrom, S.boostTo, share), w, v.boosting ? col.hot : col.warn, pulse);
         this.op(1);
       }
+    }
+  }
+
+  /**
+   * The race display's two arcs beside the speed: the engines' heat headroom up the right, where a ship's guns are
+   * (full is cold: good above half, caution down to a quarter, bad under it, pulsing when it is nearly gone), and the
+   * boost across the bottom, where a ship's booster is (the charge filling, then full and hot while it burns).
+   */
+  private drawRaceArcs(c: FlightCanvas, col: FlightColours, cx: number, cy: number, r: number, w: number): void {
+    const S = HUD_SIZES;
+    const R = FLIGHT_RATE;
+    const v = this.view;
+    c.arc(cx, cy, r, S.gunsFrom, S.gunsTo, w, col.rule, 1);
+    this.op(1);
+    const heat = clamp01(v.heat);
+    if (heat > 1e-4) {
+      const colour = heat > 0.5 ? col.good : heat >= 0.25 ? col.warn : col.bad;
+      const alpha = heat < S.boostPulse ? R.pulseLow + R.pulseSwing * (0.5 + 0.5 * Math.sin(this.clock * Math.PI * 2)) : R.fillAlpha;
+      c.arc(cx, cy, r, S.gunsFrom, along(S.gunsFrom, S.gunsTo, heat), w, colour, alpha);
+      this.op(1);
+    }
+    c.arc(cx, cy, r, S.boostFrom, S.boostTo, w, col.rule, 1);
+    this.op(1);
+    const charge = v.boosting ? 1 : clamp01(v.charge);
+    if (charge > 1e-4) {
+      c.arc(cx, cy, r, S.boostFrom, along(S.boostFrom, S.boostTo, charge), w, v.boosting ? col.hot : col.accent, R.fillAlpha);
+      this.op(1);
     }
   }
 

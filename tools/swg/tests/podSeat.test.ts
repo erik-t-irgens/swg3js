@@ -604,4 +604,17 @@ else {
   }
 }
 
+// --- the race drive's routing (the racer pass): a pod's seat and clips follow what it is, never the kind it is spawned as.
+{
+  const pod = { id: 'some_pod', kind: 'podracer', source: 'gallery' };
+  ok(isPod(pod), 'a pod is a pod whatever kind it is spawned as (the def decides, never the spawn)');
+  const others = [
+    { id: 'a_bike', kind: 'speederbike', source: 'gallery' },
+    { id: 'a_walker', kind: 'ground', source: 'gallery' },
+    { id: 'a_car', kind: 'flyer', source: 'gallery' },
+    { id: 'a_beast', kind: 'podracer', source: 'creature' },
+  ];
+  ok(others.every((def) => !isPod(def)), 'and anything else spawned as a pod is not one (a creature named for a pod keeps its saddle)');
+}
+
 console.log(`\n${checks} checks passed`);

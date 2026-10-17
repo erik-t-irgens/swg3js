@@ -129,6 +129,15 @@ export class VehicleSource implements FrameSource {
     vo.x = l.x;
     vo.y = l.y;
     vo.z = l.z;
+    const race = v.race;
+    if (race && race.active) {
+      // A race-driven hull's drive writes its turn into the body itself, about the world's up, and its turn rate to
+      // nought every step: the turn is the drive's yaw rate (degrees a second).
+      wo.x = 0;
+      wo.y = (race.w * Math.PI) / 180;
+      wo.z = 0;
+      return;
+    }
     if (v.spec.ship && v.airborne) {
       // flyShip writes the turn into the attitude itself and the body's turn rate to nought every step: the turn is the
       // stick's spin, about the hull's own axes.
@@ -152,14 +161,20 @@ export class VehicleSource implements FrameSource {
 
   turnInFrameTime(): boolean {
     const v = this.v!;
-    return !!v.spec.ship && v.airborne && !v.holding && !v.held;
+    if (v.holding || v.held) return false;
+    return (!!v.spec.ship && v.airborne) || v.raceDriven;
   }
 
-  /** Never a flown, held, landed, jump-held, ghosted, disposed or destroyed hull: its drive writes its velocity, or it is not there. */
+  /**
+   * Never a flown, race-driven, held, landed, jump-held, ghosted, disposed or destroyed hull: its drive writes its
+   * velocity, or it is not there. A race-driven hull's drive commands its velocity every step and its command wins, so
+   * a share of a catch handed to it would be lost at its next step and the catch only partly taken: the player takes
+   * the whole of it, as from a flown ship.
+   */
   takesPull(): boolean {
     const v = this.v;
     if (!v || v.disposed) return false;
-    return !v.ghosted && !v.destroyed && !v.holding && !v.held && !v.landed && !(v.spec.ship && v.airborne);
+    return !v.ghosted && !v.destroyed && !v.holding && !v.held && !v.landed && !(v.spec.ship && v.airborne) && !v.raceDriven;
   }
 
   mass(): number {
@@ -1726,7 +1741,9 @@ export class HullFrames {
     for (let pass = 0; pass < 2; pass++) {
       for (let k = 0; k < h.markedColliders.length; k++) {
         const hc = h.markedColliders[k];
-        if (!hc.isValid()) continue;
+        // A disabled collider is no surface (a race-driven hull's own colliders while its race box stands in for them,
+        // and the race box at every other moment): the controller never meets it, so nothing pushes out of it either.
+        if (!hc.isValid() || !hc.isEnabled()) continue;
         at.x = P0[0];
         at.y = P0[1];
         at.z = P0[2];

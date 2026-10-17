@@ -512,6 +512,22 @@ export class Physics {
    */
   steps = 0;
 
+  /**
+   * How many fixed steps the next `step(dt)` will take, 0 to 4, worked out from the accumulator exactly as `step`
+   * will spend it, and changing nothing: what a race-driven hull plans its height over (`raceDrive.ts`), since the
+   * bodies move only on these whole sixtieths of a second and a frame at 144 fps moves none on most frames.
+   */
+  stepsAhead(dt: number): number {
+    if (this.broken) return 0;
+    let a = this.acc + dt;
+    let n = 0;
+    while (a >= FIXED_DT && n < 4) {
+      a -= FIXED_DT;
+      n++;
+    }
+    return n;
+  }
+
   step(dt: number): void {
     if (this.broken) return;
     this.acc += dt;

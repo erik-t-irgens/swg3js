@@ -289,7 +289,7 @@ import { HyperspaceUi } from './ui/hyperspaceUi';
 import { Hyperspace } from './space/hyperspace';
 import { CRUISE_KEY, CRUISE_TUNE, Cruise, tuneCruise } from './space/cruise';
 import { HyperspaceTunnel } from './space/hyperspaceTunnel';
-import { STAND_ENEMY, STAND_FRIEND, STAND_NEUTRAL, ShipHud, WING_CLOSED, WING_HELD, WING_NONE, WING_OPEN, WING_OPENING, newFlightView, newTargetView, type FlightTune, type FlightView, type MessageKind as ShipMessageKind, type TargetView } from './ui/shipHud';
+import { RACE_OVERHEATED, RACE_RACING, RACE_READY, STAND_ENEMY, STAND_FRIEND, STAND_NEUTRAL, ShipHud, WING_CLOSED, WING_HELD, WING_NONE, WING_OPEN, WING_OPENING, newFlightView, newTargetView, type FlightTune, type FlightView, type MessageKind as ShipMessageKind, type TargetView } from './ui/shipHud';
 import { TargetFx } from './space/targetFx';
 import { FACTION_COLOR, FACTION_LABEL, shipStanding, type ShipFaction } from './space/factions';
 import { NpcBrain } from './space/npcBrain';
@@ -350,6 +350,11 @@ import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, room
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
+import { CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
+import { RACE_CLOCK, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
+import { raceNote, raceRoute } from './vehicles/vehicleKinds.ts';
+import { RACE_BLOCK_MARGIN, easeFovOut, frameRaceView, newRaceView, newRaceViewOut, raceBlocked, raceEyeOf, raceTurnOf, releaseRaceView, steerRaceView, widenRaceView, type RaceViewInput } from './vehicles/raceView.ts';
+import type { RaceLevels } from './vehicles/raceMath.ts';
 import { World } from './world/world';
 import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
@@ -414,6 +419,10 @@ import { castsShadow, surfaces } from './world/surfaces';
 import { compilerVerdict, groupPrograms, loadingLine, machineAside, measureCompiler, ProgramWatch, readKey, SHADER_TUNE, verdictLine, type ProgramPhase, type ProgramRow } from './core/shaderWatch.ts';
 import { census as programFamilies } from './core/fx/programCensus.ts';
 import { censusOf, CNT, PASS, PERF, perf, PERF_SWITCHES, PERF_TUNE, PERF_WAIT_MS, readMarks, registerPerfSwitch, SEC, writeMark, type TraceReport } from './core/perf.ts';
+
+// The race drive's hatch, read before anything spawns or the garage sorts a vehicle: `localStorage['swg.race'] = '0'`
+// starts the session with the pass switched off, so nothing is built differently (src/vehicles/raceTune.ts).
+readRaceHatch(() => (typeof localStorage === 'undefined' ? null : localStorage.getItem('swg.race')));
 
 /** The keys for the vehicle ridden, by its kind. */
 function mountPrompt(v: import('./vehicles/vehicle').Vehicle, wingsKey: string = WINGS_KEY): string {
@@ -6636,8 +6645,97 @@ class App {
                 boostTop: v.spec.boostSpeed,
                 boosting: v.boosting,
                 hp: Math.round(v.hp),
+                // A pod or a racing bike is the race drive's while it races, and on these springs only otherwise (`race()`).
+                race: v.race ? (v.raceDriven ? 'the race drive has the hull' : 'on its springs (race drive standing by)') : 'no race drive',
               }
             : 'no vehicle on its springs: spawn one (spawn(\'speeder\'))',
+        };
+      },
+      /**
+       * The race drive (src/vehicles/raceDrive.ts) on the ridden, else the nearest, pod or bike: `race()` reports it in
+       * numbers -- its own kind and the kind it was spawned as, the route, which hull is enabled, the mode, whether the
+       * drive has it and why not, the plan's fixed steps, the handling, the speed's four parts, the turn and the pose,
+       * the look-ahead and the bridge, the slope, the last hit, the hull and its floor, the living hold, the race view
+       * and the switches. `race({ on, drive, kinds, hull, podBox, bikeBox, bike, bikeHeights, view, bridge, offCourse })`
+       * flips the switches (kinds, hull and the boxes at the next spawn); `race({ mode: 'racing' })` switches a bike as
+       * U does; `race({ steer: radians })` sets the heading target that far off the nose (positive turns left, as the
+       * heading counts; held within the lead), since a driven tab has no mouse; `race({ upgrades: 'max' | 'stock' |
+       * { … }, condition })`; and `race({ tune })`, `race({ base: { podracer: { … } } })` and `race({ upgradeTune })`
+       * move any number live, the ceiling among them.
+       */
+      race: (opts: { on?: boolean; drive?: string; kinds?: string; hull?: string; podBox?: string; bikeBox?: string; bike?: string; bikeHeights?: string; view?: string; bridge?: string; offCourse?: string; mode?: RaceMode; steer?: number; upgrades?: 'max' | 'stock' | Partial<RaceLevels>; condition?: number; tune?: Partial<Record<keyof RaceTune, unknown>>; base?: Parameters<typeof tuneBase>[0]; upgradeTune?: Parameters<typeof tuneUpgrades>[0] } = {}) => {
+        const words: string[] = [];
+        const switches: Partial<Record<keyof RaceTune, unknown>> = {};
+        for (const k of ['on', 'drive', 'kinds', 'hull', 'podBox', 'bikeBox', 'bike', 'bikeHeights', 'view', 'bridge', 'offCourse'] as const) if (opts[k] !== undefined) switches[k] = opts[k];
+        if (Object.keys(switches).length) words.push(...tuneRace(switches));
+        if (opts.tune) words.push(...tuneRace(opts.tune));
+        if (opts.base) words.push(...tuneBase(opts.base));
+        if (opts.upgradeTune) words.push(...tuneUpgrades(opts.upgradeTune));
+        // The kinds follow the switch as well as `kinds` (with the pass off the table is not read and the name rule sorts
+        // the gallery, as it always did), so either sorts the garage's list again for the next spawn.
+        if (switches.kinds !== undefined || opts.tune?.kinds !== undefined || switches.on !== undefined || opts.tune?.on !== undefined) {
+          const g = this.garage ?? this.world.garage;
+          if (g) words.push(`${g.reclassify()} of the gallery's vehicles changed kind (a vehicle standing keeps its own)`);
+        }
+        const me = this.player.worldPos;
+        const mounted = this.player.mounted;
+        const v = mounted?.race ? mounted : ([...this.world.vehicles].filter((o) => o.race).sort((a, b) => a.pos.distanceTo(me) - b.pos.distanceTo(me))[0] ?? null);
+        const n2 = (n: number) => Number(n.toFixed(2));
+        const deg = (r: number) => Number(THREE.MathUtils.radToDeg(r).toFixed(1));
+        const tune = { on: RACE_TUNE.on, drive: RACE_TUNE.drive, kinds: RACE_TUNE.kinds, hull: RACE_TUNE.hull, podBox: RACE_TUNE.podBox, bikeBox: RACE_TUNE.bikeBox, bike: RACE_TUNE.bike, bikeHeights: RACE_TUNE.bikeHeights, view: RACE_TUNE.view, bridge: RACE_TUNE.bridge, offCourse: RACE_TUNE.offCourse, pitchFrom: RACE_TUNE.pitchFrom, holdLiving: RACE_TUNE.holdLiving };
+        const ceiling = { podKmh: RACE_TUNE.ceiling, bikeKmh: Math.round((RACE_TUNE.ceiling * 700) / 1200), most: CEILING_MOST, moves: RACE_TUNE.ceilingMoves };
+        if (!v?.race) {
+          const near = mounted ?? null;
+          const said = near ? `${near.spec.id} is a ${near.spec.kind}: no race drive (spawned as neither a pod nor a bike${RACE_TUNE.on ? '' : ', or spawned with the pass switched off'})` : 'no pod or bike standing: spawn one (spawn(\'podracer_anakin\'), or spawn(\'koro2_speeder\', \'speederbike\'))';
+          return { vehicle: said, words, switches: tune, ceiling, livingHold: this.world.livingHold };
+        }
+        const race = v.race;
+        if (opts.mode === 'racing' || opts.mode === 'traversal') words.push(!RACE_TUNE.on ? 'the pass is switched off: a bike has no modes (U does nothing)' : race.setMode(v, opts.mode) || `${opts.mode} mode`);
+        if (opts.upgrades !== undefined) race.setLevels(opts.upgrades, v);
+        if (typeof opts.condition === 'number') race.setCondition(opts.condition, v);
+        if (typeof opts.steer === 'number' && Number.isFinite(opts.steer)) {
+          if (v !== mounted || !race.wants(v) || RACE_TUNE.view !== 'race') words.push('steer sets the race view\'s target: ride a pod, or a bike in racing mode, with the race view on');
+          else {
+            // Taken over first (the orbit's own aim held within the lead), then the target set off the nose.
+            const ri = this.raceInput(v, race, false, false, this.raceDt);
+            ri.mouseDX = 0;
+            steerRaceView(this.raceView, ri, RACE_TUNE, this.raceOut);
+            this.raceView.target = cockpitYawStep(ri.heading + opts.steer, ri.heading, 0, 0, RACE_TUNE.steerLead);
+          }
+        }
+        const def = v.def ?? null;
+        const route = def ? raceRoute(def, v.spec.kind) : null;
+        const own = (this.garage ?? this.world.garage)?.vehicles.find((d) => d.id === v.spec.id)?.kind ?? null;
+        const whyNot = race.wants(v) ? (RACE_CLOCK.live ? '' : 'paused: play stands still, and the hull is held where it is') : !RACE_TUNE.on ? 'the pass is switched off' : RACE_TUNE.drive !== 'racer' ? 'drive is springs' : v.held || v.holding ? 'held' : v.ghosted ? 'ghosted' : v.destroyed ? 'destroyed' : race.modes && race.mode === 'traversal' ? 'traversal mode (U for racing)' : 'not raced';
+        const st = this.raceView;
+        const out = this.raceOut;
+        return {
+          id: v.spec.id,
+          ownKind: own,
+          spawnedAs: v.spec.kind,
+          ridden: v === mounted,
+          route,
+          note: route ? raceNote(route, v.spec.raceBox ?? null, v.spec.bounds) : null,
+          hullNow: v.raceBoxCollider ? (v.raceBoxCollider.isEnabled() ? 'the race box' : 'its own hull') : 'its own hull (no race box)',
+          has: race.active,
+          whyNot,
+          ...race.report(v),
+          livingHold: this.world.livingHold,
+          view: {
+            on: st.on,
+            target: Number.isNaN(st.target) ? null : n2(st.target),
+            leadDeg: deg(out.lead),
+            yaw: n2(st.yaw),
+            trailDeg: n2(out.trail),
+            pull: n2(st.pull),
+            distance: n2(this.cam.orbitDistance),
+            fov: n2(this.cam.camera.fov),
+            speedFov: n2(st.fov),
+            firstPerson: this.cam.firstPerson,
+          },
+          switches: tune,
+          ceiling,
+          words,
         };
       },
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
@@ -11380,6 +11478,10 @@ class App {
       v.guns = flown.guns.length > 0;
       v.hop = !!flown.spec.hop;
       v.boost = flown.spec.boost === 'heat' || flown.spec.boost === 'burst';
+      // A pod or a bike, by the kind it was spawned as: a bike's mode, and whether Space slides. Nothing with the pass off.
+      const race = RACE_TUNE.on && flown === p.mounted ? flown.race : null;
+      v.mode = race?.modes ? race.mode : '';
+      v.slide = !!race && race.wants(flown);
       v.cutKey = CUT_ENGINES_KEY;
       // A speeder or a mount has no ship menu of its own to offer.
       if (!v.ship) s.shipMenu = '';
@@ -15731,9 +15833,24 @@ class App {
     this.cam.setFrame(player.aboard ? roomTurn(player.aboard) : player.eva ? player.evaFrame : null);
     // Seated in a ship the first-person eye is the cockpit's, so zooming in lands there.
     const eyes = seated ? this.shipEyeWorld(seated, this.shipEyeW) : this.eyes();
-    // The orbit pulls back with the speed while the grapple swings the body (§3.12): its own eased scale, the literal 1
-    // whenever the rope is not out and the tail has run out, so nobody who never fires meets it.
-    this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+    // A pod, or a bike in racing mode, ridden: the race view (`placeRaceView`); anything else, the orbit, with the race
+    // view's widening easing out after a race (nought for good with the pass switched off, so nothing differs).
+    const raced = this.racedHull();
+    if (raced) this.placeRaceView(raced, blocked, dt, eyes);
+    else {
+      if (this.raceView.on) releaseRaceView(this.raceView);
+      this.raceAltLooking = false;
+      // The hull last measured is let go of, so a pod raced and then taken away is not kept from the collector.
+      this.raceBehindOf = null;
+      // Asked only while there is a widening to ease out: with the pass off, or never raced, it is nought for good.
+      const refit = (this.raceView.fov !== 0 || this.raceView.fitFov !== 0) && easeFovOut(this.raceView, dt, RACE_TUNE);
+      this.cam.speedFov = this.raceView.fov;
+      // The orbit pulls back with the speed while the grapple swings the body (§3.12): its own eased scale, the literal 1
+      // whenever the rope is not out and the tail has run out, so nobody who never fires meets it.
+      this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      // Fitted to the frustum the update has just given the camera, never to last frame's.
+      if (refit) this.world.onCameraResized();
+    }
     // The grapple's mark: where the dart would bite, worked out after the camera as the ghost below is, since it
     // goes where the camera looks; while attached it is the next anchor.
     this.stepGrappleMark(dt);
@@ -15767,6 +15884,173 @@ class App {
   private readonly rideBlock: import('./core/camera').CameraBlocker = (from, to) => {
     const d = this.physics.blockDistance(from.x, from.y, from.z, to.x, to.y, to.z, this.world.inside);
     return d === Infinity ? null : d;
+  };
+
+  /** The race view's state, its frame's answer and what it is handed, kept and written in place (src/vehicles/raceView.ts). */
+  private readonly raceView = newRaceView();
+  private readonly raceOut = newRaceViewOut();
+  private readonly raceIn: RaceViewInput = { heading: 0.5, mouseDX: 0.5, k: 0.5, keys: false, alt: false, orbitYaw: 0.5, speed: 0.5, ceiling: 0.5, seatY: 0.5, dt: 0.5 };
+  /** The hull the race view last measured how far its box reaches behind the seat for, and that reach (m). */
+  private raceBehindOf: Vehicle | null = null;
+  private raceBehind = 0;
+  /** The frame's step, for the race view's blocker, which the orbit calls with no step of its own. */
+  private raceDt = 1 / 60;
+  /** Alt held in the race view's first person: the look starts at the nose once per press. */
+  private raceAltLooking = false;
+  private readonly raceEyeW = new THREE.Vector3();
+  private readonly racePelvis = new THREE.Vector3();
+  private readonly raceFocus = new THREE.Vector3();
+  private readonly raceUp = new THREE.Vector3();
+  private readonly raceSeat = new THREE.Vector3();
+  private readonly raceTurnQ = new THREE.Quaternion();
+  private readonly raceEuler = new THREE.Euler();
+
+  /**
+   * The ridden hull the race view and the widening follow this frame: a pod, or a bike in racing mode, while the race
+   * drive has it (paused included), and never a shuttle's passenger's. Null with the pass switched off.
+   */
+  private racedHull(): Vehicle | null {
+    const v = this.player.mounted;
+    if (!v?.race || !RACE_TUNE.on || this.ride?.riding) return null;
+    return v.race.wants(v) ? v : null;
+  }
+
+  /**
+   * What a frame of the race view is handed, written into the one kept record, the frame's own step among it: every
+   * ease of the camera half (the yaw, the pull, the widening, the focus) is worked out from it, so a step not written
+   * there would ease at whatever the record last held, the same at every frame rate.
+   */
+  private raceInput(v: Vehicle, race: RaceDrive, keys: boolean, alt: boolean, dt: number): RaceViewInput {
+    const ri = this.raceIn;
+    ri.dt = dt;
+    ri.heading = race.active ? race.heading : v.heading;
+    ri.mouseDX = this.input.locked && !alt ? this.input.mouseDX : 0;
+    ri.k = 0.0025 * this.cam.sensitivity;
+    ri.keys = keys;
+    ri.alt = alt;
+    ri.orbitYaw = this.cam.yaw;
+    ri.speed = race.active ? Math.abs(race.h) : Math.abs(v.speed);
+    ri.ceiling = race.handling.cap;
+    // The seat's height in the hull's frame: what the third person's focus eases while a pod's cockpit stands up and sits down.
+    this.raceUp.set(0, 1, 0).applyQuaternion(v.group.quaternion);
+    ri.seatY = this.raceSeat.copy(this.player.worldPos).sub(v.group.position).dot(this.raceUp);
+    return ri;
+  }
+
+  /** How far the hull's box reaches behind the seat (m), measured the first frame the race view has this hull. */
+  private raceBehindFor(v: Vehicle): number {
+    if (this.raceBehindOf !== v) {
+      this.raceBehindOf = v;
+      v.seat.getWorldPosition(this.raceSeat);
+      v.group.worldToLocal(this.raceSeat);
+      const b = v.spec.bounds;
+      this.raceBehind = Math.max(0, this.raceSeat.z - Math.min(b.min[2], b.max[2]));
+    }
+    return this.raceBehind;
+  }
+
+  /**
+   * The race view's camera half (src/vehicles/raceView.ts). Third person is the orbit's own geometry handed a yaw (the
+   * hull's, leaning into the turn), a scale (never inside the hull, pulled out with the speed), a focus whose height
+   * in the hull's frame is eased, and a blocker of its own; first person is the pilot's own seated eyes turned with the
+   * hull. The widening is in both, and the cascades are fitted again as it moves -- after the camera has written this
+   * frame's field of view, since the cascades fit the frustum the camera has at that moment. `view: 'orbit'` is today's
+   * orbit with the widening alone. Allocates nothing.
+   */
+  private placeRaceView(v: Vehicle, blocked: import('./core/camera').CameraBlocker | null, dt: number, eyes: THREE.Vector3 | null): void {
+    if (this.placeRaceCamera(v, blocked, dt, eyes)) this.world.onCameraResized();
+  }
+
+  /** The race view's camera placed for this frame (`placeRaceView`); whether the cascades want fitting again. */
+  private placeRaceCamera(v: Vehicle, blocked: import('./core/camera').CameraBlocker | null, dt: number, eyes: THREE.Vector3 | null): boolean {
+    const { player, input } = this;
+    const race = v.race!;
+    const alt = input.held('freeLook');
+    const ri = this.raceInput(v, race, false, alt, dt);
+    if (RACE_TUNE.view !== 'race') {
+      if (this.raceView.on) releaseRaceView(this.raceView);
+      const widened = widenRaceView(this.raceView, ri, RACE_TUNE);
+      this.cam.speedFov = this.raceView.fov;
+      this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);
+      return widened;
+    }
+    const out = frameRaceView(this.raceView, ri, RACE_TUNE, this.raceOut);
+    this.cam.speedFov = out.speedFov;
+    const refit = out.refit;
+    if (this.cam.firstPerson && this.raceFirstPerson(v, dt, alt, true)) return refit;
+    this.raceAltLooking = false;
+    this.cam.setFrame(null);
+    if (out.writeYaw) this.cam.yaw = out.yaw;
+    // The focus: the seat as it stands, its height in the hull's frame the eased one.
+    this.raceUp.set(0, 1, 0).applyQuaternion(v.group.quaternion);
+    this.raceFocus.copy(player.worldPos).addScaledVector(this.raceUp, out.focusY - ri.seatY);
+    const base = Math.max(this.cam.distance, this.raceBehindFor(v) + RACE_TUNE.raceClear);
+    const scale = (base * out.pull) / Math.max(1e-3, this.cam.distance);
+    this.raceDt = dt;
+    this.cam.update(input, this.raceFocus, blocked ? this.raceBlock : null, dt, null, scale, player.eyeHeight);
+    // The frame on which the wheel has just brought the view in is drawn from the eyes, never from inside the skull.
+    if (this.cam.firstPerson) this.raceFirstPerson(v, dt, alt, false);
+    return refit;
+  }
+
+  /**
+   * The race view's first person: the pilot's own eyes where the seat stands this frame (the riding clip's first frame
+   * through the figure, never the live bones), with no ease, turned by the hull's heading and pitch and `fpRoll` of its
+   * roll; Alt looks round from the eye, as a ship's cockpit does. The field of view is written here, since the cockpit's
+   * placing writes none. False when the wheel has just taken the view out of it.
+   */
+  private raceFirstPerson(v: Vehicle, dt: number, alt: boolean, zoom: boolean): boolean {
+    const eye = this.raceEye(this.raceEyeW);
+    const turn = this.raceTurn(v, this.raceTurnQ);
+    this.cam.release();
+    if (alt) {
+      this.cam.setFrame(turn);
+      if (!this.raceAltLooking) {
+        this.cam.yaw = Math.PI;
+        this.cam.pitch = 0;
+        this.raceAltLooking = true;
+      }
+      this.orbitUnder.copy(eye).addScaledVector(this.raceUp.set(0, 1, 0).applyQuaternion(turn), -1.5);
+      this.cam.update(this.input, this.orbitUnder, null, dt, eye, 1, 1.5, 0);
+      return this.cam.firstPerson;
+    }
+    this.raceAltLooking = false;
+    this.cam.setFrame(null);
+    this.cam.cockpit(this.input, dt, eye, turn, v.heading, zoom);
+    if (!this.cam.firstPerson) return false;
+    const fov = this.cam.baseFov + this.cam.speedFov;
+    const camera = this.cam.camera;
+    if (Math.abs(camera.fov - fov) > 0.01) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+    return true;
+  }
+
+  /** The rider's seated eyes in the world (`raceEyeOf`): the playing clip's first frame through the figure as `syncMount` hung it, else the stock seated eye. */
+  private raceEye(out: THREE.Vector3): THREE.Vector3 {
+    const p = this.player;
+    const rig = p.rig;
+    const clip = rig?.currentClip ?? null;
+    const found = !!(clip && rig?.seatedPoints(clip, out, this.racePelvis));
+    return raceEyeOf(found ? out : null, SEATED_EYE_FALLBACK, rig ? rig.root.scale.y : 1, p.group.matrixWorld, out);
+  }
+
+  /** The first person's turn (`raceTurnOf`): the hull's, with `fpRoll` of its roll. */
+  private raceTurn(v: Vehicle, out: THREE.Quaternion): THREE.Quaternion {
+    return raceTurnOf(v.group.quaternion, RACE_TUNE.fpRoll, this.raceEuler, out);
+  }
+
+  /**
+   * What blocks the race view, kept rather than made a frame: the first thing that stands still along the line (the
+   * hull itself is a body and never does), in at once and let out over `camOut`, so a trunk passing between the rider
+   * and the camera pulls the view in for a moment. Its answer is the orbit's own `hit`, from which the orbit takes its
+   * own margin, so the clearance it eases is the camera's distance and the margin is put back on.
+   */
+  private readonly raceBlock: import('./core/camera').CameraBlocker = (from, to) => {
+    const len = from.distanceTo(to);
+    const d = this.physics.blockDistance(from.x, from.y, from.z, to.x, to.y, to.z, this.world.inside);
+    return raceBlocked(this.raceView, len, d, this.raceDt, RACE_TUNE.camOut) ? this.raceView.clear + RACE_BLOCK_MARGIN : null;
   };
 
   /** Show or hide a flown hull for the view, remembering one left hidden so that it is shown again when the view moves on. */
@@ -15923,6 +16207,8 @@ class App {
     // Whether play runs, and the ship the player flies or is aboard: what the world's ship contacts and NPC ships
     // read in stepLiving, which runs after this in the loop and in __debug.advance alike.
     this.world.simulating = simulate;
+    // And what every race-driven hull reads: while play stands still it is held where it is, at the speed it had.
+    RACE_CLOCK.live = simulate;
     // A hull removed with someone still in its rooms (the garage's clear, the console): out into the world first.
     // A hull somebody else flies is in no such list -- it is a picture with rooms hung under it, and the rooms
     // themselves call the walker out (peerHullGone) when that player's ship goes.
@@ -16019,6 +16305,29 @@ class App {
         stickX: inFlight ? this.flightStick.x : undefined,
         stickY: inFlight ? this.flightStick.y : undefined,
       };
+      // A pod, or a bike in racing mode (the race drive, src/vehicles/raceDrive.ts). U switches a bike's mode (a pod has
+      // none and says nothing; nothing else reads the key, and a ship's wings read it only for a ship). Space slides, the
+      // roll keys lean, and in the race view the mouse moves a heading target held within a lead of the nose rather than
+      // the view itself (src/vehicles/raceView.ts), so no flick turns the hull round. With the switch off none of it runs,
+      // U included: a bike spawned while it was on keeps its drive, and U on it does nothing, as on any bike before.
+      const race = RACE_TUNE.on && pilot === player.mounted ? pilot.race : null;
+      if (race?.modes && input.pressedAction('raceMode')) {
+        const want: RaceMode = race.mode === 'racing' ? 'traversal' : 'racing';
+        const no = race.setMode(pilot, want);
+        this.messages.system(no || (want === 'racing' ? 'racing mode' : 'traversal mode'));
+      }
+      if (race && race.wants(pilot)) {
+        drive.slide = input.held('jump');
+        drive.lean = (input.held('rollRight') ? 1 : 0) - (input.held('rollLeft') ? 1 : 0);
+        // The nose from the view's tilt only when asked for: off, a player looking up would lose speed for no reason they can see.
+        drive.pitch = RACE_TUNE.pitchFrom === 'view' && !free ? Math.sign(tilt) * THREE.MathUtils.clamp((Math.abs(tilt) - RACE_TUNE.trimDead) / Math.max(1e-3, RACE_TUNE.trimFull - RACE_TUNE.trimDead), 0, 1) : 0;
+        if (RACE_TUNE.view === 'race') {
+          const out = steerRaceView(this.raceView, this.raceInput(pilot, race, keys !== 0, free, dt), RACE_TUNE, this.raceOut);
+          // The sideways movement is the target's, spent here so the camera never reads it; Alt hands it back to the orbit.
+          if (!free) input.mouseDX = 0;
+          drive.heading = Number.isNaN(out.target) ? null : out.target;
+        }
+      }
     }
     // A ship in a jump is flown by the jump (its cruise is `jumpCruise`), whether or not a panel is open: the pilot's keys do nothing.
     if (pilot && this.hyperspace.drives(pilot)) drive = null;
@@ -16077,7 +16386,9 @@ class App {
       if (v.justHit > 0) {
         this.effects.burst(v.pos, 0xffc070, 0.4 + Math.min(2, v.justHit * 0.08), 0.2);
         this.effects.flash(v.pos, 0xffa050, 6 + v.justHit, 5, 0.12);
-        if (v === rider && !v.invulnerable) {
+        // A race-driven hull's scrape never jolts its rider (its hull takes it, down to its floor), and its crash is the
+        // destroyed path below and nothing else.
+        if (v === rider && !v.invulnerable && !v.raceDriven) {
           // A jolt through the hull under you: the hull keeps no record of what it ran into, so
           // there is no direction to point at and the flash is the whole of it. A crash is the
           // surroundings' harm, as a fall is.
@@ -16114,7 +16425,10 @@ class App {
           // Blown up under the rider: thrown clear with its speed and a kick upward, flailing, down prone.
           const lv = v.body.linvel();
           tmp.copy(v.pos).y += 0.6;
-          player.fling(tmp, tmp2.set(lv.x, lv.y, lv.z));
+          // A race-driven hull is wrecked before the body has slowed: the rider is thrown no harder than coming off a
+          // speeder today (`flingMost`), never at the hull's own hundreds of metres a second, however it was wrecked.
+          raceFling(v, tmp2.set(lv.x, lv.y, lv.z));
+          player.fling(tmp, tmp2);
           // Blown up under you: it is all round, so it has no side.
           if (player.takeDamage(25)) this.hurtFrom(null);
         } else if (player.aboard?.vehicle === v) this.thrownOutOfShip(v);
@@ -16125,6 +16439,13 @@ class App {
         this.world.disposeVehicle(v);
       }
     }
+    // The living held where they are while the ridden hull races faster than new bodies can be stood and put away
+    // (`livingAbove`): each is a clone and a compile. The perf flight's body counts as racing under `holdLiving:
+    // 'always'`, which is how the hold's worth is measured. What the drive has to say goes to the message line, once.
+    const racedNow = riding ? null : player.mounted;
+    this.world.livingHold = holdsLiving(racedNow) || (!!this.perfFlight && RACE_TUNE.on && RACE_TUNE.holdLiving === 'always');
+    const raceWords = racedNow?.race?.takeNote();
+    if (raceWords) this.messages.system(raceWords);
     // The way up and the way down, for whoever flies the ship: near the top of a planet's sky its
     // space zone is within reach; in space, the planet below. Both are taken from the ship menu.
     const flown = pilot;
@@ -16329,6 +16650,7 @@ class App {
    * so it is asked for once a frame and no more.
    */
   private fillFlightNumbers(v: Vehicle, fv: FlightView, st: CombatStatus | null): void {
+    fv.race = false;
     // Out in space a hull flies at twice its atmospheric top, which is what the arc must be scaled to.
     const over = v.space ? 2 : 1;
     fv.speed = Math.abs(v.speed);
@@ -16368,6 +16690,32 @@ class App {
       const open = v.wingsOpen;
       fv.wings = open >= 0.999 ? WING_OPEN : open <= 0.001 ? WING_CLOSED : WING_OPENING;
     }
+  }
+
+  /**
+   * The race display's numbers (the design's §8), beside the flight view's: the speed arc scaled to the ceiling with the
+   * reachable plain top and boost top as its ticks, the engines' heat headroom where a ship's guns are, the boost's
+   * charge where its booster is, and the word under the speed. Writes into the kept struct and makes nothing.
+   */
+  private fillRaceNumbers(v: Vehicle, race: RaceDrive, fv: FlightView): void {
+    fv.race = true;
+    fv.ox = 0;
+    fv.oy = 0;
+    fv.speed = Math.abs(v.speed);
+    fv.fullSpeed = race.handling.cap;
+    fv.topSpeed = race.plainTop();
+    fv.boostTop = Math.max(fv.topSpeed, race.boostTop());
+    fv.wingFactor = 1;
+    fv.boosting = race.boosting;
+    fv.gunSlots = 0;
+    fv.gunsDown = 0;
+    fv.hasBooster = true;
+    fv.boostShare = race.boosting ? 1 : race.charge;
+    fv.wings = WING_NONE;
+    fv.leadOn = false;
+    fv.heat = race.heat / 100;
+    fv.charge = race.charge;
+    fv.raceWord = race.locked ? RACE_OVERHEATED : !race.boosting && Math.abs(race.h) >= RACE_TUNE.boostGate * race.handling.V ? RACE_READY : RACE_RACING;
   }
 
   /**
@@ -22597,8 +22945,10 @@ class App {
       if (v.spec.ship && def.fit) this.lastShipDef = def;
       const b = v.spec.bounds;
       const size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]].map((n) => n.toFixed(1)).join('×');
-      this.messages.note(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)`);
-      return `${def.id} spawned as a ${v.spec.kind}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}, seated from ${v.seatFrom ?? 'its kind'}`;
+      // How it races, by the kind it was spawned as: nothing for a vehicle that does not, or with the pass switched off.
+      const races = v.race ? raceNote(raceRoute(def, v.spec.kind), v.spec.raceBox ?? null, v.spec.bounds) : null;
+      this.messages.note(`${def.label}: a ${v.spec.kind}, ${size} m (E to ride)${races ? `; ${races}` : ''}`);
+      return `${def.id} spawned as a ${v.spec.kind}${races ? ` (${races})` : ''}: ${size} m at ${v.pos.toArray().map((n) => n.toFixed(1)).join(',')}, ${v.pos.distanceTo(this.player.pos).toFixed(1)} m away, seat ${v.spec.seat.map((n) => n.toFixed(2)).join(',')}, hardpoints: ${v.hardpoints.join(' ') || 'none'}, seated from ${v.seatFrom ?? 'its kind'}`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`spawn: ${def.id}:`, err);
@@ -24942,7 +25292,10 @@ class App {
     // An NPC ship is never mounted or boarded: this one test feeds E, the prompts and every "nearest".
     if (v.autopilot) return Infinity;
     const p = this.player.pos;
-    const dy = Math.abs(v.pos.y - p.y);
+    // A raced hull holds its lowest point over the highest ground under its footprint, so parked on a slope its middle
+    // stands metres over the ground at its lower end: it is reached from that lowest point, or E never finds it there.
+    const race = v.race;
+    const dy = Math.abs((race && race.active ? race.low : v.pos.y) - p.y);
     if (dy > 4) return Infinity;
     return Math.hypot(v.pos.x - p.x, v.pos.z - p.z) - v.radius;
   }
@@ -25444,8 +25797,11 @@ class App {
         } else fv.leadOn = false;
         this.fillFlightNumbers(flownShip, fv, flownStatus);
       }
+      // A pod, or a bike in racing mode: the race display, the flight display's arcs alone (src/ui/shipHud.ts).
+      const racing = !flying ? this.racedHull() : null;
+      if (racing) this.fillRaceNumbers(racing, racing.race!, this.flightView);
       const aimed = flownShip;
-      this.shipHud.setFlight(flying && this.settings.hudArcs ? this.flightView : null);
+      this.shipHud.setFlight((flying || !!racing) && this.settings.hudArcs ? this.flightView : null);
       const showTarget = aimed?.spec.ship && aimed.airborne && !input.held('freeLook') && !this.hyperspace.drives(aimed);
       this.shipHud.setTarget(showTarget && this.settings.hudTargetBlock ? this.targetHud(aimed) : null);
       // The target effects stand on the target while it is shown, and follow it; out of the ship they go.

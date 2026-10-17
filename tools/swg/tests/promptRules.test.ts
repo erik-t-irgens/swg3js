@@ -160,6 +160,19 @@ const fill = (s: ReturnType<typeof newPromptState>) => fillActions(s, slots);
 }
 
 {
+  // The racer pass's three bars, by the kind a vehicle was spawned as: a bike in traversal (today's bike, with racing
+  // mode on U), a bike racing (boost, slide on Space, and back to traversal), and a pod (boost and slide).
+  const traversal = fill(at({ mounted: true, vehicle: { kind: 'speederbike', hop: true, boost: true, mode: 'traversal', slide: false } }));
+  ok(words(traversal).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.hop},${PROMPT_WORDS.boost},${PROMPT_WORDS.racingMode}` && keys(traversal)[3] === 'raceMode', `a bike in traversal: dismount, hop, boost, racing mode on its own key (${show(traversal).join(', ')})`);
+  const racing = fill(at({ mounted: true, vehicle: { kind: 'speederbike', hop: true, boost: true, mode: 'racing', slide: true } }));
+  ok(words(racing).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.boost},${PROMPT_WORDS.slide},${PROMPT_WORDS.traversalMode}` && keys(racing)[2] === 'jump' && keys(racing)[3] === 'raceMode', `a bike racing: dismount, boost, slide on Space, traversal mode (${show(racing).join(', ')})`);
+  const pod = fill(at({ mounted: true, vehicle: { kind: 'podracer', hop: true, boost: true, mode: '', slide: true } }));
+  ok(words(pod).join() === `${PROMPT_WORDS.dismount},${PROMPT_WORDS.boost},${PROMPT_WORDS.slide}`, `a pod: dismount, boost, slide, and no mode (${show(pod).join(', ')})`);
+  const koro = fill(at({ mounted: true, vehicle: { kind: 'flyer', hop: true, boost: true, mode: '', slide: false } }));
+  ok(!words(koro).includes(PROMPT_WORDS.racingMode) && !words(koro).includes(PROMPT_WORDS.slide), `a hover car at its own kind offers what it did before (${show(koro).join(', ')})`);
+}
+
+{
   // A ship flown from its bridge on foot: the same hull, and the words for letting go of the controls.
   const n = fill(at({ piloting: true, vehicle: { kind: 'ship', ship: true, airborne: true, canLand: true, powered: true, cutKey: 'KeyJ' } }));
   ok(words(n)[0] === PROMPT_WORDS.letGo, `at the controls: the first action lets go of them (${show(n).join(', ')})`);

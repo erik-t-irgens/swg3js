@@ -10,6 +10,7 @@ import { hardpointName, ownHardpoint, partOf, underPivot } from './shipAssembly.
 import { partnerLoss } from '../space/shipDamage.ts';
 import { LANDING, SHIP_GROUND, SHIP_ROOM, SPACE_LANDING, catchDistance, fitFloor, floorUnder, heldPose, landingFoot, landingLiquid, landingLiquidNote, poseInFrame, restPose, settleEase, surfacePose, surfaceUp, withFilter, type FloorPlane, type LandingLiquid } from './landing.ts';
 import { cellIndexOf } from './cells.ts';
+import { RACE_TUNE } from './raceTune.ts';
 
 /**
  * A vehicle's hull meets everything but the ground: the springs hold it off the terrain from
@@ -69,6 +70,10 @@ export interface DriveInput {
   stickY?: number;
   /** An autopilot's wanted cruise (m/s): the cruise eases toward it rather than following W and S. */
   cruise?: number;
+  /** A race-driven hull (src/vehicles/raceDrive.ts): the slide held, the lean (-1 left to 1 right), and the nose trim from the view (-1 down to 1 up). */
+  slide?: boolean;
+  lean?: number;
+  pitch?: number;
 }
 
 export interface VehicleSpec {
@@ -106,6 +111,13 @@ export interface VehicleSpec {
   seat: [number, number, number];
   /** The vehicle's own half-size for the chase camera and the boarding range when its bounds are wider than it (a ship framed on its hull, whose bounds reach its farthest wing either side). */
   reach?: number;
+  /**
+   * A vehicle raced as a pod or a bike: 'box' builds the race box (`raceBox`, width, height and length) beside its own
+   * hull, disabled, swapped in while the race drive holds the hull and out again when it lets go (`setRaceHull`).
+   * Absent, nothing is built beside the hull.
+   */
+  hull?: 'mesh' | 'box';
+  raceBox?: [number, number, number];
 }
 
 /** A ship's gun: where it fires from and which way in the vehicle's frame at spawn, and the muzzle node it is read from live (a wing that turned carries it). */
@@ -139,8 +151,12 @@ export function isHoverCar(name: string): boolean {
   return !/jetpack|gunship|airspeeder|xj6|xj_6|starfighter|air_?speeder|flying/.test(name.toLowerCase());
 }
 
-/** The handling for a kind, sized to a model's bounds; `animal` marks a ground vehicle that is a mount rather than a machine. */
-export function specFor(kind: VehicleKind, id: string, label: string, bounds: VehicleSpec['bounds'], { animal = false } = {}): VehicleSpec {
+/**
+ * The handling for a kind, sized to a model's bounds; `animal` marks a ground vehicle that is a mount rather than a
+ * machine, and `hoverCar` says whether a flyer is a hover car or an aircraft (the garage's table, `vehicleKinds.ts`;
+ * left out, the name decides, as it always did).
+ */
+export function specFor(kind: VehicleKind, id: string, label: string, bounds: VehicleSpec['bounds'], { animal = false, hoverCar: hoverCarSaid }: { animal?: boolean; hoverCar?: boolean } = {}): VehicleSpec {
   const length = bounds.max[2] - bounds.min[2];
   const height = bounds.max[1] - bounds.min[1];
   const seat: [number, number, number] = [0, bounds.min[1] + height * 0.62, -length * 0.08];
@@ -156,7 +172,7 @@ export function specFor(kind: VehicleKind, id: string, label: string, bounds: Ve
         ? { ...base, mass: 700, hover: 0.15, maxSpeed: 14, boostSpeed: 20, reverseSpeed: 3, accel: 8, brake: 14, turnRate: 1.6, turnAuthorityAt: 0, grip: 9, bank: 0, boost: 'burst', hop: true }
         : { ...base, mass: 2600, hover: 0.2, maxSpeed: 9, boostSpeed: 9, reverseSpeed: 3, accel: 5, brake: 10, turnRate: 1.1, turnAuthorityAt: 0, grip: 10, bank: 0, boost: 'none', hop: false };
     case 'flyer': {
-      const hoverCar = isHoverCar(id);
+      const hoverCar = hoverCarSaid ?? isHoverCar(id);
       return {
         ...base,
         mass: 800,
@@ -274,7 +290,7 @@ const SHIP_HIT_LOSS = 5;
  * integrationParameters.lengthUnit, 1 here; measured). A velocity asked past it is cut each step, which the hit test
  * reads as a crash. 399 keeps an invented metre a second under it.
  */
-const BODY_SPEED_CAP = 399;
+export const BODY_SPEED_CAP = 399;
 const SHIP_HIT_FREE = 0.4;
 /** How much of the ground's slope a hover kind takes on: 1 lies flat on it, 0 stays level. */
 const SLOPE_FOLLOW = 0.85;
@@ -799,6 +815,16 @@ export class Vehicle {
    * open). Null for any other vehicle.
    */
   autopilot: { readonly drive: DriveInput; readonly unpaused?: boolean } | null = null;
+  /**
+   * The race drive (src/vehicles/raceDrive.ts), attached by the garage to a vehicle spawned as a pod or a bike and never
+   * by the constructor, so a vehicle made with none drives exactly as it always did. While it holds the hull `update`
+   * runs it and nothing of the springs.
+   */
+  race: import('./raceDrive').RaceDrive | null = null;
+  /** The race box built beside the hull's own colliders (`VehicleSpec.raceBox`), disabled until the race drive holds the hull; null with none. */
+  raceBoxCollider: RAPIER.Collider | null = null;
+  /** The hull's own colliders, as the constructor built them: what the race box takes over from while it races. */
+  private readonly ownHull: RAPIER.Collider[] = [];
   /** Set first thing in `dispose`: whoever holds the vehicle drops it. */
   disposed = false;
   /** Materials made for this vehicle alone (its glow sprite's, each trail's, each clear pane's): World.disposeVehicle forgets and disposes them. */
@@ -873,6 +899,33 @@ export class Vehicle {
         this.body,
       );
       this.colliderHandles.push(box.handle);
+    }
+    // A vehicle raced as a pod or a bike: its race box beside the hull, built now and disabled until the race drive holds
+    // the hull, so the hull is today's at every other moment and nothing is added to the body or taken off it at a
+    // switch. It stands on the model's lowest point, centred across and along, carries the same mass as the hull (a
+    // disabled collider carries none, so the body's mass never changes), and takes nothing off the speed along a wall:
+    // its friction is the tune's under the Min rule, since the default Average would leave half a wall's own. A collider
+    // laid on a body adds its mass at once, disabled or not, and the engine takes a disabled one's off only at its next
+    // step, so the body's mass is worked out again from what is enabled the moment the box is on it: otherwise the
+    // springs' first update (at a spawn, before any step) read the body at twice its mass.
+    for (let i = 0; i < this.body.numColliders(); i++) this.ownHull.push(this.body.collider(i));
+    if (spec.hull === 'box' && spec.raceBox) {
+      const [bw, bh, bl] = spec.raceBox;
+      const by = b.min[1] + bh / 2;
+      const raceBox = world.createCollider(
+        RAPIER.ColliderDesc.cuboid(Math.max(0.1, bw / 2), Math.max(0.1, bh / 2), Math.max(0.1, bl / 2))
+          .setTranslation(cx, by, cz)
+          .setMassProperties(m, { x: 0, y: cy - by, z: 0 }, { x: this.inertia.x, y: this.inertia.y, z: this.inertia.z }, { x: 0, y: 0, z: 0, w: 1 })
+          .setFriction(RACE_TUNE.wallFriction)
+          .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Min)
+          .setRestitution(0.1)
+          .setCollisionGroups(HULL_GROUPS)
+          .setEnabled(false),
+        this.body,
+      );
+      this.body.recomputeMassPropertiesFromColliders();
+      this.raceBoxCollider = raceBox;
+      this.colliderHandles.push(raceBox.handle);
     }
     for (const h of this.colliderHandles) HULLS.set(h, this);
     this.pos.set(x, y, z);
@@ -1396,6 +1449,62 @@ export class Vehicle {
       this.prevVel.z += j.z / m;
     }
     if (j.y < 0) this.toldDown -= j.y / m;
+    // A race-driven hull commands its velocity every step and its command wins over the rope, so the grapple hands it
+    // none of a catch (`VehicleSource.takesPull`); a pull that reaches one all the same is told to the drive's own hit
+    // test, so a hooked racing hull is never hurt by the rope.
+    this.race?.told(j.x / m, j.y / m, j.z / m);
+  }
+
+  /** Whether the race drive holds the hull now (src/vehicles/raceDrive.ts): what the rider's jolt, the fling and the display ask. */
+  get raceDriven(): boolean {
+    return !!this.race?.active;
+  }
+
+  /**
+   * The race box in and the hull's own colliders out, or back again (`raceBoxCollider`; enabling, never adding or
+   * removing, so the body's mass never changes and nothing is left behind). A vehicle with no race box keeps its own
+   * hull and takes the race box's friction on it instead, given back on the way out.
+   */
+  setRaceHull(on: boolean): void {
+    if (!this.body.isValid()) return;
+    const box = this.raceBoxCollider;
+    if (box) {
+      box.setEnabled(on);
+      for (const c of this.ownHull) c.setEnabled(!on);
+      return;
+    }
+    for (const c of this.ownHull) {
+      c.setFriction(on ? RACE_TUNE.wallFriction : 0.4);
+      c.setFrictionCombineRule(on ? RAPIER.CoefficientCombineRule.Min : RAPIER.CoefficientCombineRule.Average);
+    }
+  }
+
+  /**
+   * Back to the springs from the race drive: gravity and damping as the constructor builds them, the hull's own
+   * colliders back, the springs' hit test told to skip a step and measure afresh, and the top held at the speed the
+   * hull has so `HOVER_TUNE.easeCap` brings it down at the brake rather than snapping it.
+   */
+  handBack(): void {
+    if (!this.body.isValid()) return;
+    this.body.setGravityScale(1, true);
+    this.body.setLinearDamping(0.12);
+    this.setRaceHull(false);
+    this.skipHitCheck = true;
+    this.prevVelValid = false;
+    const l = this.body.linvel();
+    this.speedCap = Math.hypot(l.x, l.z);
+  }
+
+  /** A scrape's or a strike's cost to the hull, never taking it under `floor` (and never raising one already under it). */
+  raceHurt(amount: number, floor: number): void {
+    if (this.invulnerable || !(amount > 0) || this.hp <= floor) return;
+    this.hp = Math.max(floor, this.hp - amount);
+  }
+
+  /** A race crash: the hull is gone, and the game's own path takes the vehicle away and throws its rider. */
+  raceWreck(): void {
+    if (this.invulnerable) return;
+    this.hp = 0;
   }
 
   /**
@@ -1733,6 +1842,8 @@ export class Vehicle {
 
   /** The way the vehicle faces (rad): 0 along +z, growing toward +x, as the player's heading; a ship's is its nose's bearing whatever its bank. */
   get heading(): number {
+    // A race-driven hull keeps its own heading: its body leans and pitches, which the plain reading below takes for a turn.
+    if (this.race?.active) return this.race.heading;
     const r = this.body.rotation();
     if (this.spec.ship) {
       qTmp.set(r.x, r.y, r.z, r.w);
@@ -1817,6 +1928,28 @@ export class Vehicle {
       this.group.quaternion.copy(q);
       this.onUpdate?.(dt, this, null);
       return;
+    }
+    // A pod, or a bike in racing mode, is driven by its race drive, which the garage attaches: nothing of the springs
+    // runs while it holds the hull, and it hands the hull back to them (`handBack`) when it lets go.
+    const race = this.race;
+    if (race && !s.ship) {
+      if (race.wants(this)) {
+        this.justHit = kept;
+        race.step(this, dt, drive, ground ?? null, water ?? null, lavaAt ?? null, physics);
+        this.onUpdate?.(dt, this, drive);
+        return;
+      }
+      if (race.active) {
+        // Destroyed while the drive held it, by something other than its own crash (a flow's tick, a bolt, a blast
+        // between its steps): it stays the drive's until the game takes it away later in this very step, so the rider
+        // is still thrown no harder than `flingMost` (`raceFling`). Handed back here, it threw them at its racing speed.
+        if (this.destroyed) {
+          this.justHit = kept;
+          this.onUpdate?.(dt, this, drive);
+          return;
+        }
+        race.release(this);
+      }
     }
     this.hopCd = Math.max(0, this.hopCd - dt);
     this.updateWings(dt);

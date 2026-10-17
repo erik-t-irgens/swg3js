@@ -159,6 +159,17 @@ export class Terrain {
     return this.heightAt(x, z);
   }
 
+  /** `heightIfCached` without the far grid (a built block only; the procedural ground everywhere, which costs nothing to ask). */
+  nearHeightIfCached(x: number, z: number): number | null {
+    if (this.swg) return this.swg.nearHeightIfCached(x, z);
+    return this.heightAt(x, z);
+  }
+
+  /** The far grid's own sample at a lattice point (`SwgTerrain.farSampleAt`); null with no SWG terrain, whose ground is all near. */
+  farSampleAt(i: number, j: number, farSize: number, farRes: number): number | null {
+    return this.swg ? this.swg.farSampleAt(i, j, farSize, farRes) : null;
+  }
+
   heightAt(x: number, z: number): number {
     if (this.swg) return this.swg.heightAt(x, z);
     let h = this.rawHeightAt(x, z);

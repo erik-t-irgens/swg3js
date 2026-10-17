@@ -264,6 +264,35 @@ export class SwgTerrain {
     return (h[j * n + i] * (1 - u) + h[j * n + i + 1] * u) * (1 - v) + (h[(j + 1) * n + i] * (1 - u) + h[(j + 1) * n + i + 1] * u) * v;
   }
 
+  /** `heightIfCached` without the far grid: the pole block's height where it is cached, else null. Never generates anything. */
+  nearHeightIfCached(gx: number, gz: number): number | null {
+    const x = this.toSwgX(gx);
+    const z = this.toSwgZ(gz);
+    const bw = this.sampler.blockWidth;
+    return this.sampler.hasBlock(Math.floor(x / bw), Math.floor(z / bw)) ? this.sampler.heightAt(x, z) : null;
+  }
+
+  /**
+   * The far grid's own sample at lattice point (i, j), game x `groundShift.x + i·step` and z likewise, with no
+   * interpolation, or null while its grid is not made: what a race-driven hull's look-ahead reads once a point and
+   * keeps (`raceMath.ts`, `LatticeRing`), since every far lookup builds its key.
+   */
+  farSampleAt(i: number, j: number, farSize: number, farRes: number): number | null {
+    const step = farSize / farRes;
+    const s = this.groundShift;
+    const gx = s.x + i * step;
+    const gz = s.z + j * step;
+    const cx = groundChunkAt(gx, s.x, farSize);
+    const cz = groundChunkAt(gz, s.z, farSize);
+    const grid = this.farGrids.get(SwgTerrain.farKey(cx * farSize + s.x, cz * farSize + s.z, farSize, farRes));
+    if (!grid) return null;
+    const n = farRes + 3;
+    const col = Math.min(n - 1, Math.max(0, i - cx * farRes + 1));
+    const row = Math.min(n - 1, Math.max(0, j - cz * farRes + 1));
+    const h = grid.heights[row * n + col];
+    return Number.isFinite(h) ? h : null;
+  }
+
   /** Whether a game-space corner lies on a tile centre pole, which decides the ground triangulation. */
   isTileCentre(gx: number, gz: number): boolean {
     const tw = this.tileWidth;

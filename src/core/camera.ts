@@ -82,6 +82,13 @@ export class ThirdPersonCamera {
   /** The field of view when not aiming, degrees. */
   baseFov = 60;
   /**
+   * The race view's widening at speed, degrees over `baseFov` (src/vehicles/raceView.ts, written by the game); nought
+   * everywhere else, where the view is exactly what it always was.
+   */
+  speedFov = 0;
+  /** A widened view was written last, so the first-person branch writes the base back once the widening has gone. */
+  private speedFovShown = false;
+  /**
    * How far toward the shoulder the view comes each frame while aiming: a share a frame, as it always was, which
    * the player's progress writes (`gun.aimRate`, 0.15 until something is earned). The view's only: a shot's
    * spread does not blend with it.
@@ -326,11 +333,23 @@ export class ThirdPersonCamera {
       this.camera.position.copy(this.focus).addScaledVector(this.dir, -eyeAhead);
       this.camera.lookAt(this.desired.copy(this.camera.position).sub(this.dir));
       this.orbitDistance = 0;
+      // The race view's widening, here too, and the base written back once it has gone: with none ever (anything but
+      // a vehicle racing) this writes nothing, as first person never has.
+      if (this.speedFov > 0 || this.speedFovShown) {
+        const fov = this.baseFov + this.speedFov;
+        if (Math.abs(this.camera.fov - fov) > 0.01) {
+          this.camera.fov = fov;
+          this.camera.updateProjectionMatrix();
+        }
+        this.speedFovShown = this.speedFov > 0;
+      }
       this.applyShake(dt);
       return;
     }
 
-    const fov = this.baseFov - 14 * this.aimBlend;
+    // Narrowed while aiming, and widened by the race view at speed (`speedFov`, nought everywhere else).
+    const fov = this.baseFov + this.speedFov - 14 * this.aimBlend;
+    this.speedFovShown = this.speedFov > 0;
     if (Math.abs(this.camera.fov - fov) > 0.01) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();

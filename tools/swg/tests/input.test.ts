@@ -358,4 +358,24 @@ const KEY = 'swg3js.bindings';
   ok(input.bindings.jump.join() === 'Space' && !store.has(KEY), 'reset puts every default back and keeps nothing');
 }
 
+// --- the racer pass's racing mode: on U with the wings, on purpose -------------------------------------------------
+{
+  store.clear();
+  const holders = (code: string) => (Object.keys(DEFAULT_BINDINGS) as Action[]).filter((a) => DEFAULT_BINDINGS[a].includes(code));
+  ok(DEFAULT_BINDINGS.raceMode.join() === 'KeyU' && holders('KeyU').sort().join() === 'raceMode,wings', 'racing mode is on U, shared on purpose with the wings (a bike reads the one, a ship the other)');
+  const input = new Input(canvas);
+  ok(input.bindings.raceMode.join() === 'KeyU' && input.bindings.wings.join() === 'KeyU', 'a fresh profile has both on U');
+  input.assignKey('raceMode', ['KeyH'], 'KeyH');
+  const after = new Input(canvas);
+  ok(after.bindings.raceMode.join() === 'KeyH' && after.bindings.wings.join() === 'KeyU', 'racing mode rebound to H leaves the wings on U, across a reload');
+  store.clear();
+  const other = new Input(canvas);
+  other.assignKey('wings', ['KeyK'], 'KeyK');
+  ok(new Input(canvas).bindings.raceMode.join() === 'KeyU', 'and the wings rebound leave racing mode on U');
+  store.clear();
+  const emote = loadedBindings({ emote1: ['KeyU'] });
+  ok(emote.emote1.join() === 'KeyU' && emote.raceMode.length === 0 && emote.wings.length === 0, 'a player who chose U for something else takes it from both');
+  store.clear();
+}
+
 console.log(`\n${checks} checks passed`);
