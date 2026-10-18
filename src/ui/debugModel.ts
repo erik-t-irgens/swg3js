@@ -44,11 +44,12 @@ export const DEBUG_MENU_TUNE = {
  * god mode and the fights' difficulty, the hour, the day's length and the fog, the lightsaber glow and
  * the flashlight, the speeders' hover, the nebulae, a weapon for a body already standing, the seats
  * under the seated people, how a held key turns and raises a thing in hand, and the grass, the far tree cards and
- * the flora's shadows, whose page settings they move in memory. Listed first, in a group
+ * the flora's shadows, whose page settings they move in memory, and first of all the race drive and the
+ * engines, whose numbers of feel are sliders (`src/vehicles/raceDials.ts`). Listed first, in a group
  * of their own, so every one is in one place and a new one is a line here; the pins of these are the ones
  * a tick runs again at start (`startCalls`).
  */
-export const TUNING_HELPERS: readonly string[] = ['reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
+export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
 
 /**
  * Where each helper is listed. A helper named in no group is listed under "Other", so one added to
@@ -64,7 +65,7 @@ export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] 
   { title: 'Character and kit', helpers: ['appearance', 'creator', 'hair', 'dye', 'tint', 'recipe', 'morph', 'species', 'wardrobe', 'wear', 'remove', 'preview', 'closet', 'fpHead', 'headLook', 'grapple', 'mood', 'variant', 'anim', 'upper', 'split', 'steady', 'grip', 'items', 'give', 'use', 'destroy', 'backpack', 'startingKit', 'giveScreens', 'weapons', 'equip', 'heldFx', 'shine', 'select', 'burn', 'breath', 'heal', 'profile', 'gun', 'gunType'] },
   { title: 'Fighting', helpers: ['saber', 'saberDefense', 'guns', 'bolts', 'turrets', 'turret', 'shootPlayer', 'blades', 'clash', 'scars', 'marks', 'powers', 'gadgets', 'forceLightning', 'footprints', 'ragdoll', 'kill', 'wreck'] },
   { title: 'Creatures and people', helpers: ['creature', 'fighter', 'fighters', 'cover', 'send', 'nav', 'patrols', 'mobile', 'mobiles', 'mobileRoles', 'mobileAssets', 'mobileTune', 'stepProbe', 'mobileCull', 'wild', 'people', 'ours', 'talk', 'followers'] },
-  { title: 'Vehicles and ships', helpers: ['vehicles', 'spawn', 'spawnBox', 'mount', 'unspawn', 'vehicleTune', 'vehicleState', 'race', 'engines', 'shipFit', 'refit', 'paint', 'shipEdit', 'ship', 'controls', 'cockpit', 'cockpitFrame', 'seat', 'wings', 'landing', 'dock', 'boots', 'droid', 'shipShadows', 'shipDrift', 'pushBodies', 'flight', 'taunt', 'npcShips', 'npcShip', 'shipCombat'] },
+  { title: 'Vehicles and ships', helpers: ['vehicles', 'spawn', 'spawnBox', 'mount', 'unspawn', 'vehicleTune', 'vehicleState', 'shipFit', 'refit', 'paint', 'shipEdit', 'ship', 'controls', 'cockpit', 'cockpitFrame', 'seat', 'wings', 'landing', 'dock', 'boots', 'droid', 'shipShadows', 'shipDrift', 'pushBodies', 'flight', 'taunt', 'npcShips', 'npcShip', 'shipCombat'] },
   { title: 'Space', helpers: ['cruise', 'jumps', 'jump', 'jumpState', 'jumpFx', 'suns'] },
   { title: 'Picture and effects', helpers: ['postfx', 'fxTiming', 'fxView', 'fxCheck', 'fxWarm', 'renderInfo', 'ssao', 'dof', 'previewDof', 'clouds', 'heat', 'heatPlume', 'flare', 'flareTune', 'flareProbe', 'faceSun', 'roomAir', 'movers', 'motionProbe', 'motionTune', 'grade', 'gradeSelfTest', 'gradeCheck', 'shadows', 'shadowLook', 'ambient', 'normals', 'gloss', 'ground', 'reflections', 'spec', 'specSelfTest', 'cards', 'cardsSelfTest', 'cardLight', 'cardLightSelfTest', 'leafShadowSelfTest', 'sway', 'swaySelfTest', 'grassShadowSelfTest', 'blackBox', 'specks', 'underwater', 'particles', 'ribbons', 'animTex'] },
   { title: 'Water, sky and weather', helpers: ['water', 'waterFx', 'waterSurface', 'sea', 'afloat', 'lava', 'ripples', 'fountains', 'weather', 'sky'] },

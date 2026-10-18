@@ -24,7 +24,14 @@
 // focused button out of the page (a Recent line run again, a line taken off, the list drawn again)
 // goes through `keepFocus`, which puts the keyboard back on the window rather than leaving it on the
 // page's body, where the game would take every key while the window was still up.
+//
+// A helper whose numbers are a matter of feel -- the race drive's, the engines' -- has dials (`dials.ts`,
+// handed in by the game through `DebugMenuDeps.dials`), and picked it shows them as sliders in place of the
+// arguments box, with Console beside them for the box. A slider sets its number through the helper's own
+// setter as it moves; nothing it sets is kept by itself, as with every knob, so the bar above them shows the
+// console line that sets every dial moved again, copies it, and pins it to run at start.
 
+import { allDials, dialMoved, dialNumber, dialText, dialUnit, movedArgs, movedLine, resetDials, snapDial, type Dial, type DialSet } from './dials.ts';
 import { DEBUG_MENU_TUNE, OTHER_GROUP, bestMatch, callText, captureConsole, describeValue, evaluateArgs, filterGroups, groupHelpers, isThenable, keepsColumns, pushHistory, readStore, sameCall, setAtStart, startCalls, togglePin, toJsonText, writeStore, type CallRecord, type ConsoleLike, type ConsoleLine, type DebugStore, type HelperEntry, type ViewNode } from './debugModel.ts';
 import { docKey, docsByHelper, firstArgs, inlineMarkdown, parseDebugTable, type DebugDoc, type DebugRow } from './debugReadme.ts';
 import { keyLabel } from './hud.ts';
@@ -44,6 +51,19 @@ export interface DebugMenuDeps {
   freeMouse: (free: boolean) => void;
   /** After Escape has shut it from a typed line: keep the game's keys standing aside this long. */
   holdKeys: (ms: number) => void;
+  /** The dials a helper on `__debug` has (its numbers of feel, as sliders), or null for one with none. */
+  dials?: (helper: string) => DialSet | null;
+}
+
+/** One dial's row as the window holds it, so a slider moved writes its own row and nothing else. */
+interface DialRow {
+  dial: Dial;
+  row: HTMLElement;
+  range: HTMLInputElement | null;
+  box: HTMLInputElement | null;
+  unit: HTMLElement | null;
+  choices: HTMLButtonElement[];
+  reset: HTMLButtonElement;
 }
 
 /** One helper the list shows: where it hangs, and what the README says of it (undefined: nothing). */
@@ -230,6 +250,25 @@ const DEBUG_MENU_CSS = `
 .dbg-line.l-debug { color: var(--muted); }
 .dbg-line.l-table { color: var(--shield); }
 .dbg-empty { color: var(--muted); margin: auto; text-align: center; padding: 20px; }
+.dbg-mode { margin-left: auto; display: flex; gap: 3px; }
+.dbg-panel button.dbg-mode-b { padding: 1px 8px; font-size: 11px; }
+.dbg-panel button.dbg-mode-b.on { color: var(--accent); border-color: var(--accent); }
+.dbg-dialbar { display: flex; align-items: center; gap: 5px; flex: none; flex-wrap: wrap; }
+.dbg-dcount { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.dbg-panel input.dbg-dline { flex: 1 1 220px; min-width: 120px; color: var(--shield); }
+.dbg-dials { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.dbg-gnote { color: var(--muted); font-size: 11px; margin: 0 0 4px 12px; }
+.dbg-dial { display: grid; grid-template-columns: minmax(96px, 26%) minmax(80px, 1fr) 64px minmax(36px, 128px) 22px; align-items: center; gap: 2px 6px; padding: 1px 0 1px 12px; }
+.dbg-dl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbg-dial.moved .dbg-dl { color: var(--component); }
+.dbg-panel input.dbg-range { width: 100%; margin: 0; padding: 0; border: none; background: transparent; accent-color: var(--accent); }
+.dbg-panel input.dbg-dv { width: 100%; padding: 1px 4px; text-align: right; }
+.dbg-du { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dbg-choices { grid-column: 2 / 5; display: flex; gap: 3px; flex-wrap: wrap; }
+.dbg-panel button.dbg-choice { padding: 1px 8px; }
+.dbg-panel button.dbg-choice.on { color: var(--accent); border-color: var(--accent); }
+.dbg-panel button.dbg-dreset.off { visibility: hidden; }
+.dbg-dn { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.3; margin: 0 0 3px; }
 `;
 
 export class DebugMenu {
@@ -254,6 +293,20 @@ export class DebugMenu {
   private readonly linesHead: HTMLElement;
   private readonly linesEl: HTMLElement;
   private readonly callRow: HTMLElement;
+  private readonly dialsEl: HTMLElement;
+  private readonly dialBar: HTMLElement;
+  private readonly dialCount: HTMLElement;
+  private readonly dialLine: HTMLInputElement;
+  private readonly dialResetAll: HTMLButtonElement;
+  private readonly dialCopy: HTMLButtonElement;
+  private readonly dialPin: HTMLButtonElement;
+  /** The picked helper's dials, or null when it has none. */
+  private dialSet: DialSet | null = null;
+  /** Its sliders shown (true), or the arguments box (false): the sliders until Console is chosen. */
+  private dialMode = true;
+  private readonly dialRows = new Map<string, DialRow>();
+  /** The groups of dials folded shut, by title, kept while the window is drawn again. */
+  private readonly dialShut = new Set<string>();
   /** The README's table, once it has been read; null until the first opening has fetched it. */
   private rows: DebugRow[] | null = null;
   private docs: Map<string, DebugDoc> = new Map();
@@ -353,7 +406,24 @@ export class DebugMenu {
     this.outEl = el('div', 'dbg-out');
     this.linesHead = el('div', 'dbg-lines-head hidden');
     this.linesEl = el('div', 'dbg-lines hidden');
-    main.append(this.titleEl, this.docEl, this.exEl, this.callRow, this.statusEl, this.outEl, this.linesHead, this.linesEl);
+    // A helper with dials: its sliders, and the bar over them saying how many have moved, the console line that
+    // sets them again, and the bar's three buttons.
+    this.dialBar = el('div', 'dbg-dialbar hidden');
+    this.dialCount = el('span', 'dbg-dcount');
+    this.dialLine = el('input', 'dbg-dline');
+    this.dialLine.readOnly = true;
+    this.dialLine.spellcheck = false;
+    this.dialLine.title = 'the console line that sets every dial moved again';
+    this.dialResetAll = el('button', 'dbg-dresetall', 'Reset all');
+    this.dialResetAll.title = 'every dial back where the game shipped it';
+    this.dialCopy = el('button', 'dbg-dcopy', 'Copy');
+    this.dialCopy.title = 'the console line, on the clipboard';
+    this.dialPin = el('button', 'dbg-dpin', 'Pin at start');
+    this.dialPin.title = 'pin the console line and tick it to run at start, so the dials are set again after a reload';
+    for (const b of [this.dialResetAll, this.dialCopy, this.dialPin]) b.type = 'button';
+    this.dialBar.append(this.dialCount, this.dialLine, this.dialResetAll, this.dialCopy, this.dialPin);
+    this.dialsEl = el('div', 'dbg-dials hidden');
+    main.append(this.titleEl, this.docEl, this.exEl, this.callRow, this.dialBar, this.statusEl, this.outEl, this.dialsEl, this.linesHead, this.linesEl);
     body.append(side, main);
     this.panel.append(body);
 
@@ -364,6 +434,9 @@ export class DebugMenu {
     this.pinBtn.addEventListener('click', () => this.pin());
     this.copyBtn.addEventListener('click', () => void this.copy());
     this.argsEl.addEventListener('input', () => this.drawPin());
+    this.dialResetAll.addEventListener('click', () => this.resetAllDials());
+    this.dialCopy.addEventListener('click', () => void this.copyDials());
+    this.dialPin.addEventListener('click', () => this.pinDials());
 
     // Keys pressed inside the window are the window's: Escape shuts it, the menu's own key shuts it
     // (from a typed line only when it types nothing), and nothing else is let through to the game's
@@ -409,6 +482,8 @@ export class DebugMenu {
     this.readHelpers();
     this.drawList();
     this.drawSaved();
+    // The console may have moved a number while the window was shut: the sliders read them all again.
+    this.refreshDials();
     void this.loadDocs();
     if (!this.selected && this.store.last) {
       const h = this.find(this.store.last.helper, this.store.last.on);
@@ -576,6 +651,22 @@ export class DebugMenu {
     }
     this.callRow.classList.remove('hidden');
     this.titleEl.replaceChildren(el('b', '', h.name), el('span', '', h.on === 'window' ? 'on the window' : 'on __debug'));
+    this.dialSet = h.on === 'debug' ? (this.deps.dials?.(h.name) ?? null) : null;
+    if (this.dialSet) {
+      const sw = el('span', 'dbg-mode');
+      for (const [label, sliders] of [['Sliders', true], ['Console', false]] as const) {
+        const b = el('button', `dbg-mode-b${this.dialMode === sliders ? ' on' : ''}`, label);
+        b.type = 'button';
+        b.title = sliders ? 'its numbers as sliders' : 'its arguments box, as for any helper';
+        b.addEventListener('click', () => {
+          if (this.dialMode === sliders) return;
+          this.dialMode = sliders;
+          this.drawSelected();
+        });
+        sw.append(b);
+      }
+      this.titleEl.append(sw);
+    }
     this.fnEl.textContent = h.on === 'window' ? h.name : `__debug.${h.name}`;
     this.docEl.replaceChildren();
     if (!this.rows) this.docEl.append(el('p', 'dbg-usage', 'reading the README…'));
@@ -601,6 +692,7 @@ export class DebugMenu {
       this.exEl.append(chip);
     }
     this.drawPin();
+    this.drawMode();
   }
 
   private drawEmpty(): void {
@@ -608,6 +700,191 @@ export class DebugMenu {
     this.docEl.replaceChildren();
     this.exEl.replaceChildren();
     this.callRow.classList.add('hidden');
+    this.dialSet = null;
+    this.drawMode();
+  }
+
+  // ---- the dials -----------------------------------------------------------------------------------
+
+  /** Whether the picked helper is shown as its sliders: it has dials and Console is not chosen. */
+  private get showingDials(): boolean {
+    return !!this.dialSet && this.dialMode;
+  }
+
+  /** The sliders or the arguments box, whichever is shown, and everything that goes with each. */
+  private drawMode(): void {
+    const dials = this.showingDials;
+    for (const e of [this.docEl, this.exEl, this.outEl]) e.classList.toggle('hidden', dials);
+    if (this.selected) this.callRow.classList.toggle('hidden', dials);
+    this.dialBar.classList.toggle('hidden', !dials);
+    this.dialsEl.classList.toggle('hidden', !dials);
+    const lines = !dials && this.written > 0;
+    this.linesHead.classList.toggle('hidden', !lines);
+    this.linesEl.classList.toggle('hidden', !lines);
+    if (dials) this.drawDials();
+    else {
+      this.dialRows.clear();
+      this.dialsEl.replaceChildren();
+    }
+  }
+
+  /** Every dial's row, made afresh: on a pick, and on a change of mode. */
+  private drawDials(): void {
+    const set = this.dialSet;
+    this.dialRows.clear();
+    this.keepFocus(() => {
+      this.dialsEl.replaceChildren();
+      if (!set) return;
+      for (const g of set.groups) {
+        const d = el('details', 'dbg-group');
+        d.open = !this.dialShut.has(g.title);
+        d.append(el('summary', '', g.title));
+        d.addEventListener('toggle', () => {
+          if (d.open) this.dialShut.delete(g.title);
+          else this.dialShut.add(g.title);
+        });
+        if (g.note) d.append(el('div', 'dbg-gnote', g.note));
+        for (const dial of g.dials) d.append(this.dialRow(dial));
+        this.dialsEl.append(d);
+      }
+    });
+    this.drawDialBar();
+  }
+
+  private dialRow(d: Dial): HTMLElement {
+    const row = el('div', 'dbg-dial');
+    const label = el('span', 'dbg-dl', d.label);
+    label.title = d.note;
+    const reset = el('button', 'dbg-x dbg-dreset', '↺');
+    reset.type = 'button';
+    reset.title = 'back where the game shipped it';
+    const r: DialRow = { dial: d, row, range: null, box: null, unit: null, choices: [], reset };
+    if (d.kind === 'number') {
+      const range = el('input', 'dbg-range');
+      range.type = 'range';
+      range.min = String(d.min);
+      range.max = String(d.max);
+      range.step = String(d.step);
+      range.title = d.note;
+      const box = el('input', 'dbg-dv');
+      box.type = 'text';
+      box.spellcheck = false;
+      box.title = 'type a number and press Enter: it may go past the slider, as far as the helper allows';
+      const unit = el('span', 'dbg-du');
+      range.addEventListener('input', () => this.setDial(r, snapDial(Number(range.value), d.min, d.max, d.step)));
+      box.addEventListener('change', () => {
+        const v = Number(box.value.trim());
+        if (box.value.trim() && Number.isFinite(v)) this.setDial(r, v);
+        else this.drawDialRow(r);
+      });
+      Object.assign(r, { range, box, unit });
+      row.append(label, range, box, unit, reset);
+    } else {
+      const wrap = el('span', 'dbg-choices');
+      for (const c of d.choices) {
+        const b = el('button', 'dbg-choice', c);
+        b.type = 'button';
+        b.title = d.note;
+        b.addEventListener('click', () => this.setDial(r, c));
+        r.choices.push(b);
+        wrap.append(b);
+      }
+      row.append(label, wrap, reset);
+    }
+    reset.addEventListener('click', () => {
+      const was = this.dialSet?.shipped.get(d.key);
+      if (was !== undefined) this.setDial(r, was);
+    });
+    row.append(el('div', 'dbg-dn', d.note));
+    this.dialRows.set(d.key, r);
+    this.drawDialRow(r);
+    return r.row;
+  }
+
+  /** One dial set through its helper's own setter, its row and the bar written again, and what the helper said. */
+  private setDial(r: DialRow, v: number | string): void {
+    const d = r.dial;
+    let words: string[];
+    if (d.kind === 'number') words = typeof v === 'number' ? d.set(v) : [];
+    else words = typeof v === 'string' ? d.set(v) : [];
+    this.drawDialRow(r);
+    this.drawDialBar();
+    this.status(words.length ? `${d.label}: ${words.join('; ')}` : `${d.label}: ${dialText(d)}`, words.length ? 'warn' : 'ok');
+  }
+
+  /** A row as its dial stands now: the slider, the box, the unit, the choice lit, and the ↺ only once it has moved. */
+  private drawDialRow(r: DialRow): void {
+    const set = this.dialSet;
+    const d = r.dial;
+    if (d.kind === 'number') {
+      const v = d.get();
+      if (r.range) r.range.value = String(v);
+      if (r.box) r.box.value = dialNumber(d, v);
+      if (r.unit) r.unit.textContent = dialUnit(d, v);
+    } else {
+      const v = d.get();
+      for (const b of r.choices) b.classList.toggle('on', b.textContent === v);
+    }
+    const moved = !!set && dialMoved(set, d);
+    r.row.classList.toggle('moved', moved);
+    r.reset.classList.toggle('off', !moved);
+  }
+
+  /** Every row read again (the console, or the bar's Reset all, may have moved any of them). */
+  private refreshDials(): void {
+    if (!this.showingDials) return;
+    for (const r of this.dialRows.values()) this.drawDialRow(r);
+    this.drawDialBar();
+  }
+
+  /** How many dials have moved, and the console line that sets them again. */
+  private drawDialBar(): void {
+    const set = this.dialSet;
+    const moved = set ? allDials(set).filter((d) => dialMoved(set, d)).length : 0;
+    this.dialCount.textContent = moved ? `${moved} moved` : 'as shipped';
+    this.dialLine.value = set ? movedLine(set) : '';
+    this.dialLine.placeholder = 'move a slider: the line that sets it again is written here';
+    this.dialResetAll.disabled = !moved;
+    this.dialCopy.disabled = !moved;
+    this.dialPin.disabled = !moved;
+  }
+
+  private resetAllDials(): void {
+    const set = this.dialSet;
+    if (!set) return;
+    // Its own button is disabled under the pointer by the redraw, and a browser takes the keyboard off it.
+    this.panel.focus({ preventScroll: true });
+    const words = resetDials(set);
+    this.refreshDials();
+    this.status(words.length ? `back as shipped: ${words.join('; ')}` : 'every dial back where the game shipped it', words.length ? 'warn' : 'ok');
+  }
+
+  private async copyDials(): Promise<void> {
+    const line = this.dialSet ? movedLine(this.dialSet) : '';
+    if (!line) return;
+    try {
+      await navigator.clipboard.writeText(line);
+      this.status('copied: paste it to keep these numbers, or into the console to set them again', 'ok');
+    } catch {
+      this.dialLine.focus();
+      this.dialLine.select();
+      this.status('the clipboard said no: the line is selected above for Ctrl+C', 'warn');
+    }
+  }
+
+  /** The console line pinned and ticked to run at start, so the dials are set again after a reload. */
+  private pinDials(): void {
+    const set = this.dialSet;
+    const args = set ? movedArgs(set) : '';
+    if (!set || !args) return;
+    const rec = { helper: set.helper, on: 'debug' as const, args };
+    if (!this.store.pinned.some((p) => sameCall(p, rec))) this.store.pinned = togglePin(this.store.pinned, rec).list;
+    this.store.pinned = setAtStart(this.store.pinned, rec, true);
+    saveStore(this.store);
+    this.drawSaved();
+    this.drawPin();
+    const others = startCalls(this.store.pinned).filter((p) => p.helper === set.helper && !sameCall(p, rec)).length;
+    this.status(`pinned and ticked: it runs once the first world is up after a reload${others ? `; ${others} other ticked pin${others === 1 ? '' : 's'} of ${set.helper} run${others === 1 ? 's' : ''} as well, in the order pinned (▶ beside a pin unticks it)` : ''}`, 'ok');
   }
 
   private drawCap(): void {
@@ -625,7 +902,8 @@ export class DebugMenu {
       if (!e.repeat) this.close(true);
       return;
     }
-    const typing = isField(e.target);
+    // A slider types nothing, so the menu's own key shuts the window from one as from a button.
+    const typing = isField(e.target) && (e.target as HTMLInputElement).type !== 'range';
     // The menu's own key shuts it, except where it would type a character into a box.
     if (!e.repeat && this.deps.keys().includes(e.code) && (!typing || e.key.length !== 1)) {
       e.preventDefault();
@@ -1033,7 +1311,7 @@ export class DebugMenu {
    * the call in the box (or unpins it with false), `atStart` ticks that pin to run at start (or clears
    * the tick), and `start` runs every ticked pin now, as a reload would once its first world is up.
    */
-  async drive(o: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean } = {}, say: (line: string) => void = () => {}): Promise<void> {
+  async drive(o: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean; mode?: 'sliders' | 'console'; dial?: { key: string; value: number | string }; resetDials?: boolean; pinDials?: boolean } = {}, say: (line: string) => void = () => {}): Promise<void> {
     // The list and the README as they stand, so the report that follows is the whole of it.
     this.readHelpers();
     await this.loadDocs();
@@ -1060,6 +1338,18 @@ export class DebugMenu {
       this.drawPin();
       this.drawSaved();
     }
+    if (o.mode === 'sliders' || o.mode === 'console') {
+      this.dialMode = o.mode === 'sliders';
+      if (this.selected) this.drawSelected();
+    }
+    // A dial moved as its slider or its box would move it, through the row the window holds for it.
+    if (o.dial) {
+      const r = this.dialRows.get(o.dial.key);
+      if (r) this.setDial(r, r.dial.kind === 'number' ? snapDial(Number(o.dial.value), r.dial.min, r.dial.max, r.dial.step) : String(o.dial.value));
+      else this.status(this.showingDials ? `no dial called ${o.dial.key} here` : 'pick a helper with dials, with its sliders shown, first', 'bad');
+    }
+    if (o.resetDials) this.resetAllDials();
+    if (o.pinDials) this.pinDials();
     if (o.run) await this.run();
     if (o.start) await this.runAtStart(say);
   }
@@ -1069,6 +1359,7 @@ export class DebugMenu {
     const groups = groupHelpers(this.helpers);
     const debugNames = new Set(this.helpers.filter((h) => h.on === 'debug').map((h) => h.name));
     const stale = this.rows ? [...this.docs.values()].filter((d) => d.on === 'debug' && !debugNames.has(d.helper)).map((d) => d.helper) : null;
+    const ds = this.dialSet;
     return {
       open: this.open,
       readme: this.rows ? { rows: this.rows.length, helpers: this.docs.size, error: this.docsError || null } : 'not read yet: it is read the first time the window opens',
@@ -1087,6 +1378,17 @@ export class DebugMenu {
       pinned: this.store.pinned.map(callText),
       atStart: startCalls(this.store.pinned).map(callText),
       ranAtStart: this.startRan,
+      dials: ds
+        ? {
+            helper: ds.helper,
+            shown: this.showingDials ? 'sliders' : 'console',
+            count: allDials(ds).length,
+            moved: allDials(ds)
+              .filter((d) => dialMoved(ds, d))
+              .map((d) => `${d.key} ${dialText(d)}`),
+            line: movedLine(ds) || null,
+          }
+        : null,
       recent: this.store.history.slice(0, 10).map(callText),
       key: keyLabel(this.deps.keys()[0] ?? ''),
     };

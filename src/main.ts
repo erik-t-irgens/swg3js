@@ -352,6 +352,7 @@ import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileN
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
 import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
+import { vehicleDialsFor } from './vehicles/raceDials.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
 import { hardpointName } from './vehicles/shipAssembly.ts';
 import { EngineFx } from './vehicles/engineFx.ts';
@@ -9990,14 +9991,18 @@ class App {
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.talkNow,
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
       holdKeys: (ms) => this.holdGameKeys(ms),
+      // The race drive's and the engines' numbers of feel, as sliders when `race` or `engines` is picked.
+      dials: (helper) => vehicleDialsFor(helper),
     });
     draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
     if (debugRoot) {
       // `__debug.debugMenu()` says what the menu holds; `{ open, pick, args, run }` works it from a
       // tab with no keyboard, a run being waited on before the report comes back. `{ pin, atStart }`
       // pins the call in the box and ticks it to run at start, and `{ start: true }` runs the ticked
-      // pins now, as the first world after a reload does.
-      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean }) => {
+      // pins now, as the first world after a reload does. With a helper that has dials picked, `{ mode }`
+      // shows its sliders or its box, `{ dial: { key, value } }` moves one as its slider would, and
+      // `{ resetDials, pinDials }` are the sliders' own Reset all and Pin at start.
+      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean; mode?: 'sliders' | 'console'; dial?: { key: string; value: number | string }; resetDials?: boolean; pinDials?: boolean }) => {
         await this.debugMenu.drive(o ?? {}, (line) => this.messages.system(line));
         return this.debugMenu.report();
       };

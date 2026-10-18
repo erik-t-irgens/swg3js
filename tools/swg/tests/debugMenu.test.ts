@@ -16,6 +16,10 @@
 //   map it was opened over keeps the cursor instead of having the pointer locked under it.
 // - A pin ticked to run at start runs once the first world is up, in the order pinned, each waited on, a
 //   throw or a helper gone said and stepped over, and the whole said on the message line: never silently.
+// - A helper with dials shows them as sliders: a slider moved sets its number through the dial on its
+//   step, a number typed may go past the slider, the bar says what moved and the line that sets it again,
+//   Reset and Pin at start do what they say, the keys stay the window's, and opening the window again
+//   reads numbers the console moved meanwhile.
 //
 // Everything here is synthetic: made-up helpers on a made-up `__debug`, nothing read from the game.
 import assert from 'node:assert/strict';
@@ -347,10 +351,27 @@ win.__debug = {
   },
   vanish: () => void startOrder.push('vanish'),
   never: () => void startOrder.push('never'),
+  // A helper with dials over a made-up table of its own.
+  tuned: () => ({ ...tunedTable }),
 };
 
 const { DebugMenu } = await import('../../../src/ui/debugMenu.ts');
 const { DEBUG_MENU_TUNE } = await import('../../../src/ui/debugModel.ts');
+const { readDials } = await import('../../../src/ui/dials.ts');
+
+/** The table the made-up dials move, and the set of them the menu is handed for `tuned`. */
+const tunedTable = { a: 2, b: 'x' };
+const tunedGroups = [
+  {
+    title: 'made up',
+    note: 'a group of two made-up dials',
+    dials: [
+      { kind: 'number' as const, key: 'tune.a', label: 'A number', note: 'a made-up number with a range of ten', min: 0, max: 10, step: 0.5, unit: 'm', get: () => tunedTable.a, set: (v: number) => ((tunedTable.a = v), []) },
+      { kind: 'choice' as const, key: 'tune.b', label: 'A choice', note: 'a made-up choice of two words', choices: ['x', 'y'] as const, get: () => tunedTable.b, set: (v: string) => ((tunedTable.b = v), [v === 'y' ? 'y takes effect at the next spawn' : '']).filter(Boolean) },
+    ],
+  },
+];
+const tunedSet = { helper: 'tuned', groups: tunedGroups, shipped: readDials(tunedGroups) };
 
 const asked = { freed: 0, handedBack: 0, held: [] as number[] };
 const parent = new FakeNode('div');
@@ -363,6 +384,7 @@ const menu = new DebugMenu(parent as unknown as HTMLElement, {
     else asked.handedBack++;
   },
   holdKeys: (ms) => void asked.held.push(ms),
+  dials: (helper) => (helper === 'tuned' ? tunedSet : null),
 });
 const root = menu.root as unknown as FakeNode;
 const panel = root.querySelector('.dbg-panel')!;
@@ -513,6 +535,98 @@ const report = () => menu.report() as { picked: string | null; args: string; bus
   // Where main.ts runs them: once a page, after the first world's loading screen has lifted, on the message line.
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   ok(/await this\.loadingScreen\.hide\(\);[\s\S]{0,400}if \(!this\.ranAtStart\) \{\s*this\.ranAtStart = true;\s*void this\.debugMenu\.runAtStart\(\(line\) => this\.messages\.system\(line\)\);/.test(main), 'the game runs the ticked pins once a page, after the first loading screen lifts, and says them on the message line');
+}
+
+// --- the dials -----------------------------------------------------------------------------------------------
+//
+// A helper with dials shows them as sliders in place of the arguments box. Everything here goes through the
+// window's own rows and buttons, with events delivered as a browser would deliver them.
+{
+  const fire = (n: FakeNode, type: string) => n.deliver({ type, target: n, stopped: false, stoppedNow: false, preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {} } as FakeEvent);
+  const q = (cls: string) => panel.querySelector(`.${cls}`)!;
+  const hidden = (cls: string) => q(cls).classList.contains('hidden');
+  const dialRep = () => (menu.report() as { dials: { shown: string; moved: string[]; line: string | null } | null; atStart: string[] }).dials;
+
+  await menu.drive({ pick: 'quick', args: '' });
+  ok(!panel.querySelector('.dbg-mode') && hidden('dbg-dials') && hidden('dbg-dialbar') && !hidden('dbg-callrow'), 'a helper with no dials shows its arguments box and no sliders');
+  ok((menu.report() as { dials: unknown }).dials === null, 'and the report says it has none');
+
+  await menu.drive({ pick: 'tuned' });
+  ok(!hidden('dbg-dials') && !hidden('dbg-dialbar') && hidden('dbg-callrow') && hidden('dbg-doc'), 'a helper with dials shows its sliders in place of the arguments box');
+  ok(panel.querySelectorAll('dbg-dial').length === 2 && q('dbg-gnote').textContent === 'a group of two made-up dials', 'a row for each dial, under its group and its group\'s words');
+  ok(q('dbg-dcount').textContent === 'as shipped' && (q('dbg-dresetall') as FakeNode).disabled && (q('dbg-dpin') as FakeNode).disabled, 'nothing has moved: the bar says so and its buttons wait');
+
+  // The slider, moved: on its step, through the dial, the row and the bar written again.
+  const range = q('dbg-range');
+  const box = q('dbg-dv');
+  range.value = '7.3';
+  fire(range, 'input');
+  ok(tunedTable.a === 7.5, `the slider sets its number through the dial, on its step (${tunedTable.a})`);
+  ok(box.value === '7.5' && q('dbg-du').textContent === 'm', 'the box beside it shows the number, and its unit after it');
+  const row = panel.querySelectorAll('dbg-dial')[0];
+  ok(row.classList.contains('moved') && !q('dbg-dreset').classList.contains('off'), 'the row says it has moved, and its ↺ shows');
+  ok(q('dbg-dcount').textContent === '1 moved' && q('dbg-dline').value === '__debug.tuned({ tune: { a: 7.5 } })', `the bar counts it and writes the line that sets it again (${q('dbg-dline').value})`);
+  ok(/A number: 7\.5 m/.test(status()), `and the status line says what it is now (${status()})`);
+
+  // A number typed: past the slider, as far as the dial's helper allows; and nonsense typed puts the box back.
+  box.value = '12.25';
+  fire(box, 'change');
+  ok(tunedTable.a === 12.25 && box.value === '12.25', 'a number typed into the box may go past the slider, and is shown as it was set');
+  box.value = 'twelve';
+  fire(box, 'change');
+  ok(tunedTable.a === 12.25 && box.value === '12.25', 'what is not a number sets nothing, and the box shows the number again');
+
+  // A choice clicked; what its helper says is said.
+  const y = panel.querySelectorAll('dbg-choice').find((b) => b.textContent === 'y')!;
+  click(y);
+  ok(tunedTable.b === 'y' && y.classList.contains('on'), 'a choice clicked is set, and lit');
+  ok(/next spawn/.test(status()) && q('dbg-status').classList.contains('warn'), `and what the helper said of it is said (${status()})`);
+  ok(JSON.stringify(dialRep()?.moved) === JSON.stringify(['tune.a 12.25 m', 'tune.b y']), `the console's report names what has moved (${dialRep()?.moved.join(', ')})`);
+
+  // The keys stay the window's with a slider holding them, and the menu's own key shuts it from one.
+  range.focus();
+  const heardWas = gameHeard.length;
+  press('KeyW');
+  press('ArrowLeft');
+  ok(gameHeard.length === heardWas, 'a key pressed on a slider is the window\'s, never the game\'s');
+
+  // One row's ↺, then Reset all.
+  click(panel.querySelectorAll('dbg-dreset')[1]);
+  ok(tunedTable.b === 'x' && tunedTable.a === 12.25, 'a row\'s ↺ puts that dial back, and only it');
+  click(q('dbg-dresetall'));
+  ok(tunedTable.a === 2 && tunedTable.b === 'x' && q('dbg-dcount').textContent === 'as shipped' && q('dbg-dline').value === '', 'Reset all puts every dial back where it shipped');
+  ok(panel.contains(doc.activeElement), 'and the keyboard stays in the window as its button is disabled under it');
+
+  // Copy with no clipboard: the line is selected for Ctrl+C. Pin at start: pinned and ticked.
+  range.value = '4';
+  fire(range, 'input');
+  await menu.drive({});
+  click(q('dbg-dcopy'));
+  await new Promise((r) => setImmediate(r));
+  ok(/the clipboard said no/.test(status()) && doc.activeElement === q('dbg-dline'), `with no clipboard the line is selected for Ctrl+C (${status()})`);
+  click(q('dbg-dpin'));
+  ok((menu.report() as { atStart: string[] }).atStart.includes('tuned({ tune: { a: 4 } })'), 'Pin at start pins the line and ticks it to run at start');
+
+  // Console, and back.
+  const modes = () => panel.querySelectorAll('dbg-mode-b');
+  click(modes().find((b) => b.textContent === 'Console')!);
+  ok(hidden('dbg-dials') && !hidden('dbg-callrow') && dialRep()?.shown === 'console', 'Console shows the arguments box in place of the sliders');
+  click(modes().find((b) => b.textContent === 'Sliders')!);
+  ok(!hidden('dbg-dials') && hidden('dbg-callrow') && dialRep()?.shown === 'sliders', 'and Sliders shows them again');
+
+  // The menu's key shuts the window from a slider; a number the console moves meanwhile is read on opening.
+  q('dbg-range').focus();
+  press('Backquote', '`');
+  ok(!menu.open, 'the menu\'s own key shuts the window from a slider, which types nothing');
+  tunedTable.a = 9;
+  menu.show();
+  ok(q('dbg-dv').value === '9.0' && q('dbg-range').value === '9', `opened again, the sliders read what the console moved while it was shut (${q('dbg-dv').value})`);
+
+  // The console's own handle moves a dial as its slider would.
+  await menu.drive({ dial: { key: 'tune.a', value: 3.2 } });
+  ok(tunedTable.a === 3, `__debug.debugMenu({ dial }) moves a dial on its step, as the slider would (${tunedTable.a})`);
+  await menu.drive({ resetDials: true });
+  ok(tunedTable.a === 2, 'and { resetDials: true } is Reset all');
 }
 
 // --- shutting it -------------------------------------------------------------------------------------------
