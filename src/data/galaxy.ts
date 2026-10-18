@@ -70,9 +70,11 @@ export const GALAXY_SYSTEMS: GalaxySystemDef[] = [
 
 /**
  * PLANETS entries that belong to no system on purpose: the development gallery is not a place in the
- * galaxy, and the instances zone is a box of copies reached only through each dungeon's own way in.
+ * galaxy, and the instances zone is a box of copies reached only through each dungeon's own way in. The
+ * worlds whose ground is real-world elevation (`PlanetDef.dem`) are the owner's own for the map maker and
+ * have no system of their own yet.
  */
-export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1'];
+export const GALAXY_LEFT_OUT: readonly string[] = ['gallery', 'dungeon1', 'canyon', 'seattle', 'monument', 'helens'];
 
 /**
  * Invented: how the galaxy is laid out, in the map's own units (one unit is one metre to three, and

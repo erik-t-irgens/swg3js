@@ -12,6 +12,7 @@
 // `src/world/housePlace.ts`, which is pure of fetching too.
 
 import type { Footprint, Patch } from './housePlace.ts';
+import { planetById } from '../data/planets.ts';
 
 /** One deed, as the pack carries it. */
 export interface DeedRow {
@@ -116,11 +117,14 @@ export function footprintOf(d: DeedRow): Footprint | null {
  * Why this deed cannot be put down on this world, or null.
  *
  * The worlds are the server's own `allowedZones`, and a deed that names none may stand anywhere --
- * which is what the generic house deeds do, and is the reason an empty list is not a refusal.
+ * which is what the generic house deeds do, and is the reason an empty list is not a refusal. A world of our own whose
+ * ground is real-world elevation (`PlanetDef.dem`) is none of the server's zones, so every deed may stand there: kept
+ * to the zones, nothing of the game's could ever go up on a custom world.
  */
 export function wrongWorld(d: DeedRow, planetId: string): string | null {
   if (!d.zones.length) return null;
-  if (!d.zones.includes(planetId)) return null;
+  if (d.zones.includes(planetId)) return null;
+  if (planetById(planetId)?.dem) return null;
   const where = d.zones.length === 1 ? d.zones[0] : `${d.zones.slice(0, -1).join(', ')} or ${d.zones[d.zones.length - 1]}`;
   return `this one may only stand on ${where}`;
 }

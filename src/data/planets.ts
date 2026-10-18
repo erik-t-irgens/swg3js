@@ -1,4 +1,4 @@
-import { GRAND_CANYON_LOK } from '../world/demShader';
+import { GRAND_CANYON_LOK } from '../world/demShader.ts';
 export type TreeStyle = 'none' | 'palm' | 'pine' | 'round' | 'dead' | 'giant' | 'swamp';
 
 /** One terrain of a planet the game split into separate zones (Kashyyyk), each its own converted pack. */
@@ -33,7 +33,7 @@ export interface PlanetDef {
  * Only the pack's shader table and its texture files are taken. Its terrain is not attached and
  * its layout is not placed, so nothing of that world's heights or buildings comes with them.
  */
-  ground?: import('../world/demShader').GroundRules;
+  ground?: import('../world/demShader.ts').GroundRules;
   /** Zones with their own terrain; the first is where travel lands. Absent for single-terrain planets. */
   zones?: PlanetZone[];
   /**

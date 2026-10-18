@@ -57,16 +57,24 @@ export class DemShader {
   readonly missing: string[] = [];
   private readonly ids: number[];
   private readonly fallbackId: number;
+  // Written out rather than as parameter properties: node's type stripping, which runs the tests, refuses those,
+  // and `planets.ts` brings this file into every test that reads the planet list.
+  private readonly spec: GroundRules;
+  /** Game height to metres above sea level: the DEM's own lift, subtracted back out. */
+  private readonly lift: number;
+  /** Metres between height samples, for the slope. One tile is about right. */
+  private readonly step: number;
 
   constructor(
-    private readonly spec: GroundRules,
+    spec: GroundRules,
     /** The borrowed pack's families, by name. */
     families: ReadonlyMap<string, number>,
-    /** Game height to metres above sea level: the DEM's own lift, subtracted back out. */
-    private readonly lift: number,
-    /** Metres between height samples, for the slope. One tile is about right. */
-    private readonly step = 4,
+    lift: number,
+    step = 4,
   ) {
+    this.spec = spec;
+    this.lift = lift;
+    this.step = step;
     const find = (name: string): number => {
       const id = families.get(name) ?? families.get(name.toLowerCase());
       if (id === undefined) {
