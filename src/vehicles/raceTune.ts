@@ -207,6 +207,18 @@ export const RACE_TUNE = {
   trimGlide: 0.5,
   trimDead: 0.15,
   trimFull: 0.6,
+  /**
+   * Another player's pod near yours: a nudge of the turn away from where it is drawn, never a collision (their hull is a
+   * picture here, and passes through yours). 'off' leaves the turn as the stick asks.
+   */
+  nudge: 'on' as 'on' | 'off',
+  /** How near another player's ride must be drawn before the turn is nudged from it (m): about a pod's length and a half. */
+  nudgeReach: 20,
+  /**
+   * The most of the stick a ride drawn right beside yours takes, falling to nothing at the reach: a third, so a pilot
+   * holding a line beside another feels it lean them off and can hold it with a little more stick.
+   */
+  nudgeStick: 0.35,
 };
 
 export type RaceTune = typeof RACE_TUNE;
@@ -354,6 +366,7 @@ const CHOICES: Partial<Record<keyof RaceTune, readonly (string | boolean)[]>> = 
   surfaces: ['none'],
   holdLiving: ['speed', 'always', 'never'],
   ceilingMoves: ['cap', 'all'],
+  nudge: ['on', 'off'],
 };
 
 /** The numbers kept within a range of their own; every other number is held finite and not below nought. */
@@ -377,6 +390,8 @@ const RANGES: Partial<Record<keyof RaceTune, [number, number]>> = {
   looseFall: [1, 300],
   looseGrip: [0, 300],
   looseFeed: [0, 1000],
+  nudgeReach: [0, 200],
+  nudgeStick: [0, 1],
 };
 
 /** The switches read only when a vehicle is spawned or its drive made: the knob says so. */

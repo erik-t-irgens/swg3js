@@ -29,6 +29,13 @@
 // the body is held off its box by the same arithmetic (`peerTest`), as off a hull by the hull test. Nothing is ever put
 // on the picture: only its rider's game can move it. What it reads is `RemoteBodies.hullBoxes()`, as the game hands it in
 // (`GrappleBody.peerHulls`), never the peers' own records, and its clock is the list's stamp: nothing here reads one.
+//
+// Since the racer's wave 4a a peer's picture is itself drawn where its rider's game says it is (`src/net/peerReckon.ts`:
+// moved by the velocity they sent and eased onto the last place carried forward by its age on the shared clock), and
+// where it is, the rope rides the picture's own step and nothing of its own: the slot asks the very function the
+// picture is stepped by, with the very state and the frame's very moment (`reckonAt`), so the rope drawn on the picture
+// and the body it tows are one pose. The smooth pose and its lag stand only for a picture still glided (a relay before
+// `veh: 2`, no clock shared), which is the picture they were measured against.
 import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import type { Physics } from '../core/physics.ts';
 import type { Vehicle } from '../vehicles/vehicle.ts';
@@ -36,6 +43,7 @@ import type { FrameSource, RopeFrame } from './grappleRope.ts';
 import { worldFrame } from './grappleRope.ts';
 import { hullStillIn, leadPose, peerMissIn, peerPoseIn, slerpTurn, turnBy, turnRateIn } from './grappleMath.ts';
 import { newBoxHit, rayBoxIn } from './grappleBox.ts';
+import { RECKON_TUNE, reckonable, reckonStepIn, reckonsIn, type ReckonState } from '../net/peerReckon.ts';
 
 type R = typeof RAPIER_NS;
 type Collider = RAPIER_NS.Collider;
@@ -408,6 +416,11 @@ export interface PeerHull {
   readonly turn: Float64Array;
   readonly vel: Float64Array;
   readonly heardAt: number;
+  /**
+   * The state its picture is reckoned from (`src/net/peerReckon.ts`), when the list carries one: the rope's pose on it is
+   * the picture's own reckoned step while it is reckoned. Absent or not reckonable, the pose is the smooth one as before.
+   */
+  readonly reck?: ReckonState;
 }
 
 /**
@@ -415,10 +428,13 @@ export interface PeerHull {
  * read on): the frame before's own clock, which the game reads once at every frame's start and hands the peers before they
  * are glided (`RemoteBodies.stampHulls`), so the frame's own end is that and the frame. Nothing on the peers' or the rope's
  * path reads a clock of its own: a clock read hands back a fresh number, every frame, for every player who never fires.
+ * `reckonAt` is this frame's moment on the shared clock (ms, NaN with none), which the game hands over at the frame's top
+ * (`RemoteBodies.stampReckon`) and the pictures are reckoned to later in the same frame.
  */
 export interface PeerHulls {
   readonly list: readonly PeerHull[];
   readonly stamp: number;
+  readonly reckonAt?: number;
 }
 
 /**
@@ -716,6 +732,8 @@ export class HullFrames {
       slots.push(f);
     }
     this.slots = slots;
+    // No clock shared until a list says otherwise.
+    this.peerShared = Number.NaN;
     this.capsule = new Rapier.Capsule(0.45, 0.35);
     this.contact = new Rapier.ShapeContact(0, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
     this.kept = new Rapier.CharacterCollision();
@@ -844,6 +862,21 @@ export class HullFrames {
   /** The list's clock this frame (s), read once and only while a peer is about, and the frame a slot is stepped by. */
   private peerNow = 0;
   private peerDt = 0;
+  /**
+   * This frame's moment on the shared clock (ms, NaN with none), the list's `reckonAt`: the moment the pictures are
+   * reckoned to this frame. A fraction to begin with, so its field holds a number of its own and is written in place.
+   */
+  private peerShared = 0.5;
+  /** The reckoning's numbers for one slot (the frame, the age, the moment) and the pose it steps, kept. */
+  private readonly rn = new Float64Array(3);
+  private readonly rp = { x: 0.5, y: 0.5, z: 0.5 };
+  private readonly rq = { x: 0.5, y: 0.5, z: 0.5, w: 0.5 };
+
+  /** The list's moment on the shared clock into `peerShared`: NaN where the list carries none (a stand-in's own). */
+  private readShared(peers: PeerHulls): void {
+    const ra = peers.reckonAt;
+    this.peerShared = ra === undefined ? Number.NaN : ra;
+  }
   /** The pose a mark reads off a peer's vehicle no slot holds, kept. */
   private readonly markPeer = new PeerFrame();
 
@@ -874,6 +907,7 @@ export class HullFrames {
     if (!list || !(list.length > 0 || any)) return;
     // The frame's end on the list's clock: its refill (the frame before's end) and this frame.
     this.peerNow = peers!.stamp + dt;
+    this.readShared(peers!);
     for (let k = 0; k < list.length; k++) {
       const e = list[k];
       // Its sphere round its box, grown by its speed over a few frames, against the box the rope and the dart may sweep.
@@ -926,6 +960,7 @@ export class HullFrames {
     f.gone = '';
     f.hull = e;
     this.peerNow = peers.stamp;
+    this.readShared(peers);
     this.peerDt = 0;
     this.stepPeer(f);
     return slot;
@@ -970,8 +1005,15 @@ export class HullFrames {
     }
     const o = e.obj.position;
     const oq = e.obj.quaternion;
-    const fresh = f.steppedAt < 0 || now - f.steppedAt > PEER_STALE || f.modeWas !== T.peerPose;
-    f.modeWas = T.peerPose;
+    // Reckoned this frame, as the picture will be (`src/net/peerReckon.ts`): then the pose is the picture's own step.
+    const rn = this.rn;
+    rn[0] = dt;
+    rn[2] = this.peerShared;
+    const reck = e.reck;
+    const reckoned = reck !== undefined && reckonsIn(reck, rn, RECKON_TUNE);
+    const mode = reckoned ? 'reckon' : T.peerPose;
+    const fresh = f.steppedAt < 0 || now - f.steppedAt > PEER_STALE || f.modeWas !== mode;
+    f.modeWas = mode;
     if (!fresh) {
       const gx = f.np[0] - o.x;
       const gy = f.np[1] - o.y;
@@ -990,7 +1032,14 @@ export class HullFrames {
     this.pq[0] = k;
     slerpTurn(f.bq, e.turn, this.pq, f.nq);
     const v = e.vel;
-    if (T.peerPose === 'picture') {
+    if (reckoned) {
+      // The picture where the last frame drew it, and where this frame's reckoning will draw it: the very step
+      // `RemotePlayers.update` takes later in this frame, from the same state and to the same moment.
+      f.bp[0] = o.x;
+      f.bp[1] = o.y;
+      f.bp[2] = o.z;
+      this.reckonPose(f, reck!);
+    } else if (T.peerPose === 'picture') {
       f.bp[0] = o.x;
       f.bp[1] = o.y;
       f.bp[2] = o.z;
@@ -1027,6 +1076,14 @@ export class HullFrames {
       ps.lv[2] = (f.np[2] - f.bp[2]) / dt;
       pn[0] = dt;
       turnRateIn(f.bq, f.nq, pn, ps.lw);
+    } else if (reckoned) {
+      // No time stepped (a rope fastened between frames): the motion its own game sent.
+      ps.lv[0] = reck!.vx;
+      ps.lv[1] = reck!.vy;
+      ps.lv[2] = reck!.vz;
+      ps.lw[0] = 0;
+      ps.lw[1] = RECKON_TUNE.turn ? reck!.yaw : 0;
+      ps.lw[2] = 0;
     } else {
       ps.lv[0] = v[0];
       ps.lv[1] = v[1];
@@ -1035,6 +1092,31 @@ export class HullFrames {
       ps.lw[1] = 0;
       ps.lw[2] = 0;
     }
+  }
+
+  /**
+   * A reckoned slot's end of the frame: the picture as it stands (`bp`, `bq`) stepped by the picture's own reckoning
+   * (`reckonStepIn`, with `rn` as `stepPeer` filled it), into `np` and `nq`. Its own method, so the frame's other calls
+   * keep their place in the compiler's budget.
+   */
+  private reckonPose(f: PeerFrame, reck: ReckonState): void {
+    const rp = this.rp;
+    const rq = this.rq;
+    rp.x = f.bp[0];
+    rp.y = f.bp[1];
+    rp.z = f.bp[2];
+    rq.x = f.bq[0];
+    rq.y = f.bq[1];
+    rq.z = f.bq[2];
+    rq.w = f.bq[3];
+    reckonStepIn(rp, rq, reck, this.rn, RECKON_TUNE);
+    f.np[0] = rp.x;
+    f.np[1] = rp.y;
+    f.np[2] = rp.z;
+    f.nq[0] = rq.x;
+    f.nq[1] = rq.y;
+    f.nq[2] = rq.z;
+    f.nq[3] = rq.w;
   }
 
   /** A peer slot, by its relay id, for the console: the slot index or 0. */
@@ -1529,6 +1611,7 @@ export class HullFrames {
     const len = this.markLen;
     // After the frame's peers have refilled the list: its stamp is this frame's end.
     this.peerNow = peers!.stamp;
+    this.readShared(peers!);
     const ex = o[0] + d[0] * len;
     const ey = o[1] + d[1] * len;
     const ez = o[2] + d[2] * len;
@@ -1591,6 +1674,7 @@ export class HullFrames {
     for (let k = 0; k < list.length; k++) if (list[k].id === id && list[k].obj === obj) e = list[k];
     if (!e) return false;
     this.peerNow = peers!.stamp;
+    this.readShared(peers!);
     const slot = this.peerSlotOf(e);
     const f = slot && !this.peerFrame(slot).gone ? this.peerFrame(slot) : this.peerMarkPose(e);
     const io = f.io;
@@ -1615,7 +1699,8 @@ export class HullFrames {
   /**
    * A pose for the mark on a peer's vehicle no slot holds, at the frame's end: where a slot would start it ('smooth': the
    * last state heard carried on to now and held back by the glide's lag; 'picture': the picture, which the frame's glide has
-   * already placed), turned as the picture is, moving at the relay's velocity. The mark's own scratch frame.
+   * already placed; a reckoned picture, already placed where its rider's game says it is, as it stands), turned as the
+   * picture is, moving at the relay's velocity (a reckoned one at the velocity sent). The mark's own scratch frame.
    */
   private peerMarkPose(e: PeerHull): PeerFrame {
     const f = this.markPeer;
@@ -1623,8 +1708,9 @@ export class HullFrames {
     f.boxHalf.set(e.half);
     const o = e.obj.position;
     const oq = e.obj.quaternion;
+    const reckoned = reckonable(e.reck, this.peerShared, RECKON_TUNE);
     const v = e.vel;
-    if (this.tune.peerPose === 'picture') {
+    if (reckoned || this.tune.peerPose === 'picture') {
       f.np[0] = o.x;
       f.np[1] = o.y;
       f.np[2] = o.z;
@@ -1638,7 +1724,11 @@ export class HullFrames {
     f.nq[2] = oq.z;
     f.nq[3] = oq.w;
     f.bq.set(f.nq);
-    f.ps.lv.set(v);
+    if (reckoned) {
+      f.ps.lv[0] = e.reck!.vx;
+      f.ps.lv[1] = e.reck!.vy;
+      f.ps.lv[2] = e.reck!.vz;
+    } else f.ps.lv.set(v);
     f.ps.lw[0] = 0;
     f.ps.lw[1] = 0;
     f.ps.lw[2] = 0;

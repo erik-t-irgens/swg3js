@@ -72,6 +72,10 @@ import * as THREE from 'three';
 import { Group, RAPIER, groups, type Physics } from '../core/physics.ts';
 import { nextLivingKey, type Aggression, type Hittable, type Living, type Side } from '../combat/kit.ts';
 import type { PeerView, PeerWatcher } from './remotePlayers.ts';
+import { newReckonState, type ReckonState } from './peerReckon.ts';
+
+/** The record a vehicle whose view hands none over reads: no motion, never written. */
+const NO_RECKON = newReckonState();
 
 /** A box in the frame of the thing it measures: half its extents, and where its middle sits. */
 export interface PeerBox {
@@ -211,7 +215,8 @@ class PeerShip implements Hittable {
 /**
  * A peer's vehicle as the grapple's rope sees it (`hullBoxes`, Grapple wave 3c): their relay id, the picture, its own box
  * (the measured one, without `shipPad`) and what the relay last said of it (the place and turn heard, the relay's smoothed
- * velocity, and when, in seconds). The shape `src/player/grappleFrames.ts`'s `PeerHull` reads; refilled once a frame.
+ * velocity, and when, in seconds), and the state its picture is reckoned from (`src/net/peerReckon.ts`), which the rope's
+ * pose asks the very same step of. The shape `src/player/grappleFrames.ts`'s `PeerHull` reads; refilled once a frame.
  */
 export interface PeerHullBox {
   readonly id: number;
@@ -222,6 +227,12 @@ export interface PeerHullBox {
   readonly turn: Float64Array;
   readonly vel: Float64Array;
   heardAt: number;
+  /**
+   * The ride's own record, by reference (`PeerView.shipReck`): the rope reads it in the player's update, before the
+   * pictures are reckoned in the same frame, and a copy taken when the list was last refilled would be a state behind
+   * on every frame one came.
+   */
+  reck: ReckonState;
 }
 
 /** Everything kept for one peer. */
@@ -329,8 +340,12 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
 
   /** Every shown peer's vehicle with a box, kept and refilled in place: what `hullBoxes` hands on. */
   private readonly hullList: PeerHullBox[] = [];
-  /** The list and when it was last refilled (`stamp`, seconds on the clock its `heardAt` is on), one kept object the game hands the rope once. */
-  private readonly hullSet = { list: this.hullList as readonly PeerHullBox[], stamp: 0 };
+  /**
+   * The list, when it was last refilled (`stamp`, seconds on the clock its `heardAt` is on), and this frame's moment on the
+   * shared clock (`reckonAt`, ms, NaN with none shared), which the pictures are reckoned to: one kept object the game hands
+   * the rope once.
+   */
+  private readonly hullSet = { list: this.hullList as readonly PeerHullBox[], stamp: 0, reckonAt: Number.NaN };
 
   /**
    * Each shown peer's vehicle as a box the grapple's rope can bend on and be towed by (§3.18), leaving out a mount (a
@@ -339,8 +354,17 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
    * player's update. The box is never asked of the engine: its sensor stays filtered out of every query, and the rope
    * tests the box by arithmetic of its own (`src/player/grappleBox.ts`).
    */
-  hullBoxes(): { readonly list: readonly PeerHullBox[]; readonly stamp: number } {
+  hullBoxes(): { readonly list: readonly PeerHullBox[]; readonly stamp: number; readonly reckonAt: number } {
     return this.hullSet;
+  }
+
+  /**
+   * This frame's moment on the shared clock (ms, NaN with no clock shared), handed over by the game at the top of every
+   * frame, before the player's update: the moment `RemotePlayers.update` reckons every picture to later in the same
+   * frame (`RemotePlayers.reckonAt`), so the rope's pose on a peer's vehicle is that very step.
+   */
+  stampReckon(ms: number): void {
+    this.hullSet.reckonAt = ms;
   }
 
   /**
@@ -362,7 +386,7 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
       return;
     }
     let h = held.hull;
-    if (!h) h = held.hull = { id: p.id, obj: ship, mid: new Float64Array(3), half: new Float64Array(3), target: new Float64Array(3), turn: Float64Array.of(0, 0, 0, 1), vel: new Float64Array(3), heardAt: 0 };
+    if (!h) h = held.hull = { id: p.id, obj: ship, mid: new Float64Array(3), half: new Float64Array(3), target: new Float64Array(3), turn: Float64Array.of(0, 0, 0, 1), vel: new Float64Array(3), heardAt: 0, reck: NO_RECKON };
     h.obj = ship;
     h.mid[0] = box.mid[0];
     h.mid[1] = box.mid[1];
@@ -384,6 +408,8 @@ export class RemoteBodies implements PeerWatcher, PeerHittables {
     h.vel[1] = v.y;
     h.vel[2] = v.z;
     h.heardAt = p.shipHeardAt / 1000;
+    // A view from a build that hands no reckoning state over (a test's own) leaves the rope's pose as it was before.
+    h.reck = p.shipReck ?? NO_RECKON;
     if (!held.listedHull) {
       this.hullList.push(h);
       held.listedHull = true;

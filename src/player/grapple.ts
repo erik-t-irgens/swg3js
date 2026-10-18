@@ -1838,7 +1838,7 @@ export class Grapple {
       if (f.near) near.push(frameName(i));
       const v = f.hull?.vel;
       const speed = v ? Math.hypot(v[0], v[1], v[2]) : 0;
-      peer.push({ id: f.ps.id, mode: GRAPPLE_TUNE.peerPose, carries: f.carries, smoothToPicture: n3(f.gapWorst), now: n3(f.gap), perMs: speed > 0.5 ? n3(f.gapWorst / speed) : null, speed: n2(speed), jump: { miss: n2(f.lastMiss), timing: n2(f.lastSlack), past: n2(GRAPPLE_TUNE.peerJump + f.lastSlack), jumped: f.jumped }, gone: f.gone });
+      peer.push({ id: f.ps.id, mode: f.modeWas || GRAPPLE_TUNE.peerPose, carries: f.carries, smoothToPicture: n3(f.gapWorst), now: n3(f.gap), perMs: speed > 0.5 ? n3(f.gapWorst / speed) : null, speed: n2(speed), jump: { miss: n2(f.lastMiss), timing: n2(f.lastSlack), past: n2(GRAPPLE_TUNE.peerJump + f.lastSlack), jumped: f.jumped }, gone: f.gone });
     }
     const rides = this.ropePeer();
     const main = peer.find((p) => p.id === rides) ?? peer[0] ?? null;
@@ -1846,7 +1846,8 @@ export class Grapple {
     return {
       frames,
       peer: {
-        mode: GRAPPLE_TUNE.peerPose,
+        // 'reckon' while the slot rides the picture's own reckoned step (src/net/peerReckon.ts), else the tune's pose.
+        mode: main ? main.mode : GRAPPLE_TUNE.peerPose,
         rides,
         released: this.released ? this.releasedPeer : 0,
         mayHurt: this.slamPeer() ? this.peerMayHurt(this.slamPeer()) : null,

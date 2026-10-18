@@ -53,6 +53,15 @@ export interface PeerVehicle {
    * the hull between messages instead of gliding about on it.
    */
   dock?: { to: number; p: [number, number, number]; q: [number, number, number, number] };
+  /**
+   * How it is moving as its own game has it, and when its place was true (server/vehicleWire.mjs, a relay whose hail
+   * says `veh: 2`): its body's or its race drive's velocity (m/s), its turn about straight up (rad/s) and the moment on
+   * the shared clock (ms). A watcher draws it where that carries it to (src/net/peerReckon.ts); a relay before it drops
+   * all three, and the picture glides as it always did.
+   */
+  vl?: [number, number, number];
+  yr?: number;
+  at?: number;
 }
 
 /**
@@ -167,6 +176,10 @@ interface ServerWord {
   progress?: number;
   /** Whether a server's hail says its ledger keeps carried gear, the grapple's rig (1); a server before it says nothing. */
   gear?: number;
+  /** How a server's hail says it passes a vehicle on (2: with its motion); a server before it says nothing. */
+  veh?: number;
+  /** Whether a server's hail says it carries the group's race word (1); a server before it says nothing. */
+  race?: number;
 }
 
 /**
@@ -456,7 +469,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0, gear: Number(server.gear) > 0 ? Math.floor(Number(server.gear)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0, gear: Number(server.gear) > 0 ? Math.floor(Number(server.gear)) : 0, veh: Number(server.veh) > 0 ? Math.floor(Number(server.veh)) : 0, race: Number(server.race) > 0 ? Math.floor(Number(server.race)) : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -607,6 +620,9 @@ export class Net {
       // A room of the group's copy of a dungeon opened at a member's keypad: what it means belongs to the
       // dungeons' own rules in main.ts (`heardUnlock`).
       case 'unlock':
+      // Racing together: the leader's call, a member joining, the laps, the finish and dropping out. To the group alone;
+      // what it means belongs to src/net/raceNet.ts.
+      case 'race':
       // The fight between players: the bolts that cross, where each one landed, a blade turning one
       // away, health, death and the duel. Handed over whole, as the group's words are, because what
       // they mean belongs to src/net/combatNet.ts and not here.

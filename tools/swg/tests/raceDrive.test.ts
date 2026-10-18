@@ -804,14 +804,18 @@ await section(13, 'the pause', async () => {
   const speed0 = r.race!.h;
   RACE_CLOCK.live = false;
   let moved = 0;
+  let pausedAll = true;
   drive(r, 60, 5, (run) => {
     const p = run.v.body.translation();
     moved = Math.max(moved, Math.hypot(p.x - p0.x, p.y - p0.y, p.z - p0.z));
+    if (!run.race!.isPaused) pausedAll = false;
   });
   RACE_CLOCK.live = true;
   const hitsBefore = r.hits.length;
   drive(r, 60, 2 / 60);
   ok(moved < 0.001, `13: for 5 s with play stood still the hull holds its place to a millimetre (${(moved * 1000).toFixed(3)} mm)`);
+  // What the wire reads to send no turn for a hull held still (`App.motionForWire`): paused all the while, and not after.
+  ok(pausedAll && !r.race!.isPaused, '13: the drive says it is paused for every step play stood still, and not once play is back');
   ok(Math.abs(horiz(r.v) - speed0) < 2 && r.hits.length === hitsBefore, `13: its speed is back on the first live step (${r2(horiz(r.v))} against ${r2(speed0)} m/s) and no hit is registered`);
   // Nobody driving it at all (a rider who got off): it brakes.
   const n2 = await setup({ kind: 'pod', z: -2000 });
@@ -1417,11 +1421,64 @@ await section(24, 'the engines, through the drive', async () => {
   }
 });
 
+// =============================================================================================================
+await section(25, 'the nudge, through the drive', async () => {
+  // The same pod on the same flat ground and keys, run four ways for half a second at 60 fps: with another player's ride
+  // drawn 6 m to its right and 2 m ahead, kept there as it goes (the list filled before every step, as the game fills
+  // it before the hulls step); with none; with the stick given by hand the nudge that ride makes; and with the ride drawn
+  // there and the nudge switched off. The nudge is what the turn takes: the drive's own stick and yaw rate with the ride
+  // near are the ones the hand-given stick makes, and with the switch off they are none's.
+  const expected = -RACE_TUNE.nudgeStick * (1 - Math.sqrt(6 * 6 + 2 * 2) / RACE_TUNE.nudgeReach);
+  const runWith = async (o: { near?: boolean; steer?: number; nudge?: 'on' | 'off' }) => {
+    restore();
+    if (o.nudge) RACE_TUNE.nudge = o.nudge;
+    const r = await setup({ kind: 'pod' });
+    launch(r, 60, 60);
+    const race = r.race!;
+    r.input.steer = o.steer ?? 0;
+    const place = () => {
+      if (!o.near) return;
+      const t = r.v.body.translation();
+      const h = race.heading;
+      const nx = Math.sin(h);
+      const nz = Math.cos(h);
+      // The right is the nose crossed with up, (-cos h, sin h).
+      race.near.n = 1;
+      race.near.x[0] = t.x - nz * 6 + nx * 2;
+      race.near.y[0] = t.y;
+      race.near.z[0] = t.z + nx * 6 + nz * 2;
+    };
+    place();
+    let nudgedMost = 0;
+    drive(r, 60, 0.5, () => {
+      nudgedMost = Math.max(nudgedMost, Math.abs(race.nudged));
+      place();
+    });
+    return { stick: race.stick, w: race.w, heading: race.heading, nudgedMost };
+  };
+  const near = await runWith({ near: true });
+  const plain = await runWith({});
+  const hand = await runWith({ steer: expected });
+  const off = await runWith({ near: true, nudge: 'off' });
+  restore();
+  ok(
+    near.stick < -0.1 && Math.abs(near.stick - expected) < 1e-9 && Math.abs(near.stick - hand.stick) < 1e-9 && Math.abs(near.w - hand.w) < 1e-6 && Math.abs(near.heading - hand.heading) < 1e-6 && near.w !== 0,
+    `25: a ride drawn 6 m to the right pushes the drive's own stick left by the nudge (${r2(near.stick)}, the rule's ${r2(expected)}), and the hull turns as the same stick given by hand turns it (yaw rate ${r2(near.w)} against ${r2(hand.w)} deg/s)`,
+  );
+  ok(plain.stick === 0 && plain.w === 0 && off.stick === 0 && off.w === 0 && off.nudgedMost === 0, `25: with none drawn near, or the nudge switched off, the stick and the turn are none (${plain.stick}, ${off.stick})`);
+  // And the game fills the list for the hull the player races before the hulls step, from the peers' pictures drawn near it.
+  const main = src('../../../src/main.ts');
+  ok(
+    /this\.fillRaceNear\(pilot === player\.mounted \? pilot : null\);\s*for \(const v of this\.world\.vehicles\) \{/.test(main) && /this\.remotes\.nearPictures\(raced!\.pos, RACE_TUNE\.nudgeReach, race\.near\);/.test(main),
+    "25: the game fills the raced hull's list from the peers' pictures within the nudge's reach, before the hulls step",
+  );
+});
+
 // --- nothing made a step ---------------------------------------------------------------------------------------------
 await section(18, 'nothing made a step', async () => {
   // The cleanest of three processes: when the compiler builds what happens to be compiled first decides a little of what
   // it builds into what, and a process caught the other way round measures a few numbers made a step that the next does not.
-  type Alone = { skipped?: string; frames: number; made: number; scavenges: number; view: { frames: number; made: number; scavenges: number }; planned: number; watch?: { crossed: number; laps: number } };
+  type Alone = { skipped?: string; frames: number; made: number; scavenges: number; view: { frames: number; made: number; scavenges: number }; planned: number; nudged?: number; watch?: { crossed: number; laps: number } };
   let alone: Alone | null = null;
   for (let run = 0; run < 3; run++) {
     const line = execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', fileURLToPath(new URL('./raceAllocOwn.ts', import.meta.url))], { encoding: 'utf8', timeout: 600_000 }).trim().split('\n').pop() ?? '{}';
@@ -1434,7 +1491,7 @@ await section(18, 'nothing made a step', async () => {
   if (alone.skipped) note(`the allocation measure was skipped: ${alone.skipped}`);
   else {
     // Under a byte a step on average: what is left is a strike's few numbers, which is an event and not a step.
-    ok(alone.planned > 0 && alone.scavenges === 0 && alone.made < 1 * alone.frames, `18: over ${alone.frames} steps of the drive's own code (racing, planning, sweeping, bridging, striking, the engines burning, pulling and mended) it makes ${Math.max(0, alone.made)} bytes (${(Math.max(0, alone.made) / alone.frames).toFixed(2)} a step, ${alone.scavenges} collections)`);
+    ok(alone.planned > 0 && (alone.nudged ?? 0) > 0 && alone.scavenges === 0 && alone.made < 1 * alone.frames, `18: over ${alone.frames} steps of the drive's own code (racing, planning, sweeping, bridging, striking, the engines burning, pulling and mended, and nudged from other players' rides drawn near on ${alone.nudged} of them) it makes ${Math.max(0, alone.made)} bytes (${(Math.max(0, alone.made) / alone.frames).toFixed(2)} a step, ${alone.scavenges} collections)`);
     ok(alone.view.scavenges === 0 && alone.view.made < 0.2 * alone.view.frames, `18: and over ${alone.view.frames} frames of the race view ${Math.max(0, alone.view.made)} bytes`);
     ok(!!alone.watch && alone.watch.crossed > 10 && alone.watch.laps > 0, `18: those steps carry a run of a track watching them (src/race/raceRun.ts), testing a gate every step and crossing ${alone.watch?.crossed} of them in ${alone.watch?.laps} laps`);
   }

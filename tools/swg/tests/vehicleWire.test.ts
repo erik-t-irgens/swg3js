@@ -7,7 +7,7 @@
 // transform a clamped ship and its rider are already placed by.
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { cleanAboard, cleanRide, cleanVehicle, quat } from '../../../server/vehicleWire.mjs';
+import { VEHICLE_MOTION, VEHICLE_WIRE_VERSION, cleanAboard, cleanMotion, cleanRide, cleanVehicle, quat } from '../../../server/vehicleWire.mjs';
 import { easeInHull, peerAboard, placeInHull, rideFields } from '../../../src/net/aboardMath.ts';
 
 let checks = 0;
@@ -156,6 +156,30 @@ const veh = (extra: Record<string, unknown> = {}) => ({ id: 'a_ship', p: [1, 2, 
   ok(crossed > 3.0 && crossed < 3.3, `8: turning past the half turn goes the short way round (${crossed.toFixed(3)})`);
   const back = easeInHull({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, -3.0, 3.0, 1 / 60, 0.1);
   ok(back < -3.0 && back > -3.3, `8: and so does turning back across it (${back.toFixed(3)})`);
+}
+
+// --- 9: how it is moving, and when its place was true (the racer's wave 4a) -----------------------------------------
+{
+  const at = Date.UTC(2026, 9, 18, 12);
+  const moving = cleanVehicle(veh({ vl: [12.5, -0.5, 97.25], yr: 1.25, at }));
+  ok(JSON.stringify(moving?.vl) === '[12.5,-0.5,97.25]' && moving?.yr === 1.25 && moving?.at === at, `9: a vehicle's own velocity, its turn about straight up and the moment its place was true are kept (${JSON.stringify(moving)})`);
+  ok(JSON.stringify(cleanMotion({ vl: [0, 0, 5], at })) === JSON.stringify({ vl: [0, 0, 5], at }), '9: the turn is optional; the velocity and the moment are not');
+  ok(cleanVehicle(veh())?.vl === undefined && cleanVehicle(veh())?.at === undefined, '9: a state with no motion (an older build) carries none');
+  const dropped = (extra: Record<string, unknown>, what: string) => {
+    const c = cleanVehicle(veh(extra)) as Record<string, unknown> | undefined;
+    ok(!!c && c.vl === undefined && c.yr === undefined && c.at === undefined && c.id === 'a_ship', `9: ${what}: all three dropped together, the vehicle kept`);
+  };
+  dropped({ vl: [0, 0, 5] }, 'a velocity with no moment');
+  dropped({ at }, 'a moment with no velocity');
+  dropped({ vl: [0, 0, 5], at, yr: 'fast' }, 'a turn that is not a number');
+  dropped({ vl: [0, Number.NaN, 5], at }, 'a velocity that is not three numbers');
+  dropped({ vl: [0, 0, VEHICLE_MOTION.speed + 1], at }, `a velocity past ${VEHICLE_MOTION.speed} m/s`);
+  dropped({ vl: [0, 0, 5], at, yr: VEHICLE_MOTION.yaw + 1 }, `a turn past ${VEHICLE_MOTION.yaw} rad/s`);
+  dropped({ vl: [0, 0, 5], at: 12345 }, 'a moment before the shared clock could be');
+  dropped({ vl: [0, 0, 5], at: String(at) }, 'a moment sent as words');
+  ok(VEHICLE_WIRE_VERSION === 2, '9: the relay says so in its hail (veh 2)');
+  const kept = cleanVehicle(veh({ vl: [1, 2, 3], yr: 0, at, junk: 1 })) as Record<string, unknown>;
+  ok(Object.keys(kept).join() === 'id,p,q,role,vl,yr,at', `9: and nothing else rides with them (${Object.keys(kept).join()})`);
 }
 
 console.log(`\n${checks} checks passed`);

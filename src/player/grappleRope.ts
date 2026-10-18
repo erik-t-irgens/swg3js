@@ -1472,10 +1472,28 @@ export class GrappleRope {
   }
 
   /**
-   * The fan of the pivot from the hand at p0 to the hand a share `t` of the way to p1, into the kept `fw`, the pivot at
-   * each end where it stands at that end's moment (a still pivot stands at both, so the second triangle has no area).
+   * The fan search's numbers, kept (the hand at p0 and at p1, their moments, and the share `t` of the way): `fanOf` reads
+   * them from here. Handed over as arguments they were boxed whenever the compiler left `fanOf` out of `sweep`, about a
+   * kilobyte a frame on a rope hung at another player's reckoned vehicle, where the fan met its box on every frame.
    */
-  private fanOf(p0x: number, p0y: number, p0z: number, p1x: number, p1y: number, p1z: number, s0: number, s1: number, t: number): void {
+  private readonly fq = new Float64Array(9);
+
+  /**
+   * The fan of the pivot from the hand at p0 to the hand a share `t` of the way to p1 (all in the kept `fq`), into the
+   * kept `fw`, the pivot at each end where it stands at that end's moment (a still pivot stands at both, so the second
+   * triangle has no area).
+   */
+  private fanOf(): void {
+    const q = this.fq;
+    const p0x = q[0];
+    const p0y = q[1];
+    const p0z = q[2];
+    const p1x = q[3];
+    const p1y = q[4];
+    const p1z = q[5];
+    const s0 = q[6];
+    const s1 = q[7];
+    const t = q[8];
     const fw = this.fw;
     this.st = s0;
     this.worldOf(this.n, fw, 0);
@@ -1626,16 +1644,30 @@ export class GrappleRope {
         this.fws[1] = s1;
         if (!this.fanHit()) return;
         // The fan only means something from a clear start: the pivot and the hand where both stood at the piece's start.
-        const w0x = fw[0];
-        const w0y = fw[1];
-        const w0z = fw[2];
+        // Every number below goes to its call in a kept record (`cs`, `fq`), never as an argument.
+        cs[0] = fw[0];
+        cs[1] = fw[1];
+        cs[2] = fw[2];
+        cs[3] = p0x;
+        cs[4] = p0y;
+        cs[5] = p0z;
         this.cst = s0;
-        if (!this.clearAt(w0x, w0y, w0z, p0x, p0y, p0z)) return;
+        if (!this.clearCs()) return;
+        const fq = this.fq;
+        fq[0] = p0x;
+        fq[1] = p0y;
+        fq[2] = p0z;
+        fq[3] = p1x;
+        fq[4] = p1y;
+        fq[5] = p1z;
+        fq[6] = s0;
+        fq[7] = s1;
         let lo = 0;
         let hi = 1;
         for (let it = 0; it < iters; it++) {
           const mid = (lo + hi) * 0.5;
-          this.fanOf(p0x, p0y, p0z, p1x, p1y, p1z, s0, s1, mid);
+          fq[8] = mid;
+          this.fanOf();
           if (this.fanHit()) hi = mid;
           else lo = mid;
         }
@@ -1648,7 +1680,13 @@ export class GrappleRope {
           this.st = sT;
           this.worldOf(this.n, this.wc, 0);
           this.cst = sT;
-          if (this.cast(this.wc[0], this.wc[1], this.wc[2], p0x + (p1x - p0x) * t, p0y + (p1y - p0y) * t, p0z + (p1z - p0z) * t, this.hitA)) {
+          cs[0] = this.wc[0];
+          cs[1] = this.wc[1];
+          cs[2] = this.wc[2];
+          cs[3] = p0x + (p1x - p0x) * t;
+          cs[4] = p0y + (p1y - p0y) * t;
+          cs[5] = p0z + (p1z - p0z) * t;
+          if (this.castCs(this.hitA)) {
             found = true;
             break;
           }
@@ -1670,7 +1708,13 @@ export class GrappleRope {
       this.st = s0;
       this.worldOf(this.n, this.wb, 0);
       this.cst = s0;
-      if (this.cast(this.wb[0], this.wb[1], this.wb[2], p0x, p0y, p0z, this.hitB)) {
+      cs[0] = this.wb[0];
+      cs[1] = this.wb[1];
+      cs[2] = this.wb[2];
+      cs[3] = p0x;
+      cs[4] = p0y;
+      cs[5] = p0z;
+      if (this.castCs(this.hitB)) {
         // No clear start to search from: bend once at the plain hit, off its own face, and stop for this
         // piece. Chained, plain-hit bends crawl along a face a few centimetres at a time instead of finding its edge.
         const len = len3(p1x - wx, p1y - wy, p1z - wz);

@@ -30,8 +30,10 @@
 //   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, tb?, gr?, grf?, veh? | in? }   position, heading, rig state, speed,
 //                                                          mounted, saber lit, the whole turn as a quaternion (aboard, adrift,
 //                                                          leaning on a rope), the blade in the air [x, y, z, spin], the vehicle
-//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed, dock }
-//                                                          (vehicleWire.mjs); or, standing in a hull somebody else flies,
+//                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed, dock,
+//                                                          vl, yr, at } (vehicleWire.mjs: its own velocity, its turn about
+//                                                          straight up and the moment on the shared clock its place was true,
+//                                                          kept whole or dropped whole); or, standing in a hull somebody else flies,
 //                                                          in { ship, p, h } -- whose hull and where in that hull's own
 //                                                          frame, which takes the place of veh so that a watcher draws
 //                                                          one hull with people in it and not one hull per person;
@@ -59,6 +61,12 @@
 //   { t: 'unlock', kind, at: [x, z], cell }                  a room of the group's copy of a dungeon opened at its
 //                                                          keypad (copyWire.mjs): to the group and only the group,
 //                                                          held nowhere, so every member's doors open with it
+//   { t: 'race', phase: call|join|lap|finish|out, world, track, at, digest?, laps?, members?, n?, time?, total?, why? }
+//                                                          racing together (raceWire.mjs): the leader calling a race on
+//                                                          a track at a moment of the shared clock, with the gates'
+//                                                          digest and the members in grid order, a member joining it,
+//                                                          each lap and the finish, and dropping out. To the group and
+//                                                          only the group; nothing of it is judged here
 //   { t: 'shot', n, p, d, s, l, c, z, g?, a?, b?, fx?, rc?, hx?, pk?, in? }
 //                                                          a bolt that left this player's gun (combatWire.mjs): its
 //                                                          own number, where it left and which way, how fast, how
@@ -206,7 +214,7 @@
 //                                                          person the browser says is in reach
 //   { t: 'progress', do: 'grant' | 'xp' | 'reset', node?, src?, n? }   the admin's own: a node granted, XP given, emptied
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress, gear }   sent the instant the socket opens, before
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress, gear, veh, race }   sent the instant the socket opens, before
 //                                                          anything is said; `story` is { v, sets, tests }, the story this
 //                                                          server holds, which a browser built before it never reads; `items`
 //                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
@@ -225,7 +233,12 @@
 //                                                          holds progress itself against any other; `gear` is 1 on a server
 //                                                          whose ledger keeps carried gear (ledger.mjs's GEAR_VERSION, the
 //                                                          grapple's rig), and a browser hands a gear row up, and lets a
-//                                                          list take one away, only to a server that says it
+//                                                          list take one away, only to a server that says it; `veh` is 2 on
+//                                                          a server that passes a vehicle's motion on (vehicleWire.mjs's
+//                                                          VEHICLE_WIRE_VERSION), which a watcher draws the vehicle ahead
+//                                                          by; `race` is 1 on a server that carries the group's race word
+//                                                          (raceWire.mjs's RACE_VERSION), and a browser calls no race against
+//                                                          any other
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -248,6 +261,7 @@
 //   { t: 'chat', id, from, scope, text }
 //   { t: 'cross', id, from, phase, planet, zone, how, at? }   (to the sender's group, and to nobody else)
 //   { t: 'unlock', id, from, kind, at, cell }   (to the sender's group, and to nobody else)
+//   { t: 'race', id, from, phase, world, track, at, ... }   (to the sender's group, and to nobody else)
 //   { t: 'shot', id, ... }   { t: 'end', id, n, at }   { t: 'blocked', id, of, n, at }
 //   { t: 'health', id, hp, d? }   { t: 'died', id, by? }
 //   { t: 'hurt', id, a, at, w? }   (to the one hurt and to nobody else, and only where they may be hurt)
@@ -341,7 +355,8 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { cleanAsk } from './vehicleWire.mjs';
+import { VEHICLE_WIRE_VERSION, cleanAsk } from './vehicleWire.mjs';
+import { RACE_VERSION, cleanRace, mayRace } from './raceWire.mjs';
 import { PAINT_VERSION } from './shipWire.mjs';
 import { WIRE, cleanClaim, cleanEmote, cleanHello, cleanPing, cleanSettle, cleanState } from './wire.mjs';
 import { Rooms, roomKey, roomLabel } from './rooms.mjs';
@@ -1196,6 +1211,22 @@ function onMessage(c, text, trimmed = false) {
       const session = groups.sessionOf(key);
       if (session && session !== c.id) send(clients.get(session), line);
     }
+  } else if (msg.t === 'race') {
+    // Racing together. The leader names a track and a start moment on the shared clock, and each member says its laps
+    // and its finish; every browser works the grid, the countdown and the standings out from the same words, so the
+    // word goes to the group and only the group, exactly as `cross` does, and the server judges none of it.
+    if (!c.hello || !c.member || !holdsMember(c)) return;
+    const race = cleanRace(msg);
+    if (!race) return;
+    c.racing ??= { at: 0, lines: 0 };
+    if (!mayRace(c.racing, Date.now())) return;
+    const to = groups.chatTo(c.member);
+    if (!to) return;
+    const line = { t: 'race', id: c.id, from: c.hello.name, ...race };
+    for (const key of to) {
+      const session = groups.sessionOf(key);
+      if (session && session !== c.id) send(clients.get(session), line);
+    }
   } else if (msg.t === 'unlock') {
     // A room of the group's copy of a dungeon opened at its keypad. Every member works the copy out for
     // themselves and keeps its locks in their own browser, so the word goes to the group and only the
@@ -1869,7 +1900,7 @@ server.on('upgrade', (req, socket) => {
   // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them;
   // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself;
   // `progress` that it holds each character's progress, so a browser claims rather than paying itself.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION });
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION, veh: VEHICLE_WIRE_VERSION, race: RACE_VERSION });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');

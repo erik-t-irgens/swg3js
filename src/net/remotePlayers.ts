@@ -19,8 +19,10 @@ import type { FxMoverList } from '../core/fx/velocity';
 import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { hangHeld } from './peerHands.ts';
-import { glidePeerTurn } from './peerTurn.ts';
+import { glidePeerTurn, yawOf } from './peerTurn.ts';
 import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
+import { RECKON_TUNE, newReckonState, readReckon, reckonStepIn, reckonsIn, type ReckonState } from './peerReckon.ts';
+import { sharedClock } from '../world/sharedClock.ts';
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -52,6 +54,14 @@ export interface PeerView {
   shipTargetQ: THREE.Quaternion;
   shipVel: THREE.Vector3;
   shipHeardAt: number;
+  /**
+   * The state the picture of that ride is reckoned from (`src/net/peerReckon.ts`): the motion its own game sent and the
+   * moment its place was true. The ride's own record, never a copy: a state is heard between frames and the picture is
+   * reckoned from it in the next, and a copy taken as the view was last refilled would hand the rope, in that frame's
+   * player's update, the state before it, so on every frame a state came the rope's pose and the picture would part.
+   * `has` false while the ride sends none (a relay before `veh: 2`), so the rope's pose on it is the one it rode before.
+   */
+  shipReck: ReckonState;
   /** The ride is a creature (its garage def's `source` is `'creature'`): a friend's mount is a creature to the rope. */
   shipMount: boolean;
   /** The ride is clamped onto another player's ship (the relay's `dock`): only in space, where nobody on foot fires. */
@@ -125,6 +135,14 @@ interface RemoteVehicle {
   vel: THREE.Vector3;
   /** performance.now() of its last message; 0 before the first. */
   heardAt: number;
+  /**
+   * Its last state as the picture is reckoned from (`src/net/peerReckon.ts`), whether the picture was reckoned this
+   * frame (else it glided as before), and the velocity sent with it as a vector, which is the picture's own speed while
+   * it is reckoned: what the motion blur and a pod's gait read then.
+   */
+  reck: ReckonState;
+  reckoned: boolean;
+  sentVel: THREE.Vector3;
   /** Its wings that open, once the picture is in (moved as the pilot's are); null before, or for a ride with none. */
   wings: WingSet | null;
   /** Whether the pilot's wings are open or opening: the relay's `w`, else (a peer on an older build) whether it is moving. */
@@ -205,6 +223,13 @@ interface Remote {
   vehicle: RemoteVehicle | null;
   /** In a hull somebody else flies; null when they are not. It and `vehicle` are never both set. */
   aboard: RemoteAboard | null;
+  /**
+   * The figure on a ride whose picture is reckoned: where it sits and how it is turned in that ride's own frame, eased
+   * toward what each state says (the figure's place and the ride's both come in one state, so their difference is the
+   * seat), and carried onto the picture. Gliding on its own toward the place heard, the figure would trail the reckoned
+   * picture by the very lag the reckoning took away. `first` until it has been placed on this ride.
+   */
+  ride: { at: THREE.Vector3; q: THREE.Quaternion; yaw: number; first: boolean };
   /** The look last put on the rig, so a repeated hello does not dress it again. */
   lookApplied: string | null;
   /** The dress of `lookApplied` while it goes on (resolved once it is on, or given up for a newer one); null before any. */
@@ -283,6 +308,14 @@ export class RemotePlayers {
 
   /** The garage, for the vehicles the peers ride (loaded the first time one is seen). */
   private garage: Promise<Garage> | null = null;
+
+  /**
+   * This frame's moment on the shared clock (ms), NaN with no clock shared: the game writes it once at the top of every
+   * frame, before anything reads a peer, and the pictures are reckoned to it (`src/net/peerReckon.ts`). The grapple's
+   * rope reads the same number off the peers' boxes (`RemoteBodies.stampReckon`), so the pose it rides on a peer's
+   * vehicle and the picture drawn here are worked out to one moment.
+   */
+  reckonAt = Number.NaN;
 
   /** Called with a peer's rig once it is dressed, and again when their look changes: the motion blur prepares its shaders for it. */
   onDressed: ((root: THREE.Object3D) => void) | null = null;
@@ -384,8 +417,8 @@ export class RemotePlayers {
     this.scene.add(group);
     markActor(group);
     const rope = newPeerRope();
-    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
+    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipReck: NO_RECKON, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, ride: { at: new THREE.Vector3(), q: new THREE.Quaternion(), yaw: 0, first: true }, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -411,10 +444,12 @@ export class RemotePlayers {
       v.shipTargetQ.copy(rv.targetQ);
       v.shipVel.copy(rv.vel);
       v.shipHeardAt = rv.heardAt;
+      v.shipReck = rv.reck;
       v.shipMount = rv.mount;
       v.shipDocked = rv.dock !== null;
     } else {
       v.shipHeardAt = 0;
+      v.shipReck = NO_RECKON;
       v.shipMount = false;
       v.shipDocked = false;
     }
@@ -703,6 +738,7 @@ export class RemotePlayers {
       if (!jumping) {
         r.group.position.copy(r.target);
         r.vel.set(0, 0, 0);
+        r.ride.first = true;
         const rv = r.vehicle;
         if (rv) {
           rv.vel.set(0, 0, 0);
@@ -756,8 +792,9 @@ export class RemotePlayers {
     }
     if (!r.vehicle || r.vehicle.id !== veh.id) {
       this.dropVehicle(r);
-      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null, mount: false };
+      const rv: RemoteVehicle = { id: veh.id, obj: null, target: new THREE.Vector3(veh.p[0], veh.p[1], veh.p[2]), targetQ: new THREE.Quaternion(veh.q[0], veh.q[1], veh.q[2], veh.q[3]), pose: veh.pose ?? null, role: veh.role, vel: new THREE.Vector3(), heardAt: 0, reck: newReckonState(), reckoned: false, sentVel: new THREE.Vector3(), wings: null, wingsWant: veh.w === 1, wingsMoved: false, landed: veh.landed === 1, dock: null, size: null, box: null, build: null, paint: null, fit: null, busy: null, want: null, gait: null, mount: false };
       r.vehicle = rv;
+      r.ride.first = true;
       void this.bringVehicle(r, rv);
     }
     const rv = r.vehicle;
@@ -766,6 +803,10 @@ export class RemotePlayers {
     rv.heardAt = now;
     rv.target.set(veh.p[0], veh.p[1], veh.p[2]);
     rv.targetQ.set(veh.q[0], veh.q[1], veh.q[2], veh.q[3]).normalize();
+    // How it is moving as its own game has it and when its place was true, judged by its age as it is heard on the
+    // clock everybody shares (none shared: none believed, and the picture glides as before).
+    readReckon(veh, sharedClock.where === 'shared' ? sharedClock.now() - sharedClock.lagNow() : Number.NaN, rv.reck);
+    rv.sentVel.set(rv.reck.vx, rv.reck.vy, rv.reck.vz);
     rv.pose = veh.pose ?? null;
     // Seated, at a bridge's controls, or merely aboard: it can change without the hull changing (a
     // passenger takes the controls), so it is written on every message and not only on the first.
@@ -985,14 +1026,31 @@ export class RemotePlayers {
       if (rv?.obj) {
         // Clamped onto another ship: placed from that ship's own pose after this pass, so the hull it
         // rides has been moved first whatever order the peers come in.
-        if (rv.dock) anyDocked = true;
+        if (rv.dock) {
+          anyDocked = true;
+          rv.reckoned = false;
+        }
         // Landed, it is still: the glide would leave it creeping toward each message, and its springs' bob is not sent.
         else if (rv.landed) {
           rv.obj.position.copy(rv.target);
           rv.obj.quaternion.copy(rv.targetQ);
+          rv.reckoned = false;
         } else {
-          rv.obj.position.lerp(rv.target, k);
-          rv.obj.quaternion.slerp(rv.targetQ, k);
+          // Moving: drawn where its own game's velocity carries the last place sent by that state's age on the shared
+          // clock (`src/net/peerReckon.ts`), or, with no motion to read or no clock to read it by, glided as before.
+          const n = RECK_N;
+          n[0] = dt;
+          n[2] = this.reckonAt;
+          rv.reckoned = reckonsIn(rv.reck, n);
+          if (rv.reckoned) {
+            // Turned in a kept quaternion and copied on once, so the picture is told it turned once.
+            reckQ.copy(rv.obj.quaternion);
+            reckonStepIn(rv.obj.position, reckQ, rv.reck, n);
+            rv.obj.quaternion.copy(reckQ);
+          } else {
+            rv.obj.position.lerp(rv.target, k);
+            rv.obj.quaternion.slerp(rv.targetQ, k);
+          }
         }
         // The wings open and close as the pilot's do, each on its own clock (nothing moves once they have settled).
         if (rv.wings) {
@@ -1012,8 +1070,11 @@ export class RemotePlayers {
         // placed where their game seated it, on that game's pod, so this picture has to stand the same way.
         // Its speed is read along the nose as that game reads its own, or a slide or a fall would play the
         // run here while the rider's game holds the idle, and the pilot would hang 4 m under the cockpit.
-        if (rv.gait) stepPodPicture(rv.gait, dt, rv.vel, rv.obj.quaternion, rv.landed);
-      }
+        if (rv.gait) stepPodPicture(rv.gait, dt, rv.reckoned ? rv.sentVel : rv.vel, rv.obj.quaternion, rv.landed);
+        // The figure rides the reckoned picture in its own frame; any other picture leaves it to its glide, as before.
+        if (rv.reckoned && !rv.dock) this.rideOn(r, rv, k);
+        else r.ride.first = true;
+      } else r.ride.first = true;
       const rig = r.rig;
       if (rig && r.down) {
         // Down: the death clip holds on its last frame and nothing else is asked of the figure. The
@@ -1089,6 +1150,44 @@ export class RemotePlayers {
       placeInHull(dockPos, dockQuat, a.at, a.turn, r.group.position, aboardTurn);
       r.group.quaternion.copy(aboardTurn);
     }
+  }
+
+  /**
+   * A figure on a reckoned ride put where that ride puts it: its place and turn in the ride's own frame, worked out
+   * from the one state both came in (the figure's place and the ride's, so the difference is the seat; the figure's
+   * whole turn, or its heading against the ride's), eased toward each state's at the glide's own rate so a walker aboard
+   * their own hull does not step ten times a second, and carried onto the picture as it now stands. A heading-only
+   * figure stays upright, turned as far round from the picture's heading as it was from the ride's in the state.
+   * Nothing is allocated.
+   */
+  private rideOn(r: Remote, rv: RemoteVehicle, k: number): void {
+    const ride = r.ride;
+    const obj = rv.obj!;
+    rideInv.copy(rv.targetQ).invert();
+    rideLocal.copy(r.target).sub(rv.target).applyQuaternion(rideInv);
+    if (ride.first) ride.at.copy(rideLocal);
+    else ride.at.lerp(rideLocal, k);
+    r.group.position.copy(ride.at).applyQuaternion(obj.quaternion).add(obj.position);
+    if (r.targetQ) {
+      rideRel.copy(rideInv).multiply(r.targetQ);
+      if (ride.first) ride.q.copy(rideRel);
+      else ride.q.slerp(rideRel, k);
+      rideTurn.copy(obj.quaternion).multiply(ride.q);
+      r.group.quaternion.copy(rideTurn);
+      r.turned = true;
+    } else {
+      let rel = r.heading - yawOf(rv.targetQ);
+      rel = Math.atan2(Math.sin(rel), Math.cos(rel));
+      if (ride.first) ride.yaw = rel;
+      else {
+        let d = rel - ride.yaw;
+        d = Math.atan2(Math.sin(d), Math.cos(d));
+        ride.yaw += d * k;
+      }
+      r.group.rotation.set(0, yawOf(obj.quaternion) + ride.yaw, 0);
+      r.turned = false;
+    }
+    ride.first = false;
   }
 
   /**
@@ -1187,15 +1286,76 @@ export class RemotePlayers {
     return out;
   }
 
-  /** The pose and velocity of the ship that peer is on; false when they are on none, or are elsewhere. */
+  /** The pose and velocity of the ship that peer is on (the velocity they sent while the picture is reckoned); false when they are on none, or are elsewhere. */
   vehiclePose(id: number, pos: THREE.Vector3, quat: THREE.Quaternion, vel: THREE.Vector3): boolean {
     const r = this.remotes.get(id);
     const rv = r?.vehicle;
     if (!r?.group.visible || !rv?.obj) return false;
     pos.copy(rv.obj.position);
     quat.copy(rv.obj.quaternion);
-    vel.copy(rv.vel);
+    vel.copy(rv.reckoned ? rv.sentVel : rv.vel);
     return true;
+  }
+
+  /**
+   * Every shown peer's ride picture within `reach` of a point (3D), into a kept list (`out.n` of them, their places in
+   * `out.x`/`y`/`z`, at most as many as the lists hold): what a racing hull nudges its turn away from
+   * (`RaceDrive.near`). A ride clamped onto another ship is left out. Nothing is allocated.
+   */
+  nearPictures(at: { x: number; y: number; z: number }, reach: number, out: { n: number; x: Float64Array; y: Float64Array; z: Float64Array }): number {
+    out.n = 0;
+    const most = out.x.length;
+    const r2 = reach * reach;
+    for (const r of this.remotes.values()) {
+      if (out.n >= most) break;
+      const rv = r.vehicle;
+      if (!r.group.visible || !rv?.obj || rv.dock) continue;
+      const p = rv.obj.position;
+      const dx = p.x - at.x;
+      const dy = p.y - at.y;
+      const dz = p.z - at.z;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      out.x[out.n] = p.x;
+      out.y[out.n] = p.y;
+      out.z[out.n] = p.z;
+      out.n++;
+    }
+    return out.n;
+  }
+
+  /**
+   * Every peer's ride and how its picture is drawn, for `__debug.reckon()`: reckoned or glided and why, the state's age
+   * on the shared clock, where the picture is, where the last state was sent from and where its motion carries it now.
+   * It allocates freely and never runs in a frame.
+   */
+  reckonDebug(): Record<string, unknown>[] {
+    const out: Record<string, unknown>[] = [];
+    const now = this.reckonAt;
+    const r2 = (n: number) => Number(n.toFixed(2));
+    for (const r of this.remotes.values()) {
+      const rv = r.vehicle;
+      if (!rv) continue;
+      const s = rv.reck;
+      const age = s.has && Number.isFinite(now) ? (now - s.at) / 1000 : Number.NaN;
+      const carry = Number.isFinite(age) ? Math.min(age, RECKON_TUNE.most) : 0;
+      const why = rv.dock ? 'clamped onto a ship: drawn on it' : rv.landed ? 'landed: stood where it is said to be' : rv.reckoned ? 'reckoned' : !RECKON_TUNE.on ? 'reckoning switched off: glided' : !s.has ? 'its state carries no motion (a relay before veh 2): glided' : !Number.isFinite(now) ? 'no clock shared: glided' : !s.ok ? 'its age when heard was past what a clock that agrees could give: glided' : 'glided';
+      out.push({
+        id: r.id,
+        name: r.hello.name,
+        ride: rv.id,
+        shown: r.group.visible,
+        drawn: why,
+        age: Number.isFinite(age) ? Number(age.toFixed(3)) : null,
+        picture: rv.obj ? rv.obj.position.toArray().map(r2) : null,
+        sent: rv.target.toArray().map(r2),
+        carried: s.has ? [r2(s.px + s.vx * carry), r2(s.py + s.vy * carry), r2(s.pz + s.vz * carry)] : null,
+        pictureToCarried: rv.obj && s.has ? r2(Math.hypot(rv.obj.position.x - (s.px + s.vx * carry), rv.obj.position.y - (s.py + s.vy * carry), rv.obj.position.z - (s.pz + s.vz * carry))) : null,
+        velocity: s.has ? [r2(s.vx), r2(s.vy), r2(s.vz)] : null,
+        speed: s.has ? r2(Math.hypot(s.vx, s.vy, s.vz)) : r2(rv.vel.length()),
+        yaw: s.has ? Number(s.yaw.toFixed(3)) : null,
+      });
+    }
+    return out;
   }
 
   /** That ship's name, box and bounding radius; null before its picture is in. */
@@ -1227,9 +1387,12 @@ export class RemotePlayers {
   collectMovers(out: FxMoverList): void {
     for (const r of this.remotes.values()) {
       if (!r.group.visible) continue;
-      out.add(r.group, false, 'remote', r.vel);
+      // A reckoned ride moves at the velocity its own game sent, and so does the figure on it.
+      const rv = r.vehicle;
+      const reckoned = !!rv?.obj && rv.reckoned;
+      out.add(r.group, false, 'remote', reckoned ? rv!.sentVel : r.vel);
       // Added to the scene root, not under the figure.
-      if (r.vehicle?.obj) out.add(r.vehicle.obj, false, 'remoteVehicle', r.vehicle.vel);
+      if (rv?.obj) out.add(rv.obj, false, 'remoteVehicle', reckoned ? rv.sentVel : rv.vel);
     }
   }
 
@@ -1257,6 +1420,16 @@ const reportQuat = new THREE.Quaternion();
 /** The hull a passenger stands in, as a matrix, for anything of theirs that lives in that frame. */
 const hullMatrix = new THREE.Matrix4();
 const ONE = new THREE.Vector3(1, 1, 1);
+/** The reckoning's numbers for one picture (the frame's seconds, the state's age, the frame's moment) and its turn, kept. */
+const RECK_N = new Float64Array(3);
+const reckQ = new THREE.Quaternion();
+/** The record a view hands on for a peer riding nothing: no motion, never written. */
+const NO_RECKON = newReckonState();
+/** Scratch for a figure riding a reckoned picture. */
+const rideInv = new THREE.Quaternion();
+const rideLocal = new THREE.Vector3();
+const rideRel = new THREE.Quaternion();
+const rideTurn = new THREE.Quaternion();
 
 /**
  * The invented numbers of standing in somebody else's hull, both live through `__aboard()`.

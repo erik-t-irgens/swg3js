@@ -198,7 +198,7 @@ ok(net.includes('const leans = !p.aboard && !p.eva && p.grapple.leanSends;') && 
 ok(net.includes('const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3)') && net.includes("this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)],") && /sendState\(\{[^\n]*\bq,/.test(net), 'and puts the whole turn in the state while it does, with that origin as the place');
 // The receiver: the glide of a peer's turn is `peerTurn.ts`'s, which the node test runs over a let-go at the wire's rate.
 const remotes = read('../../../src/net/remotePlayers.ts');
-ok(remotes.includes("import { glidePeerTurn } from './peerTurn.ts';") && remotes.includes('glidePeerTurn(r.group, r.targetQ, r.heading, k, r);') && !/r\.group\.rotation\.set\(0, r\.group\.rotation\.y/.test(remotes), "a peer's turn is glided by peerTurn.ts, never by the Euler yaw a whole turn leaves behind");
+ok(/import \{ glidePeerTurn(, \w+)* \} from '\.\/peerTurn\.ts';/.test(remotes) && remotes.includes('glidePeerTurn(r.group, r.targetQ, r.heading, k, r);') && !/r\.group\.rotation\.set\(0, r\.group\.rotation\.y/.test(remotes), "a peer's turn is glided by peerTurn.ts, never by the Euler yaw a whole turn leaves behind");
 // The camera's pull and the shake: the camera's own arguments and register, nothing new in it.
 ok(main.includes('this.cam.update(input, player.worldPos, blocked, dt, eyes, player.grapple.camScaleNow, player.eyeHeight);'), "the on-foot camera is handed the hook's own scale in place of its 1");
 const feel = method(main, '  private stepGrappleFeel(): void {');
@@ -336,6 +336,45 @@ ok(inOrder(fly, ["kind === 'prop' ? this.propAt?.(hit.collider.handle)", "this.w
   const play = method(main, '  private async play(c: SavedCharacter): Promise<void> {');
   ok(inOrder(play, ['this.relayAsked = !!Net.savedUrl();', "this.gearKeptBy = 'pending';", 'await this.equipment.load(c);']).ok, "a session's first world asks for its server before the load, so a server saved here and not yet heard from leaves the rig to it rather than the record's mark");
   ok(inOrder(method(main, '  private stepKeepers(dt: number): void {'), ['const gear = keeperOf(this.gearKeptBy, this.gearStateNow());', "if (gear === 'local') void this.equipment.grantRigHere();"]).ok, 'and the rig is given by the mark the moment this browser is known to keep it');
+}
+
+// Racer wave 4a: another player's vehicle drawn where it is, and the rope riding that very picture. Every hand-over in
+// the game, which the behaviour tests make for themselves (peerReckon's simulation and grappleVehicles' stand-in step
+// the picture and hand the rope its moment and its record on their own): a line lost here leaves the rope riding the old
+// smooth pose, held back by `peerLag`, while the picture is reckoned -- the two then part by the lag times the speed --
+// or never reckons a picture, or disbelieves every state, or sends no motion, while every test of the parts passes.
+{
+  const loopAt = main.indexOf('    const step = () => {\n      const tFrame = performance.now();');
+  const loop = loopAt < 0 ? '' : main.slice(loopAt);
+  ok(
+    inOrder(loop, [
+      'const tFrame = performance.now();',
+      "const reckonAt = this.remotes.count > 0 && sharedClock.where === 'shared' ? sharedClock.now() - sharedClock.lagNow() : Number.NaN;",
+      'this.remotes.reckonAt = reckonAt;',
+      'peerBodies().stampReckon(reckonAt);',
+      'player.update(dt, input, this.cam, this.world);',
+      'this.stepNet(dt, tFrame);',
+      'this.physics.step(dt);',
+    ]).ok,
+    "the frame reads its moment on the shared clock once at its top and hands it to the peers' pictures and the peers' boxes before the player's update; the state goes out after the hulls step and before the frame's physics step",
+  );
+  const bodies = read('../../../src/net/remoteBodies.ts');
+  ok(/stampReckon\(ms: number\): void \{\s*this\.hullSet\.reckonAt = ms;\s*\}/.test(bodies) && bodies.includes('h.reck = p.shipReck ?? NO_RECKON;'), "the peers' boxes keep the frame's moment and hand the rope each ride's own record, by reference");
+  const viewOf = method(remotes, '  private viewOf(');
+  ok(viewOf.includes('v.shipReck = rv.reck;') && viewOf.includes('v.shipReck = NO_RECKON;'), "the peer view hands on the ride's own record (none with no ride), never a copy");
+  ok(remotes.includes("readReckon(veh, sharedClock.where === 'shared' ? sharedClock.now() - sharedClock.lagNow() : Number.NaN, rv.reck);"), "every state's motion is read into the ride's record and judged by its age on the shared clock as it is heard");
+  const peersUpdate = method(remotes, '  update(dt: number): void {');
+  ok(inOrder(peersUpdate, ['n[2] = this.reckonAt;', 'rv.reckoned = reckonsIn(rv.reck, n);', 'reckonStepIn(rv.obj.position, reckQ, rv.reck, n);']).ok, "each ride's picture is reckoned to the frame's moment the frame read at its top, from its own record");
+  const stepNet = method(main, '  private stepNet(dt: number, frameAt: number): void {');
+  ok(
+    inOrder(stepNet, ['const turn = own ? own.quaternion(tmpQ) : null;', 'this.motionForWire(own, frameAt, dt, turn)', 'q: turn.toArray().map(n3)', '...(motion ?? {})']).ok,
+    "the state carries its ride's motion, stamped with the frame's own step, and the turn as the motion carried it back",
+  );
+  const forWire = method(main, '  private motionForWire(');
+  ok(
+    forWire.includes('const at = placeMoment(sharedClock.now() - sharedClock.lagNow(), performance.now() - frameAt, dt, this.physics.behind);') && forWire.includes('if (turn && written) turnBack(turn, sentYr, dt);') && /if \(!race\.isPaused\) \{/.test(forWire),
+    "a ride's place is stamped the moment the frame before's step made it true (the frame's start less its own step and the remainder), a turn written this frame is carried back to it, and a race drive paused while play stands still sends no turn",
+  );
 }
 
 console.log(`\n${checks} checks passed`);

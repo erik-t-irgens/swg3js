@@ -401,7 +401,8 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
   ok(/const gait = isPod\(def\) && loaded\.animations\.length \? podGait\(model, loaded\.animations, def\.clipSpeeds\) : null;/.test(garage), "another player's picture of a pod asks the same isPod and gets the same clips");
   ok(!/\bkind === 'podracer' && def\.source/.test(garage), 'and nothing decides it by the kind a vehicle is tried as');
   const peers = readFileSync(join(root, 'src', 'net', 'remotePlayers.ts'), 'utf8');
-  ok(/if \(rv\.gait\) stepPodPicture\(rv\.gait, dt, rv\.vel, rv\.obj\.quaternion, rv\.landed\);/.test(peers), "the peers' frame steps a pod picture's clips by stepPodPicture, along the picture's own nose");
+  // The velocity it reads is the one the rider's own game sent while the picture is reckoned (Racer wave 4a), else the glided one.
+  ok(/if \(rv\.gait\) stepPodPicture\(rv\.gait, dt, rv\.reckoned \? rv\.sentVel : rv\.vel, rv\.obj\.quaternion, rv\.landed\);/.test(peers), "the peers' frame steps a pod picture's clips by stepPodPicture, along the picture's own nose, at the velocity sent while it is reckoned");
   ok(/rv\.gait = gait;/.test(peers), 'with the gait the picture was built with');
 }
 

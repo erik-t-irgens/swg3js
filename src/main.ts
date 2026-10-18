@@ -364,6 +364,9 @@ import type { RaceLevels } from './vehicles/raceMath.ts';
 import { RACE_KINDS, corridorCircles, corridorHits, courseLegs, isTrackId, lapLength, readTrackFile, trackInGame, trackSync, tracksPath, type CourseThing, type RaceKind, type TrackDef, type TrackRead } from './race/trackFile.ts';
 import { GATE_STRIDE, bakeGate, gateCorners, headingTurn, turnHeading } from './race/gates.ts';
 import { RUN_ACT, RUN_EVENT, RaceRun, STAND_LIFT, bestOf, newRunWorld, putBackSpawn, raceBestKey, raceDelta, raceTime, runBestOf, runInput, runKindFor, runStep } from './race/raceRun.ts';
+import { RACE_GROUP_TUNE, gridSlot, syncGroupCountdown, tuneRaceGroup } from './race/raceGroup.ts';
+import { RaceTogether, type GroupRace } from './net/raceNet.ts';
+import { RECKON_TUNE, placeMoment, tuneReckon, turnBack } from './net/peerReckon.ts';
 import { TRACK_TUNE, gateSizeFor, tuneTrack, type TrackTune } from './race/trackTune.ts';
 import { TRACK_EDITOR_HEADER, TRACK_EDITOR_HEADER_VALUE, deleteGate, insertGate, moveGateTo, nudgeGate, resizeGate, roundPlace, trackEditFile, type TrackReply } from './race/trackEdits.ts';
 import { RaceHud, type RaceBlockView } from './ui/raceHud.ts';
@@ -792,6 +795,8 @@ interface TrackConsoleOpts {
   stop?: boolean;
   check?: string;
   reload?: boolean;
+  /** The debug menu's "Race the group": the leader calls a race on that track (`__debug.raceTogether({ start })`). */
+  groupRace?: string;
 }
 
 class App {
@@ -1042,6 +1047,10 @@ class App {
   private readonly remotes: RemotePlayers;
   /** Going where the group goes: what a leader's trip means here, and where to come out to be beside them. */
   private readonly together = new TravelTogether();
+  /** Racing together (src/net/raceNet.ts): a race the group's leader called, this browser's place in it and the standings. */
+  private readonly raceTogether = new RaceTogether();
+  /** The race drive the nudge's list was last filled for (`fillRaceNear`), so a hull left behind is told none is near. */
+  private nudgedDrive: RaceDrive | null = null;
   /**
    * The character's story book (src/story/bookClient.ts): the copy this browser keeps, who holds it --
    * this browser alone, or a server whose greeting says it holds a story -- and the waypoints set in it.
@@ -7047,6 +7056,34 @@ class App {
        * twice) and `track({ drop: true })`.
        */
       track: (opts: TrackConsoleOpts = {}) => this.trackConsole(opts),
+      /**
+       * Racing together (src/net/raceNet.ts, src/race/raceGroup.ts): `raceTogether()` reports the race the group's
+       * leader called (its track, start, members in grid order, this browser's slot and place in it, the standings),
+       * `raceTogether({ start: 'test_dune_loop', in: 20 })` calls one (the leader's), `{ join: true }` joins the one
+       * called, `{ leave: true }` drops out, and `{ tune: { across, back, perRow, bikeShare, lead, nudge, nudgeReach,
+       * nudgeStick } }` moves the grid's spacing, the call's lead and the nudge between pods.
+       */
+      raceTogether: (opts: { start?: string; in?: number; join?: boolean; leave?: boolean; tune?: Record<string, unknown> } = {}) => this.raceTogetherConsole(opts),
+      /**
+       * Other players' rides drawn where they are (src/net/peerReckon.ts): `reckon()` lists every peer's ride, whether its
+       * picture is reckoned or glided and why, the state's age on the shared clock, where the picture is, where the last
+       * state was sent from and where its motion carries it now, beside this frame's moment and this browser's own ride;
+       * `reckon({ tune: { on, ease, turn, most, early, trust } })` moves the reckoning live.
+       */
+      reckon: (opts: { tune?: Partial<typeof RECKON_TUNE> } = {}) => {
+        if (opts.tune) tuneReckon(opts.tune);
+        const own = this.player.mounted ?? this.player.piloting ?? null;
+        return {
+          clock: sharedClock.where,
+          frameMoment: Number.isFinite(this.remotes.reckonAt) ? new Date(this.remotes.reckonAt).toISOString() : null,
+          now: sharedClock.now() - sharedClock.lagNow(),
+          vehVersion: this.net.session.vehVersion,
+          // Asked between frames, after the last one's physics step: its place is that step's, with no step of a frame still to come.
+          mine: own ? { at: [own.pos.x, own.pos.y, own.pos.z].map((n) => Number(n.toFixed(2))), sent: this.motionForWire(own, performance.now(), 0) } : null,
+          peers: this.remotes.reckonDebug(),
+          tune: { ...RECKON_TUNE },
+        };
+      },
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
       /** Set the ship whose room the player is in (or the nearest ship) adrift: forward speed and a spin (rad/s) with no gravity or righting, so the room's physics can be tried; `shipDrift(0)` brings it to rest. */
       /** Move the cockpit frame over the seat of the ship you are in (metres right, up, forward), to find where it should sit; the numbers to report. */
@@ -9899,6 +9936,56 @@ class App {
         return { ...together.debug(), tune: TOGETHER_TUNE, trip: groups.trip };
       };
     }
+    // ---- Racing together. ----
+    //
+    // The group's leader calls a race on a track of the world's file at a moment of the shared clock; each member is
+    // offered it on the message line and joins with /race, which stands what they ride at a slot of their own behind the
+    // grid and counts down to that one moment; from go each times itself as any run does and says its laps and finish to
+    // the group, and every member's race block shows the standings. Nothing of it is the server's to judge, and with no
+    // server, or one whose hail carries no races, none is called (src/net/raceNet.ts).
+    const rt = this.raceTogether;
+    rt.send = (msg) => this.net.sendWord(msg);
+    rt.authority = () => this.net.session.authority;
+    rt.raceVersion = () => this.net.session.raceVersion;
+    rt.note = (text) => this.messages.system(text);
+    // The clock the start is set on, which every member reads alike: the shared clock as the weather reads it.
+    rt.now = () => sharedClock.now() - sharedClock.lagNow();
+    rt.leading = () => groups.leading;
+    rt.myId = () => this.net.id;
+    rt.myName = () => this.current?.name ?? 'you';
+    rt.members = () => (groups.roster ? groups.roster.members.map((m) => ({ id: m.me ? this.net.id : m.id, name: m.name, leader: m.leader })) : null);
+    rt.world = () => packIdOf(this.world.planet, this.zone);
+    rt.track = (id) => this.trackById(id);
+    rt.canRace = (t) => {
+      const v = this.racedHullNow();
+      if (typeof v === 'string') return v;
+      return runKindFor(t, v.spec.kind).why;
+    };
+    // Joined when the run it started is this race's and stands; anything else is the words of why not.
+    rt.join = async (race, slot) => {
+      const words = await this.startRun(race.track, { race, slot });
+      return this.raceRun?.live && rt.ownsRun(race) ? '' : words;
+    };
+    rt.ownsRun = (race) => !!this.raceRun && this.raceRun.sharedStart === race.at && this.raceRun.track.id === race.track && this.raceRun.world === race.world;
+    rt.stop = (why) => {
+      if (this.raceRun?.live) this.endRun(why);
+    };
+    // A member leaving the group drops out of the race, and the rest are told by their own roster.
+    const raceRosterWas = groups.onRoster;
+    groups.onRoster = (g) => {
+      raceRosterWas(g);
+      rt.rosterChanged();
+    };
+    const raceWordWas = this.net.onWord;
+    this.net.onWord = (msg) => {
+      raceWordWas(msg);
+      rt.handle(msg);
+    };
+    const raceStatusWas = this.net.onStatus;
+    this.net.onStatus = (status, detail) => {
+      raceStatusWas(status, detail);
+      if (status !== 'online') rt.clear();
+    };
     // Whatever else reads the server's own words reads them first and this takes what is left, so a
     // later wave hanging its own words on the same hook does not unplug the group's.
     const wordWas = this.net.onWord;
@@ -14594,7 +14681,13 @@ class App {
     // Clamped onto another ship: whose, and where on it. The others then hang the picture of this hull
     // from that ship's own pose rather than gliding it about on the hull it rides.
     const dock = own ? this.docking.clamp.wire(own) : null;
-    const veh: PeerVehicle | undefined = own ? { id: own.def?.id ?? own.spec.id, p: [n2(own.pos.x), n2(own.pos.y), n2(own.pos.z)], q: own.quaternion(tmpQ).toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: own.riderPose ?? undefined, ...(own.wings.length ? { w: own.wings.target ? 1 : 0 } as const : {}), ...(own.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}) } : undefined;
+    // How it is moving and when its place was true, on the clock everybody shares, so the others draw it where it is
+    // rather than where it was (src/net/peerReckon.ts). Only with a clock shared, and never for a hull set down or
+    // clamped onto another, whose pictures have rules of their own. The turn is read first, so a turn written this frame
+    // can be carried back to the one beside the place sent.
+    const turn = own ? own.quaternion(tmpQ) : null;
+    const motion = own && turn && !own.landed && !dock ? this.motionForWire(own, frameAt, dt, turn) : null;
+    const veh: PeerVehicle | undefined = own && turn ? { id: own.def?.id ?? own.spec.id, p: [n2(own.pos.x), n2(own.pos.y), n2(own.pos.z)], q: turn.toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: own.riderPose ?? undefined, ...(own.wings.length ? { w: own.wings.target ? 1 : 0 } as const : {}), ...(own.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}), ...(motion ?? {}) } : undefined;
     const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     // In a jump, from its start until the tunnel opens, the others do not see this player or the ship
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
@@ -14619,6 +14712,73 @@ class App {
     const rope = hidden ? null : this.ropeForWire(now);
     // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
     this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(rope ? { gr: rope.gr } : {}), ...(rope?.grf ? { grf: rope.grf } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+  }
+
+  /**
+   * The nudge's list for the hull the player races (`RaceDrive.near`): every other player's ride picture drawn within
+   * `nudgeReach` of it, as the peers last placed them, written before the hulls step. Any other drive's list is nought,
+   * a hull just left behind told so at once; with the nudge off, nothing raced, or nobody about, nothing is read.
+   */
+  private fillRaceNear(raced: Vehicle | null): void {
+    const race = raced && RACE_TUNE.on ? raced.race : null;
+    if (this.nudgedDrive && this.nudgedDrive !== race) this.nudgedDrive.near.n = 0;
+    this.nudgedDrive = race;
+    if (!race) return;
+    if (RACE_TUNE.nudge !== 'on' || !race.active || this.remotes.count === 0) {
+      race.near.n = 0;
+      return;
+    }
+    this.remotes.nearPictures(raced!.pos, RACE_TUNE.nudgeReach, race.near);
+  }
+
+  /**
+   * A vehicle's motion as the wire carries it (`server/vehicleWire.mjs`'s `vl`, `yr`, `at`), or null with no clock shared:
+   * the velocity its body really has (a race drive commands it, so it is the drive's own; never a difference of places),
+   * its turn about straight up (a race drive's yaw rate, a flown ship's stick spin turned by its attitude, else its
+   * body's), and the moment its place was true on the shared clock (`placeMoment`). A state goes out before the frame's
+   * own physics step, so the place sent is the one the frame before's step left: true at the frame's start on that clock
+   * less the frame's own step `dt`, which the bodies have not taken yet, and less how far they stood behind even that
+   * (`Physics.behind`). A turn the drive or the flight wrote this frame is a frame ahead of that place, so `turn` (the
+   * body's turn as it is about to be sent) is carried back by the turn rate over the frame (`turnBack`) to the turn the
+   * body stood at beside it; a turn the physics carries with the place is left. A held hull, and a race drive paused
+   * while play stands still, is still: no velocity and no turn. Ten times a second at most, so it allocates freely.
+   */
+  private motionForWire(v: Vehicle, frameAt: number, dt: number, turn?: THREE.Quaternion): { vl: [number, number, number]; yr: number; at: number } | null {
+    if (sharedClock.where !== 'shared' || v.disposed || !v.body.isValid()) return null;
+    let vx = 0;
+    let vy = 0;
+    let vz = 0;
+    let yr = 0;
+    // Whether the turn sent was written this frame, a frame ahead of the place the frame before's step left.
+    let written = false;
+    if (!v.holding && !v.held) {
+      const l = v.body.linvel();
+      vx = l.x;
+      vy = l.y;
+      vz = l.z;
+      const race = v.race;
+      if (race?.active) {
+        // Paused, the drive holds the hull where it is with no velocity, keeping its last turn rate for when play comes back.
+        if (!race.isPaused) {
+          yr = (race.w * Math.PI) / 180;
+          written = true;
+        }
+      } else if (v.spec.ship && v.airborne) {
+        // The stick's spin about the hull's own axes, turned into the world's by its attitude: its part about straight up.
+        const q = v.attitude;
+        const s = v.spin;
+        const tx = 2 * (q.y * s.z - q.z * s.y);
+        const ty = 2 * (q.z * s.x - q.x * s.z);
+        const tz = 2 * (q.x * s.y - q.y * s.x);
+        yr = s.y + q.w * ty + (q.z * tx - q.x * tz);
+        written = true;
+      } else yr = v.body.angvel().y;
+    }
+    const at = placeMoment(sharedClock.now() - sharedClock.lagNow(), performance.now() - frameAt, dt, this.physics.behind);
+    const n2 = (n: number) => Number(n.toFixed(2));
+    const sentYr = Number(yr.toFixed(3));
+    if (turn && written) turnBack(turn, sentYr, dt);
+    return { vl: [n2(vx), n2(vy), n2(vz)], yr: sentYr, at: Math.round(at * 10) / 10 };
   }
 
   /** The rope's two lists as the last state carried them, and their size on the wire, for `__debug.grapple().sent`. */
@@ -16790,6 +16950,8 @@ class App {
     // fire along the nose; the bolts are the game's own and strike what a blaster's would, ships included.
     if (simulate && pilot?.spec.ship && !this.hyperspace.drives(pilot)) this.aimShip(pilot, dt);
     else this.shipLeadValid = false;
+    // Other players' rides drawn near the hull the player races, for its turn's nudge away from them.
+    this.fillRaceNear(pilot === player.mounted ? pilot : null);
     for (const v of this.world.vehicles) {
       // Which building room the ship stands in, followed through the portals before it steps: in one, its
       // floor is the room's and its hull ignores the terrain and the shells.
@@ -17232,7 +17394,7 @@ class App {
   /** The split the block shows and until when on the run's clock, the note under it, and what the block last said it from. */
   private readonly runSplit = { text: '', tone: '' as '' | 'good' | 'bad', until: -Infinity };
   private runNote = '';
-  private readonly runBlockKey = { tenths: Number.NaN, phase: '', events: -1 };
+  private readonly runBlockKey = { tenths: Number.NaN, phase: '', events: -1, standings: -1 };
   private runEvents = 0;
   /** The gates the overlay draws: twelve numbers a gate (`gateCorners`), the run's track's or the track in hand's. */
   private gateShapes = new Float64Array(0);
@@ -17436,7 +17598,7 @@ class App {
    * run stands. A bike is put in racing mode. The hull is stood at the grid behind the curtain, the run made with the
    * best this character kept there, and the countdown begun.
    */
-  private async startRun(id: string): Promise<string> {
+  private async startRun(id: string, group: { race: GroupRace; slot: number } | null = null): Promise<string> {
     if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
     if (this.raceRun?.live) return `a run of ${this.raceRun.track.name} is under way: track({ stop: true }) first`;
     const t = this.trackById(id);
@@ -17456,12 +17618,20 @@ class App {
     const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
     const heading = turnHeading(places.grid.q);
     const midY = this.hullMiddle(v);
-    await this.standOnCourse(v, places.grid.x, places.grid.y, places.grid.z, heading, { label: t.name, warmAt: [places.grid, ...places.gates] });
+    // A group race stands each member at a slot of its own behind the grid, in the order the leader's word listed them.
+    const at = group ? gridSlot({ x: places.grid.x, y: places.grid.y, z: places.grid.z, heading }, group.slot, kind) : places.grid;
+    await this.standOnCourse(v, at.x, at.y, at.z, heading, { label: group ? `${t.name}: a group race` : t.name, warmAt: [places.grid, ...places.gates] });
     if (packIdOf(this.world.planet, this.zone) !== world || this.player.mounted !== v || v.disposed) return 'the run was not started: the world or the ride changed behind the curtain';
+    if (group && this.raceTogether.race !== group.race) return 'the race changed behind the curtain';
     this.clearRun();
     const key = raceBestKey(world, t.id);
     const run = new RaceRun(t, world, kind, def.id, places.grid, places.gates, midY, bestOf(this.current?.raceBest, key, kind));
     run.standing(v.pos.x, v.pos.y, v.pos.z);
+    // A group race counts down to the leader's moment on the shared clock, so every member's go is one instant.
+    if (group) {
+      run.sharedStart = group.race.at;
+      syncGroupCountdown(run, sharedClock.now() - sharedClock.lagNow());
+    }
     race.watch = run;
     this.raceRun = run;
     this.runVehicle = v;
@@ -17472,6 +17642,7 @@ class App {
     this.refreshGateShapes();
     if (moded) this.messages.system('racing mode: a timed run races the bike');
     this.messages.system(`${t.name}: ${t.kind === 'circuit' ? `${run.laps} lap${run.laps === 1 ? '' : 's'}` : 'a sprint'}, ${run.n} gates, ${(lapLength(t, places.gates) / 1000).toFixed(1)} km a lap; W in the window round go for a start boost`);
+    if (group) return `${t.name}, a group race, on the ${def.label} as a ${kind} from slot ${group.slot + 1}: go in ${Math.max(0, Math.ceil(-run.clock))} s`;
     return `${t.name} started on the ${def.label} as a ${kind}: counting down from ${TRACK_TUNE.countdown} s`;
   }
 
@@ -17485,6 +17656,9 @@ class App {
   private stepRun(dt: number, simulate: boolean): void {
     const run = this.raceRun;
     if (!run) return;
+    // A group race's countdown read off the shared clock, on frames play is simulated, until go (`syncGroupCountdown`):
+    // the clock read only while one counts down.
+    if (simulate && run.phase === 'countdown' && Number.isFinite(run.sharedStart)) syncGroupCountdown(run, sharedClock.now() - sharedClock.lagNow());
     const v = this.runVehicle;
     const p = this.player;
     const w = this.runWorld;
@@ -17534,11 +17708,14 @@ class App {
         this.runSplit.tone = !Number.isFinite(e.delta) ? '' : e.delta < 0 ? 'good' : e.delta > 0 ? 'bad' : '';
         this.runSplit.until = run.clock + TRACK_TUNE.splitShow;
         this.keepRaceBest(run, { lap: e.time, splits: run.circuit ? run.bestSplits ?? undefined : undefined });
+        // A group race's lap, said to the group: its time and the time from go at its end (every lap so far summed).
+        if (Number.isFinite(run.sharedStart)) this.raceTogether.ranLap(e.lap, e.time, run.lapTimes.reduce((a, b) => a + b, 0));
       } else if (e.kind === RUN_EVENT.finish) {
         const best = !Number.isFinite(e.delta) || e.delta < 0;
         this.messages.system(`finished ${run.track.name} in ${raceTime(e.time)}${Number.isFinite(e.delta) ? ` (${raceDelta(e.delta)})` : ''}${best ? ': a best time' : ''}`);
         this.runNote = best ? 'a best time' : 'finished';
         this.keepRaceBest(run, run.circuit ? { total: e.time } : { lap: e.time, total: e.time, splits: run.bestSplits ?? undefined });
+        if (Number.isFinite(run.sharedStart)) this.raceTogether.ranFinish(e.time);
         if (this.runVehicle?.race) this.runVehicle.race.watch = null;
       } else if (e.kind === RUN_EVENT.wrongWay) {
         this.messages.system(`wrong way: gate ${e.gate} is the next`);
@@ -17568,6 +17745,8 @@ class App {
     const run = this.raceRun;
     if (!run || !run.live) return;
     run.end(why);
+    // A group race's member dropping out says so to the group.
+    if (Number.isFinite(run.sharedStart)) this.raceTogether.ranOut(why);
     if (this.runVehicle?.race) this.runVehicle.race.watch = null;
     if (this.runVehicle?.race) this.runVehicle.race.startBoost = 1;
     this.world.releaseVehicleMaterials(this.runKept);
@@ -17691,10 +17870,12 @@ class App {
   private updateRaceBlock(run: RaceRun): void {
     const tenths = Math.floor(run.clock * 10);
     const key = this.runBlockKey;
-    if (key.tenths === tenths && key.phase === run.phase && key.events === this.runEvents) return;
+    const standings = this.raceTogether.version;
+    if (key.tenths === tenths && key.phase === run.phase && key.events === this.runEvents && key.standings === standings) return;
     key.tenths = tenths;
     key.phase = run.phase;
     key.events = this.runEvents;
+    key.standings = standings;
     this.raceHud.block(this.raceBlockView(run));
   }
 
@@ -17716,6 +17897,8 @@ class App {
       last: run.circuit && Number.isFinite(lastLap) ? `last ${raceTime(lastLap)}` : '',
       best: Number.isFinite(run.bestLap) ? `best lap ${raceTime(run.bestLap)}${Number.isFinite(run.bestTotal) && run.circuit ? ` · best ${raceTime(run.bestTotal)}` : ''}` : '',
       note: run.phase === 'down' ? `put back in ${Math.max(0, run.downAt + TRACK_TUNE.putBack - run.clock).toFixed(1)} s` : run.wrongWay ? 'wrong way' : this.runNote,
+      // A group race's standings, a line a racer; '' for a run of its own.
+      standings: Number.isFinite(run.sharedStart) ? this.raceTogether.lines().join('\n') : '',
     };
   }
 
@@ -17919,7 +18102,7 @@ class App {
         }),
       };
     }
-    return { world, file: trackEditFile(world), tracks, problem: read?.problem ?? '', held };
+    return { world, file: trackEditFile(world), tracks, problem: read?.problem ?? '', held, group: this.raceTogether.active && this.raceTogether.leading() };
   }
 
   /** The editor's list, made once (the dev server's alone). */
@@ -17953,6 +18136,31 @@ class App {
       hits: hits.map((h) => ({ what: h.thing.what, leg: legName(h.leg), off: Math.round(h.off * 10) / 10, at: raw(h.thing.x, h.thing.z) })),
       built: `${Math.round(share * 100)}% of the course stands on ground chunks built now (trees are read only there)`,
       words: hits.length ? `${hits.length} thing${hits.length === 1 ? '' : 's'} in ${t.name}'s corridor` : `nothing in ${t.name}'s corridor`,
+    };
+  }
+
+  /** `__debug.raceTogether(opts)`: the group's race, called, joined, left and tuned. */
+  private async raceTogetherConsole(opts: { start?: string; in?: number; join?: boolean; leave?: boolean; tune?: Record<string, unknown> }): Promise<Record<string, unknown>> {
+    const words: string[] = [];
+    if (opts.tune) {
+      // The nudge is the race drive's (`RACE_TUNE`, the race dials' too); the grid and the lead the group race's own.
+      const nudge: Record<string, unknown> = {};
+      const group: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(opts.tune)) (k === 'nudge' || k === 'nudgeReach' || k === 'nudgeStick' ? nudge : group)[k] = v;
+      if (Object.keys(nudge).length) words.push(...tuneRace(nudge));
+      if (Object.keys(group).length) words.push(...tuneRaceGroup(group));
+    }
+    if (typeof opts.start === 'string') words.push(this.raceTogether.call(opts.start, opts.in));
+    if (opts.join) words.push(await this.raceTogether.joinNow());
+    if (opts.leave) words.push(this.raceTogether.leave('you left the race from the console'));
+    this.raceTogether.forgetOld();
+    const race = this.player.mounted?.race;
+    return {
+      ...this.raceTogether.debug(),
+      run: this.raceRun ? { phase: this.raceRun.phase, clock: Number(this.raceRun.clock.toFixed(3)), group: Number.isFinite(this.raceRun.sharedStart) } : null,
+      nudge: race ? { on: RACE_TUNE.nudge, near: race.near.n, stick: Number(race.nudged.toFixed(3)) } : { on: RACE_TUNE.nudge },
+      tune: { ...RACE_GROUP_TUNE, nudge: RACE_TUNE.nudge, nudgeReach: RACE_TUNE.nudgeReach, nudgeStick: RACE_TUNE.nudgeStick },
+      words: words.filter(Boolean),
     };
   }
 
@@ -17995,6 +18203,7 @@ class App {
       }
     }
     if (typeof opts.start === 'string') words.push(await this.startRun(opts.start));
+    if (typeof opts.groupRace === 'string') words.push(this.raceTogether.call(opts.groupRace));
     let check: { hits: { what: string; leg: string; off: number; at: [number, number] }[]; built: string; words: string } | null = null;
     if (typeof opts.check === 'string') {
       const t = this.trackById(opts.check) ?? (this.trackHeld?.id === opts.check ? this.trackHeld : null);
@@ -26735,6 +26944,12 @@ class App {
       // The frame report's frame (`__debug.perf()`): from here to `frameEnd` below. It also sets
       // this frame's value of any switch an A/B run is alternating.
       perf.frameStart(tFrame);
+      // This frame's moment on the shared clock, read once and only with a peer about: every peer's ride picture is
+      // reckoned to it in `stepNet` (src/net/peerReckon.ts), and the grapple's rope reads the same number off the peers'
+      // boxes in the player's update, before that, so the pose it rides and the picture are worked out to one moment.
+      const reckonAt = this.remotes.count > 0 && sharedClock.where === 'shared' ? sharedClock.now() - sharedClock.lagNow() : Number.NaN;
+      this.remotes.reckonAt = reckonAt;
+      peerBodies().stampReckon(reckonAt);
       const active = this.started && !this.traveling && !this.dying && !this.menu.open;
       if (active) this.savePlace();
       // Who keeps this player's own things, asked a few times a second whatever the game is doing: a claim

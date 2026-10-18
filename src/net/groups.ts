@@ -25,6 +25,7 @@
 
 import { combatNow } from './combatNet.ts';
 import { tradeNow } from './trade.ts';
+import { raceNow } from './raceNet.ts';
 import type { Authority } from './session.ts';
 
 /**
@@ -630,8 +631,15 @@ export class Groups {
       case 'peace':
         combatNow()?.peace();
         return '';
+      // Racing together (src/net/raceNet.ts): the leader calls a race on a track with `/race <track id> [seconds]`,
+      // and a member joins the one called with `/race` and drops out with `/race leave`.
+      case 'race': {
+        const race = raceNow();
+        if (!race) return 'there is nothing to race here';
+        return race.chat(line.arg);
+      }
       case 'help':
-        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /trade <name>, /duel <name>, /peace, /mood <name>.';
+        return 'chat: type to say it aloud, /g <words> to the group. /invite <name>, /accept, /decline, /leave, /promote <name>, /kick <name>, /who, /trade <name>, /duel <name>, /peace, /mood <name>, /race (join), /race <track> (call one), /race leave.';
       default:
         return `there is no /${line.command}`;
     }

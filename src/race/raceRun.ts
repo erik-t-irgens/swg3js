@@ -162,6 +162,11 @@ export class RaceRun {
   downAt = Number.NaN;
   /** Why it ended, once it has. */
   endedWhy = '';
+  /**
+   * A group race's start on the shared clock (ms): its countdown is read off that clock every frame until go
+   * (`syncGroupCountdown`, `src/race/raceGroup.ts`), so every member's go is the same instant. NaN for a run of its own.
+   */
+  sharedStart = Number.NaN;
   /** The start's window: whether W was down before it opened, and whether the start boost has been earned. */
   private heldEarly = false;
   startEarned = false;
@@ -491,6 +496,7 @@ export class RaceRun {
       startBoost: this.startEarned,
       wrongWay: this.wrongWay,
       downAt: r3(this.downAt),
+      ...(Number.isFinite(this.sharedStart) ? { group: { startsAt: new Date(this.sharedStart).toISOString() } } : {}),
       ...(this.endedWhy ? { ended: this.endedWhy } : {}),
     };
   }

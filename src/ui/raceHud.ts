@@ -32,6 +32,8 @@ export interface RaceBlockView {
   last: string;
   best: string;
   note: string;
+  /** A group race's standings, a line a racer (`src/race/raceGroup.ts`'s `standingLines`), '' outside one. */
+  standings: string;
 }
 
 /** The gates' shapes: the next and the one after in a run, every gate while editing. Ours. */
@@ -75,6 +77,7 @@ const RACE_HUD_CSS = `
 .hud-race .rc-split.bad { color: var(--bad); }
 .hud-race .rc-row { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; }
 .hud-race .rc-note { color: var(--warn); }
+.hud-race .rc-board { color: var(--ink); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85em; white-space: pre-line; text-align: left; border-top: 1px solid var(--rule); margin-top: 3px; padding-top: 3px; }
 `;
 
 interface Field {
@@ -89,7 +92,7 @@ function nowMs(): number {
 
 export class RaceHud {
   readonly root: HTMLElement;
-  private readonly fields: Record<'title' | 'countdown' | 'lap' | 'time' | 'split' | 'last' | 'best' | 'note', Field>;
+  private readonly fields: Record<'title' | 'countdown' | 'lap' | 'time' | 'split' | 'last' | 'best' | 'note' | 'standings', Field>;
   private splitTone = '';
   private shown = false;
   private on = true;
@@ -122,7 +125,7 @@ export class RaceHud {
       this.root.appendChild(el);
       return { el, text: '' };
     };
-    this.fields = { title: make('rc-title'), countdown: make('rc-count'), lap: make('rc-lap'), time: make('rc-time'), split: make('rc-split'), last: make('rc-row'), best: make('rc-row'), note: make('rc-note') };
+    this.fields = { title: make('rc-title'), countdown: make('rc-count'), lap: make('rc-lap'), time: make('rc-time'), split: make('rc-split'), last: make('rc-row'), best: make('rc-row'), note: make('rc-note'), standings: make('rc-board') };
   }
 
   /** The overlay to draw the gates on. Until this, none is drawn. */
@@ -164,6 +167,7 @@ export class RaceHud {
     this.field('last', v.last);
     this.field('best', v.best);
     this.field('note', v.note);
+    this.field('standings', v.standings);
   }
 
   private field(k: keyof RaceHud['fields'], text: string): void {

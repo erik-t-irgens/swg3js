@@ -126,6 +126,8 @@ const quat = new THREE.Quaternion();
 const tmpV = new THREE.Vector3();
 /** Nought, handed to the engine's setters. Never written. */
 const ZERO = Object.freeze({ x: 0, y: 0, z: 0 });
+/** The most other players' rides a hull is nudged from at once: a group's seven others and one spare. */
+export const NEAR_MOST = 8;
 
 /** One sub-step's place along the travel, and the plan's start. */
 interface Place {
@@ -158,6 +160,14 @@ export class RaceDrive {
   rng: () => number = Math.random;
   /** A run's watch on this hull's travel, handed the hull as each live step begins; null outside a run. */
   watch: DriveWatch | null = null;
+  /**
+   * Other players' rides drawn near this hull (their pictures, reckoned where their own games put them), filled by the game
+   * before the hulls step on the frames the player races this one (`RemotePlayers.nearPictures`), `n` nought on every
+   * other: the turn is nudged away from them (`nudgeStick`), and with none near the step takes no part of it.
+   */
+  readonly near = { n: 0, x: new Float64Array(NEAR_MOST), y: new Float64Array(NEAR_MOST), z: new Float64Array(NEAR_MOST) };
+  /** The nudge the last step laid on the stick, for the console. */
+  nudged = 0.5;
   /**
    * A run's start boost: the thrust's rate is multiplied by this while it stands over one, and it falls back to one the
    * step the throttle is let go or the speed passes `startCap` of the plain top. Set by the run at go (`TRACK_TUNE`).
@@ -227,6 +237,10 @@ export class RaceDrive {
 
   // --- pause --------------------------------------------------------------------------------------------------------
   private paused = false;
+  /** Whether play standing still holds the hull where it is (`RACE_CLOCK.live` false): no velocity and no turn. */
+  get isPaused(): boolean {
+    return this.paused;
+  }
   private readonly keptPos = new THREE.Vector3();
   private readonly keptQuat = new THREE.Quaternion();
 
@@ -380,6 +394,9 @@ export class RaceDrive {
     this.lossZ = 0;
     this.startBoost = 1;
     this.startCap = 0;
+    this.nudged = 0;
+    this.sPx = 0;
+    this.sPz = 0;
   }
 
   /**
@@ -725,6 +742,9 @@ export class RaceDrive {
   private sEz = 0.5;
   private sRoll = 0.5;
   private sOverWater = false;
+  /** Where the body stood as the step began, across the ground: what the nudge measures other riders from. */
+  private sPx = 0.5;
+  private sPz = 0.5;
   /** The liquid's surface over the hull's column the last step (-Infinity where there is none). */
   private sWetTop = 0.5;
   private sBraking = false;
@@ -793,6 +813,8 @@ export class RaceDrive {
     const body = v.body;
     const t = body.translation();
     v.pos.set(t.x, t.y, t.z);
+    this.sPx = t.x;
+    this.sPz = t.z;
     const lv = body.linvel();
     this.lvNow.x = lv.x;
     this.lvNow.y = lv.y;
@@ -1069,6 +1091,11 @@ export class RaceDrive {
     // Damaged parts pull toward their side, and a side under repair toward itself (`drivetrain.ts`'s `pullOf`).
     const pull = this.engines.pull;
     if (pull !== 0) s = Math.max(-1, Math.min(1, s + pull));
+    // Another player's ride drawn near: the turn nudged away from it (a step with none near asks nothing of it).
+    if (this.near.n > 0 && tune.nudge === 'on') {
+      this.nudgeFrom();
+      s = Math.max(-1, Math.min(1, s + this.nudged));
+    } else this.nudged = 0;
     this.stick = s;
     const sign = s > 0 ? 1 : s < 0 ? -1 : 0;
     const snap = sign !== 0 && this.lastSign !== 0 && sign !== this.lastSign;
@@ -1091,6 +1118,35 @@ export class RaceDrive {
     this.heading = wrap(this.heading + this.w * D2R * dt);
     this.sNx = Math.sin(this.heading);
     this.sNz = Math.cos(this.heading);
+  }
+
+  /**
+   * The nudge away from other players' rides drawn near (the shape of Racer's own pods' nudge away from a near pod,
+   * rather than colliding), into `nudged`: each one within `nudgeReach` across the ground pushes the stick away from the
+   * side it is on, by `nudgeStick` right beside the hull falling to nothing at the reach. One straight ahead or behind,
+   * on no side, pushes nothing. Allocates nothing.
+   */
+  private nudgeFrom(): void {
+    const tune = RACE_TUNE;
+    const reach = tune.nudgeReach;
+    const near = this.near;
+    // The nose and the right (the nose crossed with up: -x at heading nought) as the step began.
+    const nx = Math.sin(this.heading);
+    const nz = Math.cos(this.heading);
+    const rx = -nz;
+    const rz = nx;
+    let push = 0;
+    for (let i = 0; i < near.n; i++) {
+      const dx = near.x[i] - this.sPx;
+      const dz = near.z[i] - this.sPz;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (!(d < reach) || d < 1e-3) continue;
+      const side = dx * rx + dz * rz;
+      if (side === 0) continue;
+      // A stick above nought turns right: a ride on the right pushes it left.
+      push += (side > 0 ? -1 : 1) * (1 - d / reach);
+    }
+    this.nudged = Math.max(-1, Math.min(1, push)) * tune.nudgeStick;
   }
 
   /** The travel's lag behind the nose, its multipliers eased in and out. */
@@ -2042,6 +2098,7 @@ export class RaceDrive {
       speed: r2(this.h),
       kmh: Math.round(Math.abs(this.h) * 3.6),
       tau: r2(h.tau * this.slideMul),
+      heading: Number(this.heading.toFixed(4)),
       yawRate: r2(this.w),
       bank: r2(this.bank),
       lean: r2(this.lean),
@@ -2052,6 +2109,7 @@ export class RaceDrive {
       lookAhead: { reach: r2(this.reach), farRayTaken: this.rayTaken, latticeReads: this.ring.reads },
       bridge: { span: r2(this.span), lift: r2(this.bridgeLift), on: RACE_TUNE.bridge },
       slope: { degrees: r2(this.slopeTheta / D2R), push: r2(this.p) },
+      nudge: { on: RACE_TUNE.nudge, near: this.near.n, stick: r2(this.nudged), reach: RACE_TUNE.nudgeReach },
       lastHit: this.lastHit.kind ? { ...this.lastHit, loss: r2(this.lastHit.loss), drop: r2(this.lastHit.drop), stepsAgo: this.steps - this.lastHit.at } : null,
       hull: r2(v.hp),
       wearFloor: RACE_TUNE.wearFloor,

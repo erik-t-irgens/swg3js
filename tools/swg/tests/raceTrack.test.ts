@@ -599,6 +599,25 @@ function driveRound(r: ReturnType<typeof runOf>, pts: { x: number; z: number }[]
   ok(/w\.simulate = simulate;\s*w\.steps = simulate \? this\.physics\.stepsAhead\(dt\) : 0;/.test(stepRun) && /const act = runStep\(run, w\);/.test(stepRun) && /act === RUN_ACT\.putBack\) void this\.putBack\(\);/.test(stepRun) && /act === RUN_ACT\.clear\) this\.clearRun\(\);/.test(stepRun) && /act === RUN_ACT\.gone\) this\.endRun\(/.test(stepRun) && !/advanceSteps|goDown/.test(stepRun), "the game's stepRun writes the world into the record, asks runStep, and moves the clock or puts a run down nowhere else");
   ok(/w\.destroyed = !!v\?\.destroyed;\s*w\.disposed = !!v\?\.disposed;\s*w\.mounted = v !== null && p\.mounted === v;\s*w\.racing = !v\?\.race\?\.modes \|\| v\.race\.mode === 'racing';\s*w\.placing = this\.runPlacing;/.test(stepRun), 'with the hull as it stands');
   ok(/if \(run && this\.gateShapesFor === run && \(run\.live \|\| run\.phase === 'finished' \|\| run\.phase === 'ended'\)\)/.test(main), 'and draws a run ended in words with its note, as a finished one');
+  // A group race (Racer wave 4a): the game's half of it, which raceTogether's test drives only through stand-in hooks, so
+  // a line lost here would leave every member counting down on their own three seconds, or saying nothing to the group,
+  // while every test of the rules and the module still passed.
+  const startRun = main.slice(main.indexOf('  private async startRun('), main.indexOf('  private stepRun('));
+  ok(
+    /const at = group \? gridSlot\(\{ x: places\.grid\.x, y: places\.grid\.y, z: places\.grid\.z, heading \}, group\.slot, kind\) : places\.grid;/.test(startRun) &&
+      /if \(group\) \{\s*run\.sharedStart = group\.race\.at;\s*syncGroupCountdown\(run, sharedClock\.now\(\) - sharedClock\.lagNow\(\)\);\s*\}/.test(startRun) &&
+      main.includes('const words = await this.startRun(race.track, { race, slot });'),
+    "a member's group run stands at its own slot behind the grid and counts down to the leader's moment on the shared clock",
+  );
+  ok(/if \(simulate && run\.phase === 'countdown' && Number\.isFinite\(run\.sharedStart\)\) syncGroupCountdown\(run, sharedClock\.now\(\) - sharedClock\.lagNow\(\)\);/.test(stepRun), "and its countdown is read off the shared clock on frames play is simulated, only while it counts down");
+  const takeEvents = main.slice(main.indexOf('  private takeRunEvents('), main.indexOf('  private keepRaceBest('));
+  const endRun = main.slice(main.indexOf('  private endRun('), main.indexOf('  private clearRun('));
+  ok(
+    /if \(Number\.isFinite\(run\.sharedStart\)\) this\.raceTogether\.ranLap\(e\.lap, e\.time, run\.lapTimes\.reduce\(/.test(takeEvents) &&
+      /if \(Number\.isFinite\(run\.sharedStart\)\) this\.raceTogether\.ranFinish\(e\.time\);/.test(takeEvents) &&
+      /run\.end\(why\);\s*\/\/[^\n]*\n\s*if \(Number\.isFinite\(run\.sharedStart\)\) this\.raceTogether\.ranOut\(why\);/.test(endRun),
+    "a group run's laps, its finish and its end before the finish are said to the group",
+  );
 }
 
 // --- 5. the run's clock through the real accumulator -------------------------------------------------------------

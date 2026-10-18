@@ -1,6 +1,7 @@
 // The vehicle a player is on, as the relay passes it on in their state: which vehicle, where it
-// stands, how it is turned, how the player is on it, the riding pose, a winged ship's wings and
-// whether it is set down on the ground. Dependency-free, shared by the relay and the tests.
+// stands, how it is turned, how the player is on it, the riding pose, a winged ship's wings,
+// whether it is set down on the ground, and how it is moving and when its place was true (which a
+// watcher draws it ahead by). Dependency-free, shared by the relay and the tests.
 // Everything is checked and kept small; anything else is dropped, so a client on another build
 // can neither grow a message nor put anything unexpected through the relay.
 //
@@ -15,6 +16,25 @@ const VEHICLE_ID = /^[A-Za-z0-9_.\- ]+$/;
 const ROLES = ['ride', 'pilot', 'aboard'];
 /** The words two browsers pass about one ship clamped onto another. */
 const ASK_WORDS = ['dock', 'allow', 'refuse', 'undock'];
+
+/**
+ * What this relay keeps of a vehicle, as its hail says it (`veh`): 2 passes on the sender's own velocity, its turn
+ * about straight up and the moment its place was true on the shared clock (`vl`, `yr`, `at`), which a watcher moves
+ * the picture of it by; a relay before it drops the three, and a browser then glides the picture as it always did.
+ */
+export const VEHICLE_WIRE_VERSION = 2;
+
+/**
+ * The bounds on that motion. Ours, and far past anything that drives: the fastest body the physics moves is cut at
+ * 400 m/s, and a hull turning a full turn in a third of a second is not turning but spinning. A clock before 2020 or
+ * after 2100 is no clock this game shares (the shared clock's own limits, `src/world/sharedClock.ts`).
+ */
+export const VEHICLE_MOTION = {
+  speed: 1000,
+  yaw: 20,
+  earliest: Date.UTC(2020, 0, 1),
+  latest: Date.UTC(2100, 0, 1),
+};
 
 /** Three finite numbers, or null. */
 function vec3(x) {
@@ -32,10 +52,11 @@ export function quat(x) {
 
 /**
  * A cleaned copy of a state's `veh`, or undefined when it is not one:
- * `{ id, p, q, role, pose?, w?, landed? }`. id: at most 48 characters of letters, digits, dots,
+ * `{ id, p, q, role, pose?, w?, landed?, dock?, vl?, yr?, at? }`. id: at most 48 characters of letters, digits, dots,
  * dashes, spaces and underscores; p: three finite numbers; q: four finite numbers; role: ride,
  * pilot or aboard (ride otherwise); pose: at most 48 characters, kept as it is sent (an empty one is
- * a rider in the vehicle's own default pose); w and landed: 0 or 1, and kept only when they were sent.
+ * a rider in the vehicle's own default pose); w and landed: 0 or 1, and kept only when they were sent; the motion
+ * (`cleanMotion`) kept whole or not at all.
  */
 export function cleanVehicle(x) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
@@ -49,7 +70,33 @@ export function cleanVehicle(x) {
   if (x.landed === 0 || x.landed === 1) out.landed = x.landed;
   const dock = cleanDock(x.dock);
   if (dock) out.dock = dock;
+  const motion = cleanMotion(x);
+  if (motion) {
+    out.vl = motion.vl;
+    if (motion.yr !== undefined) out.yr = motion.yr;
+    out.at = motion.at;
+  }
   return out;
+}
+
+/**
+ * A vehicle's motion as its own game has it, or undefined: `{ vl, yr?, at }` -- the velocity its body or its race drive
+ * really has (three finite numbers, none past `VEHICLE_MOTION.speed`), its turn about straight up (rad/s, at most
+ * `VEHICLE_MOTION.yaw` either way, and optional) and the moment its place was true on the shared clock (milliseconds,
+ * within the shared clock's own years). All of it or none: a velocity with no moment, or a moment that cannot be a
+ * clock, is no motion a watcher can carry a place forward by, so the three are dropped together.
+ */
+export function cleanMotion(x) {
+  if (!x || typeof x !== 'object') return undefined;
+  if (x.vl === undefined && x.at === undefined && x.yr === undefined) return undefined;
+  const vl = vec3(x.vl);
+  if (!vl || vl.some((v) => Math.abs(v) > VEHICLE_MOTION.speed)) return undefined;
+  const at = Number(x.at);
+  if (typeof x.at !== 'number' || !Number.isFinite(at) || at < VEHICLE_MOTION.earliest || at > VEHICLE_MOTION.latest) return undefined;
+  if (x.yr === undefined) return { vl, at };
+  const yr = Number(x.yr);
+  if (typeof x.yr !== 'number' || !Number.isFinite(yr) || Math.abs(yr) > VEHICLE_MOTION.yaw) return undefined;
+  return { vl, yr, at };
 }
 
 /**

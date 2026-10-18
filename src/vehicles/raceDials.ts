@@ -101,6 +101,15 @@ const RACE_GROUPS: DialGroup[] = [
     ],
   },
   {
+    title: 'Racing together',
+    note: 'Another player\'s pod drawn near yours nudges your turn away from it; it never collides, since theirs is a picture here and passes through yours.',
+    dials: [
+      choice('nudge', 'Nudge', ['on', 'off'], 'On: a ride drawn near leans your turn away from it. Off: the turn is only what you steer.'),
+      rule('nudgeReach', 'Nudge reach', 0, 60, 1, 'm', 'How near another ride must be drawn before your turn is nudged away from it.'),
+      rule('nudgeStick', 'Nudge strength', 0, 1, 0.01, '', 'The most of the stick a ride right beside yours takes, falling to nothing at the reach.'),
+    ],
+  },
+  {
     title: 'Camera',
     dials: [
       rule('camPull', 'Pull back', 0, 1, 0.05, '', 'How much further out the camera stands at the ceiling (0.3 is thirty per cent).'),

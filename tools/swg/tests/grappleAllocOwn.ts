@@ -16,6 +16,7 @@ import v8 from 'node:v8';
 import { PerformanceObserver, constants as perfConstants } from 'node:perf_hooks';
 import { GRAPPLE_TUNE, Grapple, type GrappleBody } from '../../../src/player/grapple.ts';
 import { Group, RAPIER, type Physics } from '../../../src/core/physics.ts';
+import { newReckonState, reckonStepIn, reckonsIn } from '../../../src/net/peerReckon.ts';
 
 const gc = (globalThis as { gc?: (o?: { type: 'minor' }) => void }).gc;
 if (!gc) {
@@ -516,14 +517,23 @@ if (process.argv.includes('hull')) {
 // the face on some frames (`hang`), the frames' peer slot, the smooth pose and its jump test, the rope's casts, fans and
 // depth against the box by arithmetic, the box test, the relative clip, the carry round a moving pivot and the tow all
 // run, and after them wave 2's `look` and the mark worked out with the peers handed over, its box cast meeting the vehicle
-// and missing it, the mark shown on it, held on it and lost.
+// and missing it, the mark shown on it, held on it and lost. With `reckon` (Racer wave 4a) every state carries the
+// vehicle's motion and its moment, the picture is reckoned by the game's own step and the rope rides that step, from the
+// record and the frame's moment the list hands it, as the game's do.
 if (process.argv.includes('peer')) {
   useNear();
   const hang = process.argv.includes('hang');
+  const reckon = process.argv.includes('reckon');
   const V = 40;
   const obj = { position: { x: 0, y: 0.6, z: 0 }, quaternion: { x: 0, y: 0, z: 0, w: 1 } };
-  const entry = { id: 7, obj, mid: Float64Array.of(0, 1.25, 0), half: Float64Array.of(2.5, 1.25, 8), target: Float64Array.of(0, 0.6, 0), turn: Float64Array.of(0, 0, 0, 1), vel: Float64Array.of(0, 0, V), heardAt: 0 };
-  const peers = { list: [entry], stamp: 0 };
+  const reck = newReckonState();
+  const entry = { id: 7, obj, mid: Float64Array.of(0, 1.25, 0), half: Float64Array.of(2.5, 1.25, 8), target: Float64Array.of(0, 0.6, 0), turn: Float64Array.of(0, 0, 0, 1), vel: Float64Array.of(0, 0, V), heardAt: 0, ...(reckon ? { reck } : {}) };
+  const peers = { list: [entry], stamp: 0, reckonAt: 0.5 };
+  peers.reckonAt = Number.NaN;
+  // The reckoning's numbers (the frame, the age, the moment), kept; the state's motion is the vehicle's own, straight on.
+  const rn = new Float64Array(3);
+  reck.vz = V;
+  reck.py = 0.6;
   const pb = body as unknown as { peerHulls: unknown; grounded: boolean; ground: number };
   pb.peerHulls = peers;
   pb.ground = 0;
@@ -542,10 +552,20 @@ if (process.argv.includes('peer')) {
       entry.target[2] = z;
       entry.vel[2] = relayVel.z;
       entry.heardAt = heard;
+      if (reckon) {
+        // The state's place, true at the moment it was sent, and the age it was heard at believed.
+        reck.pz = z;
+        reck.at = clk.next * 1000;
+        reck.has = true;
+        reck.ok = true;
+      }
       clk.last = heard;
       clk.next += 0.1;
     }
-    obj.position.z += (entry.target[2] - obj.position.z) * k;
+    rn[0] = DT;
+    rn[2] = clk.t * 1000;
+    if (reckon && reckonsIn(reck, rn)) reckonStepIn(obj.position, obj.quaternion, reck, rn);
+    else obj.position.z += (entry.target[2] - obj.position.z) * k;
     peers.stamp = clk.t;
   };
   for (let i = 0; i < 60; i++) glide();
@@ -559,6 +579,8 @@ if (process.argv.includes('peer')) {
   vel.y = 0;
   vel.z = V;
   pb.grounded = !hang;
+  // The frame's moment, as the game's list carries it whenever the rope bites.
+  if (reckon) peers.reckonAt = clk.t * 1000;
   const hooked = g.attachPeer(body, 7, 0, 0.6 + 2.5, obj.position.z - 6, 0, 1, 0);
   if (!hang) g.latch = true;
   const hv = g.view;
@@ -582,6 +604,8 @@ if (process.argv.includes('peer')) {
     vel.y = 0;
     vel.z = V;
     if (g.rope.length > back + 6) g.rope.length = back + 5;
+    // The frame's moment, read at its top as the game reads it: the one the picture is reckoned to after the update.
+    if (reckon) peers.reckonAt = (clk.t + DT) * 1000;
     const contacts = g.slipNow.contacts;
     g.refreshModes(body);
     g.beforeMove(body, DT);
@@ -624,7 +648,8 @@ if (process.argv.includes('peer')) {
   };
   for (let q = 0; q < 600; q++) pstep(true);
   const pbest = await measure(pstep);
-  console.log(JSON.stringify({ frames: FRAMES, made: pbest.made, scavenges: pbest.scavenges, hooked, seen: seenPeer, attached: g.attached, why: g.lastLetGo, frame0: (g.vehicleReport(body) as { frames: string[] }).frames[0] }));
+  const report = g.vehicleReport(body) as { frames: string[]; peer: { mode: string } };
+  console.log(JSON.stringify({ frames: FRAMES, made: pbest.made, scavenges: pbest.scavenges, hooked, seen: seenPeer, attached: g.attached, why: g.lastLetGo, frame0: report.frames[0], mode: report.peer.mode, bends: g.rope.n, rope: g.rope.stats }));
   process.exit(0);
 }
 

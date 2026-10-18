@@ -167,14 +167,33 @@ const drive: DriveInput = { throttle: 1, steer: 0, heading: 0.5, boost: true, ho
 // list holds something that is not a number too, so the engine keeps each as made), as a game's frame hands its own on.
 const DTS: unknown[] = [1 / 144, 1 / 75, 1 / 40, 'not a number'];
 let k = 0;
-const counts = { planned: 0 };
+const counts = { planned: 0, nudged: 0 };
 /** The engines' damage, fires and repair in the run (`RACE_ALLOC_ENGINES=0` leaves them whole, to compare). */
 const ENGINES_AT_WORK = process.env.RACE_ALLOC_ENGINES !== '0';
 const HOLD = process.env.RACE_ALLOC_HOLD ?? '';
+/** Other players' rides drawn near, which nudge the turn (Racer wave 4a; `RACE_ALLOC_PEERS=0` leaves them out, to compare). */
+const PEERS = process.env.RACE_ALLOC_PEERS !== '0';
 function frame(): void {
   const dt = DTS[k++ % 3] as number;
   // A gentle weave: the target off the nose and back.
   drive.heading = race.heading + Math.sin(k / 400) * 0.2;
+  // Other players' rides drawn near, as the game fills the list from their pictures before the step: none for a stretch,
+  // then a pair riding either side of the hull, in and out of the nudge's reach together, then one of them alone for a
+  // moment, so the nudge's part runs, pushes, finds nobody within reach and is skipped. The pair stand mirrored through the
+  // hull, so their pushes cancel and the nudge never steers the weave away from the run's gates for good.
+  if (PEERS) {
+    const near = race.near;
+    const phase = k & 4095;
+    near.n = phase < 2048 ? 0 : phase < 4000 ? 2 : 1;
+    const ox = 4 + 20 * (0.5 + 0.5 * Math.sin(k / 250));
+    const oz = 2 * Math.sin(k / 90);
+    near.x[0] = t.x + ox;
+    near.y[0] = t.y;
+    near.z[0] = t.z + oz;
+    near.x[1] = t.x - ox;
+    near.y[1] = t.y;
+    near.z[1] = t.z - oz;
+  }
   drive.slide = (k & 1023) < 100;
   drive.lean = (k & 2047) < 300 ? 1 : 0;
   // The engines at work (src/vehicles/drivetrain.ts): a part worn past the pull now and then, another set burning, and
@@ -191,6 +210,7 @@ function frame(): void {
   RACE_TUNE.hold = HOLD === 'loose' || (HOLD !== 'firm' && (k & 16383) < 12000) ? 'loose' : 'firm';
   race.step(vehicle, dt, drive, ground, null, null, physics);
   if (race.planned > 0) counts.planned++;
+  if (race.nudged !== 0) counts.nudged++;
   if (run) {
     run.advanceSteps(physics.stepsAhead(dt));
     // The game reads the ring every frame; here every so often, which is no different to the step.
@@ -328,4 +348,4 @@ if (process.argv[2] === 'profile') {
 const d = await measure(frame, FRAMES);
 const v = await measure(viewFrame, FRAMES);
 watch.disconnect();
-console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));
+console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, nudged: counts.nudged, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));

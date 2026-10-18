@@ -202,6 +202,12 @@ export class TestBody implements GrappleBody {
    * frame's update is a physics step behind its body, as it is in the game. None by default.
    */
   beforeStep: ((dt: number) => void) | null = null;
+  /**
+   * What happens before the frame's own work begins: the messages the page handled since the last frame, and the
+   * moment the game reads at its top (`App`'s `reckonAt`, which the peers' pictures are reckoned to later in the same
+   * frame). None by default.
+   */
+  frameStart: ((dt: number) => void) | null = null;
   /** What refuses a shot, as `Player.grappleFireState` fills it. */
   prone = false;
   kneeling = false;
@@ -361,6 +367,7 @@ export class TestBody implements GrappleBody {
 
   /** One frame of the game's loop for this body, `Player.update`'s on-foot order, then the physics' step. */
   frame(dt: number): void {
+    this.frameStart?.(dt);
     const input = this.input;
     const g = this.grapple;
     this.t += dt;

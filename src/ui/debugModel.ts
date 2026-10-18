@@ -73,7 +73,7 @@ export const DEBUG_GROUPS: readonly { title: string; helpers: readonly string[] 
   { title: 'Frame cost', helpers: ['perf', 'bench', 'cull', 'skeletons', 'farTiles', 'placed', 'passes', 'passLog', 'drawCalls', 'shaders', 'physics', 'props'] },
   { title: 'Sound', helpers: ['audio', 'sound', 'soundGain', 'ambience', 'audioSelfTest', 'footsteps', 'gunSounds', 'vehicleSounds', 'sabers', 'surface', 'band'] },
   { title: 'Display and keys', helpers: ['hud', 'hurt', 'hit', 'say', 'windows', 'bind', 'bindings', 'resetBindings', 'debugMenu'] },
-  { title: 'Playing together', helpers: ['session', 'group', 'chat', 'combat', 'together', 'owned', 'npcs', '__sharedDay', '__aboard', '__board', '__peers', '__rooms', '__peerBlades', '__npcs'] },
+  { title: 'Playing together', helpers: ['session', 'group', 'chat', 'combat', 'together', 'raceTogether', 'reckon', 'owned', 'npcs', '__sharedDay', '__aboard', '__board', '__peers', '__rooms', '__peerBlades', '__npcs'] },
 ];
 
 /** The heading a helper nobody filed is listed under. */

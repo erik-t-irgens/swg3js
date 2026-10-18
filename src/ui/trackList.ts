@@ -38,6 +38,8 @@ export interface TrackListModel {
   tracks: TrackListEntry[];
   /** Why the file could not be read, or ''. */
   problem: string;
+  /** Whether this browser leads a group a server holds and carries races for: the list then offers "Race the group". */
+  group?: boolean;
   held: null | {
     id: string;
     name: string;
@@ -130,7 +132,10 @@ export class TrackList implements DebugListSource {
       for (const t of m.tracks) {
         list.append(el('div', 'trk-d', `${t.id} · ${t.name} · ${t.kind}${t.kind === 'circuit' ? ` ×${t.laps}` : ''} · ${t.gates} gates · ${(t.length / 1000).toFixed(2)} km`));
         const b = el('span', 'trk-b');
-        b.append(btn('Edit', 'take it in hand to edit its gates', { edit: t.id }), btn('Go to', 'stand at its grid, on what you ride', { go: t.id }), btn('Start', 'run it on what you ride', { start: t.id }), btn('Check', 'what stands in its corridor', { check: t.id }));
+        b.append(btn('Edit', 'take it in hand to edit its gates', { edit: t.id }), btn('Go to', 'stand at its grid, on what you ride', { go: t.id }), btn('Start', 'run it on what you ride', { start: t.id }));
+        // The group's leader calls a race on it for everybody (`__debug.raceTogether({ start })`).
+        if (m.group) b.append(btn('Race the group', 'call a race on it for your group, each member joining with /race before go', { groupRace: t.id }));
+        b.append(btn('Check', 'what stands in its corridor', { check: t.id }));
         list.append(b);
       }
       if (!m.tracks.length) into.append(el('div', 'trk-note', 'No track on this world yet.'));
