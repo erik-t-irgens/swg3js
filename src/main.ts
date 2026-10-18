@@ -352,6 +352,7 @@ import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, room
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
+import { wireVehicleId } from './vehicles/podHybrid.ts';
 import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
 import { vehicleDialsFor } from './vehicles/raceDials.ts';
@@ -1989,7 +1990,7 @@ class App {
         upsertCharacter(this.current);
       }
     };
-    this.vehiclesUi = new VehiclesUi(this.ui, (def, kind) => void this.spawnVehicle(def, kind), () => this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null));
+    this.vehiclesUi = new VehiclesUi(this.ui, (def, kind, engines) => void this.spawnWithEngines(def, kind, engines), () => this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null));
     // The ship's edit page: DOM only here (its preview's WebGL context is made the first time it opens);
     // every dependency is an arrow read at click time, after the constructor.
     this.shipEdit = new ShipEditUi(this.ui, {
@@ -6939,7 +6940,8 @@ class App {
         }
         const def = v.def ?? null;
         const route = def ? raceRoute(def, v.spec.kind) : null;
-        const own = (this.garage ?? this.world.garage)?.vehicles.find((d) => d.id === v.spec.id)?.kind ?? null;
+        // What it is: the def's own kind, which for a pod put together from parts (not in the garage's list) is its cockpit pod's.
+        const own = def?.hybrid ? def.kind : ((this.garage ?? this.world.garage)?.vehicles.find((d) => d.id === v.spec.id)?.kind ?? null);
         const whyNot = race.wants(v) ? (RACE_CLOCK.live ? '' : 'paused: play stands still, and the hull is held where it is') : !RACE_TUNE.on ? 'the pass is switched off' : RACE_TUNE.drive !== 'racer' ? 'drive is springs' : v.held || v.holding ? 'held' : v.ghosted ? 'ghosted' : v.destroyed ? 'destroyed' : race.modes && race.mode === 'traversal' ? 'traversal mode (U for racing)' : 'not raced';
         const st = this.raceView;
         const out = this.raceOut;
@@ -7398,9 +7400,30 @@ class App {
         this.world.removeVehicles(this.player.mounted ?? this.player.aboard?.vehicle ?? null);
         return this.world.vehicles.length;
       },
-      spawn: async (name: string, kind?: VehicleKind) => {
+      /**
+       * Stand a garage vehicle in front of you, as its own kind or the one named; `{ engines: '<pod id>' }` puts a skinned
+       * pod on another skinned pod's engines (a pod put together from parts, src/vehicles/podHybrid.ts), as the garage
+       * panel's engines choice does.
+       */
+      spawn: async (name: string, kind?: VehicleKind, opts?: { engines?: string }) => {
         const def = (await this.loadGarage()).find(name);
-        return def ? this.spawnVehicle(def, kind) : `no vehicle matches ${name}`;
+        return def ? this.spawnWithEngines(def, kind || undefined, opts?.engines) : `no vehicle matches ${name}`;
+      },
+      /**
+       * Pods put together from parts (src/vehicles/podHybrid.ts): the skinned pods any of which may be a hybrid's cockpit or
+       * engines, the engines the garage panel has chosen for each in this browser, every hybrid made this session with
+       * what its last build kept of each half (triangles, the ones reaching across, the points taken off and hung on), and
+       * other players' hybrids as this browser draws them.
+       */
+      pods: async () => {
+        const g = await this.loadGarage();
+        return {
+          halves: g.halves().map((d) => ({ id: d.id, label: d.label, clips: Object.keys(d.clipSpeeds ?? {}) })),
+          chosen: this.vehiclesUi.enginesChosen(),
+          hybrids: g.hybridDefs().map((d) => ({ id: d.id, label: d.label, wire: wireVehicleId(d), thrusters: d.raceThrusters ?? null, build: g.hybridBuilds.get(d.id) ?? null })),
+          // Other players' hybrids as drawn here: whose, the id their ride came on, and the picture's meshes.
+          pictures: this.remotes.podPictures(),
+        };
       },
       /**
        * A ship's fit: `shipFit()` the ship ridden, flown or boarded (else the nearest spawned), as it stands: each slot's
@@ -14687,7 +14710,8 @@ class App {
     // can be carried back to the one beside the place sent.
     const turn = own ? own.quaternion(tmpQ) : null;
     const motion = own && turn && !own.landed && !dock ? this.motionForWire(own, frameAt, dt, turn) : null;
-    const veh: PeerVehicle | undefined = own && turn ? { id: own.def?.id ?? own.spec.id, p: [n2(own.pos.x), n2(own.pos.y), n2(own.pos.z)], q: turn.toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: own.riderPose ?? undefined, ...(own.wings.length ? { w: own.wings.target ? 1 : 0 } as const : {}), ...(own.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}), ...(motion ?? {}) } : undefined;
+    // A pod put together from parts goes out by the id that names both its halves (`wireVehicleId`), so the others build the same pod.
+    const veh: PeerVehicle | undefined = own && turn ? { id: own.def ? wireVehicleId(own.def) : own.spec.id, p: [n2(own.pos.x), n2(own.pos.y), n2(own.pos.z)], q: turn.toArray().map(n3) as [number, number, number, number], role: p.mounted ? 'ride' : p.piloting ? 'pilot' : 'aboard', pose: own.riderPose ?? undefined, ...(own.wings.length ? { w: own.wings.target ? 1 : 0 } as const : {}), ...(own.landed ? { landed: 1 } as const : {}), ...(dock ? { dock } : {}), ...(motion ?? {}) } : undefined;
     const q = p.aboard || p.eva || leans ? (p.group.quaternion.toArray().map(n3) as [number, number, number, number]) : undefined;
     // In a jump, from its start until the tunnel opens, the others do not see this player or the ship
     // (`j`). An ultra cruise is hidden the same way and for the same reason: at kilometres a second a
@@ -24523,6 +24547,21 @@ class App {
     } finally {
       if (guard) this.spawning.delete(def.id);
     }
+  }
+
+  /**
+   * Spawn a vehicle from the garage on the engines chosen for it: a skinned pod on another skinned pod's engines is a pod
+   * put together from parts (`Garage.hybrid`, src/vehicles/podHybrid.ts), spawned as any vehicle is, as its own kind or
+   * the one asked; no engines, or its own, is the vehicle itself. A pair that cannot be put together is said in words.
+   */
+  async spawnWithEngines(def: VehicleDef, kind?: VehicleKind, engines?: string): Promise<string> {
+    if (!engines || engines === def.id) return this.spawnVehicle(def, kind);
+    const h = (await this.loadGarage()).hybrid(def, engines);
+    if (typeof h === 'string') {
+      this.messages.system(h);
+      return h;
+    }
+    return this.spawnVehicle(h, kind);
   }
 
   /** The garage, loaded once whichever asks first (the panel, the edit page, the world or the console), and the world given the same one. */

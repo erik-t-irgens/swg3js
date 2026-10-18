@@ -6,7 +6,8 @@ import { Vehicle, specFor, type VehicleKind, type VehicleSpec } from './vehicle'
 import { hoverCarFor, kindFor, raceSpecFor } from './vehicleKinds.ts';
 import { attachRace, type RaceDeps } from './raceDrive.ts';
 import { RACE_TUNE } from './raceTune.ts';
-import { glowShare, raceThrustersFor, type EnginePoint } from './raceSpots.ts';
+import { glowShare, noteRaceThrusters, type EnginePoint } from './raceSpots.ts';
+import { PodHalfRefused, buildHybrid, cloneSkinned, disposePodHybrid, framedExtents, hybridDefOf, hybridId, hybridSeatCockpit, isHalf, parseHybridId, pickHalves, type HybridReport } from './podHybrid.ts';
 import type { Physics } from '../core/physics';
 import { ACTOR_LAYER } from '../world/portalRender';
 import { surfaces } from '../world/surfaces';
@@ -15,7 +16,7 @@ import { COCKPIT_BODY_NUDGE, EYE_OVER_PELVIS, bodyLift, frameFileName, isEyeHard
 import { EngineTrail } from './trail';
 import { advanceEnginePhase, engineHeatOf } from './enginePlumes';
 import { planSeat, hangSaddle, type SaddleDef, type SeatPlan } from './saddle';
-import { PART_LIMIT, applyPlace, findHardpoint, frameExtents, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
+import { PART_LIMIT, applyPlace, findHardpoint, hangAttachments, hardpointName, partOf, underPivot, wingDrop, type AttachmentDef, type Assembly } from './shipAssembly';
 import { WING_DROP_MIN, WING_TIP_ROOM, WingSet, type Wing } from './wings';
 import { armGuns, changedSlots, componentIndex, droidShown, droidSink, paintOnlyFit, partsOf, resolveFit, samePaint, type ComponentDef, type DroidDef, type FitDef, type FitPaint, type PlacedPart, type ResolvedFit, type ShipFit } from './shipFit.ts';
 import { collectMounts, countSpotHardpoints, dropWingsUnder, engineSpotsOf, fitTree, hangParts, onModel, rebindGlows, recordHung, refitSwap, splitPartChildren, stageRefit, type Mounts, type PendingPart, type ShipBuild, type SpareGlows, type StandIn, type SwapResult } from './shipMounts';
@@ -23,7 +24,7 @@ import { ShipPaint } from './shipPaint';
 import { renderPaint } from './paintRender';
 import { lavaImmuneTemplate, setImmunityCatalogue } from '../world/lavaImmunity';
 import { RIG_HULL_TUNE, RigHull, assembleRigModel, hullJointOf, pieceVolumes } from './rigHull.ts';
-import { POD_COCKPIT_JOINT, isPod, podGait, seatPod, type PodGait } from './podSeat.ts';
+import { POD_COCKPIT_JOINT, POD_SEAT, isPod, podGait, seatPod, type PodGait } from './podSeat.ts';
 import type { TravelRig } from '../world/travelTerminal.ts';
 
 // Moved to shipAssembly.ts (node-testable); every existing import from here keeps working.
@@ -121,6 +122,15 @@ export interface VehicleDef {
   paintDir?: string;
   /** The manifest's class for a ship ('fighter', 'bomber', 'freighter', 'gunship', 'shuttle', 'other'). */
   class?: string;
+  /** A gallery model converted on a skeleton (its manifest entry's `skeletal`): a skinned pod may be either half of a hybrid. */
+  skeletal?: boolean;
+  /**
+   * A pod put together from parts (src/vehicles/podHybrid.ts): the garage ids of the pod whose cockpit it wears and the pod
+   * whose engines. Its def is its own (`Garage.hybrid`), never in the list, and its id names both halves.
+   */
+  hybrid?: { cockpit: string; engines: string } | null;
+  /** The garage vehicle whose client data this one sounds by, when it is not its own (a hybrid's engine pod). */
+  soundFrom?: { id: string; template?: string } | null;
 }
 
 export interface ShipWeapon {
@@ -191,7 +201,7 @@ export class Garage {
       const [idx, man] = await Promise.all([fetch(`${baseUrl}assets-private/gallery/gallery.json`), fetch(`${baseUrl}assets-private/gallery/manifest.json`)]);
       if (idx.ok && man.ok) {
         const index = (await idx.json()) as GalleryIndex;
-        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number>; paint?: FitPaint | null }[] } };
+        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number>; paint?: FitPaint | null; skeletal?: boolean }[] } };
         const files = new Map(manifest.categories.layout.map((m) => [m.id, m]));
         for (const it of index.sections.find((s) => s.id === 'vehicles')?.items ?? []) {
           const m = files.get(it.model);
@@ -200,7 +210,7 @@ export class Garage {
           const { kind, inferred } = kindFor({ id: it.label, template: it.template, model: it.model });
           // A speeder whose shaders take colours: a fit of its paint alone (`paintOnlyFit`), its recipes beside the gallery's manifest.
           const fit = paintOnlyFit(m.paint);
-          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind, inferred, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, model: it.model, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds, ...(fit ? { fit, paintDir: 'assets-private/gallery/' } : {}) });
+          g.vehicles.push({ id: it.label, label: it.label.replace(/_/g, ' '), kind, inferred, source: 'gallery', file: `assets-private/gallery/${m.file}`, template: it.template, model: it.model, bounds: m.bounds, riderPose: it.riderPose ?? null, clipSpeeds: m.clipSpeeds, ...(m.skeletal === true ? { skeletal: true } : {}), ...(fit ? { fit, paintDir: 'assets-private/gallery/' } : {}) });
         }
       }
     } catch (err) {
@@ -305,6 +315,14 @@ export class Garage {
       v.inferred = inferred;
     }
     this.vehicles.sort((a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
+    // A hybrid is what its cockpit pod is.
+    for (const h of this.hybrids.values()) {
+      const c = this.vehicles.find((v) => v.id === h.hybrid?.cockpit);
+      if (c) {
+        h.kind = c.kind;
+        h.inferred = c.inferred;
+      }
+    }
     return changed;
   }
 
@@ -314,7 +332,7 @@ export class Garage {
    */
   clearRaceThrusters(): number {
     let n = 0;
-    for (const d of this.vehicles) {
+    for (const d of [...this.vehicles, ...this.hybrids.values()]) {
       if (d.raceThrusters === undefined) continue;
       if (d.raceThrusters.length && d.thrusters === d.raceThrusters) delete d.thrusters;
       delete d.raceThrusters;
@@ -323,9 +341,85 @@ export class Garage {
     return n;
   }
 
+  /**
+   * A vehicle by its garage id, else the first whose id holds the name. A pod put together from parts is found by its
+   * own id, which names both halves (the id another player's ride arrives on): its def, made once (`hybrid`), or none
+   * when either half is not a skinned pod this garage has.
+   */
   find(name: string): VehicleDef | undefined {
     const n = name.toLowerCase();
-    return this.vehicles.find((v) => v.id.toLowerCase() === n) ?? this.vehicles.find((v) => v.id.toLowerCase().includes(n));
+    const exact = this.vehicles.find((v) => v.id.toLowerCase() === n);
+    if (exact) return exact;
+    const pair = parseHybridId(name);
+    if (pair) {
+      const h = this.hybrid(pair.cockpit, pair.engines, true);
+      return typeof h === 'string' ? undefined : h;
+    }
+    return this.vehicles.find((v) => v.id.toLowerCase().includes(n));
+  }
+
+  /** The pods put together from parts this session, by id: their defs, each its own and never in the list. */
+  private readonly hybrids = new Map<string, VehicleDef>();
+  /** What each hybrid's last build kept, by its id, for the console. */
+  readonly hybridBuilds = new Map<string, HybridReport>();
+
+  /** The skinned pods (`isHalf`), any of which may be a hybrid's cockpit or its engines. */
+  halves(): VehicleDef[] {
+    return this.vehicles.filter(isHalf);
+  }
+
+  /** The hybrids made this session. */
+  hybridDefs(): VehicleDef[] {
+    return [...this.hybrids.values()];
+  }
+
+  /**
+   * One skinned pod's cockpit on another's engines (src/vehicles/podHybrid.ts): its def, a new object made once and kept
+   * for the session so every spawn of it shares what is written on it, as every def is; the pod itself when the engines
+   * are its own; or why not, in words. The two pods are `pickHalves`' (a hybrid handed as the cockpit is its own cockpit
+   * pod, so a hybrid given new engines is that pod on them, never a hybrid of a hybrid). Whether the two skeletons agree
+   * is asked when it is built.
+   */
+  hybrid(cockpit: VehicleDef | string, engines: string, exact = false): VehicleDef | string {
+    const pick = pickHalves(this.halves(), (id) => this.vehicles.some((v) => v.id === id), cockpit, engines, exact);
+    if (typeof pick === 'string') return pick;
+    const { cockpit: c, engines: e } = pick;
+    if (e.id === c.id) return c;
+    const id = hybridId(c.id, e.id);
+    let d = this.hybrids.get(id);
+    if (!d) {
+      d = hybridDefOf(c, e);
+      this.hybrids.set(id, d);
+    }
+    return d;
+  }
+
+  /**
+   * A spawn's own model and its clips: a clone of the model loaded once for the session (with a skeleton of its own when it
+   * is skinned, or its mesh would draw where the loaded scene stands), or, for a pod put together from parts, the hybrid
+   * built afresh out of the two pods' loaded models, which writes neither (its own geometries go with the vehicle).
+   */
+  private async instance(def: VehicleDef): Promise<{ model: THREE.Group; animations: THREE.AnimationClip[] }> {
+    if (def.hybrid) {
+      const c = this.vehicles.find((v) => v.id === def.hybrid!.cockpit);
+      const e = this.vehicles.find((v) => v.id === def.hybrid!.engines);
+      if (!c || !e) throw new PodHalfRefused(`garage: ${def.id}: this gallery has no ${!c ? def.hybrid.cockpit : def.hybrid.engines}`);
+      const [cl, el] = await Promise.all([this.model(c), this.model(e)]);
+      const built = buildHybrid(cl, el, def.hybrid);
+      this.hybridBuilds.set(def.id, built.report);
+      // Its own bounds, for anything that sizes it from its def (another player's picture of it): its box at rest, in its own frame.
+      if (!def.bounds) {
+        const box = new THREE.Box3().setFromObject(built.model, true);
+        if (!box.isEmpty()) def.bounds = { min: box.min.toArray(), max: box.max.toArray() };
+      }
+      return { model: built.model, animations: cl.animations };
+    }
+    const loaded = await this.model(def);
+    let skinned = false;
+    loaded.scene.traverse((o) => {
+      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
+    });
+    return { model: skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone(), animations: loaded.animations };
   }
 
   /** How a ship's bolt looks, from the projectile table, or null when the pack has no table. */
@@ -686,36 +780,25 @@ export class Garage {
   /** Stand a vehicle on the ground at a point, facing a heading, and hand it back to drive. */
   async spawn(def: VehicleDef, physics: Physics, scene: THREE.Scene, x: number, y: number, z: number, heading: number, kind: VehicleKind = def.kind, place?: (bounds: VehicleSpec['bounds']) => [number, number, number], opts: BuildOptions = {}): Promise<Vehicle> {
     if (def.source === 'rig') return this.spawnRig(def, physics, scene, x, y, z, heading, place, opts);
-    // A mount's saddle loads beside it, before the body exists: nothing may be awaited once it does.
-    const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
-    // A skinned model (a creature, a walker, a pod racer built on a skeleton) needs a skeleton of
-    // its own: a plain clone shares the loaded scene's bones, and its mesh then draws where that
-    // scene stands, at the origin, however the vehicle moves.
-    let skinned = false;
-    loaded.scene.traverse((o) => {
-      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
-    });
-    const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    // A mount's saddle loads beside it, before the body exists: nothing may be awaited once it does. A skinned model (a
+    // creature, a walker, a pod racer built on a skeleton) is cloned with a skeleton of its own, and a pod put together
+    // from parts is built afresh (`instance`).
+    const [{ model, animations }, saddle] = await Promise.all([this.instance(def), this.saddleFor(def)]);
     // A fitted ship is built from its fit (the stock one when none is given).
     const fit = def.fit ? (opts.fit ?? this.resolve(def, null)) : null;
     const a = await this.assemble(def, model, fit);
     // Its paint notes the meshes wearing a paint shader now; copies only come with custom paint.
     const paint = this.paintFor(def, opts);
     paint?.track(model);
-    const bounds = this.frameModel(def, model);
+    const bounds = this.frameModel(def, model, animations);
     // A gallery pod's or bike's own engine points, named once at its first spawn with the race pass on, for its glows
-    // (src/vehicles/raceSpots.ts): by what it is, never by what it is spawned as, since the def is every spawn's.
-    if (def.raceThrusters === undefined) {
-      const list = raceThrustersFor(def, def.source === 'gallery' ? enginePoints(model) : [], RACE_TUNE.on);
-      if (list) {
-        def.raceThrusters = list;
-        if (list.length) def.thrusters = list;
-      }
-    }
+    // (src/vehicles/raceSpots.ts): by what it is, never by what it is spawned as, since the def is every spawn's. A pod
+    // put together from parts names its engine pod's, on its own def.
+    noteRaceThrusters(def, () => enginePoints(model), RACE_TUNE.on);
     // How far the open wings reach under the closed belly, on the real vertices (a portal hull's rooms left out).
     const drop = a.wings.length ? wingDrop(model, a.wings, (o) => cellIndexOf(o) <= 0) : 0;
     const hardpoints: string[] = [];
-    return this.finishSpawn(def, model, a, drop, bounds, hardpoints, loaded.animations, saddle, physics, scene, x, y, z, heading, kind, place, opts, fit, paint);
+    return this.finishSpawn(def, model, a, drop, bounds, hardpoints, animations, saddle, physics, scene, x, y, z, heading, kind, place, opts, fit, paint);
   }
 
   /**
@@ -823,17 +906,13 @@ export class Garage {
    * it is handed back, so it compiles nothing once shown.
    */
   async visualParts(def: VehicleDef, opts: BuildOptions = {}): Promise<{ holder: THREE.Object3D; wings: WingSet; unresolved: string[]; build: ShipBuild; paint: ShipPaint | null; fit: ResolvedFit | null; gait: PodGait | null }> {
-    const [loaded, saddle] = await Promise.all([this.model(def), this.saddleFor(def)]);
-    let skinned = false;
-    loaded.scene.traverse((o) => {
-      if ((o as THREE.SkinnedMesh).isSkinnedMesh) skinned = true;
-    });
-    const model = skinned ? cloneSkinned(loaded.scene) : loaded.scene.clone();
+    // Another player's pod put together from parts is built as the rider's own is (`instance`), from the id that names both halves.
+    const [{ model, animations }, saddle] = await Promise.all([this.instance(def), this.saddleFor(def)]);
     const fit = def.fit ? (opts.fit ?? this.resolve(def, null)) : null;
     const a = await this.assemble(def, model, fit);
     const paint = this.paintFor(def, opts);
     paint?.track(model);
-    this.frameModel(def, model);
+    this.frameModel(def, model, animations);
     model.traverse((o) => {
       if (cellIndexOf(o) > 0) o.visible = false;
     });
@@ -851,7 +930,7 @@ export class Garage {
     if (def.source === 'creature') {
       // Posed as it stands in its idle before anything is measured or hung (its rest pose can stand
       // metres from it), so another player's mount wears its saddle where the rider's own does.
-      const idle = loaded.animations.find((a) => a.name === 'idle' || a.name === 'loop_stand:speed0') ?? loaded.animations[0];
+      const idle = animations.find((a) => a.name === 'idle' || a.name === 'loop_stand:speed0') ?? animations[0];
       if (idle) {
         const mixer = new THREE.AnimationMixer(model);
         mixer.clipAction(idle).play();
@@ -867,13 +946,15 @@ export class Garage {
     }
     // A pod plays its own idle and run on the picture too, by its glided speed (`RemotePlayers` steps it), so the
     // pilot its rider's own game seated in the cockpit sits in the cockpit drawn here; posed in the idle to start.
-    const gait = isPod(def) && loaded.animations.length ? podGait(model, loaded.animations, def.clipSpeeds) : null;
+    const gait = isPod(def) && animations.length ? podGait(model, animations, def.clipSpeeds) : null;
     // Compiled before it is shown, saddle and parts included (the holder carries everything).
     try {
       if (opts.prepare) await opts.prepare([holder]);
       if (paint && fit?.painted) await paint.apply(fit.paint, opts.paintWait ?? 3000);
     } catch (err) {
       paint?.dispose();
+      // A hybrid's own geometries go with the picture that never was.
+      disposePodHybrid(holder);
       throw err;
     }
     return { holder, wings: a.wings, unresolved: a.unresolved, build: a.build, paint, fit, gait };
@@ -1042,9 +1123,11 @@ export class Garage {
 
   /**
    * The vehicle's box, and the model moved so the box is centred on the vehicle and stands on
-   * its underside (a creature keeps its pack's bounds and its place). Returns the bounds.
+   * its underside (a creature keeps its pack's bounds and its place). Returns the bounds. A pod put
+   * together from parts is measured as its cockpit pod's idle poses it, its skeleton put back at
+   * rest after; everything else at rest, as it always was (`framedExtents`, src/vehicles/podHybrid.ts).
    */
-  private frameModel(def: VehicleDef, model: THREE.Object3D): VehicleSpec['bounds'] {
+  private frameModel(def: VehicleDef, model: THREE.Object3D, animations: readonly THREE.AnimationClip[] = []): VehicleSpec['bounds'] {
     let bounds = def.bounds;
     if (!bounds || def.source !== 'creature') {
       // A machine's box is measured from the model itself: the pack's bounds are the mesh file's
@@ -1063,7 +1146,7 @@ export class Garage {
         if ((o as THREE.Mesh).isMesh && cellIndexOf(o) === 0) shell = true;
       });
       const include = shell ? (o: THREE.Object3D) => cellIndexOf(o) === 0 || (cellIndexOf(o) < 0 && !!partOf(o, model)) : () => true;
-      const f = frameExtents(model, include);
+      const f = framedExtents(def, model, animations, include);
       if (f) {
         const w = f.halfW * 2;
         const l = f.halfL * 2;
@@ -1246,6 +1329,8 @@ export class Garage {
       if (glow) opts.forget?.([glow.mat, ...glow.trails.map((t) => t.mesh.material as THREE.Material)]);
       for (const t of glow?.trails ?? []) t.dispose(scene);
       glow?.mat.dispose();
+      // A hybrid's own geometries go with the vehicle that never was (the two pods' cached ones stay).
+      disposePodHybrid(model);
       throw err;
     }
     // The ground is read when the vehicle is made, after the preparation's wait.
@@ -1329,10 +1414,13 @@ export class Garage {
     // A pod plays its own clips and seats its pilot by rules of its own (src/vehicles/podSeat.ts), decided by what
     // it is rather than the kind it is tried as: a walker tried as a pod keeps its walk and its seat.
     const pod = isPod(def);
+    const cockpit = pod ? hybridSeatCockpit(def, model) : null;
     if (pod) {
-      const { pelvis, rule, joint, gait } = seatPod(v, { id: def.id, model, clips: animations, speeds: def.clipSpeeds, find: findHardpoint, guess: () => guessCockpit(model, bounds) });
-      const why = { table: "the owner's own place for it", hardpoint: "the game's own player point", joint: `its ${POD_COCKPIT_JOINT} joint's origin (a gallery converted before the player point was kept)`, guess: 'the cockpit guessed from the mesh' }[rule];
+      const { pelvis, rule, joint, gait } = seatPod(v, { id: def.id, model, clips: animations, speeds: def.clipSpeeds, find: findHardpoint, guess: () => guessCockpit(model, bounds), cockpit });
+      const why = { table: cockpit && !Object.hasOwn(POD_SEAT, def.id) ? `the owner's own place for the ${cockpit.id}` : "the owner's own place for it", hardpoint: "the game's own player point", joint: `its ${POD_COCKPIT_JOINT} joint's origin (a gallery converted before the player point was kept)`, guess: 'the cockpit guessed from the mesh' }[rule];
       console.info(`garage: ${def.id} seats its pilot's pelvis at ${pelvis.map((n) => n.toFixed(2)).join(',')} from ${why}${joint ? `, riding its ${joint.name || 'unnamed'} joint${gait ? ' through its own clips' : ''}` : ', fixed to the pod'}`);
+      const built = def.hybrid ? this.hybridBuilds.get(def.id) : undefined;
+      if (built) console.info(`garage: ${def.id}: the ${built.cockpit.id}'s cockpit (${built.cockpit.kept} of its ${built.cockpit.total} triangles) on the ${built.engines.id}'s engines (${built.engines.kept} of ${built.engines.total}, the ${built.engines.straddle} reaching into its own cockpit among them); its engines' points ${built.pointsOn.join(' ') || 'none'} hung on the cockpit's joints, the cockpit pod's ${built.pointsOff.join(' ') || 'none'} taken off; ${built.own} geometries its own, ${built.shared} the pods' own`);
     }
     if (animations.length && !pod) {
       // Its own idle, walk and run, picked by speed: an animal's, or a walker's from its animation table.
@@ -1731,28 +1819,4 @@ function glowTexture(): THREE.Texture {
   glowTex = new THREE.CanvasTexture(canvas);
   glowTex.colorSpace = THREE.SRGBColorSpace;
   return glowTex;
-}
-
-/** Clone a skinned model so its skeleton is its own (three's SkeletonUtils, inlined for the one use). */
-function cloneSkinned(source: THREE.Object3D): THREE.Group {
-  const sourceLookup = new Map<THREE.Object3D, THREE.Object3D>();
-  const cloneLookup = new Map<THREE.Object3D, THREE.Object3D>();
-  const clone = source.clone() as THREE.Group;
-  const pair = (a: THREE.Object3D, b: THREE.Object3D) => {
-    sourceLookup.set(b, a);
-    cloneLookup.set(a, b);
-    for (let i = 0; i < a.children.length; i++) pair(a.children[i], b.children[i]);
-  };
-  pair(source, clone);
-  clone.traverse((node) => {
-    const sm = node as THREE.SkinnedMesh;
-    if (!sm.isSkinnedMesh) return;
-    const sourceMesh = sourceLookup.get(node) as THREE.SkinnedMesh;
-    const sourceBones = sourceMesh.skeleton.bones;
-    sm.skeleton = sourceMesh.skeleton.clone();
-    sm.bindMatrix.copy(sourceMesh.bindMatrix);
-    sm.skeleton.bones = sourceBones.map((b) => (cloneLookup.get(b) as THREE.Bone) ?? b);
-    sm.bind(sm.skeleton, sm.bindMatrix);
-  });
-  return clone;
 }

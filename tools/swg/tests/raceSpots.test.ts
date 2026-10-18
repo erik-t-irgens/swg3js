@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { ENGINE_POINT, glowShare, raceThrustersFor, racerThrusters, type EnginePoint } from '../../../src/vehicles/raceSpots.ts';
+import { ENGINE_POINT, glowShare, noteRaceThrusters, raceThrustersFor, racerThrusters, type EnginePoint } from '../../../src/vehicles/raceSpots.ts';
 import { ENGINE_TUNE } from '../../../src/vehicles/drivetrain.ts';
 import { VEHICLE_KINDS } from '../../../src/vehicles/vehicleKinds.ts';
 
@@ -59,9 +59,18 @@ const same = (a: string[], b: string[]) => a.length === b.length && a.every((n) 
   ok(raceThrustersFor({ kind: 'ground', source: 'gallery' }, pts, true) === null && raceThrustersFor({ kind: 'ship', source: 'ship' }, pts, true) === null, 'nor a walker, nor a ship');
   ok(raceThrustersFor({ kind: 'podracer', source: 'creature' }, pts, true) === null, "nor anything that is not the gallery's");
   ok(raceThrustersFor({ kind: 'podracer', source: 'gallery' }, pts, false) === null, 'and nothing at all with the pass switched off');
-  // The garage asks by the def and never by the kind it spawns as; a spawn as another kind therefore writes none.
+  // The garage asks by the def and never by the kind it spawns as; a spawn as another kind therefore writes none. What it
+  // writes is `noteRaceThrusters`'s: on the def it is handed and nothing else, once, its points read only then.
   const garage = readFileSync(new URL('../../../src/vehicles/garage.ts', import.meta.url), 'utf8');
-  ok(/raceThrustersFor\(def, def\.source === 'gallery' \? enginePoints\(model\) : \[\], RACE_TUNE\.on\)/.test(garage), '(garage.ts: the spawn asks raceThrustersFor of the def itself, with no word of the kind it is spawned as)');
+  ok(/noteRaceThrusters\(def, \(\) => enginePoints\(model\), RACE_TUNE\.on\)/.test(garage), '(garage.ts: the spawn asks noteRaceThrusters of the def itself, with no word of the kind it is spawned as)');
+  const pod: { kind: string; source: string; raceThrusters?: string[]; thrusters?: string[] } = { kind: 'podracer', source: 'gallery' };
+  let read = 0;
+  ok(noteRaceThrusters(pod, () => (read++, pts), true) && same(pod.raceThrusters ?? [], ['engine_1', 'engine_2']) && pod.thrusters === pod.raceThrusters && read === 1, "noteRaceThrusters writes a gallery pod's race thrusters and its glows' points from them, reading its points once");
+  ok(!noteRaceThrusters(pod, () => (read++, []), true) && read === 1, 'and never again while they are known (its points not even read)');
+  const hover: { kind: string; source: string; raceThrusters?: string[]; thrusters?: string[] } = { kind: 'flyer', source: 'gallery' };
+  ok(!noteRaceThrusters(hover, () => pts, true) && hover.raceThrusters === undefined && hover.thrusters === undefined, 'a hover car is written nothing');
+  const none: { kind: string; source: string; raceThrusters?: string[]; thrusters?: string[] } = { kind: 'podracer', source: 'gallery' };
+  ok(noteRaceThrusters(none, () => [], true) && same(none.raceThrusters ?? ['x'], []) && none.thrusters === undefined, 'a pod with no engine points is written an empty list and keeps its own thrusters');
   ok(/clearRaceThrusters\(\): number/.test(garage) && /delete d\.raceThrusters/.test(garage), '(garage.ts: switched off, every def\'s race thrusters are taken off again)');
   const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   ok(/if \(g && !RACE_TUNE\.on\) \{\n\s*const n = g\.clearRaceThrusters\(\);/.test(main), '(main.ts: and the console switching the pass off is what takes them off)');

@@ -53,6 +53,26 @@ export function raceThrustersFor(def: ThrusterDef, points: readonly EnginePoint[
   return racerThrusters(points, def.kind === 'podracer' ? 'pod' : 'bike');
 }
 
+/** What the spawn writes of a def's thrusters: its race thrusters, once, and its glows' points from them when there are any. */
+export interface ThrusterNote extends ThrusterDef {
+  raceThrusters?: string[];
+  thrusters?: string[];
+}
+
+/**
+ * A def's race thrusters written on it at its first spawn with the pass on (nothing while they are known, or when it gets
+ * none): onto the def the spawn was handed and nothing else, so a pod put together from parts, whose def is its own,
+ * never writes into either pod's. `points` are read only when the def has none yet. Returns whether it wrote.
+ */
+export function noteRaceThrusters(def: ThrusterNote, points: () => readonly EnginePoint[], on: boolean): boolean {
+  if (def.raceThrusters !== undefined) return false;
+  const list = raceThrustersFor(def, def.source === 'gallery' ? points() : [], on);
+  if (!list) return false;
+  def.raceThrusters = list;
+  if (list.length) def.thrusters = list;
+  return true;
+}
+
 /** How much smaller each glow is drawn on a vehicle with more engine points than the two its size is worked out for. */
 export function glowShare(points: number): number {
   return points > 2 ? 1 / Math.sqrt(points / 2) : 1;

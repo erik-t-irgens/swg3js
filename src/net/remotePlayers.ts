@@ -9,6 +9,7 @@ import { easeInHull, MIN_GLIDE_SECONDS, peerAboard, placeInHull } from './aboard
 import type { Garage } from '../vehicles/garage';
 import type { WingSet } from '../vehicles/wings';
 import { stepPodPicture, type PodGait } from '../vehicles/podSeat.ts';
+import { disposePodHybrid, parseHybridId } from '../vehicles/podHybrid.ts';
 import { changedSlots, fitFromWire, fitKey, type ResolvedFit, type WireFit } from '../vehicles/shipFit.ts';
 import type { ShipBuild } from '../vehicles/shipMounts';
 import type { ShipPaint } from '../vehicles/shipPaint';
@@ -852,6 +853,7 @@ export class RemotePlayers {
       const { holder: obj, wings, build, paint, gait } = await g.visualParts(def, { fit, prepare: this.prepareVehicle ?? undefined, forget: this.forget ?? undefined });
       if (r.vehicle !== rv) {
         paint?.dispose();
+        disposePodHybrid(obj);
         return;
       }
       rv.gait = gait;
@@ -942,7 +944,11 @@ export class RemotePlayers {
 
   private dropVehicle(r: Remote): void {
     if (!r.vehicle) return;
-    if (r.vehicle.obj) this.scene.remove(r.vehicle.obj);
+    if (r.vehicle.obj) {
+      this.scene.remove(r.vehicle.obj);
+      // A pod put together from parts made geometries of its own, which go with its picture; the pods' own cached ones stay.
+      disposePodHybrid(r.vehicle.obj);
+    }
     // Its paint's copies leave the world's material sets with it.
     r.vehicle.paint?.dispose();
     r.vehicle.paint = null;
@@ -1354,6 +1360,29 @@ export class RemotePlayers {
         speed: s.has ? r2(Math.hypot(s.vx, s.vy, s.vz)) : r2(rv.vel.length()),
         yaw: s.has ? Number(s.yaw.toFixed(3)) : null,
       });
+    }
+    return out;
+  }
+
+  /**
+   * Other players' pods put together from parts, for the console (`__debug.pods()`): whose, the id their ride came on, and
+   * its picture's meshes (all of them, and those wearing geometries the hybrid made of its own); null meshes before the
+   * picture is in.
+   */
+  podPictures(): { id: number; name: string; ride: string; meshes: number | null; own: number | null }[] {
+    const out: { id: number; name: string; ride: string; meshes: number | null; own: number | null }[] = [];
+    for (const r of this.remotes.values()) {
+      const rv = r.vehicle;
+      if (!rv || !parseHybridId(rv.id)) continue;
+      let meshes = 0;
+      let own = 0;
+      rv.obj?.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        meshes++;
+        if (m.geometry?.userData?.podHybrid === true) own++;
+      });
+      out.push({ id: r.id, name: r.hello.name, ride: rv.id, meshes: rv.obj ? meshes : null, own: rv.obj ? own : null });
     }
     return out;
   }

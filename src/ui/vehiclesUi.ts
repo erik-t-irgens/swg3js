@@ -1,9 +1,36 @@
 // The garage: the gallery's vehicles and the animal mounts, by the kind each handles as, with a
-// button to stand one beside you, and a way to try a model as another kind.
+// button to stand one beside you, and a way to try a model as another kind. Beside each skinned pod,
+// the engines it is spawned on: its own, or any other skinned pod's (a pod put together from parts,
+// src/vehicles/podHybrid.ts), kept in this browser.
 import { SPAWNER_TABS, tabStrip, wireTabs } from './tabs';
 import { GroupState, escapeHtml, groupHtml } from './catalogue';
 import type { Garage, VehicleDef } from '../vehicles/garage';
 import type { VehicleKind } from '../vehicles/vehicle';
+import { isHalf } from '../vehicles/podHybrid.ts';
+
+/** Where this browser keeps the engines chosen for each skinned pod: a convenience of the viewer's, never the character's. */
+const ENGINES_KEY = 'swg3js.podEngines';
+
+/** The engines chosen for each skinned pod, by its garage id; empty where storage is refused or holds nothing sensible. */
+function readEngines(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ENGINES_KEY) ?? '{}') as unknown;
+    const out: Record<string, string> = Object.create(null) as Record<string, string>;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) for (const [k, v] of Object.entries(raw as Record<string, unknown>)) if (typeof v === 'string' && v) out[k] = v;
+    return out;
+  } catch {
+    return Object.create(null) as Record<string, string>;
+  }
+}
+
+/** Keep the choices; a browser that refuses storage keeps them for the session only. */
+function writeEngines(chosen: Record<string, string>): void {
+  try {
+    localStorage.setItem(ENGINES_KEY, JSON.stringify(chosen));
+  } catch {
+    // Storage refused (a private window, cleared site data): the choice holds until the page goes.
+  }
+}
 
 const KINDS: { id: VehicleKind; label: string; blurb: string }[] = [
   { id: 'podracer', label: 'Podracers', blurb: 'fast, drifting, banking; the boost heats and burns out' },
@@ -20,6 +47,8 @@ export class VehiclesUi {
   private garage: Garage | null = null;
   private readonly groups = new GroupState();
   private lastFind = '';
+  /** The engines chosen for each skinned pod, by its garage id (absent: its own). */
+  private readonly engines = readEngines();
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -42,7 +71,7 @@ export class VehiclesUi {
     this.hide();
     this.onClose();
   }
-  constructor(parent: HTMLElement, private readonly onSpawn: (def: VehicleDef, kind?: VehicleKind) => void, private readonly onClear: () => number) {
+  constructor(parent: HTMLElement, private readonly onSpawn: (def: VehicleDef, kind?: VehicleKind, engines?: string) => void, private readonly onClear: () => number) {
     this.root = document.createElement('div');
     this.root.id = 'garage';
     this.root.className = 'overlay hidden';
@@ -91,6 +120,7 @@ export class VehiclesUi {
     if (find !== this.lastFind) this.groups.clear();
     this.lastFind = find;
     const groups = g.byKind();
+    const halves = g.halves();
     const html: string[] = [];
     let shown = 0;
     for (const k of KINDS) {
@@ -103,7 +133,10 @@ export class VehiclesUi {
         // A ship the pack gave a fit has an edit page; one converted before shows the spawn button only. A
         // speeder whose shaders take colours has the same page with its paint alone.
         const edit = v.kind === 'ship' && v.fit ? `<button data-edit="${v.id}" title="components, droid and paint">edit</button>` : v.fit?.paint ? `<button data-edit="${v.id}" title="its colours">paint</button>` : '';
-        return `<div class="cat-item" title="${escapeHtml(v.id)}"><span class="cat-name">${escapeHtml(v.label)}${tags ? ` <small>${escapeHtml(tags)}</small>` : ''}</span><span class="cat-hands">${edit}<button data-id="${v.id}" title="stand one beside you">spawn</button><select data-id="${v.id}" title="try it as another kind"><option value="">as…</option>${other}</select></span></div>`;
+        // A skinned pod's engines: its own, or any other skinned pod's, by the name the garage gives it.
+        const mine = this.enginesFor(v.id);
+        const engines = isHalf(v) && halves.length > 1 ? `<select data-engines="${v.id}" title="the engines it is spawned on"><option value="">own engines</option>${halves.filter((o) => o.id !== v.id).map((o) => `<option value="${o.id}"${o.id === mine ? ' selected' : ''}>${escapeHtml(o.label)} engines</option>`).join('')}</select>` : '';
+        return `<div class="cat-item" title="${escapeHtml(v.id)}"><span class="cat-name">${escapeHtml(v.label)}${tags ? ` <small>${escapeHtml(tags)}</small>` : ''}</span><span class="cat-hands">${edit}${engines}<button data-id="${v.id}" title="stand one beside you">spawn</button><select data-id="${v.id}" title="try it as another kind"><option value="">as…</option>${other}</select></span></div>`;
       });
       html.push(groupHtml(k.id, k.label, list.length, k.blurb, this.groups.isOpen(k.id, !!find), items.join('')));
     }
@@ -113,7 +146,16 @@ export class VehiclesUi {
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-id]')) {
       b.addEventListener('click', () => {
         const def = g.vehicles.find((v) => v.id === b.dataset.id);
-        if (def) this.onSpawn(def);
+        if (def) this.onSpawn(def, undefined, this.enginesFor(def.id) || undefined);
+      });
+    }
+    for (const sel of this.body.querySelectorAll<HTMLSelectElement>('select[data-engines]')) {
+      sel.addEventListener('change', () => {
+        const id = sel.dataset.engines ?? '';
+        if (!id) return;
+        if (sel.value) this.engines[id] = sel.value;
+        else delete this.engines[id];
+        writeEngines(this.engines);
       });
     }
     for (const b of this.body.querySelectorAll<HTMLButtonElement>('button[data-edit]')) {
@@ -125,10 +167,21 @@ export class VehiclesUi {
     for (const sel of this.body.querySelectorAll<HTMLSelectElement>('select[data-id]')) {
       sel.addEventListener('change', () => {
         const def = g.vehicles.find((v) => v.id === sel.dataset.id);
-        if (def && sel.value) this.onSpawn(def, sel.value as VehicleKind);
+        if (def && sel.value) this.onSpawn(def, sel.value as VehicleKind, this.enginesFor(def.id) || undefined);
         sel.value = '';
       });
     }
+  }
+
+  /** The engines chosen for a skinned pod in this browser ('' for its own), kept only while that pod is still a skinned pod of this garage. */
+  enginesFor(id: string): string {
+    const want = this.engines[id] ?? '';
+    return want && this.garage?.halves().some((v) => v.id === want) ? want : '';
+  }
+
+  /** Every choice of engines kept in this browser, by pod, for the console. */
+  enginesChosen(): Record<string, string> {
+    return { ...this.engines };
   }
 
   show(): void {

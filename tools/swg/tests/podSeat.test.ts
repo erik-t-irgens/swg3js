@@ -398,7 +398,8 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
   ok(spawnAt > 0 && /if \(pod\) \{\s*const \{[^}]*\} = seatPod\(v, \{ id: def\.id, model, clips: animations, speeds: def\.clipSpeeds, find: findHardpoint,/.test(garage.slice(spawnAt, spawnAt + 600)), 'the garage decides a pod by isPod(def) and seats it with seatPod over the vehicle itself');
   ok(/if \(animations\.length && !pod\)/.test(garage), 'and keeps the old animation branch for everything that is not a pod');
   ok(spawnAt > garage.indexOf('if (glow) wireEngineGlow(v, glow);'), "seated after the engine glow's update is wired, so seatPod has it to chain");
-  ok(/const gait = isPod\(def\) && loaded\.animations\.length \? podGait\(model, loaded\.animations, def\.clipSpeeds\) : null;/.test(garage), "another player's picture of a pod asks the same isPod and gets the same clips");
+  // The clips are the model's own (`instance`: a hybrid's, its cockpit pod's).
+  ok(/const gait = isPod\(def\) && animations\.length \? podGait\(model, animations, def\.clipSpeeds\) : null;/.test(garage), "another player's picture of a pod asks the same isPod and gets the same clips");
   ok(!/\bkind === 'podracer' && def\.source/.test(garage), 'and nothing decides it by the kind a vehicle is tried as');
   const peers = readFileSync(join(root, 'src', 'net', 'remotePlayers.ts'), 'utf8');
   // The velocity it reads is the one the rider's own game sent while the picture is reckoned (Racer wave 4a), else the glided one.

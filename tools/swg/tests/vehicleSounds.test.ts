@@ -849,6 +849,26 @@ const TABLES: VehicleTables = {
   sounds2.setListener(0, 0, 0, { building: -1, cell: -1 });
   sounds2.update(0.1, [seb], seb, null);
   ok(host2.living().includes(ENGINE.idle), "and so sounds with Gasgano's own engine, which no name match would ever find for it");
+
+  // A pod put together from parts (src/vehicles/podHybrid.ts) sounds by its engine pod's client data, here Sebulba's
+  // engines on Anakin's cockpit, through the very lend: never by its own id, which names both halves and joins nothing.
+  const hybrid = makeVehicle({ id: 'podracer_anakin.podracer_sebulba', def: { id: 'podracer_anakin.podracer_sebulba', template: 'object/mobile/vehicle/shared_podracer_anakin.iff', soundFrom: { id: 'podracer_sebulba' } } });
+  const host3 = new FakeMixer();
+  const sounds3 = new VehicleSounds();
+  sounds3.attach(host3 as never, '');
+  sounds3.adoptEvents(PACK);
+  sounds3.setListener(0, 0, 0, { building: -1, cell: -1 });
+  sounds3.update(0.1, [hybrid], hybrid, null);
+  ok(host3.living().includes(ENGINE.idle), "a hybrid on Sebulba's engines sounds with them (lent Gasgano's engine), not with its cockpit pod's");
+  // The control: the same def with nothing to sound by is looked up by its own id and template, which join nothing here.
+  const bare = makeVehicle({ id: 'podracer_anakin.podracer_sebulba', def: { id: 'podracer_anakin.podracer_sebulba', template: 'object/mobile/vehicle/shared_podracer_anakin.iff' } });
+  const host4 = new FakeMixer();
+  const sounds4 = new VehicleSounds();
+  sounds4.attach(host4 as never, '');
+  sounds4.adoptEvents(PACK);
+  sounds4.setListener(0, 0, 0, { building: -1, cell: -1 });
+  sounds4.update(0.1, [bare], bare, null);
+  ok(!host4.living().includes(ENGINE.idle), 'and without it the hybrid would be silent: its own id names both halves and joins to no client data');
 }
 
 console.log(`\n${passed} checks passed`);

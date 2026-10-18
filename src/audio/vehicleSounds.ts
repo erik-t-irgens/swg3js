@@ -153,6 +153,8 @@ export interface SoundVehicle {
     chassis?: string | null;
     attachments?: readonly { kind: string; slot?: string; template?: string; sound?: string | null }[];
     fit?: { slots: readonly { slot: string; looks: readonly { parts: readonly { template: string }[] }[] }[] } | null;
+    /** The vehicle whose client data it sounds by, when not its own (a pod put together from parts: its engine pod). */
+    soundFrom?: { id: string; template?: string } | null;
   } | null;
   readonly fit: { looks: Record<string, number> } | null;
   /** `progress` is the mean share open (0..1); a stand-in that leaves it out is taken to be moving whenever `target` turns. */
@@ -1250,21 +1252,26 @@ export class VehicleSounds {
     return null;
   }
 
-  /** A ground vehicle's client data, the same way. */
+  /**
+   * A ground vehicle's client data, the same way: by its own garage id and template, or by those of the vehicle it sounds
+   * by (`soundFrom`: a pod put together from parts sounds by its engine pod's).
+   */
   private vehicleData(v: SoundVehicle): ClientDataSounds | null {
     const data = this.events?.clientData;
     if (!data) return null;
-    const id = v.def?.id ?? v.spec.id;
+    const from = v.def?.soundFrom;
+    const id = from?.id ?? v.def?.id ?? v.spec.id;
+    const template = from ? from.template : v.def?.template;
     // A lend of ours first (`VEHICLE_SOUND_LENDS`): an exhibit no template joins to anything.
     const lent = Object.hasOwn(VEHICLE_SOUND_LENDS, id) ? data[VEHICLE_SOUND_LENDS[id]] : undefined;
     if (lent) return lent;
     const joins = this.events?.ships?.vehicles;
-    for (const want of [id, v.def?.template]) {
+    for (const want of [id, template]) {
       if (!want) continue;
       const joined = joins?.[want] ?? joins?.[baseName(want)];
       if (joined && data[joined]) return data[joined];
     }
-    for (const want of [id, v.def?.template]) {
+    for (const want of [id, template]) {
       if (!want) continue;
       const found = bestName(baseName(want), this.vehicleIndex);
       if (found && data[found]?.thrusters?.length) return data[found];

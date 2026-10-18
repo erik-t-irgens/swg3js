@@ -61,11 +61,28 @@ export interface PodSeatFound {
   guess: () => Vec3;
 }
 
-/** Where a pod's pilot's pelvis goes and which rule said so: the owner's row, the game's point, the joint, the guess. */
-export function podSeatRule(id: string, found: PodSeatFound): { pelvis: Vec3; rule: PodSeatRule } {
+/**
+ * A pod put together from parts (src/vehicles/podHybrid.ts) seats its pilot by its cockpit pod's rules: the owner's row for
+ * that pod is in that pod's own frame, so it is moved by how far the hybrid's framing stands the cockpit from where the
+ * pod framed alone stood it (`shift`, in the vehicle's frame).
+ */
+export interface PodSeatCockpit {
+  readonly id: string;
+  readonly shift: Vec3;
+}
+
+/**
+ * Where a pod's pilot's pelvis goes and which rule said so: the owner's row (the pod's own, else, on a hybrid, its cockpit
+ * pod's moved by `cockpit.shift`), the game's point, the joint, the guess.
+ */
+export function podSeatRule(id: string, found: PodSeatFound, cockpit?: PodSeatCockpit | null): { pelvis: Vec3; rule: PodSeatRule } {
   if (Object.hasOwn(POD_SEAT, id)) {
     const row = POD_SEAT[id];
     return { pelvis: [row[0], row[1], row[2]], rule: 'table' };
+  }
+  if (cockpit && Object.hasOwn(POD_SEAT, cockpit.id)) {
+    const row = POD_SEAT[cockpit.id];
+    return { pelvis: [row[0] + cockpit.shift[0], row[1] + cockpit.shift[1], row[2] + cockpit.shift[2]], rule: 'table' };
   }
   if (found.hardpoint) return { pelvis: [found.hardpoint[0], found.hardpoint[1], found.hardpoint[2]], rule: 'hardpoint' };
   if (found.joint) return { pelvis: [found.joint[0], found.joint[1], found.joint[2]], rule: 'joint' };
@@ -253,6 +270,8 @@ export interface PodModel {
   readonly find: FindHardpoint;
   /** The old guess from the mesh, the last of the rules; worked out only when nothing else answers. */
   readonly guess: () => Vec3;
+  /** On a pod put together from parts, its cockpit pod and how far the hybrid's framing moved it (`podSeatRule`). */
+  readonly cockpit?: PodSeatCockpit | null;
 }
 
 /**
@@ -277,7 +296,7 @@ export function seatPod<T extends { readonly speed: number }, D>(target: PodSeat
   }
   const hp = pod.find(pod.model, 'player');
   const body = boneNamed(pod.model, POD_COCKPIT_JOINT);
-  const { pelvis, rule } = podSeatRule(pod.id, { hardpoint: placeIn(target.group, hp), joint: placeIn(target.group, body), guess: pod.guess });
+  const { pelvis, rule } = podSeatRule(pod.id, { hardpoint: placeIn(target.group, hp), joint: placeIn(target.group, body), guess: pod.guess }, pod.cockpit);
   const joint = boneOver(hp) ?? body;
   target.seatBind = hangPodSeat(target.seat, joint, target.group, pelvis);
   target.seatPelvis = true;
