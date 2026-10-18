@@ -374,6 +374,14 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   put('assets/stray-12345678.glb', 'x');
   ok(distFiles(dist, tracked).problems.some((p) => p.includes('stray-12345678.glb')), 'and a hashed-looking file no chunk names');
   rmSync(join(dist, 'assets', 'stray-12345678.glb'));
+  // A real-world elevation raster, tracked under public/dem, is a file a page reads; the same kind anywhere else is not.
+  put('dem/monument/base16.raw', 'heights');
+  put('misc/base16.raw', 'heights');
+  const rasters = new Map([...tracked, ['public/dem/monument/base16.raw', blobHash(Buffer.from('heights'))], ['public/misc/base16.raw', blobHash(Buffer.from('heights'))]]);
+  const dem = distFiles(dist, rasters);
+  ok(dem.files.includes('dem/monument/base16.raw') && !dem.problems.some((p) => p.includes('dem/monument')) && dem.problems.some((p) => p.includes('misc/base16.raw') && p.includes('not a kind of file')), `an elevation raster under dem/ is packed, and a .raw anywhere else is refused (${dem.problems.join('; ')})`);
+  rmSync(join(dist, 'dem'), { recursive: true });
+  rmSync(join(dist, 'misc'), { recursive: true });
   put('assets/characters/xbot.glb', 'changed here');
   ok(distFiles(dist, tracked).problems.some((p) => /not the public\/assets\/characters\/xbot\.glb git holds/.test(p)), 'a public file that is not what git holds is refused');
   put('assets/characters/xbot.glb', 'glb');
