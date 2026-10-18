@@ -176,7 +176,8 @@ jobs:
             gh release create latest --target "$GITHUB_SHA" --title "swg3js (main)" \
               --notes "The newest build of main. On Windows download swg3js.exe and run it; on a Mac download swg3js-macos.tar.gz, unpack it and run swg3js (its README.txt says what macOS will ask you). Either keeps itself up to date, converts your own Star Wars Galaxies install on your machine and plays the game in your browser. No game files are in this release."
           fi
-          old=$(gh release view latest --json assets --jq '.assets[].name' | grep -E '^swg3js-.*\.tar\.gz$' | grep -vxF "$archive" || true)
+          # The Mac download shares the archives' name pattern and is put back above; it is never an old archive.
+          old=$(gh release view latest --json assets --jq '.assets[].name' | grep -E '^swg3js-.*\.tar\.gz$' | grep -vxF "$archive" | grep -vxF swg3js-macos.tar.gz || true)
           gh release upload latest "release/$archive" --clobber
           gh release upload latest exe/swg3js.exe --clobber
           gh release upload latest macos/swg3js-macos.tar.gz --clobber
