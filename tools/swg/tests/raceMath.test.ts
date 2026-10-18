@@ -42,12 +42,14 @@ import {
   newBase,
   newLineWalk,
   newSweptPath,
+  newLooseStep,
   planFall,
   resolveRace,
   scaleSpeeds,
   shareSpeed,
   slopePush,
   speedOf,
+  stepLooseOf,
   stepVertical,
   stepYawRate,
   strikeKick,
@@ -121,14 +123,14 @@ const KINDS: [string, RaceBase][] = [
   const A = thrustA(full.t75);
   const cap = thrustCapOf(A, RACE_TUNE.thrustCap);
   const reverseT = -thrustFor(-full.reverseTop, full.V, A);
-  const lowered = { ...full, V: 200 };
+  const lowered = { ...full, V: 100 };
   const cases: [string, number, number, number, RaceBase][] = [
     ['the speed left at V', full.V, 0, 0, full],
-    ["past V (a 30-degree glance's 273 m/s off a 315.6 m/s descent)", 273, 40, 0, full],
-    ['with a downhill push', 250, 30, 0, full],
-    ['with an uphill push', 150, -12, 0, full],
-    ['with a boost running', 300, 0, 2, full],
-    ['with a part out (V lowered under the speed)', 260, 0, 0, lowered],
+    ["past V (a 30-degree glance's 136.5 m/s off a 157.8 m/s descent)", 136.5, 20, 0, full],
+    ['with a downhill push', 125, 15, 0, full],
+    ['with an uphill push', 75, -6, 0, full],
+    ['with a boost running', 150, 0, 2, full],
+    ['with a part out (V lowered under the speed)', 130, 0, 0, lowered],
   ];
   const parts: SpeedParts = { T: 0, B: 0, p: 0, over: 0 };
   for (const [name, v, p, B, h] of cases) {
@@ -223,10 +225,10 @@ const KINDS: [string, RaceBase][] = [
   ok(Object.is(stock.V, POD.V * POD.stockTop) && Object.is(stock.tau, POD.tau) && Object.is(stock.t75, POD.t75), "5: the stock table's top is the base's stock share of V, its times the base's own");
   const full = resolved(POD, 5);
   ok(Object.is(full.V, POD.V * RACE_UPGRADES.top) && Object.is(full.tau, POD.tau * RACE_UPGRADES.traction) && Object.is(full.coolSeconds, POD.coolSeconds * RACE_UPGRADES.cooling), '5: level five is the full table');
-  // The owner's two ceilings, written out as the owner gave them.
+  // The owner's two ceilings, written out as the owner gave them (halved after his first ride).
   for (const [name, base, ceiling] of [
-    ['pod', POD, 1200 / 3.6],
-    ['bike', BIKE, 700 / 3.6],
+    ['pod', POD, 600 / 3.6],
+    ['bike', BIKE, 350 / 3.6],
   ] as const) {
     const h = resolved(base, 5);
     const plain = RACE_TUNE.thrustCap * h.V;
@@ -237,7 +239,7 @@ const KINDS: [string, RaceBase][] = [
   const s = BIKE_SCALE;
   ok(
     SPEED_KEYS.every((k) => Object.is(BIKE[k], POD[k] * s)) && VERTICAL_KEYS.every((k) => Object.is(BIKE[k], POD[k] * s)),
-    '5: bikeFromPod scales every speed (the vertical ones too) by 700/1200',
+    '5: bikeFromPod scales every speed (the vertical ones too) by 350/600',
   );
   ok(['t75', 'coast', 'brake', 'chargeTime', 'boostSeconds', 'coolSeconds', 'tau', 'maxTurn', 'turnResponse', 'bankMax', 'bankEase', 'leanMax', 'riseRate', 'bandRate', 'fall', 'climbGrade', 'stockTop'].every((k) => Object.is(BIKE[k as keyof RaceBase], POD[k as keyof RaceBase])), '5: and keeps every time, rate, angle, share and acceleration');
   ok(BIKE.ride === RACE_BIKE_SIZES.ride && BIKE.band === RACE_BIKE_SIZES.band && BIKE.box.every((n, i) => n === RACE_BIKE_SIZES.box[i]), "5: and keeps the bike's own sizes");
@@ -263,9 +265,9 @@ const KINDS: [string, RaceBase][] = [
   ok(reach >= 1368 / 3.6 && Object.is(all.riseMax, POD.riseMax) && Object.is(all.fallMax, POD.fallMax), `5: ceilingMoves 'all': a full pod boosting reaches the new ceiling (${reach.toFixed(1)} m/s) and riseMax and fallMax stay the pod's`);
   for (const moves of ['cap', 'all'] as const) {
     RACE_TUNE.ceilingMoves = moves;
-    for (const c of [800, 1200, 1368]) {
+    for (const c of [400, 600, 1368]) {
       RACE_TUNE.ceiling = c;
-      ok(near(baseFor('bike', newBase()).cap, ((c * 700) / 1200) / 3.6, 1e-9), `5: the bike's ceiling is the pod's times 700/1200 at ${c} km/h ('${moves}')`);
+      ok(near(baseFor('bike', newBase()).cap, ((c * 350) / 600) / 3.6, 1e-9), `5: the bike's ceiling is the pod's times 350/600 at ${c} km/h ('${moves}')`);
     }
   }
   restore();
@@ -283,7 +285,7 @@ const KINDS: [string, RaceBase][] = [
   const pod = resolved(POD, 5);
   const bike = resolved(BIKE, 5);
   const k = (h: RaceBase) => ({ hitLoss: RACE_TUNE.hitLoss, crashImpact: h.crashImpact, crashDrop: h.crashDrop, crashFrom: h.crashFrom });
-  ok(hitVerdict(0, 0, 100, 0, 0, 0, k(pod)) === HIT_CRASH, '6: head on at 100 m/s, a pod crashes');
+  ok(hitVerdict(0, 0, 50, 0, 0, 0, k(pod)) === HIT_CRASH, '6: head on at 50 m/s, a pod crashes');
   // Through a contact with no friction: the part of the velocity into the wall taken away, the rest kept.
   const glance = (speed: number, deg: number, h: RaceBase) => {
     const a = (deg * Math.PI) / 180;
@@ -291,9 +293,9 @@ const KINDS: [string, RaceBase][] = [
     const vz = speed * Math.cos(a);
     return hitVerdict(vx, 0, vz, 0, 0, vz, k(h));
   };
-  ok(glance(333.3, 30, pod) === HIT_SCRAPE && glance(333.3, 45, pod) === HIT_CRASH, '6: at 333.3 m/s a 30-degree glance is a scrape and 45 a crash');
-  ok(glance(194.4, 30, bike) === HIT_SCRAPE && glance(194.4, 45, bike) === HIT_CRASH, "6: and a bike's at 194.4 m/s the same, by its own numbers");
-  ok(glance(333.3, 10, pod) === HIT_SCRAPE, '6: a 10-degree graze is a scrape');
+  ok(glance(600 / 3.6, 30, pod) === HIT_SCRAPE && glance(600 / 3.6, 45, pod) === HIT_CRASH, '6: at the pod ceiling, 166.7 m/s, a 30-degree glance is a scrape and 45 a crash');
+  ok(glance(350 / 3.6, 30, bike) === HIT_SCRAPE && glance(350 / 3.6, 45, bike) === HIT_CRASH, "6: and a bike's at its 97.2 m/s the same, by its own numbers");
+  ok(glance(600 / 3.6, 10, pod) === HIT_SCRAPE, '6: a 10-degree graze is a scrape');
   ok(hitVerdict(0, 0, 50, 0, 0, 50 - RACE_TUNE.hitLoss + 0.5, k(pod)) === HIT_NONE, '6: under hitLoss nothing at all');
 }
 
@@ -313,7 +315,7 @@ const KINDS: [string, RaceBase][] = [
   };
   ok(faceVerdict(faceAt(60, 20), lip, h) > h.climbGrade, '7: a 60-degree face 20 m high met at full speed is a steep wall');
   const kerb = faceAt(80, 3);
-  ok(faceVerdict(kerb, lip, h) <= h.climbGrade && strikeKick(kerb, 333, h) > 0, '7: an 80-degree kerb 3 m high is a strike, not a wall');
+  ok(faceVerdict(kerb, lip, h) <= h.climbGrade && strikeKick(kerb, 600 / 3.6, h) > 0, '7: an 80-degree kerb 3 m high is a strike, not a wall');
   ok(faceVerdict(faceAt(30, 60), lip, h) <= h.climbGrade, '7: a 30-degree hill 60 m high is no wall (its grade over faceLen is under climbGrade)');
   const low = faceAt(80, lip * 0.9);
   const high = faceAt(80, lip * 1.2);
@@ -332,7 +334,7 @@ const KINDS: [string, RaceBase][] = [
     const verdicts: boolean[] = [];
     for (const fps of [144, 60, 20]) {
       const dt = 1 / fps;
-      const speed = 300;
+      const speed = 150;
       const judged = new Map<number, number>();
       const out = { to: 0, allowed: Infinity, points: 0 };
       let odo = 0;
@@ -390,7 +392,7 @@ const KINDS: [string, RaceBase][] = [
   const walk = newLineWalk(64);
   const fps = 144;
   const dt = 1 / fps;
-  const speed = 330;
+  const speed = 165;
   const dir = { x: Math.sin(0.3), z: Math.cos(0.3) };
   let x = 0;
   let z = 0;
@@ -422,7 +424,8 @@ const KINDS: [string, RaceBase][] = [
   // the line a tenth of a second on must not, and a peak at the first walk's one sample past its end, which the line
   // on must see. Read with the spike, or without the sample past the end, the rate is metres a second out.
   {
-    const spike = (x: number) => 8 * Math.exp(-(((x - 16) / 3) ** 2)) + 6 * Math.exp(-(((x - 168) / 5) ** 2)) + 0.002 * x;
+    const past = h.lookMax + h.lookStep;
+    const spike = (x: number) => 8 * Math.exp(-(((x - 16) / 3) ** 2)) + 6 * Math.exp(-(((x - past) / 2) ** 2)) + 0.002 * x;
     const near2: LineReader = { near: (px) => spike(px), far: () => null, farStep: 16, farX: () => 0, farZ: () => 0 };
     const tune = { lookAhead: RACE_TUNE.lookAhead, lookMax: h.lookMax, lookStep: h.lookStep };
     const v = (4 * h.lookStep) / RACE_TUNE.feedAhead;
@@ -486,12 +489,12 @@ const KINDS: [string, RaceBase][] = [
     const inPit = closedAt(dil, starts, nw, 22);
     ok(Number.isNaN(inPit) || inPit <= -25, '9: nothing is bridged where the far side is a sample the cache cannot answer (NaN)');
   }
-  // A closing over 128 entries at the ceiling's highest span (1368 km/h for a quarter of a second, 95 m, plus a pod's length).
+  // A closing over the ring's 256 entries at the ceiling's highest span (1368 km/h for half a second, 190 m, plus a pod's length).
   {
-    const N = 128;
+    const N = RACE_TUNE.bridgeRing;
     const big = new Float64Array(N);
-    for (let i = 0; i < N; i++) big[i] = i >= 30 && i < 70 ? -40 : Math.sin(i) * 0.2;
-    const nw = Math.round((0.25 * (1368 / 3.6) + 15) / 2) + 1;
+    for (let i = 0; i < N; i++) big[i] = i >= 110 && i < 150 ? -40 : Math.sin(i) * 0.2;
+    const nw = Math.round((RACE_TUNE.bridgeTime * (1368 / 3.6) + 15) / 2) + 1;
     const d2 = new Float64Array(N);
     const dq = new Int32Array(N);
     const starts = bridgeClose(big, N, nw, d2, dq);
@@ -508,9 +511,9 @@ const KINDS: [string, RaceBase][] = [
       }
       worst = Math.max(worst, Math.abs(c - best));
     }
-    ok(starts > 0 && worst < 1e-12, `9: a closing over 128 ring entries at the ceiling's span (${nw} samples) matches the slow one (worst ${worst})`);
-    const between = closedBetween(d2, starts, nw, 60.5);
-    ok(near(between, (closedAt(d2, starts, nw, 60) + closedAt(d2, starts, nw, 61)) / 2, 1e-12), '9: and a place between samples reads the two either side');
+    ok(starts > 0 && worst < 1e-12, `9: a closing over ${N} ring entries at the ceiling's span (${nw} samples) matches the slow one (worst ${worst})`);
+    const between = closedBetween(d2, starts, nw, 130.5);
+    ok(Number.isFinite(between) && near(between, (closedAt(d2, starts, nw, 130) + closedAt(d2, starts, nw, 131)) / 2, 1e-12), '9: and a place between samples reads the two either side');
     ok(Number.isNaN(closedAt(d2, starts, nw, 20)), '9: a sample whose windows would run off the row is not bridged at all');
   }
   // What the drive's `under` takes between samples (`bridgedBetweenOf`): the closing where it lifted a sample either
@@ -561,20 +564,20 @@ const KINDS: [string, RaceBase][] = [
   path.g[0] = 10;
   path.back[0] = 0;
   path.y[0] = 9.7;
-  const clip = strikeKick(path, 333, h);
+  const clip = strikeKick(path, 600 / 3.6, h);
   path.g[0] = 0.3;
   path.y[0] = 0;
-  const step = strikeKick(path, 333, h);
+  const step = strikeKick(path, 600 / 3.6, h);
   ok(Math.abs(clip - step) < 1e-9, `10: a 0.3 m clip of a 10 m wall kicks no harder than a 0.3 m step (${clip.toFixed(2)} against ${step.toFixed(2)} m/s)`);
   path.g[0] = 40;
   path.y[0] = 0;
-  ok(strikeKick(path, 333, h) === h.riseMax, '10: a kick is never more than riseMax');
+  ok(strikeKick(path, 600 / 3.6, h) === h.riseMax, '10: a kick is never more than riseMax');
   // A hull clipping a 20-degree descent: the ground 8 m behind stands higher, so the ground's own rise is its fall.
   path.g[0] = 0;
   path.back[0] = h.faceLen * Math.tan((20 * Math.PI) / 180);
   path.y[0] = -0.05;
-  const fall = strikeKick(path, 270, h);
-  ok(fall < 0 && Math.abs(fall + 270 * Math.tan((20 * Math.PI) / 180)) < 1e-9, `10: on a descent the rise is the slope's own fall (${r2(fall)} m/s), never a closing at the hull's whole sink`);
+  const fall = strikeKick(path, 135, h);
+  ok(fall < 0 && Math.abs(fall + 135 * Math.tan((20 * Math.PI) / 180)) < 1e-9, `10: on a descent the rise is the slope's own fall (${r2(fall)} m/s), never a closing at the hull's whole sink`);
 }
 
 // --- 11: the fall over the physics' fixed steps ---------------------------------------------------------------------
@@ -601,10 +604,10 @@ const KINDS: [string, RaceBase][] = [
   const tune = { ride: h.ride, riseRate: h.riseRate, riseMax: h.riseMax, band: h.band, bandRate: h.bandRate, fall: h.fall, fallMax: h.fallMax };
   const phases = new Set<number>();
   // A fall cut into sub-steps lands where the exact fall over the whole plan does (`fallDisplacement`), whatever the cut,
-  // across the fall's most too: from rest and from 140 m/s down, over one to four fixed steps in one to eight sub-steps.
+  // across the fall's most too: from rest and from 70 m/s down, over one to four fixed steps in one to eight sub-steps.
   {
     let worst = 0;
-    for (const v0 of [0, -140]) {
+    for (const v0 of [0, -70]) {
       for (const n of [1, 2, 3, 4]) {
         for (const m of [1, 2, 3, 5, 8]) {
           const st = { low: 500, vy: v0 };
@@ -646,6 +649,107 @@ const KINDS: [string, RaceBase][] = [
     ok(Math.abs(st.low - h.ride) < 0.05 && under <= Math.max(...steps) + 1e-9, `11: within its band it settles onto its ride, ${r2(Math.abs(st.low - h.ride) * 100)} cm off after half a second, never under it by more than a sub-step's travel (${r2(under * 100)} cm)`);
   }
   ok(phases.has(RISE) && phases.has(BAND) && phases.has(FALL) && [...phases].every((p) => p === RISE || p === BAND || p === FALL), '11: and every sub-step names its phase, each of the three met');
+  // The loose hold's sub-step (`stepLooseOf`): the firm rule's own rise and settle, with a floor under them -- never
+  // below nought faster than the grip on the ground or gravity in the air, never below what the ground gave (`keep`)
+  // faster than either -- and the cushion's own lift, beyond what the ground gave, never carrying the hull past its line.
+  const loose = { ...tune, gravity: RACE_TUNE.looseFall, grip: RACE_TUNE.looseGrip };
+  const looseStep = (low: number, vy: number, keep: number) => {
+    const st = newLooseStep();
+    st.low = low;
+    st.vy = vy;
+    st.keep = keep;
+    st.feed = 0;
+    st.ahead = 0;
+    st.line = 0;
+    st.rate = 0;
+    return st;
+  };
+  {
+    // Over its band, flying on what the ground gave it: the world's gravity, worked out exactly however it is cut.
+    let worst = 0;
+    for (const v0 of [6, 0, -30]) {
+      for (const m of [1, 2, 5]) {
+        const st = looseStep(500, v0, v0);
+        const T = 3 * FIXED;
+        st.dt = T / m;
+        for (let i = 0; i < m; i++) stepLooseOf(st, loose);
+        worst = Math.max(worst, Math.abs(st.low - (500 + fallDisplacement(v0, T, loose.gravity, loose.fallMax))), Math.abs(st.vy - (v0 - loose.gravity * T)));
+      }
+    }
+    ok(worst < 1e-9, `11: loose, over its band a flight on what the ground gave, cut into sub-steps, lands where the world's gravity puts it, at its speed (worst ${worst.toExponential(1)})`);
+    // And an upward speed the ground never gave (a kick, a lift the cushion overshot with) is taken back at the firm
+    // fall down to what it did give, and only then at gravity.
+    const st = looseStep(500, 40, 10);
+    st.dt = FIXED / 2;
+    const speeds: number[] = [];
+    for (let i = 0; i < 24; i++) {
+      stepLooseOf(st, loose);
+      speeds.push(st.vy);
+    }
+    const firmLeg = (40 - speeds[0]) / (FIXED / 2);
+    const at = speeds.findIndex((v) => v <= 10 - 1e-9);
+    const gravLeg = at > 0 ? (speeds[at] - speeds[at + 1]) / (FIXED / 2) : NaN;
+    ok(near(firmLeg, h.fall, 1e-6) && near(gravLeg, loose.gravity, 1e-6), `11: loose, an upward 40 m/s of which the ground gave 10 is taken back at the firm fall (${r2(firmLeg)} m/s²) to 10, then at gravity (${r2(gravLeg)} m/s²)`);
+  }
+  {
+    // A line falling away under a hull riding on it, at ten times what the grip could follow: the hull's speed never
+    // goes down below nought faster than the grip, and it settles onto its ride again once the line stops. (Its own lift
+    // as it comes back up onto its line is braked faster, at the firm fall, but only ever down to nought: that is a rise
+    // stopped, and nothing pulls the hull down.)
+    const st = looseStep(h.ride, 0, 0);
+    let worstDrop = 0;
+    let line = 0;
+    const dt = FIXED / 2;
+    for (let i = 0; i < 240; i++) {
+      const rate = i < 30 ? -10 * loose.grip * (i * dt) : 0;
+      line += rate * dt;
+      st.line = line;
+      st.rate = rate;
+      st.dt = dt;
+      const before = st.vy;
+      stepLooseOf(st, loose);
+      worstDrop = Math.max(worstDrop, ((before < 0 ? before : 0) - st.vy) / dt);
+    }
+    ok(worstDrop <= loose.grip + 1e-9 && Math.abs(st.low - (line + h.ride)) < 0.05, `11: loose, a hull is never taken down below nought faster than the grip (${r2(worstDrop)} m/s², grip ${loose.grip}) and settles onto its ride once the line stops (${r2(st.low - (line + h.ride))} m off)`);
+  }
+  {
+    // A hull a little under its line down a descent is lifted on the descent's own rate, never stopped dead.
+    const st = looseStep(h.ride - 0.3, -19, 0);
+    st.rate = -19;
+    st.dt = FIXED;
+    ok(stepLooseOf(st, loose) === RISE && near(st.vy, 0.3 * h.riseRate - 19, 1e-9), `11: loose, a hull 0.3 m under its line down a 19 m/s descent rises on the descent's rate (${r2(st.vy)} m/s), never stopped dead`);
+    const firm = { low: h.ride - 0.3, vy: -19 };
+    stepVertical(firm, 0, -19, FIXED, tune);
+    ok(firm.vy >= 0, `11: (the control: the firm rule stops it dead under its line: ${r2(firm.vy)} m/s)`);
+  }
+  {
+    // A line stepped up 3 m at once, as at a kerb's foot, read as a rate of 60 m/s for a tenth of a second: the firm
+    // rule's rise takes the hull up at once, and the cushion's own lift is no faster than the firm fall can take back by
+    // the line, so it stops at its line rather than flying past it. What the ground gave it (`keep`) it keeps: with the
+    // same step given as ground it rode, it flies on past the line.
+    const run = (keep: number) => {
+      const st = looseStep(h.ride, 0, keep);
+      let most = 0;
+      let fastest = 0;
+      const dt = FIXED / 2;
+      for (let i = 0; i < 120; i++) {
+        st.line = 3;
+        st.rate = i < 12 ? 60 : 0;
+        st.feed = keep;
+        st.dt = dt;
+        stepLooseOf(st, loose);
+        most = Math.max(most, st.low - (3 + h.ride));
+        fastest = Math.max(fastest, st.vy);
+      }
+      return { most, fastest };
+    };
+    const lift = run(0);
+    const given = run(30);
+    // (Under half a metre: the brake is judged at each sub-step's start, so the last sub-step before the line carries
+    // the hull a little past it, and the firm fall takes the rest within centimetres.)
+    ok(lift.most < 0.5 && lift.fastest > 20, `11: loose, a line stepped up 3 m is risen to at up to ${r2(lift.fastest)} m/s and passed by no more than ${r2(lift.most * 100)} cm`);
+    ok(given.most > 10, `11: (the control: the same rise given by the ground it rode carries the hull ${r2(given.most)} m past its line, a jump)`);
+  }
 }
 
 // --- 12: the slope's push -------------------------------------------------------------------------------------------

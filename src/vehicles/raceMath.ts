@@ -972,6 +972,109 @@ export function stepVerticalOf(st: VerticalStep, tune: { ride: number; riseRate:
 }
 
 /**
+ * The loose hold's sub-step as a record: the height rule's own, and three more. `keep` is the upward speed the ground
+ * itself has given the hull (a slope it rode up), which nothing but gravity takes back; `feed` is the rate the ground
+ * under the hull has risen at lately, as the drive takes it up (`RaceDrive.planRate`), which is where `keep` comes from;
+ * and `ahead`.
+ */
+export interface LooseStep extends VerticalStep {
+  keep: number;
+  feed: number;
+  /** How far the ground under the hull will have risen a moment on (m, `RaceDrive.planRate`): its own lift may run that far ahead of its line. */
+  ahead: number;
+}
+
+export function newLooseStep(): LooseStep {
+  return { low: 0.5, vy: 0.5, line: 0.5, rate: 0.5, dt: 0.5, keep: 0.5, feed: 0.5, ahead: 0.5 };
+}
+
+/**
+ * The loose hold's numbers: the height rule's own (the rise, the band, the firm fall, which takes back only what the
+ * ground never gave, and the most it falls at), the world's gravity in the air, and the cushion's grip on the ground.
+ */
+export interface LooseTune {
+  ride: number;
+  riseRate: number;
+  riseMax: number;
+  band: number;
+  bandRate: number;
+  fall: number;
+  fallMax: number;
+  gravity: number;
+  grip: number;
+}
+
+/**
+ * One sub-step of the loose hold (`RACE_TUNE.hold` 'loose', the owner's after his first ride, against the firm rule of
+ * `stepVerticalOf`, which held the hull so hard it was dragged down into every hollow and back out of it). The firm
+ * rule's own arithmetic says what the cushion would do -- under its line it lifts the hull at once toward it, within
+ * its band it settles it, over its band it takes back any upward speed at the firm fall -- and the loose hold takes
+ * that, with a floor under it and a brake over it. The floor: the hull's vertical speed never goes below nought faster
+ * than `grip` on the ground or `gravity` in the air, and never below `keep`, the upward speed the ground gave it,
+ * faster than either. The brake: the lift the cushion adds of its own, beyond `keep` (to reach a line raised ahead of a
+ * rise, the look-ahead's, the drive's and no part of the ground's), is never more than the firm fall could stop at its
+ * line, or where the ground under it is about to rise to (`ahead`), and what it is over that is taken back at the firm
+ * fall. So a rise is climbed as the firm hold climbs it, and the climbing judge's reckoning of what the hull can rise to
+ * stays true; the hull stops at its line rather than flying past it; but what a slope gave it it keeps, so off a crest
+ * it flies on the speed the slope gave and lands where a thrown thing would, and over a dip wider than the bridge
+ * nothing pulls it down faster than gravity, so it carries on its momentum and comes down where it comes down. Reads
+ * the record's `line`, `rate`, `dt`, `feed` and `ahead`, steps its `low`, `vy` and `keep`, gives back the phase.
+ */
+export function stepLooseOf(st: LooseStep, tune: LooseTune): number {
+  const rate = st.rate;
+  const dt = st.dt;
+  const want = st.line + tune.ride;
+  const v0 = st.vy;
+  let cand = 0;
+  let phase = BAND;
+  let down = tune.grip;
+  const kept = st.keep > 0 ? st.keep : 0;
+  if (st.low <= want + tune.band) {
+    if (st.low < want) {
+      // As the firm rule rises, the line's own rate in it (a fall included: `RaceDrive.planRate`, so a hull a little
+      // under its line down a descent is eased onto it at the descent's speed and never stopped dead).
+      const target = Math.min(tune.riseMax, (want - st.low) * tune.riseRate + rate);
+      cand = v0 > target ? target + (v0 - target) * Math.exp(-tune.riseRate * dt) : target;
+      phase = RISE;
+    } else {
+      const target = (want - st.low) * tune.bandRate + rate;
+      cand = v0 + (target - v0) * (1 - Math.exp(-tune.bandRate * dt));
+    }
+    // The cushion's own lift, beyond what the ground gave, never carries the hull past its line, or past where the
+    // ground under it is about to rise to (`ahead`): it is no faster than the firm fall could take back by there, and
+    // anything faster is taken back at the firm fall (never below nought: that is the floor's). The lift a step's far
+    // edge or a line raised ahead asks for at once (`rate` reads a kerb as tens of metres a second, a line raised half a
+    // second ahead of a rise as up to a hundred) is the cushion's, and with nothing but gravity to bring it down again
+    // it threw the hull eight metres over a crevasse's far rim and hung it there for a second; let it carry the hull up
+    // to its band's top instead, the hull hung there, three metres higher than the firm hold rides.
+    const room = want + (st.ahead > 0 ? st.ahead : 0) - st.low;
+    const most = kept + Math.sqrt(2 * tune.fall * (room > 0 ? room : 0));
+    if (cand > most) {
+      const back = most > v0 - tune.fall * dt ? most : v0 - tune.fall * dt;
+      if (back < cand) cand = back;
+    }
+  } else {
+    cand = v0 - tune.fall * dt;
+    phase = FALL;
+    down = tune.gravity;
+  }
+  // What the ground gave, kept: on the ground as high as the ground under it now rises, taken back no faster than the
+  // grip; in the air only gravity takes it back.
+  let keep = st.keep - down * dt;
+  if (phase !== FALL && st.feed > keep) keep = st.feed;
+  const floor = Math.min(v0 - down * dt, keep > 0 ? keep : 0);
+  let vy = cand > floor ? cand : floor;
+  if (vy < -tune.fallMax) vy = -tune.fallMax < v0 ? -tune.fallMax : v0;
+  // A lift is moved by its end speed, as the firm rule moves it, so a rise is climbed to the centimetre as it climbs;
+  // anything slower by the mean of its speeds at the sub-step's ends, which is the world's gravity's parabola exactly.
+  st.low += (vy > v0 ? vy : 0.5 * (v0 + vy)) * dt;
+  st.vy = vy;
+  // Never more kept than the hull has.
+  st.keep = keep < vy ? keep : vy;
+  return phase;
+}
+
+/**
  * The crossed points of one piece of travel, as the strike sweep reads them: the ground under the footprint at each
  * (`g`), the ground `faceLen` behind it (`back`), and the hull's lowest point there, interpolated (`y`).
  */

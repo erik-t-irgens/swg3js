@@ -137,11 +137,11 @@ function seeded(seed: number): () => number {
   pullOf(bike);
   ok(bike.pull === 0, "a bike's one engine never pulls, all three parts out");
 
-  // Through the drive: a full pod at 200 m/s, the stick in the middle, settles at the yaw rate the squared stick gives
+  // Through the drive: a full pod at 100 m/s, the stick in the middle, settles at the yaw rate the squared stick gives
   // its pull -- one part about a twentieth of its full rate, three on a side about two-fifths -- and full opposite lock
   // still turns it the other way.
   const settled = (parts: number[], steer: number): number => {
-    const run = standInRun('pod', 'max', 200);
+    const run = standInRun('pod', 'max', 100);
     run.drive.steer = steer;
     for (const i of parts) {
       run.race.engines.parts[i].d = 1;
@@ -154,7 +154,7 @@ function seeded(seed: number): () => number {
   one.parts[4].d = ENGINE_TUNE.pullAt;
   pullOf(one);
   const oneRate = (() => {
-    const run = standInRun('pod', 'max', 200);
+    const run = standInRun('pod', 'max', 100);
     run.race.engines.parts[4].d = ENGINE_TUNE.pullAt;
     for (let i = 0; i < 120; i++) run.frame(1 / 60);
     return run.race.w / run.race.handling.maxTurn;
@@ -171,7 +171,7 @@ function seeded(seed: number): () => number {
 // --- the boost refused -----------------------------------------------------------------------------------------------
 {
   const boosted = (spoil: ((e: EngineSet) => void) | null): { ever: boolean; boost: number } => {
-    const run = standInRun('pod', 'max', 250);
+    const run = standInRun('pod', 'max', 125);
     run.drive.throttle = 1;
     run.drive.boost = true;
     if (spoil) spoil(run.race.engines);
@@ -243,7 +243,7 @@ function seeded(seed: number): () => number {
   // Through the drive at a full pod's plain top: a part out on the left, R held. The speed comes down under the limp's
   // share of the plain top at the brake, never in a step, and the part comes back.
   for (const fps of [144, 60, 20]) {
-    const run = standInRun('pod', 'max', 200);
+    const run = standInRun('pod', 'max', 100);
     run.drive.throttle = 1;
     for (let i = 0; i < 20 * fps; i++) run.frame(1 / fps);
     const plain = run.race.plainTop();
@@ -276,12 +276,12 @@ function seeded(seed: number): () => number {
     ok(run.race.engines.top === outShare(run.race.engines) && run.race.h > limpTop + 5, `let go, the limp is lifted and the pod climbs again (${r3(run.race.h)} m/s)`);
   }
 
-  // The repair felt in the hands, through the drive: a stock pod at 200 m/s, the stick in the middle, a part under
+  // The repair felt in the hands, through the drive: a stock pod at 100 m/s, the stick in the middle, a part under
   // pullAt (so the damage pulls nothing) held for repair. It settles at the yaw rate the squared repairPull gives,
   // toward the side repaired (the right turns it right, w below nought), mirrored for the left; and nothing at all
   // without the key, so what turns it is the repair and nothing else.
   const repairTurn = (part: number, repair: boolean): { rate: number; repairing: number } => {
-    const run = standInRun('pod', 'stock', 200);
+    const run = standInRun('pod', 'stock', 100);
     run.race.engines.parts[part].d = ENGINE_TUNE.pullAt - 0.05;
     run.drive.repair = repair;
     for (let i = 0; i < 150; i++) run.frame(1 / 60);
@@ -296,7 +296,7 @@ function seeded(seed: number): () => number {
 
   // The lean held off while a part is repaired: the pilot's hands are full. The control leans over on the same keys.
   const leaned = (repair: boolean): number => {
-    const run = standInRun('pod', 'stock', 200);
+    const run = standInRun('pod', 'stock', 100);
     run.race.engines.parts[4].d = ENGINE_TUNE.pullAt - 0.05;
     run.drive.lean = 1;
     run.drive.repair = repair;
@@ -328,7 +328,7 @@ function seeded(seed: number): () => number {
   // nothing, which is the lava world's whole planet (its sea a flow under dry ground everywhere).
   let wet = false;
   const heatAfter = (water: ((x: number, z: number) => number) | null, lava: ((x: number, z: number) => boolean) | null): number => {
-    const run = standInRun('pod', 'stock', 150, { water, lava });
+    const run = standInRun('pod', 'stock', 75, { water, lava });
     run.race.heat = 60;
     for (let i = 0; i < 120; i++) run.frame(1 / 60);
     wet = run.vehicle.onWater;

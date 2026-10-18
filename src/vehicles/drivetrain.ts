@@ -14,10 +14,14 @@
 
 /** Every number of the engines: all ours, each with what it is for. */
 export const ENGINE_TUNE = {
-  /** A scrape damages one part of the struck side by this much a m/s past the hit threshold: a light graze marks a part, a hard glance at full speed burns one out. */
-  scrapePart: 0.006,
-  /** A hard landing damages a random part by this much a m/s past the strike's hurt, never more than `strikeMost`: a bad landing is felt in the engines, never ruinous. */
-  strikePart: 0.004,
+  /**
+   * A scrape damages one part of the struck side by this much a m/s past the hit threshold: a light graze marks a part, a
+   * hard glance at full speed burns one out. Twice the first ride's, since the speeds were halved: the same share of the
+   * speed costs the same part.
+   */
+  scrapePart: 0.012,
+  /** A hard landing damages a random part by this much a m/s past the strike's hurt, never more than `strikeMost`: a bad landing is felt in the engines, never ruinous. Doubled with the halved speeds, as above. */
+  strikePart: 0.008,
   strikeMost: 0.05,
   /** The hull takes this share of what a scrape cost it before the engines had parts: the parts take the rest. */
   hullShare: 1 / 3,

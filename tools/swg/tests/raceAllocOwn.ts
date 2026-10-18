@@ -26,9 +26,12 @@ if (!gc) {
 const FIXED = 1 / 60;
 // Rolling ground with a crevasse every kilometre, so the plan rises, settles, falls and bridges. Its heights are whole
 // metres, which the engine hands back without making a number: the world's own readers (the terrain, the water) are
-// the world's, and what is measured is what the drive makes between their answers.
+// the world's, and what is measured is what the drive makes between their answers. The crevasse is a band 40 m wide and
+// endless, which the circling hull crosses now square and now at a grazing angle. (Its place in the kilometre is taken
+// with integer arithmetic: the drive calls this stand-in, and one a few operations longer was left out of the step it is
+// built into, which then made the numbers it handed over.)
 const ground = (x: number, z: number): number => {
-  const m = ((z % 1000) + 1000) % 1000;
+  const m = (z | 0) & 1023;
   const pit = m > 600 && m < 640 ? -8 : 0;
   return (Math.round(2 * Math.sin(x / 41) + 3 * Math.sin(z / 97)) + pit) | 0;
 };
@@ -147,6 +150,7 @@ let k = 0;
 const counts = { planned: 0 };
 /** The engines' damage, fires and repair in the run (`RACE_ALLOC_ENGINES=0` leaves them whole, to compare). */
 const ENGINES_AT_WORK = process.env.RACE_ALLOC_ENGINES !== '0';
+const HOLD = process.env.RACE_ALLOC_HOLD ?? '';
 function frame(): void {
   const dt = DTS[k++ % 3] as number;
   // A gentle weave: the target off the nose and back.
@@ -162,6 +166,9 @@ function frame(): void {
     race.engines.parts[1].fire = 0.001;
   }
   drive.repair = ENGINES_AT_WORK && (k & 8191) > 7700;
+  // Both holds, a stretch of each in turn (RACE_ALLOC_HOLD=loose or firm keeps to one): the loose one's look behind
+  // and its own sub-step, and the firm one's, each measured making nothing.
+  RACE_TUNE.hold = HOLD === 'loose' || (HOLD !== 'firm' && (k & 16383) < 12000) ? 'loose' : 'firm';
   race.step(vehicle, dt, drive, ground, null, null, physics);
   if (race.planned > 0) counts.planned++;
   physics.step(dt);
@@ -174,7 +181,7 @@ function frame(): void {
 
 const view = newRaceView();
 const out = newRaceViewOut();
-const vin: RaceViewInput = { heading: 0.5, mouseDX: 0.5, k: 0.0025, keys: false, alt: false, orbitYaw: Math.PI, speed: 200.5, ceiling: 333.3, seatY: 1.5, dt: 0.5 };
+const vin: RaceViewInput = { heading: 0.5, mouseDX: 0.5, k: 0.0025, keys: false, alt: false, orbitYaw: Math.PI, speed: 100.5, ceiling: 166.7, seatY: 1.5, dt: 0.5 };
 let vk = 0;
 function viewFrame(): void {
   vk++;
@@ -183,7 +190,7 @@ function viewFrame(): void {
   vin.keys = (vk & 511) < 40;
   vin.alt = (vk & 1023) < 30;
   vin.orbitYaw = vin.heading + Math.PI;
-  vin.speed = 150 + 150 * Math.sin(vk / 900);
+  vin.speed = 75 + 75 * Math.sin(vk / 900);
   vin.seatY = 1 + Math.sin(vk / 50);
   steerRaceView(view, vin, RACE_TUNE, out);
   vin.dt = DTS[vk % 3] as number;

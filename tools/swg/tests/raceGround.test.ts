@@ -11,13 +11,23 @@
 // a full bike) and holds the bounds; `npm run test:race-ground` runs every converted world, both kinds, stock and
 // full, gentle, rolling and hilly with the bridge on and off and `offCourse` both ways, and prints the uncurated lines
 // for information. A world whose pack is not converted is passed over. A false dive and a false flight are research5
-// §4.3's, over its own reference pits (the raw ground along the line closed at `max(L, 0.15 × speed)`), so they are
+// §4.3's, over its own reference pits (the raw ground along the line closed at `max(L, 0.6 × bridgeTime × speed)`, the metres `0.15 × speed`
+// closed at the first ride's speeds), so they are
 // the same measure with the bridge on and off: a hull high over such a pit is gliding, which is printed apart.
+//
+// The hold (`RACE_TUNE.hold`): every run is the loose hold, the owner's after his first ride, and the firm one (the
+// first ride's) is run beside it as its control -- in `test:race` at 60 fps, under `test:race-ground` at 144, 60 and 20
+// -- with what the owner's words can be held to, measured off the body and the raw ground alone, never off the drive's
+// own idea of itself: how often the hull leaves the ground off a crest (a jump: its lowest point climbing past its ride
+// and its band over the raw ground under it, where no reference pit is), the share of the distance it is off the ground,
+// how often it is pulled down harder than the world's gravity while the ground under it does not ask for that (its
+// vertical speed falling faster than 23 m/s² over a tenth of a second, unless it is on the ground and the ground there
+// curves down at least as hard at its speed), and the hardest it is ever pulled down.
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
-import { Physics } from '../../../src/core/physics.ts';
+import { FIXED_DT, Physics } from '../../../src/core/physics.ts';
 import { SwgTerrain } from '../../../src/world/swgTerrain.ts';
 import { CHUNK_SIZE, Terrain, chunkHeightfield } from '../../../src/world/terrain.ts';
 import { Vehicle, specFor, type DriveInput } from '../../../src/vehicles/vehicle.ts';
@@ -147,7 +157,31 @@ interface Run {
   glide: number;
   rideDips: number;
   frames: number;
+  /** Jumps off a crest, the distance driven and the part of it off the ground, the pulls nothing under it asked for, and the hardest pull down (m/s²). */
+  jumps: number;
+  dist: number;
+  airDist: number;
+  pulls: number;
+  mostDown: number;
+  /** The most the hull's lowest point stood over its own line (m): how high anything threw it, or how deep under it the ground fell away. */
+  highest: number;
 }
+
+/**
+ * The world's own gravity, which the loose hold falls at: a pull down past it (and a margin) is the hold's, not the
+ * world's. The margin is the measure's: the body's speed is the drive's average over each plan, read at the window's
+ * two ends, and a frame now and then takes a step more or less than its neighbours (four where 20 fps's frames take
+ * three, two where 120's take one), which can stand the two plans' middles a step further apart than the window and
+ * read a fall at gravity up to a sixth over it.
+ */
+const G = 20;
+const PULL_MARGIN = 4;
+/** The window a vertical acceleration is read over: a tenth of a second of the physics' own fixed steps, the same at every frame rate. */
+const WINDOW_STEPS = Math.round(0.1 / FIXED_DT);
+/** The length the ground's own curve is read over (m), a face's: the same at every frame rate. */
+const CURVE_LEN = 8;
+/** A jolt: the vertical speed changing by more than this in a tenth of a second (half the first ride's 40, as every speed is halved). */
+const JOLT = 20;
 
 const BOUNDS = { pod: { min: [-3, 0, -6], max: [3, 2.5, 6] }, bike: { min: [-0.45, 0, -2.05], max: [0.45, 1.16, 2.05] } } as const;
 const BOXES = { pod: [7, 3, 15], bike: [1, 1.3, 3.6] } as const;
@@ -161,7 +195,12 @@ const REF_FROM = -100;
 /**
  * The pits a hull crossing at `speed` passes in a blink, as research5 §4.3 defines them for its false dives and false
  * flights, independent of the drive's own bridge (so the same with it on and off): the raw ground along the stretch's
- * line closed at `max(L, 0.15 × speed)`, a pit wherever the closing stands more than half a metre over the raw ground.
+ * line closed at `max(L, 0.6 × bridgeTime × speed)`, a pit wherever the closing stands more than half a metre over the
+ * raw ground. Research5's reference was 0.15 s of travel against the bridge's 0.25 s, three-fifths of the bridge's
+ * span; it is held at that share of the bridge, so it is the same metres the first ride's was now the bridge spans half
+ * a second at half the speed. (Left at 0.15 s, the reference halved in metres while the bridge did not, and the time
+ * the bridge spent gliding pits 25 to 83 m wide, which the reference no longer called pits, was counted against it as
+ * time high over open ground, under either hold.)
  */
 function refPits(t: Terrain, st: Stretch, length: number, speed: number): RefPits {
   const n = Math.round((LEN + 300 - REF_FROM) / STEP) + 1;
@@ -170,7 +209,7 @@ function refPits(t: Terrain, st: Stretch, length: number, speed: number): RefPit
     const d = REF_FROM + i * STEP;
     raw[i] = floorOf(t, st.x0 + Math.sin(st.a) * d, st.z0 + Math.cos(st.a) * d);
   }
-  const nw = Math.max(1, Math.round(Math.max(length, 0.15 * speed) / STEP) + 1);
+  const nw = Math.max(1, Math.round(Math.max(length, 0.6 * RACE_TUNE.bridgeTime * speed) / STEP) + 1);
   const dil = new Float64Array(n);
   const dq = new Int32Array(n);
   const starts = bridgeClose(raw, n, nw, dil, dq);
@@ -215,19 +254,29 @@ async function drive(t: Terrain, st: Stretch, kind: 'pod' | 'bike', level: 'max'
   v.body.setLinvel({ x: Math.sin(st.a) * race.boostTop(), y: 0, z: Math.cos(st.a) * race.boostTop() }, true);
   race.h = race.boostTop();
   (race as unknown as { cmdValid: boolean }).cmdValid = false;
-  const run: Run = { km: 0, under: 0, walls: 0, climbs: 0, crashes: 0, strikes: 0, strikeHull: 0, jolts: 0, falseDives: 0, airborne: 0, falseFlight: 0, glide: 0, rideDips: 0, frames: 0 };
+  const run: Run = { km: 0, under: 0, walls: 0, climbs: 0, crashes: 0, strikes: 0, strikeHull: 0, jolts: 0, falseDives: 0, airborne: 0, falseFlight: 0, glide: 0, rideDips: 0, frames: 0, jumps: 0, dist: 0, airDist: 0, pulls: 0, mostDown: 0, highest: 0 };
   const dt = 1 / fps;
   const vyBack: number[] = [];
   const keep = Math.max(1, Math.round(0.1 * fps));
   const L = Math.abs(BOUNDS[kind].max[2] - BOUNDS[kind].min[2]);
   const ref = refPits(t, st, L, race.boostTop());
+  // The body's own vertical speed through time, for its acceleration over a fixed window.
+  const vyAt: number[] = [];
+  const tAt: number[] = [];
+  const liftsAt: number[] = [];
+  const liftsStart = race.lifts;
+  let back = 0;
   let lastAt = race.lastHit.at;
   let diving = false;
   let dipping = false;
+  let off = false;
+  let pulling = false;
   let hp = v.hp;
+  let was = 0;
+  const offAt = race.handling.ride + race.handling.band;
   for (let time = 0; !v.destroyed; time += dt) {
     const along = (v.pos.x - st.x0) * Math.sin(st.a) + (v.pos.z - st.z0) * Math.cos(st.a);
-    if (along > LEN || time > 20) break;
+    if (along > LEN || time > 40) break;
     v.update(dt, physics, input, groundAt, waterAt);
     physics.step(dt);
     run.frames++;
@@ -235,6 +284,9 @@ async function drive(t: Terrain, st: Stretch, kind: 'pod' | 'bike', level: 'max'
     const p = v.body.translation();
     const now = (p.x - st.x0) * Math.sin(st.a) + (p.z - st.z0) * Math.cos(st.a);
     const gHere = floorOf(t, p.x, p.z);
+    const travel = Math.max(0, now - was);
+    was = now;
+    run.dist += travel;
     // (Not on the step that wrecked it: a crash leaves the body where its last step put it, in the face it met.)
     if (p.y < gHere - 0.05 && !v.destroyed) run.under++;
     if (race.lastHit.at !== lastAt) {
@@ -253,13 +305,13 @@ async function drive(t: Terrain, st: Stretch, kind: 'pod' | 'bike', level: 'max'
     vyBack.push(race.vy);
     if (vyBack.length > keep) {
       const old = vyBack.shift()!;
-      if (Math.abs(race.vy - old) > 40) {
+      if (Math.abs(race.vy - old) > JOLT) {
         run.jolts++;
         vyBack.length = 0;
       }
     }
-    // Research5 §4.3's two measures, over its own reference pits (the raw ground closed at max(L, 0.15 × speed), the
-    // same with the bridge on and off): a false dive is the hull's lowest point more than half a metre under the
+    // Research5 §4.3's two measures, over its own reference pits (the raw ground closed at max(L, 0.6 × bridgeTime ×
+    // speed), the metres 0.15 × speed closed at the first ride's speeds, the same with the bridge on and off): a false dive is the hull's lowest point more than half a metre under the
     // rim-closed ground of a pit under its middle -- down into a pothole it is past in a blink; a false flight is its
     // lowest point more than `airborneAt` over the raw ground under its middle where no such pit is under its middle or
     // its ends -- high over open ground -- and the same over a pit is a glide, which is what the bridge is for.
@@ -283,6 +335,55 @@ async function drive(t: Terrain, st: Stretch, kind: 'pod' | 'bike', level: 'max'
     const high = race.low - gHere > race.handling.airborneAt;
     if (high && overPit) run.glide++;
     else if (high) run.falseFlight++;
+    // The owner's words, off the body and the raw ground alone. Off the ground: the lowest point past its ride and its
+    // band over the raw ground under its middle; a jump is leaving it where no reference pit is (over one it is a glide).
+    const isOff = race.low - gHere > offAt;
+    if (isOff) run.airDist += travel;
+    if (isOff && !off && !overPit) run.jumps++;
+    off = isOff;
+    // How high anything threw it: its lowest point over its own line, the most it ever stood (printed only: the ceiling
+    // on a throw is `raceHold.test.ts`'s, over a kerb, a bump and a pit's far rim. A ceiling was tried here -- a take-off
+    // over its line faster than the centre line's ground rose over the half second before -- and over every world the
+    // hold taking a step's rise up at once, `looseFeed` at its most, was thrown no more often by it than the hold as
+    // built, which it counted thrown off ground its footprint's sides rose over: the worlds' ground, read every 2 m and
+    // smooth between, has no step to fling a hull off.)
+    if (race.overLine > run.highest) run.highest = race.overLine;
+    // Its vertical acceleration over the last tenth of a second of the physics' own steps (the body moves only on them,
+    // at the speed the drive commanded for them), from the body's own vertical speed: counted in steps, so a frame that
+    // took none reads the same as one that took four.
+    const vyNow = v.body.linvel().y;
+    const stepsNow = physics.steps;
+    const stepped = !tAt.length || stepsNow > tAt[tAt.length - 1];
+    // (Judged only on a frame the physics stepped: the body's speed moves on no other. And not over a window in which the
+    // ground itself lifted the hull out of it, a strike slight or hard, nor just before it: the speed it shoved the hull
+    // up at, spread over the step it was shoved in, ends with that step, and that is the ground's push and not the
+    // hold's pull. The drive counts every such lift, `lifts`.)
+    if (stepped) {
+      vyAt.push(vyNow);
+      tAt.push(stepsNow);
+      liftsAt.push(race.lifts);
+      while (back + 1 < tAt.length && tAt[back + 1] <= stepsNow - WINDOW_STEPS) back++;
+      const span = (stepsNow - tAt[back]) * FIXED_DT;
+      // Pulled down: how fast its vertical speed went below nought, or further below it, over the window (a rise
+      // brought to a stop is not a pull down: the owner's words are about being pulled down and back up).
+      const from = vyAt[back] < 0 ? vyAt[back] : 0;
+      const accel = stepsNow - tAt[back] >= WINDOW_STEPS && vyNow < from ? (vyNow - from) / span : 0;
+      // (Before the first record, the count as the run began: a lift on the run's first frame, the hull stood at the
+      // start line with the ground under its footprint over it, is the ground's too.)
+      const struck = race.lifts !== (back > 0 ? liftsAt[back - 1] : liftsStart);
+      if (!struck && -accel > run.mostDown) run.mostDown = -accel;
+      // What the ground asks of a hull on it there: its own curve over a face's length, at the hull's speed (negative
+      // where it falls away). A pull down harder than gravity is the ground's only while the hull is on it and the
+      // ground curves down at least that hard; any other is the hold's.
+      const j = Math.round((now - REF_FROM) / STEP);
+      const k = Math.round(CURVE_LEN / STEP);
+      const curve = onLine && j - k >= 0 && j + k < ref.raw.length ? (ref.raw[j + k] - 2 * ref.raw[j] + ref.raw[j - k]) / (CURVE_LEN * CURVE_LEN) : 0;
+      const asked = curve * race.h * race.h;
+      const onIt = race.low - gHere <= offAt;
+      const pulled = !struck && accel < -(G + PULL_MARGIN) && !(onIt && asked <= accel + PULL_MARGIN);
+      if (pulled && !pulling) run.pulls++;
+      pulling = pulled;
+    }
   }
   if (v.destroyed && race.lastHit.kind === 'crash') run.crashes = Math.max(run.crashes, 1);
   run.km = Math.max(1e-3, Math.hypot(v.pos.x - st.x0, v.pos.z - st.z0) / 1000);
@@ -293,12 +394,18 @@ interface Sum extends Run {
   runs: number;
 }
 const sum = (rs: Run[]): Sum => {
-  const s: Sum = { runs: rs.length, km: 0, under: 0, walls: 0, climbs: 0, crashes: 0, strikes: 0, strikeHull: 0, jolts: 0, falseDives: 0, airborne: 0, falseFlight: 0, glide: 0, rideDips: 0, frames: 0 };
-  for (const r of rs) for (const k of Object.keys(s) as (keyof Sum)[]) if (k !== 'runs') (s[k] as number) += r[k as keyof Run];
+  const s: Sum = { runs: rs.length, km: 0, under: 0, walls: 0, climbs: 0, crashes: 0, strikes: 0, strikeHull: 0, jolts: 0, falseDives: 0, airborne: 0, falseFlight: 0, glide: 0, rideDips: 0, frames: 0, jumps: 0, dist: 0, airDist: 0, pulls: 0, mostDown: 0, highest: 0 };
+  for (const r of rs) {
+    for (const k of Object.keys(s) as (keyof Sum)[]) if (k !== 'runs' && k !== 'mostDown' && k !== 'highest') (s[k] as number) += r[k as keyof Run];
+    s.mostDown = Math.max(s.mostDown, r.mostDown);
+    s.highest = Math.max(s.highest, r.highest);
+  }
   return s;
 };
+/** The share of the distance off the ground, in per cent. */
+const airPct = (s: Sum) => (100 * s.airDist) / Math.max(1e-9, s.dist);
 const line = (label: string, s: Sum) =>
-  `${label}: ${r2(s.km)} km, walls ${r2(s.walls / s.km)}/km, climbing walls ${r2(s.climbs / s.km)}/km, crashes ${r2(s.crashes / s.km)}/km, strikes ${r2(s.strikes / s.km)}/km, strike hull ${r2(s.strikeHull / s.km)} hp/km, jolts ${r2(s.jolts / s.km)}/km, false dives ${r2(s.falseDives / s.km)}/km (dips under the ride ${r2(s.rideDips / s.km)}/km), airborne ${r2((100 * s.airborne) / Math.max(1, s.frames))}%, false flight ${r2((100 * s.falseFlight) / Math.max(1, s.frames))}%, glide ${r2((100 * s.glide) / Math.max(1, s.frames))}%, under the ground ${s.under} frames`;
+  `${label}: ${r2(s.km)} km, walls ${r2(s.walls / s.km)}/km, climbing walls ${r2(s.climbs / s.km)}/km, crashes ${r2(s.crashes / s.km)}/km, strikes ${r2(s.strikes / s.km)}/km, strike hull ${r2(s.strikeHull / s.km)} hp/km, jolts ${r2(s.jolts / s.km)}/km, false dives ${r2(s.falseDives / s.km)}/km (dips under the ride ${r2(s.rideDips / s.km)}/km), airborne ${r2((100 * s.airborne) / Math.max(1, s.frames))}%, false flight ${r2((100 * s.falseFlight) / Math.max(1, s.frames))}%, glide ${r2((100 * s.glide) / Math.max(1, s.frames))}%, under the ground ${s.under} frames; jumps ${r2(s.jumps / s.km)}/km, off the ground ${r2(airPct(s))}% of the way, pulled down unasked ${r2(s.pulls / s.km)}/km, hardest pull down ${r2(s.mostDown)} m/s², highest over its line ${r2(s.highest)} m`;
 
 const worlds = ALL
   ? readdirSync(PACKS, { withFileTypes: true })
@@ -312,10 +419,21 @@ const plan: { world: string; cls: string; want: number }[] = ALL
       { world: 'corellia', cls: 'rolling', want: 4 },
     ];
 const FPS = [144, 120, 60, 20];
+/** The firm hold, run beside the loose as its control: at 60 fps in `test:race`, at three rates over every world. */
+const FIRM_FPS = ALL ? [144, 60, 20] : [60];
 const byClass: Record<string, Record<number, Run[]>> = {};
+const byFirm: Record<string, Record<number, Run[]>> = {};
 const offBridge: Record<string, Run[]> = {};
+/** Each world's own runs of each class, kind and level, the hold in force and the firm beside it, by frame rate. */
+const byWorld: { world: string; key: string; loose: Record<number, Run[]>; firm: Record<number, Run[]> }[] = [];
+// `RACE_GROUND_TUNE='{"looseGrip":30}'` moves any rule of the drive for the whole run, to measure another number;
+// `RACE_GROUND_WORLDS=tatooine,naboo` drives only those worlds under `all`.
+if (process.env.RACE_GROUND_TUNE) note(`tuned for this run: ${tuneRace(JSON.parse(process.env.RACE_GROUND_TUNE) as Parameters<typeof tuneRace>[0]).join('; ') || process.env.RACE_GROUND_TUNE}`);
+const TUNED = JSON.parse(JSON.stringify(RACE_TUNE)) as typeof RACE_TUNE;
+const only = process.env.RACE_GROUND_WORLDS ? new Set(process.env.RACE_GROUND_WORLDS.split(',')) : null;
 let any = false;
 for (const { world, cls, want } of plan) {
+  if (only && !only.has(world)) continue;
   const t = await terrainOf(world);
   if (!t) {
     note(`${world}: not converted, passed over`);
@@ -333,11 +451,27 @@ for (const { world, cls, want } of plan) {
     for (const level of levels) {
       const key = `${cls} ${kind} ${level}`;
       byClass[key] ??= {};
+      const mine: (typeof byWorld)[number] = { world, key, loose: {}, firm: {} };
+      byWorld.push(mine);
       for (const fps of FPS) {
         const runs: Run[] = [];
         for (const st of stretches) runs.push(await drive(t, st, kind, level, fps));
         (byClass[key][fps] ??= []).push(...runs);
-        console.log(line(`${world} ${cls} ${kind} ${level} ${fps} fps (${runs.length} stretches)`, sum(runs)));
+        mine.loose[fps] = runs;
+        console.log(line(`${world} ${cls} ${kind} ${level} ${fps} fps, ${RACE_TUNE.hold} (${runs.length} stretches)`, sum(runs)));
+      }
+      // The firm hold beside it, the first ride's: the loose hold's control.
+      if (RACE_TUNE.hold !== 'firm') {
+        tuneRace({ hold: 'firm' });
+        byFirm[key] ??= {};
+        for (const fps of FIRM_FPS) {
+          const runs: Run[] = [];
+          for (const st of stretches) runs.push(await drive(t, st, kind, level, fps));
+          (byFirm[key][fps] ??= []).push(...runs);
+          mine.firm[fps] = runs;
+          console.log(line(`${world} ${cls} ${kind} ${level} ${fps} fps, firm`, sum(runs)));
+        }
+        tuneRace({ hold: TUNED.hold });
       }
       // The bridge off, at 60 fps: what the bridge buys, and what it costs in time high over open ground.
       tuneRace({ bridge: 'off' });
@@ -379,10 +513,48 @@ else {
     const ffOn = (100 * on60.falseFlight) / Math.max(1, on60.frames);
     const ffOff = (100 * off.falseFlight) / Math.max(1, off.frames);
     // The design's half a point, over open ground in research5's sense: time high over the reference pits is a glide,
-    // which is what the bridge is for, and is printed apart.
+    // which is what the bridge is for, and is printed apart. The same under either hold (the reference pits stand to the
+    // bridge as they did on the first ride, `refPits`).
     ok(ffOn - ffOff <= 0.5, `${key}: time high over open ground with the bridge within half a point of without (${r2(ffOn)}% against ${r2(ffOff)}%)`);
-    if (cls === 'gentle' && level === 'max') ok((100 * all.airborne) / Math.max(1, all.frames) < 5, `${key}: airborne under 5% of the way at full speed on gentle ground (${r2((100 * all.airborne) / Math.max(1, all.frames))}%)`);
+    // Restated for the loose hold, which flies off crests the firm one held down: still under 5% on gentle ground at full
+    // speed, since gentle ground has next to no crest that falls away faster than gravity at the halved speeds.
+    if (cls === 'gentle' && level === 'max') ok((100 * all.airborne) / Math.max(1, all.frames) < 5, `${key}: airborne under 5% of the way at full speed on gentle ground, loose as firm held it (${r2((100 * all.airborne) / Math.max(1, all.frames))}%)`);
+    // The owner's words, the loose hold against the firm one beside it (FIRM_FPS). Never pulled down harder than the
+    // world's gravity where the ground under it does not ask for it, and never harder than the hold's own fall or grip
+    // anywhere, where the firm hold is pulled down at many times gravity; and on rolling and hilly ground off the ground
+    // at least as often and as far as the firm hold.
+    if (RACE_TUNE.hold !== 'firm') {
+      const firm = sum(Object.values(byFirm[key] ?? {}).flat());
+      const most = Math.max(RACE_TUNE.looseFall, RACE_TUNE.looseGrip) + PULL_MARGIN;
+      ok(all.pulls === 0 && all.mostDown <= most, `${key}: loose, never pulled down harder than gravity where the ground does not ask it, nor harder than ${most} m/s² anywhere (${all.pulls} pulls, the hardest ${r2(all.mostDown)} m/s²; firm: ${r2(firm.pulls / Math.max(1e-9, firm.km))} a km, the hardest ${r2(firm.mostDown)})`);
+      if (cls !== 'gentle' && firm.km > 0) {
+        // (Off the ground as far, not off a crest as often: on hilly ground one loose flight spans what the firm hold
+        // made two or three short hops of, so the loose hold can count fewer jumps a km while flying three times as far.)
+        ok(airPct(all) >= airPct(firm), `${key}: loose, off the ground at least as far as the firm hold (${r2(airPct(all))}% of the way in ${r2(all.jumps / all.km)} jumps a km, against ${r2(airPct(firm))}% in ${r2(firm.jumps / firm.km)})`);
+        ok(firm.pulls > 0, `${key}: (the control: the firm hold is pulled down unasked ${r2(firm.pulls / firm.km)} times a km: the measure sees the magnet)`);
+      }
+    }
     void kind;
+  }
+  // World by world: the loose hold crashes no more than the firm hold beside it on the same stretches at the same rates
+  // (a rise ahead is climbed rather than struck, and a hull is wrecked only where it would have been before), and its
+  // strikes come at the same rate whatever the frame rate.
+  if (RACE_TUNE.hold !== 'firm') {
+    for (const w of byWorld) {
+      const [cls] = w.key.split(' ');
+      if (cls === 'uncurated' || !Object.keys(w.firm).length) continue;
+      const loose = sum(FIRM_FPS.flatMap((f) => w.loose[f] ?? []));
+      const firm = sum(FIRM_FPS.flatMap((f) => w.firm[f] ?? []));
+      ok(loose.crashes <= firm.crashes, `${w.world} ${w.key}: loose crashes no more than firm at ${FIRM_FPS.join(', ')} fps (${loose.crashes} against ${firm.crashes})`);
+      const counts = FPS.map((f) => sum(w.loose[f] ?? []).strikes);
+      // (One strike's slack: on four stretches a world, a quarter of a rate is less than one strike.)
+      const at144 = sum(w.loose[144] ?? []).strikes;
+      const at20 = sum(w.loose[20] ?? []).strikes;
+      if (w.loose[144] && w.loose[20]) ok(at144 <= at20 * 1.25 + 1, `${w.world} ${w.key}: loose strikes at 144 fps no more than 20 fps's plus a quarter and one (${at144} against ${at20})`);
+      const looseAll = sum(FPS.flatMap((f) => w.loose[f] ?? []));
+      const firmAll = sum(FIRM_FPS.flatMap((f) => w.firm[f] ?? []));
+      console.log(`note ${w.world} ${w.key}: loose strikes at ${FPS.join(', ')} fps ${counts.join(', ')}; firm at ${FIRM_FPS.join(', ')} ${FIRM_FPS.map((f) => sum(w.firm[f] ?? []).strikes).join(', ')}; airborne loose ${r2((100 * looseAll.airborne) / Math.max(1, looseAll.frames))}% firm ${r2((100 * firmAll.airborne) / Math.max(1, firmAll.frames))}%; highest over its line loose ${r2(looseAll.highest)} firm ${r2(firmAll.highest)} m`);
+    }
   }
 }
 console.log(`\nraceGround: ${checks} checks passed`);

@@ -8,8 +8,10 @@
 // owner's ceiling. The travel lags the nose by a time constant, so a pod drifts wide at speed and grips as it slows;
 // the turn eases toward what the stick asks, never past the maximum turn rate; the hull banks with the turn and leans
 // on Z and V. Its height is set rather than sprung: its posed lowest point is held at its ride over a line read off
-// the ground under the hull (bridged over pits narrower than a quarter of a second of travel) and raised halfway
-// toward the ground half a second ahead, rising at once, settling within a band, falling hard above it. The body moves
+// the ground under the hull (bridged over pits narrower than half a second of travel) and raised halfway toward the
+// ground half a second ahead, rising at once and settling within a band; and held there loosely (`RACE_TUNE.hold`
+// 'loose'): never pulled down harder than the cushion's grip, and over its band falling at the world's own gravity, so
+// a crest is a jump and a dip is carried over, where the first ride's firm rule ('firm') fell hard. The body moves
 // only on the physics' whole sixtieths of a second, so every frame the drive asks how many of them the coming step
 // will take (`Physics.stepsAhead`) and plans exactly that travel, in sub-steps, with every sweep (the strikes, the
 // bridge's odometer, the climbing judge) running from a mark of its own; a frame on which the physics takes no step
@@ -53,12 +55,13 @@ import {
   newLagStep,
   newLineWalk,
   newSweptPath,
-  newVerticalStep,
+  newLooseStep,
   newYawStep,
   resolveRace,
   shareSpeed,
   slopePush,
   speedOf,
+  stepLooseOf,
   stepVerticalOf,
   stepYawRateOf,
   strikeKick,
@@ -200,6 +203,8 @@ export class RaceDrive {
   readonly lastHit = { kind: '' as '' | 'scrape' | 'crash' | 'face' | 'climb' | 'strike', loss: 0, drop: 0, at: 0 };
   /** Words for the message line, taken once by the game (`takeNote`). */
   private note = '';
+  /** Every time the strike sweep met the ground and lifted the hull out of it, slight or hard, ever: the ground's own push, which a measure of the hold sets apart. */
+  lifts = 0;
   /** Steps taken, for the console's clock of when things happened. */
   private steps = 0;
 
@@ -231,6 +236,32 @@ export class RaceDrive {
   rayTaken = false;
   lineRate = 0.5;
   line = 0.5;
+  /**
+   * The rate the height rule is fed: the line's own under the firm hold; under the loose the rate the ground under the
+   * hull has risen at over the last tenth of a second, taken up no faster than `looseFeed` (`planRate`), which is where
+   * the upward speed it keeps comes from (`keep`).
+   */
+  rateFed = 0.5;
+  /** The loose hold's rate for its rise and its settle (`looseRate`): the ground's own rise ahead while it rises, else the line's fall as it falls now. */
+  looseLine = 0.5;
+  /** The ground under the footprint a tenth of a second on less the ground under it now, over that time (m/s, bridged): how far the cushion may run ahead of its line. */
+  underRate = 0.5;
+  /** The ground under the hull at the plan's start, raw (unbridged): what its kept upward speed is fed from. */
+  private rawNow = 0.5;
+  /** The upward speed the ground has given the hull and gravity alone may take back (`stepLooseOf`'s `keep`). */
+  keep = 0.5;
+  /** The line at the last sub-step, whether it may be read against (a sub-step of the same run of plans), and the rate a run's first sub-step takes. */
+  private lastLine = 0.5;
+  private lastLineOk = false;
+  private firstRate = 0.5;
+  /** The loose hold's look behind: the line under the hull at each plan's start and the plan's clock then, in a ring (`pastRate`). */
+  private readonly pastT = new Float64Array(16);
+  private readonly pastL = new Float64Array(16);
+  private pastN = 0;
+  private pastHead = 0;
+  private pastClock = 0.5;
+  private pastLine = 0.5;
+  private pastFed = 0.5;
 
   // --- the bridge ---------------------------------------------------------------------------------------------------
   private readonly bridgeRing: number;
@@ -306,6 +337,16 @@ export class RaceDrive {
     this.reach = 0;
     this.lineRate = 0;
     this.line = 0;
+    this.rateFed = 0;
+    this.looseLine = 0;
+    this.underRate = 0;
+    this.rawNow = 0;
+    this.keep = 0;
+    this.lastLine = 0;
+    this.firstRate = 0;
+    this.pastClock = 0;
+    this.pastLine = 0;
+    this.pastFed = 0;
     this.bridgeLift = 0;
     this.span = 0;
     this.slopeTheta = 0;
@@ -353,6 +394,11 @@ export class RaceDrive {
 
   boostTop(): number {
     return Math.min(this.handling.cap, RACE_TUNE.thrustCap * this.handling.V + this.handling.BT);
+  }
+
+  /** What a hull over its band falls at under the hold in force (m/s²): the world's gravity loose, the firm rule's own fall. */
+  fallNow(): number {
+    return RACE_TUNE.hold === 'firm' ? this.handling.fall : RACE_TUNE.looseFall;
   }
 
   private writeSpec(v: Vehicle): void {
@@ -457,6 +503,10 @@ export class RaceDrive {
     this.sweptTo = 0;
     this.judgedTo = this.lengthOf(v) / 2 + this.handling.climbLen;
     this.planFromValid = false;
+    this.pastN = 0;
+    this.rateFed = 0;
+    this.keep = 0;
+    this.lastLineOk = false;
   }
 
   /** A bike's mode, as U switches it: up at any speed, down only under its traversal top. '' when done, else the words of the refusal. */
@@ -660,6 +710,8 @@ export class RaceDrive {
   private pLip = 0.5;
   private pStopAt = 0.5;
   private pPhase = 0;
+  /** The loose hold this plan (`RACE_TUNE.hold`), or the firm. */
+  private pLoose = true;
   /** The sweep's sub-step: where it starts and ends on the odometer, the hull's lowest point at each, and whether it is the plan's last. */
   private wS0 = 0.5;
   private wS1 = 0.5;
@@ -667,7 +719,7 @@ export class RaceDrive {
   private wLowB = 0.5;
   private wLast = false;
   private readonly lineQ = newLineQuery();
-  private readonly vStep = newVerticalStep();
+  private readonly vStep = newLooseStep();
   private readonly climb = newClimbPass();
   private readonly pose = { ex: 0.5, ez: 0.5, low: 0.5 };
   private readonly hitC = { x: 0.5, y: 0.5, z: 0.5 };
@@ -1320,6 +1372,7 @@ export class RaceDrive {
     this.airborne = st.low - this.line > h.airborneAt;
     this.onBand = this.pPhase !== FALL || this.overLine <= h.band;
     this.vy = st.vy;
+    this.keep = st.keep;
     this.cmdVy = (st.low - this.pLow0) / this.pT;
     return false;
   }
@@ -1332,7 +1385,16 @@ export class RaceDrive {
     this.pT = this.pN * FIXED_DT;
     this.pL = this.lengthOf(v);
     this.pHalfW = this.widthOf(v) / 2;
-    this.pose.ex = this.sEx;
+    this.pLoose = tune.hold !== 'firm';
+    // The hull's lowest point as it rolls, banks and leans, and under the firm hold as it pitches too. The loose hold
+    // leaves the pitch out: the attitude tips the nose toward the ground a hull's length ahead and behind, raw (a bridged
+    // pit's floor included), so it tips the nose down 36 degrees at a pit's near edge and up 30 to 47 at its far rim, and
+    // the cushion lifting the whole hull out of a dip of its own nose or tail threw it two to nine metres up at every
+    // edge it passed (the firm hold does too, and its fall of fifteen times gravity brings it back down in a blink; with
+    // nothing but gravity to, the loose hold hung there). What the hull holds is its flat underside over the highest
+    // ground under its footprint, which a nose tipped toward ground falling away, or a tail toward ground left behind,
+    // is never nearer than.
+    this.pose.ex = this.pLoose ? 0 : this.sEx;
     this.pose.ez = this.sEz;
     lowestOffsetOf(b, this.pose);
     const st = this.vStep;
@@ -1360,6 +1422,19 @@ export class RaceDrive {
     fallTune.bandRate = h.bandRate;
     fallTune.fall = h.fall * (this.sTrim > 0 ? 1 - tune.trimGlide * this.sTrim : 1);
     fallTune.fallMax = h.fallMax;
+    // The loose hold's: the firm rule's own rise, settle and fall, the world's gravity in the air (the nose trim's glide
+    // on it as on the firm fall) and the cushion's grip.
+    const loose = this.looseTune;
+    loose.ride = h.ride;
+    loose.riseRate = h.riseRate;
+    loose.riseMax = h.riseMax;
+    loose.band = h.band;
+    loose.bandRate = h.bandRate;
+    loose.fall = fallTune.fall;
+    loose.fallMax = h.fallMax;
+    loose.gravity = tune.looseFall * (this.sTrim > 0 ? 1 - tune.trimGlide * this.sTrim : 1);
+    loose.grip = tune.looseGrip;
+    st.keep = this.keep;
     this.pLip = tune.lipShare * h.ride;
     this.pPhase = BAND;
     this.pStopAt = Infinity;
@@ -1458,6 +1533,7 @@ export class RaceDrive {
     this.fz = v.pos.z;
     this.footprintAt(v);
     let underNow = this.fp > this.mOut ? this.fp : this.mOut;
+    this.rawNow = underNow;
     if (this.pBridge) {
       this.bS = this.odo;
       this.bridgedAt();
@@ -1465,6 +1541,11 @@ export class RaceDrive {
     }
     if (!this.pForward) {
       this.lineRate = 0;
+      this.rateFed = 0;
+      this.pastN = 0;
+      this.lastLineOk = false;
+      this.firstRate = 0;
+      this.underRate = 0;
       return;
     }
     const q = this.lineQ;
@@ -1486,6 +1567,95 @@ export class RaceDrive {
     q.speed = this.pSpeed;
     lineRateOfQ(this.walk, q, RACE_TUNE);
     this.lineRate = q.out;
+    if (!this.pLoose) {
+      this.rateFed = this.lineRate;
+      // (The loose hold's look behind and its line's own rate begin afresh if the hold is switched back.)
+      this.pastN = 0;
+      this.lastLineOk = false;
+      return;
+    }
+    // A hull riding its line carries on at the vertical speed it has, which on a slope is the slope's, wherever nothing
+    // is behind it to read (just taken over, or put somewhere else). Read as nought, a hull taken over halfway down a
+    // descent levelled off and flew off its own slope as off a crest.
+    const h = this.handling;
+    const over = this.pLow0 - underNow - h.ride;
+    const riding = over <= h.band && over >= -h.band;
+    const vyNow = this.vy > h.riseMax ? h.riseMax : this.vy < -h.fallMax ? -h.fallMax : this.vy;
+    if (!this.lastLineOk) this.firstRate = riding ? vyNow : 0;
+    // How far the ground under the footprint will have risen a tenth of a second on (`stepLooseOf`'s `ahead`): the
+    // cushion's own lift may run that far ahead of its line, as the firm rule's rise on the line's rate ahead does, so a
+    // rise met at the foot of a step is climbed from before it rather than from it. Held to its line alone, a bike at its
+    // top met the far wall of a pit 6 m deep, vertical, at its line half a wall below the rim and crashed, which the firm
+    // hold rises out of.
+    this.underRate = RACE_TUNE.feedAhead > 0 ? (underAhead - underNow) / RACE_TUNE.feedAhead : 0;
+    // What the hull keeps comes from the rate of the ground itself under it over the last tenth of a second, never the
+    // line's rate ahead (the look-ahead raises the line to anticipate a rise, which the ground has given nothing yet),
+    // nor the bridged ground's (the bridge is the drive's own glide over a pothole, and gives nothing either: fed the
+    // bridged ground, a hull carried up a slope over its potholes kept more of the slope's speed than one that met
+    // them, flew further off the crest beyond, and with the bridge on spent more time high over open ground than with
+    // it off, by 0.6 of a point on hilly ground, past the half point the bridge is held to; fed the ground itself, 0.3).
+    this.pastLine = this.rawNow;
+    const first = this.pastN === 0;
+    this.pastRate();
+    if (first) {
+      this.rateFed = riding ? vyNow : 0;
+      return;
+    }
+    // And taken up no faster than `looseFeed` a second: a slope's rate is taken within a fraction of a second, while a
+    // step (a kerb, the far rim of a pit the hull is carried over) is the ground's whole height in one sub-step, read
+    // over the look behind as hundreds of metres a second, and taken whole it threw the hull tens of metres up. (The
+    // climb does not wait for it: the rise is the firm rule's own, `looseRate`.)
+    const most = RACE_TUNE.looseFeed * this.pT;
+    const d = this.pastFed - this.rateFed;
+    this.rateFed += d > most ? most : d < -most ? -most : d;
+  }
+
+  /**
+   * The loose hold's rate for its rise and its settle at this sub-step (its line in `line`): the line's own rate ahead
+   * while it rises (`lineRate`, exactly the firm rule's, so a rise is climbed as the firm hold climbs it and the
+   * climbing judge's reckoning holds), else the line's fall as it falls now, from sub-step to sub-step (the first of a
+   * run taking `firstRate`, the hull's own while it rides its line). The line's own
+   * rate ahead reads nought on a descent wherever the footprint a tenth of a second on still overlaps the one now (at
+   * the halved speeds a stock pod's whole range), and fed nought a hull riding a descent fell behind it in the band and
+   * then could only follow it at the grip; fed what the ground has done over a tenth of a second behind it, a hull
+   * reaching a descent's foot was still being taken down at the descent's speed after the ground had levelled, and sank
+   * into the foot. The line's own fall now stops with the line.
+   */
+  private looseRate(): void {
+    // (Read off `line` and written into `looseLine`, fields both: nothing crosses the call as a number.)
+    const line = this.line;
+    const inst = this.lastLineOk ? (line - this.lastLine) / this.pDts : this.firstRate;
+    this.lastLine = line;
+    this.lastLineOk = true;
+    this.looseLine = this.lineRate > 0 ? this.lineRate : inst < 0 ? inst : 0;
+  }
+
+  /**
+   * The line's rate over the last `feedAhead` seconds of the physics' own steps, behind the hull as the line's own rate
+   * is ahead of it, into `pastFed`: the line under the hull now (`pastLine`) kept in a ring with the plan's clock, and
+   * read against the newest kept a `feedAhead` ago (or the oldest, nearer). Over one plan alone it was the line's own
+   * jitter between plans, a fixed step apart at one frame rate and three at another.
+   */
+  private pastRate(): void {
+    const now = this.pastClock;
+    const size = this.pastT.length;
+    let at = -1;
+    let oldest = -1;
+    for (let k = 0; k < this.pastN; k++) {
+      const i = (this.pastHead - 1 - k + size * 2) % size;
+      oldest = i;
+      if (now - this.pastT[i] >= RACE_TUNE.feedAhead - 1e-9) {
+        at = i;
+        break;
+      }
+    }
+    if (at < 0) at = oldest;
+    this.pastFed = at >= 0 && now - this.pastT[at] > 1e-9 ? (this.pastLine - this.pastL[at]) / (now - this.pastT[at]) : 0;
+    this.pastT[this.pastHead] = now;
+    this.pastL[this.pastHead] = this.pastLine;
+    this.pastHead = (this.pastHead + 1) % size;
+    if (this.pastN < size) this.pastN++;
+    this.pastClock = now + this.pT;
   }
 
   /** One sub-step of the plan: the ground under it (bridged), its line, the height rule, and the strike sweep over what it crossed. True when the hull was wrecked. */
@@ -1528,9 +1698,17 @@ export class RaceDrive {
     this.under = under;
     const lowA = st.low;
     st.line = line;
-    st.rate = this.lineRate;
     st.dt = this.pDts;
-    this.pPhase = stepVerticalOf(st, this.fallTune);
+    if (this.pLoose) {
+      this.looseRate();
+      st.rate = this.looseLine;
+      st.feed = this.rateFed;
+      st.ahead = this.underRate * RACE_TUNE.feedAhead;
+      this.pPhase = stepLooseOf(st, this.looseTune);
+    } else {
+      st.rate = this.rateFed;
+      this.pPhase = stepVerticalOf(st, this.fallTune);
+    }
     // The strike sweep: every point the footprint crossed since its mark, against the hull's height there.
     if (this.pForward && s1 > s0) {
       this.wS0 = s0;
@@ -1547,6 +1725,7 @@ export class RaceDrive {
     return false;
   }
   private readonly fallTune = { ride: 0.5, riseRate: 0.5, riseMax: 0.5, band: 0.5, bandRate: 0.5, fall: 0.5, fallMax: 0.5 };
+  private readonly looseTune = { ride: 0.5, riseRate: 0.5, riseMax: 0.5, band: 0.5, bandRate: 0.5, fall: 0.5, fallMax: 0.5, gravity: 0.5, grip: 0.5 };
   private readonly walkTune = { lookAhead: 0.5, lookMax: 0.5, lookStep: 0.5 };
 
   /**
@@ -1682,6 +1861,7 @@ export class RaceDrive {
     }
     let top = -Infinity;
     for (let i = 0; i < path.n; i++) if (path.g[i] > top) top = path.g[i];
+    this.lifts++;
     const rise = strikeKick(path, speed, h);
     const closing = Math.max(0, rise - st.vy);
     if (top > st.low) st.low = top;
@@ -1802,6 +1982,7 @@ export class RaceDrive {
       bank: r2(this.bank),
       lean: r2(this.lean),
       pitch: r2(this.pitch),
+      hold: { rule: RACE_TUNE.hold, fall: r2(this.fallNow()), grip: RACE_TUNE.hold === 'firm' ? null : RACE_TUNE.looseGrip, kept: RACE_TUNE.hold === 'firm' ? null : r2(Math.max(0, this.keep)), vy: r2(this.vy) },
       overLine: r2(this.overLine),
       airborne: this.airborne,
       lookAhead: { reach: r2(this.reach), farRayTaken: this.rayTaken, latticeReads: this.ring.reads },

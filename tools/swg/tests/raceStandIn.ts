@@ -1,6 +1,8 @@
-// A race drive stepped over stand-ins for the body and the physics, for the tests that need the drive's own turn and
-// speed without a physics world (raceView.test.ts). Not a test itself. The stand-in body moves by its own velocity over
-// the fixed steps the stand-in physics takes, as Rapier's would; the ground is flat at nought and nothing stands on it.
+// A race drive stepped over stand-ins for the body and the physics, for the tests that need the drive's own turn,
+// speed and height without a physics world (raceView.test.ts, drivetrain.test.ts, raceHold.test.ts). Not a test itself.
+// The stand-in body moves by its own velocity over the fixed steps the stand-in physics takes, as Rapier's would; the
+// ground is flat at nought, or the test's own (read built everywhere and at the far grid's lattice, as the drive reads
+// the world's), and nothing stands on it.
 import * as THREE from 'three';
 import { RaceDrive, type RaceGround } from '../../../src/vehicles/raceDrive.ts';
 import type { DriveInput, Vehicle } from '../../../src/vehicles/vehicle.ts';
@@ -8,7 +10,6 @@ import type { Physics } from '../../../src/core/physics.ts';
 
 const FIXED = 1 / 60;
 const flat = (): number => 0;
-const reader: RaceGround = { near: flat, far: () => 0, farStep: 16, farX: () => 0, farZ: () => 0, water: () => -Infinity };
 
 export interface StandInRun {
   race: RaceDrive;
@@ -16,17 +17,23 @@ export interface StandInRun {
   drive: DriveInput;
   /** One frame of play: the drive's step, then the stand-in physics. */
   frame(dt: number): void;
+  /** The stand-in physics' fixed steps taken so far. */
+  steps(): number;
 }
 
-/** The liquid a run is stepped over, where a test hands one: its surface's height and whether that liquid is a flow. */
+/** The world a run is stepped over, where a test hands one: the ground's height, the liquid's surface and whether that liquid is a flow. */
 export interface StandInLiquid {
   water?: ((x: number, z: number) => number) | null;
   lava?: ((x: number, z: number) => boolean) | null;
+  /** The ground (flat at nought where none is handed): the hull's own footprint reads it, and the cached ground ahead. */
+  ground?: ((x: number, z: number) => number) | null;
 }
 
-/** A pod (or a bike in racing mode) at `speed` along +z on flat ground, its drive at `levels`. */
-export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed: number, liquid: StandInLiquid = {}): StandInRun {
-  const t = { x: 0, y: 1.2, z: 0 };
+/** A pod (or a bike in racing mode) at `speed` along +z over the ground (flat unless handed one), its drive at `levels`, its middle `ride` over the ground under it (1.2 m unless handed). */
+export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed: number, liquid: StandInLiquid = {}, ride = 1.2): StandInRun {
+  const g = liquid.ground ?? flat;
+  const reader: RaceGround = { near: g, far: (i, j) => g(i * 16, j * 16), farStep: 16, farX: () => 0, farZ: () => 0, water: () => -Infinity };
+  const t = { x: 0, y: g(0, 0) + ride, z: 0 };
   const lv = { x: 0, y: 0, z: speed };
   const av = { x: 0, y: 0, z: 0 };
   const rot = { x: 0, y: 0, z: 0, w: 1 };
@@ -135,8 +142,9 @@ export function standInRun(kind: 'pod' | 'bike', levels: 'max' | 'stock', speed:
     vehicle,
     drive,
     frame(dt: number): void {
-      race.step(vehicle, dt, drive, flat, water, lava, physics);
+      race.step(vehicle, dt, drive, g, water, lava, physics);
       physics.step(dt);
     },
+    steps: () => clock.steps,
   };
 }

@@ -38,7 +38,7 @@ const PRE_WAVE = '4e1d42252cb054100b810ec258ddfe8676054020';
 const T = RACE_TUNE;
 const stock = resolveRace(RACE_BASE.podracer, levelsAt(0), 1, RACE_UPGRADES, newBase());
 
-const input = (): RaceViewInput => ({ heading: 0, mouseDX: 0, k: 0.0025, keys: false, alt: false, orbitYaw: Math.PI, speed: 200, ceiling: stock.cap, seatY: 1, dt: 1 / 60 });
+const input = (): RaceViewInput => ({ heading: 0, mouseDX: 0, k: 0.0025, keys: false, alt: false, orbitYaw: Math.PI, speed: 100, ceiling: stock.cap, seatY: 1, dt: 1 / 60 });
 
 /**
  * A frame of play as the game runs it: the view's steering half, the drive handed its target (`drive.heading`) and
@@ -58,7 +58,7 @@ function playFrame(run: ReturnType<typeof standInRun>, st: ReturnType<typeof new
 for (const fps of RATES) {
   const dt = 1 / fps;
   // A stock pod at its plain top, the throttle held, so its steering has its whole authority.
-  const run = standInRun('pod', 'stock', 198);
+  const run = standInRun('pod', 'stock', 99);
   const st = newRaceView();
   const out = newRaceViewOut();
   const vin = input();
@@ -83,7 +83,7 @@ for (const fps of RATES) {
 }
 for (const fps of RATES) {
   const dt = 1 / fps;
-  const run = standInRun('pod', 'stock', 198);
+  const run = standInRun('pod', 'stock', 99);
   const st = newRaceView();
   const out = newRaceViewOut();
   const vin = input();
@@ -374,7 +374,7 @@ for (const fps of RATES) {
     let frames = 0;
     for (let t = 0; t < 3; t += dt) {
       // The pod at full speed down the middle, the view behind it swinging a little either side as a turn would lean it.
-      const focus = new THREE.Vector3(Math.sin(t * 2) * 3, 1.2, t * 333);
+      const focus = new THREE.Vector3(Math.sin(t * 2) * 3, 1.2, t * 166);
       cam.yaw = Math.PI + Math.sin(t * 1.3) * 0.8;
       const scale = (Math.max(cam.distance, 15 + T.raceClear) * 1.3) / cam.distance;
       cam.update(stub, focus, block, dt, null, scale, 1.5);

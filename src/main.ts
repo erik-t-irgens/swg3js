@@ -350,7 +350,7 @@ import { SURFACE_ROOM, SurfaceRoom, isSurfaceRoom, probeSurface, roomFrame, room
 import type { Vehicle, VehicleKind } from './vehicles/vehicle';
 import { HEAD_TO_EYE, SEATED_EYE_FALLBACK, SEAT_RULE, cockpitYawStep, frameFileName, mirroredOffset, seatDropUsed } from './vehicles/cockpitSeat';
 import { POD_GAIT, nudgeSeat, seatInVehicle } from './vehicles/podSeat.ts';
-import { CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
+import { BIKE_SCALE, CEILING_MOST, RACE_BASE, RACE_TUNE, RACE_UPGRADES, readRaceHatch, tuneBase, tuneRace, tuneUpgrades, type RaceTune } from './vehicles/raceTune.ts';
 import { RACE_CLOCK, enginePartName, holdsLiving, raceFling, type RaceDrive, type RaceMode } from './vehicles/raceDrive.ts';
 import { ENGINE_TUNE, damagePart, mendEngines, tuneEngines, type EngineTune } from './vehicles/drivetrain.ts';
 import { hardpointName } from './vehicles/shipAssembly.ts';
@@ -6677,18 +6677,19 @@ class App {
        * The race drive (src/vehicles/raceDrive.ts) on the ridden, else the nearest, pod or bike: `race()` reports it in
        * numbers -- its own kind and the kind it was spawned as, the route, which hull is enabled, the mode, whether the
        * drive has it and why not, the plan's fixed steps, the handling, the speed's four parts, the turn and the pose,
-       * the look-ahead and the bridge, the slope, the last hit, the hull and its floor, the living hold, the race view
-       * and the switches. `race({ on, drive, kinds, hull, podBox, bikeBox, bike, bikeHeights, view, bridge, offCourse })`
-       * flips the switches (kinds, hull and the boxes at the next spawn); `race({ mode: 'racing' })` switches a bike as
+       * the look-ahead and the bridge, the hold, the slope, the last hit, the hull and its floor, the living hold, the race
+       * view and the switches. `race({ on, drive, kinds, hull, podBox, bikeBox, bike, bikeHeights, view, bridge, hold,
+       * offCourse })` flips the switches (kinds, hull and the boxes at the next spawn; `hold: 'firm'` the first ride's hard
+       * hold, `'loose'` the owner's after it); `race({ mode: 'racing' })` switches a bike as
        * U does; `race({ steer: radians })` sets the heading target that far off the nose (positive turns left, as the
        * heading counts; held within the lead), since a driven tab has no mouse; `race({ upgrades: 'max' | 'stock' |
        * { … }, condition })`; and `race({ tune })`, `race({ base: { podracer: { … } } })` and `race({ upgradeTune })`
        * move any number live, the ceiling among them.
        */
-      race: (opts: { on?: boolean; drive?: string; kinds?: string; hull?: string; podBox?: string; bikeBox?: string; bike?: string; bikeHeights?: string; view?: string; bridge?: string; offCourse?: string; mode?: RaceMode; steer?: number; upgrades?: 'max' | 'stock' | Partial<RaceLevels>; condition?: number; tune?: Partial<Record<keyof RaceTune, unknown>>; base?: Parameters<typeof tuneBase>[0]; upgradeTune?: Parameters<typeof tuneUpgrades>[0] } = {}) => {
+      race: (opts: { on?: boolean; drive?: string; kinds?: string; hull?: string; podBox?: string; bikeBox?: string; bike?: string; bikeHeights?: string; view?: string; bridge?: string; hold?: string; offCourse?: string; mode?: RaceMode; steer?: number; upgrades?: 'max' | 'stock' | Partial<RaceLevels>; condition?: number; tune?: Partial<Record<keyof RaceTune, unknown>>; base?: Parameters<typeof tuneBase>[0]; upgradeTune?: Parameters<typeof tuneUpgrades>[0] } = {}) => {
         const words: string[] = [];
         const switches: Partial<Record<keyof RaceTune, unknown>> = {};
-        for (const k of ['on', 'drive', 'kinds', 'hull', 'podBox', 'bikeBox', 'bike', 'bikeHeights', 'view', 'bridge', 'offCourse'] as const) if (opts[k] !== undefined) switches[k] = opts[k];
+        for (const k of ['on', 'drive', 'kinds', 'hull', 'podBox', 'bikeBox', 'bike', 'bikeHeights', 'view', 'bridge', 'hold', 'offCourse'] as const) if (opts[k] !== undefined) switches[k] = opts[k];
         if (Object.keys(switches).length) words.push(...tuneRace(switches));
         if (opts.tune) words.push(...tuneRace(opts.tune));
         if (opts.base) words.push(...tuneBase(opts.base));
@@ -6709,8 +6710,8 @@ class App {
         const v = mounted?.race ? mounted : ([...this.world.vehicles].filter((o) => o.race).sort((a, b) => a.pos.distanceTo(me) - b.pos.distanceTo(me))[0] ?? null);
         const n2 = (n: number) => Number(n.toFixed(2));
         const deg = (r: number) => Number(THREE.MathUtils.radToDeg(r).toFixed(1));
-        const tune = { on: RACE_TUNE.on, drive: RACE_TUNE.drive, kinds: RACE_TUNE.kinds, hull: RACE_TUNE.hull, podBox: RACE_TUNE.podBox, bikeBox: RACE_TUNE.bikeBox, bike: RACE_TUNE.bike, bikeHeights: RACE_TUNE.bikeHeights, view: RACE_TUNE.view, bridge: RACE_TUNE.bridge, offCourse: RACE_TUNE.offCourse, pitchFrom: RACE_TUNE.pitchFrom, holdLiving: RACE_TUNE.holdLiving };
-        const ceiling = { podKmh: RACE_TUNE.ceiling, bikeKmh: Math.round((RACE_TUNE.ceiling * 700) / 1200), most: CEILING_MOST, moves: RACE_TUNE.ceilingMoves };
+        const tune = { on: RACE_TUNE.on, drive: RACE_TUNE.drive, kinds: RACE_TUNE.kinds, hull: RACE_TUNE.hull, podBox: RACE_TUNE.podBox, bikeBox: RACE_TUNE.bikeBox, bike: RACE_TUNE.bike, bikeHeights: RACE_TUNE.bikeHeights, view: RACE_TUNE.view, bridge: RACE_TUNE.bridge, hold: RACE_TUNE.hold, offCourse: RACE_TUNE.offCourse, pitchFrom: RACE_TUNE.pitchFrom, holdLiving: RACE_TUNE.holdLiving };
+        const ceiling = { podKmh: RACE_TUNE.ceiling, bikeKmh: Math.round(RACE_TUNE.ceiling * BIKE_SCALE), most: CEILING_MOST, moves: RACE_TUNE.ceilingMoves };
         if (!v?.race) {
           const near = mounted ?? null;
           const said = near ? `${near.spec.id} is a ${near.spec.kind}: no race drive (spawned as neither a pod nor a bike${RACE_TUNE.on ? '' : ', or spawned with the pass switched off'})` : 'no pod or bike standing: spawn one (spawn(\'podracer_anakin\'), or spawn(\'koro2_speeder\', \'speederbike\'))';

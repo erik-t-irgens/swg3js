@@ -273,8 +273,8 @@ await section(1, 'day one', async () => {
 
 await section(2, 'the ceiling', async () => {
   for (const [kind, ceiling] of [
-    ['pod', 1200 / 3.6],
-    ['bike', 700 / 3.6],
+    ['pod', 600 / 3.6],
+    ['bike', 350 / 3.6],
   ] as const) {
     const r = await setup({ kind, z: -3000 });
     r.input.throttle = 1;
@@ -304,7 +304,7 @@ await section(2, 'the ceiling', async () => {
   // Downhill on a 25-degree ramp, the ceiling holds; with the knob at its most, a boosting pod never passes 380 m/s and its body never 399.
   const ramp: G = (_x, z) => -Math.tan((25 * Math.PI) / 180) * z;
   for (const [knob, top] of [
-    [1200, 1200 / 3.6],
+    [600, 600 / 3.6],
     [1368, 380],
   ] as const) {
     tuneRace({ ceiling: knob });
@@ -324,8 +324,8 @@ await section(2, 'the ceiling', async () => {
 
 await section(3, 'the body cap', async () => {
   const r = await setup({ kind: 'pod', y: 1000, z: -2000 });
-  launch(r, 333, 60);
-  drive(r, 60, 12);
+  launch(r, 166, 60);
+  drive(r, 60, 16);
   ok(!r.v.destroyed && r.v.pos.y < 20, `3: a fall from a kilometre at full speed lands (${r2(r.v.pos.y)} m) whole`);
   ok(bodyMost <= BODY_SPEED_CAP + 1e-3, `3: and no body in any test so far has passed ${BODY_SPEED_CAP} m/s (most ${r2(bodyMost)})`);
 });
@@ -333,8 +333,8 @@ await section(3, 'the body cap', async () => {
 await section(4, 'walls', async () => {
   for (const fps of [20, 60]) {
     for (const [kind, speed] of [
-      ['pod', 333],
-      ['bike', 194],
+      ['pod', 166],
+      ['bike', 97],
     ] as const) {
       // Head on.
       {
@@ -381,9 +381,17 @@ await section(4, 'walls', async () => {
   {
     const slope: G = (_x, z) => -Math.tan((20 * Math.PI) / 180) * z;
     const a = (30 * Math.PI) / 180;
-    // Started high over the slope and given a second and a half to settle onto it before the wall, 150 m on.
-    const r = await setup({ kind: 'pod', g: slope, z: -300, y: slope(0, -300) + 6, world: (ph) => wall(ph, 0, slope(0, 150) - 200, 150, -a, 1000, 400) });
-    launch(r, 300, 60);
+    // Started on the slope at its ride and already going down it, and given about three seconds on it before the wall,
+    // 450 m on, for the slope's push to carry it past V. (Started high over it at rest, as the first ride's test was, the
+    // loose hold flies it off the slope's top at the world's gravity, as off any crest, and it never gets the push.)
+    const r = await setup({ kind: 'pod', g: slope, z: -300, y: slope(0, -300) + RACE_BASE.podracer.ride + 0.1, world: (ph) => wall(ph, 0, slope(0, 150) - 200, 150, -a, 1000, 400) });
+    launch(r, 150, 60);
+    const down = -150 * Math.tan((20 * Math.PI) / 180);
+    r.race!.vy = down;
+    r.v.body.setLinvel({ x: 0, y: down, z: 150 }, true);
+    (r.race as unknown as { cmdValid: boolean }).cmdValid = false;
+    // As a hull taken over on its way down: the loose hold's look behind begins with the vertical speed it has.
+    (r.race as unknown as { pastN: number }).pastN = 0;
     r.input.boost = false;
     r.race!.boosting = false;
     let entry = 0;
@@ -392,7 +400,7 @@ await section(4, 'walls', async () => {
     let laterHits = 0;
     let steps = 0;
     let seen = 0;
-    drive(r, 60, 2.5, (run) => {
+    drive(r, 60, 4, (run) => {
       steps++;
       const scraped = run.hits.length > seen && run.hits[run.hits.length - 1].kind === 'scrape';
       if (hitAt < 0 && scraped) {
@@ -412,7 +420,7 @@ await section(4, 'walls', async () => {
 await section(5, 'strikes', async () => {
   const step: G = (_x, z) => (z > 400 ? 3 : 0);
   const r = await setup({ kind: 'pod', g: step, z: 0 });
-  launch(r, 333, 60);
+  launch(r, 166, 60);
   const hp0 = r.v.hp;
   let lifted = Infinity;
   drive(r, 60, 3, (run) => {
@@ -424,24 +432,40 @@ await section(5, 'strikes', async () => {
 
 await section(6, 'climbing', async () => {
   const face = (deg: number, height: number): G => (_x, z) => (z > 600 ? Math.min(height, (z - 600) * Math.tan((deg * Math.PI) / 180)) : 0);
-  {
-    const r = await setup({ kind: 'pod', g: face(60, 20), z: 0, field: { x0: -512, z0: 0, size: 1024, sub: 512 } });
-    launch(r, 333, 60);
-    drive(r, 60, 4);
-    ok(r.v.destroyed, `6: a 60-degree face 20 m high at full speed is a crash (${r.hits.map((h) => h.kind).join(',')})`);
+  // At full speed a face too steep and too tall to clear is a wall and a crash. The first ride's case, a 60-degree face
+  // 20 m high, under the firm hold, which holds the tail its nose-up pitch drops 3 to 4 m onto the face; the loose hold
+  // holds the hull's flat underside and leaves the pitch out (`planStart`), which clears that face over its top, so its
+  // case is an 80-degree face as tall, which no rise the hull has can clear. And the face rule's own promise, under
+  // either hold: a face is met or flown over, never passed through.
+  for (const [hold, deg] of [
+    ['firm', 60],
+    ['loose', 80],
+    ['loose', 60],
+  ] as const) {
+    tuneRace({ hold });
+    const r = await setup({ kind: 'pod', g: face(deg, 20), z: 0, field: { x0: -512, z0: 0, size: 1024, sub: 512 } });
+    launch(r, 166, 60);
+    let through = 0;
+    drive(r, 60, 4, (run) => {
+      const p = run.v.body.translation();
+      if (!run.v.destroyed) through = Math.max(through, face(deg, 20)(p.x, p.z) - run.race!.low);
+    });
+    if (hold === 'loose' && deg === 60) ok(r.v.destroyed || through <= 0.05, `6: a 60-degree face 20 m high at full speed under the loose hold is ${r.v.destroyed ? 'a crash' : `cleared over its top, the hull never under it (at most ${r2(Math.max(0, through))} m)`} (${r.hits.map((h) => h.kind).join(',') || 'nothing met'})`);
+    else ok(r.v.destroyed, `6: a ${deg}-degree face 20 m high at full speed is a crash under the ${hold} hold (${r.hits.map((h) => h.kind).join(',')})`);
   }
+  tuneRace({ hold: 'loose' });
   {
-    // At 60 m/s the hull rises up to riseMax (150 m/s), faster than a 60-degree face climbs under it (60 tan 60 = 104
-    // m/s), so the same face is ridden up; a face the hull cannot out-climb at that speed (80 degrees: 340 m/s) stops it.
+    // At 30 m/s the hull rises up to riseMax (75 m/s), faster than a 60-degree face climbs under it (30 tan 60 = 52
+    // m/s), so the same face is ridden up; a face the hull cannot out-climb at that speed (80 degrees: 170 m/s) stops it.
     for (const deg of [60, 80]) {
       const r = await setup({ kind: 'pod', g: face(deg, 20), z: 400, field: { x0: -512, z0: 0, size: 1024, sub: 512 } });
-      launch(r, 60, 60);
+      launch(r, 30, 60);
       let fastest = 0;
       let met = false;
-      drive(r, 60, 6, (run) => {
-        // Held about 60 m/s, as a pilot easing in would, and let go of once a face is met.
+      drive(r, 60, 10, (run) => {
+        // Held about 30 m/s, as a pilot easing in would, and let go of once a face is met.
         met ||= run.hits.some((h) => h.kind === 'face');
-        run.input.throttle = !met && run.race!.h < 60 ? 1 : 0;
+        run.input.throttle = !met && run.race!.h < 30 ? 1 : 0;
         run.input.boost = false;
         fastest = Math.max(fastest, run.race!.h);
       });
@@ -457,9 +481,9 @@ await section(6, 'climbing', async () => {
   }
   {
     const r = await setup({ kind: 'pod', g: face(30, 60), z: 0, field: { x0: -512, z0: 0, size: 1024, sub: 512 } });
-    launch(r, 333, 60);
+    launch(r, 166, 60);
     let top = 0;
-    drive(r, 60, 5, (run) => {
+    drive(r, 60, 6, (run) => {
       top = Math.max(top, run.v.pos.y);
     });
     ok(!r.v.destroyed && top > 60, `6: a 30-degree hill 60 m high at full speed is climbed (over its top at ${r2(top)} m; ${r.hits.map((h) => h.kind).join(',') || 'nothing'})`);
@@ -472,32 +496,46 @@ await section(7, 'a pit', async () => {
   const field = { x0: -512, z0: 0, size: 1024, sub: 1024 };
   for (const fps of [20, 60, 120, 144]) {
     const r = await setup({ kind: 'pod', g: pit, z: 200, field });
-    launch(r, 333, fps);
+    launch(r, 166, fps);
     let lowest = Infinity;
-    drive(r, fps, 2, (run) => {
+    drive(r, fps, 4, (run) => {
       if (run.v.pos.z > 590 && run.v.pos.z < 670) lowest = Math.min(lowest, run.v.pos.y);
     });
     const strikes = r.hits.filter((h) => h.kind === 'strike' || h.kind === 'crash' || h.kind === 'face').length;
     ok(!r.v.destroyed && strikes === 0 && r.v.pos.z > 700, `7: a 50 x 10 m crevasse glided at full speed at ${fps} fps with no strike (lowest ${r2(lowest)} m over it; ${r.hits.map((h) => `${h.kind}@${r2(h.t)} ${r2(h.loss)}`).join(', ') || 'nothing met'})`);
   }
   // The reason the bridge is: a deeper crevasse, 80 m across and 25 m deep, glided with it and, with it off, dived into
-  // and crashed against at every rate. (Over the 50 x 10 m one a pod with the bridge off now only dips under its ride
-  // and is thrown up past it by the far rim, since a hull under its line no longer takes the line's fall ahead.)
+  // and crashed against at every rate under the firm hold, which pulls a hull down into a pit as soon as its line drops.
+  // (Over the 50 x 10 m one a pod with the bridge off now only dips under its ride and is thrown up past it by the far
+  // rim, since a hull under its line no longer takes the line's fall ahead.) The loose hold with the bridge off carries
+  // over it on its momentum, falling a metre or two under its ride on the way at the world's gravity, where the bridge
+  // glides it level.
   const deep: G = (_x, z) => (z > 600 && z < 680 ? -25 : 0);
+  const MET = (hits: Run['hits']) => hits.filter((h) => h.kind === 'strike' || h.kind === 'crash' || h.kind === 'face');
   for (const fps of [144, 60, 20]) {
     const on = await setup({ kind: 'pod', g: deep, z: 200, field });
-    launch(on, 333, fps);
-    drive(on, fps, 2);
+    launch(on, 166, fps);
+    let onLowest = Infinity;
+    drive(on, fps, 4, (run) => {
+      if (run.v.pos.z > 590 && run.v.pos.z < 700) onLowest = Math.min(onLowest, run.v.pos.y);
+    });
     tuneRace({ bridge: 'off' });
+    const loose = await setup({ kind: 'pod', g: deep, z: 200, field });
+    launch(loose, 166, fps);
+    let looseLowest = Infinity;
+    drive(loose, fps, 4, (run) => {
+      if (run.v.pos.z > 590 && run.v.pos.z < 700) looseLowest = Math.min(looseLowest, run.v.pos.y);
+    });
+    tuneRace({ hold: 'firm' });
     const r = await setup({ kind: 'pod', g: deep, z: 200, field });
-    launch(r, 333, fps);
+    launch(r, 166, fps);
     let lowest = Infinity;
-    drive(r, fps, 2, (run) => {
+    drive(r, fps, 4, (run) => {
       if (run.v.pos.z > 590 && run.v.pos.z < 700) lowest = Math.min(lowest, run.race!.low);
     });
     restore();
-    const met = on.hits.filter((h) => h.kind === 'strike' || h.kind === 'crash' || h.kind === 'face');
-    ok(!on.v.destroyed && met.length === 0 && r.v.destroyed && r.race!.lastHit.kind === 'crash' && lowest < 0, `7: an 80 x 25 m crevasse is glided at full speed at ${fps} fps, and with the bridge off dived into (its lowest point to ${r2(lowest)} m) and crashed against: the reason the bridge is`);
+    ok(!on.v.destroyed && MET(on.hits).length === 0 && r.v.destroyed && r.race!.lastHit.kind === 'crash' && lowest < 0, `7: an 80 x 25 m crevasse is glided at full speed at ${fps} fps, and with the bridge off dived into under the firm hold (its lowest point to ${r2(lowest)} m) and crashed against: the reason the bridge is (glided: ${MET(on.hits).map((h) => h.kind).join(',') || 'nothing met'}; dived: ${r.hits.map((h) => h.kind).join(',') || 'nothing met'})`);
+    ok(!loose.v.destroyed && looseLowest < onLowest - 0.5 && looseLowest > -25, `7: and under the loose hold with the bridge off it is carried over on its momentum, the hull falling to ${r2(looseLowest)} m on the way where the bridge held it at ${r2(onLowest)} (its own height, the nose's tipping into the pit left out) (${MET(loose.hits).map((h) => h.kind).join(',') || 'nothing met'})`);
   }
 });
 
@@ -524,23 +562,24 @@ await section(8, 'wear', async () => {
   // Two glances at 30 degrees at full speed, each its own run at its own wall.
   for (const x of [0, 4000]) {
     placeAt(x, 1.2, 0);
-    launch(r, 333, 60);
-    drive(r, 60, 1.2, (run) => {
+    launch(r, 166, 60);
+    drive(r, 60, 1.6, (run) => {
       if (run.hits.length) run.input.heading = -a;
     });
     all.push(...r.hits.map((h) => h.kind));
   }
   // Two landings at the fall's most: lifted 300 m and let fall, twice. The height rule takes a landing as the rise it
-  // asks the moment the hull is under its line, a jolt and not a strike unless the ground is met.
+  // asks the moment the hull is under its line, a jolt and not a strike unless the ground is met. (At the world's gravity,
+  // the loose hold's, a hull reaches the fall's most 140 m down and lands some six seconds after it is let go.)
   let landings = 0;
   let fastestFall = 0;
   for (let i = 0; i < 2; i++) {
     placeAt(8000 + i * 4000, 300, 0);
-    launch(r, 333, 60);
+    launch(r, 166, 60);
     let falling = false;
-    drive(r, 60, 3, (run) => {
+    drive(r, 60, 8, (run) => {
       fastestFall = Math.min(fastestFall, run.race!.vy);
-      if (run.race!.vy < -100) falling = true;
+      if (run.race!.vy < -0.9 * RACE_BASE.podracer.fallMax) falling = true;
       else if (falling && run.race!.vy >= 0) {
         landings++;
         falling = false;
@@ -555,7 +594,7 @@ await section(8, 'wear', async () => {
   {
     // The floor itself: a hull worn by glance after glance stops at it.
     const w = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 4000, 60) });
-    launch(w, 333, 60);
+    launch(w, 166, 60);
     let least = Infinity;
     // Thirty glances where twelve once did: the engines take two-thirds of every scrape now, the hull the rest.
     for (let i = 0; i < 30 && !w.v.destroyed; i++) {
@@ -568,15 +607,15 @@ await section(8, 'wear', async () => {
       const p = w.v.body.translation();
       w.v.body.setTranslation({ x: p.x, y: p.y, z: p.z - 200 * Math.cos(a) }, true);
       w.v.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
-      launch(w, 333, 60);
-      drive(w, 60, 0.8, (run) => {
+      launch(w, 166, 60);
+      drive(w, 60, 1.6, (run) => {
         least = Math.min(least, run.v.hp);
       });
     }
     ok(!w.v.destroyed && least >= RACE_TUNE.wearFloor && w.v.hp <= RACE_TUNE.wearFloor + 15, `8: and glance after glance wears it down to its floor and no further (${r2(w.v.hp)} hp, least ${r2(least)})`);
   }
   const c = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 120, Math.PI / 2, 400, 60) });
-  launch(c, 333, 60);
+  launch(c, 166, 60);
   let racedAtCrash = false;
   let speedAtCrash = 0;
   drive(c, 60, 2, (run) => {
@@ -592,11 +631,11 @@ await section(8, 'wear', async () => {
   ok(thrown <= RACE_TUNE.flingMost + 1e-9, `8: and its rider is thrown at ${r2(thrown)} m/s, no more than flingMost (${RACE_TUNE.flingMost})`);
   ok(/raceFling\(v, tmp2\.set\(lv\.x, lv\.y, lv\.z\)\);\s*\n\s*player\.fling\(tmp, tmp2\);/.test(main), '8: (main.ts: the game throws its rider through raceFling, the cap standing before the fling)');
   // Wrecked from outside between its steps (a flow's tick, a bolt, a blast: the world takes its hull after the vehicles
-  // have stepped), at 300 m/s: on its next update the hull stays the drive's until the game takes it away, so its rider
-  // is thrown no harder than flingMost. Handed back to the springs on that update instead, it threw them at 300 m/s.
+  // have stepped), at 150 m/s: on its next update the hull stays the drive's until the game takes it away, so its rider
+  // is thrown no harder than flingMost. Handed back to the springs on that update instead, it threw them at its speed.
   {
     const r = await setup({ kind: 'pod', z: -2000 });
-    launch(r, 300, 60);
+    launch(r, 150, 60);
     drive(r, 60, 0.3);
     r.v.hp = 0;
     r.v.update(1 / 60, r.physics, r.input, r.g);
@@ -604,7 +643,7 @@ await section(8, 'wear', async () => {
     const vel = new THREE.Vector3(l.x, l.y, l.z);
     const raw = vel.length();
     const out = raceFling(r.v, vel).length();
-    ok(r.v.raceDriven && raw > 200 && out <= RACE_TUNE.flingMost + 1e-9, `8: a pod wrecked from outside at speed is still the drive's on its next update, and its rider is thrown at ${r2(out)} m/s of its ${r2(raw)}`);
+    ok(r.v.raceDriven && raw > 100 && out <= RACE_TUNE.flingMost + 1e-9, `8: a pod wrecked from outside at speed is still the drive's on its next update, and its rider is thrown at ${r2(out)} m/s of its ${r2(raw)}`);
     // The control: a hull nobody's drive held is thrown with its own speed, so the cap is the drive's holding and nothing else.
     const n = await setup({ kind: 'pod', z: -2000, drive: false });
     n.v.body.setLinvel({ x: 0, y: 0, z: 60 }, true);
@@ -629,10 +668,10 @@ await section(9, 'the far ray', async () => {
       ph.world.createCollider(RAPIER.ColliderDesc.cuboid(30, 0.5, 6).setTranslation(0, 12, 260).setCollisionGroups(groups(Group.exterior, Group.all)));
     },
   });
-  launch(r, 250, 60);
+  launch(r, 125, 60);
   let worst = 0;
   let farRayTaken = false;
-  drive(r, 60, 1.4, (run) => {
+  drive(r, 60, 2.8, (run) => {
     worst = Math.max(worst, run.race!.line);
     if (run.race!.rayTaken) farRayTaken = true;
   });
@@ -643,10 +682,11 @@ await section(9, 'the far ray', async () => {
     z: 0,
     world: (ph) => ph.world.createCollider(RAPIER.ColliderDesc.cuboid(20, 1, 30).setTranslation(0, 1, 200).setCollisionGroups(groups(Group.exterior, Group.all))),
   });
-  launch(ramp, 250, 60);
+  launch(ramp, 125, 60);
   let took = false;
   let lifted = 0;
-  drive(ramp, 60, 0.4, (run) => {
+  // (Twice the first ride's 0.8 s, at half its speed: the ramp is as far off in metres.)
+  drive(ramp, 60, 1.6, (run) => {
     if (run.race!.rayTaken) took = true;
     if (run.v.pos.z < 165) lifted = Math.max(lifted, run.race!.line);
   });
@@ -734,7 +774,7 @@ await section(11, 'the routing', async () => {
 
 await section(12, 'the hand-over', async () => {
   const r = await setup({ kind: 'pod', z: -2000 });
-  launch(r, 300, 60);
+  launch(r, 150, 60);
   drive(r, 60, 0.2);
   const hp = r.v.hp;
   const speeds: number[] = [];
@@ -750,7 +790,7 @@ await section(12, 'the hand-over', async () => {
     if (speeds[i - 1] > top && speeds[i] > speeds[i - 1] + 1e-6) rising++;
     if (downAt < 0 && speeds[i] <= top) downAt = i;
   }
-  ok(!r.race!.active && r.v.hp === hp && r.hits.length === 0, `12: the pass switched off at 300 m/s hands the hull back with its hull unchanged (${r2(hp)} hp) and no hit read`);
+  ok(!r.race!.active && r.v.hp === hp && r.hits.length === 0, `12: the pass switched off at 150 m/s hands the hull back with its hull unchanged (${r2(hp)} hp) and no hit read`);
   ok(rising === 0 && downAt > 0 && Math.max(...speeds.slice(downAt)) <= top + 1, `12: and brings it down at the springs' own ease, never rising (${r2(speeds[0])} m/s to their top of ${top} in ${r2(downAt / 60)} s)`);
   ok(!r.v.raceBoxCollider!.isEnabled(), "12: on today's hull");
   restore();
@@ -758,7 +798,7 @@ await section(12, 'the hand-over', async () => {
 
 await section(13, 'the pause', async () => {
   const r = await setup({ kind: 'pod', z: -2000 });
-  launch(r, 300, 60);
+  launch(r, 150, 60);
   drive(r, 60, 0.2);
   const p0 = r.v.body.translation();
   const speed0 = r.race!.h;
@@ -796,8 +836,8 @@ await section(14, 'the living hold', async () => {
   ok(!holdsLiving(r.v), '14: a hull the drive does not hold holds nothing');
   launch(r, 30, 60);
   ok(!holdsLiving(r.v), `14: racing at 30 m/s (under livingAbove ${RACE_TUNE.livingAbove}) holds nothing`);
-  launch(r, 200, 60);
-  ok(holdsLiving(r.v), '14: racing at 200 m/s holds the living');
+  launch(r, 120, 60);
+  ok(holdsLiving(r.v), '14: racing at 120 m/s holds the living');
   RACE_TUNE.holdLiving = 'never';
   ok(!holdsLiving(r.v), "14: holdLiving 'never' holds nothing");
   RACE_TUNE.holdLiving = 'always';
@@ -829,7 +869,7 @@ await section(15, "the physics' clock", async () => {
     let worst = 0;
     drive(r, fps, 1.5, (run) => {
       const k = run.physics.steps - steps0;
-      const want = y0 + fallDisplacement(0, k * FIXED_DT, run.race!.handling.fall, run.race!.handling.fallMax);
+      const want = y0 + fallDisplacement(0, k * FIXED_DT, run.race!.fallNow(), run.race!.handling.fallMax);
       if (want > 15) worst = Math.max(worst, Math.abs(run.v.body.translation().y - want));
     });
     ok(worst < 0.001, `15: a race-driven hull falling from 50 m at ${fps} fps ends on the parabola of the steps taken (worst ${(worst * 1000).toFixed(3)} mm)`);
@@ -837,7 +877,7 @@ await section(15, "the physics' clock", async () => {
   for (const fps of [144, 120, 75, 60, 40, 20]) {
     for (const extra of [false, true]) {
       const r = await setup({ kind: 'pod', z: -1500 });
-      launch(r, 333, fps);
+      launch(r, 166, fps);
       const race = r.race!;
       let covered = 0;
       let frames = 0;
@@ -859,7 +899,7 @@ await section(15, "the physics' clock", async () => {
       // travel is swept already and the body has gone over it already, as the physics stepped after it).
       covered = race.sweptTo - mark0;
       const travel = r.v.body.translation().z - z0;
-      ok(tiled && Math.abs(covered - travel) < 0.01, `15: at 333 m/s for 2 s at ${fps} fps${extra ? ', with one stepOnce thrown in,' : ''} the strike sweep covered ${r2(covered)} m of the body's ${r2(travel)} m, no gap and no repeat`);
+      ok(tiled && Math.abs(covered - travel) < 0.01, `15: at 166 m/s for 2 s at ${fps} fps${extra ? ', with one stepOnce thrown in,' : ''} the strike sweep covered ${r2(covered)} m of the body's ${r2(travel)} m, no gap and no repeat`);
     }
   }
 });
@@ -900,9 +940,9 @@ await section(16, 'the two hulls', async () => {
   ok(own.every((c, i) => c.friction() === frictions[i][0] && c.frictionCombineRule() === frictions[i][1]), `16: and today's hull keeps its own (${frictions[0][0]} under ${frictions[0][1] === RAPIER.CoefficientCombineRule.Average ? 'Average' : frictions[0][1]}), neither ever rewritten`);
   // A swap at full speed reads no hit; the pass switched off live brings back today's hull.
   r.race!.setMode(v, 'racing');
-  launch(r, 194, 60);
+  launch(r, 97, 60);
   drive(r, 60, 0.5);
-  ok(r.hits.length === 0 && box.isEnabled(), '16: racing at 194 m/s on the box with no hit read');
+  ok(r.hits.length === 0 && box.isEnabled(), '16: racing at 97 m/s on the box with no hit read');
   tuneRace({ on: false });
   drive(r, 60, 0.2);
   ok(!box.isEnabled() && own.every((c) => c.isEnabled()) && r.hits.length === 0, "16: the pass switched off live brings back today's hull, with no hit read");
@@ -910,30 +950,45 @@ await section(16, 'the two hulls', async () => {
 });
 
 await section(17, 'off a course', async () => {
-  const face: G = (_x, z) => (z > 600 ? Math.min(20, (z - 600) * Math.tan(Math.PI / 3)) : 0);
+  // A face 20 m high at full speed, too steep and too tall for either hold to clear (section 6): 60 degrees under the
+  // firm hold, 80 under the loose, which clears a 60-degree one over its top.
+  const faceOf = (deg: number): G => (_x, z) => (z > 600 ? Math.min(20, (z - 600) * Math.tan((deg * Math.PI) / 180)) : 0);
   const field = { x0: -512, z0: 0, size: 1024, sub: 512 };
-  for (const rule of ['crash', 'stop'] as const) {
-    tuneRace({ offCourse: rule });
-    const r = await setup({ kind: 'pod', g: face, z: 0, field });
-    launch(r, 333, 60);
-    // The speed and place the step that met the face left, and the pilot letting go once it has.
-    let after = -1;
-    let at = 0;
-    drive(r, 60, 4, (run) => {
-      if (after < 0 && run.hits.length) {
-        after = run.race!.h;
-        at = run.v.pos.z;
-        run.input.throttle = 0;
-        run.input.boost = false;
-      }
-    });
-    if (rule === 'crash') ok(r.v.destroyed, `17: a 60-degree face 20 m high met at full speed off a course is a crash with offCourse 'crash' (${r.hits.map((h) => h.kind).join(',')})`);
-    else ok(!r.v.destroyed && r.v.hp >= RACE_TUNE.wearFloor && after >= 0 && after < 5 && at < 602, `17: and with 'stop' stops the pod at it (${r2(after)} m/s, its middle ${r2(600 - at)} m short of the foot, hull ${r2(r.v.hp)}, ${r.hits.map((h) => h.kind).join(',')}), nothing destroyed and nobody thrown`);
+  for (const hold of ['loose', 'firm'] as const) {
+    const deg = hold === 'firm' ? 60 : 80;
+    const face = faceOf(deg);
+    for (const rule of ['crash', 'stop'] as const) {
+      tuneRace({ offCourse: rule, hold });
+      const r = await setup({ kind: 'pod', g: face, z: 0, field });
+      launch(r, 166, 60);
+      // The speed and place the step that met the face left, and the pilot letting go once it has. (The climbing judge
+      // may cut the speed a little first, a few metres out: at half the first ride's speed a plan judges half as much
+      // of the face, so the first cut can come before the cut that is the face; the step read is the face's.)
+      let after = -1;
+      let at = 0;
+      drive(r, 60, 4, (run) => {
+        if (after < 0 && run.hits.some((h) => h.kind !== 'climb')) {
+          after = run.race!.h;
+          at = run.v.pos.z;
+          run.input.throttle = 0;
+          run.input.boost = false;
+        }
+      });
+      // Where it is stopped: against the face rather than over it, its middle no more than 2 m past the foot of a
+      // 60-degree face (the first ride's bound), or of an 80-degree one no further in than the face is long. (At half
+      // the first ride's speed the climbing judge's first cut, a scrape under 'stop', comes a few metres out and slows
+      // the pod first, and the firm hold met the 60-degree face itself 2.6 m past its foot: the bound is held at the
+      // face's top edge less half the pod's 12 m, its nose short of the top.)
+      const most = 600 + 20 / Math.tan((deg * Math.PI) / 180) - (deg === 60 ? 6 : 0);
+      if (rule === 'crash') ok(r.v.destroyed, `17: a ${deg}-degree face 20 m high met at full speed off a course is a crash with offCourse 'crash', ${hold} (${r.hits.map((h) => h.kind).join(',')})`);
+      else ok(!r.v.destroyed && r.v.hp >= RACE_TUNE.wearFloor && after >= 0 && after < 5 && at < most, `17: and with 'stop' stops the pod at it, ${hold} (${r2(after)} m/s, its middle ${r2(at - 600)} m past the foot, at most ${r2(most - 600)}, hull ${r2(r.v.hp)}, ${r.hits.map((h) => h.kind).join(',')}), nothing destroyed and nobody thrown`);
+    }
   }
+  tuneRace({ hold: 'loose' });
   for (const rule of ['crash', 'stop'] as const) {
     tuneRace({ offCourse: rule });
     const r = await setup({ kind: 'pod', z: 0, world: (ph) => ph.world.createCollider(RAPIER.ColliderDesc.cuboid(10, 10, 10).setTranslation(0, 10, 300).setCollisionGroups(groups(Group.exterior, Group.all))) });
-    launch(r, 333, 60);
+    launch(r, 166, 60);
     drive(r, 60, 2);
     ok(r.v.destroyed, `17: a box stood on the way is a crash with offCourse '${rule}'`);
   }
@@ -1003,10 +1058,10 @@ await section(20, 'the handling, through the drive', async () => {
     const q = v.body.rotation();
     return (new THREE.Euler().setFromQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w), 'YXZ').z * 180) / Math.PI;
   };
-  // A full pod at 250 m/s turned hard for a second: its travel lags its nose, and Space's slide lags it four times as long.
+  // A full pod at 125 m/s turned hard for a second: its travel lags its nose, and Space's slide lags it four times as long.
   const turned = async (slide: boolean) => {
     const r = await setup({ kind: 'pod', z: -3000 });
-    launch(r, 250, 60);
+    launch(r, 125, 60);
     r.input.steer = 1;
     r.input.slide = slide;
     let most = 0;
@@ -1019,13 +1074,13 @@ await section(20, 'the handling, through the drive', async () => {
   };
   const plain = await turned(false);
   const slid = await turned(true);
-  ok(plain.most > 3, `20: a full pod turned hard at 250 m/s drifts wide, its travel up to ${r2(plain.most)} degrees off its nose`);
+  ok(plain.most > 3, `20: a full pod turned hard at 125 m/s drifts wide, its travel up to ${r2(plain.most)} degrees off its nose`);
   ok(slid.most > 1.8 * plain.most, `20: and sliding on Space, up to ${r2(slid.most)} degrees`);
   ok(plain.bank > 20 && plain.rolled > 20, `20: and it banks into the turn (${r2(plain.bank)} degrees), the body written rolled ${r2(plain.rolled)}`);
   // Leaned on V at speed and going straight: the body rolls well over onto its side.
   {
     const r = await setup({ kind: 'pod', z: -3000 });
-    launch(r, 200, 60);
+    launch(r, 100, 60);
     r.input.lean = 1;
     drive(r, 60, 1);
     ok(Math.abs(r.race!.lean) > 0.9 && Math.abs(roll(r.v)) > 40, `20: leaned at speed the pod rolls ${r2(roll(r.v))} degrees onto its side`);
@@ -1064,10 +1119,10 @@ await section(20, 'the handling, through the drive', async () => {
 });
 
 await section(21, "a rope's pull, told", async () => {
-  // A racing pod at 250 m/s pulled sideways at 20 m/s by a rope between two steps: the pull told to its hit test
+  // A racing pod at 125 m/s pulled sideways at 20 m/s by a rope between two steps: the pull told to its hit test
   // (`Vehicle.pulled`), so nothing is read and the hull loses nothing.
   const r = await setup({ kind: 'pod', z: -3000 });
-  launch(r, 250, 60);
+  launch(r, 125, 60);
   drive(r, 60, 0.2);
   const hp = r.v.hp;
   const at = r.race!.lastHit.at;
@@ -1078,7 +1133,7 @@ await section(21, "a rope's pull, told", async () => {
   ok(r.race!.lastHit.at === at && r.v.hp === hp && !r.v.destroyed, `21: a racing pod pulled sideways at 20 m/s by a rope reads no hit (hull ${r2(r.v.hp)})`);
   // The control: the same change of speed put on the body untold is read as a scrape, so the test can see one.
   const c = await setup({ kind: 'pod', z: -3000 });
-  launch(c, 250, 60);
+  launch(c, 125, 60);
   drive(c, 60, 0.2);
   const l = c.v.body.linvel();
   c.v.body.setLinvel({ x: l.x + 20, y: l.y, z: l.z }, true);
@@ -1128,12 +1183,13 @@ await section(22, 'the bridge over invented pits', async () => {
   };
   // Every pit narrower than the span glided, at the speed each kind and level races at: no strike, no wall, and the
   // hull never more than half a metre under its ride over the rims.
-  const full = 1200 / 3.6;
+  // The bridge spans half a second of travel at the halved speeds, the metres a quarter of a second spanned at the first ride's.
+  const full = 600 / 3.6;
   const cases: [string, Kind, 'max' | 'stock', number, number[]][] = [
     ['a full pod', 'pod', 'max', full, [10, 35, 50, 80]],
-    ['a stock pod', 'pod', 'stock', 198, [10, 20, 35, 45]],
-    ['a full bike', 'bike', 'max', 700 / 3.6, [10, 20, 35, 44]],
-    ['a stock bike', 'bike', 'stock', 115, [10, 20]],
+    ['a stock pod', 'pod', 'stock', 99, [10, 20, 35, 45]],
+    ['a full bike', 'bike', 'max', 350 / 3.6, [10, 20, 35, 44]],
+    ['a stock bike', 'bike', 'stock', 57.5, [10, 20]],
   ];
   for (const [name, kind, levels, speed, widths] of cases) {
     const span = RACE_TUNE.bridgeTime * speed;
@@ -1166,18 +1222,26 @@ await section(22, 'the bridge over invented pits', async () => {
     }
     ok(!bad.length, `22: and the 35 x 25, 50 x 10, 50 x 25 and 80 x 10 m crevasses at ${fps} fps${bad.length ? ` -- ${bad.join('; ')}` : ''}`);
   }
-  // A cliff-walled crevasse wider than the span (120 x 25 m at a full pod's top) is a crash at every rate, as a cliff is.
+  // A cliff-walled crevasse wider than the span is a crash at every rate, as a cliff is: 120 x 25 m at a full pod's top
+  // under the firm hold, which drags it down into it. The loose hold carries over it on its momentum (the owner's): one
+  // 100 m across, past the span, it falls 2 m over and rises over the far rim in time; one 160 m across it has fallen 7
+  // m over and meets the wall. (120 m is on the edge for it, cleared at some frame rates and met at others.)
   for (const fps of [144, 60, 20]) {
+    tuneRace({ hold: 'firm' });
     const f = await fly('pod', 'max', full, pitOf(120, 25, 90), 120, fps);
-    ok(f.destroyed && f.met.includes('crash'), `22: a 120 x 25 m crevasse at a full pod's top is a crash at ${fps} fps (${f.met.join(',')})`);
+    tuneRace({ hold: 'loose' });
+    const carried = await fly('pod', 'max', full, pitOf(100, 25, 90), 100, fps);
+    const wide = await fly('pod', 'max', full, pitOf(160, 25, 90), 160, fps);
+    ok(f.destroyed && f.met.includes('crash'), `22: a 120 x 25 m crevasse at a full pod's top is a crash at ${fps} fps under the firm hold (${f.met.join(',')})`);
+    ok(!carried.destroyed && !carried.met.length && wide.destroyed && wide.met.includes('crash'), `22: and under the loose hold one 100 x 25 m is carried over (${carried.met.join(',') || 'nothing met'}, the hull at worst ${r2(carried.low)} m off its ride over it), where one 160 x 25 m is a crash (${wide.met.join(',')})`);
   }
-  // A pit wider than the span (120 m at its rims, 10 m deep on 30-degree walls, at a stock pod's 198 m/s, span 49.5 m)
+  // A pit wider than the span (120 m at its rims, 10 m deep on 30-degree walls, at a stock pod's 99 m/s, span 49.5 m)
   // is followed as it is with the bridge off.
   for (const fps of [144, 60, 20]) {
     const g = pitOf(120, 10, 30);
-    const on = await fly('pod', 'stock', 198, g, 120, fps, undefined, true);
+    const on = await fly('pod', 'stock', 99, g, 120, fps, undefined, true);
     tuneRace({ bridge: 'off' });
-    const off = await fly('pod', 'stock', 198, g, 120, fps, undefined, true);
+    const off = await fly('pod', 'stock', 99, g, 120, fps, undefined, true);
     restore();
     let parted = -1;
     for (let i = 0; i < Math.min(on.track.length, off.track.length) && parted < 0; i++) if (!Object.is(on.track[i], off.track[i])) parted = Math.floor(i / 6);
@@ -1197,7 +1261,7 @@ await section(23, 'a racing hull, a hook and the grapple', async () => {
   // share a pull would put on it. Its turn is the drive's yaw rate about the world's up, led in frame time.
   const { VehicleSource } = await import('../../../src/player/grappleFrames.ts');
   const r = await setup({ kind: 'pod', z: -3000 });
-  launch(r, 200, 60);
+  launch(r, 100, 60);
   r.input.steer = 1;
   drive(r, 60, 0.5);
   const vs = new VehicleSource();
@@ -1217,11 +1281,11 @@ await section(23, 'a racing hull, a hook and the grapple', async () => {
 });
 
 await section(24, 'the engines, through the drive', async () => {
-  // A side put out at 300 m/s: the top falls to the limp's share and the speed is shared out under it, so it eases down
+  // A side put out at 150 m/s: the top falls to the limp's share and the speed is shared out under it, so it eases down
   // at the brake, never in a step, and no step reads a hit.
   for (const fps of [144, 60, 20]) {
     const r = await setup({ kind: 'pod', z: -3000 });
-    launch(r, 300, fps);
+    launch(r, 150, fps);
     r.input.boost = false;
     r.race!.boosting = false;
     drive(r, fps, 0.2);
@@ -1239,7 +1303,7 @@ await section(24, 'the engines, through the drive', async () => {
       last = run.race!.h;
     });
     const limp = ENGINE_TUNE.limp * plain;
-    ok(r.hits.length === 0 && r.v.hp === hp, `24: at ${fps} fps a side put out at 300 m/s reads no hit on any step (hull ${r2(r.v.hp)})`);
+    ok(r.hits.length === 0 && r.v.hp === hp, `24: at ${fps} fps a side put out at 150 m/s reads no hit on any step (hull ${r2(r.v.hp)})`);
     ok(worst <= 1.05 && r.race!.h <= limp + 1 && r.race!.engines.limp, `24: and the pod eases down to its limp top ${r2(limp)} (now ${r2(r.race!.h)} m/s), never faster than the brake (worst ${r2(worst)} of it a step)`);
   }
   // Held boosting until the engines overheat: exactly one part burning the step they do.
@@ -1263,7 +1327,7 @@ await section(24, 'the engines, through the drive', async () => {
   {
     const a = (10 * Math.PI) / 180;
     const r = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 2000, 60) });
-    launch(r, 333, 60);
+    launch(r, 166, 60);
     drive(r, 60, 1.5, (run) => {
       if (run.hits.length) run.input.heading = -a;
       return run.hits.some((h) => h.kind === 'scrape');
@@ -1278,7 +1342,7 @@ await section(24, 'the engines, through the drive', async () => {
     const a = (10 * Math.PI) / 180;
     const graze = async (): Promise<{ lost: number; kind: string }> => {
       const r = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 2000, 60) });
-      launch(r, 333, 60);
+      launch(r, 166, 60);
       const hp = r.v.hp;
       drive(r, 60, 1.5, (run) => run.hits.length > 0);
       return { lost: hp - r.v.hp, kind: r.hits[0]?.kind ?? '' };
@@ -1292,14 +1356,17 @@ await section(24, 'the engines, through the drive', async () => {
   }
   // A step met hard: past the strike's hurt it costs the hull and exactly one part of the engines, never more than
   // strikeMost of it; a strike under the hurt costs neither. The look-ahead is kept from seeing the step (its reader
-  // answers flat ground), or the hull rises over it in time and nothing is struck at all.
+  // answers flat ground), or the hull rises over it in time and nothing is struck at all. (A 5 m step beside the first
+  // ride's three: a strike's closing is the ground's kick, which is the speed times the step's grade, less the hull's
+  // own rise into it, which is not, so at half the first ride's speed a 3 m step closes at 9 m/s, under the hurt, under
+  // either hold.)
   {
     let hurt = 0;
     const said: string[] = [];
-    for (const height of [1, 2, 3]) {
+    for (const height of [1, 2, 3, 5]) {
       const step: G = (_x, z) => (z > 400 ? height : 0);
       const r = await setup({ kind: 'pod', g: step, z: 0, reader: readerOf(FLAT) });
-      launch(r, 333, 60);
+      launch(r, 166, 60);
       const hp = r.v.hp;
       drive(r, 60, 3);
       const parts = r.race!.engines.parts.filter((p) => p.d > 0);
@@ -1319,7 +1386,7 @@ await section(24, 'the engines, through the drive', async () => {
     const a = (20 * Math.PI) / 180;
     const r = await setup({ kind: 'pod', z: 0, world: (ph) => wall(ph, 0, -5, 150, -a, 2000, 60) });
     r.v.hp = RACE_TUNE.wearFloor;
-    launch(r, 250, 60);
+    launch(r, 125, 60);
     drive(r, 60, 1.5, (run) => {
       if (run.hits.length) run.input.heading = -a;
     });
