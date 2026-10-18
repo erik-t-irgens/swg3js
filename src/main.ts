@@ -361,6 +361,13 @@ import { EngineFx } from './vehicles/engineFx.ts';
 import { raceNote, raceRoute } from './vehicles/vehicleKinds.ts';
 import { RACE_BLOCK_MARGIN, easeFovOut, frameRaceView, newRaceView, newRaceViewOut, raceBlocked, raceEyeOf, raceTurnOf, releaseRaceView, steerRaceView, widenRaceView, type RaceViewInput } from './vehicles/raceView.ts';
 import type { RaceLevels } from './vehicles/raceMath.ts';
+import { RACE_KINDS, corridorCircles, corridorHits, courseLegs, isTrackId, lapLength, readTrackFile, trackInGame, trackSync, tracksPath, type CourseThing, type RaceKind, type TrackDef, type TrackRead } from './race/trackFile.ts';
+import { GATE_STRIDE, bakeGate, gateCorners, headingTurn, turnHeading } from './race/gates.ts';
+import { RUN_ACT, RUN_EVENT, RaceRun, STAND_LIFT, bestOf, newRunWorld, putBackSpawn, raceBestKey, raceDelta, raceTime, runBestOf, runInput, runKindFor, runStep } from './race/raceRun.ts';
+import { TRACK_TUNE, gateSizeFor, tuneTrack, type TrackTune } from './race/trackTune.ts';
+import { TRACK_EDITOR_HEADER, TRACK_EDITOR_HEADER_VALUE, deleteGate, insertGate, moveGateTo, nudgeGate, resizeGate, roundPlace, trackEditFile, type TrackReply } from './race/trackEdits.ts';
+import { RaceHud, type RaceBlockView } from './ui/raceHud.ts';
+import { TrackList, type TrackListModel } from './ui/trackList.ts';
 import { World } from './world/world';
 import { MODEL_REFLECTIONS_AT_LOAD, PREVIEW_REFLECTIONS, REFLECTIONS, environmentIsStandIn, isRegisteredReflective, modelReflectiveCount, plainReflectiveCount, reflectiveCount, setEnvironmentStandIn, setModelReflections, setPlainReflections, setReflectionSource, type ReflectionSource } from './world/envmap';
 import { SPEC_TUNE, setSpecTune, specReport, specSelfTest, type SpecTune } from './world/specular.ts';
@@ -763,6 +770,29 @@ function setTune(tune: object, from: object | undefined): void {
 const BREAK_RESUME = 'swg3js.physics.resume';
 const BREAK_RELOADED_AT = 'swg3js.physics.reloadedAt';
 const BREAK_RELOAD_GAP = 120_000;
+
+/** What `__debug.track` takes (`App.trackConsole`), and the debug menu's track list hands it. */
+interface TrackConsoleOpts {
+  tune?: Partial<Record<keyof TrackTune, unknown>>;
+  begin?: string;
+  edit?: string;
+  drop?: boolean;
+  set?: Record<string, unknown>;
+  grid?: 'here';
+  gate?: number | true;
+  go?: string | boolean;
+  here?: boolean;
+  insert?: boolean;
+  move?: { x?: number; y?: number; z?: number; yaw?: number };
+  size?: { w?: number; h?: number };
+  delete?: boolean;
+  save?: boolean;
+  remove?: string;
+  start?: string;
+  stop?: boolean;
+  check?: string;
+  reload?: boolean;
+}
 
 class App {
   private torch!: THREE.SpotLight;
@@ -1290,6 +1320,8 @@ class App {
    * page labels written only when they change.
    */
   private readonly waypointHud = new WaypointHud(this.ui);
+  /** A race run's block and its gates on the overlay, and a track's gates while it is laid (src/ui/raceHud.ts). */
+  private readonly raceHud = new RaceHud(this.ui);
   /** The jobs followed, down the right edge under the roster (src/ui/tracker.ts): DOM written only when its words change. */
   private readonly tracker = new Tracker(this.ui);
   private readonly waypointPlaces = new WaypointPlaces();
@@ -1794,6 +1826,8 @@ class App {
     // The waypoints' marks go on the same overlay; the minimap is the top-left panel's first child, a
     // canvas of its own, with the planet's picture from the one loader every map shares.
     this.waypointHud.attach(this.overlay);
+    // A race run's gates, and a track's while it is laid or edited, go on it too.
+    this.raceHud.attach(this.overlay);
     this.minimap = new Minimap(this.ui.querySelector<HTMLElement>('#hud .top-left')!, this.ui.querySelector<HTMLElement>('#hud')!, (pack) => mapPictureNow(pack));
     this.wireWaypoints();
     this.wireJournal();
@@ -7000,6 +7034,19 @@ class App {
           tune: { ...ENGINE_TUNE },
         };
       },
+      /**
+       * A world's race tracks and a run on one (src/race/, `public/tracks/<world>.json`): `track()` reports this world's
+       * tracks, the run in progress (its phase, lap, next gate, times, splits and its own clock) and the bests kept for
+       * this world. `track({ go: 'id' })` stands what you ride at its grid, `track({ start: 'id' })` runs it behind the
+       * curtain (countdown, gates, laps, put-back after a crash), `track({ stop: true })` ends it, `track({ check: 'id'
+       * })` names what stands in its corridor, `track({ reload: true })` reads the file again and `track({ tune })` moves
+       * `TRACK_TUNE`. On the dev server: `track({ begin: 'id' })`, `track({ gate: true })` (Numpad0), `track({ edit:
+       * 'id' })`, `track({ gate: 3, here | insert | go | delete: true })`, `track({ gate: 3, move: { x, y, z, yaw } })`,
+       * `track({ gate: 3, size: { w, h } })`, `track({ set: { name, kind, laps, for, clear } })`, `track({ grid: 'here'
+       * })`, `track({ save: true })` (the first save to a file each session asks twice), `track({ remove: 'id' })` (asked
+       * twice) and `track({ drop: true })`.
+       */
+      track: (opts: TrackConsoleOpts = {}) => this.trackConsole(opts),
       /** Every vehicle's state: where, how level (1 upright, 0 on its side), how fast it turns and moves, and how many corners find the ground. */
       /** Set the ship whose room the player is in (or the nearest ship) adrift: forward speed and a spin (rad/s) with no gravity or righting, so the room's physics can be tried; `shipDrift(0)` brings it to rest. */
       /** Move the cockpit frame over the seat of the ship you are in (metres right, up, forward), to find where it should sit; the numbers to report. */
@@ -9319,6 +9366,13 @@ class App {
         if (d?.world !== here || (d.layer !== 'story' && d.layer !== 'world')) return;
         void this.reloadDressing(here, d.layer);
       });
+      // A world's track file edited while the dev server runs (by hand, or the editor's own save): read again, and the
+      // corridors of the tracks it added or changed kept clear of the plants on the chunks built from now on.
+      import.meta.hot.on('tracks:changed', (d: { world?: string }) => {
+        if (!this.inWorld || this.traveling || this.world.sceneOnly) return;
+        const here = packIdOf(this.world.planet, this.zone);
+        if (d?.world === here) void this.reloadTracks(here);
+      });
     }
     // The game's own people's words (src/world/conversationPack.ts): the server's conversations the heralds and
     // whoever else is adopted speak, folded once a session and joined to whatever story this browser holds; a
@@ -10182,8 +10236,10 @@ class App {
       canOpen: () => this.started && this.inWorld && !this.traveling && !this.talkNow,
       freeMouse: (free) => (free ? this.freeMouse(true) : this.handBackMouse()),
       holdKeys: (ms) => this.holdGameKeys(ms),
-      // The race drive's and the engines' numbers of feel, as sliders when `race` or `engines` is picked.
+      // The race drive's, the engines' and a race run's numbers of feel, as sliders when `race`, `engines` or `track` is picked.
       dials: (helper) => vehicleDialsFor(helper),
+      // And on the dev server the track editor's list of gates, when `track` is picked.
+      list: (helper) => (import.meta.env.DEV && helper === 'track' ? this.trackListOf() : null),
     });
     draggable(this.debugMenu.root, '.dbg-panel', '.dbg-head', 'debug');
     if (debugRoot) {
@@ -10193,7 +10249,7 @@ class App {
       // pins now, as the first world after a reload does. With a helper that has dials picked, `{ mode }`
       // shows its sliders or its box, `{ dial: { key, value } }` moves one as its slider would, and
       // `{ resetDials, pinDials }` are the sliders' own Reset all and Pin at start.
-      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean; mode?: 'sliders' | 'console'; dial?: { key: string; value: number | string }; resetDials?: boolean; pinDials?: boolean }) => {
+      debugRoot.debugMenu = async (o?: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean; mode?: 'sliders' | 'console' | 'list'; dial?: { key: string; value: number | string }; resetDials?: boolean; pinDials?: boolean }) => {
         await this.debugMenu.drive(o ?? {}, (line) => this.messages.system(line));
         return this.debugMenu.report();
       };
@@ -11213,6 +11269,8 @@ class App {
     this.waypointHud.clear();
     this.cityWatch.reset();
     this.minimap.standDown();
+    // A race run, its block and its gates, and the track the dev server's editor had in hand, are the world's.
+    this.leaveTracks('the select screen');
     // A raced hull's smoke and fire stand in the session's ship effects, which outlive every world: taken away with it.
     this.engineFx.clear();
     this.world.leave();
@@ -11362,6 +11420,7 @@ class App {
       case 'hudShipCondition':
       case 'hudTargetBlock':
       case 'hudArcs':
+      case 'hudRaceBlock':
       case 'hudMessages':
       case 'hudMessageLines':
       case 'hudFullPrompts':
@@ -11477,6 +11536,8 @@ class App {
     // minimap at whatever reach and orientation the page now says (both are read by its own step).
     this.waypointHud.setScale(scale);
     this.waypointHud.setShown(S.hudWaypointMarks, S.hudWaypointMarksInFlight);
+    this.raceHud.setScale(scale);
+    this.raceHud.setShown(S.hudRaceBlock);
     this.minimap.setScale(scale);
     this.minimap.redraw();
     // The jobs followed read their two switches at their own next update, a quarter of a second off.
@@ -11871,8 +11932,10 @@ class App {
       this.feedback.idle();
       this.hud.idle();
       // The waypoints' distances are page labels, not canvas: they go too, once, or they would stand
-      // over the death card and every panel.
+      // over the death card and every panel. So does a race run's block, which comes back with play.
       this.waypointHud.idle();
+      this.raceHud.hideBlock();
+      this.runBlockKey.tenths = Number.NaN;
       return;
     }
     this.fillGrappleMark();
@@ -11883,6 +11946,8 @@ class App {
     const flown = p.mounted ?? p.piloting;
     const at = p.worldPos;
     this.waypointHud.draw(this.waypointPlaces, this.cam.camera, window.innerWidth, window.innerHeight, at.x, at.y, at.z, !!flown?.spec.ship && flown.airborne);
+    // A race run's gates ahead and its block, or a track's gates while it is laid or edited on the dev server.
+    this.drawRace();
     this.shipHud.draw();
     this.feedback.draw();
     if (this.cullShow) this.drawCullRects(o);
@@ -14966,12 +15031,13 @@ class App {
    * is not simulated meanwhile, so nothing falls through ground that is not there yet. A world
    * that never settles (a pack missing) lets go after a while rather than never.
    */
-  private async settle(timeoutMs = 30000): Promise<void> {
+  private async settle(timeoutMs = 30000, warm?: { at: readonly { x: number; z: number }[]; waitMs: number }): Promise<void> {
     const t0 = performance.now();
     // The placed models the old rule would have loaded round here start loading behind this screen, so the
     // sweep below builds their programs (step 6, `World.warmPlaced`); a world whose pack is not in yet starts
-    // them itself when it is.
-    this.world.warmPlaced(this.player.worldPos);
+    // them itself when it is. A race track's curtain hands its gates instead (`startRun`), and waits for them.
+    if (warm) this.world.warmPlaced(warm.at);
+    else this.world.warmPlaced(this.player.worldPos);
     // The world position: aboard a hull's rooms `player.pos` is in the hull's frame, near its origin, not where the hull is.
     while (performance.now() - t0 < timeoutMs) {
       if (this.world.settled(this.player.worldPos)) break;
@@ -15038,6 +15104,11 @@ class App {
     // from stand-ins (step 6): given `PLACED_TUNE.warmWaitMs` more to come in (nought as shipped, since the wait
     // costs more screen than the programs it saves), since what is not in by the sweep builds its programs in
     // play as its tier comes into range.
+    // A race track's curtain waits for the models along its course (`startRun`) by a knob of its own.
+    if (warm && warm.waitMs > 0) {
+      this.loadingScreen.setWhat('the placed objects along the course');
+      await this.world.placedWarmSettled(warm.waitMs);
+    }
     if (PLACED_TUNE.warmWaitMs > 0) {
       this.loadingScreen.setWhat('the placed objects round you');
       await this.world.placedWarmSettled(PLACED_TUNE.warmWaitMs);
@@ -15309,9 +15380,14 @@ class App {
     // would leave bare clearings with no house in them. Should the wait run out instead, each house stood keeps
     // plants off the chunks built after it, as any house put down does.
     const homeCircles = arrivalCircles(this.homesKeeper, this.localHomes.circles());
-    const keepOff = dressingFiles.then((f) => {
+    // And the world's race tracks (`public/tracks/<world>.json`), fetched beside them: each track's corridor keeps the
+    // plants off too, read with the world before its chunks build, so a tree is never planted on a course.
+    this.leaveTracks('a new world');
+    const trackFile = this.fetchTracks(dressingPack, dressingKind);
+    const keepOff = Promise.all([dressingFiles, trackFile]).then(([f, t]) => {
       const k = keepOffOf(f.story, f.world, dressingKind);
       k.game.push(...homeCircles);
+      for (const c of this.trackCircles(t, dressingKind)) (dressingKind === 'space' ? k.game : k.raw).push(c);
       return k;
     });
     const packIn = this.world.loadPack(stand, { keepOff }).then((clearSpawn) => {
@@ -15842,6 +15918,9 @@ class App {
     this.shipHud.clear();
     this.shipTarget = null;
     this.targetFx.select(null, false, null);
+    // A race run and the world's tracks are the world's (a jump carries no pod, but the tracks are read again).
+    this.leaveTracks('a jump to another system');
+    void this.fetchTracks(packIdOf(planet, this.zone), this.worldKindOf(planet));
     // And any raced hull's smoke and fire, which stand in the session's ship effects as the target's bracket does.
     this.engineFx.clear();
     this.world.loadCarrying(hull, planet, packIdOf(planet, this.zone));
@@ -16695,6 +16774,11 @@ class App {
           drive.heading = Number.isNaN(out.target) ? null : out.target;
         }
       }
+      // A race run on this hull (src/race/raceRun.ts): standing at the grid through the countdown and through a
+      // put-back's wait, and the start boost earned by W pressed in the window round go.
+      if (this.raceRun?.live && pilot === this.runVehicle) runInput(this.raceRun, drive, pilot.race);
+      // The dev server's track editor, while a track is being laid: a gate dropped where the vehicle is, facing its travel.
+      if (import.meta.env.DEV && this.trackHeld && input.pressedAction('trackGate')) this.messages.system(this.trackGateHere(null));
     }
     // A ship in a jump is flown by the jump (its cruise is `jumpCruise`), whether or not a panel is open: the pilot's keys do nothing.
     if (pilot && this.hyperspace.drives(pilot)) drive = null;
@@ -16802,15 +16886,20 @@ class App {
         this.effects.ring(v.pos, 0xffa050, 6 + v.radius, 0.5);
         this.effects.burst(v.pos, 0xffc080, 2 + v.radius, 0.4);
         this.effects.flash(v.pos, 0xffa050, 60, 20, 0.35);
-        // Through the world, so a painted ship's own material copies leave the portal set and the cascades with it.
-        this.world.disposeVehicle(v);
+        // Through the world, so a painted ship's own material copies leave the portal set and the cascades with it; a
+        // race run's own hull hands its materials to the run until its put-back is prepared (`runKept`).
+        this.world.disposeVehicle(v, this.raceRun?.live && v === this.runVehicle ? this.runKept : undefined);
       }
     }
+    // A race run's clock on the fixed steps the physics is about to move the hulls through, its crash, its put-back
+    // and what happened in it (the gates were tested in the drive's own step, above).
+    this.stepRun(dt, simulate);
     // The living held where they are while the ridden hull races faster than new bodies can be stood and put away
-    // (`livingAbove`): each is a clone and a compile. The perf flight's body counts as racing under `holdLiving:
-    // 'always'`, which is how the hold's worth is measured. What the drive has to say goes to the message line, once.
+    // (`livingAbove`), and for the whole of a timed run whatever the speed (its course was compiled behind its curtain):
+    // each body is a clone and a compile. The perf flight's body counts as racing under `holdLiving: 'always'`, which is
+    // how the hold's worth is measured. What the drive has to say goes to the message line, once.
     const racedNow = riding ? null : player.mounted;
-    this.world.livingHold = holdsLiving(racedNow) || (!!this.perfFlight && RACE_TUNE.on && RACE_TUNE.holdLiving === 'always');
+    this.world.livingHold = holdsLiving(racedNow, !!this.raceRun?.live) || (!!this.perfFlight && RACE_TUNE.on && RACE_TUNE.holdLiving === 'always');
     const raceWords = racedNow?.race?.takeNote();
     if (raceWords) this.messages.system(raceWords);
     // The smoke and fire at every race-driven hull's damaged engines, put where the hulls stand after this step.
@@ -17113,6 +17202,828 @@ class App {
       view.burning = p.fire > 0;
     }
     return list;
+  }
+
+  // ---- Race tracks and runs (src/race/) ------------------------------------------------------------------------------
+  //
+  // A world's tracks are read out of `public/tracks/<world>.json` at its arrival (`fetchTracks`), their corridors kept
+  // clear of plants before the ground is built; a run is started on what the player rides behind a "preparing the
+  // track" curtain (`startRun`), counted down at the grid, timed on its own clock on the physics' fixed steps
+  // (`stepRun`), its gates tested inside the race drive's step (the run is the drive's `watch`), and a crash in it puts
+  // the same garage vehicle back at the last gate after `TRACK_TUNE.putBack` seconds, as the kind it was spawned as.
+  // The dev server alone lays and edits tracks (`trackBegin`, `trackGateHere`, the gate edits, `trackSave`), through its
+  // own endpoint (`tools/dev/tracksEndpoint.mjs`); every call to that half is behind `import.meta.env.DEV`.
+
+  /** This world's track file as read (null for none), the world it is for, and the fetch of it under way. */
+  private tracksRead: TrackRead | null = null;
+  private tracksWorld = '';
+  private tracksFetch: { world: string; done: Promise<TrackRead | null> } | null = null;
+  /** The run under way (or just finished), the hull it races, the garage entry a put-back spawns again, and a put-back being spawned. */
+  private raceRun: RaceRun | null = null;
+  private runVehicle: Vehicle | null = null;
+  private runDef: VehicleDef | null = null;
+  private runPlacing = false;
+  /**
+   * The wrecked hull's own materials (its glows, trails and panes), held back from their disposal until the put-back's
+   * hull is prepared: disposed at the wreck, they released programs nothing else used, and the same vehicle spawned
+   * again 2.5 s later built them on a live frame (the smoke check's put-back, two sprite programs).
+   */
+  private readonly runKept: THREE.Material[] = [];
+  /** The split the block shows and until when on the run's clock, the note under it, and what the block last said it from. */
+  private readonly runSplit = { text: '', tone: '' as '' | 'good' | 'bad', until: -Infinity };
+  private runNote = '';
+  private readonly runBlockKey = { tenths: Number.NaN, phase: '', events: -1 };
+  private runEvents = 0;
+  /** The gates the overlay draws: twelve numbers a gate (`gateCorners`), the run's track's or the track in hand's. */
+  private gateShapes = new Float64Array(0);
+  private gateShapeCount = 0;
+  private gateShapesFor: object | null = null;
+  /** The dev server's editor: the track in hand, whether it differs from the file, the files saved to this session, and an ask waiting for its second. */
+  private trackHeld: TrackDef | null = null;
+  private trackHeldUnsaved = false;
+  private readonly trackFilesSaved = new Set<string>();
+  private trackArm: { what: string; until: number } | null = null;
+  /** The editor's list in the debug menu, made the first time the menu asks for it. */
+  private trackListView: TrackList | null = null;
+
+  /** The frame this world's track file is written in: the game's own in a space zone, else the raw. */
+  private trackFrame(): 'raw' | 'game' {
+    return this.world.planet.space ? 'game' : 'raw';
+  }
+
+  /**
+   * A world's track file fetched and kept as this world's once it lands (a newer fetch wins). With the race pass off
+   * (`RACE_TUNE.on`, or the load hatch `swg.race`) nothing is fetched, so no corridor keeps a plant off and a session
+   * starts exactly as before the pass.
+   */
+  private fetchTracks(world: string, kind: WorldKind): Promise<TrackRead | null> {
+    const done = kind === 'copies' || !RACE_TUNE.on ? Promise.resolve(null) : this.readTracks(world, kind === 'space' ? 'space' : 'ground');
+    this.tracksFetch = { world, done };
+    void done.then((read) => {
+      if (this.tracksFetch?.done !== done) return;
+      this.tracksRead = read;
+      this.tracksWorld = world;
+      if (import.meta.env.DEV) this.trackListChanged();
+    });
+    return done;
+  }
+
+  /**
+   * One world's track file, read, or null for none. It ships with the build (`public/tracks/`) and is asked for fresh
+   * every time, since the dev server's is edited live; a file that is not there is answered by a server with the page
+   * itself and a 200, which is why the kind of answer is asked as well as whether there was one, as the placements' is.
+   */
+  private async readTracks(world: string, kind: 'ground' | 'space'): Promise<TrackRead | null> {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}${tracksPath(world)}`, { cache: 'no-store' });
+      const type = res.headers.get('content-type') ?? '';
+      if (!res.ok || !(type.includes('json') || type.includes('text/plain'))) return null;
+      const read = readTrackFile(await res.text(), world, kind);
+      const file = trackEditFile(world);
+      if (read.problem) console.warn(`tracks: ${file} is not read: ${read.problem}`);
+      for (const s of read.skipped) console.warn(`tracks: ${file}: ${s.id} is skipped: ${s.why}`);
+      if (read.unknown.length) console.warn(`tracks: ${file}: fields this build does not read: ${read.unknown.join(', ')}`);
+      return read;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every track's corridor circles, in the file's frame: what the arrival keeps the plants off before the ground is built. */
+  private trackCircles(read: TrackRead | null, kind: WorldKind): { x: number; z: number; r: number }[] {
+    if (!read || kind === 'copies' || !RACE_TUNE.on) return [];
+    return read.tracks.flatMap((t) => corridorCircles(t, t.grid, t.gates));
+  }
+
+  /**
+   * The file read again (the dev server's word that it changed, the console's `reload`): the corridors of the tracks it
+   * added or changed kept clear of plants on the chunks built from now on (a chunk already standing keeps its plants,
+   * as with every exclusion), and the editor's list drawn again. A run under way keeps the track it started on.
+   */
+  private async reloadTracks(world: string): Promise<string> {
+    // The race pass off reads no track and keeps no plant off a corridor (ground rule: off, the world is as it was).
+    if (!RACE_TUNE.on) return 'the race pass is switched off, so no track is read: race({ on: true }), then track({ reload: true })';
+    const before = this.tracksWorld === world ? (this.tracksRead?.tracks ?? []) : [];
+    const read = await this.fetchTracks(world, this.worldKindOf(this.world.planet));
+    if (packIdOf(this.world.planet, this.zone) !== world) return 'the world changed meanwhile';
+    const now = read?.tracks ?? [];
+    const sync = trackSync(before, now);
+    const c = this.world.layoutCenter;
+    const frame = this.trackFrame();
+    for (const t of now) {
+      if (!sync.added.includes(t.id) && !sync.changed.includes(t.id)) continue;
+      for (const k of corridorCircles(t, t.grid, t.gates)) {
+        const g = placementToGame({ x: k.x, y: 0, z: k.z, q: [1, 0, 0, 0] }, c, frame);
+        if (!this.world.keepFloraOff(g.x, g.z, k.r)) break;
+      }
+    }
+    if (import.meta.env.DEV) this.trackListChanged();
+    return `${now.length} track${now.length === 1 ? '' : 's'}: ${sync.added.length} added, ${sync.changed.length} changed, ${sync.removed.length} taken out`;
+  }
+
+  /** Leaving a world (an arrival, the select screen): the run ends, the track in hand is put down, and nothing of either is shown. */
+  private leaveTracks(why: string): void {
+    if (this.raceRun) this.endRun(why);
+    this.clearRun();
+    if (this.trackHeld && this.trackHeldUnsaved) console.info(`tracks: ${this.trackHeld.id} was put down unsaved (${why})`);
+    this.trackHeld = null;
+    this.trackHeldUnsaved = false;
+    this.trackArm = null;
+    this.tracksRead = null;
+    this.tracksWorld = '';
+    this.gateShapesFor = null;
+    this.gateShapeCount = 0;
+    this.raceHud.hideBlock();
+  }
+
+  /** A track of this world's file by its id, or null. */
+  private trackById(id: string): TrackDef | null {
+    if (this.tracksWorld !== packIdOf(this.world.planet, this.zone)) return null;
+    return this.tracksRead?.tracks.find((t) => t.id === id) ?? null;
+  }
+
+  /** The way a hull travels (rad), as a gate dropped at it faces: its travel while the race drive has it, else its heading. */
+  private travelHeading(v: Vehicle): number {
+    const r = v.race;
+    return r?.active && Math.hypot(r.u.x, r.u.z) > 0.5 ? Math.atan2(r.u.x, r.u.z) : v.heading;
+  }
+
+  /** How far over its body's place a hull's middle stands: what the gates are dropped at and tested with. */
+  private hullMiddle(v: Vehicle): number {
+    const b = v.spec.bounds;
+    return (Math.min(b.min[1], b.max[1]) + Math.max(b.min[1], b.max[1])) / 2;
+  }
+
+  /** A place in the game's frame as the track file writes it, facing `heading`. */
+  private filePlace(x: number, y: number, z: number, heading: number): { x: number; y: number; z: number; q: [number, number, number, number] } {
+    const back = fromGame({ x, y, z, q: headingTurn(heading) }, this.world.layoutCenter, this.trackFrame());
+    return roundPlace({ x: back.x, y: back.y, z: back.z, q: [back.q[0], back.q[1], back.q[2], back.q[3]] });
+  }
+
+  /** The hull the player rides that a track can be raced on, or why not. */
+  private racedHullNow(): Vehicle | string {
+    const v = this.player.mounted;
+    if (!v) return 'ride a pod, or a vehicle spawned as a speeder bike, first';
+    if (!v.race) return `${v.spec.label ?? v.spec.id} has no race drive: spawn a pod, or anything as a speeder bike`;
+    if (!RACE_TUNE.on) return 'the race pass is switched off (race({ on: true }))';
+    return v;
+  }
+
+  /**
+   * The race view's heading target and its camera put on a heading a hull was just stood at (the grid, a put-back): the
+   * target is a heading of the world's held within the lead of the nose, so one left from before the hull was turned
+   * would have it turn up to the lead's width off the course at go, toward wherever the view was looking.
+   */
+  private aimRaceViewAt(heading: number): void {
+    this.raceView.target = heading;
+    this.raceView.yaw = heading + Math.PI;
+    // And the orbit behind it, which the race view starts from on the frame it takes the camera.
+    this.cam.yaw = heading + Math.PI;
+  }
+
+  /**
+   * Stand what the player rides at a place on a course, facing `heading`: behind a short curtain (the loading screen's
+   * own) when `curtain`, with the world round it settled and the models near `warmAt` warmed and compiled, so what is
+   * raced past builds no program; at once otherwise. The hull is stood again once the ground is in, at the grid's own
+   * height but never under the ground.
+   */
+  private async standOnCourse(v: Vehicle, x: number, y: number, z: number, heading: number, curtain: { label: string; warmAt: readonly { x: number; z: number }[] } | null): Promise<void> {
+    const stand = () => {
+      const at = Math.max(y, this.courseFloor(x, z) + STAND_LIFT);
+      if (v.race) v.race.standAt(v, x, at, z, heading);
+      else v.teleport(new THREE.Vector3(x, at, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), heading), 0);
+      this.aimRaceViewAt(heading);
+      this.player.syncMount();
+    };
+    stand();
+    if (!curtain) {
+      this.world.jumpTo(v.pos);
+      return;
+    }
+    this.traveling = true;
+    this.map.hide();
+    // The keys as the curtain found them, given back after it: a run started from the debug menu's Gates view leaves
+    // the menu holding the mouse, and taken back regardless the game read the keys typed into the menu, with the
+    // pointer locked under it. The lock is asked back only where nothing else holds the mouse (`handBackMouse`).
+    const held = this.input.captured;
+    this.input.captured = false;
+    this.loadingScreen.show(this.world.planet, curtain.label, 'preparing the track');
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      this.world.jumpTo(v.pos);
+      this.physics.stepOnce();
+      await this.settle(30000, { at: curtain.warmAt, waitMs: TRACK_TUNE.warmWaitMs });
+      // The ground under the grid is in now: stood again on it.
+      stand();
+    } finally {
+      await this.loadingScreen.hide();
+      this.traveling = false;
+      this.input.captured = held;
+    }
+    this.handBackMouse();
+  }
+
+  /** The floor a hull is stood on at a place of a course: the ground, or the water over it. */
+  private courseFloor(x: number, z: number): number {
+    const ground = this.world.terrain.heightAt(x, z);
+    const water = this.world.terrain.waterHeightAt(x, z);
+    return Math.max(ground, Number.isFinite(water) ? water : -Infinity);
+  }
+
+  /**
+   * A run started on what the player rides: refused for a track this world has not got, a hull with no race drive or
+   * one spawned as a kind the track is not raced as (`for`, read against the kind it was spawned as), and while another
+   * run stands. A bike is put in racing mode. The hull is stood at the grid behind the curtain, the run made with the
+   * best this character kept there, and the countdown begun.
+   */
+  private async startRun(id: string): Promise<string> {
+    if (!this.inWorld || this.traveling) return 'not now: enter the world first, and not mid-crossing';
+    if (this.raceRun?.live) return `a run of ${this.raceRun.track.name} is under way: track({ stop: true }) first`;
+    const t = this.trackById(id);
+    if (!t) return `no track called ${id} on this world (${trackEditFile(packIdOf(this.world.planet, this.zone))})`;
+    const v = this.racedHullNow();
+    if (typeof v === 'string') return v;
+    // The kind the vehicle was spawned as, and whether this track is raced as it (`runKindFor`).
+    const raced = runKindFor(t, v.spec.kind);
+    if (!raced.kind) return raced.why;
+    const kind = raced.kind;
+    const def = v.def;
+    if (!def) return 'this vehicle came from no garage entry, so a crash could not put it back: spawn one from the garage';
+    const race = v.race!;
+    // A bike starting a run is put in racing mode, and the message line says so (as U says it) once the curtain is up.
+    const moded = race.modes && race.mode !== 'racing' && !race.setMode(v, 'racing');
+    const world = packIdOf(this.world.planet, this.zone);
+    const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
+    const heading = turnHeading(places.grid.q);
+    const midY = this.hullMiddle(v);
+    await this.standOnCourse(v, places.grid.x, places.grid.y, places.grid.z, heading, { label: t.name, warmAt: [places.grid, ...places.gates] });
+    if (packIdOf(this.world.planet, this.zone) !== world || this.player.mounted !== v || v.disposed) return 'the run was not started: the world or the ride changed behind the curtain';
+    this.clearRun();
+    const key = raceBestKey(world, t.id);
+    const run = new RaceRun(t, world, kind, def.id, places.grid, places.gates, midY, bestOf(this.current?.raceBest, key, kind));
+    run.standing(v.pos.x, v.pos.y, v.pos.z);
+    race.watch = run;
+    this.raceRun = run;
+    this.runVehicle = v;
+    this.runDef = def;
+    this.runNote = '';
+    this.runSplit.until = -Infinity;
+    this.runEvents = 0;
+    this.refreshGateShapes();
+    if (moded) this.messages.system('racing mode: a timed run races the bike');
+    this.messages.system(`${t.name}: ${t.kind === 'circuit' ? `${run.laps} lap${run.laps === 1 ? '' : 's'}` : 'a sprint'}, ${run.n} gates, ${(lapLength(t, places.gates) / 1000).toFixed(1)} km a lap; W in the window round go for a start boost`);
+    return `${t.name} started on the ${def.label} as a ${kind}: counting down from ${TRACK_TUNE.countdown} s`;
+  }
+
+  /**
+   * A run's step, after the hulls have stepped (`stepVehicles`): the world as it stands written into one kept record and
+   * the run's own rules asked what to do (`runStep` in `src/race/raceRun.ts`: the clock moved on by the fixed steps the
+   * physics is about to take, only while play is simulated; a wreck put down and put back after `putBack`; a rider who
+   * died, got off or left racing mode, or a hull taken away without a wreck, ends it; a run over cleared once its rider
+   * is off its hull), the side effects done here, and what happened in the drive's step said and kept.
+   */
+  private stepRun(dt: number, simulate: boolean): void {
+    const run = this.raceRun;
+    if (!run) return;
+    const v = this.runVehicle;
+    const p = this.player;
+    const w = this.runWorld;
+    w.simulate = simulate;
+    w.steps = simulate ? this.physics.stepsAhead(dt) : 0;
+    w.riderDown = p.hp <= 0 || this.dying;
+    w.hull = v !== null;
+    w.destroyed = !!v?.destroyed;
+    w.disposed = !!v?.disposed;
+    w.mounted = v !== null && p.mounted === v;
+    w.racing = !v?.race?.modes || v.race.mode === 'racing';
+    w.placing = this.runPlacing;
+    const act = runStep(run, w);
+    if (act === RUN_ACT.died) this.endRun('the rider died');
+    else if (act === RUN_ACT.wrecked) {
+      if (v?.race) v.race.watch = null;
+      this.runVehicle = null;
+      this.messages.system(`crashed: back on a whole ${this.runDef?.label ?? 'vehicle'} at the last gate in ${TRACK_TUNE.putBack} s`);
+    } else if (act === RUN_ACT.gone) this.endRun('your vehicle is gone');
+    else if (act === RUN_ACT.gotOff) this.endRun('you got off');
+    else if (act === RUN_ACT.leftRacing) this.endRun('the bike left racing mode');
+    else if (act === RUN_ACT.putBack) void this.putBack();
+    else if (act === RUN_ACT.clear) this.clearRun();
+    this.takeRunEvents(run);
+  }
+
+  /** What `stepRun` tells the run's rules about the world, written in place each frame. */
+  private readonly runWorld = newRunWorld();
+
+  /** What happened in the run since the last step, said on the message line, shown in the block, and a best kept. */
+  private takeRunEvents(run: RaceRun): void {
+    const n = run.eventCount;
+    if (!n) return;
+    for (let k = 0; k < n; k++) {
+      const e = run.eventAt(k);
+      this.runEvents++;
+      if (e.kind === RUN_EVENT.go) {
+        this.messages.system(run.startEarned ? 'go! a start boost' : 'go!');
+      } else if (e.kind === RUN_EVENT.gate) {
+        this.runSplit.text = `gate ${e.gate} ${raceTime(e.time)}${Number.isFinite(e.delta) ? ` ${raceDelta(e.delta)}` : ''}`;
+        this.runSplit.tone = !Number.isFinite(e.delta) ? '' : e.delta < 0 ? 'good' : e.delta > 0 ? 'bad' : '';
+        this.runSplit.until = run.clock + TRACK_TUNE.splitShow;
+      } else if (e.kind === RUN_EVENT.lap) {
+        const best = !Number.isFinite(e.delta) || e.delta < 0;
+        this.messages.system(`lap ${e.lap}/${run.laps}: ${raceTime(e.time)}${Number.isFinite(e.delta) ? ` (${raceDelta(e.delta)})` : ''}${best ? ', a best lap' : ''}`);
+        this.runSplit.text = `lap ${raceTime(e.time)}${Number.isFinite(e.delta) ? ` ${raceDelta(e.delta)}` : ''}`;
+        this.runSplit.tone = !Number.isFinite(e.delta) ? '' : e.delta < 0 ? 'good' : e.delta > 0 ? 'bad' : '';
+        this.runSplit.until = run.clock + TRACK_TUNE.splitShow;
+        this.keepRaceBest(run, { lap: e.time, splits: run.circuit ? run.bestSplits ?? undefined : undefined });
+      } else if (e.kind === RUN_EVENT.finish) {
+        const best = !Number.isFinite(e.delta) || e.delta < 0;
+        this.messages.system(`finished ${run.track.name} in ${raceTime(e.time)}${Number.isFinite(e.delta) ? ` (${raceDelta(e.delta)})` : ''}${best ? ': a best time' : ''}`);
+        this.runNote = best ? 'a best time' : 'finished';
+        this.keepRaceBest(run, run.circuit ? { total: e.time } : { lap: e.time, total: e.time, splits: run.bestSplits ?? undefined });
+        if (this.runVehicle?.race) this.runVehicle.race.watch = null;
+      } else if (e.kind === RUN_EVENT.wrongWay) {
+        this.messages.system(`wrong way: gate ${e.gate} is the next`);
+      }
+    }
+    run.clearEvents();
+  }
+
+  /** A lap or a total laid into the character's bests by minimum under the kind the run is raced as (`runBestOf`), kept with the character when anything fell. */
+  private keepRaceBest(run: RaceRun, got: { lap?: number; total?: number; splits?: readonly number[] }): void {
+    const c = this.current;
+    if (!c || this.creating) return;
+    const levels: Record<string, number> = {};
+    const race = this.runVehicle?.race;
+    if (race) for (const [k, n] of Object.entries(race.levels)) if (n) levels[k] = n;
+    const out = runBestOf(c.raceBest, run, got, levels, Date.now());
+    if (!out.lap && !out.total) return;
+    c.raceBest = out.book;
+    upsertCharacter(c);
+  }
+
+  /**
+   * The run given up, in words; its hull let go of the watch. Its block stays, saying why, until the rider is off its
+   * hull or another starts (`runStep`'s clear, as a finished run's does), and its gates are drawn no more.
+   */
+  private endRun(why: string): void {
+    const run = this.raceRun;
+    if (!run || !run.live) return;
+    run.end(why);
+    if (this.runVehicle?.race) this.runVehicle.race.watch = null;
+    if (this.runVehicle?.race) this.runVehicle.race.startBoost = 1;
+    this.world.releaseVehicleMaterials(this.runKept);
+    this.runNote = `run over: ${why}`;
+    this.messages.system(`${run.track.name}: the run is over (${why})`);
+  }
+
+  /** No run at all: the watch let go of, the block and the gates taken off the screen. */
+  private clearRun(): void {
+    if (this.runVehicle?.race) {
+      this.runVehicle.race.watch = null;
+      this.runVehicle.race.startBoost = 1;
+    }
+    this.world.releaseVehicleMaterials(this.runKept);
+    this.raceRun = null;
+    this.runVehicle = null;
+    this.runDef = null;
+    this.runPlacing = false;
+    this.runNote = '';
+    this.runBlockKey.tenths = Number.NaN;
+    if (this.gateShapesFor && !this.trackHeld) {
+      this.gateShapesFor = null;
+      this.gateShapeCount = 0;
+    }
+    this.raceHud.hideBlock();
+  }
+
+  /**
+   * Put back on a whole vehicle after a crash: the same garage entry spawned again as the kind the run was raced as
+   * (`spec.kind`, kept by the run: a Koro-2 raced as a bike comes back a bike), at the last gate crossed (the grid before
+   * the first), facing the next gate and standing still, the rider mounted on it and the run carrying on, its clock
+   * running all the while. The vehicle's model is the run's own, already compiled, so the spawn builds nothing; a run that
+   * ended meanwhile, or a rider who is gone, throws the new hull away.
+   */
+  private async putBack(): Promise<void> {
+    const run = this.raceRun;
+    const def = this.runDef;
+    if (!run || !def || this.runPlacing || run.phase !== 'down') return;
+    this.runPlacing = true;
+    try {
+      // The body's place at the last gate (the grid before the first), never under the floor, and the run's own kind (`putBackSpawn`).
+      const pre = run.putBackPlace();
+      const at = putBackSpawn(run, this.courseFloor(pre.x, pre.z));
+      const v = await this.world.spawnVehicle(def, new THREE.Vector3(at.x, at.y, at.z), at.heading, at.kind, true, this.fitFor(def));
+      if (this.raceRun !== run || run.phase !== 'down' || this.player.mounted || this.player.aboard || this.dying || this.player.hp <= 0) {
+        this.world.disposeVehicle(v);
+        if (this.raceRun === run && run.live) this.endRun('the rider could not be put back');
+        return;
+      }
+      // A bike comes back in the racing mode its run raced in, which the line below says with the rest.
+      let mode = '';
+      if (v.race) {
+        const levels = raceLevelsOf(this.savedFit(def.id));
+        if (Object.keys(levels).length) v.race.setLevels(levels, v);
+        if (v.race.modes && v.race.mode !== 'racing' && !v.race.setMode(v, 'racing')) mode = ', in racing mode';
+        v.race.standAt(v, at.x, at.y, at.z, at.heading);
+      }
+      this.player.mount(v);
+      this.player.syncMount();
+      this.aimRaceViewAt(at.heading);
+      if (v.race) v.race.watch = run;
+      this.runVehicle = v;
+      run.backUp(v.pos.x, v.pos.y, v.pos.z);
+      // The new hull is prepared and holds the programs the wreck's materials held: those can go now.
+      this.world.releaseVehicleMaterials(this.runKept);
+      this.messages.system(`back on the ${def.label} at ${run.lastGate >= 0 ? `gate ${run.lastGate}` : 'the grid'}${mode}`);
+    } catch (err) {
+      if (this.raceRun === run && run.live) this.endRun(`the vehicle could not be spawned again (${err instanceof Error ? err.message : String(err)})`);
+    } finally {
+      this.runPlacing = false;
+    }
+  }
+
+  /** The gates the overlay draws, made again from the run's track, or from the track in hand while editing. Never in a frame. */
+  private refreshGateShapes(): void {
+    if (this.raceRun?.live || this.raceRun?.phase === 'finished' || this.raceRun?.phase === 'ended') {
+      const run = this.raceRun;
+      this.gateShapes = new Float64Array(run.n * 12);
+      for (let i = 0; i < run.n; i++) gateCorners(run.gates, i, this.gateShapes, i * 12);
+      this.gateShapeCount = run.n;
+      this.gateShapesFor = run;
+      return;
+    }
+    const t = this.trackHeld;
+    if (!t || !import.meta.env.DEV) {
+      this.gateShapeCount = 0;
+      this.gateShapesFor = null;
+      return;
+    }
+    const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
+    // Baked as the run bakes its own, so a gate drawn while it is laid is the window a run will test.
+    const baked = new Float64Array(places.gates.length * GATE_STRIDE);
+    for (let i = 0; i < places.gates.length; i++) bakeGate(places.gates[i], baked, i);
+    this.gateShapes = new Float64Array(places.gates.length * 12);
+    for (let i = 0; i < places.gates.length; i++) gateCorners(baked, i, this.gateShapes, i * 12);
+    this.gateShapeCount = places.gates.length;
+    this.gateShapesFor = t;
+  }
+
+  /** The race's shapes on the overlay and its block, one frame (`drawOverlay`). Allocates nothing on a frame the block does not change. */
+  private drawRace(): void {
+    const run = this.raceRun;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    // A run over (finished, or ended in words) keeps its block until `runStep` clears it, and draws no gate.
+    if (run && this.gateShapesFor === run && (run.live || run.phase === 'finished' || run.phase === 'ended')) {
+      const racing = run.live;
+      const next = racing ? run.next : -1;
+      const after = racing ? (run.circuit ? (run.next + 1) % run.n : run.next + 1 < run.n ? run.next + 1 : -1) : -1;
+      this.raceHud.drawGates(this.gateShapes, this.gateShapeCount, next, after, false, this.cam.camera, w, h);
+      this.updateRaceBlock(run);
+      return;
+    }
+    if (import.meta.env.DEV && this.trackHeld && this.gateShapesFor === this.trackHeld) {
+      this.raceHud.drawGates(this.gateShapes, this.gateShapeCount, -1, -1, true, this.cam.camera, w, h);
+    }
+    this.raceHud.hideBlock();
+  }
+
+  /** The block's words, worked out again only when the tenths, the phase or what happened has moved: the block writes only what changed. */
+  private updateRaceBlock(run: RaceRun): void {
+    const tenths = Math.floor(run.clock * 10);
+    const key = this.runBlockKey;
+    if (key.tenths === tenths && key.phase === run.phase && key.events === this.runEvents) return;
+    key.tenths = tenths;
+    key.phase = run.phase;
+    key.events = this.runEvents;
+    this.raceHud.block(this.raceBlockView(run));
+  }
+
+  /** What the race block says now (`RaceBlockView`), in words. */
+  private raceBlockView(run: RaceRun): RaceBlockView {
+    const counting = run.phase === 'countdown';
+    const goShown = run.phase === 'racing' && run.clock < 0.8;
+    const lapNow = Math.min(run.lap, run.laps);
+    const lastLap = run.lapTimes.length ? run.lapTimes[run.lapTimes.length - 1] : Number.NaN;
+    const time = run.phase === 'finished' ? run.total : run.phase === 'ended' ? Number.NaN : Math.max(0, run.clock);
+    const split = run.clock <= this.runSplit.until ? this.runSplit : null;
+    return {
+      title: run.track.name,
+      countdown: counting ? String(Math.ceil(-run.clock)) : goShown ? 'GO' : '',
+      lap: run.circuit ? `lap ${lapNow}/${run.laps}` : `gate ${Math.min(run.next + 1, run.n)}/${run.n}`,
+      time: Number.isFinite(time) ? raceTime(time) : '',
+      split: split ? split.text : '',
+      splitTone: split ? split.tone : '',
+      last: run.circuit && Number.isFinite(lastLap) ? `last ${raceTime(lastLap)}` : '',
+      best: Number.isFinite(run.bestLap) ? `best lap ${raceTime(run.bestLap)}${Number.isFinite(run.bestTotal) && run.circuit ? ` · best ${raceTime(run.bestTotal)}` : ''}` : '',
+      note: run.phase === 'down' ? `put back in ${Math.max(0, run.downAt + TRACK_TUNE.putBack - run.clock).toFixed(1)} s` : run.wrongWay ? 'wrong way' : this.runNote,
+    };
+  }
+
+  // ---- the dev server's track editor ---------------------------------------------------------------------------------
+
+  /** One ask of the dev server's track editor, answered. */
+  private async postTracks(op: Record<string, unknown>): Promise<TrackReply> {
+    if (!import.meta.env.DEV) return { ok: false, why: "the editor is the dev server's" };
+    try {
+      const res = await fetch('/__dev/tracks', { method: 'POST', headers: { 'Content-Type': 'application/json', [TRACK_EDITOR_HEADER]: TRACK_EDITOR_HEADER_VALUE }, body: JSON.stringify(op), cache: 'no-store' });
+      const body = (await res.json().catch(() => null)) as TrackReply | null;
+      return body && typeof body === 'object' && typeof body.ok === 'boolean' ? body : { ok: false, why: `the dev server answered ${res.status}` };
+    } catch (err) {
+      return { ok: false, why: `the dev server's track editor did not answer: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  /** An ask that waits for a second: true when this is the second (within the placements' own window), false when it was armed now. */
+  private trackArmed(what: string): boolean {
+    const now = performance.now();
+    if (this.trackArm && this.trackArm.what === what && now < this.trackArm.until) {
+      this.trackArm = null;
+      return true;
+    }
+    this.trackArm = { what, until: now + 15000 };
+    return false;
+  }
+
+  /** The track in hand changed: marked unsaved, its gates drawn again, the list drawn again. */
+  private trackHeldChanged(t: TrackDef): void {
+    this.trackHeld = t;
+    this.trackHeldUnsaved = true;
+    this.refreshGateShapes();
+    this.trackListChanged();
+  }
+
+  /** A new track in hand: its grid where the player rides, facing its travel; then each gate is dropped (Numpad0) or put in after. */
+  private trackBegin(id: string): string {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    if (!isTrackId(id)) return 'a track id is a-z, 0-9, _ and - (64 at most, starting with a letter or a digit)';
+    if (this.raceRun?.live) return 'not during a run: track({ stop: true }) first';
+    if (this.trackById(id)) return `${id} is in ${trackEditFile(packIdOf(this.world.planet, this.zone))} already: track({ edit: '${id}' }) takes it in hand`;
+    const v = this.racedHullNow();
+    if (typeof v === 'string') return v;
+    const kind = RACE_KINDS.includes(v.spec.kind as RaceKind) ? (v.spec.kind as RaceKind) : 'podracer';
+    const t: TrackDef = { id, name: id.replace(/[-_]+/g, ' '), kind: 'circuit', laps: 3, for: [kind], clear: 12, grid: this.filePlace(v.pos.x, v.pos.y, v.pos.z, this.travelHeading(v)), gates: [] };
+    this.trackHeldChanged(t);
+    return `${id} begun, its grid where you ride: drive the course and press ${keyLabel(this.input.bindings.trackGate[0] ?? 'Numpad0')} at each gate, then track({ save: true })`;
+  }
+
+  /** A track of this world's file taken in hand to edit. */
+  private trackEdit(id: string): string {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const t = this.trackById(id);
+    if (!t) return `no track called ${id} on this world`;
+    this.trackHeld = JSON.parse(JSON.stringify(t)) as TrackDef;
+    this.trackHeldUnsaved = false;
+    this.refreshGateShapes();
+    this.trackListChanged();
+    return `${id} in hand: ${t.gates.length} gates`;
+  }
+
+  /** A gate dropped where the player rides (`trackGate`, Numpad0), facing its travel, after the last gate or after `after`. */
+  private trackGateHere(after: number | null): string {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const t = this.trackHeld;
+    if (!t) return "no track in hand: track({ begin: 'id' })";
+    const v = this.racedHullNow();
+    if (typeof v === 'string') return v;
+    const place = this.filePlace(v.pos.x, v.pos.y + this.hullMiddle(v), v.pos.z, this.travelHeading(v));
+    const i = after ?? t.gates.length - 1;
+    const next = insertGate(t, i, place, gateSizeFor(v.spec.kind));
+    if (typeof next === 'string') return next;
+    this.trackHeldChanged(next);
+    return `gate ${i + 1} dropped (${next.gates.length} in all)`;
+  }
+
+  /** One edit to a gate of the track in hand: `go`, `here`, `insert`, `move`, `size` or `delete`. */
+  private trackGateOp(i: number, o: { go?: boolean; here?: boolean; insert?: boolean; move?: { x?: number; y?: number; z?: number; yaw?: number }; size?: { w?: number; h?: number }; delete?: boolean }): string | Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const t = this.trackHeld;
+    if (!t) return "no track in hand: track({ begin: 'id' }) or track({ edit: 'id' })";
+    if (!Number.isInteger(i) || i < 0 || i >= t.gates.length) return `there is no gate ${i}: the gates are 0 to ${t.gates.length - 1}`;
+    if (o.go) {
+      const v = this.racedHullNow();
+      if (typeof v === 'string') return v;
+      const g = trackInGame(t, this.world.layoutCenter, this.trackFrame()).gates[i];
+      return this.standOnCourse(v, g.x, g.y - this.hullMiddle(v), g.z, turnHeading(g.q), null).then(() => `at gate ${i}, facing through it`);
+    }
+    let next: TrackDef | string;
+    if (o.here || o.insert) {
+      const v = this.racedHullNow();
+      if (typeof v === 'string') return v;
+      const place = this.filePlace(v.pos.x, v.pos.y + this.hullMiddle(v), v.pos.z, this.travelHeading(v));
+      next = o.here ? moveGateTo(t, i, place) : insertGate(t, i, place, gateSizeFor(v.spec.kind));
+    } else if (o.move) next = nudgeGate(t, i, o.move, this.trackFrame());
+    else if (o.size) next = resizeGate(t, i, o.size);
+    else if (o.delete) next = deleteGate(t, i);
+    else return 'a gate edit is go, here, insert, move, size or delete';
+    if (typeof next === 'string') return next;
+    this.trackHeldChanged(next);
+    return o.here ? `gate ${i} moved to where you ride` : o.insert ? `a gate put in after ${i}` : o.move ? `gate ${i} nudged` : o.size ? `gate ${i} is ${next.gates[i].w} × ${next.gates[i].h} m` : `gate ${i} taken out`;
+  }
+
+  /** The track in hand's own fields set (`name`, `kind`, `laps`, `for`, `clear`), each as the reader would take it. */
+  private trackSet(patch: Record<string, unknown>): string {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const t = this.trackHeld;
+    if (!t) return 'no track in hand';
+    const next: TrackDef = { ...t };
+    if (typeof patch.name === 'string') next.name = patch.name.slice(0, 80);
+    if (patch.kind === 'circuit' || patch.kind === 'sprint') {
+      next.kind = patch.kind;
+      if (patch.kind === 'sprint') next.laps = 1;
+    }
+    if (typeof patch.laps === 'number' && next.kind === 'circuit') next.laps = Math.max(1, Math.min(99, Math.round(patch.laps)));
+    if (Array.isArray(patch.for)) next.for = RACE_KINDS.filter((k) => (patch.for as unknown[]).includes(k));
+    if (typeof patch.clear === 'number' && Number.isFinite(patch.clear)) next.clear = Math.max(0, Math.min(32, patch.clear));
+    if (!next.for.length) return 'a track is raced as a pod, a bike, or both';
+    this.trackHeldChanged(next);
+    return `${next.id}: ${next.name}, a ${next.kind}${next.kind === 'circuit' ? ` of ${next.laps} laps` : ''}, raced as ${next.for.join(' and ')}, clear ${next.clear} m`;
+  }
+
+  /** The grid of the track in hand moved to where the player rides, facing its travel. */
+  private trackGridHere(): string {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const t = this.trackHeld;
+    if (!t) return 'no track in hand';
+    const v = this.racedHullNow();
+    if (typeof v === 'string') return v;
+    this.trackHeldChanged({ ...t, grid: this.filePlace(v.pos.x, v.pos.y, v.pos.z, this.travelHeading(v)) });
+    return `${t.id}'s grid is where you ride`;
+  }
+
+  /** The track in hand written into this world's file: the first save to a file each session asks twice. */
+  private async trackSave(): Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const t = this.trackHeld;
+    if (!t) return 'no track in hand';
+    const world = packIdOf(this.world.planet, this.zone);
+    const file = trackEditFile(world);
+    if (t.gates.length < 2) return `${t.id} has ${t.gates.length} gate${t.gates.length === 1 ? '' : 's'}, and a track has two at least`;
+    if (!this.trackFilesSaved.has(file) && !this.trackArmed(`save:${file}`)) return `the first save to ${file} this session: track({ save: true }) again to write it`;
+    const reply = await this.postTracks({ op: 'put', world, track: t });
+    if (!reply.ok) return `not saved: ${reply.why}`;
+    this.trackFilesSaved.add(file);
+    this.trackHeldUnsaved = false;
+    if (packIdOf(this.world.planet, this.zone) === world) {
+      this.tracksRead = reply.read;
+      this.tracksWorld = world;
+    }
+    this.trackListChanged();
+    return `${t.id} saved in ${file}: commit it, or a local release pack refuses the tree`;
+  }
+
+  /** A track taken out of this world's file, asked twice. */
+  private async trackRemove(id: string): Promise<string> {
+    if (!import.meta.env.DEV) return "the editor is the dev server's";
+    const world = packIdOf(this.world.planet, this.zone);
+    if (!this.trackById(id)) return `no track called ${id} on this world`;
+    if (!this.trackArmed(`remove:${world}/${id}`)) return `take ${id} out of ${trackEditFile(world)}? track({ remove: '${id}' }) again to do it`;
+    const reply = await this.postTracks({ op: 'delete', world, id });
+    if (!reply.ok) return `not taken out: ${reply.why}`;
+    if (packIdOf(this.world.planet, this.zone) === world) {
+      this.tracksRead = reply.read;
+      this.tracksWorld = world;
+    }
+    if (this.trackHeld?.id === id) this.trackHeldUnsaved = true;
+    this.trackListChanged();
+    return `${id} taken out of ${trackEditFile(world)}`;
+  }
+
+  /** The editor's list drawn again if the debug menu shows it (the menu asks the list itself when it is drawn). */
+  private trackListChanged(): void {
+    this.debugMenu?.refreshList();
+  }
+
+  /** What the editor's list shows: this world's tracks and the track in hand with its gates. */
+  private trackListModel(): TrackListModel {
+    const world = packIdOf(this.world.planet, this.zone);
+    const read = this.tracksWorld === world ? this.tracksRead : null;
+    const frame = this.trackFrame();
+    const centre = this.world.layoutCenter;
+    const tracks = (read?.tracks ?? []).map((t) => ({ id: t.id, name: t.name, kind: t.kind, laps: t.laps, gates: t.gates.length, length: lapLength(t, trackInGame(t, centre, frame).gates) }));
+    const t = this.trackHeld;
+    let held: TrackListModel['held'] = null;
+    if (t) {
+      const g = trackInGame(t, centre, frame);
+      const me = this.player.worldPos;
+      held = {
+        id: t.id,
+        name: t.name,
+        kind: t.kind,
+        laps: t.laps,
+        for: [...t.for],
+        clear: t.clear,
+        unsaved: this.trackHeldUnsaved,
+        gates: g.gates.map((gate, i) => {
+          const prev = i === 0 ? g.grid : g.gates[i - 1];
+          return { w: gate.w, h: gate.h, from: Math.hypot(gate.x - prev.x, gate.z - prev.z), away: Math.hypot(gate.x - me.x, gate.z - me.z) };
+        }),
+      };
+    }
+    return { world, file: trackEditFile(world), tracks, problem: read?.problem ?? '', held };
+  }
+
+  /** The editor's list, made once (the dev server's alone). */
+  private trackListOf(): TrackList | null {
+    if (!import.meta.env.DEV) return null;
+    this.trackListView ??= new TrackList({
+      model: () => this.trackListModel(),
+      act: (o) => this.trackConsole(o as TrackConsoleOpts).then((r) => (typeof r === 'string' ? r : String((r as { words?: string[] }).words?.join('; ') || 'done'))),
+      nudge: () => ({ m: TRACK_TUNE.nudge, deg: TRACK_TUNE.nudgeTurn }),
+    });
+    return this.trackListView;
+  }
+
+  /**
+   * What stands in a track's corridor (`track({ check })`): every placed object, tree trunk or rock, lair, herd or camp
+   * and post a racing hull would meet between its gates, each a crash at racing speed. Trees are read only off the
+   * ground chunks built now, so the answer says how much of the course was built when it was asked.
+   */
+  private trackCheck(t: TrackDef): { hits: { what: string; leg: string; off: number; at: [number, number] }[]; built: string; words: string } {
+    const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
+    const legs = courseLegs(t, places.grid, places.gates);
+    const found = this.world.courseThings(legs);
+    const hits = corridorHits(legs, found.things as CourseThing[]);
+    const legName = (i: number) => (i === 0 ? 'grid to gate 0' : i <= t.gates.length - 1 ? `gate ${i - 1} to ${i}` : `gate ${t.gates.length - 1} to 0`);
+    const raw = (x: number, z: number): [number, number] => {
+      const p = fromGame({ x, y: 0, z, q: [0, 0, 0, 1] }, this.world.layoutCenter, this.trackFrame());
+      return [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10];
+    };
+    const share = found.points ? found.built / found.points : 0;
+    return {
+      hits: hits.map((h) => ({ what: h.thing.what, leg: legName(h.leg), off: Math.round(h.off * 10) / 10, at: raw(h.thing.x, h.thing.z) })),
+      built: `${Math.round(share * 100)}% of the course stands on ground chunks built now (trees are read only there)`,
+      words: hits.length ? `${hits.length} thing${hits.length === 1 ? '' : 's'} in ${t.name}'s corridor` : `nothing in ${t.name}'s corridor`,
+    };
+  }
+
+  /** `__debug.track(opts)`: the world's tracks, the run, the bests, and everything the editor and a run do. */
+  private async trackConsole(opts: TrackConsoleOpts = {}): Promise<Record<string, unknown> | string> {
+    const words: string[] = [];
+    if (opts.tune) words.push(...tuneTrack(opts.tune));
+    if (opts.reload) words.push(await this.reloadTracks(packIdOf(this.world.planet, this.zone)));
+    if (typeof opts.begin === 'string') words.push(this.trackBegin(opts.begin));
+    if (typeof opts.edit === 'string') words.push(this.trackEdit(opts.edit));
+    if (opts.set) words.push(this.trackSet(opts.set));
+    if (opts.grid === 'here') words.push(this.trackGridHere());
+    if (opts.gate === true) words.push(this.trackGateHere(null));
+    else if (typeof opts.gate === 'number') words.push(await this.trackGateOp(opts.gate, { go: opts.go === true, here: opts.here, insert: opts.insert, move: opts.move, size: opts.size, delete: opts.delete }));
+    if (opts.save) words.push(await this.trackSave());
+    if (typeof opts.remove === 'string') words.push(await this.trackRemove(opts.remove));
+    if (opts.drop) {
+      words.push(this.trackHeld ? `${this.trackHeld.id} put down${this.trackHeldUnsaved ? ' unsaved' : ''}` : 'no track in hand');
+      this.trackHeld = null;
+      this.trackHeldUnsaved = false;
+      this.refreshGateShapes();
+      this.trackListChanged();
+    }
+    if (opts.stop) {
+      if (this.raceRun?.live) this.endRun('stopped from the console');
+      this.clearRun();
+      words.push('no run');
+    }
+    if (typeof opts.go === 'string') {
+      const t = this.trackById(opts.go) ?? (this.trackHeld?.id === opts.go ? this.trackHeld : null);
+      const v = this.racedHullNow();
+      if (!t) words.push(`no track called ${opts.go} on this world`);
+      else if (typeof v === 'string') words.push(v);
+      else if (this.raceRun?.live) words.push('not during a run: track({ stop: true }) first');
+      else {
+        const places = trackInGame(t, this.world.layoutCenter, this.trackFrame());
+        const far = v.pos.distanceTo(new THREE.Vector3(places.grid.x, places.grid.y, places.grid.z)) > 300;
+        await this.standOnCourse(v, places.grid.x, places.grid.y, places.grid.z, turnHeading(places.grid.q), far ? { label: t.name, warmAt: [places.grid] } : null);
+        words.push(`at ${t.name}'s grid`);
+      }
+    }
+    if (typeof opts.start === 'string') words.push(await this.startRun(opts.start));
+    let check: { hits: { what: string; leg: string; off: number; at: [number, number] }[]; built: string; words: string } | null = null;
+    if (typeof opts.check === 'string') {
+      const t = this.trackById(opts.check) ?? (this.trackHeld?.id === opts.check ? this.trackHeld : null);
+      if (!t) words.push(`no track called ${opts.check} on this world`);
+      else {
+        check = this.trackCheck(t);
+        words.push(check.words);
+      }
+    }
+    const world = packIdOf(this.world.planet, this.zone);
+    const read = this.tracksWorld === world ? this.tracksRead : null;
+    const centre = this.world.layoutCenter;
+    const frame = this.trackFrame();
+    const bests = Object.entries(this.current?.raceBest ?? {})
+      .filter(([k]) => k.startsWith(`${world}/`))
+      .map(([k, byKind]) => ({ track: k.slice(world.length + 1), ...Object.fromEntries(Object.entries(byKind ?? {}).map(([kind, b]) => [kind, b ? { lap: raceTime(b.lap), total: b.total ? raceTime(b.total) : null, levels: b.levels } : null])) }));
+    return {
+      world,
+      file: trackEditFile(world),
+      problem: read?.problem ?? null,
+      skipped: read?.skipped ?? [],
+      tracks: (read?.tracks ?? []).map((t) => ({ id: t.id, name: t.name, kind: t.kind, laps: t.laps, for: t.for, clear: t.clear, gates: t.gates.length, km: Number((lapLength(t, trackInGame(t, centre, frame).gates) / 1000).toFixed(2)) })),
+      run: this.raceRun ? { ...this.raceRun.report(), vehicle: this.runVehicle?.spec.id ?? null, hull: this.runVehicle ? { at: [this.runVehicle.pos.x, this.runVehicle.pos.y, this.runVehicle.pos.z].map((n) => Number(n.toFixed(1))), heading: this.runVehicle.race ? Number(this.runVehicle.race.heading.toFixed(3)) : null } : null, putBackSpawning: this.runPlacing, block: this.raceHud.texts() } : null,
+      best: bests,
+      held: import.meta.env.DEV && this.trackHeld ? { id: this.trackHeld.id, gates: this.trackHeld.gates.length, unsaved: this.trackHeldUnsaved } : null,
+      ...(check ? { check } : {}),
+      tune: { ...TRACK_TUNE },
+      words,
+    };
   }
 
   /**

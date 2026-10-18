@@ -138,6 +138,8 @@ export interface Settings extends FxSettings {
   hudTargetBlock: boolean;
   /** The speed, gun and booster arcs around the reticle in flight. */
   hudArcs: boolean;
+  /** A race run's block: the countdown, the lap, the time, the splits against the best, and the gates ahead drawn on the overlay. */
+  hudRaceBlock: boolean;
   /** The bottom-left line where everything that happens is said. */
   hudMessages: boolean;
   /** How many of those lines stand at once, 3 to 8. */
@@ -243,6 +245,8 @@ export const DEFAULT_SETTINGS: Settings = {
   hudShipCondition: true,
   hudTargetBlock: true,
   hudArcs: true,
+  // Ours, and on: a run with no clock and no gates on the screen is not a race anybody can run.
+  hudRaceBlock: true,
   hudMessages: true,
   hudMessageLines: 8,
   // Invented, and off: the short action bar now puts the key you have bound on every action it

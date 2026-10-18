@@ -162,6 +162,9 @@ function stableJson(value: unknown): string {
  * The character's progress is in it the story's way: by how many batches this browser applied to its record
  * with nobody else holding it (`progress.local`, src/progress/progressClient.ts, `x:`), and only while there
  * are any, so a character never played alone keeps the mark it had before there was progress.
+ *
+ * Its best times on the race tracks are in it (`r:`, src/race/raceRun.ts), only while there are any: a best is a
+ * change worth settling, and a character that has never finished a lap keeps the mark it had before there were tracks.
  */
 export function characterMark(c: {
   name?: string;
@@ -174,6 +177,7 @@ export function characterMark(c: {
   saber?: { color: string };
   story?: { local: number };
   progress?: { local: number };
+  raceBest?: Record<string, unknown>;
 }): string {
   const parts: string[] = [];
   parts.push(`n:${c.name ?? ''}`);
@@ -194,6 +198,7 @@ export function characterMark(c: {
     .map((o) => `${o.kind}:${o.id}=${stableJson(o.tint)}`)
     .sort();
   if (tinted.length) parts.push(`t:${tinted.join(',')}`);
+  if (c.raceBest && Object.keys(c.raceBest).length) parts.push(`r:${stableJson(c.raceBest)}`);
   return toHex(sha256(utf8(parts.join('|')))).slice(0, 16);
 }
 

@@ -30,6 +30,10 @@
 // arguments box, with Console beside them for the box. A slider sets its number through the helper's own
 // setter as it moves; nothing it sets is kept by itself, as with every knob, so the bar above them shows the
 // console line that sets every dial moved again, copies it, and pins it to run at start.
+//
+// A helper may have a list as well (`DebugMenuDeps.list`: the track editor's gates, a row each with its buttons, on
+// the dev server alone), shown as a third mode beside the sliders and the box and drawn by the game's own code; the
+// window only gives it a place, a status line and a way to be drawn again.
 
 import { allDials, dialMoved, dialNumber, dialText, dialUnit, movedArgs, movedLine, resetDials, snapDial, type Dial, type DialSet } from './dials.ts';
 import { DEBUG_MENU_TUNE, OTHER_GROUP, bestMatch, callText, captureConsole, describeValue, evaluateArgs, filterGroups, groupHelpers, isThenable, keepsColumns, pushHistory, readStore, sameCall, setAtStart, startCalls, togglePin, toJsonText, writeStore, type CallRecord, type ConsoleLike, type ConsoleLine, type DebugStore, type HelperEntry, type ViewNode } from './debugModel.ts';
@@ -53,7 +57,24 @@ export interface DebugMenuDeps {
   holdKeys: (ms: number) => void;
   /** The dials a helper on `__debug` has (its numbers of feel, as sliders), or null for one with none. */
   dials?: (helper: string) => DialSet | null;
+  /** A list a helper on `__debug` shows in the window (the track editor's gates, on the dev server), or null for one with none. */
+  list?: (helper: string) => DebugListSource | null;
 }
+
+/**
+ * A list a helper shows in the window in place of its arguments box: rows of its own with buttons and fields, drawn by
+ * the game (the track editor's gates, `src/ui/trackList.ts`). The window draws it when it is shown and whenever the
+ * list asks (`redraw`, after an edit), and never in a frame.
+ */
+export interface DebugListSource {
+  /** The mode button's word. */
+  label: string;
+  /** Draw every row into `into` afresh; `say` writes the window's status line, `redraw` asks for the rows again. */
+  draw(into: HTMLElement, say: (text: string, tone: '' | 'ok' | 'bad' | 'warn') => void, redraw: () => void): void;
+}
+
+/** What the picked helper is shown as: its sliders, its list, or its arguments box. */
+type ViewMode = 'sliders' | 'list' | 'console';
 
 /** One dial's row as the window holds it, so a slider moved writes its own row and nothing else. */
 interface DialRow {
@@ -269,6 +290,7 @@ const DEBUG_MENU_CSS = `
 .dbg-panel button.dbg-choice.on { color: var(--accent); border-color: var(--accent); }
 .dbg-panel button.dbg-dreset.off { visibility: hidden; }
 .dbg-dn { grid-column: 1 / -1; color: var(--muted); font-size: 11px; line-height: 1.3; margin: 0 0 3px; }
+.dbg-listview { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
 `;
 
 export class DebugMenu {
@@ -302,8 +324,15 @@ export class DebugMenu {
   private readonly dialPin: HTMLButtonElement;
   /** The picked helper's dials, or null when it has none. */
   private dialSet: DialSet | null = null;
-  /** Its sliders shown (true), or the arguments box (false): the sliders until Console is chosen. */
-  private dialMode = true;
+  /** The picked helper's list, or null when it has none. */
+  private listSource: DebugListSource | null = null;
+  /** The list's rows, drawn by the list itself. */
+  private readonly listView: HTMLElement;
+  /**
+   * What a helper with sliders or a list is shown as, chosen last: its sliders until another is chosen, and a helper
+   * that does not offer the one chosen is shown as the first it does.
+   */
+  private viewMode: ViewMode = 'sliders';
   private readonly dialRows = new Map<string, DialRow>();
   /** The groups of dials folded shut, by title, kept while the window is drawn again. */
   private readonly dialShut = new Set<string>();
@@ -423,7 +452,8 @@ export class DebugMenu {
     for (const b of [this.dialResetAll, this.dialCopy, this.dialPin]) b.type = 'button';
     this.dialBar.append(this.dialCount, this.dialLine, this.dialResetAll, this.dialCopy, this.dialPin);
     this.dialsEl = el('div', 'dbg-dials hidden');
-    main.append(this.titleEl, this.docEl, this.exEl, this.callRow, this.dialBar, this.statusEl, this.outEl, this.dialsEl, this.linesHead, this.linesEl);
+    this.listView = el('div', 'dbg-listview hidden');
+    main.append(this.titleEl, this.docEl, this.exEl, this.callRow, this.dialBar, this.statusEl, this.outEl, this.dialsEl, this.listView, this.linesHead, this.linesEl);
     body.append(side, main);
     this.panel.append(body);
 
@@ -482,8 +512,10 @@ export class DebugMenu {
     this.readHelpers();
     this.drawList();
     this.drawSaved();
-    // The console may have moved a number while the window was shut: the sliders read them all again.
+    // The console may have moved a number while the window was shut: the sliders read them all again, and a list
+    // (a track edited from the console meanwhile) is drawn again.
     this.refreshDials();
+    if (this.modeNow === 'list') this.drawHelperList();
     void this.loadDocs();
     if (!this.selected && this.store.last) {
       const h = this.find(this.store.last.helper, this.store.last.on);
@@ -652,15 +684,21 @@ export class DebugMenu {
     this.callRow.classList.remove('hidden');
     this.titleEl.replaceChildren(el('b', '', h.name), el('span', '', h.on === 'window' ? 'on the window' : 'on __debug'));
     this.dialSet = h.on === 'debug' ? (this.deps.dials?.(h.name) ?? null) : null;
-    if (this.dialSet) {
+    this.listSource = h.on === 'debug' ? (this.deps.list?.(h.name) ?? null) : null;
+    if (this.dialSet || this.listSource) {
       const sw = el('span', 'dbg-mode');
-      for (const [label, sliders] of [['Sliders', true], ['Console', false]] as const) {
-        const b = el('button', `dbg-mode-b${this.dialMode === sliders ? ' on' : ''}`, label);
+      const now = this.modeNow;
+      const offered: [string, ViewMode, string][] = [];
+      if (this.dialSet) offered.push(['Sliders', 'sliders', 'its numbers as sliders']);
+      if (this.listSource) offered.push([this.listSource.label, 'list', 'its list, with a button for each thing it does']);
+      offered.push(['Console', 'console', 'its arguments box, as for any helper']);
+      for (const [label, mode, title] of offered) {
+        const b = el('button', `dbg-mode-b${now === mode ? ' on' : ''}`, label);
         b.type = 'button';
-        b.title = sliders ? 'its numbers as sliders' : 'its arguments box, as for any helper';
+        b.title = title;
         b.addEventListener('click', () => {
-          if (this.dialMode === sliders) return;
-          this.dialMode = sliders;
+          if (this.modeNow === mode) return;
+          this.viewMode = mode;
           this.drawSelected();
         });
         sw.append(b);
@@ -701,24 +739,38 @@ export class DebugMenu {
     this.exEl.replaceChildren();
     this.callRow.classList.add('hidden');
     this.dialSet = null;
+    this.listSource = null;
     this.drawMode();
   }
 
   // ---- the dials -----------------------------------------------------------------------------------
 
-  /** Whether the picked helper is shown as its sliders: it has dials and Console is not chosen. */
-  private get showingDials(): boolean {
-    return !!this.dialSet && this.dialMode;
+  /** What the picked helper is shown as now: the mode chosen where it offers it, else the first it offers. */
+  private get modeNow(): ViewMode {
+    const m = this.viewMode;
+    if (m === 'sliders' && this.dialSet) return 'sliders';
+    if (m === 'list' && this.listSource) return 'list';
+    if (m === 'console') return 'console';
+    return this.dialSet ? 'sliders' : this.listSource ? 'list' : 'console';
   }
 
-  /** The sliders or the arguments box, whichever is shown, and everything that goes with each. */
+  /** Whether the picked helper is shown as its sliders: it has dials and nothing else is chosen. */
+  private get showingDials(): boolean {
+    return this.modeNow === 'sliders';
+  }
+
+  /** The sliders, the list or the arguments box, whichever is shown, and everything that goes with each. */
   private drawMode(): void {
-    const dials = this.showingDials;
-    for (const e of [this.docEl, this.exEl, this.outEl]) e.classList.toggle('hidden', dials);
-    if (this.selected) this.callRow.classList.toggle('hidden', dials);
+    const mode = this.modeNow;
+    const dials = mode === 'sliders';
+    const list = mode === 'list';
+    const own = dials || list;
+    for (const e of [this.docEl, this.exEl, this.outEl]) e.classList.toggle('hidden', own);
+    if (this.selected) this.callRow.classList.toggle('hidden', own);
     this.dialBar.classList.toggle('hidden', !dials);
     this.dialsEl.classList.toggle('hidden', !dials);
-    const lines = !dials && this.written > 0;
+    this.listView.classList.toggle('hidden', !list);
+    const lines = !own && this.written > 0;
     this.linesHead.classList.toggle('hidden', !lines);
     this.linesEl.classList.toggle('hidden', !lines);
     if (dials) this.drawDials();
@@ -726,6 +778,33 @@ export class DebugMenu {
       this.dialRows.clear();
       this.dialsEl.replaceChildren();
     }
+    if (list) this.drawHelperList();
+    else this.listView.replaceChildren();
+  }
+
+  /** The picked helper's list drawn again, when the window is open on it: what the game calls when the list's model changed. */
+  refreshList(): void {
+    if (this.open && this.modeNow === 'list') this.drawHelperList();
+  }
+
+  /** The picked helper's list, drawn afresh by the list itself, keeping the keyboard in the window. */
+  private drawHelperList(): void {
+    const src = this.listSource;
+    this.keepFocus(() => {
+      this.listView.replaceChildren();
+      if (!src) return;
+      try {
+        src.draw(
+          this.listView,
+          (text, tone) => this.status(text, tone),
+          () => {
+            if (this.listSource === src && this.modeNow === 'list') this.drawHelperList();
+          },
+        );
+      } catch (err) {
+        this.status(`the list could not be drawn: ${err instanceof Error ? err.message : String(err)}`, 'bad');
+      }
+    });
   }
 
   /** Every dial's row, made afresh: on a pick, and on a change of mode. */
@@ -1311,7 +1390,7 @@ export class DebugMenu {
    * the call in the box (or unpins it with false), `atStart` ticks that pin to run at start (or clears
    * the tick), and `start` runs every ticked pin now, as a reload would once its first world is up.
    */
-  async drive(o: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean; mode?: 'sliders' | 'console'; dial?: { key: string; value: number | string }; resetDials?: boolean; pinDials?: boolean } = {}, say: (line: string) => void = () => {}): Promise<void> {
+  async drive(o: { open?: boolean; pick?: string; args?: string; run?: boolean; pin?: boolean; atStart?: boolean; start?: boolean; mode?: 'sliders' | 'console' | 'list'; dial?: { key: string; value: number | string }; resetDials?: boolean; pinDials?: boolean } = {}, say: (line: string) => void = () => {}): Promise<void> {
     // The list and the README as they stand, so the report that follows is the whole of it.
     this.readHelpers();
     await this.loadDocs();
@@ -1338,8 +1417,8 @@ export class DebugMenu {
       this.drawPin();
       this.drawSaved();
     }
-    if (o.mode === 'sliders' || o.mode === 'console') {
-      this.dialMode = o.mode === 'sliders';
+    if (o.mode === 'sliders' || o.mode === 'console' || o.mode === 'list') {
+      this.viewMode = o.mode;
       if (this.selected) this.drawSelected();
     }
     // A dial moved as its slider or its box would move it, through the row the window holds for it.
@@ -1381,7 +1460,7 @@ export class DebugMenu {
       dials: ds
         ? {
             helper: ds.helper,
-            shown: this.showingDials ? 'sliders' : 'console',
+            shown: this.modeNow,
             count: allDials(ds).length,
             moved: allDials(ds)
               .filter((d) => dialMoved(ds, d))
@@ -1389,6 +1468,7 @@ export class DebugMenu {
             line: movedLine(ds) || null,
           }
         : null,
+      list: this.listSource ? { label: this.listSource.label, shown: this.modeNow === 'list', rows: this.listView.childElementCount } : null,
       recent: this.store.history.slice(0, 10).map(callText),
       key: keyLabel(this.deps.keys()[0] ?? ''),
     };

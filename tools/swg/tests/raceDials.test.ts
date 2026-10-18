@@ -13,6 +13,8 @@ import { allDials, dialMoved, dialText, movedArgs, movedLine, readDials, resetDi
 import { ENGINE_TUNE, tuneEngines } from '../../../src/vehicles/drivetrain.ts';
 import { ENGINE_DIALS, RACE_DIALS, vehicleDialsFor } from '../../../src/vehicles/raceDials.ts';
 import { RACE_BASE, RACE_GEN, RACE_TUNE, tuneBase, tuneRace } from '../../../src/vehicles/raceTune.ts';
+import { TRACK_DIALS } from '../../../src/race/trackDials.ts';
+import { TRACK_TUNE, tuneTrack } from '../../../src/race/trackTune.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -69,8 +71,8 @@ table.c = 0.5;
 
 // --- 2. every racing dial moves the number its helper moves -------------------------------------------------------
 
-const sets = [RACE_DIALS, ENGINE_DIALS];
-ok(vehicleDialsFor('race') === RACE_DIALS && vehicleDialsFor('engines') === ENGINE_DIALS && vehicleDialsFor('perf') === null, 'race and engines have dials, and nothing else does');
+const sets = [RACE_DIALS, ENGINE_DIALS, TRACK_DIALS];
+ok(vehicleDialsFor('race') === RACE_DIALS && vehicleDialsFor('engines') === ENGINE_DIALS && vehicleDialsFor('track') === TRACK_DIALS && vehicleDialsFor('perf') === null, 'race, engines and track have dials, and nothing else does');
 
 /** The field a dial's key names, read straight off the table its helper writes, never through the dial. */
 function fieldOf(set: DialSet, key: string): unknown {
@@ -78,6 +80,10 @@ function fieldOf(set: DialSet, key: string): unknown {
   if (set === ENGINE_DIALS) {
     assert.equal(p[0], 'tune');
     return (ENGINE_TUNE as unknown as Record<string, unknown>)[p[1]];
+  }
+  if (set === TRACK_DIALS) {
+    assert.equal(p[0], 'tune');
+    return (TRACK_TUNE as unknown as Record<string, unknown>)[p[1]];
   }
   if (p[0] === 'tune') return (RACE_TUNE as unknown as Record<string, unknown>)[p[1]];
   assert.equal(p[0], 'base');
@@ -163,6 +169,24 @@ for (const set of sets) {
   ok(/if \(opts\.tune\) words\.push\(\.\.\.tuneRace\(opts\.tune\)\);\s*if \(opts\.base\) words\.push\(\.\.\.tuneBase\(opts\.base\)\);/.test(main), '__debug.race takes `tune` through tuneRace and `base` through tuneBase, as the line is written');
   ok(/if \(opts\.tune\) words\.push\(\.\.\.tuneEngines\(opts\.tune\)\);/.test(main), '__debug.engines takes `tune` through tuneEngines');
   ok(/dials: \(helper\) => vehicleDialsFor\(helper\)/.test(main), 'the game hands the debug menu these dials');
+  ok(/if \(opts\.tune\) words\.push\(\.\.\.tuneTrack\(opts\.tune\)\);/.test(main), '__debug.track takes `tune` through tuneTrack');
+}
+
+// --- 4b. the track's line sets exactly what was moved ----------------------------------------------------------------
+
+{
+  const d = allDials(TRACK_DIALS).find((x) => x.key === 'tune.countdown');
+  assert.ok(d && d.kind === 'number');
+  d.set(5);
+  const line = movedLine(TRACK_DIALS);
+  ok(line === '__debug.track({ tune: { countdown: 5 } })', `the track's line names its helper and the one dial moved (${line})`);
+  resetDials(TRACK_DIALS);
+  const back = evaluateArgs(movedArgs(TRACK_DIALS) || '{ tune: { countdown: 5 } }');
+  assert.ok(back.ok);
+  tuneTrack((back.args[0] as { tune: Record<string, unknown> }).tune);
+  ok(TRACK_TUNE.countdown === 5, 'and read back through tuneTrack, it sets the countdown again');
+  resetDials(TRACK_DIALS);
+  ok(TRACK_TUNE.countdown === 3, 'Reset all puts the countdown back at three');
 }
 
 // --- 5. the pod's numbers move the racing bike with them ----------------------------------------------------------

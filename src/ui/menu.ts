@@ -114,6 +114,7 @@ const ACTION_LABELS: Record<Action, string> = {
   putAway: 'Put away a prop in hand, or give up a deed',
   // The dev server's alone: a release never lists the action (`controlsActions`), nor carries these words.
   placeLayer: import.meta.env.DEV ? 'Where what you are placing is kept (dev server only)' : '',
+  trackGate: import.meta.env.DEV ? 'Drop a gate of the track being laid, where you ride (dev server only)' : '',
   debugMenu: 'Debug menu',
   waypoints: 'Waypoints (map tab)',
   journal: 'Journal (jobs, documents, the file)',

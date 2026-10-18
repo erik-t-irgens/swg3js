@@ -91,6 +91,15 @@ import { LAVA_HARM } from '../world/lavaHarmMath.ts';
  */
 export const RACE_CLOCK = { live: true };
 
+/**
+ * What watches a race-driven hull's travel (a run's gates, `src/race/raceRun.ts`): handed the hull as each live step
+ * begins, with its body where the physics left it, so the segment from its last look to here is every metre the body
+ * moved since, whatever the frame loop or the accumulator did between. It must allocate nothing.
+ */
+export interface DriveWatch {
+  cross(v: Vehicle): void;
+}
+
 /** What a race-driven hull reads of the ground ahead: built blocks and the far grid's lattice (`LineReader`), and the flat water. */
 export interface RaceGround extends LineReader {
   water(x: number, z: number): number;
@@ -147,6 +156,14 @@ export class RaceDrive {
   readonly engines: EngineSet;
   /** The random numbers a scrape, a strike or an overheat draws (which part): replaceable for tests. */
   rng: () => number = Math.random;
+  /** A run's watch on this hull's travel, handed the hull as each live step begins; null outside a run. */
+  watch: DriveWatch | null = null;
+  /**
+   * A run's start boost: the thrust's rate is multiplied by this while it stands over one, and it falls back to one the
+   * step the throttle is let go or the speed passes `startCap` of the plain top. Set by the run at go (`TRACK_TUNE`).
+   */
+  startBoost = 1.5;
+  startCap = 0.5;
   private vFull = 0.5;
   private topNow = 1.5;
   /** The velocity a hit just lost, across (written before `score`, for the side it struck). */
@@ -361,6 +378,8 @@ export class RaceDrive {
     this.topNow = 1;
     this.lossX = 0;
     this.lossZ = 0;
+    this.startBoost = 1;
+    this.startCap = 0;
   }
 
   /**
@@ -536,6 +555,47 @@ export class RaceDrive {
   setCondition(c: number, v: Vehicle | null = null): void {
     this.condition = Math.max(0, Math.min(1, Number.isFinite(c) ? c : 1));
     this.resolve(v);
+  }
+
+  /**
+   * The hull stood somewhere at once, upright, still, facing `heading` (a run's grid, a put-back): the body put there
+   * with nothing moving it, the drive's speed, turn, pose and boost let go, every mark of its sweeps begun afresh, and
+   * the next step not measured, so nothing of the move is read as a hit. A hull held paused is held there.
+   */
+  standAt(v: Vehicle, x: number, y: number, z: number, heading: number): void {
+    if (!v.body.isValid()) return;
+    euler.set(0, heading, 0, 'YXZ');
+    quat.setFromEuler(euler);
+    tmpV.set(x, y, z);
+    v.teleport(tmpV, quat, 0);
+    this.heading = heading;
+    this.u.x = Math.sin(heading);
+    this.u.z = Math.cos(heading);
+    this.T = 0;
+    this.B = 0;
+    this.p = 0;
+    this.over = 0;
+    this.h = 0;
+    this.charge = 0;
+    this.boosting = false;
+    this.startBoost = 1;
+    this.w = 0;
+    this.lastSign = 0;
+    this.vy = 0;
+    this.cmdVy = 0;
+    this.bank = 0;
+    this.lean = 0;
+    this.pitch = 0;
+    this.groundRoll = 0;
+    this.slideMul = 1;
+    this.cut = 0;
+    this.kick = 0;
+    this.hold = 0;
+    this.cmdValid = false;
+    this.keptPos.set(x, y, z);
+    this.keptQuat.copy(quat);
+    v.speed = 0;
+    this.restartMarks(v);
   }
 
   /** A rope's pull told to the hit test: what it put on the body is added to the command, so the next step reads no loss from it. */
@@ -737,6 +797,8 @@ export class RaceDrive {
     this.lvNow.x = lv.x;
     this.lvNow.y = lv.y;
     this.lvNow.z = lv.z;
+    // A run's gates, tested from the watch's own mark to where the body stands now, before anything of this step moves it.
+    if (this.watch) this.watch.cross(v);
     // The parts in order, through the list, until one says the hull was wrecked. Each part is called through the one
     // list rather than by name, so the compiler builds each on its own with its own budget: built into this method
     // they spent its budget between them, and the small arithmetic each calls was left as calls that make numbers.
@@ -897,6 +959,8 @@ export class RaceDrive {
     const trim = drive && tune.pitchFrom === 'view' && typeof drive.pitch === 'number' ? Math.max(-1, Math.min(1, drive.pitch)) : 0;
     this.sTh = th;
     this.sTrim = trim;
+    // A run's start boost ends the step the throttle is let go or the speed passes its share of the plain top.
+    if (this.startBoost > 1 && (th <= 0 || this.h >= this.startCap * Math.min(h.cap, tune.thrustCap * h.V))) this.startBoost = 1;
     let braking = false;
     if (!drive) {
       // Nobody drives it: it brakes, so nothing coasts kilometres with nobody on it.
@@ -904,7 +968,7 @@ export class RaceDrive {
     } else if (this.cut > 0 || th === 0) {
       this.T *= Math.exp(-dt / Math.max(1e-3, h.coast));
     } else if (th > 0) {
-      const rate = (this.boosting ? tune.boostRate : 1) * (trim ? 1 + (tune.trimThrottle - 1) * -trim : 1);
+      const rate = (this.boosting ? tune.boostRate : 1) * this.startBoost * (trim ? 1 + (tune.trimThrottle - 1) * -trim : 1);
       this.T = Math.min(tCap, this.T + th * rate * dt);
     } else if (this.h > tune.reverseBelow) {
       braking = true;
@@ -2022,11 +2086,18 @@ export function raceFling(v: Vehicle, vel: THREE.Vector3): THREE.Vector3 {
   return vel;
 }
 
-/** Whether the hull a drive holds is racing faster than the living's hold asks (`RACE_TUNE.livingAbove`, `holdLiving`). */
-export function holdsLiving(v: Vehicle | null): boolean {
+/**
+ * Whether the living are held (nothing new stood or put away): the hull a drive holds racing faster than the hold asks
+ * (`RACE_TUNE.livingAbove`, `holdLiving`), or a timed run standing (`inRun`), whatever the speed and with the hull down
+ * after a crash too. A run's course was warmed and compiled behind its curtain, and the body stood beside it as it
+ * passes is a clone and a compile on a live frame: a bike's plain top sits just under `livingAbove`, and its lap round
+ * the TEST course built seventeen programs of the people and creatures stood as it went.
+ */
+export function holdsLiving(v: Vehicle | null, inRun = false): boolean {
   const how = RACE_TUNE.holdLiving;
-  if (how === 'never') return false;
-  if (!v?.raceDriven || !RACE_TUNE.on) return false;
+  if (how === 'never' || !RACE_TUNE.on) return false;
+  if (inRun) return true;
+  if (!v?.raceDriven) return false;
   if (how === 'always') return true;
   return Math.abs(v.speed) > RACE_TUNE.livingAbove;
 }

@@ -291,6 +291,11 @@ export class WildLife {
    */
   readonly last = { sites: 0, up: 0, bodies: 0, stood: 0, dropped: 0, waiting: 0, cleared: 0, unwalkable: 0, refused: '' };
 
+  /** Every site laid on this world's grid, in the snapshot's frame: what a race track's corridor check reads. */
+  get allSites(): readonly LairSite[] {
+    return this.sites;
+  }
+
   /** Whether there is anything to run at all. */
   get ready(): boolean {
     return !!this.pack && !!this.manifest;

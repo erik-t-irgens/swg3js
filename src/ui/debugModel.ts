@@ -44,12 +44,13 @@ export const DEBUG_MENU_TUNE = {
  * god mode and the fights' difficulty, the hour, the day's length and the fog, the lightsaber glow and
  * the flashlight, the speeders' hover, the nebulae, a weapon for a body already standing, the seats
  * under the seated people, how a held key turns and raises a thing in hand, and the grass, the far tree cards and
- * the flora's shadows, whose page settings they move in memory, and first of all the race drive and the
- * engines, whose numbers of feel are sliders (`src/vehicles/raceDials.ts`). Listed first, in a group
- * of their own, so every one is in one place and a new one is a line here; the pins of these are the ones
- * a tick runs again at start (`startCalls`).
+ * the flora's shadows, whose page settings they move in memory, and first of all the race drive, the
+ * engines and a race run and its tracks, whose numbers of feel are sliders (`src/vehicles/raceDials.ts`,
+ * `src/race/trackDials.ts`; the track's list of gates is the menu's too, on the dev server). Listed first, in
+ * a group of their own, so every one is in one place and a new one is a line here; the pins of these are the
+ * ones a tick runs again at start (`startCalls`).
  */
-export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
+export const TUNING_HELPERS: readonly string[] = ['race', 'engines', 'track', 'reach', 'lod', 'flora', 'grass', 'farCards', 'floraShadows', 'god', 'difficulty', 'time', 'day', 'fog', 'bladeGlow', 'torch', 'hover', 'nebulae', 'arm', 'seats', 'placeHold'];
 
 /**
  * Where each helper is listed. A helper named in no group is listed under "Other", so one added to

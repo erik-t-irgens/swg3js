@@ -68,6 +68,9 @@ export type Action =
   // The dev server's placement editor, with something in hand: where it is kept when it is put down (yours,
   // the story's dressing, the world edits). Read only on the dev server, and never shown in a release.
   | 'placeLayer'
+  // The dev server's track editor, while a track is being laid: a gate dropped where the vehicle is, facing its travel.
+  // Read only on the dev server, and never shown in a release.
+  | 'trackGate'
   // The debug menu: every `__debug` helper, run from a window.
   | 'debugMenu'
   // The map open on its Waypoints tab: every waypoint the character keeps, to mark, track, rename, colour and take away.
@@ -166,6 +169,9 @@ export const DEFAULT_BINDINGS: Record<Action, string[]> = {
   // rather than spent, as the placing keys borrow R and F. The saber's key is not read while something is
   // in hand, and this one is read only then, so the two never answer one press.
   placeLayer: ['KeyL'],
+  // A track's gate dropped where the vehicle is, on the dev server alone while a track is being laid: the numeric pad's
+  // nought, which nothing else in the game reads, so it is spent rather than borrowed.
+  trackGate: ['Numpad0'],
   // The debug menu, on the key a console has always had in a game (Jedi Academy's own is there): the
   // one left of 1, which nothing else in this game uses. It types a character into a box, so inside
   // the menu's own boxes it is Escape that shuts it.
@@ -187,7 +193,7 @@ const STORAGE_KEY = 'swg3js.bindings';
  * Actions only the dev server's tools read: kept in the table so a binding of one reads and keeps like any
  * other, and left off the Controls page of a release (`controlsActions`), where nothing reads them.
  */
-export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>(['placeLayer']);
+export const DEV_ONLY_ACTIONS: ReadonlySet<Action> = new Set<Action>(['placeLayer', 'trackGate']);
 
 /** The actions the Controls page lists: every one on the dev server, and in a release all but the dev server's own. */
 export function controlsActions(dev: boolean): Action[] {

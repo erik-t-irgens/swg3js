@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import { STORY_FILE, listStorySet } from './server/storySet.mjs';
 import { placementFileOf } from './src/story/placementPath.ts';
+import { trackFileOf } from './src/race/trackPath.ts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
@@ -11,6 +12,8 @@ const PRIVATE_DIR = path.resolve(ROOT, 'assets-private');
 const STORY_DIR = path.resolve(ROOT, 'story-private');
 /** The permanent placements' two layers (`src/story/placements.ts`): tracked files that ship with the build. */
 const PLACEMENTS_DIR = path.resolve(ROOT, 'public', 'placements');
+/** The worlds' race tracks (`src/race/trackFile.ts`): tracked files that ship with the build, one a world. */
+const TRACKS_DIR = path.resolve(ROOT, 'public', 'tracks');
 
 /** The list of the owner's story files, as `/story-private/index.json` hands it to the browser. */
 function storyIndex(): string {
@@ -169,6 +172,81 @@ function placementsEditor(): Plugin {
 }
 
 /**
+ * The tracks' files as the placements' are served (`placementFiles` above): `tracks:changed { world }` said to the page
+ * when a world's file changes, so a track edited by hand, or the editor's own write, is read again without a reload,
+ * and the page's ask for a file answered from the disk as it stands, a file that is not there with a 404 (Vite's own
+ * list of the public folder learns of a new file only once its watcher has told it).
+ */
+function trackFiles(): Plugin {
+  return {
+    name: 'track-files',
+    configureServer(server) {
+      server.middlewares.use('/tracks', (req, res, next) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+        const word = trackFileOf(decodeURIComponent((req.url ?? '/').split('?')[0]));
+        if (!word) return next();
+        const file = path.resolve(TRACKS_DIR, `${word.world}.json`);
+        if (!file.startsWith(TRACKS_DIR + path.sep)) return next();
+        res.setHeader('Cache-Control', 'no-store');
+        fs.readFile(file, (err, data) => {
+          if (err) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            res.end('not found');
+            return;
+          }
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(req.method === 'HEAD' ? undefined : data);
+        });
+      });
+      server.watcher.add(TRACKS_DIR);
+      const timers = new Map<string, ReturnType<typeof setTimeout>>();
+      const changed = (file: string): void => {
+        const abs = path.resolve(file);
+        if (!abs.startsWith(TRACKS_DIR + path.sep)) return;
+        const word = trackFileOf(path.relative(TRACKS_DIR, abs));
+        if (!word) return;
+        const was = timers.get(word.world);
+        if (was) clearTimeout(was);
+        timers.set(
+          word.world,
+          setTimeout(() => {
+            timers.delete(word.world);
+            server.ws.send('tracks:changed', word);
+          }, 150),
+        );
+      };
+      for (const ev of ['add', 'change', 'unlink'] as const) server.watcher.on(ev, changed);
+    },
+  };
+}
+
+/**
+ * The track editor's endpoint, `POST /__dev/tracks`, which writes a world's track file under `public/tracks/` one track
+ * at a time (`tools/dev/tracksEndpoint.mjs`, its rules in `src/race/trackEdits.ts`), loaded at the first ask by a name
+ * worked out here, as the placements editor's is: the dev server's alone, and never this config's dependency.
+ */
+function tracksEditor(): Plugin {
+  return {
+    name: 'tracks-editor',
+    apply: 'serve',
+    configureServer(server) {
+      const glue = pathToFileURL(path.resolve(ROOT, 'tools', 'dev', 'tracksEndpoint.mjs')).href;
+      server.middlewares.use('/__dev/tracks', (req, res) => {
+        import(/* @vite-ignore */ glue)
+          .then((m: { handle: (req: unknown, res: unknown, opts: unknown) => Promise<void> }) => m.handle(req, res, { dir: TRACKS_DIR, notify: (word: { world: string }) => server.ws.send('tracks:changed', word) }))
+          .catch((err: unknown) => {
+            if (res.headersSent) return;
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({ ok: false, why: `the track editor's endpoint failed: ${err instanceof Error ? err.message : String(err)}` }));
+          });
+      });
+    },
+  };
+}
+
+/**
  * Serves the git-ignored assets-private/ folder (converted SWG content) at
  * /assets-private/ in dev and copies it into dist/ on build. The Pages
  * workflow builds from a clean checkout, so nothing private ever deploys.
@@ -202,7 +280,7 @@ function privateAssets(): Plugin {
 
 export default defineConfig({
   base: './',
-  plugins: [privateAssets(), privateStory(), placementFiles(), placementsEditor()],
+  plugins: [privateAssets(), privateStory(), placementFiles(), placementsEditor(), trackFiles(), tracksEditor()],
   build: { target: 'es2022', sourcemap: false },
   // PORT lets a launcher assign the port; without it Vite picks its own default, so `npm run dev`
   // behaves exactly as before.

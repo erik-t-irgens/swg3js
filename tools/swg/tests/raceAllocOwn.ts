@@ -14,6 +14,8 @@ import * as THREE from 'three';
 import { RaceDrive, type RaceGround } from '../../../src/vehicles/raceDrive.ts';
 import { newRaceView, newRaceViewOut, steerRaceView, frameRaceView, type RaceViewInput } from '../../../src/vehicles/raceView.ts';
 import { RACE_TUNE } from '../../../src/vehicles/raceTune.ts';
+import { RaceRun } from '../../../src/race/raceRun.ts';
+import type { GameGate, TrackDef } from '../../../src/race/trackFile.ts';
 import type { DriveInput, Vehicle } from '../../../src/vehicles/vehicle.ts';
 import type { Physics } from '../../../src/core/physics.ts';
 
@@ -142,6 +144,24 @@ const physics = {
 
 const race = new RaceDrive('pod', { ground: reader });
 race.setLevels('max', vehicle);
+// A run of a track watching the step (src/race/raceRun.ts, `DriveWatch`), as the game hangs one on a raced hull, its
+// clock moved on by the fixed steps as `stepRun` moves it. The weaving hull wanders a few kilometres about the start, so
+// its gates are one plane across the whole world through the start, faced both ways: every pass across it is the next
+// gate crossed, and every second one a lap, which makes its few numbers (the lap's time kept, the best lap's splits
+// copied) as an event and not a step. `RACE_ALLOC_WATCH=0` leaves it out, to compare.
+const WATCHING = process.env.RACE_ALLOC_WATCH !== '0';
+const gates: GameGate[] = [
+  { x: 0, y: 0, z: 0, q: [0, 0, 0, 1], w: 1e6, h: 1e6 },
+  { x: 0, y: 0, z: 0, q: [0, 1, 0, 0], w: 1e6, h: 1e6 },
+];
+const runTrack = { id: 'alloc', name: 'alloc', kind: 'circuit', laps: 99, for: ['podracer'], clear: 0, grid: { x: 0, y: 3, z: 0, q: [1, 0, 0, 0] }, gates: [] } as unknown as TrackDef;
+const run = WATCHING ? new RaceRun(runTrack, 'test', 'podracer', 'pod', { x: 0, y: 3, z: 0, q: [0, 0, 0, 1] }, gates, 1.25, null) : null;
+if (run) {
+  run.advance(10);
+  run.clearEvents();
+  run.standing(t.x, t.y, t.z);
+  race.watch = run;
+}
 const drive: DriveInput = { throttle: 1, steer: 0, heading: 0.5, boost: true, hop: false, up: false, down: false, vertical: 0, slide: false, lean: 0, pitch: 0, repair: false };
 // Frame times that cross the fixed steps every way: 144, 75 and 40 fps in turn. Kept as the engine's own numbers (the
 // list holds something that is not a number too, so the engine keeps each as made), as a game's frame hands its own on.
@@ -171,11 +191,18 @@ function frame(): void {
   RACE_TUNE.hold = HOLD === 'loose' || (HOLD !== 'firm' && (k & 16383) < 12000) ? 'loose' : 'firm';
   race.step(vehicle, dt, drive, ground, null, null, physics);
   if (race.planned > 0) counts.planned++;
+  if (run) {
+    run.advanceSteps(physics.stepsAhead(dt));
+    // The game reads the ring every frame; here every so often, which is no different to the step.
+    if (run.eventCount > 32) run.clearEvents();
+  }
   physics.step(dt);
-  // Back to the start now and then, so the run never leaves the numbers it began in (a teleport the drive starts afresh from).
+  // Back to the start now and then, so the run never leaves the numbers it began in (a teleport the drive starts afresh
+  // from, and the run's watch is stood at, as a put-back stands it).
   if (t.z > 50_000) {
     t.z = 0;
     t.x = 0;
+    if (run) run.standing(t.x, t.y, t.z);
   }
 }
 
@@ -301,4 +328,4 @@ if (process.argv[2] === 'profile') {
 const d = await measure(frame, FRAMES);
 const v = await measure(viewFrame, FRAMES);
 watch.disconnect();
-console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges } }));
+console.log(JSON.stringify({ frames: FRAMES, made: d.made, scavenges: d.scavenges, planned: counts.planned, view: { frames: FRAMES, made: v.made, scavenges: v.scavenges }, ...(run ? { watch: { crossed: run.seq, laps: run.lapTimes.length, phase: run.phase } } : {}) }));

@@ -382,6 +382,14 @@ process.on('exit', () => rmSync(scratch, { recursive: true, force: true }));
   ok(dem.files.includes('dem/monument/base16.raw') && !dem.problems.some((p) => p.includes('dem/monument')) && dem.problems.some((p) => p.includes('misc/base16.raw') && p.includes('not a kind of file')), `an elevation raster under dem/ is packed, and a .raw anywhere else is refused (${dem.problems.join('; ')})`);
   rmSync(join(dist, 'dem'), { recursive: true });
   rmSync(join(dist, 'misc'), { recursive: true });
+  // A world's race tracks (`public/tracks/<world>.json`, src/race/trackFile.ts) are plain JSON in public/, packed as the
+  // placements' files are when git tracks them, and an untracked one stops the pack.
+  put('tracks/tatooine.json', '{ "version": 1 }');
+  const withTrack = new Map([...tracked, ['public/tracks/tatooine.json', blobHash(Buffer.from('{ "version": 1 }'))]]);
+  const tracks = distFiles(dist, withTrack);
+  ok(tracks.files.includes('tracks/tatooine.json') && !tracks.problems.some((p) => p.includes('tracks/')), `a tracked track file is packed (${tracks.problems.join('; ')})`);
+  ok(distFiles(dist, tracked).problems.some((p) => p.includes('tracks/tatooine.json') && p.includes('not a tracked public file')), 'and one git does not track stops the pack');
+  rmSync(join(dist, 'tracks'), { recursive: true });
   put('assets/characters/xbot.glb', 'changed here');
   ok(distFiles(dist, tracked).problems.some((p) => /not the public\/assets\/characters\/xbot\.glb git holds/.test(p)), 'a public file that is not what git holds is refused');
   put('assets/characters/xbot.glb', 'glb');

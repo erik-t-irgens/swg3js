@@ -46,6 +46,7 @@ export const INTERFACE: { title: string; knobs: readonly Knob[] }[] = [
       { key: 'hudShipCondition', label: 'The ship\'s condition', kind: 'toggle', hint: 'Shields and armour front and back, the hull, and a small square for each part fitted, under the middle of the screen. Your own health bar is hidden while you are at the controls whatever this says.' },
       { key: 'hudTargetBlock', label: 'The target block', kind: 'toggle', hint: 'The four corners on what you have targeted, its name, how far off it is, and the shields, armour and hull of the side facing you; and the arrow at the edge of the screen when it is behind you.' },
       { key: 'hudArcs', label: 'The arcs round the reticle', kind: 'toggle', hint: 'Speed on the left, with a tick for the top speed with the wings open and one for the top speed with them closed; the guns on the right as they reload; the booster underneath.' },
+      { key: 'hudRaceBlock', label: 'The race block', kind: 'toggle', hint: 'In a race run: the countdown, the lap you are on, the time at tenths, each split against your best lap there, the last lap and the best, and the next gate and the one after it outlined where they stand, with an arrow at the edge of the screen when the next is out of sight.' },
     ],
   },
   {

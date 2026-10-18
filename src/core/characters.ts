@@ -3,6 +3,7 @@
 import type { ClassId } from '../combat/kit';
 import type { OwnedItem } from './inventory';
 import type { ShipFit } from '../vehicles/shipFit';
+import type { RaceBestBook } from '../race/raceRun';
 
 export const MAX_CHARACTERS = 5;
 const KEY = 'swg.characters';
@@ -87,6 +88,13 @@ export interface SavedCharacter {
   gear?: 1;
   /** The ships' fits by garage id (a component per chassis slot, paint values, the droid); a ship absent is stock. */
   ships?: Record<string, ShipFit>;
+  /**
+   * The best laps and totals this character has run on the worlds' race tracks (`src/race/raceRun.ts`), by
+   * `<world>/<track id>` and then by the kind the vehicle was raced as, each with the best lap's splits and the upgrade
+   * levels it was set at. Merged by minimum, so a best only ever falls. Absent until the first lap is done, which keeps
+   * every record from before it marked exactly as it was.
+   */
+  raceBest?: RaceBestBook;
   /**
    * 1 once a server has taken this character's items down, which makes everything under `items` here
    * a cache of the server's own list rather than the only copy there is. It is absent for every

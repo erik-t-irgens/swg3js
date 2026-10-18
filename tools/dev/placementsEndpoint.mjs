@@ -68,14 +68,16 @@ async function unlinkHeld(file, tune, fsx) {
  * usually holding the copy too, and one that still cannot be taken away is said aloud on the dev server's
  * console with where it is (left behind, it is an untracked file under `public/` that stops a local release
  * pack). The folder is made when it is missing. `fsx` is node's own promises API, or a stand-in a test hands
- * over.
+ * over. `prune` is how many folders above a file taken away are taken away too once nothing is left in them: two
+ * for a placements layer (the layer's and the placements'), one for the tracks' (`tools/dev/tracksEndpoint.mjs`).
  */
-export async function writeWhole(file, text, tune = PLACEMENTS_ENDPOINT_TUNE, fsx = fs.promises) {
+export async function writeWhole(file, text, tune = PLACEMENTS_ENDPOINT_TUNE, fsx = fs.promises, prune = 2) {
   if (text === null) {
     await unlinkHeld(file, tune, fsx);
     // A layer's folder left with nothing in it goes too, and the placements folder after it, so a dressing
     // tried and taken back leaves nothing behind at all. A folder with anything in it is left alone.
-    for (const folder of [path.dirname(file), path.dirname(path.dirname(file))]) {
+    const folders = [path.dirname(file), path.dirname(path.dirname(file))].slice(0, Math.max(0, prune));
+    for (const folder of folders) {
       try {
         await fsx.rmdir(folder);
       } catch {

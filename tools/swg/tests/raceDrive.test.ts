@@ -844,7 +844,19 @@ await section(14, 'the living hold', async () => {
   launch(r, 30, 60);
   ok(holdsLiving(r.v), "14: holdLiving 'always' holds at any speed");
   ok(!holdsLiving(null), '14: and nothing ridden holds nothing');
+  // A timed run holds the living whatever the speed, and with its hull down after a crash: its course was compiled
+  // behind its curtain, and a bike's plain top sits under livingAbove (its TEST lap built seventeen programs of bodies).
+  RACE_TUNE.holdLiving = 'speed';
+  launch(r, 30, 60);
+  ok(!holdsLiving(r.v) && holdsLiving(r.v, true) && holdsLiving(null, true), '14: a timed run holds the living at 30 m/s, and with no hull ridden while it is down');
+  RACE_TUNE.holdLiving = 'never';
+  ok(!holdsLiving(r.v, true), "14: holdLiving 'never' holds nothing in a run either");
+  RACE_TUNE.holdLiving = 'speed';
+  RACE_TUNE.on = false;
+  ok(!holdsLiving(r.v, true), '14: nor does a run with the pass switched off');
   restore();
+  const main = src('../../../src/main.ts');
+  ok(/this\.world\.livingHold = holdsLiving\(racedNow, !!this\.raceRun\?\.live\)/.test(main), "14: the game hands the hold whether a run stands");
 });
 
 await section(15, "the physics' clock", async () => {
@@ -1409,7 +1421,7 @@ await section(24, 'the engines, through the drive', async () => {
 await section(18, 'nothing made a step', async () => {
   // The cleanest of three processes: when the compiler builds what happens to be compiled first decides a little of what
   // it builds into what, and a process caught the other way round measures a few numbers made a step that the next does not.
-  type Alone = { skipped?: string; frames: number; made: number; scavenges: number; view: { frames: number; made: number; scavenges: number }; planned: number };
+  type Alone = { skipped?: string; frames: number; made: number; scavenges: number; view: { frames: number; made: number; scavenges: number }; planned: number; watch?: { crossed: number; laps: number } };
   let alone: Alone | null = null;
   for (let run = 0; run < 3; run++) {
     const line = execFileSync(process.execPath, ['--expose-gc', '--allow-natives-syntax', fileURLToPath(new URL('./raceAllocOwn.ts', import.meta.url))], { encoding: 'utf8', timeout: 600_000 }).trim().split('\n').pop() ?? '{}';
@@ -1424,6 +1436,7 @@ await section(18, 'nothing made a step', async () => {
     // Under a byte a step on average: what is left is a strike's few numbers, which is an event and not a step.
     ok(alone.planned > 0 && alone.scavenges === 0 && alone.made < 1 * alone.frames, `18: over ${alone.frames} steps of the drive's own code (racing, planning, sweeping, bridging, striking, the engines burning, pulling and mended) it makes ${Math.max(0, alone.made)} bytes (${(Math.max(0, alone.made) / alone.frames).toFixed(2)} a step, ${alone.scavenges} collections)`);
     ok(alone.view.scavenges === 0 && alone.view.made < 0.2 * alone.view.frames, `18: and over ${alone.view.frames} frames of the race view ${Math.max(0, alone.view.made)} bytes`);
+    ok(!!alone.watch && alone.watch.crossed > 10 && alone.watch.laps > 0, `18: those steps carry a run of a track watching them (src/race/raceRun.ts), testing a gate every step and crossing ${alone.watch?.crossed} of them in ${alone.watch?.laps} laps`);
   }
 });
 

@@ -3254,8 +3254,11 @@ export class World {
    * the screen waits for them no longer than `PLACED_TUNE.warmWaitMs` (`placedWarmSettled`), and what has not
    * arrived by the sweep is compiled as its tier loads, as it was. Nothing is warmed in a world filed by the old
    * rule (every one of those is in its first tier already), in space, or with the switch off.
+   *
+   * `at` may be a list of points, every model near any of them warmed together: a race track's gates, behind the
+   * "preparing the track" curtain, so a run along the whole course builds no program (`App.startRun`).
    */
-  warmPlaced(at: THREE.Vector3): void {
+  warmPlaced(at: THREE.Vector3 | readonly { x: number; z: number }[]): void {
     const ls = this.layoutStream;
     const st = this.placedWarmStats;
     st.asked = 0;
@@ -3269,7 +3272,9 @@ export class World {
       this.placedWarmLoads = Promise.resolve();
       return;
     }
-    const ids = ls.modelsWithin(at.x, at.z, this.streamNearRange());
+    const points = Array.isArray(at) ? at : [at as THREE.Vector3];
+    const ids = new Map<string, boolean>();
+    for (const p of points) for (const [id, indoor] of ls.modelsWithin(p.x, p.z, this.streamNearRange())) ids.set(id, (ids.get(id) ?? false) || indoor);
     this.placedWarm = ids;
     st.asked = ids.size;
     const queue: string[] = [];
@@ -3299,6 +3304,76 @@ export class World {
 
   /** The placed warm's loads under way, answered when the last has settled (or none were asked for). */
   private placedWarmLoads: Promise<void> = Promise.resolve();
+
+  /**
+   * Every flora collider standing in the ground chunks built now (a tree's trunk, a rock's cylinders: the client's own
+   * shapes or the guess), each as a circle on the ground in the game's frame, with the chunks they came from: what a
+   * race track's corridor check reads (`__debug.track({ check })`). Chunks not built yet carry no flora to read, which
+   * is why the chunks are handed back too. For the console, never a frame.
+   */
+  floraTrunks(): { trunks: { x: number; z: number; r: number }[]; chunks: { cx: number; cz: number }[] } {
+    const trunks: { x: number; z: number; r: number }[] = [];
+    const chunks: { cx: number; cz: number }[] = [];
+    for (const c of this.chunks.values()) {
+      chunks.push({ cx: c.cx, cz: c.cz });
+      for (const col of c.colliders) trunks.push({ x: col.x, z: col.z, r: col.r });
+    }
+    return { trunks, chunks };
+  }
+
+  /**
+   * Keep the plants off a circle of the game's frame on the chunks built from now on (`LayoutStreamer.keepFloraOff`):
+   * a race track's corridor read again on the dev server. False with no streamer (a world with no layout).
+   */
+  keepFloraOff(x: number, z: number, r: number): boolean {
+    if (!this.layoutStream) return false;
+    this.layoutStream.keepFloraOff(x, z, r);
+    return true;
+  }
+
+  /**
+   * Everything a race course's corridor could meet, in the game's frame (`__debug.track({ check })`, the corridor's
+   * pure test being `corridorHits` in `src/race/trackFile.ts`): every placed object near its legs at its own model's
+   * size (`LayoutStreamer.objectsNear`), every flora collider of the chunks built now, every site the world's own
+   * data lays a lair, a herd or a camp on, and every post a person stands at out of doors. How many of the legs'
+   * points every 40 m lie in a built chunk is handed back beside them, since an unbuilt chunk has no trees to read.
+   * For the console, never a frame.
+   */
+  courseThings(legs: readonly { ax: number; az: number; bx: number; bz: number; half: number }[]): { things: { x: number; z: number; r: number; what: string }[]; points: number; built: number } {
+    const things: { x: number; z: number; r: number; what: string }[] = [];
+    const seen = new Set<string>();
+    const ls = this.layoutStream;
+    const built = new Set<string>();
+    for (const c of this.chunks.values()) built.add(`${c.cx},${c.cz}`);
+    let points = 0;
+    let inBuilt = 0;
+    const STEP = 40;
+    for (const l of legs) {
+      const len = Math.hypot(l.bx - l.ax, l.bz - l.az);
+      const n = Math.max(1, Math.ceil(len / STEP));
+      for (let i = 0; i <= n; i++) {
+        const x = l.ax + ((l.bx - l.ax) * i) / n;
+        const z = l.az + ((l.bz - l.az) * i) / n;
+        points++;
+        if (built.has(`${Math.floor(x / CHUNK_SIZE)},${Math.floor(z / CHUNK_SIZE)}`)) inBuilt++;
+        if (!ls) continue;
+        for (const o of ls.objectsNear(x, z, l.half + STEP)) {
+          const key = `${o.template}|${o.x.toFixed(1)}|${o.z.toFixed(1)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          things.push({ x: o.x, z: o.z, r: o.radius, what: `placed ${o.model}` });
+        }
+      }
+    }
+    for (const t of this.floraTrunks().trunks) things.push({ x: t.x, z: t.z, r: t.r, what: 'a tree or a rock (its collision shape)' });
+    const c = this.layoutCenter ?? { x: 0, z: 0 };
+    for (const s of wildLife.allSites) things.push({ x: rawToGameX(c.x, s.x), z: rawToGameZ(c.z, s.z), r: Math.max(5, s.size / 2), what: `a lair, herd or camp (${s.lair})` });
+    for (const r of wildLife.peopleRows() as StandingRow[]) {
+      if (r.cell || !Number.isFinite(r.x) || !Number.isFinite(r.z)) continue;
+      things.push({ x: rawToGameX(c.x, r.x), z: rawToGameZ(c.z, r.z), r: 1, what: `a post (${r.who})` });
+    }
+    return { things, points, built: inBuilt };
+  }
 
   /**
    * Wait, at most `ms` (`PLACED_TUNE.warmWaitMs`), for the placed warm's models to load, so the loading screen's
@@ -5763,17 +5838,32 @@ export class World {
    * each trail's, each clear pane's) forgotten by the portal renderer and the cascades, then disposed. Every way a
    * vehicle goes comes here. A hull still being prepared (an NPC ship, not yet in the list) is disposed all the same.
    */
-  disposeVehicle(v: Vehicle): void {
+  disposeVehicle(v: Vehicle, keep?: THREE.Material[]): void {
     // Once: a second removal of its body would be a use after free (a destroyed NPC ship the manager also clears).
     if (!v.disposed) {
       v.dispose(this.physics, this.scene);
-      this.forgetMaterials(v.ownedMaterials);
-      // A trail's material is disposed twice (with its trail too): harmless.
-      for (const m of v.ownedMaterials) m.dispose();
+      if (keep) {
+        // Handed to a keeper instead (a race run's wrecked hull, `App.putBack`): a material disposed releases its program
+        // once nothing else uses it, and the same vehicle spawned again a moment later would build it on a live frame. The
+        // keeper forgets and disposes them (`releaseVehicleMaterials`) once what replaces the hull is prepared.
+        for (const m of v.ownedMaterials) keep.push(m);
+      } else {
+        this.forgetMaterials(v.ownedMaterials);
+        // A trail's material is disposed twice (with its trail too): harmless.
+        for (const m of v.ownedMaterials) m.dispose();
+      }
       v.ownedMaterials.length = 0;
     }
     const i = this.vehicles.indexOf(v);
     if (i >= 0) this.vehicles.splice(i, 1);
+  }
+
+  /** Materials a keeper held back from `disposeVehicle`, forgotten and disposed now; the list emptied. */
+  releaseVehicleMaterials(kept: THREE.Material[]): void {
+    if (!kept.length) return;
+    this.forgetMaterials(kept);
+    for (const m of kept) m.dispose();
+    kept.length = 0;
   }
 
   /** The refit of each vehicle under way, so the next waits for it (inTurn). */
