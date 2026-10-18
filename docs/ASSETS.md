@@ -10,7 +10,7 @@ Findings from research into the SWG client archives, the emulator projects and t
 - The NGE-era projects (SWG Legends, SWG Restoration) distribute the entire final client through their launchers. Reports say no retail copy is required, though their pages could not be fetched directly to confirm the wording.
 - No cease-and-desist, takedown or lawsuit against any SWG emulator was found in fifteen-plus years. The projects' posture is non-profit, non-affiliated, and (for SWGEmu) own-the-discs.
 
-So for a private, friends-only build: use the discs you own plus the SOE-origin patch archives from an emulator install, convert locally, never commit or host the output, and exclude the emulator projects' own custom archives. That is the same footing the emulators themselves stand on.
+So for a private, friends-only build: use the discs you own plus the SOE-origin patch archives from an emulator install, convert locally, never commit or host the output, and exclude the emulator projects' own custom archives. That is the same footing the emulators themselves stand on. The one exception is SWG Legends' own additions, which the owner allowed on 2026-10-18 for a player whose install has them, always optional (see below).
 
 ## What each client version contains
 
@@ -25,7 +25,9 @@ Introduction dates worth knowing: RIS armor in Publish 4 (November 2003), Mandal
 
 ## Which archives are yours to convert
 
-Only SOE-origin archives: `bottom.tre`, `default_patch.tre`, `holidays.tre`, `data_*.tre`, `patch_*.tre`, `hotfix_*.tre`. Emulator projects add their own archives containing work they made themselves and license restrictively: `restoration_N.tre` (Restoration), `Stardust_0N.tre`, `mtg_patch_NNN.tre` and `mtg_planets.tre` (ModTheGalaxy), `swgsource_3.0.tre` (SWG Source), and SWG Legends encrypts its client data. Leave all of those out.
+Only SOE-origin archives: `bottom.tre`, `default_patch.tre`, `holidays.tre`, `data_*.tre`, `patch_*.tre`, `hotfix_*.tre`. Emulator projects add their own archives containing work they made themselves and license restrictively: `restoration_N.tre` (Restoration), `Stardust_0N.tre`, `mtg_patch_NNN.tre` and `mtg_planets.tre` (ModTheGalaxy), `swgsource_3.0.tre` (SWG Source), and SWG Legends encrypts its client data. Leave all of those out, with one exception.
+
+**SWG Legends' own additions** (its rebuilt Bestine, its new armour, clothes, creatures and planets) may be converted where the player's install has them and they can be read as they stand, by the owner's decision of 2026-10-18: "If someone has a legends installation, it can be included. If they don't, they won't see new armor or new planets." The converter never breaks an archive's encryption to get at them. Whatever comes from them is optional and marked as Legends in the game, so `--retail-only` still converts and runs a whole game and nothing may depend on a Legends file. Like everything converted, it stays in `assets-private/` and is never committed or hosted. What their archives add beyond SOE's has not been surveyed yet. Every other emulator's and mod's own content stays out, and the emulator's server data still ships only as `tools/swg/core3ref/`.
 
 `npm run swg -- verify <dir>` hashes every archive in a directory against the retail manifests in `tools/swg/manifests/retail.json` (names, sizes and hashes only, taken from the SWGEmu launcher manifest, a CU launcher manifest and a final-client manifest) and says which are retail. `--retail-only` on any other command mounts only archives whose names and sizes match those manifests.
 
