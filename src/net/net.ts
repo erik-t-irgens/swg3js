@@ -101,6 +101,18 @@ export interface PeerState {
   in?: PeerAboard;
   /** In a hyperspace jump, from its start until its tunnel opens at the far end: the peer and their ship are not shown. */
   j?: 1;
+  /**
+   * Their grappling hook (server/grappleWire.mjs), absent while there is no rope: `[0, x, y, z, vx, vy, vz]` the dart
+   * flying (or a loose prop on the line, sent as the dart coming home), `[1, slack, ax, ay, az, w1x, ...]` a rope held,
+   * every point a world point as their own screen drew it. Read rather than trusted (src/net/peerRope.ts).
+   */
+  gr?: number[];
+  /**
+   * Beside a held rope, the points of it that ride a third player's vehicle, six numbers each: `[kind, id, index, lx,
+   * ly, lz, ...]`, kind 1 that player's vehicle by relay id, `index` the point's place in `gr`, and its place in that
+   * vehicle's own frame, which every watcher puts on its own picture of the vehicle.
+   */
+  grf?: number[];
 }
 
 export interface Peer {
@@ -153,6 +165,8 @@ interface ServerWord {
   homes?: number;
   /** Whether a server's hail says it holds each character's progress (1); a server before it says nothing. */
   progress?: number;
+  /** Whether a server's hail says its ledger keeps carried gear, the grapple's rig (1); a server before it says nothing. */
+  gear?: number;
 }
 
 /**
@@ -442,7 +456,7 @@ export class Net {
         // The world's clock, from the greeting: the day and the weather follow it from here on, and the
         // round trips below sharpen it. The hello follows the claim, never the other way about.
         sharedClock.hail(Number(server.now), Number(server.dayMs) || undefined, Number(server.dayAt) || undefined, Number(server.dayFrom) || 0);
-        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0 });
+        this.session.hail({ v: Number(server.v) || 0, now: Number(server.now) || 0, epoch: Number(server.epoch) || 0, dayMs: Number(server.dayMs) || 0, nonce: String(server.nonce ?? ''), word: server.word === 1 ? 1 : 0, ff: server.ff === 1 ? 1 : 0, story: storyHailVersion(server.story), items: Number(server.items) > 0 ? Math.floor(Number(server.items)) : 0, paint: Number(server.paint) > 0 ? Math.floor(Number(server.paint)) : 0, props: Number(server.props) > 0 ? Math.floor(Number(server.props)) : 0, homes: Number(server.homes) > 0 ? Math.floor(Number(server.homes)) : 0, progress: Number(server.progress) > 0 ? Math.floor(Number(server.progress)) : 0, gear: Number(server.gear) > 0 ? Math.floor(Number(server.gear)) : 0 });
         // A hail that came in after the wait had already run out: this browser said hello ahead of its
         // claim, and a server that asks for a join word threw that hello away without a word about it.
         // Now that it has claimed, the hello is said again. A server that asks for no word kept the
@@ -568,7 +582,10 @@ export class Net {
           // The head's pitch is a byte or it is nothing: a far end on another build may send
           // anything, and a number that is not one leaves the head level rather than throwing.
           const pitch = typeof msg.pt === 'number' && Number.isFinite(msg.pt) ? Math.min(255, Math.max(0, Math.round(msg.pt))) : undefined;
-          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, ...(pitch === undefined ? {} : { pt: pitch }), ...rideFields(msg.in, msg.veh), ...(msg.j === 1 ? { j: 1 as const } : {}) };
+          // The blade in the air, the grappling hook's rope and the points of it on a third player's vehicle: each
+          // copied when it is a list, and read for what it is where it is used. This rebuild once left the blade out,
+          // so nobody ever saw another player's thrown saber in flight.
+          const state: PeerState = { p: msg.p, h: msg.h ?? 0, s: msg.s ?? 'idle', v: msg.v ?? 0, m: !!msg.m, sab: !!msg.sab, q: msg.q, ...(pitch === undefined ? {} : { pt: pitch }), ...rideFields(msg.in, msg.veh), ...(msg.j === 1 ? { j: 1 as const } : {}), ...(Array.isArray(msg.tb) ? { tb: msg.tb } : {}), ...(Array.isArray(msg.gr) ? { gr: msg.gr } : {}), ...(Array.isArray(msg.grf) ? { grf: msg.grf } : {}) };
           if (peer) peer.state = state;
           this.onState(msg.id, state);
         }

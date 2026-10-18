@@ -706,10 +706,12 @@ export class Player {
 
   /**
    * Everything that refuses a grapple shot (the design's §3.8), filled in place: what the body itself knows,
-   * and what the game hands in (a shuttle's passenger, a jump with the controls, the placing hand, talking).
+   * and what the game hands in (a shuttle's passenger, a jump with the controls, the placing hand, talking, and from
+   * wave 4 whether the character owns a rig, which only matters once `everyone` is off).
    */
-  grappleFireState(riding: boolean, jump: boolean, placing: boolean, talking: boolean): GrappleFireState {
+  grappleFireState(riding: boolean, jump: boolean, placing: boolean, talking: boolean, rig = true): GrappleFireState {
     const s = this.fireState;
+    s.rig = rig;
     s.mounted = !!this.mounted;
     s.piloting = !!this.piloting;
     s.noclip = this.noclip;

@@ -305,4 +305,37 @@ ok(inOrder(fly, ["kind === 'prop' ? this.propAt?.(hit.collider.handle)", "this.w
   ok(/if \(now - this\.lastStateSent < 100\) return;/.test(stepNet) && /export const PEER_SEND = 0\.1;/.test(frames), "the jump test's gap between states is the gap the game sends them at, a tenth of a second");
 }
 
+// Wave 4: the rope on the wire and the rig as a thing owned. Every hand-over in the game, none of which the behaviour
+// tests reach (they build the watcher, the reader and the equipment for themselves): a line lost here leaves every other
+// player's rope frozen, off their vehicle or never read, or the rig given before a server has spoken, while every test of
+// the parts still passes.
+{
+  const stepNet = method(main, '  private stepNet(dt: number, frameAt: number): void {');
+  ok(inOrder(stepNet, ['peerBodies().stampHulls(frameAt);', 'remoteRopes.tick(dt);', 'this.remotes.update(dt);']).ok, "the peers' ropes are told the frame's step before the peers are moved, which is when they glide and their arms ease");
+  ok(
+    inOrder(stepNet, ['const hidden = ', 'const rope = hidden ? null : this.ropeForWire(now);', 'this.net.sendState(']).ok && /\.\.\.\(rope \? \{ gr: rope\.gr \} : \{\}\), \.\.\.\(rope\?\.grf \? \{ grf: rope\.grf \} : \{\}\)/.test(stepNet),
+    'the state carries the rope (`gr`, and `grf` beside a held one) only while the player is not hidden',
+  );
+  const forWire = method(main, '  private ropeForWire(now: number): { gr: number[]; grf: number[] | null } | null {');
+  ok(/g\.wireRope\(p\.grappleBody, GRAPPLE_TUNE\.sendPoints, this\.ropeThingVel\)/.test(forWire), "what goes is the hook's own `wireRope`, cut to `sendPoints`");
+  ok(
+    main.includes('remoteRopes.framePose = (id, pos, quat) => this.remotes.framePose(id, pos, quat);') && /remoteRopes\.cast = \(seg\) => \{[^}]*seg\[6\] = [^;]*blockDistance\(/.test(main) && /remoteRopes\.sound = \(what, x, y, z\) => grappleSounds\.peer\(what, x, y, z,/.test(main),
+    "the watcher is handed the peers' vehicle poses (a point on a vehicle on this browser's picture of it), the world's cast (a dart stopped where it struck) and the sound at the hand",
+  );
+  ok(/remoteRopes\.draw\(this\.cam\.camera, window\.innerHeight, tFrame\);/.test(main) && inOrder(main, ['remoteBlades.draw(dt, this.cam.camera,', 'remoteRopes.draw(this.cam.camera, window.innerHeight, tFrame);']).ok, "and lays the peers' ropes once a frame with the clock the frame read at its start, beside their blades");
+  const state = method(remotes, '  state(id: number, s: PeerState): void {');
+  ok(/readPeerRope\(s\.gr, s\.grf, now, r\.rope\);/.test(state), "a peer's every state reads its rope into the record the view hands the watcher (a state with none clears it)");
+  const fire = method(main, '  private fireGrapple(): string {');
+  ok(inOrder(fire, ['const rig = GRAPPLE_TUNE.everyone || this.ownsRig();', 'g.refusal(p.grappleFireState(', ', rig));']).ok && /s\.rig = rig;/.test(method(player, '  grappleFireState(')), 'the fire hands the refusal whether a rig is owned, asked only once `everyone` is off');
+  // The gear's gates: a server's list decides the rig, and is told of or takes away a rig, only where its hail says gear.
+  const gates = main.match(/this\.net\.session\.gearVersion >= GEAR_KEPT/g) ?? [];
+  ok(gates.length === 4 && /keeperStateOf\(this\.gearState, line, line\.gearVersion >= GEAR_KEPT, this\.net\.wanted, this\.relayAsked, /.test(main), `every gate on the gear asks the hail's own gear (${gates.length} of 4: the equipment's keeps, the trade's keeps, the first list's decision and the rig's keeper; its state the fifth)`);
+  ok(main.includes("keeps: (kind) => kind !== 'gear' || this.net.session.gearVersion >= GEAR_KEPT,") && main.includes("trade.keeps = (kind) => kind !== 'gear' || this.net.session.gearVersion >= GEAR_KEPT;"), 'the equipment and the trade keep a rig to themselves against a server whose hail does not say gear');
+  ok(/if \(this\.net\.session\.gearVersion >= GEAR_KEPT\) \{\s*void this\.equipment\.gearFromList\(items\)/.test(main) && inOrder(main, ['void this.equipment.reconcile(items, sharedClock.now())', 'void this.equipment.gearFromList(items)']).ok, "a server that keeps gear decides the rig from its list, after that list is laid over the backpack");
+  ok(main.includes('gearKeeper: () => this.gearKeeperNow(),') && /private gearKeeperNow\(\): 'here' \| 'server' \| 'pending' \{\s*if \(this\.net\.session\.gearVersion >= GEAR_KEPT\) return 'server';\s*return keeperOf\(this\.gearKeptBy, this\.gearStateNow\(\)\) === 'local' \? 'here' : 'pending';/.test(main), "the equipment asks who keeps the rig of one rule: the server that keeps gear, else this browser only once it is known to keep it");
+  const play = method(main, '  private async play(c: SavedCharacter): Promise<void> {');
+  ok(inOrder(play, ['this.relayAsked = !!Net.savedUrl();', "this.gearKeptBy = 'pending';", 'await this.equipment.load(c);']).ok, "a session's first world asks for its server before the load, so a server saved here and not yet heard from leaves the rig to it rather than the record's mark");
+  ok(inOrder(method(main, '  private stepKeepers(dt: number): void {'), ['const gear = keeperOf(this.gearKeptBy, this.gearStateNow());', "if (gear === 'local') void this.equipment.grantRigHere();"]).ok, 'and the rig is given by the mark the moment this browser is known to keep it');
+}
+
 console.log(`\n${checks} checks passed`);

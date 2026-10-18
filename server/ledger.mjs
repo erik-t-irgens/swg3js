@@ -10,7 +10,8 @@
 // lost.** So:
 //
 //   - A row is one item: which character owns it, what kind it is (the pack it comes out of: a
-//     wardrobe piece or a weapon off the rack), what it is (the catalogue's own id), when it was got,
+//     wardrobe piece or a weapon off the rack, or carried gear, the grapple's rig, which comes out of
+//     none), what it is (the catalogue's own id), when it was got,
 //     and **which one it is** -- its `thing`, the name the browser minted when it was got and never
 //     reuses. A character's table is keyed by that name, so two of one shirt are two rows and may be
 //     two colours (`tint`), traded apart and worn apart. A row the server made itself, and every row
@@ -76,8 +77,18 @@ export const LEDGER_TUNING = {
  */
 export const ITEMS_VERSION = 2;
 
-/** The two packs an item can come out of, which is what the backpack itself knows. */
-const KINDS = ['wear', 'weapon'];
+/**
+ * What a server that keeps carried gear says in its hail (`gear`): 1 keeps a `gear` row as it keeps a wardrobe piece
+ * or a weapon -- the grappling hook's rig, carried in no slot and no hand. A browser hands a gear row up, and lets a
+ * list take one away, only to a server that says it; against any other the rig stays a row of its own backpack.
+ */
+export const GEAR_VERSION = 1;
+
+/**
+ * The kinds of thing an item can be, which is what the backpack itself knows: a wardrobe piece or a weapon off the
+ * rack, and carried gear (the grapple's rig), which is ours and comes out of no pack.
+ */
+const KINDS = ['wear', 'weapon', 'gear'];
 /** What a browser may ask about its own list. */
 const DOES = ['list', 'get', 'add', 'drop', 'using', 'tint'];
 /** The steps of a trade a browser may ask for. */

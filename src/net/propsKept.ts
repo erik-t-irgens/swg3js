@@ -114,7 +114,16 @@ export interface LineFacts {
  * (`connectToCome`); that arrival has waited no time at all until the connect is made.
  */
 export function keeperState(out: KeeperState, line: LineFacts, props: boolean, wanted: boolean, connectToCome: boolean, sinceMs: number): KeeperState {
-  out.serverHolds = line.authority === 'server' && (!props || line.propsVersion >= 1);
+  return keeperStateOf(out, line, !props || line.propsVersion >= 1, wanted, connectToCome, sinceMs);
+}
+
+/**
+ * `keeperState` for any kind of thing: the server holds it once it has taken the claim and `keeps` says its greeting
+ * keeps that kind -- the grapple's rig asks it with the hail's `gear`, which is how a session's first world waits to
+ * hear whether a server will decide the rig before this machine gives one by the record's own mark. Makes nothing.
+ */
+export function keeperStateOf(out: KeeperState, line: { readonly authority: string; readonly mode: string }, keeps: boolean, wanted: boolean, connectToCome: boolean, sinceMs: number): KeeperState {
+  out.serverHolds = line.authority === 'server' && keeps;
   out.wanted = wanted || connectToCome;
   out.answering = line.authority === 'server' || line.mode === 'relay';
   out.sinceArrivalMs = connectToCome ? 0 : sinceMs;

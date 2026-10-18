@@ -16,7 +16,7 @@ import { BountyHunterKit } from './combat/bountyHunter';
 import { TORCH_TUNE, newTorchPose, placeTorch, torchIntensity, type TorchTune } from './player/torch.ts';
 import { GodHold, godRefusal } from './player/godMode.ts';
 import { recordHarmKind } from './player/harmRule.ts';
-import { GRAPPLE_TUNE, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
+import { GRAPPLE_TUNE, NO_RIG_WORDS, grappleStatBase, resetGrappleTune, tuneGrapple } from './player/grapple.ts';
 import { underWater } from './player/grappleMath.ts';
 import { HeldNotes } from './ui/heldNotes.ts';
 import { MENU_REACH_TOP, REACH_FLOOR, askReach, emptyHold, heldAxisNote, holding, reachInForce, reachWarnings, type ReachAsk } from './world/reachHold.ts';
@@ -152,7 +152,7 @@ import { GIVE_TUNE } from './ui/giveModel.ts';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
 import { Equipment, ITEMS_TUNE, tuneItems } from './player/equipment';
 import { itemInfo, itemSwatch, WEAPON_ORDER, type ItemContext } from './player/items';
-import { OFF_HAND_CLASSES, firstItems, lookWithoutGarments, normalizeOwned, outfitTints, pickedTint, slotRank, slotWords, speciesWords } from './core/inventory';
+import { GRAPPLE_RIG, OFF_HAND_CLASSES, firstItems, isOwnedKind, lookWithoutGarments, normalizeOwned, outfitTints, pickedTint, slotRank, slotWords, speciesWords, type OwnedKind } from './core/inventory';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS, forceFxReport, type ForceFxTune } from './combat/forcePowers';
 import { setForceBeamLook } from './combat/forceLightning.ts';
@@ -186,7 +186,7 @@ import { SHUTTLE_TUNE, fareText, isPortKind, landingOn, portAt, portPlacedAt, po
 import { ShuttleMenu } from './ui/shuttleMenu.ts';
 import { destinationFor, loadGalaxyFile, planetOfRouteId, routeFactsOf, systemOf, systemOfPack, systemsOfWorlds } from './data/galaxy';
 import { HOMES_MOVE_VERSION, homeKey, homes, routeHomeWord } from './net/homes.ts';
-import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
+import { PROPS_KEEPER_TUNE, SERVER_NOT_ANSWERING, arrivalCircles, arrivalHolds, arrivalKeeper, keeperNews, keeperOf, keeperState, keeperStateOf, keptDepsOf, keptKey, keptProps, keptRefusal, routePropWord, switchSets, type Keeper, type KeeperState, type KeptRow, type KeptSets } from './net/propsKept.ts';
 import { creditText, purse } from './net/purse.ts';
 import { BAND_TUNE, FLOOR_TUNE, animFor, band, loadMusic, musicPack, partsFor, songsFor, standsOnGround, stemFor } from './audio/band.ts';
 import { BandBar } from './ui/bandBar.ts';
@@ -314,7 +314,7 @@ import { hourOfDay } from './world/dayPhase.ts';
 import { sharedClock } from './world/sharedClock.ts';
 import { GROUP_RANGE, GROUP_TUNE, Groups, tuneGroups } from './net/groups.ts';
 import { GROUP_UI_TUNE, GroupUi, tuneGroupUi } from './ui/groupUi.ts';
-import { ITEMS_NAMED, OLD_SERVER_WORDS, TRADE_TUNE, Trade, tradeNow, tuneTrade, type TradeItem } from './net/trade.ts';
+import { GEAR_KEPT, ITEMS_NAMED, OLD_SERVER_WORDS, TRADE_TUNE, Trade, tradeNow, tuneTrade, type TradeItem } from './net/trade.ts';
 import { TRADE_UI_TUNE, TradeUi, tuneTradeUi } from './ui/tradeUi.ts';
 import { DebugMenu } from './ui/debugMenu.ts';
 import { CHAT_TUNE, ChatUi, tuneChat } from './ui/chatUi.ts';
@@ -340,6 +340,8 @@ import { isRawColour } from './player/texrender.ts';
 import { customizeFileNow, loadCustomizeFile } from './player/customizer.ts';
 import { RemotePlayers, watchPeers } from './net/remotePlayers';
 import { remoteBlades } from './net/remoteBlades.ts';
+import { remoteRopes } from './net/remoteRopes.ts';
+import { PEER_ROPE_DEFAULTS, PEER_ROPE_TUNE, tunePeerRope } from './net/peerRope.ts';
 import { danceOf, defaultEmotes, emoteChoices, FLOURISHES, isDanceClip, isFlourishClip, isMusicLoop, loadEmotes, loopsEmote, performOf, saveEmotes } from './core/emotes';
 import { HUD_DPR_RANGE, HUD_LINES_RANGE, HUD_MINIMAP_RANGE, HUD_SCALE_RANGE, loadSettings, saveSettings, type Settings } from './core/settings';
 import { deleteCharacter, knownToServer, loadCharacters, markKnownToServer, newCharacterId, upsertCharacter, type Appearance, type SavedCharacter } from './core/characters';
@@ -1913,6 +1915,12 @@ class App {
       // The garments' colours moved onto their things once, behind the loading screen: a new shape of the
       // same record, which the session adopts without counting a change.
       rewritten: (was, now) => this.net.session.noteRewritten(this.marked(was), this.marked(now)),
+      // The grapple's rig: given once by the record's own mark wherever this browser keeps the character's things,
+      // decided by the server's own first list where a server says it keeps gear (`gearFromList`, the trade wiring),
+      // and given by nobody while a server saved here has not yet said which (`gearKeeperNow`, `stepKeepers`).
+      gearKeeper: () => this.gearKeeperNow(),
+      // A server keeps a rig only where it says so: against any other the rig is this browser's row, which no list takes away.
+      keeps: (kind) => kind !== 'gear' || this.net.session.gearVersion >= GEAR_KEPT,
       baseUrl: import.meta.env.BASE_URL,
     });
     // The Skills tab: the Force powers or the gadgets in the number slots, given to the class's kit and kept with the character.
@@ -7216,20 +7224,27 @@ class App {
       items: () => {
         const snap = this.equipment.snapshot();
         const ctx = this.equipment.lastContext;
-        const where = (o: { kind: 'wear' | 'weapon'; id: string; thing?: string }) =>
-          o.kind === 'weapon'
-            ? snap.held.right === o.id && snap.heldThing.right === o.thing
-              ? 'right'
-              : snap.held.left === o.id && snap.heldThing.left === o.thing
-                ? 'left'
-                : 'pack'
-            : o.id in snap.worn && snap.wornThing[o.id] === o.thing
-              ? 'worn'
-              : 'pack';
+        const where = (o: { kind: OwnedKind; id: string; thing?: string }) =>
+          o.kind === 'gear'
+            ? 'carried'
+            : o.kind === 'weapon'
+              ? snap.held.right === o.id && snap.heldThing.right === o.thing
+                ? 'right'
+                : snap.held.left === o.id && snap.heldThing.left === o.thing
+                  ? 'left'
+                  : 'pack'
+              : o.id in snap.worn && snap.wornThing[o.id] === o.thing
+                ? 'worn'
+                : 'pack';
         return {
           inv: snap.inv,
           named: snap.named,
           tints: snap.tints,
+          // The grapple's rig: the record's own mark (given here once), whether the server's ledger keeps gear, and who
+          // keeps it now -- `here`, `server`, or `pending` while a server saved here has not yet said which.
+          gear: this.current?.gear ?? null,
+          gearVersion: this.net.session.gearVersion,
+          gearKeeper: this.gearKeeperNow(),
           itemsVersion: this.net.session.itemsVersion,
           record: snap.record,
           species: snap.species,
@@ -7252,11 +7267,11 @@ class App {
        * not on, one of each; `give('wear', 'shirt_s03', { another: true })` gives a second copy, a thing of
        * its own, whether or not one is owned (refused on a server from before things had names).
        */
-      give: async (kind: 'wear' | 'weapon', id: string, opts?: { another?: boolean }) => {
-        if (kind !== 'wear' && kind !== 'weapon') return "kind is 'wear' or 'weapon'";
+      give: async (kind: OwnedKind, id: string, opts?: { another?: boolean }) => {
+        if (!isOwnedKind(kind)) return "kind is 'wear', 'weapon' or 'gear'";
         const ctx = await this.equipment.itemContext();
         const info = itemInfo(kind, id, ctx);
-        if (info.missing) return kind === 'wear' ? `${id} is not in this character's wardrobe` : `${id} is not on the weapons rack`;
+        if (info.missing) return kind === 'wear' ? `${id} is not in this character's wardrobe` : kind === 'weapon' ? `${id} is not on the weapons rack` : `${id} is no gear this game has`;
         if (!this.current || this.creating) return 'no character is being played';
         if (opts?.another) {
           const why = this.equipment.giveAnother(kind, id);
@@ -7307,7 +7322,7 @@ class App {
        * what the rope `holds` (an anchor or a thing), and of a prop held or under the mark its mass, its distance and
        * who the mass rule moves (`whoMoves`).
        */
-      grapple: (opts: { fire?: boolean | [number, number, number] | 'prop' | 'vehicle'; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean; drive?: false | { throttle?: number; steer?: number; seconds?: number } } = {}) => {
+      grapple: (opts: { fire?: boolean | [number, number, number] | 'prop' | 'vehicle'; letGo?: boolean; everyone?: boolean; tune?: Partial<Record<keyof typeof GRAPPLE_TUNE | keyof typeof PEER_ROPE_TUNE, unknown>>; reset?: boolean; slam?: number; stagger?: boolean; drive?: false | { throttle?: number; steer?: number; seconds?: number } } = {}) => {
         const p = this.player;
         const g = p.grapple;
         const b = p.grappleBody;
@@ -7347,8 +7362,15 @@ class App {
           g.timing = true;
           said.push('timing the rope from now');
         }
-        if (opts.reset) resetGrappleTune();
-        if (opts.tune) tuneGrapple(opts.tune);
+        if (opts.reset) {
+          resetGrappleTune();
+          tunePeerRope(PEER_ROPE_DEFAULTS);
+        }
+        // The watcher's lead lives in a table of its own (src/net/peerRope.ts says why); each table takes its own keys.
+        if (opts.tune) {
+          tuneGrapple(opts.tune);
+          tunePeerRope(opts.tune);
+        }
         if (opts.everyone !== undefined) tuneGrapple({ everyone: !!opts.everyone });
         if (opts.letGo) g.letGo('console');
         // The mark's own checks from the hand toward a point: what the line meets first is the mark, and the dart fires at it.
@@ -7474,6 +7496,11 @@ class App {
           // the brake, the hull test and the hulls cast this frame -- and what the console's `drive` is driving.
           ...g.vehicleReport(b),
           drive: this.grappleDrive ? { vehicle: this.grappleDrive.v.spec.id, left: n2(this.grappleDrive.left) } : null,
+          // Wave 4: what the last state sent of the rope (its two lists and their bytes; `gr` null with none out or
+          // hidden), whether the character owns a rig, and every other player's rope as this browser draws it.
+          sent: { gr: this.ropeSent.gr, grf: this.ropeSent.grf, bytes: this.ropeSent.bytes, grfBytes: this.ropeSent.grfBytes, online: this.net.online },
+          rig: this.ownsRig(),
+          peers: remoteRopes.report(),
         };
       },
       /** Whether the torso is held steady over running legs while a pose rides the upper body (on by default). */
@@ -8957,6 +8984,15 @@ class App {
     // The other players' blades keep their renderers for the next peer; the ones over that go, and a
     // disposed material must leave the portal renderer's set and the cascades' map with them.
     remoteBlades.forget = (m) => this.world.forgetMaterials(m);
+    // The other players' grappling ropes (§3.15): a point riding a third player's vehicle is put on this browser's own
+    // picture of it (the rider's real vehicle on the rider's own browser), a dart in flight stops where it strikes in
+    // this world, and their fire, bite and let-go are heard at their hand, in the room that hand is in.
+    remoteRopes.framePose = (id, pos, quat) => this.remotes.framePose(id, pos, quat);
+    remoteRopes.cast = (seg) => {
+      const ph = this.world.physics;
+      seg[6] = ph && !ph.broken ? ph.blockDistance(seg[0], seg[1], seg[2], seg[3], seg[4], seg[5]) : Infinity;
+    };
+    remoteRopes.sound = (what, x, y, z) => grappleSounds.peer(what, x, y, z, this.world.footSurfaces.space(x, y, z) ?? undefined, this.player.grapple.clock);
     // A new mobile prototype: the motion blur's shaders for its morph counts, after the world's own preparation.
     MobileAssets.for(import.meta.env.BASE_URL).alsoPrepare = (root) => this.postfx?.product<VelocityProduct>('velocity')?.prepareRoots([root]) ?? Promise.resolve();
     this.net.onJoin = (peer) => this.remotes.add(peer.id, peer.hello);
@@ -9846,6 +9882,9 @@ class App {
     // How the server keeps what characters own: a server that keeps a row per thing says so in its
     // hail, and against one that does not this side keeps to one of each.
     trade.itemsVersion = () => this.net.session.itemsVersion;
+    // Carried gear (the grapple's rig) only to a server whose greeting says it keeps gear: to any other it is never
+    // handed up nor told of, and no list of that server's takes it away.
+    trade.keeps = (kind) => kind !== 'gear' || this.net.session.gearVersion >= GEAR_KEPT;
     trade.owns = (thing) => this.equipment.owns(thing);
     trade.inUse = (thing) => this.equipment.inUse(thing);
     // What this browser holds for the character in play, for the one moment it hands its list up.
@@ -9899,6 +9938,14 @@ class App {
         // ids and those are only known once a list has arrived.
         trade.tellUsing();
       });
+      // The grapple's rig, where this server keeps gear: its first settled list of the session decides, once, after the
+      // list above is laid over the backpack (the same queue), and a list with no rig is answered with one given as a
+      // job's reward is, which the ledger hears as an add. Never asked of a server whose greeting does not say gear.
+      if (this.net.session.gearVersion >= GEAR_KEPT) {
+        void this.equipment.gearFromList(items).then((given) => {
+          if (given && this.backpack.open) void this.refreshBackpack();
+        });
+      }
     };
     trade.onNote = (text) => this.messages.system(text);
     // A thing the server handed over on its own -- a job's reward, which a server running the jobs pays
@@ -10986,6 +11033,7 @@ class App {
     // Who keeps the next character's things is not known until its world arrives.
     this.propsKeeper = 'pending';
     this.homesKeeper = 'pending';
+    this.gearKeptBy = 'pending';
     this.relayAsked = false;
     // The world is going and the group with it: the strip comes down here, because the frame that
     // would notice stops being run the moment there is no world, and a roster left standing behind
@@ -14148,12 +14196,13 @@ class App {
   }
 
   /** Whether an id is a weapon or a wardrobe item: owned first, then the rack, then the wardrobe. */
-  private async kindOf(id: string): Promise<'wear' | 'weapon' | null> {
+  private async kindOf(id: string): Promise<OwnedKind | null> {
     const owned = this.equipment.owned().find((o) => o.id === id);
     if (owned) return owned.kind;
     const ctx = await this.equipment.itemContext();
     if (!itemInfo('weapon', id, ctx).missing) return 'weapon';
     if (!itemInfo('wear', id, ctx).missing) return 'wear';
+    if (!itemInfo('gear', id, ctx).missing) return 'gear';
     return null;
   }
 
@@ -14161,12 +14210,12 @@ class App {
    * A backpack cell's key read back as an item: an owned thing's own name, which says which copy, or
    * -- for something worn or held that is not owned, which has no name -- `wear:` or `weapon:` and its id.
    */
-  private itemOfKey(key: string): { kind: 'wear' | 'weapon'; id: string; thing?: string } | null {
+  private itemOfKey(key: string): { kind: OwnedKind; id: string; thing?: string } | null {
     const owned = this.equipment.itemOf(key);
     if (owned) return { kind: owned.kind, id: owned.id, thing: owned.thing };
     const i = key.indexOf(':');
     const kind = key.slice(0, i);
-    if (kind !== 'wear' && kind !== 'weapon') return null;
+    if (!isOwnedKind(kind)) return null;
     return { kind, id: key.slice(i + 1) };
   }
 
@@ -14209,27 +14258,32 @@ class App {
     // A cell is one thing, keyed by its own name, so two of one shirt are two cells and only the copy
     // on the body reads as worn; something worn or held that is not owned has no name and is keyed by
     // what it is.
-    const cell = (kind: 'wear' | 'weapon', id: string, got: number, thing?: string, tint?: Record<string, number>): BackpackCell => {
+    const cell = (kind: OwnedKind, id: string, got: number, thing?: string, tint?: Record<string, number>): BackpackCell => {
       const info = itemInfo(kind, id, ctx);
       const mine = (on: string | null | undefined) => !thing || on === thing;
+      // Carried gear (the grapple's rig) is ready in no slot and no hand, and stands beside what is worn.
       const where: BackpackCell['where'] =
-        kind === 'weapon'
-          ? snap.held.right === id && mine(snap.heldThing.right)
-            ? 'right'
-            : snap.held.left === id && mine(snap.heldThing.left)
-              ? 'left'
-              : 'pack'
-          : id in snap.worn && mine(snap.wornThing[id])
-            ? 'worn'
-            : 'pack';
+        kind === 'gear'
+          ? 'carried'
+          : kind === 'weapon'
+            ? snap.held.right === id && mine(snap.heldThing.right)
+              ? 'right'
+              : snap.held.left === id && mine(snap.heldThing.left)
+                ? 'left'
+                : 'pack'
+            : id in snap.worn && mine(snap.wornThing[id])
+              ? 'worn'
+              : 'pack';
       const first = info.slots?.[0];
-      const slotsText = kind === 'weapon' ? (first ? slotWords(first) : '') : info.slots?.length ? `takes: ${info.slots.map((a) => slotWords(a)).join(' or ')}` : '';
+      const slotsText = kind === 'gear' ? 'carried, in no slot and no hand' : kind === 'weapon' ? (first ? slotWords(first) : '') : info.slots?.length ? `takes: ${info.slots.map((a) => slotWords(a)).join(' or ')}` : '';
       const classRank = info.cls ? WEAPON_ORDER.indexOf(info.cls) : WEAPON_ORDER.length;
-      const order = where === 'worn' ? slotRank(first?.[0]) : kind === 'weapon' ? classRank : 100 + slotRank(first?.[0]);
+      const order = where === 'carried' ? 1000 : where === 'worn' ? slotRank(first?.[0]) : kind === 'weapon' ? classRank : 100 + slotRank(first?.[0]);
       const fitNote = info.missing
         ? kind === 'weapon'
           ? 'not on this machine\'s weapons rack'
-          : "not in this character's wardrobe"
+          : kind === 'gear'
+            ? 'no gear this build knows'
+            : "not in this character's wardrobe"
         : info.fit === 'block'
           ? `${speciesWords(ctx.species, true)} cannot wear this`
           : info.fit === 'hide' || info.unseen
@@ -14241,6 +14295,7 @@ class App {
         id,
         name: info.name,
         icon: info.icon,
+        glyph: info.glyph ?? null,
         where,
         fit: info.fit,
         missing: info.missing,
@@ -14281,6 +14336,8 @@ class App {
    */
   private stepNet(dt: number, frameAt: number): void {
     peerBodies().stampHulls(frameAt);
+    // The peers' ropes glide and their arms ease by this frame's step, read as the peers are moved (`peerMoved`).
+    remoteRopes.tick(dt);
     this.remotes.update(dt);
     if (!this.net.online) return;
     const now = performance.now();
@@ -14347,8 +14404,41 @@ class App {
     // number would lag their head twice over; a frame in which the head is not looking at all
     // (a kata, a ride, a panel) sends the middle of the byte and their head is level.
     const pt = rig ? packPitch(rig.headLook.wantedPitch) : undefined;
+    // The grappling hook (§3.15): the dart flying or the rope held, every point a world point where this screen draws
+    // it, cut to `sendPoints` at the anchor's end, and beside a held rope the points that ride another player's vehicle
+    // in that vehicle's own frame. Never while hidden: a figure nobody is shown has no rope to be seen with.
+    const rope = hidden ? null : this.ropeForWire(now);
     // One or the other, never both: the hull a passenger stands in is sent by whoever flies it.
-    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+    this.net.sendState({ p: [n2(at.x), n2(at.y), n2(at.z)], h: n3(p.heading), s: p.mounted ? 'seated' : (rig?.describe().state ?? 'idle'), v: n2(Math.hypot(p.vel.x, p.vel.z)), m: !!p.mounted, sab: p.saberOn, q, ...(pt === undefined ? {} : { pt }), ...(tb ? { tb } : {}), ...(rope ? { gr: rope.gr } : {}), ...(rope?.grf ? { grf: rope.grf } : {}), ...(inHull ? { in: inHull } : { veh }), ...(hidden ? { j: 1 as const } : {}) });
+  }
+
+  /** The rope's two lists as the last state carried them, and their size on the wire, for `__debug.grapple().sent`. */
+  private ropeSent: { gr: number[] | null; grf: number[] | null; bytes: number; grfBytes: number; at: number } = { gr: null, grf: null, bytes: 0, grfBytes: 0, at: 0 };
+  /** A loose prop's rope end at the last state sent, and when, for the velocity it goes with (it is sent as the dart coming home). */
+  private readonly ropeThingWas = new THREE.Vector3();
+  private ropeThingAt = 0;
+  private readonly ropeThingVel = new THREE.Vector3();
+
+  /** The hook's rope for this state (`Grapple.wireRope`), or null with none out. Ten times a second at most: it allocates freely. */
+  private ropeForWire(now: number): { gr: number[]; grf: number[] | null } | null {
+    const p = this.player;
+    const g = p.grapple;
+    if (!g.out || p.aboard || p.eva) {
+      this.ropeSent = { gr: null, grf: null, bytes: 0, grfBytes: 0, at: now };
+      return null;
+    }
+    // A prop's end moves with the prop; its velocity is measured between states, nought on the first.
+    if (g.holding) {
+      const end = g.rope.pts;
+      const gap = (now - this.ropeThingAt) / 1000;
+      if (this.ropeThingAt > 0 && gap > 0 && gap < 1) this.ropeThingVel.set((end[0] - this.ropeThingWas.x) / gap, (end[1] - this.ropeThingWas.y) / gap, (end[2] - this.ropeThingWas.z) / gap).clampLength(0, 60);
+      else this.ropeThingVel.set(0, 0, 0);
+      this.ropeThingWas.set(end[0], end[1], end[2]);
+      this.ropeThingAt = now;
+    } else this.ropeThingAt = 0;
+    const rope = g.wireRope(p.grappleBody, GRAPPLE_TUNE.sendPoints, this.ropeThingVel);
+    this.ropeSent = { gr: rope?.gr ?? null, grf: rope?.grf ?? null, bytes: rope ? JSON.stringify(rope.gr).length : 0, grfBytes: rope?.grf ? JSON.stringify(rope.grf).length : 0, at: now };
+    return rope;
   }
 
   /** The wheel's slots from the rig's own emotes when none were kept yet, and the menu's Emotes page fed from it. */
@@ -14652,6 +14742,12 @@ class App {
       this.applyAppearance(character, await this.recordLook(c, character));
       await this.dress(character, c.outfit ?? []);
     }
+    // The server saved in this browser is connected to once the world is up (below): until then its line is wanted all
+    // the same, so who keeps this player's things -- the grapple's rig among them, which the load below would otherwise
+    // give by the record's own mark before that server has said whether it decides it -- waits for it rather than
+    // standing this machine's.
+    this.relayAsked = !!Net.savedUrl();
+    this.gearKeptBy = 'pending';
     // What the character owns (a record from before the backpack is given what it wears and the kit),
     // with the hands emptied of whoever was played before; outside the `if`, so a single model gets its weapons too.
     await this.equipment.load(c);
@@ -14677,9 +14773,6 @@ class App {
     this.loadingScreen.setProgress(0.04);
     // A character kept in a dungeon copy is in a room, which can lie below the ground: not lifted onto it.
     this.arriveIndoors = !!planet.instances;
-    // The server saved in this browser is connected to once the world is up (below): until then its line is
-    // wanted all the same, so who keeps this player's things waits for it rather than standing this machine's.
-    this.relayAsked = !!Net.savedUrl();
     this.arrive(planet, c.zone, c.pos ? new THREE.Vector3(c.pos[0], c.pos[1], c.pos[2]) : undefined);
     if (c.heading !== undefined) {
       this.player.heading = c.heading;
@@ -19076,11 +19169,42 @@ class App {
    */
   private personalWorld = '';
 
+  /**
+   * Who keeps the grapple's rig for the character played (`Equipment`'s `gearKeeper`): by the props' own rule
+   * (`keeperOf`), with the hail's `gear` in place of its `props`. Not known (`pending`) from `play` until a server saved
+   * here has said what it is or the wait has run out, so the rig is given by the record's own mark only once it is known
+   * that this browser keeps it (`grantRigHere`, from `stepKeepers`), never at the load before the server has spoken.
+   */
+  private gearKeptBy: Keeper = 'pending';
+  /** What the rig's keeper is asked with, written in place. */
+  private readonly gearState: KeeperState = { serverHolds: false, wanted: false, answering: false, sinceArrivalMs: 0 };
+
+  private gearStateNow(): KeeperState {
+    const line = this.net.session;
+    return keeperStateOf(this.gearState, line, line.gearVersion >= GEAR_KEPT, this.net.wanted, this.relayAsked, performance.now() - this.keeperSince);
+  }
+
+  /**
+   * The rig's keeper as the equipment reads it: `server` the moment a server that keeps gear holds the claim (whatever
+   * the frame last asked), `here` once this browser is known to keep it, `pending` while a server saved or wanted has
+   * not yet said which -- or has dropped while it kept it.
+   */
+  private gearKeeperNow(): 'here' | 'server' | 'pending' {
+    if (this.net.session.gearVersion >= GEAR_KEPT) return 'server';
+    return keeperOf(this.gearKeptBy, this.gearStateNow()) === 'local' ? 'here' : 'pending';
+  }
+
   /** The frame's turn: who keeps them, asked every `everyMs`. */
   private stepKeepers(dt: number): void {
     this.keeperTick += dt * 1000;
     if (this.keeperTick < PROPS_KEEPER_TUNE.everyMs) return;
     this.keeperTick = 0;
+    // The grapple's rig, given by the record's own mark the moment it is known that this browser keeps it.
+    const gear = keeperOf(this.gearKeptBy, this.gearStateNow());
+    if (gear !== this.gearKeptBy) {
+      this.gearKeptBy = gear;
+      if (gear === 'local') void this.equipment.grantRigHere();
+    }
     const props = keeperOf(this.propsKeeper, this.keeperStateFor(true));
     const houses = keeperOf(this.homesKeeper, this.keeperStateFor(false));
     if (props === this.propsKeeper && houses === this.homesKeeper) return;
@@ -20902,6 +21026,11 @@ class App {
     this.player.grapple.stepKeys(input, this.player.grappleBody, this.grappleMuteList, this.fireGrappleNow);
   }
 
+  /** Whether the character in play owns a grapple rig (carried gear: in no slot and no hand). Asked on a press, never a frame. */
+  private ownsRig(): boolean {
+    return this.equipment.owned().some((o) => o.kind === 'gear' && o.id === GRAPPLE_RIG);
+  }
+
   /** The fire key with nothing out, kept so the key block hands the hook no new closure a frame. */
   private readonly fireGrappleNow = (): void => {
     this.fireGrapple();
@@ -20915,10 +21044,17 @@ class App {
   private fireGrapple(): string {
     const p = this.player;
     const g = p.grapple;
-    const why = g.refusal(p.grappleFireState(!!this.ride?.riding, this.hyperspace.locksControls, !!(this.placing || this.propPlacing), !!this.talkNow));
+    // Owning a rig is asked only once `everyone` is off (the owner's "for now"): until then every character fires.
+    const rig = GRAPPLE_TUNE.everyone || this.ownsRig();
+    const why = g.refusal(p.grappleFireState(!!this.ride?.riding, this.hyperspace.locksControls, !!(this.placing || this.propPlacing), !!this.talkNow, rig));
     const mk = g.mark;
     if (why || !mk.shows) {
       g.flashBad(HUD_SIZES.flashSeconds);
+      // The one refusal said in words: nothing on the screen would otherwise say why the hook will not go.
+      if (why === 'no rig') {
+        this.messages.system(NO_RIG_WORDS);
+        return NO_RIG_WORDS;
+      }
       return why || (mk.kind === 'none' ? 'nothing in reach' : `the mark is on ${mk.kind}`);
     }
     const b = p.grappleBody;
@@ -26091,6 +26227,8 @@ class App {
       // thing that asks after this draw, and it asks the same way (`CLASH.flashBorrow`, 'free'), so
       // a clash in a lit cabin sparks without a light of its own rather than blanking the cabin.
       remoteBlades.draw(dt, this.cam.camera, this.bladeGlowOwnsLight() ? null : this.effects);
+      // And their grappling ropes and darts, from their drawn left hands, on the one material every rope is drawn with.
+      remoteRopes.draw(this.cam.camera, window.innerHeight, tFrame);
       // Two blades that meet. Every blade in the world has just been drawn -- the player's above,
       // the fighters' and the catalogue's in their own step, the peers' on the line above -- so the
       // nearest approach between each pair is worked out here, where every pose is this frame's,

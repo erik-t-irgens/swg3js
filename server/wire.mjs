@@ -10,6 +10,7 @@
 import { cleanShip } from './shipWire.mjs';
 import { cleanHeadPitch } from './combatWire.mjs';
 import { cleanRide, quat } from './vehicleWire.mjs';
+import { ROPE_POINTS, cleanRope, cleanRopeFrames, ropePointCount } from './grappleWire.mjs';
 
 /**
  * The caps. Every one of these is ours, invented for this pass and kept here together so there is
@@ -39,6 +40,12 @@ export const WIRE = {
   counter: 1e9,
   /** A mood's name. It matches `MOOD_TUNE.nameChars` in the browser, and both are ours. */
   mood: 24,
+  /**
+   * The most points a grappling hook's rope sends (`grappleWire.mjs`). The wire's own shape rather than a cap a run
+   * may move: `--set wire.ropePoints` is refused, since a relay started with fewer would drop every longer rope an
+   * unchanged browser sends, whole. Printed here with the rest so the status page says it.
+   */
+  ropePoints: ROPE_POINTS,
 };
 
 const NAME_CONTROL = /[\u0000-\u001f\u007f]/g;
@@ -142,7 +149,8 @@ export function cleanHello(x) {
 /**
  * A cleaned copy of a `state`, or undefined when the place in it is not three numbers: where the
  * player is, which way they face, what their rig is playing, how fast, mounted, the saber lit, the
- * whole turn when a heading is not enough, a jump in progress and the vehicle they are on.
+ * whole turn when a heading is not enough, a jump in progress, the blade in the air, the grappling
+ * hook's rope and dart, and the vehicle they are on.
  */
 export function cleanState(x, self = 0) {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return undefined;
@@ -170,6 +178,17 @@ export function cleanState(x, self = 0) {
   if (Array.isArray(x.tb) && x.tb.length === 4) {
     const tb = x.tb.map(Number);
     if (!tb.some((v) => !Number.isFinite(v))) state.tb = tb;
+  }
+  // Their grappling hook: the dart in flight or the rope held, every point a world point, and beside a held rope the
+  // points that ride a third player's vehicle in that vehicle's own frame (`grappleWire.mjs`). Places in the world,
+  // so not otherwise bounded, as the thrown blade's is not; never a point on the sender's own vehicle.
+  const gr = cleanRope(x.gr, ROPE_POINTS);
+  if (gr) {
+    state.gr = gr;
+    if (gr[0] === 1) {
+      const grf = cleanRopeFrames(x.grf, ropePointCount(gr), self, ROPE_POINTS);
+      if (grf) state.grf = grf;
+    }
   }
   // The vehicle they ride or fly, or the hull of somebody else's ship they are standing in, never
   // both: whoever flies a hull is the one who sends it, so a watcher draws one hull with people in

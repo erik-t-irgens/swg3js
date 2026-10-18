@@ -1709,6 +1709,21 @@ await section(25, 'the refusals', async () => {
     ok(rolling && b.grapple.state === 'off' && b.lastFireRefusal === 'rolling', `no dart is fired while rolling (${b.lastFireRefusal})`);
   }
   ok(new TestBody(await makePhysics()).grapple.refusal({ ...newFireState(), special: true }) === 'special', 'no dart is fired in a special jump');
+  // Owning a rig (wave 4): asked only once `everyone` is off, and then it is what lets a character fire.
+  {
+    const g = new TestBody(await makePhysics()).grapple;
+    const was = GRAPPLE_TUNE.everyone;
+    try {
+      GRAPPLE_TUNE.everyone = true;
+      ok(g.refusal({ ...newFireState(), rig: false }) === '' && g.refusal({ ...newFireState(), rig: true }) === '', 'with everyone carrying one for now, owning a rig changes nothing: with or without, the press fires');
+      GRAPPLE_TUNE.everyone = false;
+      ok(g.refusal({ ...newFireState(), rig: false }) === 'no rig', 'with that turned off, a character with no rig is refused');
+      ok(g.refusal({ ...newFireState(), rig: true }) === '', 'and one who owns a rig fires');
+      ok(g.refusal({ ...newFireState(), rig: true, mounted: true }) === 'mounted', 'owning one refuses nothing the rest would not');
+    } finally {
+      GRAPPLE_TUNE.everyone = was;
+    }
+  }
   {
     const b = await stand();
     tap(b, 'Mouse3', 1 / 60);

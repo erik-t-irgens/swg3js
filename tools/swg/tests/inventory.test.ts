@@ -663,4 +663,29 @@ const HOLD_BOTH = [['hold_r', 'hold_l']];
   }
 }
 
+// --- carried gear: the grapple's rig is a kind every reader keeps (wave 4) ------------------------------
+{
+  const { GRAPPLE_RIG, OWNED_KINDS, isOwnedKind } = await import('../../../src/core/inventory.ts');
+  ok(same(OWNED_KINDS, ['wear', 'weapon', 'gear']) && isOwnedKind('gear') && !isOwnedKind('hair') && !isOwnedKind(7), 'the kinds a character can own are named once: a wardrobe piece, a weapon and carried gear');
+  const rig: OwnedItem = { id: GRAPPLE_RIG, kind: 'gear', got: 5, thing: 'ggrapple_rig|5|aaaa' };
+  const shirt: OwnedItem = { id: 'shirt_s03', kind: 'wear', got: 3, thing: 'wshirt_s03|3|bbbb' };
+  ok(same(normalizeOwned([shirt, rig]).map((o) => o.kind), ['wear', 'gear']), 'normalizeOwned keeps a gear row: a kind written out by hand once dropped it at every read');
+  ok(normalizeOwned([{ id: 'x', kind: 'hair', got: 1 } as unknown as OwnedItem]).length === 0, 'and still drops a kind that is no kind of thing to own');
+  // A server whose greeting does not say gear keeps none: its list never names the rig, and the rig stays.
+  const fromOld = pairOwned([shirt, rig], [{ id: 'shirt_s03', kind: 'wear', got: 3, thing: shirt.thing }], undefined, Infinity, (k) => k !== 'gear');
+  ok(fromOld.items.filter((o) => o.kind === 'gear').length === 1 && fromOld.items.some((o) => o.thing === rig.thing), 'a list from a server that keeps no gear leaves the local rig where it is, once');
+  ok(fromOld.gone.length === 0 && fromOld.came === 0, 'and lists it neither as gone nor as come');
+  const fromOldEmpty = pairOwned([shirt, rig], [], undefined, Infinity, (k) => k !== 'gear');
+  ok(fromOldEmpty.gone.length === 1 && fromOldEmpty.gone[0].kind === 'wear' && fromOldEmpty.items.length === 1 && fromOldEmpty.items[0].kind === 'gear', 'a list that has taken the shirt away takes the shirt and leaves the rig');
+  // A server that keeps gear decides: its list with no rig takes the local one away, and one with a rig is the rig.
+  const fromNew = pairOwned([shirt, rig], [{ id: 'shirt_s03', kind: 'wear', got: 3, thing: shirt.thing }]);
+  ok(fromNew.gone.length === 1 && fromNew.gone[0].kind === 'gear' && !fromNew.items.some((o) => o.kind === 'gear'), 'a list from a server that keeps gear and holds no rig is the truth: the local rig goes');
+  const fromNewRig = pairOwned([shirt], [{ id: 'shirt_s03', kind: 'wear', got: 3, thing: shirt.thing }, { id: GRAPPLE_RIG, kind: 'gear', got: 9, thing: 'srv.i4' }]);
+  ok(fromNewRig.came === 1 && fromNewRig.items.some((o) => o.kind === 'gear' && o.thing === 'srv.i4'), 'and one that holds a rig hands it over under the name the server gave it');
+  const ctx: ItemContext = { wardrobe: null, wardrobeDir: null, weapons: null, species: 'wookiee_male', packParts: [] };
+  const info = itemInfo('gear', GRAPPLE_RIG, ctx);
+  ok(info.name === 'Grapple rig' && !info.missing && info.fit === 'ok' && info.glyph === 'ic-grapple' && info.icon === null && info.slots === null, `the rig has our own name and words, fits every species, takes no slot and shows our glyph (${info.name}: ${info.description})`);
+  ok(itemInfo('gear', 'a_rig_nobody_made', ctx).missing, 'and gear this build does not know is missing, shown and destroyable');
+}
+
 console.log(`${checks} checks passed`);

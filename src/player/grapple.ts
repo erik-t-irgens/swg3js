@@ -360,10 +360,14 @@ export const GRAPPLE_TUNE = {
   tetherBlocked: 0.25,
   /** A prop dragged on the rope lets go this far short of where the pool would put it back on its stand (m). */
   tetherStandMargin: 5,
-  // --- others and the item -----------------------------------------------------------------------------
-  /** The points a rope sends to other players (when it is sent at all): at most the wire's sixteen. */
+  // --- others and the item (wave 4) --------------------------------------------------------------------
+  // This table holds 127 keys and must stay under 128: the engine makes an object literal of 128 or more with every key
+  // out of the object, and the hook's frame then boxed what it read off it (4.2 B a frame where it made 0.09). The
+  // watcher's own number is `PEER_ROPE_TUNE` in src/net/peerRope.ts for that reason; a new number goes in a table of
+  // its own (remoteRopes.test.ts counts the keys).
+  /** The points a rope sends to other players (when it is sent at all): at most the wire's sixteen, cut at the anchor's end. */
   sendPoints: 16,
-  /** [owner: "for now"] Every character can fire, owning a rig or not. */
+  /** [owner: "for now"] Every character can fire, owning a rig or not; off, firing asks for the rig in the backpack. */
   everyone: true,
 };
 
@@ -372,7 +376,7 @@ export type GrappleTune = typeof GRAPPLE_TUNE;
 /** The table as it ships, for `__debug.grapple({ reset: true })`. */
 export const GRAPPLE_DEFAULTS: Readonly<GrappleTune> = Object.freeze({ ...GRAPPLE_TUNE });
 
-/** The wire's own cap on a rope's points (`WIRE.ropePoints` on the server, when it carries ropes). */
+/** The wire's own cap on a rope's points (`ROPE_POINTS` in server/grappleWire.mjs, `WIRE.ropePoints`): fixed, never a run's. */
 export const ROPE_WIRE_POINTS = 16;
 
 /** The game's own gravity (Jedi Academy's 800 u/s², whatever the planet). */
@@ -657,11 +661,16 @@ export interface GrappleFireState {
   swgProfile: boolean;
   /** The world has stepped since the last reset, so a query can be trusted. */
   stepped: boolean;
+  /** The character owns a grapple rig (wave 4): asked only while `everyone` is off. */
+  rig: boolean;
 }
 
 export function newFireState(): GrappleFireState {
-  return { mounted: false, piloting: false, noclip: false, eva: false, aboard: false, riding: false, jump: false, dead: false, placing: false, talking: false, prone: false, kneeling: false, rolling: false, special: false, swgProfile: false, stepped: true };
+  return { mounted: false, piloting: false, noclip: false, eva: false, aboard: false, riding: false, jump: false, dead: false, placing: false, talking: false, prone: false, kneeling: false, rolling: false, special: false, swgProfile: false, stepped: true, rig: true };
 }
+
+/** What a shot refused for want of a rig says, once a press, on the message line: the one refusal said in words. */
+export const NO_RIG_WORDS = 'You carry no grapple rig.';
 
 /** Where the dart would bite, worked out each frame after the camera, and kept. */
 export interface GrappleMark {
@@ -1165,7 +1174,8 @@ export class Grapple {
 
   /** Why a shot would be refused just now, or '' when it would be fired (with the mark showing). */
   refusal(s: GrappleFireState): string {
-    if (!GRAPPLE_TUNE.everyone) return 'no rig';
+    // Owning one matters only once `everyone` is off (the owner's "for now"): every character fires until then.
+    if (!GRAPPLE_TUNE.everyone && !s.rig) return 'no rig';
     if (s.mounted) return 'mounted';
     if (s.piloting) return 'piloting';
     if (s.noclip) return 'noclip';
@@ -3986,6 +3996,60 @@ export class Grapple {
     out.y = y + q.w * ty + (q.z * tx - q.x * tz);
     out.z = z + q.w * tz + (q.x * ty - q.y * tx);
     return out;
+  }
+
+  /**
+   * The rope as it goes to other players (§3.15), worked out at the moment of sending, ten times a second at most, so it
+   * makes its two lists freely: null with nothing out. The dart flying is `[0, x, y, z, vx, vy, vz]` (coming home, its
+   * velocity is the way home over what is left of `missReturn`); a loose prop on the line is sent as the dart coming
+   * home, its end on the prop with `thingVel`, the end's own velocity as the caller measured it between states, since
+   * the others have no such prop. A rope held is `[1, slack, anchor, bends...]`, every point a world point where it is
+   * drawn (a point on a hull at the hull's drawn pose, on another player's vehicle at this browser's picture of it), cut
+   * to `most` at the anchor's end: the anchor and the bends nearest the hand are kept, and the far side draws straight
+   * from the last kept bend to the anchor. Beside it, `grf` gives every kept point that rides another player's vehicle
+   * as `[1, their relay id, its index in gr, its place in that vehicle's own frame]`, so each watcher puts it on its own
+   * picture of the hull; a point on a vehicle nobody else has (this browser's own) goes as the world point alone.
+   */
+  wireRope(b: GrappleBody, most: number, thingVel: { readonly x: number; readonly y: number; readonly z: number }): { gr: number[]; grf: number[] | null } | null {
+    // To the centimetre, as the rest of the state is (written without the bare number the stat table's test looks for).
+    const n2 = (n: number) => Number(n.toFixed(2));
+    if (this.state === 'flying') {
+      let vx = this.dartVel[0];
+      let vy = this.dartVel[1];
+      let vz = this.dartVel[2];
+      if (this.returning) {
+        const left = Math.max(0.01, (1 - Math.min(1, this.returnT)) * GRAPPLE_TUNE.missReturn);
+        vx = (b.pos.x - this.dart[0]) / left;
+        vy = (b.pos.y + GRAPPLE_TUNE.ropeY - this.dart[1]) / left;
+        vz = (b.pos.z - this.dart[2]) / left;
+      }
+      return { gr: [0, n2(this.dart[0]), n2(this.dart[1]), n2(this.dart[2]), n2(vx), n2(vy), n2(vz)], grf: null };
+    }
+    if (this.state === 'holding') {
+      const p = this.rope.pts;
+      return { gr: [0, n2(p[0]), n2(p[1]), n2(p[2]), n2(thingVel.x), n2(thingVel.y), n2(thingVel.z)], grf: null };
+    }
+    if (this.state !== 'attached') return null;
+    const rope = this.rope;
+    const points = rope.n + 1;
+    const keep = Math.max(1, Math.min(Math.round(most), points));
+    // The anchor, then the bends nearest the hand: a rope past the cap loses the bends next to its anchor.
+    const firstBend = points - keep + 1;
+    const gr: number[] = [1, n2(Math.max(0, this.slack(b)))];
+    let grf: number[] | null = null;
+    const at = this.drawnAt;
+    for (let i = 0, k = 0; i < points; i++) {
+      if (i > 0 && i < firstBend) continue;
+      this.drawnPoint(i, at, 0);
+      gr.push(n2(at[0]), n2(at[1]), n2(at[2]));
+      const fi = rope.pf[i];
+      if (fi > MAX_HULL_FRAMES) {
+        const id = this.hulls.peerFrame(fi).ps.id;
+        if (id > 0) (grf ??= []).push(1, id, k, n2(rope.pts[3 * i]), n2(rope.pts[3 * i + 1]), n2(rope.pts[3 * i + 2]));
+      }
+      k++;
+    }
+    return { gr, grf };
   }
 
   /** The mark's point where it is drawn: on a hull at the hull's drawn pose, else where it is. Into `out`. */

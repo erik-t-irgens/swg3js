@@ -79,6 +79,12 @@ export interface SavedCharacter {
    * and each thing its own `tint`. A mark of its own, and not `inv: 3`, for the reason `named` gives.
    */
   tints?: 1;
+  /**
+   * 1 once the grapple's rig was given to this character where this browser keeps its things (`grantRig` in
+   * src/core/inventory.ts), written in the same save as the row. A mark of its own, for the reason `named` gives; a
+   * server that keeps gear decides from its own list instead and never reads it.
+   */
+  gear?: 1;
   /** The ships' fits by garage id (a component per chassis slot, paint values, the droid); a ship absent is stock. */
   ships?: Record<string, ShipFit>;
   /**

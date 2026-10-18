@@ -25,7 +25,8 @@ import { createHash, createHmac } from 'node:crypto';
 import { fromBase32, fromHex, hmacSha256, sha256, toBase32, toHex, utf8 } from '../../../src/net/hash.ts';
 import { SESSION, Session, characterMark, playerIdOf, proofOf, tuneSession, verifierOf, wordProofOf, type SessionStore } from '../../../src/net/session.ts';
 import { MULTIPLAYER_PARTS, multiplayerMarkup } from '../../../src/ui/multiplayerPage.ts';
-import { keeperOf, keeperState, type Keeper } from '../../../src/net/propsKept.ts';
+import { keeperOf, keeperState, keeperStateOf, type Keeper } from '../../../src/net/propsKept.ts';
+import { GEAR_KEPT } from '../../../src/net/trade.ts';
 import { atDoorDoes } from '../../../src/world/myBuildings.ts';
 import { checkClaim, playerIdFor, verifierFor } from '../../../server/identity.mjs';
 import { cleanClaim } from '../../../server/wire.mjs';
@@ -517,6 +518,48 @@ const claimOf = (sent: Record<string, unknown>[]) => sent.find((m) => m.t === 'c
   b.it.claimed({ character: 'char-1' }, 'same');
   ok(b.it.homesVersion === 0 && b.it.debug().homes === 0, 'a server whose greeting says nothing of it moves none');
   ok(atDoorDoes(true, b.it.homesVersion) === 'tab' && atDoorDoes(false, b.it.homesVersion) === 'take', "so the key at the door of one it keeps opens the Housing tab, while this machine's own still come up");
+}
+
+{
+  // Whether the far end's ledger keeps carried gear, the grapple's rig (grapple wave 4): heard in the greeting, in force
+  // once the server has us, and nothing at all from a server whose greeting says nothing of it -- every relay from before,
+  // whose ledger drops a gear row, so a rig handed up to it would be taken out of the backpack by its next list and,
+  // marked as given, never come back. Put through the very rule the game asks with (`keeperStateOf`, `keeperOf`), with
+  // the trade's and the equipment's `keeps` as `main.ts` writes them.
+  const facts = { serverHolds: false, wanted: false, answering: false, sinceArrivalMs: 0 };
+  const keeper = (it: Session, prev: Keeper, since = 100) => keeperOf(prev, keeperStateOf(facts, it, it.gearVersion >= GEAR_KEPT, true, false, since));
+  const keeps = (it: Session) => (kind: string) => kind !== 'gear' || it.gearVersion >= GEAR_KEPT;
+  const a = session();
+  a.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  ok(a.it.gearVersion === 0 && keeper(a.it, 'pending') === 'pending', 'with a line wanted and nothing heard yet, nobody knows who keeps the rig, and nothing is given');
+  a.it.opening();
+  a.it.hail({ v: 6, now: 1, nonce: NONCE, items: 2, gear: 1 });
+  ok(a.it.gearVersion === 0 && a.it.debug().gear === 1, 'a server whose ledger keeps gear says so, and nothing rests on it until the claim is taken');
+  ok(keeper(a.it, 'pending') === 'pending' && !keeps(a.it)('gear'), 'so the rig is still nobody\'s to give, and no list may take it yet');
+  a.it.claimed({ character: 'char-1' }, 'same');
+  ok(a.it.gearVersion === 1 && keeper(a.it, 'pending') === 'server' && keeps(a.it)('gear'), 'once it is, the server decides the rig, and its lists may take one away');
+  a.it.closed();
+  ok(a.it.gearVersion === 0 && keeper(a.it, 'server') === 'server' && !keeps(a.it)('gear'), 'with the line dropped and wanted back it is still the server\'s to decide, while no list rests on the greeting');
+  a.it.opening();
+  ok(a.it.debug().gear === 0, 'a line opened again has heard nothing yet');
+  const b = session();
+  b.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  b.it.opening();
+  b.it.hail({ v: 6, now: 1, nonce: NONCE, items: 2, props: 1, homes: 2, progress: 1 });
+  ok(b.it.gearVersion === 0 && b.it.debug().gear === 0, 'a greeting that says nothing of gear keeps none, before the claim');
+  b.it.claimed({ character: 'char-1' }, 'same');
+  ok(b.it.gearVersion === 0 && b.it.debug().gear === 0, 'and after it');
+  ok(keeper(b.it, 'pending') === 'local' && keeper(b.it, 'server') === 'local', "so the rig is this browser's against it, given by the record's own mark, even coming back over a line that dropped from one that kept it");
+  ok(!keeps(b.it)('gear') && keeps(b.it)('wear') && keeps(b.it)('weapon'), 'and no list of its takes a rig away, while its clothes and weapons are its own');
+  const c = session();
+  c.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  c.it.opening();
+  c.it.hailTimedOut();
+  ok(c.it.gearVersion === 0 && keeper(c.it, 'pending') === 'local', 'the relay that came before, which never hails, keeps no gear: the rig is this browser\'s');
+  const d = session();
+  d.it.noteCharacter({ id: 'char-1', name: 'Han' }, ABOUT);
+  d.it.opening();
+  ok(keeper(d.it, 'pending', 100) === 'pending' && keeper(d.it, 'pending', 60_000) === 'local', 'and a far end that never answers at all hands it to this browser once the wait runs out');
 }
 
 {

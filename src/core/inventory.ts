@@ -10,7 +10,33 @@ export type Hand = 'right' | 'left';
 export type Fit = 'ok' | 'block' | 'hide';
 
 /**
- * One thing a character owns: a wardrobe item or a weapon off the rack.
+ * The kinds of thing a character can own, named once: a wardrobe piece, a weapon off the rack, and carried gear --
+ * the grapple's rig, which is ours, comes out of no pack and goes in no body slot and no hand. Every reader of an owned
+ * row reads it through this list, because a kind written out by hand anywhere drops the others at the next read: a
+ * gear row written once and dropped by `normalizeOwned` would be lost while its grant's mark stopped it ever coming
+ * back. The starting kit and its lookup stay a wardrobe piece or a weapon: no class's kit holds gear.
+ */
+export const OWNED_KINDS = ['wear', 'weapon', 'gear'] as const;
+export type OwnedKind = (typeof OWNED_KINDS)[number];
+
+/** Whether a value is one of the kinds a character can own. */
+export function isOwnedKind(kind: unknown): kind is OwnedKind {
+  return kind === 'wear' || kind === 'weapon' || kind === 'gear';
+}
+
+/** The grapple's rig: the one piece of carried gear there is, given to every character once (`grantRig`). */
+export const GRAPPLE_RIG = 'grapple_rig';
+
+/**
+ * Carried gear by catalogue id, its words ours (the archives hold no grapple: research2 §3.2), its picture a glyph of
+ * our own sheet (`src/ui/hud.svg`) shown through the backpack's no-picture path.
+ */
+export const GEAR: Readonly<Record<string, { name: string; description: string; glyph: string }>> = Object.freeze({
+  [GRAPPLE_RIG]: { name: 'Grapple rig', description: 'A dart launcher on a wrist winch with a hundred metres of line.', glyph: 'ic-grapple' },
+});
+
+/**
+ * One thing a character owns: a wardrobe item, a weapon off the rack, or carried gear.
  *
  * `id` is what it **is** -- the catalogue's own id, which every copy of it shares -- and `thing` is
  * which one it is, minted the moment it was got and never reused. The two were one field for a long
@@ -21,7 +47,7 @@ export type Fit = 'ok' | 'block' | 'hide';
  */
 export interface OwnedItem {
   id: string;
-  kind: 'wear' | 'weapon';
+  kind: OwnedKind;
   /** Date.now() when it was given: the backpack's "newest" order. */
   got: number;
   /**
@@ -320,7 +346,7 @@ export function normalizeOwned(items: readonly OwnedItem[] | null | undefined, m
   const seen = new Set<string>();
   const out: OwnedItem[] = [];
   for (const o of items ?? []) {
-    if (!o || typeof o.id !== 'string' || !o.id || (o.kind !== 'wear' && o.kind !== 'weapon')) continue;
+    if (!o || typeof o.id !== 'string' || !o.id || !isOwnedKind(o.kind)) continue;
     const got = Number.isFinite(o.got) ? o.got : 0;
     const thing = typeof o.thing === 'string' && o.thing ? o.thing : mint(o.kind, o.id, got);
     if (seen.has(thing)) continue;
@@ -441,7 +467,7 @@ export function pruneHeld(chosen: Readonly<{ right?: string; left?: string }> | 
  */
 export interface ListedItem {
   id: string;
-  kind: 'wear' | 'weapon';
+  kind: OwnedKind;
   got: number;
   thing?: string;
   tint?: Record<string, number> | null;
@@ -469,8 +495,15 @@ export interface ListedItem {
  * and which the server does not hold: a colour set while no server answered, one a server that had none
  * has never been told of, one taken off here since. Newest wins both ways, so those go up after the list
  * (`Equipment.reconcile`), and a colour set offline survives connecting.
+ *
+ * `keeps` says which kinds that server keeps at all. A local row of any other kind -- the grapple's rig against a
+ * server whose greeting does not say `gear` -- is none of its list's business: it is left in `items` exactly as it
+ * was, never paired and never in `gone`, or every list from such a server would take the rig away. Left out, every
+ * kind is the server's, which is what every list before carried gear meant.
  */
-export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem[], mint: (kind: string, id: string, got: number) => string = mintThing, now = Infinity): { items: OwnedItem[]; renamed: Map<string, string>; came: number; gone: OwnedItem[]; resend: string[] } {
+export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem[], mint: (kind: string, id: string, got: number) => string = mintThing, now = Infinity, keeps: (kind: OwnedKind) => boolean = () => true): { items: OwnedItem[]; renamed: Map<string, string>; came: number; gone: OwnedItem[]; resend: string[] } {
+  const others = had.filter((o) => !keeps(o.kind));
+  if (others.length) had = had.filter((o) => keeps(o.kind));
   const byThing = new Map<string, OwnedItem>();
   for (const o of had) if (o.thing) byThing.set(o.thing, o);
   const used = new Set<OwnedItem>();
@@ -525,7 +558,37 @@ export function pairOwned(had: readonly OwnedItem[], server: readonly ListedItem
     }
   }
   const gone = had.filter((o) => !used.has(o));
-  return { items: normalizeOwned(out.filter((o): o is OwnedItem => !!o)), renamed, came, gone, resend };
+  // The rows of kinds that server does not keep, after its own and as they were.
+  const kept: OwnedItem[] = out.filter((o): o is OwnedItem => !!o);
+  for (const o of others) kept.push(o);
+  return { items: normalizeOwned(kept), renamed, came, gone, resend };
+}
+
+/**
+ * The grapple's rig given to a character, once, where this browser keeps the character's things (no server, or a
+ * server whose greeting does not say it keeps gear), in place: a rig row if it owns none, kept through
+ * `normalizeOwned`, and only then the record's mark `gear: 1` -- a mark of its own, as `named` and `tints` are, never a
+ * new `inv`. The caller writes the row and the mark in one save. A record already marked comes back untouched, so a
+ * rig destroyed here is not given again. True when the record changed.
+ */
+export function grantRig<T extends { items?: OwnedItem[]; gear?: 1 }>(c: T, now: number, mint: (kind: string, id: string, got: number) => string = mintThing): boolean {
+  if (c.gear === 1) return false;
+  const items = normalizeOwned(c.items);
+  if (!items.some((o) => o.kind === 'gear' && o.id === GRAPPLE_RIG)) {
+    let thing = mint('gear', GRAPPLE_RIG, now);
+    while (items.some((o) => o.thing === thing)) thing = mint('gear', GRAPPLE_RIG, now);
+    items.push({ id: GRAPPLE_RIG, kind: 'gear', got: now, thing });
+  }
+  c.items = normalizeOwned(items);
+  // Marked only once the row is known to stand, read back the way every later read reads it.
+  if (c.items.some((o) => o.kind === 'gear' && o.id === GRAPPLE_RIG)) c.gear = 1;
+  return true;
+}
+
+/** Whether a list of things holds the grapple's rig. */
+export function holdsRig(items: readonly { kind: string; id: string }[]): boolean {
+  for (const o of items) if (o.kind === 'gear' && o.id === GRAPPLE_RIG) return true;
+  return false;
 }
 
 /** Two colour sets alike: no colour and `null` are one answer, and a set is its names and numbers. */

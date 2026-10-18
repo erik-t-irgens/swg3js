@@ -709,4 +709,31 @@ const shirt = (thing: string, got = 1, extra: Record<string, unknown> = {}) => (
   }
 }
 
+// --- 25: carried gear, the grapple's rig: accepted, listed, traded and read back (wave 4) ------------------
+{
+  const { GEAR_VERSION } = await import('../../../server/ledger.mjs');
+  ok(GEAR_VERSION === 1, '25: the greeting says the ledger keeps carried gear with a 1');
+  const list = cleanItems({ t: 'items', do: 'list', rows: [['gear', 'grapple_rig', 5, 'ggrapple_rig|5|aa'], { kind: 'gear', what: 'grapple_rig', got: 6 }] });
+  ok(list?.rows.length === 2 && list.rows.every((r: { kind: string }) => r.kind === 'gear'), '25: a gear row is a row to keep, in either shape a list carries');
+  ok(cleanItems({ t: 'items', do: 'add', kind: 'gear', what: 'grapple_rig', thing: 'ggrapple_rig|5|aa' })?.kind === 'gear', '25: and something coming into a character\'s hands may be gear');
+  const s = server();
+  s.do(s.ledger.here('c.ann', { session: 1, name: 'Ann' }) as Result);
+  s.do(s.ledger.here('c.ben', { session: 2, name: 'Ben' }) as Result);
+  s.do(s.ledger.settle('c.ann', [{ kind: 'gear', what: 'grapple_rig', got: 10, thing: 'ggrapple_rig|a|1' }, { kind: 'wear', what: 'shirt_s03', got: 11 }]) as Result);
+  s.do(s.ledger.settle('c.ben', [{ kind: 'weapon', what: 'pistol_cdef', got: 20 }]) as Result);
+  const ann = s.ledger.listFor('c.ann');
+  const rig = ann.find((r: { kind: string }) => r.kind === 'gear');
+  ok(!!rig && rig.what === 'grapple_rig' && rig.thing === 'ggrapple_rig|a|1', '25: a backpack handed up with a rig in it keeps the rig, under the name its browser gave it');
+  const add = s.ledger.add('c.ben', 'gear', 'grapple_rig', 21);
+  ok(add.ok && add.row.kind === 'gear' && s.ledger.countOf('c.ben', 'gear', 'grapple_rig') === 1, '25: a rig asked for the way a job\'s reward is given is written down');
+  ok(s.ledger.add('c.ben', 'gear', 'grapple_rig').already === true, '25: and asked for again with no name, it is the one already held');
+  // Ann hands her rig to Ben for his pistol.
+  const before = s.rowsOnDisk();
+  const done = swap(s, [rig.id], [s.ledger.listFor('c.ben').find((r: { kind: string }) => r.kind === 'weapon').id]);
+  ok(done.ok !== false && s.ledger.countOf('c.ben', 'gear', 'grapple_rig') === 2 && s.ledger.countOf('c.ann', 'gear', 'grapple_rig') === 0, '25: a rig is traded like anything owned: Ben holds two, Ann none');
+  ok(s.rowsOnDisk() === before, '25: and nothing was duplicated or lost in the swap');
+  const back = s.restart();
+  ok(back.countOf('c.ben', 'gear', 'grapple_rig') === 2 && back.listFor('c.ben').some((r: { thing: string }) => r.thing === 'ggrapple_rig|a|1'), '25: read back after a restart, Ben\'s two rigs are there, the traded one under its own name');
+}
+
 console.log(`\n${checks} checks passed`);

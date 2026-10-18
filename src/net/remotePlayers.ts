@@ -20,6 +20,7 @@ import { RELAY, stepRelayVelocity } from '../core/fx/velocityMath.ts';
 import { measureBox, peerBodies, type PeerBlow, type PeerBox } from './remoteBodies.ts';
 import { hangHeld } from './peerHands.ts';
 import { glidePeerTurn } from './peerTurn.ts';
+import { newPeerRope, readPeerRope, type PeerRope } from './peerRope.ts';
 
 /**
  * One peer, as everything that hangs something on a peer sees them: their body in the physics, a
@@ -78,6 +79,12 @@ export interface PeerView {
    * remembered in that frame, and a blade they throw in a banked hull is turned by it. Null outside.
    */
   hullFrame: THREE.Matrix4 | null;
+  /**
+   * Their grappling hook as their last state said it (`src/net/peerRope.ts`): the dart flying or the rope held, every
+   * point a world point, and the points riding a third player's vehicle in that vehicle's own frame. The peer's own kept
+   * record, refilled in place as each state is heard; kind -1 with none.
+   */
+  rope: PeerRope;
 }
 
 /** What a watcher is told. Every one of them is optional; nothing is called for a peer that has gone. */
@@ -241,6 +248,8 @@ interface Remote {
   saberColor: number;
   /** Their blade when it is out of their hand: where it is in the world and how far it has spun. */
   thrown: { x: number; y: number; z: number; spin: number } | null;
+  /** Their grappling hook as their last state said it, refilled in place (the view hands the same record on). */
+  rope: PeerRope;
   /** The one view handed to the watchers, refilled each frame rather than made. */
   view: PeerView;
 }
@@ -374,8 +383,9 @@ export class RemotePlayers {
     group.add(label);
     this.scene.add(group);
     markActor(group);
-    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null };
-    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, view };
+    const rope = newPeerRope();
+    const view: PeerView = { id, name: hello.name, shown: group.visible, group, rig: null, ship: null, shipBox: null, shipTarget: new THREE.Vector3(), shipTargetQ: new THREE.Quaternion(), shipVel: new THREE.Vector3(), shipHeardAt: 0, shipMount: false, shipDocked: false, hp: 100, maxHp: 100, down: false, saber: false, saberColor: DEFAULT_PEER_SABER, hands: [], saberThrown: null, hullFrame: null, rope };
+    const remote: Remote = { id, hello, group, rig: null, label, target: new THREE.Vector3(0, -1000, 0), heading: 0, targetQ: null, turned: false, state: 'idle', speed: 0, saber: false, silent: 0, dance: null, vehicle: null, aboard: null, lookApplied: null, lookPending: null, heldApplied: null, heldModels: [], vel: new THREE.Vector3(), heardAt: 0, jumping: false, hp: 100, maxHp: 100, down: false, headPitch: 0, lookAllowed: false, saberColor: DEFAULT_PEER_SABER, thrown: null, rope, view };
     this.remotes.set(id, remote);
     // Told before the rig is fetched: what hangs on a peer decides for itself how much of them it
     // needs, and a body is made on the first frame they are drawn, not here at the origin.
@@ -680,6 +690,9 @@ export class RemotePlayers {
     // Their blade out of their hand. Nothing here draws it; what hangs on a peer reads it off the view.
     const tb = s.tb;
     r.thrown = tb && tb.length === 4 && tb.every((v) => Number.isFinite(v)) ? { x: tb[0], y: tb[1], z: tb[2], spin: tb[3] } : null;
+    // Their grappling hook, read into the record the view hands on: nothing here draws it (`remoteRopes.ts` does). A
+    // state with none, or one this browser cannot read, clears it (`readPeerRope` does both).
+    readPeerRope(s.gr, s.grf, now, r.rope);
     r.silent = 0;
     this.rideState(r, s.veh, s.in);
     // In a jump they vanish; out of it they appear where they are now, not gliding across the distance jumped.
@@ -1143,6 +1156,16 @@ export class RemotePlayers {
       r.group.position.copy(dockOff).applyQuaternion(dockInv).applyQuaternion(rv.obj.quaternion).add(rv.obj.position);
       if (r.targetQ) r.group.quaternion.copy(rv.obj.quaternion).multiply(dockInv.multiply(r.targetQ));
     }
+  }
+
+  /**
+   * Where the vehicle of the player with this relay id stands here, for a point of a peer's grappling rope that rides it
+   * (`grf`): `carrierAt` restricted to a player who is shown. On that player's own browser it is their real vehicle
+   * (`carrierPose`), everywhere else this browser's picture of it -- which is where each browser draws the hull, so the
+   * rope's end stays on it. False when it is not here to put a point on; the point is then drawn as the world place sent.
+   */
+  framePose(id: number, pos: THREE.Vector3, quat: THREE.Quaternion): boolean {
+    return id > 0 && this.carrierShown(id) && this.carrierAt(id, pos, quat);
   }
 
   /** Where the ship of the player with this relay id stands: the game's own answer first, then the peers' pictures. */

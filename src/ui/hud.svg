@@ -346,4 +346,16 @@
     <path d="M12 13.5h3"/>
   </symbol>
 
+  <!-- ===== carried gear ======================================================================== -->
+
+  <!-- The grapple's rig: the dart, its shaft and two flukes swept back, the eye at its head and the line running off
+       it. The archives hold no grapple, so this is the rig's only picture, shown where a baked one would be. -->
+  <symbol id="ic-grapple" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="5" r="1.5"/>
+    <path d="M12 6.5V20"/>
+    <path d="M12 14.5c-.8 2.8-3.6 4.4-6.5 3.5"/>
+    <path d="M12 14.5c.8 2.8 3.6 4.4 6.5 3.5"/>
+    <path d="M13.4 4.4c2-.9 4-.1 6.1-.8"/>
+  </symbol>
+
 </svg>

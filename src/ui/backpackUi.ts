@@ -5,17 +5,20 @@
 //
 // The pictures are baked by the converter and shown as <img>, decoded off the main thread: no GL, so
 // opening the panel never compiles a shader. The panel is DOM, rebuilt on a change, never per frame.
-import type { Fit } from '../core/inventory';
+import type { Fit, OwnedKind } from '../core/inventory';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs';
 import { escapeHtml } from './catalogue';
 
 export interface BackpackCell {
   key: string;
-  kind: 'wear' | 'weapon';
+  kind: OwnedKind;
   id: string;
   name: string;
   icon: string | null;
-  where: 'pack' | 'worn' | 'right' | 'left';
+  /** A glyph of our own sheet shown where there is no picture (carried gear's), by its id (`ic-grapple`); null for none. */
+  glyph?: string | null;
+  /** In the backpack, worn, in a hand, or carried: gear that is ready in no slot and no hand, shown beside what is worn. */
+  where: 'pack' | 'worn' | 'right' | 'left' | 'carried';
   fit: Fit;
   missing: boolean;
   unseen: boolean;
@@ -251,19 +254,21 @@ export class BackpackUi {
     const find = this.find.value.trim().toLowerCase();
     const matches = (c: BackpackCell) => !find || c.name.toLowerCase().includes(find) || c.id.toLowerCase().includes(find) || c.kindText.toLowerCase().includes(find);
     const byOrder = (a: BackpackCell, b: BackpackCell) => a.order - b.order || a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
-    const worn = model.cells.filter((c) => c.where === 'worn').sort(byOrder);
+    // What is worn, then what is carried in no slot and no hand (the grapple's rig), under "Worn and held".
+    const worn = model.cells.filter((c) => c.where === 'worn' || c.where === 'carried').sort(byOrder);
     const right = model.cells.find((c) => c.where === 'right') ?? null;
     const left = model.cells.find((c) => c.where === 'left') ?? null;
     const pack = model.cells.filter((c) => c.where === 'pack').sort(byOrder);
     const shown = pack.filter(matches);
     const scroll = [this.wornGrid.scrollTop, this.packGrid.scrollTop];
     this.hands.innerHTML = [this.handHtml('right', right), this.handHtml('left', left)].join('');
-    this.wornGrid.innerHTML = model.noWardrobe ? `<div class="bp-empty">no wardrobe converted: clothes cannot be shown</div>` : worn.map((c) => this.cellHtml(c)).join('') || `<div class="bp-empty">nothing worn</div>`;
+    const carried = worn.filter((c) => c.where === 'carried');
+    this.wornGrid.innerHTML = model.noWardrobe ? [`<div class="bp-empty">no wardrobe converted: clothes cannot be shown</div>`, ...carried.map((c) => this.cellHtml(c, 'carried'))].join('') : worn.map((c) => this.cellHtml(c, c.where === 'carried' ? 'carried' : undefined)).join('') || `<div class="bp-empty">nothing worn</div>`;
     this.packGrid.innerHTML = shown.map((c) => this.cellHtml(c)).join('') || `<div class="bp-empty">${pack.length ? 'nothing matches' : 'empty'}</div>`;
     this.wornGrid.scrollTop = scroll[0];
     this.packGrid.scrollTop = scroll[1];
     const held = (right ? 1 : 0) + (left ? 1 : 0);
-    this.count.textContent = `${model.cells.length} items · ${worn.length} worn · ${held} held`;
+    this.count.textContent = `${model.cells.length} items · ${worn.length - carried.length} worn · ${held} held`;
     this.credits.textContent = model.credits ?? '';
     this.packCount.textContent = `(${pack.length})`;
     this.note.textContent = model.note ? `${model.note} · ` : '';
@@ -285,8 +290,8 @@ export class BackpackUi {
   }
 
   private cellHtml(c: BackpackCell, label?: string): string {
-    const cls = ['bp-cell', c.where === 'worn' ? 'worn' : '', c.where === 'right' || c.where === 'left' ? 'held' : '', c.fit === 'block' ? 'block' : '', c.fit === 'hide' || c.unseen ? 'hide' : '', c.missing ? 'missing' : '', c.busy ? 'busy' : '', c.isNew ? 'new' : '', c.key === this.selected ? 'sel' : ''].filter(Boolean).join(' ');
-    const pic = c.icon ? `<img src="${escapeHtml(c.icon)}" loading="lazy" decoding="async" alt="">` : initials(c.name).outerHTML;
+    const cls = ['bp-cell', c.where === 'worn' ? 'worn' : '', c.where === 'carried' ? 'carried' : '', c.where === 'right' || c.where === 'left' ? 'held' : '', c.fit === 'block' ? 'block' : '', c.fit === 'hide' || c.unseen ? 'hide' : '', c.missing ? 'missing' : '', c.busy ? 'busy' : '', c.isNew ? 'new' : '', c.key === this.selected ? 'sel' : ''].filter(Boolean).join(' ');
+    const pic = c.icon ? `<img src="${escapeHtml(c.icon)}" loading="lazy" decoding="async" alt="">` : glyphOrInitials(c);
     const busy = c.busy ? `<span class="bp-busy">${c.kind === 'weapon' ? 'taking up...' : 'putting on...'}</span>` : '';
     // The thing's own colour, a game colour shown as what it is (the appearance page's swatches are too).
     const swatch = c.swatch && /^#[0-9a-f]{6}$/i.test(c.swatch) ? `<span class="bp-swatch" style="background:${c.swatch}"></span>` : '';
@@ -314,13 +319,15 @@ export class BackpackUi {
       return;
     }
     const on = c.where !== 'pack';
-    const pic = c.icon ? `<img src="${escapeHtml(c.icon)}" decoding="async" alt="">` : initials(c.name).outerHTML;
+    const pic = c.icon ? `<img src="${escapeHtml(c.icon)}" decoding="async" alt="">` : glyphOrInitials(c);
     const head = [escapeHtml(c.name), escapeHtml(c.kindText), c.slotsText ? escapeHtml(c.slotsText) : ''].filter(Boolean).join(' · ');
     const paragraphs = (c.description || '').split(/\n\s*\n/).filter((p) => p.trim()).map((p) => `<p>${escapeHtml(p.trim())}</p>`).join('');
-    const state = c.busy ? (c.kind === 'weapon' ? 'taking up...' : 'putting on...') : c.where === 'right' || c.where === 'left' ? `in the ${c.where} hand` : c.where === 'worn' ? 'worn' : '';
+    const carried = c.where === 'carried';
+    const state = c.busy ? (c.kind === 'weapon' ? 'taking up...' : 'putting on...') : c.where === 'right' || c.where === 'left' ? `in the ${c.where} hand` : c.where === 'worn' ? 'worn' : carried ? 'carried, in no slot and no hand: always ready' : '';
     const armed = this.armed?.key === c.key;
-    const useText = on ? (c.kind === 'weapon' ? 'Put away' : 'Take off') : 'Equip';
-    const blocked = c.missing || (c.fit === 'block' && !on) || c.busy;
+    // Carried gear has nothing to put on or take off: its button says so and does nothing.
+    const useText = carried ? 'Carried' : on ? (c.kind === 'weapon' ? 'Put away' : 'Take off') : 'Equip';
+    const blocked = c.missing || (c.fit === 'block' && !on) || c.busy || carried;
     const buttons = [
       `<button data-act="use"${blocked ? ' disabled' : ''}>${useText}</button>`,
       c.canLeft && c.where !== 'left' ? `<button data-act="left"${c.missing || c.busy ? ' disabled' : ''}>Left hand</button>` : '',
@@ -360,6 +367,15 @@ export class BackpackUi {
       noIcon: cells.filter((c) => !c.icon).length,
     };
   }
+}
+
+/**
+ * Where there is no picture: the thing's own glyph from our sheet where it has one (carried gear's), drawn by a `<use>`
+ * of the sheet the page already holds, else its name's initials. Static markup, written when the cell is.
+ */
+function glyphOrInitials(c: BackpackCell): string {
+  if (c.glyph && /^ic-[a-z0-9-]+$/.test(c.glyph)) return `<svg class="ic bp-glyph" aria-hidden="true"><use href="#${c.glyph}"/></svg>`;
+  return initials(c.name).outerHTML;
 }
 
 /** A name's initials in a circle, where there is no picture. */

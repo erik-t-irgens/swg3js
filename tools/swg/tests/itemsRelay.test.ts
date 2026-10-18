@@ -561,6 +561,50 @@ if (typeof WebSocket === 'undefined') {
       await settle();
     }
 
+    // ---- 8f: carried gear, the grapple's rig: accepted, listed and traded (wave 4) -------------------
+    //
+    // The hail says the ledger keeps gear, a rig handed up with a backpack is a row like any other, an add of one is
+    // answered with a row under its name, and one rig goes from one character to another in a trade with nothing
+    // made or lost.
+    {
+      const hail8f = a0.last('hail') as Msg;
+      ok(hail8f.gear === 1, `the relay's greeting says its ledger keeps carried gear (gear ${hail8f.gear})`);
+      const kyle = await open('Kyle', 'c-rig-a', { x: 80 });
+      const jan = await open('Jan', 'c-rig-b', { x: 82 });
+      const r0 = Date.now();
+      const rigA = mintThing('gear', 'grapple_rig', r0);
+      kyle.send({ t: 'items', do: 'list', rows: [['gear', 'grapple_rig', r0, rigA], ['wear', 'shirt_s03', r0 + 1, mintThing('wear', 'shirt_s03', r0 + 1)]] });
+      jan.send({ t: 'items', do: 'list', rows: [['weapon', 'pistol_cdef', r0, mintThing('weapon', 'pistol_cdef', r0)]] });
+      await settle();
+      ok(kyle.list().some((r) => r.kind === 'gear' && r.what === 'grapple_rig' && r.thing === rigA), 'a rig handed up with a backpack is listed back, a gear row under its own name');
+      const before8f = await held();
+      const rigB = mintThing('gear', 'grapple_rig', r0 + 2);
+      jan.send({ t: 'items', do: 'add', kind: 'gear', what: 'grapple_rig', got: r0 + 2, thing: rigB });
+      await settle();
+      const added8f = jan.last('items', (m) => m.do === 'added') as { row?: Row } | undefined;
+      ok(added8f?.row?.kind === 'gear' && added8f.row.thing === rigB && await held() === before8f + 1, 'an add of one, as the browser asks a server that keeps gear for a rig, is answered with a row');
+      const rigRow = kyle.list().find((r) => r.kind === 'gear')!.id;
+      kyle.send({ t: 'trade', do: 'ask', to: jan.id });
+      await settle();
+      jan.send({ t: 'trade', do: 'accept' });
+      await settle();
+      kyle.send({ t: 'trade', do: 'offer', rows: [rigRow] });
+      await settle();
+      kyle.send({ t: 'trade', do: 'ready' });
+      await settle();
+      jan.send({ t: 'trade', do: 'ready' });
+      await settle();
+      ok(jan.last('trade', (m) => m.do === 'done' || m.do === 'off')?.do === 'done', 'a rig is traded like anything owned');
+      kyle.send({ t: 'items', do: 'get' });
+      jan.send({ t: 'items', do: 'get' });
+      await settle();
+      ok(!kyle.list().some((r) => r.kind === 'gear') && jan.list().filter((r) => r.kind === 'gear').length === 2 && jan.list().some((r) => r.thing === rigA), 'the giver holds none and the taker two, the traded one under the name it always had');
+      ok(await held() === before8f + 1, 'and nothing was made or lost in the swap');
+      kyle.close();
+      jan.close();
+      await settle();
+    }
+
     // ---- 9: a server started again from what this one wrote down -----------------------------------
     const live = { a: key(a2.list()), b: key(b2.list()), old: key(oldRows), e: key(e.list()) };
     const finalHeld = await held();

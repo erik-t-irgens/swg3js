@@ -18,7 +18,7 @@
 import type * as THREE from 'three';
 import type { ClassId } from '../combat/kit';
 import type { SavedCharacter } from '../core/characters';
-import { ITEMS_MOST, OFF_HAND_CLASSES, chooseArrangement, cleanTint, collapseOwned, garmentMeshesOf, heldThingsOf, isHairKey, mintThing, moveTints, normalizeOwned, occupancy, packPartOf, pairOwned, partToItemId, planHold, pruneHeld, pruneThings, resolveKit, slotGroupOf, speciesWords, migrateInventory, thingOf, tintValues, wornThingOf, type Fit, type Hand, type HandThings, type HeldRef, type ListedItem, type OwnedItem } from '../core/inventory.ts';
+import { GRAPPLE_RIG, ITEMS_MOST, OFF_HAND_CLASSES, chooseArrangement, cleanTint, collapseOwned, garmentMeshesOf, grantRig, heldThingsOf, holdsRig, isHairKey, mintThing, moveTints, normalizeOwned, occupancy, packPartOf, pairOwned, partToItemId, planHold, pruneHeld, pruneThings, resolveKit, slotGroupOf, speciesWords, migrateInventory, thingOf, tintValues, wornThingOf, type Fit, type Hand, type HandThings, type HeldRef, type ListedItem, type OwnedItem, type OwnedKind } from '../core/inventory.ts';
 import { itemInfo, wardrobeIndex, type ItemContext } from './items.ts';
 import type { Character } from './character';
 import type { Player } from './player';
@@ -100,6 +100,21 @@ export interface EquipmentDeps {
    * new mark without counting a change. `was` is the record as it stood before.
    */
   rewritten?: (was: SavedCharacter, now: SavedCharacter) => void;
+  /**
+   * Who keeps the character's carried gear (the grapple's rig): `here` -- no server, or one whose greeting does not say
+   * it keeps gear -- and the rig is given once by the record's own mark (`grantRig`), as the record is loaded or the
+   * moment it becomes known (`grantRigHere`); `server`, and the server's first settled list of a session decides
+   * (`gearFromList`, which whoever wires this asks after laying each list over the backpack with `reconcile`); `pending`,
+   * a server saved or wanted that has not yet said what it is, and nothing is given until it does. Optional; with
+   * nothing wired no rig is given at all, which is how the tests of everything else run.
+   */
+  gearKeeper?: () => 'here' | 'server' | 'pending';
+  /**
+   * Which kinds of thing the server holding this character keeps, for laying its list over the backpack: a local row
+   * of a kind it does not keep (the rig, against a server that does not say `gear`) is left where it is and never read
+   * as gone (`pairOwned`). Optional; with nothing wired every kind is the server's.
+   */
+  keeps?: (kind: OwnedKind) => boolean;
   baseUrl: string;
 }
 
@@ -172,6 +187,11 @@ export class Equipment {
   private tintsGivenUp = 0;
   /** The last piece drawn in a thing's colours: what went on and how many values moved, for the console. */
   private lastColour: { part: string; thing: string | null; moved: number } | null = null;
+  /**
+   * The characters whose rig a server that keeps gear has been asked about this session (`gearFromList`): its first
+   * settled list decides, once, and a list after a trade that took the rig away does not hand it straight back.
+   */
+  private readonly gearDecided = new Set<string>();
 
   constructor(deps: EquipmentDeps) {
     this.deps = deps;
@@ -287,6 +307,10 @@ export class Equipment {
         if (moveTints(c, (id) => this.meshesOfItem(id, ctx), { follows, garment: (mesh) => garments.has(mesh) })) this.deps.rewritten?.(was, c);
         changed = true;
       }
+      // The grapple's rig, once, where this browser keeps the character's things: the row and its mark go into the
+      // same save below. Where a server keeps gear its own first list decides instead (`gearFromList`), and while a
+      // server saved here has not yet said whether it does, nothing is given until it has (`grantRigHere`).
+      if (this.grantInto(c)) changed = true;
       if (changed) this.deps.persist(c);
     } catch (err) {
       console.warn(`inventory: ${err instanceof Error ? err.message : String(err)}`);
@@ -325,7 +349,7 @@ export class Equipment {
   }
 
   /** Into the record's items, unsaved; true when it is new. One of each: an item already owned is not given again. */
-  private addOwned(kind: 'wear' | 'weapon', id: string): boolean {
+  private addOwned(kind: OwnedKind, id: string): boolean {
     const rec = this.deps.record();
     if (!rec) return false;
     const items = (rec.items ??= []);
@@ -335,7 +359,7 @@ export class Equipment {
   }
 
   /** A new thing of one item into the list, under a name of its own, and told to the ledger. */
-  private push(items: OwnedItem[], kind: 'wear' | 'weapon', id: string): OwnedItem {
+  private push(items: OwnedItem[], kind: OwnedKind, id: string): OwnedItem {
     const got = Date.now();
     let thing = mintThing(kind, id, got);
     // A name is unique in one character's list and nowhere else, so it is only ever checked there.
@@ -351,11 +375,63 @@ export class Equipment {
    * record is played. One of each, which is what the starting kit and a job's reward want; a second
    * copy is `giveAnother`.
    */
-  give(kind: 'wear' | 'weapon', id: string): boolean {
+  give(kind: OwnedKind, id: string): boolean {
     const rec = this.deps.record();
     if (!rec || !this.addOwned(kind, id)) return false;
     this.deps.persist(rec);
     this.deps.changed('owned');
+    return true;
+  }
+
+  /**
+   * The grapple's rig where a server that keeps gear holds the character's things: once a session for each character,
+   * on its first settled list, which is the truth -- a list with no rig is answered with one given the way a job's
+   * reward is (`give`, which the ledger hears as an add), and a list with one asks for nothing. A rig given offline
+   * before this character met that server is therefore asked for again rather than lost, and one destroyed against it
+   * comes back at the next session: with every character able to fire anyway, "once" against a server waits for the
+   * day owning matters and the ledger keeps a mark of its own. In the queue, behind the list being laid over the
+   * backpack. True when one was given.
+   */
+  gearFromList(listed: readonly { kind: string; id: string }[]): Promise<boolean> {
+    return this.run(`gear:${GRAPPLE_RIG}`, false, async () => {
+      const rec = this.deps.record();
+      if (!rec || this.gearDecided.has(rec.id)) return false;
+      this.gearDecided.add(rec.id);
+      if (holdsRig(listed)) return false;
+      return this.give('gear', GRAPPLE_RIG);
+    });
+  }
+
+  /**
+   * The grapple's rig given by the record's own mark, once it is known that this browser keeps the character's things:
+   * the game asks it when the far end of a server saved here turns out to keep no gear (it took the claim with a greeting
+   * that says nothing of gear, it is the relay that came before, or nobody answered within the wait). At load that was
+   * not yet known, so nothing was given then: given at load and then laid under the first list of a server that does
+   * keep gear and already holds the character, the rig was taken away with "one thing went" and asked for again.
+   * In the queue; saved, and true when one was given or the record newly marked.
+   */
+  grantRigHere(): Promise<boolean> {
+    return this.run(`gear:${GRAPPLE_RIG}`, false, async () => {
+      const rec = this.deps.record();
+      if (!rec || !this.grantInto(rec)) return false;
+      this.deps.persist(rec);
+      this.deps.changed('owned');
+      return true;
+    });
+  }
+
+  /**
+   * The rig and its mark into a record, where this browser keeps its things (`grantRig`); true when the record changed.
+   * Not a change the player made: it happens behind the loading screen, or when a server is heard to keep no gear, in
+   * every browser that holds the character, so the session adopts the new mark without counting a change, as it does
+   * the garment colours' move (`rewritten`). Counted, every character's counter rose once for nothing it did, and a
+   * copy a server held one change ahead tied with this one -- a question put to the player for a rig.
+   */
+  private grantInto(c: SavedCharacter): boolean {
+    if (this.deps.gearKeeper?.() !== 'here') return false;
+    const was = { ...c, items: (c.items ?? []).map((o) => ({ ...o })) };
+    if (!grantRig(c, Date.now())) return false;
+    this.deps.rewritten?.(was, c);
     return true;
   }
 
@@ -366,7 +442,7 @@ export class Equipment {
    * copy and take it away again at the next list), or the server holding this one folds two of one item
    * into one, which would quietly cost the second.
    */
-  giveAnother(kind: 'wear' | 'weapon', id: string): string {
+  giveAnother(kind: OwnedKind, id: string): string {
     const rec = this.deps.record();
     if (!rec) return 'no character is being played';
     if ((rec.items ?? []).length >= ITEMS_MOST) return `a character carries ${ITEMS_MOST} things`;
@@ -444,8 +520,8 @@ export class Equipment {
     return pack && worn.has(pack) ? pack : null;
   }
 
-  /** An item's name as the game gives it, from the catalogues last read. */
-  private nameOf(kind: 'wear' | 'weapon', id: string): string {
+  /** An item's name as the game gives it, from the catalogues last read (carried gear's are ours). */
+  private nameOf(kind: OwnedKind, id: string): string {
     return this.lastCtx ? itemInfo(kind, id, this.lastCtx).name : id;
   }
 
@@ -471,10 +547,12 @@ export class Equipment {
    * the left's, else the oldest. Null when none is owned. It says nothing about whether the item is on
    * the body at all; that is the body's to say.
    */
-  thingInUse(kind: 'wear' | 'weapon', id: string): string | null {
+  thingInUse(kind: OwnedKind, id: string): string | null {
     const rec = this.deps.record();
     if (!rec) return null;
     const items = this.namedItems(rec);
+    // Carried gear is ready in no slot and no hand: the oldest copy is the one carried.
+    if (kind === 'gear') return wornThingOf(items, 'gear', id, null);
     if (kind === 'weapon') {
       const e = this.deps.player.equipped;
       const hands = this.thingsInHands();
@@ -735,7 +813,7 @@ export class Equipment {
   }
 
   /** What the console's `tint()` reads: every thing with a colour, the copy worn of each piece and in each hand, what waits to be told. */
-  tintReport(): { tinted: { thing: string; id: string; kind: 'wear' | 'weapon'; tint: Record<string, number>; tintAt: number | null; inUse: 'worn' | 'right' | 'left' | null }[]; worn: Record<string, string>; held: HandThings; waiting: { thing: string; tries: number }[]; sent: number; givenUp: number; live: boolean; lastColour: { part: string; thing: string | null; moved: number } | null; marked: 1 | null } {
+  tintReport(): { tinted: { thing: string; id: string; kind: OwnedKind; tint: Record<string, number>; tintAt: number | null; inUse: 'worn' | 'right' | 'left' | null }[]; worn: Record<string, string>; held: HandThings; waiting: { thing: string; tries: number }[]; sent: number; givenUp: number; live: boolean; lastColour: { part: string; thing: string | null; moved: number } | null; marked: 1 | null } {
     const rec = this.deps.record();
     const items = rec ? this.namedItems(rec) : [];
     const snap = this.snapshot();
@@ -974,9 +1052,15 @@ export class Equipment {
    * copies of one hilt are held one in each hand, each its own thing. With no thing named (the console,
    * the rack) it goes by the item, as it always did.
    */
-  use(kind: 'wear' | 'weapon', id: string, hand?: Hand, thing?: string): Promise<UseResult> {
+  use(kind: OwnedKind, id: string, hand?: Hand, thing?: string): Promise<UseResult> {
     const dropped: UseResult = { note: DROPPED, wants: null };
     return this.run(`${kind}:${id}`, dropped, async (alive) => {
+      // Carried gear is ready in no slot and no hand: there is nothing to put on or take up, only to say so.
+      if (kind === 'gear') {
+        await this.itemContext();
+        if (!alive()) return dropped;
+        return { note: `${this.nameOf('gear', id)}: carried, and always ready`, wants: null };
+      }
       if (kind === 'wear') {
         // A hairstyle a record still owns from before hair stopped being an item (a Sullustan's
         // `sul_hair_*`) is kept and never used: on or off, a style is the appearance page's.
@@ -1018,7 +1102,7 @@ export class Equipment {
    * or take-up of it still in flight finishes first, so its save (which gives whatever is worn and held)
    * cannot bring the item back after it is destroyed.
    */
-  destroy(kind: 'wear' | 'weapon', id: string, thing?: string): Promise<string> {
+  destroy(kind: OwnedKind, id: string, thing?: string): Promise<string> {
     const target = (rec: SavedCharacter | null): string | null => {
       if (!rec) return null;
       const items = this.namedItems(rec);
@@ -1041,7 +1125,7 @@ export class Equipment {
       // worn on, and of two copies of one hilt held one in each hand only the hand holding it empties.
       if (kind === 'wear') {
         if (this.thingInUse(kind, id) === doomed && this.wornPartOf(id)) this.takeOff(id);
-      } else {
+      } else if (kind === 'weapon') {
         const hands = this.thingsInHands();
         if (hands.right === doomed) this.deps.player.unequip('right');
         if (hands.left === doomed) this.deps.player.unequip('left');
@@ -1050,7 +1134,8 @@ export class Equipment {
       this.deps.ledger?.('drop', row);
       this.save({ noGive: true });
       this.deps.changed('owned');
-      this.deps.changed(kind === 'wear' ? 'worn' : 'held');
+      // Carried gear is on no body and in no hand, so nothing there moved.
+      if (kind !== 'gear') this.deps.changed(kind === 'wear' ? 'worn' : 'held');
       return `${name} destroyed`;
     });
   }
@@ -1112,7 +1197,8 @@ export class Equipment {
       if (!rec) return 'no character is being played';
       const had = normalizeOwned(rec.items);
       const handsBefore = this.thingsInHands();
-      const paired = pairOwned(had, items, undefined, now);
+      // A row of a kind that server does not keep (the rig, against one whose greeting does not say gear) stays put.
+      const paired = pairOwned(had, items, undefined, now, this.deps.keeps);
       const want = paired.items;
       const gone = paired.gone;
       let wornMoved = false;
@@ -1154,7 +1240,12 @@ export class Equipment {
       if (gone.length || paired.came) this.deps.changed('owned');
       if (wornMoved) this.deps.changed('worn');
       if (unhanded) this.deps.changed('held');
-      return reconcileWords(paired.came, gone.length);
+      // A rig given by the record's own mark before this character met a server that keeps gear and already held it is
+      // not in that server's first list of the session, which takes it away here; the server is asked for one straight
+      // after, in this same queue (`gearFromList`), so the backpack ends holding one and the words do not say it went.
+      let goneSaid = gone.length;
+      if (this.deps.gearKeeper?.() === 'server' && !this.gearDecided.has(rec.id) && !holdsRig(items) && gone.some((o) => o.kind === 'gear' && o.id === GRAPPLE_RIG)) goneSaid--;
+      return reconcileWords(paired.came, goneSaid);
     });
   }
 

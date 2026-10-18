@@ -2,23 +2,25 @@
 // description (the game's own, from the converted wardrobe and weapon packs), the body slots it
 // takes, its picture, and whether this character's species may wear it. Pure and node-loadable:
 // type-only imports apart from the rules module and the name maker, both with their extensions.
-import { fitFor, isHairKey, packPartOf, type Fit } from '../core/inventory.ts';
+import { GEAR, fitFor, isHairKey, packPartOf, type Fit, type OwnedKind } from '../core/inventory.ts';
 import { prettyName } from '../ui/catalogue.ts';
 import type { Wardrobe } from './character';
 import type { WeaponCatalogue, WeaponClass, WeaponDef } from './weapons';
 
 export interface ItemInfo {
-  kind: 'wear' | 'weapon';
+  kind: OwnedKind;
   id: string;
   /** `${kind}:${id}`: the backpack's cell key. */
   key: string;
-  /** The game's name, else words made from the id. */
+  /** The game's name, else words made from the id (carried gear's are ours: the archives hold none). */
   name: string;
   /** The game's description, else ''. */
   description: string;
   slots: string[][] | null;
   /** The picture as a full URL, or null. */
   icon: string | null;
+  /** A glyph of our own sheet (`src/ui/hud.svg`) shown where there is no picture: carried gear's. */
+  glyph?: string | null;
   fit: Fit;
   cls?: WeaponClass;
   def?: WeaponDef;
@@ -93,7 +95,7 @@ function clean(s: string | null | undefined): string | null {
  * one entry is no colour at all, so an index on it shows nothing). These are game colours shown as what
  * they are, the way the appearance page's own swatches are, and never the interface's.
  */
-export function itemSwatch(kind: 'wear' | 'weapon', id: string, tint: Readonly<Record<string, number>> | null | undefined, ctx: ItemContext | null): string | null {
+export function itemSwatch(kind: OwnedKind, id: string, tint: Readonly<Record<string, number>> | null | undefined, ctx: ItemContext | null): string | null {
   if (!tint) return null;
   const vars = kind === 'wear' && ctx?.wardrobe ? (wardrobeIndex(ctx.wardrobe).get(id)?.variables ?? []) : [];
   const bare = (n: string) => n.replace(/^.*\|/, '').replace(/^.*\//, '');
@@ -116,8 +118,27 @@ export function itemSwatch(kind: 'wear' | 'weapon', id: string, tint: Readonly<R
   return null;
 }
 
-export function itemInfo(kind: 'wear' | 'weapon', id: string, ctx: ItemContext): ItemInfo {
+export function itemInfo(kind: OwnedKind, id: string, ctx: ItemContext): ItemInfo {
   const key = `${kind}:${id}`;
+  if (kind === 'gear') {
+    // Carried gear: ours, in no body slot and no hand, so it fits every species and is worn by none.
+    const gear = Object.prototype.hasOwnProperty.call(GEAR, id) ? GEAR[id] : null;
+    return {
+      kind,
+      id,
+      key,
+      name: gear?.name ?? prettyName(id).name,
+      description: gear?.description ?? '',
+      slots: null,
+      icon: null,
+      glyph: gear?.glyph ?? null,
+      fit: 'ok',
+      kindText: 'Gear',
+      packPart: null,
+      unseen: false,
+      missing: !gear,
+    };
+  }
   if (kind === 'weapon') {
     const def = ctx.weapons?.weapons.find((w) => w.id === id);
     return {

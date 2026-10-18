@@ -421,6 +421,12 @@ b { color: var(--accent); font-weight: 600; }
 .bp-name small { font-size: 8px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
 .bp-name em { color: var(--muted); font-style: normal; }
 .bp-cell.worn { background: color-mix(in srgb, var(--pool) 10%, transparent); }
+/* Carried gear (the grapple's rig): ready in no slot and no hand, shown beside what is worn. Its picture is a glyph
+   of our own sheet (`src/ui/hud.svg`) in place of a baked one, in the text's own colour. */
+.bp-cell.carried { background: color-mix(in srgb, var(--pool) 10%, transparent); }
+.bp-glyph { font-size: 38px; color: var(--text); }
+.bp-examine-pic .bp-glyph { font-size: 60px; }
+.bp-cell.busy .bp-glyph { opacity: 0.35; }
 .bp-cell.held { background: color-mix(in srgb, var(--pool) 18%, transparent); border-color: color-mix(in srgb, var(--pool) 60%, transparent); }
 .bp-cell.block::after { content: ''; position: absolute; top: 0; right: 0; border-style: solid; border-width: 0 14px 14px 0; border-color: transparent var(--bad) transparent transparent; }
 .bp-cell.hide .bp-pic { opacity: 0.6; }

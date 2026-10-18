@@ -18,6 +18,7 @@
 import { COL, PALETTE_FALLBACK } from '../core/palette.ts';
 import { GROUP_RANGE, pickLookedAt, type LookCandidate, type PointOut } from '../net/groups.ts';
 import { TRADE_TUNE, type Trade, type TradeAsk, type TradeItem, type TradeWindow } from '../net/trade.ts';
+import type { OwnedKind } from '../core/inventory.ts';
 
 /**
  * What this panel invents, live through `__debug.trade({ ui: { ... } })`. The distance a trade
@@ -76,7 +77,7 @@ export interface TradeUiDeps {
   /** Something for the player to read that is not on the window itself. */
   note: (text: string) => void;
   /** An item's name and the picture the converter baked for it, as the backpack shows them. */
-  look: (kind: 'wear' | 'weapon', id: string) => { name: string; icon: string | null };
+  look: (kind: OwnedKind, id: string) => { name: string; icon: string | null };
   /**
    * The thing's own first colour as `#rrggbb` for the small swatch in its cell, or null for none: the
    * backpack's (`itemSwatch`), read from the colours a row carries, theirs as the server shows them.
@@ -118,7 +119,7 @@ interface Cell {
   key: string;
   /** The thing itself, which is what a click hands back: the backpack's own row, or the pane's. */
   item: TradeItem | null;
-  kind: 'wear' | 'weapon';
+  kind: OwnedKind;
   id: string;
   nameText: string;
   icon: string;

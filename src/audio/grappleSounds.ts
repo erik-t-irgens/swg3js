@@ -211,6 +211,28 @@ export class GrappleSounds {
     } else if (wind && this.windKey) host.setGain(this.windKey, gain);
   }
 
+  /**
+   * Another player's hook, heard at their left hand as their state says it changed (§3.15, wave 4): `fire` the
+   * launcher's clank as their dart goes out, `bite` the clicks as it bites, and `letGo` the same clicks a step down
+   * (`reelPitch` under, ours: the game's bank has no sound of a line let go, and the catch freeing is the nearest) as the
+   * rope comes in. One sound a change of their state, so ten a second at the very most for one peer; `space` is the room
+   * their hand is in, so a friend's rope behind a wall is heard through it.
+   */
+  peer(what: 'fire' | 'bite' | 'letGo', x: number, y: number, z: number, space: SoundSpace | undefined, clock: number): void {
+    const host = this.host;
+    if (!host) return;
+    this.ready(host);
+    const o = this.opts;
+    o.x = x;
+    o.y = y;
+    o.z = z;
+    o.space = space;
+    o.gain = 1;
+    o.pitch = what === 'letGo' ? -GRAPPLE_TUNE.reelPitch : 0;
+    this.once(host, `peer ${what}`, what === 'fire' ? GRAPPLE_SOUND.fire : GRAPPLE_SOUND.bite, clock);
+    o.pitch = 0;
+  }
+
   /** Everything let go: a travel or the select screen stops every voice, and these keys go with them. */
   forget(): void {
     this.haulKey = 0;

@@ -65,6 +65,8 @@ export const ICON_IDS = [
   'ic-freelance',
   'ic-companion',
   'ic-timer',
+  // Carried gear: the grapple's rig, which the backpack shows where a baked picture would be.
+  'ic-grapple',
 ] as const;
 
 export type IconId = (typeof ICON_IDS)[number];
@@ -107,6 +109,8 @@ const BY_NAME: Record<string, IconId> = {
   // Not a weapon and not a power: the only music in this game is the music players make.
   startplaying: 'ic-music',
   lightsaber: 'ic-saber',
+  // Carried gear.
+  grapplerig: 'ic-grapple',
 };
 
 /**
@@ -141,6 +145,7 @@ const BY_WORD: readonly (readonly [string, IconId])[] = [
   ['play', 'ic-music'],
   ['fist', 'ic-fists'],
   ['hand', 'ic-fists'],
+  ['grapple', 'ic-grapple'],
 ];
 
 /** A name to a key: its letters and digits, lower case. Allocates one string; never called in a frame. */

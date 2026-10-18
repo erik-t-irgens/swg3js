@@ -27,14 +27,20 @@
 //                                                          (shipWire.mjs: `colours` the colours carried whole,
 //                                                          `paint` the nearest of the hull's own palette);
 //                                                          sent on joining, on travel and on a change
-//   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, veh? | in? }   position, heading, rig state, speed, mounted, saber lit,
-//                                                          the whole turn as a quaternion (aboard, adrift), the vehicle
+//   { t: 'state', p: [x, y, z], h, s, v, m, sab, q?, tb?, gr?, grf?, veh? | in? }   position, heading, rig state, speed,
+//                                                          mounted, saber lit, the whole turn as a quaternion (aboard, adrift,
+//                                                          leaning on a rope), the blade in the air [x, y, z, spin], the vehicle
 //                                                          ridden { id, p, q, role: ride|pilot|aboard, pose, w, landed, dock }
 //                                                          (vehicleWire.mjs); or, standing in a hull somebody else flies,
 //                                                          in { ship, p, h } -- whose hull and where in that hull's own
 //                                                          frame, which takes the place of veh so that a watcher draws
 //                                                          one hull with people in it and not one hull per person;
-//                                                          j: 1 while in a hyperspace jump
+//                                                          j: 1 while in a hyperspace jump; the grappling hook (grappleWire.mjs)
+//                                                          gr: [0, x, y, z, vx, vy, vz] the dart flying, or [1, slack, anchor,
+//                                                          bends...] a rope held, every point a world point, at most 16; and
+//                                                          beside a held rope grf: [kind, id, index, lx, ly, lz, ...], the
+//                                                          points riding another player's vehicle (kind 1, their relay id,
+//                                                          never the sender's own) in that vehicle's own frame
 //   { t: 'emote', clip }
 //   { t: 'ask', to, word: dock|allow|refuse|undock }         the one message meant for a single other player: asking
 //                                                          their pilot for room on their hull, and the answer
@@ -200,7 +206,7 @@
 //                                                          person the browser says is in reach
 //   { t: 'progress', do: 'grant' | 'xp' | 'reset', node?, src?, n? }   the admin's own: a node granted, XP given, emptied
 // Server to browser:
-//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress }   sent the instant the socket opens, before
+//   { t: 'hail', v, now, epoch, dayMs, nonce, word, ff, story, items, paint, props, homes, progress, gear }   sent the instant the socket opens, before
 //                                                          anything is said; `story` is { v, sets, tests }, the story this
 //                                                          server holds, which a browser built before it never reads; `items`
 //                                                          is 2 on a server that keeps a row per thing (ledger.mjs's
@@ -216,7 +222,10 @@
 //                                                          HOMES_VERSION), and a browser asks no other to move one;
 //                                                          `progress` is 1 on a server that holds each character's
 //                                                          progress (progress.mjs's PROGRESS_WIRE_VERSION), and a browser
-//                                                          holds progress itself against any other
+//                                                          holds progress itself against any other; `gear` is 1 on a server
+//                                                          whose ledger keeps carried gear (ledger.mjs's GEAR_VERSION, the
+//                                                          grapple's rig), and a browser hands a gear row up, and lets a
+//                                                          list take one away, only to a server that says it
 //   { t: 'claimed', you, keep }   { t: 'denied', why }   { t: 'refused', why }   { t: 'taken', by }
 //                                 (denied closes the line; refused is about the character only and
 //                                  leaves the browser connected to offer another)
@@ -345,7 +354,7 @@ import { cleanCross, mayCross } from './crossWire.mjs';
 import { cleanUnlock, mayOpen } from './copyWire.mjs';
 import { COMBAT_WIRE, Duels, cleanBlocked, cleanDied, cleanDuel, cleanEnd, cleanHealth, cleanHit, cleanShot, mayHurt } from './combatWire.mjs';
 import { NpcPlaces, cleanNpcBatch, cleanNpcBlow, cleanNpcDrop, cleanNpcHit } from './npcWire.mjs';
-import { ITEMS_VERSION, LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
+import { GEAR_VERSION, ITEMS_VERSION, LEDGER_TUNING, Ledger, cleanItems, cleanTrade, mayItems } from './ledger.mjs';
 import { SPOT_TUNING, Spots, cleanSpot, mayClaim } from './spots.mjs';
 import { HOMES_VERSION, HOME_SAYS, HOME_TUNING, Homes, cleanHome, cleanHomeMove, cleanRemove, mayPlace } from './homes.mjs';
 import { PROPS_VERSION, PROP_SAYS, PROP_TUNING, PropsKept, cleanPropMove, cleanPropPlace, cleanPropRemove, mayProp } from './propsKept.mjs';
@@ -461,6 +470,9 @@ for (let i = 0; i < args.length; i++) {
   // `in` would see `toString` and every other name on the prototype and let one be written over.
   const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   if (has(TUNING, name)) TUNING[name] = value;
+  // The rope's points are the wire's own shape and never a run's: fewer would drop every longer rope an unchanged
+  // browser sends, whole (`grappleWire.mjs`).
+  else if (name === 'wire.ropePoints') console.log(`  --set ${name}: the rope's points are the wire's own shape and are not moved`);
   else if (name.startsWith('wire.') && has(WIRE, name.slice(5))) WIRE[name.slice(5)] = value;
   else if (name.startsWith('group.') && has(GROUP_TUNING, name.slice(6))) GROUP_TUNING[name.slice(6)] = value;
   else if (name.startsWith('combat.') && has(COMBAT_WIRE, name.slice(7))) COMBAT_WIRE[name.slice(7)] = value;
@@ -1857,7 +1869,7 @@ server.on('upgrade', (req, socket) => {
   // `paint` that it passes a ship's colours carried whole on, so a browser knows whether the others see them;
   // `props` that it keeps a player's props, so a browser hands its own to it rather than keeping them itself;
   // `progress` that it holds each character's progress, so a browser claims rather than paying itself.
-  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail() });
+  send(c, { t: 'hail', v: WIRE_VERSION, ...clock.hand(), nonce: c.nonce, word: WORD ? 1 : 0, ff: FRIENDLY_FIRE ? 1 : 0, story: stories.hail(), items: ITEMS_VERSION, paint: PAINT_VERSION, props: PROPS_VERSION, homes: HOMES_VERSION, progress: progress.hail(), gear: GEAR_VERSION });
   if (WORD) {
     const grace = setTimeout(() => {
       if (!c.player && clients.has(c.id)) deny(c, 'this server has a join word and none was given');

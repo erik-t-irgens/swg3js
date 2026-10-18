@@ -1955,6 +1955,112 @@ await section(13, "another player's vehicle", async () => {
     ok(r.g.attached && pf.boxHalf[0] === 4 && pf.boxMid[0] === 0.2 && Math.abs(pf.ps.radius - (Math.hypot(4, POD.h / 2, POD.l / 2) + Math.hypot(0.2, POD.h / 2, 0))) < 1e-9, `a box their game measures again (wings settled) is the box the rope meets on the next frame: half ${pf.boxHalf[0]} across, its middle ${pf.boxMid[0]} over`);
   }
 
+  // --- the rope as it goes to the others (wave 4), and as they draw it ------------------------------------------------
+  // `Grapple.wireRope` over a rope really fastened on another player's vehicle and bent at its edge: every point the world
+  // point where this browser draws it, and beside it each point that rides their vehicle in that vehicle's own frame. Fed
+  // through the watcher's own reader and the real `RemoteRopes`, a third browser whose picture of the vehicle stands a
+  // metre and a half from this one's puts each such point on its own picture. Then a rope past the wire's sixteen points,
+  // cut at the anchor's end: the anchor and the bends nearest the hand go, and every frame entry names the point it rode.
+  {
+    // The watcher's module imports the portal renderer and the peers' own module, which carry parameter properties node's
+    // type stripping refuses; it takes only `markActor` from the one and `watchPeers` from the other, served from stubs
+    // (as remoteRopes.test serves them). Nothing else here loads either.
+    const { register } = await import('node:module');
+    const portalSrc = readFileSync(new URL('../../../src/world/portalRender.ts', import.meta.url), 'utf8');
+    const layer = Number(/export const ACTOR_LAYER = (\d+);/.exec(portalSrc)?.[1]);
+    const stub = `export const ACTOR_LAYER = ${layer}; export function markActor(o) { o.traverse((x) => x.layers.enable(${layer})); }`;
+    const peersStub = 'export function watchPeers() { return () => {}; }';
+    const hook = `export async function resolve(s, c, next) {
+  if (s.endsWith('/portalRender.ts')) return { url: 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(stub)}), shortCircuit: true };
+  if (s.endsWith('/remotePlayers.ts')) return { url: 'data:text/javascript,' + encodeURIComponent(${JSON.stringify(peersStub)}), shortCircuit: true };
+  return next(s, c);
+}`;
+    register('data:text/javascript,' + encodeURIComponent(hook));
+    const { RemoteRopes } = await import('../../../src/net/remoteRopes.ts');
+    const { newPeerRope, readPeerRope } = await import('../../../src/net/peerRope.ts');
+
+    const r = await towPeer({ fps: 60, speed: 20, seconds: 3 });
+    const g = r.g;
+    const b = r.b;
+    const still = { x: 0, y: 0, z: 0 };
+    const n = g.rope.n + 1;
+    const onIt: number[] = [];
+    for (let i = 0; i < n; i++) if (g.rope.pf[i] > MAX_HULL_FRAMES) onIt.push(i);
+    const wire = g.attached ? g.wireRope(b, GRAPPLE_TUNE.sendPoints, still) : null;
+    const drawn = g.drawnPoints(new Float64Array(3 * n));
+    let grErr = Infinity;
+    if (wire && wire.gr.length === 2 + 3 * n) {
+      grErr = 0;
+      for (let i = 0; i < 3 * n; i++) grErr = Math.max(grErr, Math.abs(wire.gr[2 + i] - drawn[i]));
+    }
+    ok(!!wire && wire.gr[0] === 1 && n >= 2 && onIt.length >= 2 && grErr <= 0.005 + 1e-9, `a rope on their vehicle, its anchor and a bend on it (${onIt.length} of ${n} points), goes as a held rope whose every point is where this browser draws it, to the centimetre the wire carries (${r3(grErr)} m)`);
+    const grf = wire?.grf ?? [];
+    let localErr = 0;
+    let named = 0;
+    for (let e = 0; e + 5 < grf.length; e += 6) {
+      const i = grf[e + 2];
+      if (grf[e] === 1 && grf[e + 1] === PID && i === onIt[e / 6]) named++;
+      for (let c = 0; c < 3; c++) localErr = Math.max(localErr, Math.abs(grf[e + 3 + c] - g.rope.pts[3 * i + c]));
+    }
+    ok(grf.length === 6 * onIt.length && named === onIt.length && localErr <= 0.005 + 1e-9, `beside it, one frame entry for each point riding their vehicle, naming them (${PID}) and the point's index, its place in their vehicle's own frame to the centimetre (${r3(localErr)} m)`);
+    // A third browser: its picture of their vehicle stands 1.5 m behind this one's and turned a little, and the point goes on it.
+    const theirs = { pos: r.s.obj.position.clone().add(new THREE.Vector3(0, 0, -1.5)), quat: r.s.obj.quaternion.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.2)) };
+    const ropes = new RemoteRopes();
+    ropes.framePose = (id, pos, quat) => {
+      if (id !== PID) return false;
+      pos.copy(theirs.pos);
+      quat.copy(theirs.quat);
+      return true;
+    };
+    const view = { id: 2, shown: true, down: false, group: new THREE.Object3D(), rig: null, rope: newPeerRope() };
+    ropes.peerAdded(view as never);
+    readPeerRope(wire?.gr, wire?.grf, 0, view.rope);
+    ropes.tick(1 / 60);
+    ropes.peerMoved(view as never);
+    const rep = ropes.report().ropes[0] as { frames: { index: number; shown: boolean; drawn: number[] }[] } | undefined;
+    let theirErr = rep ? 0 : Infinity;
+    let worldOff = 0;
+    for (const f of rep?.frames ?? []) {
+      const i = f.index;
+      const want = new THREE.Vector3(g.rope.pts[3 * i], g.rope.pts[3 * i + 1], g.rope.pts[3 * i + 2]).applyQuaternion(theirs.quat).add(theirs.pos);
+      theirErr = Math.max(theirErr, f.shown ? Math.hypot(f.drawn[0] - want.x, f.drawn[1] - want.y, f.drawn[2] - want.z) : Infinity);
+      worldOff = Math.max(worldOff, Math.hypot(drawn[3 * i] - want.x, drawn[3 * i + 1] - want.y, drawn[3 * i + 2] - want.z));
+    }
+    ok(rep?.frames.length === onIt.length && theirErr <= 0.02 && worldOff > 1, `a watcher puts each of those points on its own picture of their vehicle within the wire's rounding (${r3(theirErr)} m), where the world point sent stands ${r2(worldOff)} m off it`);
+    ropes.dispose();
+
+    // Past the wire's sixteen: twenty points, the anchor and the bends 3 and 17 on their vehicle, the rest in the world. Cut
+    // at the anchor's end, the anchor stays and the fifteen points nearest the hand go with it; bend 3 is cut and its entry
+    // with it, and bend 17's entry names the place it holds in the list sent.
+    if (g.attached) {
+      const slot = g.rope.pf[onIt[0]];
+      const rope = g.rope;
+      rope.n = 19;
+      for (let i = 0; i <= 19; i++) {
+        const peer = i === 0 || i === 3 || i === 17;
+        rope.pf[i] = peer ? slot : 0;
+        rope.pts[3 * i] = peer ? 0.1 * i : 100 + i;
+        rope.pts[3 * i + 1] = peer ? 1 : 50;
+        rope.pts[3 * i + 2] = peer ? -0.2 : 7 * i;
+      }
+      const cut = g.wireRope(b, GRAPPLE_TUNE.sendPoints, still)!;
+      const all = g.drawnPoints(new Float64Array(3 * 20));
+      const kept = [0, ...Array.from({ length: 15 }, (_, j) => 5 + j)];
+      let keptErr = 0;
+      kept.forEach((i, k) => {
+        for (let c = 0; c < 3; c++) keptErr = Math.max(keptErr, Math.abs(cut.gr[2 + 3 * k + c] - all[3 * i + c]));
+      });
+      ok((cut.gr.length - 2) / 3 === 16 && keptErr <= 0.005 + 1e-9, `a rope of twenty points goes as sixteen, cut at the anchor's end: the anchor and the fifteen nearest the hand, in order (${r3(keptErr)} m)`);
+      const entries: number[][] = [];
+      for (let e = 0; e + 5 < (cut.grf ?? []).length; e += 6) entries.push(cut.grf!.slice(e, e + 6));
+      const bend = entries.find((x) => x[2] === 13);
+      ok(entries.length === 2 && entries[0][2] === 0 && !!bend && Math.abs(bend[3] - 1.7) < 1e-9 && entries.every((x) => x[1] === PID), `and its frame entries are the anchor's (index 0) and bend 17's under the index it holds in the sixteen sent (13, its place ${bend ? bend.slice(3).join(', ') : 'none'}); bend 3, cut, goes with its entry (${entries.map((x) => x[2]).join(', ')})`);
+      const back = newPeerRope();
+      ok(readPeerRope(cut.gr, cut.grf, 0, back) && back.count === 16 && back.frames === 2, 'and the watcher reads all of it back');
+      g.letGo('reset');
+    }
+  }
+
   // --- up to it, and it stopping: the box test keeps the body out ---------------------------------------------------
   // Towed 8 m behind it, then Shift held (reel in) or F (haul), or the vehicle braking hard or stopping dead: the body is held
   // off its box by the rope's own box test as off a hull this browser simulates, so the rope keeps its one bend at the rear

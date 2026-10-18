@@ -86,6 +86,47 @@ const claim = (extra: Record<string, unknown> = {}) => ({ t: 'claim', player: 'a
   ok(Object.keys(junk).join() === 'p,h,s,v,m,sab', `3: fields nobody knows are dropped (${Object.keys(junk).join()})`);
 }
 
+// --- 3b: a grappling hook's rope and dart (server/grappleWire.mjs) ---------------------------------
+//
+// `gr` is the dart flying (kind 0, seven numbers) or a rope held (kind 1, the slack and three numbers a point, at
+// most sixteen points); `grf` beside a held rope is six numbers a point that rides another player's vehicle.
+{
+  const dart = [0, 1, 2, 3, 40, 0, -100];
+  ok(JSON.stringify(cleanState(state({ gr: dart }))?.gr) === JSON.stringify(dart), '3b: a dart in flight is kept as seven numbers');
+  const held = [1, 0.25, 10, 20, 30, 11, 21, 31];
+  ok(JSON.stringify(cleanState(state({ gr: held }))?.gr) === JSON.stringify(held), '3b: a rope held, its slack and two points, is kept');
+  ok(cleanState(state({ gr: [0, 1, 2, 3, 4, 5] }))?.gr === undefined && cleanState(state({ gr: [0, 1, 2, 3, 4, 5, 6, 7] }))?.gr === undefined, '3b: a dart of any other length is dropped whole');
+  ok(cleanState(state({ gr: [1, 0.25, 1, 2] }))?.gr === undefined && cleanState(state({ gr: [1, 0.25, 1, 2, 3, 4] }))?.gr === undefined, '3b: a rope whose points are not whole threes is dropped');
+  ok(cleanState(state({ gr: [1, 0.25] }))?.gr === undefined, '3b: and so is a rope with no point at all');
+  ok(cleanState(state({ gr: [1, 0, 1, Number.NaN, 3] }))?.gr === undefined && cleanState(state({ gr: [0, 1, 2, 'x', 4, 5, 6] }))?.gr === undefined, '3b: a number that is not one drops the rope whole');
+  const sixteen = [1, 0, ...Array.from({ length: 48 }, (_, i) => i)];
+  ok(cleanState(state({ gr: sixteen }))?.gr?.length === 50, `3b: sixteen points (WIRE.ropePoints ${WIRE.ropePoints}) are kept`);
+  ok(cleanState(state({ gr: [...sixteen, 1, 2, 3] }))?.gr === undefined, '3b: seventeen are past the wire\'s own shape and dropped whole');
+  ok(cleanState(state({ gr: [2, 1, 2, 3, 4, 5, 6] }))?.gr === undefined, '3b: a third kind is no kind at all');
+  ok(cleanState(state({ gr: 'a rope' }))?.gr === undefined && cleanState(state({ gr: { kind: 1 } }))?.gr === undefined, '3b: and anything that is not a list is nothing');
+  ok(cleanState(state({ gr: [1, 5000, 1, 2, 3] }))?.gr?.[1] === 1000 && cleanState(state({ gr: [1, -3, 1, 2, 3] }))?.gr?.[1] === 0, '3b: the slack is held to nought and a thousand');
+  ok(WIRE.ropePoints === 16, '3b: the wire carries sixteen points of a rope');
+}
+{
+  const held = [1, 0, 10, 20, 30, 11, 21, 31, 12, 22, 32];
+  const one = (grf: unknown, self = 0) => cleanState(state({ gr: held, grf }), self) as { gr?: number[]; grf?: number[] };
+  ok(JSON.stringify(one([1, 7, 0, 0.5, 1, -2]).grf) === JSON.stringify([1, 7, 0, 0.5, 1, -2]), '3b: a point riding another player\'s vehicle is kept beside a held rope');
+  ok(one([1, 7, 0, 0.5, 1, -2, 1, 7, 2, 1, 1, 1]).grf?.length === 12, '3b: two of them are both kept');
+  ok(cleanState(state({ gr: [0, 1, 2, 3, 4, 5, 6], grf: [1, 7, 0, 0, 0, 0] }))?.grf === undefined, '3b: beside a dart in flight there is no frame to keep');
+  ok(one([1, 7, 0, 0, 0, 0], 7).grf === undefined, '3b: an entry naming the sender is dropped: nobody ropes the vehicle they are on');
+  ok(JSON.stringify(one([1, 7, 0, 0, 0, 0, 1, 9, 1, 1, 1, 1], 7).grf) === JSON.stringify([1, 9, 1, 1, 1, 1]), '3b: and only that entry: the good one beside it stands');
+  ok(JSON.stringify(one([1, 7, 3, 0, 0, 0, 1, 7, 1, 2, 2, 2]).grf) === JSON.stringify([1, 7, 1, 2, 2, 2]), '3b: an index past the rope\'s points is dropped on its own');
+  ok(JSON.stringify(one([1, 7, 1, 0, 0, 0, 1, 8, 1, 2, 2, 2]).grf) === JSON.stringify([1, 7, 1, 0, 0, 0]), '3b: an index used twice keeps its first');
+  ok(JSON.stringify(one([2, 7, 0, 0, 0, 0, 1, 7, 1, 2, 2, 2]).grf) === JSON.stringify([1, 7, 1, 2, 2, 2]), '3b: a kind nobody knows is dropped on its own');
+  ok(JSON.stringify(one([1, 7, 0, Number.NaN, 0, 0, 1, 7, 1, 2, 2, 2]).grf) === JSON.stringify([1, 7, 1, 2, 2, 2]), '3b: a number that is not one drops its entry on its own');
+  ok(JSON.stringify(one([1, 0, 0, 1, 1, 1, 1, 1.5, 1, 1, 1, 1, 1, 7, 2, 3, 3, 3]).grf) === JSON.stringify([1, 7, 2, 3, 3, 3]), '3b: an id of nobody, or of half a player, is dropped on its own');
+  const bad = one([1, 7, 9, 0, 0, 0]);
+  ok(bad.grf === undefined && bad.gr?.length === held.length, '3b: a grf with no good entry is dropped whole, and the rope stands');
+  ok(one([1, 7, 0, 0, 0]).grf === undefined && one([]).grf === undefined, '3b: a length that is not whole sixes is dropped whole');
+  const many = Array.from({ length: 17 }, (_, i) => [1, 7, i % 3, 0, 0, 0]).flat();
+  ok(one(many).grf === undefined, '3b: and so is one longer than a rope can be');
+}
+
 // --- 4: an emote -----------------------------------------------------------------------------------
 {
   ok(cleanEmote({ clip: 'dance_18' }) === 'dance_18', '4: a clip name is kept');

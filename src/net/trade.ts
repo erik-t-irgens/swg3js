@@ -33,12 +33,15 @@
 // is sent `{ t: 'items', do: 'list' | 'added' | 'gone' | 'refused' }` and
 // `{ t: 'trade', do: 'asked' | 'sent' | 'state' | 'done' | 'off' | 'refused' }`.
 
-import { cleanTint, firstItems } from '../core/inventory.ts';
+import { cleanTint, firstItems, isOwnedKind, type OwnedKind } from '../core/inventory.ts';
 import { GROUP_RANGE, cleanText, type PointOut } from './groups.ts';
 import type { Authority } from './session.ts';
 
 /** What a server that keeps a row per thing says in its hail (`ITEMS_VERSION` in server/ledger.mjs). */
 export const ITEMS_NAMED = 2;
+
+/** What a server whose ledger keeps carried gear (the grapple's rig) says in its hail (`GEAR_VERSION` in server/ledger.mjs). */
+export const GEAR_KEPT = 1;
 
 /** What the player is told when a server folds two of one item into one. */
 export const OLD_SERVER_WORDS = 'this server keeps one of each item and would fold two of one into one: restart it (npm run relay)';
@@ -96,7 +99,7 @@ export function tuneTrade(o: Partial<typeof TRADE_TUNE>): typeof TRADE_TUNE {
  * server's to mint. A row from a server built before things had names has no `thing`.
  */
 export interface TradeItem {
-  kind: 'wear' | 'weapon';
+  kind: OwnedKind;
   id: string;
   got: number;
   row?: string;
@@ -184,6 +187,12 @@ export class Trade {
   peerAt: (id: number, out: PointOut) => boolean = () => false;
   /** What the server's hail said of its items (`ITEMS_NAMED` for a row per thing, 0 for the one before). */
   itemsVersion: () => number = () => 0;
+  /**
+   * Which kinds of thing the server holding this character keeps: a wardrobe piece and a weapon on every ledger, and
+   * carried gear (the grapple's rig) only where its greeting says `gear`. A thing of any other kind is never handed up
+   * and never told to it, so a server that cannot hold the rig never writes it down as missing or takes it away.
+   */
+  keeps: (kind: OwnedKind) => boolean = (kind) => kind !== 'gear';
   /** Whether this character owns a thing now, by its name (the backpack's own list). */
   owns: (thing: string) => boolean = () => false;
   /** What a thing is doing instead of sitting in the backpack: worn, or in a hand. */
@@ -309,7 +318,7 @@ export class Trade {
    * the server's row, which a pane's own rows carry and a backpack's thing is found by, so two of one
    * shirt are told apart here exactly as the server tells them apart.
    */
-  offered(item: { kind: 'wear' | 'weapon'; id: string; thing?: string; row?: string }): boolean {
+  offered(item: { kind: OwnedKind; id: string; thing?: string; row?: string }): boolean {
     const w = this.live;
     if (!w) return false;
     const row = item.row || this.rowOf(item);
@@ -323,7 +332,7 @@ export class Trade {
    * name, or -- on a server from before things had names, which holds one row of each kind and id --
    * by what it is.
    */
-  rowOf(item: { kind: 'wear' | 'weapon'; id: string; thing?: string }): string {
+  rowOf(item: { kind: OwnedKind; id: string; thing?: string }): string {
     if (item.thing) {
       const named = this.rows.get(item.thing)?.row;
       if (named) return named;
@@ -379,7 +388,7 @@ export class Trade {
    * one of them again against its own rows and is what decides. Nothing about the window moves until
    * the server says so.
    */
-  putIn(item: { kind: 'wear' | 'weapon'; id: string; thing?: string }): string {
+  putIn(item: { kind: OwnedKind; id: string; thing?: string }): string {
     const w = this.live;
     if (!this.active || !w) return 'there is no trade open';
     if (!item?.id) return 'there is nothing there';
@@ -398,7 +407,7 @@ export class Trade {
   }
 
   /** Take a thing back out -- one of this side's pane, or one of the backpack's -- with the same message, one row shorter. */
-  takeOut(item: { kind: 'wear' | 'weapon'; id: string; thing?: string; row?: string }): string {
+  takeOut(item: { kind: OwnedKind; id: string; thing?: string; row?: string }): string {
     const w = this.live;
     if (!this.active || !w) return 'there is no trade open';
     if (!this.offered(item)) return 'that is not in the trade';
@@ -454,7 +463,8 @@ export class Trade {
     // out as objects, past the 64 KB a server takes from one browser in a second, and is 56 KB this way.
     // A server that does not keep two of one item is handed one of each, as the objects it always read,
     // and the player is told why.
-    let list = mine.slice(0, TRADE_TUNE.rows);
+    // Only the kinds this server keeps: the rig, to a server whose greeting does not say gear, stays this browser's.
+    let list = mine.filter((o) => this.keeps(o.kind)).slice(0, TRADE_TUNE.rows);
     const named = this.itemsVersion() >= ITEMS_NAMED;
     if (!named) {
       const once = firstItems(list);
@@ -523,7 +533,7 @@ export class Trade {
    * moves between two players: that is a trade, and only the server moves those.
    */
   noteAdded(item: TradeItem): void {
-    if (!this.active || !item?.id || !this.gotList) return;
+    if (!this.active || !item?.id || !this.gotList || !this.keeps(item.kind)) return;
     // Known already: the server's own answer has come, or -- on a server from before things had
     // names, which holds one of each -- it has one of these and would only say so.
     if (this.rowOf(item)) return;
@@ -537,7 +547,7 @@ export class Trade {
 
   /** One destroyed here. The server knows it by its row id, which this browser only ever hands back. */
   noteDropped(item: TradeItem): void {
-    if (!this.active || !item?.id || !this.gotList) return;
+    if (!this.active || !item?.id || !this.gotList || !this.keeps(item.kind)) return;
     const row = this.rowOf(item);
     if (!row) return;
     if (!this.mayAsk()) return;
@@ -899,7 +909,8 @@ function readRows(x: unknown, cap = TRADE_TUNE.rows): TradeItem[] {
 function readRow(x: unknown): TradeItem | null {
   if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
   const o = x as Record<string, unknown>;
-  const kind = o.kind === 'weapon' ? 'weapon' : o.kind === 'wear' ? 'wear' : null;
+  // Every kind a character can own, carried gear included: a kind written out by hand here once dropped anything else.
+  const kind = isOwnedKind(o.kind) ? o.kind : null;
   if (!kind) return null;
   const id = readId(o.what);
   if (!id) return null;
