@@ -144,21 +144,22 @@ export const HUD_SIZES = {
   chargeWidth: 2.5,
   /**
    * The grapple's mark: a diamond with its corners on the axes this far out, this wide, at this alpha, drawn
-   * where the dart would bite. At 32 its inner halo clears the charge ring's outer halo at every scale; at 28
-   * the two would touch while a shot charges. And the small mark at the anchor while it is in front of the view.
+   * where the dart would bite, and the small mark at the anchor while it is in front of the view. The owner's own
+   * smaller sizes (2026-10-17, still being tried): at 12 it sits inside the charge ring rather than round it, its
+   * corners meeting the ring's dark under-stroke while a shot charges; at 32 it cleared the ring from outside.
    */
-  grappleMark: 32,
-  grappleMarkWidth: 1.5,
+  grappleMark: 12,
+  grappleMarkWidth: 0.8,
   grappleMarkAlpha: 0.85,
-  grappleAnchor: 6,
+  grappleAnchor: 3,
   /**
    * The rope used over the longest, while the rope is in: a thin arc round the crosshair at this radius and this
-   * width, `muted`, turning `warn` past this share. At a width of 1 its under-stroke clears the charge ring's at every
-   * scale; it passes inside the diamond's corners and meets that stroke's halo only near its diagonals.
+   * width, `muted`, turning `warn` past this share. The owner's own sizes, as the diamond's: at 10 it runs inside the
+   * charge ring and the diamond's corners, where at 22 it ran between them.
    */
-  grappleRopeArc: 22,
-  grappleRopeArcWidth: 1,
-  grappleRopeWarn: 0.9,
+  grappleRopeArc: 10,
+  grappleRopeArcWidth: 0.5,
+  grappleRopeWarn: 0.5,
   /** An ability cell and its glyph. */
   slotSize: 40,
   slotGlyph: 28,

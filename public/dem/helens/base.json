@@ -1,0 +1,19 @@
+{
+  "source": "USGS_13_n47w123_20250813.tif",
+  "mapWidthInMeters": 24576.0,
+  "tileWidthInMeters": 4,
+  "base": {
+    "samples": 2458,
+    "metresPerSample": 9.998372660699756,
+    "minHeight": 299.8861083984375,
+    "maxHeight": 2535.233154296875,
+    "note": "height = minHeight + byte / 255 * (maxHeight - minHeight)"
+  },
+  "normal": {
+    "samples": 2048,
+    "metresPerSample": 12.0,
+    "residualMetres": 0.0,
+    "space": "tangent; tangent is world +X, bitangent world +Z"
+  },
+  "exaggeration": 1.0
+}

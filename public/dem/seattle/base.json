@@ -1,0 +1,19 @@
+{
+  "source": "USGS_13_n47w120_20240617.tif, USGS_13_n47w121_20250813.tif, USGS_13_n47w122_20250813.tif, USGS_13_n47w123_20250813.tif, USGS_13_n48w120_20250813.tif, USGS_13_n48w121_20250813.tif, USGS_13_n48w122_20250813.tif, USGS_13_n48w123_20240327.tif, USGS_13_n49w120_20250813.tif, USGS_13_n49w121_20250813.tif, USGS_13_n49w122_20250813.tif, USGS_13_n49w123_20240327.tif",
+  "mapWidthInMeters": 32768.0,
+  "tileWidthInMeters": 4,
+  "base": {
+    "samples": 8192,
+    "metresPerSample": 4.0,
+    "minHeight": -15.707568168640137,
+    "maxHeight": 387.05242919921875,
+    "note": "height = minHeight + byte / 255 * (maxHeight - minHeight)"
+  },
+  "normal": {
+    "samples": 2048,
+    "metresPerSample": 16.0,
+    "residualMetres": 0.0,
+    "space": "tangent; tangent is world +X, bitangent world +Z"
+  },
+  "exaggeration": 1.0
+}

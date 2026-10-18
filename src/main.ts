@@ -1721,7 +1721,7 @@ class App {
     registerPerfSwitch('oursOpenOut', { get: () => Math.max(0, ROUTINE_TUNE.clearOut), set: (v) => (ROUTINE_TUNE.clearOut = Number(v) > 0 ? Number(v) : 0), values: [0, 8], note: "a traveller of ours is stood and sent from the first open ground of the walk grid outside a door (up to this many metres out), and sent only where that ground's ranked region reaches; 0 is the old step outside, any goal counted reachable and the nearest cantina as a fallback. Read when a port is planned and a traveller stood, so it shows over minutes, not in an ab" });
     registerPerfSwitch('oursReplan', { get: () => ROUTINE_TUNE.replanOnce, set: (v) => (ROUTINE_TUNE.replanOnce = !!v), values: [false, true], note: 'a stalled walk of ours is sent once to the nearest spot it can surely reach, on a fresh route, before it is let go' });
     registerPerfSwitch('navSightAdvance', { get: () => outdoorNav.agent.sight > 0, set: (v) => (outdoorNav.agent.sight = v ? 1 : 0), values: [false, true], note: "a body outdoors drops a path's corner within reach only where the leg after it can be walked from where it stands, so a tight turn round an obstacle is walked round rather than cut into it (every arrival at Mos Eisley was let go in the junk such a turn cut through). Ships off, the reach alone every body outdoors has always walked by: on, it did not get one arrival more past that junk, and it has been measured on nothing else. It changes every creature, person and fighter out of doors, so compare it over minutes of a town, not in an ab" });
-    registerPerfSwitch('oursOffScreen',{ get: () => ROUTINE_TUNE.letGoOffScreen, set: (v) => (ROUTINE_TUNE.letGoOffScreen = !!v), values: [false, true], note: 'a stalled walk of ours is let go only while it is off the screen, or after `ROUTINE_TUNE.letGoWait` seconds held in view' });
+    registerPerfSwitch('oursOffScreen', { get: () => ROUTINE_TUNE.letGoOffScreen, set: (v) => (ROUTINE_TUNE.letGoOffScreen = !!v), values: [false, true], note: 'a stalled walk of ours is let go only while it is off the screen, or after `ROUTINE_TUNE.letGoWait` seconds held in view' });
     registerPerfSwitch('rideLodBias', { get: () => RIDE_LOD_TUNE.on, set: (v) => { RIDE_LOD_TUNE.on = !!v; this.world.refreshDetail(); }, values: [false, true], note: "the detail levels' switch distances and the plant reach divided by 1 + (speed - 20) / 30 (at most 5) while the eye moves faster than 20 m/s: a shuttle ride, a fast ship. Ships off: on a flown trip it saved nothing (RIDE_LOD_DEFAULTS says what was measured)" });
     // The cascades exist even with shadows off, so turning them on later in the menu needs no rebuild.
     this.world.attachCamera(this.cam.camera, true, this.portals);
@@ -1881,7 +1881,7 @@ class App {
     this.actions.setBindings(this.input.bindings);
     // The wardrobe says what it refused in its own panel; the line it used to clear here was rewritten
     // by the frame loop before anyone could see either it or the clear, so there is nothing to clear.
-    this.wardrobe = new WardrobeUi(this.ui, () => {});
+    this.wardrobe = new WardrobeUi(this.ui, () => { });
     this.wardrobe.setBaseUrl(import.meta.env.BASE_URL);
     this.weaponsUi = new WeaponsUi(this.ui, (def, hand) => void this.equip(def, hand));
     // The equipment: its deps are closures read only when an operation runs (after the constructor); the
@@ -2874,7 +2874,7 @@ class App {
             houses: walkIn.filter((d) => /^ply_/.test(d.id)).map((d) => d.id),
             other: walkIn.length - walkIn.filter((d) => /^ply_/.test(d.id)).length,
             shared: shared ? 'a house put down now is written down and everybody sees it' : 'no server: a house put down now stands here alone',
-          credits: creditText(purse.credits),
+            credits: creditText(purse.credits),
             standing: homes.report().standing,
             tune: { ...HOUSE_TUNE },
           };
@@ -3357,20 +3357,20 @@ class App {
           tune: { ...DRESSING_TUNE },
           ...(import.meta.env.DEV
             ? {
-                said,
-                editor: {
-                  layer: this.editLayer,
-                  dest: this.editDest.dest,
-                  confirmed: { ...this.editDest.confirmed },
-                  hand: (this.propPlacing ?? this.placing) ? { source: (this.propPlacing ?? this.placing)!.from.kind, dest: (this.propPlacing ?? this.placing)!.dest } : null,
-                  armed: this.editArm && performance.now() < this.editArm.until ? this.editArm.words : null,
-                  saving: this.editSaving,
-                  last: this.editLast,
-                  chip: this.editChip?.text ?? null,
-                  endpoint: { ...PLACEMENTS_ENDPOINT_TUNE },
-                  edit: { ...PERMANENT_EDIT_TUNE },
-                },
-              }
+              said,
+              editor: {
+                layer: this.editLayer,
+                dest: this.editDest.dest,
+                confirmed: { ...this.editDest.confirmed },
+                hand: (this.propPlacing ?? this.placing) ? { source: (this.propPlacing ?? this.placing)!.from.kind, dest: (this.propPlacing ?? this.placing)!.dest } : null,
+                armed: this.editArm && performance.now() < this.editArm.until ? this.editArm.words : null,
+                saving: this.editSaving,
+                last: this.editLast,
+                chip: this.editChip?.text ?? null,
+                endpoint: { ...PLACEMENTS_ENDPOINT_TUNE },
+                edit: { ...PERMANENT_EDIT_TUNE },
+              },
+            }
             : {}),
         };
       },
@@ -4631,6 +4631,150 @@ class App {
        * and as it was painted, its choice byte and the alternate that picks, its colour, and every colour
        * affector that wrote there, in order, beside what the cached blocks the game reads hold there.
        */
+      /**
+       * The ground rules, live. `ground()` reports what is painting this planet and every family
+       * it could be painting with. `ground({ all: 'rock_lok_lava' })` floods one family over
+       * everything, which is how to see what one actually looks like underfoot.
+       * `ground({ rules: [...] })` swaps the whole set, in the shape demShader.ts takes.
+       * `ground({ reset: true })` puts the planet's own back. The ground is rebuilt each time, so
+       * a set can be worked out in a few seconds rather than a few reloads.
+       */
+      groundRules: async (opts?: { all?: string; rules?: unknown[]; fallback?: string; reset?: boolean }) => {
+        const t = this.world.terrain;
+        const names = t.demFamilies;
+        if (!names) return { error: 'this planet paints with no borrowed families; it has no `ground` block' };
+        // The map carries a lowercase alias of every name, so halve it for the real list.
+        const distinct = [...new Map([...names].map(([n, id]) => [id, n])).values()].sort();
+        const spec = this.world.planet.ground;
+        if (!opts) {
+          return {
+            painting: !!t.demShader, pack: spec?.pack ?? null,
+            rules: spec?.rules.length ?? 0, fallback: spec?.fallback ?? null,
+            used: [...new Set((spec?.rules ?? []).map((r) => r.family))].sort(),
+            available: distinct,
+            unused: distinct.filter((n) => !(spec?.rules ?? []).some((r) => r.family === n) && n !== spec?.fallback),
+          };
+        }
+        const { DemShader } = await import('./world/demShader');
+        const lift = t.dem?.lift ?? 0;
+        let next = spec;
+        if (opts.reset) next = spec;
+        else if (opts.all) next = { pack: spec?.pack ?? '', fallback: opts.all, rules: [] };
+        else if (opts.rules) next = { pack: spec?.pack ?? '', fallback: opts.fallback ?? spec?.fallback ?? '', rules: opts.rules as never[] };
+        if (!next) return { error: 'nothing to paint with' };
+        const shader = new DemShader(next, names, lift, 4);
+        if (shader.missing.length) return { error: `no family named ${shader.missing.join(', ')}`, available: distinct };
+        t.demShader = shader;
+        this.world.remakeGround();
+        return { painting: next.rules.length ? `${next.rules.length} rules` : `all ${next.fallback}`, fallback: next.fallback };
+      },
+      /**
+       * What the ground rules actually see, sampled across this planet. Slope and hollow depend on
+       * how much the survey was resampled, not on the real place, so thresholds guessed from
+       * geology tend never to fire. This reports the distribution and suggests cuts taken from it.
+       * `slopes({ radius: 4000 })` looks at a smaller area; `{ at: [x, z] }` moves the centre.
+       */
+      slopes: async (opts?: { radius?: number; at?: [number, number]; samples?: number }) => {
+        const { groundAt } = await import('./world/demShader');
+        const t = this.world.terrain;
+        // Nine tenths of the patch. Sampled to its very edge, every reading along the perimeter
+        // is the step from the raster down to the planet's own noise -- a two kilometre cliff
+        // with a feather of 0 -- and that one artefact owns the top and bottom percentiles.
+        const r = opts?.radius ?? (t.dem ? t.dem.size * 0.45 : 8000);
+        const cx = opts?.at?.[0] ?? (t.dem?.centreX ?? 0);
+        const cz = opts?.at?.[1] ?? (t.dem?.centreZ ?? 0);
+        const n = Math.max(16, Math.min(opts?.samples ?? 160, 400));
+        const lift = t.dem?.lift ?? 0;
+        const h = (x: number, z: number) => t.heightAt(x, z);
+        const elev: number[] = [], slope: number[] = [], hollow: number[] = [];
+        for (let j = 0; j < n; j++) {
+          for (let i = 0; i < n; i++) {
+            const g = groundAt(cx - r + (2 * r * i) / (n - 1), cz - r + (2 * r * j) / (n - 1), h, lift);
+            elev.push(g.elevation); slope.push(g.slope); hollow.push(g.hollow);
+          }
+        }
+        const pick = (a: number[], q: number) => { const s2 = [...a].sort((x, y) => x - y); return s2[Math.min(s2.length - 1, Math.round(q * (s2.length - 1)))]; };
+        const band = (a: number[], u: string) => ({
+          min: +pick(a, 0).toFixed(2), p10: +pick(a, 0.1).toFixed(2), median: +pick(a, 0.5).toFixed(2),
+          p75: +pick(a, 0.75).toFixed(2), p90: +pick(a, 0.9).toFixed(2), p99: +pick(a, 0.99).toFixed(2),
+          max: +pick(a, 1).toFixed(2), unit: u,
+        });
+        return {
+          sampled: `${n}x${n} over ${(2 * r / 1000).toFixed(1)} km about ${cx.toFixed(0)}, ${cz.toFixed(0)}`,
+          elevation: band(elev, 'm above sea level'),
+          slope: band(slope, 'degrees'),
+          hollow: band(hollow, 'm below the mean of its neighbours'),
+          suggested: {
+            note: 'cuts taken from this ground, not from the real place. Steep is the top quarter.',
+            flat: `belowSlope: ${+pick(slope, 0.25).toFixed(0)}`,
+            steep: `aboveSlope: ${+pick(slope, 0.75).toFixed(0)}`,
+            verySteep: `aboveSlope: ${+pick(slope, 0.92).toFixed(0)}`,
+            gully: `aboveHollow: ${+pick(hollow, 0.88).toFixed(2)}`,
+            ridge: `belowHollow: ${+pick(hollow, 0.12).toFixed(2)}`,
+          },
+        };
+      },
+      /**
+       * The ground families a pack paints with: their ids, names, texture files and repeat sizes.
+       * `families('lok')` reads that pack's terrain for its shader table and nothing else -- no
+       * heights are attached and no buildings are placed, so it is safe to call from any world.
+       * This is what a DEM planet's material rules are written against: the names are the pack's
+       * own, and no two worlds share them.
+       */
+      families: async (packId: string, filter?: string) => {
+        const { AssetPack } = await import('./world/assetPack');
+        const { SwgTerrain } = await import('./world/swgTerrain');
+        const pack = await AssetPack.load(packId);
+        if (!pack) return { error: `no pack '${packId}' is installed` };
+        const trn = await pack.terrain();
+        if (!trn) return { error: `pack '${packId}' carries no terrain` };
+        // No building layers and no attach: this is a material table, not a world.
+        const swg = await SwgTerrain.create(trn, [], 0, 0, (file) => pack.bytes(file));
+        // A family names its alternates by shader name and weight; the files those resolve to are
+        // TerrainTextures' business, so what is useful here is the id to paint with and the names.
+        const out: { id: number; name: string; alternates: string[] }[] = [];
+        for (const f of swg.template.generator.shaderGroup.families.values()) {
+          out.push({ id: f.id, name: f.name, alternates: (f.children ?? []).map((c) => c.name) });
+        }
+        out.sort((a, b) => a.name.localeCompare(b.name));
+        const hit = filter ? out.filter((f) => f.name.toLowerCase().includes(filter.toLowerCase())) : out;
+        return { pack: packId, families: hit.length, of: out.length, list: hit };
+      },
+      /**
+       * Lay a patch of real-world ground over this planet, converted by tools/dem2swg.py and served
+       * from public/. `dem()` reports what is laid; `dem(null)` takes it away. The ground is rebuilt
+       * either way, so the mesh and the collider both follow -- they come from one array.
+       *
+       *   __debug.dem({ url: '/dem/monument', size: 4096, lift: -1580, feather: 300 })
+       *   __debug.dem({ centreX: 0, centreZ: 0 })   // move the patch already laid
+       *   __debug.dem(null)
+       */
+      dem: async (opts?: { url?: string; size?: number; lift?: number; feather?: number; centreX?: number; centreZ?: number } | null) => {
+        const terrain = this.world.terrain;
+        if (opts === null) {
+          terrain.dem = null;
+          this.world.remakeGround();
+          return { laid: false };
+        }
+        if (opts?.url) {
+          const { loadDemPatch } = await import('./world/demTerrain');
+          terrain.dem = await loadDemPatch(opts.url, opts);
+        } else if (opts && terrain.dem) {
+          // No url: nudge the patch already laid, so it can be walked into place.
+          for (const k of ['size', 'lift', 'feather', 'centreX', 'centreZ'] as const) {
+            if (opts[k] !== undefined) (terrain.dem as unknown as Record<string, number>)[k] = opts[k] as number;
+          }
+        }
+        const d = terrain.dem;
+        if (!d) return { laid: false, note: 'nothing laid yet: pass a url' };
+        this.world.remakeGround();
+        return {
+          laid: true, centreX: d.centreX, centreZ: d.centreZ, size: d.size, lift: d.lift,
+          feather: d.feather, samples: d.samples,
+          metresPerSample: +(d.size / d.samples).toFixed(2),
+          groundRange: [+(d.minHeight + d.lift).toFixed(1), +(d.maxHeight + d.lift).toFixed(1)],
+        };
+      },
       ground: (
         opts: {
           at?: boolean;
@@ -5430,7 +5574,7 @@ class App {
         const fwd = new THREE.Vector3();
         const right = new THREE.Vector3();
         const at = new THREE.Vector3();
-        let remove = () => {};
+        let remove = () => { };
         remove = this.heat.addProvider((sink) => {
           const elapsed = (performance.now() - start) / 1000;
           // The remover only marks it: the list drops it after the loop that is running.
@@ -10949,7 +11093,7 @@ class App {
     cam.updateMatrixWorld();
 
     // The world's own engine, at the place's own feet. Nothing is hurt and nothing is targeted.
-    this.world.update(dt, stand, cam.position, false, () => {}, null);
+    this.world.update(dt, stand, cam.position, false, () => { }, null);
     // A running day: the hour slider's thumb and clock follow it, written only when it has moved a step.
     if (!this.world.day.paused) this.placeBar.follow(this.world.day.time * 24);
     this.effects.update(dt);
@@ -13203,7 +13347,7 @@ class App {
     const want: number[] = [];
     for (const i of at) if (journal[i] && journalHashes([journal[i]]).some(fresh)) want.push(i);
     want.sort((a, b) => a - b);
-    for (let k = 0; k < want.length; ) {
+    for (let k = 0; k < want.length;) {
       const from = want[k];
       let to = from;
       while (k < want.length && want[k] - from < STORY_WIRE.journalMax) to = want[k++];
@@ -13794,8 +13938,8 @@ class App {
           : remoteWhy === JOBS_WAIT_UNREAD
             ? 'Your jobs wait: this server keeps your story but reads no story set.'
             : this.storyJobsWait() === JOBS_WAIT_CREDITS && !this.remoteJobs.active
-            ? 'Your jobs wait: this server keeps your credits but not your story.'
-            : '';
+              ? 'Your jobs wait: this server keeps your credits but not your story.'
+              : '';
     if (waits) {
       const book = this.story.book;
       for (const q of Object.keys(book?.quests ?? {})) if (book!.quests![q].state === 'active') held = waits;
@@ -14019,9 +14163,9 @@ class App {
     const [test, own] = await Promise.all([
       this.storyTests
         ? testSetFiles().catch((err) => {
-            console.warn('story: the test set did not load', err);
-            return null;
-          })
+          console.warn('story: the test set did not load', err);
+          return null;
+        })
         : Promise.resolve(null),
       ownSetFiles(import.meta.env.BASE_URL).catch(() => null),
     ]);
@@ -15128,7 +15272,7 @@ class App {
       .then((list) => {
         if (this.placeNamesFor === placesFor) this.placeNames = list;
       })
-      .catch(() => {});
+      .catch(() => { });
     this.spawn = this.world.spawnPoint();
     const stand = at ?? this.spawn;
     this.player.reset(stand);
@@ -18346,20 +18490,20 @@ class App {
       rigs,
       flown: h && v
         ? {
-            id: v.spec.id,
-            pad: h.key,
-            padHeld: this.shuttleRigs?.holdState(h.key) ?? null,
-            invulnerable: v.invulnerable,
-            inContacts: !!this.world.ships.of(v),
-            ghosted: v.ghosted,
-            colliders: v.colliderHandles.length,
-            holding: v.holding,
-            groundByPilot: v.groundByPilot,
-            swapError: h.swapError,
-            swapDegrees: h.swapDegrees,
-            programsBuilt: h.programsBuilt,
-            programsOnShow: h.programsOnShow,
-          }
+          id: v.spec.id,
+          pad: h.key,
+          padHeld: this.shuttleRigs?.holdState(h.key) ?? null,
+          invulnerable: v.invulnerable,
+          inContacts: !!this.world.ships.of(v),
+          ghosted: v.ghosted,
+          colliders: v.colliderHandles.length,
+          holding: v.holding,
+          groundByPilot: v.groundByPilot,
+          swapError: h.swapError,
+          swapDegrees: h.swapDegrees,
+          programsBuilt: h.programsBuilt,
+          programsOnShow: h.programsOnShow,
+        }
         : null,
       // The console's empty trips, the one that ended last, and how many flown hulls' sounds and flames the
       // drawn shuttles still step (0 once every trip has ended: nothing of one is left behind).
@@ -19061,9 +19205,9 @@ class App {
     const centre = this.world.layoutCenter;
     const plan = centre
       ? planSeats(standingPeople.seatedRows(centre), {
-          has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
-          ground: (x, z) => this.world.terrain.heightAt(x, z),
-        })
+        has: (kind, x, y, z, reach, level) => this.world.dataPlacedNear(kind === 'chair' ? isSeat : isTableTemplate, x, y, z, reach, level),
+        ground: (x, z) => this.world.terrain.heightAt(x, z),
+      })
       : null;
     const sig = plan ? seatPlanKey(plan) : '';
     const was = this.seatsStood;
@@ -23328,9 +23472,9 @@ class App {
     const c = this.player.rig?.character ?? null;
     const dir = c
       ? await c
-          .catalogue(base)
-          .then(() => c.wardrobeDir)
-          .catch(() => null)
+        .catalogue(base)
+        .then(() => c.wardrobeDir)
+        .catch(() => null)
       : null;
     const [file, table] = await Promise.all([loadCustomizeFile(dir ?? `${base}assets-private/wardrobe/human_male/`), loadCreatorTable(base)]);
     return { wardrobe: (file?.palettes as Record<string, number[][]> | undefined) ?? null, table: table ?? null };
@@ -23382,10 +23526,10 @@ class App {
    */
   private queueRefit<T>(v: Vehicle, work: () => Promise<T>): Promise<T> {
     const before = this.refitting.get(v) ?? Promise.resolve();
-    const run = before.catch(() => {}).then(work);
+    const run = before.catch(() => { }).then(work);
     this.refitting.set(v, run);
     void run
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => {
         if (this.refitting.get(v) === run) this.refitting.delete(v);
       });
@@ -24269,14 +24413,14 @@ class App {
     return {
       here: now
         ? {
-            kind: now.def.kind,
-            name: now.def.name,
-            copy: [Math.round(now.x), Math.round(now.z)],
-            room: now.cell,
-            arrival: now.arrival.toArray().map((n) => Math.round(n * 10) / 10),
-            locked: this.world.instanceLocks.lockedIn(now.object ?? undefined),
-            fittings: this.copyFittings.map((f) => ({ use: f.use, name: f.name ?? null, opens: f.opens ?? null, at: [f.x, f.y, f.z].map((n) => Math.round(n * 10) / 10), away: Math.round(Math.hypot(f.x - at.x, f.y - at.y, f.z - at.z)) })),
-          }
+          kind: now.def.kind,
+          name: now.def.name,
+          copy: [Math.round(now.x), Math.round(now.z)],
+          room: now.cell,
+          arrival: now.arrival.toArray().map((n) => Math.round(n * 10) / 10),
+          locked: this.world.instanceLocks.lockedIn(now.object ?? undefined),
+          fittings: this.copyFittings.map((f) => ({ use: f.use, name: f.name ?? null, opens: f.opens ?? null, at: [f.x, f.y, f.z].map((n) => Math.round(n * 10) / 10), away: Math.round(Math.hypot(f.x - at.x, f.y - at.y, f.z - at.z)) })),
+        }
         : null,
       use: this.gatherInstance(),
       wayBack: this.wayBack,
@@ -25284,7 +25428,7 @@ class App {
           (late) => {
             if (late) rooms.close(id);
           },
-          () => {},
+          () => { },
         );
       }
       return room;

@@ -426,21 +426,15 @@ const inside = (r: HudRect, w: number, h: number) => r.x >= 0 && r.y >= 0 && r.x
   ok(fadeOut(0.5, 1, 0) === 1, 'a fade of nothing never divides by nothing');
 }
 
-// The grapple's diamond and the mark at its anchor (the design's §7, `HUD_SIZES`): the diamond's corners out on
-// the axes, its stroke, its alpha, the anchor's mark, and its inner edge clear of the charge ring at every scale.
+// The grapple's diamond and the mark at its anchor (the design's §7, `HUD_SIZES`): the owner's own smaller sizes
+// (2026-10-17, still being tried), which put the diamond and the rope's arc inside the charge ring rather than round
+// it. Held at his numbers, so a change to them is a choice; where they now meet the ring is said, not held.
 {
-  const { grappleMarkInnerHalo, chargeOuterHalo } = await import('../../../src/ui/hudMath.ts');
-  ok(HUD_SIZES.grappleMark === 32 && HUD_SIZES.grappleMarkWidth === 1.5 && HUD_SIZES.grappleMarkAlpha === 0.85 && HUD_SIZES.grappleAnchor === 6, 'the diamond is 32 px out on its axes with a 1.5 px stroke at 0.85, and the anchor\'s mark 6 px');
-  let clear = true;
-  for (let s = HUD_SIZES.scaleMin; s <= HUD_SIZES.scaleMax + 1e-9; s += 0.05) if (!(grappleMarkInnerHalo(s, 2) > chargeOuterHalo(s, 2))) clear = false;
-  ok(clear, 'and its inner edge, under-stroke and all, clears the charge ring at every display scale');
-  // The rope-used arc (wave 2): a thin arc at 22 px round the crosshair, warning past nine tenths, clear of the charge
-  // ring, under-stroke and all, at every scale.
-  const { grappleRopeArcInnerHalo } = await import('../../../src/ui/hudMath.ts');
-  ok(HUD_SIZES.grappleRopeArc === 22 && HUD_SIZES.grappleRopeArcWidth === 1 && HUD_SIZES.grappleRopeWarn === 0.9, "the rope's arc is 22 px out with a 1 px stroke, and turns to warn past 0.9 of the longest rope");
-  let arcClear = true;
-  for (let s = HUD_SIZES.scaleMin; s <= HUD_SIZES.scaleMax + 1e-9; s += 0.05) if (!(grappleRopeArcInnerHalo(s, 2) > chargeOuterHalo(s, 2))) arcClear = false;
-  ok(arcClear, 'and its inner edge, under-stroke and all, clears the charge ring at every display scale');
+  ok(HUD_SIZES.grappleMark === 12 && HUD_SIZES.grappleMarkWidth === 0.8 && HUD_SIZES.grappleMarkAlpha === 0.85 && HUD_SIZES.grappleAnchor === 3, 'the diamond is 12 px out on its axes with a 0.8 px stroke at 0.85, and the anchor\'s mark 3 px');
+  ok(HUD_SIZES.grappleRopeArc === 10 && HUD_SIZES.grappleRopeArcWidth === 0.5 && HUD_SIZES.grappleRopeWarn === 0.5, "the rope's arc is 10 px out with a 0.5 px stroke, and turns to warn past half the longest rope");
+  const corner = HUD_SIZES.grappleMark + HUD_SIZES.grappleMarkWidth / 2 + 2;
+  const ringInside = HUD_SIZES.chargeRadius - HUD_SIZES.chargeWidth / 2 - 2;
+  console.log(`note at scale 1 the diamond's corners reach ${corner.toFixed(2)} px with their under-stroke and the charge ring's inner edge stands at ${ringInside.toFixed(2)} px: ${corner > ringInside ? 'they meet while a shot charges' : 'they stay apart'}`);
 }
 
 console.log(`\n${checks} checks passed`);

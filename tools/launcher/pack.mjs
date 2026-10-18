@@ -40,6 +40,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** The only kinds of file a built page is made of. Anything else in the dist folder fails the pack. */
 export const DIST_KINDS = new Set(['.html', '.js', '.css', '.wasm', '.json', '.svg', '.png', '.jpg', '.webp', '.ico', '.glb', '.txt', '.woff2', '.webmanifest', '.map']);
+/**
+ * A real-world elevation raster (`public/dem/<world>/base16.raw`: 16-bit heights, served as bytes), the one kind
+ * of file a page reads that is none of the kinds above, and allowed only where those rasters live.
+ */
+export const DEM_RASTER = /^dem\/[^/]+\/[^/]+\.raw$/;
 /** Game archives and the game's own file formats: never in a release, wherever they sit. */
 export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', '.mgn', '.sht', '.dds', '.ans', '.skt', '.lmg', '.sat', '.apt', '.pob', '.trn', '.lay', '.snd', '.cdf', '.stf', '.ws', '.gla', '.glm', '.clips']);
 
@@ -49,7 +54,7 @@ export const FORBIDDEN_KINDS = new Set(['.tre', '.toc', '.pk3', '.iff', '.msh', 
  * the server runs the very files the browser does and every wave of the story adds to them; the one file
  * outside it they may import is the hashing.
  */
-const SOURCE_FILES = ['src/swg/normalDecode.ts', 'src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/swg/terrain/radialFile.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/sceneCapture.ts', 'src/net/hash.ts', 'src/world/dayPhase.ts', 'src/world/weatherSchedule.ts'];
+const SOURCE_FILES = ['src/swg/normalDecode.ts', 'src/swg/terrain/trn.ts', 'src/swg/terrain/generator.ts', 'src/swg/terrain/flora.ts', 'src/swg/terrain/fractal.ts', 'src/swg/terrain/iff.ts', 'src/swg/terrain/shaderKey.ts', 'src/swg/terrain/radialFile.ts', 'src/core/fx/cloudMath.ts', 'src/data/scenes.ts', 'src/world/scenePlaces.ts', 'src/data/planets.ts', 'src/world/demShader.ts', 'src/world/sceneCapture.ts', 'src/net/hash.ts', 'src/world/dayPhase.ts', 'src/world/weatherSchedule.ts'];
 /**
  * The story's rules, its test set, and the adoptions of the emulator's conversations (`core3/`, which the
  * server folds with the Core3 reference), all read from `src/story/` as they are.
@@ -153,7 +158,7 @@ export function distFiles(dist, tracked, root = null) {
   }
   for (const rel of all) if (!reached.has(rel)) problems.push(`dist/${rel} was not made by the build and is not a tracked public file`);
   const files = all.filter((rel) => reached.has(rel));
-  for (const rel of files) if (!DIST_KINDS.has(extname(rel).toLowerCase())) problems.push(`dist/${rel} is not a kind of file a built page is made of`);
+  for (const rel of files) if (!DIST_KINDS.has(extname(rel).toLowerCase()) && !DEM_RASTER.test(rel)) problems.push(`dist/${rel} is not a kind of file a built page is made of`);
   return { files, problems };
 }
 

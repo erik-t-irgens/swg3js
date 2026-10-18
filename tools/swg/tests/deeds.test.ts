@@ -13,7 +13,8 @@ import { join } from 'node:path';
 import { footprintEntry, footprintFaults, footprintPatch, footprintSize, readFootprint } from '../sfp.mjs';
 import { deedCounts, joinDeeds, wordsFrom } from '../deeds.mjs';
 import { patchOfFootprint } from '../../../src/world/housePlace.ts';
-import { deedOfModel, type DeedRow } from '../../../src/world/deeds.ts';
+import { deedOfModel, wrongWorld, type DeedRow } from '../../../src/world/deeds.ts';
+import { PLANETS } from '../../../src/data/planets.ts';
 import { W, chunk, encode, form } from './iffWriter.ts';
 
 let passed = 0;
@@ -179,6 +180,16 @@ function makeSfp(width: number, height: number, pivotX: number, pivotZ: number, 
   ok(deedOfModel('ply_house', 'tatooine', deeds)?.id === 'tatooine_one', "the deed that may stand on this world is the one a house here is taken up by");
   ok(deedOfModel('ply_house', 'lok', deeds)?.id === 'naboo_only', 'with none for this world, any deed of its model with a footprint');
   ok(deedOfModel('ply_tower', 'tatooine', deeds) === null && deedOfModel('ply_house', 'lok', [deeds[1]]) === null, 'and none where no deed with a footprint makes it: judged on its model\'s own box, as it was put down');
+}
+
+// ---------------------------------------------------------------- which worlds a deed may stand on
+{
+  const foot = { w: 2, h: 2, px: 0, pz: 0, cw: 8, ch: 8, rows: ['FF', 'FF'] };
+  const row = (zones: string[]): DeedRow => ({ id: 'd', name: 'd', named: true, desc: '', makes: '', model: 'ply_house', layout: null, lots: 1, upkeep: 0, zones, foot, patch: null });
+  ok(wrongWorld(row(['naboo']), 'naboo') === null && wrongWorld(row([]), 'lok') === null, 'a deed stands on the worlds it names, and one that names none stands anywhere');
+  ok(/may only stand on naboo/.test(wrongWorld(row(['naboo']), 'tatooine') ?? ''), 'and is refused on a game world it does not name, in words');
+  const custom = PLANETS.find((p) => p.dem);
+  ok(!!custom && wrongWorld(row(['naboo']), custom.id) === null, `while a world of our own whose ground is real elevation (${custom?.id}) takes every deed`);
 }
 
 console.log(`\n${passed} checks passed`);

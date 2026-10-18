@@ -327,15 +327,17 @@ const rand = () => {
   ok(near === 0.02 && Math.abs(far - 1.5 * perPx) < 1e-12 && ribbonWidth(100, 60, 2160, t) < far, `the ribbon is its own 2 cm near and never under 1.5 px far (${far.toFixed(3)} m at 100 m on 1080 lines; finer on 2160)`);
 }
 
-// The diamond clears the charge ring at every scale. The overlay's under-stroke widening is read off its file as text:
-// hudCanvas.ts imports a page module node cannot load.
+// Where the diamond stands against the charge ring. It cleared the ring from outside at every scale until the owner
+// tried smaller sizes of his own (2026-10-17), which put it inside the ring: how they meet is said, not held, since the
+// size is his to choose (`hudMath.test.ts` holds his numbers). The overlay's under-stroke widening is read off its file
+// as text: hudCanvas.ts imports a page module node cannot load.
 {
   const canvasSrc = readFileSync(new URL('../../../src/ui/hudCanvas.ts', import.meta.url), 'utf8');
   const OVERLAY_TUNE = { widen: Number(/export const OVERLAY_TUNE = \{[\s\S]*?\bwiden:\s*([\d.]+)/.exec(canvasSrc)?.[1] ?? Number.NaN) };
   ok(OVERLAY_TUNE.widen > 0, `the overlay widens its under-stroke by ${OVERLAY_TUNE.widen} px a side`);
   let worst = Infinity;
   for (let s = HUD_SCALE_RANGE.min; s <= HUD_SCALE_RANGE.max + 1e-9; s += 0.05) worst = Math.min(worst, grappleMarkInnerHalo(s, OVERLAY_TUNE.widen) - chargeOuterHalo(s, OVERLAY_TUNE.widen));
-  ok(worst > 0, `the diamond's inner halo clears the charge ring's outer halo at every display scale (the narrowest gap ${worst.toFixed(2)} px; the diamond ${HUD_SIZES.grappleMark} px out on its axes)`);
+  console.log(`note the diamond (${HUD_SIZES.grappleMark} px out on its axes) ${worst > 0 ? `clears the charge ring from outside by ${worst.toFixed(2)} px at the narrowest` : 'stands inside the charge ring rather than round it'}`);
 }
 
 // The lengths, the rise, the terrain bit and the still family's flags.

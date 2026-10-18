@@ -1,0 +1,19 @@
+{
+  "source": "USGS_13_n36w112_20260601.tif, USGS_13_n36w113_20260601.tif, USGS_13_n37w112_20260601.tif, USGS_13_n37w113_20260601.tif",
+  "mapWidthInMeters": 32768.0,
+  "tileWidthInMeters": 4,
+  "base": {
+    "samples": 8192,
+    "metresPerSample": 4.0,
+    "minHeight": 719.7274780273438,
+    "maxHeight": 2454.14599609375,
+    "note": "height = minHeight + byte / 255 * (maxHeight - minHeight)"
+  },
+  "normal": {
+    "samples": 2048,
+    "metresPerSample": 16.0,
+    "residualMetres": 0.0,
+    "space": "tangent; tangent is world +X, bitangent world +Z"
+  },
+  "exaggeration": 1.0
+}

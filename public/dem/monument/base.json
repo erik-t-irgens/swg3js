@@ -1,0 +1,19 @@
+{
+  "source": "monument_pass.tif",
+  "mapWidthInMeters": 16288.0,
+  "tileWidthInMeters": 4,
+  "base": {
+    "samples": 2036,
+    "metresPerSample": 8.0,
+    "minHeight": 1490.344970703125,
+    "maxHeight": 2050.396240234375,
+    "note": "height = minHeight + byte / 255 * (maxHeight - minHeight)"
+  },
+  "normal": {
+    "samples": 2036,
+    "metresPerSample": 8.0,
+    "residualMetres": 0.0,
+    "space": "tangent; tangent is world +X, bitangent world +Z"
+  },
+  "exaggeration": 1.0
+}
