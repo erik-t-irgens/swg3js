@@ -218,7 +218,7 @@ import { bakeShader, describeShader, describeVariables, loadImage, loadShader, p
 import { ImageRegistry, exportBlueprint, exportPalettes, exportShader, palettesOf } from './customize.mjs';
 import { DYE_FORMAT, DYE_PALETTE, DYE_PALETTE_COLOURS, DYE_TUNE, EXTRA_GARMENT_PALETTES, colourOf, dyeBlock, dyeMesh, dyeSkip, readsVariable, wardrobeColourStatus } from './dye.mjs';
 import { effectAlpha, alphaModeFor } from './eff.mjs';
-import { GLASS_WORDS, MATERIAL_FORMAT, describeLines, describeSurface, isPlainCutOut, maskOf, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
+import { EYE_FILM, GLASS_WORDS, MATERIAL_FORMAT, describeLines, describeSurface, isPlainCutOut, maskOf, shineLine, splitGlow, surfaceCounts, surfaceCountsLine, surfaceLine, surfaceReaders, surfaceTexture } from './surface.mjs';
 import { bleedCard } from './cardBleed.mjs';
 import { localize, parseDatatable, parseStringTable } from './datatable.mjs';
 import { galaxyData, galaxyStatus, SPACE_PACK_VERSION, SPACE_ZONES, spaceZoneStatus } from './space.mjs';
@@ -3157,6 +3157,17 @@ function packStatus(dir) {
     if (withoutAimed.length) {
       const names = withoutAimed.slice(0, 4).map((sp) => sp.id).join(', ');
       need(`player <swg-dir> ${dir} --retail-only --jka=<jka-dir> && parts <swg-dir> ${dir} --retail-only && clips-save ${join(dir, 'player', 'human_male.glb')} ${join(dir, 'player', 'jka.clips')} --only=BOTH_ && clips-apply ${join(dir, 'characters', 'human_male', 'rig.glb')} ${join(dir, 'player', 'jka.clips')} && species <swg-dir> ${dir} --retail-only`, `${withoutAimed.length} of the ${speciesIndex.species.length} species rigs have no aimed blaster pose (a body with a gun up freezes on a transition instead): ${names}${withoutAimed.length > 4 ? ' and more' : ''}`);
+    }
+    // And the eye films (`EYE_FILM` in surface.mjs), the same hole a third time: a Trandoshan's eyelid or a Mon
+    // Calamari's eye shine written as a cut-out drew a pale opaque cap over the eye or nothing at all. Read off
+    // each rig's own models, by the material the converter names for its shader.
+    const filmCut = speciesIndex.species.filter((sp) => {
+      const m = readJson(join(dir, 'characters', sp.id, 'parts.json'));
+      return (m?.parts ?? []).some((x) => (glbJsonOnly(join(dir, 'characters', sp.id, x.file))?.materials ?? []).some((mat) => EYE_FILM.test(mat.name ?? '') && mat.alphaMode !== 'BLEND'));
+    });
+    if (filmCut.length) {
+      const only = [...new Set(filmCut.map((sp) => sp.id.replace(/_(male|female)$/, '')))].join(',');
+      need(`species <swg-dir> ${dir} --retail-only --only=${only}`, `${filmCut.map((sp) => sp.id).join(', ')}: the film over the eyes is drawn as a cut-out (converted before eye films were blended)`);
     }
   } else need(`species <swg-dir> ${dir} --retail-only`, 'no species index: only the one character can be played');
   // The creator's own table, beside the index: its own `if`, so nothing above can hide it. It carries a

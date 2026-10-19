@@ -1278,9 +1278,17 @@ export function surfaceTexture(vfs, shaderPath, deps) {
   // one of them is hair or fur** -- the highest any of the 233 hair and fur shaders reaches is 82%,
   // so the line has eight points of daylight either side. What it finds is fountain water, bacta
   // tanks, medicine gels, crystals and energy shields.
+  //
+  // **And an eye's film** (`EYE_FILM`). The Trandoshan's eyelid (`trn_m_lid.sht`) is a shell a few millimetres over the
+  // whole eye that the client blends at its texture's alpha (a third over the middle, nine tenths at the rim)
+  // with an alpha test at nought; as a half cut-out it was a pale opaque cap over 85% of the eye. The Mon
+  // Calamari's `mon_m_eyetrans.sht` is the same film whose alpha never reaches a half, so the cut-out threw
+  // it all away. By name, and not a glass word, since a glass mark also takes a ship's panes and shadows. The
+  // Mon Calamari's pass blends with no alpha test at all, which the rule otherwise asks for.
   const glassy = result.glass || paneLike(main);
-  const looksTranslucent = !!(d.scroll || d.split || em?.kind === 'full' || d.anim || glassy);
-  if (!additive && alphaMode === 'MASK' && pass?.alphaBlend && pass.alphaTest && !pass.zWrite && pass.blendDst === 5 && looksTranslucent) {
+  const eyeFilm = EYE_FILM.test(shaderPath);
+  const looksTranslucent = !!(d.scroll || d.split || em?.kind === 'full' || d.anim || glassy || eyeFilm);
+  if (!additive && alphaMode === 'MASK' && pass?.alphaBlend && (pass.alphaTest || eyeFilm) && !pass.zWrite && pass.blendDst === 5 && looksTranslucent) {
     result.translucent = true;
     if (d.alphaRef > 0) result.alphaTest = Math.round((d.alphaRef / 255) * 1e4) / 1e4;
   }
@@ -1407,6 +1415,12 @@ export function isPlainCutOut(entry) {
  * converted model, and every flora canopy it caught was drawn as a pane of glass, square shadow and all.
  */
 export const GLASS_WORDS = 'glass|window|windshield|transparen|viewport|pane|goggle|visor|lens';
+/**
+ * A film over an eye, drawn blended (rule 5): the Trandoshans' eyelids (`trn_m_lid`, `trn_f_lid`, Bossk's and the
+ * zombie's) and the Mon Calamari's eye shine (`mon_m_eyetrans`, `mon_f_eyetrans`). Every name in the archives it
+ * matches is one of these; the medic powder's `_lid` shaders are a jar's and are left alone.
+ */
+export const EYE_FILM = /trn_[mf]_lid|eyetrans/i;
 
 // ---------------------------------------------------------------------------------------------
 // Reports: the converter's log lines and diagnostics.

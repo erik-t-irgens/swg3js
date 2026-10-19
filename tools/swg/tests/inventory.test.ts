@@ -3,7 +3,8 @@
 // character into owned items, the starting kit, the species' verdict with the species packs' own
 // pieces, the words for slots, and a repeated id in a wardrobe. Plain node, no game files needed.
 import assert from 'node:assert/strict';
-import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, garmentMeshesOf, heldThingsOf, lookWithoutGarments, migrateInventory, mintThing, moveTints, normalizeOwned, occupancy, outfitTints, packPartOf, pairOwned, partToItemId, pickedTint, planHold, pruneHeld, pruneThings, resolveKit, sameTint, slotWords, speciesWords, thingOf, tintFromValues, tintValues, wornThingOf, type Fit, type HeldRef, type OwnedItem, type TintVariable } from '../../../src/core/inventory.ts';
+import { readFileSync } from 'node:fs';
+import { OFF_HAND_CLASSES, TINT_LEAST, chooseArrangement, cleanTint, collapseOwned, countOf, firstItems, fitFor, garmentMeshesOf, heldThingsOf, lookWithoutGarments, migrateInventory, mintThing, moveTints, normalizeOwned, occupancy, outfitTints, packPartOf, pairOwned, partToItemId, pickedTint, planHold, pruneHeld, pruneThings, resolveKit, sameTint, slotWords, speciesWords, starterOutfit, thingOf, tintFromValues, tintValues, wornThingOf, type Fit, type HeldRef, type OwnedItem, type TintVariable } from '../../../src/core/inventory.ts';
 import { itemInfo, itemSwatch, wardrobeIndex, type ItemContext } from '../../../src/player/items.ts';
 import { isHairKey as hairKey, slotGroupOf } from '../../../src/core/inventory.ts';
 import { characterMark } from '../../../src/net/session.ts';
@@ -711,6 +712,36 @@ ok(hairKey('singing_mountain_clan_bangs_s01') && !hairKey('singing_mountain_clan
   const old = await atBase<{ slotGroupOf: (id: string) => string }>('src/core/inventory.ts');
   if (old) ok(ids.every((id) => slotGroupOf(id) === old.slotGroupOf(id) && slotGroupOf(id, [['back']]) === (old.slotGroupOf(id) === 'other' ? 'back' : old.slotGroupOf(id))), `every id is grouped as before with no slots, and only what read Other moves with them (${ids.length}, against the pass's base)`);
   else ok(traceHash(ids.map((id) => slotGroupOf(id))) === SLOT_GROUP_BASE_HASH, `every id is grouped as before with no slots (${ids.length}, against the base's trace hash: git could not hand the old file over)`);
+}
+
+// --- the creator's fresh body: a new character starts in its pack's dress less what the table refuses ------
+{
+  // The appearance table's own verdicts for the converter's dress (shirt_s03 and pants_s01 blocked for both
+  // Wookiees, shoes_s01 hidden from them and the Trandoshans), and a Trandoshan's own boots, which are no item.
+  const items = new Map<string, { fit?: { block?: string[]; hide?: string[] } }>([
+    ['shirt_s03', { fit: { block: ['wookiee_male', 'wookiee_female'] } }],
+    ['pants_s01', { fit: { block: ['wookiee_male', 'wookiee_female'] } }],
+    ['shoes_s01', { fit: { hide: ['wookiee_male', 'wookiee_female', 'trandoshan_male', 'trandoshan_female'] } }],
+  ]);
+  const itemOf = (part: string) => {
+    const id = partToItemId(part, (x) => items.has(x));
+    return id ? items.get(id)! : null;
+  };
+  const dress = (species: string, g: 'm' | 'f') => ['shirt_s03', 'pants_s01', 'shoes_s01', ...(species.startsWith('trandoshan') ? ['trn_boot'] : [])].map((p) => (p === 'trn_boot' ? p : `${p}_${g}_l0`));
+  ok(starterOutfit(dress('wookiee_male', 'm'), 'wookiee_male', itemOf).length === 0, 'a new Wookiee starts in nothing: the table blocks the shirt and trousers and hides the shoes, as the game\'s own new Wookiee wore nothing');
+  ok(same(starterOutfit(dress('trandoshan_male', 'm'), 'trandoshan_male', itemOf), ['shirt_s03_m_l0', 'pants_s01_m_l0', 'trn_boot']), 'a new Trandoshan keeps the shirt, the trousers and its own boots (no item), not the shoes the table hides');
+  ok(same(starterOutfit(dress('human_female', 'f'), 'human_female', itemOf), ['shirt_s03_f_l0', 'pants_s01_f_l0', 'shoes_s01_f_l0']), 'a new human keeps the whole of its pack\'s dress');
+  ok(fitFor(items.get('shirt_s03')!.fit, 'wookiee_male', true) === 'ok' && fitFor(items.get('shirt_s03')!.fit, 'wookiee_male') === 'block', 'an old record\'s pack shirt still counts as wearable (packOwn), a new character\'s is judged by the table');
+  // The game's own wiring, which no behaviour test reaches: the creator always opens on a human male, puts the rig
+  // back to its pack and dresses it by the table, and the kit a new character is given is judged by the table too.
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  const open = main.slice(main.indexOf('private async openCreator('), main.indexOf('private async openCreator(') + 2000);
+  ok(!/this\.characterId/.test(open.slice(0, open.indexOf('this.showCreatorTab'))) && /s\.id === 'human_male'/.test(open) && /this\.freshBody\(character\)/.test(open), 'the creator opens on a human male, never the figure last stood on the select screen, and gives it a fresh body');
+  const fresh = main.slice(main.indexOf('private async freshBody('), main.indexOf('private async freshBody(') + 1600);
+  ok(/putBackLook\(c, null\)/.test(fresh) && /c\.resetShape\(\)/.test(fresh) && /starterOutfit\(c\.manifest\.defaultWear/.test(fresh) && /this\.dress\(c, outfit\)/.test(fresh), 'a fresh body has its colours, shape and height put back and is dressed in the table-judged starter outfit');
+  ok(!/legacyAppearance/.test(main), 'the pre-records look kept per species no longer seeds the creator');
+  const equipment = readFileSync(new URL('../../../src/player/equipment.ts', import.meta.url), 'utf8');
+  ok(/resolveKit\(cls, this\.look\(ctx, true\)/.test(equipment), 'the creator\'s kit is judged by the appearance table alone');
 }
 
 console.log(`${checks} checks passed`);

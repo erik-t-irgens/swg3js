@@ -647,6 +647,16 @@ export class Weather {
     return Math.min(this.levels - 1, Math.max(0, Math.round(raw)));
   }
 
+  /**
+   * Whether Life Day's areas are on today, by the console's word, the setting and the date: what a world's
+   * terrain is made with (`TERRAIN_GROUND_TUNE.lifeDay`), so its ground's snow follows the setting at the next
+   * arrival while the sky follows it at once.
+   */
+  lifeDayToday(): boolean {
+    this.refreshDate(true);
+    return this.forced?.lifeDay ?? lifeDayOn(this.settings.lifeDay, this.month, this.dayOfMonth);
+  }
+
   /** Today's month and day, read once a minute (the season changes by the day, and a Date is an object). */
   private refreshDate(now = false): void {
     if (!now && this.dateTimer > 0) return;

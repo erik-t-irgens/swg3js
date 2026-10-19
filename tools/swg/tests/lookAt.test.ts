@@ -3,6 +3,7 @@
 // special move does to it, and the one byte that crosses the wire -- through the browser's own
 // packer and through the server's own check, so the two cannot drift apart.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { HeadLook, LOOK, PITCH_WIRE, chestRelative, coneClampDegrees, easeAngle, lookReport, packPitch, pitchReach, pitchStep, tuneLook, unpackPitch, wrapAngle } from '../../../src/player/lookAt.ts';
 import { cleanHeadPitch, COMBAT_WIRE, HEAD_PITCH_BYTE } from '../../../server/combatWire.mjs';
 import { cleanState } from '../../../server/wire.mjs';
@@ -172,6 +173,20 @@ ok(pitchStep() < 0.71, 'which is finer than three quarters of a degree');
   head.step(30 * DEG, 10 * DEG, 0, 0, 1, true);
   const on = lookReport(null, head);
   ok(typeof on.head !== 'string' && on.head.on && on.head.yaw > 0, 'with a body it reports where that head is looking, in degrees');
+}
+
+// --- the look's clean pose goes back before anything reads the head --------------------------------
+// The rig cannot load under node (it imports the loader and an extensionless module), so its order is read as text.
+// Three's mixer writes a joint only when its clip's value moved since the last frame; on a frame it held the neck
+// still the neck kept last frame's turn, and the first-person eye, read before `lookToward`, shook back and forth.
+{
+  const rig = readFileSync(new URL('../../../src/player/rig.ts', import.meta.url), 'utf8');
+  const update = rig.slice(rig.indexOf('  update(dt: number): void {'), rig.indexOf('  update(dt: number): void {') + 900);
+  const mixed = update.indexOf('this.mixer.update(dt);');
+  const neck = update.indexOf('this.cleanLookBone(this.lookBones.neck);');
+  const head = update.indexOf('this.cleanLookBone(this.lookBones.head);');
+  ok(mixed >= 0 && neck > mixed && head > neck && update.slice(mixed, neck).split('\n').filter((l) => /^\s*[a-z]/i.test(l) && !/^\s*\/\//.test(l)).length <= 2, "the rig puts the neck's and the head's clean pose back straight after the mixer, before anything reads the head");
+  ok(/private cleanLookBone\(bone: THREE\.Bone \| null\): void \{[\s\S]{0,200}bone\.quaternion\.equals\(turn\.turned\)\) bone\.quaternion\.copy\(turn\.clean\)/.test(rig), 'and only a joint that still holds last frame\'s turn, so a clip that wrote it this frame keeps what it wrote');
 }
 
 console.log(`${checks} checks passed`);

@@ -18,7 +18,7 @@
 import type * as THREE from 'three';
 import type { ClassId } from '../combat/kit';
 import type { SavedCharacter } from '../core/characters';
-import { GRAPPLE_RIG, ITEMS_MOST, OFF_HAND_CLASSES, chooseArrangement, cleanTint, collapseOwned, garmentMeshesOf, grantRig, heldThingsOf, holdsRig, isHairKey, mintThing, moveTints, normalizeOwned, occupancy, packPartOf, pairOwned, partToItemId, planHold, pruneHeld, pruneThings, resolveKit, slotGroupOf, speciesWords, migrateInventory, thingOf, tintValues, wornThingOf, type Fit, type Hand, type HandThings, type HeldRef, type ListedItem, type OwnedItem, type OwnedKind } from '../core/inventory.ts';
+import { GRAPPLE_RIG, ITEMS_MOST, OFF_HAND_CLASSES, chooseArrangement, cleanTint, collapseOwned, fitFor, garmentMeshesOf, grantRig, heldThingsOf, holdsRig, isHairKey, mintThing, moveTints, normalizeOwned, occupancy, packPartOf, pairOwned, partToItemId, planHold, pruneHeld, pruneThings, resolveKit, slotGroupOf, speciesWords, migrateInventory, thingOf, tintValues, wornThingOf, type Fit, type Hand, type HandThings, type HeldRef, type ListedItem, type OwnedItem, type OwnedKind } from '../core/inventory.ts';
 import { itemInfo, wardrobeIndex, type ItemContext } from './items.ts';
 import type { Character } from './character';
 import type { Player } from './player';
@@ -257,12 +257,18 @@ export class Equipment {
     return partToItemId(part, (id) => index.has(id));
   }
 
-  /** What the kit's candidates are to this character: its species' verdict, or null when the catalogues lack it. */
-  private look(ctx: ItemContext): (kind: 'wear' | 'weapon', id: string) => Fit | null {
+  /**
+   * What the kit's candidates are to this character: its species' verdict, or null when the catalogues lack it.
+   * `byTable`: the appearance table's verdict alone, as a new character is judged; without it a piece the species
+   * pack carries counts as wearable (`packOwn`), which an old record's migration needs.
+   */
+  private look(ctx: ItemContext, byTable = false): (kind: 'wear' | 'weapon', id: string) => Fit | null {
     return (kind, id) => {
       if (kind === 'wear' && !ctx.wardrobe) return null;
       const info = itemInfo(kind, id, ctx);
-      return info.missing ? null : info.fit;
+      if (info.missing) return null;
+      if (byTable && kind === 'wear' && ctx.wardrobe) return fitFor(wardrobeIndex(ctx.wardrobe).get(id)?.fit, ctx.species);
+      return info.fit;
     };
   }
 
@@ -341,7 +347,7 @@ export class Equipment {
   /** The kit for a class, resolved against this character's catalogues (the creator uses it for a new record). */
   async kit(cls: ClassId): Promise<{ items: OwnedItem[]; held: { right?: string; left?: string } }> {
     const ctx = await this.itemContext();
-    return resolveKit(cls, this.look(ctx), Date.now());
+    return resolveKit(cls, this.look(ctx, true), Date.now());
   }
 
   owned(): OwnedItem[] {

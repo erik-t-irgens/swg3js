@@ -141,6 +141,7 @@ export class SwgTerrain {
             bitmaps: bitmaps.map((b) => ({ familyId: b.familyId, bytes: b.bytes.slice(0) })),
             ramps: sent,
             roadsClearFlora: TERRAIN_GROUND_TUNE.roadsClearFlora,
+            lifeDay: TERRAIN_GROUND_TUNE.lifeDay,
           },
           sent.map((r) => r.rgb),
         );

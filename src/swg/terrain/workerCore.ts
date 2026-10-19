@@ -3,7 +3,7 @@
 // it), then a pole grid generated for every `generate`. Every map of a grid goes out with it and every
 // one is transferred, never copied, so the answer costs the main thread nothing to receive.
 //
-// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora }
+// In:  { type: 'init', trn, layers: [{ bytes, x, z, yaw }], bitmaps: [{ familyId, bytes }], ramps: [{ name, width, rgb }], roadsClearFlora, lifeDay }
 //      { type: 'generate', id, startX, startZ, n, step }
 // Out: { type: 'ready', info } | { type: 'grid', id, heights, shaders, children, colors, excluded,
 //      floraCollidable, floraNonCollidable, radialNear, radialFar, environments, seasonal } | { type: 'error', message }
@@ -20,6 +20,8 @@ export interface TerrainInitMessage {
   ramps?: { name: string; width: number; rgb: ArrayBuffer }[];
   /** The main thread's `TERRAIN_GROUND_TUNE.roadsClearFlora`, since the worker's module is a copy of its own; absent keeps the default. */
   roadsClearFlora?: boolean;
+  /** The main thread's `TERRAIN_GROUND_TUNE.lifeDay`, read as the terrain is parsed; absent keeps the default (out of season). */
+  lifeDay?: boolean;
 }
 
 export interface TerrainGenerateMessage {
@@ -43,6 +45,7 @@ export class TerrainWorkerCore {
     try {
       if (msg.type === 'init') {
         if (typeof msg.roadsClearFlora === 'boolean') TERRAIN_GROUND_TUNE.roadsClearFlora = msg.roadsClearFlora;
+        if (typeof msg.lifeDay === 'boolean') TERRAIN_GROUND_TUNE.lifeDay = msg.lifeDay;
         const template = parseTerrainTemplate(new Uint8Array(msg.trn));
         for (const b of msg.bitmaps ?? []) attachBitmap(template, b.familyId, new Uint8Array(b.bytes));
         let ramps = 0;

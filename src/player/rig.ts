@@ -857,6 +857,14 @@ export class CharacterRig {
 
   update(dt: number): void {
     this.mixer.update(dt);
+    // The mixer writes a joint only when its clip's value moved since the last frame, so a neck or head the look
+    // turned last frame still carries that turn on a frame the clip held it still. The first-person eye reads the
+    // head before `lookToward` runs, so the clean pose goes back here: left to `lookToward`, every frame the clip
+    // held the neck put the eye where last frame's look had it, and the view shook back and forth by a centimetre.
+    if (this.lookTurned && this.lookBones) {
+      this.cleanLookBone(this.lookBones.neck);
+      this.cleanLookBone(this.lookBones.head);
+    }
     if (this.upperShot) {
       this.upperShotTime += dt;
       if (this.upperShotTime >= this.upperShotEnds - 0.05) {
@@ -1235,6 +1243,13 @@ export class CharacterRig {
    * again out of the death clip (`RemotePlayers.setDown`), where the held clip is dropped in the
    * same call. Everywhere else the ease is what is wanted, and `allowed` false is how to ask for it.
    */
+  /** One joint of the look back on its clean pose, when it still holds last frame's turn (nothing wrote it since). */
+  private cleanLookBone(bone: THREE.Bone | null): void {
+    if (!bone) return;
+    const turn = this.lookTurns.get(bone);
+    if (turn && bone.quaternion.equals(turn.turned)) bone.quaternion.copy(turn.clean);
+  }
+
   clearLook(): void {
     this.headLook.reset();
     for (const [bone, turn] of this.lookTurns) {

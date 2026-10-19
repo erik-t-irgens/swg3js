@@ -20,8 +20,9 @@
 //      plant name the same collidable flora family (PIMP) and on Talus 82.3%, the research's figures over
 //      its own 200 blocks; on every converted world the share of tiles whose flora agrees with the
 //      client's map, planted or bare, is never worse with the pattern than without it; and our ground
-//      stands at the client's own baked height (PFPM) to within that map's rounding at every planted tile,
-//      Talus held where it was measured
+//      stands at the client's own baked height (PFPM) to within that map's rounding at every planted tile
+//   1b. a top-level layer the file switches off paints nothing, and one painting Life Day's area runs only
+//      in season
 //
 // Run: node tools/swg/tests/terrainSnap.test.ts
 import assert from 'node:assert/strict';
@@ -226,6 +227,54 @@ const cornerOf = (w: number, lattice = 8) => Math.floor(w / lattice + 0.5) * lat
   }
 }
 
+// ------------------------------------------- 1b. a top-level layer switched off, and Life Day's out of season
+
+{
+  // The engine prepares only the top-level layers its file marks active, so one switched off paints nothing
+  // (Tatooine's and Talus's Life Day snow, Talus's paths). A layer painting a seasonal area (an AENV whose
+  // family is Life Day's: Corellia's, which the file leaves on) runs only while `TERRAIN_GROUND_TUNE.lifeDay`.
+  const header = new W().str('season').f32(2048).f32(8).i32(2).i32(0).f32(0).f32(2).str('').f32(60)
+    .f32(0).f32(0).f32(16).f32(2).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).f32(0).f32(0).f32(0).f32(0).u32(0).u8(1).bytes();
+  const sfam = (id: number, name: string) => chunk('SFAM', new W().i32(id).str(name).str('').u8(1).u8(2).u8(3).f32(4).f32(1).i32(1).str(`shader/${name}.sht`).f32(1).bytes());
+  const efam = (id: number, name: string) => form('EFAM', chunk('DATA', new W().i32(id).str(name).u8(255).u8(255).u8(255).f32(0.5).bytes()));
+  const adta = () => chunk('ADTA', new W().i32(0).i32(0).i32(1).str('').bytes());
+  const ascn = (family: number) => form('ASCN', form('0001', ihdr(`paint ${family}`), chunk('DATA', new W().i32(family).i32(0).f32(1).bytes())));
+  const aenv = (family: number) => form('AENV', form('0000', ihdr(`area ${family}`), chunk('DATA', new W().i32(family).i32(0).f32(0.5).bytes())));
+  const circle = (x: number, z: number, r: number) => form('BCIR', form('0002', ihdr('circle'), chunk('DATA', new W().f32(x).f32(z).f32(r).i32(0).f32(0).bytes())));
+  const layer = (name: string, active: number, ...items: ReturnType<typeof form>[]) => form('LAYR', form('0003', ihdr(name, active), adta(), ...items));
+  const tgen = form('TGEN', form('0000',
+    form('SGRP', form('0006', sfam(1, 'sand'), sfam(2, 'snow'), sfam(3, 'drift'))), form('FGRP', form('0008')), form('RGRP', form('0003')),
+    form('EGRP', form('0002', efam(4, 'town'), efam(9, 'lifeday'))), form('MGRP', form('0000')),
+    form('LYRS',
+      layer('town', 1, circle(100, 100, 30), aenv(4), ascn(1)),
+      layer('switched off', 0, circle(100, 100, 30), ascn(2)),
+      layer('life day', 1, circle(300, 300, 30), aenv(9), ascn(3)),
+    )));
+  const bytes = encode(form('PTAT', form('0015', chunk('DATA', header), tgen, form('BAKE'))));
+  const at = (lifeDay: boolean, x: number, z: number) => {
+    const was = TERRAIN_GROUND_TUNE.lifeDay;
+    TERRAIN_GROUND_TUNE.lifeDay = lifeDay;
+    try {
+      const t = parseTerrainTemplate(bytes);
+      const s = new TerrainSampler(t);
+      // A small grid of poles round the point, read at its middle.
+      const g = s.generate(x - 8, z - 8, 9, 2);
+      const k = 4 * 9 + 4;
+      return { family: g.shaders[k], env: g.environments[k], seasonal: g.seasonal[k], runs: t.generator.layers.map((l) => t.generator.runs(l)) };
+    } finally {
+      TERRAIN_GROUND_TUNE.lifeDay = was;
+    }
+  };
+  ok(TERRAIN_GROUND_TUNE.lifeDay === false, 'the generator runs out of Life Day\'s season unless told otherwise (the converter\'s walk grids and references are made so)');
+  const town = at(false, 100, 100);
+  ok(town.family === 1 && town.env === 4, `a layer the file switches off paints nothing over the one under it (family ${town.family}, the town's sand, not the switched-off layer's snow)`);
+  ok(at(true, 100, 100).family === 1, 'nor does it in Life Day\'s season: switched off is switched off');
+  const out = at(false, 300, 300);
+  ok(out.family === 0 && out.seasonal === 0 && out.runs.join() === 'true,false,false', `out of season a layer painting Life Day's area paints nothing at all, neither its ground nor its area (family ${out.family}, seasonal ${out.seasonal})`);
+  const inSeason = at(true, 300, 300);
+  ok(inSeason.family === 3 && inSeason.seasonal === 9 && inSeason.runs.join() === 'true,false,true', `in season it paints both (family ${inSeason.family}, seasonal area ${inSeason.seasonal})`);
+}
+
 // ---------------------------------------------------------------- 2. the converted worlds
 
 const worlds = groundWorlds();
@@ -282,12 +331,11 @@ for (const name of named(['tatooine', 'naboo'], 'every pole on its nearest corne
   const FLOOR: Record<string, number> = { tatooine: 98.4, talus: 82.3 };
   named(Object.keys(FLOOR), 'the floor on agreement with the client\'s baked flora');
   // The client's baked heights are packed at 0.03125 m, so a ground made as the client made it is within
-  // half that step of them, and float rounding: 0.02 m. Talus is the one world whose ground does not yet
-  // come out as the client's everywhere (its flora agrees only about 80% too, a gap of the generator's own,
-  // out of this pass's reach), so it is pinned where it was measured, at the generator before this pass as
-  // well as after: no more tiles past the rounding, none more past half a metre, and none worse.
+  // half that step of them, and float rounding: 0.02 m. Talus was pinned here at 99 tiles past it (worst
+  // 2.6 m) until the generator stopped running the top-level layers its file switches off (its `paths`):
+  // every world is now held to the rounding. A world that cannot yet be is named here with its measure.
   const PFPM_ROUNDING = 0.02;
-  const PFPM_KNOWN: Record<string, { past: number; farPast: number; worst: number }> = { talus: { past: 99, farPast: 31, worst: 2.64 } };
+  const PFPM_KNOWN: Record<string, { past: number; farPast: number; worst: number }> = {};
   const pct = (a: number, b: number) => (b ? (100 * a) / b : 0);
   const tenth = (v: number) => Math.round(v * 10) / 10;
   for (const name of worlds) {

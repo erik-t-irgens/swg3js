@@ -2502,6 +2502,16 @@ export class Layer extends LayerItem {
     this.readsShaders = this.hasActiveFilters && this.hasActiveAffectors && this.filters.some((f) => f.active && f.needsShaders());
   }
 
+  /** Left unprepared: with nothing active known of it, `prune` passes it over in every chunk. */
+  hold(): void {
+    this.hasActiveBoundaries = false;
+    this.hasActiveFilters = false;
+    this.hasActiveAffectors = false;
+    this.hasActiveLayers = false;
+    this.paintsShaders = false;
+    this.readsShaders = false;
+  }
+
   calculateExtent(): void {
     this.useExtent = false;
     if (this.invertBoundaries) return;
@@ -2874,8 +2884,14 @@ export function loadLayerItem(form: IffForm, group: FractalGroup): LayerItem | n
  * trees: measured over the blocks of seven worlds that hold a road or river point, our trees where the client's
  * own baked map has none fall from 135 to 78, and none of the client's is lost. False is the port of before,
  * which cleared nothing. The worker reads its own copy, which the terrain's `init` hands it.
+ *
+ * `lifeDay`: whether a top-level layer that paints a seasonal area (an AENV whose family is Life Day's) runs.
+ * Ours: the client ran Corellia's (Doaba Guerfel) all year, since the file marks it active, and SOE switched
+ * Tatooine's and Talus's on with a December hotfix; here every such layer runs only in Life Day's season, as
+ * the sky's Life Day rows already do. Read when a terrain is parsed, so the main thread sets it from the
+ * weather's own rule (`Weather.lifeDayToday`) before a world's terrain is made and hands it to the worker.
  */
-export const TERRAIN_GROUND_TUNE = { legacyChildren: 'hash' as const, roadsClearFlora: true };
+export const TERRAIN_GROUND_TUNE = { legacyChildren: 'hash' as const, roadsClearFlora: true, lifeDay: false };
 
 export class TerrainGenerator {
   readonly shaderGroup = new ShaderGroup();
@@ -2957,11 +2973,35 @@ export class TerrainGenerator {
     for (const l of layers) walk(l);
   }
 
+  /**
+   * The top-level layers that run, prepared; the rest are never prepared and so prune themselves from
+   * every chunk (`Layer.prune`), as the engine leaves an inactive one unprepared (TerrainGenerator::prepare
+   * checks `isActive`, where ours prepared every one: Tatooine's and Talus's switched-off Life Day layers
+   * snowed over Wayfar and Dearic, and Talus's switched-off `paths` stood its ground up to 2.6 m off the
+   * client's own baked heights). A layer prepared before and held now is cleared (`Layer.hold`).
+   */
   prepare(): void {
     for (const l of this.layers) {
+      if (!this.runs(l)) {
+        l.hold();
+        continue;
+      }
       l.prepare();
       l.calculateExtent();
     }
+  }
+
+  /** Whether a top-level layer runs: active, and a seasonal one only in its season (`TERRAIN_GROUND_TUNE.lifeDay`). */
+  runs(layer: Layer): boolean {
+    if (!layer.active) return false;
+    return TERRAIN_GROUND_TUNE.lifeDay || !this.paintsSeasonal(layer);
+  }
+
+  /** Whether a layer, or one under it, paints a seasonal environment area. */
+  private paintsSeasonal(layer: Layer): boolean {
+    for (const a of layer.affectors) if (a.active && a instanceof AffectorEnvironment && this.environmentGroup.isSeasonal(a.familyId)) return true;
+    for (const s of layer.layers) if (s.active && this.paintsSeasonal(s)) return true;
+    return false;
   }
 
   addLayer(layer: Layer): void {

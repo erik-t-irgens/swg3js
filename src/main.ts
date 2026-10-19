@@ -157,8 +157,8 @@ import { LATE_THINGS, bodiesProduct, clothesProduct, emotesProduct, garageProduc
 import { GIVE_TUNE } from './ui/giveModel.ts';
 import { BackpackUi, type BackpackCell } from './ui/backpackUi';
 import { Equipment, ITEMS_TUNE, tuneItems } from './player/equipment';
-import { itemInfo, itemSwatch, WEAPON_ORDER, type ItemContext } from './player/items';
-import { GRAPPLE_RIG, OFF_HAND_CLASSES, firstItems, isOwnedKind, lookWithoutGarments, normalizeOwned, outfitTints, pickedTint, slotRank, slotWords, speciesWords, type OwnedKind } from './core/inventory';
+import { itemInfo, itemSwatch, wardrobeIndex, WEAPON_ORDER, type ItemContext } from './player/items';
+import { GRAPPLE_RIG, OFF_HAND_CLASSES, firstItems, isOwnedKind, lookWithoutGarments, normalizeOwned, outfitTints, partToItemId, pickedTint, slotRank, slotWords, speciesWords, starterOutfit, type OwnedKind } from './core/inventory';
 import { ForceUi } from './ui/forceUi';
 import { DEFAULT_LOADOUT, POWERS, forceFxReport, type ForceFxTune } from './combat/forcePowers';
 import { setForceBeamLook } from './combat/forceLightning.ts';
@@ -15279,12 +15279,8 @@ class App {
     const character = await this.useSpecies(id);
     if (!character || character.manifest.id !== id) return `no parts pack for ${id}: run the converter's species command`;
     if (this.creating) {
-      // A fresh start for the species, with the look last tuned for it in this browser when there is one.
-      const legacy = this.legacyAppearance(id);
-      putBackLook(character, legacy);
-      this.applyAppearance(character, legacy);
-      // A species that may not go bald starts in the game's first style.
-      void this.wearDefaultHair(character);
+      // A fresh start for the species, as the creator opens on one.
+      void this.freshBody(character);
     } else if (this.current) {
       this.current.species = id;
       this.current.appearance = this.appearanceOf(character, this.current.tints !== 1);
@@ -15299,14 +15295,30 @@ class App {
     return `playing as ${id}`;
   }
 
-  /** The look kept per species before characters had records of their own, as a starting point in the creator. */
-  private legacyAppearance(species: string): Appearance | null {
-    try {
-      const saved = localStorage.getItem(`swg.appearance.${species}`);
-      return saved ? (JSON.parse(saved) as Appearance) : null;
-    } catch {
-      return null;
-    }
+  /**
+   * The creator's fresh body: the rig back to its pack (colours, shape sliders, the height's middle), dressed in the
+   * pack's own dress less what the appearance table blocks or hides for the species (`starterOutfit`: a Wookiee in
+   * nothing, as the game's own new Wookiee), and then a species that may not go bald in the game's first style. The
+   * rig is the last figure's when the select screen stood one of the same species, so all of it has to go back, or
+   * a new character was the last one looked at under a new name. Nothing here is a look kept in this browser: the
+   * pre-records `swg.appearance.<species>` key that once seeded it has had no writer for a long time.
+   */
+  private async freshBody(c: Character): Promise<void> {
+    putBackLook(c, null);
+    c.resetShape();
+    const w = await c.catalogue(import.meta.env.BASE_URL).catch(() => null);
+    if (!this.creating || this.player.rig?.character !== c) return;
+    const index = w ? wardrobeIndex(w) : null;
+    const outfit = starterOutfit(c.manifest.defaultWear ?? [], c.manifest.id, (part) => {
+      const id = index ? partToItemId(part, (x) => index.has(x)) : null;
+      return (id && index?.get(id)) || null;
+    });
+    await this.dress(c, outfit);
+    if (!this.creating || this.player.rig?.character !== c) return;
+    // The species the creator opens on goes through no species pick, and starts as one picked would.
+    await this.wearDefaultHair(c);
+    if (this.appearanceUi.open && this.player.rig?.character === c) this.appearanceUi.refresh();
+    if (this.wardrobe.open && this.player.rig?.character === c) void this.wardrobe.attach(c, import.meta.env.BASE_URL).catch((err) => console.warn('wardrobe', err));
   }
 
   // ---- The creator: the appearance and wardrobe panels at full size, no world behind them. ----
@@ -15322,21 +15334,14 @@ class App {
     this.wardrobe.root.classList.add('creation');
     this.appearanceUi.root.classList.add('creation');
     this.creatorBar.show();
-    const species = this.speciesList.find((s) => s.id === this.characterId)?.id ?? this.speciesList[0]?.id ?? 'human_male';
+    // Always a human male, never the figure last stood on the select screen (the owner's call): a new character
+    // starts from the game's first species, in its own dress, whoever was looked at before.
+    const species = this.speciesList.find((s) => s.id === 'human_male')?.id ?? this.speciesList[0]?.id ?? 'human_male';
     const character = await this.useSpecies(species);
     // Whoever was played last leaves their weapons behind, even when the species is the same.
     this.equipment.reset();
     if (!this.creating) return;
-    if (character) {
-      // The rig is the last figure's when the species is the same, colours and all: those go back to the
-      // pack's own first, or the new character's first record carries the last one's skin, its garments'
-      // colours and its remembered hair colour.
-      const legacy = this.legacyAppearance(species);
-      putBackLook(character, legacy);
-      this.applyAppearance(character, legacy);
-      // The species the creator opens on goes through no species pick, and starts as one picked would.
-      void this.wearDefaultHair(character);
-    }
+    if (character) void this.freshBody(character);
     this.showCreatorTab('appearance');
     // A place to stand in, if this install has any built. It is asked for after the panels are up
     // so the creator is usable the whole time the world is loading, and it answers false on a fresh

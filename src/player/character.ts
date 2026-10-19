@@ -527,6 +527,8 @@ export class Character {
       if (s.morphTargetDictionary) {
         for (const [morph, index] of Object.entries(s.morphTargetDictionary)) {
           (this.morphs.get(morph) ?? this.morphs.set(morph, []).get(morph)!).push(s);
+          // Where a slider stood as the first mesh carrying it loaded, before anybody moved it (`resetShape`).
+          if (!this.restMorphs.has(morph) && s.morphTargetInfluences) this.restMorphs.set(morph, s.morphTargetInfluences[index]);
           if (morph in shape && s.morphTargetInfluences) s.morphTargetInfluences[index] = shape[morph];
         }
       }
@@ -1066,12 +1068,24 @@ export class Character {
   private baseScale: number | null = null;
   /** The height slider's setting, 0 to 1; the whole character is scaled by it. */
   height = 0.5;
+  /** Every shape slider where the pack loaded it, kept for `resetShape`. */
+  private readonly restMorphs = new Map<string, number>();
+
+  /**
+   * Every shape slider back where the pack loaded it and the height to the middle of the species' range: the
+   * creator's fresh body, since the rig it opens on may be the one the last figure on the select screen wore.
+   */
+  resetShape(): void {
+    for (const [name, v] of this.restMorphs) this.setMorph(name, v);
+    this.setHeight(0.5);
+  }
 
   /** Scale the character for a height setting from 0 (shortest) to 1 (tallest) within its species' range, over the size the rig gave it. */
   setHeight(t: number): void {
     this.height = Math.min(1, Math.max(0, t));
     if (this.baseScale === null) this.baseScale = this.group.scale.x || 1;
-    const [lo, hi] = heightRange(this.manifest.species ?? this.manifest.id);
+    const gender = this.manifest.gender ?? (/female/.test(this.manifest.id) ? 'female' : 'male');
+    const [lo, hi] = heightRange(this.manifest.species ?? this.manifest.id, gender);
     this.group.scale.setScalar(this.baseScale * (lo + (hi - lo) * this.height));
   }
 
@@ -1110,27 +1124,41 @@ export class Character {
 }
 
 /**
- * How far a species' height slider reaches, as a scale over its model: the game's creation ranges,
- * near enough (a Wookiee's model already stands tall, so its band is narrow and above one; a
- * Sullustan's or Bothan's is short and below).
+ * How far a species' height slider reaches, as a scale over its model: the game's own range for each species
+ * and gender, the `scale` parameter of `object/creature/player/shared_<species>_<gender>.iff` (a range, its
+ * minimum and maximum), copied here as written. Every playable model stands about 1.8 m in its bind pose, so the
+ * range does all the work: a Wookiee male 2.04 to 2.35 m, a Bothan female 1.31 to 1.47. The slider is read as
+ * running straight from the one to the other, which is an inference. The table before this was keyed by species
+ * alone and was nobody's numbers: a Wookiee stood 0.3 m short at the slider's middle and every woman at a man's.
  */
 const HEIGHT_RANGES: Record<string, [number, number]> = {
-  human: [0.88, 1.1],
-  twilek: [0.88, 1.1],
-  zabrak: [0.88, 1.1],
-  wookiee: [0.96, 1.12],
-  trandoshan: [0.94, 1.12],
-  rodian: [0.86, 1.04],
-  moncal: [0.9, 1.08],
-  mon_calamari: [0.9, 1.08],
-  bothan: [0.84, 1.0],
-  sullustan: [0.8, 0.96],
-  ithorian: [0.96, 1.12],
+  human_male: [0.89, 1.11],
+  human_female: [0.83, 1.08],
+  bothan_male: [0.75, 0.83],
+  bothan_female: [0.72, 0.81],
+  ithorian_male: [0.92, 1.06],
+  ithorian_female: [0.89, 1.03],
+  moncal_male: [0.89, 1.0],
+  moncal_female: [0.86, 0.94],
+  rodian_male: [0.81, 0.94],
+  rodian_female: [0.78, 0.92],
+  sullustan_male: [0.92, 1.06],
+  sullustan_female: [0.89, 1.03],
+  trandoshan_male: [1.03, 1.25],
+  trandoshan_female: [1.0, 1.22],
+  twilek_male: [0.92, 1.11],
+  twilek_female: [0.89, 1.08],
+  wookiee_male: [1.11, 1.28],
+  wookiee_female: [1.08, 1.25],
+  zabrak_male: [0.92, 1.06],
+  zabrak_female: [0.89, 1.03],
 };
 
-export function heightRange(species: string): [number, number] {
-  const key = species.toLowerCase().replace(/_(male|female)$/, '');
-  return HEIGHT_RANGES[key] ?? [0.88, 1.1];
+/** A species and gender's height range (`HEIGHT_RANGES`); a body nobody plays (an NPC's own parts) takes the human's. */
+export function heightRange(species: string, gender = 'male'): [number, number] {
+  const base = species.toLowerCase().replace(/_(male|female)$/, '').replace(/^mon_calamari$/, 'moncal');
+  const own = /_female$/.test(species.toLowerCase()) ? 'female' : /_male$/.test(species.toLowerCase()) ? 'male' : gender;
+  return HEIGHT_RANGES[`${base}_${own}`] ?? HEIGHT_RANGES[`human_${own === 'female' ? 'female' : 'male'}`];
 }
 
 /** The per-triangle zone combination the converter left on the primitive. */

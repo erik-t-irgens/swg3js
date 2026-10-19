@@ -50,6 +50,7 @@ import { OUTPOSTS } from '../data/outposts';
 import { Group, groups, RAPIER as R } from '../core/physics';
 import { CHUNK_SIZE, chunkHeightfield, FAR_TILE_DROP, Terrain } from './terrain';
 import { SwgTerrain, type BuildingLayerSource, type SwgWaterTable } from './swgTerrain';
+import { TERRAIN_GROUND_TUNE } from '../swg/terrain/generator.ts';
 import type { GroundRules } from './demShader';
 import { LayoutStreamer, nearTierRange, type Building, type CellState, type PlacedObject, type WaterSurfaceHandle } from './layoutStream';
 import { blockedBy, blockerName, clearRadius, groundVerdict, patchMiddle, patchOfBounds, patchProbes, spotAhead } from './housePlace.ts';
@@ -1734,6 +1735,7 @@ export class World {
         if (token !== this.loadToken) return null;
         try {
           const t0 = performance.now();
+          TERRAIN_GROUND_TUNE.lifeDay = this.weather.lifeDayToday();
           const swg = await SwgTerrain.create(trn, layers, layout.center.x, layout.center.z, (file) => pack.bytes(file));
           if (token !== this.loadToken) return null;
           this.terrain.attachSwg(swg);

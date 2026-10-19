@@ -161,6 +161,21 @@ export function fitFor(fit: ItemFit | undefined | null, species: string, packOwn
 /** A pack part's name without its gender and detail suffix: `shirt_s03_m_l0` is `shirt_s03`. */
 const PACK_SUFFIX = /_[mf]_l\d+$/i;
 
+/**
+ * What a new character of a species starts in: its pack's own dress less every piece the appearance table blocks
+ * or hides for it, judged by the table alone (never `packOwn`, which keeps an old record's pack shirt on). The
+ * converter dressed every species pack in one shirt, trousers and shoes, which the table blocks for the Wookiees
+ * (shirt, trousers) and hides from them and the Trandoshans (shoes), and the game's own new Wookiee wore nothing
+ * (`creation/default_pc_equipment.iff`'s Wookiee rows are empty). A part that is no catalogue item (the
+ * Trandoshan's own `trn_boot`) is the body's and stays. `itemOf` answers a part's catalogue item, or null.
+ */
+export function starterOutfit(parts: readonly string[], species: string, itemOf: (part: string) => { fit?: ItemFit | null } | null): string[] {
+  return parts.filter((part) => {
+    const item = itemOf(part);
+    return !item || fitFor(item.fit, species) === 'ok';
+  });
+}
+
 /** A worn part's catalogue id: the name itself when the catalogue has it, else without `_m_l<n>`/`_f_l<n>`, else null. */
 export function partToItemId(part: string, has: (id: string) => boolean): string | null {
   if (has(part)) return part;
@@ -290,8 +305,10 @@ export interface KitEntry {
 }
 
 /**
- * The starting kit (the client's creation tables carry none: that was server data). Candidates in
- * order, the Ithorian ids after the human ones so each wardrobe folder finds its own.
+ * The starting kit, ours. The client's creation tables do dress a new character (`creation/default_pc_equipment.iff`
+ * and the professions' own tables, which no converter reads yet), but give no weapon, which was the server's.
+ * Candidates in order, the Ithorian ids after the human ones so each wardrobe folder finds its own; the creator
+ * judges them by the appearance table alone (`Equipment.kit`), so a new Wookiee is given no blocked shirt.
  */
 export const STARTING_KIT: { common: KitEntry[]; jedi: KitEntry[]; bounty_hunter: KitEntry[] } = {
   common: [
