@@ -194,6 +194,39 @@ export interface LightSet {
   lights: string;
   counts: LightCounts;
   programs: number;
+  /** Of those, the shadow pass's depth programs (`isDepthProgram`), which a set holding every light may key rightly. */
+  depth?: number;
+}
+
+/**
+ * Whether a program is a shadow pass's depth program: three's depth and distance materials (the sway's twins among
+ * them) and the grass's own casting material. Since the performance pass's second wave the shadow pass draws through
+ * a scene of its own whose light set is every light at once (`passScenes.ts`), so a depth program keyed on a set that
+ * holds two passes' lights is a real pass's and no stray; a colour program under that set is still one.
+ */
+export function isDepthProgram(read: KeyRead): boolean {
+  return read.shaderId === 'depth' || read.shaderId === 'distance' || read.defines.some((d) => d.name === 'SWG_GRASS_DEPTH');
+}
+
+/** What a program built in play was, for `shaders().inPlay` and the loading report: a kind, and whether it was a skinned body's. */
+export interface PlayKind {
+  kind: 'velocity' | 'depth' | 'colour';
+  skinned: boolean;
+}
+
+/**
+ * A program built in play, sorted by its own cache key and never by its label alone: a label is the name of the first
+ * material that built the key, so the sway's depth twins (`sway depth (…)`) and the grass's casting material, which
+ * carry names of their own, read as colour programs by a label's words. The motion blur's variants are named
+ * `fx.velocity` by the game and are known by that name; a key three's run cannot be found in falls back on the label's
+ * words. For the console; it allocates.
+ */
+export function playKindOf(cacheKey: string, label: string): PlayKind {
+  const read = readKey(cacheKey);
+  const skinned = read ? read.flags.includes('skinning') : /skinned/.test(label);
+  if (/^fx\.velocity/.test(label)) return { kind: 'velocity', skinned };
+  if (read) return { kind: isDepthProgram(read) ? 'depth' : 'colour', skinned };
+  return { kind: /(Depth|Distance)Material/.test(label) ? 'depth' : 'colour', skinned };
 }
 
 /** A light signature that covers two others which do not cover each other, and which two. */
@@ -357,8 +390,9 @@ export function census(rows: readonly ProgramRow[]): Census {
       continue;
     }
     const sig = lightSignature(read.lights);
-    const set = byLight.get(sig) ?? byLight.set(sig, { lights: sig, counts: read.lights, programs: 0 }).get(sig)!;
+    const set = byLight.get(sig) ?? byLight.set(sig, { lights: sig, counts: read.lights, programs: 0, depth: 0 }).get(sig)!;
     set.programs++;
+    if (isDepthProgram(read)) set.depth = (set.depth ?? 0) + 1;
     g.variants.push({ lights: sig, marks: marksOf(read), used: row.usedTimes ?? 1, id: row.id ?? -1 });
   }
   const out: CensusGroup[] = [];
@@ -373,7 +407,8 @@ export function census(rows: readonly ProgramRow[]): Census {
     groups: out,
     split: out.filter((g) => g.programs > 1).length,
     combined,
-    combinedPrograms: combined.reduce((n, c) => n + c.programs, 0),
+    // The shadow pass's depth programs under a set holding every light are that pass's own, never a stray.
+    combinedPrograms: combined.reduce((n, c) => n + c.programs - (byLight.get(c.lights)?.depth ?? 0), 0),
   };
 }
 

@@ -5,6 +5,8 @@
 // Message in:  { init: { cacheMB } }  (once, first: how much decoded image this worker keeps)
 //            | { id, recipe, values: [name, value][], palettes, dir, normal }  (dir: the images' folder, an absolute URL)
 // Messages out: { id, width, height, rgba, emis?: { width, height, rgba }, normal?: { width, height, rgba }, ms }  (the buffers transferred)
+//               with `hash` on the colour, the glow and the normal map when the job asked for them (`hash: true`: a
+//               shared look's render, whose pixels the main thread would otherwise read again to know them, bytesHash.ts)
 //             | { id, empty: true }  (nothing rendered: an image missing)
 //             | { id, error }
 // It fetches only the images the recipe reads for the values (each choice at the value chosen), decodes
@@ -12,6 +14,7 @@
 // let go first, up to the size it was told. A character's job also makes the normal map the values pick.
 import type { Img } from './texrender.ts';
 import { decodePng } from './png.ts';
+import { hashPixels } from './bytesHash.ts';
 import { ImageCache, paintFiles, runRecipeJob, type PaintRecipe } from '../vehicles/paintJob.ts';
 
 interface JobMessage {
@@ -21,6 +24,7 @@ interface JobMessage {
   palettes: Record<string, number[][]>;
   dir: string;
   normal?: boolean;
+  hash?: boolean;
 }
 
 const ctx = self as unknown as { postMessage(message: unknown, transfer?: Transferable[]): void; onmessage: ((e: MessageEvent) => void) | null };
@@ -55,7 +59,7 @@ ctx.onmessage = (e: MessageEvent<JobMessage | { init: { cacheMB: number } }>) =>
     if (Number.isFinite(mb) && mb > 0) cache = new ImageCache(mb * MB);
     return;
   }
-  const { id, recipe, values, palettes, dir, normal } = e.data;
+  const { id, recipe, values, palettes, dir, normal, hash } = e.data;
   void (async () => {
     try {
       const vals = new Map(values);
@@ -73,12 +77,16 @@ ctx.onmessage = (e: MessageEvent<JobMessage | { init: { cacheMB: number } }>) =>
       const sources = new Set<ArrayBufferLike>([...mine.values()].filter((x): x is Img => !!x).map((x) => x.rgba.buffer));
       const own = (a: Img['rgba']): Uint8Array => (sources.has(a.buffer) ? new Uint8Array(a) : a instanceof Uint8Array ? a : new Uint8Array(a.buffer, a.byteOffset, a.length));
       const rgba = own(img.rgba);
-      const emis = img.emis ? { width: img.emis.width, height: img.emis.height, rgba: own(img.emis.rgba) } : undefined;
-      const nrm = img.normal ? { width: img.normal.width, height: img.normal.height, rgba: own(img.normal.rgba) } : undefined;
+      // Hashed here, before the buffers go, when asked: the main thread then never reads them again to know them.
+      const h = (a: Uint8Array): { hash?: string } => (hash ? { hash: hashPixels(a) } : {});
+      const er = img.emis ? own(img.emis.rgba) : null;
+      const nr = img.normal ? own(img.normal.rgba) : null;
+      const emis = img.emis && er ? { width: img.emis.width, height: img.emis.height, rgba: er, ...h(er) } : undefined;
+      const nrm = img.normal && nr ? { width: img.normal.width, height: img.normal.height, rgba: nr, ...h(nr) } : undefined;
       const transfer = new Set<ArrayBuffer>([rgba.buffer as ArrayBuffer]);
       if (emis) transfer.add(emis.rgba.buffer as ArrayBuffer);
       if (nrm) transfer.add(nrm.rgba.buffer as ArrayBuffer);
-      ctx.postMessage({ id, width: img.width, height: img.height, rgba, ms, ...(emis ? { emis } : {}), ...(nrm ? { normal: nrm } : {}) }, [...transfer]);
+      ctx.postMessage({ id, width: img.width, height: img.height, rgba, ms, ...h(rgba), ...(emis ? { emis } : {}), ...(nrm ? { normal: nrm } : {}) }, [...transfer]);
     } catch (err) {
       ctx.postMessage({ id, error: err instanceof Error ? err.message : String(err) });
     }

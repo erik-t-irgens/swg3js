@@ -71,6 +71,12 @@ const F_SKIP = 2;
 const F_HID = 4;
 const F_DRAWN = 8;
 const F_UNDRAWN = 16;
+/**
+ * A record whose rooms program is still being built off the frame (the room deferral, `roomDefer.ts`): never shown in
+ * a building's pass, shown in the shadow and world passes as `F_OUT` says. One that reaches more rooms than the routes
+ * take is flagged so too, in place of the wide skip, which would leave it drawn in every building's pass.
+ */
+const F_NOROOM = 32;
 
 /** One root as this has seen it: whether a light is under it and when that was looked at, and how its rooms were seen. */
 interface RootMark {
@@ -99,6 +105,14 @@ export interface RouteStats {
   shownWorld: number;
   shownRooms: number;
   passes: Int32Array;
+  /**
+   * Records not room-ready this frame (the room deferral): all of them, those reaching more rooms than the routes take
+   * (flagged `F_NOROOM` where the wide skip would have left them in every building's pass), and those left untouched
+   * because a light hangs under them (should stay nought: no light is hung under a mobile's or a fighter's root).
+   */
+  notReady: number;
+  deferredWide: number;
+  deferredLit: number;
 }
 
 export class ActorRoutes {
@@ -106,7 +120,7 @@ export class ActorRoutes {
   active = false;
   /** How many records this frame. */
   n = 0;
-  readonly stats: RouteStats = { records: 0, byKind: new Int32Array(NKIND), unhideable: 0, doorway: 0, hidden: 0, hiddenByKind: new Int32Array(NKIND), undrawn: 0, shownShadows: 0, shownWorld: 0, shownRooms: 0, passes: new Int32Array(3) };
+  readonly stats: RouteStats = { records: 0, byKind: new Int32Array(NKIND), unhideable: 0, doorway: 0, hidden: 0, hiddenByKind: new Int32Array(NKIND), undrawn: 0, shownShadows: 0, shownWorld: 0, shownRooms: 0, passes: new Int32Array(3), notReady: 0, deferredWide: 0, deferredLit: 0 };
   private vis: PortalVisibility | null = null;
   private cap = 0;
   private readonly k: number;
@@ -163,6 +177,9 @@ export class ActorRoutes {
     s.shownWorld = 0;
     s.shownRooms = 0;
     s.passes.fill(0);
+    s.notReady = 0;
+    s.deferredWide = 0;
+    s.deferredLit = 0;
     return on && !!vis && vis.result.valid;
   }
 
@@ -212,10 +229,15 @@ export class ActorRoutes {
    * One record: what it is, its roots (`b` a second root that is not under the first, a lit blade's, or
    * null), the building and room it stands in (null and 0 outdoors), and its sphere, written into `at`
    * first. Called between `begin` and `hideFrame`, only when `begin` answered true.
+   *
+   * `roomReady` false is a body whose rooms program is still being built off the frame (the room deferral,
+   * `roomDefer.ts`): it is never shown in a building's pass, and one that reaches more rooms than the routes take is
+   * flagged `F_NOROOM` rather than skipped, since a skipped record is drawn in every building's pass. Answers true when
+   * such a record counts in a room, so the caller can make its rooms job urgent (`RoomJob.promote`).
    */
-  add(kind: number, a: THREE.Object3D, b: THREE.Object3D | null, building: VisBuilding | null, cell: number): void {
+  add(kind: number, a: THREE.Object3D, b: THREE.Object3D | null, building: VisBuilding | null, cell: number, roomReady = true): boolean {
     const vis = this.vis;
-    if (!vis) return;
+    if (!vis) return false;
     if (this.n >= this.cap) this.grow();
     const i = this.n++;
     const s = this.stats;
@@ -234,10 +256,13 @@ export class ActorRoutes {
     this.flag[i] = 0;
     const mark = this.markOf(a);
     this.markA[i] = mark;
+    if (!roomReady) s.notReady++;
     if (this.lit(mark, a) || (b !== null && this.lit(this.markOf(b), b))) {
+      // Never hidden from a pass, ready or not: hiding a light changes the light count, and that rebuilds every program.
       this.flag[i] = F_SKIP;
       s.unhideable++;
-      return;
+      if (!roomReady) s.deferredLit++;
+      return false;
     }
     // The portals are tried with the sphere grown by how far the body has gone since its room was followed.
     const q = this.probe;
@@ -267,11 +292,20 @@ export class ActorRoutes {
       }
     }
     if (wide) {
-      this.flag[i] = F_SKIP;
-      s.unhideable++;
-      return;
+      if (roomReady) {
+        this.flag[i] = F_SKIP;
+        s.unhideable++;
+        return false;
+      }
+      // Not room-ready: routed as any record is (its own visibility kept by `hideFrame`), shown in the shadow and world
+      // passes as `F_OUT` says, and never in a building's pass.
+      s.deferredWide++;
+      this.flag[i] |= F_NOROOM;
+      return true;
     }
+    if (!roomReady) this.flag[i] |= F_NOROOM;
     if (this.memN[i] + (this.flag[i] & F_OUT ? 1 : 0) > 1) s.doorway++;
+    return !roomReady && this.memN[i] > 0;
   }
 
   /**
@@ -451,11 +485,14 @@ export class ActorRoutes {
       if (f & (F_SKIP | F_HID)) continue;
       let show = false;
       if (pass === ROUTE_PASS.building) {
-        const base = i * k;
-        for (let j = 0; j < this.memN[i]; j++) {
-          if (this.memB[base + j] === b) {
-            show = true;
-            break;
+        // A body whose rooms program is still being built off the frame is never drawn in a building's pass.
+        if ((f & F_NOROOM) === 0) {
+          const base = i * k;
+          for (let j = 0; j < this.memN[i]; j++) {
+            if (this.memB[base + j] === b) {
+              show = true;
+              break;
+            }
           }
         }
       } else {

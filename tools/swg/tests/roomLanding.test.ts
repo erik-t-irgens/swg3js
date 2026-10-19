@@ -280,8 +280,8 @@ else {
   // only the hangar's rooms are lit -- as they all were before there was a hint. Read off the renderer's own
   // interior pass, driven with a fake renderer, since three's WebGL renderer is not to be had under node.
   const src = text('src/world/portalRender.ts');
-  const body = /private renderRooms\(scene: THREE\.Scene, camera: THREE\.Camera, b: Building\): void \{[\s\S]*?\n  \}/.exec(src)?.[0] ?? '';
-  ok(!!body && (src.match(/this\.renderRooms\(scene, camera, (view|b)\);/g) ?? []).length === 2 && !/this\.renderLayer\(scene, camera, INTERIOR_LAYER\);\n\s*(this\.showInterior|if \(this\.matrixOnce)/.test(src), '5: both interior passes, from inside and through the doors from outside, go through one call that dims the pool for any building it was not lit for');
+  const body = /private renderRooms\(scene: THREE\.Scene, camera: THREE\.Camera, b: Building, routed: boolean\): void \{[\s\S]*?\n  \}/.exec(src)?.[0] ?? '';
+  ok(!!body && (src.match(/this\.renderRooms\(scene, camera, (view|b), routes !== null\);/g) ?? []).length === 2 && !/this\.renderLayer\([^)]*INTERIOR_LAYER\);\n\s*(this\.showInterior|if \(this\.matrixOnce)/.test(src), '5: both interior passes, from inside and through the doors from outside, go through one call that dims the pool for any building it was not lit for');
   // That call, run as it stands against a record of the pool and a pass that reads it.
   type B = { name: string };
   const hangar: B = { name: 'hangar' };
@@ -302,12 +302,18 @@ else {
     renderLayer: (_s: unknown, _c: unknown, _l: number) => void drawnWith.push(String(pool.lit)),
     // The leaves' own word round each rooms pass (leafWiring.test.ts holds it); nothing of the pool's.
     roomPass: (_on: boolean) => {},
+    // The rooms pass's own scene and the bodies whose rooms program is still coming (the performance pass's second
+    // wave, passScenes.test.ts and roomDefer.test.ts hold them); nothing of the pool's.
+    passScenes: { forRooms: (s: unknown) => s },
+    roomPending: [] as unknown[],
+    roomPendingCount: 0,
+    roomPendingWas: [] as boolean[],
   };
-  const fn = new Function('INTERIOR_LAYER', `return function ${body.replace(/^\s*private /, '').replace(/\(scene: THREE\.Scene, camera: THREE\.Camera, b: Building\): void/, '(scene, camera, b)')}`)(1) as (this: typeof self, s: unknown, c: unknown, b: B) => void;
-  fn.call(self, null, null, cantina);
-  fn.call(self, null, null, hangar);
+  const fn = new Function('INTERIOR_LAYER', `return function ${body.replace(/^\s*private /, '').replace(/\(scene: THREE\.Scene, camera: THREE\.Camera, b: Building, routed: boolean\): void/, '(scene, camera, b, routed)')}`)(1) as (this: typeof self, s: unknown, c: unknown, b: B, routed: boolean) => void;
+  fn.call(self, null, null, cantina, true);
+  fn.call(self, null, null, hangar, true);
   self.hintedLights.building = null;
-  fn.call(self, null, null, cantina);
+  fn.call(self, null, null, cantina, true);
   ok(drawnWith.join() === '0,1,1' && pool.lit === 1, `... the cantina's rooms seen through their door are drawn with the pool at nought and the hangar's with it lit, and with no hint every building's with the pool as it stands, which is put back after (${drawnWith.join(', ')})`);
 }
 

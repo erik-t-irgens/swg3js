@@ -93,16 +93,28 @@ export class PaceBudget {
   /** The worst play frame seen, and how many frames went over the play budget. */
   private worst = 0;
   private overruns = 0;
+  /** A play frame that built more than this says so (`warnOver`, or the frame's own allowance when one was handed). */
+  private warnAt = 1;
 
-  /** Start a frame. `loading` raises the allowance to the loading screen's. */
-  open(loading: boolean): void {
+  /**
+   * Start a frame. `loading` raises the allowance to the loading screen's. `programs`, when not negative, is the
+   * frame's program allowance in place of the machine's: in `parallel` mode a frame issues `issuePerFrame` programs
+   * without waiting on any of them, and building that many is then no overrun.
+   */
+  open(loading: boolean, programs = -1): void {
     this.behindScreen = loading;
-    this.budget = Math.max(0, Math.floor(shaderBudget(loading)));
+    this.budget = programs >= 0 ? Math.floor(programs) : Math.max(0, Math.floor(shaderBudget(loading)));
+    this.warnAt = programs >= 0 ? Math.max(PACE_TUNE.warnOver, Math.floor(programs)) : PACE_TUNE.warnOver;
     this.msBudget = loading ? PACE_TUNE.loadMs : PACE_TUNE.playMs;
     this.jobBudget = loading ? PACE_TUNE.loadJobs : PACE_TUNE.playJobs;
     this.builtNow = 0;
     this.spentMs = 0;
     this.tookJobs = 0;
+  }
+
+  /** The program allowance this frame was opened with. */
+  get allowed(): number {
+    return this.budget;
   }
 
   /** Whether another job may run on this frame. */
@@ -134,7 +146,7 @@ export class PaceBudget {
   close(): boolean {
     if (this.behindScreen) return false;
     if (this.builtNow > this.worst) this.worst = this.builtNow;
-    if (this.builtNow > PACE_TUNE.warnOver) {
+    if (this.builtNow > this.warnAt) {
       this.overruns++;
       return true;
     }

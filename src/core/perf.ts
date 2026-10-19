@@ -116,6 +116,11 @@ const COUNTER_DEFS = [
   // Of those, the programs the paced queue built in play for a dressed person (its job's label a look's): what
   // the performance pass's first wave stands behind the loading screen instead.
   { key: 'programsPeople', group: 'streaming', label: 'programs (people)', kind: 'sum', scale: 1 },
+  // The performance pass's second wave: how far one world material's light version moved this frame (the ground's,
+  // drawn every frame in the world pass: 3 a frame outdoors beside buildings with one render state for every pass,
+  // nought with one per pass), and the milliseconds the main thread waited on shader links, timed at the GL calls.
+  { key: 'lightChurn', group: 'programs', label: 'light churn', kind: 'mean', scale: 1 },
+  { key: 'linkWait', group: 'programs', label: 'link wait', kind: 'mean', scale: 1 },
   { key: 'portalMaterials', group: 'scene', label: 'portal materials', kind: 'last', scale: 1 },
   { key: 'mobiles', group: 'scene', label: 'mobiles', kind: 'last', scale: 1 },
   // The portal renderer's visible set (step 1): the flood's room visits, the room meshes shown in the

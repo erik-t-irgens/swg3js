@@ -8,7 +8,7 @@
 // material's own key), so the test pins the reading and not the game. Nothing is read from the
 // client's files and no renderer is made.
 import assert from 'node:assert/strict';
-import { LIGHT_FIELDS, anchorOf, census, combinedLights, lightSignature, marksOf, namesOfDifference, readKey, type Census, type LightCounts } from '../../../src/core/fx/programCensus.ts';
+import { LIGHT_FIELDS, MASK_B, anchorOf, census, combinedLights, isDepthProgram, lightSignature, marksOf, namesOfDifference, playKindOf, readKey, type Census, type LightCounts } from '../../../src/core/fx/programCensus.ts';
 
 let checks = 0;
 const ok = (cond: boolean, what: string) => {
@@ -266,6 +266,59 @@ const HOOK_SOURCE = 'function wetObject(shader, renderer) { const a = "highp flo
   ok(live.combinedPrograms === 1 && live.combined[0].of.length === 2, 'the guard rail is readable from it: the set holding two passes at once, and which two');
   ok(live.split === 1 && live.groups[0].label === 'hull', 'and the family that has more than one program is named');
   ok(census([]).combinedPrograms === 0 && census([]).groups.length === 0, 'an empty list answers nought rather than throwing');
+}
+
+// ---------------------------------------------------------------------------------------------
+// The shadow pass's own scene (the performance pass's second wave, `passScenes.ts`): it holds every light at once, so
+// a depth program keyed on the set that covers both passes is that pass's and no stray; a colour program under the
+// same set is still one, and still counted.
+{
+  const depth = makeKey({ shaderId: 'depth', lights: BOTH_LIGHTS });
+  const distance = makeKey({ shaderId: 'distance', lights: BOTH_LIGHTS });
+  const grass = makeKey({ shaderId: 'depth', defines: [['SWG_GRASS_DEPTH', '']], lights: BOTH_LIGHTS });
+  const colour = makeKey({ shaderId: 'standard', lights: BOTH_LIGHTS });
+  const world = makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS });
+  const rooms = makeKey({ shaderId: 'standard', lights: ROOM_LIGHTS });
+  ok(isDepthProgram(readKey(depth)!) && isDepthProgram(readKey(distance)!) && isDepthProgram(readKey(grass)!), "three's depth and distance programs and the grass's own casting material read as depth programs");
+  ok(!isDepthProgram(readKey(colour)!), 'a colour program does not');
+  const shadowOnly = census([
+    { id: 1, name: 'hull', cacheKey: world },
+    { id: 2, name: 'hull', cacheKey: rooms },
+    { id: 3, name: '', type: 'MeshDepthMaterial', cacheKey: depth },
+    { id: 4, name: '', type: 'MeshDistanceMaterial', cacheKey: distance },
+  ]);
+  ok(shadowOnly.combined.length === 1 && shadowOnly.combinedPrograms === 0, "depth programs under the shadow pass's every-light set are named as that set but counted as no stray");
+  const withColour = census([
+    { id: 1, name: 'hull', cacheKey: world },
+    { id: 2, name: 'hull', cacheKey: rooms },
+    { id: 3, name: '', type: 'MeshDepthMaterial', cacheKey: depth },
+    { id: 5, name: 'hull', cacheKey: colour },
+  ]);
+  ok(withColour.combinedPrograms === 1, 'while a colour program built under that same set is counted, which is what should stay nought');
+}
+
+// ---------------------------------------------------------------------------------------------
+// What a program built in play was, by its own key and never by its label alone (`shaders().inPlay`, the loading
+// report): a label is the first material's name, and the sway's depth twins and the grass's casting material carry
+// names of their own that no word test of a label would read as depth.
+{
+  const SKINNING = 1 << MASK_B.indexOf('skinning');
+  const depth = makeKey({ shaderId: 'depth', lights: BOTH_LIGHTS });
+  const skinnedDepth = makeKey({ shaderId: 'depth', lights: BOTH_LIGHTS, maskB: SKINNING });
+  const grass = makeKey({ shaderId: 'depth', defines: [['SWG_GRASS_DEPTH', '']], lights: BOTH_LIGHTS });
+  const colour = makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS });
+  const skinnedColour = makeKey({ shaderId: 'standard', lights: WORLD_LIGHTS, maskB: SKINNING });
+  const sway = playKindOf(depth, 'sway depth (leaf_aa7) · 1 dir');
+  ok(sway.kind === 'depth' && !sway.skinned, 'a depth program named for the sway twin it was built for reads as depth');
+  ok(playKindOf(grass, 'grass depth · no lights').kind === 'depth', "and so does the grass's casting material under a name of its own");
+  ok(playKindOf(depth, 'MeshDepthMaterial · 1 dir').kind === 'depth', "and three's own unnamed depth material, as before");
+  const body = playKindOf(skinnedDepth, 'a name with no hint in it');
+  ok(body.kind === 'depth' && body.skinned, "a skinned body's depth program is a skinned depth program by its key, whatever its label says");
+  ok(playKindOf(colour, 'hull · 1 dir').kind === 'colour' && playKindOf(skinnedColour, 'shirt · 1 dir').skinned, 'a colour program is colour, and a skinned one is a body\'s');
+  ok(playKindOf(colour, 'something named DepthMaterial by accident').kind === 'colour', "and a colour program whose name happens to say Depth is still colour: the key decides");
+  ok(playKindOf(makeKey({ customIds: [4, 5] }), 'fx.velocity · no lights').kind === 'velocity', 'the motion blur\'s own variants are known by their name, as the game gives it');
+  const unread = playKindOf('not a key three wrote', 'MeshDistanceMaterial · skinned');
+  ok(unread.kind === 'depth' && unread.skinned, "a key the run cannot be found in falls back on the label's words");
 }
 
 console.log(`\n${checks} checks passed`);

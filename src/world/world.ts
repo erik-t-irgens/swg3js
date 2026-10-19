@@ -17,7 +17,7 @@ import { detailWrap } from './detailMap.ts';
 import { specWrap } from './specular.ts';
 import { cardWrap, isCard, prepareCardModel, setCardRule } from './cardRule.ts';
 import { CARD_LIGHT_TUNE, cardReceives, setCardRoomPass, updateCardLight } from './cardLight.ts';
-import { SWAY_TUNE, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
+import { SWAY_TUNE, disposeStandIn, hangSwayDepth, plainDepthCombos, setSwayEye, setSwayRoomPass, skinnedDepthCombos, stepSway, swayDepthCombos, swayDepthStandIns, swayWrap } from './floraSway.ts';
 import { resetWaterDepth, Splashes, updateWaterDepth, type WaterMaterial } from './water';
 import { addSimBody, stepWaterSim, type SimBody } from './waterSim';
 import { WaterBodies, type WaterBody } from './waterBodies';
@@ -79,7 +79,10 @@ import { roomOverhead } from './nav/navMesh.ts';
 import type { SunInfo } from '../core/postfx';
 import { luminance, pointIrradiance } from '../core/fx/bladeGlowMath.ts';
 import { isShadowOnly } from '../core/fxRegistry.ts';
-import { ProgramQueue, materialsUnder, resolveLinks } from '../core/programQueue.ts';
+import { ProgramQueue, materialsUnder, pendingPrograms, resolveLinks, type OwnJob } from '../core/programQueue.ts';
+import { LINK_TUNE, LinkFlight, linkMode, type ReadyProgram } from '../core/linkMode.ts';
+import { ROOM_DEFER, deferRooms, type RoomCompile, type RoomJob, type RoomQueue } from './roomDefer.ts';
+import { PASS_STATES } from './passScenes.ts';
 import { PACE_TUNE, QueueWatch, framesFor } from '../core/programPace.ts';
 import { noteProgramTime, pacingHard, shaderBudget } from '../core/shaderWatch.ts';
 import { LOADING_TUNE, courseCounts, loadBounded, sweepYield } from './loadingTune.ts';
@@ -889,6 +892,14 @@ export class World {
   private readonly warmedFx = new Set<string>();
 
   constructor(readonly scene: THREE.Scene, readonly physics: Physics) {
+    // How the program queue issues and polls in `parallel` mode (`linkMode.ts`): the mode and the tab's visibility read
+    // at every pump, an object's programs not yet resolved, and the resolve itself.
+    this.programs.links = {
+      parallel: () => linkMode(typeof document !== 'undefined' && document.hidden) === 'parallel',
+      hidden: () => typeof document !== 'undefined' && document.hidden,
+      pending: (o) => pendingPrograms(this.renderer, o, this.pendingScratch),
+      resolve: (o, onlyReady) => resolveLinks(this.renderer, o, onlyReady),
+    };
     // First: nothing below reads it, but main configures it right after constructing the world.
     this.weather = new Weather(physics);
     this.bolts = new Bolts(scene);
@@ -1503,7 +1514,7 @@ export class World {
     // The catalogue's mobiles. The asset cache outlives the planet; the catalogue is a getter,
     // not a value, because on a cold first load it is usually still in flight here.
     const mobileAssets = MobileAssets.for(import.meta.env.BASE_URL);
-    mobileAssets.prepare = (root, label) => this.prepareActor(root, label);
+    mobileAssets.prepare = (root, label, roomsLater) => this.prepareActor(root, label, roomsLater);
     mobileAssets.forget = (mats) => this.forgetMaterials(mats);
     this.mobiles = new MobileManager({
       physics: this.physics,
@@ -3101,6 +3112,21 @@ export class World {
       console.warn('terrain: ground textures failed to load', err);
     }
   }
+
+  /**
+   * One world material drawn every frame in the world pass, for the frame report's `light churn` (how far its light
+   * version moves a frame, the performance pass's second wave): the ground's, the session's tile material on a
+   * version-4 pack and the older ground program on a version-3 one. Null in space, where no ground is built, and
+   * before a ground is made. Never makes a material.
+   */
+  churnMaterial(): THREE.Material | null {
+    if (this.planet?.space) return null;
+    if (this.groundTilesMat && this.groundTextures?.tiles && this.terrain.swg) return this.groundTilesMat;
+    return this.chunkMaterial;
+  }
+
+  /** The material of the ground chunks made last, whichever it is (`churnMaterial`); null before any. */
+  private chunkMaterial: THREE.Material | null = null;
 
   /** The material for new ground meshes: the session's tile material, else textured when the planet has textures, tinted otherwise. */
   private get groundMaterial(): THREE.Material {
@@ -4814,7 +4840,7 @@ export class World {
    * a converted actor's meshes sit wherever their GLB put them under the model root, so three's
    * per-mesh sphere is not what anyone wants; the whole actor is culled as one group instead.
    */
-  async prepareActor(root: THREE.Object3D, label?: string): Promise<void> {
+  async prepareActor(root: THREE.Object3D, label?: string, roomsLater?: RoomJob): Promise<void> {
     markActor(root);
     this.adoptMaterials(root);
     root.traverse((o) => {
@@ -4826,8 +4852,9 @@ export class World {
     });
     await this.uploadTextures([root]);
     // The label is the queue's: a program built in play names the body it was for (`shaders().pace.lastBuilt`),
-    // and a look's (`look:`) is counted as the frame report's `programs (people)`.
-    await this.compileReady([root], label);
+    // and a look's (`look:`) is counted as the frame report's `programs (people)`. A body stood outdoors hands the
+    // room deferral's handle (`roomDefer.ts`): its rooms pass follows it, off the frame.
+    await this.compileReady([root], label, roomsLater ? { roomsLater } : undefined);
   }
 
   /**
@@ -5063,19 +5090,26 @@ export class World {
    * on `KHR_parallel_shader_compile`, which is advertised and broken on the machines this matters
    * for; `async` now means only "let the driver start on the rest of the batch first".
    */
-  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], target: THREE.WebGLRenderTarget | null = this.compileTarget()): void {
+  private compileFor(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], target: THREE.WebGLRenderTarget | null = this.compileTarget(), resolve = true): void {
     const byPass = new Map<number, THREE.Object3D[]>();
     for (const o of objects) for (const p of World.passesOf(o)) (byPass.get(p) ?? byPass.set(p, []).get(p)!).push(o);
     for (const [layer, list] of byPass) {
       const root = World.rootOf(list);
-      this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
+      // Against the scene that pass draws (a rooms pass's proxy, `passScenes.ts`), so a compile sets up that pass's
+      // own lights and never leaves another pass's set in force for the next shadow pass.
+      this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.passScene(layer))));
     }
     // After every pass, so a material drawn in two has both of its programs finished. This is what
     // makes the call synchronous in the only sense a caller cares about: every program these
     // objects need exists and has been linked by the time this returns. Never `compileAsync`,
-    // which waits on `KHR_parallel_shader_compile` -- advertised and broken on the drivers this
-    // work exists for, where it answered "not ready" for six programs over four seconds.
-    for (const o of objects) this.programs.countLinks(resolveLinks(r, o));
+    // which waits on `KHR_parallel_shader_compile` without a bound. In `parallel` mode the sweep asks for
+    // no resolve here (`resolve` false) and polls the programs itself (`sweepBatches`).
+    if (resolve) for (const o of objects) this.programs.countLinks(resolveLinks(r, o));
+  }
+
+  /** The scene a pass of this layer is drawn and compiled against: the rooms' proxy for the rooms' layer, the world's own else. */
+  private passScene(layer: number): THREE.Scene {
+    return this.portals ? this.portals.passScene(this.scene, layer) : this.scene;
   }
 
   /**
@@ -5085,8 +5119,16 @@ export class World {
    * offers the object again. The map is weak, so an object that goes takes its place in it along.
    */
   private readonly passCursor = new WeakMap<THREE.Object3D, number>();
-  /** An empty group, compiled under layer 0 to put the world pass's lights back after a room's compile. Kept, never added. */
+  /** The same cursors for a turn at one object's world pass alone and at its rooms pass alone (the room deferral). */
+  private readonly worldCursor = new WeakMap<THREE.Object3D, number>();
+  private readonly roomsCursor = new WeakMap<THREE.Object3D, number>();
+  /** The world pass's layer alone and the rooms' alone, for those turns. */
+  private static readonly WORLD_ONLY: readonly number[] = [0];
+  private static readonly ROOMS_ONLY: readonly number[] = [INTERIOR_LAYER];
+  /** An empty group, compiled under layer 0 to put the world pass's lights back after a room's compile the old way. Kept, never added. */
   private readonly compileNothing = new THREE.Group();
+  /** An object's programs not yet resolved, as the queue's `parallel` mode asks for them: one array, refilled. */
+  private readonly pendingScratch: ReadyProgram[] = [];
 
   /**
    * One turn at making an object ready to be drawn: its programs built, a pass at a time, for the
@@ -5095,15 +5137,23 @@ export class World {
    * is how many more programs this frame may build; a turn stops as soon as it has spent it, and
    * the first pass of a turn always runs, or a frame with nothing left could never make progress.
    * This is the one place a program is built outside the loading screen's own batches.
+   *
+   * Each pass compiles against the scene that pass draws (`passScene`): a rooms pass's against the rooms' own proxy, so
+   * a queued actor's room program never leaves the room set in force for the next frame's shadow pass (the put-back
+   * the first wave made here is gone with the reason for it). With `resolve` false (the queue's `parallel` mode) the
+   * programs are only issued and the queue resolves them once they report ready. `only` takes the world pass alone or
+   * the rooms pass alone (the room deferral), each with a cursor of its own.
    */
-  private compileOne(o: THREE.Object3D, allowance = Number.POSITIVE_INFINITY): { made: number; done: boolean } {
+  private compileOne(o: THREE.Object3D, allowance = Number.POSITIVE_INFINITY, resolve = true, only: 'all' | 'world' | 'rooms' = 'all'): { made: number; done: boolean } {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return { made: 0, done: true };
-    const passes = World.passesOf(o);
-    let at = this.passCursor.get(o) ?? 0;
+    const all = World.passesOf(o);
+    const passes = only === 'all' ? all : only === 'world' ? (all.includes(0) ? World.WORLD_ONLY : []) : all.includes(INTERIOR_LAYER) ? World.ROOMS_ONLY : [];
+    const cursor = only === 'all' ? this.passCursor : only === 'world' ? this.worldCursor : this.roomsCursor;
+    let at = cursor.get(o) ?? 0;
     if (at >= passes.length) {
-      this.passCursor.delete(o);
+      cursor.delete(o);
       return { made: 0, done: true };
     }
     const before = r.info.programs?.length ?? 0;
@@ -5116,35 +5166,43 @@ export class World {
       const layer = passes[at];
       const root = World.rootOf([o]);
       const was = r.info.programs?.length ?? 0;
-      this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.scene)));
+      this.withLayers(camera, layer, () => this.withTarget(r, target, () => r.compile(root, camera, this.passScene(layer))));
       made += (r.info.programs?.length ?? 0) - was;
       last = layer;
       at++;
       if (made >= allowance) break;
     }
-    // A compile sets three's lights up for the layers it was made under, and the next shadow pass keys every
-    // depth program it draws first on whatever set was last set up (it draws before it sets up its own pass's
-    // lights). So a turn that ended on a room's pass puts the world pass's set back with a compile of nothing
-    // under layer 0, as the depth warm-up does, or a queued actor's room program left the room set in force
-    // for the next frame's shadows. Only the queue's own leak: outdoors beside buildings a frame's last real
-    // pass is still a room's (wave 2's per-pass render states end that).
-    if (last !== 0) this.withLayers(camera, 0, () => this.withTarget(r, target, () => r.compile(this.compileNothing, camera, this.scene)));
+    // A rooms pass compiles against its own scene (`passScene`), whose light state is its own, so nothing is left set up
+    // for anybody else. The old way (`PASS_STATES.mode` 'shared', the A/B switch) every pass shares the real scene's
+    // state and the next shadow pass keys its first depth programs on whatever set was set up last, so a turn that
+    // ended on a room's pass puts the world pass's set back with a compile of nothing under layer 0, as it always did.
+    if (last !== 0 && PASS_STATES.mode === 'shared') this.withLayers(camera, 0, () => this.withTarget(r, target, () => r.compile(this.compileNothing, camera, this.scene)));
     const done = at >= passes.length;
-    if (done) this.passCursor.delete(o);
-    else this.passCursor.set(o, at);
+    if (done) cursor.delete(o);
+    else cursor.set(o, at);
     // Asked after every pass this turn built, so a material drawn in two has both links finished
     // by the time the object is done with.
-    this.programs.countLinks(resolveLinks(r, o));
+    if (resolve) this.programs.countLinks(resolveLinks(r, o));
     return { made: (r.info.programs?.length ?? 0) - before, done };
   }
 
+  /** A queue job's own compile for an object's world pass alone (the room deferral's urgent half). Kept: one for every job. */
+  private readonly worldOnlyJob: OwnJob = { compile: (o, allowance, resolve) => this.compileOne(o, allowance, resolve, 'world') };
+  /** One turn at an object's rooms pass alone (the room deferral's later half, `deferRooms`). */
+  private readonly roomsOnly: RoomCompile = (o, allowance, resolve) => this.compileOne(o, allowance, resolve, 'rooms');
+  /** What the room deferral is handed of this world: the queue (or an outright build) and its promote. */
+  private readonly roomQueue: RoomQueue = {
+    push: (objects, label, urgent, own) => this.queueOrBuild(objects, label, urgent, own),
+    promote: (own) => this.programs.promote(own),
+  };
+
   /** Every pass of one object, in one go: behind a loading screen, where nothing is being looked at. */
-  private compileWhole(o: THREE.Object3D): number {
+  private compileWhole(o: THREE.Object3D, resolve = true, own: OwnJob | null = null): number {
     let made = 0;
     for (; ;) {
-      const step = this.compileOne(o);
+      const step = own ? own.compile(o, Number.POSITIVE_INFINITY, resolve) : this.compileOne(o, Number.POSITIVE_INFINITY, resolve);
       made += step.made;
-      if (step.done) return made;
+      if (step.done || step.made <= 0) return made;
     }
   }
 
@@ -5156,7 +5214,7 @@ export class World {
    * time a few short ones. Every drawable with a material counts (meshes, sprites, points,
    * lines), as `compileAllAsync` walks them.
    */
-  async compileReady(objects: THREE.Object3D[], label?: string): Promise<void> {
+  async compileReady(objects: THREE.Object3D[], label?: string, opts?: { roomsLater?: RoomJob }): Promise<void> {
     const r = this.renderer;
     const camera = this.camera;
     if (!r || !camera) return;
@@ -5175,10 +5233,59 @@ export class World {
       });
     }
     if (!meshes.length) return;
+    const what = label ?? 'something being made ready to be shown';
+    // The room deferral (`roomDefer.ts`): a body stood outdoors is shown once its world pass is built, and its rooms
+    // pass follows as work of its own below the urgent rank, its handle marked ready when that answers. Only where the
+    // queue would really take the work (behind a screen, idle, or pacing off everything is built outright anyway), and
+    // never for a body with a light under it, which no pass may ever leave out.
+    const later = opts?.roomsLater;
+    if (later) {
+      if (ROOM_DEFER.on && this.wouldQueue() && !World.hasLight(objects) && meshes.some((m) => World.passesOf(m).includes(INTERIOR_LAYER))) {
+        later.ready = false;
+        await this.queueOrBuild(meshes, what, true, this.worldOnlyJob);
+        // The rooms half as work of its own, tied to the life of what it compiles (`deferRooms`): an owner gone compiles
+        // nothing, and work a world's unload lets go leaves the handle not ready, asking again when a body is wanted.
+        deferRooms(later, meshes, `${what} (its rooms)`, this.roomsOnly, this.roomQueue);
+        return;
+      }
+      await this.queueOrBuild(meshes, what, true);
+      later.ready = true;
+      return;
+    }
     // Something being made ready to be shown is urgent: a peer walking up, a weapon taken up, a
     // ship spawned. It goes ahead of the scenery filling in, which is the one producer that pushes
     // without stopping.
-    await this.queueOrBuild(meshes, label ?? 'something being made ready to be shown', true);
+    await this.queueOrBuild(meshes, what, true);
+  }
+
+  /** Whether a light hangs anywhere under these roots: such a body is never deferred (`roomDefer.ts`). */
+  private static hasLight(objects: readonly THREE.Object3D[]): boolean {
+    let lit = false;
+    for (const o of objects) {
+      o.traverse((x) => {
+        if ((x as THREE.Light).isLight) lit = true;
+      });
+      if (lit) return true;
+    }
+    return false;
+  }
+
+  /** Whether `queueOrBuild` would put work on the paced queue now, rather than build it outright. */
+  private wouldQueue(): boolean {
+    return SHADER_PACING && !this.behindScreen && !this.programs.idle(performance.now(), typeof document !== 'undefined' && !document.hidden);
+  }
+
+  /**
+   * Some objects made ready through the program queue with a compile of their own (`OwnJob`, the motion blur's
+   * variants): queued, or built outright behind a screen or with no frame looking at the queue, exactly as
+   * `compileReady`'s work is. Loose work (`urgent` false) goes on the queue whatever the frame and is answered at once.
+   */
+  programJob(objects: THREE.Object3D[], label: string, urgent: boolean, own: OwnJob): Promise<void> {
+    if (!urgent) {
+      this.programs.add(objects, label, own);
+      return Promise.resolve();
+    }
+    return this.queueOrBuild(objects, label, true, own);
   }
 
   /**
@@ -5213,7 +5320,7 @@ export class World {
    * whose saved world is a space zone is put back in a ship inside `play()`, which is before the
    * frame loop's own gate is opened, and this is the call it hangs on.
    */
-  private async queueOrBuild(objects: THREE.Object3D[], label: string, urgent: boolean): Promise<void> {
+  private async queueOrBuild(objects: THREE.Object3D[], label: string, urgent: boolean, own: OwnJob | null = null): Promise<void> {
     if (!objects.length) return;
     // On a page on screen the idle rule's bounds are the long ones (`PACE_TUNE.idleShownMs`): frames stand still there
     // only while the browser waits on the GPU process, never because the loop has gone.
@@ -5224,10 +5331,7 @@ export class World {
       const before = byIdle ? (this.renderer?.info.programs?.length ?? 0) : 0;
       this.outrightBuilds++;
       try {
-        for (const o of objects) {
-          this.compileWhole(o);
-          await this.breath();
-        }
+        await this.buildOutright(objects, own, label);
       } finally {
         this.outrightBuilds--;
         if (byIdle) this.programs.noteIdleBuilt((this.renderer?.info.programs?.length ?? 0) - before);
@@ -5236,8 +5340,9 @@ export class World {
     }
     // On the queue, a program a frame, answered when the last of it is built: a dressed fighter or
     // a spawned ship stays hidden for a few more frames rather than stopping one dead. `compileOne`
-    // finishes each program's link, so the frame that first draws it pays nothing.
-    const wait = this.programs.push(objects, label, urgent);
+    // finishes each program's link (or, in `parallel` mode, the queue polls it and resolves it once
+    // ready), so the frame that first draws it pays nothing.
+    const wait = this.programs.push(objects, label, urgent, own ?? undefined);
     let settled = false;
     void wait.then(() => {
       settled = true;
@@ -5261,6 +5366,78 @@ export class World {
     }
     await wait;
   }
+
+  /**
+   * Objects made ready outright, where nothing that is drawn would notice (`queueOrBuild`'s first branch). The old
+   * way, each object's links waited for one after another (54 programs blocked 16.6 s behind a Direct3D 11 screen);
+   * in `parallel` mode they are issued up to `sweepInFlight` at a time and polled between breaths, each resolved the
+   * moment it reports ready (about 20 a second there). A tab that hides is read at every breath, and everything in
+   * flight then is resolved outright at once, so nothing waits the bound behind a screen.
+   */
+  private async buildOutright(objects: THREE.Object3D[], own: OwnJob | null, label: string): Promise<void> {
+    const r = this.renderer;
+    const parallel = (): boolean => linkMode(document.hidden) === 'parallel';
+    if (!r || !parallel()) {
+      for (const o of objects) {
+        this.compileWhole(o, true, own);
+        if (own?.finish) own.finish(o);
+        await this.breath();
+      }
+      return;
+    }
+    const flight = new LinkFlight();
+    const pending: ReadyProgram[] = [];
+    const land = (all: boolean): void => {
+      const n = all ? flight.finishAll(performance.now()) : flight.poll(performance.now(), document.hidden);
+      for (let i = 0; i < n; i++) {
+        const e = flight.finished[i];
+        const o = e.object as THREE.Object3D;
+        // Seen ready: only what reports its link done (`resolveLinks`' `onlyReady`); the bound and a hiding tab finish it all.
+        this.programs.countLinks(resolveLinks(r, o, e.how === 'ready'));
+        if (own?.finish) own.finish(o);
+      }
+      flight.release();
+    };
+    for (const o of objects) {
+      if (!parallel()) {
+        // The tab hid, or the mode turned: what is in flight is resolved now and the rest built the old way.
+        land(true);
+        this.compileWhole(o, true, own);
+        if (own?.finish) own.finish(o);
+        await this.breath();
+        continue;
+      }
+      this.compileWhole(o, false, own);
+      const programs = pendingPrograms(r, o, pending);
+      if (programs.length) flight.issue(o, programs, performance.now());
+      else if (own?.finish) own.finish(o);
+      land(false);
+      while (flight.programsInFlight >= LINK_TUNE.sweepInFlight) {
+        await this.breath();
+        land(!parallel());
+      }
+    }
+    while (flight.objects > 0) {
+      await this.breath();
+      land(!parallel());
+    }
+    const t = this.outrightLinks;
+    t.issued += flight.issued;
+    t.resolved += flight.resolved;
+    t.bound += flight.bound;
+    t.hidden += flight.hiddenResolved;
+    t.gone += flight.gone;
+    if (flight.worstReadyMs > t.worstReadyMs) t.worstReadyMs = flight.worstReadyMs;
+    if (flight.bound) console.info(`shaders: ${label}: ${flight.bound} object${flight.bound === 1 ? '' : 's'} finished the old way after the bound`);
+  }
+
+  /**
+   * What the outright builds and the sweeps did in `parallel` mode this session (their own flights, apart from the
+   * queue's): programs issued, objects resolved, those the bound finished the old way and those a hiding tab did, and
+   * the worst issue-to-ready time, and the programs three destroyed in flight (a material disposed meanwhile). For
+   * `__debug.links()`.
+   */
+  readonly outrightLinks = { issued: 0, resolved: 0, bound: 0, hidden: 0, gone: 0, worstReadyMs: 0 };
 
   /** How many outright builds (`queueOrBuild` behind a screen) are under way: each holds the GPU process's compile threads. */
   private outrightBuilds = 0;
@@ -5300,7 +5477,7 @@ export class World {
       // In play (a waiter whose polls saw no frame): only the jobs there now, stopping the moment a frame
       // looks at the queue again (`ProgramQueue.flush`'s `play`).
       this.flushing = this.programs
-        .flush((o, allowance) => this.compileOne(o, allowance), () => this.breath(), play ? this.flushPlay : undefined)
+        .flush(this.queueCompile, () => this.breath(), play ? this.flushPlay : undefined)
         .finally(() => {
           this.flushing = null;
         });
@@ -5338,9 +5515,13 @@ export class World {
     // With the pacing off the queue is still where the quarter-second scan's finds go; they are
     // taken at the loading screen's allowance instead of one a frame, which is as near as this can
     // come to not pacing at all.
-    const out = this.programs.pump(this.behindScreen || !SHADER_PACING, (o, allowance) => this.compileOne(o, allowance), () => performance.now());
+    const out = this.programs.pump(this.behindScreen || !SHADER_PACING, this.queueCompile, this.queueClock);
     if (out.over) console.info(this.programs.line());
   }
+
+  /** The queue's compile and clock, made once: a frame's pump makes no closure. */
+  private readonly queueCompile = (o: THREE.Object3D, allowance: number, resolve: boolean): { made: number; done: boolean } => this.compileOne(o, allowance, resolve);
+  private readonly queueClock = (): number => performance.now();
 
   /**
    * What the program queue is doing: the console's one shader hook reads it.
@@ -5424,20 +5605,69 @@ export class World {
    */
   private async sweepBatches(r: THREE.WebGLRenderer, camera: THREE.Camera, objects: THREE.Object3D[], target: THREE.WebGLRenderTarget | null, onBatch: (i: number, built: number) => void): Promise<void> {
     const behind = this.behindScreen;
+    // In `parallel` mode a screen's sweep issues its batches with no resolve and polls them between frames, up to
+    // `sweepInFlight` programs in flight, resolving each object the moment its programs report ready; 54 programs that
+    // blocked 16.6 s one after another behind a Direct3D 11 screen take about 3 s polled. Only behind a screen: the
+    // Effects switch's sweep in play keeps to the old batch a frame. Read again at every batch, so a tab that hides
+    // part way resolves everything in flight at once and goes on the old way.
+    const parallel = (): boolean => behind && linkMode(document.hidden) === 'parallel';
+    const flight = new LinkFlight();
+    const pending: ReadyProgram[] = [];
+    let landMs = 0;
+    const land = (all: boolean): void => {
+      const t0 = performance.now();
+      const n = all ? flight.finishAll(t0) : flight.poll(t0, document.hidden);
+      for (let i = 0; i < n; i++) this.programs.countLinks(resolveLinks(r, flight.finished[i].object as THREE.Object3D, flight.finished[i].how === 'ready'));
+      flight.release();
+      landMs += performance.now() - t0;
+    };
     let sliceFrom = performance.now();
     for (let i = 0; i < objects.length; i += SWEEP_BATCH) {
       const was = r.info.programs?.length ?? 0;
       const t0 = performance.now();
-      this.compileFor(r, camera, objects.slice(i, i + SWEEP_BATCH), target);
+      const batch = objects.slice(i, i + SWEEP_BATCH);
+      const issue = parallel();
+      if (!issue && flight.objects > 0) land(true);
+      this.compileFor(r, camera, batch, target, !issue);
+      if (issue) {
+        for (const o of batch) {
+          const programs = pendingPrograms(r, o, pending);
+          if (programs.length) flight.issue(o, programs, performance.now());
+        }
+        land(false);
+      }
       const t1 = performance.now();
       const built = (r.info.programs?.length ?? 0) - was;
-      if (built > 0) noteProgramTime(t1 - t0, built);
+      // The main thread's own milliseconds a program: in `parallel` mode the issue and the resolves, never the wait.
+      if (built > 0) noteProgramTime(t1 - t0 + (issue ? landMs : 0), built);
+      landMs = 0;
       onBatch(i, built);
+      if (issue) {
+        while (flight.programsInFlight >= LINK_TUNE.sweepInFlight) {
+          await this.nextFrame();
+          land(!parallel());
+        }
+        sliceFrom = performance.now();
+        continue;
+      }
       if (sweepYield(built, t1 - sliceFrom, behind, LOADING_TUNE.sliceMs)) {
         await this.nextFrame();
         sliceFrom = performance.now();
       }
     }
+    // What is still in flight is waited for here, polled a frame at a time, so every program the sweep made is ready
+    // to draw with when it returns, as the old way's promised.
+    while (flight.objects > 0) {
+      await this.nextFrame();
+      land(!parallel());
+    }
+    const t = this.outrightLinks;
+    t.issued += flight.issued;
+    t.resolved += flight.resolved;
+    t.bound += flight.bound;
+    t.hidden += flight.hiddenResolved;
+    t.gone += flight.gone;
+    if (flight.worstReadyMs > t.worstReadyMs) t.worstReadyMs = flight.worstReadyMs;
   }
 
   private async compileEverything(
@@ -5447,6 +5677,9 @@ export class World {
     opts: { target?: THREE.WebGLRenderTarget | null; keepQueue?: boolean },
   ): Promise<number> {
     this.setupShadowMaterials();
+    // The shadow pass's and the rooms' own scenes take this world's lights first (`passScenes.ts`), so nothing compiled
+    // or drawn through them below is keyed on an empty light set.
+    this.portals?.primePasses(this.scene, camera);
     // Switching the effects compiles for the other path while the frames still draw the old one,
     // so the queue it would otherwise be feeding is left alone.
     const target = opts.target !== undefined ? opts.target : this.compileTarget();
@@ -5485,10 +5718,10 @@ export class World {
       onProgress(Math.min(objects.length, i + SWEEP_BATCH), objects.length, (r.info.programs?.length ?? 0) - before);
     });
     // The shadows' depth programs (`compileShadowDepth`): the loading sweep never builds a depth program, so one
-    // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the world
-    // pass's lights and a room's -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep
-    // compiled, the grass's one depth material, and every way three's own depth material can be drawn for a caster
-    // a shadow switch or the smallest caster's slider may turn on in play.
+    // stand-in per depth combination is drawn into the shadow maps here as a frame draws them, under the shadow
+    // pass's own lights -- the flora's swaying shadows (`floraSway.ts`) over everything the sweep compiled, the
+    // grass's one depth material, every way three's own depth material can be drawn for a caster a shadow switch or
+    // the smallest caster's slider may turn on in play, and every way a body casts (each rung of the morph ladder).
     this.compileShadowDepth(r, target, objects);
     if (placed.length) {
       this.placedWarmStats.programs = placedPrograms;
@@ -5518,31 +5751,30 @@ export class World {
    * What the last warm of the depth programs did, for the console: the sway's stand-ins a set, the programs built,
    * whether shadows were on, whether the grass's depth material was drawn, and the plain combinations a set.
    */
-  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, plain: 0 };
+  readonly shadowDepthWarm = { standIns: 0, programs: 0, shadows: false, grass: false, plain: 0, skinned: 0 };
 
   /**
    * Build the shadows' depth programs from stand-ins (see `compileEverything`) by drawing them into the shadow maps
    * as a frame does. A compile cannot stand in for that draw: three draws the shadow maps before it sets up the
-   * lights of the pass that asked for them, so a depth program is keyed on the light set of the last pass drawn
-   * with this scene -- the world's outdoors, a room's wherever a building's rooms are drawn after the world, which
-   * is in and beside every town -- and on the cascades casting all the same (measured: compiled through the shadow
-   * camera they came out keyed on a light set no frame ever draws with, and the room's were built in play). So the
-   * pass's lights are set up first, under the world pass's layers and then the rooms', each by a compile of
-   * nothing, and the stand-ins, stood just in front of the eye where the nearest cascade draws them, are drawn
-   * into the shadow maps through the portal renderer's own shadow-only draw, with a target bound. A depth material
-   * keeps the program of its first draw whatever the lights do after (it is unlit), and the frames drawn between
-   * the loading screen's batches have already drawn the models' own under whichever set they last left, so each
-   * set is drawn with depth materials of its own (`swayDepthStandIns`' twins), or it would build nothing.
+   * lights of the pass that asked for them, so a depth program is keyed on the light set of the render state the
+   * shadow pass draws under, and a depth material keeps the program of its first draw whatever the lights do after
+   * (it is unlit). Since the performance pass's second wave the shadow pass draws through a scene of its own
+   * (`passScenes.ts`), whose light state is every light at once and stays so whatever pass came before, so there is
+   * one set to warm: its lights are set up by `primePasses` and the stand-ins, stood just in front of the eye where
+   * the nearest cascade draws them, are drawn into the shadow maps through the portal renderer's own shadow-only draw,
+   * with a target bound, and nothing has to be put back after. With `PASS_STATES.mode` 'shared' (the A/B switch, the
+   * old way) the shadow pass draws under whichever pass drew last, the world's outdoors or a room's, so both sets are
+   * set up in turn by a compile of nothing under each pass's layers and drawn with depth materials of their own
+   * (`swayDepthStandIns`' twins, each set's sources), and the world pass's set is put back after.
    *
-   * Three more go with the sway's (wave 8). The grass's one depth material, on its stand-in tuft under the world set
-   * alone (grass is drawn in the world pass only), which fixes its program for the session. And one plain stand-in
-   * for every way three's own depth material can be drawn for a caster that does not sway (`plainDepthCombos`),
-   * under each set through sources of its own: a flora switch or the page's smallest caster puts cut-out props and
-   * leaves that never cast before into the shadow pass in play, and a clone three makes for one keys its program on
-   * the lights of the moment, so every key they can come to must already have its program. Each makes three's shared
-   * depth material choose its program again (`chooseDepthProgram`), since nothing else these draws differ in would:
-   * drawn as they come, every shared key but the first was left for a live frame. Nothing is warmed with
-   * shadows off at the loading screen: turning them on rebuilds every program anyway.
+   * Beside the sway's twins: the grass's one depth material, on its stand-in tuft (wave 8), which fixes its program for
+   * the session; one plain stand-in for every way three's own depth material can be drawn for a caster that does not
+   * sway (`plainDepthCombos`), since a flora switch or the page's smallest caster puts cut-out props and leaves that
+   * never cast before into the shadow pass in play; and one skinned stand-in for every way a body casts
+   * (`skinnedDepthCombos`: each rung of the morph ladder by side by plain, pictured and cut), which a body's first
+   * shadow frame built in play before. Each makes three's shared depth material choose its program again
+   * (`chooseDepthProgram`), since nothing else these draws differ in would. Nothing is warmed with shadows off at the
+   * loading screen: turning them on rebuilds every program anyway.
    */
   private compileShadowDepth(r: THREE.WebGLRenderer, target: THREE.WebGLRenderTarget | null, meshes: readonly THREE.Object3D[]): void {
     const portals = this.portals;
@@ -5551,34 +5783,43 @@ export class World {
     warm.shadows = r.shadowMap.enabled;
     warm.grass = false;
     warm.plain = 0;
+    warm.skinned = 0;
     if (!portals || !camera || !this.csm || !r.shadowMap.enabled) return;
     // The scene's own swaying meshes first, then a source for every combination a swaying material can cast with
     // (`swayDepthCombos`): a placed tier streamed in after this screen lifts may bring one nothing here had.
     const swaying = [...(meshes.filter((o) => (o as THREE.Mesh).isMesh) as THREE.Mesh[]), ...swayDepthCombos()];
-    const sets = [
-      { layer: 0, standIns: swayDepthStandIns(swaying, 'world'), plain: plainDepthCombos('world') },
-      { layer: INTERIOR_LAYER, standIns: swayDepthStandIns(swaying, 'rooms'), plain: plainDepthCombos('rooms') },
-    ];
-    warm.standIns = sets[0].standIns.length;
-    warm.plain = sets[0].plain.length;
+    // One set, the shadow pass's own, while it has a scene of its own; the world's and the rooms' in turn the old way.
+    const perPass = PASS_STATES.mode === 'perPass';
+    const sets = perPass
+      ? [{ layer: -1, name: 'shadow' }]
+      : [
+          { layer: 0, name: 'world' },
+          { layer: INTERIOR_LAYER, name: 'rooms' },
+        ];
     const bound = target ?? (this.depthWarmTarget ??= new THREE.WebGLRenderTarget(1, 1));
     const before = r.info.programs?.length ?? 0;
     // Not culled: behind a loading screen the cascades' cameras may still stand where the last world left them,
     // and the probe's own view, which would otherwise draw them, is dropped by the portal renderer's hook.
     const at = camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(4).add(camera.position);
     const nothing = new THREE.Group();
-    // The grass's stand-in casts with the grass's depth material for the world set's draw alone, then is put back as
-    // it was: it hangs no cascade hooks, so it is drawn into every cascade.
+    // The grass's stand-in casts with the grass's depth material for the first set's draw alone (grass is drawn in the
+    // world pass only), then is put back as it was: it hangs no cascade hooks, so it is drawn into every cascade.
     const tuft = this.grassStand && this.grassDepth ? this.grassStand : null;
-    for (const { layer, standIns, plain } of sets) {
-      const drawn: THREE.Object3D[] = [...standIns, ...plain];
+    for (const set of sets) {
+      const standIns = swayDepthStandIns(swaying, set.name);
+      const plain = plainDepthCombos(set.name);
+      const skinned = skinnedDepthCombos(set.name);
+      warm.standIns = standIns.length;
+      warm.plain = plain.length;
+      warm.skinned = skinned.length;
+      const drawn: THREE.Object3D[] = [...standIns, ...plain, ...skinned];
       for (const s of drawn) {
         s.position.copy(at);
         s.frustumCulled = false;
         s.updateMatrixWorld(true);
         this.scene.add(s);
       }
-      const withTuft = tuft !== null && layer === 0;
+      const withTuft = tuft !== null && set === sets[0];
       if (withTuft) {
         tuft.customDepthMaterial = this.grassDepth!;
         tuft.castShadow = true;
@@ -5588,7 +5829,10 @@ export class World {
         this.scene.add(tuft);
       }
       try {
-        this.withLayers(camera, layer, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
+        // The set's lights first: the shadow pass's own scene primed (a compile of nothing through its proxy), or the
+        // old way a compile of nothing under that pass's layers. Then the draw.
+        if (perPass) portals.primePasses(this.scene, camera);
+        else this.withLayers(camera, set.layer, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
         this.withTarget(r, bound, () => portals.drawShadowsOnly(this.scene));
         if (withTuft) warm.grass = true;
       } finally {
@@ -5601,13 +5845,13 @@ export class World {
       }
       this.programs.countLinks(resolveLinks(r, standIns.map((s) => s.customDepthMaterial!).filter(Boolean)));
       // The geometry and the materials are the models' own (the twins the session's): only the sway's stand-ins go;
-      // the plain combinations are the session's and kept.
+      // the plain and skinned combinations are the session's and kept.
       for (const s of standIns) disposeStandIn(s);
     }
-    // The shadow-only draw leaves the scene's lights set up as the probe sees them, every layer at once, which is no
-    // pass's: the next frame's shadow pass would key every depth material it draws first on that (measured: three
-    // of three's own depth programs built so, for nothing). The world pass's set is put back.
-    this.withLayers(camera, 0, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
+    // The old way only: the shadow-only draw leaves the scene's lights as the probe sees them, every layer at once,
+    // which is no pass's, and the next frame's shadow pass would key every depth material it draws first on that. The
+    // world pass's set is put back. With a scene of its own the shadow pass's state is its own and nothing is put back.
+    if (!perPass) this.withLayers(camera, 0, () => this.withTarget(r, bound, () => r.compile(nothing, camera, this.scene)));
     warm.programs = (r.info.programs?.length ?? 0) - before;
   }
 
@@ -8727,6 +8971,7 @@ export class World {
     const group = new THREE.Group();
     const { geometry, heights, origin } = this.terrain.buildChunk(cx, cz);
     const mesh = new THREE.Mesh(geometry, this.groundMaterial);
+    this.chunkMaterial = mesh.material as THREE.Material;
     mesh.receiveShadow = true;
     mesh.castShadow = true;
     group.add(mesh);

@@ -8,6 +8,7 @@ import { ACTOR_LAYER } from './portalRender';
 import { Ragdoll } from '../combat/ragdoll';
 import { nextLivingKey, type Aggression, type Living, type Side } from '../combat/kit';
 import { applyDifficultyTo, rescaleBody, scaledByDifficulty } from './difficulty.ts';
+import { skinnedPlugin } from '../core/skinnedLoad.ts';
 
 export type CreatureDef = PlanetDef['creatures'];
 
@@ -42,7 +43,8 @@ export async function loadCreatureModel(name: string): Promise<CreatureModel | n
     const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number> }[] };
     const entry = manifest.creatures.find((c) => c.id === id);
     if (!entry) return null;
-    const gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}assets-private/${entry.file}`);
+    // Float32 joints and the morph ladder at load (`skinnedLoad.ts`), before anything draws it.
+    const gltf = await new GLTFLoader().register(skinnedPlugin).loadAsync(`${import.meta.env.BASE_URL}assets-private/${entry.file}`);
     gltf.scene.traverse((o) => {
       o.layers.enable(ACTOR_LAYER);
       const m = o as THREE.Mesh;

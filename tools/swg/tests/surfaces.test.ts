@@ -339,12 +339,16 @@ const anim8 = (map = [0, 1, 2, 3, 4, 5, 6, 7]): SwgSurface => ({ anim: { mode: '
 {
   const s = new AnimatedSurfaces();
   let register: ((parser: unknown) => { name: string; afterRoot?: (r: unknown) => Promise<void> | null }) | null = null;
+  const registered: (typeof register)[] = [];
   const loader = { register(cb: typeof register) {
-    register = cb;
+    registered.push(cb);
+    register ??= cb;
     return this;
   } };
   const returned = s.withPlugin(loader as never);
   ok(returned === (loader as unknown) && typeof register === 'function', 'withPlugin registers and hands the loader back');
+  // The skinned meshes' own plugin goes on beside it (the performance pass's second wave, skinnedLoad.test.ts).
+  ok(registered.length === 2 && (registered[1] as unknown as () => { name: string })().name === 'SWG_skinned_load', 'and registers the skinned meshes\' load plugin after its own');
   const { list } = texturesOf(8);
   const json = {
     materials: [

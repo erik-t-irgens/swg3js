@@ -20,10 +20,12 @@
 import * as THREE from 'three';
 import { isShadowOnly, type FxProductId } from '../fxRegistry.ts';
 import type { FxFrameContext } from './context';
-import { FX_CAMERA, NO_PRODUCTS, type FxWarmItem } from './pass';
-import { GeometryProduct, geometryMaterialDefaults, type FxGeometryDrawer } from './geometry';
+// The value imports carry their extensions so a node test can build the product itself (`velocity.test.ts`).
+import { FX_CAMERA, NO_PRODUCTS, type FxWarmItem } from './pass.ts';
+import type { OwnJob } from '../programQueue.ts';
+import { GeometryProduct, geometryMaterialDefaults, type FxGeometryDrawer } from './geometry.ts';
 import type { PostFX } from '../postfx';
-import { ACTOR_LAYER } from '../../world/portalRender';
+import { ACTOR_LAYER } from '../../world/portalRender.ts';
 import { MOVER_LIMITS, WARM_VARIANTS, classifyMover, drawableSince, moverPriority, movingWeight, reprojectionCarry, shownSince, staticCut, takeByBudget, variantKey, type BudgetTotals, type FxMoverKind, type MoverFacts, type MoverResult, type VariantKeyParts } from './velocityMath.ts';
 
 export type { FxMoverKind } from './velocityMath.ts';
@@ -824,7 +826,7 @@ export class VelocityProduct extends GeometryProduct {
     s.draws.length = s.drawCount;
     if (s.drawCount === 0) return;
     // What first person keeps on the shadow layer (the player's head) is off the actor layer on purpose.
-    if (import.meta.env.DEV && !rec.warned && !rec.anyLayer && !mesh.layers.isEnabled(ACTOR_LAYER) && !isShadowOnly(mesh.layers.mask)) {
+    if (import.meta.env?.DEV && !rec.warned && !rec.anyLayer && !mesh.layers.isEnabled(ACTOR_LAYER) && !isShadowOnly(mesh.layers.mask)) {
       rec.warned = true;
       console.warn(`velocity: ${mesh.name || mesh.type} under ${rec.name || rec.root.type} is not on the actor layer, so it is never drawn and blurs with the camera only`);
     }
@@ -1026,6 +1028,11 @@ export class VelocityProduct extends GeometryProduct {
         if (v.failed) continue;
         if (!v.ready) {
           this.waiting++;
+          // A variant whose job the queue let go unbuilt (a world went) is asked for again, as loose work.
+          if (!v.compiling && this.queue) {
+            v.compiling = true;
+            void this.queue([v.dummy], `fx.velocity ${v.key}`, false, this.variantJob);
+          }
           continue;
         }
         n++;
@@ -1116,7 +1123,7 @@ export class VelocityProduct extends GeometryProduct {
 
   // --- variants ---------------------------------------------------------------------------------
 
-  private variantFor(parts: VariantKeyParts, warm: boolean): VelocityVariant {
+  private variantFor(parts: VariantKeyParts, warm: boolean, held = false): VelocityVariant {
     const key = variantKey(parts);
     const have = this.byKey.get(key);
     if (have) return have;
@@ -1137,11 +1144,96 @@ export class VelocityProduct extends GeometryProduct {
     };
     this.variants.push(variant);
     this.byKey.set(key, variant);
-    // A key first met in play builds its program now: its draws are this frame's, so there is
-    // nothing to defer it to and nothing to put it on the world's queue for. It is one program,
-    // and the frame loop's own shader line reports it as it reports every program built in play.
-    if (!warm) void this.compileVariant(variant);
+    this.byDummy.set(variant.dummy, variant);
+    // A key first met in play goes on the world's queue as loose work carrying its own compile (`variantJob`), never
+    // compiled here on the frame that met it: its movers are drawn with the camera's blur until it is ready. With no
+    // queue (no world yet) it is built at once, as it always was. `held`: made and left, its caller pushes it itself.
+    if (!warm && !held) {
+      if (this.queue) {
+        variant.compiling = true;
+        void this.queue([variant.dummy], `fx.velocity ${key}`, false, this.variantJob);
+      } else void this.compileVariant(variant);
+    }
     return variant;
+  }
+
+  /**
+   * Where a variant met after the warm-up is built (`setQueue`): the world's program queue, as a job with its own
+   * compile and finish (`variantJob`), urgent from `prepareRoots` (whose caller keeps the body hidden until it is
+   * answered) and loose from the draws. Null builds it at once on the frame that met it, the old way.
+   */
+  private queue: ((objects: THREE.Object3D[], label: string, urgent: boolean, own: OwnJob) => Promise<void>) | null = null;
+  /** Each variant by its dummy, which is what the queue hands the job's own compile and finish. */
+  private readonly byDummy = new Map<THREE.Object3D, VelocityVariant>();
+
+  /** The world's queue, wired once by the game (`World.programJob`); null takes the old way back. */
+  setQueue(push: ((objects: THREE.Object3D[], label: string, urgent: boolean, own: OwnJob) => Promise<void>) | null): void {
+    this.queue = push;
+  }
+
+  /**
+   * A variant's program built as its own scene under the effects' compile target (`compileTarget`), never against a
+   * pass's scene: three puts the light counts of the state a program is compiled under in every non-raw material's
+   * key, `lights: false` or not, and the velocity draws are made under the empty state of their own proxy, so compiled
+   * by the world's `compileOne` a variant would be keyed on the world's lights or the rooms' and its first real draw
+   * would build it again in play. With `resolve` false the program is only issued (the queue polls it in `parallel`
+   * mode); the finish then records the version three records after its own first draw and marks it ready.
+   */
+  private readonly variantJob: OwnJob = {
+    compile: (o, _allowance, resolve) => {
+      const variant = this.byDummy.get(o);
+      if (!variant || variant.ready || variant.failed || this.disposed) return { made: 0, done: true };
+      const r = this.renderer;
+      const before = r.info.programs?.length ?? 0;
+      const prev = r.getRenderTarget();
+      r.setRenderTarget(this.compileTarget);
+      try {
+        r.compile(variant.dummy, FX_CAMERA);
+      } catch (e) {
+        variant.failed = true;
+        variant.compiling = false;
+        console.warn(`velocity: variant ${variant.key} failed to compile; its meshes blur with the camera only`, e);
+      } finally {
+        r.setRenderTarget(prev);
+      }
+      if (resolve && !variant.failed) {
+        const props = r.properties.get(variant.material) as { currentProgram?: { getUniforms(): unknown } };
+        try {
+          props.currentProgram?.getUniforms();
+        } catch {
+          // The finish reads the program's diagnostics and says what failed.
+        }
+      }
+      return { made: (r.info.programs?.length ?? 0) - before, done: true };
+    },
+    finish: (o) => {
+      const variant = this.byDummy.get(o);
+      if (variant && !variant.failed && !variant.ready && !this.disposed) this.finishVariant(variant);
+    },
+    // Let go unbuilt (a world unloading clears the queue): asked for again the next time a draw wants it.
+    dropped: (o) => {
+      const variant = this.byDummy.get(o);
+      if (variant && !variant.ready) variant.compiling = false;
+    },
+  };
+
+  /** A variant whose program has been built and resolved: ready, or failed if it did not link. */
+  private finishVariant(variant: VelocityVariant): void {
+    const r = this.renderer;
+    try {
+      const props = r.properties.get(variant.material) as { currentProgram?: { getUniforms(): unknown; diagnostics?: { runnable: boolean } }; __version?: number };
+      const program = props.currentProgram;
+      program?.getUniforms();
+      if (!program || program.diagnostics?.runnable === false) throw new Error('the program did not link');
+      // The first real draw would otherwise work the program out again with that draw's `side`, which is in the key.
+      props.__version = variant.material.version;
+      variant.ready = true;
+    } catch (e) {
+      variant.failed = true;
+      console.warn(`velocity: variant ${variant.key} failed to compile; its meshes blur with the camera only`, e);
+    } finally {
+      variant.compiling = false;
+    }
   }
 
   private makeMaterial(alpha: boolean): THREE.ShaderMaterial {
@@ -1182,7 +1274,8 @@ export class VelocityProduct extends GeometryProduct {
       g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3));
       g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1], 2));
       if (p.skinned) {
-        g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(12), 4));
+        // Floats, as every skinned mesh's joints are stored at load (`skinnedLoad.ts`).
+        g.setAttribute('skinIndex', new THREE.Float32BufferAttribute(new Float32Array(12), 4));
         g.setAttribute('skinWeight', new THREE.Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 4));
       }
       if (p.morphs > 0) {
@@ -1239,33 +1332,29 @@ export class VelocityProduct extends GeometryProduct {
     } finally {
       r.setRenderTarget(prev);
     }
-    try {
-      if (err) throw err;
-      const props = r.properties.get(variant.material) as { currentProgram?: { getUniforms(): unknown; diagnostics?: { runnable: boolean } }; __version?: number };
-      const program = props.currentProgram;
-      // The question three's own first draw asks, which is what makes a deferred driver finish.
-      program?.getUniforms();
-      if (!program || program.diagnostics?.runnable === false) throw new Error('the program did not link');
-      // The first real draw would otherwise work the program out again with that draw's `side`,
-      // which is in the key: a double-sided mesh first would compile a second program mid-frame.
-      // This is what three records after its own first draw with the program just built.
-      props.__version = variant.material.version;
-      variant.ready = true;
-    } catch (e) {
+    if (err) {
       variant.failed = true;
-      console.warn(`velocity: variant ${variant.key} failed to compile; its meshes blur with the camera only`, e);
-    } finally {
       variant.compiling = false;
+      console.warn(`velocity: variant ${variant.key} failed to compile; its meshes blur with the camera only`, err);
+    } else {
+      // The question three's own first draw asks, which is what makes a deferred driver finish, then the version three
+      // records after its own first draw: a double-sided mesh first would otherwise compile a second program mid-frame.
+      this.finishVariant(variant);
     }
     variant.job = Promise.resolve();
     return variant.job;
   }
 
-  /** Make and compile the variants these roots' meshes need (a dressed fighter or peer); resolves when each is ready or failed. */
+  /**
+   * Make and compile the variants these roots' meshes need (a dressed fighter or peer, a mobile's prototype); resolves
+   * when each is ready or failed. With the world's queue set, those not ready are pushed urgent as one job carrying its
+   * own compile (`variantJob`) and awaited, so nothing compiles here synchronously; with none, built at once.
+   */
   async prepareRoots(roots: readonly THREE.Object3D[]): Promise<void> {
     if (this.disposed || this.broken) return;
     const wanted = new Set<VelocityVariant>();
     const parts: VariantKeyParts = { skinned: false, morphs: 0, morphNormals: false, morphColors: false, alpha: false };
+    const queue = this.queue;
     const visit = (o: THREE.Object3D): void => {
       if (!eligibleMesh(o)) return;
       const g = o.geometry;
@@ -1277,14 +1366,47 @@ export class VelocityProduct extends GeometryProduct {
       for (const m of mats) {
         if (!eligibleMaterial(m)) continue;
         parts.alpha = m.alphaTest > 0 && !!(m as THREE.MeshBasicMaterial).map;
-        wanted.add(this.variantFor(parts, false));
+        if (!queue) {
+          wanted.add(this.variantFor(parts, false));
+          continue;
+        }
+        // Made here without being queued as loose work or compiled, since this caller pushes what it needs urgent below.
+        wanted.add(this.variantFor(parts, false, true));
       }
     };
     for (const root of roots) root.traverse(visit);
-    await Promise.all([...wanted].map((v) => this.compileVariant(v)));
+    if (!queue) {
+      await Promise.all([...wanted].map((v) => this.compileVariant(v)));
+      return;
+    }
+    const need: THREE.Object3D[] = [];
+    for (const v of wanted) {
+      if (v.ready || v.failed) continue;
+      v.compiling = true;
+      need.push(v.dummy);
+    }
+    if (need.length) await queue(need, 'fx.velocity for a body about to be shown', true, this.variantJob);
   }
 
   // --- the rest of the product ------------------------------------------------------------------
+
+  /** How many variants there are warmed behind the loading screen, and how many of those are ready; and the rest. For `__debug.shaders().warm`. */
+  warmCount(): { warm: number; ready: number; others: number; othersReady: number } {
+    let warm = 0;
+    let ready = 0;
+    let others = 0;
+    let othersReady = 0;
+    for (const v of this.variants) {
+      if (v.warm) {
+        warm++;
+        if (v.ready) ready++;
+      } else {
+        others++;
+        if (v.ready) othersReady++;
+      }
+    }
+    return { warm, ready, others, othersReady };
+  }
 
   materials(): FxWarmItem[] {
     // The warm variants only: the rest are prepared when a fighter or a peer is dressed, or first seen.

@@ -103,8 +103,9 @@ ok(Number.isFinite(moverPriority(Infinity, 0)), 'a mover around the camera still
 ok(variantKey({ skinned: true, morphs: 3, morphNormals: true, morphColors: false, alpha: false }) === 's1|m3|n1|c0|a0', 'a variant key reads s1|m3|n1|c0|a0');
 {
   const keys = WARM_VARIANTS.map(variantKey);
-  ok(keys.length === 14 && new Set(keys).size === 14, 'fourteen warm variants, fourteen distinct keys');
-  ok(keys.includes('s0|m0|n0|c0|a0') && keys.includes('s1|m0|n0|c0|a1') && keys.includes('s1|m4|n1|c0|a0'), 'rigid, alpha-tested skinned and four-morph skinned are among them');
+  ok(keys.length === 8 && new Set(keys).size === 8, 'eight warm variants, eight distinct keys: a closed list of our own off the morph ladder');
+  ok(keys.includes('s0|m0|n0|c0|a0') && keys.includes('s1|m0|n0|c0|a1') && keys.includes('s1|m7|n1|c0|a0') && keys.includes('s1|m33|n1|c0|a1'), 'rigid, alpha-tested skinned and both morphed rungs are among them');
+  ok(!keys.includes('s1|m4|n1|c0|a0') && !keys.includes('s1|m19|n1|c0|a0'), 'and no count read off the packs (every skinned primitive is padded to a rung at load)');
 }
 
 // --- combineVelocity ---
@@ -238,6 +239,121 @@ ok(MOVER_LIMITS.figureJumpSpeed < MOVER_LIMITS.machineJumpSpeed && MOVER_LIMITS.
   for (const d of R.FX_PRODUCTS) cpu += (d as CpuRow).cpuBudgetMs ?? 0;
   for (const d of R.FX_PASSES) cpu += (d as CpuRow).cpuBudgetMs ?? 0;
   ok(cpu <= (R.FX_TYPICAL_CPU_MS ?? 0) + 1e-6, `the declared CPU budgets come to ${cpu.toFixed(2)} ms, inside it`);
+}
+
+// --- the variants met in play go on the world's queue (the performance pass's second wave) ---
+// A real VelocityProduct over a recording stand-in renderer: a variant met after the warm-up is pushed to the queue as
+// loose work carrying its own compile, never compiled on the frame that met it; that compile builds the dummy as its
+// own scene under the effects' compile target (the empty light state its draws are made under); the finish records
+// the version three records after its own first draw and marks it ready; a mover whose variant is not ready is not
+// drawn; one let go unbuilt is asked for again; a body about to be shown pushes what it needs urgent; and with no queue
+// a variant is built at once, the old way.
+{
+  const THREE = await import('three');
+  const { VelocityProduct } = await import('../../../src/core/fx/velocity.ts');
+  type Rec = { scene: unknown; target: unknown };
+  const compiled: Rec[] = [];
+  const props = new Map<object, Record<string, unknown>>();
+  let bound: unknown = null;
+  const renderer = {
+    info: { programs: [] as unknown[] },
+    getRenderTarget: () => bound,
+    setRenderTarget: (t: unknown) => {
+      bound = t;
+    },
+    compile(scene: THREE.Object3D) {
+      compiled.push({ scene, target: bound });
+      scene.traverse((o) => {
+        const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+        if (!m) return;
+        const p = props.get(m) ?? {};
+        if (!p.currentProgram) {
+          p.currentProgram = { getUniforms() {}, diagnostics: { runnable: true } };
+          renderer.info.programs.push(p.currentProgram);
+        }
+        props.set(m, p);
+      });
+    },
+    properties: {
+      get: (m: object) => {
+        let p = props.get(m);
+        if (!p) props.set(m, (p = {}));
+        return p;
+      },
+    },
+  };
+  const postfx = { ctx: { renderer }, size: new THREE.Vector2(4, 4), sceneDepth: new THREE.DepthTexture(4, 4) };
+  const product = new VelocityProduct(postfx as never, () => {});
+  const priv = product as unknown as {
+    compileTarget: unknown;
+    variantFor(parts: object, warm: boolean, held?: boolean): { key: string; dummy: THREE.Mesh; material: THREE.Material; ready: boolean; failed: boolean; compiling: boolean };
+    countDraws(rec: object): number;
+  };
+  const warm = product.warmCount();
+  ok(warm.warm === WARM_VARIANTS.length && warm.ready === warm.warm && warm.others === 0, `the ${warm.warm} warm variants are built as the product is made, every one ready`);
+  ok(compiled.every((c) => c.target === priv.compileTarget), "each under the effects' compile target");
+
+  type Push = { objects: THREE.Object3D[]; label: string; urgent: boolean; own: { compile(o: THREE.Object3D, allowance: number, resolve: boolean): { made: number; done: boolean }; finish?(o: THREE.Object3D): void; dropped?(o: THREE.Object3D): void }; settle(): void };
+  const pushes: Push[] = [];
+  product.setQueue((objects, label, urgent, own) => new Promise<void>((settle) => pushes.push({ objects, label, urgent, own, settle })));
+  const n0 = compiled.length;
+  const parts = { skinned: true, morphs: 40, morphNormals: true, morphColors: false, alpha: false };
+  const v = priv.variantFor(parts, false);
+  ok(pushes.length === 1 && pushes[0].label === `fx.velocity ${variantKey(parts)}` && !pushes[0].urgent && pushes[0].objects[0] === v.dummy, 'a variant first met in play is pushed to the queue as loose work, its dummy the job');
+  ok(compiled.length === n0 && !v.ready && v.compiling, 'and nothing is compiled on the frame that met it: it waits, not ready');
+  const rec = { result: 'all', states: [{ drawable: true, animated: false, draws: [{ variant: v, parts }] }] };
+  ok(priv.countDraws(rec) === 0, 'a mover whose variant is not ready is not drawn (it blurs with the camera)');
+  ok(pushes.length === 1, 'and asking again while it is on the queue pushes nothing more');
+  const done = pushes[0].own.compile(v.dummy, 1, false);
+  const last = compiled[compiled.length - 1];
+  ok(done.done && done.made === 1 && last.scene === v.dummy && last.target === priv.compileTarget, "its own compile builds the dummy as its own scene under the compile target, never against a pass's scene");
+  ok(bound === null, 'and puts the bound target back after');
+  ok(!v.ready, 'issued is not ready: only the finish says so');
+  pushes[0].own.finish?.(v.dummy);
+  ok(v.ready && !v.compiling && props.get(v.material)?.__version === v.material.version, 'the finish marks it ready with the version three records after its own first draw');
+  ok(priv.countDraws(rec) === 1, 'and the mover is drawn from then on');
+
+  const parts2 = { skinned: true, morphs: 41, morphNormals: true, morphColors: false, alpha: true };
+  const v2 = priv.variantFor(parts2, false);
+  pushes[1].own.dropped?.(v2.dummy);
+  ok(!v2.compiling && !v2.ready, 'a variant the queue let go unbuilt (a world went) is not ready and not being built');
+  const rec2 = { result: 'all', states: [{ drawable: true, animated: false, draws: [{ variant: v2, parts: parts2 }] }] };
+  ok(priv.countDraws(rec2) === 0 && pushes.length === 3 && pushes[2].label === `fx.velocity ${variantKey(parts2)}` && !pushes[2].urgent, 'the next draw that wants it asks for it again, as loose work');
+
+  // A body about to be shown: what it needs is pushed urgent as one job and awaited.
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
+  g.setAttribute('skinIndex', new THREE.Float32BufferAttribute(new Float32Array(12), 4));
+  g.setAttribute('skinWeight', new THREE.Float32BufferAttribute([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 4));
+  g.morphAttributes.position = Array.from({ length: 42 }, () => new THREE.Float32BufferAttribute(new Float32Array(9), 3));
+  const body = new THREE.SkinnedMesh(g, new THREE.MeshStandardMaterial());
+  const bone = new THREE.Bone();
+  body.add(bone);
+  body.bind(new THREE.Skeleton([bone]));
+  const n1 = compiled.length;
+  let answered = false;
+  const waiting = product.prepareRoots([body]).then(() => {
+    answered = true;
+  });
+  await Promise.resolve();
+  const urgent = pushes[pushes.length - 1];
+  ok(urgent.urgent && urgent.label === 'fx.velocity for a body about to be shown' && compiled.length === n1, "a body about to be shown pushes the variants it needs urgent, compiling none itself");
+  ok(!answered, 'and is not answered until the queue answers');
+  for (const o of urgent.objects) {
+    urgent.own.compile(o, 1, true);
+    urgent.own.finish?.(o);
+  }
+  urgent.settle();
+  await waiting;
+  ok(answered && product.warmCount().othersReady >= 2, 'answered once its job has been built and finished');
+
+  // No queue: the old way, built at once.
+  product.setQueue(null);
+  const n2 = compiled.length;
+  const v3 = priv.variantFor({ skinned: false, morphs: 3, morphNormals: false, morphColors: false, alpha: false }, false);
+  ok(v3.ready && compiled.length === n2 + 1, 'with no queue a variant is built at once, as it always was');
+  ok((v.dummy.geometry.getAttribute('skinIndex').array as unknown) instanceof Float32Array, "a skinned dummy's joints are floats, as every skinned mesh's are at load");
+  product.dispose();
 }
 
 console.log(`\n${passed} checks passed`);

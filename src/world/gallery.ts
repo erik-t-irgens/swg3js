@@ -7,6 +7,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { markActor } from './portalRender';
 import { additiveAgainstRest, isAdditive } from '../player/rig';
+import { skinnedPlugin } from '../core/skinnedLoad.ts';
 
 export interface GalleryClip {
   name: string;
@@ -178,7 +179,9 @@ export class Gallery {
         this.models.set(s.source, 'failed');
         return;
       }
+      // Float32 joints and the morph ladder at load (`skinnedLoad.ts`), before anything draws it.
       new GLTFLoader()
+        .register(skinnedPlugin)
         .loadAsync(`${this.baseUrl}${file}`)
         .then((gltf) => {
           gltf.scene.traverse((o) => {

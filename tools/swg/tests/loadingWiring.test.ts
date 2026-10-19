@@ -143,8 +143,11 @@ function method(text: string, signature: string): string {
 {
   const batches = method(world, '  private async sweepBatches(');
   ok(/if \(sweepYield\(built, t1 - sliceFrom, behind, LOADING_TUNE\.sliceMs\)\) \{\s*await this\.nextFrame\(\);/.test(batches) && !/breath\(\)/.test(batches), "the sweep's batch loop awaits nextFrame through sweepYield, and never breath");
-  ok(/\{\n\s*const behind = this\.behindScreen;\n/.test(batches) && (batches.match(/\bbehind\b/g) ?? []).length === 2, 'whether a screen is up is the world\'s own word, read once as the sweep begins: in play (the Effects switch) every batch still waits a frame');
-  ok(/if \(built > 0\) noteProgramTime\(t1 - t0, built\);/.test(batches), 'and times every batch that built into the milliseconds a program');
+  // Read in code twice since the performance pass's second wave: the frame rule, and whether the sweep issues its
+  // batches in parallel (only behind a screen); the comments say "behind a screen" too, so they are left out.
+  const code = batches.replace(/\/\/.*$/gm, '');
+  ok(/\{\n\s*const behind = this\.behindScreen;\n/.test(batches) && (code.match(/\bbehind\b/g) ?? []).length === 3 && /const parallel = \(\): boolean => behind && linkMode\(document\.hidden\) === 'parallel';/.test(code) && !/\bbehind = /.test(code.replace('const behind = this.behindScreen;', '')), 'whether a screen is up is the world\'s own word, read once as the sweep begins: in play (the Effects switch) every batch still waits a frame, and only behind a screen are batches issued in parallel');
+  ok(/if \(built > 0\) noteProgramTime\(t1 - t0 \+ \(issue \? landMs : 0\), built\);/.test(batches), 'and times every batch that built into the milliseconds a program (issued in parallel, the issue and the resolves, never the wait)');
   const everything = method(world, '  private async compileEverything(');
   ok(/await this\.sweepBatches\(r, camera, objects, target,/.test(everything) && !/await this\.nextFrame\(\);/.test(everything), 'compileEverything sweeps through it and waits on no frame of its own');
   const draw = main.indexOf('        this.drawFrame();\n        if (screenHides) this.screenDrawnAt = tFrame;');
@@ -152,13 +155,15 @@ function method(text: string, signature: string): string {
   ok(draw > 0 && tick > draw && tick - draw < 800, 'the frame loop ticks the queue again after drawFrame');
   ok(/const screenHides = LOADING_TUNE\.screenDraws && this\.loadingScreen\.opaque;\s*if \(!screenHides \|\| tFrame - this\.screenDrawnAt >= LOADING_TUNE\.drawEveryMs\)/.test(main), 'and draws the world at most every drawEveryMs only while the screen is fully opaque');
   const one = method(world, '  private compileOne(');
-  ok(/if \(last !== 0\) this\.withLayers\(camera, 0, \(\) => this\.withTarget\(r, target, \(\) => r\.compile\(this\.compileNothing, camera, this\.scene\)\)\);/.test(one), "compileOne puts the world pass's lights back after a room's pass");
+  // Since the performance pass's second wave a rooms pass compiles against its own scene and leaves nothing set up; the
+  // put-back is the old way's alone (`renderStates` 'shared').
+  ok(/r\.compile\(root, camera, this\.passScene\(layer\)\)/.test(one) && /if \(last !== 0 && PASS_STATES\.mode === 'shared'\) this\.withLayers\(camera, 0, \(\) => this\.withTarget\(r, target, \(\) => r\.compile\(this\.compileNothing, camera, this\.scene\)\)\);/.test(one), "compileOne compiles each pass against that pass's own scene, and the old way puts the world pass's lights back after a room's pass");
   const waiter = method(world, '  private async queueOrBuild(');
   ok(/const watch = new QueueWatch\(\);/.test(waiter) && /watch\.stopped\(this\.programs\.ticks, performance\.now\(\), !document\.hidden\)/.test(waiter) && /await this\.flushQueue\(true\);/.test(waiter), "a waiter judges the loop by frames counted, by the long bound on a page on screen, and flushes in play's own way");
   ok(/private readonly flushPlay = \{ shown: \(\): boolean => !document\.hidden && !this\.behindScreen \};/.test(world) && /play \? this\.flushPlay : undefined/.test(world), 'and a flush in play counts what it builds on a page on screen with no loading screen up, the fault itself');
   ok(/const shown = !document\.hidden;\s*if \(!SHADER_PACING \|\| this\.behindScreen \|\| this\.programs\.idle\(performance\.now\(\), shown\)\)/.test(waiter), 'its entry is the single-instant test, by the long bound on a page on screen');
   ok(/const byIdle = SHADER_PACING && !this\.behindScreen && shown;/.test(waiter) && /if \(byIdle\) this\.programs\.noteIdleBuilt\(/.test(waiter), "and what the entry test's own outright build makes on a page on screen is counted with the flushes");
-  ok(/async prepareActor\(root: THREE\.Object3D, label\?: string\)[\s\S]{0,900}await this\.compileReady\(\[root\], label\);/.test(world), 'prepareActor hands the queue its label');
+  ok(/async prepareActor\(root: THREE\.Object3D, label\?: string, roomsLater\?: RoomJob\)[\s\S]{0,1100}await this\.compileReady\(\[root\], label, roomsLater \? \{ roomsLater \} : undefined\);/.test(world), 'prepareActor hands the queue its label (and the room deferral its handle)');
 }
 
 console.log(`\nloadingWiring: ${checks} checks passed`);

@@ -130,6 +130,7 @@ import { EVADE_TUNE, EvadeClock, JUMP_TUNE, ROLL_CLIPS, aimedAt, jumpAcross, jum
 import { Strikers } from '../combat/strikers.ts';
 import { NPC_TUNE, mayFight, npcNow, type NpcBolt, type NpcEnd, type NpcLow, type NpcMark, type NpcRow, type NpcSubject } from '../net/npcNet.ts';
 import { rngFor, type SpawnRecord } from './spawnSeed.ts';
+import { roomJob as newRoomJob, type RoomJob } from './roomDefer.ts';
 
 /** What a fighter carries, and so how it fights. */
 export type Arm = 'saber' | 'melee' | 'gun';
@@ -390,8 +391,11 @@ export interface NpcDeps {
   hittableAt?: (handle: number) => Hittable | undefined;
   /** The species the character packs hold, by id; the fallback list when none is known. */
   species: string[];
-  /** Compile an object's shaders in the background, resolving when it can be drawn without a stall. */
-  compile?: (objects: THREE.Object3D[]) => Promise<void>;
+  /**
+   * Compile an object's shaders in the background, resolving when it can be drawn without a stall. `roomsLater` is the
+   * room deferral's handle (`roomDefer.ts`) for a fighter dressed outdoors: its rooms pass follows it, off the frame.
+   */
+  compile?: (objects: THREE.Object3D[], opts?: { roomsLater?: RoomJob }) => Promise<void>;
   /** The room a fighter put down inside a building starts in. */
   cellAt?: (p: THREE.Vector3) => CellState | null;
   /** Follow a body through a building's portals, as the player is followed. */
@@ -602,6 +606,19 @@ export class Npc implements Living, ErrandBody, NpcSubject {
   /** Its lit blade's own group, which hangs beside the body rather than under it; null with no blade. */
   get bladeRoot(): THREE.Object3D | null {
     return this.blade ? this.blade.group : null;
+  }
+  /**
+   * Its dressed body's rooms programs (the room deferral, `roomDefer.ts`): not ready while a fighter dressed outdoors has
+   * had only its world pass built; the routes never draw it in a building's pass meanwhile. Each fighter dresses a
+   * figure of its own, so the handle is its own.
+   */
+  readonly roomJob: RoomJob = newRoomJob();
+  get roomReady(): boolean {
+    return this.roomJob.ready;
+  }
+  /** Its rooms programs wanted now (it counts in a room before they are built): that job goes ahead. */
+  roomsNow(): void {
+    if (!this.roomJob.ready) this.roomJob.promote();
   }
   /**
    * This fighter's blade emitter and full-length tip this frame, world space. Each fighter keeps
@@ -1093,7 +1110,8 @@ export class Npc implements Living, ErrandBody, NpcSubject {
     if (this.dead || !this.rig) return;
     rig.root.updateMatrixWorld(true);
     this.fitCull(rig);
-    if (deps.compile) await deps.compile([rig.root]);
+    // Dressed outdoors, its rooms pass follows it off the frame (`roomDefer.ts`); indoors both are built before it shows.
+    if (deps.compile) await deps.compile([rig.root], this.cell ? undefined : { roomsLater: this.roomJob });
     rig.root.visible = true;
   }
 
@@ -3928,6 +3946,8 @@ export class Npc implements Living, ErrandBody, NpcSubject {
   }
 
   dispose(scene: THREE.Scene): void {
+    // Its rooms work still queued (the room deferral) compiles nothing from here on: the figure has gone.
+    this.roomJob.gone = true;
     // Off the wire with it: this browser's body went, not the creature.
     if (this.shared) {
       const net = npcNow();

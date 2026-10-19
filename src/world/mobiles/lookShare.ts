@@ -20,6 +20,7 @@
 // is prepared, and a shared piece taken by a later look is one already prepared, so standing another
 // person of the same body compiles nothing and uploads only what is new about them.
 import * as THREE from 'three';
+import { hashBytes, hashRun } from '../../player/bytesHash.ts';
 
 /**
  * The switch and the one number that is ours, live through `__debug.mobileAssets({ share })`. Off, a
@@ -54,27 +55,15 @@ interface Entry {
   gone: number;
 }
 
-/**
- * Two 32-bit hashes of a run of numbers and its length, as one string: what tells two images or two
- * index buffers apart. Every number is read, so two runs that differ anywhere are two keys.
- */
-function hashRun(a: ArrayLike<number>, n: number): string {
-  let h1 = 0x811c9dc5;
-  let h2 = 0x9747b28c;
-  for (let i = 0; i < n; i++) {
-    const v = a[i];
-    h1 = Math.imul(h1 ^ v, 0x01000193);
-    h2 = Math.imul(h2 ^ (v + i), 0x5bd1e995);
-    h2 ^= h2 >>> 13;
-  }
-  return `${n}:${(h1 >>> 0).toString(36)}:${(h2 >>> 0).toString(36)}`;
-}
+// The hashes live in a module with no imports, which the characters' recipe worker runs too (`bytesHash.ts`).
+export { hashBytes };
 
-/** `hashRun` over bytes, four at a time where they are aligned for it. */
-export function hashBytes(bytes: Uint8Array): string {
-  if (bytes.byteOffset % 4 === 0 && bytes.byteLength % 4 === 0) return `w${hashRun(new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4), bytes.byteLength / 4)}`;
-  return `b${hashRun(bytes, bytes.length)}`;
-}
+/**
+ * The key a render's pixels were hashed under where they were made, the characters' worker (`Customizer`'s share
+ * render): read before hashing them again here, so four megabytes are never read on the main thread to learn what the
+ * worker already knew. The worker runs `hashBytes` itself, so the two are the same string.
+ */
+export const CONTENT_HASH = 'swgContentHash';
 
 /**
  * Everything about a texture besides its pixels that changes how it is drawn: its colour space, which
@@ -95,7 +84,9 @@ export function contentKey(t: THREE.Texture): string | null {
   const img = t.image as { data?: ArrayBufferView; width?: number; height?: number } | null;
   const d = img?.data;
   if (!d || !ArrayBuffer.isView(d)) return null;
-  return `px|${img!.width}x${img!.height}|${hashBytes(new Uint8Array(d.buffer, d.byteOffset, d.byteLength))}|${textureParams(t)}`;
+  const known = t.userData?.[CONTENT_HASH];
+  const hash = typeof known === 'string' ? known : hashBytes(new Uint8Array(d.buffer, d.byteOffset, d.byteLength));
+  return `px|${img!.width}x${img!.height}|${hash}|${textureParams(t)}`;
 }
 
 /** GPU bytes of a texture, with its mips: what the asset cache has always counted a texture at. */

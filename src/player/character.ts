@@ -16,6 +16,8 @@ import { fitFor, garmentMeshesOf, isHairKey, packPartOf, type ItemFit } from '..
 import { garmentMeshesOn, pieceMeshes } from './pieceMeshes.ts';
 import { pickMoodClip, type RigVariants } from '../world/mobiles/moodIdle.ts';
 import { partsToLoad } from './partsShown.ts';
+import { partsFile } from './partsFile.ts';
+import { floatSkinIndex, skinnedPlugin } from '../core/skinnedLoad.ts';
 
 /** A mesh's occlusion data, as the converter carried it out of the mesh generator. */
 interface PartDef {
@@ -172,12 +174,16 @@ function remapSkin(s: THREE.SkinnedMesh, target: THREE.Skeleton): void {
   if (missing.length) console.info(`wearable ${s.name}: ${missing.length} joints this skeleton lacks (${missing.slice(0, 4).join(', ')}) ride its root`);
   const attr = s.geometry.getAttribute('skinIndex');
   if (!attr) return;
-  const out = new Uint16Array(attr.count * attr.itemSize);
-  for (let i = 0; i < attr.count * attr.itemSize; i++) {
-    const v = map[(attr.array as ArrayLike<number>)[i]] ?? -1;
-    out[i] = v < 0 ? 0 : v;
+  const out = new Float32Array(attr.count * attr.itemSize);
+  for (let i = 0; i < attr.count; i++) {
+    for (let c = 0; c < attr.itemSize; c++) {
+      const v = map[attr.getComponent(i, c)] ?? -1;
+      out[i * attr.itemSize + c] = v < 0 ? 0 : v;
+    }
   }
-  s.geometry.setAttribute('skinIndex', new THREE.BufferAttribute(out, attr.itemSize));
+  // Floats, as every skinned mesh's joints are stored at load (`skinnedLoad.ts`): unsigned shorts here would make
+  // Direct3D 11 build a second vertex shader at the piece's first draw, which is what the load's own pass ends.
+  s.geometry.setAttribute('skinIndex', floatSkinIndex(out, attr.itemSize));
 }
 
 /** The blade's axis in a hand bone's own frame, for each hand. */
@@ -319,10 +325,11 @@ export class Character {
    */
   static async load(baseUrl: string, id = 'human_male', wear?: string[], opts: CharacterOptions = {}): Promise<Character> {
     const dir = opts.dir ? `${baseUrl}assets-private/${opts.dir.replace(/\/?$/, '/')}` : `${baseUrl}assets-private/characters/${id}/`;
-    const res = await fetch(`${dir}parts.json`);
-    if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json')) throw new Error(`no parts for ${id}`);
-    const manifest = (await res.json()) as PartsManifest;
-    const loader = new GLTFLoader();
+    // Fetched and parsed once a folder for the session (`partsFile.ts`): every dressed person's look of one body reads
+    // the same 700 KB, and parsing it again for each was main-thread work for nothing. Nothing writes to it.
+    const manifest = (await partsFile(dir)) as PartsManifest | null;
+    if (!manifest) throw new Error(`no parts for ${id}`);
+    const loader = new GLTFLoader().register(skinnedPlugin);
     // The rig file is animations only -- it has no mesh, so nothing in it builds a skeleton. The
     // skeleton comes from the first part instead, where the loader makes a real one out of that
     // file's own inverse bind matrices. Every part carries the same matrices for the same joints
@@ -354,11 +361,14 @@ export class Character {
     for (const def of wanted) await character.addPart(def.name, [def], true);
     if (!character.skeleton) throw new Error(`${id}: no part carried a skeleton`);
     character.applyOcclusion();
-    // A look built to share renders here, through its share; every other character in the worker the
-    // characters share (`characterRender`), which also hands back the normal map and splits a glowing piece.
+    // A look built to share renders through its share, never the customizer's private branch (`renderOff` stays null
+    // for it, or it would hold textures of its own); the share's renders are made in the characters' worker all the
+    // same (`shareRender`, the performance pass's second wave). Every other character renders in that worker
+    // (`characterRender`), which also hands back the normal map and splits a glowing piece.
     const off = opts.share ? null : opts.renderOff === undefined ? characterRender : opts.renderOff;
     const customizer = new Customizer(off, { putsGlow: !!off });
     customizer.share = opts.share ?? null;
+    customizer.shareRender = opts.share ? (opts.renderOff ?? characterRender) : null;
     customizer.normalScale.copy(Character.normalScale);
     customizer.materialsFor = (name, mesh) => character.materialsNamed(name, mesh);
     // The pack's values are the manifest's; ours start there, and the recipes render only when a value moves.
@@ -477,7 +487,8 @@ export class Character {
     const scenes: THREE.Object3D[] = [];
     for (const def of defs) {
       const url = (def.dir ?? this.dir) + def.file;
-      const gltf = await new GLTFLoader().loadAsync(url);
+      // Float32 joints and the morph ladder at load (`skinnedLoad.ts`), before anything draws the piece.
+      const gltf = await new GLTFLoader().register(skinnedPlugin).loadAsync(url);
       scenes.push(gltf.scene);
       const own: THREE.SkinnedMesh[] = [];
       gltf.scene.traverse((o) => {

@@ -1,7 +1,7 @@
 // The model memory budget over looks that share their pieces, on the asset cache itself
 // (src/world/mobiles/assets.ts): what it holds in all, what is referenced, what a trim gives back, what
 // standing a look again costs, what putting several bodies down together gives back, and what the next
-// look of a body is estimated at. Every figure the 180 MB budget is read by counts a shared piece once.
+// look of a body is estimated at. Every figure the model budget (`MOBILE_CACHE.budget`) is read by counts a shared piece once.
 //
 // The cache is driven for real, from `acquireModel` through `buildLook` and `shareLook`. Only the parts
 // character underneath is a stand-in, since it loads GLB files and decodes their pictures: it hands back
