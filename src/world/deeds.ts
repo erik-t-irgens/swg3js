@@ -49,6 +49,8 @@ export interface DeedPack {
   version: number;
   counts: Record<string, number>;
   deeds: DeedRow[];
+  /** The converter's late stamp: whether SOE's final files were in the mount it was written from. */
+  late?: unknown;
 }
 
 /** The shape this build understands. A pack written by an older run is ignored and asked for again. */
@@ -57,6 +59,8 @@ export const DEED_PACK_VERSION = 1;
 let pending: Promise<DeedPack | null> | null = null;
 let rows: DeedRow[] = [];
 let byId = new Map<string, DeedRow>();
+/** The pack's late stamp once it has landed (null for one with none), undefined before. */
+let lateStamp: unknown = undefined;
 
 /**
  * The pack, fetched once for the session. A missing file (or a dev server answering with its index
@@ -72,6 +76,7 @@ export function loadDeeds(baseUrl: string): Promise<DeedPack | null> {
       if (pack?.version !== DEED_PACK_VERSION || !Array.isArray(pack.deeds)) return null;
       rows = pack.deeds;
       byId = new Map(rows.map((d) => [d.id, d]));
+      lateStamp = pack.late ?? null;
       return pack;
     } catch {
       return null;
@@ -83,6 +88,11 @@ export function loadDeeds(baseUrl: string): Promise<DeedPack | null> {
 /** Every deed the pack carries, in the order it was written (by id). */
 export function allDeeds(): readonly DeedRow[] {
   return rows;
+}
+
+/** The pack's late stamp (whether SOE's final files were in the mount), null for one with none, undefined before it has landed. */
+export function deedsLate(): unknown {
+  return lateStamp;
 }
 
 /** One deed by its id, or null. */

@@ -39,6 +39,8 @@ export interface MobileCatalogueFile {
   entries: MobileEntry[];
   /** Models the archives could not give (a permanent gap, not an error): treated as missing. */
   failed?: { what: string; id: string; why: string }[];
+  /** How it was converted; `source.late` is the converter's late stamp (whether SOE's final files were in the mount). */
+  options?: { source?: { late?: unknown } };
 }
 
 export interface MobileEntry {

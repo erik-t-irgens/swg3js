@@ -42,8 +42,8 @@ const NOTES: Record<WeaponClass, string> = {
   entertainer: "not a weapon: the dancer's ribbons, sparklers, glowsticks and batons. Most of them are a particle effect rather than a model, which is what the game made them",
 };
 
-/** The class groups in the order the rack reads, for the display rules. */
-const GROUP_ORDER = ORDER.map((id) => ({ id, label: CLASS_LABELS[id] }));
+/** The class groups in the order the rack reads, for the display rules (and `__debug.late()`, which asks the rack's own view). */
+export const GROUP_ORDER = ORDER.map((id) => ({ id, label: CLASS_LABELS[id] }));
 
 export class WeaponsUi {
   readonly root: HTMLElement;

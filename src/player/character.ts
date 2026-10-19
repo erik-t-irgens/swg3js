@@ -102,6 +102,8 @@ const rigClipsParsed = new Map<string, THREE.AnimationClip[]>();
 const rigVariantsParsed = new Map<string, RigVariants>();
 /** The wardrobes' catalogues, one fetch per folder however many characters dress from it. */
 const wardrobes = new Map<string, Promise<(Wardrobe & { skeleton?: string }) | null>>();
+/** The ones that have landed, by folder, for a report that must fetch nothing (`Character.wardrobesNow`). */
+const wardrobesLanded = new Map<string, Wardrobe & { skeleton?: string }>();
 
 /**
  * The shaders a garment's bare skin wears: the archives' own generic names, which carry no texture
@@ -413,12 +415,18 @@ export class Character {
           const w = (await res.json()) as Wardrobe & { skeleton?: string };
           // Each item's meshes live beside the catalogue, not in the character's own folder.
           for (const item of w.items ?? []) for (const part of item.parts ?? []) part.dir ??= dir;
+          wardrobesLanded.set(dir, w);
           return w;
         })
         .catch(() => null);
       wardrobes.set(dir, p);
     }
     return p;
+  }
+
+  /** Every wardrobe catalogue already fetched, by folder: what a report reads without fetching one (`__debug.late()`). */
+  static wardrobesNow(): ReadonlyMap<string, Wardrobe & { skeleton?: string }> {
+    return wardrobesLanded;
   }
 
   /**

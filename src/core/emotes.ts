@@ -10,12 +10,17 @@
 export const EMOTE_SLOTS = 8;
 const KEY = 'swg.emotes';
 
-/** The dances by visual id, as the performance table names them (datatables/performance/performance.iff). */
+/**
+ * The dances by visual id, as the performance table's keys name them (datatables/performance/performance.iff).
+ * 33 to 36 are SOE's last four (the table's `breakdance3` to `breakdance6`, re-issued in publish 57, which the
+ * body table every species shares names from publish 58 on); a rig converted before carries none of them.
+ */
 export const DANCES: Record<number, string> = {
   1: 'basic', 2: 'basic 2', 3: 'rhythmic', 4: 'rhythmic 2', 5: 'exotic', 6: 'exotic 2', 7: 'exotic 3', 8: 'exotic 4',
   9: 'popular', 10: 'popular 2', 11: 'lyrical', 12: 'lyrical 2', 13: 'poplock', 14: 'poplock 2', 15: 'footloose', 16: 'footloose 2',
   17: 'formal', 18: 'formal 2', 19: 'jazzy', 20: 'jazzy 2', 21: 'theatrical', 22: 'theatrical 2', 23: 'bunduki', 24: 'bunduki 2',
   25: 'peiyi (novice)', 26: 'peiyi', 27: 'freestyle', 28: 'freestyle 2', 29: 'breakdance', 30: 'breakdance 2', 31: 'tumble', 32: 'tumble 2',
+  33: 'breakdance 3', 34: 'breakdance 4', 35: 'breakdance 5', 36: 'breakdance 6',
 };
 
 /** The number of flourishes a dance has: skill_action_1 to skill_action_8. */

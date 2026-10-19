@@ -9,13 +9,18 @@
 // Then the same species' other gender's, which is ours: the game never let a man wear a woman's style.
 // Then whatever the wardrobe converted that no row names, "Not in the game's creator": one Bothan male
 // style, four Trandoshan female ones, and the Sullustan's eighteen, which the game never offered at all
-// (each of those is two templates, `_f` and `_m`, wearing one mesh a wardrobe folder, so a style whose
-// meshes another cell already shows is not offered twice). A cell for no hair leads wherever the species
+// (each of those is two templates, `_f` and `_m`, wearing one mesh a wardrobe folder). In both later groups
+// a style whose meshes another cell already shows is not offered twice: SOE's final table gives the
+// Wookiees and the Sullustans rows of their own, each gender the other's styles on the very same meshes,
+// so a Wookiee's other gender's group and a Sullustan man's are empty and not drawn (a Sullustan woman
+// keeps his beards and his styles 20 to 27), and the same rule takes four styles each way out of the
+// Bothans' and the Zabrak men's 25 out of a Zabrak woman's (on the mesh of their 21), each already
+// shown by an earlier cell (`hairGrid.test.ts` holds every grid to the base). A cell for no hair leads wherever the species
 // has hairstyles at all, the species the game kept from going bald included: the owner's call, since
 // taking the hair off leaves no hole in any base head (`hairNone`).
 //
 // Every hair template's own name is just "hair" (or "lekku", "ridges", "frills"), so a cell reads "Style N"
-// from the `_sNN` its id ends in, with the id and the template behind it in the tooltip. The pictures are
+// (a beard "Beard N") from the `_sNN` its id ends in, with the id and the template behind it in the tooltip. The pictures are
 // the converter's, drawn into the wardrobe folder and shown as `<img>`: a live 3D cell would compile a
 // program per material on the main thread.
 //
@@ -85,10 +90,15 @@ export function hairStyleNumber(id: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-/** What a style's cell reads: "Style N", or the id's own words when it carries no number. */
+/**
+ * What a style's cell reads: "Style N", "Beard N" for a beard (the Sullustans' `sul_beard_s01_m` to `s12_m` and the
+ * Wookiees' two, from SOE's last publishes, numbered from 1 as the styles are, so read as "Style N" twelve of a
+ * Sullustan man's cells said what twelve others said), or the id's own words when it carries no number.
+ */
 export function styleLabel(id: string): string {
   const n = hairStyleNumber(id);
-  return n !== null ? `Style ${n}` : id.replace(/_/g, ' ');
+  if (n === null) return id.replace(/_/g, ' ');
+  return /beard/.test(id) ? `Beard ${n}` : `Style ${n}`;
 }
 
 const GENDER_WORDS = { female: "Women's styles", male: "Men's styles" } as const;
@@ -158,11 +168,21 @@ export function hairCells(table: CreatorTable | null | undefined, items: readonl
   const offered = new Set<string>();
   const own = tableStyles(entry, have);
   for (const s of own) offered.add(s.item.id);
-  const theirs = tableStyles(otherEntry, have).filter((s) => !offered.has(s.item.id));
+  // The other gender's, a style whose meshes this gender's already show left out, as the untabled ones are: SOE's
+  // final table gives both Wookiee genders and both Sullustan ones each the other's styles on the very same meshes,
+  // so taken by id alone every one of them stood twice in the grid.
+  const shown = new Set(own.map((s) => meshKey(s.item)));
+  const theirs: typeof own = [];
+  for (const s of tableStyles(otherEntry, have)) {
+    if (offered.has(s.item.id)) continue;
+    const k = meshKey(s.item);
+    if (k && shown.has(k)) continue;
+    if (k) shown.add(k);
+    theirs.push(s);
+  }
   for (const s of theirs) offered.add(s.item.id);
   // What no row of either gender names, this gender's first, a style whose meshes are already shown left out.
   const tabled = new Set([...(entry.hair ?? []), ...(otherEntry?.hair ?? [])].map((h) => h.id));
-  const shown = new Set([...own, ...theirs].map((s) => meshKey(s.item)));
   const loose: HairItem[] = [];
   const rest = all.filter((i) => !tabled.has(i.id) && !offered.has(i.id));
   const rank = (i: HairItem) => (hairGender(i.id) === gender ? 0 : 1);

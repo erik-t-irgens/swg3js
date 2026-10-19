@@ -5,12 +5,12 @@
 // on a cold disk it can land after the first planet is up: every caller treats a catalogue that
 // has not landed as absent (`loaded` gives null), and the one parsed object is the only copy.
 import type { MobileAppearance, MobileCatalogueFile, MobileEntry, MobileKind, PackSummary } from './types';
-import { buildIndex, groupTree, resolveEntry, searchEntries, type Indexed, type KindNode } from './catalogueIndex';
+import { CATALOGUE_COMMAND, buildIndex, failedModelsOf, groupTree, readinessOf, resolveEntry, searchEntries, type Indexed, type KindNode } from './catalogueIndex';
 
 /** The format this game reads. */
 export const CATALOGUE_FORMAT = 1;
-/** What to run when there is no catalogue. */
-export const CATALOGUE_COMMAND = 'npm run swg -- mobiles @SWG assets-private --retail-only';
+/** What to run when there is no catalogue (kept beside the readiness rule, which says it too). */
+export { CATALOGUE_COMMAND };
 
 const loads = new Map<string, Promise<MobileCatalogue | null>>();
 const landed = new Map<string, MobileCatalogue | null>();
@@ -20,13 +20,13 @@ export class MobileCatalogue {
   private readonly ids = new Map<string, MobileEntry>();
   private readonly index: Indexed[];
   private tree: KindNode[] | null = null;
-  private readonly failedModels = new Set<string>();
+  private readonly failedModels: Set<string>;
 
   private constructor(readonly file: MobileCatalogueFile, readonly baseUrl: string) {
     this.entries = file.entries;
     for (const e of file.entries) this.ids.set(e.id, e);
     this.index = buildIndex(file.entries);
-    for (const f of file.failed ?? []) if (f.what === 'model') this.failedModels.add(f.id);
+    this.failedModels = failedModelsOf(file);
   }
 
   /** Fetched and indexed once per base URL; null when the pack has no catalogue (or one of another format). */
@@ -111,20 +111,9 @@ export class MobileCatalogue {
     return a.file;
   }
 
-  /** Whether the pack holds what the entry needs, and if not, why, in a sentence. */
+  /** Whether the pack holds what the entry needs, and if not, why, in a sentence (`readinessOf`, the one rule). */
   ready(e: MobileEntry): { ok: boolean; why: string | null } {
-    if (!e.ready) return { ok: false, why: e.notReady ?? 'the converter marked it not ready' };
-    if (e.kind !== 'dressed') {
-      if (!e.appearance) return { ok: false, why: 'it names no appearance' };
-      if (this.failedModels.has(e.appearance)) return { ok: false, why: `its model (${e.appearance}) is not in the game's archives` };
-      const a = this.appearanceOf(e);
-      if (!a) return { ok: false, why: `its model ${e.appearance} is not in the catalogue` };
-      if (!a.ready) return { ok: false, why: `its model ${e.appearance} was not converted (run ${CATALOGUE_COMMAND})` };
-    }
-    const p = this.packOf(e);
-    if (!p) return { ok: false, why: 'it has no animation pack' };
-    if (!p.ready) return { ok: false, why: `its animation pack ${p.id} was not converted (run ${CATALOGUE_COMMAND})` };
-    return { ok: true, why: null };
+    return readinessOf(e, this.file, this.failedModels);
   }
 
   /** The URL of a file the catalogue names (paths are under assets-private/). */

@@ -4,7 +4,7 @@
 // a live knob with a range, a step and a line of words, set through the very function its console helper
 // sets it through, so a slider and a typed line can never mean two different things.
 //
-// A set of dials belongs to one helper (`race`, `engines`) and is shown when that helper is picked. Nothing a
+// A set of dials belongs to one helper (`race`, `engines`, `npcShips`) and is shown when that helper is picked. Nothing a
 // dial sets is kept by itself, as with every knob: what has moved can be copied out as that helper's own
 // console line, or pinned to run at start, which is the menu's one way of keeping a knob across a reload.
 //
@@ -143,7 +143,8 @@ export function resetDials(set: DialSet): string[] {
   return words;
 }
 
-const WORD = /^[A-Za-z_$][\w$]*$/;
+/** A key the line may write bare: a name, or a whole number (the NPC ship ladder's tiers, `{ grade: { 8: 4 } }`). */
+const WORD = /^(?:[A-Za-z_$][\w$]*|0|[1-9]\d{0,8})$/;
 const FORBIDDEN = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**

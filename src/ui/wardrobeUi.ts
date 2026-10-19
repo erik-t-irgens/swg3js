@@ -13,8 +13,10 @@
 // built to avoid; only the doll beside the list draws anything, and it always has.
 //
 // What a pick does is unchanged. Putting something on takes off whatever held that slot, which is the
-// rule the original game's paper doll enforces too, and "take this slot off" is the dropdowns' old
-// "— none —" under another name.
+// rule the original game's paper doll enforces too, and a group's "take off" is the dropdowns' old
+// "— none —" under another name. A double-click on a piece already worn takes off that piece alone:
+// a group gathers several body slots (a ring and a cybernetic hand under Hands, a wrist bracelet under
+// a bracer), so taking the whole group off would take off pieces worn beside it.
 
 import type { Character, Wardrobe } from '../player/character';
 import { INVENTORY_TABS, tabStrip, wireTabs } from './tabs.ts';
@@ -301,7 +303,7 @@ export class WardrobeUi {
     const wanted = openGroups(this.view, find);
     const parts = this.view.groups.map((g) => {
       const note = g.wearing.length ? `wearing ${g.wearing.join(', ')}` : SLOT_NOTE;
-      const actions = g.wearing.length ? `<span class="group-actions"><button data-act="off:${escapeHtml(g.id)}" title="take off what this slot holds">take off</button></span>` : '';
+      const actions = g.wearing.length ? `<span class="group-actions"><button data-act="off:${escapeHtml(g.id)}" title="take off every worn piece listed under this heading">take off</button></span>` : '';
       return groupShell(g.id, g.label, g.cells.length, note, this.groups.isOpen(g.id, wanted.has(g.id)), actions);
     });
     // Where the list was is kept: every change of clothes rebuilds the body, and a list that jumped
@@ -368,14 +370,39 @@ export class WardrobeUi {
     if (what === 'another' && this.selected && this.onGiveAnother) this.note(this.onGiveAnother(this.selected));
   }
 
-  /** A double-click, or Enter: put it on, or take its slot off when it is on the body already. */
+  /**
+   * A double-click, or Enter: put it on, or take that one piece off when it is on the body already. Never its whole
+   * group: the groups gather several body slots (`slotGroupOf`'s, a ring and a cybernetic hand under Hands, a wrist
+   * bracelet under a bracer, an earring under the head), and the pieces in them are worn together by their own
+   * arrangements, so a double-click on the gloves must not take the cybernetic hand off with them.
+   */
   private async use(id: string): Promise<void> {
     const c = this.cell(id);
     if (!c) return;
-    await this.choose(c.group, c.on ? '' : c.id);
+    if (c.on) await this.takeOff(c.id);
+    else await this.choose(c.group, c.id);
   }
 
-  /** Put on what was picked, having taken off whatever that slot held; '' takes the slot off. */
+  /** Take off one worn piece: every part the character wears that is that catalogue entry, and nothing else. */
+  private async takeOff(itemId: string): Promise<void> {
+    const c = this.character;
+    if (!c) return;
+    const parts = [...this.wornItems()].filter(([part, x]) => !isHairKey(part) && x === itemId).map(([part]) => part);
+    const refused: string[] = [];
+    if (this.onRemove) {
+      this.picking = true;
+      try {
+        if (parts.length) this.onRemove(parts);
+      } finally {
+        this.picking = false;
+      }
+    } else for (const part of parts) if (!c.remove(part)) refused.push(part);
+    this.build();
+    this.note(refused.length ? `could not take off: ${refused.join(', ')}` : '');
+    this.onChange();
+  }
+
+  /** Put on what was picked, having taken off whatever that slot held; '' takes off every worn piece of the group. */
   private async choose(slot: string, id: string): Promise<void> {
     const c = this.character;
     if (!c) return;
@@ -388,7 +415,7 @@ export class WardrobeUi {
         if (id) {
           if (!(await this.onWear(id))) refused.push(id);
         } else {
-          const parts = [...this.wornItems()].filter(([part, itemId]) => !isHairKey(part) && slotOf(itemId) === slot).map(([part]) => part);
+          const parts = [...this.wornItems()].filter(([part, itemId]) => !isHairKey(part) && this.groupOf(itemId) === slot).map(([part]) => part);
           if (parts.length) this.onRemove(parts);
         }
       } finally {
@@ -399,11 +426,11 @@ export class WardrobeUi {
       this.onChange();
       return;
     }
-    const previous = [...this.wornIds()].find((x) => slotOf(x) === slot);
+    const previous = [...this.wornIds()].find((x) => this.groupOf(x) === slot);
     const refused: string[] = [];
     if (previous && previous !== id) {
       // `previous` may be the display name of a mesh-keyed piece; take off whatever holds the slot.
-      const held = c.status().filter((p) => p.worn && !p.body && slotOf(p.name) === slot);
+      const held = c.status().filter((p) => p.worn && !p.body && this.groupOf(p.name) === slot);
       const keys = held.length ? held.map((p) => p.name) : [previous];
       for (const key of keys) if (!c.remove(key)) refused.push(key);
     }
@@ -441,6 +468,17 @@ export class WardrobeUi {
     this.onChange();
   }
 
+  /**
+   * The group a piece is listed under, as the view lists it (`slotGroupOf` with the entry's own arrangement), so a
+   * group's "take off" takes off what stands under that heading. A mesh-keyed part name finds its entry by the name
+   * less its gender and level, as `wornIds` does.
+   */
+  private groupOf(id: string): string {
+    const items = this.catalogue?.items;
+    const item = items?.find((i) => i.id === id) ?? items?.find((i) => i.id === id.replace(/_[fm]_l\d+$/, ''));
+    return slotGroupOf(item?.id ?? id, item?.slots);
+  }
+
   /** The worn pieces (not the body) with the catalogue id each is, by part name. */
   private wornItems(): Map<string, string> {
     const out = new Map<string, string>();
@@ -469,20 +507,21 @@ export class WardrobeUi {
   private drawExamine(): void {
     const c = this.selected ? this.cell(this.selected) : undefined;
     if (!c) {
-      this.examine.innerHTML = `<div class="bp-examine-empty">click a piece to read what the game says about it · double-click to put it on</div>`;
+      this.examine.innerHTML = `<div class="bp-examine-empty">click a piece to read what the game says about it · double-click to put it on or take it off</div>`;
       return;
     }
     const pic = c.picture === 'icon' && c.icon ? `<img src="${escapeHtml(c.icon)}" decoding="async" alt="">` : `<span class="bp-initials">${escapeHtml(c.initials)}</span>`;
     const head = [escapeHtml(c.label), `<small>${escapeHtml(c.id)}</small>`].join(' ');
     const paragraphs = c.description.split(/\n\s*\n/).filter((p) => p.trim()).map((p) => `<p>${escapeHtml(p.trim())}</p>`).join('');
     const slot = [...SLOTS, OTHER].find((s) => s.id === c.group)?.label ?? c.group;
-    // "Take this slot off" is only offered when the slot holds something: worn, it is what the piece's
-    // own button does, and with the slot empty there would be nothing for it to take off.
+    // A worn piece's own button takes that piece off, as its double-click does; the group's button takes off every
+    // worn piece listed under the heading (a group gathers several body slots, so it says so), and is only offered
+    // when the group holds something, since with it empty there would be nothing for it to take off.
     const wearing = this.view?.groups.find((g) => g.id === c.group)?.wearing.length ?? 0;
     // "Give another" puts a second copy in the backpack, a thing of its own that may be worn, traded and
     // coloured apart from the first: a developer's give, offered only in the world.
     const another = this.developer && this.onGiveAnother ? `<button data-act="another" title="a second copy of this piece into the backpack">Give another</button>` : '';
-    const buttons = [c.on ? '' : `<button data-act="use">Wear</button>`, wearing ? `<button data-act="off:${escapeHtml(c.group)}">Take this slot off</button>` : '', another].filter(Boolean).join('');
+    const buttons = [c.on ? `<button data-act="use">Take off</button>` : `<button data-act="use">Wear</button>`, wearing ? `<button data-act="off:${escapeHtml(c.group)}" title="take off every worn piece listed under this heading">Take off all under ${escapeHtml(slot)}</button>` : '', another].filter(Boolean).join('');
     this.examine.innerHTML = `<div class="bp-examine-pic" data-initials="${escapeHtml(c.initials)}">${pic}</div><div class="bp-examine-text"><div class="bp-examine-head">${head}</div>${c.note ? `<div class="bp-fit ${c.fit}">${escapeHtml(c.note)}</div>` : ''}<div class="bp-state">${escapeHtml(slot)}${c.on ? ' · worn' : ''}</div>${paragraphs || '<p class="bp-nodesc">The game says nothing more about it.</p>'}</div><div class="bp-actions">${buttons}</div>`;
   }
 

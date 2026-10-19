@@ -14,6 +14,10 @@ import { PILOT_SKILL, skillOfTier } from '../../../src/space/pilot.ts';
 import { tierDamage, tierDurability } from '../../../src/space/shipStats.ts';
 import type { ComponentDef, FitDef, FitSlot } from '../../../src/vehicles/shipFit.ts';
 import { PASS_BASE, atBase, traceHash } from './atBase.ts';
+import { readFileSync } from 'node:fs';
+import { TIER_DIALS, shipDialsFor } from '../../../src/space/tierDials.ts';
+import { allDials, dialMoved, movedArgs, movedLine, resetDials, snapDial } from '../../../src/ui/dials.ts';
+import { evaluateArgs } from '../../../src/ui/debugModel.ts';
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -91,6 +95,51 @@ const BASE_TRACE = 'c828f8690df2';
   ok(TIER_LADDER_TUNE.top === 6, 'the top is held to 6 at the least');
   Object.assign(TIER_LADDER_TUNE, saved);
   ok(/tiers 6 to 10 read as/.test(ladderLine()), 'the console line names the ladder');
+}
+
+// The debug menu's dials (src/space/tierDials.ts): each slider moves the very row of the table its key names, read
+// straight off the table and never through the dial; the line the menu copies out is `npcShips`'s own argument and,
+// read back as the helper reads it, sets exactly what was moved; Reset puts the shipped table back; and tiers 1 to 5
+// read as they always did whatever the dials say.
+{
+  const saved = JSON.parse(JSON.stringify(TIER_LADDER_TUNE));
+  ok(shipDialsFor('npcShips') === TIER_DIALS && shipDialsFor('race') === null, 'npcShips has the ladder\'s dials, and nothing else here does');
+  const field = (key: string): unknown => {
+    const [head, row, tier] = key.split('.');
+    assert.equal(head, 'ladder');
+    return row === 'top' ? TIER_LADDER_TUNE.top : (TIER_LADDER_TUNE as unknown as Record<string, Record<string, number>>)[row][tier];
+  };
+  const dials = allDials(TIER_DIALS);
+  ok(dials.length === 16 && new Set(dials.map((d) => d.key)).size === 16, `three rows of five tiers and the top, each one dial (${dials.length})`);
+  for (const d of dials) {
+    assert.ok(d.kind === 'number');
+    ok(field(d.key) === TIER_DIALS.shipped.get(d.key) && d.note.length > 20, `${d.key}: names a real row of the table, which shipped at ${TIER_DIALS.shipped.get(d.key)}, and says what it does`);
+    for (const v of [d.min, d.max, snapDial((d.min + d.max) / 2, d.min, d.max, d.step)]) {
+      const words = d.set(v);
+      ok(field(d.key) === v && words.length === 0, `${d.key} set to ${v} reads ${v} in the table`);
+    }
+  }
+  const low = [1, 2, 3, 4, 5].map((t) => [gradeTier(t), skillTier(t), strengthTier(t)].join());
+  ok(low.every((s, i) => s === [i + 1, i + 1, i + 1].join()), 'moving the dials leaves tiers 1 to 5 reading their own rows');
+  resetDials(TIER_DIALS);
+  ok(dials.every((d) => field(d.key) === TIER_DIALS.shipped.get(d.key)), 'Reset all puts every row back where it shipped');
+  const grade8 = dials.find((d) => d.key === 'ladder.grade.8')!;
+  const top = dials.find((d) => d.key === 'ladder.top')!;
+  assert.ok(grade8.kind === 'number' && top.kind === 'number');
+  grade8.set(3);
+  top.set(9);
+  const line = movedLine(TIER_DIALS);
+  ok(line === '__debug.npcShips({ ladder: { grade: { 8: 3 }, top: 9 } })', `the line names the helper and the two dials moved, a tier written as its number (${line})`);
+  ok(grade8.set(7).length === 1 && TIER_LADDER_TUNE.grade[8] === 5, 'a number typed past the slider is held by the helper, and said');
+  resetDials(TIER_DIALS);
+  const back = evaluateArgs(movedArgs(TIER_DIALS) || '{ ladder: { grade: { 8: 3 }, top: 9 } }');
+  assert.ok(back.ok);
+  tuneTierLadder((back.args[0] as { ladder: Parameters<typeof tuneTierLadder>[0] }).ladder);
+  ok(TIER_LADDER_TUNE.grade[8] === 3 && TIER_LADDER_TUNE.top === 9 && dials.filter((d) => dialMoved(TIER_DIALS, d)).length === 2, 'read back as npcShips reads its ladder, the line sets those two again and nothing else');
+  Object.assign(TIER_LADDER_TUNE, saved);
+  const main = readFileSync(new URL('../../../src/main.ts', import.meta.url), 'utf8');
+  ok(/if \(opts\.ladder !== true\) tuneTierLadder\(opts\.ladder\);/.test(main), '__debug.npcShips takes its ladder through tuneTierLadder, as the line is written');
+  ok(/dials: \(helper\) => vehicleDialsFor\(helper\) \?\? shipDialsFor\(helper\)/.test(main), 'and the game hands the debug menu these dials');
 }
 
 console.log(`\n${passed} checks passed`);

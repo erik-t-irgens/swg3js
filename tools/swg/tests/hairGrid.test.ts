@@ -18,6 +18,41 @@ import { creatorView, type CreatorTable, type CreatorVariable } from '../../../s
 import { hairOfSpecies, isHairKey, migrateInventory } from '../../../src/core/inventory.ts';
 import { giveCellHtml } from '../../../src/ui/giveModel.ts';
 import { Customizer } from '../../../src/player/customizer.ts';
+import { atBase, traceHash } from './atBase.ts';
+
+/** The labels of the plain sweep below through `styleLabel` as it stood at the pass's base (`atBase`), for a checkout git cannot answer in. */
+const STYLE_LABEL_BASE_HASH = '75c86f293074';
+/** Today's grids over the made-up rows (`flatGrid`), which the base check shows are the base's less the drops the rule names, for a checkout git cannot answer in. */
+const HAIR_CELLS_TRACE_HASH = 'e8b789558e6e';
+
+/** A grid's cells in order as group, id and mesh (`hairGrid`'s own mesh key: the style's part files, sorted), no-hair left out, and whether no hair is offered. */
+function flatGrid(g: { none: boolean; groups: { id: string; cells: { id: string }[] }[] }, items: readonly HairItem[]): { none: boolean; cells: { group: string; id: string; mesh: string }[] } {
+  const meshOf = new Map(items.map((i) => [i.id, (i.parts ?? []).map((p) => p.file ?? p.name ?? '').sort().join(',')]));
+  return { none: g.none, cells: g.groups.flatMap((x) => x.cells.filter((c) => c.id !== NO_HAIR).map((c) => ({ group: x.id, id: c.id, mesh: meshOf.get(c.id) ?? '' }))) };
+}
+
+/**
+ * Whether today's grid is the base's less only cells of the other gender's group whose meshes an earlier cell the grid
+ * keeps already shows (the dedupe SOE's final table asked for), with no cell added and the order kept; and which were
+ * dropped.
+ */
+function againstBase(base: ReturnType<typeof flatGrid>, now: ReturnType<typeof flatGrid>): { ok: boolean; dropped: string[]; why: string } {
+  const key = (c: { group: string; id: string }) => `${c.group}:${c.id}`;
+  const kept = new Set(now.cells.map(key));
+  const left = base.cells.filter((c) => kept.has(key(c)));
+  if (base.none !== now.none) return { ok: false, dropped: [], why: 'no hair offered differently' };
+  if (left.length !== now.cells.length || left.some((c, i) => key(c) !== key(now.cells[i]))) return { ok: false, dropped: [], why: 'a cell added or moved' };
+  const dropped: string[] = [];
+  for (let i = 0; i < base.cells.length; i++) {
+    const c = base.cells[i];
+    if (kept.has(key(c))) continue;
+    if (c.group !== 'other') return { ok: false, dropped, why: `${key(c)} dropped from a group the dedupe never touches` };
+    const twin = c.mesh && base.cells.slice(0, i).some((e) => kept.has(key(e)) && e.mesh === c.mesh);
+    if (!twin) return { ok: false, dropped, why: `${c.id} dropped with no earlier cell showing its mesh` };
+    dropped.push(c.id);
+  }
+  return { ok: true, dropped, why: '' };
+}
 
 let passed = 0;
 function ok(cond: boolean, what: string): void {
@@ -32,7 +67,20 @@ const note = (s: string) => console.log(`note ${s}`);
 ok(hairGender('hair_human_female_s04') === 'female' && hairGender('hair_human_male_s04') === 'male' && hairGender('sul_hair_s03_f') === 'female' && hairGender('sul_hair_s03_m') === 'male', "a style's gender is read from its id, the Sullustan's from the letter at its end");
 ok(hairStyleNumber('hair_twilek_female_s07') === 7 && hairStyleNumber('sul_hair_s18_m') === 18 && hairStyleNumber('hair_x') === null, "a style's number is the `_sNN` its id ends in");
 ok(styleLabel('hair_zabrak_male_s12') === 'Style 12' && styleLabel('sul_hair_s02_f') === 'Style 2', 'a cell reads "Style N"');
-ok(isHairKey('hair_human_male_s01') && isHairKey('sul_hair_s01_f') && !isHairKey('shirt_s03') && !isHairKey('chair_s01'), "every hairstyle id is hair, the Sullustan's too, and nothing else is");
+ok(styleLabel('sul_beard_s03_m') === 'Beard 3' && styleLabel('hair_wookiee_male_beard_s10') === 'Beard 10' && styleLabel('sul_hair_s03_m') === 'Style 3', 'a beard reads "Beard N", so a Sullustan man\'s twelve beards no longer say what his first twelve styles say');
+ok(isHairKey('hair_human_male_s01') && isHairKey('sul_hair_s01_f') && isHairKey('sul_beard_s12_m') && isHairKey('singing_mountain_clan_bangs_s01') && !isHairKey('shirt_s03') && !isHairKey('chair_s01'), "every hairstyle id is hair, the Sullustan's, their beards and the clan's bangs too, and nothing else is");
+{
+  // The day one (the pass's ground rule 7): every id the label of before read without a beard in it reads the same
+  // now, held to the function as it stood at the pass's base, or where git cannot hand it over to a hash of its trace.
+  const sweep: string[] = [];
+  for (const sp of ['human', 'twilek', 'zabrak', 'rodian', 'bothan', 'trandoshan', 'wookiee', 'moncal']) for (const g of ['male', 'female']) for (let n = 1; n <= 72; n++) sweep.push(`hair_${sp}_${g}_s${String(n).padStart(2, '0')}`, `hair_${sp}_${g}_s${n}`);
+  for (let n = 1; n <= 30; n++) for (const g of ['f', 'm']) sweep.push(`sul_hair_s${String(n).padStart(2, '0')}_${g}`);
+  sweep.push('hair_x', 'hair_human_male', 'singing_mountain_clan_bangs_s01', 'hair_wookiee_dreds', 'npc_hum_m_hair_s43');
+  const plain = sweep.filter((id) => !/beard/.test(id));
+  const old = await atBase<{ styleLabel: (id: string) => string }>('src/ui/hairGrid.ts');
+  if (old) ok(plain.every((id) => styleLabel(id) === old.styleLabel(id)), `every id the label of before read without a beard reads the same (${plain.length}, against the pass's base)`);
+  else ok(traceHash(plain.map(styleLabel)) === STYLE_LABEL_BASE_HASH, `every id the label of before read without a beard reads the same (${plain.length}, against the base's trace hash: git could not hand the old file over)`);
+}
 {
   const rec = migrateInventory({ outfit: ['sul_hair_s01_f', 'hair_human_male_s02', 'shirt_s03'], items: [] }, [], (p) => p, 0);
   ok(rec.items!.map((o) => o.id).join() === 'shirt_s03', "bringing a record into the backpack leaves the Sullustan's hair out, as it does every other style");
@@ -112,6 +160,47 @@ const ids = (cells: { id: string }[]) => cells.map((c) => c.id).join();
   ok(g.groups.map((x) => x.id).join() === 'untabled' && ids(g.groups[0].cells) === `${NO_HAIR},sul_hair_s01_f,sul_hair_s02_f`, "the Sullustan's, which no row names, are one group of this gender's, each pair wearing one mesh offered once, with no hair leading");
   const m = hairCells(TABLE, ITEMS, 'sullustan', 'male', 'sul_hair_s02_m');
   ok(ids(m.groups[0].cells) === `${NO_HAIR},sul_hair_s01_m,sul_hair_s02_m` && m.groups[0].cells[2].on, "and a male's are the male templates");
+}
+{
+  // SOE's final table gives both genders of a species each the other's styles on the very same meshes (the Wookiees'
+  // and the Sullustans'), and a man his beards: the other gender's group leaves out a style whose meshes this gender's
+  // already show, as the untabled one always did, and a beard reads "Beard N" beside the styles.
+  const bird = (id: string, file: string) => item(id, 'bird', `${file}_l0.glb`);
+  const items2 = [bird('hair_bird_female_s01', 'a'), bird('hair_bird_female_s02', 'b'), bird('hair_bird_male_s01', 'a'), bird('hair_bird_male_s02', 'c'), bird('hair_bird_male_beard_s01', 'd')];
+  const table2: CreatorTable = {
+    format: 1,
+    source: 'test',
+    palettes: {},
+    species: {
+      bird_female: { bald: true, groups: [{ id: 'hair', label: 'g:hair', hair: true }], rows: [], hair: [hairRow('hair_bird_female_s01', true), hairRow('hair_bird_female_s02', true)] },
+      bird_male: { bald: true, groups: [{ id: 'hair', label: 'g:hair', hair: true }], rows: [], hair: [hairRow('hair_bird_male_s01', true), hairRow('hair_bird_male_s02', true), hairRow('hair_bird_male_beard_s01', false)] },
+    },
+  };
+  const f = hairCells(table2, items2, 'bird', 'female', null);
+  ok(ids(f.groups[1].cells) === 'hair_bird_male_s02,hair_bird_male_beard_s01', `a woman's grid offers the men's styles whose meshes hers do not show, the one on her own first style's mesh left out (${ids(f.groups[1].cells)})`);
+  ok(f.groups[1].cells.map((c) => c.label).join() === 'Style 2,Beard 1', 'and the beard reads as a beard');
+  const m = hairCells(table2, items2, 'bird', 'male', null);
+  ok(ids(m.groups[0].cells) === `${NO_HAIR},hair_bird_male_s01,hair_bird_male_s02,hair_bird_male_beard_s01` && m.groups[0].cells.slice(1).map((c) => c.label).join() === 'Style 1,Style 2,Beard 1', "a man's own group: his styles, then his beard, no label said twice");
+  ok(ids(m.groups[1].cells) === 'hair_bird_female_s02', "and the women's group holds only the style whose mesh none of his shows");
+  const same = { ...table2, species: { bird_female: table2.species.bird_female, bird_male: { ...table2.species.bird_male, hair: [hairRow('hair_bird_male_s01', true)] } } };
+  ok(hairCells(same, items2.slice(0, 3), 'bird', 'male', null).groups.map((x) => x.id).join() === 'own,other' && hairCells(same, [items2[0], items2[2]], 'bird', 'male', null).groups.map((x) => x.id).join() === 'own', 'a species whose genders wear every style on the same meshes has no other gender\'s group at all');
+
+  // The day one (the pass's ground rule 7) over the made-up rows: today's grid is the base's, cell for cell and in its
+  // order, less only cells of the other gender's group whose meshes an earlier cell of the grid already shows, and
+  // nothing new; held to the function as it stood at the pass's base, or where git cannot hand it over to a hash of
+  // today's trace, which the base check showed to be exactly that.
+  const cases: [CreatorTable | null, HairItem[], string, 'female' | 'male'][] = [];
+  for (const g of ['female', 'male'] as const) {
+    cases.push([TABLE, ITEMS, 'fox', g], [TABLE, ITEMS, 'newt', g], [TABLE, ITEMS, 'sullustan', g], [table2, items2, 'bird', g], [null, ITEMS, 'fox', g]);
+  }
+  const old = await atBase<{ hairCells: typeof hairCells }>('src/ui/hairGrid.ts');
+  const trace = cases.map(([t, it, sp, g]) => flatGrid(hairCells(t, it, sp, g, null), it));
+  if (old) {
+    const res = cases.map(([t, it, sp, g], i) => ({ what: `${sp} ${g}`, ...againstBase(flatGrid(old.hairCells(t, it, sp, g, null), it), trace[i]) }));
+    const bad = res.filter((r) => !r.ok);
+    const dropped = res.filter((r) => r.dropped.length).map((r) => `${r.what}: ${r.dropped.join(', ')}`);
+    ok(!bad.length && dropped.join('; ') === 'bird female: hair_bird_male_s01; bird male: hair_bird_female_s01', `today's grid is the base's less the other gender's styles whose meshes an earlier cell shows, and nothing new (${cases.length} grids against the pass's base; dropped ${dropped.join('; ') || 'none'}${bad.length ? `; wrong: ${bad.map((r) => `${r.what}: ${r.why}`).join('; ')}` : ''}; trace ${traceHash(trace)})`);
+  } else ok(traceHash(trace) === HAIR_CELLS_TRACE_HASH, `today's grid over the made-up rows is the base's less the drops the rule names (${cases.length} grids, against the trace hash: git could not hand the old file over)`);
 }
 {
   const g = hairCells(null, ITEMS, 'fox', 'male', 'hair_fox_female_s03');
@@ -232,17 +321,41 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     const wantOrder = [...want.filter((h) => h.creation), ...want.filter((h) => !h.creation)].map((h) => h.id);
     ok((own ? own.cells.filter((c) => c.id !== NO_HAIR).map((c) => c.id) : []).join() === wantOrder.join(), `${sp.id}: this gender's styles are the table's, creation first (${wantOrder.length})`);
     ok(g.none && g.groups[0].cells[0].id === NO_HAIR, `${sp.id}: no hair is offered, leading the grid, whatever the table says (it says ${entry?.bald === false ? 'may not' : 'may'})`);
-    ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || /^Style \d+$/.test(c.label))), `${sp.id}: every cell reads "Style N"`);
+    ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || (/beard/.test(c.id) ? /^Beard \d+$/ : /^Style \d+$/).test(c.label))), `${sp.id}: every cell reads "Style N", a beard "Beard N"`);
     ok(g.groups.every((x) => x.cells.every((c) => c.id === NO_HAIR || c.picture === 'icon')), `${sp.id}: every style has its picture`);
     const seen = g.groups.flatMap((x) => x.cells.map((c) => c.id)).filter((x) => x !== NO_HAIR);
     ok(new Set(seen).size === seen.length, `${sp.id}: no style is offered twice`);
   }
   note(`grids: ${counts.join('; ')}`);
   ok(checked >= 18, `every species with a wardrobe was laid out (${checked})`);
+  {
+    // The day one over every species converted here: each grid is the base's less only the other gender's styles
+    // whose meshes an earlier cell already shows, and nothing new. Measured on the owner's packs converted with SOE's
+    // final files, that is each Wookiee gender's twelve and a Sullustan man's nineteen (the other gender's on the very
+    // same meshes), nineteen of the thirty-nine men's styles a Sullustan woman was offered, four each way between the
+    // Bothans (the other gender's styles on meshes their own rows already wear), and one of the Zabrak woman's (the
+    // men's 25, on the mesh of the men's 21).
+    const oldGrid = await atBase<{ hairCells: typeof hairCells }>('src/ui/hairGrid.ts');
+    if (!oldGrid) note("git could not hand the pass's base over: the packs' grids are not held to it here");
+    else {
+      const wrong: string[] = [];
+      const dropped: string[] = [];
+      for (const sp of index.species) {
+        if (!sp.wardrobe || !existsSync(`${ROOT}wardrobe/${sp.wardrobe}/wardrobe.json`)) continue;
+        const items = wardrobe(sp.wardrobe).items;
+        const gender = sp.gender === 'female' ? 'female' : 'male';
+        const r = againstBase(flatGrid(oldGrid.hairCells(table, items, sp.species, gender, null), items), flatGrid(hairCells(table, items, sp.species, gender, null), items));
+        if (!r.ok) wrong.push(`${sp.id}: ${r.why}`);
+        if (r.dropped.length) dropped.push(`${sp.id} ${r.dropped.length}`);
+      }
+      ok(!wrong.length, `every species' grid is the base's less only the other gender's styles an earlier cell shows the mesh of, and nothing new (${wrong.length ? wrong.join('; ') : `dropped: ${dropped.join(', ') || 'none'}`})`);
+    }
+  }
   // SOE's final names list (the table's own `late` stamp says it was in the mount) brings SOE's final creator table,
   // measured on SOE complete's pilot conversion: one of the Trandoshan female's four untabled styles is a row of it,
   // the Bothan male has a second style no row names, the Sullustans have rows of their own (19 a woman's, 39 a man's
-  // with his twelve beards), the Wookiees twelve styles each, and the human wardrobe five styles no row names.
+  // with his twelve beards), the Wookiees twelve styles each, and the human wardrobe five styles no row names. Each
+  // Wookiee and Sullustan gender's rows wear the other's very meshes, so neither has an other gender's group.
   const lateState = (table as { late?: { state?: string } }).late?.state;
   const late = lateState === 'applied' || lateState === 'final';
   {
@@ -269,11 +382,22 @@ if (!existsSync(tableFile) || !existsSync(indexFile)) {
     const styles = g.groups.flatMap((x) => x.cells).filter((c) => c.id !== NO_HAIR);
     if (late) {
       const own = (g.groups.find((x) => x.id === 'own')?.cells ?? []).filter((c) => c.id !== NO_HAIR);
-      ok(g.groups.map((x) => x.id).join() === 'own,other' && own.length === count && own.every((c) => c.id.endsWith(end)), `${id}: the table's own ${count} styles, all ${end}, then the other gender's`);
+      // A man's rows wear every one of a woman's meshes, so his grid has no women's group; hers keeps the men's styles
+      // her nineteen do not show (his beards and his styles 20 to 27).
+      const other = g.groups.find((x) => x.id === 'other')?.cells ?? [];
+      const shape = end === '_m' ? 'own' : 'own,other';
+      ok(g.groups.map((x) => x.id).join() === shape && own.length === count && own.every((c) => c.id.endsWith(end)) && other.every((c) => c.id.endsWith('_m')), `${id}: the table's own ${count} styles, all ${end}, ${end === '_m' ? "and no women's group, every one of theirs wearing one of his meshes" : "then the men's her own meshes do not show"} (${g.groups.map((x) => `${x.id} ${x.cells.length}`).join(', ')})`);
+      ok(own.filter((c) => /beard/.test(c.id)).every((c) => /^Beard \d+$/.test(c.label)) && new Set(own.map((c) => c.label)).size === own.length, `${id}: no two of them read alike, the beards reading as beards`);
     } else ok(g.groups.map((x) => x.id).join() === 'untabled' && styles.length === 18 && styles.every((c) => c.id.endsWith(end)), `${id}: eighteen styles, all ${end}, under "Not in the game's creator"`);
   }
   for (const id of ['ithorian_female', 'moncal_male', ...(late ? [] : ['wookiee_female'])]) ok((gridOf(id)?.groups.length ?? 0) === 0, `${id} has no styles, so no grid`);
-  if (late) ok(gridOf('wookiee_female')!.groups.find((x) => x.id === 'own')?.cells.filter((c) => c.id !== NO_HAIR).length === 12, 'a Wookiee woman has her twelve styles from the table');
+  if (late) {
+    ok(gridOf('wookiee_female')!.groups.find((x) => x.id === 'own')?.cells.filter((c) => c.id !== NO_HAIR).length === 12, 'a Wookiee woman has her twelve styles from the table');
+    for (const id of ['wookiee_male', 'wookiee_female']) {
+      const g = gridOf(id)!;
+      ok(g.groups.map((x) => x.id).join() === 'own', `${id}: their own group alone, the other gender's twelve wearing the same meshes (${g.groups.map((x) => `${x.id} ${x.cells.length}`).join(', ')})`);
+    }
+  }
 
   // The colour carried, through the game's own customizer: a human male's first style coloured, his
   // fourth loaded beside it, and the keys the grid's carry writes are the ones the fourth's recipe reads.

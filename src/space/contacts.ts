@@ -106,6 +106,8 @@ const boom = new THREE.Matrix4();
 export class ShipContacts {
   readonly list: ShipContact[] = [];
   data: CombatData | null = null;
+  /** Whether the combat file's one fetch has answered, with a file (`data`) or with none: so a missing file is told from one not yet landed. */
+  loaded = false;
   /** Set by the game: a taunt line to show (speaker, text, faction). */
   onTaunt: (speaker: string, text: string, faction: ShipFaction) => void = () => {};
   /** Set by the game: told when a ship has been destroyed (after its explosion and taunt), with who struck last. */
@@ -155,6 +157,7 @@ export class ShipContacts {
   load(baseUrl: string): Promise<void> {
     this.loading ??= CombatData.load(baseUrl).then((d) => {
       this.data = d;
+      this.loaded = true;
       if (d) console.info(`combat: ${d.file.types.length} NPC ship types, ${Object.keys(d.file.chassis).length} chassis rows`);
       else console.info('combat: no combat.json in the ships pack; no NPC ships (convert the ships again)');
       if (!d) return;

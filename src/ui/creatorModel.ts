@@ -78,6 +78,8 @@ export interface CreatorTable {
   source: string;
   species: Record<string, CreatorSpecies>;
   palettes: Record<string, CreatorPalette>;
+  /** The converter's late stamp: whether SOE's final files were in the mount it was written from. */
+  late?: unknown;
 }
 
 /** Every number and switch here is ours. */
@@ -400,6 +402,16 @@ export function creatorView(entry: CreatorSpecies | null | undefined, state: Cre
     else for (const r of ours) hidden.push({ key: r.keys[0] ?? r.hi ?? r.name, why: 'the group of ours is switched off' });
   }
   return { groups, unresolved, hidden, following, duplicates, taken, body };
+}
+
+/**
+ * The group the grid of hairstyles stands at the top of: the view's first hair group, or null with none. A later
+ * hair group shows its own rows under its own heading, or nothing when it has none (SOE's final table gives the
+ * humans a second, `hair_trim`, whose trim colour only a few styles carry; the Wookiees' one is their fur, holding
+ * the pattern). The appearance page asks this, and the node test asks it of the converted table.
+ */
+export function gridGroupId(view: Pick<CreatorView, 'groups'>): string | null {
+  return view.groups.find((g) => g.hair)?.id ?? null;
 }
 
 /**

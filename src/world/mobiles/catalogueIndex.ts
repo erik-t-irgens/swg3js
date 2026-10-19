@@ -4,7 +4,39 @@
 //
 // Rule for this file (it is run by node with type stripping): relative imports only as
 // `import type`, no enum, no namespace, no constructor parameter properties.
-import type { MobileEntry, MobileKind } from './types';
+import type { MobileCatalogueFile, MobileEntry, MobileKind } from './types';
+
+/** What to run when there is no catalogue, or an entry's model or pack was not converted. */
+export const CATALOGUE_COMMAND = 'npm run swg -- mobiles @SWG assets-private --retail-only';
+
+/** The models the catalogue records the archives could not give (`failed`, `what` 'model'), by appearance id. */
+export function failedModelsOf(file: Pick<MobileCatalogueFile, 'failed'>): Set<string> {
+  const out = new Set<string>();
+  for (const f of file.failed ?? []) if (f.what === 'model') out.add(f.id);
+  return out;
+}
+
+/**
+ * Whether the pack holds what an entry needs to be stood, and if not, why, in a sentence: the converter's own mark,
+ * then (for anything but a dressed person, which wears a species body) a model the archives gave and the converter
+ * made, then a converted animation pack. Out here rather than on the catalogue so the NPC tab (`MobileCatalogue.ready`)
+ * and `lateMenus.test.ts`, which reads the catalogue on disk, ask the one rule.
+ */
+export function readinessOf(e: MobileEntry, file: Pick<MobileCatalogueFile, 'appearances' | 'packs'>, failedModels: ReadonlySet<string>): { ok: boolean; why: string | null } {
+  if (!e.ready) return { ok: false, why: e.notReady ?? 'the converter marked it not ready' };
+  const a = e.appearance ? (file.appearances[e.appearance] ?? null) : null;
+  if (e.kind !== 'dressed') {
+    if (!e.appearance) return { ok: false, why: 'it names no appearance' };
+    if (failedModels.has(e.appearance)) return { ok: false, why: `its model (${e.appearance}) is not in the game's archives` };
+    if (!a) return { ok: false, why: `its model ${e.appearance} is not in the catalogue` };
+    if (!a.ready) return { ok: false, why: `its model ${e.appearance} was not converted (run ${CATALOGUE_COMMAND})` };
+  }
+  const packId = e.pack ?? a?.pack ?? null;
+  const p = packId ? (file.packs[packId] ?? null) : null;
+  if (!p) return { ok: false, why: 'it has no animation pack' };
+  if (!p.ready) return { ok: false, why: `its animation pack ${p.id} was not converted (run ${CATALOGUE_COMMAND})` };
+  return { ok: true, why: null };
+}
 
 /** One entry and the text the find box matches against. */
 export interface Indexed {

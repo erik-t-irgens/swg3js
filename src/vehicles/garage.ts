@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Vehicle, specFor, type VehicleKind, type VehicleSpec } from './vehicle';
-import { hoverCarFor, kindFor, raceSpecFor } from './vehicleKinds.ts';
+import { garageGalleryRows, hoverCarFor, kindFor, raceSpecFor } from './vehicleKinds.ts';
 import { attachRace, type RaceDeps } from './raceDrive.ts';
 import { RACE_TUNE } from './raceTune.ts';
 import { glowShare, noteRaceThrusters, type EnginePoint } from './raceSpots.ts';
@@ -189,6 +189,11 @@ export class Garage {
   readonly components: ComponentDef[] = [];
   readonly componentByName = new Map<string, number>();
   readonly droids: DroidDef[] = [];
+  /**
+   * The late stamp of each pack the garage read (`late` as the converter wrote it, which says whether SOE's final files
+   * were in the mount), or undefined for a pack it did not read: what `__debug.late()` reports of the garage.
+   */
+  readonly late: { gallery?: unknown; creatures?: unknown; ships?: unknown } = {};
   private readonly loader = surfaces.withPlugin(new GLTFLoader());
   private readonly models = new Map<string, Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>>();
 
@@ -201,11 +206,10 @@ export class Garage {
       const [idx, man] = await Promise.all([fetch(`${baseUrl}assets-private/gallery/gallery.json`), fetch(`${baseUrl}assets-private/gallery/manifest.json`)]);
       if (idx.ok && man.ok) {
         const index = (await idx.json()) as GalleryIndex;
-        const manifest = (await man.json()) as { categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number>; paint?: FitPaint | null; skeletal?: boolean }[] } };
-        const files = new Map(manifest.categories.layout.map((m) => [m.id, m]));
-        for (const it of index.sections.find((s) => s.id === 'vehicles')?.items ?? []) {
-          const m = files.get(it.model);
-          if (!m) continue;
+        const manifest = (await man.json()) as { late?: unknown; categories: { layout: { id: string; file: string; bounds?: VehicleSpec['bounds']; clipSpeeds?: Record<string, number>; paint?: FitPaint | null; skeletal?: boolean }[] } };
+        g.late.gallery = manifest.late ?? null;
+        // Each vehicle whose model the layout holds (`garageGalleryRows`, the rule the late test reads the packs by).
+        for (const { item: it, model: m } of garageGalleryRows(index.sections.find((s) => s.id === 'vehicles')?.items ?? [], manifest.categories.layout)) {
           // By the table of the gallery's vehicles while it is used (`vehicleKinds.ts`), else by the names as before.
           const { kind, inferred } = kindFor({ id: it.label, template: it.template, model: it.model });
           // A speeder whose shaders take colours: a fit of its paint alone (`paintOnlyFit`), its recipes beside the gallery's manifest.
@@ -220,7 +224,8 @@ export class Garage {
       const res = await fetch(`${baseUrl}assets-private/creatures/manifest.json`);
       if (res.ok && (res.headers.get('content-type') ?? '').includes('json')) {
         type Saddle = { appearance: string; file: string | null; joint: string | null; from: string | null; player: [number, number, number] | null };
-        const manifest = (await res.json()) as { creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string; mount?: boolean; hardpoints?: string[]; saddle?: Saddle }[] };
+        const manifest = (await res.json()) as { late?: unknown; creatures: { id: string; file: string; clipSpeeds?: Record<string, number>; bounds?: VehicleSpec['bounds']; riderPose?: string; mount?: boolean; hardpoints?: string[]; saddle?: Saddle }[] };
+        g.late.creatures = manifest.late ?? null;
         // The mounts the game sold (the saddle map's creatures) come first; the planets' other creatures can be ridden too, as a wild thing.
         // A mount's saddle is the one the mount tables name; a pack converted before saddles has none.
         for (const c of manifest.creatures) g.vehicles.push({ id: c.id, label: `${c.id.replace(/_/g, ' ')} (${c.mount ? 'mount' : 'wild'})`, kind: 'ground', inferred: true, source: 'creature', file: `assets-private/${c.file}`, bounds: c.bounds, clipSpeeds: c.clipSpeeds, riderPose: c.riderPose ?? null, saddle: c.saddle ? { file: c.saddle.file ? `assets-private/${c.saddle.file}` : null, joint: c.saddle.joint ?? null, player: c.saddle.player ?? null } : null });
@@ -247,7 +252,8 @@ export class Garage {
         type Attachment = NonNullable<VehicleDef['attachments']>[number];
         type Cockpit = NonNullable<VehicleDef['cockpit']>;
         type Portals = NonNullable<import('./interior').InteriorDef['portals']>;
-        const manifest = (await res.json()) as { ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
+        const manifest = (await res.json()) as { late?: unknown; ships: { id: string; label: string; template: string; file: string; bounds?: VehicleSpec['bounds']; class: string; interior: { file?: string; cells?: number; failed?: string } | null; attachments?: Attachment[]; cockpit?: Cockpit | null; thrusters?: string[]; weapon?: ShipWeapon | null; chassis?: string | null; wingOpenSpeedFactor?: number; fit?: FitDef | null }[]; models?: { file: string; bounds?: { min: number[]; max: number[] }; cells?: Cells; portals?: Portals }[] };
+        g.late.ships = manifest.late ?? null;
         const modelByFile = new Map((manifest.models ?? []).map((m) => [m.file, m]));
         for (const sh of manifest.ships) {
           const im = sh.interior?.file ? modelByFile.get(sh.interior.file) : undefined;
