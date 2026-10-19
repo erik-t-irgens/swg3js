@@ -20,9 +20,13 @@ import { TauntGate, fillTaunt, pickLine, type TauntEvent } from './taunts.ts';
 import { vehicleSounds } from '../audio/vehicleSounds.ts';
 import { NEBULA_SYSTEMS, NebulaNote, newNebulaSystems, shipSystemsAt, type NebulaSystems } from './nebulaMath.ts';
 import type { Nebula } from './spaceData.ts';
+import { HULL_FITTED_RADIUS, reachBeyond } from './hullNpc.ts';
 
 /** No nebulae: what a world with none hands the contacts, made once. */
 const NO_NEBULAE: readonly Nebula[] = [];
+/** Scratch for `reachToward`: nothing is allocated per ask. */
+const towardQ = new THREE.Quaternion();
+const towardV = new THREE.Vector3();
 
 /** The slots a ship is given when neither its fit nor combat.json says (an older pack): a fighter's systems, each weighing 10. */
 const DEFAULT_SLOTS: StatInput['slots'] = {
@@ -98,6 +102,21 @@ export class ShipContact implements Living {
   radiusToward(from: THREE.Vector3): number {
     void from;
     return this.vehicle.radius;
+  }
+
+  /**
+   * How far its hull stands out toward `from` past a fitted hull's sphere (`reachBeyond`): nought for every hull no
+   * bigger than the game's own NPC hulls, so a pilot's sight and gun reach measured with it are what they always were;
+   * a bigger hull's box that way (a Star Destroyer's length off its bow, its height over its deck), never past its sphere.
+   */
+  reachToward(from: THREE.Vector3): number {
+    const v = this.vehicle;
+    if (!(v.radius > HULL_FITTED_RADIUS)) return 0;
+    const b = v.spec.bounds;
+    towardQ.copy(v.group.quaternion).invert();
+    towardV.copy(from).sub(v.pos).applyQuaternion(towardQ);
+    // A pack's box corners may be written either way round: the extents are taken whole.
+    return reachBeyond(v.radius, Math.abs(b.max[0] - b.min[0]) / 2, Math.abs(b.max[1] - b.min[1]) / 2, Math.abs(b.max[2] - b.min[2]) / 2, towardV.x, towardV.y, towardV.z);
   }
 }
 

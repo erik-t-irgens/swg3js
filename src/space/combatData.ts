@@ -28,6 +28,11 @@ export interface NpcTypeDef {
   /** The taunt table it reads (a key of `taunts`, or one the pack lacks: none). */
   taunts: string;
   template?: string;
+  /**
+   * Set only on a type of OURS that stands a garage hull as an NPC ship for a side and tier picked (`hullNpc.ts`),
+   * never on one the combat file carries: the manager counts and clears those apart from the game's families.
+   */
+  standIn?: true;
 }
 
 export interface CombatChassis {

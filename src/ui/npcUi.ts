@@ -64,6 +64,18 @@ export interface ShipSpawner {
   clear(family?: string): number;
   count(family: string): number;
   missing: string | null;
+  /**
+   * Every garage ship hull, any of which may be stood as an NPC for a side and at a tier picked: its garage id, its
+   * name (the game's where an NPC type draws it) and the words under it. Null while the garage is still loading.
+   */
+  hulls(): { hull: string; label: string; sub: string }[] | null;
+  /** The sides a hull may fly for, in order, with their words. */
+  sides(): { id: string; label: string }[];
+  /** Stand one of a hull, or three in its side's formation; resolves to the sentence for the count line. */
+  spawnHull(hull: string, side: string, tier: number, count: 1 | 3): Promise<string>;
+  /** Take away every NPC ship stood from a hull's row; returns how many. */
+  clearHull(hull: string): number;
+  countHull(hull: string): number;
 }
 
 /**
@@ -169,6 +181,9 @@ export class NpcUi {
   private readonly shipTiers = new Map<string, number>();
   /** And each machine row's, for the rows that have grades (the fighters). Kept the same way and for the same reason. */
   private readonly kindTiers = new Map<string, number>();
+  /** Each hull row's chosen side and tier, by garage id, kept the same way. */
+  private readonly hullSides = new Map<string, string>();
+  private readonly hullTiers = new Map<string, number>();
   open = false;
   /** A click on another tab: the game swaps the panels. */
   onTab: (id: string) => void = () => {};
@@ -198,7 +213,7 @@ export class NpcUi {
         <div class="wardrobe-header">
           ${tabStrip(SPAWNER_TABS, 'npcs')}
           <span class="count"></span>
-          <input class="find" placeholder="find a creature or NPC" spellcheck="false" />
+          <input class="find" placeholder="find a creature, NPC or ship" spellcheck="false" />
           <label class="ready-only" title="leave out what cannot be stood"><input type="checkbox" /> ready only</label>
           <button class="clear-all" title="take away everything stood from here">Clear all</button>
           <button class="close">Close <b>B</b></button>
@@ -233,14 +248,19 @@ export class NpcUi {
     this.root.querySelector('.clear-all')!.addEventListener('click', () => this.clearEverything());
     // One listener for every button in the body, by what it is for.
     this.body.addEventListener('click', (e) => this.onClick(e));
-    // A starship row's tier, kept by family; and a machine row's grade, kept by its id.
+    // A starship row's tier, kept by family; a machine row's grade, kept by its id; a hull row's side and tier, by its id.
     this.body.addEventListener('change', (e) => {
       const sel = e.target as HTMLSelectElement;
       if (sel?.tagName !== 'SELECT') return;
+      if (sel.dataset.hullSide !== undefined) {
+        this.hullSides.set(sel.dataset.hullSide, sel.value);
+        return;
+      }
       const tier = Number(sel.value);
       if (!Number.isFinite(tier)) return;
       if (sel.dataset.shipTier !== undefined) this.shipTiers.set(sel.dataset.shipTier, tier);
       else if (sel.dataset.kindTier !== undefined) this.kindTiers.set(sel.dataset.kindTier, tier);
+      else if (sel.dataset.hullTier !== undefined) this.hullTiers.set(sel.dataset.hullTier, tier);
     });
     // A group opened for the first time builds its rows ('toggle' does not bubble: caught on the way down).
     this.body.addEventListener(
@@ -433,7 +453,53 @@ export class NpcUi {
       const key = `ships:${g.faction}`;
       out.push(groupHtml(key, g.label, g.rows.length, note, this.groups.isOpen(key, false), rows.join('')));
     }
+    out.push(this.hullsHtml(ships));
     return out.join('');
+  }
+
+  /**
+   * Any ship as an NPC: every garage ship hull, a row each with the side it flies for, its tier (1 to 10; above 5 as the
+   * ladder reads them), its count and one, patrol and clear. Found by the find box as the catalogue's entries are (every
+   * word of it in the hull's name, its words or its id), and open while a search finds any; drawn whole, since it is
+   * seventy rows at most. While the garage is still loading, one line says so.
+   */
+  private hullsHtml(ships: ShipSpawner): string {
+    const list = ships.hulls();
+    if (!list) return '<div class="mob-missing">the garage is loading: its ships are listed here once it is in</div>';
+    const words = this.find.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const rows = words.length ? list.filter((h) => words.every((w) => `${h.label} ${h.sub} ${h.hull}`.toLowerCase().includes(w))) : list;
+    if (!rows.length) return '';
+    const sides = ships.sides();
+    const start = Math.min(10, Math.max(1, Math.round(ships.defaultTier())));
+    const html = rows.map((h) => {
+      const id = escapeHtml(h.hull);
+      const side = this.hullSides.get(h.hull) ?? 'neutral';
+      const tier = this.hullTiers.get(h.hull) ?? start;
+      const sideOptions = sides.map((s) => `<option value="${escapeHtml(s.id)}"${s.id === side ? ' selected' : ''}>${escapeHtml(s.label)}</option>`).join('');
+      let tierOptions = '';
+      for (let t = 1; t <= 10; t++) tierOptions += `<option${t === tier ? ' selected' : ''}>${t}</option>`;
+      return `<div class="cat-item ship-row" data-hull-row="${id}" title="${id}"><span class="cat-name">${escapeHtml(h.label)}${h.sub ? ` <small>${escapeHtml(h.sub)}</small>` : ''}</span><span class="cat-hands"><select class="ship-side" data-hull-side="${id}" title="the side it flies for">${sideOptions}</select><select class="ship-tier" data-hull-tier="${id}" title="tier (6 to 10 fly, fit and take damage as the ladder reads them)">${tierOptions}</select><span class="cat-badge" data-hull-count="${id}"></span><button data-hull-one="${id}" title="stand one ahead of you">one</button><button data-hull-patrol="${id}" title="stand three in its side's formation ahead of you">patrol</button><button data-hull-clear="${id}" title="take away every one of this hull stood from this list">clear</button></span></div>`;
+    });
+    const key = 'ships:hulls';
+    const note = 'every ship the garage has, flying for the side and at the tier picked; hostile ones attack your ship; nothing moves while this panel is open';
+    return groupHtml(key, 'Any ship as an NPC', rows.length, note, words.length ? true : this.groups.isOpen(key, false), html.join(''));
+  }
+
+  /** The side a hull row has picked (its select, else the kept one, else neutral). */
+  private hullSide(hull: string): string {
+    for (const el of this.body.querySelectorAll<HTMLSelectElement>('select[data-hull-side]')) if (el.dataset.hullSide === hull) return el.value;
+    return this.hullSides.get(hull) ?? 'neutral';
+  }
+
+  /** The tier a hull row has picked (its select, else the kept one, else the zone's). */
+  private hullTier(hull: string): number {
+    for (const el of this.body.querySelectorAll<HTMLSelectElement>('select[data-hull-tier]')) {
+      if (el.dataset.hullTier === hull) {
+        const n = Number(el.value);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return this.hullTiers.get(hull) ?? Math.min(10, Math.max(1, Math.round(this.deps?.ships?.defaultTier() ?? 1)));
   }
 
   /** The tier a starship row has picked (its select, else the kept one, else the zone's). */
@@ -614,6 +680,16 @@ export class NpcUi {
       );
     } else if (d.shipClear !== undefined && deps.ships) {
       this.say(`${deps.ships.clear(d.shipClear)} taken away`);
+    } else if ((d.hullOne !== undefined || d.hullPatrol !== undefined) && deps.ships) {
+      const hull = (d.hullOne ?? d.hullPatrol)!;
+      const count: 1 | 3 = d.hullOne !== undefined ? 1 : 3;
+      this.say(`standing ${count === 1 ? 'one' : 'a patrol'}…`);
+      void deps.ships.spawnHull(hull, this.hullSide(hull), this.hullTier(hull), count).then(
+        (s) => this.say(s),
+        (err: unknown) => this.say(`not stood: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    } else if (d.hullClear !== undefined && deps.ships) {
+      this.say(`${deps.ships.clearHull(d.hullClear)} taken away`);
     }
   }
 
@@ -659,6 +735,11 @@ export class NpcUi {
     if (ships) {
       for (const el of this.body.querySelectorAll<HTMLElement>('[data-ship-count]')) {
         const n = ships.count(el.dataset.shipCount ?? '');
+        const text = n ? `${n} out` : '';
+        if (el.textContent !== text) el.textContent = text;
+      }
+      for (const el of this.body.querySelectorAll<HTMLElement>('[data-hull-count]')) {
+        const n = ships.countHull(el.dataset.hullCount ?? '');
         const text = n ? `${n} out` : '';
         if (el.textContent !== text) el.textContent = text;
       }
